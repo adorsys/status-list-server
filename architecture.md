@@ -87,22 +87,16 @@
      }
      ```
 
----
-
 ### **6. Security Considerations**
    - **HTTPS**: All communication with the Status List Server must use HTTPS to ensure data integrity and confidentiality.
    - **Token Signing**: Status List Tokens must be signed (e.g., using JWT or CWT) to prevent tampering.
    - **CORS**: The Status List Server should support Cross-Origin Resource Sharing (CORS) for browser-based clients.
    - **Rate Limiting**: Implement rate limiting to prevent abuse of the Status List Server.
 
----
-
 ### **7. Deployment and Scalability**
    - **Hosting**: The Status List Server can be hosted on cloud platforms (e.g., AWS, Azure, GCP) for scalability.
    - **Caching**: Use HTTP caching headers (`Cache-Control`, `Expires`) or rely on the `exp` and `ttl` claims in the Status List Token for caching.
    - **Load Balancing**: Use load balancers to distribute traffic across multiple instances of the Status List Server.
-
----
 
 ### **8. Developer Integration**
    - **Step 1**: Configure the Token Issuer to include the `status` claim in Referenced Tokens.
