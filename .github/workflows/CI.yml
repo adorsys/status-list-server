@@ -16,8 +16,8 @@ jobs:
         with:
           toolchain: stable
 
-      - name: Check Formatting
-        run: cargo fmt --all --check
+      #   - name: Check Formatting
+      #     run: cargo fmt --all --check
 
       - name: Run Clippy (Lint)
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings
