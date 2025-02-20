@@ -1,0 +1,29 @@
+name: CI
+
+on: [pull_request]
+
+jobs:
+  cargo-build:
+    name: Cargo Build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Fetch Repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust Toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
+
+      - name: Check Formatting
+        run: cargo fmt --all --check
+
+      - name: Run Clippy (Lint)
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+
+      - name: Build Project
+        run: cargo build --workspace --all-targets --all-features
+
+      - name: Run Tests
+        run: cargo nextest run --workspace --all-targets --all-features
