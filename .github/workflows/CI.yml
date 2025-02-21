@@ -68,4 +68,5 @@ jobs:
           tool: cargo-nextest
 
       - name: Run Cargo Tests
-        run: cargo nextest run --workspace --all-targets --all-features
+        run: cargo nextest run --workspace --all-targets --all-features --no-fail-fast
+
