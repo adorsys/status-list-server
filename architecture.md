@@ -121,6 +121,7 @@ The data flow in the Status List Server is as follows:
 2. **Relying Party**:
    - Receives the Referenced Token and extracts the `status` claim.
    - Requests the Status List Token from the Status List Server.
+   - Validates the status list.
    - Decodes the Status List Token and verifies the token's status.
 
 3. **Status List Server**:
