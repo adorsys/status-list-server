@@ -86,6 +86,15 @@
        "ttl": 43200
      }
      ```
+   - **Status List Token (CWT Example)**:
+   ```
+  d2845820a2012610781a6170706c69636174696f6e2f7374617475736c6973742b63
+   7774a1044231325850a502782168747470733a2f2f6578616d706c652e636f6d2f73
+   74617475736c697374732f31061a648c5bea041a8898dfea19fffe19a8c019fffda2
+   646269747301636c73744a78dadbb918000217015d5840251d844ecc6541b8b2fd24
+   e681836c1a072cad61716fb174d57b162b4b392c1ea08b875a493ca8d1cf4328eee1
+   b14f33aa899e532844778ba2fff80b5c1e56e5
+   ``` 
 
 Here’s how you can add an **Application Design** section to the **developer guide and architecture documentation** for the **Status List Server**. This section will explain the **tech stack** used, the architecture, and how the components interact.
 
