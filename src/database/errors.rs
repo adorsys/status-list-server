@@ -5,5 +5,7 @@ pub enum RepositoryError {
     #[error("could not get connection from pool")]
     PoolError,
     #[error("could not get data")]
-    FetchError
+    FetchError,
+    #[error("could not store data")]
+    StoreError
 }

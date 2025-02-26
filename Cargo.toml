@@ -1,9 +1,11 @@
 [package]
+
 name = "status-list-server"
 version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+async-trait = "0.1.86"
 diesel = "2.2.7"
 diesel-async = { version = "0.5.2", features = ["postgres", "deadpool"] }
 dotenvy = "0.15.7"

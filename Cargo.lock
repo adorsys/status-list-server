@@ -691,6 +691,7 @@ dependencies = [
 name = "status-list-server"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "diesel",
  "diesel-async",
  "dotenvy",
