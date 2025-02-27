@@ -1,4 +1,3 @@
-pub mod connection;
-pub mod schema;
-pub mod queries;
-pub mod errors;
+mod queries;
+mod error;
+mod repository;
