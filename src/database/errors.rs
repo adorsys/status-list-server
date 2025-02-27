@@ -7,5 +7,5 @@ pub enum RepositoryError {
     #[error("could not get data")]
     FetchError,
     #[error("could not store data")]
-    StoreError
+    InsertError,
 }
