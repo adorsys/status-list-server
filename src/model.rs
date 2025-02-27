@@ -1,31 +1,24 @@
-use diesel::{
-    prelude::{Insertable, Queryable},
-    Selectable,
-};
+use mongodb::bson::oid::ObjectId;
+use serde::{Deserialize, Serialize};
+#[derive(Deserialize, Serialize)]
+pub struct Credentials {
+    #[serde(rename = "_id")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub id: Option<ObjectId>,
+    pub issuer: String,
+    public_key: Vec<u8>,
+    algorithm: String,
+}
 
-#[derive(Default)]
 pub struct StatusList {
     pub bits: u8,
     pub lst: String,
 }
 
-#[derive(Queryable, Insertable, Selectable)]
-#[diesel(table_name = crate::database::schema::credentials)]
-#[diesel(check_for_backend(diesel::pg::Pg))]
-#[derive(Default)]
-pub struct Credentials {
-    issuer: String,
-    public_key: Vec<u8>,
-    alg: String,
-}
-
-use diesel::prelude::*;
-use diesel::associations::HasTable;
-
-impl HasTable for Credentials {
-    type Table = crate::database::schema::credentials::table;
-
-    fn table() -> Self::Table {
-        crate::database::schema::credentials::table
-    }
+pub struct StatusListToken {
+    pub exp: Option<i32>,
+    pub iat: i32,
+    pub status_list: StatusList,
+    pub sub: String,
+    pub ttl: Option<String>,
 }

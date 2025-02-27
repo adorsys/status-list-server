@@ -1,5 +1,5 @@
-#![recursion_limit = "256"]
 mod auth;
-pub mod database;
 pub mod web;
+mod database;
 pub mod model;
+mod storage;

@@ -1,103 +1,163 @@
-use diesel::helper_types::{AsSelect, Eq};
-use diesel::query_builder::AsQuery;
-use diesel::query_dsl::methods::FilterDsl;
-use diesel::query_dsl::methods::SelectDsl;
-use diesel::{
-    associations::HasTable, pg::Pg, prelude::Insertable, query_builder::QueryId,
-    query_dsl::methods::LimitDsl,
+use async_trait::async_trait;
+use mongodb::{
+    bson::{self, doc, oid::ObjectId, Bson, Document as BsonDocument},
+    error::Error as MongoError,
+    options::{ClientOptions, FindOptions},
+    Client, Collection, Database,
 };
-use diesel::{SelectableHelper, Table};
+use once_cell::sync::OnceCell;
+use serde::{Deserialize, Serialize};
+use thiserror::Error;
 
-use diesel_async::AsyncPgConnection;
-use diesel_async::{methods::LoadQuery, RunQueryDsl};
+/// A trait that ensures the entity has an `id` field.
+pub trait Identifiable {
+    fn id(&self) -> Option<ObjectId>;
+    fn set_id(&mut self, id: ObjectId);
+}
 
-use crate::model::Credentials;
+/// Definition of custom errors for repository operations.
+#[derive(Debug, Serialize, Deserialize, Error)]
+pub enum RepositoryError {
+    #[error("failed to convert to bson format")]
+    BsonConversionError,
+    #[error("generic: {0}")]
+    Generic(String),
+    #[error("missing identifier")]
+    MissingIdentifier,
+    #[error("target not found")]
+    TargetNotFound,
+}
 
-use super::schema::{self, credentials};
-use super::{connection::Database, errors::RepositoryError};
+static MONGO_DB: OnceCell<Database> = OnceCell::new();
 
-/// Database Repository
-trait Repository<C, T>
+/// Get a handle to a database.
+///
+/// Many threads may call this function concurrently with different initializing functions,
+/// but it is guaranteed that only one function will be executed.
+pub fn get_or_init_database() -> Database {
+    MONGO_DB
+        .get_or_init(|| {
+            let mongo_uri = std::env::var("MONGO_URI").expect("MONGO_URI env variable required");
+            let mongo_dbn = std::env::var("MONGO_DBN").expect("MONGO_DBN env variable required");
+
+            // Create a handle to a database.
+            tokio::task::block_in_place(|| {
+                tokio::runtime::Handle::current().block_on(async move {
+                    let client_options = ClientOptions::parse(mongo_uri)
+                        .await
+                        .expect("Failed to parse Mongo URI");
+                    let client = Client::with_options(client_options)
+                        .expect("Failed to create MongoDB client");
+
+                    client.database(&mongo_dbn)
+                })
+            })
+        })
+        .clone()
+}
+
+/// Definition of a trait for repository operations.
+#[async_trait]
+pub trait Repository<Entity>: Sync + Send
 where
-    <T as HasTable>::Table: QueryId + Send + 'static,
-    T: diesel::associations::HasTable + diesel::Selectable<Pg>,
-    <T::Table as diesel::QuerySource>::FromClause:
-        Send + diesel::query_builder::QueryFragment<diesel::pg::Pg>,
-    C: diesel::Insertable<T::Table>,
-    <C as Insertable<<T as HasTable>::Table>>::Values: QueryId + Send,
-    C::Values: diesel::insertable::CanInsertInSingleQuery<diesel::pg::Pg>
-        + diesel::query_builder::QueryFragment<diesel::pg::Pg>,
+    Entity: Sized + Clone + Send + Sync + 'static,
+    Entity: Identifiable + Unpin,
+    Entity: Serialize + for<'de> Deserialize<'de>,
 {
-    /// Store a single entity in the database
-    async fn store(entity: C, conn_pool: &Database) -> Result<(), RepositoryError> {
-        let mut conn = conn_pool
-            .get()
-            .await
-            .map_err(|_| RepositoryError::PoolError)?;
-        diesel::insert_into(T::table())
-            .values(entity)
-            .execute(&mut conn)
-            .await
-            .map_err(|_| RepositoryError::InsertError)?;
+    /// Get a handle to a collection.
+    fn get_collection(&self) -> Collection<Entity>;
+
+    /// Retrieve all entities from the database.
+    async fn find_all(&self) -> Result<Vec<Entity>, RepositoryError> {
+        let mut entities = Vec::new();
+        let collection = self.get_collection();
+ 
+
+        let mut cursor = collection.find(doc! {}).await?;
+        while cursor.advance().await? {
+            entities.push(cursor.deserialize_current()?);
+        }
+
+        Ok(entities)
+    }
+
+    /// Find an entity matching `filter`.
+    async fn find_one_by(&self, filter: BsonDocument) -> Result<Option<Entity>, RepositoryError> {
+        let collection = self.get_collection();
+
+        Ok(collection.find_one(filter).await?)
+    }
+
+    /// Stores a new entity.
+    async fn store(&self, mut entity: Entity) -> Result<Entity, RepositoryError> {
+        let collection = self.get_collection();
+
+        // Insert the new entity into the database
+        let metadata = collection.insert_one(entity.clone()).await?;
+
+        // Set the ID if it was inserted and return the updated entity
+        if let Bson::ObjectId(oid) = metadata.inserted_id {
+            entity.set_id(oid);
+        }
+
+        Ok(entity)
+    }
+
+    /// Find all entities matching `filter`.
+    /// If `limit` is set, only the first `limit` entities are returned.
+    async fn find_all_by(
+        &self,
+        filter: BsonDocument,
+        limit: Option<i64>,
+    ) -> Result<Vec<Entity>, RepositoryError> {
+        let find_options = FindOptions::builder().limit(limit).build();
+        let mut entities = Vec::new();
+        let collection = self.get_collection();
+
+        // Retrieve all entities from the database
+        let mut cursor = collection.find(filter).with_options(find_options).await?;
+        while cursor.advance().await? {
+            entities.push(cursor.deserialize_current()?);
+        }
+
+        Ok(entities)
+    }
+
+    /// Deletes an entity by `id`.
+    async fn delete_one(&self, id: ObjectId) -> Result<(), RepositoryError> {
+        let collection = self.get_collection();
+
+        // Delete the entity from the database
+        collection.delete_one(doc! {"_id": id}).await?;
+
         Ok(())
     }
 
-    /// find by id
-    async fn find_by<'query, S, U>(
-        id: U,
-        conn_pool: &Database,
-        column: S,
-    ) -> Result<Self, RepositoryError>
-    where
-        S: diesel::Expression + diesel::ExpressionMethods + Send,
-        <S as diesel::Expression>::SqlType: diesel::sql_types::SqlType + Send,
-        U: diesel::expression::AsExpression<<S as diesel::Expression>::SqlType> + Send + Copy,
-        T::Table: diesel::Table + diesel::QuerySource + diesel::SelectableHelper<Pg> + Send,
-        T: diesel::Selectable<Pg> + Send + 'static,
-        T::Table: FilterDsl<Eq<S, U>> + Send,
-        diesel::dsl::FindBy<T::Table, S, U>: SelectDsl<AsSelect<Self, Pg>> + Send,
-        diesel::dsl::Select<diesel::dsl::FindBy<T::Table, S, U>, AsSelect<Self, Pg>>:
-            RunQueryDsl<AsyncPgConnection> + LimitDsl + Send,
-        diesel::dsl::Limit<
-            diesel::dsl::Select<diesel::dsl::FindBy<T::Table, S, U>, AsSelect<Self, Pg>>,
-        >: LoadQuery<'query, AsyncPgConnection, Self> + Send + 'query,
+    /// Updates an entity.
+    async fn update(&self, entity: Entity) -> Result<Entity, RepositoryError> {
+        if entity.id().is_none() {
+            return Err(RepositoryError::MissingIdentifier);
+        }
+        let collection = self.get_collection();
 
-        <<T::Table as FilterDsl<Eq<S, U>>>::Output as SelectDsl<AsSelect<Self, Pg>>>::Output: Send,
-        <T::Table as FilterDsl<Eq<S, U>>>::Output:
-            SelectDsl<AsSelect<Self, Pg>> + LimitDsl + Send + Sync,
-        <<T::Table as FilterDsl<Eq<S, U>>>::Output as SelectDsl<AsSelect<Self, Pg>>>::Output:
-            Send + Sync + LoadQuery<'query, AsyncPgConnection, Self>,
-        Self: diesel::Selectable<Pg> + Sized + Send + 'static,
-        <Self as diesel::Selectable<Pg>>::SelectExpression: QueryId + Send,
-        T::Table: diesel::Table + Send,
-        T::Table: diesel::QueryDsl + Send,
-        S: diesel::Column + Send,
-        Self: Send + Sync,
-    {
-        let mut conn = conn_pool
-            .get()
-            .await
-            .map_err(|_| RepositoryError::PoolError)?;
+        // Update the entity in the database
+        let metadata = collection
+            .update_one(
+                doc! {"_id": entity.id().unwrap()},
+                doc! {"$set": bson::to_document(&entity).map_err(|_| RepositoryError::BsonConversionError)?}
+            )
+            .await?;
 
-        let cred = <T as HasTable>::table()
-            .filter(column.eq(id))
-            .select(Self::as_select())
-            .first::<Self>(&mut conn)
-            .await
-            .map_err(|_| RepositoryError::FetchError)?;
-
-        Ok(cred)
+        if metadata.matched_count > 0 {
+            Ok(entity)
+        } else {
+            Err(RepositoryError::TargetNotFound)
+        }
     }
 }
 
-impl Repository<Credentials, Credentials> for Credentials {
-
-}
-
-
-
-
-#[cfg(test)]
-mod test {
-
+impl From<MongoError> for RepositoryError {
+    fn from(error: MongoError) -> Self {
+        RepositoryError::Generic(error.to_string())
+    }
 }
