@@ -7,7 +7,7 @@ use dotenvy::dotenv;
 
 pub type Database = Pool<AsyncPgConnection>;
 
-pub async fn establish_connection() -> Pool<AsyncPgConnection> {
+pub async fn establish_connection() -> Database {
     dotenv().ok();
     let database_url = env::var("DATABASE_URL").expect("DATABASE_URL must be set");
     let manager = AsyncDieselConnectionManager::<AsyncPgConnection>::new(database_url);

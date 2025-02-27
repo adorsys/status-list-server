@@ -1,12 +1,12 @@
-use diesel::{prelude::{Insertable, Queryable}, Selectable};
-
-
+use diesel::{
+    prelude::{Insertable, Queryable},
+    Selectable,
+};
 
 #[derive(Default)]
 pub struct StatusList {
     pub bits: u8,
     pub lst: String,
-
 }
 
 #[derive(Queryable, Insertable, Selectable)]
@@ -16,6 +16,16 @@ pub struct StatusList {
 pub struct Credentials {
     issuer: String,
     public_key: Vec<u8>,
-    alg: String
+    alg: String,
 }
 
+use diesel::prelude::*;
+use diesel::associations::HasTable;
+
+impl HasTable for Credentials {
+    type Table = crate::database::schema::credentials::table;
+
+    fn table() -> Self::Table {
+        crate::database::schema::credentials::table
+    }
+}
