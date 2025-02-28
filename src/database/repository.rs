@@ -1,32 +1,61 @@
 use std::collections::HashMap;
 
-use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use sqlx::{postgres::PgRow, FromRow, PgPool, Postgres};
+use sqlx::{postgres::PgRow, FromRow, PgPool};
 
-use super::error::RepositoryError;
+use crate::model::{Credentials, StatusListToken};
+
+use super::{connection::establish_connection, error::RepositoryError};
 
 #[derive(Debug, Clone)]
 pub struct Table<T>
 where
-    T: for<'a> FromRow<'a, PgRow> + Send + Sync + Unpin + 'static,
+    // T: for<'a> FromRow<'a, PgRow> + Send + Sync + Unpin + 'static,
     T: Serialize + for<'de> Deserialize<'de>,
 {
-    pool: PgPool,
-    table_name: String,
+    pub pool: PgPool,
+    pub table_name: String,
     // column serving as unique id to table
-    column: String,
+    pub column: String,
     _phantom: std::marker::PhantomData<T>,
+}
+
+pub struct Store<T>
+where
+    T: Sized + Clone + Send + Sync + 'static,
+    // T: for<'a> FromRow<'a, PgRow> + Send + Sync + Unpin + 'static,
+    T: Unpin,
+    T: Serialize + for<'de> Deserialize<'de>,
+{
+    pub table: Table<T>,
+}
+
+impl Store<StatusListToken> {
+    pub async fn new() -> Store<StatusListToken> {
+        let pool = establish_connection().await;
+        Store {
+            table: Table::new(pool, "statuslisttoken".to_string(), "issuer".to_string()),
+        }
+    }
+}
+
+impl Store<Credentials> {
+    pub async fn new() -> Store<Credentials> {
+        let pool = establish_connection().await;
+        Store {
+            table: Table::new(pool, "credentials".to_string(), "issuer".to_string()),
+        }
+    }
 }
 
 impl<T> Table<T>
 where
-    T: for<'a> FromRow<'a, PgRow> + Send + Sync + Unpin + 'static,
+    // T: for<'a> FromRow<'a, PgRow> + Send + Sync + Unpin + 'static,
     T: Serialize + for<'de> Deserialize<'de>,
 {
     /// Creates a new `Table` instance.
-    fn new(pool: PgPool, table_name: impl Into<String>, column: String) -> Self {
+    pub fn new(pool: PgPool, table_name: impl Into<String>, column: String) -> Self {
         Self {
             pool,
             table_name: table_name.into(),
@@ -49,7 +78,7 @@ pub fn to_map(value: Value) -> HashMap<String, Value> {
 pub trait Repository<T>
 where
     T: for<'a> FromRow<'a, PgRow> + Send + Sync + Unpin + 'static,
-    T: Serialize + for<'de> Deserialize<'de>,
+    T: Serialize + for<'de> Deserialize<'de> ,
 {
     ///Get a handle to a table
     fn get_table(&self) -> Table<T>;
@@ -82,26 +111,26 @@ where
         query
             .execute(&table.pool)
             .await
-            .map_err(|_| RepositoryError::StoreError)?;
+            .map_err(|e| e).unwrap();
 
         Ok(())
     }
 
     /// find one by filter.
     /// `value`: value to filter by, unique value in a table column
-    async fn find_one_by<'a, 'b>(&'a self, value: String) -> Result<Option<T>, RepositoryError> {
+    async fn find_one_by<'a, 'b>(&'a self, value: String) -> Result<T, RepositoryError> {
         let table = self.get_table();
         let query_string = format!(
-            "SELECT * FROM {} WHERE {} = $1 LIMIT 1",
+            "SELECT * FROM {} WHERE {} SIMILAR TO $1 LIMIT 1",
             table.table_name, table.column
         );
-        let result: Option<T> = sqlx::query_as(&query_string)
-            .bind(value)
-            .fetch_optional(&table.pool)
+        let result: T = sqlx::query_as(&query_string)
+            .bind(format!("%{}%", value)) // Wrap the value in '%' for SIMILAR TO
+            .fetch_one(&table.pool)
             .await
-            .map_err(|_| RepositoryError::FetchError)?;
-
-        return Ok(result);
+            .map_err(|e| e).unwrap();
+        
+        Ok(result)
     }
 
     /// delete by value, where value is unique in a table column
