@@ -1,20 +1,22 @@
-use mongodb::bson::oid::ObjectId;
 use serde::{Deserialize, Serialize};
-#[derive(Deserialize, Serialize)]
+use serde_json::Value;
+use sqlx::prelude::FromRow;
+#[derive(Deserialize, Serialize, Clone, Default, Debug, PartialEq, Eq)]
+#[derive(FromRow)]
 pub struct Credentials {
-    #[serde(rename = "_id")]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub id: Option<ObjectId>,
     pub issuer: String,
-    public_key: Vec<u8>,
-    algorithm: String,
+    pub public_key: Value,
+    pub alg: String,
 }
 
+#[derive(Clone, Serialize, Deserialize, Default)]
 pub struct StatusList {
     pub bits: u8,
     pub lst: String,
 }
 
+#[derive(FromRow)]
+#[derive(Clone, Serialize, Deserialize, Default)]
 pub struct StatusListToken {
     pub exp: Option<i32>,
     pub iat: i32,
