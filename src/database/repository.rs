@@ -7,6 +7,7 @@ use sqlx::{postgres::PgRow, FromRow, PgPool};
 use super::error::RepositoryError;
 
 #[derive(Debug, Clone)]
+/// Describes a table instance
 pub struct Table<T>
 where
     T: Serialize + for<'de> Deserialize<'de>,
@@ -18,6 +19,8 @@ where
     _phantom: std::marker::PhantomData<T>,
 }
 
+/// wrapper type on Table of T
+/// creates a new instance of Table with configurable information on table
 pub struct Store<T>
 where
     T: Sized + Clone + Send + Sync + 'static,
@@ -99,7 +102,10 @@ where
         }
 
         // Execute the query
-        query.execute(&table.pool).await.map_err(|_| RepositoryError::StoreError)?;
+        query
+            .execute(&table.pool)
+            .await
+            .map_err(|_| RepositoryError::StoreError)?;
 
         Ok(())
     }
@@ -196,5 +202,4 @@ where
             .map_err(|_| RepositoryError::UpdateError)?;
         Ok(result.rows_affected() > 0)
     }
-
 }
