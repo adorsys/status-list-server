@@ -9,5 +9,5 @@ pub enum RepositoryError {
     #[error("could not update entity")]
     UpdateError,
     #[error("could not delete entity")]
-    DeleteError,
+    DeleteError
 }

@@ -32,6 +32,7 @@ pub struct StatusListToken {
     ttl: Option<String>,
 }
 
+#[allow(unused)]
 impl StatusListToken {
     fn new(
         exp: Option<i32>,
