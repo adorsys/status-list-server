@@ -1,4 +1,4 @@
-use std::{collections::HashMap, fmt::format, path::is_separator};
+use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -13,7 +13,7 @@ where
 {
     pub pool: PgPool,
     pub table_name: String,
-    // column serving as query field id to table
+    // column serving as query field to table
     pub column: String,
     _phantom: std::marker::PhantomData<T>,
 }
@@ -99,7 +99,7 @@ where
         }
 
         // Execute the query
-        query.execute(&table.pool).await.map_err(|e| e).unwrap(); //RepositoryError::StoreError)?;
+        query.execute(&table.pool).await.map_err(|_| RepositoryError::StoreError)?;
 
         Ok(())
     }
@@ -117,10 +117,10 @@ where
         let wrapped_value = format!("\"{}\"", value);
 
         let result: T = sqlx::query_as(&query_string)
-            .bind(wrapped_value) // Bind the correctly formatted value
+            .bind(wrapped_value)
             .fetch_one(&table.pool)
             .await
-            .map_err(|e| e) // Consider better error handling
+            .map_err(|_| RepositoryError::FetchError)
             .unwrap();
 
         Ok(result)
@@ -160,20 +160,19 @@ where
         let mut values = vec![];
         let obj = to_map(json!(entity));
 
-        // Wrap value in double quotes
         let wrapped_value = format!("\"{}\"", issuer);
 
         // Filter out the `id` field if it's auto-incrementing
         for (key, val) in obj {
             if key != "id" {
-                columns.push(format!("{} = ${}", key, values.len() + 2)); // $2, $3, $4, ...
+                columns.push(format!("{} = ${}", key, values.len() + 2));
                 values.push(val);
             }
         }
 
         // Construct the query
         let query = format!(
-            "UPDATE {} SET {} WHERE {} = $1", // Use $1 for issuer
+            "UPDATE {} SET {} WHERE {} = $1",
             table.table_name,
             columns.join(", "),
             table.column
@@ -191,8 +190,11 @@ where
         }
 
         // Execute the query
-        let result = query.execute(&table.pool).await.map_err(|e| e).unwrap();
-
+        let result = query
+            .execute(&table.pool)
+            .await
+            .map_err(|_| RepositoryError::UpdateError)?;
         Ok(result.rows_affected() > 0)
     }
+
 }
