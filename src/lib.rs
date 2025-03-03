@@ -1,4 +1,4 @@
 mod auth;
-pub mod web;
 mod database;
 pub mod model;
+pub mod web;
