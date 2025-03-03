@@ -117,7 +117,7 @@ The Status List Server is built using modern, performant, and scalable technolog
    - **JSON Web Tokens (JWT)**: Used for encoding and decoding Status List Tokens. The `jsonwebtoken` crate is used for JWT operations.
 
 #### **Storage**
-   - **Database**: to map and store statuslist to id and  credentials(postgressql) .
+   - **Database**: to map and store statuslist to id and  credentials .
 
 ### **7.2. Data Flow**
 The data flow in the Status List Server is as follows:
