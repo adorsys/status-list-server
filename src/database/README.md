@@ -22,13 +22,28 @@ Stores information about issuers and their cryptographic public keys.
 | `statuslisttoken`| JSONB | status list token|
 
 ## Usage
+
 ```rust
+// implement Repository for your Store<T>
+impl<T> Repository<T> for Store<T>
+where
+    T: Sized + Clone + Send + Sync + 'static,
+    T: Unpin,
+    T: for<'a> FromRow<'a, PgRow>,
+    T: Serialize + for<'de> Deserialize<'de>,
+{
+    fn get_table(&self) -> Table<T> {
+        self.table.clone()
+    }
+}
+
 // create a store instance of credentials
 let store: Store<Credentials> = Store {
 
             table: Table::new(conn, "credentials", "issuer".to_string()),
         };
-// insert into databas
+
+// insert into database
 store.insert_one(credential).await.unwrap()
 ```
 

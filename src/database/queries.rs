@@ -30,16 +30,6 @@ mod test {
         model::Credentials,
     };
 
-    pub struct MockStore {
-        _table: Table<Credentials>,
-    }
-
-    impl Repository<Credentials> for MockStore {
-        fn get_table(&self) -> crate::database::repository::Table<Credentials> {
-            unimplemented!("not real")
-        }
-    }
-
     #[tokio::test]
     async fn test() {
         env::set_var(

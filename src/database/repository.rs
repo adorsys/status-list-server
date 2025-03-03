@@ -30,6 +30,7 @@ where
     pub table: Table<T>,
 }
 
+#[allow(unused)]
 impl<T> Table<T>
 where
     T: Serialize + for<'de> Deserialize<'de>,
