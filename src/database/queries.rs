@@ -19,11 +19,8 @@ where
 mod test {
     use std::env;
 
-    use sea_orm::sea_query::PostgresQueryBuilder;
-    use sea_orm::MockDatabase;
-
-    use serde_json::{json, to_string};
-    use sqlx::PgPool;
+    use serde_json::json;
+    use sqlx::Executor;
 
     use crate::{
         database::{
@@ -34,7 +31,7 @@ mod test {
     };
 
     pub struct MockStore {
-        table: Table<Credentials>,
+        _table: Table<Credentials>,
     }
 
     impl Repository<Credentials> for MockStore {
@@ -42,52 +39,55 @@ mod test {
             unimplemented!("not real")
         }
     }
+
     #[tokio::test]
     async fn test() {
-        let database = MockDatabase::new(sea_orm::DatabaseBackend::Postgres);
-        let conn = database.into_connection();
-        let mock = conn.as_mock_connection();
-
         env::set_var(
             "DATABASE_URL",
-            "postgres://myuser:mypassword@localhost:5432/mydatabase?connect_timeout=3",
+            "postgres://myuser:mypassword@localhost:5432/mydatabase",
         );
 
-        let a = json!("dsaf");
-        let entity = Credentials {
-            issuer: "new".to_string(),
-            public_key: a,
-            alg: "[65]".to_string(),
-        };
-
         let conn = establish_connection().await;
-        let mocktstore: Store<Credentials> = Store {
+        conn.execute(include_str!("./migrations/001_status_list.sql"))
+            .await
+            .expect("Failed to initialize DB");
+
+        let entity = Credentials::new(
+            "issuer1".to_string(),
+            json!("public_key"),
+            "alg".to_string(),
+        );
+        let new_entity = Credentials::new(
+            "issuer2".to_string(),
+            json!("public_key"),
+            "alg".to_string(),
+        );
+
+        let store: Store<Credentials> = Store {
             table: Table::new(conn, "credentials", "issuer".to_string()),
         };
 
-        // let a = mocktstore.delete_by("issuer16".to_string()).await.unwrap();
-        let a = mocktstore.update_one("issuer16".to_string(), entity).await.unwrap();
-        // assert_eq!(a,true);
-        // let id = "isuuer16".to_string();
-        // let mut result = mocktstore.find_one_by(id).await.unwrap();
-        // result = Credentials {
-        //     issuer: serde_json::to_string(&result.issuer).unwrap(),
-        //     public_key: result.issuer.trim().into(),
-        //     alg: result.alg.trim().to_string(),
-        // };
+        // test inserting
+        store.insert_one(entity.clone()).await.unwrap();
 
-        assert_eq!(a, false)
-    }
-    #[sqlx::test]
-    async fn basic_test(pool: PgPool) -> sqlx::Result<()> {
-        let mut conn = pool.acquire().await?;
+        // test finding
+        let credential = store.find_one_by("issuer1".to_string()).await.unwrap();
+        let issuer = &credential.issuer.replace("\"", "");
 
-        let foo = sqlx::query("SELECT * FROM foo")
-            .fetch_one(&mut *conn)
-            .await?;
+        let alg = credential.alg.replace("\"", "");
+        let public_key = serde_json::to_value(&credential.public_key).unwrap();
+        let normalised_credential = Credentials::new(issuer.to_string(), public_key, alg);
+        assert_eq!(normalised_credential, entity);
 
-        // assert_eq!(foo.get::<String, _>("bar"), "foobar!");
+        // test update functionality
+        let a = store
+            .update_one("issuer1".to_string(), new_entity)
+            .await
+            .unwrap();
+        assert!(a);
 
-        Ok(())
+        // test delete functionality
+        let a = store.delete_by("issuer2".to_string()).await.unwrap();
+        assert!(a);
     }
 }

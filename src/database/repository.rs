@@ -1,12 +1,10 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, fmt::format, path::is_separator};
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sqlx::{postgres::PgRow, FromRow, PgPool};
 
-use crate::model::{Credentials, StatusListToken};
-
-use super::{connection::establish_connection, error::RepositoryError};
+use super::error::RepositoryError;
 
 #[derive(Debug, Clone)]
 pub struct Table<T>
@@ -27,24 +25,6 @@ where
     T: Serialize + for<'de> Deserialize<'de>,
 {
     pub table: Table<T>,
-}
-
-impl Store<StatusListToken> {
-    pub async fn new() -> Store<StatusListToken> {
-        let pool = establish_connection().await;
-        Store {
-            table: Table::new(pool, "statuslisttoken".to_string(), "issuer".to_string()),
-        }
-    }
-}
-
-impl Store<Credentials> {
-    pub async fn new() -> Store<Credentials> {
-        let pool = establish_connection().await;
-        Store {
-            table: Table::new(pool, "credentials".to_string(), "issuer".to_string()),
-        }
-    }
 }
 
 impl<T> Table<T>
@@ -72,6 +52,7 @@ pub fn to_map(value: Value) -> HashMap<String, Value> {
     map
 }
 
+#[allow(unused)]
 pub trait Repository<T>
 where
     T: for<'a> FromRow<'a, PgRow> + Send + Sync + Unpin + 'static,
@@ -118,24 +99,28 @@ where
         }
 
         // Execute the query
-        query.execute(&table.pool).await.map_err(|e| e).unwrap();
+        query.execute(&table.pool).await.map_err(|e| e).unwrap(); //RepositoryError::StoreError)?;
 
         Ok(())
     }
 
     /// find one by filter.
     /// `value`: value to filter by, unique value in a table column
-    async fn find_one_by<'a, 'b>(&'a self, value: String) -> Result<T, RepositoryError> {
+    async fn find_one_by(&self, value: String) -> Result<T, RepositoryError> {
         let table = self.get_table();
         let query_string = format!(
             "SELECT * FROM {} WHERE {} SIMILAR TO $1 LIMIT 1",
             table.table_name, table.column
         );
+
+        // Wrap value in double quotes
+        let wrapped_value = format!("\"{}\"", value);
+
         let result: T = sqlx::query_as(&query_string)
-            .bind(format!("%{}%", value))
+            .bind(wrapped_value) // Bind the correctly formatted value
             .fetch_one(&table.pool)
             .await
-            .map_err(|e| e)
+            .map_err(|e| e) // Consider better error handling
             .unwrap();
 
         Ok(result)
@@ -155,12 +140,12 @@ where
 
         // Now, delete from credentials
         let delete_credentials_query = format!(
-            "DELETE FROM {} WHERE {} = $1",
+            "DELETE FROM {} WHERE {} LIKE $1",
             table.table_name, table.column
         );
 
         let result = sqlx::query(&delete_credentials_query)
-            .bind(value)
+            .bind(format!("%{}%", value))
             .execute(&table.pool)
             .await
             .map_err(|_| RepositoryError::DeleteError)?;
@@ -168,47 +153,45 @@ where
         Ok(result.rows_affected() > 0)
     }
 
-    /// update by value, where value is unique in a table column
     async fn update_one(&self, issuer: String, entity: T) -> Result<bool, RepositoryError> {
         let table = self.get_table();
 
         let mut columns = vec![];
         let mut values = vec![];
         let obj = to_map(json!(entity));
-        for (key, value) in obj.iter() {
-            if key != "issuer" {
-                // Don't update the issuer field itself
-                columns.push(format!("{} = ${}", key, values.len() + 1));
-                values.push(value);
+
+        // Wrap value in double quotes
+        let wrapped_value = format!("\"{}\"", issuer);
+
+        // Filter out the `id` field if it's auto-incrementing
+        for (key, val) in obj {
+            if key != "id" {
+                columns.push(format!("{} = ${}", key, values.len() + 2)); // $2, $3, $4, ...
+                values.push(val);
             }
         }
 
-        if columns.is_empty() {
-            return Err(RepositoryError::UpdateError); // No valid update fields
-        }
-
-        // Ensure we update only the row with the given issuer
+        // Construct the query
         let query = format!(
-            "UPDATE {} SET {} WHERE issuer = ${}",
+            "UPDATE {} SET {} WHERE {} = $1", // Use $1 for issuer
             table.table_name,
             columns.join(", "),
-            values.len() + 1 // Placeholder for the issuer at the end
+            table.column
         );
 
+        // Prepare the query
         let mut query = sqlx::query(&query);
 
-        // Bind new values dynamically
+        // Bind the issuer first (this is for the WHERE clause)
+        query = query.bind(wrapped_value);
+
+        // Bind the values dynamically for the SET clause in the correct order
         for value in values {
             query = query.bind(value);
         }
 
-        // Bind the issuer at the end
-        query = query.bind(issuer);
-
-        let result = query
-            .execute(&table.pool)
-            .await
-            .map_err(|_| RepositoryError::UpdateError)?;
+        // Execute the query
+        let result = query.execute(&table.pool).await.map_err(|e| e).unwrap();
 
         Ok(result.rows_affected() > 0)
     }

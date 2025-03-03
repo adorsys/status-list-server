@@ -8,6 +8,6 @@ pub enum RepositoryError {
     FetchError,
     #[error("could not update entity")]
     UpdateError,
-    #[error("could not delete entity")] 
+    #[error("could not delete entity")]
     DeleteError,
 }

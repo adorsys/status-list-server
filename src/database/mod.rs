@@ -1,4 +1,4 @@
-mod queries;
-mod error;
-mod repository;
 mod connection;
+mod error;
+mod queries;
+mod repository;
