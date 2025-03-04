@@ -11,4 +11,6 @@ pub enum RepositoryError {
     UpdateError,
     #[error("could not delete entity")]
     DeleteError,
+    #[error("Repository not set")]
+    RepositoryNotSet
 }
