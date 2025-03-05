@@ -28,7 +28,6 @@ impl AppStateRepository {
     }
 }
 
-
 pub async fn setup() -> AppState {
     let conn = establish_connection().await;
     let credential_repo: Store<Credentials> = Store {

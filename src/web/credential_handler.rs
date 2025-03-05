@@ -1,6 +1,9 @@
 use axum::{extract::State, http::StatusCode, response::IntoResponse, Json};
 
-use crate::{auth::auth::publish_credentials, database::error::RepositoryError, model::Credentials, utils::state::AppState};
+use crate::{
+    auth::authentication::publish_credentials, database::error::RepositoryError,
+    model::Credentials, utils::state::AppState,
+};
 
 #[axum::debug_handler]
 pub async fn credential_handler(
@@ -19,7 +22,6 @@ pub async fn credential_handler(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 RepositoryError::StoreError.to_string(),
             ))
-            .into()
         }
     }
 }
