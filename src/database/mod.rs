@@ -1,4 +1,4 @@
-mod connection;
+pub mod connection;
 pub mod error;
 mod queries;
 pub mod repository;

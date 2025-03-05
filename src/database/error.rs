@@ -1,3 +1,5 @@
+use axum::Json;
+use serde_json::{json, Value};
 use thiserror::Error;
 
 #[derive(Error, Debug)]
@@ -12,5 +14,13 @@ pub enum RepositoryError {
     #[error("could not delete entity")]
     DeleteError,
     #[error("Repository not set")]
-    RepositoryNotSet
+    RepositoryNotSet,
+    #[error("generic: {0}")]
+    Generic(String),
+}
+
+impl RepositoryError {
+    pub fn json(&self) -> Json<Value> {
+        Json(json!({"error": self.to_string()}))
+    }
 }

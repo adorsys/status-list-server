@@ -1,5 +1,5 @@
-mod auth;
+pub mod auth;
 mod database;
 pub mod model;
 pub mod web;
-mod utils;
+pub mod utils;

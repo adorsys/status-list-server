@@ -1,4 +1,8 @@
+use axum::routing::post;
 use axum::{http::Method, response::IntoResponse, routing::get, Router};
+use dotenvy::dotenv;
+use status_list_server::utils::state::setup;
+use status_list_server::web::credential_handler::credential_handler;
 use tokio::net::TcpListener;
 use tower::ServiceBuilder;
 use tower_http::catch_panic::CatchPanicLayer;
@@ -13,18 +17,52 @@ async fn welcome() -> impl IntoResponse {
 
 #[tokio::main]
 async fn main() {
+    dotenv().ok();
+
+    // Enable logging
+    config_tracing();
+
+    let state = setup().await;
     // cors Layer
     let cors = CorsLayer::new()
         .allow_methods([Method::GET, Method::POST, Method::OPTIONS])
         .allow_origin(Any)
         .allow_headers(Any);
 
-    let router = Router::new().route("/", get(welcome)).layer(
-        ServiceBuilder::new()
-            .layer(TraceLayer::new_for_http())
-            .layer(CatchPanicLayer::new())
-            .layer(cors),
-    );
-    let listener = TcpListener::bind("0.0.0.0:8000").await.unwrap();
+    let router = Router::new()
+        .route("/", get(welcome))
+        .route("/credentials", post(credential_handler))
+        .layer(
+            ServiceBuilder::new()
+                .layer(TraceLayer::new_for_http())
+                .layer(CatchPanicLayer::new())
+                .layer(cors),
+        )
+        .with_state(state);
+
+    let addr = "0.0.0.0:8000";
+    let listener = TcpListener::bind(addr).await.unwrap();
+    tracing::info!("listening on {addr}");
     axum::serve(listener, router).await.unwrap()
+}
+
+fn config_tracing() {
+    // Enable errors backtrace
+    if std::env::var("RUST_LIB_BACKTRACE").is_err() {
+        std::env::set_var("RUST_LIB_BACKTRACE", "1")
+    }
+
+    use tracing::Level;
+    use tracing_subscriber::{filter, layer::SubscriberExt, util::SubscriberInitExt};
+
+    let tracing_layer = tracing_subscriber::fmt::layer();
+    let filter = filter::Targets::new()
+        .with_target("hyper::proto", Level::INFO)
+        .with_target("tower_http::trace", Level::DEBUG)
+        .with_default(Level::DEBUG);
+
+    tracing_subscriber::registry()
+        .with(tracing_layer)
+        .with(filter)
+        .init();
 }
