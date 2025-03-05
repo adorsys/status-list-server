@@ -54,7 +54,7 @@ mod test {
         );
 
         let store: Store<Credentials> = Store {
-            table: Table::new(conn, "credentials", "issuer".to_string()),
+            table: Table::new(conn, "credentials".to_string(), "issuer".to_string()),
         };
 
         // test inserting
