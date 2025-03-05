@@ -13,6 +13,6 @@ pub async fn publish_credentials(
     if let Some(store) = state.repository {
         Ok(store.credential_repository.insert_one(credentials).await?)
     } else {
-        return Err(RepositoryError::RepositoryNotSet)?;
+        Err(RepositoryError::RepositoryNotSet)?
     }
 }
