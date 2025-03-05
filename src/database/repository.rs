@@ -2,6 +2,7 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use sqlx::error::Error;
 use sqlx::{postgres::PgRow, FromRow, PgPool};
 
 use super::error::RepositoryError;
@@ -21,6 +22,8 @@ where
 
 /// wrapper type on Table of T
 /// creates a new instance of Table with configurable information on table
+
+#[derive(Clone)]
 pub struct Store<T>
 where
     T: Sized + Clone + Send + Sync + 'static,
@@ -30,7 +33,6 @@ where
     pub table: Table<T>,
 }
 
-#[allow(unused)]
 impl<T> Table<T>
 where
     T: Serialize + for<'de> Deserialize<'de>,
@@ -103,10 +105,7 @@ where
         }
 
         // Execute the query
-        query
-            .execute(&table.pool)
-            .await
-            .map_err(|_| RepositoryError::StoreError)?;
+        query.execute(&table.pool).await?;
 
         Ok(())
     }
@@ -126,9 +125,7 @@ where
         let result: T = sqlx::query_as(&query_string)
             .bind(wrapped_value)
             .fetch_one(&table.pool)
-            .await
-            .map_err(|_| RepositoryError::FetchError)
-            .unwrap();
+            .await?;
 
         Ok(result)
     }
@@ -142,8 +139,7 @@ where
         let _ = sqlx::query(delete_status_list_tokens_query)
             .bind(&value)
             .execute(&table.pool)
-            .await
-            .map_err(|_| RepositoryError::DeleteError)?;
+            .await?;
 
         // Now, delete from credentials
         let delete_credentials_query = format!(
@@ -154,8 +150,7 @@ where
         let result = sqlx::query(&delete_credentials_query)
             .bind(format!("%{}%", value))
             .execute(&table.pool)
-            .await
-            .map_err(|_| RepositoryError::DeleteError)?;
+            .await?;
 
         Ok(result.rows_affected() > 0)
     }
@@ -197,10 +192,13 @@ where
         }
 
         // Execute the query
-        let result = query
-            .execute(&table.pool)
-            .await
-            .map_err(|_| RepositoryError::UpdateError)?;
+        let result = query.execute(&table.pool).await?;
         Ok(result.rows_affected() > 0)
+    }
+}
+
+impl From<Error> for RepositoryError {
+    fn from(err: Error) -> Self {
+        RepositoryError::Generic(err.to_string())
     }
 }
