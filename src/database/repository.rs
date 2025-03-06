@@ -2,6 +2,7 @@ use std::{collections::HashMap, fmt::Error};
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use sqlx::error::Error;
 use sqlx::{postgres::PgRow, FromRow, PgPool};
 
 use super::error::RepositoryError;
@@ -21,6 +22,8 @@ where
 
 /// wrapper type on Table of T
 /// creates a new instance of Table with configurable information on table
+
+#[derive(Clone)]
 pub struct Store<T>
 where
     T: Sized + Clone + Send + Sync + 'static,
@@ -30,7 +33,6 @@ where
     pub table: Table<T>,
 }
 
-#[allow(unused)]
 impl<T> Table<T>
 where
     T: Serialize + for<'de> Deserialize<'de>,
@@ -197,6 +199,6 @@ where
 
 impl From<Error> for RepositoryError {
     fn from(err: Error) -> Self {
-        Self::Generic(err.to_string())
+        RepositoryError::Generic(err.to_string())
     }
 }
