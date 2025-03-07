@@ -11,6 +11,8 @@ pub enum RepositoryError {
     CouldNotStoreEntity,
     #[error("repository not set")]
     RepositoryNotSet,
+    #[error("issuer already exist")]
+    DuplicateEntry,
 }
 
 impl RepositoryError {
