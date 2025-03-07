@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use sqlx::error::Error;
+
 use sqlx::{postgres::PgRow, FromRow, PgPool};
 
 use super::error::RepositoryError;
@@ -38,10 +38,10 @@ where
     T: Serialize + for<'de> Deserialize<'de>,
 {
     /// Creates a new `Table` instance.
-    pub fn new(pool: PgPool, table_name: impl Into<String>, column: String) -> Self {
+    pub fn new(pool: PgPool, table_name: String, column: String) -> Self {
         Self {
             pool,
-            table_name: table_name.into(),
+            table_name,
             column,
             _phantom: std::marker::PhantomData,
         }
@@ -194,11 +194,5 @@ where
         // Execute the query
         let result = query.execute(&table.pool).await?;
         Ok(result.rows_affected() > 0)
-    }
-}
-
-impl From<Error> for RepositoryError {
-    fn from(err: Error) -> Self {
-        RepositoryError::Generic(err.to_string())
     }
 }

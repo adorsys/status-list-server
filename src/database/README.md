@@ -25,6 +25,15 @@ Stores information about issuers and their cryptographic public keys.
 
 ```rust
 // implement Repository for your Store<T>
+pub struct Store<T>
+where
+    T: Sized + Clone + Send + Sync + 'static,
+    T: Unpin,
+    T: Serialize + for<'de> Deserialize<'de>,
+{
+    pub table: Table<T>,
+}
+
 impl<T> Repository<T> for Store<T>
 where
     T: Sized + Clone + Send + Sync + 'static,
@@ -39,11 +48,10 @@ where
 
 // create a store instance of credentials
 let store: Store<Credentials> = Store {
-
             table: Table::new(conn, "credentials", "issuer".to_string()),
         };
 
 // insert into database
-store.insert_one(credential).await.unwrap()
+store.insert_one(credential).await?;
 ```
 
