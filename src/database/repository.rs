@@ -112,7 +112,7 @@ where
 
     /// find one by filter.
     /// `value`: value to filter by, unique value in a table column
-    async fn find_one_by(&self, value: String) -> Result<T, RepositoryError> {
+    async fn find_one_by(&self, value: String) -> Result<Option<T>, RepositoryError> {
         let table = self.get_table();
         let query_string = format!(
             "SELECT * FROM {} WHERE {} SIMILAR TO $1 LIMIT 1",
@@ -122,9 +122,9 @@ where
         // Wrap value in double quotes
         let wrapped_value = format!("\"{}\"", value);
 
-        let result: T = sqlx::query_as(&query_string)
+        let result: Option<T> = sqlx::query_as(&query_string)
             .bind(wrapped_value)
-            .fetch_one(&table.pool)
+            .fetch_optional(&table.pool)
             .await?;
 
         Ok(result)
