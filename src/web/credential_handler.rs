@@ -20,7 +20,7 @@ pub async fn credential_handler(
             tracing::error!("Failed to store credentials: {err:?}");
             Err((
                 StatusCode::INTERNAL_SERVER_ERROR,
-                RepositoryError::StoreError.to_string(),
+                RepositoryError::CouldNotStoreEntity.to_string(),
             ))
         }
     }
