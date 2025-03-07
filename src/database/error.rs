@@ -7,6 +7,10 @@ use thiserror::Error;
 pub enum RepositoryError {
     #[error("generic: {0}")]
     Generic(String),
+    #[error("could not store entity")]
+    CouldNotStoreEntity,
+    #[error("repository not set")]
+    RepositoryNotSet,
 }
 
 impl RepositoryError {

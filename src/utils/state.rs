@@ -31,10 +31,10 @@ impl AppStateRepository {
 pub async fn setup() -> AppState {
     let conn = establish_connection().await;
     let credential_repo: Store<Credentials> = Store {
-        table: Table::new(conn.clone(), "credentials", "issuer".to_owned()),
+        table: Table::new(conn.clone(), "credentials".to_owned(), "issuer".to_owned()),
     };
     let status_list_repo: Store<StatusListToken> = Store {
-        table: Table::new(conn, "status_list_tokens", "issuer".to_owned()),
+        table: Table::new(conn, "status_list_tokens".to_owned(), "issuer".to_owned()),
     };
 
     AppState {
