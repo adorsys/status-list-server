@@ -2,7 +2,7 @@ use std::str::FromStr;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use sqlx::prelude::FromRow;
+use sqlx::prelude::{FromRow, Type};
 #[derive(Deserialize, Serialize, Clone, Default, Debug, PartialEq, Eq, FromRow)]
 pub struct Credentials {
     pub issuer: String,
@@ -46,22 +46,22 @@ impl FromStr for Status {
     }
 }
 
-#[derive(Clone, Serialize, Deserialize, Default)]
+#[derive(Clone, Serialize, Deserialize, Default, PartialEq, Eq, Debug, Type)]
 pub struct StatusList {
-    pub bits: u8,
+    pub bits: i8,
     pub lst: String,
 }
 
-#[derive(FromRow, Clone, Serialize, Deserialize, Default)]
+
+#[derive(Deserialize, Serialize, Clone, Default, Debug, PartialEq, Eq, FromRow, Type)]
 pub struct StatusListToken {
-    exp: Option<i32>,
-    iat: i32,
-    status_list: StatusList,
-    sub: String,
-    ttl: Option<String>,
+    pub exp: Option<i32>,
+    pub iat: i32,
+    pub status_list: StatusList,
+    pub sub: String,
+    pub ttl: Option<String>,
 }
 
-#[allow(unused)]
 impl StatusListToken {
     fn new(
         exp: Option<i32>,
