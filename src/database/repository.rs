@@ -1,7 +1,8 @@
-use std::{collections::HashMap, fmt::Error};
+use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+
 use sqlx::{postgres::PgRow, FromRow, PgPool};
 
 use super::error::RepositoryError;
@@ -21,6 +22,8 @@ where
 
 /// wrapper type on Table of T
 /// creates a new instance of Table with configurable information on table
+
+#[derive(Clone)]
 pub struct Store<T>
 where
     T: Sized + Clone + Send + Sync + 'static,
@@ -30,7 +33,6 @@ where
     pub table: Table<T>,
 }
 
-#[allow(unused)]
 impl<T> Table<T>
 where
     T: Serialize + for<'de> Deserialize<'de>,
@@ -110,7 +112,7 @@ where
 
     /// find one by filter.
     /// `value`: value to filter by, unique value in a table column
-    async fn find_one_by(&self, value: String) -> Result<T, RepositoryError> {
+    async fn find_one_by(&self, value: String) -> Result<Option<T>, RepositoryError> {
         let table = self.get_table();
         let query_string = format!(
             "SELECT * FROM {} WHERE {} SIMILAR TO $1 LIMIT 1",
@@ -120,9 +122,9 @@ where
         // Wrap value in double quotes
         let wrapped_value = format!("\"{}\"", value);
 
-        let result: T = sqlx::query_as(&query_string)
+        let result: Option<T> = sqlx::query_as(&query_string)
             .bind(wrapped_value)
-            .fetch_one(&table.pool)
+            .fetch_optional(&table.pool)
             .await?;
 
         Ok(result)
@@ -192,11 +194,5 @@ where
         // Execute the query
         let result = query.execute(&table.pool).await?;
         Ok(result.rows_affected() > 0)
-    }
-}
-
-impl From<Error> for RepositoryError {
-    fn from(err: Error) -> Self {
-        Self::Generic(err.to_string())
     }
 }
