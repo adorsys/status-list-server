@@ -34,7 +34,7 @@ pub async fn setup() -> AppState {
         table: Table::new(conn.clone(), "credentials", "issuer".to_owned()),
     };
     let status_list_repo: Store<StatusListToken> = Store {
-        table: Table::new(conn, "status_list_tokens", "issuer".to_owned()),
+        table: Table::new(conn, "status_list_tokens", "status_list_id".to_owned()),
     };
 
     AppState {
