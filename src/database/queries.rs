@@ -62,7 +62,8 @@ mod test {
 
         // test finding
         let credential = store.find_one_by("issuer1".to_string()).await.unwrap();
-        let issuer = &credential.issuer.replace("\"", "");
+        let credential = credential.unwrap();
+        let issuer = credential.issuer.replace("\"", "");
 
         let alg = credential.alg.replace("\"", "");
         let public_key = serde_json::to_value(&credential.public_key).unwrap();
