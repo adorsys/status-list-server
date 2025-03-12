@@ -7,13 +7,17 @@ edition = "2021"
 [dependencies]
 async-trait = "0.1.86"
 axum = { version = "0.8.1", features = ["macros"] }
+chrono = "0.4.40"
 dotenvy = "0.15.7"
+flate2 = "1.1.0"
+hyper = "1.6.0"
 mongodb = "3.2.1"
 once_cell = "1.20.3"
 serde = { version = "1.0.218", features = ["derive"] }
 serde_json = "1.0.139"
 sqlx = { version = "0.8.3", features = ["postgres", "runtime-tokio"] }
 thiserror = "2.0.11"
+time = "0.3.39"
 tokio = { version = "1.16.1", features = ["full"] }
 tower = "0.5.2"
 tower-http = { version = "0.6.2", features = ["cors", "trace", "catch-panic"] }
