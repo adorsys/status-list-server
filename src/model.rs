@@ -68,13 +68,15 @@ impl Type<Postgres> for StatusList {
 impl<'r> Decode<'r, Postgres> for StatusList {
     fn decode(value: sqlx::postgres::PgValueRef<'r>) -> Result<Self, sqlx::error::BoxDynError> {
         let json = <serde_json::Value as Decode<Postgres>>::decode(value)?;
-        
+
         // Extract the bits value as a number and convert to U8Wrapper
-        let bits = json.get("bits")
+        let bits = json
+            .get("bits")
             .and_then(|v| v.as_i64())
             .ok_or("Missing or invalid bits field")?;
-        
-        let lst = json.get("lst")
+
+        let lst = json
+            .get("lst")
             .and_then(|v| v.as_str())
             .ok_or("Missing or invalid lst field")?
             .to_string();
@@ -87,7 +89,10 @@ impl<'r> Decode<'r, Postgres> for StatusList {
 }
 
 impl Encode<'_, Postgres> for StatusList {
-    fn encode_by_ref(&self, buf: &mut sqlx::postgres::PgArgumentBuffer) -> Result<IsNull, Box<dyn Error + Send + Sync + 'static>> {
+    fn encode_by_ref(
+        &self,
+        buf: &mut sqlx::postgres::PgArgumentBuffer,
+    ) -> Result<IsNull, Box<dyn Error + Send + Sync + 'static>> {
         let json = serde_json::json!({
             "bits": self.bits.0,
             "lst": self.lst

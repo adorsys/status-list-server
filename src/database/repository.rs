@@ -118,15 +118,15 @@ where
             "SELECT * FROM {} WHERE {} = $1 LIMIT 1",
             table.table_name, table.column
         );
-    
+
         // Do NOT wrap value in double quotes
         let result: Option<T> = sqlx::query_as(&query_string)
-            .bind(value) 
+            .bind(value)
             .fetch_optional(&table.pool)
             .await?;
-    
+
         Ok(result)
-    }    
+    }
 
     /// delete by value, where value is unique in a table column
     async fn delete_by(&self, value: String) -> Result<bool, RepositoryError> {
