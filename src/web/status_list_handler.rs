@@ -102,7 +102,7 @@ pub async fn get_status_list(
                 .headers()
                 .get("Accept-Encoding")
                 .and_then(|h| h.to_str().ok())
-                .map_or(false, |h| h.contains("gzip"))
+                .is_some_and(|h| h.contains("gzip"))
             {
                 // Compress response
                 let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
