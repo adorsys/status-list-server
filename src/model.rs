@@ -35,7 +35,7 @@ impl Type<Postgres> for U8Wrapper {
 }
 
 // Implement `sqlx::Encode<Postgres>` for `U8Wrapper`
-impl<'q> Encode<'q, Postgres> for U8Wrapper {
+impl Encode<'_, Postgres> for U8Wrapper {
     fn encode_by_ref(
         &self,
         buf: &mut sqlx::postgres::PgArgumentBuffer,
