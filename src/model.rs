@@ -63,7 +63,7 @@ pub struct StatusListToken {
 }
 
 impl StatusListToken {
-    fn new(
+    pub fn new(
         exp: Option<i32>,
         iat: i32,
         status_list: StatusList,
