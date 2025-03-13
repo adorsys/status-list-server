@@ -52,9 +52,9 @@ pub struct StatusList {
     pub lst: String,
 }
 
-
 #[derive(Deserialize, Serialize, Clone, Default, Debug, PartialEq, Eq, FromRow, Type)]
 pub struct StatusListToken {
+    pub list_id: String,
     pub exp: Option<i32>,
     pub iat: i32,
     pub status_list: StatusList,
@@ -64,6 +64,7 @@ pub struct StatusListToken {
 
 impl StatusListToken {
     pub fn new(
+        list_id: String,
         exp: Option<i32>,
         iat: i32,
         status_list: StatusList,
@@ -71,6 +72,7 @@ impl StatusListToken {
         ttl: Option<String>,
     ) -> Self {
         Self {
+            list_id,
             exp,
             iat,
             status_list,

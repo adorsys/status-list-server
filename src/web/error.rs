@@ -1,5 +1,3 @@
-use core::error;
-
 use thiserror::Error;
 
 #[derive(Error, Debug)]
@@ -10,4 +8,10 @@ pub enum StatusError {
     UnknownStatus,
     #[error("error: {0}")]
     Generic(String),
+    #[error("failed to update status")]
+    UpdateFailed,
+    #[error("Request body must contain a valid 'updates' array")]
+    MalformedBody,
+    #[error("Status list not found")]
+    StatusListNotFound
 }
