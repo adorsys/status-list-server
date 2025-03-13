@@ -1,5 +1,3 @@
-use core::error;
-
 use thiserror::Error;
 
 #[derive(Error, Debug)]
