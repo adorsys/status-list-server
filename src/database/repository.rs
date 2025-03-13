@@ -115,13 +115,15 @@ where
     async fn find_one_by(&self, value: String) -> Result<Option<T>, RepositoryError> {
         let table = self.get_table();
         let query_string = format!(
-            "SELECT * FROM {} WHERE {} = $1 LIMIT 1",
+            "SELECT * FROM {} WHERE {} SIMILAR TO $1 LIMIT 1",
             table.table_name, table.column
         );
 
-        // Do NOT wrap value in double quotes
+        // Wrap value in double quotes
+        let wrapped_value = format!("\"{}\"", value);
+
         let result: Option<T> = sqlx::query_as(&query_string)
-            .bind(value)
+            .bind(wrapped_value)
             .fetch_optional(&table.pool)
             .await?;
 

@@ -47,8 +47,8 @@ impl Encode<'_, Postgres> for U8Wrapper {
 // Implement `sqlx::Decode<Postgres>` for `U8Wrapper`
 impl<'r> Decode<'r, Postgres> for U8Wrapper {
     fn decode(value: sqlx::postgres::PgValueRef<'r>) -> Result<Self, sqlx::error::BoxDynError> {
-        let decoded = i8::decode(value)?; // Decode as `i8` first
-        Ok(U8Wrapper(decoded as u8)) // Convert safely to `u8`
+        let decoded = i8::decode(value)?;
+        Ok(U8Wrapper(decoded as u8))
     }
 }
 
@@ -58,7 +58,6 @@ pub struct StatusList {
     pub lst: String,
 }
 
-// Add these implementations for StatusList
 impl Type<Postgres> for StatusList {
     fn type_info() -> PgTypeInfo {
         PgTypeInfo::with_name("jsonb")
