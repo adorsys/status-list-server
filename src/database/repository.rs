@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 
+use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sqlx::error::Error;
@@ -11,7 +12,7 @@ use super::error::RepositoryError;
 /// Describes a table instance
 pub struct Table<T>
 where
-    T: Serialize + for<'de> Deserialize<'de>,
+T: Serialize + for<'de> Deserialize<'de>,
 {
     pub pool: PgPool,
     pub table_name: String,
@@ -22,7 +23,6 @@ where
 
 /// wrapper type on Table of T
 /// creates a new instance of Table with configurable information on table
-
 #[derive(Clone)]
 pub struct Store<T>
 where
@@ -35,7 +35,7 @@ where
 
 impl<T> Table<T>
 where
-    T: Serialize + for<'de> Deserialize<'de>,
+T: Serialize + for<'de> Deserialize<'de>,
 {
     /// Creates a new `Table` instance.
     pub fn new(pool: PgPool, table_name: impl Into<String>, column: String) -> Self {
@@ -58,10 +58,10 @@ pub fn to_map(value: Value) -> HashMap<String, Value> {
     map
 }
 
-#[allow(unused)]
-pub trait Repository<T>
+#[async_trait]
+pub trait Repository<T>: Send + Sync
 where
-    T: for<'a> FromRow<'a, PgRow> + Send + Sync + Unpin + 'static,
+    T: for<'a> FromRow<'a, PgRow> + Send + Sync + Unpin + 'static + Sized + Clone,
     T: Serialize + for<'de> Deserialize<'de>,
 {
     ///Get a handle to a table
