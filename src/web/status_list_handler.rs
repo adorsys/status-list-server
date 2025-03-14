@@ -193,7 +193,7 @@ mod tests {
         // Set up test database URL
         env::set_var(
             "DATABASE_URL",
-            "postgres://myuser:dastro12345@localhost:5433/status_list_db",
+            "postgres://myuser:mypassword@localhost:5433/mydatabase",
         );
 
         // Generate a unique issuer for this test
