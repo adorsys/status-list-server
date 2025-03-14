@@ -1,9 +1,15 @@
-use std::str::FromStr;
+use std::{error::Error, str::FromStr};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use sqlx::prelude::{FromRow, Type};
-#[derive(Deserialize, Serialize, Clone, Default, Debug, PartialEq, Eq, FromRow)]
+use sqlx::{
+    encode::IsNull,
+    postgres::PgTypeInfo,
+    prelude::{FromRow, Type},
+    Decode, Encode, Postgres,
+};
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, FromRow)]
 pub struct Credentials {
     pub issuer: String,
     pub public_key: Value,
@@ -52,14 +58,40 @@ pub struct StatusList {
     pub lst: String,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct U8Wrapper(pub u8);
+
+impl Type<Postgres> for U8Wrapper {
+    fn type_info() -> PgTypeInfo {
+        <i8 as Type<Postgres>>::type_info()
+    }
+}
+
+// Implement `sqlx::Encode<Postgres>` for `U8Wrapper`
+impl Encode<'_, Postgres> for U8Wrapper {
+    fn encode_by_ref(
+        &self,
+        buf: &mut sqlx::postgres::PgArgumentBuffer,
+    ) -> Result<IsNull, Box<(dyn Error + Send + Sync + 'static)>> {
+        (self.0 as i8).encode(buf)
+    }
+}
+
+// Implement `sqlx::Decode<Postgres>` for `U8Wrapper`
+impl<'r> Decode<'r, Postgres> for U8Wrapper {
+    fn decode(value: sqlx::postgres::PgValueRef<'r>) -> Result<Self, sqlx::error::BoxDynError> {
+        let decoded = i8::decode(value)?;
+        Ok(U8Wrapper(decoded as u8)) 
+    }
+}
 #[derive(Deserialize, Serialize, Clone, Default, Debug, PartialEq, Eq, FromRow, Type)]
 pub struct StatusListToken {
-    pub list_id: String,
     pub exp: Option<i32>,
     pub iat: i32,
     pub status_list: StatusList,
     pub sub: String,
     pub ttl: Option<String>,
+    pub list_id: String,
 }
 
 impl StatusListToken {
@@ -81,3 +113,4 @@ impl StatusListToken {
         }
     }
 }
+

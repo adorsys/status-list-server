@@ -1,26 +1,29 @@
 use axum::Json;
 use serde_json::{json, Value};
+use sqlx::error::Error;
 use thiserror::Error;
 
 #[derive(Error, Debug)]
-#[allow(clippy::enum_variant_names)]
 pub enum RepositoryError {
-    #[error("could not store entity")]
-    StoreError,
-    #[error("could not fetch entity")]
-    FetchError,
-    #[error("could not update entity")]
-    UpdateError,
-    #[error("could not delete entity")]
-    DeleteError,
-    #[error("Repository not set")]
-    RepositoryNotSet,
     #[error("generic: {0}")]
     Generic(String),
+    #[error("could not store entity")]
+    CouldNotStoreEntity,
+    #[error("repository not set")]
+    RepositoryNotSet,
+    #[error("issuer already exist")]
+    DuplicateEntry,
+    #[error("not found")]
+    NotFound,
 }
 
 impl RepositoryError {
     pub fn json(&self) -> Json<Value> {
         Json(json!({"error": self.to_string()}))
+    }
+}
+impl From<Error> for RepositoryError {
+    fn from(err: Error) -> Self {
+        RepositoryError::Generic(err.to_string())
     }
 }
