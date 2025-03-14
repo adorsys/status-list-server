@@ -80,63 +80,66 @@ pub async fn update_statuslist(
                 .into_response();
         }
     };
+    if let Some(status_list_token) = status_list_token {
+        let lst = status_list_token.status_list.lst.clone();
 
-    let lst = status_list_token.status_list.lst.clone();
+        // Apply updates
 
-    // Apply updates
+        let updated_lst = match update_status(&lst, updates) {
+            Ok(updated_lst) => updated_lst,
+            Err(e) => {
+                tracing::error!("Status update failed: {:?}", e);
+                return match e {
+                    StatusError::InvalidIndex => {
+                        (StatusCode::BAD_REQUEST, "Invalid index").into_response()
+                    }
+                    _ => (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        StatusError::UpdateFailed.to_string(),
+                    )
+                        .into_response(),
+                };
+            }
+        };
 
-    let updated_lst = match update_status(&lst, updates) {
-        Ok(updated_lst) => updated_lst,
-        Err(e) => {
-            tracing::error!("Status update failed: {:?}", e);
-            return match e {
-                StatusError::InvalidIndex => {
-                    (StatusCode::BAD_REQUEST, "Invalid index").into_response()
-                }
-                _ => (
-                    StatusCode::INTERNAL_SERVER_ERROR,
+        // Construct the new status list token
+        let status_list = StatusList {
+            bits: status_list_token.status_list.bits,
+            lst: updated_lst,
+        };
+
+        let list_id = status_list_token.list_id;
+        let statuslisttoken = StatusListToken::new(
+            list_id.clone(),
+            status_list_token.exp,
+            status_list_token.iat,
+            status_list,
+            status_list_token.sub.clone(),
+            status_list_token.ttl.clone(),
+        );
+
+        // Store updated list in the database
+        match store
+            .status_list_token_repository
+            .update_one(list_id.clone(), statuslisttoken)
+            .await
+        {
+            Ok(true) => StatusCode::ACCEPTED.into_response(),
+            Ok(false) => {
+                tracing::error!("Failed to update status list");
+                (
+                    StatusCode::BAD_REQUEST,
                     StatusError::UpdateFailed.to_string(),
                 )
-                    .into_response(),
-            };
+                    .into_response()
+            }
+            Err(e) => {
+                tracing::error!("Database error: {:?}", e);
+                (StatusCode::INTERNAL_SERVER_ERROR, "Database update failed").into_response()
+            }
         }
-    };
-
-    // Construct the new status list token
-    let status_list = StatusList {
-        bits: status_list_token.status_list.bits,
-        lst: updated_lst,
-    };
-
-    let list_id = status_list_token.list_id;
-    let statuslisttoken = StatusListToken::new(
-        list_id.clone(),
-        status_list_token.exp,
-        status_list_token.iat,
-        status_list,
-        status_list_token.sub.clone(),
-        status_list_token.ttl.clone(),
-    );
-
-    // Store updated list in the database
-    match store
-        .status_list_token_repository
-        .update_one(list_id.clone(), statuslisttoken)
-        .await
-    {
-        Ok(true) => StatusCode::ACCEPTED.into_response(),
-        Ok(false) => {
-            tracing::error!("Failed to update status list");
-            (
-                StatusCode::BAD_REQUEST,
-                StatusError::UpdateFailed.to_string(),
-            )
-                .into_response()
-        }
-        Err(e) => {
-            tracing::error!("Database error: {:?}", e);
-            (StatusCode::INTERNAL_SERVER_ERROR, "Database update failed").into_response()
-        }
+    } else {
+        (StatusCode::NOT_FOUND, "Status list not found").into_response()
     }
 }
 

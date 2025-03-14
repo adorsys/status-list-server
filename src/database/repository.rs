@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use sqlx::error::Error;
+
 use sqlx::{postgres::PgRow, FromRow, PgPool};
 
 use super::error::RepositoryError;
@@ -38,10 +38,10 @@ where
     T: Serialize + for<'de> Deserialize<'de>,
 {
     /// Creates a new `Table` instance.
-    pub fn new(pool: PgPool, table_name: impl Into<String>, column: String) -> Self {
+    pub fn new(pool: PgPool, table_name: String, column: String) -> Self {
         Self {
             pool,
-            table_name: table_name.into(),
+            table_name,
             column,
             _phantom: std::marker::PhantomData,
         }
@@ -112,7 +112,7 @@ where
 
     /// find one by filter.
     /// `value`: value to filter by, unique value in a table column
-    async fn find_one_by(&self, value: String) -> Result<T, RepositoryError> {
+    async fn find_one_by(&self, value: String) -> Result<Option<T>, RepositoryError> {
         let table = self.get_table();
         let query_string = format!(
             "SELECT * FROM {} WHERE {} SIMILAR TO $1 LIMIT 1",
@@ -122,9 +122,9 @@ where
         // Wrap value in double quotes
         let wrapped_value = format!("\"{}\"", value);
 
-        let result: T = sqlx::query_as(&query_string)
+        let result: Option<T> = sqlx::query_as(&query_string)
             .bind(wrapped_value)
-            .fetch_one(&table.pool)
+            .fetch_optional(&table.pool)
             .await?;
 
         Ok(result)
@@ -194,11 +194,5 @@ where
         // Execute the query
         let result = query.execute(&table.pool).await?;
         Ok(result.rows_affected() > 0)
-    }
-}
-
-impl From<Error> for RepositoryError {
-    fn from(err: Error) -> Self {
-        RepositoryError::Generic(err.to_string())
     }
 }

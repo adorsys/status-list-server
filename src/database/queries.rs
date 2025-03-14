@@ -6,6 +6,7 @@ use std::{
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use sqlx::{postgres::PgRow, FromRow};
+use std::result::Result::Ok;
 
 use crate::model::{Credentials, StatusListToken};
 
@@ -44,13 +45,10 @@ impl Repository<StatusListToken> for MockStore<StatusListToken> {
         Ok(())
     }
 
-    async fn find_one_by(&self, value: String) -> Result<StatusListToken, RepositoryError> {
-        self.repository
-            .read()
-            .unwrap()
-            .get(&value)
-            .cloned()
-            .ok_or(RepositoryError::FetchError)
+    async fn find_one_by(&self, value: String) -> Result<Option<StatusListToken>, RepositoryError> {
+        let a = self.repository.read().unwrap().get(&value).cloned();
+
+        Ok(a)
     }
 
     async fn update_one(
@@ -90,13 +88,9 @@ impl Repository<Credentials> for MockStore<Credentials> {
         Ok(())
     }
 
-    async fn find_one_by(&self, value: String) -> Result<Credentials, RepositoryError> {
-        self.repository
-            .read()
-            .unwrap()
-            .get(&value)
-            .cloned()
-            .ok_or(RepositoryError::FetchError)
+    async fn find_one_by(&self, value: String) -> Result<Option<Credentials>, RepositoryError> {
+        let a = self.repository.read().unwrap().get(&value).cloned();
+        Ok(a)
     }
 
     async fn update_one(
@@ -160,7 +154,7 @@ mod test {
         );
 
         let store: Store<Credentials> = Store {
-            table: Table::new(conn, "credentials", "issuer".to_string()),
+            table: Table::new(conn, "credentials".to_string(), "issuer".to_string()),
         };
 
         // test inserting
@@ -168,7 +162,8 @@ mod test {
 
         // test finding
         let credential = store.find_one_by("issuer1".to_string()).await.unwrap();
-        let issuer = &credential.issuer.replace("\"", "");
+        let credential = credential.unwrap();
+        let issuer = credential.issuer.replace("\"", "");
 
         let alg = credential.alg.replace("\"", "");
         let public_key = serde_json::to_value(&credential.public_key).unwrap();
