@@ -147,7 +147,6 @@ mod tests {
         body::{to_bytes, Body},
         http::{Request, StatusCode},
     };
-    use serde_json::json;
     use std::env;
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -204,14 +203,17 @@ mod tests {
         let conn = establish_connection().await;
 
         // First, insert the credentials with quoted values
+        let public_key = serde_json::json!({"key": "test-key"});
+        let alg = "\"RS256\"";
+
         sqlx::query!(
             r#"
             INSERT INTO credentials (issuer, public_key, alg)
             VALUES ($1, $2, $3)
             "#,
             test_issuer,
-            json!({"key": "test-key"}),
-            "\"RS256\"" // Note the quoted alg
+            public_key,
+            alg
         )
         .execute(&conn)
         .await
@@ -231,6 +233,7 @@ mod tests {
 
         // Create test status list
         let test_status_list = create_test_status_list_token(&test_issuer);
+        let status_list_json = serde_json::to_value(&test_status_list.status_list).unwrap();
 
         // Then insert the status list
         sqlx::query!(
@@ -241,7 +244,7 @@ mod tests {
             test_issuer,
             test_status_list.exp,
             test_status_list.iat,
-            serde_json::to_value(&test_status_list.status_list).unwrap(),
+            status_list_json,
             test_issuer,
             test_status_list.ttl
         )
