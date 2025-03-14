@@ -3,11 +3,7 @@ use std::str::FromStr;
 use jsonwebtoken::{decode, decode_header, Algorithm, DecodingKey, Validation};
 use serde_json::Value;
 
-use crate::{
-    database::error::RepositoryError,
-    model::Credentials,
-    utils::state::AppState,
-};
+use crate::{database::error::RepositoryError, model::Credentials, utils::state::AppState};
 
 use super::errors::AuthenticationError;
 

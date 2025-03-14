@@ -2,7 +2,11 @@ use std::{collections::HashMap, sync::Arc};
 
 use std::sync::RwLock;
 
-use crate::{database::queries::MockStore, model::{Credentials, StatusListToken}, utils::state::{AppState, AppStateRepository}};
+use crate::{
+    database::queries::MockStore,
+    model::{Credentials, StatusListToken},
+    utils::state::{AppState, AppStateRepository},
+};
 
 pub fn test_setup(
     credential_repo: Arc<RwLock<HashMap<String, Credentials>>>,

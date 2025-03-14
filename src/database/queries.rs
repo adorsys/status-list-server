@@ -59,8 +59,8 @@ impl Repository<StatusListToken> for MockStore<StatusListToken> {
         entity: StatusListToken,
     ) -> Result<bool, RepositoryError> {
         let mut repo = self.repository.write().unwrap();
-        if repo.contains_key(&issuer) {
-            repo.insert(issuer, entity);
+        if let std::collections::hash_map::Entry::Occupied(mut e) = repo.entry(issuer) {
+            e.insert(entity);
             Ok(true)
         } else {
             Ok(false)
