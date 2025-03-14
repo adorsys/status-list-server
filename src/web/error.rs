@@ -13,5 +13,5 @@ pub enum StatusError {
     #[error("Request body must contain a valid 'updates' array")]
     MalformedBody,
     #[error("Status list not found")]
-    StatusListNotFound
+    StatusListNotFound,
 }

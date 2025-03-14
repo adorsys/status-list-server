@@ -104,7 +104,7 @@ pub async fn update_statuslist(
 
     // Construct the new status list token
     let status_list = StatusList {
-        bits: status_list_token.status_list.bits.clone(),
+        bits: status_list_token.status_list.bits,
         lst: updated_lst,
     };
 
@@ -142,8 +142,7 @@ pub async fn update_statuslist(
 
 fn encode_lst(bits: Vec<u8>) -> String {
     let encoded = base64url::encode(
-        &bits
-            .iter()
+        bits.iter()
             .flat_map(|&n| n.to_be_bytes())
             .collect::<Vec<u8>>(),
     );
@@ -185,8 +184,10 @@ mod test {
     use tower::ServiceExt;
 
     use crate::{
-
-        model::{Credentials, StatusList, StatusListToken}, test_resources::setup::test_setup, utils::state::AppState, web::update_statuslist::update_statuslist
+        model::{Credentials, StatusList, StatusListToken},
+        test_resources::setup::test_setup,
+        utils::state::AppState,
+        web::update_statuslist::update_statuslist,
     };
 
     pub fn setup() -> (AppState, Arc<RwLock<HashMap<String, StatusListToken>>>) {

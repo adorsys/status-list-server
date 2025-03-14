@@ -15,6 +15,5 @@ pub enum AuthenticationError {
     #[error("Missing Authorisation header")]
     MissingAuthHeader,
     #[error("Could not verify token")]
-    VerificationFailed
-
+    VerificationFailed,
 }

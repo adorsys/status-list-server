@@ -12,7 +12,7 @@ use super::error::RepositoryError;
 /// Describes a table instance
 pub struct Table<T>
 where
-T: Serialize + for<'de> Deserialize<'de>,
+    T: Serialize + for<'de> Deserialize<'de>,
 {
     pub pool: PgPool,
     pub table_name: String,
@@ -35,7 +35,7 @@ where
 
 impl<T> Table<T>
 where
-T: Serialize + for<'de> Deserialize<'de>,
+    T: Serialize + for<'de> Deserialize<'de>,
 {
     /// Creates a new `Table` instance.
     pub fn new(pool: PgPool, table_name: impl Into<String>, column: String) -> Self {
