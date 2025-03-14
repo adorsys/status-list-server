@@ -34,7 +34,7 @@ mod test {
     async fn test() {
         env::set_var(
             "DATABASE_URL",
-            "postgres://myuser:mypassword@localhost:5432/mydatabase",
+            "postgres://myuser:dastro12345@localhost:5433/status_list_db",
         );
 
         let conn = establish_connection().await;
