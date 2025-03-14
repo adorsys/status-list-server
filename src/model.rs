@@ -81,7 +81,7 @@ impl Encode<'_, Postgres> for U8Wrapper {
 impl<'r> Decode<'r, Postgres> for U8Wrapper {
     fn decode(value: sqlx::postgres::PgValueRef<'r>) -> Result<Self, sqlx::error::BoxDynError> {
         let decoded = i8::decode(value)?;
-        Ok(U8Wrapper(decoded as u8)) 
+        Ok(U8Wrapper(decoded as u8))
     }
 }
 #[derive(Deserialize, Serialize, Clone, Default, Debug, PartialEq, Eq, FromRow, Type)]
@@ -113,4 +113,3 @@ impl StatusListToken {
         }
     }
 }
-
