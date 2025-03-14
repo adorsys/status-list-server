@@ -3,19 +3,18 @@ use axum::{
     response::IntoResponse,
     Json,
 };
+
 use hyper::StatusCode;
 use serde_json::Value;
 use std::sync::Arc;
 
 use crate::{
-    database::repository::Repository,
     model::{Status, StatusList, StatusListToken, StatusUpdate},
     utils::state::AppState,
 };
 
 use super::error::StatusError;
 
-#[axum::debug_handler]
 pub async fn update_statuslist(
     State(appstate): State<Arc<AppState>>,
     Path(list_id): Path<String>,
@@ -82,35 +81,36 @@ pub async fn update_statuslist(
         }
     };
 
-    let mut lst = status_list_token.status_list.lst.clone();
+    let lst = status_list_token.status_list.lst.clone();
 
     // Apply updates
-    for update in updates {
-        lst = match update_status(&lst, update) {
-            Ok(updated_lst) => updated_lst,
-            Err(e) => {
-                tracing::error!("Status update failed: {:?}", e);
-                return match e {
-                    StatusError::InvalidIndex => {
-                        (StatusCode::BAD_REQUEST, "Invalid index").into_response()
-                    }
-                    _ => (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        StatusError::UpdateFailed.to_string(),
-                    )
-                        .into_response(),
-                };
-            }
-        };
-    }
+
+    let updated_lst = match update_status(&lst, updates) {
+        Ok(updated_lst) => updated_lst,
+        Err(e) => {
+            tracing::error!("Status update failed: {:?}", e);
+            return match e {
+                StatusError::InvalidIndex => {
+                    (StatusCode::BAD_REQUEST, "Invalid index").into_response()
+                }
+                _ => (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    StatusError::UpdateFailed.to_string(),
+                )
+                    .into_response(),
+            };
+        }
+    };
 
     // Construct the new status list token
     let status_list = StatusList {
         bits: status_list_token.status_list.bits.clone(),
-        lst,
+        lst: updated_lst,
     };
 
+    let list_id = status_list_token.list_id;
     let statuslisttoken = StatusListToken::new(
+        list_id.clone(),
         status_list_token.exp,
         status_list_token.iat,
         status_list,
@@ -127,7 +127,11 @@ pub async fn update_statuslist(
         Ok(true) => StatusCode::ACCEPTED.into_response(),
         Ok(false) => {
             tracing::error!("Failed to update status list");
-            (StatusCode::CONFLICT, StatusError::UpdateFailed.to_string()).into_response()
+            (
+                StatusCode::BAD_REQUEST,
+                StatusError::UpdateFailed.to_string(),
+            )
+                .into_response()
         }
         Err(e) => {
             tracing::error!("Database error: {:?}", e);
@@ -136,96 +140,158 @@ pub async fn update_statuslist(
     }
 }
 
-fn encode_lst(bits: Vec<i32>) -> String {
-    base64url::encode(
+fn encode_lst(bits: Vec<u8>) -> String {
+    let encoded = base64url::encode(
         &bits
             .iter()
             .flat_map(|&n| n.to_be_bytes())
             .collect::<Vec<u8>>(),
-    )
+    );
+    encoded
 }
 
-pub fn update_status(lst: &str, updates: StatusUpdate) -> Result<String, StatusError> {
-    let decoded_lst = base64url::decode(lst).map_err(|e| StatusError::Generic(e.to_string()))?;
+pub fn update_status(lst: &str, updates: Vec<StatusUpdate>) -> Result<String, StatusError> {
+    let mut decoded_lst =
+        base64url::decode(lst).map_err(|e| StatusError::Generic(e.to_string()))?;
 
-    let mut bits: Vec<i32> = decoded_lst.iter().map(|&b| b as i32).collect();
+    for update in updates {
+        let index = update.index as usize;
+        if index >= decoded_lst.len() {
+            return Err(StatusError::InvalidIndex);
+        }
 
-    let index = updates.index as usize;
-    if index >= bits.len() {
-        return Err(StatusError::InvalidIndex);
+        decoded_lst[index] = match update.status {
+            Status::VALID => 0,
+            Status::INVALID => 1,
+            Status::SUSPENDED => 2,
+            Status::APPLICATIONSPECIFIC => 3,
+        };
     }
 
-    bits[index] = match updates.status {
-        Status::VALID => 0,
-        Status::INVALID => 1,
-        Status::SUSPENDED => 2,
-        Status::APPLICATIONSPECIFIC => 3,
+    Ok(encode_lst(decoded_lst))
+}
+#[cfg(test)]
+mod test {
+
+    use std::{
+        collections::HashMap,
+        sync::{Arc, RwLock},
     };
 
-    Ok(encode_lst(bits))
-}
-
-#[cfg(test)]
-#[tokio::test]
-async fn test_update_statuslist() {
-    use std::{collections::HashMap, sync::RwLock};
-    struct AppState {
-        repository: Option<HashMap<String, StatusListToken>>,
-    }
-
-    use axum::{body::Body, routing::put, Router};
+    use axum::{body::Body, extract::Request, routing::put, Router};
     use base64url::encode;
-    use hyper::Request;
+    use hyper::StatusCode;
     use serde_json::json;
     use tower::ServiceExt;
 
-    use crate::model::Credentials;
+    use crate::{
 
-    let mut mock_repo = HashMap::new();
-    let mock_credential_repo: HashMap<String, Credentials> = HashMap::new();
+        model::{Credentials, StatusList, StatusListToken}, test_resources::setup::test_setup, utils::state::AppState, web::update_statuslist::update_statuslist
+    };
 
-    let status = vec![1, 0, 3, 3];
-    let lst = encode(status);
+    pub fn setup() -> (AppState, Arc<RwLock<HashMap<String, StatusListToken>>>) {
+        let mut mock_statustk_repo = HashMap::new();
+        let mock_credential_repo: HashMap<String, Credentials> = HashMap::new();
 
-    let list_id = "test_list_id".to_string();
-    let existing_status_list = StatusList { bits: 1, lst };
+        let status = vec![2, 1, 3, 1];
+        let lst = encode(status);
 
-    let existing_token = StatusListToken::new(
-        list_id,
-        Some(123456789), // exp
-        123456000,       // iat
-        existing_status_list,
-        "test_sub".to_string(),
-        Some("3600".to_string()), // ttl
-    );
+        let list_id = "test_list_id".to_string();
+        let existing_status_list = StatusList { bits: 1, lst };
 
-    // store the token
-    mock_repo.insert(list_id, existing_token);
+        let existing_token = StatusListToken::new(
+            list_id.clone(),
+            Some(123456789),
+            123456000,
+            existing_status_list,
+            "test_sub".to_string(),
+            Some("3600".to_string()),
+        );
 
-    let app_state = <dyn Repository>::from(RwLock::new(mock_credential_repo), RwLock::new(mock_repo));
+        // store the token
+        mock_statustk_repo.insert(list_id.clone(), existing_token);
+        let shared_statustk_repo = Arc::new(RwLock::new(mock_statustk_repo));
 
-    let app = Router::new()
-        .route("/statuslist/:list_id", put(update_statuslist))
-        .with_state(app_state);
+        let appstate = test_setup(
+            Arc::new(RwLock::new(mock_credential_repo)),
+            shared_statustk_repo.clone(),
+        );
+        (appstate, shared_statustk_repo)
+    }
 
-    // JSON request body
-    let body = json!({
+    #[tokio::test]
+    async fn test_update_statuslist() {
+        let appstate = setup();
+
+        let app = Router::new()
+            .route("/statuslist/{issuer}", put(update_statuslist))
+            .with_state(Arc::new(appstate.0));
+
+        // JSON request body
+        let body = json!({
         "updates": [
-            { "index": 2, "status": "VALID" },
-            { "index": 0, "status": "INVALID" }
-        ]
-    });
+            { "index": 1, "status": "VALID" },
+            { "index": 3, "status": "INVALID" }
+            ]
+        });
+        let updated_lst = vec![2, 0, 3, 1];
+        let expected_lst = encode(updated_lst);
 
-    let request = Request::builder()
-        .method("PUT")
-        .uri(format!("/statuslist/{}", list_id))
-        .header("Content-Type", "application/json")
-        .body(Body::from(body.to_string()))
-        .unwrap();
+        let list_id = "test_list_id".to_string();
+        let request = Request::builder()
+            .method("PUT")
+            .uri(format!("/statuslist/{}", list_id))
+            .header("Content-Type", "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap();
 
-    // Send request
-    let response = app.oneshot(request).await.unwrap();
+        // Send request
+        let response = app.oneshot(request).await.unwrap();
 
-    // Check response status
-    assert_eq!(response.status(), StatusCode::ACCEPTED);
+        // Check response status
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        let shared_lst = appstate
+            .1
+            .read()
+            .unwrap()
+            .get(&list_id)
+            .unwrap()
+            .status_list
+            .lst
+            .clone();
+
+        // assert the lst has been updated
+        assert_eq!(shared_lst, expected_lst);
+    }
+
+    #[tokio::test]
+    async fn test_malformed_body() {
+        let appstate = setup();
+
+        let app = Router::new()
+            .route("/statuslist/{issuer}", put(update_statuslist))
+            .with_state(Arc::new(appstate.0));
+
+        // JSON request body
+        let bad_body = json!({
+        "updates": [
+            { "index": 1, "status": "VALID" },
+            { "index": 3, "status": "UNKNOWSTATUS" }
+            ]
+        });
+
+        let list_id = "test_list_id".to_string();
+        let request = Request::builder()
+            .method("PUT")
+            .uri(format!("/statuslist/{}", list_id))
+            .header("Content-Type", "application/json")
+            .body(Body::from(bad_body.to_string()))
+            .unwrap();
+
+        // Send request
+        let response = app.oneshot(request).await.unwrap();
+
+        // Check response status
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
 }

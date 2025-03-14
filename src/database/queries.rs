@@ -1,7 +1,18 @@
+use std::{
+    collections::HashMap,
+    sync::{Arc, RwLock},
+};
+
+use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use sqlx::{postgres::PgRow, FromRow};
 
-use super::repository::{Repository, Store, Table};
+use crate::model::{Credentials, StatusListToken};
+
+use super::{
+    error::RepositoryError,
+    repository::{Repository, Store, Table},
+};
 
 impl<T> Repository<T> for Store<T>
 where
@@ -12,6 +23,101 @@ where
 {
     fn get_table(&self) -> Table<T> {
         self.table.clone()
+    }
+}
+
+pub struct MockStore<T> {
+    pub(crate) repository: Arc<RwLock<HashMap<String, T>>>,
+}
+
+#[async_trait]
+impl Repository<StatusListToken> for MockStore<StatusListToken> {
+    fn get_table(&self) -> Table<StatusListToken> {
+        unimplemented!("this is not real db")
+    }
+    async fn insert_one(&self, entity: StatusListToken) -> Result<(), RepositoryError> {
+        self.repository
+            .write()
+            .unwrap()
+            .clone()
+            .insert(entity.list_id.clone(), entity);
+        Ok(())
+    }
+
+    async fn find_one_by(&self, value: String) -> Result<StatusListToken, RepositoryError> {
+        self.repository
+            .read()
+            .unwrap()
+            .get(&value)
+            .cloned()
+            .ok_or(RepositoryError::FetchError)
+    }
+
+    async fn update_one(
+        &self,
+        issuer: String,
+        entity: StatusListToken,
+    ) -> Result<bool, RepositoryError> {
+        let mut repo = self.repository.write().unwrap();
+        if repo.contains_key(&issuer) {
+            repo.insert(issuer, entity);
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+
+    async fn delete_by(&self, value: String) -> Result<bool, RepositoryError> {
+        if self.repository.write().unwrap().remove(&value).is_some() {
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+}
+
+#[async_trait]
+impl Repository<Credentials> for MockStore<Credentials> {
+    fn get_table(&self) -> Table<Credentials> {
+        unimplemented!("this is not real db")
+    }
+    async fn insert_one(&self, entity: Credentials) -> Result<(), RepositoryError> {
+        self.repository
+            .write()
+            .unwrap()
+            .clone()
+            .insert(entity.issuer.clone(), entity);
+        Ok(())
+    }
+
+    async fn find_one_by(&self, value: String) -> Result<Credentials, RepositoryError> {
+        self.repository
+            .read()
+            .unwrap()
+            .get(&value)
+            .cloned()
+            .ok_or(RepositoryError::FetchError)
+    }
+
+    async fn update_one(
+        &self,
+        issuer: String,
+        entity: Credentials,
+    ) -> Result<bool, RepositoryError> {
+        if self.repository.read().unwrap().contains_key(&issuer) {
+            self.repository.write().unwrap().insert(issuer, entity);
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+
+    async fn delete_by(&self, value: String) -> Result<bool, RepositoryError> {
+        if self.repository.write().unwrap().remove(&value).is_some() {
+            Ok(true)
+        } else {
+            Ok(false)
+        }
     }
 }
 

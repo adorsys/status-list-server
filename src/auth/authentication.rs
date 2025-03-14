@@ -4,7 +4,7 @@ use jsonwebtoken::{decode, decode_header, Algorithm, DecodingKey, Validation};
 use serde_json::Value;
 
 use crate::{
-    database::{error::RepositoryError, repository::Repository},
+    database::error::RepositoryError,
     model::Credentials,
     utils::state::AppState,
 };

@@ -1,7 +1,9 @@
+use std::sync::Arc;
+
 use crate::{
     database::{
         connection::establish_connection,
-        repository::{Store, Table},
+        repository::{Repository, Store, Table},
     },
     model::{Credentials, StatusListToken},
 };
@@ -12,14 +14,14 @@ pub struct AppState {
 
 #[derive(Clone)]
 pub struct AppStateRepository {
-    pub credential_repository: Store<Credentials>,
-    pub status_list_token_repository: Store<StatusListToken>,
+    pub credential_repository: Arc<dyn Repository<Credentials>>,
+    pub status_list_token_repository: Arc<dyn Repository<StatusListToken>>,
 }
 
 impl AppStateRepository {
     pub fn from(
-        credential_repository: Store<Credentials>,
-        status_list_token_repository: Store<StatusListToken>,
+        credential_repository: Arc<Store<Credentials>>,
+        status_list_token_repository: Arc<Store<StatusListToken>>,
     ) -> Self {
         Self {
             credential_repository,
@@ -39,8 +41,8 @@ pub async fn setup() -> AppState {
 
     AppState {
         repository: Some(AppStateRepository {
-            credential_repository: credential_repo,
-            status_list_token_repository: status_list_repo,
+            credential_repository: Arc::new(credential_repo),
+            status_list_token_repository: Arc::new(status_list_repo),
         }),
     }
 }
