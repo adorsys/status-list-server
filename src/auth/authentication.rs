@@ -62,17 +62,29 @@ pub async fn verify_token(state: &AppState, token: &str) -> Result<bool, Authent
             AuthenticationError::Generic("Failed to serialize public key".to_string())
         })?;
 
-        let decoding_key = DecodingKey::from_rsa_pem(key_json.as_bytes())
-            .map_err(|_| AuthenticationError::Generic("Invalid public key".to_string()))?;
+        let decoding_key = match credential.alg.as_str() {
+            "RS256" | "RS512" => DecodingKey::from_rsa_pem(key_json.as_bytes())
+                .map_err(|_| AuthenticationError::Generic("Invalid RSA public key".to_string())),
+            "ES256" | "ES512" => DecodingKey::from_ec_pem(key_json.as_bytes())
+                .map_err(|_| AuthenticationError::Generic("Invalid EC public key".to_string())),
+            "HS256" | "HS512" => Ok(DecodingKey::from_secret(key_json.as_bytes())),
+            _ => Err(AuthenticationError::Generic(
+                "Unsupported algorithm".to_string(),
+            )),
+        }?;
 
         let algorithm = Algorithm::from_str(&credential.alg)
             .map_err(|_| AuthenticationError::Generic("Invalid algorithm".to_string()))?;
 
         let validation = Validation::new(algorithm);
 
-        Ok(decode::<Value>(token, &decoding_key, &validation)
-            .map(|_| true)
-            .unwrap_or_else(|_| false))
+        match decode::<Value>(token, &decoding_key, &validation) {
+            Ok(_) => Ok(true),
+            Err(e) => {
+                tracing::warn!("Token decoding failed: {}", e);
+                Ok(false)
+            }
+        }
     } else {
         Err(AuthenticationError::IssuerNotFound)
     }
