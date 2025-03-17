@@ -60,7 +60,7 @@ pub async fn update_statuslist(
         Some(store) => store,
         None => {
             tracing::error!("Repository is unavailable");
-            return (StatusCode::INTERNAL_SERVER_ERROR, "Repository unavailable").into_response();
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
         }
     };
 
@@ -172,6 +172,7 @@ pub fn update_status(lst: &str, updates: Vec<StatusUpdate>) -> Result<String, St
 
     Ok(encode_lst(decoded_lst))
 }
+
 #[cfg(test)]
 mod test {
 
