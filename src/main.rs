@@ -2,7 +2,7 @@ use axum::routing::post;
 use axum::{http::Method, response::IntoResponse, routing::get, Router};
 use dotenvy::dotenv;
 use status_list_server::utils::state::setup;
-use status_list_server::web::credential_handler::credential_handler;
+use status_list_server::web::handlers::credential_handler;
 use tokio::net::TcpListener;
 use tower::ServiceBuilder;
 use tower_http::catch_panic::CatchPanicLayer;
