@@ -11,7 +11,7 @@ pub fn parse_token(
     match status_type {
         StatusType::JWT => {
             let header = Header::default();
-            let jwt = match encode(&header, &token, &key) {
+            match encode(&header, &token, &key) {
                 Ok(jwt) => Ok(jwt),
                 Err(e) => {
                     tracing::error!("{}", e);
@@ -20,12 +20,10 @@ pub fn parse_token(
                         "failed to encode jwt",
                     ))
                 }
-            };
-            jwt
+            }
         }
 
         StatusType::CWT => {
-            
             // for feature implmentation
             Ok(String::new())
             // Serialize the token (claims) to CBOR bytes

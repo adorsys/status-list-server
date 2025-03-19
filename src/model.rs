@@ -25,6 +25,39 @@ impl Credentials {
     }
 }
 
+#[derive(Deserialize)]
+pub struct StatusUpdate {
+    pub index: i32,
+    pub status: Status,
+}
+
+#[derive(Deserialize)]
+pub enum Status {
+    VALID,
+    INVALID,
+    SUSPENDED,
+    APPLICATIONSPECIFIC,
+}
+
+impl FromStr for Status {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "valid" => Ok(Status::VALID),
+            "invalid" => Ok(Status::INVALID),
+            "suspended" => Ok(Status::SUSPENDED),
+            "application_specific" => Ok(Status::APPLICATIONSPECIFIC),
+            _ => Err("Unknown status".to_string()),
+        }
+    }
+}
+
+#[derive(Clone, Serialize, Deserialize, Default, PartialEq, Eq, Debug, Type)]
+pub struct StatusList {
+    pub bits: i8,
+    pub lst: String,
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct U8Wrapper(pub u8);
 
@@ -47,29 +80,23 @@ impl Encode<'_, Postgres> for U8Wrapper {
 // Implement `sqlx::Decode<Postgres>` for `U8Wrapper`
 impl<'r> Decode<'r, Postgres> for U8Wrapper {
     fn decode(value: sqlx::postgres::PgValueRef<'r>) -> Result<Self, sqlx::error::BoxDynError> {
-        let decoded = i8::decode(value)?; // Decode as `i8` first
-        Ok(U8Wrapper(decoded as u8)) // Convert safely to `u8`
+        let decoded = i8::decode(value)?;
+        Ok(U8Wrapper(decoded as u8))
     }
 }
-
-#[derive(Clone, Serialize, Deserialize, Default, Debug, PartialEq, Eq, FromRow, Type)]
-pub struct StatusList {
-    pub bits: U8Wrapper,
-    pub lst: String,
-}
-
-#[derive(Deserialize, Serialize, Clone, Default, Debug, PartialEq, Eq, FromRow)]
+#[derive(Deserialize, Serialize, Clone, Default, Debug, PartialEq, Eq, FromRow, Type)]
 pub struct StatusListToken {
     pub exp: Option<i32>,
     pub iat: i32,
     pub status_list: StatusList,
     pub sub: String,
     pub ttl: Option<String>,
+    pub list_id: String,
 }
 
-#[allow(unused)]
 impl StatusListToken {
-    fn new(
+    pub fn new(
+        list_id: String,
         exp: Option<i32>,
         iat: i32,
         status_list: StatusList,
@@ -77,6 +104,7 @@ impl StatusListToken {
         ttl: Option<String>,
     ) -> Self {
         Self {
+            list_id,
             exp,
             iat,
             status_list,
@@ -95,8 +123,8 @@ impl FromStr for StatusType {
     type Err = String;
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s.to_uppercase().as_str() {
-            "jwt" => Ok(Self::JWT),
-            "cwt" => Ok(Self::CWT),
+            "JWT" => Ok(Self::JWT),
+            "CWT" => Ok(Self::CWT),
             _ => Err("Unknown status type".to_string()),
         }
     }
