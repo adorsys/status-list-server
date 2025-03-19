@@ -3,9 +3,15 @@ use std::sync::Arc;
 use axum::{
     extract::{Path, State},
     http::HeaderMap, response::IntoResponse,
+    Json,
 };
+use hyper::StatusCode;
+use serde_json::Value;
 
-use crate::utils::state::AppState;
+use crate::{
+    model::{Status, StatusList, StatusListToken, StatusUpdate},
+    utils::state::AppState, web::error::StatusError,
+};
 
 use super::error::StatusListError;
 
@@ -21,23 +27,6 @@ pub async fn status_list_token(
 
     Ok(status_list)
 }
-
-use axum::{
-    extract::{Path, State},
-    response::IntoResponse,
-    Json,
-};
-
-use hyper::StatusCode;
-use serde_json::Value;
-use std::sync::Arc;
-
-use crate::{
-    model::{Status, StatusList, StatusListToken, StatusUpdate},
-    utils::state::AppState,
-};
-
-use super::error::StatusError;
 
 pub async fn update_statuslist(
     State(appstate): State<Arc<AppState>>,
@@ -200,6 +189,7 @@ pub fn update_status(lst: &str, updates: Vec<StatusUpdate>) -> Result<String, St
 #[cfg(test)]
 mod test {
 
+    use super::*;
     use std::{
         collections::HashMap,
         sync::{Arc, RwLock},
@@ -215,7 +205,6 @@ mod test {
         model::{Credentials, StatusList, StatusListToken},
         test_resources::setup::test_setup,
         utils::state::AppState,
-        web::update_statuslist::update_statuslist,
     };
 
     pub fn setup() -> (AppState, Arc<RwLock<HashMap<String, StatusListToken>>>) {
