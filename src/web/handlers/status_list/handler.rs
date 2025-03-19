@@ -2,30 +2,62 @@ use std::sync::Arc;
 
 use axum::{
     extract::{Path, State},
-    http::HeaderMap, response::IntoResponse,
+    http::{header, HeaderMap, StatusCode},
+    response::IntoResponse,
     Json,
 };
-use hyper::StatusCode;
 use serde_json::Value;
 
 use crate::{
     model::{Status, StatusList, StatusListToken, StatusUpdate},
-    utils::state::AppState, web::error::StatusError,
+    utils::state::{AppState, AppStateRepository},
 };
 
-use super::error::StatusListError;
+use super::{constants::STATUS_LISTS_HEADER_JWT, error::StatusListError};
 
-pub async fn status_list_token(
-    State(db): State<Arc<AppState>>,
-    Path(list_id): Path<u32>,
+// Get status list claims and return it as a JSON object.
+pub async fn get_status_list_token(
+    State(state): State<Arc<AppState>>,
+    Path(list_id): Path<i32>,
     headers: HeaderMap,
-) -> Result<impl IntoResponse, StatusListError> {
-    let status_list = db
-        .get_status_list(status_list_id)
-        .await
-        .map_err(StatusListError::Database)?;
+) -> Result<StatusList, StatusListError> {
+    // check the persistence layer
+    let repo = state.repository.as_ref().ok_or_else(|| {
+        tracing::error!("Repository is unavailable");
+        StatusListError::InternalServerError
+    })?;
 
-    Ok(status_list)
+    // Check Accept header
+    let accept = headers
+        .get(header::ACCEPT)
+        .and_then(|h| h.to_str().ok())
+        .unwrap_or(STATUS_LISTS_HEADER_JWT);
+
+    if !accept.contains(STATUS_LISTS_HEADER_JWT) {
+        return Err(StatusListError::InvalidAcceptHeader);
+    }
+
+    // Get status list claims from database
+    let record = get_status_list(repo, list_id).await?;
+
+    Ok(record.status_list)
+}
+
+async fn get_status_list(
+    repo: &AppStateRepository,
+    id: i32,
+) -> Result<StatusListToken, StatusListError> {
+    let status_claims = repo
+        .status_list_token_repository
+        .find_one_by(id.to_string())
+        .await
+        .map_err(|err| {
+            tracing::error!("Failed to get status list {id} from database: {err:?}");
+            StatusListError::InternalServerError
+        })?
+        .ok_or(StatusListError::StatusListNotFound)?;
+
+    Ok(status_claims)
 }
 
 pub async fn update_statuslist(
@@ -42,7 +74,9 @@ pub async fn update_statuslist(
         None => {
             return (
                 StatusCode::BAD_REQUEST,
-                StatusError::MalformedBody.to_string(),
+                StatusListError::MalformedBody(
+                    "Request body must contain a valid 'updates' array".to_string(),
+                ),
             )
                 .into_response();
         }
@@ -62,7 +96,9 @@ pub async fn update_statuslist(
             tracing::error!("Malformed request body: {e}");
             return (
                 StatusCode::BAD_REQUEST,
-                StatusError::MalformedBody.to_string(),
+                StatusListError::MalformedBody(
+                    "Request body must contain a valid 'updates' array".to_string(),
+                ),
             )
                 .into_response();
         }
@@ -88,7 +124,7 @@ pub async fn update_statuslist(
             tracing::error!("Status list not found: {}", list_id);
             return (
                 StatusCode::NOT_FOUND,
-                StatusError::StatusListNotFound.to_string(),
+                StatusListError::StatusListNotFound.to_string(),
             )
                 .into_response();
         }
@@ -103,12 +139,12 @@ pub async fn update_statuslist(
             Err(e) => {
                 tracing::error!("Status update failed: {:?}", e);
                 return match e {
-                    StatusError::InvalidIndex => {
+                    StatusListError::InvalidIndex => {
                         (StatusCode::BAD_REQUEST, "Invalid index").into_response()
                     }
                     _ => (
                         StatusCode::INTERNAL_SERVER_ERROR,
-                        StatusError::UpdateFailed.to_string(),
+                        StatusListError::UpdateFailed.to_string(),
                     )
                         .into_response(),
                 };
@@ -142,7 +178,7 @@ pub async fn update_statuslist(
                 tracing::error!("Failed to update status list");
                 (
                     StatusCode::BAD_REQUEST,
-                    StatusError::UpdateFailed.to_string(),
+                    StatusListError::UpdateFailed.to_string(),
                 )
                     .into_response()
             }
@@ -165,14 +201,14 @@ fn encode_lst(bits: Vec<u8>) -> String {
     encoded
 }
 
-pub fn update_status(lst: &str, updates: Vec<StatusUpdate>) -> Result<String, StatusError> {
+pub fn update_status(lst: &str, updates: Vec<StatusUpdate>) -> Result<String, StatusListError> {
     let mut decoded_lst =
-        base64url::decode(lst).map_err(|e| StatusError::Generic(e.to_string()))?;
+        base64url::decode(lst).map_err(|e| StatusListError::Generic(e.to_string()))?;
 
     for update in updates {
         let index = update.index as usize;
         if index >= decoded_lst.len() {
-            return Err(StatusError::InvalidIndex);
+            return Err(StatusListError::InvalidIndex);
         }
 
         decoded_lst[index] = match update.status {
@@ -313,4 +349,3 @@ mod test {
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     }
 }
-
