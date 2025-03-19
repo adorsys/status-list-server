@@ -1,4 +1,4 @@
-use std::error::Error;
+use std::{error::Error, str::FromStr};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -82,6 +82,22 @@ impl StatusListToken {
             status_list,
             sub,
             ttl,
+        }
+    }
+}
+
+pub enum StatusType {
+    JWT,
+    CWT,
+}
+
+impl FromStr for StatusType {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_uppercase().as_str() {
+            "jwt" => Ok(Self::JWT),
+            "cwt" => Ok(Self::CWT),
+            _ => Err("Unknown status type".to_string()),
         }
     }
 }
