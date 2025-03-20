@@ -13,6 +13,8 @@ pub enum RepositoryError {
     RepositoryNotSet,
     #[error("issuer already exist")]
     DuplicateEntry,
+    #[error("not found")]
+    NotFound,
 }
 
 impl RepositoryError {
