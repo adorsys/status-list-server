@@ -16,7 +16,7 @@ pub async fn get_status_list(
     let store = match &state.repository {
         Some(repo) => repo,
         None => {
-            return Err((StatusCode::INTERNAL_SERVER_ERROR, "".to_string()));
+            return Err((StatusCode::INTERNAL_SERVER_ERROR, "Internal server error".to_string()));
         }
     };
 
