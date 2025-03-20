@@ -45,21 +45,19 @@ pub async fn get_status_list(
 }
 
 #[tokio::test]
-async fn test_get_status_list() {
-    use crate::model::StatusList;
-    use crate::model::StatusListToken;
+async fn test_get_status_list_success() {
+    use crate::model::{StatusList, StatusListToken};
     use crate::test_resources::setup::test_setup;
-    use axum::body::to_bytes;
-    use axum::{extract::State, http::StatusCode};
+    use axum::{body::to_bytes, extract::State, http::StatusCode};
     use std::{
         collections::HashMap,
         sync::{Arc, RwLock},
     };
 
-    // Create a mock repository
+    // mock repository
     let mut status_list_repo = HashMap::new();
     let test_status_list_id = "test-id".to_string();
-    let test_status_list = StatusListToken {
+    let expected_status_list = StatusListToken {
         exp: Some(1735689600),
         iat: 1704067200,
         status_list: StatusList {
@@ -71,7 +69,8 @@ async fn test_get_status_list() {
         list_id: "boris".to_string(),
     };
 
-    status_list_repo.insert(test_status_list_id.clone(), test_status_list);
+    // Insert test data into the mock repository
+    status_list_repo.insert(test_status_list_id.clone(), expected_status_list.clone());
     let app_state = test_setup(
         Arc::new(RwLock::new(HashMap::new())),
         Arc::new(RwLock::new(status_list_repo)),
@@ -93,5 +92,52 @@ async fn test_get_status_list() {
     let body = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
     let body_str = String::from_utf8(body.to_vec()).unwrap();
 
-    assert!(body_str.contains("test-issuer12"));
+    // Deserialize JSON response
+    let actual_status_list: StatusListToken = serde_json::from_str(&body_str).unwrap();
+
+    // Assert that the response matches the expected status list
+    assert_eq!(actual_status_list, expected_status_list);
+}
+
+#[tokio::test]
+async fn test_get_status_list_not_found() {
+    use crate::test_resources::setup::test_setup;
+    use axum::{extract::State, http::StatusCode};
+    use std::{
+        collections::HashMap,
+        sync::{Arc, RwLock},
+    };
+
+    let app_state = test_setup(
+        Arc::new(RwLock::new(HashMap::new())),
+        Arc::new(RwLock::new(HashMap::new())),
+    );
+
+    let response = get_status_list(
+        State(app_state),
+        axum::extract::Path("non-existent-id".to_string()),
+    )
+    .await;
+
+    let response = response.err().expect("Expected an error");
+
+    // Validate error response
+    assert_eq!(response.0, StatusCode::NOT_FOUND);
+    assert_eq!(response.1, "Status list not found");
+}
+
+#[tokio::test]
+async fn test_get_status_list_internal_server_error() {
+    use axum::extract::State;
+    use axum::http::StatusCode;
+
+    let app_state = AppState { repository: None };
+
+    let response =
+        get_status_list(State(app_state), axum::extract::Path("any-id".to_string())).await;
+    let response = response.err().expect("Expected an error");
+
+    // Validate error response
+    assert_eq!(response.0, StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(response.1, "");
 }
