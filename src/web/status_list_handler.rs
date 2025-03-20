@@ -142,5 +142,5 @@ async fn test_get_status_list_internal_server_error() {
 
     // Validate error response
     assert_eq!(response.0, StatusCode::INTERNAL_SERVER_ERROR);
-    assert_eq!(response.1, "");
+    assert_eq!(response.1, "Internal server error");
 }
