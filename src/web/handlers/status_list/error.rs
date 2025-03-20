@@ -2,7 +2,7 @@ use axum::{http::StatusCode, response::IntoResponse};
 use thiserror::Error;
 
 #[derive(Debug, Error)]
-pub(crate) enum StatusListError {
+pub enum StatusListError {
     #[error("Invalid accept header")]
     InvalidAcceptHeader,
     #[error("Internal server error")]
