@@ -10,13 +10,13 @@ use serde_json::Value;
 
 use crate::{
     model::{Status, StatusList, StatusListToken, StatusUpdate},
-    utils::state::{AppState, AppStateRepository},
+    utils::state::AppState,
 };
 
 use super::{constants::STATUS_LISTS_HEADER_JWT, error::StatusListError};
 
-// Get status list claims and return it as a JSON object.
-pub async fn get_status_list_token(
+// Get status list information
+pub async fn handle_status_list_retrieval(
     State(state): State<Arc<AppState>>,
     Path(list_id): Path<i32>,
     headers: HeaderMap,
@@ -27,7 +27,7 @@ pub async fn get_status_list_token(
         StatusListError::InternalServerError
     })?;
 
-    // Check Accept header
+    // Validate accept header
     let accept = headers
         .get(header::ACCEPT)
         .and_then(|h| h.to_str().ok())
@@ -38,26 +38,17 @@ pub async fn get_status_list_token(
     }
 
     // Get status list claims from database
-    let record = get_status_list(repo, list_id).await?;
-
-    Ok(record.status_list)
-}
-
-async fn get_status_list(
-    repo: &AppStateRepository,
-    id: i32,
-) -> Result<StatusListToken, StatusListError> {
     let status_claims = repo
         .status_list_token_repository
-        .find_one_by(id.to_string())
+        .find_one_by(list_id.to_string())
         .await
         .map_err(|err| {
-            tracing::error!("Failed to get status list {id} from database: {err:?}");
+            tracing::error!("Failed to get status list {list_id} from database: {err:?}");
             StatusListError::InternalServerError
         })?
         .ok_or(StatusListError::StatusListNotFound)?;
 
-    Ok(status_claims)
+    Ok(status_claims.status_list)
 }
 
 pub async fn update_statuslist(
@@ -201,7 +192,7 @@ fn encode_lst(bits: Vec<u8>) -> String {
     encoded
 }
 
-pub fn update_status(lst: &str, updates: Vec<StatusUpdate>) -> Result<String, StatusListError> {
+fn update_status(lst: &str, updates: Vec<StatusUpdate>) -> Result<String, StatusListError> {
     let mut decoded_lst =
         base64url::decode(lst).map_err(|e| StatusListError::Generic(e.to_string()))?;
 
