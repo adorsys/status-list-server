@@ -2,7 +2,7 @@ use axum::routing::post;
 use axum::{http::Method, response::IntoResponse, routing::get, Router};
 use dotenvy::dotenv;
 use status_list_server::utils::state::setup;
-use status_list_server::web::handlers::credential_handler;
+use status_list_server::web::handlers::{credential_handler, get_status_list};
 use tokio::net::TcpListener;
 use tower::ServiceBuilder;
 use tower_http::catch_panic::CatchPanicLayer;
@@ -32,6 +32,7 @@ async fn main() {
     let router = Router::new()
         .route("/", get(welcome))
         .route("/credentials", post(credential_handler))
+        .route("/statuslists/:id", get(get_status_list))
         .layer(
             ServiceBuilder::new()
                 .layer(TraceLayer::new_for_http())
