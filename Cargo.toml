@@ -10,6 +10,7 @@ async-trait = "0.1"
 axum = { version = "0.8", features = ["macros"] }
 base64url = "0.1"
 dotenvy = "0.15"
+flate2 = "1.1.0"
 http-body-util = "0.1"
 hyper = "1.6"
 jsonwebtoken = "9.3"
