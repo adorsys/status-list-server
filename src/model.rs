@@ -113,3 +113,19 @@ impl StatusListToken {
         }
     }
 }
+
+pub enum StatusType {
+    JWT,
+    CWT,
+}
+
+impl FromStr for StatusType {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_uppercase().as_str() {
+            "JWT" => Ok(Self::JWT),
+            "CWT" => Ok(Self::CWT),
+            _ => Err("Unknown status type".to_string()),
+        }
+    }
+}

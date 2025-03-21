@@ -5,18 +5,23 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-anyhow = "1.0"
 async-trait = "0.1"
 axum = { version = "0.8", features = ["macros"] }
+base64 = "0.22"
 base64url = "0.1"
-chrono = "0.4.40"
+coset = "0.3"
 dotenvy = "0.15"
-flate2 = "1.1.0"
+http-body = "1.0"
+chrono = "0.4"
+flate2 = "1.1"
 http-body-util = "0.1"
-hyper = "1.6"
+hyper = "1.6.0"
 jsonwebtoken = "9.3"
+mongodb = "3.2"
 once_cell = "1.20"
+rsa = "0.9"
 serde = { version = "1.0", features = ["derive"] }
+serde_cbor = "0.11"
 serde_json = "1.0"
 sqlx = { version = "0.8", features = ["postgres", "runtime-tokio"] }
 thiserror = "2.0"
