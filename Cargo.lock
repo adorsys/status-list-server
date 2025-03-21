@@ -1657,6 +1657,7 @@ dependencies = [
  "hyper",
  "jsonwebtoken",
  "once_cell",
+ "pem",
  "serde",
  "serde_json",
  "sqlx",
