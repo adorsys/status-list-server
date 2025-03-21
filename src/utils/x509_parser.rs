@@ -48,7 +48,7 @@ mod test {
     fn test_der_encoded_certificate_content() {
         // Pretend this is DER content (binary-like junk data in a .pem)
         let test_cert = "./src/test_resources/test_cert.der";
-        let res = crate::utils::x509_parser::load_certificate_der(&test_cert).ok();
+        let res = crate::utils::x509_parser::load_certificate_der(test_cert).ok();
         assert!(res.is_none());
     }
 }
