@@ -10,10 +10,14 @@ pub fn load_certificate_der<P: AsRef<Path>>(cert_path: P) -> Result<Vec<u8>, Err
     let path = cert_path.as_ref();
 
     // Check file extension is .pem
-    if path.extension().and_then(|s| s.to_str()).unwrap_or("") != "pem" {
+    if path
+        .extension()
+        .and_then(|s| s.to_str())
+        .and_then(|s| check(s, "pem")())
+        .is_none()
+    {
         Err(Error::InvalidFileType)?;
     }
-
     // Read the PEM-encoded certificate file
     let cert_pem =
         fs::read_to_string(path).map_err(|_| Error::ReadCertificate(path.to_path_buf()))?;
@@ -21,13 +25,25 @@ pub fn load_certificate_der<P: AsRef<Path>>(cert_path: P) -> Result<Vec<u8>, Err
     // Parse the PEM
     let pem = parse(cert_pem).map_err(|_| Error::ParseFailed)?;
 
-    // Optional: Validate that it's a certificate
     if pem.tag() != "CERTIFICATE" {
         return Err(Error::PermFailed);
     }
 
     // Return the DER bytes
     Ok(pem.contents().to_vec())
+}
+
+#[inline]
+fn check(s: &str, right: &str) -> impl FnOnce() -> Option<bool> {
+    let s = s.to_string();
+    let right = right.to_string();
+    move || {
+        if s == right {
+            Some(true)
+        } else {
+            None
+        }
+    }
 }
 
 mod test {
@@ -40,8 +56,8 @@ mod test {
         ];
 
         for cert_path in test_certs {
-            let dec = crate::utils::x509_parser::load_certificate_der(cert_path).ok();
-            assert!(dec.is_some(), "Failed to parse {}", cert_path);
+            let res = crate::utils::x509_parser::load_certificate_der(cert_path).ok();
+            assert!(res.is_some(), "Failed to parse {}", cert_path);
         }
     }
     #[test]
