@@ -18,7 +18,7 @@ use super::{constants::STATUS_LISTS_HEADER_JWT, error::StatusListError};
 // Return the specified status list token
 pub async fn get_status_list(
     State(state): State<AppState>,
-    Path(list_id): Path<i32>,
+    Path(list_id): Path<String>,
     headers: HeaderMap,
 ) -> Result<impl IntoResponse + Debug, StatusListError> {
     // check the persistence layer
@@ -254,7 +254,7 @@ mod test {
         let status = vec![2, 1, 3, 1];
         let lst = encode(status);
 
-        let list_id = 1.to_string();
+        let list_id = "list_id".to_string();
         let existing_status_list = StatusList { bits: 1, lst };
 
         let existing_token = StatusListToken::new(
@@ -295,7 +295,7 @@ mod test {
         let updated_lst = vec![2, 0, 3, 1];
         let expected_lst = encode(updated_lst);
 
-        let list_id = 1.to_string();
+        let list_id = "list_id".to_string();
         let request = Request::builder()
             .method("PUT")
             .uri(format!("/statuslist/{}", list_id))
@@ -338,7 +338,7 @@ mod test {
             ]
         });
 
-        let list_id = 1.to_string();
+        let list_id = "list_id".to_string();
         let request = Request::builder()
             .method("PUT")
             .uri(format!("/statuslist/{}", list_id))
@@ -362,10 +362,11 @@ mod test {
 
         let headers = HeaderMap::new();
 
-        let response = get_status_list(State(appstate), Path(1), headers).await;
+        let response =
+            get_status_list(State(appstate), Path("test_list".to_string()), headers).await;
         assert_eq!(response.unwrap_err(), StatusListError::InternalServerError);
 
-        let list_id = 1.to_string();
+        let list_id = "list_id".to_string();
         let request = Request::builder()
             .method("GET")
             .uri(format!("/statuslists/{list_id}"))
@@ -387,14 +388,19 @@ mod test {
         headers.insert(header::ACCEPT, "application/json".parse().unwrap());
 
         // The valid accept header is "application/statuslist+jwt"
-        let response = get_status_list(State(appstate.clone().0), Path(1), headers).await;
+        let response = get_status_list(
+            State(appstate.clone().0),
+            Path("list_id".to_string()),
+            headers,
+        )
+        .await;
         assert_eq!(response.unwrap_err(), StatusListError::InvalidAcceptHeader);
 
         let app = Router::new()
             .route("/statuslists/{id}", get(get_status_list))
             .with_state(appstate.0);
 
-        let list_id = 1.to_string();
+        let list_id = "list_id".to_string();
         let request = Request::builder()
             .method("GET")
             .uri(format!("/statuslists/{list_id}"))
@@ -414,14 +420,19 @@ mod test {
         let mut headers = HeaderMap::new();
         headers.insert(header::ACCEPT, STATUS_LISTS_HEADER_JWT.parse().unwrap());
 
-        let response = get_status_list(State(appstate.clone().0), Path(2), headers).await;
+        let response = get_status_list(
+            State(appstate.clone().0),
+            Path("invalid_id".to_string()),
+            headers,
+        )
+        .await;
         assert_eq!(response.unwrap_err(), StatusListError::StatusListNotFound);
 
         let app = Router::new()
             .route("/statuslists/{id}", get(get_status_list))
             .with_state(appstate.0);
 
-        let list_id = 2.to_string();
+        let list_id = "invalid_id".to_string();
         let request = Request::builder()
             .method("GET")
             .uri(format!("/statuslists/{list_id}"))
@@ -441,14 +452,19 @@ mod test {
         let mut headers = HeaderMap::new();
         headers.insert(header::ACCEPT, STATUS_LISTS_HEADER_JWT.parse().unwrap());
 
-        let response = get_status_list(State(appstate.clone().0), Path(1), headers).await;
+        let response = get_status_list(
+            State(appstate.clone().0),
+            Path("list_id".to_string()),
+            headers,
+        )
+        .await;
         assert!(response.is_ok());
 
         let app = Router::new()
             .route("/statuslists/{id}", get(get_status_list))
             .with_state(appstate.0);
 
-        let list_id = 1.to_string();
+        let list_id = "list_id".to_string();
         let request = Request::builder()
             .method("GET")
             .uri(format!("/statuslists/{list_id}"))
