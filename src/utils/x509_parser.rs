@@ -1,6 +1,7 @@
-use ::pem::parse;
 use std::fs;
 use std::path::Path;
+
+use pem::parse;
 
 use super::errors::Error;
 
