@@ -36,7 +36,7 @@ pub async fn publish_token_status(
     {
         Ok(Some(_)) => {
             // Token already exists
-            return StatusCode::CONFLICT.into_response();
+            StatusCode::CONFLICT.into_response()
         }
         Ok(None) => {
             // Proceed to insert the new token
