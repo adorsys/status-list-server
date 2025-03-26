@@ -5,7 +5,6 @@ use crate::{
     model::Credentials, utils::state::AppState,
 };
 
-#[axum::debug_handler]
 pub async fn credential_handler(
     State(appstate): State<AppState>,
     credential: Json<Credentials>,
