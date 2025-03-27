@@ -29,6 +29,7 @@ pub fn lst_from(status_updates: Vec<PublishStatus>) -> Result<String, Error> {
 
     let total_entries = (max_index as usize) + 1;
     let mut status_array = vec![0u8; total_entries];
+
     // Apply each status update
     for update in status_updates {
         if update.index < 0 {
@@ -36,6 +37,7 @@ pub fn lst_from(status_updates: Vec<PublishStatus>) -> Result<String, Error> {
         }
         let idx = update.index as usize;
 
+        // https://www.ietf.org/archive/id/draft-ietf-oauth-status-list-10.html#name-status-types-values
         status_array[idx] = match update.status {
             Status::VALID => 0x00,               // VALID = 0
             Status::INVALID => 0x01,             // INVALID = 1
