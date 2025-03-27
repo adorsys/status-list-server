@@ -10,4 +10,8 @@ pub enum Error {
     PermFailed,
     #[error("invalid file type")]
     InvalidFileType,
+    #[error("error: {0}")]
+    Generic(String),
+    #[error("invalid index")]
+    InvalidIndex,
 }
