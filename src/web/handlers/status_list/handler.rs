@@ -7,7 +7,8 @@ use axum::{
     Json,
 };
 
-use flate2::{read::ZlibDecoder, write::ZlibEncoder};
+use base64url::{decode, encode};
+use flate2::{read::ZlibDecoder, write::ZlibEncoder, Compression};
 use serde_json::Value;
 use std::io::{Read, Write};
 
@@ -134,10 +135,11 @@ pub async fn update_statuslist(
 
     if let Some(status_list_token) = status_list_token {
         let lst = status_list_token.status_list.lst.clone();
+        let bits = status_list_token.status_list.bits as usize;
 
         // Apply updates
 
-        let updated_lst = match update_status(&lst, updates) {
+        let updated_lst = match update_status(lst, updates, bits) {
             Ok(updated_lst) => updated_lst,
             Err(e) => {
                 tracing::error!("Status update failed: {:?}", e);
@@ -195,52 +197,99 @@ pub async fn update_statuslist(
     }
 }
 
-pub fn update_status(lst: &str, updates: Vec<StatusUpdate>) -> Result<String, StatusError> {
-    // bas
-    let decoded_lst = base64url::decode(lst).map_err(|e| StatusError::Generic(e.to_string()))?;
+pub fn update_status(
+    lst: String,
+    status_updates: Vec<StatusUpdate>,
+    bits: usize,
+) -> Result<String, StatusListError> {
+    if status_updates.is_empty() {
+        return Err(StatusListError::Generic(
+            "No status updates provided".to_string(),
+        ));
+    }
 
-    // decompressed byte array
-    let mut decompressed_lst = ZlibDecoder::new(&*decoded_lst);
-    let mut decompressed_array = vec![];
-    decompressed_lst
-        .read_to_end(&mut decompressed_array)
-        .map_err(|_| StatusError::Generic("could not decompressed lst".to_string()))?;
+    // Validate the 'bits' parameter
+    if ![1, 2, 4, 8].contains(&bits) {
+        return Err(StatusListError::UnsupportedBits);
+    }
 
-    for update in updates {
-        let index = update.index as usize;
-        if index >= decompressed_array.len() * 8 {
-            return Err(StatusError::InvalidIndex);
+    // Decode the existing Base64-encoded status list
+    let compressed_data = decode(&lst).map_err(|_| StatusListError::DecodeError)?;
+
+    // Decompress the data using zlib
+    let mut decoder = ZlibDecoder::new(&compressed_data[..]);
+    let mut status_array = Vec::new();
+    decoder
+        .read_to_end(&mut status_array)
+        .map_err(|e| StatusListError::DecompressionError(e.to_string()))?;
+
+    // Determine the highest index in the updates to ensure the array is large enough
+    let max_update_index = status_updates
+        .iter()
+        .map(|update| update.index)
+        .max()
+        .unwrap_or(0);
+    if max_update_index < 0 {
+        return Err(StatusListError::InvalidIndex);
+    }
+
+    let required_len = ((max_update_index as usize + 1) * bits + 7) / 8;
+    if status_array.len() < required_len {
+        status_array.resize(required_len, 0);
+    }
+
+    // Apply each status update
+    for update in status_updates {
+        if update.index < 0 {
+            return Err(StatusListError::InvalidIndex);
         }
+        let idx = update.index as usize;
 
-        let byte_index = index / 8;
-        let bit_index = index % 8;
-        let mask = 1 << bit_index;
+        // Determine the bit position for the current index
+        let bit_position = idx * bits;
+        let byte_index = bit_position / 8;
+        let bit_offset = bit_position % 8;
 
-        match update.status {
-            Status::VALID => {
-                decompressed_array[byte_index] &= !mask;
-            }
-            Status::INVALID => {
-                decompressed_array[byte_index] |= mask;
-            }
+        // Assign a unique value to each status variant
+        let status_value = match update.status {
+            Status::VALID => 0b0000_0000,               // VALID = 0
+            Status::INVALID => 0b0000_0001,             // INVALID = 1
+            Status::SUSPENDED => 0b0000_0010,           // SUSPENDED = 2
+            Status::APPLICATIONSPECIFIC => 0b0000_0011, // APPLICATIONSPECIFIC = 3
+        };
 
-            _ => {
-                tracing::warn!("Unsupported status variant: {:?}", update.status);
-                return Err(StatusError::MalformedBody);
+        // Mask and set the status value in the appropriate position
+        if bits == 8 {
+            status_array[byte_index] = status_value;
+        } else {
+            let mask = ((1 << bits) - 1) << bit_offset;
+            status_array[byte_index] &= !mask;
+            status_array[byte_index] |= (status_value << bit_offset) & mask;
+
+            // Handle cases where the status spans across two bytes
+            if bit_offset + bits > 8 {
+                let next_byte_index = byte_index + 1;
+                let next_bit_offset = 8 - bit_offset;
+                let next_mask = (1 << (bits - next_bit_offset)) - 1;
+                if next_byte_index < status_array.len() {
+                    status_array[next_byte_index] &= !next_mask;
+                    status_array[next_byte_index] |= status_value >> next_bit_offset;
+                }
             }
         }
     }
 
-    // compress the updated status
-    let mut encoder = ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+    // Compress the updated status array using zlib
+    let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
     encoder
-        .write_all(&decompressed_array)
-        .map_err(|_| StatusError::Generic("could not compress lst".to_string()))?;
-    let encoded = encoder
+        .write_all(&status_array)
+        .map_err(|e| StatusListError::CompressionError(e.to_string()))?;
+    let compressed = encoder
         .finish()
-        .map_err(|_| StatusError::Generic("failed to encode".to_string()))?;
+        .map_err(|e| StatusListError::CompressionError(e.to_string()))?;
 
-    Ok(base64url::encode(encoded))
+    // Base64url encode the compressed data without padding
+    Ok(encode(&compressed))
 }
 
 #[cfg(test)]
@@ -271,7 +320,7 @@ mod test {
         utils::state::AppState,
     };
 
-    pub fn setup() -> (AppState, Arc<RwLock<HashMap<String, StatusListToken>>>) {
+    pub fn setup(bits: i8) -> (AppState, Arc<RwLock<HashMap<String, StatusListToken>>>) {
         let mut mock_statustk_repo = HashMap::new();
         let mock_credential_repo: HashMap<String, Credentials> = HashMap::new();
 
@@ -285,7 +334,7 @@ mod test {
         let lst = encode(compressed_status);
 
         let list_id = "list_id".to_string();
-        let existing_status_list = StatusList { bits: 1, lst };
+        let existing_status_list = StatusList { bits, lst };
 
         let existing_token = StatusListToken::new(
             list_id.clone(),
@@ -310,7 +359,7 @@ mod test {
 
     #[tokio::test]
     async fn test_update_statuslist() {
-        let appstate = setup();
+        let appstate = setup(1);
 
         let app = Router::new()
             .route("/statuslist/{issuer}", put(update_statuslist))
@@ -367,9 +416,105 @@ mod test {
         assert_eq!(shared_lst, expected_lst);
     }
 
+    #[test]
+    fn test_update_status_with_bits_set_to_8() {
+        let original_status_array = vec![
+            0b0000_0000,
+            0b0000_0001,
+            0b0000_0010,
+            0b0000_0011,
+            0b0000_0000,
+            0b0000_0000,
+            0b0000_0000,
+            0b0000_0000,
+        ];
+
+        let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
+        encoder.write_all(&original_status_array).unwrap();
+        let compressed = encoder.finish().unwrap();
+
+        // Base64 encode the compressed data
+        let lst = encode(&compressed);
+
+        // Step 2: Define new status updates
+        let status_updates = vec![
+            StatusUpdate {
+                index: 4,
+                status: Status::INVALID,
+            },
+            StatusUpdate {
+                index: 7,
+                status: Status::SUSPENDED,
+            },
+        ];
+
+        let updated_lst =
+            update_status(lst, status_updates, 8).expect("Failed to update status list");
+
+        let decoded = decode(&updated_lst).expect("Failed to decode base64");
+        let mut decoder = ZlibDecoder::new(&decoded[..]);
+        let mut updated_status_array = Vec::new();
+        decoder
+            .read_to_end(&mut updated_status_array)
+            .expect("Failed to decompress");
+
+        let expected_status_array = vec![
+            0b0000_0000,
+            0b0000_0001,
+            0b0000_0010,
+            0b0000_0011,
+            0b0000_0001,
+            0b0000_0000,
+            0b0000_0000,
+            0b0000_0010,
+        ];
+        assert_eq!(
+            updated_status_array, expected_status_array,
+            "The status array was not updated correctly"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_update_with_bits_value_set_to_2() {
+        let original_lst = vec![0b00011011, 0b00000000]; // Each byte holds 4 statuses (2 bits each)
+
+        // Compress and encode the original status list
+        let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
+        encoder.write_all(&original_lst).unwrap();
+        let compressed_lst = encoder.finish().unwrap();
+        let lst = encode(&compressed_lst);
+
+        let status_updates = vec![
+            StatusUpdate {
+                index: 1,
+                status: Status::VALID,
+            }, // Change index 1 from INVALID to VALID
+            StatusUpdate {
+                index: 8,
+                status: Status::VALID,
+            }, // Add index 8 as VALID
+        ];
+
+        let updated_lst =
+            update_status(lst, status_updates, 2).expect("Failed to update status list");
+
+        let decoded_lst = decode(&updated_lst).expect("Failed to decode base64");
+        let mut decompressed_lst = Vec::new();
+        ZlibDecoder::new(&decoded_lst[..])
+            .read_to_end(&mut decompressed_lst)
+            .unwrap();
+
+        let expected_lst = vec![0b00010011, 0b00000000, 0b00000000]; // Adjusted statuses with added index 8
+
+        assert_eq!(
+            decompressed_lst, expected_lst,
+            "The updated status list does not match the expected list."
+        );
+    }
+
     #[tokio::test]
     async fn test_malformed_body() {
-        let appstate = setup();
+        let appstate = setup(1);
 
         let app = Router::new()
             .route("/statuslist/{issuer}", put(update_statuslist))
@@ -427,7 +572,7 @@ mod test {
 
     #[tokio::test]
     async fn test_status_list_invalid_accept_header() {
-        let appstate = setup();
+        let appstate = setup(1);
 
         let mut headers = HeaderMap::new();
         headers.insert(header::ACCEPT, "application/json".parse().unwrap());
@@ -460,7 +605,7 @@ mod test {
 
     #[tokio::test]
     async fn test_status_list_not_found() {
-        let appstate = setup();
+        let appstate = setup(1);
 
         let mut headers = HeaderMap::new();
         headers.insert(header::ACCEPT, STATUS_LISTS_HEADER_JWT.parse().unwrap());
@@ -492,7 +637,7 @@ mod test {
 
     #[tokio::test]
     async fn test_status_list_success() {
-        let appstate = setup();
+        let appstate = setup(1);
 
         let mut headers = HeaderMap::new();
         headers.insert(header::ACCEPT, STATUS_LISTS_HEADER_JWT.parse().unwrap());
