@@ -1,23 +1,66 @@
+use std::{fmt::Debug, sync::Arc};
+
 use axum::{
     extract::{Path, State},
+    http::{header, HeaderMap, StatusCode},
     response::IntoResponse,
     Json,
 };
 
 use flate2::{read::ZlibDecoder, write::ZlibEncoder};
-use hyper::StatusCode;
 use serde_json::Value;
-use std::{
-    io::{Read, Write},
-    sync::Arc,
-};
+use std::io::{Read, Write};
 
 use crate::{
     model::{Status, StatusList, StatusListToken, StatusUpdate},
     utils::state::AppState,
 };
 
-use super::error::StatusError;
+use super::{constants::STATUS_LISTS_HEADER_JWT, error::StatusListError};
+
+// Return the specified status list token
+pub async fn get_status_list(
+    State(state): State<AppState>,
+    Path(list_id): Path<String>,
+    headers: HeaderMap,
+) -> Result<impl IntoResponse + Debug, StatusListError> {
+    // check the persistence layer
+    let repo = state.repository.as_ref().ok_or_else(|| {
+        tracing::error!("Repository is unavailable");
+        StatusListError::InternalServerError
+    })?;
+
+    // Validate accept header
+    let accept = headers
+        .get(header::ACCEPT)
+        .and_then(|h| h.to_str().ok())
+        .unwrap_or(STATUS_LISTS_HEADER_JWT);
+
+    if !accept.contains(STATUS_LISTS_HEADER_JWT) {
+        return Err(StatusListError::InvalidAcceptHeader);
+    }
+
+    // Get status list claims from database
+    let status_claims = repo
+        .status_list_token_repository
+        .find_one_by(list_id.to_string())
+        .await
+        .map_err(|err| {
+            tracing::error!("Failed to get status list {list_id} from database: {err:?}");
+            StatusListError::InternalServerError
+        })?
+        .ok_or(StatusListError::StatusListNotFound)?;
+
+    // TODO : add function to construct the status list token from this status list before sending it out
+    let status_list = status_claims.status_list;
+
+    Ok((
+        StatusCode::OK,
+        [(header::CONTENT_TYPE, STATUS_LISTS_HEADER_JWT)],
+        Json(status_list),
+    )
+        .into_response())
+}
 
 pub async fn update_statuslist(
     State(appstate): State<Arc<AppState>>,
@@ -33,7 +76,9 @@ pub async fn update_statuslist(
         None => {
             return (
                 StatusCode::BAD_REQUEST,
-                StatusError::MalformedBody.to_string(),
+                StatusListError::MalformedBody(
+                    "Request body must contain a valid 'updates' array".to_string(),
+                ),
             )
                 .into_response();
         }
@@ -53,7 +98,9 @@ pub async fn update_statuslist(
             tracing::error!("Malformed request body: {e}");
             return (
                 StatusCode::BAD_REQUEST,
-                StatusError::MalformedBody.to_string(),
+                StatusListError::MalformedBody(
+                    "Request body must contain a valid 'updates' array".to_string(),
+                ),
             )
                 .into_response();
         }
@@ -79,7 +126,7 @@ pub async fn update_statuslist(
             tracing::error!("Status list not found: {}", list_id);
             return (
                 StatusCode::NOT_FOUND,
-                StatusError::StatusListNotFound.to_string(),
+                StatusListError::StatusListNotFound.to_string(),
             )
                 .into_response();
         }
@@ -95,12 +142,12 @@ pub async fn update_statuslist(
             Err(e) => {
                 tracing::error!("Status update failed: {:?}", e);
                 return match e {
-                    StatusError::InvalidIndex => {
+                    StatusListError::InvalidIndex => {
                         (StatusCode::BAD_REQUEST, "Invalid index").into_response()
                     }
                     _ => (
                         StatusCode::INTERNAL_SERVER_ERROR,
-                        StatusError::UpdateFailed.to_string(),
+                        StatusListError::UpdateFailed.to_string(),
                     )
                         .into_response(),
                 };
@@ -134,7 +181,7 @@ pub async fn update_statuslist(
                 tracing::error!("Failed to update status list");
                 (
                     StatusCode::BAD_REQUEST,
-                    StatusError::UpdateFailed.to_string(),
+                    StatusListError::UpdateFailed.to_string(),
                 )
                     .into_response()
             }
@@ -199,13 +246,19 @@ pub fn update_status(lst: &str, updates: Vec<StatusUpdate>) -> Result<String, St
 #[cfg(test)]
 mod test {
 
+    use super::*;
     use std::{
         collections::HashMap,
         io::{Read, Write},
         sync::{Arc, RwLock},
     };
 
-    use axum::{body::Body, extract::Request, routing::put, Router};
+    use axum::{
+        body::Body,
+        extract::Request,
+        routing::{get, put},
+        Router,
+    };
     use base64url::encode;
     use flate2::{read::ZlibDecoder, write::ZlibEncoder, Compression};
     use hyper::StatusCode;
@@ -216,7 +269,6 @@ mod test {
         model::{Credentials, StatusList, StatusListToken},
         test_resources::setup::test_setup,
         utils::state::AppState,
-        web::update_statuslist::update_statuslist,
     };
 
     pub fn setup() -> (AppState, Arc<RwLock<HashMap<String, StatusListToken>>>) {
@@ -232,7 +284,7 @@ mod test {
         // encode status lst
         let lst = encode(compressed_status);
 
-        let list_id = "test_list_id".to_string();
+        let list_id = "list_id".to_string();
         let existing_status_list = StatusList { bits: 1, lst };
 
         let existing_token = StatusListToken::new(
@@ -279,7 +331,7 @@ mod test {
 
         let expected_lst = encode(compressed_status);
 
-        let list_id = "test_list_id".to_string();
+        let list_id = "list_id".to_string();
         let request = Request::builder()
             .method("PUT")
             .uri(format!("/statuslist/{}", list_id))
@@ -331,7 +383,7 @@ mod test {
             ]
         });
 
-        let list_id = "test_list_id".to_string();
+        let list_id = "list_id".to_string();
         let request = Request::builder()
             .method("PUT")
             .uri(format!("/statuslist/{}", list_id))
@@ -344,5 +396,129 @@ mod test {
 
         // Check response status
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn test_status_list_repo_not_set() {
+        let appstate = AppState { repository: None };
+        let app = Router::new()
+            .route("/statuslists/{id}", get(get_status_list))
+            .with_state(appstate.clone());
+
+        let headers = HeaderMap::new();
+
+        let response =
+            get_status_list(State(appstate), Path("test_list".to_string()), headers).await;
+        assert_eq!(response.unwrap_err(), StatusListError::InternalServerError);
+
+        let list_id = "list_id".to_string();
+        let request = Request::builder()
+            .method("GET")
+            .uri(format!("/statuslists/{list_id}"))
+            .header("Content-Type", "application/json")
+            .body(Body::from(""))
+            .unwrap();
+
+        // We expect a 500 error because the repository is not set
+        let response = app.oneshot(request).await.unwrap();
+
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    #[tokio::test]
+    async fn test_status_list_invalid_accept_header() {
+        let appstate = setup();
+
+        let mut headers = HeaderMap::new();
+        headers.insert(header::ACCEPT, "application/json".parse().unwrap());
+
+        // The valid accept header is "application/statuslist+jwt"
+        let response = get_status_list(
+            State(appstate.clone().0),
+            Path("list_id".to_string()),
+            headers,
+        )
+        .await;
+        assert_eq!(response.unwrap_err(), StatusListError::InvalidAcceptHeader);
+
+        let app = Router::new()
+            .route("/statuslists/{id}", get(get_status_list))
+            .with_state(appstate.0);
+
+        let list_id = "list_id".to_string();
+        let request = Request::builder()
+            .method("GET")
+            .uri(format!("/statuslists/{list_id}"))
+            .header(header::ACCEPT, "application/json")
+            .body(Body::from(""))
+            .unwrap();
+
+        // We should get a 400 because the accept header is invalid
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn test_status_list_not_found() {
+        let appstate = setup();
+
+        let mut headers = HeaderMap::new();
+        headers.insert(header::ACCEPT, STATUS_LISTS_HEADER_JWT.parse().unwrap());
+
+        let response = get_status_list(
+            State(appstate.clone().0),
+            Path("invalid_id".to_string()),
+            headers,
+        )
+        .await;
+        assert_eq!(response.unwrap_err(), StatusListError::StatusListNotFound);
+
+        let app = Router::new()
+            .route("/statuslists/{id}", get(get_status_list))
+            .with_state(appstate.0);
+
+        let list_id = "invalid_id".to_string();
+        let request = Request::builder()
+            .method("GET")
+            .uri(format!("/statuslists/{list_id}"))
+            .header(header::ACCEPT, STATUS_LISTS_HEADER_JWT)
+            .body(Body::from(""))
+            .unwrap();
+
+        // We should get a 404 because the status list with the given id does not exist
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn test_status_list_success() {
+        let appstate = setup();
+
+        let mut headers = HeaderMap::new();
+        headers.insert(header::ACCEPT, STATUS_LISTS_HEADER_JWT.parse().unwrap());
+
+        let response = get_status_list(
+            State(appstate.clone().0),
+            Path("list_id".to_string()),
+            headers,
+        )
+        .await;
+        assert!(response.is_ok());
+
+        let app = Router::new()
+            .route("/statuslists/{id}", get(get_status_list))
+            .with_state(appstate.0);
+
+        let list_id = "list_id".to_string();
+        let request = Request::builder()
+            .method("GET")
+            .uri(format!("/statuslists/{list_id}"))
+            .header(header::ACCEPT, STATUS_LISTS_HEADER_JWT)
+            .body(Body::from(""))
+            .unwrap();
+
+        // We should get a 200 because the status list with the given id exists
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
     }
 }
