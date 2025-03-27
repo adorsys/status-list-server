@@ -1,4 +1,4 @@
-use base64url;
+use base64url::encode;
 use flate2::{write::ZlibEncoder, Compression};
 use std::io::Write;
 
@@ -11,12 +11,17 @@ pub struct PublishStatus {
     pub status: Status,
 }
 
-pub fn lst_from(status_updates: Vec<PublishStatus>) -> Result<String, Error> {
+pub fn lst_from(status_updates: Vec<PublishStatus>, bits: usize) -> Result<String, Error> {
     if status_updates.is_empty() {
         return Err(Error::Generic("No status updates provided".to_string()));
     }
 
-    // Find the highest index to determine the array size
+    // Validate the 'bits' parameter
+    if ![1, 2, 4, 8].contains(&bits) {
+        return Err(Error::UnsupportedBits);
+    }
+
+    // Determine the highest index to set the size of the status array
     let max_index = status_updates
         .iter()
         .map(|update| update.index)
@@ -27,8 +32,12 @@ pub fn lst_from(status_updates: Vec<PublishStatus>) -> Result<String, Error> {
         return Err(Error::InvalidIndex);
     }
 
+    // Calculate the total number of entries needed
     let total_entries = (max_index as usize) + 1;
-    let mut status_array = vec![0u8; total_entries];
+
+    // Calculate the number of bytes needed to store all statuses
+    let bytes_needed = (total_entries * bits + 7) / 8;
+    let mut status_array = vec![0u8; bytes_needed];
 
     // Apply each status update
     for update in status_updates {
@@ -37,16 +46,40 @@ pub fn lst_from(status_updates: Vec<PublishStatus>) -> Result<String, Error> {
         }
         let idx = update.index as usize;
 
-        // https://www.ietf.org/archive/id/draft-ietf-oauth-status-list-10.html#name-status-types-values
-        status_array[idx] = match update.status {
-            Status::VALID => 0x00,               // VALID = 0
-            Status::INVALID => 0x01,             // INVALID = 1
-            Status::SUSPENDED => 0x02,           // SUSPENDED = 2
-            Status::APPLICATIONSPECIFIC => 0x03, // APPLICATIONSPECIFIC = 3
+        // Determine the bit position for the current index
+        let bit_position = idx * bits;
+        let byte_index = bit_position / 8;
+        let bit_offset = bit_position % 8;
+
+        // Assign a unique value to each status variant
+        // https://www.ietf.org/archive/id/draft-ietf-oauth-status-list-10.html#name-compressed-byte-array
+        let status_value = match update.status {
+            Status::VALID => 0b0000_0000,               // VALID = 0
+            Status::INVALID => 0b0000_0001,             // INVALID = 1
+            Status::SUSPENDED => 0b0000_0010,           // SUSPENDED = 2
+            Status::APPLICATIONSPECIFIC => 0b0000_0011, // APPLICATIONSPECIFIC = 3
         };
+
+        // Mask and set the status value in the appropriate position
+        if bits == 8 {
+            status_array[byte_index] = status_value;
+        } else {
+            let mask = ((1 << bits) - 1) << bit_offset;
+            status_array[byte_index] &= !mask;
+            status_array[byte_index] |= (status_value << bit_offset) & mask;
+
+            // Handle cases where the status spans across two bytes
+            if bit_offset + bits > 8 {
+                let next_byte_index = byte_index + 1;
+                let next_bit_offset = 8 - bit_offset;
+                let next_mask = (1 << (bits - next_bit_offset)) - 1;
+                status_array[next_byte_index] &= !next_mask;
+                status_array[next_byte_index] |= status_value >> next_bit_offset;
+            }
+        }
     }
 
-    // Compress with zlib
+    // Compress the status array using zlib
     let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
     encoder
         .write_all(&status_array)
@@ -55,23 +88,63 @@ pub fn lst_from(status_updates: Vec<PublishStatus>) -> Result<String, Error> {
         .finish()
         .map_err(|_| Error::Generic("Failed to finish compression".to_string()))?;
 
-    // Base64url encode (no padding)
-    Ok(base64url::encode(compressed))
+    // Base64url encode the compressed data without padding
+    Ok(encode(&compressed))
 }
 
 #[cfg(test)]
-mod test {
+mod tests {
     use std::io::Read;
 
-    use flate2::read::ZlibDecoder;
-
-    use crate::model::Status;
-
-    use super::{lst_from, PublishStatus};
+    use super::*;
 
     #[test]
-    fn test_lst_from() {
-        let status_updates = vec![
+    fn test_lst_from_valid_status_1_bit() {
+        let updates = vec![
+            PublishStatus {
+                index: 0,
+                status: Status::VALID,
+            },
+            PublishStatus {
+                index: 1,
+                status: Status::INVALID,
+            },
+        ];
+
+        let result = lst_from(updates, 1).unwrap();
+        let decoded = base64url::decode(&result).unwrap();
+        let mut decoder = flate2::read::ZlibDecoder::new(&*decoded);
+        let mut decompressed = Vec::new();
+        decoder.read_to_end(&mut decompressed).unwrap();
+
+        assert_eq!(decompressed, vec![0b0000_0010]);
+    }
+
+    #[test]
+    fn test_lst_from_invalid_status_1_bit() {
+        let updates = vec![
+            PublishStatus {
+                index: 0,
+                status: Status::INVALID,
+            },
+            PublishStatus {
+                index: 1,
+                status: Status::INVALID,
+            },
+        ];
+
+        let result = lst_from(updates, 1).unwrap();
+        let decoded = base64url::decode(&result).unwrap();
+        let mut decoder = flate2::read::ZlibDecoder::new(&*decoded);
+        let mut decompressed = Vec::new();
+        decoder.read_to_end(&mut decompressed).unwrap();
+
+        assert_eq!(decompressed, vec![0b0000_0011]);
+    }
+
+    #[test]
+    fn test_lst_from_mixed_status_2_bits() {
+        let updates = vec![
             PublishStatus {
                 index: 0,
                 status: Status::VALID,
@@ -88,34 +161,44 @@ mod test {
                 index: 3,
                 status: Status::APPLICATIONSPECIFIC,
             },
-            PublishStatus {
-                index: 10,
-                status: Status::INVALID,
-            },
         ];
 
-        let encoded_lst = lst_from(status_updates).expect("Failed to create LST");
+        let result = lst_from(updates, 2).unwrap();
+        let decoded = base64url::decode(&result).unwrap();
+        let mut decoder = flate2::read::ZlibDecoder::new(&*decoded);
+        let mut decompressed = Vec::new();
+        decoder.read_to_end(&mut decompressed).unwrap();
 
-        // Decode Base64 URL
-        let decoded_lst = base64url::decode(&encoded_lst).expect("Failed to decode Base64");
+        assert_eq!(decompressed, vec![0b1110_0100]);
+    }
 
-        // Decompress Zlib
-        let mut decoder = ZlibDecoder::new(&decoded_lst[..]);
-        let mut decompressed_lst = Vec::new();
-        decoder
-            .read_to_end(&mut decompressed_lst)
-            .expect("Failed to decompress LST");
+    #[test]
+    fn test_lst_from_empty_updates() {
+        let updates = vec![];
 
-        // Expected bytes (indexes 0,1,2,3,10 modified)
-        let mut expected_lst = vec![0x00; 11];
-        expected_lst[1] = 0x01; // INVALID = 1
-        expected_lst[2] = 0x02; // SUSPENDED = 2
-        expected_lst[3] = 0x03; // APPLICATIONSPECIFIC = 3
-        expected_lst[10] = 0x01; // INVALID = 1
+        let result = lst_from(updates, 1);
+        assert!(matches!(result, Err(Error::Generic(_))));
+    }
 
-        assert_eq!(
-            decompressed_lst, expected_lst,
-            "Decompressed LST does not match expected bytes"
-        );
+    #[test]
+    fn test_lst_from_invalid_index() {
+        let updates = vec![PublishStatus {
+            index: -1,
+            status: Status::VALID,
+        }];
+
+        let result = lst_from(updates, 1);
+        assert!(matches!(result, Err(Error::InvalidIndex)));
+    }
+
+    #[test]
+    fn test_lst_from_unsupported_bits() {
+        let updates = vec![PublishStatus {
+            index: 0,
+            status: Status::VALID,
+        }];
+
+        let result = lst_from(updates, 3);
+        assert!(matches!(result, Err(Error::UnsupportedBits)));
     }
 }

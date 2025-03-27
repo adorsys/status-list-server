@@ -14,4 +14,6 @@ pub enum Error {
     Generic(String),
     #[error("invalid index")]
     InvalidIndex,
+    #[error("Unsupported bits value")]
+    UnsupportedBits,
 }
