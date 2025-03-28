@@ -17,6 +17,14 @@ pub enum StatusListError {
     MalformedBody(String),
     #[error("Status list not found")]
     StatusListNotFound,
+    #[error("Unsupported bits value")]
+    UnsupportedBits,
+    #[error("Could not decode lst")]
+    DecodeError,
+    #[error("Decompression error: {0}")]
+    DecompressionError(String),
+    #[error("Compression error: {0}")]
+    CompressionError(String),
 }
 
 impl IntoResponse for StatusListError {
@@ -30,6 +38,10 @@ impl IntoResponse for StatusListError {
             UpdateFailed => StatusCode::INTERNAL_SERVER_ERROR,
             MalformedBody(_) => StatusCode::BAD_REQUEST,
             StatusListNotFound => StatusCode::NOT_FOUND,
+            UnsupportedBits => StatusCode::BAD_REQUEST,
+            DecodeError => StatusCode::BAD_REQUEST,
+            DecompressionError(_) => StatusCode::BAD_REQUEST,
+            CompressionError(_) => StatusCode::INTERNAL_SERVER_ERROR,
         };
 
         (status_code, self.to_string()).into_response()

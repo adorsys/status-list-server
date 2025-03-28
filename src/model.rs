@@ -25,13 +25,13 @@ impl Credentials {
     }
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Debug)]
 pub struct StatusUpdate {
     pub index: i32,
     pub status: Status,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Debug)]
 pub enum Status {
     VALID,
     INVALID,
