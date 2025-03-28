@@ -202,6 +202,11 @@ pub fn update_status(
     status_updates: Vec<StatusUpdate>,
     bits: usize,
 ) -> Result<String, StatusListError> {
+    if lst.is_empty() {
+        return Err(StatusListError::Generic(
+            "No status list provided".to_string(),
+        ));
+    }
     if status_updates.is_empty() {
         return Err(StatusListError::Generic(
             "No status updates provided".to_string(),
@@ -280,7 +285,7 @@ pub fn update_status(
     }
 
     // Compress the updated status array using zlib
-    let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
+    let mut encoder = ZlibEncoder::new(Vec::new(), Compression::fast());
     encoder
         .write_all(&status_array)
         .map_err(|e| StatusListError::CompressionError(e.to_string()))?;
@@ -374,7 +379,7 @@ mod test {
         });
         let updated_lst = vec![0b11111101, 0b01101110];
 
-        let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
+        let mut encoder = ZlibEncoder::new(Vec::new(), Compression::fast());
         encoder.write_all(&updated_lst).unwrap();
         let compressed_status = encoder.finish().unwrap();
 
@@ -429,7 +434,7 @@ mod test {
             0b0000_0000,
         ];
 
-        let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
+        let mut encoder = ZlibEncoder::new(Vec::new(), Compression::fast());
         encoder.write_all(&original_status_array).unwrap();
         let compressed = encoder.finish().unwrap();
 
@@ -479,7 +484,7 @@ mod test {
         let original_lst = vec![0b00011011, 0b00000000]; // Each byte holds 4 statuses (2 bits each)
 
         // Compress and encode the original status list
-        let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
+        let mut encoder = ZlibEncoder::new(Vec::new(), Compression::fast());
         encoder.write_all(&original_lst).unwrap();
         let compressed_lst = encoder.finish().unwrap();
         let lst = encode(&compressed_lst);
