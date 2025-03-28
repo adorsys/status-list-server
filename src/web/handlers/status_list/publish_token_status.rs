@@ -37,7 +37,7 @@ pub async fn publish_token_status(
     let store = appstate
         .repository
         .as_ref()
-        .ok_or_else(|| StatusListError::InternalServerError)?;
+        .ok_or(StatusListError::InternalServerError)?;
 
     // Validate that bits is one of the allowed values (1, 2, 4, 8)
     if ![1, 2, 4, 8].contains(&payload.bits) {
@@ -46,7 +46,7 @@ pub async fn publish_token_status(
 
     // Generate the compressed status list; use empty encoding if no updates
     let lst = if payload.updates.is_empty() {
-        base64url::encode(&[])
+        base64url::encode([])
     } else {
         lst_from(payload.updates, payload.bits as usize).map_err(|e| {
             tracing::error!("lst_from failed: {:?}", e);
@@ -236,7 +236,7 @@ mod tests {
         assert!(result.is_some());
         let token = result.unwrap();
         assert_eq!(token.list_id, token_id);
-        assert_eq!(token.status_list.lst, base64url::encode(&[]));
+        assert_eq!(token.status_list.lst, base64url::encode([]));
     }
 
     // Test rejection of invalid bits values
