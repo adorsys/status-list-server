@@ -40,7 +40,6 @@ impl Repository<StatusListToken> for MockStore<StatusListToken> {
         self.repository
             .write()
             .unwrap()
-            .clone()
             .insert(entity.list_id.clone(), entity);
         Ok(())
     }
@@ -83,7 +82,6 @@ impl Repository<Credentials> for MockStore<Credentials> {
         self.repository
             .write()
             .unwrap()
-            .clone()
             .insert(entity.issuer.clone(), entity);
         Ok(())
     }
