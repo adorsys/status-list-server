@@ -34,11 +34,7 @@ pub async fn publish_credentials(
     }
 
     // ensure consistent order in credentials
-    let credential = Credentials::new(
-        credentials.issuer,
-        credentials.public_key.into(),
-        credentials.alg,
-    );
+    let credential = Credentials::new(credentials.issuer, credentials.public_key, credentials.alg);
 
     // Insert the credentials into the repository
     store.credential_repository.insert_one(credential).await?;

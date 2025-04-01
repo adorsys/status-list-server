@@ -45,7 +45,6 @@ impl Repository<StatusListToken> for SeaOrmStore<StatusListToken> {
                 .map_err(|e| RepositoryError::InsertError(e.to_string()))?),
             sub: Set(entity.sub),
             ttl: Set(entity.ttl),
-            ..Default::default()
         };
         active
             .insert(&*self.db)
@@ -82,7 +81,6 @@ impl Repository<StatusListToken> for SeaOrmStore<StatusListToken> {
                 .map_err(|e| RepositoryError::UpdateError(e.to_string()))?),
             sub: Set(entity.sub),
             ttl: Set(entity.ttl),
-            ..Default::default()
         };
         active
             .update(&*self.db)
@@ -115,7 +113,6 @@ impl Repository<Credentials> for SeaOrmStore<Credentials> {
             issuer: Set(entity.issuer),
             public_key: Set(entity.public_key),
             alg: Set(entity.alg),
-            ..Default::default()
         };
         active
             .insert(&*self.db)
@@ -148,7 +145,6 @@ impl Repository<Credentials> for SeaOrmStore<Credentials> {
             issuer: Set(entity.issuer),
             public_key: Set(entity.public_key),
             alg: Set(entity.alg),
-            ..Default::default()
         };
         active
             .update(&*self.db)

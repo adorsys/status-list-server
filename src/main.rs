@@ -34,7 +34,7 @@ async fn main() {
     let router = Router::new()
         .route("/", get(welcome))
         .route("/credentials", post(credential_handler))
-        .route("/statuslists/{id}", get(get_status_list))
+        .route("/statuslists/{list_id}", get(get_status_list))
         .layer(
             ServiceBuilder::new()
                 .layer(TraceLayer::new_for_http())
