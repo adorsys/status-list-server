@@ -26,3 +26,6 @@ sqlx = { version = "0.8", features = ["postgres", "runtime-tokio"] }
 tokio = { version = "1.16", features = ["full"] }
 tower-http = { version = "0.6", features = ["cors", "trace", "catch-panic"] }
 pem = "3.0.5"
+rsa = "0.9"
+rand = "0.8"
+sha2 = "0.10.8"
