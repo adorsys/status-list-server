@@ -41,7 +41,10 @@ pub async fn publish_token_status(
 
     // Validate that bits is one of the allowed values (1, 2, 4, 8)
     if ![1, 2, 4, 8].contains(&payload.bits) {
-        return Err(StatusListError::UnsupportedBits);
+        return Err(StatusListError::Generic(format!(
+            "Invalid 'bits' value: {}. Allowed values are 1, 2, 4, 8.",
+            payload.bits
+        )));
     }
 
     // Generate the compressed status list; use empty encoding if no updates
@@ -75,11 +78,15 @@ pub async fn publish_token_status(
                 .duration_since(UNIX_EPOCH)
                 .unwrap()
                 .as_secs() as i64;
-            let exp = payload.ttl.as_ref().and_then(|ttl| {
-                ttl.parse::<i64>()
-                    .ok()
-                    .map(|ttl_seconds| iat.saturating_add(ttl_seconds))
-            });
+            let exp = match payload.ttl.as_ref() {
+                Some(ttl) => match ttl.parse::<i64>() {
+                    Ok(ttl_seconds) => Some(iat.saturating_add(ttl_seconds)),
+                    Err(_) => {
+                        return Err(StatusListError::Generic("Invalid TTL format".to_string()))
+                    }
+                },
+                None => None,
+            };
 
             // Build the new status list token
             let new_status_list_token = StatusListToken {
@@ -106,7 +113,7 @@ pub async fn publish_token_status(
             Ok(StatusCode::CREATED.into_response()) // Return 201 Created on success
         }
         Err(e) => {
-            tracing::error!("Failed to query repository: {:?}", e);
+            tracing::error!(error = ?e, list_id = ?payload.list_id, "Database query failed for status list.");
             Err(StatusListError::InternalServerError)
         }
     }
