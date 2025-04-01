@@ -1,5 +1,9 @@
-use axum::routing::post;
-use axum::{http::Method, response::IntoResponse, routing::get, Router};
+use axum::{
+    http::Method,
+    response::IntoResponse,
+    routing::{get, post},
+    Router,
+};
 use dotenvy::dotenv;
 use status_list_server::utils::state::setup;
 use status_list_server::web::handlers::{credential_handler, get_status_list};
@@ -18,12 +22,10 @@ async fn welcome() -> impl IntoResponse {
 #[tokio::main]
 async fn main() {
     dotenv().ok();
-
-    // Enable logging
     config_tracing();
 
     let state = setup().await;
-    // cors Layer
+
     let cors = CorsLayer::new()
         .allow_methods([Method::GET, Method::POST, Method::OPTIONS])
         .allow_origin(Any)
@@ -32,7 +34,7 @@ async fn main() {
     let router = Router::new()
         .route("/", get(welcome))
         .route("/credentials", post(credential_handler))
-        .route("/statuslists/:id", get(get_status_list))
+        .route("/statuslists/{id}", get(get_status_list))
         .layer(
             ServiceBuilder::new()
                 .layer(TraceLayer::new_for_http())
@@ -48,7 +50,6 @@ async fn main() {
 }
 
 fn config_tracing() {
-    // Enable errors backtrace
     if std::env::var("RUST_LIB_BACKTRACE").is_err() {
         std::env::set_var("RUST_LIB_BACKTRACE", "1")
     }
