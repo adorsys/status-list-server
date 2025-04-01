@@ -17,6 +17,7 @@ where
 }
 
 #[derive(Clone)]
+#[allow(dead_code)]
 pub struct Store<T>
 where
     T: Sized + Clone + Send + Sync + 'static,
