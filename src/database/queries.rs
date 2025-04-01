@@ -1,32 +1,172 @@
+use async_trait::async_trait;
+use sea_orm::{ActiveModelTrait, DatabaseConnection, EntityTrait, Set};
 use std::{
     collections::HashMap,
     sync::{Arc, RwLock},
 };
 
-use async_trait::async_trait;
-use serde::{Deserialize, Serialize};
-use sqlx::{postgres::PgRow, FromRow};
-use std::result::Result::Ok;
-
-use crate::model::{Credentials, StatusListToken};
+use crate::model::{credentials, status_list_tokens, Credentials, StatusListToken};
 
 use super::{
     error::RepositoryError,
-    repository::{Repository, Store, Table},
+    repository::{Repository, Table},
 };
 
-impl<T> Repository<T> for Store<T>
-where
-    T: Sized + Clone + Send + Sync + 'static,
-    T: Unpin,
-    T: for<'a> FromRow<'a, PgRow>,
-    T: Serialize + for<'de> Deserialize<'de>,
-{
-    fn get_table(&self) -> Table<T> {
-        self.table.clone()
+pub struct SeaOrmStore<T> {
+    db: Arc<DatabaseConnection>,
+    _phantom: std::marker::PhantomData<T>,
+}
+
+impl<T> SeaOrmStore<T> {
+    pub fn new(db: Arc<DatabaseConnection>) -> Self {
+        Self {
+            db,
+            _phantom: std::marker::PhantomData,
+        }
     }
 }
 
+#[async_trait]
+impl Repository<StatusListToken> for SeaOrmStore<StatusListToken> {
+    fn get_table(&self) -> Table<StatusListToken> {
+        Table::new(
+            Arc::clone(&self.db),
+            "status_list_tokens".to_string(),
+            "list_id".to_string(),
+        )
+    }
+
+    async fn insert_one(&self, entity: StatusListToken) -> Result<(), RepositoryError> {
+        let active = status_list_tokens::ActiveModel {
+            list_id: Set(entity.list_id),
+            exp: Set(entity.exp),
+            iat: Set(entity.iat),
+            status_list: Set(serde_json::to_value(entity.status_list)
+                .map_err(|e| RepositoryError::InsertError(e.to_string()))?),
+            sub: Set(entity.sub),
+            ttl: Set(entity.ttl),
+            ..Default::default()
+        };
+        active
+            .insert(&*self.db)
+            .await
+            .map_err(|e| RepositoryError::InsertError(e.to_string()))?;
+        Ok(())
+    }
+
+    async fn find_one_by(&self, value: String) -> Result<Option<StatusListToken>, RepositoryError> {
+        status_list_tokens::Entity::find_by_id(value)
+            .one(&*self.db)
+            .await
+            .map(|opt| opt.map(StatusListToken::from))
+            .map_err(|e| RepositoryError::FindError(e.to_string()))
+    }
+
+    async fn update_one(
+        &self,
+        issuer: String,
+        entity: StatusListToken,
+    ) -> Result<bool, RepositoryError> {
+        let existing = status_list_tokens::Entity::find_by_id(&issuer)
+            .one(&*self.db)
+            .await
+            .map_err(|e| RepositoryError::FindError(e.to_string()))?;
+        if existing.is_none() {
+            return Ok(false);
+        }
+        let active = status_list_tokens::ActiveModel {
+            list_id: Set(entity.list_id),
+            exp: Set(entity.exp),
+            iat: Set(entity.iat),
+            status_list: Set(serde_json::to_value(entity.status_list)
+                .map_err(|e| RepositoryError::UpdateError(e.to_string()))?),
+            sub: Set(entity.sub),
+            ttl: Set(entity.ttl),
+            ..Default::default()
+        };
+        active
+            .update(&*self.db)
+            .await
+            .map_err(|e| RepositoryError::UpdateError(e.to_string()))?;
+        Ok(true)
+    }
+
+    async fn delete_by(&self, value: String) -> Result<bool, RepositoryError> {
+        let result = status_list_tokens::Entity::delete_by_id(value)
+            .exec(&*self.db)
+            .await
+            .map_err(|e| RepositoryError::DeleteError(e.to_string()))?;
+        Ok(result.rows_affected > 0)
+    }
+}
+
+#[async_trait]
+impl Repository<Credentials> for SeaOrmStore<Credentials> {
+    fn get_table(&self) -> Table<Credentials> {
+        Table::new(
+            Arc::clone(&self.db),
+            "credentials".to_string(),
+            "issuer".to_string(),
+        )
+    }
+
+    async fn insert_one(&self, entity: Credentials) -> Result<(), RepositoryError> {
+        let active = credentials::ActiveModel {
+            issuer: Set(entity.issuer),
+            public_key: Set(entity.public_key),
+            alg: Set(entity.alg),
+            ..Default::default()
+        };
+        active
+            .insert(&*self.db)
+            .await
+            .map_err(|e| RepositoryError::InsertError(e.to_string()))?;
+        Ok(())
+    }
+
+    async fn find_one_by(&self, value: String) -> Result<Option<Credentials>, RepositoryError> {
+        credentials::Entity::find_by_id(value)
+            .one(&*self.db)
+            .await
+            .map(|opt| opt.map(Credentials::from))
+            .map_err(|e| RepositoryError::FindError(e.to_string()))
+    }
+
+    async fn update_one(
+        &self,
+        issuer: String,
+        entity: Credentials,
+    ) -> Result<bool, RepositoryError> {
+        let existing = credentials::Entity::find_by_id(&issuer)
+            .one(&*self.db)
+            .await
+            .map_err(|e| RepositoryError::FindError(e.to_string()))?;
+        if existing.is_none() {
+            return Ok(false);
+        }
+        let active = credentials::ActiveModel {
+            issuer: Set(entity.issuer),
+            public_key: Set(entity.public_key),
+            alg: Set(entity.alg),
+            ..Default::default()
+        };
+        active
+            .update(&*self.db)
+            .await
+            .map_err(|e| RepositoryError::UpdateError(e.to_string()))?;
+        Ok(true)
+    }
+
+    async fn delete_by(&self, value: String) -> Result<bool, RepositoryError> {
+        let result = credentials::Entity::delete_by_id(value)
+            .exec(&*self.db)
+            .await
+            .map_err(|e| RepositoryError::DeleteError(e.to_string()))?;
+        Ok(result.rows_affected > 0)
+    }
+}
+
+// MockStore remains unchanged
 pub struct MockStore<T> {
     pub(crate) repository: Arc<RwLock<HashMap<String, T>>>,
 }
@@ -40,17 +180,12 @@ impl Repository<StatusListToken> for MockStore<StatusListToken> {
         self.repository
             .write()
             .unwrap()
-            .clone()
             .insert(entity.list_id.clone(), entity);
         Ok(())
     }
-
     async fn find_one_by(&self, value: String) -> Result<Option<StatusListToken>, RepositoryError> {
-        let a = self.repository.read().unwrap().get(&value).cloned();
-
-        Ok(a)
+        Ok(self.repository.read().unwrap().get(&value).cloned())
     }
-
     async fn update_one(
         &self,
         issuer: String,
@@ -64,13 +199,8 @@ impl Repository<StatusListToken> for MockStore<StatusListToken> {
             Ok(false)
         }
     }
-
     async fn delete_by(&self, value: String) -> Result<bool, RepositoryError> {
-        if self.repository.write().unwrap().remove(&value).is_some() {
-            Ok(true)
-        } else {
-            Ok(false)
-        }
+        Ok(self.repository.write().unwrap().remove(&value).is_some())
     }
 }
 
@@ -83,16 +213,12 @@ impl Repository<Credentials> for MockStore<Credentials> {
         self.repository
             .write()
             .unwrap()
-            .clone()
             .insert(entity.issuer.clone(), entity);
         Ok(())
     }
-
     async fn find_one_by(&self, value: String) -> Result<Option<Credentials>, RepositoryError> {
-        let a = self.repository.read().unwrap().get(&value).cloned();
-        Ok(a)
+        Ok(self.repository.read().unwrap().get(&value).cloned())
     }
-
     async fn update_one(
         &self,
         issuer: String,
@@ -105,80 +231,93 @@ impl Repository<Credentials> for MockStore<Credentials> {
             Ok(false)
         }
     }
-
     async fn delete_by(&self, value: String) -> Result<bool, RepositoryError> {
-        if self.repository.write().unwrap().remove(&value).is_some() {
-            Ok(true)
-        } else {
-            Ok(false)
-        }
+        Ok(self.repository.write().unwrap().remove(&value).is_some())
     }
 }
 
 #[cfg(test)]
 mod test {
-    use std::env;
-
+    use super::*;
+    use crate::model::credentials::Model as CredentialsModel;
+    use sea_orm::{MockDatabase, MockExecResult};
     use serde_json::json;
-    use sqlx::Executor;
-
-    use crate::{
-        database::{
-            connection::establish_connection,
-            repository::{Repository, Store, Table},
-        },
-        model::Credentials,
-    };
 
     #[tokio::test]
-    async fn test() {
-        env::set_var(
-            "DATABASE_URL",
-            "postgres://myuser:mypassword@localhost:5432/mydatabase",
-        );
+    async fn test_sea_orm_store() {
+        let db = MockDatabase::new(sea_orm::DatabaseBackend::Postgres)
+            .append_query_results(vec![
+                vec![CredentialsModel {
+                    // Result for insert
+                    issuer: "issuer1".to_string(),
+                    public_key: json!("public_key"),
+                    alg: "alg".to_string(),
+                }],
+                vec![CredentialsModel {
+                    // Result for find_one_by
+                    issuer: "issuer1".to_string(),
+                    public_key: json!("public_key"),
+                    alg: "alg".to_string(),
+                }],
+                vec![CredentialsModel {
+                    // Result for update_one's find_by_id
+                    issuer: "issuer1".to_string(),
+                    public_key: json!("public_key"),
+                    alg: "alg".to_string(),
+                }],
+                vec![CredentialsModel {
+                    // Result for update_one's update
+                    issuer: "issuer1".to_string(),
+                    public_key: json!("new_public_key"),
+                    alg: "new_alg".to_string(),
+                }],
+            ])
+            .append_exec_results(vec![
+                MockExecResult {
+                    rows_affected: 1,
+                    last_insert_id: 0,
+                }, // Insert
+                MockExecResult {
+                    rows_affected: 1,
+                    last_insert_id: 0,
+                }, // Update
+                MockExecResult {
+                    rows_affected: 1,
+                    last_insert_id: 0,
+                }, // Delete
+            ])
+            .into_connection();
 
-        let conn = establish_connection().await;
-        conn.execute(include_str!("./migrations/001_status_list.sql"))
-            .await
-            .expect("Failed to initialize DB");
+        let store = SeaOrmStore::new(Arc::new(db));
 
         let entity = Credentials::new(
             "issuer1".to_string(),
             json!("public_key"),
             "alg".to_string(),
         );
-        let new_entity = Credentials::new(
-            "issuer2".to_string(),
-            json!("public_key"),
-            "alg".to_string(),
-        );
-
-        let store: Store<Credentials> = Store {
-            table: Table::new(conn, "credentials".to_string(), "issuer".to_string()),
-        };
-
-        // test inserting
         store.insert_one(entity.clone()).await.unwrap();
 
-        // test finding
-        let credential = store.find_one_by("issuer1".to_string()).await.unwrap();
-        let credential = credential.unwrap();
-        let issuer = credential.issuer.replace("\"", "");
+        let credential = store
+            .find_one_by("issuer1".to_string())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(credential.issuer, "issuer1");
+        assert_eq!(credential.public_key, json!("public_key"));
+        assert_eq!(credential.alg, "alg");
 
-        let alg = credential.alg.replace("\"", "");
-        let public_key = serde_json::to_value(&credential.public_key).unwrap();
-        let normalised_credential = Credentials::new(issuer.to_string(), public_key, alg);
-        assert_eq!(normalised_credential, entity);
-
-        // test update functionality
-        let a = store
-            .update_one("issuer1".to_string(), new_entity)
+        let new_entity = Credentials::new(
+            "issuer1".to_string(),
+            json!("new_public_key"),
+            "new_alg".to_string(),
+        );
+        let updated = store
+            .update_one("issuer1".to_string(), new_entity.clone())
             .await
             .unwrap();
-        assert!(a);
+        assert!(updated);
 
-        // test delete functionality
-        let a = store.delete_by("issuer2".to_string()).await.unwrap();
-        assert!(a);
+        let deleted = store.delete_by("issuer1".to_string()).await.unwrap();
+        assert!(deleted);
     }
 }

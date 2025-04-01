@@ -9,7 +9,6 @@ use super::errors::AuthenticationError;
 
 use super::errors::AuthErrors;
 
-/// Handle JWT registration
 pub async fn publish_credentials(
     credentials: Credentials,
     state: AppState,
@@ -35,7 +34,11 @@ pub async fn publish_credentials(
     }
 
     // ensure consistent order in credentials
-    let credential = Credentials::new(credentials.issuer, credentials.public_key, credentials.alg);
+    let credential = Credentials::new(
+        credentials.issuer,
+        credentials.public_key.into(),
+        credentials.alg,
+    );
 
     // Insert the credentials into the repository
     store.credential_repository.insert_one(credential).await?;
