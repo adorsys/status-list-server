@@ -3,7 +3,7 @@ use http_body_util::BodyExt;
 use serde_json::Value;
 use std::sync::Arc;
 
-use axum::{extract::State, response::IntoResponse};
+use axum::response::IntoResponse;
 use hyper::{header, Request, StatusCode};
 
 use crate::{
@@ -12,7 +12,7 @@ use crate::{
 };
 
 pub async fn auth(
-    State(appstate): State<Arc<AppState>>,
+    appstate: Arc<AppState>,
     request: Request<Body>,
     next: Next,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
