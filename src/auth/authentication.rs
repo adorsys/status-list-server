@@ -1,5 +1,3 @@
-use std::str::FromStr;
-
 use jsonwebtoken::{decode, decode_header, Algorithm, DecodingKey, Validation};
 use serde_json::Value;
 
@@ -28,8 +26,8 @@ pub async fn publish_credentials(
 
     // Validate the algorithm
     let algorithm = credentials.alg.clone();
-    match algorithm.as_str() {
-        "RS256" | "RS384" | "RS512" | "ES256" | "ES384" | "ES512" => (),
+    match algorithm {
+        Algorithm::RS256 | Algorithm::RS384 | Algorithm::RS512 | Algorithm::ES256 => (),
         _ => return Err(RepositoryError::from(AuthErrors::UnknownAlgorithm))?,
     }
 
@@ -61,20 +59,20 @@ pub async fn verify_token(state: &AppState, token: &str) -> Result<bool, Authent
             AuthenticationError::Generic("Failed to serialize public key".to_string())
         })?;
 
-        let decoding_key = match credential.alg.as_str() {
-            "RS256" | "RS512" => DecodingKey::from_rsa_pem(key_json.as_bytes())
+        let decoding_key = match credential.alg {
+            Algorithm::RS256 | Algorithm::RS512 => DecodingKey::from_rsa_pem(key_json.as_bytes())
                 .map_err(|_| AuthenticationError::Generic("Invalid RSA public key".to_string())),
-            "ES256" | "ES512" => DecodingKey::from_ec_pem(key_json.as_bytes())
+            Algorithm::ES256 => DecodingKey::from_ec_pem(key_json.as_bytes())
                 .map_err(|_| AuthenticationError::Generic("Invalid EC public key".to_string())),
-            "HS256" | "HS512" => Ok(DecodingKey::from_secret(key_json.as_bytes())),
+            Algorithm::HS256 | Algorithm::HS512 => {
+                Ok(DecodingKey::from_secret(key_json.as_bytes()))
+            }
             _ => Err(AuthenticationError::Generic(
                 "Unsupported algorithm".to_string(),
             )),
         }?;
 
-        let algorithm = Algorithm::from_str(&credential.alg)
-            .map_err(|_| AuthenticationError::Generic("Invalid algorithm".to_string()))?;
-
+        let algorithm = credential.alg;
         let validation = Validation::new(algorithm);
 
         match decode::<Value>(token, &decoding_key, &validation) {
