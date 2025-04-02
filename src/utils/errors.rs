@@ -11,5 +11,5 @@ pub enum Error {
     #[error("invalid file type")]
     InvalidFileType,
     #[error("error {0}")]
-    Generic(String)
+    Generic(String),
 }

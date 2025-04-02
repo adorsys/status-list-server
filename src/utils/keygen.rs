@@ -26,28 +26,54 @@ pub fn keygen() -> Result<Keypair, Error> {
 mod test {
     use jsonwebtoken::{decode, encode, DecodingKey, EncodingKey, Header, Validation};
     use rsa::pkcs1::{EncodeRsaPrivateKey, EncodeRsaPublicKey};
-    use super::keygen;     
-                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    use crate::utils::keygen::keygen;
+
     #[test]
     fn test() {
         #[derive(Debug, serde::Deserialize, serde::Serialize)]
-        struct Claims {}
+        struct Claims {
+            exp: usize,
+        }
 
         let keypair = keygen().unwrap();
-        let header = Header::default();
 
-        let encoding_key =
-            EncodingKey::from_rsa_der(keypair.private_key.to_pkcs1_der().unwrap().as_bytes());
+        let header = Header {
+            alg: jsonwebtoken::Algorithm::RS256,
+            ..Default::default()
+        };
 
-        let claims = Claims {};
+        let encoding_key = EncodingKey::from_rsa_pem(
+            keypair
+                .private_key
+                .to_pkcs1_pem(rsa::pkcs8::LineEnding::CRLF)
+                .unwrap()
+                .as_bytes(),
+        )
+        .unwrap();
+
+        let exp_time = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as usize
+            + 3600;
+
+        let claims = Claims { exp: exp_time };
         let token = encode(&header, &claims, &encoding_key).unwrap();
 
-        // decode and verify signature
-        let decoding_key =
-            DecodingKey::from_rsa_der(&keypair.public_key.to_pkcs1_der().unwrap().as_bytes());
+        let public_key_pem = keypair
+            .public_key
+            .to_pkcs1_pem(rsa::pkcs8::LineEnding::CRLF)
+            .unwrap();
+        let decoding_key = DecodingKey::from_rsa_pem(public_key_pem.as_bytes()).unwrap();
 
-        let decoded = decode::<Claims>(&token, &decoding_key, &Validation::default()).ok();
-        assert!(decoded.is_some());
+        let decoded = decode::<Claims>(
+            &token,
+            &decoding_key,
+            &Validation::new(jsonwebtoken::Algorithm::RS256),
+        );
+
+        assert!(decoded.is_ok(), "Decoding failed: {:?}", decoded.err());
     }
 }
-
