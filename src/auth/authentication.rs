@@ -25,7 +25,7 @@ pub async fn publish_credentials(
     }
 
     // Validate the algorithm
-    let algorithm = credentials.alg.clone();
+    let algorithm = credentials.alg;
     match algorithm {
         Algorithm::RS256 | Algorithm::RS384 | Algorithm::RS512 | Algorithm::ES256 => (),
         _ => return Err(RepositoryError::from(AuthErrors::UnknownAlgorithm))?,
