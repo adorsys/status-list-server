@@ -1,8 +1,12 @@
+use std::sync::Arc;
+
+use axum::middleware;
 use axum::routing::post;
 use axum::{http::Method, response::IntoResponse, routing::get, Router};
 use dotenvy::dotenv;
 use status_list_server::utils::state::setup;
 use status_list_server::web::handlers::{credential_handler, get_status_list};
+use status_list_server::web::midlw::auth;
 use tokio::net::TcpListener;
 use tower::ServiceBuilder;
 use tower_http::catch_panic::CatchPanicLayer;
@@ -23,6 +27,7 @@ async fn main() {
     config_tracing();
 
     let state = setup().await;
+    let shared_state = Arc::new(state.clone());
     // cors Layer
     let cors = CorsLayer::new()
         .allow_methods([Method::GET, Method::POST, Method::OPTIONS])
@@ -32,7 +37,10 @@ async fn main() {
     let router = Router::new()
         .route("/", get(welcome))
         .route("/credentials", post(credential_handler))
-        .route("/statuslists/:id", get(get_status_list))
+        .route_layer(middleware::from_fn(move |req, next| {
+            auth(shared_state.clone(), req, next)
+        }))
+        .route("/statuslists/{list_id}", get(get_status_list))
         .layer(
             ServiceBuilder::new()
                 .layer(TraceLayer::new_for_http())
