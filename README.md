@@ -11,7 +11,7 @@ Before setting up the Status List Server, ensure you have the following installe
 
 ## Installation
 
-1. **Clone the Repository:**
+**Clone the Repository:**
 
    ```bash
     https://github.com/adorsys/status-list-server.git
@@ -20,7 +20,7 @@ Before setting up the Status List Server, ensure you have the following installe
 
 ## Configuration
 
-1. **Environment Variables:**
+ **Environment Variables:**
 
    Create a `.env` file in the root directory with the following configurations:
 
@@ -48,7 +48,7 @@ By default, the server runs on `http://localhost:8000`. You can modify the port 
 - **Description:** Checks the health status of the server.
 - **Response:**
   - `200 OK`: Server is running.
-  - 
+  
 ### Publish Credentials
 - **Endpoint**: `POST /credentials/`
 - **Description**: allow issuers to publish their credentials (`public_key`) and identifiers used to later for authorisation verification
@@ -72,7 +72,7 @@ By default, the server runs on `http://localhost:8000`. You can modify the port 
 
 - **Endpoint:** `PUT /statuslist/{issuer}`
 - **Description:** Allows an issuer to update the status list.
-- **Authorization:**Requires a valid sign jwt with the issuer scope (a signed jwt with issuers as kid).
+- **Authorization:** Requires a valid sign jwt with the issuer scope (a signed jwt with issuers as kid).
   
 - **Request Body:** 
 
@@ -106,6 +106,6 @@ By default, the server runs on `http://localhost:8000`. You can modify the port 
 
 
 ### Issuer Authorization
-the issuer should construct and sign a sample jwt with issuer as kid which will be used to get the key to verify the jwt 
+The issuer should construct and sign a sample jwt with issuer as kid which will be used to get the key to verify the jwt 
 
 Ensure that the database is set up and the necessary environment variables are configured before running tests.
