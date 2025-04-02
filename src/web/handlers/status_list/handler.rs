@@ -234,9 +234,6 @@ pub fn update_status(
         .map(|update| update.index)
         .max()
         .unwrap_or(0);
-    if max_update_index < 0 {
-        return Err(StatusListError::InvalidIndex);
-    }
 
     let required_len = ((max_update_index as usize + 1) * bits + 7) / 8;
     if status_array.len() < required_len {
