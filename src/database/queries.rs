@@ -41,7 +41,7 @@ impl Repository<StatusListToken> for SeaOrmStore<StatusListToken> {
             list_id: Set(entity.list_id),
             exp: Set(entity.exp),
             iat: Set(entity.iat),
-            status_list: Set(serde_json::to_value(entity.status_list)
+            status_list: Set(serde_json::to_string(&entity.status_list)
                 .map_err(|e| RepositoryError::InsertError(e.to_string()))?),
             sub: Set(entity.sub),
             ttl: Set(entity.ttl),
@@ -77,7 +77,7 @@ impl Repository<StatusListToken> for SeaOrmStore<StatusListToken> {
             list_id: Set(entity.list_id),
             exp: Set(entity.exp),
             iat: Set(entity.iat),
-            status_list: Set(serde_json::to_value(entity.status_list)
+            status_list: Set(serde_json::to_string(&entity.status_list)
                 .map_err(|e| RepositoryError::UpdateError(e.to_string()))?),
             sub: Set(entity.sub),
             ttl: Set(entity.ttl),
@@ -112,7 +112,7 @@ impl Repository<Credentials> for SeaOrmStore<Credentials> {
         let active = credentials::ActiveModel {
             issuer: Set(entity.issuer),
             public_key: Set(entity.public_key),
-            alg: Set(entity.alg),
+            alg: Set(format!("{:?}", entity.alg)),
         };
         active
             .insert(&*self.db)
@@ -144,7 +144,7 @@ impl Repository<Credentials> for SeaOrmStore<Credentials> {
         let active = credentials::ActiveModel {
             issuer: Set(entity.issuer),
             public_key: Set(entity.public_key),
-            alg: Set(entity.alg),
+            alg: Set(format!("{:?}", entity.alg)),
         };
         active
             .update(&*self.db)
@@ -236,8 +236,8 @@ impl Repository<Credentials> for MockStore<Credentials> {
 mod test {
     use super::*;
     use crate::model::credentials::Model as CredentialsModel;
+    use jsonwebtoken::Algorithm;
     use sea_orm::{MockDatabase, MockExecResult};
-    use serde_json::json;
 
     #[tokio::test]
     async fn test_sea_orm_store() {
@@ -246,26 +246,26 @@ mod test {
                 vec![CredentialsModel {
                     // Result for insert
                     issuer: "issuer1".to_string(),
-                    public_key: json!("public_key"),
-                    alg: "alg".to_string(),
+                    public_key: "test_public_key".to_string(),
+                    alg: format!("{:?}", Algorithm::HS256),
                 }],
                 vec![CredentialsModel {
                     // Result for find_one_by
                     issuer: "issuer1".to_string(),
-                    public_key: json!("public_key"),
-                    alg: "alg".to_string(),
+                    public_key: "test_public_key".to_string(),
+                    alg: format!("{:?}", Algorithm::HS256),
                 }],
                 vec![CredentialsModel {
                     // Result for update_one's find_by_id
                     issuer: "issuer1".to_string(),
-                    public_key: json!("public_key"),
-                    alg: "alg".to_string(),
+                    public_key: "test_public_key".to_string(),
+                    alg: format!("{:?}", Algorithm::HS256),
                 }],
                 vec![CredentialsModel {
                     // Result for update_one's update
                     issuer: "issuer1".to_string(),
-                    public_key: json!("new_public_key"),
-                    alg: "new_alg".to_string(),
+                    public_key: "new_public_key".to_string(),
+                    alg: format!("{:?}", Algorithm::RS256),
                 }],
             ])
             .append_exec_results(vec![
@@ -288,8 +288,8 @@ mod test {
 
         let entity = Credentials::new(
             "issuer1".to_string(),
-            json!("public_key"),
-            "alg".to_string(),
+            "test_public_key".to_string(),
+            Algorithm::HS256, // Now an Algorithm enum
         );
         store.insert_one(entity.clone()).await.unwrap();
 
@@ -299,13 +299,13 @@ mod test {
             .unwrap()
             .unwrap();
         assert_eq!(credential.issuer, "issuer1");
-        assert_eq!(credential.public_key, json!("public_key"));
-        assert_eq!(credential.alg, "alg");
+        assert_eq!(credential.public_key, "test_public_key");
+        assert_eq!(credential.alg, Algorithm::HS256);
 
         let new_entity = Credentials::new(
             "issuer1".to_string(),
-            json!("new_public_key"),
-            "new_alg".to_string(),
+            "new_public_key".to_string(),
+            Algorithm::RS256, // Now an Algorithm enum
         );
         let updated = store
             .update_one("issuer1".to_string(), new_entity.clone())

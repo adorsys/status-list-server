@@ -2,26 +2,20 @@ pub mod error;
 pub mod queries;
 pub mod repository;
 
-// Re-export Migrator for use in state.rs
 pub use migrations::Migrator;
 
 pub mod migrations {
     use sea_orm_migration::prelude::*;
 
-    // Define Migrator struct
     pub struct Migrator;
 
     #[async_trait::async_trait]
     impl MigratorTrait for Migrator {
         fn migrations() -> Vec<Box<dyn MigrationTrait>> {
-            vec![
-                // Include your migration file
-                Box::new(m20230329_000001_create_tables::Migration),
-            ]
+            vec![Box::new(m20230329_000001_create_tables::Migration)]
         }
     }
 
-    // Declare the migration module (assuming it’s in migrations/m20230329_000001_create_tables.rs)
     pub mod m20230329_000001_create_tables {
         use super::*;
 
@@ -42,7 +36,7 @@ pub mod migrations {
                                     .not_null()
                                     .primary_key(),
                             )
-                            .col(ColumnDef::new(Credentials::PublicKey).json().not_null())
+                            .col(ColumnDef::new(Credentials::PublicKey).text().not_null()) // Changed to text
                             .col(ColumnDef::new(Credentials::Alg).string().not_null())
                             .to_owned(),
                     )

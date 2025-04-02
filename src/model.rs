@@ -1,17 +1,17 @@
+use jsonwebtoken::Algorithm;
 use sea_orm::entity::prelude::*;
 use serde::{Deserialize, Serialize};
-use serde_json::Value as SerdeJsonValue;
 use std::str::FromStr;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Credentials {
     pub issuer: String,
-    pub public_key: SerdeJsonValue, // Consistent with struct definition
-    pub alg: String,
+    pub public_key: String,
+    pub alg: Algorithm,
 }
 
 impl Credentials {
-    pub fn new(issuer: String, public_key: SerdeJsonValue, alg: String) -> Self {
+    pub fn new(issuer: String, public_key: String, alg: Algorithm) -> Self {
         Self {
             issuer,
             public_key,
@@ -92,7 +92,7 @@ pub mod credentials {
     pub struct Model {
         #[sea_orm(primary_key, auto_increment = false)]
         pub issuer: String,
-        pub public_key: SerdeJsonValue, // Matches Credentials
+        pub public_key: String, // Matches Credentials
         pub alg: String,
     }
 
@@ -119,7 +119,7 @@ pub mod status_list_tokens {
         pub exp: Option<i32>,
         pub iat: i32,
         #[sea_orm(column_type = "Json")]
-        pub status_list: SerdeJsonValue,
+        pub status_list: String,
         pub sub: String,
         pub ttl: Option<String>,
     }
@@ -138,7 +138,11 @@ pub mod status_list_tokens {
 
 impl From<credentials::Model> for Credentials {
     fn from(model: credentials::Model) -> Self {
-        Credentials::new(model.issuer, model.public_key, model.alg)
+        Credentials::new(
+            model.issuer,
+            model.public_key,
+            Algorithm::from_str(&model.alg).unwrap_or(Algorithm::HS256),
+        )
     }
 }
 
@@ -148,7 +152,7 @@ impl From<status_list_tokens::Model> for StatusListToken {
             model.list_id,
             model.exp,
             model.iat,
-            serde_json::from_value(model.status_list).unwrap_or_default(),
+            serde_json::from_str(&model.status_list).unwrap_or_default(),
             model.sub,
             model.ttl,
         )
