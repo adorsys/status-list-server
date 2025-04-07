@@ -2,6 +2,7 @@ use axum::routing::post;
 use axum::{http::Method, response::IntoResponse, routing::get, Router};
 use dotenvy::dotenv;
 use status_list_server::utils::state::setup;
+use status_list_server::web::handlers::status_list::publish_token_status::publish_token_status;
 use status_list_server::web::handlers::{credential_handler, get_status_list};
 use tokio::net::TcpListener;
 use tower::ServiceBuilder;
@@ -32,7 +33,8 @@ async fn main() {
     let router = Router::new()
         .route("/", get(welcome))
         .route("/credentials", post(credential_handler))
-        .route("/statuslists/:id", get(get_status_list))
+        .route("/statuslists/{list_id}", get(get_status_list))
+        .route("/statuslists/publish", post(publish_token_status))
         .layer(
             ServiceBuilder::new()
                 .layer(TraceLayer::new_for_http())
