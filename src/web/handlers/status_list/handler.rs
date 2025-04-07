@@ -10,10 +10,13 @@ use serde_json::Value;
 
 use crate::{
     model::{Status, StatusList, StatusListToken, StatusUpdate},
-    utils::state::AppState,
+    utils::state::{AppState, AppStateRepository},
 };
 
-use super::{constants::STATUS_LISTS_HEADER_JWT, error::StatusListError};
+use super::{
+    constants::{STATUS_LISTS_HEADER_CWT, STATUS_LISTS_HEADER_JWT},
+    error::StatusListError,
+};
 
 // Return the specified status list token
 pub async fn get_status_list(
@@ -27,16 +30,30 @@ pub async fn get_status_list(
         StatusListError::InternalServerError
     })?;
 
-    // Validate accept header
-    let accept = headers
-        .get(header::ACCEPT)
-        .and_then(|h| h.to_str().ok())
-        .unwrap_or(STATUS_LISTS_HEADER_JWT);
+    let accept = headers.get(header::ACCEPT).and_then(|h| h.to_str().ok());
 
-    if !accept.contains(STATUS_LISTS_HEADER_JWT) {
-        return Err(StatusListError::InvalidAcceptHeader);
+    // build the token depending on the accept header
+    match accept {
+        Some(accept) if accept.contains(STATUS_LISTS_HEADER_JWT) => {
+            build_status_list_token(STATUS_LISTS_HEADER_JWT, &list_id, repo).await
+        }
+        Some(accept) if accept.contains(STATUS_LISTS_HEADER_CWT) => {
+            build_status_list_token(STATUS_LISTS_HEADER_CWT, &list_id, repo).await
+        }
+        Some(_) => return Err(StatusListError::InvalidAcceptHeader),
+        None =>
+        // assume jwt by default if no accept header is provided
+        {
+            build_status_list_token(STATUS_LISTS_HEADER_JWT, &list_id, repo).await
+        }
     }
+}
 
+async fn build_status_list_token(
+    accept: &str,
+    list_id: &str,
+    repo: &AppStateRepository,
+) -> Result<impl IntoResponse + Debug, StatusListError> {
     // Get status list claims from database
     let status_claims = repo
         .status_list_token_repository
@@ -51,12 +68,22 @@ pub async fn get_status_list(
     // TODO : add function to construct the status list token from this status list before sending it out
     let status_list = status_claims.status_list;
 
-    Ok((
-        StatusCode::OK,
-        [(header::CONTENT_TYPE, STATUS_LISTS_HEADER_JWT)],
-        Json(status_list),
-    )
-        .into_response())
+    if STATUS_LISTS_HEADER_JWT == accept {
+        Ok((
+            StatusCode::OK,
+            [(header::CONTENT_TYPE, accept)],
+            Json(status_list),
+        )
+            .into_response())
+    } else {
+        Ok((
+            StatusCode::OK,
+            [(header::CONTENT_TYPE, accept)],
+            // TODO : implement CWT serialization
+            String::new(),
+        )
+            .into_response())
+    }
 }
 
 pub async fn update_statuslist(
