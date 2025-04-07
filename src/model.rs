@@ -28,7 +28,7 @@ impl Credentials {
 #[derive(Deserialize, Serialize, Debug, Clone)]
 /// Represents a single entry in a status list, used both for updating
 /// individual status values and for publishing the complete status list.
-/// 
+///
 /// Each entry consists of an `index` identifying the position in the list,
 /// and a `status` indicating the current state at that index.
 pub struct StatusEntry {

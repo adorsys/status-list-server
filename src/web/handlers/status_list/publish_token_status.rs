@@ -1,10 +1,6 @@
 use crate::{
     model::{StatusEntry, StatusList, StatusListToken},
-    utils::{
-        errors::Error,
-        lst_gen::update_or_create_status_list,
-        state::AppState,
-    },
+    utils::{errors::Error, lst_gen::update_or_create_status_list, state::AppState},
     web::handlers::status_list::error::StatusListError,
 };
 use axum::{
@@ -51,7 +47,7 @@ pub async fn publish_token_status(
     let lst = if payload.updates.is_empty() {
         base64url::encode([])
     } else {
-        update_or_create_status_list(None,payload.updates, payload.bits as usize).map_err(|e| {
+        update_or_create_status_list(None, payload.updates, payload.bits as usize).map_err(|e| {
             tracing::error!("lst_from failed: {:?}", e);
             match e {
                 Error::Generic(msg) => StatusListError::Generic(msg),
