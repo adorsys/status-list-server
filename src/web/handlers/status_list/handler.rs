@@ -357,7 +357,8 @@ mod test {
             },
         ];
 
-        let updated_lst = update_or_create_status_list(Some(existing_lst), status_updates, 8).expect("Failed to update status list");
+        let updated_lst = update_or_create_status_list(Some(existing_lst), status_updates, 8)
+            .expect("Failed to update status list");
 
         let decoded = decode(&updated_lst).expect("Failed to decode base64");
         let mut decoder = ZlibDecoder::new(&decoded[..]);
@@ -403,7 +404,8 @@ mod test {
             }, // Add index 8 as VALID
         ];
 
-        let updated_lst = update_or_create_status_list(Some(existing_list), status_updates, 2).expect("Failed to update status list");
+        let updated_lst = update_or_create_status_list(Some(existing_list), status_updates, 2)
+            .expect("Failed to update status list");
 
         let decoded_lst = decode(&updated_lst).expect("Failed to decode base64");
         let mut decompressed_lst = Vec::new();

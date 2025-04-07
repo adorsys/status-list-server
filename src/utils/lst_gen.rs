@@ -141,7 +141,6 @@ mod tests {
             },
         ];
 
-
         let result = update_or_create_status_list(None, updates, 1).unwrap();
         let decoded = base64url::decode(&result).unwrap();
         let mut decoder = flate2::read::ZlibDecoder::new(&*decoded);
@@ -240,7 +239,8 @@ mod tests {
             },
         ];
 
-        let updated_lst = update_or_create_status_list(Some(existing_lst), status_updates, 8).expect("Failed to update status list");
+        let updated_lst = update_or_create_status_list(Some(existing_lst), status_updates, 8)
+            .expect("Failed to update status list");
 
         let decoded = decode(&updated_lst).expect("Failed to decode base64");
         let mut decoder = ZlibDecoder::new(&decoded[..]);
@@ -264,4 +264,4 @@ mod tests {
             "The status array was not updated correctly"
         );
     }
-} 
+}
