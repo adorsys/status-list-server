@@ -55,6 +55,7 @@ By default, the server runs on `http://localhost:8000`. You can modify the port 
 - **Request Body**
   ```json
   {"issuer": "<value>", "public_key": "<public_key>", "alg": "<alg>"}
+  ```
  
 ### Publish statuslist
 - **Endpoint**: `POST /statuslist/{issuer}` 
@@ -66,7 +67,7 @@ By default, the server runs on `http://localhost:8000`. You can modify the port 
       { "index": 1, "status": "INVALID" },
       { "index": 8, "status": "VALID" }
     ]
-    ```
+  ```
 
 ### Update Status List
 
@@ -84,9 +85,10 @@ By default, the server runs on `http://localhost:8000`. You can modify the port 
     ]
   }
   ```
-
+  
   - `index`: The position in the status list to update.
   - `status`: The new status value. Possible values: `VALID`, `INVALID`, `SUSPENDED`, `APPLICATIONSPECIFIC`.
+  
 
 - **Responses:**
   - `202 ACCEPTED`: The update request has been accepted and processed.
