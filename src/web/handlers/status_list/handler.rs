@@ -7,14 +7,11 @@ use axum::{
     Json,
 };
 
-use base64url::{decode, encode};
-use flate2::{read::ZlibDecoder, write::ZlibEncoder, Compression};
 use serde_json::Value;
-use std::io::{Read, Write};
 
 use crate::{
-    model::{Status, StatusList, StatusListToken, StatusUpdate},
-    utils::state::AppState,
+    model::{StatusEntry, StatusList, StatusListToken},
+    utils::{errors::Error, lst_gen::update_or_create_status_list, state::AppState},
 };
 
 use super::{constants::STATUS_LISTS_HEADER_JWT, error::StatusListError};
@@ -85,6 +82,14 @@ pub async fn update_statuslist(
         }
     };
 
+    if updates.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            StatusListError::Generic("No status updates provided".to_string()),
+        )
+            .into_response();
+    }
+
     let updates_json = match serde_json::to_vec(updates) {
         Ok(json) => json,
         Err(e) => {
@@ -93,7 +98,7 @@ pub async fn update_statuslist(
         }
     };
 
-    let updates: Vec<StatusUpdate> = match serde_json::from_slice(&updates_json) {
+    let updates: Vec<StatusEntry> = match serde_json::from_slice(&updates_json) {
         Ok(updates) => updates,
         Err(e) => {
             tracing::error!("Malformed request body: {e}");
@@ -133,18 +138,19 @@ pub async fn update_statuslist(
         }
     };
 
+    let lst;
     if let Some(status_list_token) = status_list_token {
-        let lst = status_list_token.status_list.lst.clone();
         let bits = status_list_token.status_list.bits as usize;
+        lst = Some(status_list_token.status_list.lst);
 
         // Apply updates
 
-        let updated_lst = match update_status(lst, updates, bits) {
-            Ok(updated_lst) => updated_lst,
+        let updated_lst = match update_or_create_status_list(lst, updates, bits) {
+            Ok(update_lst) => update_lst,
             Err(e) => {
                 tracing::error!("Status update failed: {:?}", e);
                 return match e {
-                    StatusListError::InvalidIndex => {
+                    Error::InvalidIndex => {
                         (StatusCode::BAD_REQUEST, "Invalid index").into_response()
                     }
                     _ => (
@@ -197,103 +203,6 @@ pub async fn update_statuslist(
     }
 }
 
-pub fn update_status(
-    lst: String,
-    status_updates: Vec<StatusUpdate>,
-    bits: usize,
-) -> Result<String, StatusListError> {
-    if lst.is_empty() {
-        return Err(StatusListError::Generic(
-            "No status list provided".to_string(),
-        ));
-    }
-    if status_updates.is_empty() {
-        return Err(StatusListError::Generic(
-            "No status updates provided".to_string(),
-        ));
-    }
-
-    // Validate the 'bits' parameter
-    if ![1, 2, 4, 8].contains(&bits) {
-        return Err(StatusListError::UnsupportedBits);
-    }
-
-    // Decode the existing Base64-encoded status list
-    let compressed_data = decode(&lst).map_err(|_| StatusListError::DecodeError)?;
-
-    // Decompress the data using zlib
-    let mut decoder = ZlibDecoder::new(&compressed_data[..]);
-    let mut status_array = Vec::new();
-    decoder
-        .read_to_end(&mut status_array)
-        .map_err(|e| StatusListError::DecompressionError(e.to_string()))?;
-
-    // Determine the highest index in the updates to ensure the array is large enough
-    let max_update_index = status_updates
-        .iter()
-        .map(|update| update.index)
-        .max()
-        .unwrap_or(0);
-
-    let required_len = ((max_update_index as usize + 1) * bits + 7) / 8;
-    if status_array.len() < required_len {
-        status_array.resize(required_len, 0);
-    }
-
-    // Apply each status update
-    for update in status_updates {
-        if update.index < 0 {
-            return Err(StatusListError::InvalidIndex);
-        }
-        let idx = update.index as usize;
-
-        // Determine the bit position for the current index
-        let bit_position = idx * bits;
-        let byte_index = bit_position / 8;
-        let bit_offset = bit_position % 8;
-
-        // Assign a unique value to each status variant
-        let status_value = match update.status {
-            Status::VALID => 0b0000_0000,               // VALID = 0
-            Status::INVALID => 0b0000_0001,             // INVALID = 1
-            Status::SUSPENDED => 0b0000_0010,           // SUSPENDED = 2
-            Status::APPLICATIONSPECIFIC => 0b0000_0011, // APPLICATIONSPECIFIC = 3
-        };
-
-        // Mask and set the status value in the appropriate position
-        if bits == 8 {
-            status_array[byte_index] = status_value;
-        } else {
-            let mask = ((1 << bits) - 1) << bit_offset;
-            status_array[byte_index] &= !mask;
-            status_array[byte_index] |= (status_value << bit_offset) & mask;
-
-            // Handle cases where the status spans across two bytes
-            if bit_offset + bits > 8 {
-                let next_byte_index = byte_index + 1;
-                let next_bit_offset = 8 - bit_offset;
-                let next_mask = (1 << (bits - next_bit_offset)) - 1;
-                if next_byte_index < status_array.len() {
-                    status_array[next_byte_index] &= !next_mask;
-                    status_array[next_byte_index] |= status_value >> next_bit_offset;
-                }
-            }
-        }
-    }
-
-    // Compress the updated status array using zlib
-    let mut encoder = ZlibEncoder::new(Vec::new(), Compression::fast());
-    encoder
-        .write_all(&status_array)
-        .map_err(|e| StatusListError::CompressionError(e.to_string()))?;
-    let compressed = encoder
-        .finish()
-        .map_err(|e| StatusListError::CompressionError(e.to_string()))?;
-
-    // Base64url encode the compressed data without padding
-    Ok(encode(&compressed))
-}
-
 #[cfg(test)]
 mod test {
 
@@ -310,14 +219,14 @@ mod test {
         routing::{get, put},
         Router,
     };
-    use base64url::encode;
+    use base64url::{decode, encode};
     use flate2::{read::ZlibDecoder, write::ZlibEncoder, Compression};
     use hyper::StatusCode;
     use serde_json::json;
     use tower::ServiceExt;
 
     use crate::{
-        model::{Credentials, StatusList, StatusListToken},
+        model::{Credentials, Status, StatusList, StatusListToken},
         test_resources::setup::test_setup,
         utils::state::AppState,
     };
@@ -433,25 +342,22 @@ mod test {
 
         let mut encoder = ZlibEncoder::new(Vec::new(), Compression::fast());
         encoder.write_all(&original_status_array).unwrap();
-        let compressed = encoder.finish().unwrap();
-
-        // Base64 encode the compressed data
-        let lst = encode(&compressed);
+        let compressed_status = encoder.finish().expect("Failed to finish compression");
+        let existing_lst = base64url::encode(compressed_status);
 
         // Step 2: Define new status updates
         let status_updates = vec![
-            StatusUpdate {
+            StatusEntry {
                 index: 4,
                 status: Status::INVALID,
             },
-            StatusUpdate {
+            StatusEntry {
                 index: 7,
                 status: Status::SUSPENDED,
             },
         ];
 
-        let updated_lst =
-            update_status(lst, status_updates, 8).expect("Failed to update status list");
+        let updated_lst = update_or_create_status_list(Some(existing_lst), status_updates, 8).expect("Failed to update status list");
 
         let decoded = decode(&updated_lst).expect("Failed to decode base64");
         let mut decoder = ZlibDecoder::new(&decoded[..]);
@@ -483,22 +389,21 @@ mod test {
         // Compress and encode the original status list
         let mut encoder = ZlibEncoder::new(Vec::new(), Compression::fast());
         encoder.write_all(&original_lst).unwrap();
-        let compressed_lst = encoder.finish().unwrap();
-        let lst = encode(&compressed_lst);
+        let compressed_data = encoder.finish().expect("Failed to finish compression");
+        let existing_list = base64url::encode(compressed_data);
 
         let status_updates = vec![
-            StatusUpdate {
+            StatusEntry {
                 index: 1,
                 status: Status::VALID,
             }, // Change index 1 from INVALID to VALID
-            StatusUpdate {
+            StatusEntry {
                 index: 8,
                 status: Status::VALID,
             }, // Add index 8 as VALID
         ];
 
-        let updated_lst =
-            update_status(lst, status_updates, 2).expect("Failed to update status list");
+        let updated_lst = update_or_create_status_list(Some(existing_list), status_updates, 2).expect("Failed to update status list");
 
         let decoded_lst = decode(&updated_lst).expect("Failed to decode base64");
         let mut decompressed_lst = Vec::new();
