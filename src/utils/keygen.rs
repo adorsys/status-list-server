@@ -23,9 +23,10 @@ impl Keypair {
     /// Generate a new random keypair
     pub fn generate() -> Result<Self, Error> {
         let mut seed = [0u8; SECRET_KEY_LENGTH];
-        OsRng
-            .try_fill_bytes(&mut seed)
-            .map_err(|_| Error::KeyGenFailed)?;
+        OsRng.try_fill_bytes(&mut seed).map_err(|err| {
+            tracing::error!("Failed to generate random bytes: {err:?}");
+            Error::KeyGenFailed
+        })?;
         let signing_key = SigningKey::from_bytes(&seed);
         let verifying_key = signing_key.verifying_key();
 
@@ -43,7 +44,10 @@ impl Keypair {
         self.repr
             .signing_key
             .to_pkcs8_pem(LineEnding::default())
-            .map_err(|_| Error::PemGenFailed)
+            .map_err(|err| {
+                tracing::error!("Failed to convert keypair to pkcs8 pem: {err:?}");
+                Error::PemGenFailed
+            })
             .map(|pem| pem.to_string())
     }
 
