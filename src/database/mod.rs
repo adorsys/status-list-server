@@ -1,6 +1,5 @@
 pub mod error;
 pub mod queries;
-pub mod repository;
 
 pub use migrations::Migrator;
 

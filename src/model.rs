@@ -1,9 +1,92 @@
 use jsonwebtoken::Algorithm;
 use sea_orm::entity::prelude::*;
+use sea_orm::ActiveValue::Set;
 use serde::{Deserialize, Serialize};
-use std::str::FromStr;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Alg(pub Algorithm);
+
+impl From<Algorithm> for Alg {
+    fn from(alg: Algorithm) -> Self {
+        Alg(alg)
+    }
+}
+
+impl From<Alg> for Algorithm {
+    fn from(alg: Alg) -> Self {
+        alg.0
+    }
+}
+
+impl sea_orm::sea_query::ValueType for Alg {
+    fn try_from(v: sea_orm::Value) -> Result<Self, sea_orm::sea_query::ValueTypeErr> {
+        match v {
+            sea_orm::Value::String(Some(s)) => s
+                .parse::<Algorithm>()
+                .map(Alg)
+                .map_err(|_| sea_orm::sea_query::ValueTypeErr),
+            _ => Err(sea_orm::sea_query::ValueTypeErr),
+        }
+    }
+
+    fn type_name() -> String {
+        "Alg".to_string()
+    }
+
+    fn array_type() -> sea_orm::sea_query::ArrayType {
+        sea_orm::sea_query::ArrayType::String
+    }
+
+    fn column_type() -> sea_orm::sea_query::ColumnType {
+        sea_orm::sea_query::ColumnType::String(sea_orm::sea_query::StringLen::N(255))
+    }
+}
+
+impl sea_orm::sea_query::Nullable for Alg {
+    fn null() -> sea_orm::Value {
+        sea_orm::Value::String(None)
+    }
+}
+
+impl From<Alg> for sea_orm::Value {
+    fn from(alg: Alg) -> Self {
+        sea_orm::Value::String(Some(Box::new(format!("{:?}", alg.0))))
+    }
+}
+
+impl sea_orm::TryGetable for Alg {
+    fn try_get_by<I: sea_orm::ColIdx>(
+        res: &sea_orm::QueryResult,
+        index: I,
+    ) -> Result<Self, sea_orm::TryGetError> {
+        let value: String = res.try_get_by(index)?;
+        value
+            .parse::<Algorithm>()
+            .map(Alg)
+            .map_err(|e| sea_orm::TryGetError::DbErr(sea_orm::DbErr::Custom(e.to_string())))
+    }
+}
+
+// Credentials entity
+pub mod credentials {
+    use super::*;
+
+    #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel, Serialize, Deserialize)]
+    #[sea_orm(table_name = "credentials")]
+    pub struct Model {
+        #[sea_orm(primary_key)]
+        pub issuer: String,
+        pub public_key: String,
+        pub alg: Alg,
+    }
+
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub enum Relation {}
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Credentials {
     pub issuer: String,
     pub public_key: String,
@@ -20,106 +103,38 @@ impl Credentials {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct StatusListToken {
-    pub list_id: String,
-    pub exp: Option<i32>,
-    pub iat: i32,
-    pub status_list: StatusList,
-    pub sub: String,
-    pub ttl: Option<String>,
-}
-
-impl StatusListToken {
-    pub fn new(
-        list_id: String,
-        exp: Option<i32>,
-        iat: i32,
-        status_list: StatusList,
-        sub: String,
-        ttl: Option<String>,
-    ) -> Self {
+impl From<credentials::Model> for Credentials {
+    fn from(model: credentials::Model) -> Self {
         Self {
-            list_id,
-            exp,
-            iat,
-            status_list,
-            sub,
-            ttl,
+            issuer: model.issuer,
+            public_key: model.public_key,
+            alg: model.alg.into(),
         }
     }
 }
 
-#[derive(Clone, Serialize, Deserialize, Default, PartialEq, Eq, Debug)]
-pub struct StatusList {
-    pub bits: i8,
-    pub lst: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct StatusUpdate {
-    pub index: i32,
-    pub status: Status,
-}
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-pub enum Status {
-    VALID,
-    INVALID,
-    SUSPENDED,
-    APPLICATIONSPECIFIC,
-}
-
-impl FromStr for Status {
-    type Err = String;
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s.to_lowercase().as_str() {
-            "valid" => Ok(Status::VALID),
-            "invalid" => Ok(Status::INVALID),
-            "suspended" => Ok(Status::SUSPENDED),
-            "application_specific" => Ok(Status::APPLICATIONSPECIFIC),
-            _ => Err("Unknown status".to_string()),
+impl From<Credentials> for credentials::ActiveModel {
+    fn from(creds: Credentials) -> Self {
+        Self {
+            issuer: Set(creds.issuer),
+            public_key: Set(creds.public_key),
+            alg: Set(Alg(creds.alg)),
         }
     }
 }
 
-// SeaORM Entities
-pub mod credentials {
-    use super::*;
-
-    #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel, Serialize, Deserialize)]
-    #[sea_orm(table_name = "credentials")]
-    pub struct Model {
-        #[sea_orm(primary_key, auto_increment = false)]
-        pub issuer: String,
-        pub public_key: String, // Matches Credentials
-        pub alg: String,
-    }
-
-    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
-    pub enum Relation {}
-
-    impl Related<super::status_list_tokens::Entity> for Entity {
-        fn to() -> RelationDef {
-            panic!("No relations defined")
-        }
-    }
-
-    impl ActiveModelBehavior for ActiveModel {}
-}
-
+// StatusListToken entity
 pub mod status_list_tokens {
     use super::*;
 
     #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel, Serialize, Deserialize)]
     #[sea_orm(table_name = "status_list_tokens")]
     pub struct Model {
-        #[sea_orm(primary_key, auto_increment = false)]
+        #[sea_orm(primary_key)]
         pub list_id: String,
         pub exp: Option<i32>,
         pub iat: i32,
-        #[sea_orm(column_type = "Json")]
-        pub status_list: String,
+        pub status_list: serde_json::Value,
         pub sub: String,
         pub ttl: Option<String>,
     }
@@ -127,40 +142,28 @@ pub mod status_list_tokens {
     #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
     pub enum Relation {}
 
-    impl Related<super::credentials::Entity> for Entity {
-        fn to() -> RelationDef {
-            panic!("No relations defined")
-        }
-    }
-
     impl ActiveModelBehavior for ActiveModel {}
 }
 
-impl From<credentials::Model> for Credentials {
-    fn from(model: credentials::Model) -> Self {
-        Credentials::new(
-            model.issuer,
-            model.public_key,
-            Algorithm::from_str(&model.alg).unwrap_or(Algorithm::HS256),
-        )
-    }
+pub type StatusListToken = status_list_tokens::Model;
+
+// Additional types for status list handling
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum Status {
+    VALID,
+    INVALID,
+    SUSPENDED,
+    APPLICATIONSPECIFIC,
 }
 
-impl From<status_list_tokens::Model> for StatusListToken {
-    fn from(model: status_list_tokens::Model) -> Self {
-        StatusListToken::new(
-            model.list_id,
-            model.exp,
-            model.iat,
-            serde_json::from_str(&model.status_list).unwrap_or_default(),
-            model.sub,
-            model.ttl,
-        )
-    }
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct StatusList {
+    pub bits: usize,
+    pub lst: String,
 }
 
-impl From<StatusList> for sea_orm::Value {
-    fn from(status_list: StatusList) -> sea_orm::Value {
-        sea_orm::Value::Json(Some(Box::new(serde_json::to_value(status_list).unwrap())))
-    }
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct StatusUpdate {
+    pub index: i32,
+    pub status: Status,
 }
