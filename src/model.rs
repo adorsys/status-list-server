@@ -31,7 +31,7 @@ pub struct StatusUpdate {
     pub status: Status,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize, Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Status {
     VALID,
     INVALID,
