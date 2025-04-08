@@ -17,10 +17,6 @@ pub enum StatusListError {
     MalformedBody(String),
     #[error("Status list not found")]
     StatusListNotFound,
-    #[error("Status list already exists")]
-    StatusListAlreadyExists,
-    #[error("Unsupported bits value")]
-    UnsupportedBits,
 }
 
 impl IntoResponse for StatusListError {
@@ -34,8 +30,6 @@ impl IntoResponse for StatusListError {
             UpdateFailed => StatusCode::INTERNAL_SERVER_ERROR,
             MalformedBody(_) => StatusCode::BAD_REQUEST,
             StatusListNotFound => StatusCode::NOT_FOUND,
-            StatusListAlreadyExists => StatusCode::CONFLICT,
-            UnsupportedBits => StatusCode::BAD_REQUEST,
         };
 
         (status_code, self.to_string()).into_response()
