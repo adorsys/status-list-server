@@ -16,12 +16,10 @@ pub fn lst_from(status_updates: Vec<PublishStatus>, bits: usize) -> Result<Strin
         return Err(Error::Generic("No status updates provided".to_string()));
     }
 
-    // Validate the 'bits' parameter
     if ![1, 2, 4, 8].contains(&bits) {
         return Err(Error::UnsupportedBits);
     }
 
-    // Determine the highest index to set the size of the status array
     let max_index = status_updates
         .iter()
         .map(|update| update.index)
@@ -32,35 +30,26 @@ pub fn lst_from(status_updates: Vec<PublishStatus>, bits: usize) -> Result<Strin
         return Err(Error::InvalidIndex);
     }
 
-    // Calculate the total number of entries needed
     let total_entries = (max_index as usize) + 1;
-
-    // Calculate the number of bytes needed to store all statuses
     let bytes_needed = (total_entries * bits + 7) / 8;
     let mut status_array = vec![0u8; bytes_needed];
 
-    // Apply each status update
     for update in status_updates {
         if update.index < 0 {
             return Err(Error::InvalidIndex);
         }
         let idx = update.index as usize;
-
-        // Determine the bit position for the current index
         let bit_position = idx * bits;
         let byte_index = bit_position / 8;
         let bit_offset = bit_position % 8;
 
-        // Assign a unique value to each status variant
-        // https://www.ietf.org/archive/id/draft-ietf-oauth-status-list-10.html#name-compressed-byte-array
         let status_value = match update.status {
-            Status::VALID => 0b0000_0000,               // VALID = 0
-            Status::INVALID => 0b0000_0001,             // INVALID = 1
-            Status::SUSPENDED => 0b0000_0010,           // SUSPENDED = 2
-            Status::APPLICATIONSPECIFIC => 0b0000_0011, // APPLICATIONSPECIFIC = 3
+            Status::VALID => 0b0000_0000,
+            Status::INVALID => 0b0000_0001,
+            Status::SUSPENDED => 0b0000_0010,
+            Status::APPLICATIONSPECIFIC => 0b0000_0011,
         };
 
-        // Mask and set the status value in the appropriate position
         if bits == 8 {
             status_array[byte_index] = status_value;
         } else {
@@ -68,7 +57,6 @@ pub fn lst_from(status_updates: Vec<PublishStatus>, bits: usize) -> Result<Strin
             status_array[byte_index] &= !mask;
             status_array[byte_index] |= (status_value << bit_offset) & mask;
 
-            // Handle cases where the status spans across two bytes
             if bit_offset + bits > 8 {
                 let next_byte_index = byte_index + 1;
                 let next_bit_offset = 8 - bit_offset;
@@ -79,7 +67,6 @@ pub fn lst_from(status_updates: Vec<PublishStatus>, bits: usize) -> Result<Strin
         }
     }
 
-    // Compress the status array using zlib
     let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
     encoder
         .write_all(&status_array)
@@ -88,7 +75,6 @@ pub fn lst_from(status_updates: Vec<PublishStatus>, bits: usize) -> Result<Strin
         .finish()
         .map_err(|_| Error::Generic("Failed to finish compression".to_string()))?;
 
-    // Base64url encode the compressed data without padding
     Ok(encode(&compressed))
 }
 

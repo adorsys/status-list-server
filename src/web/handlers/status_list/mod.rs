@@ -1,3 +1,3 @@
 pub(super) mod constants;
 pub(super) mod error;
-pub(super) mod handler;
+pub(crate) mod handler;
