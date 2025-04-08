@@ -27,7 +27,6 @@ async fn main() {
 
     let state = setup().await;
 
-
     let cors = CorsLayer::new()
         .allow_methods([Method::GET, Method::POST, Method::OPTIONS])
         .allow_origin(Any)
