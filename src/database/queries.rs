@@ -159,22 +159,22 @@ mod test {
                     vec![credentials::Model {
                         issuer: entity.issuer.clone(),
                         public_key: entity.public_key.clone(),
-                        alg: model::Alg(entity.alg.clone()),
+                        alg: model::Alg(entity.alg),
                     }], // Insert return
                     vec![credentials::Model {
                         issuer: entity.issuer.clone(),
                         public_key: entity.public_key.clone(),
-                        alg: model::Alg(entity.alg.clone()),
+                        alg: model::Alg(entity.alg),
                     }], // Find after insert
                     vec![credentials::Model {
                         issuer: entity.issuer.clone(),
                         public_key: entity.public_key.clone(),
-                        alg: model::Alg(entity.alg.clone()),
+                        alg: model::Alg(entity.alg),
                     }], // Find before update
                     vec![credentials::Model {
                         issuer: updated_entity.issuer.clone(),
                         public_key: updated_entity.public_key.clone(),
-                        alg: model::Alg(updated_entity.alg.clone()),
+                        alg: model::Alg(updated_entity.alg),
                     }], // Update return
                 ])
                 .append_exec_results(vec![
