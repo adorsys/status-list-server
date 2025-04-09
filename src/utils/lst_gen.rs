@@ -108,7 +108,7 @@ mod tests {
                 status: Status::INVALID,
             },
         ];
-        let bits = BitFlag::new(1).unwrap();
+        let bits = BitFlag::new(1).ok_or(Error::UnsupportedBits).unwrap();
 
         let result = lst_from(updates, bits).unwrap();
         let decoded = base64url::decode(&result).unwrap();
@@ -131,7 +131,7 @@ mod tests {
                 status: Status::INVALID,
             },
         ];
-        let bits = BitFlag::new(1).unwrap();
+        let bits = BitFlag::new(1).ok_or(Error::UnsupportedBits).unwrap();
         let result = lst_from(updates, bits).unwrap();
         let decoded = base64url::decode(&result).unwrap();
         let mut decoder = flate2::read::ZlibDecoder::new(&*decoded);
@@ -162,7 +162,7 @@ mod tests {
             },
         ];
 
-        let bits = BitFlag::new(2).unwrap();
+        let bits = BitFlag::new(2).ok_or(Error::UnsupportedBits).unwrap();
         let result = lst_from(updates, bits).unwrap();
         let decoded = base64url::decode(&result).unwrap();
         let mut decoder = flate2::read::ZlibDecoder::new(&*decoded);
@@ -175,7 +175,7 @@ mod tests {
     #[test]
     fn test_lst_from_empty_updates() {
         let updates = vec![];
-        let bits = BitFlag::new(1).unwrap();
+        let bits = BitFlag::new(1).ok_or(Error::UnsupportedBits).unwrap();
         let result = lst_from(updates, bits);
         assert!(matches!(result, Err(Error::Generic(_))));
     }
@@ -186,7 +186,7 @@ mod tests {
             index: -1,
             status: Status::VALID,
         }];
-        let bits = BitFlag::new(1).unwrap();
+        let bits = BitFlag::new(1).ok_or(Error::UnsupportedBits).unwrap();
         let result = lst_from(updates, bits);
         assert!(matches!(result, Err(Error::InvalidIndex)));
     }
