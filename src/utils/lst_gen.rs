@@ -41,14 +41,16 @@ pub fn update_or_create_status_list(
         decompressed
     } else {
         // Create a new list initialized to VALID
-        let required_len = ((max_update_index as usize + 1) * bits + 7) / 8;
-        vec![0u8; required_len]
+        let required_len = (max_update_index as usize + 1) * bits + 7;
+        let len = required_len / 8;
+        vec![0u8; len]
     };
 
     // Ensure the array is large enough to apply all updates
-    let required_len = ((max_update_index as usize + 1) * bits + 7) / 8;
+    let required_len = (max_update_index as usize + 1) * bits + 7;
+    let len = required_len / 8;
     if status_array.len() < required_len {
-        status_array.resize(required_len, 0);
+        status_array.resize(len, 0);
     }
 
     for update in status_updates {
