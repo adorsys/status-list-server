@@ -169,7 +169,7 @@ mod test {
                     vec![credentials::Model {
                         issuer: entity.issuer.clone(),
                         public_key: entity.public_key.clone(),
-                        alg: model::Alg(entity.alg),
+                        alg: model::Alg(entity.alg.clone()),
                     }], // Find before update
                     vec![credentials::Model {
                         issuer: updated_entity.issuer.clone(),
