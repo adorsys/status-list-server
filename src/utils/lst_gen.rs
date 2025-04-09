@@ -74,17 +74,6 @@ pub fn update_or_create_status_list(
             let mask = ((1 << bits) - 1) << bit_offset;
             status_array[byte_index] &= !mask;
             status_array[byte_index] |= (status_value << bit_offset) & mask;
-
-            // Handle span across two bytes
-            if bit_offset + bits > 8 {
-                let next_byte_index = byte_index + 1;
-                let next_bit_offset = 8 - bit_offset;
-                let next_mask = (1 << (bits - next_bit_offset)) - 1;
-                if next_byte_index < status_array.len() {
-                    status_array[next_byte_index] &= !next_mask;
-                    status_array[next_byte_index] |= status_value >> next_bit_offset;
-                }
-            }
         }
     }
 
@@ -259,6 +248,37 @@ mod tests {
             0b0000_0000,
             0b0000_0010,
         ];
+        assert_eq!(
+            updated_status_array, expected_status_array,
+            "The status array was not updated correctly"
+        );
+    }
+    #[test]
+    fn test_update_status_with_bits_set_to_2() {
+        let original_status_array = vec![0b11001001, 0b01000100, 0b11111001];
+
+        let mut encoder = ZlibEncoder::new(Vec::new(), Compression::fast());
+        encoder.write_all(&original_status_array).unwrap();
+        let compressed_status = encoder.finish().expect("Failed to finish compression");
+        let existing_lst = base64url::encode(compressed_status);
+
+        // Step 2: Define new status updates
+        let status_updates = vec![StatusEntry {
+            index: 4,
+            status: Status::INVALID,
+        }];
+
+        let updated_lst = update_or_create_status_list(Some(existing_lst), status_updates, 2)
+            .expect("Failed to update status list");
+
+        let decoded = decode(&updated_lst).expect("Failed to decode base64");
+        let mut decoder = ZlibDecoder::new(&decoded[..]);
+        let mut updated_status_array = Vec::new();
+        decoder
+            .read_to_end(&mut updated_status_array)
+            .expect("Failed to decompress");
+
+        let expected_status_array = vec![0b11001001, 0b01000101, 0b11111001];
         assert_eq!(
             updated_status_array, expected_status_array,
             "The status array was not updated correctly"
