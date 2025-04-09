@@ -59,6 +59,7 @@ pub fn update_or_create_status_list(
         let idx = update.index as usize;
         let bit_position = idx * bits;
         let byte_index = bit_position / 8;
+        // Determine the offset within that byte
         let bit_offset = bit_position % 8;
 
         let status_value = match update.status {
@@ -71,8 +72,13 @@ pub fn update_or_create_status_list(
         if bits == 8 {
             status_array[byte_index] = status_value;
         } else {
+            // Create a mask to isolate the target bit segment within the byte
             let mask = ((1 << bits) - 1) << bit_offset;
+
+            // Clear the bits at the target location using bitwise AND with the inverted mask
             status_array[byte_index] &= !mask;
+
+            // Shift the status value into the correct position, then set the bits using bitwise OR
             status_array[byte_index] |= (status_value << bit_offset) & mask;
         }
     }
@@ -128,7 +134,7 @@ mod tests {
                 index: 1,
                 status: Status::INVALID,
             },
-        ];
+        ];            // For 8-bit status values, we can write directly into the byte
 
         let result = update_or_create_status_list(None, updates, 1).unwrap();
         let decoded = base64url::decode(&result).unwrap();
