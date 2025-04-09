@@ -1,11 +1,13 @@
 use base64url::encode;
 use flate2::{write::ZlibEncoder, Compression};
+use serde::{Deserialize, Serialize};
 use std::io::Write;
 
 use crate::model::Status;
 
 use super::errors::Error;
 
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct PublishStatus {
     pub index: i32,
     pub status: Status,
