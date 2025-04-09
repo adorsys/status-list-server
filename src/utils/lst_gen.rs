@@ -134,7 +134,7 @@ mod tests {
                 index: 1,
                 status: Status::INVALID,
             },
-        ];            // For 8-bit status values, we can write directly into the byte
+        ];
 
         let result = update_or_create_status_list(None, updates, 1).unwrap();
         let decoded = base64url::decode(&result).unwrap();
