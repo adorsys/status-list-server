@@ -1,0 +1,429 @@
+use crate::{
+    model::{StatusList, StatusListToken},
+    utils::{
+        errors::Error,
+        lst_gen::{lst_from, PublishStatus},
+        state::AppState,
+    },
+    web::handlers::status_list::error::StatusListError,
+};
+use axum::{
+    extract::{Json, State},
+    http::StatusCode,
+    response::IntoResponse,
+};
+use serde::{Deserialize, Serialize};
+use std::time::{SystemTime, UNIX_EPOCH};
+use tracing;
+
+// Request payload for publishing a status list token
+#[derive(Deserialize, Serialize, Clone)]
+pub struct PublishTokenStatusRequest {
+    pub list_id: String,
+    pub updates: Vec<PublishStatus>,
+    #[serde(default)]
+    pub sub: Option<String>,
+    #[serde(default)]
+    pub ttl: Option<String>,
+    pub bits: u8,
+}
+
+// Handler to create a new status list token
+pub async fn publish_token_status(
+    State(appstate): State<AppState>,
+    Json(payload): Json<PublishTokenStatusRequest>,
+) -> Result<impl IntoResponse, StatusListError> {
+    let store = &appstate.status_list_token_repository;
+
+    // Validate that bits is one of the allowed values (1, 2, 4, 8)
+    if ![1, 2, 4, 8].contains(&payload.bits) {
+        return Err(StatusListError::Generic(format!(
+            "Invalid 'bits' value: {}. Allowed values are 1, 2, 4, 8.",
+            payload.bits
+        )));
+    }
+
+    // Generate the compressed status list; use empty encoding if no updates
+    let lst = if payload.updates.is_empty() {
+        base64url::encode([])
+    } else {
+        lst_from(payload.updates, payload.bits as usize).map_err(|e| {
+            tracing::error!("lst_from failed: {:?}", e);
+            match e {
+                Error::Generic(msg) => StatusListError::Generic(msg),
+                Error::InvalidIndex => StatusListError::InvalidIndex,
+                Error::UnsupportedBits => StatusListError::UnsupportedBits,
+                _ => StatusListError::Generic(e.to_string()),
+            }
+        })?
+    };
+
+    // Check for existing token to prevent duplicates
+    match store.find_one_by(payload.list_id.clone()).await {
+        Ok(Some(_)) => {
+            tracing::info!("Status list {} already exists", payload.list_id);
+            Err(StatusListError::StatusListAlreadyExists)
+        }
+        Ok(None) => {
+            // Calculate issuance and expiration timestamps
+            let iat = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_secs() as i64;
+            let exp = match payload.ttl.as_ref() {
+                Some(ttl) => match ttl.parse::<i64>() {
+                    Ok(ttl_seconds) => Some(iat.saturating_add(ttl_seconds)),
+                    Err(_) => {
+                        return Err(StatusListError::Generic("Invalid TTL format".to_string()))
+                    }
+                },
+                None => None,
+            };
+
+            // Serialize the status list before constructing the token
+            let status_list = StatusList {
+                bits: payload.bits as usize,
+                lst,
+            };
+            let status_list_value = serde_json::to_value(status_list).map_err(|e| {
+                tracing::error!("Failed to serialize status_list: {:?}", e);
+                StatusListError::InternalServerError
+            })?;
+
+            // Build the new status list token
+            let new_status_list_token = StatusListToken {
+                list_id: payload.list_id.clone(),
+                exp: exp.map(|e| e as i32),
+                iat: iat as i32,
+                status_list: status_list_value,
+                sub: payload.sub.unwrap_or_default(),
+                ttl: payload.ttl,
+            };
+
+            // Insert the token into the repository
+            store.insert_one(new_status_list_token).await.map_err(|e| {
+                tracing::error!("Failed to insert token: {:?}", e);
+                StatusListError::InternalServerError
+            })?;
+            Ok(StatusCode::CREATED.into_response())
+        }
+        Err(e) => {
+            tracing::error!(error = ?e, list_id = ?payload.list_id, "Database query failed for status list.");
+            Err(StatusListError::InternalServerError)
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        database::queries::SeaOrmStore,
+        model::{status_list_tokens, Status, StatusListToken},
+        utils::state::AppState,
+    };
+    use axum::{extract::State, Json};
+    use sea_orm::{DatabaseBackend, MockDatabase};
+    use std::sync::Arc;
+
+    // Helper to create a test request payload with customizable bits
+    fn create_test_token(
+        list_id: &str,
+        updates: Vec<PublishStatus>,
+        bits: u8,
+    ) -> PublishTokenStatusRequest {
+        PublishTokenStatusRequest {
+            list_id: list_id.to_string(),
+            updates,
+            sub: Some("issuer".to_string()),
+            ttl: Some("3600".to_string()),
+            bits,
+        }
+    }
+
+    #[tokio::test]
+    async fn test_successful_token_insertion() {
+        let mock_db = MockDatabase::new(DatabaseBackend::Postgres);
+        let token_id = "token1";
+        let payload = create_test_token(
+            token_id,
+            vec![
+                PublishStatus {
+                    index: 0,
+                    status: Status::VALID,
+                },
+                PublishStatus {
+                    index: 1,
+                    status: Status::INVALID,
+                },
+            ],
+            2,
+        );
+        let status_list = StatusList {
+            bits: 2,
+            lst: lst_from(payload.updates.clone(), 2).unwrap(),
+        };
+        let status_list_value = serde_json::to_value(status_list).unwrap();
+        let new_token = StatusListToken {
+            list_id: token_id.to_string(),
+            exp: Some(
+                (SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs() as i32)
+                    .saturating_add(3600),
+            ),
+            iat: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_secs() as i32,
+            status_list: status_list_value,
+            sub: "issuer".to_string(),
+            ttl: Some("3600".to_string()),
+        };
+        let db_conn = Arc::new(
+            mock_db
+                .append_query_results::<status_list_tokens::Model, Vec<_>, _>(vec![
+                    vec![],                  // find_one_by in handler returns None
+                    vec![new_token.clone()], // insert_one return
+                    vec![new_token.clone()], // find_one_by in test verification
+                ])
+                .into_connection(),
+        );
+
+        let app_state = AppState {
+            credential_repository: Arc::new(SeaOrmStore::new(db_conn.clone())),
+            status_list_token_repository: Arc::new(SeaOrmStore::new(db_conn)),
+        };
+
+        let response = publish_token_status(State(app_state.clone()), Json(payload))
+            .await
+            .unwrap()
+            .into_response();
+        assert_eq!(response.status(), StatusCode::CREATED);
+
+        let result = app_state
+            .status_list_token_repository
+            .find_one_by(token_id.to_string())
+            .await
+            .unwrap();
+        assert!(result.is_some());
+        let token = result.unwrap();
+        assert_eq!(token.list_id, token_id);
+        let status_list: StatusList =
+            serde_json::from_value(token.status_list).expect("Failed to deserialize status_list");
+        assert_eq!(status_list.bits, 2);
+        assert_eq!(token.sub, "issuer");
+        assert!(token.exp.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_token_conflict() {
+        let mock_db = MockDatabase::new(DatabaseBackend::Postgres);
+        let token_id = "token1";
+        let payload = create_test_token(
+            token_id,
+            vec![PublishStatus {
+                index: 0,
+                status: Status::VALID,
+            }],
+            1,
+        );
+        let existing_token = StatusListToken {
+            list_id: token_id.to_string(),
+            exp: None,
+            iat: 1234567890,
+            status_list: serde_json::to_value(StatusList {
+                bits: 1,
+                lst: lst_from(payload.updates.clone(), 1).unwrap(),
+            })
+            .unwrap(),
+            sub: "issuer".to_string(),
+            ttl: Some("3600".to_string()),
+        };
+        let db_conn = Arc::new(
+            mock_db
+                .append_query_results::<status_list_tokens::Model, Vec<_>, _>(vec![vec![
+                    existing_token,
+                ]])
+                .into_connection(),
+        );
+
+        let app_state = AppState {
+            credential_repository: Arc::new(SeaOrmStore::new(db_conn.clone())),
+            status_list_token_repository: Arc::new(SeaOrmStore::new(db_conn)),
+        };
+
+        let response = match publish_token_status(State(app_state), Json(payload)).await {
+            Ok(_) => panic!("Expected an error but got Ok"),
+            Err(err) => err.into_response(),
+        };
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+    }
+
+    #[tokio::test]
+    async fn test_empty_updates() {
+        let mock_db = MockDatabase::new(DatabaseBackend::Postgres);
+        let token_id = "token_empty";
+        let payload = create_test_token(token_id, vec![], 1);
+        let status_list = StatusList {
+            bits: 1,
+            lst: base64url::encode([]),
+        };
+        let status_list_value = serde_json::to_value(status_list).unwrap();
+        let new_token = StatusListToken {
+            list_id: token_id.to_string(),
+            exp: Some(
+                (SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs() as i32)
+                    .saturating_add(3600),
+            ),
+            iat: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_secs() as i32,
+            status_list: status_list_value,
+            sub: "issuer".to_string(),
+            ttl: Some("3600".to_string()),
+        };
+        let db_conn = Arc::new(
+            mock_db
+                .append_query_results::<status_list_tokens::Model, Vec<_>, _>(vec![
+                    vec![],                  // find_one_by in handler returns None
+                    vec![new_token.clone()], // insert_one return
+                    vec![new_token.clone()], // find_one_by in test verification
+                ])
+                .into_connection(),
+        );
+
+        let app_state = AppState {
+            credential_repository: Arc::new(SeaOrmStore::new(db_conn.clone())),
+            status_list_token_repository: Arc::new(SeaOrmStore::new(db_conn)),
+        };
+
+        let response = publish_token_status(State(app_state.clone()), Json(payload))
+            .await
+            .unwrap()
+            .into_response();
+        assert_eq!(response.status(), StatusCode::CREATED);
+
+        let result = app_state
+            .status_list_token_repository
+            .find_one_by(token_id.to_string())
+            .await
+            .unwrap();
+        assert!(result.is_some());
+        let token = result.unwrap();
+        assert_eq!(token.list_id, token_id);
+        let status_list: StatusList =
+            serde_json::from_value(token.status_list).expect("Failed to deserialize status_list");
+        assert_eq!(status_list.lst, base64url::encode([]));
+    }
+
+    #[tokio::test]
+    async fn test_invalid_bits() {
+        let mock_db = MockDatabase::new(DatabaseBackend::Postgres);
+        let db_conn = Arc::new(mock_db.into_connection());
+        let app_state = AppState {
+            credential_repository: Arc::new(SeaOrmStore::new(db_conn.clone())),
+            status_list_token_repository: Arc::new(SeaOrmStore::new(db_conn)),
+        };
+        let token_id = "token_invalid_bits";
+        let payload = create_test_token(
+            token_id,
+            vec![PublishStatus {
+                index: 0,
+                status: Status::VALID,
+            }],
+            3, // Invalid bits value
+        );
+
+        let response = match publish_token_status(State(app_state), Json(payload)).await {
+            Ok(_) => panic!("Expected an error but got Ok"),
+            Err(err) => err.into_response(),
+        };
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn test_repository_unavailable() {
+        let mock_db = MockDatabase::new(DatabaseBackend::Postgres);
+        let token_id = "token_no_repo";
+        let payload = create_test_token(
+            token_id,
+            vec![PublishStatus {
+                index: 0,
+                status: Status::VALID,
+            }],
+            1,
+        );
+        let status_list = StatusList {
+            bits: 1,
+            lst: lst_from(payload.updates.clone(), 1).unwrap(),
+        };
+        let status_list_value = serde_json::to_value(status_list).unwrap();
+        let new_token = StatusListToken {
+            list_id: token_id.to_string(),
+            exp: Some(
+                (SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs() as i32)
+                    .saturating_add(3600),
+            ),
+            iat: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_secs() as i32,
+            status_list: status_list_value,
+            sub: "issuer".to_string(),
+            ttl: Some("3600".to_string()),
+        };
+        let db_conn = Arc::new(
+            mock_db
+                .append_query_results::<status_list_tokens::Model, Vec<_>, _>(vec![
+                    vec![],                  // find_one_by in handler returns None
+                    vec![new_token.clone()], // insert_one return
+                    vec![new_token.clone()], // find_one_by in test verification
+                ])
+                .into_connection(),
+        );
+        let app_state = AppState {
+            credential_repository: Arc::new(SeaOrmStore::new(db_conn.clone())),
+            status_list_token_repository: Arc::new(SeaOrmStore::new(db_conn)),
+        };
+
+        let response = publish_token_status(State(app_state), Json(payload))
+            .await
+            .unwrap()
+            .into_response();
+        assert_eq!(response.status(), StatusCode::CREATED);
+    }
+
+    #[tokio::test]
+    async fn test_invalid_index() {
+        let mock_db = MockDatabase::new(DatabaseBackend::Postgres);
+        let token_id = "token_invalid_index";
+        let payload = create_test_token(
+            token_id,
+            vec![PublishStatus {
+                index: -1,
+                status: Status::VALID,
+            }],
+            1,
+        );
+        let db_conn = Arc::new(mock_db.into_connection());
+        let app_state = AppState {
+            credential_repository: Arc::new(SeaOrmStore::new(db_conn.clone())),
+            status_list_token_repository: Arc::new(SeaOrmStore::new(db_conn)),
+        };
+
+        let response = match publish_token_status(State(app_state), Json(payload)).await {
+            Ok(_) => panic!("Expected an error but got Ok"),
+            Err(err) => err.into_response(),
+        };
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+}
