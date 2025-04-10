@@ -4,31 +4,18 @@ use std::io::{Read, Write};
 
 use crate::model::{Status, StatusEntry};
 
-use super::errors::Error;
+use super::{bits_validation::BitFlag, errors::Error};
 
 pub fn update_or_create_status_list(
     existing_lst: Option<String>,
     status_updates: Vec<StatusEntry>,
-    bits: usize,
+    bits: BitFlag,
 ) -> Result<String, Error> {
     if status_updates.is_empty() {
         return Err(Error::Generic("No status updates provided".to_string()));
     }
 
-    if ![1, 2, 4, 8].contains(&bits) {
-        return Err(Error::UnsupportedBits);
-    }
-
-    // Determine the highest index in updates
-    let max_update_index = status_updates
-        .iter()
-        .map(|update| update.index)
-        .max()
-        .ok_or_else(|| Error::Generic("Failed to determine max index".to_string()))?;
-
-    if max_update_index < 0 {
-        return Err(Error::InvalidIndex);
-    }
+    let bits = bits.value() as usize;
 
     let mut status_array: Vec<u8> = if let Some(existing_lst) = existing_lst {
         // Decode & decompress existing list
@@ -40,19 +27,30 @@ pub fn update_or_create_status_list(
             .map_err(|e| Error::Generic(e.to_string()))?;
         decompressed
     } else {
+        // Determine the highest index to set the size of the status array
+        let max_index = status_updates
+            .iter()
+            .map(|update| update.index)
+            .max()
+            .ok_or_else(|| Error::Generic("Failed to determine max index".to_string()))?;
+
+        if max_index < 0 {
+            return Err(Error::InvalidIndex);
+        }
+
         // Create a new list initialized to VALID
-        let required_len = (max_update_index as usize + 1) * bits + 7;
+        let required_len = (max_index as usize + 1) * bits + 7;
         let len = required_len / 8;
         vec![0u8; len]
     };
 
     // Ensure the array is large enough to apply all updates
-    let required_len = (max_update_index as usize + 1) * bits + 7;
-    let len = required_len / 8;
-    if status_array.len() < required_len {
-        status_array.resize(len, 0);
+    if let Some(max_update_index) = status_updates.iter().map(|u| u.index).max() {
+        let required_len = ((max_update_index as usize + 1) * bits + 7) / 8;
+        if status_array.len() < required_len {
+            status_array.resize(required_len, 0);
+        }
     }
-
     for update in status_updates {
         if update.index < 0 {
             return Err(Error::InvalidIndex);
@@ -115,8 +113,9 @@ mod tests {
                 status: Status::INVALID,
             },
         ];
+        let bits = BitFlag::new(1).ok_or(Error::UnsupportedBits).unwrap();
 
-        let result = update_or_create_status_list(None, updates, 1).unwrap();
+        let result = update_or_create_status_list(None, updates, bits).unwrap();
         let decoded = base64url::decode(&result).unwrap();
         let mut decoder = flate2::read::ZlibDecoder::new(&*decoded);
         let mut decompressed = Vec::new();
@@ -137,8 +136,8 @@ mod tests {
                 status: Status::INVALID,
             },
         ];
-
-        let result = update_or_create_status_list(None, updates, 1).unwrap();
+        let bits = BitFlag::new(1).ok_or(Error::UnsupportedBits).unwrap();
+        let result = update_or_create_status_list(None, updates, bits).unwrap();
         let decoded = base64url::decode(&result).unwrap();
         let mut decoder = flate2::read::ZlibDecoder::new(&*decoded);
         let mut decompressed = Vec::new();
@@ -167,8 +166,9 @@ mod tests {
                 status: Status::APPLICATIONSPECIFIC,
             },
         ];
+        let bits = BitFlag::new(2).ok_or(Error::UnsupportedBits).unwrap();
 
-        let result = update_or_create_status_list(None, updates, 2).unwrap();
+        let result = update_or_create_status_list(None, updates, bits).unwrap();
         let decoded = base64url::decode(&result).unwrap();
         let mut decoder = flate2::read::ZlibDecoder::new(&*decoded);
         let mut decompressed = Vec::new();
@@ -180,8 +180,8 @@ mod tests {
     #[test]
     fn test_lst_from_empty_updates() {
         let updates = vec![];
-
-        let result = update_or_create_status_list(None, updates, 1);
+        let bits = BitFlag::new(1).ok_or(Error::UnsupportedBits).unwrap();
+        let result = update_or_create_status_list(None, updates, bits);
         assert!(matches!(result, Err(Error::Generic(_))));
     }
 
@@ -191,20 +191,20 @@ mod tests {
             index: -1,
             status: Status::VALID,
         }];
+        let bits = BitFlag::new(1).ok_or(Error::UnsupportedBits).unwrap();
 
-        let result = update_or_create_status_list(None, updates, 1);
+        let result = update_or_create_status_list(None, updates, bits);
         assert!(matches!(result, Err(Error::InvalidIndex)));
     }
 
     #[test]
     fn test_lst_from_unsupported_bits() {
-        let updates = vec![StatusEntry {
+        let _updates = vec![StatusEntry {
             index: 0,
             status: Status::VALID,
         }];
-
-        let result = update_or_create_status_list(None, updates, 3);
-        assert!(matches!(result, Err(Error::UnsupportedBits)));
+        let bits = BitFlag::new(3).ok_or(Error::UnsupportedBits);
+        assert!(bits.is_err());
     }
     #[test]
     fn test_status_update() {
@@ -227,16 +227,16 @@ mod tests {
         // Step 2: Define new status updates
         let status_updates = vec![
             StatusEntry {
-                index: 4,
+                index: 6,
                 status: Status::INVALID,
             },
             StatusEntry {
-                index: 7,
+                index: 3,
                 status: Status::SUSPENDED,
             },
         ];
-
-        let updated_lst = update_or_create_status_list(Some(existing_lst), status_updates, 8)
+        let bits = BitFlag::new(8).ok_or(Error::UnsupportedBits).unwrap();
+        let updated_lst = update_or_create_status_list(Some(existing_lst), status_updates, bits)
             .expect("Failed to update status list");
 
         let decoded = decode(&updated_lst).expect("Failed to decode base64");
@@ -250,17 +250,74 @@ mod tests {
             0b0000_0000,
             0b0000_0001,
             0b0000_0010,
-            0b0000_0011,
+            0b0000_0010,
+            0b0000_0000,
+            0b0000_0000,
             0b0000_0001,
             0b0000_0000,
-            0b0000_0000,
-            0b0000_0010,
         ];
         assert_eq!(
             updated_status_array, expected_status_array,
             "The status array was not updated correctly"
         );
     }
+
+    #[test]
+    fn test_status_update_with_max_index() {
+        let original_status_array = vec![
+            0b0000_0000,
+            0b0000_0001,
+            0b0000_0010,
+            0b0000_0011,
+            0b0000_0000,
+            0b0000_0000,
+            0b0000_0000,
+            0b0000_0000,
+        ];
+
+        let mut encoder = ZlibEncoder::new(Vec::new(), Compression::fast());
+        encoder.write_all(&original_status_array).unwrap();
+        let compressed_status = encoder.finish().expect("Failed to finish compression");
+        let existing_lst = base64url::encode(compressed_status);
+
+        // Step 2: Define new status updates
+        let status_updates = vec![
+            StatusEntry {
+                index: 7,
+                status: Status::INVALID,
+            },
+            StatusEntry {
+                index: 3,
+                status: Status::SUSPENDED,
+            },
+        ];
+        let bits = BitFlag::new(8).ok_or(Error::UnsupportedBits).unwrap();
+        let updated_lst = update_or_create_status_list(Some(existing_lst), status_updates, bits)
+            .expect("Failed to update status list");
+
+        let decoded = decode(&updated_lst).expect("Failed to decode base64");
+        let mut decoder = ZlibDecoder::new(&decoded[..]);
+        let mut updated_status_array = Vec::new();
+        decoder
+            .read_to_end(&mut updated_status_array)
+            .expect("Failed to decompress");
+
+        let expected_status_array = vec![
+            0b0000_0000,
+            0b0000_0001,
+            0b0000_0010,
+            0b0000_0010,
+            0b0000_0000,
+            0b0000_0000,
+            0b0000_0000,
+            0b0000_0001,
+        ];
+        assert_eq!(
+            updated_status_array, expected_status_array,
+            "The status array was not updated correctly"
+        );
+    }
+
     #[test]
     fn test_update_status_with_bits_set_to_2() {
         let original_status_array = vec![0b11001001, 0b01000100, 0b11111001];
@@ -275,8 +332,9 @@ mod tests {
             index: 4,
             status: Status::INVALID,
         }];
+        let bits = BitFlag::new(2).ok_or(Error::UnsupportedBits).unwrap();
 
-        let updated_lst = update_or_create_status_list(Some(existing_lst), status_updates, 2)
+        let updated_lst = update_or_create_status_list(Some(existing_lst), status_updates, bits)
             .expect("Failed to update status list");
 
         let decoded = decode(&updated_lst).expect("Failed to decode base64");
