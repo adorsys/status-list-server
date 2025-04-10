@@ -1,6 +1,6 @@
 use crate::{
     model::{StatusEntry, StatusList, StatusListToken},
-    utils::{errors::Error, lst_gen::update_or_create_status_list, state::AppState},
+    utils::{bits_validation::BitFlag, errors::Error, lst_gen::update_or_create_status_list, state::AppState},
     web::handlers::status_list::error::StatusListError,
 };
 use axum::{
@@ -35,19 +35,21 @@ pub async fn publish_token_status(
         .as_ref()
         .ok_or(StatusListError::InternalServerError)?;
 
-    // Validate that bits is one of the allowed values (1, 2, 4, 8)
-    if ![1, 2, 4, 8].contains(&payload.bits) {
-        return Err(StatusListError::Generic(format!(
+    let bitflag = if let Some(bits) = BitFlag::new(payload.bits) {
+        Ok(bits)
+    } else {
+        Err(StatusListError::Generic(format!(
             "Invalid 'bits' value: {}. Allowed values are 1, 2, 4, 8.",
             payload.bits
-        )));
-    }
+        )))
+    };
+    let bits = bitflag?;
 
     // Generate the compressed status list; use empty encoding if no updates
     let lst = if payload.updates.is_empty() {
         base64url::encode([])
     } else {
-        update_or_create_status_list(None, payload.updates, payload.bits as usize).map_err(|e| {
+        update_or_create_status_list(None, payload.updates, bits).map_err(|e| {
             tracing::error!("lst_from failed: {:?}", e);
             match e {
                 Error::Generic(msg) => StatusListError::Generic(msg),
