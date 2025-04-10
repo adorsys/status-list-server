@@ -33,7 +33,7 @@ pub fn lst_from(status_updates: Vec<PublishStatus>, bits: usize) -> Result<Strin
     }
 
     let total_entries = (max_index as usize) + 1;
-    let bytes_needed = (total_entries * bits + 7) / 8;
+    let bytes_needed = (total_entries * bits + 7).div_ceil(8);
     let mut status_array = vec![0u8; bytes_needed];
 
     for update in status_updates {
