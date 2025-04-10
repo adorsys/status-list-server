@@ -11,11 +11,11 @@ pub mod migrations {
     #[async_trait::async_trait]
     impl MigratorTrait for Migrator {
         fn migrations() -> Vec<Box<dyn MigrationTrait>> {
-            vec![Box::new(m20230329_000001_create_tables::Migration)]
+            vec![Box::new(tables::Migration)]
         }
     }
 
-    pub mod m20230329_000001_create_tables {
+    pub mod tables {
         use super::*;
 
         #[derive(DeriveMigrationName)]

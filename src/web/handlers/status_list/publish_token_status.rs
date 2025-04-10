@@ -142,7 +142,68 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_successful_token_insertion() {
+    async fn test_publish_status_creates_token() {
+        let mock_db = MockDatabase::new(DatabaseBackend::Postgres);
+        let token_id = "token1";
+        let payload = create_test_token(
+            token_id,
+            vec![
+                PublishStatus {
+                    index: 0,
+                    status: Status::VALID,
+                },
+                PublishStatus {
+                    index: 1,
+                    status: Status::INVALID,
+                },
+            ],
+            2,
+        );
+        let status_list = StatusList {
+            bits: 2,
+            lst: lst_from(payload.updates.clone(), 2).unwrap(),
+        };
+        let status_list_value = serde_json::to_value(status_list).unwrap();
+        let new_token = StatusListToken {
+            list_id: token_id.to_string(),
+            exp: Some(
+                (SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs() as i32)
+                    .saturating_add(3600),
+            ),
+            iat: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_secs() as i32,
+            status_list: status_list_value,
+            sub: "issuer".to_string(),
+            ttl: Some("3600".to_string()),
+        };
+        let db_conn = Arc::new(
+            mock_db
+                .append_query_results::<status_list_tokens::Model, Vec<_>, _>(vec![
+                    vec![],                  // find_one_by in handler returns None
+                    vec![new_token.clone()], // insert_one return
+                ])
+                .into_connection(),
+        );
+
+        let app_state = AppState {
+            credential_repository: Arc::new(SeaOrmStore::new(db_conn.clone())),
+            status_list_token_repository: Arc::new(SeaOrmStore::new(db_conn)),
+        };
+
+        let response = publish_token_status(State(app_state), Json(payload))
+            .await
+            .unwrap()
+            .into_response();
+        assert_eq!(response.status(), StatusCode::CREATED);
+    }
+
+    #[tokio::test]
+    async fn test_token_is_stored_after_publish() {
         let mock_db = MockDatabase::new(DatabaseBackend::Postgres);
         let token_id = "token1";
         let payload = create_test_token(
@@ -196,12 +257,12 @@ mod tests {
             status_list_token_repository: Arc::new(SeaOrmStore::new(db_conn)),
         };
 
-        let response = publish_token_status(State(app_state.clone()), Json(payload))
+        // Perform the insertion
+        let _ = publish_token_status(State(app_state.clone()), Json(payload))
             .await
-            .unwrap()
-            .into_response();
-        assert_eq!(response.status(), StatusCode::CREATED);
+            .unwrap();
 
+        // Verify the token is stored
         let result = app_state
             .status_list_token_repository
             .find_one_by(token_id.to_string())
