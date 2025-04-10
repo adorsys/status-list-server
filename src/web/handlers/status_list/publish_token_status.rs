@@ -1,6 +1,7 @@
 use crate::{
     model::{StatusList, StatusListToken},
     utils::{
+        bits_validation::BitFlag,
         errors::Error,
         lst_gen::{lst_from, PublishStatus},
         state::AppState,
@@ -39,19 +40,21 @@ pub async fn publish_token_status(
         .as_ref()
         .ok_or(StatusListError::InternalServerError)?;
 
-    // Validate that bits is one of the allowed values (1, 2, 4, 8)
-    if ![1, 2, 4, 8].contains(&payload.bits) {
-        return Err(StatusListError::Generic(format!(
+    let bitflag = if let Some(bits) = BitFlag::new(payload.bits) {
+        Ok(bits)
+    } else {
+        Err(StatusListError::Generic(format!(
             "Invalid 'bits' value: {}. Allowed values are 1, 2, 4, 8.",
             payload.bits
-        )));
-    }
+        )))
+    };
+    let bitflag = bitflag?;
 
     // Generate the compressed status list; use empty encoding if no updates
     let lst = if payload.updates.is_empty() {
         base64url::encode([])
     } else {
-        lst_from(payload.updates, payload.bits as usize).map_err(|e| {
+        lst_from(payload.updates, bitflag).map_err(|e| {
             tracing::error!("lst_from failed: {:?}", e);
             match e {
                 Error::Generic(msg) => StatusListError::Generic(msg),
