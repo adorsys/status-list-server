@@ -1,6 +1,7 @@
 use crate::{
     model::{StatusList, StatusListToken},
     utils::{
+        bits_validation::BitFlag,
         errors::Error,
         lst_gen::{lst_from, PublishStatus},
         state::AppState,
@@ -35,19 +36,21 @@ pub async fn publish_token_status(
 ) -> Result<impl IntoResponse, StatusListError> {
     let store = &appstate.status_list_token_repository;
 
-    // Validate that bits is one of the allowed values (1, 2, 4, 8)
-    if ![1, 2, 4, 8].contains(&payload.bits) {
-        return Err(StatusListError::Generic(format!(
+    let bitflag = if let Some(bits) = BitFlag::new(payload.bits) {
+        Ok(bits)
+    } else {
+        Err(StatusListError::Generic(format!(
             "Invalid 'bits' value: {}. Allowed values are 1, 2, 4, 8.",
             payload.bits
-        )));
-    }
+        )))
+    };
+    let bitflag = bitflag?;
 
     // Generate the compressed status list; use empty encoding if no updates
     let lst = if payload.updates.is_empty() {
         base64url::encode([])
     } else {
-        lst_from(payload.updates, payload.bits as usize).map_err(|e| {
+        lst_from(payload.updates, bitflag).map_err(|e| {
             tracing::error!("lst_from failed: {:?}", e);
             match e {
                 Error::Generic(msg) => StatusListError::Generic(msg),
@@ -159,9 +162,10 @@ mod tests {
             ],
             2,
         );
+        let bits = BitFlag::new(2).unwrap();
         let status_list = StatusList {
             bits: 2,
-            lst: lst_from(payload.updates.clone(), 2).unwrap(),
+            lst: lst_from(payload.updates.clone(), bits).unwrap(),
         };
         let status_list_value = serde_json::to_value(status_list).unwrap();
         let new_token = StatusListToken {
@@ -220,9 +224,11 @@ mod tests {
             ],
             2,
         );
+        let bits = BitFlag::new(2).unwrap();
+
         let status_list = StatusList {
             bits: 2,
-            lst: lst_from(payload.updates.clone(), 2).unwrap(),
+            lst: lst_from(payload.updates.clone(), bits).unwrap(),
         };
         let status_list_value = serde_json::to_value(status_list).unwrap();
         let new_token = StatusListToken {
@@ -290,13 +296,15 @@ mod tests {
             }],
             1,
         );
+        let bits = BitFlag::new(2).unwrap();
+
         let existing_token = StatusListToken {
             list_id: token_id.to_string(),
             exp: None,
             iat: 1234567890,
             status_list: serde_json::to_value(StatusList {
                 bits: 1,
-                lst: lst_from(payload.updates.clone(), 1).unwrap(),
+                lst: lst_from(payload.updates.clone(), bits).unwrap(),
             })
             .unwrap(),
             sub: "issuer".to_string(),
@@ -420,9 +428,11 @@ mod tests {
             }],
             1,
         );
+        let bits = BitFlag::new(2).unwrap();
+
         let status_list = StatusList {
             bits: 1,
-            lst: lst_from(payload.updates.clone(), 1).unwrap(),
+            lst: lst_from(payload.updates.clone(), bits).unwrap(),
         };
         let status_list_value = serde_json::to_value(status_list).unwrap();
         let new_token = StatusListToken {

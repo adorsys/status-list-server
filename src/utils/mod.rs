@@ -1,3 +1,4 @@
+pub mod bits_validation;
 pub mod errors;
 pub mod lst_gen;
 pub mod state;
