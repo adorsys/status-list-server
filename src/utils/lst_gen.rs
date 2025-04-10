@@ -38,6 +38,7 @@ pub fn lst_from(status_updates: Vec<PublishStatus>, bits: usize) -> Result<Strin
     let total_entries = (max_index as usize) + 1;
 
     // Calculate the number of bytes needed to store all statuses
+    #[allow(clippy::manual_div_ceil)]
     let bytes_needed = (total_entries * bits + 7) / 8;
     let mut status_array = vec![0u8; bytes_needed];
 
