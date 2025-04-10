@@ -1,40 +1,48 @@
-use ed25519_dalek::{
-    pkcs8::{spki::der::pem::LineEnding, EncodePrivateKey},
-    SigningKey, VerifyingKey, SECRET_KEY_LENGTH,
+use p256::{
+    ecdsa::SigningKey,
+    pkcs8::{EncodePrivateKey, LineEnding},
 };
-use rand::{rngs::OsRng, RngCore};
-use serde::{Deserialize, Serialize};
+use rand::{rngs::OsRng, TryRngCore};
 
 use super::errors::Error;
 
+const SECRET_KEY_LENGTH: usize = 32;
+
 /// A keypair for signing and verifying JWT
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug)]
 pub struct Keypair {
     repr: KeyRepr,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug)]
 struct KeyRepr {
-    signing_key: SigningKey,
-    verifying_key: VerifyingKey,
+    key: SigningKey,
 }
 
 impl Keypair {
     /// Generate a new random keypair
     pub fn generate() -> Result<Self, Error> {
         let mut seed = [0u8; SECRET_KEY_LENGTH];
-        OsRng.try_fill_bytes(&mut seed).map_err(|err| {
-            tracing::error!("Failed to generate random bytes: {err:?}");
+        const MAX_ATTEMPTS: u8 = 3;
+        // Try up to 3 times to generate a random seed as a safeguard against bad RNG
+        for attempt in 0..MAX_ATTEMPTS {
+            match OsRng.try_fill_bytes(&mut seed) {
+                Ok(()) => break,
+                Err(err) => {
+                    if attempt == MAX_ATTEMPTS - 1 {
+                        tracing::error!("Failed to generate random bytes: {err:?}");
+                        return Err(Error::KeyGenFailed);
+                    }
+                }
+            }
+        }
+        let key = SigningKey::from_slice(&seed).map_err(|err| {
+            tracing::error!("Failed to create signing key: {err:?}");
             Error::KeyGenFailed
         })?;
-        let signing_key = SigningKey::from_bytes(&seed);
-        let verifying_key = signing_key.verifying_key();
 
         let keypair = Keypair {
-            repr: KeyRepr {
-                signing_key,
-                verifying_key,
-            },
+            repr: KeyRepr { key },
         };
         Ok(keypair)
     }
@@ -42,10 +50,10 @@ impl Keypair {
     /// Convert the private key to a pkcs8 PEM string
     pub fn to_pkcs8_pem(&self) -> Result<String, Error> {
         self.repr
-            .signing_key
+            .key
             .to_pkcs8_pem(LineEnding::default())
             .map_err(|err| {
-                tracing::error!("Failed to convert keypair to pkcs8 pem: {err:?}");
+                tracing::error!("Failed to convert signing key to PEM: {err:?}");
                 Error::PemGenFailed
             })
             .map(|pem| pem.to_string())
@@ -60,12 +68,12 @@ impl Keypair {
 #[cfg(test)]
 mod test {
     use super::*;
-    use ed25519_dalek::pkcs8::EncodePublicKey;
     use jsonwebtoken::{decode, encode, DecodingKey, EncodingKey, Header, Validation};
+    use p256::pkcs8::EncodePublicKey;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
-    fn test() {
+    fn test_validate_generated_signing_key() {
         #[derive(Debug, serde::Deserialize, serde::Serialize)]
         struct Claims {
             exp: usize,
@@ -74,12 +82,12 @@ mod test {
         let keypair = Keypair::generate().unwrap();
 
         let header = Header {
-            alg: jsonwebtoken::Algorithm::EdDSA,
+            alg: jsonwebtoken::Algorithm::ES256,
             ..Default::default()
         };
 
         let encoding_key =
-            EncodingKey::from_ed_pem(&keypair.to_pkcs8_pem_bytes().unwrap()).unwrap();
+            EncodingKey::from_ec_pem(&keypair.to_pkcs8_pem_bytes().unwrap()).unwrap();
 
         let exp_time = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -92,15 +100,16 @@ mod test {
 
         let public_key_pem = keypair
             .repr
-            .verifying_key
+            .key
+            .verifying_key()
             .to_public_key_pem(LineEnding::default())
             .unwrap();
-        let decoding_key = DecodingKey::from_ed_pem(public_key_pem.as_bytes()).unwrap();
+        let decoding_key = DecodingKey::from_ec_pem(public_key_pem.as_bytes()).unwrap();
 
         let decoded = decode::<Claims>(
             &token,
             &decoding_key,
-            &Validation::new(jsonwebtoken::Algorithm::EdDSA),
+            &Validation::new(jsonwebtoken::Algorithm::ES256),
         );
 
         assert!(decoded.is_ok(), "Decoding failed: {:?}", decoded.err());
