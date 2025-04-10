@@ -48,13 +48,13 @@ pub async fn get_status_list(
         })?
         .ok_or(StatusListError::StatusListNotFound)?;
 
-    // TODO : add function to construct the status list token from this status list before sending it out
-    let status_list = status_claims.status_list;
+    // TODO : add function to encode the status list before returning it
+    let status_list_token = status_claims;
 
     Ok((
         StatusCode::OK,
         [(header::CONTENT_TYPE, STATUS_LISTS_HEADER_JWT)],
-        Json(status_list),
+        Json(status_list_token),
     )
         .into_response())
 }
