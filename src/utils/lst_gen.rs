@@ -5,7 +5,7 @@ use std::io::Write;
 
 use crate::model::Status;
 
-use super::errors::Error;
+use super::{bits_validation::BitFlag, errors::Error};
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct PublishStatus {
@@ -13,15 +13,13 @@ pub struct PublishStatus {
     pub status: Status,
 }
 
-pub fn lst_from(status_updates: Vec<PublishStatus>, bits: usize) -> Result<String, Error> {
+pub fn lst_from(status_updates: Vec<PublishStatus>, bits: BitFlag) -> Result<String, Error> {
     if status_updates.is_empty() {
         return Err(Error::Generic("No status updates provided".to_string()));
     }
 
-    if ![1, 2, 4, 8].contains(&bits) {
-        return Err(Error::UnsupportedBits);
-    }
-
+    let bits = bits.value() as usize;
+    // Determine the highest index to set the size of the status array
     let max_index = status_updates
         .iter()
         .map(|update| update.index)
@@ -33,7 +31,7 @@ pub fn lst_from(status_updates: Vec<PublishStatus>, bits: usize) -> Result<Strin
     }
 
     let total_entries = (max_index as usize) + 1;
-    let bytes_needed = (total_entries * bits + 7).div_ceil(8);
+    let bytes_needed = (total_entries * bits + 7) /8;
     let mut status_array = vec![0u8; bytes_needed];
 
     for update in status_updates {
@@ -98,8 +96,9 @@ mod tests {
                 status: Status::INVALID,
             },
         ];
+        let bits = BitFlag::new(1).ok_or(Error::UnsupportedBits).unwrap();
 
-        let result = lst_from(updates, 1).unwrap();
+        let result = lst_from(updates, bits).unwrap();
         let decoded = base64url::decode(&result).unwrap();
         let mut decoder = flate2::read::ZlibDecoder::new(&*decoded);
         let mut decompressed = Vec::new();
@@ -120,8 +119,8 @@ mod tests {
                 status: Status::INVALID,
             },
         ];
-
-        let result = lst_from(updates, 1).unwrap();
+        let bits = BitFlag::new(1).ok_or(Error::UnsupportedBits).unwrap();
+        let result = lst_from(updates, bits).unwrap();
         let decoded = base64url::decode(&result).unwrap();
         let mut decoder = flate2::read::ZlibDecoder::new(&*decoded);
         let mut decompressed = Vec::new();
@@ -151,7 +150,8 @@ mod tests {
             },
         ];
 
-        let result = lst_from(updates, 2).unwrap();
+        let bits = BitFlag::new(2).ok_or(Error::UnsupportedBits).unwrap();
+        let result = lst_from(updates, bits).unwrap();
         let decoded = base64url::decode(&result).unwrap();
         let mut decoder = flate2::read::ZlibDecoder::new(&*decoded);
         let mut decompressed = Vec::new();
@@ -163,8 +163,8 @@ mod tests {
     #[test]
     fn test_lst_from_empty_updates() {
         let updates = vec![];
-
-        let result = lst_from(updates, 1);
+        let bits = BitFlag::new(1).ok_or(Error::UnsupportedBits).unwrap();
+        let result = lst_from(updates, bits);
         assert!(matches!(result, Err(Error::Generic(_))));
     }
 
@@ -174,19 +174,8 @@ mod tests {
             index: -1,
             status: Status::VALID,
         }];
-
-        let result = lst_from(updates, 1);
+        let bits = BitFlag::new(1).ok_or(Error::UnsupportedBits).unwrap();
+        let result = lst_from(updates, bits);
         assert!(matches!(result, Err(Error::InvalidIndex)));
-    }
-
-    #[test]
-    fn test_lst_from_unsupported_bits() {
-        let updates = vec![PublishStatus {
-            index: 0,
-            status: Status::VALID,
-        }];
-
-        let result = lst_from(updates, 3);
-        assert!(matches!(result, Err(Error::UnsupportedBits)));
     }
 }
