@@ -51,10 +51,10 @@ By default, the server runs on `http://localhost:8000`. You can modify the port 
   
 ### Publish Credentials
 - **Endpoint**: `POST /credentials/`
-- **Description**: allow issuers to publish their credentials (`public_key`) and identifiers used to later for authorisation verification
+- **Description**: allow issuers to publish their credentials (`public_key` which is the pem base64 encoded form) and identifiers used to later for authorisation verification
 - **Request Body**
   ```json
-  {"issuer": "<value>", "public_key": "<public_key>", "alg": "<alg>"}
+  {"issuer": "<value>", "public_key": "<public_key.pem>", "alg": "<alg>"}
   ```
  
 ### Publish statuslist
