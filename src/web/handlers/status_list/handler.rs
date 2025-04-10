@@ -11,7 +11,10 @@ use serde_json::Value;
 
 use crate::{
     model::{StatusEntry, StatusList, StatusListToken},
-    utils::{errors::Error, lst_gen::update_or_create_status_list, state::AppState},
+    utils::{
+        bits_validation::BitFlag, errors::Error, lst_gen::update_or_create_status_list,
+        state::AppState,
+    },
 };
 
 use super::{constants::STATUS_LISTS_HEADER_JWT, error::StatusListError};
@@ -140,11 +143,20 @@ pub async fn update_statuslist(
 
     let lst;
     if let Some(status_list_token) = status_list_token {
-        let bits = status_list_token.status_list.bits as usize;
+        let bits = status_list_token.status_list.bits;
         lst = Some(status_list_token.status_list.lst);
 
         // Apply updates
-
+        let bits = match BitFlag::new(bits as u8) {
+            Some(bits) => bits,
+            None => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    StatusListError::UnsupportedBits.to_string(),
+                )
+                    .into_response();
+            }
+        };
         let updated_lst = match update_or_create_status_list(lst, updates, bits) {
             Ok(update_lst) => update_lst,
             Err(e) => {
@@ -356,8 +368,8 @@ mod test {
                 status: Status::SUSPENDED,
             },
         ];
-
-        let updated_lst = update_or_create_status_list(Some(existing_lst), status_updates, 8)
+        let bits = BitFlag::new(8).unwrap();
+        let updated_lst = update_or_create_status_list(Some(existing_lst), status_updates, bits)
             .expect("Failed to update status list");
 
         let decoded = decode(&updated_lst).expect("Failed to decode base64");
@@ -403,8 +415,9 @@ mod test {
                 status: Status::VALID,
             }, // Add index 8 as VALID
         ];
+        let bits = BitFlag::new(2).unwrap();
 
-        let updated_lst = update_or_create_status_list(Some(existing_list), status_updates, 2)
+        let updated_lst = update_or_create_status_list(Some(existing_list), status_updates, bits)
             .expect("Failed to update status list");
 
         let decoded_lst = decode(&updated_lst).expect("Failed to decode base64");

@@ -1,6 +1,9 @@
 use crate::{
     model::{StatusEntry, StatusList, StatusListToken},
-    utils::{bits_validation::BitFlag, errors::Error, lst_gen::update_or_create_status_list, state::AppState},
+    utils::{
+        bits_validation::BitFlag, errors::Error, lst_gen::update_or_create_status_list,
+        state::AppState,
+    },
     web::handlers::status_list::error::StatusListError,
 };
 use axum::{
