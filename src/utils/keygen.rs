@@ -66,7 +66,7 @@ impl Keypair {
 }
 
 #[cfg(test)]
-mod test {
+mod tests {
     use super::*;
     use jsonwebtoken::{decode, encode, DecodingKey, EncodingKey, Header, Validation};
     use p256::pkcs8::EncodePublicKey;
