@@ -46,9 +46,10 @@ pub fn update_or_create_status_list(
 
     // Ensure the array is large enough to apply all updates
     if let Some(max_update_index) = status_updates.iter().map(|u| u.index).max() {
-        let required_len = ((max_update_index as usize + 1) * bits + 7) / 8;
-        if status_array.len() < required_len {
-            status_array.resize(required_len, 0);
+        let required_len = (max_update_index as usize + 1) * bits + 7;
+        let len = required_len / 8;
+        if status_array.len() < len {
+            status_array.resize(len, 0);
         }
     }
     for update in status_updates {
