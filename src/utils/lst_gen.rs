@@ -199,7 +199,7 @@ mod tests {
 
     #[test]
     fn test_lst_from_unsupported_bits() {
-        let _updates = vec![StatusEntry {
+        let _updates = [StatusEntry {
             index: 0,
             status: Status::VALID,
         }];
