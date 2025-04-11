@@ -6,11 +6,15 @@ use axum::{
     response::IntoResponse,
     Json,
 };
+
 use serde_json::Value;
 
 use crate::{
-    model::{Status, StatusList, StatusListToken, StatusUpdate},
-    utils::state::AppState,
+    model::{StatusEntry, StatusList, StatusListToken},
+    utils::{
+        bits_validation::BitFlag, errors::Error, lst_gen::update_or_create_status_list,
+        state::AppState,
+    },
 };
 
 use super::{constants::STATUS_LISTS_HEADER_JWT, error::StatusListError};
@@ -81,6 +85,14 @@ pub async fn update_statuslist(
         }
     };
 
+    if updates.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            StatusListError::Generic("No status updates provided".to_string()),
+        )
+            .into_response();
+    }
+
     let updates_json = match serde_json::to_vec(updates) {
         Ok(json) => json,
         Err(e) => {
@@ -89,7 +101,7 @@ pub async fn update_statuslist(
         }
     };
 
-    let updates: Vec<StatusUpdate> = match serde_json::from_slice(&updates_json) {
+    let updates: Vec<StatusEntry> = match serde_json::from_slice(&updates_json) {
         Ok(updates) => updates,
         Err(e) => {
             tracing::error!("Malformed request body: {e}");
@@ -128,17 +140,29 @@ pub async fn update_statuslist(
                 .into_response();
         }
     };
+
+    let lst;
     if let Some(status_list_token) = status_list_token {
-        let lst = status_list_token.status_list.lst.clone();
+        let bits = status_list_token.status_list.bits;
+        lst = Some(status_list_token.status_list.lst);
 
         // Apply updates
-
-        let updated_lst = match update_status(&lst, updates) {
-            Ok(updated_lst) => updated_lst,
+        let bits = match BitFlag::new(bits as u8) {
+            Some(bits) => bits,
+            None => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    StatusListError::UnsupportedBits.to_string(),
+                )
+                    .into_response();
+            }
+        };
+        let updated_lst = match update_or_create_status_list(lst, updates, bits) {
+            Ok(update_lst) => update_lst,
             Err(e) => {
                 tracing::error!("Status update failed: {:?}", e);
                 return match e {
-                    StatusListError::InvalidIndex => {
+                    Error::InvalidIndex => {
                         (StatusCode::BAD_REQUEST, "Invalid index").into_response()
                     }
                     _ => (
@@ -191,42 +215,13 @@ pub async fn update_statuslist(
     }
 }
 
-fn encode_lst(bits: Vec<u8>) -> String {
-    let encoded = base64url::encode(
-        bits.iter()
-            .flat_map(|&n| n.to_be_bytes())
-            .collect::<Vec<u8>>(),
-    );
-    encoded
-}
-
-fn update_status(lst: &str, updates: Vec<StatusUpdate>) -> Result<String, StatusListError> {
-    let mut decoded_lst =
-        base64url::decode(lst).map_err(|e| StatusListError::Generic(e.to_string()))?;
-
-    for update in updates {
-        let index = update.index as usize;
-        if index >= decoded_lst.len() {
-            return Err(StatusListError::InvalidIndex);
-        }
-
-        decoded_lst[index] = match update.status {
-            Status::VALID => 0,
-            Status::INVALID => 1,
-            Status::SUSPENDED => 2,
-            Status::APPLICATIONSPECIFIC => 3,
-        };
-    }
-
-    Ok(encode_lst(decoded_lst))
-}
-
 #[cfg(test)]
 mod test {
 
     use super::*;
     use std::{
         collections::HashMap,
+        io::{Read, Write},
         sync::{Arc, RwLock},
     };
 
@@ -236,26 +231,33 @@ mod test {
         routing::{get, put},
         Router,
     };
-    use base64url::encode;
+    use base64url::{decode, encode};
+    use flate2::{read::ZlibDecoder, write::ZlibEncoder, Compression};
     use hyper::StatusCode;
     use serde_json::json;
     use tower::ServiceExt;
 
     use crate::{
-        model::{Credentials, StatusList, StatusListToken},
+        model::{Credentials, Status, StatusList, StatusListToken},
         test_resources::setup::test_setup,
         utils::state::AppState,
     };
 
-    pub fn setup() -> (AppState, Arc<RwLock<HashMap<String, StatusListToken>>>) {
+    pub fn setup(bits: i8) -> (AppState, Arc<RwLock<HashMap<String, StatusListToken>>>) {
         let mut mock_statustk_repo = HashMap::new();
         let mock_credential_repo: HashMap<String, Credentials> = HashMap::new();
 
-        let status = vec![2, 1, 3, 1];
-        let lst = encode(status);
+        let status = vec![0b11111111, 0b01101110];
+        // compress status
+        let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
+        encoder.write_all(&status).unwrap();
+        let compressed_status = encoder.finish().unwrap();
+
+        // encode status lst
+        let lst = encode(compressed_status);
 
         let list_id = "list_id".to_string();
-        let existing_status_list = StatusList { bits: 1, lst };
+        let existing_status_list = StatusList { bits, lst };
 
         let existing_token = StatusListToken::new(
             list_id.clone(),
@@ -274,12 +276,13 @@ mod test {
             Arc::new(RwLock::new(mock_credential_repo)),
             shared_statustk_repo.clone(),
         );
+
         (appstate, shared_statustk_repo)
     }
 
     #[tokio::test]
     async fn test_update_statuslist() {
-        let appstate = setup();
+        let appstate = setup(1);
 
         let app = Router::new()
             .route("/statuslist/{issuer}", put(update_statuslist))
@@ -289,11 +292,16 @@ mod test {
         let body = json!({
         "updates": [
             { "index": 1, "status": "VALID" },
-            { "index": 3, "status": "INVALID" }
+            { "index": 8, "status": "VALID" }
             ]
         });
-        let updated_lst = vec![2, 0, 3, 1];
-        let expected_lst = encode(updated_lst);
+        let updated_lst = vec![0b11111101, 0b01101110];
+
+        let mut encoder = ZlibEncoder::new(Vec::new(), Compression::fast());
+        encoder.write_all(&updated_lst).unwrap();
+        let compressed_status = encoder.finish().unwrap();
+
+        let expected_lst = encode(compressed_status);
 
         let list_id = "list_id".to_string();
         let request = Request::builder()
@@ -318,13 +326,117 @@ mod test {
             .lst
             .clone();
 
+        // decode lst
+        let decoded_lst = base64url::decode(&shared_lst).unwrap();
+
+        let mut decompressed_lst = ZlibDecoder::new(&*decoded_lst);
+        let mut decompressed_array = vec![];
+        decompressed_lst
+            .read_to_end(&mut decompressed_array)
+            .unwrap();
+
         // assert the lst has been updated
         assert_eq!(shared_lst, expected_lst);
     }
 
+    #[test]
+    fn test_update_status_with_bits_set_to_8() {
+        let original_status_array = vec![
+            0b0000_0000,
+            0b0000_0001,
+            0b0000_0010,
+            0b0000_0011,
+            0b0000_0000,
+            0b0000_0000,
+            0b0000_0000,
+            0b0000_0000,
+        ];
+
+        let mut encoder = ZlibEncoder::new(Vec::new(), Compression::fast());
+        encoder.write_all(&original_status_array).unwrap();
+        let compressed_status = encoder.finish().expect("Failed to finish compression");
+        let existing_lst = base64url::encode(compressed_status);
+
+        // Step 2: Define new status updates
+        let status_updates = vec![
+            StatusEntry {
+                index: 4,
+                status: Status::INVALID,
+            },
+            StatusEntry {
+                index: 7,
+                status: Status::SUSPENDED,
+            },
+        ];
+        let bits = BitFlag::new(8).unwrap();
+        let updated_lst = update_or_create_status_list(Some(existing_lst), status_updates, bits)
+            .expect("Failed to update status list");
+
+        let decoded = decode(&updated_lst).expect("Failed to decode base64");
+        let mut decoder = ZlibDecoder::new(&decoded[..]);
+        let mut updated_status_array = Vec::new();
+        decoder
+            .read_to_end(&mut updated_status_array)
+            .expect("Failed to decompress");
+
+        let expected_status_array = vec![
+            0b0000_0000,
+            0b0000_0001,
+            0b0000_0010,
+            0b0000_0011,
+            0b0000_0001,
+            0b0000_0000,
+            0b0000_0000,
+            0b0000_0010,
+        ];
+        assert_eq!(
+            updated_status_array, expected_status_array,
+            "The status array was not updated correctly"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_update_with_bits_value_set_to_2() {
+        let original_lst = vec![0b00011011, 0b00000000]; // Each byte holds 4 statuses (2 bits each)
+
+        // Compress and encode the original status list
+        let mut encoder = ZlibEncoder::new(Vec::new(), Compression::fast());
+        encoder.write_all(&original_lst).unwrap();
+        let compressed_data = encoder.finish().expect("Failed to finish compression");
+        let existing_list = base64url::encode(compressed_data);
+
+        let status_updates = vec![
+            StatusEntry {
+                index: 1,
+                status: Status::VALID,
+            }, // Change index 1 from INVALID to VALID
+            StatusEntry {
+                index: 8,
+                status: Status::VALID,
+            }, // Add index 8 as VALID
+        ];
+        let bits = BitFlag::new(2).unwrap();
+
+        let updated_lst = update_or_create_status_list(Some(existing_list), status_updates, bits)
+            .expect("Failed to update status list");
+
+        let decoded_lst = decode(&updated_lst).expect("Failed to decode base64");
+        let mut decompressed_lst = Vec::new();
+        ZlibDecoder::new(&decoded_lst[..])
+            .read_to_end(&mut decompressed_lst)
+            .unwrap();
+
+        let expected_lst = vec![0b00010011, 0b00000000, 0b00000000]; // Adjusted statuses with added index 8
+
+        assert_eq!(
+            decompressed_lst, expected_lst,
+            "The updated status list does not match the expected list."
+        );
+    }
+
     #[tokio::test]
     async fn test_malformed_body() {
-        let appstate = setup();
+        let appstate = setup(1);
 
         let app = Router::new()
             .route("/statuslist/{issuer}", put(update_statuslist))
@@ -382,7 +494,7 @@ mod test {
 
     #[tokio::test]
     async fn test_status_list_invalid_accept_header() {
-        let appstate = setup();
+        let appstate = setup(1);
 
         let mut headers = HeaderMap::new();
         headers.insert(header::ACCEPT, "application/json".parse().unwrap());
@@ -415,7 +527,7 @@ mod test {
 
     #[tokio::test]
     async fn test_status_list_not_found() {
-        let appstate = setup();
+        let appstate = setup(1);
 
         let mut headers = HeaderMap::new();
         headers.insert(header::ACCEPT, STATUS_LISTS_HEADER_JWT.parse().unwrap());
@@ -447,7 +559,7 @@ mod test {
 
     #[tokio::test]
     async fn test_status_list_success() {
-        let appstate = setup();
+        let appstate = setup(1);
 
         let mut headers = HeaderMap::new();
         headers.insert(header::ACCEPT, STATUS_LISTS_HEADER_JWT.parse().unwrap());

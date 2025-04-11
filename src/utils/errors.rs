@@ -20,4 +20,6 @@ pub enum Error {
     InvalidIndex,
     #[error("Unsupported bits value")]
     UnsupportedBits,
+    #[error("Failed to decode lst")]
+    DecodeError,
 }
