@@ -56,7 +56,6 @@ pub fn update_or_create_status_list(
         if update.index < 0 {
             return Err(Error::InvalidIndex);
         }
-
         let idx = update.index as usize;
         let bit_position = idx * bits;
         let byte_index = bit_position / 8;
