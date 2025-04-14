@@ -76,8 +76,8 @@
    - **Status List Token (JWT Example)**:
      ```json
      {
-       "iss": "https://statuslist.example.com",
-       "sub": "https://issuer.example.com",
+       "iss": "https://issuer.example.com",
+       "sub": "https://statuslist.example.com/statuslists/1",
        "status_list": {
          "bits": 1,
          "lst": "eyJhbGciOiJFUzI1NiIsImtpZCI6IjEyIiwidHlwIjoic3RhdHVzbGlzdCtqd3QifQ..."
