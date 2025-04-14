@@ -86,6 +86,10 @@ async fn build_status_list_token(
     }
 }
 
+fn issue_jwt(status_list: StatusList) -> Result<StatusListToken, StatusListError> {
+    Err(StatusListError::UnsupportedBits)
+}
+
 pub async fn update_statuslist(
     State(appstate): State<Arc<AppState>>,
     Path(list_id): Path<String>,

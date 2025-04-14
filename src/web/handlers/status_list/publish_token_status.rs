@@ -151,7 +151,7 @@ mod tests {
     async fn test_successful_token_insertion() {
         let cred_repo = Arc::new(RwLock::new(HashMap::new()));
         let status_list_repo = Arc::new(RwLock::new(HashMap::new()));
-        let app_state = test_setup(cred_repo, status_list_repo);
+        let app_state = test_setup(cred_repo, status_list_repo, None);
         let new_token_id = "token1";
         let payload = create_test_token(
             new_token_id,
@@ -197,7 +197,7 @@ mod tests {
     async fn test_token_conflict() {
         let cred_repo = Arc::new(RwLock::new(HashMap::new()));
         let status_list_repo = Arc::new(RwLock::new(HashMap::new()));
-        let app_state = test_setup(cred_repo, status_list_repo);
+        let app_state = test_setup(cred_repo, status_list_repo, None);
         let token_id = "token1";
         let payload = create_test_token(
             token_id,
@@ -226,7 +226,7 @@ mod tests {
     async fn test_empty_updates() {
         let cred_repo = Arc::new(RwLock::new(HashMap::new()));
         let status_list_repo = Arc::new(RwLock::new(HashMap::new()));
-        let app_state = test_setup(cred_repo, status_list_repo);
+        let app_state = test_setup(cred_repo, status_list_repo, None);
         let token_id = "token_empty";
         let payload = create_test_token(token_id, vec![], 1);
 
@@ -254,7 +254,7 @@ mod tests {
     async fn test_invalid_bits() {
         let cred_repo = Arc::new(RwLock::new(HashMap::new()));
         let status_list_repo = Arc::new(RwLock::new(HashMap::new()));
-        let app_state = test_setup(cred_repo, status_list_repo);
+        let app_state = test_setup(cred_repo, status_list_repo, None);
         let token_id = "token_invalid_bits";
         let payload = create_test_token(
             token_id,
@@ -275,7 +275,7 @@ mod tests {
     // Test error when repository is unavailable
     #[tokio::test]
     async fn test_repository_unavailable() {
-        let app_state = AppState { repository: None };
+        let app_state = AppState { repository: None, server_keypair: None };
         let token_id = "token_no_repo";
         let payload = create_test_token(
             token_id,
@@ -298,7 +298,7 @@ mod tests {
     async fn test_invalid_index() {
         let cred_repo = Arc::new(RwLock::new(HashMap::new()));
         let status_list_repo = Arc::new(RwLock::new(HashMap::new()));
-        let app_state = test_setup(cred_repo, status_list_repo);
+        let app_state = test_setup(cred_repo, status_list_repo, None);
         let token_id = "token_invalid_index";
         let payload = create_test_token(
             token_id,

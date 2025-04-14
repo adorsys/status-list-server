@@ -7,9 +7,12 @@ use crate::{
     },
     model::{Credentials, StatusListToken},
 };
+
+use super::keygen::Keypair;
 #[derive(Clone)]
 pub struct AppState {
     pub repository: Option<AppStateRepository>,
+    pub server_keypair: Option<Keypair>,
 }
 
 #[derive(Clone)]
@@ -38,11 +41,13 @@ pub async fn setup() -> AppState {
     let status_list_repo: Store<StatusListToken> = Store {
         table: Table::new(conn, "status_list_tokens".to_owned(), "list_id".to_owned()),
     };
+    let server_keypair = Keypair::generate().unwrap();
 
     AppState {
         repository: Some(AppStateRepository {
             credential_repository: Arc::new(credential_repo),
             status_list_token_repository: Arc::new(status_list_repo),
         }),
+        server_keypair: Some(server_keypair),
     }
 }
