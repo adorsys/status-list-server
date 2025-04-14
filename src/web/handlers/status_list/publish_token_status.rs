@@ -163,7 +163,7 @@ mod tests {
         let bits = BitFlag::new(2).unwrap();
         let status_list = StatusList {
             bits: 2,
-            lst: update_or_create_status_list(None,payload.updates.clone(), bits).unwrap(),
+            lst: update_or_create_status_list(None, payload.updates.clone(), bits).unwrap(),
         };
         let status_list_value = serde_json::to_value(status_list).unwrap();
         let new_token = StatusListToken {

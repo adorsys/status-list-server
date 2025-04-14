@@ -190,7 +190,7 @@ mod tests {
     fn test_lst_update_with_bits_2() {
         let original_status_array = vec![0b11001001, 0b01000100, 0b11111001];
 
-        let mut encoder = ZlibEncoder::new(Vec::new(), Compression::fast());
+        let mut encoder = ZlibEncoder::new(Vec::new(), Compression::best());
         encoder.write_all(&original_status_array).unwrap();
         let compressed_status = encoder.finish().expect("Failed to finish compression");
         let existing_lst = base64url::encode(compressed_status);
@@ -246,7 +246,7 @@ mod tests {
     fn test_lst_update_with_bits_4() {
         let original_status_array = vec![0b11001001, 0b01000100, 0b11111001];
 
-        let mut encoder = ZlibEncoder::new(Vec::new(), Compression::fast());
+        let mut encoder = ZlibEncoder::new(Vec::new(), Compression::best());
         encoder.write_all(&original_status_array).unwrap();
         let compressed_status = encoder.finish().expect("Failed to finish compression");
         let existing_lst = base64url::encode(compressed_status);
@@ -275,7 +275,6 @@ mod tests {
         );
     }
 
-
     #[test]
     fn test_lst_update_with_bits_8() {
         let original_status_array = vec![
@@ -289,7 +288,7 @@ mod tests {
             0b0000_0000,
         ];
 
-        let mut encoder = ZlibEncoder::new(Vec::new(), Compression::fast());
+        let mut encoder = ZlibEncoder::new(Vec::new(), Compression::best());
         encoder.write_all(&original_status_array).unwrap();
         let compressed_status = encoder.finish().expect("Failed to finish compression");
         let existing_lst = base64url::encode(compressed_status);
@@ -361,7 +360,7 @@ mod tests {
         let bits = BitFlag::new(3).ok_or(Error::UnsupportedBits);
         assert!(bits.is_err());
     }
-    
+
     #[test]
     fn test_status_update_with_max_index() {
         let original_status_array = vec![
@@ -375,7 +374,7 @@ mod tests {
             0b0000_0000,
         ];
 
-        let mut encoder = ZlibEncoder::new(Vec::new(), Compression::fast());
+        let mut encoder = ZlibEncoder::new(Vec::new(), Compression::best());
         encoder.write_all(&original_status_array).unwrap();
         let compressed_status = encoder.finish().expect("Failed to finish compression");
         let existing_lst = base64url::encode(compressed_status);
