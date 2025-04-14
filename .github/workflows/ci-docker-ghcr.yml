@@ -18,7 +18,7 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      # Set up Docker Buildx (only if multi-platform is needed; skip if not)
+      # Set up Docker Buildx
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
@@ -38,6 +38,7 @@ jobs:
           context: .
           file: ./Dockerfile
           push: true
+          platform: linux/amd64,linux/arm64
           tags: |
-            ghcr.io/${{ github.repository }}/status-list-server:${{ steps.meta.outputs.tags }}
+            ghcr.io/${{ github.repository }}:v1.0.0
             ghcr.io/${{ github.repository }}:${{ github.sha }}
