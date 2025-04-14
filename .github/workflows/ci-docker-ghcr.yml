@@ -3,7 +3,7 @@ name: Build and push images to GHCR
 on:
   push:
     branches:
-      - issue-38
+      - main
 
 jobs:
   build:
@@ -39,5 +39,5 @@ jobs:
           file: ./Dockerfile
           push: true
           tags: |
-            ghcr.io/${{ github.repository }}:latest
+            ghcr.io/${{ github.repository }}/status-list-server:${{ steps.meta.outputs.tags }}
             ghcr.io/${{ github.repository }}:${{ github.sha }}

@@ -1,1 +1,9 @@
 /target
+**/target/
+/helm
+.github/
+.cargo/
+.gitignore
+architecture.md
+README.md
+arc.png
