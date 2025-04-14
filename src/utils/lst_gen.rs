@@ -85,7 +85,7 @@ pub fn update_or_create_status_list(
     }
 
     // Compress and encode
-    let mut encoder = ZlibEncoder::new(Vec::new(), Compression::fast());
+    let mut encoder = ZlibEncoder::new(Vec::new(), Compression::best());
     encoder
         .write_all(&status_array)
         .map_err(|e| Error::Generic(e.to_string()))?;
@@ -103,7 +103,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_lst_from_valid_status_1_bit() {
+    fn test_lst_with_bits_1() {
         let updates = vec![
             StatusEntry {
                 index: 0,
@@ -126,11 +126,12 @@ mod tests {
     }
 
     #[test]
-    fn test_lst_from_invalid_status_1_bit() {
+    fn test_lst_update_with_bits_1_as_spec() {
+        let existing_byte_array = [0xb9, 0xa3];
         let updates = vec![
             StatusEntry {
                 index: 0,
-                status: Status::INVALID,
+                status: Status::VALID,
             },
             StatusEntry {
                 index: 1,
@@ -138,17 +139,25 @@ mod tests {
             },
         ];
         let bits = BitFlag::new(1).ok_or(Error::UnsupportedBits).unwrap();
-        let result = update_or_create_status_list(None, updates, bits).unwrap();
+        let mut encoder = ZlibEncoder::new(Vec::new(), Compression::best());
+        encoder.write_all(&existing_byte_array).unwrap();
+
+        let compressed_status = encoder.finish().expect("Failed to finish compression");
+        let existing_lst = base64url::encode(compressed_status);
+
+        assert_eq!(existing_lst, "eNrbuRgAAhcBXQ");
+
+        let result = update_or_create_status_list(Some(existing_lst), updates, bits).unwrap();
         let decoded = base64url::decode(&result).unwrap();
         let mut decoder = flate2::read::ZlibDecoder::new(&*decoded);
         let mut decompressed = Vec::new();
         decoder.read_to_end(&mut decompressed).unwrap();
 
-        assert_eq!(decompressed, vec![0b0000_0011]);
+        assert_eq!(decompressed, vec![0xba, 0xa3]);
     }
 
     #[test]
-    fn test_lst_from_mixed_status_2_bits() {
+    fn test_lst_from_with_bits_2() {
         let updates = vec![
             StatusEntry {
                 index: 0,
@@ -179,36 +188,97 @@ mod tests {
     }
 
     #[test]
-    fn test_lst_from_empty_updates() {
-        let updates = vec![];
-        let bits = BitFlag::new(1).ok_or(Error::UnsupportedBits).unwrap();
-        let result = update_or_create_status_list(None, updates, bits);
-        assert!(matches!(result, Err(Error::Generic(_))));
-    }
+    fn test_lst_update_with_bits_2() {
+        let original_status_array = vec![0b11001001, 0b01000100, 0b11111001];
 
-    #[test]
-    fn test_lst_from_invalid_index() {
-        let updates = vec![StatusEntry {
-            index: -1,
-            status: Status::VALID,
+        let mut encoder = ZlibEncoder::new(Vec::new(), Compression::fast());
+        encoder.write_all(&original_status_array).unwrap();
+        let compressed_status = encoder.finish().expect("Failed to finish compression");
+        let existing_lst = base64url::encode(compressed_status);
+
+        // Step 2: Define new status updates
+        let status_updates = vec![StatusEntry {
+            index: 4,
+            status: Status::INVALID,
         }];
-        let bits = BitFlag::new(1).ok_or(Error::UnsupportedBits).unwrap();
+        let bits = BitFlag::new(2).ok_or(Error::UnsupportedBits).unwrap();
 
-        let result = update_or_create_status_list(None, updates, bits);
-        assert!(matches!(result, Err(Error::InvalidIndex)));
+        let updated_lst = update_or_create_status_list(Some(existing_lst), status_updates, bits)
+            .expect("Failed to update status list");
+
+        let decoded = decode(&updated_lst).expect("Failed to decode base64");
+        let mut decoder = ZlibDecoder::new(&decoded[..]);
+        let mut updated_status_array = Vec::new();
+        decoder
+            .read_to_end(&mut updated_status_array)
+            .expect("Failed to decompress");
+
+        let expected_status_array = vec![0b11001001, 0b01000101, 0b11111001];
+        assert_eq!(
+            updated_status_array, expected_status_array,
+            "The status array was not updated correctly"
+        );
     }
 
     #[test]
-    fn test_lst_from_unsupported_bits() {
-        let _updates = [StatusEntry {
+    fn test_lst_from_with_bits_set_to_2_specs() {
+        let original_status_array = vec![0xc9, 0x44, 0xf9];
+
+        let mut encoder = ZlibEncoder::new(Vec::new(), Compression::best());
+        encoder.write_all(&original_status_array).unwrap();
+        let compressed_status = encoder.finish().expect("Failed to finish compression");
+        let existing_lst = base64url::encode(compressed_status);
+
+        assert_eq!(existing_lst, "eNo76fITAAPfAgc");
+
+        let status_updates = vec![StatusEntry {
             index: 0,
+            status: Status::INVALID,
+        }];
+
+        let bits = BitFlag::new(2).ok_or(Error::UnsupportedBits).unwrap();
+        let updated_lst = update_or_create_status_list(Some(existing_lst), status_updates, bits)
+            .expect("Failed to update status list");
+
+        assert_eq!(updated_lst, "eNo76fITAAPfAgc");
+    }
+
+    #[test]
+    fn test_lst_update_with_bits_4() {
+        let original_status_array = vec![0b11001001, 0b01000100, 0b11111001];
+
+        let mut encoder = ZlibEncoder::new(Vec::new(), Compression::fast());
+        encoder.write_all(&original_status_array).unwrap();
+        let compressed_status = encoder.finish().expect("Failed to finish compression");
+        let existing_lst = base64url::encode(compressed_status);
+
+        // Step 2: Define new status updates
+        let status_updates = vec![StatusEntry {
+            index: 4,
             status: Status::VALID,
         }];
-        let bits = BitFlag::new(3).ok_or(Error::UnsupportedBits);
-        assert!(bits.is_err());
+        let bits = BitFlag::new(4).ok_or(Error::UnsupportedBits).unwrap();
+
+        let updated_lst = update_or_create_status_list(Some(existing_lst), status_updates, bits)
+            .expect("Failed to update status list");
+
+        let decoded = decode(&updated_lst).expect("Failed to decode base64");
+        let mut decoder = ZlibDecoder::new(&decoded[..]);
+        let mut updated_status_array = Vec::new();
+        decoder
+            .read_to_end(&mut updated_status_array)
+            .expect("Failed to decompress");
+
+        let expected_status_array = vec![0b11001001, 0b01000100, 0b11110000];
+        assert_eq!(
+            updated_status_array, expected_status_array,
+            "The status array was not updated correctly"
+        );
     }
+
+
     #[test]
-    fn test_status_update() {
+    fn test_lst_update_with_bits_8() {
         let original_status_array = vec![
             0b0000_0000,
             0b0000_0001,
@@ -264,6 +334,36 @@ mod tests {
     }
 
     #[test]
+    fn test_lst_from_empty_updates() {
+        let updates = vec![];
+        let bits = BitFlag::new(1).ok_or(Error::UnsupportedBits).unwrap();
+        let result = update_or_create_status_list(None, updates, bits);
+        assert!(matches!(result, Err(Error::Generic(_))));
+    }
+
+    #[test]
+    fn test_lst_from_invalid_index() {
+        let updates = vec![StatusEntry {
+            index: -1,
+            status: Status::VALID,
+        }];
+        let bits = BitFlag::new(1).ok_or(Error::UnsupportedBits).unwrap();
+
+        let result = update_or_create_status_list(None, updates, bits);
+        assert!(matches!(result, Err(Error::InvalidIndex)));
+    }
+
+    #[test]
+    fn test_lst_from_unsupported_bits() {
+        let _updates = [StatusEntry {
+            index: 0,
+            status: Status::VALID,
+        }];
+        let bits = BitFlag::new(3).ok_or(Error::UnsupportedBits);
+        assert!(bits.is_err());
+    }
+    
+    #[test]
     fn test_status_update_with_max_index() {
         let original_status_array = vec![
             0b0000_0000,
@@ -313,39 +413,6 @@ mod tests {
             0b0000_0000,
             0b0000_0001,
         ];
-        assert_eq!(
-            updated_status_array, expected_status_array,
-            "The status array was not updated correctly"
-        );
-    }
-
-    #[test]
-    fn test_update_status_with_bits_set_to_2() {
-        let original_status_array = vec![0b11001001, 0b01000100, 0b11111001];
-
-        let mut encoder = ZlibEncoder::new(Vec::new(), Compression::fast());
-        encoder.write_all(&original_status_array).unwrap();
-        let compressed_status = encoder.finish().expect("Failed to finish compression");
-        let existing_lst = base64url::encode(compressed_status);
-
-        // Step 2: Define new status updates
-        let status_updates = vec![StatusEntry {
-            index: 4,
-            status: Status::INVALID,
-        }];
-        let bits = BitFlag::new(2).ok_or(Error::UnsupportedBits).unwrap();
-
-        let updated_lst = update_or_create_status_list(Some(existing_lst), status_updates, bits)
-            .expect("Failed to update status list");
-
-        let decoded = decode(&updated_lst).expect("Failed to decode base64");
-        let mut decoder = ZlibDecoder::new(&decoded[..]);
-        let mut updated_status_array = Vec::new();
-        decoder
-            .read_to_end(&mut updated_status_array)
-            .expect("Failed to decompress");
-
-        let expected_status_array = vec![0b11001001, 0b01000101, 0b11111001];
         assert_eq!(
             updated_status_array, expected_status_array,
             "The status array was not updated correctly"
