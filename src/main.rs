@@ -1,5 +1,9 @@
-use axum::routing::post;
-use axum::{http::Method, response::IntoResponse, routing::get, Router};
+use axum::{
+    http::Method,
+    response::IntoResponse,
+    routing::{get, post},
+    Router,
+};
 use dotenvy::dotenv;
 use status_list_server::utils::state::setup;
 use status_list_server::web::handlers::status_list::publish_token_status::publish_token_status;
@@ -19,12 +23,10 @@ async fn welcome() -> impl IntoResponse {
 #[tokio::main]
 async fn main() {
     dotenv().ok();
-
-    // Enable logging
     config_tracing();
 
     let state = setup().await;
-    // cors Layer
+
     let cors = CorsLayer::new()
         .allow_methods([Method::GET, Method::POST, Method::OPTIONS])
         .allow_origin(Any)
@@ -50,7 +52,6 @@ async fn main() {
 }
 
 fn config_tracing() {
-    // Enable errors backtrace
     if std::env::var("RUST_LIB_BACKTRACE").is_err() {
         std::env::set_var("RUST_LIB_BACKTRACE", "1")
     }
