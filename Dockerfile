@@ -10,7 +10,7 @@ COPY Cargo.toml Cargo.lock ./
 # Create dummy main.rs to pre-download dependencies
 # This allows caching dependencies separate from our source code changes
 RUN mkdir src && echo "fn main() {}" > src/main.rs && \
-    cargo build --release  # Build dependencies in release mode
+    cargo build --release
 
 # Copy actual source code (this happens after dependency caching)
 COPY src ./src
@@ -21,7 +21,7 @@ RUN cargo build --release && \
     ls -lh target/release/
 
 # Stage 2: Runtime - Create minimal production image
-FROM debian:buster-slim
+FROM debian:bookworm-slim
 
 # Set working directory in the runtime container
 WORKDIR /app
