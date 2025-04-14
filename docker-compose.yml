@@ -26,7 +26,7 @@ services:
       dockerfile: Dockerfile
     container_name: status-list-server
     ports:
-      - "9090:8080"
+      - "9090:8000"
     environment:
       - RUST_LOG=info
       - DATABASE_URL=postgres://postgres:postgres@db/status-list

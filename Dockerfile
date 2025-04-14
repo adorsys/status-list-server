@@ -1,5 +1,5 @@
 # Stage 1: Build - Creates an optimized production binary
-FROM rust:1.85 as builder
+FROM rust:1.85 As builder
 
 # Set working directory in container
 WORKDIR /app
@@ -21,7 +21,7 @@ RUN cargo build --release && \
     ls -lh target/release/
 
 # Stage 2: Runtime - Create minimal production image
-FROM debian:bookworm-slim
+FROM debian:buster-slim
 
 # Set working directory in the runtime container
 WORKDIR /app
@@ -33,10 +33,7 @@ COPY --from=builder /app/target/release/status-list-server /app/status-list-serv
 RUN chmod +x /app/status-list-server
 
 # Expose the default network port
-EXPOSE 8080
-
-# Set default logging level
-ENV RUST_LOG=info
+EXPOSE 8000
 
 # Command to run when container starts
 CMD ["./status-list-server"]
