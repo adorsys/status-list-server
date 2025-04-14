@@ -1,53 +1,30 @@
-use std::sync::Arc;
-
 use crate::{
-    database::{
-        connection::establish_connection,
-        repository::{Repository, Store, Table},
-    },
+    database::queries::SeaOrmStore,
     model::{Credentials, StatusListToken},
 };
+use sea_orm::{Database, DatabaseConnection};
+use sea_orm_migration::MigratorTrait;
+use std::sync::Arc;
 
-use super::keygen::Keypair;
 #[derive(Clone)]
 pub struct AppState {
-    pub repository: Option<AppStateRepository>,
-    pub server_keypair: Option<Keypair>,
-}
-
-#[derive(Clone)]
-pub struct AppStateRepository {
-    pub credential_repository: Arc<dyn Repository<Credentials>>,
-    pub status_list_token_repository: Arc<dyn Repository<StatusListToken>>,
-}
-
-impl AppStateRepository {
-    pub fn from(
-        credential_repository: Arc<Store<Credentials>>,
-        status_list_token_repository: Arc<Store<StatusListToken>>,
-    ) -> Self {
-        Self {
-            credential_repository,
-            status_list_token_repository,
-        }
-    }
+    pub credential_repository: Arc<SeaOrmStore<Credentials>>,
+    pub status_list_token_repository: Arc<SeaOrmStore<StatusListToken>>,
 }
 
 pub async fn setup() -> AppState {
-    let conn = establish_connection().await;
-    let credential_repo: Store<Credentials> = Store {
-        table: Table::new(conn.clone(), "credentials".to_owned(), "issuer".to_owned()),
-    };
-    let status_list_repo: Store<StatusListToken> = Store {
-        table: Table::new(conn, "status_list_tokens".to_owned(), "list_id".to_owned()),
-    };
-    let server_keypair = Keypair::generate().unwrap();
+    let url = std::env::var("DATABASE_URL").expect("DATABASE_URL env not set");
+    let db: DatabaseConnection = Database::connect(&url)
+        .await
+        .expect("Failed to connect to database");
 
+    crate::database::Migrator::up(&db, None)
+        .await
+        .expect("Failed to apply migrations");
+
+    let db = Arc::new(db);
     AppState {
-        repository: Some(AppStateRepository {
-            credential_repository: Arc::new(credential_repo),
-            status_list_token_repository: Arc::new(status_list_repo),
-        }),
-        server_keypair: Some(server_keypair),
+        credential_repository: Arc::new(SeaOrmStore::new(Arc::clone(&db))),
+        status_list_token_repository: Arc::new(SeaOrmStore::new(Arc::clone(&db))),
     }
 }
