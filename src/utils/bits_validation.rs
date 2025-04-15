@@ -41,6 +41,7 @@ impl BitFlag {
     /// # Examples
     ///
     /// ```
+    /// use crate::status_list_server::utils::bits_validation::BitFlag;
     /// let bit = BitFlag::new(2).unwrap();
     /// assert_eq!(bit.value(), 2);
     /// ```
