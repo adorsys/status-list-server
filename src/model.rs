@@ -163,7 +163,7 @@ pub struct StatusList {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct StatusUpdate {
+pub struct StatusEntry {
     pub index: i32,
     pub status: Status,
 }

@@ -6,10 +6,11 @@ use axum::{
     response::IntoResponse,
     Json,
 };
+
 use serde_json::Value;
 
 use crate::{
-    model::{Status, StatusList, StatusListToken, StatusUpdate},
+    model::{Status, StatusEntry, StatusList, StatusListToken},
     utils::state::AppState,
 };
 
@@ -102,6 +103,14 @@ pub async fn update_statuslist(
         }
     };
 
+    if updates.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            StatusListError::Generic("No status updates provided".to_string()),
+        )
+            .into_response();
+    }
+
     let updates_json = match serde_json::to_vec(updates) {
         Ok(json) => json,
         Err(e) => {
@@ -110,7 +119,7 @@ pub async fn update_statuslist(
         }
     };
 
-    let updates: Vec<StatusUpdate> = match serde_json::from_slice(&updates_json) {
+    let updates: Vec<StatusEntry> = match serde_json::from_slice(&updates_json) {
         Ok(updates) => updates,
         Err(e) => {
             tracing::error!("Malformed request body: {e}");
@@ -137,6 +146,7 @@ pub async fn update_statuslist(
                 .into_response();
         }
     };
+
     if let Some(status_list_token) = status_list_token {
         let lst: StatusList =
             serde_json::from_value(status_list_token.status_list.clone()).unwrap();
@@ -199,7 +209,7 @@ fn encode_lst(bits: Vec<u8>) -> String {
     )
 }
 
-fn update_status(lst: &str, updates: Vec<StatusUpdate>) -> Result<String, StatusListError> {
+fn update_status(lst: &str, updates: Vec<StatusEntry>) -> Result<String, StatusListError> {
     let mut decoded_lst =
         base64url::decode(lst).map_err(|e| StatusListError::Generic(e.to_string()))?;
 
@@ -234,6 +244,7 @@ mod tests {
         http::{self, HeaderMap, StatusCode},
         Json,
     };
+
     use sea_orm::{DatabaseBackend, MockDatabase};
     use serde_json::json;
     use std::sync::Arc;
