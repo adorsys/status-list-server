@@ -3,7 +3,7 @@ name: Build and push images to GHCR
 on:
   push:
     branches:
-      - main
+      - issue-38
 
 jobs:
   build:
