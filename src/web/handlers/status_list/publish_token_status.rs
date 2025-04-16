@@ -20,9 +20,8 @@ use tracing;
 pub struct PublishTokenStatusRequest {
     pub list_id: String,
     pub updates: Vec<StatusEntry>,
-    #[serde(default)]
-    pub sub: Option<String>,
-    #[serde(default)]
+    pub sub: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub ttl: Option<String>,
     pub bits: u8,
 }
@@ -97,7 +96,7 @@ pub async fn publish_token_status(
                 exp: exp.map(|e| e as i32),
                 iat: iat as i32,
                 status_list: status_list_value,
-                sub: payload.sub.unwrap_or_default(),
+                sub: payload.sub,
                 ttl: payload.ttl,
             };
 
@@ -136,7 +135,7 @@ mod tests {
         PublishTokenStatusRequest {
             list_id: list_id.to_string(),
             updates,
-            sub: Some("issuer".to_string()),
+            sub: "issuer".to_string(),
             ttl: Some("3600".to_string()),
             bits,
         }
