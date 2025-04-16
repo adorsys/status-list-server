@@ -18,6 +18,15 @@ Before setting up the Status List Server, ensure you have the following installe
     cd status-list-server
    ```
 
+## Running with Docker Compose
+You can run the project directly using docker compose:
+
+- Execute the command below at the root of the project
+```sh
+docker-compose up
+```
+This command will pull and start postgres and also build the project image and start a container.
+
 ## Configuration
 
  **Environment Variables:**
