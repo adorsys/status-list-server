@@ -22,7 +22,7 @@ RUN rm -rf src
 COPY src ./src
 
 # Final build with locked dependencies and musl target
-RUN cargo build --release --target x86_64-unknown-linux-musl --locked && \
+RUN cargo build --release --target x86_64-unknown-linux-musl --verbose && \
     strip target/x86_64-unknown-linux-musl/release/status-list-server
 
 # Stage 2: Runtime - Distroless image 
