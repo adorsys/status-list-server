@@ -25,7 +25,7 @@ pub struct PublishTokenStatusRequest {
     #[serde(default)]
     pub sub: Option<String>,
     #[serde(default)]
-    pub ttl: Option<String>,
+    pub ttl: Option<i64>,
     pub bits: u8,
 }
 
@@ -73,32 +73,20 @@ pub async fn publish_token_status(
                 .duration_since(UNIX_EPOCH)
                 .unwrap()
                 .as_secs() as i64;
-            let exp = match payload.ttl.as_ref() {
-                Some(ttl) => match ttl.parse::<i64>() {
-                    Ok(ttl_seconds) => Some(iat.saturating_add(ttl_seconds)),
-                    Err(_) => {
-                        return Err(StatusListError::Generic("Invalid TTL format".to_string()))
-                    }
-                },
-                None => None,
-            };
+            let exp = payload.ttl.map(|ttl| iat.saturating_add(ttl));
 
             // Serialize the status list before constructing the token
             let status_list = StatusList {
                 bits: payload.bits as usize,
                 lst,
             };
-            let status_list_value = serde_json::to_value(status_list).map_err(|e| {
-                tracing::error!("Failed to serialize status_list: {:?}", e);
-                StatusListError::InternalServerError
-            })?;
 
             // Build the new status list token
             let new_status_list_token = StatusListToken {
                 list_id: payload.list_id.clone(),
-                exp: exp.map(|e| e as i32),
-                iat: iat as i32,
-                status_list: status_list_value,
+                exp,
+                iat,
+                status_list,
                 sub: payload.sub.unwrap_or_default(),
                 ttl: payload.ttl,
             };
@@ -123,7 +111,7 @@ mod tests {
     use crate::{
         database::queries::SeaOrmStore,
         model::{status_list_tokens, Status, StatusListToken},
-        utils::state::AppState,
+        utils::{keygen::Keypair, state::AppState},
     };
     use axum::{extract::State, Json};
     use sea_orm::{DatabaseBackend, MockDatabase};
@@ -139,9 +127,15 @@ mod tests {
             list_id: list_id.to_string(),
             updates,
             sub: Some("issuer".to_string()),
-            ttl: Some("3600".to_string()),
+            ttl: Some(3600),
             bits,
         }
+    }
+
+    // Helper to generate a test server key
+    // Note: It does nothing, it's just use to build the AppState
+    fn server_key() -> Keypair {
+        Keypair::generate().unwrap()
     }
 
     #[tokio::test]
@@ -167,23 +161,22 @@ mod tests {
             bits: 2,
             lst: lst_from(payload.updates.clone(), bits).unwrap(),
         };
-        let status_list_value = serde_json::to_value(status_list).unwrap();
         let new_token = StatusListToken {
             list_id: token_id.to_string(),
             exp: Some(
                 (SystemTime::now()
                     .duration_since(UNIX_EPOCH)
                     .unwrap()
-                    .as_secs() as i32)
+                    .as_secs() as i64)
                     .saturating_add(3600),
             ),
             iat: SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap()
-                .as_secs() as i32,
-            status_list: status_list_value,
+                .as_secs() as i64,
+            status_list,
             sub: "issuer".to_string(),
-            ttl: Some("3600".to_string()),
+            ttl: Some(3600),
         };
         let db_conn = Arc::new(
             mock_db
@@ -197,6 +190,7 @@ mod tests {
         let app_state = AppState {
             credential_repository: Arc::new(SeaOrmStore::new(db_conn.clone())),
             status_list_token_repository: Arc::new(SeaOrmStore::new(db_conn)),
+            server_key: Arc::new(server_key()),
         };
 
         let response = publish_token_status(State(app_state), Json(payload))
@@ -230,23 +224,22 @@ mod tests {
             bits: 2,
             lst: lst_from(payload.updates.clone(), bits).unwrap(),
         };
-        let status_list_value = serde_json::to_value(status_list).unwrap();
         let new_token = StatusListToken {
             list_id: token_id.to_string(),
             exp: Some(
                 (SystemTime::now()
                     .duration_since(UNIX_EPOCH)
                     .unwrap()
-                    .as_secs() as i32)
+                    .as_secs() as i64)
                     .saturating_add(3600),
             ),
             iat: SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap()
-                .as_secs() as i32,
-            status_list: status_list_value,
+                .as_secs() as i64,
+            status_list,
             sub: "issuer".to_string(),
-            ttl: Some("3600".to_string()),
+            ttl: Some(3600),
         };
         let db_conn = Arc::new(
             mock_db
@@ -261,6 +254,7 @@ mod tests {
         let app_state = AppState {
             credential_repository: Arc::new(SeaOrmStore::new(db_conn.clone())),
             status_list_token_repository: Arc::new(SeaOrmStore::new(db_conn)),
+            server_key: Arc::new(server_key()),
         };
 
         // Perform the insertion
@@ -277,9 +271,7 @@ mod tests {
         assert!(result.is_some());
         let token = result.unwrap();
         assert_eq!(token.list_id, token_id);
-        let status_list: StatusList =
-            serde_json::from_value(token.status_list).expect("Failed to deserialize status_list");
-        assert_eq!(status_list.bits, 2);
+        assert_eq!(token.status_list.bits, 2);
         assert_eq!(token.sub, "issuer");
         assert!(token.exp.is_some());
     }
@@ -302,13 +294,12 @@ mod tests {
             list_id: token_id.to_string(),
             exp: None,
             iat: 1234567890,
-            status_list: serde_json::to_value(StatusList {
+            status_list: StatusList {
                 bits: 1,
                 lst: lst_from(payload.updates.clone(), bits).unwrap(),
-            })
-            .unwrap(),
+            },
             sub: "issuer".to_string(),
-            ttl: Some("3600".to_string()),
+            ttl: Some(3600),
         };
         let db_conn = Arc::new(
             mock_db
@@ -321,6 +312,7 @@ mod tests {
         let app_state = AppState {
             credential_repository: Arc::new(SeaOrmStore::new(db_conn.clone())),
             status_list_token_repository: Arc::new(SeaOrmStore::new(db_conn)),
+            server_key: Arc::new(server_key()),
         };
 
         let response = match publish_token_status(State(app_state), Json(payload)).await {
@@ -339,23 +331,22 @@ mod tests {
             bits: 1,
             lst: base64url::encode([]),
         };
-        let status_list_value = serde_json::to_value(status_list).unwrap();
         let new_token = StatusListToken {
             list_id: token_id.to_string(),
             exp: Some(
                 (SystemTime::now()
                     .duration_since(UNIX_EPOCH)
                     .unwrap()
-                    .as_secs() as i32)
+                    .as_secs() as i64)
                     .saturating_add(3600),
             ),
             iat: SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap()
-                .as_secs() as i32,
-            status_list: status_list_value,
+                .as_secs() as i64,
+            status_list,
             sub: "issuer".to_string(),
-            ttl: Some("3600".to_string()),
+            ttl: Some(3600),
         };
         let db_conn = Arc::new(
             mock_db
@@ -370,6 +361,7 @@ mod tests {
         let app_state = AppState {
             credential_repository: Arc::new(SeaOrmStore::new(db_conn.clone())),
             status_list_token_repository: Arc::new(SeaOrmStore::new(db_conn)),
+            server_key: Arc::new(server_key()),
         };
 
         let response = publish_token_status(State(app_state.clone()), Json(payload))
@@ -386,9 +378,7 @@ mod tests {
         assert!(result.is_some());
         let token = result.unwrap();
         assert_eq!(token.list_id, token_id);
-        let status_list: StatusList =
-            serde_json::from_value(token.status_list).expect("Failed to deserialize status_list");
-        assert_eq!(status_list.lst, base64url::encode([]));
+        assert_eq!(token.status_list.lst, base64url::encode([]));
     }
 
     #[tokio::test]
@@ -398,6 +388,7 @@ mod tests {
         let app_state = AppState {
             credential_repository: Arc::new(SeaOrmStore::new(db_conn.clone())),
             status_list_token_repository: Arc::new(SeaOrmStore::new(db_conn)),
+            server_key: Arc::new(server_key()),
         };
         let token_id = "token_invalid_bits";
         let payload = create_test_token(
@@ -434,23 +425,22 @@ mod tests {
             bits: 1,
             lst: lst_from(payload.updates.clone(), bits).unwrap(),
         };
-        let status_list_value = serde_json::to_value(status_list).unwrap();
         let new_token = StatusListToken {
             list_id: token_id.to_string(),
             exp: Some(
                 (SystemTime::now()
                     .duration_since(UNIX_EPOCH)
                     .unwrap()
-                    .as_secs() as i32)
+                    .as_secs() as i64)
                     .saturating_add(3600),
             ),
             iat: SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap()
-                .as_secs() as i32,
-            status_list: status_list_value,
+                .as_secs() as i64,
+            status_list,
             sub: "issuer".to_string(),
-            ttl: Some("3600".to_string()),
+            ttl: Some(3600),
         };
         let db_conn = Arc::new(
             mock_db
@@ -464,6 +454,7 @@ mod tests {
         let app_state = AppState {
             credential_repository: Arc::new(SeaOrmStore::new(db_conn.clone())),
             status_list_token_repository: Arc::new(SeaOrmStore::new(db_conn)),
+            server_key: Arc::new(server_key()),
         };
 
         let response = publish_token_status(State(app_state), Json(payload))
@@ -489,6 +480,7 @@ mod tests {
         let app_state = AppState {
             credential_repository: Arc::new(SeaOrmStore::new(db_conn.clone())),
             status_list_token_repository: Arc::new(SeaOrmStore::new(db_conn)),
+            server_key: Arc::new(server_key()),
         };
 
         let response = match publish_token_status(State(app_state), Json(payload)).await {
