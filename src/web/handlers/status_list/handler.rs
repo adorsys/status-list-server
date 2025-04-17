@@ -255,6 +255,14 @@ pub async fn update_statuslist(
         }
     };
 
+    if updates.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            StatusListError::Generic("No status updates provided".to_string()),
+        )
+            .into_response();
+    }
+
     let updates_json = match serde_json::to_vec(updates) {
         Ok(json) => json,
         Err(e) => {
@@ -263,7 +271,7 @@ pub async fn update_statuslist(
         }
     };
 
-    let updates: Vec<StatusUpdate> = match serde_json::from_slice(&updates_json) {
+    let updates: Vec<StatusEntry> = match serde_json::from_slice(&updates_json) {
         Ok(updates) => updates,
         Err(e) => {
             tracing::error!("Malformed request body: {e}");
@@ -290,6 +298,7 @@ pub async fn update_statuslist(
                 .into_response();
         }
     };
+
     if let Some(status_list_token) = status_list_token {
         let lst = status_list_token.status_list;
         let updated_lst = match update_status(&lst.lst, updates) {
@@ -351,7 +360,7 @@ fn encode_lst(bits: Vec<u8>) -> String {
     )
 }
 
-fn update_status(lst: &str, updates: Vec<StatusUpdate>) -> Result<String, StatusListError> {
+fn update_status(lst: &str, updates: Vec<StatusEntry>) -> Result<String, StatusListError> {
     let mut decoded_lst =
         base64url::decode(lst).map_err(|e| StatusListError::Generic(e.to_string()))?;
 
