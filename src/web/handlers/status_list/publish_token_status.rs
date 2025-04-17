@@ -1,9 +1,7 @@
 use crate::{
-    model::{StatusList, StatusListToken},
+    model::{StatusEntry, StatusList, StatusListToken},
     utils::{
-        bits_validation::BitFlag,
-        errors::Error,
-        lst_gen::{lst_from, PublishStatus},
+        bits_validation::BitFlag, errors::Error, lst_gen::update_or_create_status_list,
         state::AppState,
     },
     web::handlers::status_list::error::StatusListError,
@@ -21,7 +19,7 @@ use tracing;
 #[derive(Deserialize, Serialize, Clone)]
 pub struct PublishTokenStatusRequest {
     pub list_id: String,
-    pub updates: Vec<PublishStatus>,
+    pub updates: Vec<StatusEntry>,
     #[serde(default)]
     pub sub: Option<String>,
     #[serde(default)]
@@ -44,13 +42,13 @@ pub async fn publish_token_status(
             payload.bits
         )))
     };
-    let bitflag = bitflag?;
+    let bits = bitflag?;
 
     // Generate the compressed status list; use empty encoding if no updates
     let lst = if payload.updates.is_empty() {
         base64url::encode([])
     } else {
-        lst_from(payload.updates, bitflag).map_err(|e| {
+        update_or_create_status_list(None, payload.updates, bits).map_err(|e| {
             tracing::error!("lst_from failed: {:?}", e);
             match e {
                 Error::Generic(msg) => StatusListError::Generic(msg),
@@ -120,7 +118,7 @@ mod tests {
     // Helper to create a test request payload with customizable bits
     fn create_test_token(
         list_id: &str,
-        updates: Vec<PublishStatus>,
+        updates: Vec<StatusEntry>,
         bits: u8,
     ) -> PublishTokenStatusRequest {
         PublishTokenStatusRequest {
@@ -145,11 +143,11 @@ mod tests {
         let payload = create_test_token(
             token_id,
             vec![
-                PublishStatus {
+                StatusEntry {
                     index: 0,
                     status: Status::VALID,
                 },
-                PublishStatus {
+                StatusEntry {
                     index: 1,
                     status: Status::INVALID,
                 },
@@ -159,7 +157,7 @@ mod tests {
         let bits = BitFlag::new(2).unwrap();
         let status_list = StatusList {
             bits: 2,
-            lst: lst_from(payload.updates.clone(), bits).unwrap(),
+            lst: update_or_create_status_list(None, payload.updates.clone(), bits).unwrap(),
         };
         let new_token = StatusListToken {
             list_id: token_id.to_string(),
@@ -207,11 +205,11 @@ mod tests {
         let payload = create_test_token(
             token_id,
             vec![
-                PublishStatus {
+                StatusEntry {
                     index: 0,
                     status: Status::VALID,
                 },
-                PublishStatus {
+                StatusEntry {
                     index: 1,
                     status: Status::INVALID,
                 },
@@ -222,7 +220,7 @@ mod tests {
 
         let status_list = StatusList {
             bits: 2,
-            lst: lst_from(payload.updates.clone(), bits).unwrap(),
+            lst: update_or_create_status_list(None, payload.updates.clone(), bits).unwrap(),
         };
         let new_token = StatusListToken {
             list_id: token_id.to_string(),
@@ -282,7 +280,7 @@ mod tests {
         let token_id = "token1";
         let payload = create_test_token(
             token_id,
-            vec![PublishStatus {
+            vec![StatusEntry {
                 index: 0,
                 status: Status::VALID,
             }],
@@ -296,7 +294,7 @@ mod tests {
             iat: 1234567890,
             status_list: StatusList {
                 bits: 1,
-                lst: lst_from(payload.updates.clone(), bits).unwrap(),
+                lst: update_or_create_status_list(None, payload.updates.clone(), bits).unwrap(),
             },
             sub: "issuer".to_string(),
             ttl: Some(3600),
@@ -393,7 +391,7 @@ mod tests {
         let token_id = "token_invalid_bits";
         let payload = create_test_token(
             token_id,
-            vec![PublishStatus {
+            vec![StatusEntry {
                 index: 0,
                 status: Status::VALID,
             }],
@@ -413,7 +411,7 @@ mod tests {
         let token_id = "token_no_repo";
         let payload = create_test_token(
             token_id,
-            vec![PublishStatus {
+            vec![StatusEntry {
                 index: 0,
                 status: Status::VALID,
             }],
@@ -423,7 +421,7 @@ mod tests {
 
         let status_list = StatusList {
             bits: 1,
-            lst: lst_from(payload.updates.clone(), bits).unwrap(),
+            lst: update_or_create_status_list(None, payload.updates.clone(), bits).unwrap(),
         };
         let new_token = StatusListToken {
             list_id: token_id.to_string(),
@@ -470,7 +468,7 @@ mod tests {
         let token_id = "token_invalid_index";
         let payload = create_test_token(
             token_id,
-            vec![PublishStatus {
+            vec![StatusEntry {
                 index: -1,
                 status: Status::VALID,
             }],
