@@ -1,6 +1,6 @@
 use p256::{
-    ecdsa::SigningKey,
-    pkcs8::{EncodePrivateKey, LineEnding},
+    ecdsa::{SigningKey, VerifyingKey},
+    pkcs8::{DecodePrivateKey, EncodePrivateKey, LineEnding},
 };
 use rand::{rngs::OsRng, TryRngCore};
 
@@ -9,12 +9,12 @@ use super::errors::Error;
 const SECRET_KEY_LENGTH: usize = 32;
 
 /// A keypair for signing and verifying JWT
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Keypair {
     repr: KeyRepr,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct KeyRepr {
     key: SigningKey,
 }
@@ -45,6 +45,27 @@ impl Keypair {
             repr: KeyRepr { key },
         };
         Ok(keypair)
+    }
+
+    /// Get the signing key
+    pub fn signing_key(&self) -> &SigningKey {
+        &self.repr.key
+    }
+
+    /// Get the verifying key
+    pub fn verifying_key(&self) -> &VerifyingKey {
+        self.repr.key.verifying_key()
+    }
+
+    /// Create a keypair from a pkcs8 PEM file
+    pub fn from_pkcs8_pem(pem: &str) -> Result<Self, Error> {
+        let key = SigningKey::from_pkcs8_pem(pem).map_err(|err| {
+            tracing::error!("Failed to create signing key from PEM: {err:?}");
+            Error::KeyGenFailed
+        })?;
+        Ok(Keypair {
+            repr: KeyRepr { key },
+        })
     }
 
     /// Convert the private key to a pkcs8 PEM string
