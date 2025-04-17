@@ -27,7 +27,7 @@ impl IntoResponse for StatusListError {
     fn into_response(self) -> axum::response::Response {
         use StatusListError::*;
         let status_code = match self {
-            InvalidAcceptHeader => StatusCode::BAD_REQUEST,
+            InvalidAcceptHeader => StatusCode::NOT_ACCEPTABLE,
             InternalServerError => StatusCode::INTERNAL_SERVER_ERROR,
             InvalidIndex => StatusCode::BAD_REQUEST,
             Generic(_) => StatusCode::BAD_REQUEST,
