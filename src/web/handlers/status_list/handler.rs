@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::{
-    model::{Status, StatusList, StatusListToken, StatusUpdate},
+    model::{Status, StatusEntry, StatusList, StatusListToken},
     utils::{keygen::Keypair, state::AppState},
 };
 
