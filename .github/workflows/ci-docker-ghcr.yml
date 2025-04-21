@@ -29,9 +29,7 @@ jobs:
         with:
           images: ghcr.io/${{ github.repository }}
           tags: |
-            type=sha,format=long
-            type=ref,event=branch
-            type=raw,value=latest
+            type=semver,pattern={{version}}
 
       # Login to GitHub Container Registry
       - name: Login to GHCR
