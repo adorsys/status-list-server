@@ -1,4 +1,4 @@
-name: Build and push images to GHCR
+name: Build and push Docker image
 
 on:
   push:
