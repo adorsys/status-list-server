@@ -1,41 +1,51 @@
-# Stage 1: Build - Creates an optimized production binary
-FROM rust:1.85.0 AS builder
+# Stage 1: Compile Rust binary with all dependencies
+FROM rust:1.85-alpine AS builder
 
-# Install musl-tools for static linking
-RUN apt-get update && apt-get install -y musl-tools && \
-    rustup target add x86_64-unknown-linux-musl
-
-# Set the working directory
+# Set working directory for build stage
 WORKDIR /app
 
-# Copy dependency files first to leverage Docker caching
+# Install required build dependencies, including OpenSSL development files
+RUN apk add --no-cache \
+    build-base \
+    pkgconf \
+    openssl-dev \
+    musl-dev \
+    ca-certificates \
+    postgresql-dev \
+    musl-utils \
+    llvm-libunwind-dev
+
+# Set environment variables (disable static linking for OpenSSL)
+ENV OPENSSL_STATIC=0
+ENV OPENSSL_DIR=/usr
+
+# Copy dependency specifications first to optimize layer caching
 COPY Cargo.toml Cargo.lock ./
 
-# Create a dummy src/main.rs to pass initial build and cache dependencies
-RUN mkdir src && echo "fn main() {}" > src/main.rs
+# Create placeholder source to pre-download and cache dependencies
+RUN mkdir -p src && echo "fn main() {}" > src/main.rs
+RUN cargo build --release
 
-# Build the dependencies first to cache them
-RUN cargo build --release --target x86_64-unknown-linux-musl
-
-# Remove dummy file and copy actual source
-RUN rm -rf src
+# Overwrite placeholder with actual source code
+# Touch main.rs to ensure rebuild if source changed
 COPY src ./src
+RUN touch src/main.rs && cargo build --release
 
-# Final build with locked dependencies and musl target
-RUN cargo build --release --target x86_64-unknown-linux-musl --verbose && \
-    strip target/x86_64-unknown-linux-musl/release/status-list-server
+# Build the project (using the host's default target)
+RUN cargo build --release && \
+    strip target/release/status-list-server
 
-# Stage 2: Runtime - Distroless image 
+# Debug: Check if binary exists in builder stage
+RUN ls -l target/release/status-list-server && file target/release/status-list-server
+
+# Stage 2: Debug runtime image (temporary, for inspection)
 FROM gcr.io/distroless/static-debian12:latest
 
-# Set working directory
-WORKDIR /app
+# Copy only the compiled binary from builder stage
+COPY --from=builder /app/target/release/status-list-server /usr/local/bin/status-list-server
 
-# Copy only the built binary from the builder stage
-COPY --from=builder /app/target/x86_64-unknown-linux-musl/release/status-list-server /app/
-
-# Expose the default network port
+# Expose default application port (TCP/8000)
 EXPOSE 8000
 
-# Start the binary (must be statically linked, no shell available in distroless)
-CMD ["/app/status-list-server"]
+# Container entrypoint
+CMD ["/usr/local/bin/status-list-server"]
