@@ -48,5 +48,4 @@ jobs:
           file: ./Dockerfile
           push: true
           platforms: linux/amd64,linux/arm64
-          tags: |
-            ghcr.io/${{ github.repository }}/status-list:${{ steps.meta.outputs.version }}
+          tags: ${{ steps.meta.outputs.version }}
