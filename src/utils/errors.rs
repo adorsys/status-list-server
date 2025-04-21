@@ -8,6 +8,10 @@ pub enum Error {
     ParseFailed,
     #[error("provided pem file is not valid certficate")]
     PermFailed,
+    #[error("Failed to generate a new keypair")]
+    KeyGenFailed,
+    #[error("Failed to generate pem from keypair")]
+    PemGenFailed,
     #[error("invalid file type")]
     InvalidFileType,
     #[error("error: {0}")]
@@ -16,4 +20,6 @@ pub enum Error {
     InvalidIndex,
     #[error("Unsupported bits value")]
     UnsupportedBits,
+    #[error("Failed to decode lst")]
+    DecodeError,
 }
