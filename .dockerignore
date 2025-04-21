@@ -1,0 +1,7 @@
+/target
+.github/
+.cargo/
+.gitignore
+architecture.md
+README.md
+arc.png

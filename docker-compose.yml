@@ -1,0 +1,41 @@
+version: '3.9'
+
+services:
+  db:
+    image: postgres:15
+    container_name: status-list-server-db
+    environment:
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=postgres
+      - POSTGRES_DB=status-list
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - status-list-network
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: status-list-server
+    environment:
+      - RUST_LOG=info
+      - DATABASE_URL=postgres://postgres:postgres@db/status-list
+    depends_on:
+      db:
+        condition: service_healthy
+    networks:
+      - status-list-network
+
+networks:
+  status-list-network:
+    driver: bridge
+
+volumes:
+  pgdata:
+    driver: local
