@@ -23,8 +23,8 @@ use crate::{
 
 use super::{
     constants::{
-        ACCEPT_STATUS_LISTS_HEADER_CWT, ACCEPT_STATUS_LISTS_HEADER_JWT, STATUS_LISTS_HEADER_CWT,
-        STATUS_LISTS_HEADER_JWT,
+        ACCEPT_STATUS_LISTS_HEADER_CWT, ACCEPT_STATUS_LISTS_HEADER_JWT, CWT_TYPE, EXP, ISSUED_AT,
+        STATUS_LIST, STATUS_LISTS_HEADER_CWT, STATUS_LISTS_HEADER_JWT, SUBJECT, TTL,
     },
     error::StatusListError,
 };
@@ -74,10 +74,10 @@ pub async fn get_status_list(
         {
             build_status_list_token(ACCEPT_STATUS_LISTS_HEADER_JWT, &list_id, &state).await
         }
-        Some(accept) if accept == ACCEPT_STATUS_LISTS_HEADER_JWT => {
-            build_status_list_token(accept, &list_id, &state).await
-        }
-        Some(accept) if accept == ACCEPT_STATUS_LISTS_HEADER_CWT => {
+        Some(accept)
+            if accept == ACCEPT_STATUS_LISTS_HEADER_JWT
+                || accept == ACCEPT_STATUS_LISTS_HEADER_CWT =>
+        {
             build_status_list_token(accept, &list_id, &state).await
         }
         Some(_) => Err(StatusListError::InvalidAcceptHeader),
@@ -125,28 +125,31 @@ fn issue_cwt(token: &StatusListToken, server_key: &Keypair) -> Result<Vec<u8>, S
 
     // Building the claims
     claims.push((
-        CborValue::Integer(2.into()),
+        CborValue::Integer(SUBJECT.into()),
         CborValue::Text(token.sub.clone()),
     ));
     let iat = Utc::now().timestamp();
-    claims.push((CborValue::Integer(6.into()), CborValue::Integer(iat.into())));
+    claims.push((
+        CborValue::Integer(ISSUED_AT.into()),
+        CborValue::Integer(iat.into()),
+    ));
     // According to the spec, the lifetime of the token depends on the lifetime of the referenced token
     // https://www.ietf.org/archive/id/draft-ietf-oauth-status-list-10.html#section-13.1
     if let Some(exp) = token.exp {
-        claims.push((CborValue::Integer(4.into()), CborValue::Integer(exp.into())));
-    }
-    if let Some(ttl) = token.ttl {
         claims.push((
-            CborValue::Integer(65534.into()),
-            CborValue::Integer(ttl.into()),
+            CborValue::Integer(EXP.into()),
+            CborValue::Integer(exp.into()),
         ));
-    } else {
-        claims.push((
-            CborValue::Integer(65534.into()),
+    }
+    claims.push((
+        CborValue::Integer(TTL.into()),
+        if let Some(ttl) = token.ttl {
+            CborValue::Integer(ttl.into())
+        } else {
             // Default to 12 hours
-            CborValue::Integer(43200.into()),
-        ));
-    }
+            CborValue::Integer(43200.into())
+        },
+    ));
     // Adding the status list map to the claims
     let status_list = vec![
         (
@@ -159,7 +162,7 @@ fn issue_cwt(token: &StatusListToken, server_key: &Keypair) -> Result<Vec<u8>, S
         ),
     ];
     claims.push((
-        CborValue::Integer(65533.into()),
+        CborValue::Integer(STATUS_LIST.into()),
         CborValue::Map(status_list),
     ));
 
@@ -171,7 +174,7 @@ fn issue_cwt(token: &StatusListToken, server_key: &Keypair) -> Result<Vec<u8>, S
     // Building the protected header
     let protected = HeaderBuilder::new()
         .algorithm(Algorithm::ES256)
-        .value(16, CborValue::Text(STATUS_LISTS_HEADER_CWT.into()))
+        .value(CWT_TYPE, CborValue::Text(STATUS_LISTS_HEADER_CWT.into()))
         .build();
 
     let signing_key = server_key.signing_key();
@@ -548,7 +551,7 @@ mod tests {
         // Verify claims
         let sub = claims
             .iter()
-            .find(|(k, _)| k == &CborValue::Integer(2.into()))
+            .find(|(k, _)| k == &CborValue::Integer(SUBJECT.into()))
             .unwrap()
             .1
             .clone();
@@ -556,7 +559,7 @@ mod tests {
 
         let status_list_map = claims
             .iter()
-            .find(|(k, _)| k == &CborValue::Integer(65533.into()))
+            .find(|(k, _)| k == &CborValue::Integer(STATUS_LIST.into()))
             .unwrap()
             .1
             .clone();
@@ -583,7 +586,7 @@ mod tests {
 
         let ttl = claims
             .iter()
-            .find(|(k, _)| k == &CborValue::Integer(65534.into()))
+            .find(|(k, _)| k == &CborValue::Integer(TTL.into()))
             .unwrap()
             .1
             .clone();
