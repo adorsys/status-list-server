@@ -17,6 +17,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::{
+    auth::middleware::AuthenticatedIssuer,
     model::{Status, StatusEntry, StatusList, StatusListToken},
     utils::{keygen::Keypair, state::AppState},
 };
@@ -239,8 +240,19 @@ fn issue_jwt(token: &StatusListToken, server_key: &Keypair) -> Result<String, St
 pub async fn update_statuslist(
     State(appstate): State<Arc<AppState>>,
     Path(list_id): Path<String>,
+    AuthenticatedIssuer(issuer): AuthenticatedIssuer,
     Json(body): Json<Value>,
 ) -> impl IntoResponse {
+    if list_id != issuer {
+        return (
+            StatusCode::UNAUTHORIZED,
+            StatusListError::Unauthorized(
+                "Issuer mismatch: list_id does not match authenticated issuer".to_string(),
+            ),
+        )
+            .into_response();
+    }
+
     let updates = match body
         .as_object()
         .and_then(|body| body.get("updates"))
@@ -701,6 +713,7 @@ mod tests {
         let response = update_statuslist(
             State(app_state),
             Path("test_list".to_string()),
+            AuthenticatedIssuer("test_list".to_string()),
             Json(update_body),
         )
         .await
@@ -733,6 +746,7 @@ mod tests {
         let response = update_statuslist(
             State(app_state),
             Path("test_list".to_string()),
+            AuthenticatedIssuer("test_list".to_string()),
             Json(update_body),
         )
         .await
