@@ -24,8 +24,7 @@ impl SeaOrmStore<StatusListToken> {
             list_id: Set(entity.list_id),
             exp: Set(entity.exp),
             iat: Set(entity.iat),
-            status_list: Set(serde_json::to_value(entity.status_list)
-                .map_err(|e| RepositoryError::InsertError(e.to_string()))?),
+            status_list: Set(entity.status_list),
             sub: Set(entity.sub),
             ttl: Set(entity.ttl),
         };
@@ -62,8 +61,7 @@ impl SeaOrmStore<StatusListToken> {
             list_id: Set(entity.list_id),
             exp: Set(entity.exp),
             iat: Set(entity.iat),
-            status_list: Set(serde_json::to_value(entity.status_list)
-                .map_err(|e| RepositoryError::UpdateError(e.to_string()))?),
+            status_list: Set(entity.status_list),
             sub: Set(entity.sub),
             ttl: Set(entity.ttl),
         };

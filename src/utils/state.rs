@@ -6,10 +6,13 @@ use sea_orm::{Database, DatabaseConnection};
 use sea_orm_migration::MigratorTrait;
 use std::sync::Arc;
 
+use super::keygen::Keypair;
+
 #[derive(Clone)]
 pub struct AppState {
     pub credential_repository: Arc<SeaOrmStore<Credentials>>,
     pub status_list_token_repository: Arc<SeaOrmStore<StatusListToken>>,
+    pub server_key: Arc<Keypair>,
 }
 
 pub async fn setup() -> AppState {
@@ -22,9 +25,15 @@ pub async fn setup() -> AppState {
         .await
         .expect("Failed to apply migrations");
 
+    // TODO : Not secure. We should find a way to store this key in a secure way
+    // TODO : For example, using a vault or pkcs#8 encrypted pem
+    let server_key = Keypair::from_pkcs8_pem(include_str!("../test_resources/ec-private.pem"))
+        .expect("Failed to load server key");
+
     let db = Arc::new(db);
     AppState {
         credential_repository: Arc::new(SeaOrmStore::new(Arc::clone(&db))),
         status_list_token_repository: Arc::new(SeaOrmStore::new(Arc::clone(&db))),
+        server_key: Arc::new(server_key),
     }
 }
