@@ -105,7 +105,9 @@ mod test {
             .withf(|secret_name, _| secret_name == "test/secret")
             .returning(|_, _| Ok(()));
 
-        let result = mock.store_secret(&secret.secret_name, &secret.secret_value).await;
+        let result = mock
+            .store_secret(&secret.secret_name, &secret.secret_value)
+            .await;
         assert!(result.is_ok());
     }
 }
