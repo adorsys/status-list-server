@@ -64,4 +64,3 @@ impl Operations for Client {
         Ok(())
     }
 }
-
