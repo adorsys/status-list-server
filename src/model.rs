@@ -1,6 +1,6 @@
 use jsonwebtoken::Algorithm;
-use sea_orm::entity::prelude::*;
 use sea_orm::ActiveValue::Set;
+use sea_orm::{entity::prelude::*, FromJsonQueryResult};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -132,11 +132,12 @@ pub mod status_list_tokens {
     pub struct Model {
         #[sea_orm(primary_key)]
         pub list_id: String,
-        pub exp: Option<i32>,
-        pub iat: i32,
-        pub status_list: serde_json::Value,
+        pub exp: Option<i64>,
+        pub iat: i64,
+        #[sea_orm(column_type = "Json")]
+        pub status_list: StatusList,
         pub sub: String,
-        pub ttl: Option<String>,
+        pub ttl: Option<i64>,
     }
 
     #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
@@ -156,7 +157,7 @@ pub enum Status {
     APPLICATIONSPECIFIC,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, FromJsonQueryResult)]
 pub struct StatusList {
     pub bits: usize,
     pub lst: String,
