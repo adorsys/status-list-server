@@ -5,7 +5,8 @@ use aws_sdk_secretsmanager::Client as awsClient;
 use super::errors::Error;
 pub struct Client {
     secret_name: String,
-    region: Region,
+    _region: Region,
+    aws_client: awsClient,
 }
 
 pub struct Secret {
@@ -21,26 +22,25 @@ pub trait Operations {
 }
 
 impl Client {
-    pub fn new(secret_name: String, region: Region) -> Self {
-        Self {
-            secret_name,
-            region,
-        }
-    }
-
-    async fn configs(region: Region) -> awsClient {
+    pub async fn new(secret_name: String, _region: Region) -> Self {
         let config = aws_config::defaults(BehaviorVersion::v2025_01_17())
-            .region(region)
+            .region(_region.clone())
             .load()
             .await;
-        aws_sdk_secretsmanager::Client::new(&config)
+        let aws_client = aws_sdk_secretsmanager::Client::new(&config);
+
+        Self {
+            secret_name,
+            _region,
+            aws_client,
+        }
     }
 }
 
 #[async_trait]
 impl Operations for Client {
     async fn get_key(&self) -> Result<Option<String>, Error> {
-        let asm = self::Client::configs(self.region.clone()).await;
+        let asm = self.aws_client.clone();
         let response = asm
             .get_secret_value()
             .secret_id(self.secret_name.clone())
@@ -51,7 +51,7 @@ impl Operations for Client {
     }
 
     async fn store_key(&self, secret: Secret) -> Result<(), Error> {
-        let asm = self::Client::configs(self.region.clone()).await;
+        let asm = self.aws_client.clone();
         asm.create_secret()
             .name(secret.secret_name)
             .secret_string(secret.secret_value)
