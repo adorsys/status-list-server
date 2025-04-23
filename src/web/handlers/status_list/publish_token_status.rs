@@ -52,7 +52,7 @@ pub async fn publish_token_status(
     let status_list = if payload.updates.is_empty() {
         StatusList {
             bits: payload.bits as usize,
-            lst: base64url::encode(&[]), // Empty encoded status list
+            lst: base64url::encode([]), // Empty encoded status list
         }
     } else {
         let bits = BitFlag::new(payload.bits).ok_or(StatusListError::UnsupportedBits)?;
@@ -327,7 +327,7 @@ mod tests {
         let payload = create_test_token(token_id, vec![], 1);
         let status_list = StatusList {
             bits: 1,
-            lst: base64url::encode(&[]),
+            lst: base64url::encode([]),
         };
         let new_token = StatusListToken {
             list_id: token_id.to_string(),
@@ -380,7 +380,7 @@ mod tests {
         assert!(result.is_some());
         let token = result.unwrap();
         assert_eq!(token.list_id, token_id);
-        assert_eq!(token.status_list.lst, base64url::encode(&[]));
+        assert_eq!(token.status_list.lst, base64url::encode([]));
     }
 
     #[tokio::test]
