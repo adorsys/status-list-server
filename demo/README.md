@@ -32,8 +32,8 @@ conda activate demo-status-list-server
 
 ## Run Jupyter notebooks
 
-Run the following command to open the Jupyter Notebook interface in your
-default web browser. From there, you can explore and run the provided workflows.
+Run the following command to open the Jupyter Lab interface in your default web
+browser, enabling you to explore and run the provided workflows.
 
 ```bash
 jupyter lab .
