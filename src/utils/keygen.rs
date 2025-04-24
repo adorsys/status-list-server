@@ -3,6 +3,7 @@ use p256::{
     pkcs8::{DecodePrivateKey, EncodePrivateKey, LineEnding},
 };
 use rand::{rngs::OsRng, TryRngCore};
+use std::fmt;
 
 use super::errors::Error;
 
@@ -52,6 +53,11 @@ impl Keypair {
         &self.repr.key
     }
 
+    /// Get mutable access to the signing key
+    pub fn signing_key_mut(&mut self) -> &mut SigningKey {
+        &mut self.repr.key
+    }
+
     /// Get the verifying key
     pub fn verifying_key(&self) -> &VerifyingKey {
         self.repr.key.verifying_key()
@@ -83,6 +89,12 @@ impl Keypair {
     /// Convert the private key to a pkcs8 PEM bytes
     pub fn to_pkcs8_pem_bytes(&self) -> Result<Vec<u8>, Error> {
         self.to_pkcs8_pem().map(|pem| pem.into_bytes())
+    }
+}
+
+impl fmt::Display for Keypair {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "Keypair {{ verifying_key: {:?} }}", self.verifying_key())
     }
 }
 
