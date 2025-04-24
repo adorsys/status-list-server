@@ -1,0 +1,27 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ include "status-list-server-chart.fullname" . }}-ingress
+  namespace: {{ .Release.Namespace }}
+  annotations:
+    external-dns.alpha.kubernetes.io/hostname: {{ .Values.statuslist.externalDnsHostname | default "statuslist.eudi-adorsys.com" | quote }}
+    {{- toYaml .Values.statuslist.ingress.annotations | nindent 4 }}
+spec:
+  ingressClassName: nginx
+  rules:
+  - host: {{ .Values.statuslist.externalDnsHostname | default "statuslist.eudi-adorsys.com" | quote }}
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: {{ include "status-list-server-chart.fullname" . }}-service
+            port:
+              number: {{ .Values.statuslist.service.port }}
+  tls:
+  - hosts:
+    {{- range .Values.statuslist.ingress.tls.hosts }}
+    - {{ . | quote }}
+    {{- end }}
+    secretName: {{ .Values.statuslist.ingress.tls.secretName }}
