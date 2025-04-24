@@ -21,6 +21,7 @@ dependencies:
   - certifi=2025.1.31=py310h06a4308_0
   - cffi=1.17.1=py310h1fdaa30_1
   - charset-normalizer=3.3.2=pyhd3eb1b0_0
+  - click=8.1.8=py310h06a4308_0
   - comm=0.2.1=py310h06a4308_0
   - debugpy=1.8.11=py310h6a678d5_0
   - decorator=5.1.1=pyhd3eb1b0_0
@@ -83,6 +84,7 @@ dependencies:
   - pysocks=1.7.1=py310h06a4308_0
   - python=3.10.16=he870216_1
   - python-dateutil=2.9.0post0=py310h06a4308_2
+  - python-dotenv=0.21.0=py310h06a4308_0
   - python-fastjsonschema=2.20.0=py310h06a4308_0
   - python-json-logger=3.2.1=py310h06a4308_0
   - pyyaml=6.0.2=py310h5eee18b_0
