@@ -24,10 +24,10 @@ fn validate_keypair(keypair: &mut Keypair) -> Result<(), Error> {
     // Test signing and verifying to ensure the keypair is valid
     let test_data = b"test data";
     let signature: Signature = keypair.signing_key_mut().sign(test_data);
-    if !keypair
+    if keypair
         .verifying_key()
         .verify(test_data, &signature)
-        .is_ok()
+        .is_err()
     {
         return Err(Error::Generic("Keypair validation failed".to_string()));
     }
@@ -129,7 +129,6 @@ pub async fn setup() -> AppState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::env;
     use std::fs;
     use std::path::Path;
 
