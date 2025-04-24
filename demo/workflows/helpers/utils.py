@@ -1,5 +1,11 @@
 from pathlib import Path
 from dotenv import dotenv_values
+import unittest
+
+
+# Handy handle for test-like assertions
+tc = unittest.TestCase()
+
 
 def get_base_url():
     """
