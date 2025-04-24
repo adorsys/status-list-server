@@ -14,7 +14,7 @@ always change this address when running a workflow.
 ## Create a virtual environment to run the notebooks
 
 The `environment.yml` file encodes a tested working environment that you can
-spin up with [conda](https://docs.conda.io/projects/conda/en/stable/index.html). 
+spin up with [conda](https://docs.conda.io/projects/conda/en/stable/index.html).
 If you do not already have `conda` installed, you will need to install it first.
 Go for the `Miniconda` option if you are unfamiliar with conda distributions.
 
