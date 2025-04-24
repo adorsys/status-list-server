@@ -33,7 +33,7 @@ async fn main() {
         .allow_headers(Any);
 
     let router = Router::new()
-        .route("/", get(welcome))
+        .route("/health", get(welcome))
         .route("/credentials", post(credential_handler))
         .route("/statuslists/{list_id}", get(get_status_list))
         .route("/statuslists/publish", post(publish_token_status))
