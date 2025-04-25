@@ -7,7 +7,7 @@ use axum::{
 use dotenvy::dotenv;
 use status_list_server::utils::state::setup;
 use status_list_server::web::handlers::status_list::publish_token_status::publish_token_status;
-use status_list_server::web::handlers::{credential_handler, get_status_list};
+use status_list_server::web::handlers::{credential_handler, generate_nonce, get_status_list};
 use tokio::net::TcpListener;
 use tower::ServiceBuilder;
 use tower_http::catch_panic::CatchPanicLayer;
@@ -34,6 +34,7 @@ async fn main() {
 
     let router = Router::new()
         .route("/", get(welcome))
+        .route("/nonce", get(generate_nonce))
         .route("/credentials", post(credential_handler))
         .route("/statuslists/{list_id}", get(get_status_list))
         .route("/statuslists/publish", post(publish_token_status))

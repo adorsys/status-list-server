@@ -2,7 +2,7 @@ use p256::{
     ecdsa::{SigningKey, VerifyingKey},
     pkcs8::{DecodePrivateKey, EncodePrivateKey, LineEnding},
 };
-use rand::{rngs::OsRng, TryRngCore};
+use rand::{rngs::OsRng, RngCore};
 
 use super::errors::Error;
 
