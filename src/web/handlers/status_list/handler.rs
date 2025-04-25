@@ -17,9 +17,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::{
-    auth::middleware::AuthenticatedIssuer,
     model::{Status, StatusEntry, StatusList, StatusListToken},
     utils::{keygen::Keypair, state::AppState},
+    web::midlw::AuthenticatedIssuer,
 };
 
 use super::{
