@@ -53,11 +53,6 @@ impl Keypair {
         &self.repr.key
     }
 
-    /// Get mutable access to the signing key
-    pub fn signing_key_mut(&mut self) -> &mut SigningKey {
-        &mut self.repr.key
-    }
-
     /// Get the verifying key
     pub fn verifying_key(&self) -> &VerifyingKey {
         self.repr.key.verifying_key()

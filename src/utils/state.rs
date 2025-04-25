@@ -2,7 +2,7 @@ use crate::{
     database::queries::SeaOrmStore,
     model::{Credentials, StatusListToken},
 };
-use p256::ecdsa::signature::{SignerMut, Verifier};
+use p256::ecdsa::signature::{Signer, Verifier};
 use p256::ecdsa::Signature;
 use sea_orm::{Database, DatabaseConnection};
 use sea_orm_migration::MigratorTrait;
@@ -23,7 +23,7 @@ pub struct AppState {
 fn validate_keypair(keypair: &mut Keypair) -> Result<(), Error> {
     // Test signing and verifying to ensure the keypair is valid
     let test_data = b"test data";
-    let signature: Signature = keypair.signing_key_mut().sign(test_data);
+    let signature: Signature = keypair.signing_key().sign(test_data);
     if keypair
         .verifying_key()
         .verify(test_data, &signature)
