@@ -20,6 +20,10 @@ async fn welcome() -> impl IntoResponse {
     "Status list Server"
 }
 
+async fn health_check() -> &'static str {
+    "OK"
+}
+
 #[tokio::main]
 async fn main() {
     dotenv().ok();
@@ -33,7 +37,8 @@ async fn main() {
         .allow_headers(Any);
 
     let router = Router::new()
-        .route("/health", get(welcome))
+        .route("/", get(welcome))
+        .route("/health", get(health_check))
         .route("/credentials", post(credential_handler))
         .route("/statuslists/{list_id}", get(get_status_list))
         .route("/statuslists/publish", post(publish_token_status))

@@ -4,16 +4,16 @@ metadata:
   name: {{ include "status-list-server-chart.fullname" . }}-ingress
   namespace: {{ .Release.Namespace }}
   annotations:
-    external-dns.alpha.kubernetes.io/hostname: {{ .Values.statuslist.externalDnsHostname | default "statuslist.eudi-adorsys.com" | quote }}
+    external-dns.alpha.kubernetes.io/hostname: {{ .Values.statuslist.externalDnsHostname }}
     {{- toYaml .Values.statuslist.ingress.annotations | nindent 4 }}
 spec:
   ingressClassName: nginx
   rules:
-  - host: {{ .Values.statuslist.externalDnsHostname | default "statuslist.eudi-adorsys.com" | quote }}
+  - host: {{ .Values.statuslist.externalDnsHostname }}
     http:
       paths:
-      - path: /
-        pathType: Prefix
+      - path: {{ .Values.statuslist.ingress.path }}
+        pathType: {{ .Values.statuslist.ingress.pathType }}
         backend:
           service:
             name: {{ include "status-list-server-chart.fullname" . }}-service
