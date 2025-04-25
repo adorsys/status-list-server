@@ -3,7 +3,7 @@ statuslist:
   image:
     repository: ghcr.io/adorsys/status-list-server
     pullPolicy: IfNotPresent
-    tag: "1.0.0"
+    tag: latest
   service:
     type: ClusterIP
     port: 80
