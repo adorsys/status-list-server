@@ -1,8 +1,7 @@
-use crate::auth::middleware::AuthenticatedIssuer;
 use crate::{
     model::{StatusEntry, StatusList, StatusListToken},
     utils::{bits_validation::BitFlag, lst_gen::update_or_create_status_list, state::AppState},
-    web::handlers::status_list::error::StatusListError,
+    web::{handlers::status_list::error::StatusListError, midlw::AuthenticatedIssuer},
 };
 use axum::{
     extract::{Json, State},
