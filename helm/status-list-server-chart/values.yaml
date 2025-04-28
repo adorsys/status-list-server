@@ -65,3 +65,6 @@ externalSecret:
       remoteRef:
         key: statuslist-secret
         property: POSTGRES_PASSWORD
+    provider:
+      aws:
+        region: eu-central-1
