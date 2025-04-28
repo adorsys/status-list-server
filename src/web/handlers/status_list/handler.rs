@@ -75,10 +75,7 @@ pub async fn get_status_list(
         None => (), // Default to JWT
         Some(accept)
             if accept == ACCEPT_STATUS_LISTS_HEADER_JWT
-                || accept == ACCEPT_STATUS_LISTS_HEADER_CWT =>
-        {
-            ()
-        } // Valid accept header
+                || accept == ACCEPT_STATUS_LISTS_HEADER_CWT => {} // Valid accept header
         Some(_) => return Err(StatusListError::InvalidAcceptHeader),
     }
 
