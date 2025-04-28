@@ -8,7 +8,8 @@ you will need to set up a Python environment.
 
 You'll find notebooks for the following scenarios in the `./workflows` directory:
 
-- [A Token Issuer manages Token Status Lists at the Status List Server](./workflows/01-issuer-manages-status-lists.ipynb)
+- [A Token Issuer maintains a Token Status List at the Status List Server](./workflows/01-an-issuer-maintains-a-status-list.ipynb)
+- [Token Issuers can maintain multiple Token Status Lists](./workflows/02-issuers-can-maintain-multiple-status-lists.ipynb)
 
 ## Start a live Status List Server
 
