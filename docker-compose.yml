@@ -26,6 +26,8 @@ services:
     environment:
       - RUST_LOG=info
       - DATABASE_URL=postgres://postgres:postgres@db/status-list
+    ports:
+      - "8000:8000"
     depends_on:
       db:
         condition: service_healthy
