@@ -32,6 +32,7 @@ use super::{
 pub trait StatusListTokenExt {
     fn new(
         list_id: String,
+        issuer: String,
         exp: Option<i64>,
         iat: i64,
         status_list: StatusList,
@@ -43,6 +44,7 @@ pub trait StatusListTokenExt {
 impl StatusListTokenExt for StatusListToken {
     fn new(
         list_id: String,
+        issuer: String,
         exp: Option<i64>,
         iat: i64,
         status_list: StatusList,
@@ -51,6 +53,7 @@ impl StatusListTokenExt for StatusListToken {
     ) -> Self {
         Self {
             list_id,
+            issuer,
             exp,
             iat,
             status_list,
@@ -62,37 +65,27 @@ impl StatusListTokenExt for StatusListToken {
 
 pub async fn get_status_list(
     State(state): State<AppState>,
-    Path(list_id): Path<String>,
+    Path((issuer, list_id)): Path<(String, String)>,
     headers: HeaderMap,
 ) -> Result<impl IntoResponse + Debug, StatusListError> {
     let accept = headers.get(header::ACCEPT).and_then(|h| h.to_str().ok());
 
-    // build the token depending on the accept header
+    // Check accept header first
     match accept {
-        None =>
-        // assume jwt by default if no accept header is provided
-        {
-            build_status_list_token(ACCEPT_STATUS_LISTS_HEADER_JWT, &list_id, &state).await
-        }
+        None => (), // Default to JWT
         Some(accept)
             if accept == ACCEPT_STATUS_LISTS_HEADER_JWT
                 || accept == ACCEPT_STATUS_LISTS_HEADER_CWT =>
         {
-            build_status_list_token(accept, &list_id, &state).await
-        }
-        Some(_) => Err(StatusListError::InvalidAcceptHeader),
+            ()
+        } // Valid accept header
+        Some(_) => return Err(StatusListError::InvalidAcceptHeader),
     }
-}
 
-async fn build_status_list_token(
-    accept: &str,
-    list_id: &str,
-    repo: &AppState,
-) -> Result<impl IntoResponse + Debug, StatusListError> {
     // Get status list claims from database
-    let status_claims = repo
+    let status_claims = state
         .status_list_token_repository
-        .find_one_by(list_id.to_string())
+        .find_one_by(list_id.clone())
         .await
         .map_err(|err| {
             tracing::error!("Failed to get status list {list_id} from database: {err:?}");
@@ -100,20 +93,35 @@ async fn build_status_list_token(
         })?
         .ok_or(StatusListError::StatusListNotFound)?;
 
+    // Verify the issuer matches
+    if status_claims.issuer != issuer {
+        return Err(StatusListError::UnauthorizedIssuer);
+    }
+
+    // build the token depending on the accept header
+    let accept = accept.unwrap_or(ACCEPT_STATUS_LISTS_HEADER_JWT);
+    build_status_list_token(accept, &status_claims, &state).await
+}
+
+async fn build_status_list_token(
+    accept: &str,
+    token: &StatusListToken,
+    repo: &AppState,
+) -> Result<impl IntoResponse + Debug, StatusListError> {
     let server_key = repo.server_key.clone();
 
     if ACCEPT_STATUS_LISTS_HEADER_JWT == accept {
         Ok((
             StatusCode::OK,
             [(header::CONTENT_TYPE, accept)],
-            issue_jwt(&status_claims, &server_key)?,
+            issue_jwt(token, &server_key)?,
         )
             .into_response())
     } else {
         Ok((
             StatusCode::OK,
             [(header::CONTENT_TYPE, accept)],
-            issue_cwt(&status_claims, &server_key)?,
+            issue_cwt(token, &server_key)?,
         )
             .into_response())
     }
@@ -238,7 +246,7 @@ fn issue_jwt(token: &StatusListToken, server_key: &Keypair) -> Result<String, St
 
 pub async fn update_statuslist(
     State(appstate): State<Arc<AppState>>,
-    Path(list_id): Path<String>,
+    Path((issuer, list_id)): Path<(String, String)>,
     Json(body): Json<Value>,
 ) -> impl IntoResponse {
     let updates = match body
@@ -303,6 +311,15 @@ pub async fn update_statuslist(
     };
 
     if let Some(status_list_token) = status_list_token {
+        // Verify the issuer matches
+        if status_list_token.issuer != issuer {
+            return (
+                StatusCode::FORBIDDEN,
+                StatusListError::UnauthorizedIssuer.to_string(),
+            )
+                .into_response();
+        }
+
         let lst = status_list_token.status_list;
         let updated_lst = match update_status(&lst.lst, updates) {
             Ok(updated_lst) => updated_lst,
@@ -328,6 +345,7 @@ pub async fn update_statuslist(
 
         let statuslisttoken = StatusListToken::new(
             list_id.clone(),
+            status_list_token.issuer.clone(),
             status_list_token.exp,
             status_list_token.iat,
             status_list,
@@ -335,7 +353,7 @@ pub async fn update_statuslist(
             status_list_token.ttl,
         );
 
-        match store.update_one(list_id.clone(), statuslisttoken).await {
+        match store.update_one(issuer, statuslisttoken).await {
             Ok(true) => StatusCode::ACCEPTED.into_response(),
             Ok(false) => {
                 tracing::error!("Failed to update status list");
@@ -421,6 +439,7 @@ mod tests {
         };
         let status_list_token = StatusListToken::new(
             "test_list".to_string(),
+            "test_issuer".to_string(),
             Some(1234767890),
             1234567890,
             status_list.clone(),
@@ -449,7 +468,7 @@ mod tests {
 
         let response = get_status_list(
             State(app_state.clone()),
-            Path("test_list".to_string()),
+            Path(("test_issuer".to_string(), "test_list".to_string())),
             headers,
         )
         .await
@@ -491,6 +510,7 @@ mod tests {
         };
         let status_list_token = StatusListToken::new(
             "test_list".to_string(),
+            "test_issuer".to_string(),
             None,
             1234567890,
             status_list.clone(),
@@ -519,7 +539,7 @@ mod tests {
 
         let response = get_status_list(
             State(app_state.clone()),
-            Path("test_list".to_string()),
+            Path(("test_issuer".to_string(), "test_list".to_string())),
             headers,
         )
         .await
@@ -614,8 +634,12 @@ mod tests {
             ACCEPT_STATUS_LISTS_HEADER_JWT.parse().unwrap(),
         );
 
-        let result =
-            get_status_list(State(app_state), Path("test_list".to_string()), headers).await;
+        let result = get_status_list(
+            State(app_state),
+            Path(("test_issuer".to_string(), "test_list".to_string())),
+            headers,
+        )
+        .await;
 
         assert!(result.is_err());
         let err = result.unwrap_err();
@@ -637,8 +661,12 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.insert(http::header::ACCEPT, "application/xml".parse().unwrap()); // unsupported
 
-        let result =
-            get_status_list(State(app_state), Path("test_list".to_string()), headers).await;
+        let result = get_status_list(
+            State(app_state),
+            Path(("test_issuer".to_string(), "test_list".to_string())),
+            headers,
+        )
+        .await;
 
         assert!(result.is_err());
         let err = result.unwrap_err();
@@ -658,6 +686,7 @@ mod tests {
         };
         let existing_token = StatusListToken::new(
             "test_list".to_string(),
+            "test_issuer".to_string(),
             None,
             1234567890,
             initial_status_list.clone(),
@@ -670,6 +699,7 @@ mod tests {
         };
         let updated_token = StatusListToken::new(
             "test_list".to_string(),
+            "test_issuer".to_string(),
             None,
             1234567890,
             updated_status_list,
@@ -700,7 +730,7 @@ mod tests {
 
         let response = update_statuslist(
             State(app_state),
-            Path("test_list".to_string()),
+            Path(("test_issuer".to_string(), "test_list".to_string())),
             Json(update_body),
         )
         .await
@@ -732,7 +762,7 @@ mod tests {
 
         let response = update_statuslist(
             State(app_state),
-            Path("test_list".to_string()),
+            Path(("test_issuer".to_string(), "test_list".to_string())),
             Json(update_body),
         )
         .await

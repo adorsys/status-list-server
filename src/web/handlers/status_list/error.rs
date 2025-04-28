@@ -27,6 +27,8 @@ pub enum StatusListError {
     CompressionError(String),
     #[error("Status list already exists")]
     StatusListAlreadyExists,
+    #[error("Unauthorized issuer access")]
+    UnauthorizedIssuer,
 }
 
 impl IntoResponse for StatusListError {
@@ -45,6 +47,7 @@ impl IntoResponse for StatusListError {
             DecompressionError(_) => StatusCode::BAD_REQUEST,
             CompressionError(_) => StatusCode::INTERNAL_SERVER_ERROR,
             StatusListAlreadyExists => StatusCode::CONFLICT,
+            UnauthorizedIssuer => StatusCode::FORBIDDEN,
         };
 
         (status_code, self.to_string()).into_response()
