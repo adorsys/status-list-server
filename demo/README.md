@@ -4,6 +4,12 @@ Typical scenarios for interacting with the Status List Server are showcased
 by means of notebooks. To run the notebooks, a live server is required, and
 you will need to set up a Python environment.
 
+## Catalog of notebook workflows
+
+You'll find notebooks for the following scenarios in the `./workflows` directory:
+
+- [A Token Issuer manages Token Status Lists at the Status List Server](./workflows/01-issuer-manages-status-lists.ipynb)
+
 ## Start a live Status List Server
 
 A live instance of the server is required and should be started independently.
