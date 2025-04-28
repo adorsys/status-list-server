@@ -36,27 +36,46 @@
      3. The status is used to determine if the Referenced Token is valid, revoked, or expired.
 
 ### **4. API Specifications**
-   - **Endpoint**: `/statuslists/{id}`
+   - **Endpoint**: `/statuslists/{issuer}`
    - **Method**: `GET`
    - **Request Headers**:
      - `Accept`: `application/statuslist+jwt` or `application/statuslist+cwt`.
    - **Response**:
-     - **Status Code**: `200 OK` (success) or `3xx` (redirect).
+     - **Status Code**: `200 OK` (success) or `404 NOT FOUND` (issuer not found).
      - **Headers**:
        - `Content-Type`: `application/statuslist+jwt` or `application/statuslist+cwt`.
        - `Content-Encoding`: `gzip` (optional, for compression).
-       - **Body**: The Status List Token in JWT or CWT format.
-  
-   - **Endpoint**: `/statuslists/list1/tokens/42`
-   - **Method**: `PUT`
-   - **Response**:
-     - **Status Code**: `200 OK` (success) or `3xx` (redirect).
-  
-   - **Endpoint**: `/statuslists/list1/tokens/42` 
+     - **Body**: The Status List Token in JWT or CWT format.
+   
+   - **Endpoint**: `/statuslists/{issuer}`
    - **Method**: `POST`
+   - **Description**: Allows an issuer to publish token statuses from which a status list will be created.
+   - **Authorization**: Requires a valid signed JWT with the issuer scope.
+   - **Request Body**:
+     ```json
+     [
+       { "index": 1, "status": "INVALID" },
+       { "index": 8, "status": "VALID" }
+     ]
+     ```
    - **Response**:
-     - **Status Code**: `200 OK` (success) or `3xx` (redirect). 
-     
+     - **Status Code**: `201 Created` (success), `400 Bad Request` (invalid data), `401 Unauthorized`, or `403 Forbidden`.
+
+   - **Endpoint**: `/statuslists/{issuer}`
+   - **Method**: `PUT`
+   - **Description**: Allows an issuer to update an existing status list.
+   - **Authorization**: Requires a valid signed JWT with the issuer scope.
+   - **Request Body**:
+     ```json
+     {
+       "updates": [
+         { "index": 1, "status": "VALID" },
+         { "index": 8, "status": "INVALID" }
+       ]
+     }
+     ```
+   - **Response**:
+     - **Status Code**: `200 OK` (success), `400 Bad Request` (invalid data), `401 Unauthorized`, `403 Forbidden`, or `404 Not Found`.
 
 ### **5. Data Formats**
    - **Referenced Token**:
@@ -117,7 +136,7 @@ The Status List Server is built using modern, performant, and scalable technolog
    - **JSON Web Tokens (JWT)**: Used for encoding and decoding Status List Tokens. The `jsonwebtoken` crate is used for JWT operations.
 
 #### **Storage**
-   - **Database**: to map and store statuslist to id and  credentials .
+   - **Database**: to map and store statuslist to id and credentials.
 
 ### **7.2. Data Flow**
 The data flow in the Status List Server is as follows:
@@ -166,4 +185,3 @@ The data flow in the Status List Server is as follows:
    - [IETF Draft: OAuth Status List](https://datatracker.ietf.org/doc/draft-ietf-oauth-status-list/)
    - [JWT (JSON Web Token) RFC 7519](https://tools.ietf.org/html/rfc7519)
    - [CWT (CBOR Web Token) RFC 8392](https://tools.ietf.org/html/rfc8392)
-

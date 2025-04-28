@@ -53,21 +53,21 @@ By default, the server runs on `http://localhost:8000`. You can modify the port 
 
 ### Health Check
 
-- **Endpoint:** `GET /health`
+- **Endpoint:** `GET /healthz`
 - **Description:** Checks the health status of the server.
 - **Response:**
   - `200 OK`: Server is running.
   
 ### Publish Credentials
 - **Endpoint**: `POST /credentials/`
-- **Description**: allow issuers to publish their credentials (`public_key` which is the pem base64 encoded form) and identifiers used to later for authorisation verification
+- **Description**: Allow issuers to publish their credentials (`public_key` which is the pem base64 encoded form) and identifiers used to later for authorisation verification
 - **Request Body**
   ```json
   {"issuer": "<value>", "public_key": "<public_key.pem>", "alg": "<alg>"}
   ```
  
 ### Publish statuslist
-- **Endpoint**: `POST /statuslist/{issuer}` 
+- **Endpoint**: `POST /statuslists/{issuer}` 
 - **Description**: Allows an issuer to publish his token status from which will be created a status list
 - **Authorization**: Requires a valid sign jwt with the issuer scope (a signed jwt with issuers as kid).
 - **Request Body**
@@ -75,12 +75,12 @@ By default, the server runs on `http://localhost:8000`. You can modify the port 
   [
       { "index": 1, "status": "INVALID" },
       { "index": 8, "status": "VALID" }
-    ]
+  ]
   ```
 
 ### Update Status List
 
-- **Endpoint:** `PUT /statuslist/{issuer}`
+- **Endpoint:** `PUT /statuslists/{issuer}`
 - **Description:** Allows an issuer to update the status list.
 - **Authorization:** Requires a valid sign jwt with the issuer scope (a signed jwt with issuers as kid).
   
@@ -100,15 +100,15 @@ By default, the server runs on `http://localhost:8000`. You can modify the port 
   
 
 - **Responses:**
-  - `202 ACCEPTED`: The update request has been accepted and processed.
+  - `200 OK`: The update request has been processed successfully.
   - `400 BAD REQUEST`: Invalid input data.
   - `401 UNAUTHORIZED`: Missing or invalid authentication token.
   - `403 FORBIDDEN`: Insufficient permissions.
 
 ### Retrieve Status List
 
-- **Endpoint:** `GET /statuslist/{issuer}`
-- **Description:** Retrieves the current status list for the specified issuer.
+- **Endpoint:** `GET /statuslists/{issuer}`
+- **Description:** Retrieves the current status list for the specified issuer. This endpoint is publicly accessible with no authentication required.
 - **Responses:**
   - `200 OK`: Returns the status list in a compressed and encoded format.
   - `401 UNAUTHORIZED`: Missing or invalid authentication token.
