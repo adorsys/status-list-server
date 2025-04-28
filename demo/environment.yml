@@ -1,5 +1,6 @@
 name: demo-status-list-server
 channels:
+  - conda-forge
   - defaults
   - https://repo.anaconda.com/pkgs/main
   - https://repo.anaconda.com/pkgs/r
@@ -17,7 +18,8 @@ dependencies:
   - bleach=6.2.0=py310h06a4308_0
   - brotli-python=1.0.9=py310h6a678d5_9
   - bzip2=1.0.8=h5eee18b_6
-  - ca-certificates=2025.2.25=h06a4308_0
+  - ca-certificates=2025.4.26=hbd8a1cb_0
+  - cbor2=5.6.5=py310ha75aee5_0
   - certifi=2025.1.31=py310h06a4308_0
   - cffi=1.17.1=py310h1fdaa30_1
   - charset-normalizer=3.3.2=pyhd3eb1b0_0
@@ -50,8 +52,9 @@ dependencies:
   - jupyterlab_server=2.27.3=py310h06a4308_0
   - ld_impl_linux-64=2.40=h12ee557_0
   - libffi=3.4.4=h6a678d5_1
-  - libgcc-ng=11.2.0=h1234567_1
-  - libgomp=11.2.0=h1234567_1
+  - libgcc=14.2.0=h767d61c_2
+  - libgcc-ng=14.2.0=h69a702a_2
+  - libgomp=14.2.0=h767d61c_2
   - libsodium=1.0.18=h7b6447c_0
   - libstdcxx-ng=11.2.0=h1234567_1
   - libuuid=1.41.5=h5eee18b_0
@@ -65,7 +68,7 @@ dependencies:
   - nest-asyncio=1.6.0=py310h06a4308_0
   - notebook=7.3.2=py310h06a4308_0
   - notebook-shim=0.2.4=py310h06a4308_0
-  - openssl=3.0.16=h5eee18b_0
+  - openssl=3.5.0=h7b32b05_0
   - overrides=7.4.0=py310h06a4308_0
   - packaging=24.2=py310h06a4308_0
   - pandocfilters=1.5.0=pyhd3eb1b0_0
@@ -81,12 +84,14 @@ dependencies:
   - pure_eval=0.2.2=pyhd3eb1b0_0
   - pycparser=2.21=pyhd3eb1b0_0
   - pygments=2.19.1=py310h06a4308_0
+  - pyjwt=2.10.1=pyhd8ed1ab_0
   - pysocks=1.7.1=py310h06a4308_0
   - python=3.10.16=he870216_1
   - python-dateutil=2.9.0post0=py310h06a4308_2
   - python-dotenv=0.21.0=py310h06a4308_0
   - python-fastjsonschema=2.20.0=py310h06a4308_0
   - python-json-logger=3.2.1=py310h06a4308_0
+  - python_abi=3.10=2_cp310
   - pyyaml=6.0.2=py310h5eee18b_0
   - pyzmq=26.2.0=py310h6a678d5_0
   - readline=8.2=h5eee18b_0
