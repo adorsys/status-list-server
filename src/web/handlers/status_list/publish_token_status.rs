@@ -19,6 +19,7 @@ use tracing;
 #[derive(Deserialize, Serialize, Clone)]
 pub struct PublishTokenStatusRequest {
     pub list_id: String,
+    pub issuer: String,
     pub updates: Vec<StatusEntry>,
     #[serde(default)]
     pub sub: Option<String>,
@@ -82,6 +83,7 @@ pub async fn publish_token_status(
             // Build the new status list token
             let new_status_list_token = StatusListToken {
                 list_id: payload.list_id.clone(),
+                issuer: payload.issuer.clone(),
                 exp,
                 iat,
                 status_list,
@@ -127,6 +129,7 @@ mod tests {
             sub: Some("issuer".to_string()),
             ttl: Some(3600),
             bits,
+            issuer: "issuer".to_string(),
         }
     }
 
@@ -175,6 +178,7 @@ mod tests {
             status_list,
             sub: "issuer".to_string(),
             ttl: Some(3600),
+            issuer: "issuer".to_string(),
         };
         let db_conn = Arc::new(
             mock_db
@@ -238,6 +242,7 @@ mod tests {
             status_list,
             sub: "issuer".to_string(),
             ttl: Some(3600),
+            issuer: "issuer".to_string(),
         };
         let db_conn = Arc::new(
             mock_db
@@ -298,6 +303,7 @@ mod tests {
             },
             sub: "issuer".to_string(),
             ttl: Some(3600),
+            issuer: "issuer".to_string(),
         };
         let db_conn = Arc::new(
             mock_db
@@ -345,6 +351,7 @@ mod tests {
             status_list,
             sub: "issuer".to_string(),
             ttl: Some(3600),
+            issuer: "issuer".to_string(),
         };
         let db_conn = Arc::new(
             mock_db
@@ -439,6 +446,7 @@ mod tests {
             status_list,
             sub: "issuer".to_string(),
             ttl: Some(3600),
+            issuer: "issuer".to_string(),
         };
         let db_conn = Arc::new(
             mock_db
