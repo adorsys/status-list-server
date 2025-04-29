@@ -53,7 +53,11 @@ pub mod migrations {
                                     .primary_key(),
                             )
                             .col(ColumnDef::new(StatusListTokens::Exp).big_integer())
-                            .col(ColumnDef::new(StatusListTokens::Iat).big_integer().not_null())
+                            .col(
+                                ColumnDef::new(StatusListTokens::Iat)
+                                    .big_integer()
+                                    .not_null(),
+                            )
                             .col(
                                 ColumnDef::new(StatusListTokens::StatusList)
                                     .json()
