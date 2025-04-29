@@ -107,7 +107,7 @@ pub async fn req_certificate(
             .find(|c| c.r#type == ChallengeType::Http01)
             .ok_or_else(|| anyhow::anyhow!("no http01 challenge found"))?;
         let token = &challenge.token;
-        let key_auth = order.key_authorization(&challenge);
+        let key_auth = order.key_authorization(challenge);
         let challenge_dir = format!("{}{}", web_root, WELL_KNOWN_PATH);
         let challenge_dir_path = Path::new(&challenge_dir);
         if !challenge_dir_path.try_exists()? {
