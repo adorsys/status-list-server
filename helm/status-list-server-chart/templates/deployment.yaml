@@ -1,0 +1,35 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "status-list-server-chart.fullname" . }}-deployment
+  labels:
+    app: {{ include "status-list-server-chart.name" . }}
+  namespace: {{ .Release.Namespace }}
+spec:
+  replicas: {{ .Values.statuslist.replicaCount }}
+  selector:
+    matchLabels:
+      app: {{ include "status-list-server-chart.name" . }}
+  template:
+    metadata:
+      labels:
+        app: {{ include "status-list-server-chart.name" . }}
+    spec:
+      containers:
+        - name: {{ include "status-list-server-chart.name" . }}
+          image: {{ .Values.statuslist.image.repository }}:{{ .Values.statuslist.image.tag }}
+          imagePullPolicy: {{ .Values.statuslist.image.pullPolicy }}
+          ports:
+            - containerPort: {{ .Values.statuslist.service.targetPort }}
+          env:
+            - name: RUST_LOG
+              value: {{ .Values.statuslist.env.RUST_LOG | quote }}
+            - name: POSTGRES_USER
+              value: {{ .Values.statuslist.env.POSTGRES_USER | quote }}
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.externalSecret.spec.target.name }}
+                  key:  postgres-password
+            - name: DATABASE_URL
+              value: {{ printf "postgres://%s:%s@%s-postgresql:5432/%s" .Values.statuslist.env.POSTGRES_USER "$(POSTGRES_PASSWORD)" .Release.Name .Values.postgresql.global.postgresql.auth.database | quote }}
