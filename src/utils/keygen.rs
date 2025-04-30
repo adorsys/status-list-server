@@ -4,6 +4,7 @@ use p256::{
 };
 use rand::{rngs::OsRng, TryRngCore};
 use std::fmt;
+use std::path::Path;
 
 use super::errors::Error;
 
@@ -58,7 +59,7 @@ impl Keypair {
         self.repr.key.verifying_key()
     }
 
-    /// Create a keypair from a pkcs8 PEM file
+    /// Create a keypair from a pkcs8 PEM string
     pub fn from_pkcs8_pem(pem: &str) -> Result<Self, Error> {
         let key = SigningKey::from_pkcs8_pem(pem).map_err(|err| {
             tracing::error!("Failed to create signing key from PEM: {err:?}");
@@ -85,6 +86,19 @@ impl Keypair {
     pub fn to_pkcs8_pem_bytes(&self) -> Result<Vec<u8>, Error> {
         self.to_pkcs8_pem().map(|pem| pem.into_bytes())
     }
+
+    /// Load a keypair from a PEM file
+    pub fn from_pem_file(path: impl AsRef<Path>) -> Result<Self, Error> {
+        let pem_content = std::fs::read_to_string(path.as_ref())?;
+        Self::from_pkcs8_pem(&pem_content)
+    }
+
+    /// Save the keypair to a PEM file
+    pub fn to_pem_file(&self, path: impl AsRef<Path>) -> Result<(), Error> {
+        let pem = self.to_pkcs8_pem()?;
+        std::fs::write(path, pem)?;
+        Ok(())
+    }
 }
 
 impl fmt::Display for Keypair {
@@ -99,6 +113,7 @@ mod tests {
     use jsonwebtoken::{decode, encode, DecodingKey, EncodingKey, Header, Validation};
     use p256::pkcs8::EncodePublicKey;
     use std::time::{SystemTime, UNIX_EPOCH};
+    use tempfile::NamedTempFile;
 
     #[test]
     fn test_validate_generated_signing_key() {
@@ -141,5 +156,23 @@ mod tests {
         );
 
         assert!(decoded.is_ok(), "Decoding failed: {:?}", decoded.err());
+    }
+
+    #[test]
+    fn test_keypair_file_operations() {
+        let temp_file = NamedTempFile::new().unwrap();
+        let temp_path = temp_file.path();
+
+        // Generate a keypair and save it
+        let keypair1 = Keypair::generate().unwrap();
+        keypair1.to_pem_file(temp_path).unwrap();
+
+        // Load the keypair back
+        let keypair2 = Keypair::from_pem_file(temp_path).unwrap();
+
+        // Verify both keypairs are identical
+        let pem1 = keypair1.to_pkcs8_pem().unwrap();
+        let pem2 = keypair2.to_pkcs8_pem().unwrap();
+        assert_eq!(pem1, pem2, "Keypairs should match when loaded from file");
     }
 }

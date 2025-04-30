@@ -1,3 +1,4 @@
+use std::io;
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -22,4 +23,6 @@ pub enum Error {
     UnsupportedBits,
     #[error("Failed to decode lst")]
     DecodeError,
+    #[error("IO error: {0}")]
+    Io(#[from] io::Error),
 }
