@@ -35,47 +35,6 @@
      2. It uses the `status_list.index` to locate the token's status in the Status List Token.
      3. The status is used to determine if the Referenced Token is valid, revoked, or expired.
 
-### **4. API Specifications**
-   - **Endpoint**: `/statuslists/{issuer}`
-   - **Method**: `GET`
-   - **Request Headers**:
-     - `Accept`: `application/statuslist+jwt` or `application/statuslist+cwt`.
-   - **Response**:
-     - **Status Code**: `200 OK` (success) or `404 NOT FOUND` (issuer not found).
-     - **Headers**:
-       - `Content-Type`: `application/statuslist+jwt` or `application/statuslist+cwt`.
-       - `Content-Encoding`: `gzip` (optional, for compression).
-     - **Body**: The Status List Token in JWT or CWT format.
-   
-   - **Endpoint**: `/statuslists/{issuer}`
-   - **Method**: `POST`
-   - **Description**: Allows an issuer to publish token statuses from which a status list will be created.
-   - **Authorization**: Requires a valid signed JWT with the issuer scope.
-   - **Request Body**:
-     ```json
-     [
-       { "index": 1, "status": "INVALID" },
-       { "index": 8, "status": "VALID" }
-     ]
-     ```
-   - **Response**:
-     - **Status Code**: `201 Created` (success), `400 Bad Request` (invalid data), `401 Unauthorized`, or `403 Forbidden`.
-
-   - **Endpoint**: `/statuslists/{issuer}`
-   - **Method**: `PUT`
-   - **Description**: Allows an issuer to update an existing status list.
-   - **Authorization**: Requires a valid signed JWT with the issuer scope.
-   - **Request Body**:
-     ```json
-     {
-       "updates": [
-         { "index": 1, "status": "VALID" },
-         { "index": 8, "status": "INVALID" }
-       ]
-     }
-     ```
-   - **Response**:
-     - **Status Code**: `200 OK` (success), `400 Bad Request` (invalid data), `401 Unauthorized`, `403 Forbidden`, or `404 Not Found`.
 
 ### **5. Data Formats**
    - **Referenced Token**:
