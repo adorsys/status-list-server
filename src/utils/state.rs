@@ -2,8 +2,6 @@ use crate::{
     database::queries::SeaOrmStore,
     model::{Credentials, StatusListToken},
 };
-use p256::ecdsa::signature::{Signer, Verifier};
-use p256::ecdsa::Signature;
 use sea_orm::{Database, DatabaseConnection};
 use sea_orm_migration::MigratorTrait;
 use std::fs;
@@ -20,88 +18,54 @@ pub struct AppState {
     pub server_key: Arc<Keypair>,
 }
 
-fn validate_keypair(keypair: &mut Keypair) -> Result<(), Error> {
-    // Test signing and verifying to ensure the keypair is valid
-    let test_data = b"test data";
-    let signature: Signature = keypair.signing_key().sign(test_data);
-    if keypair
-        .verifying_key()
-        .verify(test_data, &signature)
-        .is_err()
-    {
-        return Err(Error::Generic("Keypair validation failed".to_string()));
-    }
-    Ok(())
-}
-
-fn load_or_generate_keypair(pem_path: &Path) -> Result<Keypair, Error> {
-    tracing::debug!("Loading keypair from {}", pem_path.display());
-
-    if pem_path.exists() {
-        tracing::info!("Loading existing keypair from {}", pem_path.display());
-        let pem_content = fs::read_to_string(pem_path).map_err(|e| {
-            tracing::error!("Failed to read key file: {}", e);
-            Error::ReadCertificate(pem_path.to_path_buf())
-        })?;
-
-        if pem_content
-            .trim()
-            .starts_with("-----BEGIN PRIVATE KEY-----")
-        {
-            let normalized_pem = pem_content.trim();
-
-            match Keypair::from_pkcs8_pem(normalized_pem) {
-                Ok(mut keypair) => {
-                    if let Err(e) = validate_keypair(&mut keypair) {
-                        tracing::warn!("Loaded keypair validation failed: {}", e);
-                    } else {
-                        tracing::info!("Successfully loaded and validated keypair");
+fn load_or_generate_keypair() -> Result<Keypair, Error> {
+    if let Ok(pem_path) = std::env::var("SERVER_KEY_PATH") {
+        let pem_path = Path::new(&pem_path);
+        match pem_path.try_exists() {
+            Ok(true) => {
+                match Keypair::from_pem_file(pem_path) {
+                    Ok(keypair) => {
+                        tracing::info!("Loaded server key from {}", pem_path.display());
                         return Ok(keypair);
                     }
-                }
-                Err(e) => {
-                    tracing::warn!("Failed to parse key file: {}", e);
+                    Err(e) => {
+                        tracing::warn!("Failed to load keypair from {}: {}; generating a new one", pem_path.display(), e);
+                    }
                 }
             }
-        } else {
-            tracing::warn!("Key file does not contain a valid PEM key");
+            Ok(false) => {
+                tracing::info!("Key file does not exist at {}; generating a new one", pem_path.display());
+            }
+            Err(e) => {
+                tracing::warn!("Error checking key file existence: {}; generating a new one", e);
+            }
         }
-    } else {
-        tracing::info!("Key file does not exist at {}", pem_path.display());
-    }
 
-    tracing::info!("Generating new keypair");
-    let mut keypair = Keypair::generate().map_err(|e| {
-        tracing::error!("Failed to generate new keypair: {}", e);
-        e
-    })?;
-
-    validate_keypair(&mut keypair).map_err(|e| {
-        tracing::error!("Failed to validate new keypair: {}", e);
-        e
-    })?;
-
-    tracing::info!("Saving new keypair to {}", pem_path.display());
-
-    if let Some(parent) = pem_path.parent() {
-        fs::create_dir_all(parent).map_err(|e| {
-            tracing::error!("Failed to create key directory: {}", e);
-            Error::Generic("Failed to create key directory".to_string())
+        // Generate and save a new keypair
+        let keypair = Keypair::generate().map_err(|e| {
+            tracing::error!("Failed to generate new keypair: {}", e);
+            e
         })?;
+
+        if let Some(parent) = pem_path.parent() {
+            fs::create_dir_all(parent).map_err(|e| {
+                tracing::error!("Failed to create key directory: {}", e);
+                Error::Generic("Failed to create key directory".to_string())
+            })?;
+        }
+
+        keypair.to_pem_file(pem_path).map_err(|e| {
+            tracing::error!("Failed to save new keypair: {}", e);
+            e
+        })?;
+
+        tracing::info!("Generated and saved new server key to {}", pem_path.display());
+        Ok(keypair)
+    } else {
+        // No SERVER_KEY_PATH, just generate
+        tracing::info!("Generating new server keypair (no path specified)");
+        Keypair::generate()
     }
-
-    let pem_content = keypair.to_pkcs8_pem().map_err(|e| {
-        tracing::error!("Failed to convert key to PEM: {}", e);
-        e
-    })?;
-
-    fs::write(pem_path, pem_content.as_bytes()).map_err(|e| {
-        tracing::error!("Failed to write key file: {}", e);
-        Error::Generic("Failed to write key file".to_string())
-    })?;
-
-    tracing::info!("Successfully saved new keypair");
-    Ok(keypair)
 }
 
 pub async fn setup() -> AppState {
@@ -115,7 +79,7 @@ pub async fn setup() -> AppState {
         .expect("Failed to apply migrations");
 
     // Load or generate server key
-    let server_key = load_or_generate_keypair(Path::new("server_key.pem"))
+    let server_key = load_or_generate_keypair()
         .expect("Failed to load or generate server key");
 
     let db = Arc::new(db);
@@ -129,81 +93,70 @@ pub async fn setup() -> AppState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::fs;
-    use std::path::Path;
+    use std::env;
+    use tempfile::NamedTempFile;
+
+    #[test]
+    fn test_load_or_generate_keypair_no_env() {
+        // Clear any existing SERVER_KEY_PATH
+        env::remove_var("SERVER_KEY_PATH");
+        
+        let keypair = load_or_generate_keypair().expect("Failed to load or generate keypair");
+        // Verify the keypair can be serialized to PEM
+        assert!(keypair.to_pkcs8_pem().is_ok(), "Keypair should serialize to PEM successfully");
+    }
 
     #[test]
     fn test_load_or_generate_keypair_with_env() {
-        let temp_path_str = "./src/test_resources/test_key_roundtrip.pem".to_string();
-        let temp_path = Path::new(&temp_path_str);
-
-        let test_resources_dir = Path::new("./src/test_resources");
-        if !test_resources_dir.exists() {
-            fs::create_dir_all(test_resources_dir)
-                .expect("Failed to create test_resources directory");
-        }
-
-        if temp_path.exists() {
-            fs::remove_file(temp_path).expect("Failed to remove existing test file");
-        }
-
-        // First call: Generate and save a keypair
-        let mut keypair1 =
-            load_or_generate_keypair(temp_path).expect("Failed to load or generate first keypair");
-        assert!(validate_keypair(&mut keypair1).is_ok());
-        assert!(temp_path.exists(), "File should exist after first call");
-
-        // Second call: Load the saved keypair
-        let mut keypair2 =
-            load_or_generate_keypair(temp_path).expect("Failed to load or generate second keypair");
-        assert!(validate_keypair(&mut keypair2).is_ok());
-
-        // Verify both keypairs are identical
-        let pem1 = keypair1
-            .to_pkcs8_pem()
-            .expect("Failed to get PEM from first keypair");
-        let pem2 = keypair2
-            .to_pkcs8_pem()
-            .expect("Failed to get PEM from second keypair");
-        assert_eq!(pem1, pem2, "Keypairs should match when loaded from file");
+        // Create a temporary file
+        let temp_file = NamedTempFile::new().expect("Failed to create temp file");
+        let temp_path = temp_file.path().to_str().expect("Failed to get temp path");
+        
+        // Set the environment variable
+        env::set_var("SERVER_KEY_PATH", temp_path);
+        
+        // First call should generate and save a key
+        let keypair1 = load_or_generate_keypair().expect("Failed to load or generate first keypair");
+        
+        // Second call should load the same key
+        let keypair2 = load_or_generate_keypair().expect("Failed to load or generate second keypair");
+        
+        // Verify both keys are the same
+        let pem1 = keypair1.to_pkcs8_pem().expect("Failed to get PEM from first keypair");
+        let pem2 = keypair2.to_pkcs8_pem().expect("Failed to get PEM from second keypair");
+        assert_eq!(pem1, pem2, "Generated keys should be identical when loading from file");
+        
+        // Clean up
+        env::remove_var("SERVER_KEY_PATH");
     }
 
     #[test]
     fn test_load_or_generate_keypair_invalid_file() {
-        let temp_path_str = "./src/test_resources/test_key_invalid_content.pem".to_string();
-        let temp_path = Path::new(&temp_path_str);
-
-        let test_resources_dir = Path::new("./src/test_resources");
-        if !test_resources_dir.exists() {
-            fs::create_dir_all(test_resources_dir)
-                .expect("Failed to create test_resources directory");
-        }
-
-        if temp_path.exists() {
-            fs::remove_file(temp_path).expect("Failed to remove existing test file");
-        }
-
-        // Write invalid content
-        fs::write(temp_path, "invalid key content").expect("Failed to write invalid content");
-
-        // Call the function: Should overwrite with a valid keypair
-        let mut keypair =
-            load_or_generate_keypair(temp_path).expect("Failed to load or generate keypair");
-        assert!(validate_keypair(&mut keypair).is_ok());
-
-        // Verify the file was overwritten
-        let saved_content = fs::read_to_string(temp_path).expect("Failed to read saved key");
+        // Create a temporary file with invalid content
+        let temp_file = NamedTempFile::new().expect("Failed to create temp file");
+        let temp_path = temp_file.path().to_str().expect("Failed to get temp path");
+        let invalid_content = "invalid key content";
+        std::fs::write(temp_path, invalid_content).expect("Failed to write invalid content");
+        
+        // Set the environment variable
+        env::set_var("SERVER_KEY_PATH", temp_path);
+        
+        // Should generate a new key despite invalid file
+        let keypair = load_or_generate_keypair().expect("Failed to load or generate keypair");
+        
+        // Verify the key was saved and is different from the invalid content
+        let saved_content = std::fs::read_to_string(temp_path).expect("Failed to read saved key");
         assert!(!saved_content.is_empty(), "Saved key should not be empty");
         assert!(
-            saved_content
-                .trim()
-                .starts_with("-----BEGIN PRIVATE KEY-----"),
+            saved_content.starts_with("-----BEGIN PRIVATE KEY-----"),
             "Saved content should be a valid PEM key"
         );
         assert_ne!(
-            saved_content.trim(),
-            "invalid key content",
-            "Saved key should replace invalid content"
+            saved_content, invalid_content,
+            "Saved key should be different from invalid content"
         );
+        
+        // Clean up
+        env::remove_var("SERVER_KEY_PATH");
     }
 }
