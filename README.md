@@ -53,7 +53,7 @@ By default, the server runs on `http://localhost:8000`. You can modify the port 
 
 ### Health Check
 
-- **Endpoint:** `GET /healthz`
+- **Endpoint:** `GET /health`
 - **Description:** Checks the health status of the server.
 - **Response:**
   - `200 OK`: Server is running.
@@ -67,7 +67,7 @@ By default, the server runs on `http://localhost:8000`. You can modify the port 
   ```
  
 ### Publish statuslist
-- **Endpoint**: `POST /statuslists/{issuer}` 
+- **Endpoint**: `POST /statuslists/{list_id}` 
 - **Description**: Allows an issuer to publish his token status from which will be created a status list
 - **Authorization**: Requires a valid sign jwt with the issuer scope (a signed jwt with issuers as kid).
 - **Request Body**
@@ -80,9 +80,9 @@ By default, the server runs on `http://localhost:8000`. You can modify the port 
 
 ### Update Status List
 
-- **Endpoint:** `PUT /statuslists/{issuer}`
+- **Endpoint:** `PUT /statuslists/{list_id}`
 - **Description:** Allows an issuer to update the status list.
-- **Authorization:** Requires a valid sign jwt with the issuer scope (a signed jwt with issuers as kid).
+- **Authorization:** Requires a valid sign jwt with the issuer scope (a signed jwt with issuer as kid).
   
 - **Request Body:** 
 
@@ -107,7 +107,7 @@ By default, the server runs on `http://localhost:8000`. You can modify the port 
 
 ### Retrieve Status List
 
-- **Endpoint:** `GET /statuslists/{issuer}`
+- **Endpoint:** `GET /statuslists/{list_id}`
 - **Description:** Retrieves the current status list for the specified issuer. This endpoint is publicly accessible with no authentication required.
 - **Responses:**
   - `200 OK`: Returns the status list in a compressed and encoded format.
