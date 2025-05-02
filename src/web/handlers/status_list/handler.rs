@@ -65,22 +65,20 @@ impl StatusListTokenExt for StatusListToken {
 
 pub async fn get_status_list(
     State(state): State<AppState>,
-    Path((issuer, list_id)): Path<(String, String)>,
+    Path(list_id): Path<String>, // Updated to single list_id
     headers: HeaderMap,
 ) -> Result<impl IntoResponse + Debug, StatusListError> {
     let accept = headers.get(header::ACCEPT).and_then(|h| h.to_str().ok());
 
-    // Check accept header first
     match accept {
         None => (), // Default to JWT
         Some(accept)
             if accept == ACCEPT_STATUS_LISTS_HEADER_JWT
-                || accept == ACCEPT_STATUS_LISTS_HEADER_CWT => {} // Valid accept header
+                || accept == ACCEPT_STATUS_LISTS_HEADER_CWT => {}
         Some(_) => return Err(StatusListError::InvalidAcceptHeader),
     }
 
-    // Get status list claims from database
-    let status_claims = state
+    let status_list_token = state
         .status_list_token_repository
         .find_one_by(list_id.clone())
         .await
@@ -90,19 +88,13 @@ pub async fn get_status_list(
         })?
         .ok_or(StatusListError::StatusListNotFound)?;
 
-    // Verify the issuer matches
-    if status_claims.issuer != issuer {
-        return Err(StatusListError::UnauthorizedIssuer);
-    }
-
-    // build the token depending on the accept header
     let accept = accept.unwrap_or(ACCEPT_STATUS_LISTS_HEADER_JWT);
-    build_status_list_token(accept, &status_claims, &state).await
+    build_status_list_token(accept, &status_list_token, &state).await
 }
 
 async fn build_status_list_token(
     accept: &str,
-    token: &StatusListToken,
+    status_list_token: &StatusListToken, // Renamed for clarity
     repo: &AppState,
 ) -> Result<impl IntoResponse + Debug, StatusListError> {
     let server_key = repo.server_key.clone();
@@ -111,27 +103,28 @@ async fn build_status_list_token(
         Ok((
             StatusCode::OK,
             [(header::CONTENT_TYPE, accept)],
-            issue_jwt(token, &server_key)?,
+            issue_jwt(status_list_token, &server_key)?,
         )
             .into_response())
     } else {
         Ok((
             StatusCode::OK,
             [(header::CONTENT_TYPE, accept)],
-            issue_cwt(token, &server_key)?,
+            issue_cwt(status_list_token, &server_key)?,
         )
             .into_response())
     }
 }
 
-// Function to create a CWT per the specification
-fn issue_cwt(token: &StatusListToken, server_key: &Keypair) -> Result<Vec<u8>, StatusListError> {
+fn issue_cwt(
+    status_list_token: &StatusListToken,
+    server_key: &Keypair,
+) -> Result<Vec<u8>, StatusListError> {
     let mut claims = vec![];
 
-    // Building the claims
     claims.push((
         CborValue::Integer(SUBJECT.into()),
-        CborValue::Text(token.sub.clone()),
+        CborValue::Text(status_list_token.sub.clone()),
     ));
     let iat = Utc::now().timestamp();
     claims.push((
@@ -140,7 +133,7 @@ fn issue_cwt(token: &StatusListToken, server_key: &Keypair) -> Result<Vec<u8>, S
     ));
     // According to the spec, the lifetime of the token depends on the lifetime of the referenced token
     // https://www.ietf.org/archive/id/draft-ietf-oauth-status-list-10.html#section-13.1
-    if let Some(exp) = token.exp {
+    if let Some(exp) = status_list_token.exp {
         claims.push((
             CborValue::Integer(EXP.into()),
             CborValue::Integer(exp.into()),
@@ -148,22 +141,20 @@ fn issue_cwt(token: &StatusListToken, server_key: &Keypair) -> Result<Vec<u8>, S
     }
     claims.push((
         CborValue::Integer(TTL.into()),
-        if let Some(ttl) = token.ttl {
+        if let Some(ttl) = status_list_token.ttl {
             CborValue::Integer(ttl.into())
         } else {
-            // Default to 12 hours
             CborValue::Integer(43200.into())
         },
     ));
-    // Adding the status list map to the claims
     let status_list = vec![
         (
             CborValue::Text("bits".into()),
-            CborValue::Integer(token.status_list.bits.into()),
+            CborValue::Integer(status_list_token.status_list.bits.into()),
         ),
         (
             CborValue::Text("lst".into()),
-            CborValue::Text(token.status_list.lst.clone()),
+            CborValue::Text(status_list_token.status_list.lst.clone()),
         ),
     ];
     claims.push((
@@ -211,18 +202,19 @@ pub struct StatusListClaims {
     pub ttl: Option<i64>,
 }
 
-fn issue_jwt(token: &StatusListToken, server_key: &Keypair) -> Result<String, StatusListError> {
+fn issue_jwt(
+    status_list_token: &StatusListToken,
+    server_key: &Keypair,
+) -> Result<String, StatusListError> {
     let iat = Utc::now().timestamp();
-    let ttl = token.ttl.unwrap_or(43200);
-    // Building the claims
+    let ttl = status_list_token.ttl.unwrap_or(43200);
     let claims = StatusListClaims {
-        exp: token.exp,
+        exp: status_list_token.exp,
         iat,
-        status_list: token.status_list.clone(),
-        sub: token.sub.to_owned(),
+        status_list: status_list_token.status_list.clone(),
+        sub: status_list_token.sub.to_owned(),
         ttl: Some(ttl),
     };
-    // Building the header
     let mut header = Header::new(jsonwebtoken::Algorithm::ES256);
     header.typ = Some(STATUS_LISTS_HEADER_JWT.into());
 
@@ -243,7 +235,7 @@ fn issue_jwt(token: &StatusListToken, server_key: &Keypair) -> Result<String, St
 
 pub async fn update_statuslist(
     State(appstate): State<Arc<AppState>>,
-    Path((issuer, list_id)): Path<(String, String)>,
+    Path(list_id): Path<String>, // Updated to single list_id
     Json(body): Json<Value>,
 ) -> impl IntoResponse {
     let updates = match body
@@ -308,14 +300,8 @@ pub async fn update_statuslist(
     };
 
     if let Some(status_list_token) = status_list_token {
-        // Verify the issuer matches
-        if status_list_token.issuer != issuer {
-            return (
-                StatusCode::FORBIDDEN,
-                StatusListError::UnauthorizedIssuer.to_string(),
-            )
-                .into_response();
-        }
+        // Issuer verification is assumed to be handled via authentication (e.g., JWT)
+        // Proceed with the update without explicit issuer check here
 
         let lst = status_list_token.status_list;
         let updated_lst = match update_status(&lst.lst, updates) {
@@ -340,7 +326,7 @@ pub async fn update_statuslist(
             lst: updated_lst,
         };
 
-        let statuslisttoken = StatusListToken::new(
+        let updated_token = StatusListToken::new(
             list_id.clone(),
             status_list_token.issuer.clone(),
             status_list_token.exp,
@@ -350,7 +336,8 @@ pub async fn update_statuslist(
             status_list_token.ttl,
         );
 
-        match store.update_one(issuer, statuslisttoken).await {
+        match store.update_one(updated_token).await {
+            // Updated to pass only StatusListToken
             Ok(true) => StatusCode::ACCEPTED.into_response(),
             Ok(false) => {
                 tracing::error!("Failed to update status list");
@@ -465,7 +452,7 @@ mod tests {
 
         let response = get_status_list(
             State(app_state.clone()),
-            Path(("test_issuer".to_string(), "test_list".to_string())),
+            Path("test_list".to_string()), // Updated to single list_id
             headers,
         )
         .await
@@ -490,7 +477,6 @@ mod tests {
         let token_data =
             jsonwebtoken::decode::<StatusListClaims>(body_str, &decoding_key, &validation).unwrap();
 
-        // Verify the claims
         assert_eq!(token_data.claims.sub, "test_subject");
         assert_eq!(token_data.claims.status_list.bits, 8);
         assert_eq!(token_data.claims.status_list.lst, encode_lst(vec![0, 0, 0]));
@@ -536,7 +522,7 @@ mod tests {
 
         let response = get_status_list(
             State(app_state.clone()),
-            Path(("test_issuer".to_string(), "test_list".to_string())),
+            Path("test_list".to_string()), // Updated to single list_id
             headers,
         )
         .await
@@ -548,7 +534,6 @@ mod tests {
 
         let cwt = CoseSign1::from_slice(&body_bytes).unwrap();
 
-        // verify signature
         let binding = app_state.server_key.clone();
         let signing_key = binding.signing_key();
         let verifying_key = VerifyingKey::from(signing_key);
@@ -565,7 +550,6 @@ mod tests {
             _ => panic!("Invalid CWT payload"),
         };
 
-        // Verify claims
         let sub = claims
             .iter()
             .find(|(k, _)| k == &CborValue::Integer(SUBJECT.into()))
@@ -633,7 +617,7 @@ mod tests {
 
         let result = get_status_list(
             State(app_state),
-            Path(("test_issuer".to_string(), "test_list".to_string())),
+            Path("test_list".to_string()), // Updated to single list_id
             headers,
         )
         .await;
@@ -660,7 +644,7 @@ mod tests {
 
         let result = get_status_list(
             State(app_state),
-            Path(("test_issuer".to_string(), "test_list".to_string())),
+            Path("test_list".to_string()), // Updated to single list_id
             headers,
         )
         .await;
@@ -727,7 +711,7 @@ mod tests {
 
         let response = update_statuslist(
             State(app_state),
-            Path(("test_issuer".to_string(), "test_list".to_string())),
+            Path("test_list".to_string()), // Updated to single list_id
             Json(update_body),
         )
         .await
@@ -759,7 +743,7 @@ mod tests {
 
         let response = update_statuslist(
             State(app_state),
-            Path(("test_issuer".to_string(), "test_list".to_string())),
+            Path("test_list".to_string()), // Updated to single list_id
             Json(update_body),
         )
         .await

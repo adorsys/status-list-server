@@ -46,25 +46,7 @@ impl SeaOrmStore<StatusListToken> {
             .map_err(|e| RepositoryError::FindError(e.to_string()))
     }
 
-    pub async fn update_one(
-        &self,
-        issuer: String,
-        entity: StatusListToken,
-    ) -> Result<bool, RepositoryError> {
-        // First verify the issuer matches
-        let existing = status_list_tokens::Entity::find_by_id(&entity.list_id)
-            .one(&*self.db)
-            .await
-            .map_err(|e| RepositoryError::FindError(e.to_string()))?;
-
-        if let Some(existing) = existing {
-            if existing.issuer != issuer {
-                return Ok(false);
-            }
-        } else {
-            return Ok(false);
-        }
-
+    pub async fn update_one(&self, entity: StatusListToken) -> Result<bool, RepositoryError> {
         let active = status_list_tokens::ActiveModel {
             list_id: Set(entity.list_id),
             issuer: Set(entity.issuer),
@@ -81,25 +63,7 @@ impl SeaOrmStore<StatusListToken> {
         Ok(true)
     }
 
-    pub async fn delete_by(
-        &self,
-        issuer: String,
-        list_id: String,
-    ) -> Result<bool, RepositoryError> {
-        // First verify the issuer matches
-        let existing = status_list_tokens::Entity::find_by_id(&list_id)
-            .one(&*self.db)
-            .await
-            .map_err(|e| RepositoryError::FindError(e.to_string()))?;
-
-        if let Some(existing) = existing {
-            if existing.issuer != issuer {
-                return Ok(false);
-            }
-        } else {
-            return Ok(false);
-        }
-
+    pub async fn delete_by(&self, list_id: String) -> Result<bool, RepositoryError> {
         let result = status_list_tokens::Entity::delete_by_id(list_id)
             .exec(&*self.db)
             .await
