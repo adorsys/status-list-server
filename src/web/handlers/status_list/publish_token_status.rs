@@ -1,9 +1,7 @@
 use crate::{
+    auth::authentication::extract_issuer_from_token,
     model::{StatusEntry, StatusList, StatusListToken},
-    utils::{
-        bits_validation::BitFlag, errors::Error, lst_gen::update_or_create_status_list,
-        state::AppState,
-    },
+    utils::{bits_validation::BitFlag, lst_gen::update_or_create_status_list, state::AppState},
     web::handlers::status_list::error::StatusListError,
 };
 use axum::{
@@ -11,6 +9,9 @@ use axum::{
     http::StatusCode,
     response::IntoResponse,
 };
+use axum_extra::typed_header::TypedHeader;
+use headers::authorization::Bearer;
+use headers::Authorization;
 use serde::{Deserialize, Serialize};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tracing;
@@ -19,7 +20,6 @@ use tracing;
 #[derive(Deserialize, Serialize, Clone)]
 pub struct PublishTokenStatusRequest {
     pub list_id: String,
-    pub issuer: String,
     pub updates: Vec<StatusEntry>,
     #[serde(default)]
     pub sub: Option<String>,
@@ -30,37 +30,39 @@ pub struct PublishTokenStatusRequest {
 
 // Handler to create a new status list token
 pub async fn publish_token_status(
-    State(appstate): State<AppState>,
+    State(state): State<AppState>,
+    TypedHeader(Authorization(bearer)): TypedHeader<Authorization<Bearer>>,
     Json(payload): Json<PublishTokenStatusRequest>,
 ) -> Result<impl IntoResponse, StatusListError> {
-    let store = &appstate.status_list_token_repository;
+    let store = &state.status_list_token_repository;
+    let bits = BitFlag::new(payload.bits).ok_or(StatusListError::UnsupportedBits)?;
 
-    let bitflag = if let Some(bits) = BitFlag::new(payload.bits) {
-        Ok(bits)
-    } else {
-        Err(StatusListError::Generic(format!(
-            "Invalid 'bits' value: {}. Allowed values are 1, 2, 4, 8.",
-            payload.bits
-        )))
-    };
-    let bits = bitflag?;
+    // Extract and verify the issuer from the token
+    let issuer = extract_issuer_from_token(&state, bearer.token())
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to extract issuer from token: {:?}", e);
+            StatusListError::Unauthorized
+        })?;
 
-    // Generate the compressed status list; use empty encoding if no updates
+    // Validate indices
+    if payload.updates.iter().any(|entry| entry.index < 0) {
+        return Err(StatusListError::BadRequest(
+            "Invalid index: indices must be non-negative".into(),
+        ));
+    }
+
+    // Generate the status list
     let lst = if payload.updates.is_empty() {
+        // For empty updates, create an empty status list
         base64url::encode([])
     } else {
-        update_or_create_status_list(None, payload.updates, bits).map_err(|e| {
-            tracing::error!("lst_from failed: {:?}", e);
-            match e {
-                Error::Generic(msg) => StatusListError::Generic(msg),
-                Error::InvalidIndex => StatusListError::InvalidIndex,
-                Error::UnsupportedBits => StatusListError::UnsupportedBits,
-                _ => StatusListError::Generic(e.to_string()),
-            }
+        update_or_create_status_list(None, payload.updates.clone(), bits).map_err(|e| {
+            tracing::error!("Failed to create status list: {:?}", e);
+            StatusListError::InternalServerError
         })?
     };
 
-    // Check for existing token to prevent duplicates
     match store.find_one_by(payload.list_id.clone()).await {
         Ok(Some(_)) => {
             tracing::info!("Status list {} already exists", payload.list_id);
@@ -83,7 +85,7 @@ pub async fn publish_token_status(
             // Build the new status list token
             let new_status_list_token = StatusListToken {
                 list_id: payload.list_id.clone(),
-                issuer: payload.issuer.clone(),
+                issuer,
                 exp,
                 iat,
                 status_list,
@@ -114,6 +116,7 @@ mod tests {
         utils::{keygen::Keypair, state::AppState},
     };
     use axum::{extract::State, Json};
+    use jsonwebtoken::{encode, EncodingKey, Header};
     use sea_orm::{DatabaseBackend, MockDatabase};
     use std::sync::Arc;
 
@@ -129,20 +132,38 @@ mod tests {
             sub: Some("issuer".to_string()),
             ttl: Some(3600),
             bits,
-            issuer: "issuer".to_string(),
         }
     }
 
     // Helper to generate a test server key
-    // Note: It does nothing, it's just use to build the AppState
     fn server_key() -> Keypair {
         Keypair::generate().unwrap()
+    }
+
+    // Helper to create a test JWT token
+    fn create_test_jwt(issuer: &str) -> String {
+        let keypair = server_key();
+        let header = Header {
+            alg: jsonwebtoken::Algorithm::ES256,
+            kid: Some(issuer.to_string()),
+            ..Default::default()
+        };
+        let claims = serde_json::json!({
+            "exp": (SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_secs() as usize) + 3600
+        });
+        let encoding_key =
+            EncodingKey::from_ec_pem(&keypair.to_pkcs8_pem_bytes().unwrap()).unwrap();
+        encode(&header, &claims, &encoding_key).unwrap()
     }
 
     #[tokio::test]
     async fn test_publish_status_creates_token() {
         let mock_db = MockDatabase::new(DatabaseBackend::Postgres);
         let token_id = "token1";
+        let issuer = "test_issuer";
         let payload = create_test_token(
             token_id,
             vec![
@@ -164,6 +185,7 @@ mod tests {
         };
         let new_token = StatusListToken {
             list_id: token_id.to_string(),
+            issuer: issuer.to_string(),
             exp: Some(
                 (SystemTime::now()
                     .duration_since(UNIX_EPOCH)
@@ -178,7 +200,6 @@ mod tests {
             status_list,
             sub: "issuer".to_string(),
             ttl: Some(3600),
-            issuer: "issuer".to_string(),
         };
         let db_conn = Arc::new(
             mock_db
@@ -195,10 +216,14 @@ mod tests {
             server_key: Arc::new(server_key()),
         };
 
-        let response = publish_token_status(State(app_state), Json(payload))
-            .await
-            .unwrap()
-            .into_response();
+        let token = create_test_jwt(issuer);
+        let auth_header = Authorization::bearer(&token).unwrap();
+
+        let response =
+            publish_token_status(State(app_state), TypedHeader(auth_header), Json(payload))
+                .await
+                .unwrap()
+                .into_response();
         assert_eq!(response.status(), StatusCode::CREATED);
     }
 
@@ -206,6 +231,7 @@ mod tests {
     async fn test_token_is_stored_after_publish() {
         let mock_db = MockDatabase::new(DatabaseBackend::Postgres);
         let token_id = "token1";
+        let issuer = "test_issuer";
         let payload = create_test_token(
             token_id,
             vec![
@@ -228,6 +254,7 @@ mod tests {
         };
         let new_token = StatusListToken {
             list_id: token_id.to_string(),
+            issuer: issuer.to_string(),
             exp: Some(
                 (SystemTime::now()
                     .duration_since(UNIX_EPOCH)
@@ -242,7 +269,6 @@ mod tests {
             status_list,
             sub: "issuer".to_string(),
             ttl: Some(3600),
-            issuer: "issuer".to_string(),
         };
         let db_conn = Arc::new(
             mock_db
@@ -260,10 +286,17 @@ mod tests {
             server_key: Arc::new(server_key()),
         };
 
+        let token = create_test_jwt(issuer);
+        let auth_header = Authorization::bearer(&token).unwrap();
+
         // Perform the insertion
-        let _ = publish_token_status(State(app_state.clone()), Json(payload))
-            .await
-            .unwrap();
+        let _ = publish_token_status(
+            State(app_state.clone()),
+            TypedHeader(auth_header),
+            Json(payload),
+        )
+        .await
+        .unwrap();
 
         // Verify the token is stored
         let result = app_state
@@ -283,6 +316,7 @@ mod tests {
     async fn test_token_conflict() {
         let mock_db = MockDatabase::new(DatabaseBackend::Postgres);
         let token_id = "token1";
+        let issuer = "test_issuer";
         let payload = create_test_token(
             token_id,
             vec![StatusEntry {
@@ -295,6 +329,7 @@ mod tests {
 
         let existing_token = StatusListToken {
             list_id: token_id.to_string(),
+            issuer: issuer.to_string(),
             exp: None,
             iat: 1234567890,
             status_list: StatusList {
@@ -303,7 +338,6 @@ mod tests {
             },
             sub: "issuer".to_string(),
             ttl: Some(3600),
-            issuer: "issuer".to_string(),
         };
         let db_conn = Arc::new(
             mock_db
@@ -319,10 +353,16 @@ mod tests {
             server_key: Arc::new(server_key()),
         };
 
-        let response = match publish_token_status(State(app_state), Json(payload)).await {
-            Ok(_) => panic!("Expected an error but got Ok"),
-            Err(err) => err.into_response(),
-        };
+        let token = create_test_jwt(issuer);
+        let auth_header = Authorization::bearer(&token).unwrap();
+
+        let response =
+            match publish_token_status(State(app_state), TypedHeader(auth_header), Json(payload))
+                .await
+            {
+                Ok(_) => panic!("Expected an error but got Ok"),
+                Err(err) => err.into_response(),
+            };
         assert_eq!(response.status(), StatusCode::CONFLICT);
     }
 
@@ -330,6 +370,7 @@ mod tests {
     async fn test_empty_updates() {
         let mock_db = MockDatabase::new(DatabaseBackend::Postgres);
         let token_id = "token_empty";
+        let issuer = "test_issuer";
         let payload = create_test_token(token_id, vec![], 1);
         let status_list = StatusList {
             bits: 1,
@@ -337,6 +378,7 @@ mod tests {
         };
         let new_token = StatusListToken {
             list_id: token_id.to_string(),
+            issuer: issuer.to_string(),
             exp: Some(
                 (SystemTime::now()
                     .duration_since(UNIX_EPOCH)
@@ -351,7 +393,6 @@ mod tests {
             status_list,
             sub: "issuer".to_string(),
             ttl: Some(3600),
-            issuer: "issuer".to_string(),
         };
         let db_conn = Arc::new(
             mock_db
@@ -369,10 +410,17 @@ mod tests {
             server_key: Arc::new(server_key()),
         };
 
-        let response = publish_token_status(State(app_state.clone()), Json(payload))
-            .await
-            .unwrap()
-            .into_response();
+        let token = create_test_jwt(issuer);
+        let auth_header = Authorization::bearer(&token).unwrap();
+
+        let response = publish_token_status(
+            State(app_state.clone()),
+            TypedHeader(auth_header),
+            Json(payload),
+        )
+        .await
+        .unwrap()
+        .into_response();
         assert_eq!(response.status(), StatusCode::CREATED);
 
         let result = app_state
@@ -396,6 +444,7 @@ mod tests {
             server_key: Arc::new(server_key()),
         };
         let token_id = "token_invalid_bits";
+        let issuer = "test_issuer";
         let payload = create_test_token(
             token_id,
             vec![StatusEntry {
@@ -405,10 +454,16 @@ mod tests {
             3, // Invalid bits value
         );
 
-        let response = match publish_token_status(State(app_state), Json(payload)).await {
-            Ok(_) => panic!("Expected an error but got Ok"),
-            Err(err) => err.into_response(),
-        };
+        let token = create_test_jwt(issuer);
+        let auth_header = Authorization::bearer(&token).unwrap();
+
+        let response =
+            match publish_token_status(State(app_state), TypedHeader(auth_header), Json(payload))
+                .await
+            {
+                Ok(_) => panic!("Expected an error but got Ok"),
+                Err(err) => err.into_response(),
+            };
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     }
 
@@ -416,6 +471,7 @@ mod tests {
     async fn test_repository_unavailable() {
         let mock_db = MockDatabase::new(DatabaseBackend::Postgres);
         let token_id = "token_no_repo";
+        let issuer = "test_issuer";
         let payload = create_test_token(
             token_id,
             vec![StatusEntry {
@@ -432,6 +488,7 @@ mod tests {
         };
         let new_token = StatusListToken {
             list_id: token_id.to_string(),
+            issuer: issuer.to_string(),
             exp: Some(
                 (SystemTime::now()
                     .duration_since(UNIX_EPOCH)
@@ -446,7 +503,6 @@ mod tests {
             status_list,
             sub: "issuer".to_string(),
             ttl: Some(3600),
-            issuer: "issuer".to_string(),
         };
         let db_conn = Arc::new(
             mock_db
@@ -463,10 +519,14 @@ mod tests {
             server_key: Arc::new(server_key()),
         };
 
-        let response = publish_token_status(State(app_state), Json(payload))
-            .await
-            .unwrap()
-            .into_response();
+        let token = create_test_jwt(issuer);
+        let auth_header = Authorization::bearer(&token).unwrap();
+
+        let response =
+            publish_token_status(State(app_state), TypedHeader(auth_header), Json(payload))
+                .await
+                .unwrap()
+                .into_response();
         assert_eq!(response.status(), StatusCode::CREATED);
     }
 
@@ -474,6 +534,7 @@ mod tests {
     async fn test_invalid_index() {
         let mock_db = MockDatabase::new(DatabaseBackend::Postgres);
         let token_id = "token_invalid_index";
+        let issuer = "test_issuer";
         let payload = create_test_token(
             token_id,
             vec![StatusEntry {
@@ -489,10 +550,16 @@ mod tests {
             server_key: Arc::new(server_key()),
         };
 
-        let response = match publish_token_status(State(app_state), Json(payload)).await {
-            Ok(_) => panic!("Expected an error but got Ok"),
-            Err(err) => err.into_response(),
-        };
+        let token = create_test_jwt(issuer);
+        let auth_header = Authorization::bearer(&token).unwrap();
+
+        let response =
+            match publish_token_status(State(app_state), TypedHeader(auth_header), Json(payload))
+                .await
+            {
+                Ok(_) => panic!("Expected an error but got Ok"),
+                Err(err) => err.into_response(),
+            };
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     }
 }
