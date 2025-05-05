@@ -65,7 +65,7 @@ impl StatusListTokenExt for StatusListToken {
 
 pub async fn get_status_list(
     State(state): State<AppState>,
-    Path(list_id): Path<String>, // Updated to single list_id
+    Path(list_id): Path<String>,
     headers: HeaderMap,
 ) -> Result<impl IntoResponse + Debug, StatusListError> {
     let accept = headers.get(header::ACCEPT).and_then(|h| h.to_str().ok());
@@ -94,7 +94,7 @@ pub async fn get_status_list(
 
 async fn build_status_list_token(
     accept: &str,
-    status_list_token: &StatusListToken, // Renamed for clarity
+    status_list_token: &StatusListToken,
     repo: &AppState,
 ) -> Result<impl IntoResponse + Debug, StatusListError> {
     let server_key = repo.server_key.clone();
@@ -235,7 +235,7 @@ fn issue_jwt(
 
 pub async fn update_statuslist(
     State(appstate): State<Arc<AppState>>,
-    Path(list_id): Path<String>, // Updated to single list_id
+    Path(list_id): Path<String>,
     Json(body): Json<Value>,
 ) -> impl IntoResponse {
     let updates = match body
@@ -337,7 +337,6 @@ pub async fn update_statuslist(
         );
 
         match store.update_one(updated_token).await {
-            // Updated to pass only StatusListToken
             Ok(true) => StatusCode::ACCEPTED.into_response(),
             Ok(false) => {
                 tracing::error!("Failed to update status list");
@@ -452,7 +451,7 @@ mod tests {
 
         let response = get_status_list(
             State(app_state.clone()),
-            Path("test_list".to_string()), // Updated to single list_id
+            Path("test_list".to_string()),
             headers,
         )
         .await
@@ -522,7 +521,7 @@ mod tests {
 
         let response = get_status_list(
             State(app_state.clone()),
-            Path("test_list".to_string()), // Updated to single list_id
+            Path("test_list".to_string()),
             headers,
         )
         .await
@@ -615,12 +614,8 @@ mod tests {
             ACCEPT_STATUS_LISTS_HEADER_JWT.parse().unwrap(),
         );
 
-        let result = get_status_list(
-            State(app_state),
-            Path("test_list".to_string()), // Updated to single list_id
-            headers,
-        )
-        .await;
+        let result =
+            get_status_list(State(app_state), Path("test_list".to_string()), headers).await;
 
         assert!(result.is_err());
         let err = result.unwrap_err();
@@ -642,12 +637,8 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.insert(http::header::ACCEPT, "application/xml".parse().unwrap()); // unsupported
 
-        let result = get_status_list(
-            State(app_state),
-            Path("test_list".to_string()), // Updated to single list_id
-            headers,
-        )
-        .await;
+        let result =
+            get_status_list(State(app_state), Path("test_list".to_string()), headers).await;
 
         assert!(result.is_err());
         let err = result.unwrap_err();
@@ -711,7 +702,7 @@ mod tests {
 
         let response = update_statuslist(
             State(app_state),
-            Path("test_list".to_string()), // Updated to single list_id
+            Path("test_list".to_string()),
             Json(update_body),
         )
         .await
@@ -743,7 +734,7 @@ mod tests {
 
         let response = update_statuslist(
             State(app_state),
-            Path("test_list".to_string()), // Updated to single list_id
+            Path("test_list".to_string()),
             Json(update_body),
         )
         .await
