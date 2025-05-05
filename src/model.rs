@@ -159,10 +159,21 @@ pub enum Status {
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, FromJsonQueryResult)]
 pub struct StatusList {
-    pub bits: usize,
+    pub bits: u8,
     pub lst: String,
 }
 
+/// Request payload for publishing and updating a status list token
+#[derive(Deserialize, Serialize, Clone)]
+pub struct StatusListTokenPayload {
+    pub list_id: String,
+    pub status: Vec<StatusEntry>,
+    #[serde(default)]
+    pub sub: Option<String>,
+    #[serde(default)]
+    pub ttl: Option<i64>,
+    pub bits: u8,
+}
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct StatusEntry {
     pub index: i32,
