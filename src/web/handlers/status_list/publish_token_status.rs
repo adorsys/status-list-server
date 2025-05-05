@@ -1,10 +1,7 @@
 use crate::{
     model::{StatusList, StatusListToken, StatusListTokenPayload},
     utils::{
-        bits_validation::BitFlag,
-        errors::Error,
-        lst_gen::create_status_list,
-        state::AppState,
+        bits_validation::BitFlag, errors::Error, lst_gen::create_status_list, state::AppState,
     },
     web::handlers::status_list::error::StatusListError,
 };
@@ -15,8 +12,6 @@ use axum::{
 };
 use std::time::{SystemTime, UNIX_EPOCH};
 use tracing;
-
-
 
 // Handler to create a new status list token
 pub async fn publish_token_status(
@@ -98,13 +93,14 @@ pub async fn publish_token_status(
 mod tests {
     use super::*;
     use crate::{
-        database::queries::SeaOrmStore, model::{status_list_tokens, Status, StatusEntry, StatusListToken}, test_resources::helper::{create_test_token, server_key}, utils::{keygen::Keypair, state::AppState}
+        database::queries::SeaOrmStore,
+        model::{status_list_tokens, Status, StatusEntry, StatusListToken},
+        test_resources::helper::{create_test_token, server_key},
+        utils::{keygen::Keypair, state::AppState},
     };
     use axum::{extract::State, Json};
     use sea_orm::{DatabaseBackend, MockDatabase};
     use std::sync::Arc;
-
-
 
     #[tokio::test]
     async fn test_publish_status_creates_token() {
