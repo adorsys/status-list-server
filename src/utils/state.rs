@@ -137,7 +137,7 @@ mod tests {
         let temp_path_str = temp_path
             .to_str()
             .expect("Failed to get temp path as string");
-        
+
         println!("Temporary file created at: {}", temp_path.display());
 
         // Ensure we start with a clean state
@@ -152,7 +152,8 @@ mod tests {
         fs::write(&temp_path, &pem1).expect("Failed to write keypair to file");
 
         // Test the load_or_generate_keypair function
-        let keypair2 = load_or_generate_keypair().expect("Failed to load or generate second keypair");
+        let keypair2 =
+            load_or_generate_keypair().expect("Failed to load or generate second keypair");
         let pem2 = keypair2
             .to_pkcs8_pem()
             .expect("Failed to serialize second keypair to PEM");
