@@ -74,9 +74,6 @@
    b14f33aa899e532844778ba2fff80b5c1e56e5
    ``` 
 
-Here’s how you can add an **Application Design** section to the **developer guide and architecture documentation** for the **Status List Server**. This section will explain the **tech stack** used, the architecture, and how the components interact.
-
-
 ## **5. Application Design**
 
 This section provides an overview of the **technology stack** and **design principles** used to build the Status List Server.
