@@ -35,7 +35,8 @@ sea-orm = { version = "1.1.7", features = [
     "runtime-tokio-native-tls",
     "macros",
 ] }
-
+axum-extra = { version = "0.10.1", features = ["typed-header"] }
+headers = "0.4.0"
 
 [dev-dependencies]
 sea-orm = { version = "1.1.7", features = ["mock"] }
