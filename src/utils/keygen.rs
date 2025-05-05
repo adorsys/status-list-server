@@ -74,12 +74,12 @@ impl Keypair {
     pub fn to_pkcs8_pem(&self) -> Result<String, Error> {
         self.repr
             .key
-            .to_pkcs8_pem(LineEnding::default())
+            .to_pkcs8_pem(LineEnding::LF)
             .map_err(|err| {
                 tracing::error!("Failed to convert signing key to PEM: {err:?}");
                 Error::PemGenFailed
             })
-            .map(|pem| pem.to_string())
+            .map(|pem| pem.to_string().trim().to_string())
     }
 
     /// Convert the private key to a pkcs8 PEM bytes
