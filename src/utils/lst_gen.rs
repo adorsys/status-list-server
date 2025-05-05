@@ -68,7 +68,7 @@ pub fn update_status_list(
 }
 
 fn apply_updates(
-    status_array: &mut Vec<u8>,
+    status_array: &mut [u8],
     status_updates: &[StatusEntry],
     bits: usize,
 ) -> Result<(), Error> {
@@ -194,7 +194,7 @@ mod tests {
         ];
         let bits = BitFlag::new(2).ok_or(Error::UnsupportedBits).unwrap();
 
-        let result = create_status_list( updates, bits).unwrap();
+        let result = create_status_list(updates, bits).unwrap();
         let decoded = base64url::decode(&result).unwrap();
         let mut decoder = flate2::read::ZlibDecoder::new(&*decoded);
         let mut decompressed = Vec::new();

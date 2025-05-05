@@ -4,7 +4,11 @@ use crate::{
 };
 
 // Helper to create a test request payload with customizable bits
-pub fn create_test_token(list_id: &str, status: Vec<StatusEntry>, bits: u8) -> StatusListTokenPayload {
+pub fn create_test_token(
+    list_id: &str,
+    status: Vec<StatusEntry>,
+    bits: u8,
+) -> StatusListTokenPayload {
     StatusListTokenPayload {
         list_id: list_id.to_string(),
         status,

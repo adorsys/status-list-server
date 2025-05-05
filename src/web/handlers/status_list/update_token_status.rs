@@ -83,11 +83,7 @@ mod test {
             StatusListTokenPayload,
         },
         test_resources::helper::server_key,
-        utils::{
-            bits_validation::BitFlag,
-            lst_gen::create_status_list,
-            state::AppState,
-        },
+        utils::{bits_validation::BitFlag, lst_gen::create_status_list, state::AppState},
         web::handlers::status_list::update_token_status::update_token_status,
     };
 
