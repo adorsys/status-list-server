@@ -1,7 +1,9 @@
 use crate::{
-    model::{StatusEntry, StatusList, StatusListToken},
+    model::{StatusList, StatusListToken, StatusListTokenPayload},
     utils::{
-        bits_validation::BitFlag, errors::Error, lst_gen::update_or_create_status_list,
+        bits_validation::BitFlag,
+        errors::Error,
+        lst_gen::create_status_list,
         state::AppState,
     },
     web::handlers::status_list::error::StatusListError,
@@ -11,26 +13,15 @@ use axum::{
     http::StatusCode,
     response::IntoResponse,
 };
-use serde::{Deserialize, Serialize};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tracing;
 
-// Request payload for publishing a status list token
-#[derive(Deserialize, Serialize, Clone)]
-pub struct PublishTokenStatusRequest {
-    pub list_id: String,
-    pub updates: Vec<StatusEntry>,
-    #[serde(default)]
-    pub sub: Option<String>,
-    #[serde(default)]
-    pub ttl: Option<i64>,
-    pub bits: u8,
-}
+
 
 // Handler to create a new status list token
 pub async fn publish_token_status(
     State(appstate): State<AppState>,
-    Json(payload): Json<PublishTokenStatusRequest>,
+    Json(payload): Json<StatusListTokenPayload>,
 ) -> Result<impl IntoResponse, StatusListError> {
     let store = &appstate.status_list_token_repository;
 
@@ -45,10 +36,10 @@ pub async fn publish_token_status(
     let bits = bitflag?;
 
     // Generate the compressed status list; use empty encoding if no updates
-    let lst = if payload.updates.is_empty() {
+    let lst = if payload.status.is_empty() {
         base64url::encode([])
     } else {
-        update_or_create_status_list(None, payload.updates, bits).map_err(|e| {
+        create_status_list(payload.status, bits).map_err(|e| {
             tracing::error!("lst_from failed: {:?}", e);
             match e {
                 Error::Generic(msg) => StatusListError::Generic(msg),
@@ -75,7 +66,7 @@ pub async fn publish_token_status(
 
             // Serialize the status list before constructing the token
             let status_list = StatusList {
-                bits: payload.bits as usize,
+                bits: payload.bits,
                 lst,
             };
 
@@ -107,34 +98,13 @@ pub async fn publish_token_status(
 mod tests {
     use super::*;
     use crate::{
-        database::queries::SeaOrmStore,
-        model::{status_list_tokens, Status, StatusListToken},
-        utils::{keygen::Keypair, state::AppState},
+        database::queries::SeaOrmStore, model::{status_list_tokens, Status, StatusEntry, StatusListToken}, test_resources::helper::{create_test_token, server_key}, utils::{keygen::Keypair, state::AppState}
     };
     use axum::{extract::State, Json};
     use sea_orm::{DatabaseBackend, MockDatabase};
     use std::sync::Arc;
 
-    // Helper to create a test request payload with customizable bits
-    fn create_test_token(
-        list_id: &str,
-        updates: Vec<StatusEntry>,
-        bits: u8,
-    ) -> PublishTokenStatusRequest {
-        PublishTokenStatusRequest {
-            list_id: list_id.to_string(),
-            updates,
-            sub: Some("issuer".to_string()),
-            ttl: Some(3600),
-            bits,
-        }
-    }
 
-    // Helper to generate a test server key
-    // Note: It does nothing, it's just use to build the AppState
-    fn server_key() -> Keypair {
-        Keypair::generate().unwrap()
-    }
 
     #[tokio::test]
     async fn test_publish_status_creates_token() {
@@ -157,7 +127,7 @@ mod tests {
         let bits = BitFlag::new(2).unwrap();
         let status_list = StatusList {
             bits: 2,
-            lst: update_or_create_status_list(None, payload.updates.clone(), bits).unwrap(),
+            lst: create_status_list(payload.status.clone(), bits).unwrap(),
         };
         let new_token = StatusListToken {
             list_id: token_id.to_string(),
@@ -220,7 +190,7 @@ mod tests {
 
         let status_list = StatusList {
             bits: 2,
-            lst: update_or_create_status_list(None, payload.updates.clone(), bits).unwrap(),
+            lst: create_status_list(payload.status.clone(), bits).unwrap(),
         };
         let new_token = StatusListToken {
             list_id: token_id.to_string(),
@@ -294,7 +264,7 @@ mod tests {
             iat: 1234567890,
             status_list: StatusList {
                 bits: 1,
-                lst: update_or_create_status_list(None, payload.updates.clone(), bits).unwrap(),
+                lst: create_status_list(payload.status.clone(), bits).unwrap(),
             },
             sub: "issuer".to_string(),
             ttl: Some(3600),
@@ -421,7 +391,7 @@ mod tests {
 
         let status_list = StatusList {
             bits: 1,
-            lst: update_or_create_status_list(None, payload.updates.clone(), bits).unwrap(),
+            lst: create_status_list(payload.status.clone(), bits).unwrap(),
         };
         let new_token = StatusListToken {
             list_id: token_id.to_string(),
