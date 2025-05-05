@@ -2,6 +2,8 @@ from pathlib import Path
 from dotenv import dotenv_values
 import unittest
 import cbor2
+import zlib
+import base64
 
 
 # Handy handle for test-like assertions
@@ -73,3 +75,10 @@ def is_valid_cwt(cwt_data: bytes) -> bool:
     except (cbor2.CBORDecodeError, ValueError) as e:
         print(f"Failed to decode CBOR: {e}")
         return False
+
+
+def decode_and_decompress(encoded: str) -> bytes:
+    padded_encoded = encoded + '=' * \
+        (-len(encoded) % 4)  # Add padding if necessary
+    compressed = base64.urlsafe_b64decode(padded_encoded)
+    return zlib.decompress(compressed)
