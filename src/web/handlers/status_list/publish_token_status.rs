@@ -96,7 +96,7 @@ mod tests {
         database::queries::SeaOrmStore,
         model::{status_list_tokens, Status, StatusEntry, StatusListToken},
         test_resources::helper::{create_test_token, server_key},
-        utils::{keygen::Keypair, state::AppState},
+        utils::state::AppState,
     };
     use axum::{extract::State, Json};
     use sea_orm::{DatabaseBackend, MockDatabase};
