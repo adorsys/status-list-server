@@ -1,4 +1,3 @@
-use std::io;
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -23,10 +22,4 @@ pub enum Error {
     UnsupportedBits,
     #[error("Failed to decode lst")]
     DecodeError,
-    #[error("IO error: {0}")]
-    Io(#[from] io::Error),
-    #[error("Failed to save new keypair {0:?}")]
-    WriteCertificate(std::path::PathBuf),
-    #[error("Failed to parse keypair")]
-    InvalidKeyFormat,
 }

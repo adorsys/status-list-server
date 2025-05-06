@@ -37,6 +37,12 @@ impl AwsSecret {
     }
 }
 
+impl Secret {
+    pub fn new(secret_name: String, secret_value: String) -> Self {
+        Self { secret_name, secret_value }
+    }
+}
+
 #[async_trait]
 impl Operations for AwsSecret {
     async fn get_key(&self) -> Result<Option<String>, Error> {
@@ -67,3 +73,4 @@ impl Operations for AwsSecret {
         Ok(())
     }
 }
+
