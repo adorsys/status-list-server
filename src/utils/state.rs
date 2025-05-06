@@ -27,7 +27,6 @@ pub async fn setup() -> AppState {
         .await
         .expect("Failed to apply migrations");
 
-    // --- AWS Keypair Logic ---
     let secret_name =
         std::env::var("SERVER_KEY_SECRET_NAME").expect("SERVER_KEY_SECRET_NAME env not set");
     let region = std::env::var("AWS_REGION").expect("AWS_REGION env not set");
@@ -82,7 +81,6 @@ pub async fn ensure_server_key_exists() {
     match aws_secret.get_key().await {
         Ok(Some(_)) => {
             tracing::info!("Server key already exists in AWS SecretManager");
-            // Do nothing else
         }
         Ok(None) => {
             tracing::info!("No key found in AWS, generating and storing new keypair");
