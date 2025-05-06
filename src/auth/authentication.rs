@@ -65,15 +65,3 @@ pub async fn verify_token(state: &AppState, token: &str) -> Result<bool, Authent
         Err(AuthenticationError::IssuerNotFound)
     }
 }
-
-pub async fn extract_issuer_from_token(
-    state: &AppState,
-    token: &str,
-) -> Result<String, AuthenticationError> {
-    let _store = &state.credential_repository;
-    let header = decode_header(token).map_err(|_| AuthenticationError::InvalidToken)?;
-    let kid = header.kid.ok_or(AuthenticationError::MissingKid)?;
-
-    // The kid in the token header should be the issuer
-    Ok(kid)
-}
