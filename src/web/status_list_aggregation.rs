@@ -1,22 +1,22 @@
+use std::fmt::Debug;
 use std::sync::Arc;
 
 use axum::{
     extract::{Json, State},
-    http::{header, HeaderMap, StatusCode},
+    http::{header, HeaderMap},
     response::IntoResponse,
 };
 use serde::{Deserialize, Serialize};
 use tracing;
 
 use crate::{
-    model::StatusList,
+    model::{StatusList, StatusListToken},
     utils::state::AppState,
-};
-
-use super::status_list::{
-    constants::{ACCEPT_STATUS_LISTS_HEADER_CWT, ACCEPT_STATUS_LISTS_HEADER_JWT},
-    error::StatusListError,
-    handler::{build_status_list_token, StatusListToken},
+    web::handlers::status_list::{
+        constants::{ACCEPT_STATUS_LISTS_HEADER_CWT, ACCEPT_STATUS_LISTS_HEADER_JWT},
+        error::StatusListError,
+        handler::build_status_list_token,
+    },
 };
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -25,16 +25,21 @@ pub struct StatusListAggregationRequest {
 }
 
 pub async fn aggregate_status_lists(
-    State(state): State<Arc<AppState>>,
+    State(state): State<AppState>,
     headers: HeaderMap,
     Json(request): Json<StatusListAggregationRequest>,
-) -> Result<impl IntoResponse, StatusListError> {
+) -> Result<impl IntoResponse + Debug, StatusListError> {
     let accept = headers.get(header::ACCEPT).and_then(|h| h.to_str().ok());
 
     // Validate accept header
     let accept = match accept {
         None => ACCEPT_STATUS_LISTS_HEADER_JWT, // Default to JWT if no accept header
-        Some(accept) if accept == ACCEPT_STATUS_LISTS_HEADER_JWT || accept == ACCEPT_STATUS_LISTS_HEADER_CWT => accept,
+        Some(accept)
+            if accept == ACCEPT_STATUS_LISTS_HEADER_JWT
+                || accept == ACCEPT_STATUS_LISTS_HEADER_CWT =>
+        {
+            accept
+        }
         Some(_) => return Err(StatusListError::InvalidAcceptHeader),
     };
 
@@ -59,24 +64,32 @@ pub async fn aggregate_status_lists(
     // Create a new status list token for the aggregated list
     let aggregated_token = StatusListToken {
         list_id: "aggregated".to_string(), // This is a placeholder, you might want to generate a unique ID
-        exp: None, // No expiration for aggregated list
+        exp: None,                         // No expiration for aggregated list
         iat: chrono::Utc::now().timestamp(),
         status_list: aggregated_list,
         sub: "aggregated".to_string(), // This is a placeholder
-        ttl: None, // No TTL for aggregated list
+        ttl: None,                     // No TTL for aggregated list
     };
 
     // Return the aggregated list in the requested format
     build_status_list_token(accept, "aggregated", &state).await
 }
 
-fn aggregate_status_lists_impl(status_lists: Vec<StatusListToken>) -> Result<StatusList, StatusListError> {
+fn aggregate_status_lists_impl(
+    status_lists: Vec<StatusListToken>,
+) -> Result<StatusList, StatusListError> {
     if status_lists.is_empty() {
-        return Err(StatusListError::InvalidRequest("No status lists provided".to_string()));
+        return Err(StatusListError::Generic(
+            "No status lists provided".to_string(),
+        ));
     }
 
     // Get the maximum bits value from all lists
-    let max_bits = status_lists.iter().map(|list| list.status_list.bits).max().unwrap_or(0);
+    let max_bits = status_lists
+        .iter()
+        .map(|list| list.status_list.bits)
+        .max()
+        .unwrap_or(0);
 
     // Combine all status lists
     let mut combined_lst = String::new();

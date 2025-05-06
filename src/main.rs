@@ -7,7 +7,8 @@ use axum::{
 use dotenvy::dotenv;
 use status_list_server::utils::state::setup;
 use status_list_server::web::handlers::status_list::publish_token_status::publish_token_status;
-use status_list_server::web::handlers::{credential_handler, get_status_list, status_list_aggregation::aggregate_status_lists};
+use status_list_server::web::handlers::{credential_handler, get_status_list};
+use status_list_server::web::status_list_aggregation::aggregate_status_lists;
 use tokio::net::TcpListener;
 use tower::ServiceBuilder;
 use tower_http::catch_panic::CatchPanicLayer;

@@ -84,7 +84,7 @@ pub async fn get_status_list(
     }
 }
 
-async fn build_status_list_token(
+pub async fn build_status_list_token(
     accept: &str,
     list_id: &str,
     repo: &AppState,
