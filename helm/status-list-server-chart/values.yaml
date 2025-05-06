@@ -1,0 +1,70 @@
+statuslist:
+  replicaCount: 1
+  image:
+    repository: ghcr.io/adorsys/status-list-server
+    pullPolicy: IfNotPresent
+    tag: latest
+  service:
+    type: ClusterIP
+    port: 80
+    targetPort: 8000
+  ingress:
+    enabled: true
+    path: /
+    pathType: Prefix
+    annotations:
+      cert-manager.io/cluster-issuer: letsencrypt-prod
+      nginx.ingress.kubernetes.io/ssl-redirect: "true"
+      nginx.ingress.kubernetes.io/proxy-body-size: "10m"
+    tls:
+      hosts:
+        - '*.eudi-adorsys.com'
+        - 'statuslist.eudi-adorsys.com'
+      secretName: statuslist-tls
+    externalDnsHostname: statuslist.eudi-adorsys.com
+  env:
+    POSTGRES_USER: "postgres"
+
+postgresql:
+  image:
+    registry: docker.io
+    repository: bitnami/postgresql
+    tag: 17.4.0-debian-12-r15
+    pullPolicy: IfNotPresent
+  auth:
+    enablePostgresUser: true
+    username: "postgres"
+    database: "status-list"
+    existingSecret: "statuslist-secret"
+    secretKeys:
+      adminPasswordKey: postgres-password
+  containerPorts:
+    postgresql: 5432
+  primary:
+    name: primary
+    service:
+      type: ClusterIP
+      ports:
+        postgresql: 5432
+    persistence:
+      enabled: false
+
+externalSecret:
+  metadata:
+    name: statuslist-external-secret
+  spec:
+    refreshInterval: 30m
+    secretStoreRef:
+      name: statuslist-secret-store
+      kind: SecretStore
+    target:
+      name: statuslist-secret
+      creationPolicy: Owner
+    data:
+      secretKey: postgres-password
+      remoteRef:
+        key: statuslist-secret
+        property: POSTGRES_PASSWORD
+    provider:
+      aws:
+        region: eu-central-1

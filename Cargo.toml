@@ -40,8 +40,13 @@ sea-orm = { version = "1.1.7", features = [
     "macros",
 ] }
 
+axum-extra = { version = "0.10.1", features = ["typed-header"] }
+headers = "0.4.0"
+aws-config = "1.6"
+aws-sdk-secretsmanager = "1.68"
 
 [dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 sea-orm = { version = "1.1.7", features = ["mock"] }
 
 [dependencies.sea-orm-migration]
