@@ -22,7 +22,6 @@ impl SeaOrmStore<StatusListToken> {
     pub async fn insert_one(&self, entity: StatusListToken) -> Result<(), RepositoryError> {
         let active = status_list_tokens::ActiveModel {
             list_id: Set(entity.list_id),
-            issuer: Set(entity.issuer),
             exp: Set(entity.exp),
             iat: Set(entity.iat),
             status_list: Set(entity.status_list),
@@ -46,10 +45,20 @@ impl SeaOrmStore<StatusListToken> {
             .map_err(|e| RepositoryError::FindError(e.to_string()))
     }
 
-    pub async fn update_one(&self, entity: StatusListToken) -> Result<bool, RepositoryError> {
+    pub async fn update_one(
+        &self,
+        issuer: String,
+        entity: StatusListToken,
+    ) -> Result<bool, RepositoryError> {
+        let existing = status_list_tokens::Entity::find_by_id(&issuer)
+            .one(&*self.db)
+            .await
+            .map_err(|e| RepositoryError::FindError(e.to_string()))?;
+        if existing.is_none() {
+            return Ok(false);
+        }
         let active = status_list_tokens::ActiveModel {
             list_id: Set(entity.list_id),
-            issuer: Set(entity.issuer),
             exp: Set(entity.exp),
             iat: Set(entity.iat),
             status_list: Set(entity.status_list),
@@ -63,8 +72,8 @@ impl SeaOrmStore<StatusListToken> {
         Ok(true)
     }
 
-    pub async fn delete_by(&self, list_id: String) -> Result<bool, RepositoryError> {
-        let result = status_list_tokens::Entity::delete_by_id(list_id)
+    pub async fn delete_by(&self, value: String) -> Result<bool, RepositoryError> {
+        let result = status_list_tokens::Entity::delete_by_id(value)
             .exec(&*self.db)
             .await
             .map_err(|e| RepositoryError::DeleteError(e.to_string()))?;
