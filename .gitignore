@@ -2,4 +2,5 @@
 .env
 .debug/
 .vscode/
-
+cert.yml
+tls.crt
