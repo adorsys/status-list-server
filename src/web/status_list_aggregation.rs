@@ -1,5 +1,4 @@
 use std::fmt::Debug;
-use std::sync::Arc;
 
 use axum::{
     extract::{Json, State},
@@ -62,7 +61,7 @@ pub async fn aggregate_status_lists(
     let aggregated_list = aggregate_status_lists_impl(status_lists)?;
 
     // Create a new status list token for the aggregated list
-    let aggregated_token = StatusListToken {
+    let _aggregated_token = StatusListToken {
         list_id: "aggregated".to_string(), // This is a placeholder, you might want to generate a unique ID
         exp: None,                         // No expiration for aggregated list
         iat: chrono::Utc::now().timestamp(),

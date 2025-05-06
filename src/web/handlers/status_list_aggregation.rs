@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use axum::{
     extract::{Json, State},
-    http::{header, HeaderMap, StatusCode},
+    http::{header, HeaderMap},
     response::IntoResponse,
 };
 use serde::{Deserialize, Serialize};
@@ -12,12 +12,11 @@ use tracing;
 use crate::{
     model::{StatusList, StatusListToken},
     utils::state::AppState,
-};
-
-use super::status_list::{
-    constants::{ACCEPT_STATUS_LISTS_HEADER_CWT, ACCEPT_STATUS_LISTS_HEADER_JWT},
-    error::StatusListError,
-    handler::build_status_list_token,
+    web::handlers::status_list::{
+        constants::{ACCEPT_STATUS_LISTS_HEADER_CWT, ACCEPT_STATUS_LISTS_HEADER_JWT},
+        error::StatusListError,
+        handler::build_status_list_token,
+    },
 };
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -63,7 +62,7 @@ pub async fn aggregate_status_lists(
     let aggregated_list = aggregate_status_lists_impl(status_lists)?;
 
     // Create a new status list token for the aggregated list
-    let aggregated_token = StatusListToken {
+    let _aggregated_token = StatusListToken {
         list_id: "aggregated".to_string(), // This is a placeholder, you might want to generate a unique ID
         exp: None,                         // No expiration for aggregated list
         iat: chrono::Utc::now().timestamp(),
@@ -109,9 +108,10 @@ mod tests {
     use super::*;
     use crate::{
         database::queries::SeaOrmStore,
-        model::{status_list_tokens, Status, StatusListToken},
+        model::{status_list_tokens, StatusListToken},
         utils::keygen::Keypair,
     };
+    use axum::http::StatusCode;
     use sea_orm::{DatabaseBackend, MockDatabase};
     use std::sync::Arc;
 
