@@ -132,6 +132,7 @@ pub mod status_list_tokens {
     pub struct Model {
         #[sea_orm(primary_key)]
         pub list_id: String,
+        pub issuer: String,
         pub exp: Option<i64>,
         pub iat: i64,
         #[sea_orm(column_type = "Json")]
@@ -141,7 +142,14 @@ pub mod status_list_tokens {
     }
 
     #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
-    pub enum Relation {}
+    pub enum Relation {
+        #[sea_orm(
+            belongs_to = "super::credentials::Entity",
+            from = "Column::Issuer",
+            to = "super::credentials::Column::Issuer"
+        )]
+        Credentials,
+    }
 
     impl ActiveModelBehavior for ActiveModel {}
 }
