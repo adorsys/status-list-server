@@ -39,7 +39,10 @@ impl AwsSecret {
 
 impl Secret {
     pub fn new(secret_name: String, secret_value: String) -> Self {
-        Self { secret_name, secret_value }
+        Self {
+            secret_name,
+            secret_value,
+        }
     }
 }
 
@@ -73,4 +76,3 @@ impl Operations for AwsSecret {
         Ok(())
     }
 }
-

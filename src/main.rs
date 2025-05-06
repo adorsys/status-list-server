@@ -6,7 +6,7 @@ use axum::{
 };
 use dotenvy::dotenv;
 use serde::Serialize;
-use status_list_server::utils::state::{setup, ensure_server_key_exists};
+use status_list_server::utils::state::{ensure_server_key_exists, setup};
 use status_list_server::web::handlers::status_list::publish_token_status::publish_token_status;
 use status_list_server::web::handlers::{credential_handler, get_status_list};
 use tokio::net::TcpListener;

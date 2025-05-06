@@ -28,27 +28,26 @@ pub async fn setup() -> AppState {
         .expect("Failed to apply migrations");
 
     // --- AWS Keypair Logic ---
-    let secret_name = std::env::var("SERVER_KEY_SECRET_NAME").expect("SERVER_KEY_SECRET_NAME env not set");
+    let secret_name =
+        std::env::var("SERVER_KEY_SECRET_NAME").expect("SERVER_KEY_SECRET_NAME env not set");
     let region = std::env::var("AWS_REGION").expect("AWS_REGION env not set");
     let region = Region::new(region);
     let aws_secret = AwsSecret::new(secret_name.clone(), region).await;
 
     let server_key = match aws_secret.get_key().await {
-        Ok(Some(pem)) => {
-            match Keypair::from_pkcs8_pem(&pem) {
-                Ok(keypair) => {
-                    tracing::info!("Server key loaded from AWS SecretManager");
-                    keypair
-                },
-                Err(_) => {
-                    tracing::warn!("Invalid key in AWS, generating new keypair");
-                    let keypair = Keypair::generate().expect("Failed to generate keypair");
-                    let pem = keypair.to_pkcs8_pem().expect("Failed to serialize keypair");
-                    let secret = Secret::new(secret_name.clone(), pem.clone());
-                    let _ = aws_secret.store_key(secret).await;
-                    keypair
-                }
-            } 
+        Ok(Some(pem)) => match Keypair::from_pkcs8_pem(&pem) {
+            Ok(keypair) => {
+                tracing::info!("Server key loaded from AWS SecretManager");
+                keypair
+            }
+            Err(_) => {
+                tracing::warn!("Invalid key in AWS, generating new keypair");
+                let keypair = Keypair::generate().expect("Failed to generate keypair");
+                let pem = keypair.to_pkcs8_pem().expect("Failed to serialize keypair");
+                let secret = Secret::new(secret_name.clone(), pem.clone());
+                let _ = aws_secret.store_key(secret).await;
+                keypair
+            }
         },
         Ok(None) => {
             tracing::info!("No key found in AWS, generating new keypair");
@@ -57,7 +56,7 @@ pub async fn setup() -> AppState {
             let secret = Secret::new(secret_name.clone(), pem.clone());
             let _ = aws_secret.store_key(secret).await;
             keypair
-        },
+        }
         Err(e) => {
             tracing::error!("Error accessing AWS SecretManager: {:?}", e);
             panic!("Failed to access AWS SecretManager");
@@ -74,7 +73,8 @@ pub async fn setup() -> AppState {
 
 /// Ensures a server key exists in AWS SecretManager. If not, generates and stores a new one.
 pub async fn ensure_server_key_exists() {
-    let secret_name = std::env::var("SERVER_KEY_SECRET_NAME").expect("SERVER_KEY_SECRET_NAME env not set");
+    let secret_name =
+        std::env::var("SERVER_KEY_SECRET_NAME").expect("SERVER_KEY_SECRET_NAME env not set");
     let region = std::env::var("AWS_REGION").expect("AWS_REGION env not set");
     let region = Region::new(region);
     let aws_secret = AwsSecret::new(secret_name.clone(), region).await;
@@ -83,14 +83,14 @@ pub async fn ensure_server_key_exists() {
         Ok(Some(_)) => {
             tracing::info!("Server key already exists in AWS SecretManager");
             // Do nothing else
-        },
+        }
         Ok(None) => {
             tracing::info!("No key found in AWS, generating and storing new keypair");
             let keypair = Keypair::generate().expect("Failed to generate keypair");
             let pem = keypair.to_pkcs8_pem().expect("Failed to serialize keypair");
             let secret = Secret::new(secret_name.clone(), pem.clone());
             let _ = aws_secret.store_key(secret).await;
-        },
+        }
         Err(e) => {
             tracing::error!("Error accessing AWS SecretManager: {:?}", e);
             panic!("Failed to access AWS SecretManager");
