@@ -70,36 +70,34 @@ pub async fn get_status_list(
 ) -> Result<impl IntoResponse + Debug, StatusListError> {
     let accept = headers.get(header::ACCEPT).and_then(|h| h.to_str().ok());
 
-    match accept {
-        None => (), // Default to JWT
+    // Validate accept header
+    let accept = match accept {
+        None => ACCEPT_STATUS_LISTS_HEADER_JWT, // Default to JWT if no accept header
         Some(accept)
             if accept == ACCEPT_STATUS_LISTS_HEADER_JWT
-                || accept == ACCEPT_STATUS_LISTS_HEADER_CWT => {}
+                || accept == ACCEPT_STATUS_LISTS_HEADER_CWT =>
+        {
+            accept
+        }
         Some(_) => return Err(StatusListError::InvalidAcceptHeader),
-    }
-}
+    };
 
-async fn build_status_list_token(
-    accept: &str,
-    list_id: &str,
-    repo: &AppState,
-) -> Result<impl IntoResponse + Debug, StatusListError> {
     // Get status list claims from database
-    let status_claims = repo
+    let list_id_clone = list_id.clone();
+    let status_list_token = state
         .status_list_token_repository
-        .find_one_by(list_id.clone())
+        .find_one_by(list_id)
         .await
         .map_err(|err| {
-            tracing::error!("Failed to get status list {list_id} from database: {err:?}");
+            tracing::error!("Failed to get status list {list_id_clone} from database: {err:?}");
             StatusListError::InternalServerError
         })?
         .ok_or(StatusListError::StatusListNotFound)?;
 
-    let accept = accept.unwrap_or(ACCEPT_STATUS_LISTS_HEADER_JWT);
     build_status_list_token(accept, &status_list_token, &state).await
 }
 
-async fn build_status_list_token(
+pub async fn build_status_list_token(
     accept: &str,
     status_list_token: &StatusListToken,
     repo: &AppState,

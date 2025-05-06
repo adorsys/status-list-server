@@ -63,7 +63,8 @@ pub async fn aggregate_status_lists(
     // Create a new status list token for the aggregated list
     let _aggregated_token = StatusListToken {
         list_id: "aggregated".to_string(), // This is a placeholder, you might want to generate a unique ID
-        exp: None,                         // No expiration for aggregated list
+        issuer: "aggregated_issuer".to_string(),
+        exp: None, // No expiration for aggregated list
         iat: chrono::Utc::now().timestamp(),
         status_list: aggregated_list,
         sub: "aggregated".to_string(), // This is a placeholder
@@ -71,7 +72,7 @@ pub async fn aggregate_status_lists(
     };
 
     // Return the aggregated list in the requested format
-    build_status_list_token(accept, "aggregated", &state).await
+    build_status_list_token(accept, &_aggregated_token, &state).await
 }
 
 fn aggregate_status_lists_impl(
