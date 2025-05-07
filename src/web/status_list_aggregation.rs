@@ -1,4 +1,4 @@
-use std::{fmt::Debug, sync::Arc};
+use std::fmt::Debug;
 
 use axum::{
     extract::{Json, State},
@@ -120,4 +120,50 @@ fn aggregate_status_lists_impl(
         bits: max_bits,
         lst: combined_lst,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::{
+        model::{StatusList, StatusListToken},
+        web::handlers::status_list::handler::StatusListTokenExt,
+    };
+    use sea_orm::{DatabaseBackend, MockDatabase};
+
+    fn encode_lst(bits: Vec<u8>) -> String {
+        base64url::encode(
+            bits.iter()
+                .flat_map(|&n| n.to_be_bytes())
+                .collect::<Vec<u8>>(),
+        )
+    }
+
+    #[tokio::test]
+    async fn test_update_statuslist_success() {
+        let _mock_db = MockDatabase::new(DatabaseBackend::Postgres);
+        let initial_status_list = StatusList {
+            bits: 8,
+            lst: encode_lst(vec![0, 0, 0]),
+        };
+        let _existing_token = StatusListToken::new(
+            "test_list".to_string(),
+            None,
+            1234567890,
+            initial_status_list.clone(),
+            "test_subject".to_string(),
+            None,
+        );
+        let updated_status_list = StatusList {
+            bits: 8,
+            lst: encode_lst(vec![0, 1, 0]), // After update: index 1 set to INVALID
+        };
+        let _updated_token = StatusListToken::new(
+            "test_list".to_string(),
+            None,
+            1234567890,
+            updated_status_list,
+            "test_subject".to_string(),
+            None,
+        );
+    }
 }

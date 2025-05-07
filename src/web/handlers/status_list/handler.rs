@@ -105,14 +105,14 @@ pub async fn build_status_list_token(
         Ok((
             StatusCode::OK,
             [(header::CONTENT_TYPE, accept)],
-            issue_jwt(&status_list_token, &server_key)?,
+            issue_jwt(status_list_token, &server_key)?,
         )
             .into_response())
     } else {
         Ok((
             StatusCode::OK,
             [(header::CONTENT_TYPE, accept)],
-            issue_cwt(&status_list_token, &server_key)?,
+            issue_cwt(status_list_token, &server_key)?,
         )
             .into_response())
     }

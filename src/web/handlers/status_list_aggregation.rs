@@ -24,6 +24,7 @@ pub struct StatusListAggregationRequest {
     pub list_ids: Vec<String>,
 }
 
+#[allow(dead_code)]
 fn encode_lst(bits: Vec<u8>) -> String {
     base64url::encode(
         bits.iter()
@@ -306,12 +307,12 @@ mod tests {
 
     #[tokio::test]
     async fn test_update_statuslist_success() {
-        let mock_db = MockDatabase::new(DatabaseBackend::Postgres);
+        let _mock_db = MockDatabase::new(DatabaseBackend::Postgres);
         let initial_status_list = StatusList {
             bits: 8,
             lst: encode_lst(vec![0, 0, 0]),
         };
-        let existing_token = StatusListToken::new(
+        let _existing_token = StatusListToken::new(
             "test_list".to_string(),
             None,
             1234567890,
@@ -323,7 +324,7 @@ mod tests {
             bits: 8,
             lst: encode_lst(vec![0, 1, 0]), // After update: index 1 set to INVALID
         };
-        let updated_token = StatusListToken::new(
+        let _updated_token = StatusListToken::new(
             "test_list".to_string(),
             None,
             1234567890,
