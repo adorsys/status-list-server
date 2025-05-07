@@ -1,4 +1,4 @@
-use std::fmt::Debug;
+use std::{fmt::Debug, sync::Arc};
 
 use axum::{
     extract::{Json, State},
@@ -7,6 +7,7 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use tracing;
+use uuid::Uuid;
 
 use crate::{
     model::{StatusList, StatusListToken},
@@ -60,19 +61,31 @@ pub async fn aggregate_status_lists(
     // Aggregate the status lists
     let aggregated_list = aggregate_status_lists_impl(status_lists)?;
 
+    // Generate a unique ID for the aggregated list
+    let aggregated_id = format!("aggregated_{}", Uuid::new_v4());
+
     // Create a new status list token for the aggregated list
-    let _aggregated_token = StatusListToken {
-        list_id: "aggregated".to_string(), // This is a placeholder, you might want to generate a unique ID
-        issuer: "aggregated_issuer".to_string(),
+    let aggregated_token = StatusListToken {
+        list_id: aggregated_id.clone(),
         exp: None, // No expiration for aggregated list
         iat: chrono::Utc::now().timestamp(),
-        status_list: aggregated_list,
-        sub: "aggregated".to_string(), // This is a placeholder
-        ttl: None,                     // No TTL for aggregated list
+        status_list: aggregated_list.clone(),
+        sub: "aggregated".to_string(),
+        ttl: None, // No TTL for aggregated list
     };
 
+    // Store the aggregated list in the database
+    state
+        .status_list_token_repository
+        .insert_one(aggregated_token.clone())
+        .await
+        .map_err(|err| {
+            tracing::error!("Failed to store aggregated status list: {err:?}");
+            StatusListError::InternalServerError
+        })?;
+
     // Return the aggregated list in the requested format
-    build_status_list_token(accept, &_aggregated_token, &state).await
+    build_status_list_token(accept, &aggregated_token, &state).await
 }
 
 fn aggregate_status_lists_impl(
@@ -94,7 +107,13 @@ fn aggregate_status_lists_impl(
     // Combine all status lists
     let mut combined_lst = String::new();
     for list in status_lists {
-        combined_lst.push_str(&list.status_list.lst);
+        // If the list has fewer bits than max_bits, pad it with zeros
+        let mut lst = list.status_list.lst;
+        if list.status_list.bits < max_bits {
+            let padding = "0".repeat(max_bits - list.status_list.bits);
+            lst.push_str(&padding);
+        }
+        combined_lst.push_str(&lst);
     }
 
     Ok(StatusList {

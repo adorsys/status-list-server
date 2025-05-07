@@ -24,6 +24,14 @@ pub struct StatusListAggregationRequest {
     pub list_ids: Vec<String>,
 }
 
+fn encode_lst(bits: Vec<u8>) -> String {
+    base64url::encode(
+        bits.iter()
+            .flat_map(|&n| n.to_be_bytes())
+            .collect::<Vec<u8>>(),
+    )
+}
+
 pub async fn aggregate_status_lists(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -62,15 +70,14 @@ pub async fn aggregate_status_lists(
     let aggregated_list = aggregate_status_lists_impl(status_lists)?;
 
     // Create a new status list token for the aggregated list
-    let _aggregated_token = StatusListToken {
-        list_id: "aggregated".to_string(), // This is a placeholder, you might want to generate a unique ID
-        issuer: "aggregated_issuer".to_string(),
-        exp: None, // No expiration for aggregated list
-        iat: chrono::Utc::now().timestamp(),
-        status_list: aggregated_list,
-        sub: "aggregated".to_string(), // This is a placeholder
-        ttl: None,                     // No TTL for aggregated list
-    };
+    let _aggregated_token = StatusListToken::new(
+        "aggregated".to_string(),
+        None,
+        chrono::Utc::now().timestamp(),
+        aggregated_list,
+        "aggregated".to_string(),
+        None,
+    );
 
     // Return the aggregated list in the requested format
     build_status_list_token(accept, &_aggregated_token, &state).await
@@ -104,6 +111,37 @@ fn aggregate_status_lists_impl(
     })
 }
 
+pub trait StatusListTokenExt {
+    fn new(
+        list_id: String,
+        exp: Option<i64>,
+        iat: i64,
+        status_list: StatusList,
+        sub: String,
+        ttl: Option<i64>,
+    ) -> Self;
+}
+
+impl StatusListTokenExt for StatusListToken {
+    fn new(
+        list_id: String,
+        exp: Option<i64>,
+        iat: i64,
+        status_list: StatusList,
+        sub: String,
+        ttl: Option<i64>,
+    ) -> Self {
+        Self {
+            list_id,
+            exp,
+            iat,
+            status_list,
+            sub,
+            ttl,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -133,31 +171,29 @@ mod tests {
         let list_id2 = "list2";
         let request = create_test_request(vec![list_id1.to_string(), list_id2.to_string()]);
 
-        let status_list1 = StatusListToken {
-            list_id: list_id1.to_string(),
-            issuer: "test_issuer".to_string(),
-            exp: None,
-            iat: chrono::Utc::now().timestamp(),
-            status_list: StatusList {
+        let status_list1 = StatusListToken::new(
+            list_id1.to_string(),
+            None,
+            chrono::Utc::now().timestamp(),
+            StatusList {
                 bits: 2,
                 lst: "abc".to_string(),
             },
-            sub: "issuer1".to_string(),
-            ttl: None,
-        };
+            "issuer1".to_string(),
+            None,
+        );
 
-        let status_list2 = StatusListToken {
-            list_id: list_id2.to_string(),
-            issuer: "test_issuer".to_string(),
-            exp: None,
-            iat: chrono::Utc::now().timestamp(),
-            status_list: StatusList {
+        let status_list2 = StatusListToken::new(
+            list_id2.to_string(),
+            None,
+            chrono::Utc::now().timestamp(),
+            StatusList {
                 bits: 2,
                 lst: "def".to_string(),
             },
-            sub: "issuer2".to_string(),
-            ttl: None,
-        };
+            "issuer2".to_string(),
+            None,
+        );
 
         let db_conn = Arc::new(
             mock_db
@@ -266,5 +302,34 @@ mod tests {
             .unwrap_err()
             .into_response();
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn test_update_statuslist_success() {
+        let mock_db = MockDatabase::new(DatabaseBackend::Postgres);
+        let initial_status_list = StatusList {
+            bits: 8,
+            lst: encode_lst(vec![0, 0, 0]),
+        };
+        let existing_token = StatusListToken::new(
+            "test_list".to_string(),
+            None,
+            1234567890,
+            initial_status_list.clone(),
+            "test_subject".to_string(),
+            None,
+        );
+        let updated_status_list = StatusList {
+            bits: 8,
+            lst: encode_lst(vec![0, 1, 0]), // After update: index 1 set to INVALID
+        };
+        let updated_token = StatusListToken::new(
+            "test_list".to_string(),
+            None,
+            1234567890,
+            updated_status_list,
+            "test_subject".to_string(),
+            None,
+        );
     }
 }
