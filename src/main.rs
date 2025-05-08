@@ -6,7 +6,7 @@ use axum::{
 };
 use dotenvy::dotenv;
 use serde::Serialize;
-use status_list_server::utils::state::{ensure_server_key_exists, setup};
+use status_list_server::utils::state::setup;
 use status_list_server::web::handlers::status_list::publish_token_status::publish_token_status;
 use status_list_server::web::handlers::{credential_handler, get_status_list};
 use tokio::net::TcpListener;
@@ -36,9 +36,6 @@ async fn health_check() -> impl IntoResponse {
 async fn main() {
     dotenv().ok();
     config_tracing();
-
-    // Ensure the server key exists in AWS before anything else
-    ensure_server_key_exists().await;
 
     let state = setup().await;
 
