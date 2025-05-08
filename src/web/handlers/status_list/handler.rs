@@ -421,10 +421,6 @@ mod tests {
     use serde_json::json;
     use std::sync::Arc;
 
-    // fn server_key() -> Keypair {
-    //     Keypair::from_pkcs8_pem(include_str!("../../../test_resources/ec-private.pem")).unwrap()
-    // }
-
     fn test_app_state(db_conn: Arc<sea_orm::DatabaseConnection>) -> AppState {
         use crate::utils::state::MockSecretCache;
 
