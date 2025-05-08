@@ -131,12 +131,6 @@ mod tests {
         }
     }
 
-    // Helper to generate a test server key
-    // Note: It does nothing, it's just use to build the AppState
-    // fn server_key() -> Keypair {
-    //     Keypair::generate().unwrap()
-    // }
-
     fn test_app_state(db_conn: Arc<sea_orm::DatabaseConnection>) -> AppState {
         AppState {
             credential_repository: Arc::new(SeaOrmStore::new(db_conn.clone())),
