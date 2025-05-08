@@ -106,10 +106,11 @@ pub async fn publish_token_status(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::utils::state::MockSecretCache;
     use crate::{
         database::queries::SeaOrmStore,
         model::{status_list_tokens, Status, StatusListToken},
-        utils::{keygen::Keypair, state::AppState},
+        utils::state::AppState,
     };
     use axum::{extract::State, Json};
     use sea_orm::{DatabaseBackend, MockDatabase};
@@ -132,8 +133,19 @@ mod tests {
 
     // Helper to generate a test server key
     // Note: It does nothing, it's just use to build the AppState
-    fn server_key() -> Keypair {
-        Keypair::generate().unwrap()
+    // fn server_key() -> Keypair {
+    //     Keypair::generate().unwrap()
+    // }
+
+    fn test_app_state(db_conn: Arc<sea_orm::DatabaseConnection>) -> AppState {
+        AppState {
+            credential_repository: Arc::new(SeaOrmStore::new(db_conn.clone())),
+            status_list_token_repository: Arc::new(SeaOrmStore::new(db_conn)),
+            secret_cache: Arc::new(MockSecretCache {
+                value: Some("test-key".to_string()),
+            }),
+            server_secret_name: "test-server-key".to_string(),
+        }
     }
 
     #[tokio::test]
@@ -185,11 +197,7 @@ mod tests {
                 .into_connection(),
         );
 
-        let app_state = AppState {
-            credential_repository: Arc::new(SeaOrmStore::new(db_conn.clone())),
-            status_list_token_repository: Arc::new(SeaOrmStore::new(db_conn)),
-            server_key: Arc::new(server_key()),
-        };
+        let app_state = test_app_state(db_conn.clone());
 
         let response = publish_token_status(State(app_state), Json(payload))
             .await
@@ -249,11 +257,7 @@ mod tests {
                 .into_connection(),
         );
 
-        let app_state = AppState {
-            credential_repository: Arc::new(SeaOrmStore::new(db_conn.clone())),
-            status_list_token_repository: Arc::new(SeaOrmStore::new(db_conn)),
-            server_key: Arc::new(server_key()),
-        };
+        let app_state = test_app_state(db_conn.clone());
 
         // Perform the insertion
         let _ = publish_token_status(State(app_state.clone()), Json(payload))
@@ -307,11 +311,7 @@ mod tests {
                 .into_connection(),
         );
 
-        let app_state = AppState {
-            credential_repository: Arc::new(SeaOrmStore::new(db_conn.clone())),
-            status_list_token_repository: Arc::new(SeaOrmStore::new(db_conn)),
-            server_key: Arc::new(server_key()),
-        };
+        let app_state = test_app_state(db_conn.clone());
 
         let response = match publish_token_status(State(app_state), Json(payload)).await {
             Ok(_) => panic!("Expected an error but got Ok"),
@@ -356,11 +356,7 @@ mod tests {
                 .into_connection(),
         );
 
-        let app_state = AppState {
-            credential_repository: Arc::new(SeaOrmStore::new(db_conn.clone())),
-            status_list_token_repository: Arc::new(SeaOrmStore::new(db_conn)),
-            server_key: Arc::new(server_key()),
-        };
+        let app_state = test_app_state(db_conn.clone());
 
         let response = publish_token_status(State(app_state.clone()), Json(payload))
             .await
@@ -383,11 +379,7 @@ mod tests {
     async fn test_invalid_bits() {
         let mock_db = MockDatabase::new(DatabaseBackend::Postgres);
         let db_conn = Arc::new(mock_db.into_connection());
-        let app_state = AppState {
-            credential_repository: Arc::new(SeaOrmStore::new(db_conn.clone())),
-            status_list_token_repository: Arc::new(SeaOrmStore::new(db_conn)),
-            server_key: Arc::new(server_key()),
-        };
+        let app_state = test_app_state(db_conn.clone());
         let token_id = "token_invalid_bits";
         let payload = create_test_token(
             token_id,
@@ -449,11 +441,7 @@ mod tests {
                 ])
                 .into_connection(),
         );
-        let app_state = AppState {
-            credential_repository: Arc::new(SeaOrmStore::new(db_conn.clone())),
-            status_list_token_repository: Arc::new(SeaOrmStore::new(db_conn)),
-            server_key: Arc::new(server_key()),
-        };
+        let app_state = test_app_state(db_conn.clone());
 
         let response = publish_token_status(State(app_state), Json(payload))
             .await
@@ -475,11 +463,7 @@ mod tests {
             1,
         );
         let db_conn = Arc::new(mock_db.into_connection());
-        let app_state = AppState {
-            credential_repository: Arc::new(SeaOrmStore::new(db_conn.clone())),
-            status_list_token_repository: Arc::new(SeaOrmStore::new(db_conn)),
-            server_key: Arc::new(server_key()),
-        };
+        let app_state = test_app_state(db_conn.clone());
 
         let response = match publish_token_status(State(app_state), Json(payload)).await {
             Ok(_) => panic!("Expected an error but got Ok"),

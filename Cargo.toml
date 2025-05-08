@@ -1,5 +1,4 @@
 [package]
-
 name = "status-list-server"
 version = "0.1.0"
 edition = "2021"
@@ -24,7 +23,7 @@ hyper = "1.6"
 serde = { version = "1.0", features = ["derive"] }
 sqlx = { version = "0.8", features = ["postgres", "runtime-tokio"] }
 thiserror = "2.0"
-tokio = { version = "1.16", features = ["full"] }
+tokio = { version = "1.16", features = ["full", "macros", "net", "rt-multi-thread"] }
 tower = "0.5"
 tower-http = { version = "0.6", features = ["cors", "trace", "catch-panic"] }
 tracing = "0.1.41"
@@ -35,9 +34,9 @@ sea-orm = { version = "1.1.7", features = [
     "runtime-tokio-native-tls",
     "macros",
 ] }
-aws-config = "1.6"
-aws-sdk-secretsmanager = "1.68"
-
+aws-config = "0.55.3"
+aws-sdk-secretsmanager = "0.26.0"
+aws-secretsmanager-cache = "0.5.0"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
