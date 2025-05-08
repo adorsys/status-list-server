@@ -115,27 +115,20 @@ async fn build_status_list_token(
         })
     };
 
-    if ACCEPT_STATUS_LISTS_HEADER_JWT == accept {
-        Ok((
-            StatusCode::OK,
-            [
-                (header::CONTENT_TYPE, accept),
-                (header::CONTENT_ENCODING, GZIP_HEADER),
-            ],
-            apply_gzip(issue_jwt(&status_claims, &server_key)?.as_bytes())?,
-        )
-            .into_response())
-    } else {
-        Ok((
-            StatusCode::OK,
-            [
-                (header::CONTENT_TYPE, accept),
-                (header::CONTENT_ENCODING, GZIP_HEADER),
-            ],
-            apply_gzip(issue_cwt(&status_claims, &server_key)?.as_slice())?,
-        )
-            .into_response())
-    }
+    let token_bytes = match accept {
+        ACCEPT_STATUS_LISTS_HEADER_CWT => issue_cwt(&status_claims, &server_key)?,
+        _ => issue_jwt(&status_claims, &server_key)?.into_bytes(),
+    };
+
+    Ok((
+        StatusCode::OK,
+        [
+            (header::CONTENT_TYPE, accept),
+            (header::CONTENT_ENCODING, GZIP_HEADER),
+        ],
+        apply_gzip(&token_bytes)?,
+    )
+        .into_response())
 }
 
 // Function to create a CWT per the specification
