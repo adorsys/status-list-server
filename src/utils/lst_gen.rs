@@ -92,8 +92,11 @@ fn apply_updates(
         if bits == 8 {
             status_array[byte_index] = status_value;
         } else {
+            // Create a mask to isolate the target bit segment within the byte
             let mask = ((1 << bits) - 1) << bit_offset;
+            // Clear the bits at the target location using bitwise AND with the inverted mask
             status_array[byte_index] &= !mask;
+            // Shift the status value into the correct position, then set the bits using bitwise OR
             status_array[byte_index] |= (status_value << bit_offset) & mask;
         }
     }
