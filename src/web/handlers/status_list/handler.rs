@@ -401,9 +401,8 @@ fn update_status(lst: &str, updates: Vec<StatusEntry>) -> Result<String, StatusL
 mod tests {
     use super::*;
     use crate::{
-        database::queries::SeaOrmStore,
         model::{status_list_tokens, StatusList, StatusListToken},
-        utils::state::AppState,
+        test_utils::test_app_state,
     };
     use axum::{
         body::to_bytes,
@@ -420,18 +419,6 @@ mod tests {
     use sea_orm::{DatabaseBackend, MockDatabase};
     use serde_json::json;
     use std::sync::Arc;
-
-    fn test_app_state(db_conn: Arc<sea_orm::DatabaseConnection>) -> AppState {
-        use crate::utils::state::MockSecretCache;
-
-        let pem = include_str!("../../../test_resources/ec-private.pem").to_string();
-        AppState {
-            credential_repository: Arc::new(SeaOrmStore::new(db_conn.clone())),
-            status_list_token_repository: Arc::new(SeaOrmStore::new(db_conn)),
-            secret_cache: Arc::new(MockSecretCache { value: Some(pem) }),
-            server_secret_name: "test-server-key".to_string(),
-        }
-    }
 
     #[tokio::test]
     async fn test_get_status_list_jwt_success() {
