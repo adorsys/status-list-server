@@ -16,9 +16,13 @@ use crate::{
     utils::state::AppState,
 };
 
+/// Represents an authenticated issuer in the system.
+/// This struct is used to store and pass the authenticated issuer's ID through the request pipeline.
 #[derive(Clone)]
 pub struct AuthenticatedIssuer(pub String);
 
+/// Implementation of FromRequestParts for AuthenticatedIssuer.
+/// This allows Axum to automatically extract and validate the authenticated issuer from incoming requests.
 impl<S> FromRequestParts<S> for AuthenticatedIssuer
 where
     S: Send + Sync + 'static,
@@ -26,10 +30,16 @@ where
 {
     type Rejection = Response;
 
+    /// Extracts and validates the authenticated issuer from the request.
+    /// This function:
+    /// 1. Gets the Authorization header
+    /// 2. Extracts the Bearer token
+    /// 3. Verifies the token
+    /// 4. Extracts the issuer ID from the token
     async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
         let app_state = AppState::from_ref(state);
 
-        // Get the Authorization header
+        // Get the Authorization header and validate its presence
         let auth_header = parts
             .headers
             .get(header::AUTHORIZATION)
@@ -47,7 +57,7 @@ where
                 .into_response()
         })?;
 
-        // Verify the token
+        // Verify the token and extract the issuer
         match verify_token(&app_state, token).await {
             Ok(true) => {
                 // Extract the issuer from the token header
@@ -78,11 +88,18 @@ where
     }
 }
 
+/// Middleware function for authentication.
+/// This function:
+/// 1. Extracts the token from the Authorization header
+/// 2. Verifies the token
+/// 3. Processes the request body
+/// 4. Continues the request pipeline if authentication is successful
 pub async fn auth(
     appstate: Arc<AppState>,
     request: Request<Body>,
     next: Next,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
+    // Extract and validate the Bearer token
     let token = request
         .headers()
         .get(header::AUTHORIZATION)
@@ -106,6 +123,7 @@ pub async fn auth(
         }
     }
 
+    // Process the request body
     let (parts, body) = request.into_parts();
     let collected = BodyExt::collect(body).await.map_err(|err| {
         tracing::error!("Failed to read request body: {err:?}");
@@ -124,8 +142,10 @@ pub async fn auth(
         )
     })?;
 
+    // Reconstruct the request with the processed body
     let mut request = Request::from_parts(parts, Body::from(bytes));
     request.extensions_mut().insert(json_body);
 
+    // Continue the request pipeline
     Ok(next.run(request).await)
 }
