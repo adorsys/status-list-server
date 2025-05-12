@@ -1,4 +1,4 @@
-use std::{fmt::Debug, sync::Arc};
+use std::{fmt::Debug, io::Write as _, sync::Arc};
 
 use axum::{
     extract::{Path, State},
@@ -11,6 +11,7 @@ use coset::{
     self, cbor::Value as CborValue, iana::Algorithm, CborSerializable, CoseSign1Builder,
     HeaderBuilder,
 };
+use flate2::{write::GzEncoder, Compression};
 use jsonwebtoken::{EncodingKey, Header};
 use p256::ecdsa::{signature::Signer, Signature};
 use serde::{Deserialize, Serialize};
@@ -23,8 +24,8 @@ use crate::{
 
 use super::{
     constants::{
-        ACCEPT_STATUS_LISTS_HEADER_CWT, ACCEPT_STATUS_LISTS_HEADER_JWT, CWT_TYPE, EXP, ISSUED_AT,
-        STATUS_LIST, STATUS_LISTS_HEADER_CWT, STATUS_LISTS_HEADER_JWT, SUBJECT, TTL,
+        ACCEPT_STATUS_LISTS_HEADER_CWT, ACCEPT_STATUS_LISTS_HEADER_JWT, CWT_TYPE, EXP, GZIP_HEADER,
+        ISSUED_AT, STATUS_LIST, STATUS_LISTS_HEADER_CWT, STATUS_LISTS_HEADER_JWT, SUBJECT, TTL,
     },
     error::StatusListError,
 };
@@ -105,14 +106,14 @@ pub async fn build_status_list_token(
         Ok((
             StatusCode::OK,
             [(header::CONTENT_TYPE, accept)],
-            issue_jwt(status_list_token, &server_key)?,
+            issue_jwt(&status_claims, &server_key)?,
         )
             .into_response())
     } else {
         Ok((
             StatusCode::OK,
             [(header::CONTENT_TYPE, accept)],
-            issue_cwt(status_list_token, &server_key)?,
+            issue_cwt(&status_claims, &server_key)?,
         )
             .into_response())
     }
@@ -405,7 +406,7 @@ mod tests {
     };
     use sea_orm::{DatabaseBackend, MockDatabase};
     use serde_json::json;
-    use std::sync::Arc;
+    use std::{io::Read, sync::Arc};
 
     fn server_key() -> Keypair {
         Keypair::from_pkcs8_pem(include_str!("../../../test_resources/ec-private.pem")).unwrap()
@@ -456,7 +457,13 @@ mod tests {
         .into_response();
 
         assert_eq!(response.status(), StatusCode::OK);
-        let body_bytes = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+        let headers = response.headers();
+        assert_eq!(headers.get(http::header::CONTENT_ENCODING).unwrap(), "gzip");
+
+        let compressed_body_bytes = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+        let mut decoder = flate2::read::GzDecoder::new(&compressed_body_bytes[..]);
+        let mut body_bytes = Vec::new();
+        decoder.read_to_end(&mut body_bytes).unwrap();
         let body_str = std::str::from_utf8(&body_bytes).unwrap();
 
         let decoding_key_pem = app_state
@@ -526,7 +533,13 @@ mod tests {
         .into_response();
 
         assert_eq!(response.status(), StatusCode::OK);
-        let body_bytes = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+        let headers = response.headers();
+        assert_eq!(headers.get(http::header::CONTENT_ENCODING).unwrap(), "gzip");
+
+        let compressed_body_bytes = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+        let mut decoder = flate2::read::GzDecoder::new(&compressed_body_bytes[..]);
+        let mut body_bytes = Vec::new();
+        decoder.read_to_end(&mut body_bytes).unwrap();
 
         let cwt = CoseSign1::from_slice(&body_bytes).unwrap();
 
