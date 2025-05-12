@@ -28,7 +28,7 @@ pub async fn publish_credentials(
 pub async fn verify_token(state: &AppState, token: &str) -> Result<bool, AuthenticationError> {
     let store = &state.credential_repository;
 
-    let header = decode_header(token).map_err(|err| AuthenticationError::JwtError(err))?;
+    let header = decode_header(token).map_err(AuthenticationError::JwtError)?;
 
     let kid = header.kid.ok_or(AuthenticationError::MissingKid)?;
 
@@ -62,5 +62,5 @@ pub async fn verify_token(state: &AppState, token: &str) -> Result<bool, Authent
 
     decode::<Value>(token, &decoding_key, &validation)
         .map(|_| true)
-        .map_err(|err| AuthenticationError::JwtError(err))
+        .map_err(AuthenticationError::JwtError)
 }
