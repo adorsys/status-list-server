@@ -53,6 +53,7 @@ pub mod migrations {
                                     .primary_key(),
                             )
                             .col(ColumnDef::new(StatusListTokens::Exp).integer())
+                            .col(ColumnDef::new(StatusListTokens::Issuer).string().not_null())
                             .col(ColumnDef::new(StatusListTokens::Iat).integer().not_null())
                             .col(
                                 ColumnDef::new(StatusListTokens::StatusList)
@@ -90,6 +91,7 @@ pub mod migrations {
         #[derive(Iden)]
         enum StatusListTokens {
             Table,
+            Issuer,
             ListId,
             Exp,
             Iat,
