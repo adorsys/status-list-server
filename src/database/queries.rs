@@ -54,10 +54,10 @@ impl SeaOrmStore<StatusListToken> {
             .filter(status_list_tokens::Column::ListId.eq(issuer))
             .all(&*self.db)
             .await
-            .map(|tokens| tokens.into_iter().map(StatusListToken::from).collect())
+            .map(|tokens| tokens.into_iter().collect())
             .map_err(|e| RepositoryError::FindError(e.to_string()))
     }
-    
+
     pub async fn update_one(
         &self,
         issuer: String,
