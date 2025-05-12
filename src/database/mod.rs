@@ -35,7 +35,7 @@ pub mod migrations {
                                     .not_null()
                                     .primary_key(),
                             )
-                            .col(ColumnDef::new(Credentials::PublicKey).string().not_null())
+                            .col(ColumnDef::new(Credentials::PublicKey).text().not_null())
                             .col(ColumnDef::new(Credentials::Alg).string().not_null())
                             .to_owned(),
                     )
