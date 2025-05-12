@@ -70,7 +70,7 @@ pub async fn publish_token_status(
             // Build the new status list token
             let new_status_list_token = StatusListToken {
                 list_id: payload.list_id.clone(),
-                issuer: issuer,
+                issuer,
                 exp,
                 iat,
                 status_list,
