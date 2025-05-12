@@ -1,31 +1,16 @@
-use crate::database::error::RepositoryError;
+use jsonwebtoken::errors::Error as JwtError;
 use thiserror::Error;
 
 #[derive(Error, Debug)]
 pub enum AuthenticationError {
-    #[error("invalid token")]
-    InvalidToken,
-    #[error("missing kid in token header")]
+    #[error("Missing kid in token header")]
     MissingKid,
-    #[error("Repository not set")]
-    RepositoryNotSet,
     #[error("No issuer found for kid")]
     IssuerNotFound,
-    #[error("error: {0}")]
-    Generic(String),
-    #[error("Missing Authorisation header")]
+    #[error("Database error: {0}")]
+    DatabaseError(String),
+    #[error("Missing Authorization header")]
     MissingAuthHeader,
-    #[error("Could not verify token")]
-    VerificationFailed,
-}
-#[derive(Error, Debug)]
-pub enum AuthErrors {
-    #[error("algorithm not known")]
-    UnknownAlgorithm,
-}
-
-impl From<AuthErrors> for RepositoryError {
-    fn from(err: AuthErrors) -> Self {
-        Self::Generic(err.to_string())
-    }
+    #[error("{0}")]
+    JwtError(#[from] JwtError),
 }
