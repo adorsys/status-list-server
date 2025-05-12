@@ -1,4 +1,4 @@
-use std::{fmt::Debug, io::Write as _, sync::Arc};
+use std::{fmt::Debug, sync::Arc};
 
 use axum::{
     extract::{Path, State},
@@ -11,7 +11,6 @@ use coset::{
     self, cbor::Value as CborValue, iana::Algorithm, CborSerializable, CoseSign1Builder,
     HeaderBuilder,
 };
-use flate2::{write::GzEncoder, Compression};
 use jsonwebtoken::{EncodingKey, Header};
 use p256::ecdsa::{signature::Signer, Signature};
 use serde::{Deserialize, Serialize};
@@ -24,7 +23,7 @@ use crate::{
 
 use super::{
     constants::{
-        ACCEPT_STATUS_LISTS_HEADER_CWT, ACCEPT_STATUS_LISTS_HEADER_JWT, CWT_TYPE, EXP, GZIP_HEADER,
+        ACCEPT_STATUS_LISTS_HEADER_CWT, ACCEPT_STATUS_LISTS_HEADER_JWT, CWT_TYPE, EXP,
         ISSUED_AT, STATUS_LIST, STATUS_LISTS_HEADER_CWT, STATUS_LISTS_HEADER_JWT, SUBJECT, TTL,
     },
     error::StatusListError,
@@ -102,18 +101,20 @@ pub async fn build_status_list_token(
 ) -> Result<impl IntoResponse + Debug, StatusListError> {
     let server_key = repo.server_key.clone();
 
+    // Removed unused variable `status_claims`
+
     if ACCEPT_STATUS_LISTS_HEADER_JWT == accept {
         Ok((
             StatusCode::OK,
             [(header::CONTENT_TYPE, accept)],
-            issue_jwt(&status_claims, &server_key)?,
+            issue_jwt(status_list_token, &server_key)?,
         )
             .into_response())
     } else {
         Ok((
             StatusCode::OK,
             [(header::CONTENT_TYPE, accept)],
-            issue_cwt(&status_claims, &server_key)?,
+            issue_cwt(status_list_token, &server_key)?,
         )
             .into_response())
     }

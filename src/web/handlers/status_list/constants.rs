@@ -1,7 +1,7 @@
-pub(super) const ACCEPT_STATUS_LISTS_HEADER_JWT: &str = "application/statuslist+jwt";
-pub(super) const ACCEPT_STATUS_LISTS_HEADER_CWT: &str = "application/statuslist+cwt";
-pub(super) const STATUS_LISTS_HEADER_JWT: &str = "statuslist+jwt";
-pub(super) const STATUS_LISTS_HEADER_CWT: &str = "statuslist+cwt";
+pub const ACCEPT_STATUS_LISTS_HEADER_JWT: &str = "application/statuslist+jwt";
+pub const ACCEPT_STATUS_LISTS_HEADER_CWT: &str = "application/statuslist+cwt";
+pub const STATUS_LISTS_HEADER_JWT: &str = "statuslist+jwt";
+pub const STATUS_LISTS_HEADER_CWT: &str = "statuslist+cwt";
 
 // CBOR Web Token (CWT) constants
 pub(super) const CWT_TYPE: i64 = 16;
