@@ -1,4 +1,4 @@
-use axum::{extract::State, response::IntoResponse, Json};
+use axum::{extract::State, response::IntoResponse, Extension, Json};
 use hyper::StatusCode;
 
 use crate::{
@@ -13,6 +13,7 @@ use super::error::StatusListError;
 // Handler to update an existing status list token
 pub async fn update_token_status(
     State(appstate): State<AppState>,
+    Extension(issuer): Extension<String>,
     Json(payload): Json<StatusListTokenPayload>,
 ) -> Result<impl IntoResponse, StatusListError> {
     let store = &appstate.status_list_token_repository;
@@ -25,37 +26,45 @@ pub async fn update_token_status(
     })?;
 
     // Fetch the existing token
-    let mut token = match store.find_one_by(payload.list_id.clone()).await {
-        Ok(Some(token)) => token,
-        Ok(None) => return Err(StatusListError::StatusListNotFound),
+    let token = match store.find_all_by(issuer).await {
+        Ok(tokens) => tokens,
         Err(e) => {
             tracing::error!(error = ?e, list_id = ?payload.list_id, "Database query failed for status list.");
             return Err(StatusListError::InternalServerError);
         }
     };
 
-    // Update the status list
-    let updated_lst =
-        update_status_list(token.status_list.lst.clone(), payload.status.clone(), bits).map_err(
-            |e| {
-                tracing::error!("update_status_list failed: {:?}", e);
-                match e {
-                    Error::Generic(msg) => StatusListError::Generic(msg),
-                    Error::InvalidIndex => StatusListError::InvalidIndex,
-                    Error::UnsupportedBits => StatusListError::UnsupportedBits,
-                    _ => StatusListError::Generic(e.to_string()),
-                }
-            },
-        )?;
+    let exact_token = token
+        .into_iter()
+        .find(|t| t.list_id == payload.list_id)
+        .ok_or(StatusListError::StatusListNotFound)?
+        .clone();
 
-    // Set new values in the token
-    token.status_list.lst = updated_lst;
-    token.status_list.bits = payload.bits;
+    // Update the status list
+    let updated_lst = update_status_list(
+        exact_token.status_list.lst.clone(),
+        payload.status.clone(),
+        bits,
+    )
+    .map_err(|e| {
+        tracing::error!("update_status_list failed: {:?}", e);
+        match e {
+            Error::Generic(msg) => StatusListError::Generic(msg),
+            Error::InvalidIndex => StatusListError::InvalidIndex,
+            Error::UnsupportedBits => StatusListError::UnsupportedBits,
+            _ => StatusListError::Generic(e.to_string()),
+        }
+    })?;
+
+    let mut exact_token = exact_token;
+    exact_token.status_list.lst = updated_lst;
+    exact_token.status_list.bits = payload.bits;
+    exact_token.status_list.bits = payload.bits;
 
     // Save the updated token
 
     store
-        .update_one(token.list_id.clone(), token)
+        .update_one(exact_token.list_id.clone(), exact_token.clone())
         .await
         .map_err(|e| {
             tracing::error!("Failed to update token: {:?}", e);
@@ -72,7 +81,7 @@ mod test {
         time::{SystemTime, UNIX_EPOCH},
     };
 
-    use axum::{extract::State, response::IntoResponse, Json};
+    use axum::{extract::State, response::IntoResponse, Extension, Json};
     use hyper::StatusCode;
     use sea_orm::{DatabaseBackend, MockDatabase};
 
@@ -115,6 +124,7 @@ mod test {
 
         let existing_token = StatusListToken {
             list_id: token_id.to_string(),
+            issuer: "issuer".to_string(),
             exp: Some(
                 (SystemTime::now()
                     .duration_since(UNIX_EPOCH)
@@ -158,10 +168,14 @@ mod test {
             server_key: Arc::new(server_key()),
         };
 
-        let response = update_token_status(State(app_state), Json(update_payload))
-            .await
-            .unwrap()
-            .into_response();
+        let response = update_token_status(
+            State(app_state),
+            Extension("issuer".to_string()),
+            Json(update_payload),
+        )
+        .await
+        .unwrap()
+        .into_response();
 
         assert_eq!(response.status(), StatusCode::OK);
     }

@@ -9,6 +9,7 @@ use axum::{
     extract::{Json, State},
     http::StatusCode,
     response::IntoResponse,
+    Extension,
 };
 use std::time::{SystemTime, UNIX_EPOCH};
 use tracing;
@@ -16,6 +17,7 @@ use tracing;
 // Handler to create a new status list token
 pub async fn publish_token_status(
     State(appstate): State<AppState>,
+    Extension(issuer): Extension<String>,
     Json(payload): Json<StatusListTokenPayload>,
 ) -> Result<impl IntoResponse, StatusListError> {
     let store = &appstate.status_list_token_repository;
@@ -68,6 +70,7 @@ pub async fn publish_token_status(
             // Build the new status list token
             let new_status_list_token = StatusListToken {
                 list_id: payload.list_id.clone(),
+                issuer: issuer,
                 exp,
                 iat,
                 status_list,
@@ -127,6 +130,7 @@ mod tests {
         };
         let new_token = StatusListToken {
             list_id: token_id.to_string(),
+            issuer: "issuer".to_string(),
             exp: Some(
                 (SystemTime::now()
                     .duration_since(UNIX_EPOCH)
@@ -157,10 +161,14 @@ mod tests {
             server_key: Arc::new(server_key()),
         };
 
-        let response = publish_token_status(State(app_state), Json(payload))
-            .await
-            .unwrap()
-            .into_response();
+        let response = publish_token_status(
+            State(app_state),
+            Extension("issuer".to_string()),
+            Json(payload),
+        )
+        .await
+        .unwrap()
+        .into_response();
         assert_eq!(response.status(), StatusCode::CREATED);
     }
 
@@ -190,6 +198,7 @@ mod tests {
         };
         let new_token = StatusListToken {
             list_id: token_id.to_string(),
+            issuer: "issuer".to_string(),
             exp: Some(
                 (SystemTime::now()
                     .duration_since(UNIX_EPOCH)
@@ -222,9 +231,13 @@ mod tests {
         };
 
         // Perform the insertion
-        let _ = publish_token_status(State(app_state.clone()), Json(payload))
-            .await
-            .unwrap();
+        let _ = publish_token_status(
+            State(app_state.clone()),
+            Extension("issuer".to_string()),
+            Json(payload),
+        )
+        .await
+        .unwrap();
 
         // Verify the token is stored
         let result = app_state
@@ -256,6 +269,7 @@ mod tests {
 
         let existing_token = StatusListToken {
             list_id: token_id.to_string(),
+            issuer: "issuer".to_string(),
             exp: None,
             iat: 1234567890,
             status_list: StatusList {
@@ -279,7 +293,13 @@ mod tests {
             server_key: Arc::new(server_key()),
         };
 
-        let response = match publish_token_status(State(app_state), Json(payload)).await {
+        let response = match publish_token_status(
+            State(app_state),
+            Extension("issuer".to_string()),
+            Json(payload),
+        )
+        .await
+        {
             Ok(_) => panic!("Expected an error but got Ok"),
             Err(err) => err.into_response(),
         };
@@ -297,6 +317,7 @@ mod tests {
         };
         let new_token = StatusListToken {
             list_id: token_id.to_string(),
+            issuer: "issuer".to_string(),
             exp: Some(
                 (SystemTime::now()
                     .duration_since(UNIX_EPOCH)
@@ -328,10 +349,14 @@ mod tests {
             server_key: Arc::new(server_key()),
         };
 
-        let response = publish_token_status(State(app_state.clone()), Json(payload))
-            .await
-            .unwrap()
-            .into_response();
+        let response = publish_token_status(
+            State(app_state.clone()),
+            Extension("issuer".to_string()),
+            Json(payload),
+        )
+        .await
+        .unwrap()
+        .into_response();
         assert_eq!(response.status(), StatusCode::CREATED);
 
         let result = app_state
@@ -364,7 +389,13 @@ mod tests {
             3, // Invalid bits value
         );
 
-        let response = match publish_token_status(State(app_state), Json(payload)).await {
+        let response = match publish_token_status(
+            State(app_state),
+            Extension("issuer".to_string()),
+            Json(payload),
+        )
+        .await
+        {
             Ok(_) => panic!("Expected an error but got Ok"),
             Err(err) => err.into_response(),
         };
@@ -391,6 +422,7 @@ mod tests {
         };
         let new_token = StatusListToken {
             list_id: token_id.to_string(),
+            issuer: "issuer".to_string(),
             exp: Some(
                 (SystemTime::now()
                     .duration_since(UNIX_EPOCH)
@@ -421,10 +453,14 @@ mod tests {
             server_key: Arc::new(server_key()),
         };
 
-        let response = publish_token_status(State(app_state), Json(payload))
-            .await
-            .unwrap()
-            .into_response();
+        let response = publish_token_status(
+            State(app_state),
+            Extension("issuer".to_string()),
+            Json(payload),
+        )
+        .await
+        .unwrap()
+        .into_response();
         assert_eq!(response.status(), StatusCode::CREATED);
     }
 
@@ -447,7 +483,13 @@ mod tests {
             server_key: Arc::new(server_key()),
         };
 
-        let response = match publish_token_status(State(app_state), Json(payload)).await {
+        let response = match publish_token_status(
+            State(app_state),
+            Extension("issuer".to_string()),
+            Json(payload),
+        )
+        .await
+        {
             Ok(_) => panic!("Expected an error but got Ok"),
             Err(err) => err.into_response(),
         };

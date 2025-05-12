@@ -4,7 +4,7 @@ use axum::{
     extract::{Path, State},
     http::{header, HeaderMap, StatusCode},
     response::IntoResponse,
-    Json,
+    Extension, Json,
 };
 use chrono::Utc;
 use coset::{
@@ -32,6 +32,7 @@ use super::{
 pub trait StatusListTokenExt {
     fn new(
         list_id: String,
+        issuer: String,
         exp: Option<i64>,
         iat: i64,
         status_list: StatusList,
@@ -43,6 +44,7 @@ pub trait StatusListTokenExt {
 impl StatusListTokenExt for StatusListToken {
     fn new(
         list_id: String,
+        issuer: String,
         exp: Option<i64>,
         iat: i64,
         status_list: StatusList,
@@ -51,6 +53,7 @@ impl StatusListTokenExt for StatusListToken {
     ) -> Self {
         Self {
             list_id,
+            issuer,
             exp,
             iat,
             status_list,
@@ -63,6 +66,7 @@ impl StatusListTokenExt for StatusListToken {
 pub async fn get_status_list(
     State(state): State<AppState>,
     Path(list_id): Path<String>,
+    Extension(issuer): Extension<String>,
     headers: HeaderMap,
 ) -> Result<impl IntoResponse + Debug, StatusListError> {
     let accept = headers.get(header::ACCEPT).and_then(|h| h.to_str().ok());
@@ -72,13 +76,13 @@ pub async fn get_status_list(
         None =>
         // assume jwt by default if no accept header is provided
         {
-            build_status_list_token(ACCEPT_STATUS_LISTS_HEADER_JWT, &list_id, &state).await
+            build_status_list_token(ACCEPT_STATUS_LISTS_HEADER_JWT, &list_id, &issuer, &state).await
         }
         Some(accept)
             if accept == ACCEPT_STATUS_LISTS_HEADER_JWT
                 || accept == ACCEPT_STATUS_LISTS_HEADER_CWT =>
         {
-            build_status_list_token(accept, &list_id, &state).await
+            build_status_list_token(accept, &list_id, &issuer, &state).await
         }
         Some(_) => Err(StatusListError::InvalidAcceptHeader),
     }
@@ -87,17 +91,22 @@ pub async fn get_status_list(
 async fn build_status_list_token(
     accept: &str,
     list_id: &str,
+    issuer: &str,
     repo: &AppState,
 ) -> Result<impl IntoResponse + Debug, StatusListError> {
     // Get status list claims from database
     let status_claims = repo
         .status_list_token_repository
-        .find_one_by(list_id.to_string())
+        .find_all_by(issuer.to_string())
         .await
         .map_err(|err| {
             tracing::error!("Failed to get status list {list_id} from database: {err:?}");
             StatusListError::InternalServerError
-        })?
+        })?;
+
+    let status_claims = status_claims
+        .iter()
+        .find(|token| token.list_id == list_id)
         .ok_or(StatusListError::StatusListNotFound)?;
 
     let server_key = repo.server_key.clone();
@@ -328,6 +337,7 @@ pub async fn update_statuslist(
 
         let statuslisttoken = StatusListToken::new(
             list_id.clone(),
+            status_list_token.issuer,
             status_list_token.exp,
             status_list_token.iat,
             status_list,
@@ -421,6 +431,7 @@ mod tests {
         };
         let status_list_token = StatusListToken::new(
             "test_list".to_string(),
+            "issuer1".to_string(),
             Some(1234767890),
             1234567890,
             status_list.clone(),
@@ -450,6 +461,7 @@ mod tests {
         let response = get_status_list(
             State(app_state.clone()),
             Path("test_list".to_string()),
+            Extension("issuer1".to_string()),
             headers,
         )
         .await
@@ -491,6 +503,7 @@ mod tests {
         };
         let status_list_token = StatusListToken::new(
             "test_list".to_string(),
+            "issuer1".to_string(),
             None,
             1234567890,
             status_list.clone(),
@@ -520,6 +533,7 @@ mod tests {
         let response = get_status_list(
             State(app_state.clone()),
             Path("test_list".to_string()),
+            Extension("issuer1".to_string()),
             headers,
         )
         .await
@@ -614,8 +628,13 @@ mod tests {
             ACCEPT_STATUS_LISTS_HEADER_JWT.parse().unwrap(),
         );
 
-        let result =
-            get_status_list(State(app_state), Path("test_list".to_string()), headers).await;
+        let result = get_status_list(
+            State(app_state),
+            Path("test_list".to_string()),
+            Extension("issuer1".to_string()),
+            headers,
+        )
+        .await;
 
         assert!(result.is_err());
         let err = result.unwrap_err();
@@ -637,8 +656,13 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.insert(http::header::ACCEPT, "application/xml".parse().unwrap()); // unsupported
 
-        let result =
-            get_status_list(State(app_state), Path("test_list".to_string()), headers).await;
+        let result = get_status_list(
+            State(app_state),
+            Path("test_list".to_string()),
+            Extension("issuer1".to_string()),
+            headers,
+        )
+        .await;
 
         assert!(result.is_err());
         let err = result.unwrap_err();
@@ -658,6 +682,7 @@ mod tests {
         };
         let existing_token = StatusListToken::new(
             "test_list".to_string(),
+            "issuer1".to_string(),
             None,
             1234567890,
             initial_status_list.clone(),
@@ -670,6 +695,7 @@ mod tests {
         };
         let updated_token = StatusListToken::new(
             "test_list".to_string(),
+            "issuer1".to_string(),
             None,
             1234567890,
             updated_status_list,
