@@ -27,8 +27,8 @@ pub enum StatusListError {
     CompressionError(String),
     #[error("Status list already exists")]
     StatusListAlreadyExists,
-    #[error("Unauthorized: {0}")]
-    Unauthorized(String),
+    #[error("Forbidden: {0}")]
+    Forbidden(String),
     #[error("Token already exists")]
     TokenAlreadyExists,
 }
@@ -49,7 +49,7 @@ impl IntoResponse for StatusListError {
             DecompressionError(_) => StatusCode::BAD_REQUEST,
             CompressionError(_) => StatusCode::INTERNAL_SERVER_ERROR,
             StatusListAlreadyExists => StatusCode::CONFLICT,
-            Unauthorized(_) => StatusCode::UNAUTHORIZED,
+            Forbidden(_) => StatusCode::FORBIDDEN,
             TokenAlreadyExists => StatusCode::CONFLICT,
         };
 

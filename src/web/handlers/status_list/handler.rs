@@ -257,8 +257,8 @@ pub async fn update_statuslist(
 ) -> impl IntoResponse {
     if list_id != issuer {
         return (
-            StatusCode::UNAUTHORIZED,
-            StatusListError::Unauthorized(
+            StatusCode::FORBIDDEN,
+            StatusListError::Forbidden(
                 "Issuer mismatch: list_id does not match authenticated issuer".to_string(),
             ),
         )

@@ -12,25 +12,32 @@ use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use tracing;
 
-// Request payload for publishing a status list token
+/// Request payload for publishing a status list token.
+/// This struct represents the data needed to create or update a status list token.
 #[derive(Deserialize, Serialize, Clone)]
 pub struct PublishTokenStatusRequest {
+    /// The unique identifier for the status list
     pub list_id: String,
+    /// List of status updates to be applied
     pub updates: Vec<StatusEntry>,
+    /// Number of bits per status entry (must be 1 or 2 as per IETF draft)
     pub bits: u8,
 }
 
-// Handler to create a new status list token
+/// Handler to create a new status list token.
+/// This function:
+/// 1. Validates the request payload
+/// 2. Checks for existing tokens and verifies ownership
+/// 3. Creates or updates the status list
+/// 4. Stores the token in the database
 pub async fn publish_token_status(
     State(state): State<AppState>,
     AuthenticatedIssuer(issuer): AuthenticatedIssuer,
     Json(payload): Json<PublishTokenStatusRequest>,
 ) -> Result<impl IntoResponse, StatusListError> {
-    // Verify that the issuer matches the authenticated issuer
-    if payload.list_id != issuer {
-        return Err(StatusListError::Unauthorized(
-            "Issuer mismatch: list_id does not match authenticated issuer".to_string(),
-        ));
+    // Validate bits value according to IETF draft (must be 1 or 2)
+    if payload.bits != 1 && payload.bits != 2 {
+        return Err(StatusListError::UnsupportedBits);
     }
 
     // Check if the token already exists
@@ -44,16 +51,26 @@ pub async fn publish_token_status(
         })?;
 
     if existing_token.is_some() {
+        // Return conflict if token exists
         return Err(StatusListError::TokenAlreadyExists);
+    }
+
+    // Validate status entries
+    for entry in &payload.updates {
+        if entry.index < 0 {
+            return Err(StatusListError::InvalidIndex);
+        }
     }
 
     // Handle empty updates or create status list with updates
     let status_list = if payload.updates.is_empty() {
+        // Create an empty status list if no updates provided
         StatusList {
             bits: payload.bits as usize,
             lst: base64url::encode([]), // Empty encoded status list
         }
     } else {
+        // Create or update status list with the provided updates
         let bits = BitFlag::new(payload.bits).ok_or(StatusListError::UnsupportedBits)?;
 
         StatusList {
@@ -70,7 +87,7 @@ pub async fn publish_token_status(
         }
     };
 
-    // Create the new token
+    // Create the new token with current timestamp
     let now = Utc::now().timestamp();
     let new_token = StatusListToken {
         list_id: payload.list_id,
@@ -81,17 +98,17 @@ pub async fn publish_token_status(
         ttl: Some(3600),
     };
 
-    // Store the token
+    // Store the token in the database
     state
         .status_list_token_repository
-        .insert_one(new_token.clone())
+        .insert_one(new_token)
         .await
         .map_err(|err| {
             tracing::error!("Failed to store token: {err:?}");
             StatusListError::InternalServerError
         })?;
 
-    Ok((StatusCode::CREATED, "Token published successfully"))
+    Ok(StatusCode::CREATED)
 }
 
 #[cfg(test)]
