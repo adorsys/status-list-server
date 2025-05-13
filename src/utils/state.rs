@@ -7,28 +7,42 @@ use async_trait::async_trait;
 use aws_sdk_secretsmanager::config::Region;
 use aws_sdk_secretsmanager::error::ProvideErrorMetadata;
 use aws_sdk_secretsmanager::Client as SecretsManagerClient;
-use aws_secretsmanager_cache::{CacheConfig, SecretCache};
+use aws_secretsmanager_caching::SecretsManagerCachingClient;
 use sea_orm::{Database, DatabaseConnection};
 use sea_orm_migration::MigratorTrait;
+use std::num::NonZeroUsize;
 use std::sync::Arc;
+use std::time::Duration;
 
 use super::keygen::Keypair;
 
+// Define the SecretCacheTrait
 #[async_trait]
 pub trait SecretCacheTrait: Send + Sync {
     async fn get_secret_string(&self, secret_id: String) -> Result<Option<String>, String>;
 }
 
+// Define a wrapper struct for SecretsManagerCachingClient
+pub struct AwsSecretCache {
+    inner: SecretsManagerCachingClient,
+}
+
+// Implement SecretCacheTrait for AwsSecretCache
 #[async_trait]
-impl SecretCacheTrait for SecretCache {
+impl SecretCacheTrait for AwsSecretCache {
     async fn get_secret_string(&self, secret_id: String) -> Result<Option<String>, String> {
-        match self.get_secret_string(secret_id).await {
-            Ok(val) => Ok(val),
+        match self
+            .inner
+            .get_secret_value(&secret_id, None, None, false)
+            .await
+        {
+            Ok(output) => Ok(output.secret_string),
             Err(e) => Err(e.to_string()),
         }
     }
 }
 
+// Mock implementation for testing
 pub struct MockSecretCache {
     pub value: Option<String>,
 }
@@ -61,7 +75,7 @@ pub async fn setup() -> AppState {
     let secret_name =
         std::env::var("SERVER_KEY_SECRET_NAME").expect("SERVER_KEY_SECRET_NAME env not set");
     let region = std::env::var("AWS_REGION").expect("AWS_REGION env not set");
-    let aws_config = aws_config::from_env()
+    let aws_config = aws_config::defaults(aws_config::BehaviorVersion::latest())
         .region(Region::new(region))
         .load()
         .await;
@@ -109,12 +123,15 @@ pub async fn setup() -> AppState {
         }
     }
 
-    // Create secret cache with TTL
-    let config = CacheConfig {
-        cache_item_ttl: 3600 * 1_000_000_000, // 1 hour in nanoseconds
-        ..CacheConfig::default()
+    // Create secret cache with max size and TTL
+    let max_size = NonZeroUsize::new(1024).unwrap();
+    let ttl = Duration::from_secs(3600); // 1 hour
+    let caching_client = SecretsManagerCachingClient::default(max_size, ttl)
+        .await
+        .expect("Failed to create cache");
+    let cache = AwsSecretCache {
+        inner: caching_client,
     };
-    let cache = SecretCache::new_with_config(client, config);
 
     let db = Arc::new(db);
     AppState {

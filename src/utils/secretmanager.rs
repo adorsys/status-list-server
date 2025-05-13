@@ -1,6 +1,6 @@
 use super::errors::Error;
 use async_trait::async_trait;
-use aws_sdk_secretsmanager::config::Region;
+use aws_config::{BehaviorVersion, Region};
 use aws_sdk_secretsmanager::Client as AwsClient;
 
 pub struct AwsSecret {
@@ -23,22 +23,16 @@ pub trait Operations {
 
 impl AwsSecret {
     pub async fn new(secret_name: String, _region: Region) -> Self {
-        let config = aws_config::from_env().region(_region.clone()).load().await;
+        let config = aws_config::defaults(BehaviorVersion::v2025_01_17())
+            .region(_region.clone())
+            .load()
+            .await;
         let aws_client = AwsClient::new(&config);
 
         Self {
             secret_name,
             _region,
             aws_client,
-        }
-    }
-}
-
-impl Secret {
-    pub fn new(secret_name: String, secret_value: String) -> Self {
-        Self {
-            secret_name,
-            secret_value,
         }
     }
 }
