@@ -64,7 +64,6 @@ pub async fn update_token_status(
     let mut exact_token = token;
     exact_token.status_list.lst = updated_lst;
     exact_token.status_list.bits = payload.bits;
-    exact_token.status_list.bits = payload.bits;
 
     // Save the updated token
 
