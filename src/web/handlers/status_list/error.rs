@@ -47,7 +47,7 @@ impl IntoResponse for StatusListError {
             DecompressionError(_) => StatusCode::BAD_REQUEST,
             CompressionError(_) => StatusCode::INTERNAL_SERVER_ERROR,
             StatusListAlreadyExists => StatusCode::CONFLICT,
-            IssuerMismatch => StatusCode::BAD_REQUEST,
+            IssuerMismatch => StatusCode::FORBIDDEN,
         };
 
         (status_code, self.to_string()).into_response()
