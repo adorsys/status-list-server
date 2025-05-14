@@ -42,9 +42,6 @@ pub async fn verify_token(state: &AppState, token: &str) -> Result<(), Authentic
         .ok_or(AuthenticationError::IssuerNotFound)?;
 
     let decoding_key = match credential.alg {
-        Algorithm::HS256 | Algorithm::HS384 | Algorithm::HS512 => {
-            Ok(DecodingKey::from_secret(credential.public_key.as_bytes()))
-        }
         Algorithm::RS256
         | Algorithm::RS384
         | Algorithm::RS512
@@ -55,6 +52,7 @@ pub async fn verify_token(state: &AppState, token: &str) -> Result<(), Authentic
             DecodingKey::from_ec_pem(credential.public_key.as_bytes())
         }
         Algorithm::EdDSA => DecodingKey::from_ed_pem(credential.public_key.as_bytes()),
+        _ => return Err(AuthenticationError::UnsupportedAlgorithm),
     }?;
 
     let mut validation = Validation::new(credential.alg);
