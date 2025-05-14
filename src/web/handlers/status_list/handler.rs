@@ -4,7 +4,7 @@ use axum::{
     extract::{Path, State},
     http::{header, HeaderMap, StatusCode},
     response::IntoResponse,
-    Extension, Json,
+    Json,
 };
 use chrono::Utc;
 use coset::{
@@ -67,7 +67,6 @@ impl StatusListTokenExt for StatusListToken {
 pub async fn get_status_list(
     State(state): State<AppState>,
     Path(list_id): Path<String>,
-    Extension(issuer): Extension<String>,
     headers: HeaderMap,
 ) -> Result<impl IntoResponse + Debug, StatusListError> {
     let accept = headers.get(header::ACCEPT).and_then(|h| h.to_str().ok());
@@ -77,13 +76,13 @@ pub async fn get_status_list(
         None =>
         // assume jwt by default if no accept header is provided
         {
-            build_status_list_token(ACCEPT_STATUS_LISTS_HEADER_JWT, &list_id, &issuer, &state).await
+            build_status_list_token(ACCEPT_STATUS_LISTS_HEADER_JWT, &list_id,&state).await
         }
         Some(accept)
             if accept == ACCEPT_STATUS_LISTS_HEADER_JWT
                 || accept == ACCEPT_STATUS_LISTS_HEADER_CWT =>
         {
-            build_status_list_token(accept, &list_id, &issuer, &state).await
+            build_status_list_token(accept, &list_id, &state).await
         }
         Some(_) => Err(StatusListError::InvalidAcceptHeader),
     }
@@ -92,24 +91,26 @@ pub async fn get_status_list(
 async fn build_status_list_token(
     accept: &str,
     list_id: &str,
-    issuer: &str,
     repo: &AppState,
 ) -> Result<impl IntoResponse + Debug, StatusListError> {
     // Get status list claims from database
     let status_claims = repo
         .status_list_token_repository
-        .find_all_by(issuer.to_string())
+        .find_one_by(list_id.to_string())
         .await
         .map_err(|err| {
             tracing::error!("Failed to get status list {list_id} from database: {err:?}");
             StatusListError::InternalServerError
         })?;
 
-    let status_claims = status_claims
-        .iter()
-        .find(|token| token.list_id == list_id)
-        .ok_or(StatusListError::StatusListNotFound)?;
-
+    let status_claims = match status_claims {
+        Some(status_claims) => status_claims,
+        None => {
+            tracing::error!("Status list {list_id} not found");
+            return Err(StatusListError::StatusListNotFound);
+        }
+    };
+    
     let server_key = repo.server_key.clone();
 
     let apply_gzip = |data: &[u8]| -> Result<Vec<u8>, StatusListError> {
@@ -125,8 +126,8 @@ async fn build_status_list_token(
     };
 
     let token_bytes = match accept {
-        ACCEPT_STATUS_LISTS_HEADER_CWT => issue_cwt(status_claims, &server_key)?,
-        _ => issue_jwt(status_claims, &server_key)?.into_bytes(),
+        ACCEPT_STATUS_LISTS_HEADER_CWT => issue_cwt(&status_claims, &server_key)?,
+        _ => issue_jwt(&status_claims, &server_key)?.into_bytes(),
     };
 
     Ok((
@@ -473,7 +474,6 @@ mod tests {
         let response = get_status_list(
             State(app_state.clone()),
             Path("test_list".to_string()),
-            Extension("issuer1".to_string()),
             headers,
         )
         .await
@@ -551,7 +551,6 @@ mod tests {
         let response = get_status_list(
             State(app_state.clone()),
             Path("test_list".to_string()),
-            Extension("issuer1".to_string()),
             headers,
         )
         .await
@@ -655,7 +654,6 @@ mod tests {
         let result = get_status_list(
             State(app_state),
             Path("test_list".to_string()),
-            Extension("issuer1".to_string()),
             headers,
         )
         .await;
@@ -683,7 +681,6 @@ mod tests {
         let result = get_status_list(
             State(app_state),
             Path("test_list".to_string()),
-            Extension("issuer1".to_string()),
             headers,
         )
         .await;

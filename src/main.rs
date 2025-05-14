@@ -2,9 +2,10 @@ use axum::{
     http::Method,
     response::IntoResponse,
     routing::{get, post},
-    Router,
+    Json, Router,
 };
 use dotenvy::dotenv;
+use serde::Serialize;
 use status_list_server::web::handlers::{credential_handler, get_status_list};
 use status_list_server::{
     utils::state::setup,
@@ -24,8 +25,15 @@ async fn welcome() -> impl IntoResponse {
     "Status list Server"
 }
 
+#[derive(Serialize)]
+struct HealthCheckResponse {
+    status: String,
+}
+
 async fn health_check() -> impl IntoResponse {
-    "Server is Running"
+    Json(HealthCheckResponse {
+        status: "OK".to_string(),
+    })
 }
 
 #[tokio::main]

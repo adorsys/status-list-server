@@ -26,37 +26,42 @@ pub async fn update_token_status(
     })?;
 
     // Fetch the existing token
-    let token = match store.find_all_by(issuer).await {
+    let token = match store.find_one_by(payload.list_id.clone()).await {
         Ok(tokens) => tokens,
         Err(e) => {
             tracing::error!(error = ?e, list_id = ?payload.list_id, "Database query failed for status list.");
             return Err(StatusListError::InternalServerError);
         }
     };
+    let token = match token {
+        Some(token) => token,
+        None => {
+            tracing::error!("Token not found in the database.");
+            return Err(StatusListError::StatusListNotFound);
+        }
+    };
 
-    let exact_token = token
-        .into_iter()
-        .find(|t| t.list_id == payload.list_id)
-        .ok_or(StatusListError::StatusListNotFound)?
-        .clone();
+    // check if the request issuer matches the token issuer
+    if token.issuer != issuer {
+        tracing::error!("Issuer mismatch: expected {}, got {}", token.issuer, issuer);
+        return Err(StatusListError::IssuerMismatch);
+    }
 
     // Update the status list
-    let updated_lst = update_status_list(
-        exact_token.status_list.lst.clone(),
-        payload.status.clone(),
-        bits,
-    )
-    .map_err(|e| {
-        tracing::error!("update_status_list failed: {:?}", e);
-        match e {
-            Error::Generic(msg) => StatusListError::Generic(msg),
-            Error::InvalidIndex => StatusListError::InvalidIndex,
-            Error::UnsupportedBits => StatusListError::UnsupportedBits,
-            _ => StatusListError::Generic(e.to_string()),
-        }
-    })?;
+    let updated_lst =
+        update_status_list(token.status_list.lst.clone(), payload.status.clone(), bits).map_err(
+            |e| {
+                tracing::error!("update_status_list failed: {:?}", e);
+                match e {
+                    Error::Generic(msg) => StatusListError::Generic(msg),
+                    Error::InvalidIndex => StatusListError::InvalidIndex,
+                    Error::UnsupportedBits => StatusListError::UnsupportedBits,
+                    _ => StatusListError::Generic(e.to_string()),
+                }
+            },
+        )?;
 
-    let mut exact_token = exact_token;
+    let mut exact_token = token;
     exact_token.status_list.lst = updated_lst;
     exact_token.status_list.bits = payload.bits;
     exact_token.status_list.bits = payload.bits;
