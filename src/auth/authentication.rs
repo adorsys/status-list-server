@@ -25,7 +25,7 @@ pub async fn publish_credentials(
     Ok(())
 }
 
-pub async fn verify_token(state: &AppState, token: &str) -> Result<bool, AuthenticationError> {
+pub async fn verify_token(state: &AppState, token: &str) -> Result<(), AuthenticationError> {
     let store = &state.credential_repository;
 
     let header = decode_header(token).map_err(AuthenticationError::JwtError)?;
@@ -61,6 +61,6 @@ pub async fn verify_token(state: &AppState, token: &str) -> Result<bool, Authent
     validation.set_issuer(&[credential.issuer]);
 
     decode::<Value>(token, &decoding_key, &validation)
-        .map(|_| true)
+        .map(|_| ())
         .map_err(AuthenticationError::JwtError)
 }
