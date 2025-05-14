@@ -76,7 +76,7 @@ pub async fn get_status_list(
         None =>
         // assume jwt by default if no accept header is provided
         {
-            build_status_list_token(ACCEPT_STATUS_LISTS_HEADER_JWT, &list_id,&state).await
+            build_status_list_token(ACCEPT_STATUS_LISTS_HEADER_JWT, &list_id, &state).await
         }
         Some(accept)
             if accept == ACCEPT_STATUS_LISTS_HEADER_JWT
@@ -110,7 +110,7 @@ async fn build_status_list_token(
             return Err(StatusListError::StatusListNotFound);
         }
     };
-    
+
     let server_key = repo.server_key.clone();
 
     let apply_gzip = |data: &[u8]| -> Result<Vec<u8>, StatusListError> {
@@ -651,12 +651,8 @@ mod tests {
             ACCEPT_STATUS_LISTS_HEADER_JWT.parse().unwrap(),
         );
 
-        let result = get_status_list(
-            State(app_state),
-            Path("test_list".to_string()),
-            headers,
-        )
-        .await;
+        let result =
+            get_status_list(State(app_state), Path("test_list".to_string()), headers).await;
 
         assert!(result.is_err());
         let err = result.unwrap_err();
@@ -678,12 +674,8 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.insert(http::header::ACCEPT, "application/xml".parse().unwrap()); // unsupported
 
-        let result = get_status_list(
-            State(app_state),
-            Path("test_list".to_string()),
-            headers,
-        )
-        .await;
+        let result =
+            get_status_list(State(app_state), Path("test_list".to_string()), headers).await;
 
         assert!(result.is_err());
         let err = result.unwrap_err();
