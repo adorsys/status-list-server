@@ -30,12 +30,9 @@ pub async fn auth(
 
     // Verify the token
     match verify_token(&appstate, token).await {
-        Ok(true) => {}
-        Ok(false) | Err(_) => {
-            return Err((
-                StatusCode::UNAUTHORIZED,
-                AuthenticationError::VerificationFailed.to_string(),
-            ));
+        Ok(_) => {}
+        Err(err) => {
+            return Err((StatusCode::UNAUTHORIZED, err.to_string()));
         }
     }
 
