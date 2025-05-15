@@ -170,7 +170,7 @@ mod tests {
     #[tokio::test]
 
     async fn test_authenticated_issuer_from_request_parts_success() {
-        let _ = *INIT;
+        *INIT;
         // Generate keypair and JWT
         let keypair = Keypair::generate().unwrap();
         let public_key_pem = keypair
@@ -235,7 +235,7 @@ mod tests {
     #[tokio::test]
 
     async fn test_missing_authorization_header() {
-        let _ = *INIT;
+        *INIT;
         let app_state = crate::utils::state::setup().await;
         let mut parts = Request::builder()
             .method(Method::GET)
@@ -260,7 +260,7 @@ mod tests {
     #[tokio::test]
 
     async fn test_invalid_authorization_header_format() {
-        let _ = *INIT;
+        *INIT;
         let app_state = crate::utils::state::setup().await;
         let mut headers = HeaderMap::new();
         headers.insert(header::AUTHORIZATION, "NotBearer token".parse().unwrap());
@@ -287,7 +287,7 @@ mod tests {
     #[tokio::test]
 
     async fn test_invalid_token_format() {
-        let _ = *INIT;
+        *INIT;
         let app_state = crate::utils::state::setup().await;
         let mut headers = HeaderMap::new();
         headers.insert(header::AUTHORIZATION, "Bearer not.a.jwt".parse().unwrap());
@@ -314,7 +314,7 @@ mod tests {
     #[tokio::test]
 
     async fn test_missing_issuer_identifier_in_token() {
-        let _ = *INIT;
+        *INIT;
         // Create a valid JWT but without kid
         let keypair = Keypair::generate().unwrap();
         let private_key_pem = keypair.to_pkcs8_pem_bytes().unwrap();
@@ -361,7 +361,7 @@ mod tests {
     #[tokio::test]
 
     async fn test_invalid_token_verification() {
-        let _ = *INIT;
+        *INIT;
         // Create a valid JWT with kid, but not registered in DB
         let keypair = Keypair::generate().unwrap();
         let private_key_pem = keypair.to_pkcs8_pem_bytes().unwrap();
@@ -416,7 +416,7 @@ mod tests {
     #[tokio::test]
 
     async fn test_other_authentication_error() {
-        let _ = *INIT;
+        *INIT;
         // Simulate a token with a valid kid, but with an unsupported algorithm
         let keypair = Keypair::generate().unwrap();
         let _public_key_pem = keypair
