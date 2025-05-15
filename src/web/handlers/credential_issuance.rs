@@ -7,19 +7,31 @@ use crate::{
 
 pub async fn credential_handler(
     State(appstate): State<AppState>,
-    credential: Json<Credentials>,
+    Json(credential): Json<Credentials>,
 ) -> impl IntoResponse {
-    match publish_credentials(credential.0, appstate).await {
-        Ok(_) => {
-            tracing::info!("successfully stored credentials");
-            Ok(StatusCode::ACCEPTED)
+    match publish_credentials(credential.to_owned(), appstate).await {
+        Ok(_) => (StatusCode::ACCEPTED, "Credentials stored successfully").into_response(),
+        Err(RepositoryError::DuplicateEntry) => {
+            tracing::warn!(
+                "Attempted to publish credentials for existing issuer {}",
+                credential.issuer,
+            );
+            (
+                StatusCode::CONFLICT,
+                "Credentials already exist for this issuer".to_string(),
+            )
+                .into_response()
         }
         Err(err) => {
-            tracing::error!("Failed to store credentials: {err:?}");
-            Err((
+            tracing::error!(
+                "Failed to store credentials for issuer {}: {err:?}",
+                credential.issuer,
+            );
+            (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                RepositoryError::CouldNotStoreEntity.to_string(),
-            ))
+                "Internal server error".to_string(),
+            )
+                .into_response()
         }
     }
 }
