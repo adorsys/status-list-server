@@ -2,7 +2,7 @@ use axum::{extract::State, response::IntoResponse, Extension, Json};
 use hyper::StatusCode;
 
 use crate::{
-    model::StatusListTokenPayload,
+    model::UpdateStatusRequest,
     utils::{
         bits_validation::BitFlag, errors::Error, lst_gen::update_status_list, state::AppState,
     },
@@ -14,16 +14,9 @@ use super::error::StatusListError;
 pub async fn update_token_status(
     State(appstate): State<AppState>,
     Extension(issuer): Extension<String>,
-    Json(payload): Json<StatusListTokenPayload>,
+    Json(payload): Json<UpdateStatusRequest>,
 ) -> Result<impl IntoResponse, StatusListError> {
     let store = &appstate.status_list_token_repository;
-
-    let bits = BitFlag::new(payload.bits).ok_or_else(|| {
-        StatusListError::Generic(format!(
-            "Invalid 'bits' value: {}. Allowed values are 1, 2, 4, 8.",
-            payload.bits
-        ))
-    })?;
 
     // Fetch the existing token
     let token = match store.find_one_by(payload.list_id.clone()).await {
@@ -47,6 +40,16 @@ pub async fn update_token_status(
         return Err(StatusListError::IssuerMismatch);
     }
 
+    let bits = if let Some(bits) = BitFlag::new(token.status_list.bits) {
+        Ok(bits)
+    } else {
+        Err(StatusListError::Generic(format!(
+            "Invalid 'bits' value: {}. Allowed values are 1, 2, 4, 8.",
+            token.status_list.bits
+        )))
+    };
+    let bits = bits?;
+
     // Update the status list
     let updated_lst =
         update_status_list(token.status_list.lst.clone(), payload.status.clone(), bits).map_err(
@@ -63,7 +66,6 @@ pub async fn update_token_status(
 
     let mut exact_token = token;
     exact_token.status_list.lst = updated_lst;
-    exact_token.status_list.bits = payload.bits;
 
     // Save the updated token
 
@@ -93,7 +95,7 @@ mod test {
         database::queries::SeaOrmStore,
         model::{
             status_list_tokens, Status, StatusEntry, StatusList, StatusListToken,
-            StatusListTokenPayload,
+            UpdateStatusRequest,
         },
         test_resources::helper::server_key,
         utils::{bits_validation::BitFlag, lst_gen::create_status_list, state::AppState},
@@ -146,7 +148,7 @@ mod test {
         };
 
         // Update payload that flips status at index 1 to INVALID
-        let update_payload = StatusListTokenPayload {
+        let update_payload = UpdateStatusRequest {
             list_id: token_id.to_string(),
             status: vec![StatusEntry {
                 index: 1,
@@ -154,7 +156,6 @@ mod test {
             }],
             sub: Some("issuer".to_string()),
             ttl: Some(3600),
-            bits: initial_bits,
         };
 
         let db_conn = Arc::new(

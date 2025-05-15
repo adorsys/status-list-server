@@ -1,22 +1,20 @@
+use crate::model::PublishStatusRequest;
 #[cfg(test)]
-use crate::{
-    model::{StatusEntry, StatusListTokenPayload},
-    utils::keygen::Keypair,
-};
+use crate::{model::StatusEntry, utils::keygen::Keypair};
 
 // Helper to create a test request payload with customizable bits
 #[cfg(test)]
-pub fn create_test_token(
+pub fn publish_test_token(
     list_id: &str,
     status: Vec<StatusEntry>,
     bits: u8,
-) -> StatusListTokenPayload {
-    StatusListTokenPayload {
-        list_id: list_id.to_string(),
-        status,
-        sub: Some("issuer".to_string()),
-        ttl: Some(3600),
-        bits,
+) -> PublishStatusRequest {
+    PublishStatusRequest {
+        list_id: list_id.to_owned(),
+        status: status,
+        sub: "issuer".to_string(),
+        bits: bits,
+        ttl: Some(36000),
     }
 }
 

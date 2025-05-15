@@ -1,5 +1,5 @@
 use crate::{
-    model::{StatusList, StatusListToken, StatusListTokenPayload},
+    model::{PublishStatusRequest, StatusList, StatusListToken},
     utils::{
         bits_validation::BitFlag, errors::Error, lst_gen::create_status_list, state::AppState,
     },
@@ -18,7 +18,7 @@ use tracing;
 pub async fn publish_token_status(
     State(appstate): State<AppState>,
     Extension(issuer): Extension<String>,
-    Json(payload): Json<StatusListTokenPayload>,
+    Json(payload): Json<PublishStatusRequest>,
 ) -> Result<impl IntoResponse, StatusListError> {
     let store = &appstate.status_list_token_repository;
 
@@ -74,7 +74,7 @@ pub async fn publish_token_status(
                 exp,
                 iat,
                 status_list,
-                sub: payload.sub.unwrap_or_default(),
+                sub: payload.sub,
                 ttl: payload.ttl,
             };
 
@@ -98,7 +98,7 @@ mod tests {
     use crate::{
         database::queries::SeaOrmStore,
         model::{status_list_tokens, Status, StatusEntry, StatusListToken},
-        test_resources::helper::{create_test_token, server_key},
+        test_resources::helper::{publish_test_token, server_key},
         utils::state::AppState,
     };
     use axum::{extract::State, Json};
@@ -109,7 +109,7 @@ mod tests {
     async fn test_publish_status_creates_token() {
         let mock_db = MockDatabase::new(DatabaseBackend::Postgres);
         let token_id = "token1";
-        let payload = create_test_token(
+        let payload = publish_test_token(
             token_id,
             vec![
                 StatusEntry {
@@ -176,7 +176,7 @@ mod tests {
     async fn test_token_is_stored_after_publish() {
         let mock_db = MockDatabase::new(DatabaseBackend::Postgres);
         let token_id = "token1";
-        let payload = create_test_token(
+        let payload = publish_test_token(
             token_id,
             vec![
                 StatusEntry {
@@ -257,7 +257,7 @@ mod tests {
     async fn test_token_conflict() {
         let mock_db = MockDatabase::new(DatabaseBackend::Postgres);
         let token_id = "token1";
-        let payload = create_test_token(
+        let payload = publish_test_token(
             token_id,
             vec![StatusEntry {
                 index: 0,
@@ -310,7 +310,7 @@ mod tests {
     async fn test_empty_updates() {
         let mock_db = MockDatabase::new(DatabaseBackend::Postgres);
         let token_id = "token_empty";
-        let payload = create_test_token(token_id, vec![], 1);
+        let payload = publish_test_token(token_id, vec![], 1);
         let status_list = StatusList {
             bits: 1,
             lst: base64url::encode([]),
@@ -380,7 +380,7 @@ mod tests {
             server_key: Arc::new(server_key()),
         };
         let token_id = "token_invalid_bits";
-        let payload = create_test_token(
+        let payload = publish_test_token(
             token_id,
             vec![StatusEntry {
                 index: 0,
@@ -406,7 +406,7 @@ mod tests {
     async fn test_repository_unavailable() {
         let mock_db = MockDatabase::new(DatabaseBackend::Postgres);
         let token_id = "token_no_repo";
-        let payload = create_test_token(
+        let payload = publish_test_token(
             token_id,
             vec![StatusEntry {
                 index: 0,
@@ -468,7 +468,7 @@ mod tests {
     async fn test_invalid_index() {
         let mock_db = MockDatabase::new(DatabaseBackend::Postgres);
         let token_id = "token_invalid_index";
-        let payload = create_test_token(
+        let payload = publish_test_token(
             token_id,
             vec![StatusEntry {
                 index: -1,
