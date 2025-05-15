@@ -52,7 +52,7 @@ pub async fn update_token_status(
 
     // Update the status list
     let updated_lst =
-        update_status_list(token.status_list.lst.clone(), payload.status.clone(), bits).map_err(
+        update_status_list(token.status_list.lst.clone(), payload.status.clone(), bits.value()).map_err(
             |e| {
                 tracing::error!("update_status_list failed: {:?}", e);
                 match e {
@@ -123,7 +123,7 @@ mod test {
                         status: Status::VALID,
                     },
                 ],
-                bits,
+                
             )
             .unwrap(),
         };
