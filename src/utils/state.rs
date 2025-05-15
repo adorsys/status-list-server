@@ -37,3 +37,18 @@ pub async fn setup() -> AppState {
         server_key: Arc::new(server_key),
     }
 }
+
+impl AppState {
+    /// Helper to set up AppState with a test credential for the given issuer
+    pub async fn setup_test_with_credential(
+        issuer: &str,
+        public_key: &str,
+        alg: jsonwebtoken::Algorithm,
+    ) -> Self {
+        let state = setup().await;
+        let creds = crate::model::Credentials::new(issuer.to_string(), public_key.to_string(), alg);
+        // Ignore error if already exists
+        let _ = state.credential_repository.insert_one(creds).await;
+        state
+    }
+}

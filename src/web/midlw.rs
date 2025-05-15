@@ -81,9 +81,8 @@ where
             Err(AuthenticationError::IssuerNotFound) => {
                 Err((StatusCode::UNAUTHORIZED, "Issuer not found").into_response())
             }
-            Err(_) => {
-                Err((StatusCode::INTERNAL_SERVER_ERROR, "Authentication error").into_response())
-            }
+            // Map all other errors to 401 Unauthorized for token/format errors
+            Err(_) => Err((StatusCode::UNAUTHORIZED, "Invalid token").into_response()),
         }
     }
 }
@@ -148,4 +147,308 @@ pub async fn auth(
 
     // Continue the request pipeline
     Ok(next.run(request).await)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::utils::keygen::Keypair;
+    use axum::{
+        body::to_bytes,
+        http::{header, HeaderMap, Method, Request},
+    };
+    use jsonwebtoken::{encode, EncodingKey, Header as JwtHeader};
+    use once_cell::sync::Lazy;
+    use p256::pkcs8::EncodePublicKey;
+    use p256::pkcs8::LineEnding;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    static INIT: Lazy<()> = Lazy::new(|| {
+        dotenvy::dotenv().ok();
+    });
+
+    #[tokio::test]
+
+    async fn test_authenticated_issuer_from_request_parts_success() {
+        let _ = *INIT;
+        // Generate keypair and JWT
+        let keypair = Keypair::generate().unwrap();
+        let public_key_pem = keypair
+            .verifying_key()
+            .to_public_key_pem(LineEnding::default())
+            .unwrap();
+        let private_key_pem = keypair.to_pkcs8_pem_bytes().unwrap();
+
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as usize;
+        let issuer_id = "test-issuer-demo";
+        #[derive(serde::Serialize)]
+        struct Claims {
+            exp: usize,
+            iat: usize,
+        }
+        let claims = Claims {
+            exp: now + 3600,
+            iat: now,
+        };
+        let mut header = JwtHeader::new(jsonwebtoken::Algorithm::ES256);
+        header.kid = Some(issuer_id.to_string());
+        let token = encode(
+            &header,
+            &claims,
+            &EncodingKey::from_ec_pem(&private_key_pem).unwrap(),
+        )
+        .unwrap();
+
+        // Setup AppState with the issuer registered
+        let app_state = AppState::setup_test_with_credential(
+            issuer_id,
+            &public_key_pem,
+            jsonwebtoken::Algorithm::ES256,
+        )
+        .await;
+
+        // Build request parts with Authorization header
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::AUTHORIZATION,
+            format!("Bearer {}", token).parse().unwrap(),
+        );
+        let mut parts = Request::builder()
+            .method(Method::GET)
+            .uri("/")
+            .body(Body::empty())
+            .unwrap()
+            .into_parts()
+            .0;
+        parts.headers = headers;
+
+        // Call the middleware
+        let result = AuthenticatedIssuer::from_request_parts(&mut parts, &app_state).await;
+        assert!(result.is_ok());
+        let authenticated_issuer = result.unwrap();
+        assert_eq!(authenticated_issuer.0, issuer_id);
+    }
+
+    #[tokio::test]
+
+    async fn test_missing_authorization_header() {
+        let _ = *INIT;
+        let app_state = crate::utils::state::setup().await;
+        let mut parts = Request::builder()
+            .method(Method::GET)
+            .uri("/")
+            .body(Body::empty())
+            .unwrap()
+            .into_parts()
+            .0;
+        // No headers set
+        let result = AuthenticatedIssuer::from_request_parts(&mut parts, &app_state).await;
+        assert!(result.is_err());
+        let resp = result.err().unwrap().into_response();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        // Check body
+        let body = futures::executor::block_on(async {
+            let bytes = to_bytes(resp.into_body(), 1024 * 1024).await.unwrap(); // Set limit to 1MB
+            String::from_utf8(bytes.to_vec()).unwrap()
+        });
+        assert!(body.contains("Missing Authorization header"));
+    }
+
+    #[tokio::test]
+
+    async fn test_invalid_authorization_header_format() {
+        let _ = *INIT;
+        let app_state = crate::utils::state::setup().await;
+        let mut headers = HeaderMap::new();
+        headers.insert(header::AUTHORIZATION, "NotBearer token".parse().unwrap());
+        let mut parts = Request::builder()
+            .method(Method::GET)
+            .uri("/")
+            .body(Body::empty())
+            .unwrap()
+            .into_parts()
+            .0;
+        parts.headers = headers;
+        let result = AuthenticatedIssuer::from_request_parts(&mut parts, &app_state).await;
+        assert!(result.is_err());
+        let resp = result.err().unwrap().into_response();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        // Check body
+        let body = futures::executor::block_on(async {
+            let bytes = to_bytes(resp.into_body(), 1024 * 1024).await.unwrap();
+            String::from_utf8(bytes.to_vec()).unwrap()
+        });
+        assert!(body.contains("Invalid Authorization header format"));
+    }
+
+    #[tokio::test]
+
+    async fn test_invalid_token_format() {
+        let _ = *INIT;
+        let app_state = crate::utils::state::setup().await;
+        let mut headers = HeaderMap::new();
+        headers.insert(header::AUTHORIZATION, "Bearer not.a.jwt".parse().unwrap());
+        let mut parts = Request::builder()
+            .method(Method::GET)
+            .uri("/")
+            .body(Body::empty())
+            .unwrap()
+            .into_parts()
+            .0;
+        parts.headers = headers;
+        let result = AuthenticatedIssuer::from_request_parts(&mut parts, &app_state).await;
+        assert!(result.is_err());
+        let resp = result.err().unwrap().into_response();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        // Check body
+        let body = futures::executor::block_on(async {
+            let bytes = to_bytes(resp.into_body(), 1024 * 1024).await.unwrap();
+            String::from_utf8(bytes.to_vec()).unwrap()
+        });
+        assert!(body.contains("Invalid token format") || body.contains("Invalid token"));
+    }
+
+    #[tokio::test]
+
+    async fn test_missing_issuer_identifier_in_token() {
+        let _ = *INIT;
+        // Create a valid JWT but without kid
+        let keypair = Keypair::generate().unwrap();
+        let private_key_pem = keypair.to_pkcs8_pem_bytes().unwrap();
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as usize;
+        #[derive(serde::Serialize)]
+        struct Claims {
+            exp: usize,
+            iat: usize,
+        }
+        let claims = Claims {
+            exp: now + 3600,
+            iat: now,
+        };
+        let header = JwtHeader::new(jsonwebtoken::Algorithm::ES256); // no kid
+        let token = encode(
+            &header,
+            &claims,
+            &EncodingKey::from_ec_pem(&private_key_pem).unwrap(),
+        )
+        .unwrap();
+        let app_state = crate::utils::state::setup().await;
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::AUTHORIZATION,
+            format!("Bearer {}", token).parse().unwrap(),
+        );
+        let mut parts = Request::builder()
+            .method(Method::GET)
+            .uri("/")
+            .body(Body::empty())
+            .unwrap()
+            .into_parts()
+            .0;
+        parts.headers = headers;
+        let result = AuthenticatedIssuer::from_request_parts(&mut parts, &app_state).await;
+        assert!(result.is_err());
+        let resp = result.err().unwrap().into_response();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+
+    async fn test_invalid_token_verification() {
+        let _ = *INIT;
+        // Create a valid JWT with kid, but not registered in DB
+        let keypair = Keypair::generate().unwrap();
+        let private_key_pem = keypair.to_pkcs8_pem_bytes().unwrap();
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as usize;
+        let issuer_id = "not-registered-issuer";
+        #[derive(serde::Serialize)]
+        struct Claims {
+            exp: usize,
+            iat: usize,
+        }
+        let claims = Claims {
+            exp: now + 3600,
+            iat: now,
+        };
+        let mut header = JwtHeader::new(jsonwebtoken::Algorithm::ES256);
+        header.kid = Some(issuer_id.to_string());
+        let token = encode(
+            &header,
+            &claims,
+            &EncodingKey::from_ec_pem(&private_key_pem).unwrap(),
+        )
+        .unwrap();
+        let app_state = crate::utils::state::setup().await;
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::AUTHORIZATION,
+            format!("Bearer {}", token).parse().unwrap(),
+        );
+        let mut parts = Request::builder()
+            .method(Method::GET)
+            .uri("/")
+            .body(Body::empty())
+            .unwrap()
+            .into_parts()
+            .0;
+        parts.headers = headers;
+        let result = AuthenticatedIssuer::from_request_parts(&mut parts, &app_state).await;
+        assert!(result.is_err());
+        let resp = result.err().unwrap().into_response();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        // Check body
+        let body = futures::executor::block_on(async {
+            let bytes = to_bytes(resp.into_body(), 1024 * 1024).await.unwrap();
+            String::from_utf8(bytes.to_vec()).unwrap()
+        });
+        assert!(body.contains("Issuer not found"));
+    }
+
+    #[tokio::test]
+
+    async fn test_other_authentication_error() {
+        let _ = *INIT;
+        // Simulate a token with a valid kid, but with an unsupported algorithm
+        let keypair = Keypair::generate().unwrap();
+        let _public_key_pem = keypair
+            .verifying_key()
+            .to_public_key_pem(LineEnding::default())
+            .unwrap();
+        let private_key_pem = keypair.to_pkcs8_pem_bytes().unwrap();
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as usize;
+        let issuer_id = "test-issuer-unsupported-alg";
+        #[derive(serde::Serialize)]
+        struct Claims {
+            exp: usize,
+            iat: usize,
+        }
+        let claims = Claims {
+            exp: now + 3600,
+            iat: now,
+        };
+        let mut header = JwtHeader::new(jsonwebtoken::Algorithm::HS384);
+        header.kid = Some(issuer_id.to_string());
+        let token_result = encode(
+            &header,
+            &claims,
+            &EncodingKey::from_ec_pem(&private_key_pem).unwrap(),
+        );
+
+        assert!(
+            token_result.is_err(),
+            "Expected error for invalid algorithm"
+        );
+    }
 }
