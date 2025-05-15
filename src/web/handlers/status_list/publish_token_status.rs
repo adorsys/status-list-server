@@ -36,7 +36,7 @@ pub async fn publish_token_status(
     let lst = if payload.status.is_empty() {
         base64url::encode([])
     } else {
-        create_status_list(payload.status, bits).map_err(|e| {
+        create_status_list(payload.status).map_err(|e| {
             tracing::error!("lst_from failed: {:?}", e);
             match e {
                 Error::Generic(msg) => StatusListError::Generic(msg),
@@ -126,7 +126,7 @@ mod tests {
         let bits = BitFlag::new(2).unwrap();
         let status_list = StatusList {
             bits: 2,
-            lst: create_status_list(payload.status.clone(), bits).unwrap(),
+            lst: create_status_list(payload.status.clone()).unwrap(),
         };
         let new_token = StatusListToken {
             list_id: token_id.to_string(),
@@ -194,7 +194,7 @@ mod tests {
 
         let status_list = StatusList {
             bits: 2,
-            lst: create_status_list(payload.status.clone(), bits).unwrap(),
+            lst: create_status_list(payload.status.clone()).unwrap(),
         };
         let new_token = StatusListToken {
             list_id: token_id.to_string(),
@@ -274,7 +274,7 @@ mod tests {
             iat: 1234567890,
             status_list: StatusList {
                 bits: 1,
-                lst: create_status_list(payload.status.clone(), bits).unwrap(),
+                lst: create_status_list(payload.status.clone()).unwrap(),
             },
             sub: "issuer".to_string(),
             ttl: Some(3600),
@@ -418,7 +418,7 @@ mod tests {
 
         let status_list = StatusList {
             bits: 1,
-            lst: create_status_list(payload.status.clone(), bits).unwrap(),
+            lst: create_status_list(payload.status.clone()).unwrap(),
         };
         let new_token = StatusListToken {
             list_id: token_id.to_string(),
