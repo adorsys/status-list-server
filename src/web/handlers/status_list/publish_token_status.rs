@@ -20,7 +20,6 @@ pub struct PublishTokenStatusRequest {
     pub list_id: String,
     /// List of status updates to be applied
     pub updates: Vec<StatusEntry>,
-    /// Number of bits per status entry (must be 1 or 2 as per IETF draft)
     pub bits: u8,
 }
 
@@ -35,11 +34,6 @@ pub async fn publish_token_status(
     AuthenticatedIssuer(issuer): AuthenticatedIssuer,
     Json(payload): Json<PublishTokenStatusRequest>,
 ) -> Result<impl IntoResponse, StatusListError> {
-    // Validate bits value according to IETF draft (must be 1 or 2)
-    if payload.bits != 1 && payload.bits != 2 {
-        return Err(StatusListError::UnsupportedBits);
-    }
-
     // Check if the token already exists
     let existing_token = state
         .status_list_token_repository

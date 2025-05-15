@@ -87,11 +87,6 @@ pub mod migrations {
                 manager
                     .drop_table(Table::drop().table(StatusListTokens::Table).to_owned())
                     .await?;
-
-                manager
-                    .drop_table(Table::drop().table(StatusListTokens::Table).to_owned())
-                    .await?;
-
                 Ok(())
             }
         }
