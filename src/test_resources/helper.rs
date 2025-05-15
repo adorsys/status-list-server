@@ -11,9 +11,9 @@ pub fn publish_test_token(
 ) -> PublishStatusRequest {
     PublishStatusRequest {
         list_id: list_id.to_owned(),
-        status: status,
+        status,
         sub: "issuer".to_string(),
-        bits: bits,
+        bits,
         ttl: Some(36000),
     }
 }
