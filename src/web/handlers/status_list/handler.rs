@@ -20,6 +20,7 @@ use serde_json::Value;
 use crate::{
     model::{Status, StatusEntry, StatusList, StatusListToken},
     utils::{keygen::Keypair, state::AppState},
+    web::midlw::AuthenticatedIssuer,
 };
 
 use super::{
@@ -251,6 +252,7 @@ fn issue_jwt(token: &StatusListToken, server_key: &Keypair) -> Result<String, St
 pub async fn update_statuslist(
     State(appstate): State<Arc<AppState>>,
     Path(list_id): Path<String>,
+    AuthenticatedIssuer(issuer): AuthenticatedIssuer,
     Json(body): Json<Value>,
 ) -> impl IntoResponse {
     let updates = match body
@@ -315,6 +317,14 @@ pub async fn update_statuslist(
     };
 
     if let Some(status_list_token) = status_list_token {
+        // Ownership check: only the owner (token.sub) can update
+        if status_list_token.sub != issuer {
+            return (
+                StatusCode::FORBIDDEN,
+                StatusListError::Forbidden("Issuer does not own this list".to_string()),
+            )
+                .into_response();
+        }
         let lst = status_list_token.status_list;
         let updated_lst = match update_status(&lst.lst, updates) {
             Ok(updated_lst) => updated_lst,
@@ -680,12 +690,13 @@ mod tests {
             bits: 8,
             lst: encode_lst(vec![0, 0, 0]),
         };
+        let owner = "test_list";
         let existing_token = StatusListToken::new(
-            "test_list".to_string(),
+            owner.to_string(),
             None,
             1234567890,
             initial_status_list.clone(),
-            "test_subject".to_string(),
+            owner.to_string(), // sub matches issuer
             None,
         );
         let updated_status_list = StatusList {
@@ -693,11 +704,11 @@ mod tests {
             lst: encode_lst(vec![0, 1, 0]), // After update: index 1 set to INVALID
         };
         let updated_token = StatusListToken::new(
-            "test_list".to_string(),
+            owner.to_string(),
             None,
             1234567890,
             updated_status_list,
-            "test_subject".to_string(),
+            owner.to_string(), // sub matches issuer
             None,
         );
         let db_conn = Arc::new(
@@ -724,7 +735,8 @@ mod tests {
 
         let response = update_statuslist(
             State(app_state),
-            Path("test_list".to_string()),
+            Path(owner.to_string()),
+            AuthenticatedIssuer(owner.to_string()),
             Json(update_body),
         )
         .await
@@ -757,6 +769,7 @@ mod tests {
         let response = update_statuslist(
             State(app_state),
             Path("test_list".to_string()),
+            AuthenticatedIssuer("test_list".to_string()),
             Json(update_body),
         )
         .await
