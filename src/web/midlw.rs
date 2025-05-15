@@ -59,7 +59,7 @@ where
 
         // Verify the token and extract the issuer
         match verify_token(&app_state, token).await {
-            Ok(true) => {
+            Ok(()) => {
                 // Extract the issuer from the token header
                 let header = jsonwebtoken::decode_header(token).map_err(|_| {
                     (StatusCode::UNAUTHORIZED, "Invalid token format").into_response()
@@ -77,7 +77,6 @@ where
                 parts.extensions.insert(AuthenticatedIssuer(issuer.clone()));
                 Ok(AuthenticatedIssuer(issuer))
             }
-            Ok(false) => Err((StatusCode::UNAUTHORIZED, "Invalid token").into_response()),
             Err(AuthenticationError::IssuerNotFound) => {
                 Err((StatusCode::UNAUTHORIZED, "Issuer not found").into_response())
             }
