@@ -106,7 +106,6 @@ async fn build_status_list_token(
     let status_claims = match status_claims {
         Some(status_claims) => status_claims,
         None => {
-            tracing::error!("Status list {list_id} not found");
             return Err(StatusListError::StatusListNotFound);
         }
     };

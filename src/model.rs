@@ -164,16 +164,23 @@ pub struct StatusList {
     pub lst: String,
 }
 
-/// Request payload for publishing and updating a status list token
-#[derive(Deserialize, Serialize, Clone)]
-pub struct StatusListTokenPayload {
+/// Request payload for publishing a status list token
+#[derive(Deserialize)]
+pub struct PublishStatusRequest {
     pub list_id: String,
     pub status: Vec<StatusEntry>,
-    #[serde(default)]
-    pub sub: Option<String>,
-    #[serde(default)]
-    pub ttl: Option<i64>,
+    pub sub: String,
     pub bits: u8,
+    pub ttl: Option<i64>,
+}
+
+/// Request payload for updating a status list token
+#[derive(Deserialize)]
+pub struct UpdateStatusRequest {
+    pub list_id: String,
+    pub status: Vec<StatusEntry>,
+    pub ttl: Option<i64>,
+    pub sub: Option<String>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct StatusEntry {
