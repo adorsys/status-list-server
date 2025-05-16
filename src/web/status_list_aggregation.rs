@@ -1,16 +1,16 @@
-use std::fmt::Debug;
 use std::collections::HashMap;
+use std::fmt::Debug;
 use std::sync::Mutex;
 
 use axum::{
-    extract::{Json, State, Path},
+    extract::{Json, Path, State},
     http::{header, HeaderMap},
     response::IntoResponse,
 };
+use lazy_static::lazy_static;
 use serde::{Deserialize, Serialize};
 use tracing;
 use uuid::Uuid;
-use lazy_static::lazy_static;
 
 use crate::{
     utils::state::AppState,
@@ -51,7 +51,7 @@ pub async fn aggregate_status_lists(
 
     // Get status lists based on either list_ids or issuer
     let mut status_lists = Vec::new();
-    
+
     if let Some(list_ids) = request.list_ids {
         // Fetch by specific list IDs
         for list_id in list_ids {
@@ -94,12 +94,17 @@ pub async fn aggregate_status_lists(
     // Store the mapping from aggregation_id to the list of status list IDs
     {
         let mut map = AGGREGATION_MAP.lock().unwrap();
-        map.insert(aggregation_id.clone(), status_lists.iter().map(|t| t.list_id.clone()).collect());
+        map.insert(
+            aggregation_id.clone(),
+            status_lists.iter().map(|t| t.list_id.clone()).collect(),
+        );
     }
 
     // Return the aggregation URI
     let aggregation_uri = format!("/statuslists/aggregate/{}", aggregation_id);
-    Ok(axum::Json(serde_json::json!({ "aggregation_uri": aggregation_uri })))
+    Ok(axum::Json(
+        serde_json::json!({ "aggregation_uri": aggregation_uri }),
+    ))
 }
 
 pub async fn get_aggregated_status_lists(
@@ -107,7 +112,8 @@ pub async fn get_aggregated_status_lists(
     State(state): State<AppState>,
 ) -> Result<impl IntoResponse, StatusListError> {
     let map = AGGREGATION_MAP.lock().unwrap();
-    let list_ids = map.get(&aggregation_id)
+    let list_ids = map
+        .get(&aggregation_id)
         .ok_or(StatusListError::StatusListNotFound)?;
 
     // Fetch all tokens from the DB
