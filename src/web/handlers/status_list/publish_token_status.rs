@@ -106,11 +106,9 @@ pub async fn publish_token_status(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::utils::state::MockSecretCache;
     use crate::{
-        database::queries::SeaOrmStore,
         model::{status_list_tokens, Status, StatusListToken},
-        utils::state::AppState,
+        test_utils::test::test_app_state,
     };
     use axum::{extract::State, Json};
     use sea_orm::{DatabaseBackend, MockDatabase};
@@ -128,17 +126,6 @@ mod tests {
             sub: Some("issuer".to_string()),
             ttl: Some(3600),
             bits,
-        }
-    }
-
-    fn test_app_state(db_conn: Arc<sea_orm::DatabaseConnection>) -> AppState {
-        AppState {
-            credential_repository: Arc::new(SeaOrmStore::new(db_conn.clone())),
-            status_list_token_repository: Arc::new(SeaOrmStore::new(db_conn)),
-            secret_cache: Arc::new(MockSecretCache {
-                value: Some("test-key".to_string()),
-            }),
-            server_secret_name: "test-server-key".to_string(),
         }
     }
 
