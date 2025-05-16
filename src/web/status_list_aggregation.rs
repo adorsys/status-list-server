@@ -26,7 +26,8 @@ lazy_static! {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct StatusListAggregationRequest {
-    pub list_ids: Vec<String>,
+    pub list_ids: Option<Vec<String>>,
+    pub issuer: Option<String>,
 }
 
 pub async fn aggregate_status_lists(
@@ -34,10 +35,10 @@ pub async fn aggregate_status_lists(
     headers: HeaderMap,
     Json(request): Json<StatusListAggregationRequest>,
 ) -> Result<impl IntoResponse + Debug, StatusListError> {
-    let accept = headers.get(header::ACCEPT).and_then(|h| h.to_str().ok());
+    let _accept = headers.get(header::ACCEPT).and_then(|h| h.to_str().ok());
 
     // Validate accept header
-    let _accept = match accept {
+    let _accept = match _accept {
         None => ACCEPT_STATUS_LISTS_HEADER_JWT, // Default to JWT if no accept header
         Some(accept)
             if accept == ACCEPT_STATUS_LISTS_HEADER_JWT
@@ -48,24 +49,42 @@ pub async fn aggregate_status_lists(
         Some(_) => return Err(StatusListError::InvalidAcceptHeader),
     };
 
-    // Get all status lists from the database
+    // Get status lists based on either list_ids or issuer
     let mut status_lists = Vec::new();
-    for list_id in request.list_ids {
-        let status_list = state
+    
+    if let Some(list_ids) = request.list_ids {
+        // Fetch by specific list IDs
+        for list_id in list_ids {
+            let status_list = state
+                .status_list_token_repository
+                .find_one_by(list_id.clone())
+                .await
+                .map_err(|err| {
+                    tracing::error!("Failed to get status list {list_id} from database: {err:?}");
+                    StatusListError::InternalServerError
+                })?
+                .ok_or(StatusListError::StatusListNotFound)?;
+            status_lists.push(status_list);
+        }
+    } else if let Some(issuer) = request.issuer {
+        // Fetch all status lists for the given issuer
+        status_lists = state
             .status_list_token_repository
-            .find_one_by(list_id.clone())
+            .find_by_issuer(issuer)
             .await
             .map_err(|err| {
-                tracing::error!("Failed to get status list {list_id} from database: {err:?}");
+                tracing::error!("Failed to get status lists for issuer: {err:?}");
                 StatusListError::InternalServerError
-            })?
-            .ok_or(StatusListError::StatusListNotFound)?;
-        status_lists.push(status_list);
+            })?;
+    } else {
+        return Err(StatusListError::Generic(
+            "Either list_ids or issuer must be provided".to_string(),
+        ));
     }
 
     if status_lists.is_empty() {
         return Err(StatusListError::Generic(
-            "No status lists provided".to_string(),
+            "No status lists found".to_string(),
         ));
     }
 

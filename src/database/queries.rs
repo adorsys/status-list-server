@@ -1,4 +1,4 @@
-use sea_orm::{ActiveModelTrait, DatabaseConnection, EntityTrait, Set};
+use sea_orm::{ActiveModelTrait, DatabaseConnection, EntityTrait, Set, QueryFilter, ColumnTrait};
 use std::sync::Arc;
 
 use super::error::RepositoryError;
@@ -41,6 +41,17 @@ impl SeaOrmStore<StatusListToken> {
     ) -> Result<Option<StatusListToken>, RepositoryError> {
         status_list_tokens::Entity::find_by_id(value)
             .one(&*self.db)
+            .await
+            .map_err(|e| RepositoryError::FindError(e.to_string()))
+    }
+
+    pub async fn find_by_issuer(
+        &self,
+        issuer: String,
+    ) -> Result<Vec<StatusListToken>, RepositoryError> {
+        status_list_tokens::Entity::find()
+            .filter(status_list_tokens::Column::Sub.eq(issuer))
+            .all(&*self.db)
             .await
             .map_err(|e| RepositoryError::FindError(e.to_string()))
     }
