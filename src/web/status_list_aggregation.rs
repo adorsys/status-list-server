@@ -1,23 +1,28 @@
 use std::fmt::Debug;
+use std::collections::HashMap;
+use std::sync::Mutex;
 
 use axum::{
-    extract::{Json, State},
+    extract::{Json, State, Path},
     http::{header, HeaderMap},
     response::IntoResponse,
 };
 use serde::{Deserialize, Serialize};
 use tracing;
 use uuid::Uuid;
+use lazy_static::lazy_static;
 
 use crate::{
-    model::{StatusList, StatusListToken},
     utils::state::AppState,
     web::handlers::status_list::{
         constants::{ACCEPT_STATUS_LISTS_HEADER_CWT, ACCEPT_STATUS_LISTS_HEADER_JWT},
         error::StatusListError,
-        handler::build_status_list_token,
     },
 };
+
+lazy_static! {
+    static ref AGGREGATION_MAP: Mutex<HashMap<String, Vec<String>>> = Mutex::new(HashMap::new());
+}
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct StatusListAggregationRequest {
@@ -32,7 +37,7 @@ pub async fn aggregate_status_lists(
     let accept = headers.get(header::ACCEPT).and_then(|h| h.to_str().ok());
 
     // Validate accept header
-    let accept = match accept {
+    let _accept = match accept {
         None => ACCEPT_STATUS_LISTS_HEADER_JWT, // Default to JWT if no accept header
         Some(accept)
             if accept == ACCEPT_STATUS_LISTS_HEADER_JWT
@@ -58,68 +63,47 @@ pub async fn aggregate_status_lists(
         status_lists.push(status_list);
     }
 
-    // Aggregate the status lists
-    let aggregated_list = aggregate_status_lists_impl(status_lists)?;
-
-    // Generate a unique ID for the aggregated list
-    let aggregated_id = format!("aggregated_{}", Uuid::new_v4());
-
-    // Create a new status list token for the aggregated list
-    let aggregated_token = StatusListToken {
-        list_id: aggregated_id.clone(),
-        exp: None, // No expiration for aggregated list
-        iat: chrono::Utc::now().timestamp(),
-        status_list: aggregated_list.clone(),
-        sub: "aggregated".to_string(),
-        ttl: None, // No TTL for aggregated list
-    };
-
-    // Store the aggregated list in the database
-    state
-        .status_list_token_repository
-        .insert_one(aggregated_token.clone())
-        .await
-        .map_err(|err| {
-            tracing::error!("Failed to store aggregated status list: {err:?}");
-            StatusListError::InternalServerError
-        })?;
-
-    // Return the aggregated list in the requested format
-    build_status_list_token(accept, &aggregated_token, &state).await
-}
-
-fn aggregate_status_lists_impl(
-    status_lists: Vec<StatusListToken>,
-) -> Result<StatusList, StatusListError> {
     if status_lists.is_empty() {
         return Err(StatusListError::Generic(
             "No status lists provided".to_string(),
         ));
     }
 
-    // Get the maximum bits value from all lists
-    let max_bits = status_lists
-        .iter()
-        .map(|list| list.status_list.bits)
-        .max()
-        .unwrap_or(0);
+    // Generate a unique aggregation ID
+    let aggregation_id = format!("aggregation_{}", Uuid::new_v4());
 
-    // Combine all status lists
-    let mut combined_lst = String::new();
-    for list in status_lists {
-        // If the list has fewer bits than max_bits, pad it with zeros
-        let mut lst = list.status_list.lst;
-        if list.status_list.bits < max_bits {
-            let padding = "0".repeat(max_bits - list.status_list.bits);
-            lst.push_str(&padding);
-        }
-        combined_lst.push_str(&lst);
+    // Store the mapping from aggregation_id to the list of status list IDs
+    {
+        let mut map = AGGREGATION_MAP.lock().unwrap();
+        map.insert(aggregation_id.clone(), status_lists.iter().map(|t| t.list_id.clone()).collect());
     }
 
-    Ok(StatusList {
-        bits: max_bits,
-        lst: combined_lst,
-    })
+    // Return the aggregation URI
+    let aggregation_uri = format!("/statuslists/aggregate/{}", aggregation_id);
+    Ok(axum::Json(serde_json::json!({ "aggregation_uri": aggregation_uri })))
+}
+
+pub async fn get_aggregated_status_lists(
+    Path(aggregation_id): Path<String>,
+    State(state): State<AppState>,
+) -> Result<impl IntoResponse, StatusListError> {
+    let map = AGGREGATION_MAP.lock().unwrap();
+    let list_ids = map.get(&aggregation_id)
+        .ok_or(StatusListError::StatusListNotFound)?;
+
+    // Fetch all tokens from the DB
+    let mut tokens = Vec::new();
+    for list_id in list_ids {
+        let token = state
+            .status_list_token_repository
+            .find_one_by(list_id.clone())
+            .await
+            .map_err(|_| StatusListError::InternalServerError)?
+            .ok_or(StatusListError::StatusListNotFound)?;
+        tokens.push(token);
+    }
+
+    Ok(axum::Json(tokens))
 }
 
 #[cfg(test)]

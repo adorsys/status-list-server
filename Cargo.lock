@@ -3641,6 +3641,7 @@ dependencies = [
  "http-body-util",
  "hyper 1.6.0",
  "jsonwebtoken",
+ "lazy_static",
  "once_cell",
  "p256",
  "pem",
