@@ -1,10 +1,12 @@
+use serde::{Deserialize, Serialize};
+
 /// A strongly-typed wrapper for valid BitFlag values (1, 2, 4, or 8).
 ///
 /// This struct ensures that only valid single-bit values are used,
 /// preventing invalid values like 3, 5, or 6 from being constructed.
 ///
 /// Use `BitFlag::new` or implement `TryFrom<u8>` to safely create an instance.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BitFlag(u8);
 
 impl BitFlag {
