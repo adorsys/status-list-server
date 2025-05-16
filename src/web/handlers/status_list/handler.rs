@@ -100,10 +100,10 @@ async fn build_status_list_token(
         })?
         .ok_or(StatusListError::StatusListNotFound)?;
 
-    // Load the server key from the secret cache
+    // Load the server key from the secret manager
     let pem = repo
-        .secret_cache
-        .get_secret_string(repo.server_secret_name.clone())
+        .secret_manager
+        .get_server_secret()
         .await
         .map_err(|e| {
             tracing::error!("Failed to load server key from cache: {e}");
@@ -402,7 +402,7 @@ mod tests {
     use super::*;
     use crate::{
         model::{status_list_tokens, StatusList, StatusListToken},
-        test_utils::test_app_state,
+        test_utils::test::test_app_state,
     };
     use axum::{
         body::to_bytes,
@@ -466,8 +466,8 @@ mod tests {
 
         // Load the key from the cache
         let pem = app_state
-            .secret_cache
-            .get_secret_string(app_state.server_secret_name.clone())
+            .secret_manager
+            .get_server_secret()
             .await
             .unwrap()
             .unwrap();
@@ -540,8 +540,8 @@ mod tests {
 
         // Load the key from the cache
         let pem = app_state
-            .secret_cache
-            .get_secret_string(app_state.server_secret_name.clone())
+            .secret_manager
+            .get_server_secret()
             .await
             .unwrap()
             .unwrap();
