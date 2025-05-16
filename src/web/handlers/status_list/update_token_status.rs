@@ -51,24 +51,26 @@ pub async fn update_token_status(
     let bits = bits?;
 
     // Update the status list
-    let updated_lst =
-        update_status_list(token.status_list.lst.clone(), payload.status.clone(), bits.value()).map_err(
-            |e| {
-                tracing::error!("update_status_list failed: {:?}", e);
-                match e {
-                    Error::Generic(msg) => StatusListError::Generic(msg),
-                    Error::InvalidIndex => StatusListError::InvalidIndex,
-                    Error::UnsupportedBits => StatusListError::UnsupportedBits,
-                    _ => StatusListError::Generic(e.to_string()),
-                }
-            },
-        )?;
+    let updated_lst = update_status_list(
+        token.status_list.lst.clone(),
+        payload.status.clone(),
+        bits.value(),
+    )
+    .map_err(|e| {
+        tracing::error!("update_status_list failed: {:?}", e);
+        match e {
+            Error::Generic(msg) => StatusListError::Generic(msg),
+            Error::InvalidIndex => StatusListError::InvalidIndex,
+            Error::UnsupportedBits => StatusListError::UnsupportedBits,
+            _ => StatusListError::Generic(e.to_string()),
+        }
+    })?;
 
     let mut exact_token = token;
-    exact_token.status_list.lst = updated_lst;
+    exact_token.status_list.lst = updated_lst.lst;
+    exact_token.status_list.bits = updated_lst.bits;
 
     // Save the updated token
-
     store
         .update_one(exact_token.list_id.clone(), exact_token.clone())
         .await
@@ -98,7 +100,7 @@ mod test {
             UpdateStatusRequest,
         },
         test_resources::helper::server_key,
-        utils::{bits_validation::BitFlag, lst_gen::create_status_list, state::AppState},
+        utils::{lst_gen::create_status_list, state::AppState},
         web::handlers::status_list::update_token_status::update_token_status,
     };
 
@@ -107,25 +109,22 @@ mod test {
         let mock_db = MockDatabase::new(DatabaseBackend::Postgres);
         let token_id = "token1";
         let initial_bits = 2;
-        let bits = BitFlag::new(initial_bits).unwrap();
 
         // Initial token setup
         let original_status_list = StatusList {
             bits: initial_bits,
-            lst: create_status_list(
-                vec![
-                    StatusEntry {
-                        index: 0,
-                        status: Status::VALID,
-                    },
-                    StatusEntry {
-                        index: 1,
-                        status: Status::VALID,
-                    },
-                ],
-                
-            )
-            .unwrap(),
+            lst: create_status_list(vec![
+                StatusEntry {
+                    index: 0,
+                    status: Status::VALID,
+                },
+                StatusEntry {
+                    index: 1,
+                    status: Status::VALID,
+                },
+            ])
+            .unwrap()
+            .lst,
         };
 
         let existing_token = StatusListToken {
@@ -154,8 +153,6 @@ mod test {
                 index: 1,
                 status: Status::INVALID,
             }],
-            sub: Some("issuer".to_string()),
-            ttl: Some(3600),
         };
 
         let db_conn = Arc::new(

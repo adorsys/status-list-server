@@ -170,8 +170,6 @@ pub struct PublishStatusRequest {
     pub list_id: String,
     pub status: Vec<StatusEntry>,
     pub sub: String,
-    pub bits: u8,
-    pub ttl: Option<i64>,
 }
 
 /// Request payload for updating a status list token
@@ -179,9 +177,8 @@ pub struct PublishStatusRequest {
 pub struct UpdateStatusRequest {
     pub list_id: String,
     pub status: Vec<StatusEntry>,
-    pub ttl: Option<i64>,
-    pub sub: Option<String>,
 }
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct StatusEntry {
     pub index: i32,
