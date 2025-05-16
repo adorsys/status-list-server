@@ -6,17 +6,17 @@ use crate::{
     },
 };
 use axum::{
-    extract::{Json, State, Path},
+    extract::{Json, Path, State},
     http::{header, HeaderMap},
     response::IntoResponse,
 };
 use lazy_static::lazy_static;
 use serde::{Deserialize, Serialize};
-use tracing;
-use uuid::Uuid;
 use std::collections::HashMap;
 use std::fmt::Debug;
 use tokio::sync::Mutex;
+use tracing;
+use uuid::Uuid;
 
 lazy_static! {
     static ref AGGREGATION_MAP: Mutex<HashMap<String, Vec<String>>> = Mutex::new(HashMap::new());
@@ -135,15 +135,18 @@ mod tests {
     use crate::{
         database::queries::SeaOrmStore,
         model::{status_list_tokens, StatusList, StatusListToken},
-        utils::state::AppState,
         utils::keygen::Keypair,
+        utils::state::AppState,
     };
     use axum::http::StatusCode;
     use sea_orm::{DatabaseBackend, MockDatabase};
     use std::sync::Arc;
 
     // Helper to create a test request payload
-    fn create_test_request(list_ids: Option<Vec<String>>, issuer: Option<String>) -> StatusListAggregationRequest {
+    fn create_test_request(
+        list_ids: Option<Vec<String>>,
+        issuer: Option<String>,
+    ) -> StatusListAggregationRequest {
         StatusListAggregationRequest { list_ids, issuer }
     }
 
@@ -157,7 +160,8 @@ mod tests {
         let mock_db = MockDatabase::new(DatabaseBackend::Postgres);
         let list_id1 = "list1";
         let list_id2 = "list2";
-        let request = create_test_request(Some(vec![list_id1.to_string(), list_id2.to_string()]), None);
+        let request =
+            create_test_request(Some(vec![list_id1.to_string(), list_id2.to_string()]), None);
 
         let status_list1 = StatusListToken {
             list_id: list_id1.to_string(),
@@ -203,11 +207,13 @@ mod tests {
             .await
             .unwrap()
             .into_response();
-        
+
         assert_eq!(response.status(), StatusCode::OK);
-        
+
         // Verify the response contains an aggregation URI
-        let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert!(json.get("aggregation_uri").is_some());
     }
@@ -261,11 +267,13 @@ mod tests {
             .await
             .unwrap()
             .into_response();
-        
+
         assert_eq!(response.status(), StatusCode::OK);
-        
+
         // Verify the response contains an aggregation URI
-        let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert!(json.get("aggregation_uri").is_some());
     }
@@ -294,7 +302,7 @@ mod tests {
             .await
             .unwrap_err()
             .into_response();
-        
+
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
 }
