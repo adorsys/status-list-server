@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::fmt::Debug;
-use std::sync::Mutex;
+use tokio::sync::Mutex;
 
 use axum::{
     extract::{Json, Path, State},
@@ -93,7 +93,7 @@ pub async fn aggregate_status_lists(
 
     // Store the mapping from aggregation_id to the list of status list IDs
     {
-        let mut map = AGGREGATION_MAP.lock().unwrap();
+        let mut map = AGGREGATION_MAP.lock().await;
         map.insert(
             aggregation_id.clone(),
             status_lists.iter().map(|t| t.list_id.clone()).collect(),
@@ -111,7 +111,7 @@ pub async fn get_aggregated_status_lists(
     Path(aggregation_id): Path<String>,
     State(state): State<AppState>,
 ) -> Result<impl IntoResponse, StatusListError> {
-    let map = AGGREGATION_MAP.lock().unwrap();
+    let map = AGGREGATION_MAP.lock().await;
     let list_ids = map
         .get(&aggregation_id)
         .ok_or(StatusListError::StatusListNotFound)?;
