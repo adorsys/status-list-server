@@ -1,4 +1,4 @@
-use std::{fmt::Debug, io::Write as _, sync::Arc};
+use std::{fmt::Debug, sync::Arc};
 
 use axum::{
     extract::{Path, State},
@@ -11,7 +11,6 @@ use coset::{
     self, cbor::Value as CborValue, iana::Algorithm, CborSerializable, CoseSign1Builder,
     HeaderBuilder,
 };
-use flate2::{write::GzEncoder, Compression};
 use jsonwebtoken::{EncodingKey, Header};
 use p256::ecdsa::{signature::Signer, Signature};
 use serde::{Deserialize, Serialize};
@@ -24,8 +23,8 @@ use crate::{
 
 use super::{
     constants::{
-        ACCEPT_STATUS_LISTS_HEADER_CWT, ACCEPT_STATUS_LISTS_HEADER_JWT, CWT_TYPE, EXP, GZIP_HEADER,
-        ISSUED_AT, STATUS_LIST, STATUS_LISTS_HEADER_CWT, STATUS_LISTS_HEADER_JWT, SUBJECT, TTL,
+        ACCEPT_STATUS_LISTS_HEADER_CWT, ACCEPT_STATUS_LISTS_HEADER_JWT, CWT_TYPE, EXP, ISSUED_AT,
+        STATUS_LIST, STATUS_LISTS_HEADER_CWT, STATUS_LISTS_HEADER_JWT, SUBJECT, TTL,
     },
     error::StatusListError,
 };
@@ -68,67 +67,57 @@ pub async fn get_status_list(
 ) -> Result<impl IntoResponse + Debug, StatusListError> {
     let accept = headers.get(header::ACCEPT).and_then(|h| h.to_str().ok());
 
-    // build the token depending on the accept header
-    match accept {
-        None =>
-        // assume jwt by default if no accept header is provided
-        {
-            build_status_list_token(ACCEPT_STATUS_LISTS_HEADER_JWT, &list_id, &state).await
-        }
+    // Validate accept header
+    let accept = match accept {
+        None => ACCEPT_STATUS_LISTS_HEADER_JWT, // Default to JWT if no accept header
         Some(accept)
             if accept == ACCEPT_STATUS_LISTS_HEADER_JWT
                 || accept == ACCEPT_STATUS_LISTS_HEADER_CWT =>
         {
-            build_status_list_token(accept, &list_id, &state).await
+            accept
         }
-        Some(_) => Err(StatusListError::InvalidAcceptHeader),
-    }
-}
+        Some(_) => return Err(StatusListError::InvalidAcceptHeader),
+    };
 
-async fn build_status_list_token(
-    accept: &str,
-    list_id: &str,
-    repo: &AppState,
-) -> Result<impl IntoResponse + Debug, StatusListError> {
     // Get status list claims from database
-    let status_claims = repo
+    let list_id_clone = list_id.clone();
+    let status_list_token = state
         .status_list_token_repository
-        .find_one_by(list_id.to_string())
+        .find_one_by(list_id)
         .await
         .map_err(|err| {
-            tracing::error!("Failed to get status list {list_id} from database: {err:?}");
+            tracing::error!("Failed to get status list {list_id_clone} from database: {err:?}");
             StatusListError::InternalServerError
         })?
         .ok_or(StatusListError::StatusListNotFound)?;
 
+    build_status_list_token(accept, &status_list_token, &state).await
+}
+
+pub async fn build_status_list_token(
+    accept: &str,
+    status_list_token: &StatusListToken,
+    repo: &AppState,
+) -> Result<impl IntoResponse + Debug, StatusListError> {
     let server_key = repo.server_key.clone();
 
-    let apply_gzip = |data: &[u8]| -> Result<Vec<u8>, StatusListError> {
-        let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
-        encoder.write_all(data).map_err(|err| {
-            tracing::error!("Failed to compress payload: {err:?}");
-            StatusListError::InternalServerError
-        })?;
-        encoder.finish().map_err(|err| {
-            tracing::error!("Failed to finish compression: {err:?}");
-            StatusListError::InternalServerError
-        })
-    };
+    // Removed unused variable `status_claims`
 
-    let token_bytes = match accept {
-        ACCEPT_STATUS_LISTS_HEADER_CWT => issue_cwt(&status_claims, &server_key)?,
-        _ => issue_jwt(&status_claims, &server_key)?.into_bytes(),
-    };
-
-    Ok((
-        StatusCode::OK,
-        [
-            (header::CONTENT_TYPE, accept),
-            (header::CONTENT_ENCODING, GZIP_HEADER),
-        ],
-        apply_gzip(&token_bytes)?,
-    )
-        .into_response())
+    if ACCEPT_STATUS_LISTS_HEADER_JWT == accept {
+        Ok((
+            StatusCode::OK,
+            [(header::CONTENT_TYPE, accept)],
+            issue_jwt(status_list_token, &server_key)?,
+        )
+            .into_response())
+    } else {
+        Ok((
+            StatusCode::OK,
+            [(header::CONTENT_TYPE, accept)],
+            issue_cwt(status_list_token, &server_key)?,
+        )
+            .into_response())
+    }
 }
 
 // Function to create a CWT per the specification
