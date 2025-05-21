@@ -1,7 +1,7 @@
 use axum::{
     http::Method,
     response::IntoResponse,
-    routing::{get, post, put},
+    routing::{get, patch, post},
     Json, Router,
 };
 use dotenvy::dotenv;
@@ -57,7 +57,7 @@ async fn main() {
             Router::new()
                 .route("/:list_id", get(get_status_list))
                 .route("/publish", post(publish_token_status))
-                .route("/update", put(update_token_status)),
+                .route("/update", patch(update_token_status)),
         )
         .layer(
             ServiceBuilder::new()

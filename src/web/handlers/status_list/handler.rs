@@ -462,6 +462,7 @@ mod tests {
             credential_repository: Arc::new(SeaOrmStore::new(db_conn.clone())),
             status_list_token_repository: Arc::new(SeaOrmStore::new(db_conn)),
             server_key: Arc::new(server_key()),
+            server_public_domain: "example.com".to_string(),
         };
 
         let mut headers = HeaderMap::new();
@@ -539,6 +540,7 @@ mod tests {
             credential_repository: Arc::new(SeaOrmStore::new(db_conn.clone())),
             status_list_token_repository: Arc::new(SeaOrmStore::new(db_conn)),
             server_key: Arc::new(server_key()),
+            server_public_domain: "example.com".to_string(),
         };
 
         let mut headers = HeaderMap::new();
@@ -642,6 +644,7 @@ mod tests {
             credential_repository: Arc::new(SeaOrmStore::new(db_conn.clone())),
             status_list_token_repository: Arc::new(SeaOrmStore::new(db_conn)),
             server_key: Arc::new(server_key()),
+            server_public_domain: "example.com".to_string(),
         };
 
         let mut headers = HeaderMap::new();
@@ -668,6 +671,7 @@ mod tests {
             credential_repository: Arc::new(SeaOrmStore::new(db_conn.clone())),
             status_list_token_repository: Arc::new(SeaOrmStore::new(db_conn)),
             server_key: Arc::new(server_key()),
+            server_public_domain: "example.com".to_string(),
         };
 
         let mut headers = HeaderMap::new();
@@ -728,6 +732,7 @@ mod tests {
             credential_repository: Arc::new(SeaOrmStore::new(db_conn.clone())),
             status_list_token_repository: Arc::new(SeaOrmStore::new(db_conn)),
             server_key: Arc::new(server_key()),
+            server_public_domain: "example.com".to_string(),
         });
 
         let update_body = json!({
@@ -760,6 +765,7 @@ mod tests {
             credential_repository: Arc::new(SeaOrmStore::new(db_conn.clone())),
             status_list_token_repository: Arc::new(SeaOrmStore::new(db_conn)),
             server_key: Arc::new(server_key()),
+            server_public_domain: "example.com".to_string(),
         });
 
         let update_body = json!({

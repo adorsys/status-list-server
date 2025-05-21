@@ -2,7 +2,7 @@ use axum::{extract::State, response::IntoResponse, Extension, Json};
 use hyper::StatusCode;
 
 use crate::{
-    model::UpdateStatusRequest,
+    model::StatusRequest,
     utils::{
         bits_validation::BitFlag, errors::Error, lst_gen::update_status_list, state::AppState,
     },
@@ -14,7 +14,7 @@ use super::error::StatusListError;
 pub async fn update_token_status(
     State(appstate): State<AppState>,
     Extension(issuer): Extension<String>,
-    Json(payload): Json<UpdateStatusRequest>,
+    Json(payload): Json<StatusRequest>,
 ) -> Result<impl IntoResponse, StatusListError> {
     let store = &appstate.status_list_token_repository;
 
@@ -96,8 +96,7 @@ mod test {
     use crate::{
         database::queries::SeaOrmStore,
         model::{
-            status_list_tokens, Status, StatusEntry, StatusList, StatusListToken,
-            UpdateStatusRequest,
+            status_list_tokens, Status, StatusEntry, StatusList, StatusListToken, StatusRequest,
         },
         test_resources::helper::server_key,
         utils::{lst_gen::create_status_list, state::AppState},
@@ -147,7 +146,7 @@ mod test {
         };
 
         // Update payload that flips status at index 1 to INVALID
-        let update_payload = UpdateStatusRequest {
+        let update_payload = StatusRequest {
             list_id: token_id.to_string(),
             status: vec![StatusEntry {
                 index: 1,
@@ -168,6 +167,7 @@ mod test {
             credential_repository: Arc::new(SeaOrmStore::new(db_conn.clone())),
             status_list_token_repository: Arc::new(SeaOrmStore::new(db_conn)),
             server_key: Arc::new(server_key()),
+            server_public_domain: "example.com".to_string(),
         };
 
         let response = update_token_status(

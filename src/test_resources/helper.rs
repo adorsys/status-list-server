@@ -1,14 +1,13 @@
-use crate::model::PublishStatusRequest;
+use crate::model::StatusRequest;
 #[cfg(test)]
 use crate::{model::StatusEntry, utils::keygen::Keypair};
 
 // Helper to create a test request payload with customizable bits
 #[cfg(test)]
-pub fn publish_test_token(list_id: &str, status: Vec<StatusEntry>) -> PublishStatusRequest {
-    PublishStatusRequest {
+pub fn publish_test_token(list_id: &str, status: Vec<StatusEntry>) -> StatusRequest {
+    StatusRequest {
         list_id: list_id.to_owned(),
         status,
-        sub: "https://example.com/statuslists/1".to_string(),
     }
 }
 
