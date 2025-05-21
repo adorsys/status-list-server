@@ -1,20 +1,18 @@
+use super::keygen::Keypair;
 use crate::{
     database::queries::SeaOrmStore,
     model::{Credentials, StatusListToken},
     utils::errors::{Error, SecretCacheError},
 };
 use async_trait::async_trait;
-use aws_sdk_secretsmanager::config::Region;
-use aws_sdk_secretsmanager::error::ProvideErrorMetadata;
-use aws_sdk_secretsmanager::Client as SecretsManagerClient;
+use aws_sdk_secretsmanager::{
+    config::Region, error::ProvideErrorMetadata, Client as SecretsManagerClient,
+};
 use aws_secretsmanager_caching::SecretsManagerCachingClient;
 use sea_orm::{Database, DatabaseConnection};
 use sea_orm_migration::MigratorTrait;
-use std::num::NonZeroUsize;
-use std::sync::Arc;
-use std::time::Duration;
-
-use super::keygen::Keypair;
+use std::{num::NonZeroUsize, sync::Arc, time::Duration};
+use tracing::info;
 
 // Define the SecretCache
 #[async_trait]
@@ -85,8 +83,9 @@ impl SecretManager {
             .send()
             .await
         {
-            Ok(_) => {
+            Ok(e) => {
                 tracing::info!("Server key secret already exists in AWS Secrets Manager");
+                info!("{}", e.name().unwrap_or_default());
             }
             Err(e) => {
                 let error_message = e.to_string();
