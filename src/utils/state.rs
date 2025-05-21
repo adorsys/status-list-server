@@ -46,35 +46,108 @@ impl SecretCache for AwsSecretCache {
     }
 }
 
+/// Configuration for secret caching
+#[derive(Clone)]
+pub struct CacheConfig {
+    pub enabled: bool,
+    pub cache_size: NonZeroUsize,
+    pub ttl: Duration,
+}
+
+impl Default for CacheConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            cache_size: NonZeroUsize::new(1024).unwrap(),
+            ttl: Duration::from_secs(3600),
+        }
+    }
+}
+
 /// A type that manages server secrets and their caching
 #[derive(Clone)]
 pub struct SecretManager {
     cache: Arc<dyn SecretCache>,
+    client: Arc<SecretsManagerClient>,
     server_secret_name: String,
+    cache_config: CacheConfig,
 }
 
 impl SecretManager {
-    pub fn new(cache: Arc<dyn SecretCache>, server_secret_name: String) -> Self {
+    pub fn new(
+        cache: Arc<dyn SecretCache>,
+        client: Arc<SecretsManagerClient>,
+        server_secret_name: String,
+        cache_config: CacheConfig,
+    ) -> Self {
         Self {
             cache,
+            client,
             server_secret_name,
+            cache_config,
         }
     }
 
     pub async fn get_server_secret(&self) -> Result<Option<String>, SecretCacheError> {
-        self.cache
-            .get_secret_string(self.server_secret_name.clone())
+        if self.cache_config.enabled {
+            self.cache
+                .get_secret_string(self.server_secret_name.clone())
+                .await
+        } else {
+            let result = self
+                .client
+                .get_secret_value()
+                .secret_id(self.server_secret_name.clone())
+                .send()
+                .await;
+            match result {
+                Ok(output) => Ok(output.secret_string().map(String::from)),
+                Err(e) => Err(SecretCacheError::AwsSdkError(e.to_string())),
+            }
+        }
+    }
+
+    /// Creates a new secret with the given name and value
+    pub async fn create_secret(&self, name: String, value: String) -> Result<(), Error> {
+        self.client
+            .create_secret()
+            .name(name)
+            .secret_string(value)
+            .send()
             .await
+            .map_err(|e| Error::Generic(e.to_string()))?;
+        Ok(())
+    }
+
+    /// Deletes a secret by name
+    pub async fn delete_secret(&self, name: String) -> Result<(), Error> {
+        self.client
+            .delete_secret()
+            .secret_id(name)
+            .force_delete_without_recovery(true)
+            .send()
+            .await
+            .map_err(|e| Error::Generic(e.to_string()))?;
+        Ok(())
+    }
+
+    /// Updates the cache configuration
+    pub fn update_cache_config(&mut self, config: CacheConfig) {
+        self.cache_config = config;
     }
 
     /// Creates a new SecretManager instance and ensures the server secret exists
-    pub async fn setup(secret_name: String, region: String) -> Result<Self, Error> {
-        let config = aws_config::load_defaults(aws_config::BehaviorVersion::latest())
+    pub async fn setup(
+        secret_name: String,
+        region: String,
+        cache_config: Option<CacheConfig>,
+    ) -> Result<Self, Error> {
+        let config = aws_config::load_from_env()
             .await
             .into_builder()
             .region(Region::new(region))
             .build();
-        let client = SecretsManagerClient::new(&config);
+        let client = Arc::new(SecretsManagerClient::new(&config));
 
         // Ensure secret exists
         match client
@@ -110,21 +183,40 @@ impl SecretManager {
             }
         }
 
-        let asm_builder = aws_sdk_secretsmanager::config::Builder::from(&config);
-        let caching_client = SecretsManagerCachingClient::from_builder(
-            asm_builder,
-            NonZeroUsize::new(1024).unwrap(),
-            Duration::from_secs(3600),
-            false,
-        )
-        .await
-        .map_err(|e| Error::Generic(e.to_string()))?;
+        let cache_config = cache_config.unwrap_or_default();
+        let cache: Arc<dyn SecretCache> = if cache_config.enabled {
+            let asm_builder = aws_sdk_secretsmanager::config::Builder::from(&config);
+            let caching_client = SecretsManagerCachingClient::from_builder(
+                asm_builder,
+                cache_config.cache_size,
+                cache_config.ttl,
+                false,
+            )
+            .await
+            .map_err(|e| Error::Generic(e.to_string()))?;
 
-        let cache = AwsSecretCache {
-            inner: caching_client,
+            Arc::new(AwsSecretCache {
+                inner: caching_client,
+            })
+        } else {
+            // Create a no-op cache implementation
+            Arc::new(NoOpCache)
         };
 
-        Ok(Self::new(Arc::new(cache), secret_name))
+        Ok(Self::new(cache, client, secret_name, cache_config))
+    }
+}
+
+/// A no-op cache implementation for when caching is disabled
+struct NoOpCache;
+
+#[async_trait]
+impl SecretCache for NoOpCache {
+    async fn get_secret_string(
+        &self,
+        _secret_id: String,
+    ) -> Result<Option<String>, SecretCacheError> {
+        Ok(None)
     }
 }
 
@@ -149,7 +241,7 @@ pub async fn setup() -> AppState {
         std::env::var("SERVER_KEY_SECRET_NAME").expect("SERVER_KEY_SECRET_NAME env not set");
     let region = std::env::var("AWS_REGION").expect("AWS_REGION env not set");
 
-    let secret_manager = SecretManager::setup(secret_name, region)
+    let secret_manager = SecretManager::setup(secret_name, region, None)
         .await
         .expect("Failed to setup secret manager");
 

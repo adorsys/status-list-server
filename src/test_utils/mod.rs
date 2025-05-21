@@ -1,8 +1,10 @@
 #[cfg(test)]
 pub mod test {
     use crate::utils::errors::SecretCacheError;
-    use crate::utils::state::{AppState, SecretCache, SecretManager};
+    use crate::utils::state::{AppState, CacheConfig, SecretCache, SecretManager};
     use async_trait::async_trait;
+    use aws_config::{BehaviorVersion, SdkConfig};
+    use aws_sdk_secretsmanager::Client as SecretsManagerClient;
     use std::sync::Arc;
 
     // Mock implementation for testing
@@ -24,9 +26,14 @@ pub mod test {
         use crate::database::queries::SeaOrmStore;
 
         let pem = include_str!("../test_resources/ec-private.pem").to_string();
+        let config = SdkConfig::builder()
+            .behavior_version(BehaviorVersion::latest())
+            .build();
         let secret_manager = SecretManager::new(
             Arc::new(MockSecretCache { value: Some(pem) }),
+            Arc::new(SecretsManagerClient::new(&config)),
             "test-server-key".to_string(),
+            CacheConfig::default(),
         );
 
         AppState {
