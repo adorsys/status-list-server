@@ -1,5 +1,5 @@
 use crate::{
-    model::{PublishStatusRequest, StatusList, StatusListToken},
+    model::{StatusList, StatusListToken, StatusRequest},
     utils::{errors::Error, lst_gen::create_status_list, state::AppState},
     web::handlers::status_list::error::StatusListError,
 };
@@ -16,7 +16,7 @@ use tracing;
 pub async fn publish_token_status(
     State(appstate): State<AppState>,
     Extension(issuer): Extension<String>,
-    Json(payload): Json<PublishStatusRequest>,
+    Json(payload): Json<StatusRequest>,
 ) -> Result<impl IntoResponse, StatusListError> {
     let store = &appstate.status_list_token_repository;
 
@@ -49,6 +49,11 @@ pub async fn publish_token_status(
                 lst: stl.lst,
             };
 
+            let sub = format!(
+                "https://{}/statuslist/{}",
+                appstate.server_public_domain, payload.list_id
+            );
+
             // Build the new status list token
             let new_status_list_token = StatusListToken {
                 list_id: payload.list_id.clone(),
@@ -56,7 +61,7 @@ pub async fn publish_token_status(
                 exp: None,
                 iat,
                 status_list,
-                sub: payload.sub,
+                sub,
                 ttl: None,
             };
 
@@ -140,6 +145,7 @@ mod tests {
             credential_repository: Arc::new(SeaOrmStore::new(db_conn.clone())),
             status_list_token_repository: Arc::new(SeaOrmStore::new(db_conn)),
             server_key: Arc::new(server_key()),
+            server_public_domain: "example.com".to_string(),
         };
 
         let response = publish_token_status(
@@ -207,6 +213,7 @@ mod tests {
             credential_repository: Arc::new(SeaOrmStore::new(db_conn.clone())),
             status_list_token_repository: Arc::new(SeaOrmStore::new(db_conn)),
             server_key: Arc::new(server_key()),
+            server_public_domain: "example.com".to_string(),
         };
 
         // Perform the insertion
@@ -268,6 +275,7 @@ mod tests {
             credential_repository: Arc::new(SeaOrmStore::new(db_conn.clone())),
             status_list_token_repository: Arc::new(SeaOrmStore::new(db_conn)),
             server_key: Arc::new(server_key()),
+            server_public_domain: "example.com".to_string(),
         };
 
         let response = match publish_token_status(
@@ -324,6 +332,7 @@ mod tests {
             credential_repository: Arc::new(SeaOrmStore::new(db_conn.clone())),
             status_list_token_repository: Arc::new(SeaOrmStore::new(db_conn)),
             server_key: Arc::new(server_key()),
+            server_public_domain: "example.com".to_string(),
         };
 
         let response = publish_token_status(
@@ -394,6 +403,7 @@ mod tests {
             credential_repository: Arc::new(SeaOrmStore::new(db_conn.clone())),
             status_list_token_repository: Arc::new(SeaOrmStore::new(db_conn)),
             server_key: Arc::new(server_key()),
+            server_public_domain: "example.com".to_string(),
         };
 
         let response = publish_token_status(
@@ -423,6 +433,7 @@ mod tests {
             credential_repository: Arc::new(SeaOrmStore::new(db_conn.clone())),
             status_list_token_repository: Arc::new(SeaOrmStore::new(db_conn)),
             server_key: Arc::new(server_key()),
+            server_public_domain: "example.com".to_string(),
         };
 
         let response = match publish_token_status(
