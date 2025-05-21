@@ -246,10 +246,8 @@ mod tests {
         let resp = result.err().unwrap().into_response();
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
         // Check body
-        let body = futures::executor::block_on(async {
-            let bytes = to_bytes(resp.into_body(), 1024 * 1024).await.unwrap(); // Set limit to 1MB
-            String::from_utf8(bytes.to_vec()).unwrap()
-        });
+        let bytes = to_bytes(resp.into_body(), 1024 * 1024).await.unwrap(); // Set limit to 1MB
+        let body = String::from_utf8(bytes.to_vec()).unwrap();
         assert!(body.contains("Missing Authorization header"));
     }
 
@@ -273,10 +271,8 @@ mod tests {
         let resp = result.err().unwrap().into_response();
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
         // Check body
-        let body = futures::executor::block_on(async {
-            let bytes = to_bytes(resp.into_body(), 1024 * 1024).await.unwrap();
-            String::from_utf8(bytes.to_vec()).unwrap()
-        });
+        let bytes = to_bytes(resp.into_body(), 1024 * 1024).await.unwrap();
+        let body = String::from_utf8(bytes.to_vec()).unwrap();
         assert!(body.contains("Invalid Authorization header format"));
     }
 
@@ -300,10 +296,8 @@ mod tests {
         let resp = result.err().unwrap().into_response();
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
         // Check body
-        let body = futures::executor::block_on(async {
-            let bytes = to_bytes(resp.into_body(), 1024 * 1024).await.unwrap();
-            String::from_utf8(bytes.to_vec()).unwrap()
-        });
+        let bytes = to_bytes(resp.into_body(), 1024 * 1024).await.unwrap();
+        let body = String::from_utf8(bytes.to_vec()).unwrap();
         assert!(body.contains("Invalid token format") || body.contains("Invalid token"));
     }
 
@@ -402,10 +396,8 @@ mod tests {
         let resp = result.err().unwrap().into_response();
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
         // Check body
-        let body = futures::executor::block_on(async {
-            let bytes = to_bytes(resp.into_body(), 1024 * 1024).await.unwrap();
-            String::from_utf8(bytes.to_vec()).unwrap()
-        });
+        let bytes = to_bytes(resp.into_body(), 1024 * 1024).await.unwrap();
+        let body = String::from_utf8(bytes.to_vec()).unwrap();
         assert!(body.contains("Issuer not found"));
     }
 
