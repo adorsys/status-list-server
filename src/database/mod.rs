@@ -78,7 +78,6 @@ pub mod migrations {
                                     .from(StatusListTokens::Table, StatusListTokens::Sub)
                                     .to(Credentials::Table, Credentials::Issuer),
                             )
-                            .col(ColumnDef::new(StatusListTokens::Ttl).big_integer())
                             .to_owned(),
                     )
                     .await?;
@@ -89,6 +88,9 @@ pub mod migrations {
             /// Drops the database tables
             async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
                 // Drop tables in reverse order to handle foreign key constraints
+                manager
+                    .drop_table(Table::drop().table(Credentials::Table).to_owned())
+                    .await?;
                 manager
                     .drop_table(Table::drop().table(StatusListTokens::Table).to_owned())
                     .await?;
