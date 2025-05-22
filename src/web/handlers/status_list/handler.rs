@@ -33,6 +33,7 @@ use super::{
 pub trait StatusListTokenExt {
     fn new(
         list_id: String,
+        issuer: String,
         exp: Option<i64>,
         iat: i64,
         status_list: StatusList,
@@ -44,6 +45,7 @@ pub trait StatusListTokenExt {
 impl StatusListTokenExt for StatusListToken {
     fn new(
         list_id: String,
+        issuer: String,
         exp: Option<i64>,
         iat: i64,
         status_list: StatusList,
@@ -52,6 +54,7 @@ impl StatusListTokenExt for StatusListToken {
     ) -> Self {
         Self {
             list_id,
+            issuer,
             exp,
             iat,
             status_list,
@@ -98,8 +101,14 @@ async fn build_status_list_token(
         .map_err(|err| {
             tracing::error!("Failed to get status list {list_id} from database: {err:?}");
             StatusListError::InternalServerError
-        })?
-        .ok_or(StatusListError::StatusListNotFound)?;
+        })?;
+
+    let status_claims = match status_claims {
+        Some(status_claims) => status_claims,
+        None => {
+            return Err(StatusListError::StatusListNotFound);
+        }
+    };
 
     let server_key = repo.server_key.clone();
 
@@ -340,6 +349,7 @@ pub async fn update_statuslist(
 
         let statuslisttoken = StatusListToken::new(
             list_id.clone(),
+            status_list_token.issuer,
             status_list_token.exp,
             status_list_token.iat,
             status_list,
@@ -433,6 +443,7 @@ mod tests {
         };
         let status_list_token = StatusListToken::new(
             "test_list".to_string(),
+            "issuer1".to_string(),
             Some(1234767890),
             1234567890,
             status_list.clone(),
@@ -451,6 +462,7 @@ mod tests {
             credential_repository: Arc::new(SeaOrmStore::new(db_conn.clone())),
             status_list_token_repository: Arc::new(SeaOrmStore::new(db_conn)),
             server_key: Arc::new(server_key()),
+            server_public_domain: "example.com".to_string(),
         };
 
         let mut headers = HeaderMap::new();
@@ -509,6 +521,7 @@ mod tests {
         };
         let status_list_token = StatusListToken::new(
             "test_list".to_string(),
+            "issuer1".to_string(),
             None,
             1234567890,
             status_list.clone(),
@@ -527,6 +540,7 @@ mod tests {
             credential_repository: Arc::new(SeaOrmStore::new(db_conn.clone())),
             status_list_token_repository: Arc::new(SeaOrmStore::new(db_conn)),
             server_key: Arc::new(server_key()),
+            server_public_domain: "example.com".to_string(),
         };
 
         let mut headers = HeaderMap::new();
@@ -630,6 +644,7 @@ mod tests {
             credential_repository: Arc::new(SeaOrmStore::new(db_conn.clone())),
             status_list_token_repository: Arc::new(SeaOrmStore::new(db_conn)),
             server_key: Arc::new(server_key()),
+            server_public_domain: "example.com".to_string(),
         };
 
         let mut headers = HeaderMap::new();
@@ -656,6 +671,7 @@ mod tests {
             credential_repository: Arc::new(SeaOrmStore::new(db_conn.clone())),
             status_list_token_repository: Arc::new(SeaOrmStore::new(db_conn)),
             server_key: Arc::new(server_key()),
+            server_public_domain: "example.com".to_string(),
         };
 
         let mut headers = HeaderMap::new();
@@ -682,6 +698,7 @@ mod tests {
         };
         let existing_token = StatusListToken::new(
             "test_list".to_string(),
+            "issuer1".to_string(),
             None,
             1234567890,
             initial_status_list.clone(),
@@ -694,6 +711,7 @@ mod tests {
         };
         let updated_token = StatusListToken::new(
             "test_list".to_string(),
+            "issuer1".to_string(),
             None,
             1234567890,
             updated_status_list,
@@ -714,6 +732,7 @@ mod tests {
             credential_repository: Arc::new(SeaOrmStore::new(db_conn.clone())),
             status_list_token_repository: Arc::new(SeaOrmStore::new(db_conn)),
             server_key: Arc::new(server_key()),
+            server_public_domain: "example.com".to_string(),
         });
 
         let update_body = json!({
@@ -746,6 +765,7 @@ mod tests {
             credential_repository: Arc::new(SeaOrmStore::new(db_conn.clone())),
             status_list_token_repository: Arc::new(SeaOrmStore::new(db_conn)),
             server_key: Arc::new(server_key()),
+            server_public_domain: "example.com".to_string(),
         });
 
         let update_body = json!({
