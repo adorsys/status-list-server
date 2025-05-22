@@ -61,9 +61,8 @@ where
         match verify_token(&app_state, token).await {
             Ok(()) => {
                 // Extract the issuer from the token header
-                let header = jsonwebtoken::decode_header(token).map_err(|_| {
-                    (StatusCode::UNAUTHORIZED, "Invalid token").into_response()
-                })?;
+                let header = jsonwebtoken::decode_header(token)
+                    .map_err(|_| (StatusCode::UNAUTHORIZED, "Invalid token").into_response())?;
 
                 let issuer = header.kid.ok_or_else(|| {
                     (
