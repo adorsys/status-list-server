@@ -26,7 +26,7 @@ impl SeaOrmStore<StatusListToken> {
             iat: Set(entity.iat),
             status_list: Set(entity.status_list),
             sub: Set(entity.sub),
-            ttl: Set(entity.ttl), 
+            ttl: Set(entity.ttl),
         };
         active
             .insert(&*self.db)
@@ -98,7 +98,7 @@ impl SeaOrmStore<Credentials> {
         active
             .insert(&*self.db)
             .await
-            .map_err(|e| RepositoryError::InsertError(e.to_string()))?; 
+            .map_err(|e| RepositoryError::InsertError(e.to_string()))?;
         Ok(())
     }
 
