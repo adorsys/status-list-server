@@ -132,6 +132,7 @@ pub mod status_list_tokens {
     pub struct Model {
         #[sea_orm(primary_key)]
         pub list_id: String,
+        pub issuer: String,
         pub exp: Option<i64>,
         pub iat: i64,
         #[sea_orm(column_type = "Json")]
@@ -159,8 +160,14 @@ pub enum Status {
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, FromJsonQueryResult)]
 pub struct StatusList {
-    pub bits: usize,
+    pub bits: u8,
     pub lst: String,
+}
+/// Request payload for perfoming actions(publish / update) on a status list token
+#[derive(Deserialize)]
+pub struct StatusRequest {
+    pub list_id: String,
+    pub status: Vec<StatusEntry>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
