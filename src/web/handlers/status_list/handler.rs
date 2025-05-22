@@ -1,4 +1,4 @@
-use std::{fmt::Debug, sync::Arc};
+use std::{fmt::Debug, io::Write as _, sync::Arc};
 
 use axum::{
     extract::{Path, State},
@@ -11,6 +11,7 @@ use coset::{
     self, cbor::Value as CborValue, iana::Algorithm, CborSerializable, CoseSign1Builder,
     HeaderBuilder,
 };
+use flate2::{write::GzEncoder, Compression};
 use jsonwebtoken::{EncodingKey, Header};
 use p256::ecdsa::{signature::Signer, Signature};
 use serde::{Deserialize, Serialize};
@@ -23,8 +24,8 @@ use crate::{
 
 use super::{
     constants::{
-        ACCEPT_STATUS_LISTS_HEADER_CWT, ACCEPT_STATUS_LISTS_HEADER_JWT, CWT_TYPE, EXP, ISSUED_AT,
-        STATUS_LIST, STATUS_LISTS_HEADER_CWT, STATUS_LISTS_HEADER_JWT, SUBJECT, TTL,
+        ACCEPT_STATUS_LISTS_HEADER_CWT, ACCEPT_STATUS_LISTS_HEADER_JWT, CWT_TYPE, EXP, GZIP_HEADER,
+        ISSUED_AT, STATUS_LIST, STATUS_LISTS_HEADER_CWT, STATUS_LISTS_HEADER_JWT, SUBJECT, TTL,
     },
     error::StatusListError,
 };
@@ -32,6 +33,7 @@ use super::{
 pub trait StatusListTokenExt {
     fn new(
         list_id: String,
+        issuer: String,
         exp: Option<i64>,
         iat: i64,
         status_list: StatusList,
@@ -43,6 +45,7 @@ pub trait StatusListTokenExt {
 impl StatusListTokenExt for StatusListToken {
     fn new(
         list_id: String,
+        issuer: String,
         exp: Option<i64>,
         iat: i64,
         status_list: StatusList,
@@ -51,6 +54,7 @@ impl StatusListTokenExt for StatusListToken {
     ) -> Self {
         Self {
             list_id,
+            issuer,
             exp,
             iat,
             status_list,
@@ -97,8 +101,14 @@ async fn build_status_list_token(
         .map_err(|err| {
             tracing::error!("Failed to get status list {list_id} from database: {err:?}");
             StatusListError::InternalServerError
-        })?
-        .ok_or(StatusListError::StatusListNotFound)?;
+        })?;
+
+    let status_claims = match status_claims {
+        Some(status_claims) => status_claims,
+        None => {
+            return Err(StatusListError::StatusListNotFound);
+        }
+    };
 
     // Load the server key from the secret manager
     let pem = repo
@@ -115,21 +125,32 @@ async fn build_status_list_token(
         StatusListError::InternalServerError
     })?;
 
-    if ACCEPT_STATUS_LISTS_HEADER_JWT == accept {
-        Ok((
-            StatusCode::OK,
-            [(header::CONTENT_TYPE, accept)],
-            issue_jwt(&status_claims, &server_key)?,
-        )
-            .into_response())
-    } else {
-        Ok((
-            StatusCode::OK,
-            [(header::CONTENT_TYPE, accept)],
-            issue_cwt(&status_claims, &server_key)?,
-        )
-            .into_response())
-    }
+    let apply_gzip = |data: &[u8]| -> Result<Vec<u8>, StatusListError> {
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+        encoder.write_all(data).map_err(|err| {
+            tracing::error!("Failed to compress payload: {err:?}");
+            StatusListError::InternalServerError
+        })?;
+        encoder.finish().map_err(|err| {
+            tracing::error!("Failed to finish compression: {err:?}");
+            StatusListError::InternalServerError
+        })
+    };
+
+    let token_bytes = match accept {
+        ACCEPT_STATUS_LISTS_HEADER_CWT => issue_cwt(&status_claims, &server_key)?,
+        _ => issue_jwt(&status_claims, &server_key)?.into_bytes(),
+    };
+
+    Ok((
+        StatusCode::OK,
+        [
+            (header::CONTENT_TYPE, accept),
+            (header::CONTENT_ENCODING, GZIP_HEADER),
+        ],
+        apply_gzip(&token_bytes)?,
+    )
+        .into_response())
 }
 
 // Function to create a CWT per the specification
@@ -341,6 +362,7 @@ pub async fn update_statuslist(
 
         let statuslisttoken = StatusListToken::new(
             list_id.clone(),
+            status_list_token.issuer,
             status_list_token.exp,
             status_list_token.iat,
             status_list,
@@ -418,7 +440,7 @@ mod tests {
     };
     use sea_orm::{DatabaseBackend, MockDatabase};
     use serde_json::json;
-    use std::sync::Arc;
+    use std::{io::Read, sync::Arc};
 
     #[tokio::test]
     async fn test_get_status_list_jwt_success() {
@@ -429,6 +451,7 @@ mod tests {
         };
         let status_list_token = StatusListToken::new(
             "test_list".to_string(),
+            "issuer1".to_string(),
             Some(1234767890),
             1234567890,
             status_list.clone(),
@@ -461,7 +484,13 @@ mod tests {
         .into_response();
 
         assert_eq!(response.status(), StatusCode::OK);
-        let body_bytes = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+        let headers = response.headers();
+        assert_eq!(headers.get(http::header::CONTENT_ENCODING).unwrap(), "gzip");
+
+        let compressed_body_bytes = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+        let mut decoder = flate2::read::GzDecoder::new(&compressed_body_bytes[..]);
+        let mut body_bytes = Vec::new();
+        decoder.read_to_end(&mut body_bytes).unwrap();
         let body_str = std::str::from_utf8(&body_bytes).unwrap();
 
         // Load the key from the cache
@@ -502,6 +531,7 @@ mod tests {
         };
         let status_list_token = StatusListToken::new(
             "test_list".to_string(),
+            "issuer1".to_string(),
             None,
             1234567890,
             status_list.clone(),
@@ -534,7 +564,13 @@ mod tests {
         .into_response();
 
         assert_eq!(response.status(), StatusCode::OK);
-        let body_bytes = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+        let headers = response.headers();
+        assert_eq!(headers.get(http::header::CONTENT_ENCODING).unwrap(), "gzip");
+
+        let compressed_body_bytes = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+        let mut decoder = flate2::read::GzDecoder::new(&compressed_body_bytes[..]);
+        let mut body_bytes = Vec::new();
+        decoder.read_to_end(&mut body_bytes).unwrap();
 
         let cwt = CoseSign1::from_slice(&body_bytes).unwrap();
 
@@ -665,6 +701,7 @@ mod tests {
         };
         let existing_token = StatusListToken::new(
             "test_list".to_string(),
+            "issuer1".to_string(),
             None,
             1234567890,
             initial_status_list.clone(),
@@ -677,6 +714,7 @@ mod tests {
         };
         let updated_token = StatusListToken::new(
             "test_list".to_string(),
+            "issuer1".to_string(),
             None,
             1234567890,
             updated_status_list,

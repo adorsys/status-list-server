@@ -35,7 +35,7 @@ pub mod migrations {
                                     .not_null()
                                     .primary_key(),
                             )
-                            .col(ColumnDef::new(Credentials::PublicKey).text().not_null()) // Changed to text
+                            .col(ColumnDef::new(Credentials::PublicKey).text().not_null())
                             .col(ColumnDef::new(Credentials::Alg).string().not_null())
                             .to_owned(),
                     )
@@ -53,6 +53,7 @@ pub mod migrations {
                                     .primary_key(),
                             )
                             .col(ColumnDef::new(StatusListTokens::Exp).integer())
+                            .col(ColumnDef::new(StatusListTokens::Issuer).string().not_null())
                             .col(ColumnDef::new(StatusListTokens::Iat).integer().not_null())
                             .col(
                                 ColumnDef::new(StatusListTokens::StatusList)
@@ -60,7 +61,7 @@ pub mod migrations {
                                     .not_null(),
                             )
                             .col(ColumnDef::new(StatusListTokens::Sub).string().not_null())
-                            .col(ColumnDef::new(StatusListTokens::Ttl).string())
+                            .col(ColumnDef::new(StatusListTokens::Ttl).big_integer())
                             .to_owned(),
                     )
                     .await?;
@@ -90,6 +91,7 @@ pub mod migrations {
         #[derive(Iden)]
         enum StatusListTokens {
             Table,
+            Issuer,
             ListId,
             Exp,
             Iat,

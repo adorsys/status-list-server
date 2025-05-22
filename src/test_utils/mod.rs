@@ -39,6 +39,7 @@ pub mod test {
         AppState {
             credential_repository: Arc::new(SeaOrmStore::new(db_conn.clone())),
             status_list_token_repository: Arc::new(SeaOrmStore::new(db_conn)),
+            server_public_domain: "example.com".to_string(),
             secret_manager: Arc::new(secret_manager),
         }
     }

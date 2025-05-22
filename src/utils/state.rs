@@ -237,6 +237,7 @@ pub struct AppState {
     pub credential_repository: Arc<SeaOrmStore<Credentials>>,
     pub status_list_token_repository: Arc<SeaOrmStore<StatusListToken>>,
     pub secret_manager: Arc<SecretManager>,
+    pub server_public_domain: String,
 }
 
 pub async fn setup() -> AppState {
@@ -257,10 +258,14 @@ pub async fn setup() -> AppState {
         .await
         .expect("Failed to setup secret manager");
 
+    let server_public_domain =
+        std::env::var("SERVER_PUBLIC_DOMAIN").expect("SERVER_PUBLIC_DOMAIN env not set");
+
     let db = Arc::new(db);
     AppState {
         credential_repository: Arc::new(SeaOrmStore::new(Arc::clone(&db))),
         status_list_token_repository: Arc::new(SeaOrmStore::new(Arc::clone(&db))),
         secret_manager: Arc::new(secret_manager),
+        server_public_domain,
     }
 }
