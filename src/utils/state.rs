@@ -5,6 +5,7 @@ use crate::{
     utils::errors::{Error, SecretCacheError},
 };
 use async_trait::async_trait;
+use aws_config::BehaviorVersion;
 use aws_sdk_secretsmanager::{
     config::Region, error::ProvideErrorMetadata, Client as SecretsManagerClient,
 };
@@ -75,16 +76,37 @@ pub struct SecretManager {
 
 impl SecretManager {
     pub fn new(
-        cache: Arc<dyn SecretCache>,
-        client: Arc<SecretsManagerClient>,
+        cache: impl SecretCache + 'static,
+        client: SecretsManagerClient,
         server_secret_name: String,
         cache_config: CacheConfig,
     ) -> Self {
         Self {
-            cache,
-            client,
+            cache: Arc::new(cache),
+            client: Arc::new(client),
             server_secret_name,
             cache_config,
+        }
+    }
+
+    pub async fn get_secret_from_cache_or_aws(
+        &self,
+        secret_name: String,
+        use_cache: bool,
+    ) -> Result<Option<String>, SecretCacheError> {
+        if use_cache && self.cache_config.enabled {
+            self.cache.get_secret_string(secret_name).await
+        } else {
+            let result = self
+                .client
+                .get_secret_value()
+                .secret_id(secret_name)
+                .send()
+                .await;
+            match result {
+                Ok(output) => Ok(output.secret_string().map(String::from)),
+                Err(e) => Err(SecretCacheError::AwsSdkError(e.to_string())),
+            }
         }
     }
 
@@ -142,12 +164,12 @@ impl SecretManager {
         region: String,
         cache_config: Option<CacheConfig>,
     ) -> Result<Self, Error> {
-        let config = aws_config::load_from_env()
+        let config = aws_config::load_defaults(BehaviorVersion::latest())
             .await
             .into_builder()
             .region(Region::new(region))
             .build();
-        let client = Arc::new(SecretsManagerClient::new(&config));
+        let client = SecretsManagerClient::new(&config);
 
         // Ensure secret exists
         match client
@@ -184,39 +206,29 @@ impl SecretManager {
         }
 
         let cache_config = cache_config.unwrap_or_default();
-        let cache: Arc<dyn SecretCache> = if cache_config.enabled {
-            let asm_builder = aws_sdk_secretsmanager::config::Builder::from(&config);
-            let caching_client = SecretsManagerCachingClient::from_builder(
-                asm_builder,
-                cache_config.cache_size,
-                cache_config.ttl,
-                false,
-            )
-            .await
-            .map_err(|e| Error::Generic(e.to_string()))?;
+        let asm_builder = aws_sdk_secretsmanager::config::Builder::from(&config);
+        let caching_client = SecretsManagerCachingClient::from_builder(
+            asm_builder,
+            if cache_config.enabled {
+                cache_config.cache_size
+            } else {
+                NonZeroUsize::new(1).unwrap() // Minimal cache size when disabled
+            },
+            if cache_config.enabled {
+                cache_config.ttl
+            } else {
+                Duration::from_secs(1) // Minimal TTL when disabled
+            },
+            false,
+        )
+        .await
+        .map_err(|e| Error::Generic(e.to_string()))?;
 
-            Arc::new(AwsSecretCache {
-                inner: caching_client,
-            })
-        } else {
-            // Create a no-op cache implementation
-            Arc::new(NoOpCache)
+        let cache = AwsSecretCache {
+            inner: caching_client,
         };
 
         Ok(Self::new(cache, client, secret_name, cache_config))
-    }
-}
-
-/// A no-op cache implementation for when caching is disabled
-struct NoOpCache;
-
-#[async_trait]
-impl SecretCache for NoOpCache {
-    async fn get_secret_string(
-        &self,
-        _secret_id: String,
-    ) -> Result<Option<String>, SecretCacheError> {
-        Ok(None)
     }
 }
 
