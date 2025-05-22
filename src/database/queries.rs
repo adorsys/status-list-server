@@ -22,6 +22,7 @@ impl SeaOrmStore<StatusListToken> {
     pub async fn insert_one(&self, entity: StatusListToken) -> Result<(), RepositoryError> {
         let active = status_list_tokens::ActiveModel {
             list_id: Set(entity.list_id),
+            issuer: Set(entity.issuer),
             exp: Set(entity.exp),
             iat: Set(entity.iat),
             status_list: Set(entity.status_list),
@@ -45,6 +46,18 @@ impl SeaOrmStore<StatusListToken> {
             .map_err(|e| RepositoryError::FindError(e.to_string()))
     }
 
+    pub async fn find_all_by(
+        &self,
+        issuer: String,
+    ) -> Result<Vec<StatusListToken>, RepositoryError> {
+        status_list_tokens::Entity::find()
+            .filter(status_list_tokens::Column::ListId.eq(issuer))
+            .all(&*self.db)
+            .await
+            .map(|tokens| tokens.into_iter().collect())
+            .map_err(|e| RepositoryError::FindError(e.to_string()))
+    }
+
     pub async fn update_one(
         &self,
         list_id: String,
@@ -59,6 +72,7 @@ impl SeaOrmStore<StatusListToken> {
         }
         let active = status_list_tokens::ActiveModel {
             list_id: Set(entity.list_id),
+            issuer: Set(entity.issuer),
             exp: Set(entity.exp),
             iat: Set(entity.iat),
             status_list: Set(entity.status_list),
