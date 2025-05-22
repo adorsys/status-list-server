@@ -30,8 +30,8 @@ pub mod test {
             .behavior_version(BehaviorVersion::latest())
             .build();
         let secret_manager = SecretManager::new(
-            Arc::new(MockSecretCache { value: Some(pem) }),
-            Arc::new(SecretsManagerClient::new(&config)),
+            MockSecretCache { value: Some(pem) },
+            SecretsManagerClient::new(&config),
             "test-server-key".to_string(),
             CacheConfig::default(),
         );
