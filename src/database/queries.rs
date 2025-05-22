@@ -26,7 +26,7 @@ impl SeaOrmStore<StatusListToken> {
             iat: Set(entity.iat),
             status_list: Set(entity.status_list),
             sub: Set(entity.sub),
-            ttl: Set(entity.ttl),
+            ttl: Set(entity.ttl), 
         };
         active
             .insert(&*self.db)
@@ -80,19 +80,6 @@ impl SeaOrmStore<StatusListToken> {
         Ok(result.rows_affected > 0)
     }
 
-    pub async fn is_issuer_owner(
-        &self,
-        issuer: &str,
-        list_id: &str,
-    ) -> Result<bool, RepositoryError> {
-        let token = status_list_tokens::Entity::find_by_id(list_id)
-            .one(&*self.db)
-            .await
-            .map_err(|e| RepositoryError::FindError(e.to_string()))?;
-
-        Ok(token.map(|t| t.sub == issuer).unwrap_or(false))
-    }
-
     pub async fn find_by_issuer(
         &self,
         issuer: &str,
@@ -111,7 +98,7 @@ impl SeaOrmStore<Credentials> {
         active
             .insert(&*self.db)
             .await
-            .map_err(|e| RepositoryError::InsertError(e.to_string()))?;
+            .map_err(|e| RepositoryError::InsertError(e.to_string()))?; 
         Ok(())
     }
 

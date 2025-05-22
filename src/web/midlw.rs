@@ -62,7 +62,7 @@ where
             Ok(()) => {
                 // Extract the issuer from the token header
                 let header = jsonwebtoken::decode_header(token).map_err(|_| {
-                    (StatusCode::UNAUTHORIZED, "Invalid token format").into_response()
+                    (StatusCode::UNAUTHORIZED, "Invalid token").into_response()
                 })?;
 
                 let issuer = header.kid.ok_or_else(|| {
@@ -298,7 +298,7 @@ mod tests {
         // Check body
         let bytes = to_bytes(resp.into_body(), 1024 * 1024).await.unwrap();
         let body = String::from_utf8(bytes.to_vec()).unwrap();
-        assert!(body.contains("Invalid token format") || body.contains("Invalid token"));
+        assert!(body.contains("Invalid token"));
     }
 
     #[tokio::test]
