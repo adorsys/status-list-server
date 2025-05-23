@@ -23,3 +23,11 @@ pub enum Error {
     #[error("Failed to decode lst")]
     DecodeError,
 }
+
+#[derive(Error, Debug)]
+pub enum SecretCacheError {
+    #[error("Failed to retrieve secret: {0}")]
+    RetrieveFailed(String),
+    #[error("AWS SDK error: {0}")]
+    AwsSdkError(String),
+}
