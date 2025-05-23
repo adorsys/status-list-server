@@ -94,12 +94,11 @@ mod test {
     use sea_orm::{DatabaseBackend, MockDatabase};
 
     use crate::{
-        database::queries::SeaOrmStore,
         model::{
             status_list_tokens, Status, StatusEntry, StatusList, StatusListToken, StatusRequest,
         },
-        test_resources::helper::server_key,
-        utils::{lst_gen::create_status_list, state::AppState},
+        test_utils::test::test_app_state,
+        utils::lst_gen::create_status_list,
         web::handlers::status_list::update_token_status::update_token_status,
     };
 
@@ -163,13 +162,7 @@ mod test {
                 .into_connection(),
         );
 
-        let app_state = AppState {
-            credential_repository: Arc::new(SeaOrmStore::new(db_conn.clone())),
-            status_list_token_repository: Arc::new(SeaOrmStore::new(db_conn)),
-            server_key: Arc::new(server_key()),
-            server_public_domain: "example.com".to_string(),
-        };
-
+        let app_state = test_app_state(db_conn.clone());
         let response = update_token_status(
             State(app_state),
             Extension("issuer".to_string()),

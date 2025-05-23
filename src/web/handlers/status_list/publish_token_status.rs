@@ -83,10 +83,9 @@ pub async fn publish_token_status(
 mod tests {
     use super::*;
     use crate::{
-        database::queries::SeaOrmStore,
         model::{status_list_tokens, Status, StatusEntry, StatusListToken},
-        test_resources::helper::{publish_test_token, server_key},
-        utils::state::AppState,
+        test_resources::helper::publish_test_token,
+        test_utils::test::test_app_state,
     };
     use axum::{extract::State, Json};
     use sea_orm::{DatabaseBackend, MockDatabase};
@@ -141,12 +140,7 @@ mod tests {
                 .into_connection(),
         );
 
-        let app_state = AppState {
-            credential_repository: Arc::new(SeaOrmStore::new(db_conn.clone())),
-            status_list_token_repository: Arc::new(SeaOrmStore::new(db_conn)),
-            server_key: Arc::new(server_key()),
-            server_public_domain: "example.com".to_string(),
-        };
+        let app_state = test_app_state(db_conn.clone());
 
         let response = publish_token_status(
             State(app_state),
@@ -209,12 +203,7 @@ mod tests {
                 .into_connection(),
         );
 
-        let app_state = AppState {
-            credential_repository: Arc::new(SeaOrmStore::new(db_conn.clone())),
-            status_list_token_repository: Arc::new(SeaOrmStore::new(db_conn)),
-            server_key: Arc::new(server_key()),
-            server_public_domain: "example.com".to_string(),
-        };
+        let app_state = test_app_state(db_conn.clone());
 
         // Perform the insertion
         let _ = publish_token_status(
@@ -271,12 +260,7 @@ mod tests {
                 .into_connection(),
         );
 
-        let app_state = AppState {
-            credential_repository: Arc::new(SeaOrmStore::new(db_conn.clone())),
-            status_list_token_repository: Arc::new(SeaOrmStore::new(db_conn)),
-            server_key: Arc::new(server_key()),
-            server_public_domain: "example.com".to_string(),
-        };
+        let app_state = test_app_state(db_conn.clone());
 
         let response = match publish_token_status(
             State(app_state),
@@ -328,12 +312,7 @@ mod tests {
                 .into_connection(),
         );
 
-        let app_state = AppState {
-            credential_repository: Arc::new(SeaOrmStore::new(db_conn.clone())),
-            status_list_token_repository: Arc::new(SeaOrmStore::new(db_conn)),
-            server_key: Arc::new(server_key()),
-            server_public_domain: "example.com".to_string(),
-        };
+        let app_state = test_app_state(db_conn.clone());
 
         let response = publish_token_status(
             State(app_state.clone()),
@@ -399,12 +378,7 @@ mod tests {
                 ])
                 .into_connection(),
         );
-        let app_state = AppState {
-            credential_repository: Arc::new(SeaOrmStore::new(db_conn.clone())),
-            status_list_token_repository: Arc::new(SeaOrmStore::new(db_conn)),
-            server_key: Arc::new(server_key()),
-            server_public_domain: "example.com".to_string(),
-        };
+        let app_state = test_app_state(db_conn.clone());
 
         let response = publish_token_status(
             State(app_state),
@@ -429,12 +403,7 @@ mod tests {
             }],
         );
         let db_conn = Arc::new(mock_db.into_connection());
-        let app_state = AppState {
-            credential_repository: Arc::new(SeaOrmStore::new(db_conn.clone())),
-            status_list_token_repository: Arc::new(SeaOrmStore::new(db_conn)),
-            server_key: Arc::new(server_key()),
-            server_public_domain: "example.com".to_string(),
-        };
+        let app_state = test_app_state(db_conn.clone());
 
         let response = match publish_token_status(
             State(app_state),
