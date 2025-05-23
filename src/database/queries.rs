@@ -60,10 +60,10 @@ impl SeaOrmStore<StatusListToken> {
 
     pub async fn update_one(
         &self,
-        issuer: String,
+        list_id: String,
         entity: StatusListToken,
     ) -> Result<bool, RepositoryError> {
-        let existing = status_list_tokens::Entity::find_by_id(&issuer)
+        let existing = status_list_tokens::Entity::find_by_id(&list_id)
             .one(&*self.db)
             .await
             .map_err(|e| RepositoryError::FindError(e.to_string()))?;
@@ -92,6 +92,17 @@ impl SeaOrmStore<StatusListToken> {
             .await
             .map_err(|e| RepositoryError::DeleteError(e.to_string()))?;
         Ok(result.rows_affected > 0)
+    }
+
+    pub async fn find_by_issuer(
+        &self,
+        issuer: &str,
+    ) -> Result<Vec<StatusListToken>, RepositoryError> {
+        status_list_tokens::Entity::find()
+            .filter(status_list_tokens::Column::Sub.eq(issuer))
+            .all(&*self.db)
+            .await
+            .map_err(|e| RepositoryError::FindError(e.to_string()))
     }
 }
 
