@@ -111,7 +111,20 @@ async fn build_status_list_token(
         }
     };
 
-    let server_key = repo.server_key.clone();
+    // Load the server key from the secret manager
+    let pem = repo
+        .secret_manager
+        .get_server_secret()
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to load server key from cache: {e}");
+            StatusListError::InternalServerError
+        })?
+        .ok_or(StatusListError::InternalServerError)?;
+    let server_key = Keypair::from_pkcs8_pem(&pem).map_err(|e| {
+        tracing::error!("Failed to parse server key: {e:?}");
+        StatusListError::InternalServerError
+    })?;
 
     let apply_gzip = |data: &[u8]| -> Result<Vec<u8>, StatusListError> {
         let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
@@ -420,9 +433,8 @@ fn update_status(lst: &str, updates: Vec<StatusEntry>) -> Result<String, StatusL
 mod tests {
     use super::*;
     use crate::{
-        database::queries::SeaOrmStore,
         model::{status_list_tokens, StatusList, StatusListToken},
-        utils::state::AppState,
+        test_utils::test::test_app_state,
     };
     use axum::{
         body::to_bytes,
@@ -439,10 +451,6 @@ mod tests {
     use sea_orm::{DatabaseBackend, MockDatabase};
     use serde_json::json;
     use std::{io::Read, sync::Arc};
-
-    fn server_key() -> Keypair {
-        Keypair::from_pkcs8_pem(include_str!("../../../test_resources/ec-private.pem")).unwrap()
-    }
 
     #[tokio::test]
     async fn test_get_status_list_jwt_success() {
@@ -468,12 +476,7 @@ mod tests {
                 .into_connection(),
         );
 
-        let app_state = AppState {
-            credential_repository: Arc::new(SeaOrmStore::new(db_conn.clone())),
-            status_list_token_repository: Arc::new(SeaOrmStore::new(db_conn)),
-            server_key: Arc::new(server_key()),
-            server_public_domain: "example.com".to_string(),
-        };
+        let app_state = test_app_state(db_conn.clone());
 
         let mut headers = HeaderMap::new();
         headers.insert(
@@ -500,8 +503,15 @@ mod tests {
         decoder.read_to_end(&mut body_bytes).unwrap();
         let body_str = std::str::from_utf8(&body_bytes).unwrap();
 
-        let decoding_key_pem = app_state
-            .server_key
+        // Load the key from the cache
+        let pem = app_state
+            .secret_manager
+            .get_server_secret()
+            .await
+            .unwrap()
+            .unwrap();
+        let server_key = Keypair::from_pkcs8_pem(&pem).unwrap();
+        let decoding_key_pem = server_key
             .verifying_key()
             .to_public_key_pem(LineEnding::default())
             .unwrap()
@@ -546,12 +556,7 @@ mod tests {
                 .into_connection(),
         );
 
-        let app_state = AppState {
-            credential_repository: Arc::new(SeaOrmStore::new(db_conn.clone())),
-            status_list_token_repository: Arc::new(SeaOrmStore::new(db_conn)),
-            server_key: Arc::new(server_key()),
-            server_public_domain: "example.com".to_string(),
-        };
+        let app_state = test_app_state(db_conn.clone());
 
         let mut headers = HeaderMap::new();
         headers.insert(
@@ -579,10 +584,18 @@ mod tests {
 
         let cwt = CoseSign1::from_slice(&body_bytes).unwrap();
 
-        // verify signature
-        let binding = app_state.server_key.clone();
-        let signing_key = binding.signing_key();
+        // Load the key from the cache
+        let pem = app_state
+            .secret_manager
+            .get_server_secret()
+            .await
+            .unwrap()
+            .unwrap();
+        let server_key = Keypair::from_pkcs8_pem(&pem).unwrap();
+        let signing_key = server_key.signing_key();
         let verifying_key = VerifyingKey::from(signing_key);
+
+        // Verify signature
         let result = cwt.verify_signature(&[], |sig, data| {
             let signature = Signature::from_slice(sig).unwrap();
             verifying_key.verify(data, &signature)
@@ -650,12 +663,7 @@ mod tests {
                 .into_connection(),
         );
 
-        let app_state = AppState {
-            credential_repository: Arc::new(SeaOrmStore::new(db_conn.clone())),
-            status_list_token_repository: Arc::new(SeaOrmStore::new(db_conn)),
-            server_key: Arc::new(server_key()),
-            server_public_domain: "example.com".to_string(),
-        };
+        let app_state = test_app_state(db_conn.clone());
 
         let mut headers = HeaderMap::new();
         headers.insert(
@@ -677,12 +685,7 @@ mod tests {
         let mock_db = MockDatabase::new(DatabaseBackend::Postgres);
         let db_conn = Arc::new(mock_db.into_connection());
 
-        let app_state = AppState {
-            credential_repository: Arc::new(SeaOrmStore::new(db_conn.clone())),
-            status_list_token_repository: Arc::new(SeaOrmStore::new(db_conn)),
-            server_key: Arc::new(server_key()),
-            server_public_domain: "example.com".to_string(),
-        };
+        let app_state = test_app_state(db_conn.clone());
 
         let mut headers = HeaderMap::new();
         headers.insert(http::header::ACCEPT, "application/xml".parse().unwrap()); // unsupported
@@ -739,12 +742,7 @@ mod tests {
                 .into_connection(),
         );
 
-        let app_state = Arc::new(AppState {
-            credential_repository: Arc::new(SeaOrmStore::new(db_conn.clone())),
-            status_list_token_repository: Arc::new(SeaOrmStore::new(db_conn)),
-            server_key: Arc::new(server_key()),
-            server_public_domain: "example.com".to_string(),
-        });
+        let app_state = test_app_state(db_conn.clone());
 
         let update_body = json!({
             "updates": [
@@ -753,7 +751,7 @@ mod tests {
         });
 
         let response = update_statuslist(
-            State(app_state),
+            State(app_state.into()),
             Path(owner.to_string()),
             AuthenticatedIssuer(owner.to_string()),
             Json(update_body),
@@ -773,12 +771,7 @@ mod tests {
                 .into_connection(),
         );
 
-        let app_state = Arc::new(AppState {
-            credential_repository: Arc::new(SeaOrmStore::new(db_conn.clone())),
-            status_list_token_repository: Arc::new(SeaOrmStore::new(db_conn)),
-            server_key: Arc::new(server_key()),
-            server_public_domain: "example.com".to_string(),
-        });
+        let app_state = test_app_state(db_conn.clone());
 
         let update_body = json!({
             "updates": [
@@ -787,7 +780,7 @@ mod tests {
         });
 
         let response = update_statuslist(
-            State(app_state),
+            State(app_state.into()),
             Path("test_list".to_string()),
             AuthenticatedIssuer("test_list".to_string()),
             Json(update_body),
