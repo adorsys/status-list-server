@@ -1,5 +1,4 @@
 [package]
-
 name = "status-list-server"
 version = "0.1.0"
 edition = "2021"
@@ -21,10 +20,12 @@ axum = { version = "0.8", features = ["macros"] }
 dotenvy = "0.15"
 flate2 = "1.1.0"
 hyper = "1.6"
+rcgen = { version = "0.13", features = ["pem"] }
+instant-acme = "0.7"
 serde = { version = "1.0", features = ["derive"] }
 sqlx = { version = "0.8", features = ["postgres", "runtime-tokio"] }
 thiserror = "2.0"
-tokio = { version = "1.16", features = ["full"] }
+tokio = { version = "1", features = ["full", "macros", "net", "rt-multi-thread"] }
 tower = "0.5"
 tower-http = { version = "0.6", features = ["cors", "trace", "catch-panic"] }
 tracing = "0.1.41"
@@ -37,8 +38,6 @@ sea-orm = { version = "1.1.7", features = [
 ] }
 aws-config = "1.6"
 aws-sdk-secretsmanager = "1.68"
-uuid = { version = "1.16.0", features = ["v4"] }
-lazy_static = "1.5.0"
 
 
 [dev-dependencies]

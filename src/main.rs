@@ -1,15 +1,12 @@
 use axum::{
     http::Method,
     response::IntoResponse,
-    routing::{get, post},
+    routing::{get, patch, post},
     Json, Router,
 };
 use dotenvy::dotenv;
 use serde::Serialize;
-use status_list_server::utils::state::setup;
-use status_list_server::web::handlers::status_list::publish_token_status::publish_token_status;
 use status_list_server::web::handlers::{credential_handler, get_status_list};
-use status_list_server::web::status_list_aggregation::aggregate_status_lists;
 use tokio::net::TcpListener;
 use tower::ServiceBuilder;
 use tower_http::catch_panic::CatchPanicLayer;
@@ -51,7 +48,6 @@ async fn main() {
         .route("/credentials", post(credential_handler))
         .route("/statuslists/{list_id}", get(get_status_list))
         .route("/statuslists/publish", post(publish_token_status))
-        .route("/statuslists/aggregate", post(aggregate_status_lists))
         .layer(
             ServiceBuilder::new()
                 .layer(TraceLayer::new_for_http())
