@@ -3,9 +3,7 @@ services:
     image: postgres:15
     container_name: status-list-server-db
     environment:
-      - POSTGRES_USER=${DB_USER:-postgres}
-      - POSTGRES_PASSWORD=${DB_PASSWORD:-postgres}
-      - POSTGRES_DB=${DB_NAME:-status-list}
+      - env_file=.env
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
@@ -22,6 +20,7 @@ services:
       dockerfile: Dockerfile
     container_name: status-list-server
     environment:
+      - RUST_LOG=info
       - SERVER_KEY_SECRET_NAME=${SERVER_KEY_SECRET_NAME}
       - AWS_REGION=${AWS_REGION}
       - SERVER_PUBLIC_DOMAIN=${SERVER_PUBLIC_DOMAIN}
