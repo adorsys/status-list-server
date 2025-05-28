@@ -76,13 +76,15 @@ By default, the server runs on `http://localhost:8000`. You can modify the port 
 ### Publish Status List
 - **Endpoint**: `POST /statuslists/publish` 
 - **Description**: Allows an issuer to publish their token status list
-- **Authorization**: Requires a valid JWT token with the issuer's ID as the `kid` (Key ID) in the header
+- **Authorization**: Requires a valid signed JWT token with the corresponding registered private key with issuer's ID as the `kid` (Key ID) in the header
 - **Request Body**
   ```json
+  { "list_id": "30202cc6-1e3f-4479-a567-74e86ad73693",
   [
       { "index": 1, "status": "INVALID" },
       { "index": 8, "status": "VALID" }
   ]
+  }
   ```
   - `index`: Position in the status list
   - `status`: Status value (VALID, INVALID, SUSPENDED, APPLICATIONSPECIFIC)
@@ -91,14 +93,13 @@ By default, the server runs on `http://localhost:8000`. You can modify the port 
 
 - **Endpoint:** `PUT /statuslists/{list_id}`
 - **Description:** Allows an issuer to update an existing status list
-- **Authorization:** Requires a valid JWT token with the issuer's ID as the `kid` in the header
+- **Authorization:** Requires a valid signed JWT token with the corresponding registered private key with issuer's ID as the `kid` (Key ID) in the header
   
 - **Request Body:** 
 
   ```json
   {
     "list_id": "755a0cf7-8289-4f65-9d24-0e01be92f4a6",
-    "bits": 4,
     "updates": [
         {
             "index": 1,
@@ -113,24 +114,56 @@ By default, the server runs on `http://localhost:8000`. You can modify the port 
   ```
   
   - `list_id`: UUID of the status list to update
-  - `bits`: Number of bits per status entry
   - `updates`: Array of status updates
     - `index`: Position in the status list
     - `status`: New status value (VALID, INVALID, SUSPENDED, APPLICATIONSPECIFIC)
+
+  Example of a complete status update payload:
+  ```json
+  {
+    "list_id": "755a0cf7-8289-4f65-9d24-0e01be92f4a6",
+    "updates": [
+        {
+            "index": 1,
+            "status": "VALID"
+        },
+        {
+            "index": 2,
+            "status": "INVALID"
+        },
+        {
+            "index": 3,
+            "status": "SUSPENDED"
+        },
+        {
+            "index": 4,
+            "status": "APPLICATIONSPECIFIC"
+        }
+    ]
+  }
+  ```
 
 - **Responses:**
   - `200 OK`: Update successful
   - `400 BAD REQUEST`: Invalid input data
   - `401 UNAUTHORIZED`: Invalid or missing JWT token
   - `403 FORBIDDEN`: Token issuer doesn't match list owner
+  - `404 NOT FOUND`: Status list not found
+  - `500 INTERNAL SERVER ERROR`: System incurred an error
 
 ### Retrieve Status List
 
 - **Endpoint:** `GET /statuslists/{list_id}`
-- **Description:** Retrieves the current status list. This endpoint is publicly accessible with no authentication required.
+- **Description:** Retrieves the current status list for the requested list_id. This endpoint is publicly accessible with no authentication required.
+- **Headers:**
+  - `Accept`: Specifies the desired response format
+    - `application/jwt`: Returns the status list as a JWT token
+    - `application/cwt`: Returns the status list as a CWT token
+    - Default: Returns the status list in a compressed and encoded format
 - **Responses:**
-  - `200 OK`: Returns the status list in a compressed and encoded format
+  - `200 OK`: Returns the status list in the requested format
   - `404 NOT FOUND`: Status list not found
+  - `406 NOT ACCEPTABLE`: Requested format not supported
 
 ## Authentication
 
@@ -142,7 +175,7 @@ The server uses JWT-based authentication with the following requirements:
    Authorization: Bearer <jwt_token>
    ```
 3. The JWT token must:
-   - Be signed with ES256 (ECDSA with P-256 and SHA-256)
+   - Be signed with the algorithm specified during issuer registration (currently only ES256 is supported)
    - Include the issuer's ID as the `kid` (Key ID) in the header
    - Be signed with the private key corresponding to the registered public key
    - Have valid `exp` (expiration) and `iat` (issued at) claims
