@@ -3,7 +3,7 @@ statuslist:
   image:
     repository: ghcr.io/adorsys/status-list-server
     pullPolicy: IfNotPresent
-    tag: latest
+    tag: "1.0.0"  # Replace with your actual version
   service:
     type: ClusterIP
     port: 80
@@ -15,15 +15,22 @@ statuslist:
     annotations:
       cert-manager.io/cluster-issuer: letsencrypt-prod
       nginx.ingress.kubernetes.io/ssl-redirect: "true"
+      nginx.ingress.kubernetes.io/force-ssl-redirect: "true"
       nginx.ingress.kubernetes.io/proxy-body-size: "10m"
     tls:
       hosts:
-        - '*.eudi-adorsys.com'
-        - 'statuslist.eudi-adorsys.com'
+        - "*.eudi-adorsys.com"
       secretName: statuslist-tls
     externalDnsHostname: statuslist.eudi-adorsys.com
   env:
-    POSTGRES_USER: "postgres"
+    RUST_LOG: "info"
+  resources:
+    requests:
+      memory: "256Mi"
+      cpu: "250m"
+    limits:
+      memory: "512Mi"
+      cpu: "500m"
 
 postgresql:
   image:
@@ -47,7 +54,9 @@ postgresql:
       ports:
         postgresql: 5432
     persistence:
-      enabled: false
+      enabled: true
+      storageClass: "standard"
+      size: 8Gi
 
 externalSecret:
   metadata:
@@ -61,10 +70,13 @@ externalSecret:
       name: statuslist-secret
       creationPolicy: Owner
     data:
-      secretKey: postgres-password
-      remoteRef:
-        key: statuslist-secret
-        property: POSTGRES_PASSWORD
-    provider:
-      aws:
-        region: eu-central-1
+      - secretKey: postgres-password
+        remoteRef:
+          key: statuslist-secret
+          property: POSTGRES_PASSWORD
+
+secretStore:
+  aws:
+    region: eu-central-1
+    authType: jwt
+    serviceAccountName: statuslist-secret-store-sa
