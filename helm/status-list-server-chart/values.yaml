@@ -3,7 +3,7 @@ statuslist:
   image:
     repository: ghcr.io/adorsys/status-list-server
     pullPolicy: IfNotPresent
-    tag: "1.0.0"  # Replace with your actual version
+    tag: "1.0.0" # Replace with your actual version
   service:
     type: ClusterIP
     port: 80
@@ -31,13 +31,12 @@ statuslist:
     limits:
       memory: "512Mi"
       cpu: "500m"
-
 postgresql:
   image:
     registry: docker.io
     repository: bitnami/postgresql
     tag: 17.4.0-debian-12-r15
-    pullPolicy: IfNotPresent
+    pullPolicy: Always
   auth:
     enablePostgresUser: true
     username: "postgres"
@@ -55,9 +54,8 @@ postgresql:
         postgresql: 5432
     persistence:
       enabled: true
-      storageClass: "standard"
-      size: 8Gi
-
+      storageClass: "high-performance"
+      size: 10Gi
 externalSecret:
   metadata:
     name: statuslist-external-secret
