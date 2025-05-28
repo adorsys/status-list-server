@@ -1,4 +1,5 @@
 /target
+/helm
 .github/
 .cargo/
 .gitignore

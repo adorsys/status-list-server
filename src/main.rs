@@ -1,13 +1,18 @@
 use axum::{
     http::Method,
     response::IntoResponse,
-    routing::{get, post},
-    Router,
+    routing::{get, patch, post},
+    Json, Router,
 };
 use dotenvy::dotenv;
-use status_list_server::utils::state::setup;
-use status_list_server::web::handlers::status_list::publish_token_status::publish_token_status;
+use serde::Serialize;
 use status_list_server::web::handlers::{credential_handler, get_status_list};
+use status_list_server::{
+    utils::state::setup,
+    web::handlers::status_list::{
+        publish_token_status::publish_token_status, update_token_status::update_token_status,
+    },
+};
 use tokio::net::TcpListener;
 use tower::ServiceBuilder;
 use tower_http::catch_panic::CatchPanicLayer;
@@ -18,6 +23,17 @@ use tower_http::{
 
 async fn welcome() -> impl IntoResponse {
     "Status list Server"
+}
+
+#[derive(Serialize)]
+struct HealthCheckResponse {
+    status: String,
+}
+
+async fn health_check() -> impl IntoResponse {
+    Json(HealthCheckResponse {
+        status: "OK".to_string(),
+    })
 }
 
 #[tokio::main]
@@ -34,9 +50,15 @@ async fn main() {
 
     let router = Router::new()
         .route("/", get(welcome))
+        .route("/health", get(health_check))
         .route("/credentials", post(credential_handler))
-        .route("/statuslists/{list_id}", get(get_status_list))
-        .route("/statuslists/publish", post(publish_token_status))
+        .nest(
+            "/statuslists",
+            Router::new()
+                .route("/list_id", get(get_status_list))
+                .route("/publish", post(publish_token_status))
+                .route("/update", patch(update_token_status)),
+        )
         .layer(
             ServiceBuilder::new()
                 .layer(TraceLayer::new_for_http())

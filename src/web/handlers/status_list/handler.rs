@@ -1,4 +1,4 @@
-use std::{fmt::Debug, sync::Arc};
+use std::{fmt::Debug, io::Write as _, sync::Arc};
 
 use axum::{
     extract::{Path, State},
@@ -6,41 +6,59 @@ use axum::{
     response::IntoResponse,
     Json,
 };
-
+use chrono::Utc;
+use coset::{
+    self, cbor::Value as CborValue, iana::Algorithm, CborSerializable, CoseSign1Builder,
+    HeaderBuilder,
+};
+use flate2::{write::GzEncoder, Compression};
+use jsonwebtoken::{EncodingKey, Header};
+use p256::ecdsa::{signature::Signer, Signature};
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::{
     model::{Status, StatusEntry, StatusList, StatusListToken},
-    utils::state::AppState,
+    utils::{keygen::Keypair, state::AppState},
+    web::midlw::AuthenticatedIssuer,
 };
 
-use super::{constants::STATUS_LISTS_HEADER_JWT, error::StatusListError};
+use super::{
+    constants::{
+        ACCEPT_STATUS_LISTS_HEADER_CWT, ACCEPT_STATUS_LISTS_HEADER_JWT, CWT_TYPE, EXP, GZIP_HEADER,
+        ISSUED_AT, STATUS_LIST, STATUS_LISTS_HEADER_CWT, STATUS_LISTS_HEADER_JWT, SUBJECT, TTL,
+    },
+    error::StatusListError,
+};
 
 pub trait StatusListTokenExt {
     fn new(
         list_id: String,
-        exp: Option<i32>,
-        iat: i32,
+        issuer: String,
+        exp: Option<i64>,
+        iat: i64,
         status_list: StatusList,
         sub: String,
-        ttl: Option<String>,
+        ttl: Option<i64>,
     ) -> Self;
 }
 
 impl StatusListTokenExt for StatusListToken {
     fn new(
         list_id: String,
-        exp: Option<i32>,
-        iat: i32,
+        issuer: String,
+        exp: Option<i64>,
+        iat: i64,
         status_list: StatusList,
         sub: String,
-        ttl: Option<String>,
+        ttl: Option<i64>,
     ) -> Self {
         Self {
             list_id,
+            issuer,
             exp,
             iat,
-            status_list: serde_json::to_value(status_list).unwrap(),
+            status_list,
             sub,
             ttl,
         }
@@ -52,38 +70,211 @@ pub async fn get_status_list(
     Path(list_id): Path<String>,
     headers: HeaderMap,
 ) -> Result<impl IntoResponse + Debug, StatusListError> {
-    let repo = &state.status_list_token_repository;
+    let accept = headers.get(header::ACCEPT).and_then(|h| h.to_str().ok());
 
-    let accept = headers
-        .get(header::ACCEPT)
-        .and_then(|h| h.to_str().ok())
-        .unwrap_or(STATUS_LISTS_HEADER_JWT);
-
-    if !accept.contains(STATUS_LISTS_HEADER_JWT) {
-        return Err(StatusListError::InvalidAcceptHeader);
+    // build the token depending on the accept header
+    match accept {
+        None =>
+        // assume jwt by default if no accept header is provided
+        {
+            build_status_list_token(ACCEPT_STATUS_LISTS_HEADER_JWT, &list_id, &state).await
+        }
+        Some(accept)
+            if accept == ACCEPT_STATUS_LISTS_HEADER_JWT
+                || accept == ACCEPT_STATUS_LISTS_HEADER_CWT =>
+        {
+            build_status_list_token(accept, &list_id, &state).await
+        }
+        Some(_) => Err(StatusListError::InvalidAcceptHeader),
     }
+}
 
+async fn build_status_list_token(
+    accept: &str,
+    list_id: &str,
+    repo: &AppState,
+) -> Result<impl IntoResponse + Debug, StatusListError> {
+    // Get status list claims from database
     let status_claims = repo
+        .status_list_token_repository
         .find_one_by(list_id.to_string())
         .await
         .map_err(|err| {
             tracing::error!("Failed to get status list {list_id} from database: {err:?}");
             StatusListError::InternalServerError
-        })?
-        .ok_or(StatusListError::StatusListNotFound)?;
+        })?;
 
-    let status_list = status_claims.status_list;
+    let status_claims = match status_claims {
+        Some(status_claims) => status_claims,
+        None => {
+            return Err(StatusListError::StatusListNotFound);
+        }
+    };
+
+    // Load the server key from the secret manager
+    let pem = repo
+        .secret_manager
+        .get_server_secret()
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to load server key from cache: {e}");
+            StatusListError::InternalServerError
+        })?
+        .ok_or(StatusListError::InternalServerError)?;
+    let server_key = Keypair::from_pkcs8_pem(&pem).map_err(|e| {
+        tracing::error!("Failed to parse server key: {e:?}");
+        StatusListError::InternalServerError
+    })?;
+
+    let apply_gzip = |data: &[u8]| -> Result<Vec<u8>, StatusListError> {
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+        encoder.write_all(data).map_err(|err| {
+            tracing::error!("Failed to compress payload: {err:?}");
+            StatusListError::InternalServerError
+        })?;
+        encoder.finish().map_err(|err| {
+            tracing::error!("Failed to finish compression: {err:?}");
+            StatusListError::InternalServerError
+        })
+    };
+
+    let token_bytes = match accept {
+        ACCEPT_STATUS_LISTS_HEADER_CWT => issue_cwt(&status_claims, &server_key)?,
+        _ => issue_jwt(&status_claims, &server_key)?.into_bytes(),
+    };
+
     Ok((
         StatusCode::OK,
-        [(header::CONTENT_TYPE, STATUS_LISTS_HEADER_JWT)],
-        Json(status_list),
+        [
+            (header::CONTENT_TYPE, accept),
+            (header::CONTENT_ENCODING, GZIP_HEADER),
+        ],
+        apply_gzip(&token_bytes)?,
     )
         .into_response())
+}
+
+// Function to create a CWT per the specification
+fn issue_cwt(token: &StatusListToken, server_key: &Keypair) -> Result<Vec<u8>, StatusListError> {
+    let mut claims = vec![];
+
+    // Building the claims
+    claims.push((
+        CborValue::Integer(SUBJECT.into()),
+        CborValue::Text(token.sub.clone()),
+    ));
+    let iat = Utc::now().timestamp();
+    claims.push((
+        CborValue::Integer(ISSUED_AT.into()),
+        CborValue::Integer(iat.into()),
+    ));
+    // According to the spec, the lifetime of the token depends on the lifetime of the referenced token
+    // https://www.ietf.org/archive/id/draft-ietf-oauth-status-list-10.html#section-13.1
+    if let Some(exp) = token.exp {
+        claims.push((
+            CborValue::Integer(EXP.into()),
+            CborValue::Integer(exp.into()),
+        ));
+    }
+    claims.push((
+        CborValue::Integer(TTL.into()),
+        if let Some(ttl) = token.ttl {
+            CborValue::Integer(ttl.into())
+        } else {
+            // Default to 12 hours
+            CborValue::Integer(43200.into())
+        },
+    ));
+    // Adding the status list map to the claims
+    let status_list = vec![
+        (
+            CborValue::Text("bits".into()),
+            CborValue::Integer(token.status_list.bits.into()),
+        ),
+        (
+            CborValue::Text("lst".into()),
+            CborValue::Text(token.status_list.lst.clone()),
+        ),
+    ];
+    claims.push((
+        CborValue::Integer(STATUS_LIST.into()),
+        CborValue::Map(status_list),
+    ));
+
+    let payload = CborValue::Map(claims).to_vec().map_err(|err| {
+        tracing::error!("Failed to serialize claims: {err:?}");
+        StatusListError::InternalServerError
+    })?;
+
+    // Building the protected header
+    let protected = HeaderBuilder::new()
+        .algorithm(Algorithm::ES256)
+        .value(CWT_TYPE, CborValue::Text(STATUS_LISTS_HEADER_CWT.into()))
+        .build();
+
+    let signing_key = server_key.signing_key();
+
+    // Building the CWT
+    let sign1 = CoseSign1Builder::new()
+        .protected(protected)
+        .payload(payload)
+        .create_signature(&[], |payload| {
+            let signature: Signature = signing_key.sign(payload);
+            signature.to_vec()
+        })
+        .build();
+
+    let cwt_bytes = sign1.to_vec().map_err(|err| {
+        tracing::error!("Failed to serialize CWT: {err:?}");
+        StatusListError::InternalServerError
+    })?;
+
+    Ok(cwt_bytes)
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct StatusListClaims {
+    pub exp: Option<i64>,
+    pub iat: i64,
+    pub status_list: StatusList,
+    pub sub: String,
+    pub ttl: Option<i64>,
+}
+
+fn issue_jwt(token: &StatusListToken, server_key: &Keypair) -> Result<String, StatusListError> {
+    let iat = Utc::now().timestamp();
+    let ttl = token.ttl.unwrap_or(43200);
+    // Building the claims
+    let claims = StatusListClaims {
+        exp: token.exp,
+        iat,
+        status_list: token.status_list.clone(),
+        sub: token.sub.to_owned(),
+        ttl: Some(ttl),
+    };
+    // Building the header
+    let mut header = Header::new(jsonwebtoken::Algorithm::ES256);
+    header.typ = Some(STATUS_LISTS_HEADER_JWT.into());
+
+    let pem_bytes = server_key.to_pkcs8_pem_bytes().map_err(|err| {
+        tracing::error!("Failed to convert signing key to PEM: {err:?}");
+        StatusListError::InternalServerError
+    })?;
+    let signer = EncodingKey::from_ec_pem(&pem_bytes).map_err(|err| {
+        tracing::error!("Failed to create encoding key: {err:?}");
+        StatusListError::InternalServerError
+    })?;
+    let token = jsonwebtoken::encode(&header, &claims, &signer).map_err(|err| {
+        tracing::error!("Failed to encode JWT: {err:?}");
+        StatusListError::InternalServerError
+    })?;
+    Ok(token)
 }
 
 pub async fn update_statuslist(
     State(appstate): State<Arc<AppState>>,
     Path(list_id): Path<String>,
+    AuthenticatedIssuer(issuer): AuthenticatedIssuer,
     Json(body): Json<Value>,
 ) -> impl IntoResponse {
     let updates = match body
@@ -148,8 +339,15 @@ pub async fn update_statuslist(
     };
 
     if let Some(status_list_token) = status_list_token {
-        let lst: StatusList =
-            serde_json::from_value(status_list_token.status_list.clone()).unwrap();
+        // Ownership check: only the owner (token.sub) can update
+        if status_list_token.sub != issuer {
+            return (
+                StatusCode::FORBIDDEN,
+                StatusListError::Forbidden("Issuer does not own this list".to_string()),
+            )
+                .into_response();
+        }
+        let lst = status_list_token.status_list;
         let updated_lst = match update_status(&lst.lst, updates) {
             Ok(updated_lst) => updated_lst,
             Err(e) => {
@@ -174,11 +372,12 @@ pub async fn update_statuslist(
 
         let statuslisttoken = StatusListToken::new(
             list_id.clone(),
+            status_list_token.issuer,
             status_list_token.exp,
             status_list_token.iat,
             status_list,
             status_list_token.sub.clone(),
-            status_list_token.ttl.clone(),
+            status_list_token.ttl,
         );
 
         match store.update_one(list_id.clone(), statuslisttoken).await {
@@ -234,9 +433,8 @@ fn update_status(lst: &str, updates: Vec<StatusEntry>) -> Result<String, StatusL
 mod tests {
     use super::*;
     use crate::{
-        database::queries::SeaOrmStore,
         model::{status_list_tokens, StatusList, StatusListToken},
-        utils::state::AppState,
+        test_utils::test::test_app_state,
     };
     use axum::{
         body::to_bytes,
@@ -244,13 +442,18 @@ mod tests {
         http::{self, HeaderMap, StatusCode},
         Json,
     };
-
+    use coset::CoseSign1;
+    use jsonwebtoken::{DecodingKey, Validation};
+    use p256::{
+        ecdsa::{signature::Verifier, VerifyingKey},
+        pkcs8::{EncodePublicKey, LineEnding},
+    };
     use sea_orm::{DatabaseBackend, MockDatabase};
     use serde_json::json;
-    use std::sync::Arc;
+    use std::{io::Read, sync::Arc};
 
     #[tokio::test]
-    async fn test_get_status_list_success() {
+    async fn test_get_status_list_jwt_success() {
         let mock_db = MockDatabase::new(DatabaseBackend::Postgres);
         let status_list = StatusList {
             bits: 8,
@@ -258,7 +461,8 @@ mod tests {
         };
         let status_list_token = StatusListToken::new(
             "test_list".to_string(),
-            None,
+            "issuer1".to_string(),
+            Some(1234767890),
             1234567890,
             status_list.clone(),
             "test_subject".to_string(),
@@ -272,32 +476,182 @@ mod tests {
                 .into_connection(),
         );
 
-        let app_state = AppState {
-            credential_repository: Arc::new(SeaOrmStore::new(db_conn.clone())),
-            status_list_token_repository: Arc::new(SeaOrmStore::new(db_conn)),
-        };
+        let app_state = test_app_state(db_conn.clone());
 
         let mut headers = HeaderMap::new();
         headers.insert(
             http::header::ACCEPT,
-            STATUS_LISTS_HEADER_JWT.parse().unwrap(),
+            ACCEPT_STATUS_LISTS_HEADER_JWT.parse().unwrap(),
         );
 
-        let response = get_status_list(State(app_state), Path("test_list".to_string()), headers)
-            .await
-            .unwrap()
-            .into_response();
+        let response = get_status_list(
+            State(app_state.clone()),
+            Path("test_list".to_string()),
+            headers,
+        )
+        .await
+        .unwrap()
+        .into_response();
 
         assert_eq!(response.status(), StatusCode::OK);
-        let body_bytes = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
-        let body: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
-        assert_eq!(
-            body,
-            json!({
-                "bits": 8,
-                "lst": encode_lst(vec![0, 0, 0])
-            })
+        let headers = response.headers();
+        assert_eq!(headers.get(http::header::CONTENT_ENCODING).unwrap(), "gzip");
+
+        let compressed_body_bytes = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+        let mut decoder = flate2::read::GzDecoder::new(&compressed_body_bytes[..]);
+        let mut body_bytes = Vec::new();
+        decoder.read_to_end(&mut body_bytes).unwrap();
+        let body_str = std::str::from_utf8(&body_bytes).unwrap();
+
+        // Load the key from the cache
+        let pem = app_state
+            .secret_manager
+            .get_server_secret()
+            .await
+            .unwrap()
+            .unwrap();
+        let server_key = Keypair::from_pkcs8_pem(&pem).unwrap();
+        let decoding_key_pem = server_key
+            .verifying_key()
+            .to_public_key_pem(LineEnding::default())
+            .unwrap()
+            .into_bytes();
+        let decoding_key = DecodingKey::from_ec_pem(&decoding_key_pem).unwrap();
+        let mut validation = Validation::new(jsonwebtoken::Algorithm::ES256);
+        // Disable exp validation since the token is expired in the test
+        // we just want to verify the claims
+        validation.validate_exp = false;
+        let token_data =
+            jsonwebtoken::decode::<StatusListClaims>(body_str, &decoding_key, &validation).unwrap();
+
+        // Verify the claims
+        assert_eq!(token_data.claims.sub, "test_subject");
+        assert_eq!(token_data.claims.status_list.bits, 8);
+        assert_eq!(token_data.claims.status_list.lst, encode_lst(vec![0, 0, 0]));
+        assert_eq!(token_data.claims.exp, Some(1234767890));
+        assert_eq!(token_data.claims.ttl, Some(43200));
+    }
+
+    #[tokio::test]
+    async fn test_get_status_list_success_cwt() {
+        let mock_db = MockDatabase::new(DatabaseBackend::Postgres);
+        let status_list = StatusList {
+            bits: 8,
+            lst: encode_lst(vec![0, 0, 0]),
+        };
+        let status_list_token = StatusListToken::new(
+            "test_list".to_string(),
+            "issuer1".to_string(),
+            None,
+            1234567890,
+            status_list.clone(),
+            "test_subject".to_string(),
+            Some(43200),
         );
+        let db_conn = Arc::new(
+            mock_db
+                .append_query_results::<status_list_tokens::Model, Vec<_>, _>(vec![vec![
+                    status_list_token.clone(),
+                ]])
+                .into_connection(),
+        );
+
+        let app_state = test_app_state(db_conn.clone());
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            http::header::ACCEPT,
+            ACCEPT_STATUS_LISTS_HEADER_CWT.parse().unwrap(),
+        );
+
+        let response = get_status_list(
+            State(app_state.clone()),
+            Path("test_list".to_string()),
+            headers,
+        )
+        .await
+        .unwrap()
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let headers = response.headers();
+        assert_eq!(headers.get(http::header::CONTENT_ENCODING).unwrap(), "gzip");
+
+        let compressed_body_bytes = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+        let mut decoder = flate2::read::GzDecoder::new(&compressed_body_bytes[..]);
+        let mut body_bytes = Vec::new();
+        decoder.read_to_end(&mut body_bytes).unwrap();
+
+        let cwt = CoseSign1::from_slice(&body_bytes).unwrap();
+
+        // Load the key from the cache
+        let pem = app_state
+            .secret_manager
+            .get_server_secret()
+            .await
+            .unwrap()
+            .unwrap();
+        let server_key = Keypair::from_pkcs8_pem(&pem).unwrap();
+        let signing_key = server_key.signing_key();
+        let verifying_key = VerifyingKey::from(signing_key);
+
+        // Verify signature
+        let result = cwt.verify_signature(&[], |sig, data| {
+            let signature = Signature::from_slice(sig).unwrap();
+            verifying_key.verify(data, &signature)
+        });
+        assert!(result.is_ok());
+
+        let payload_bytes = cwt.payload.unwrap();
+        let payload = CborValue::from_slice(&payload_bytes).unwrap();
+        let claims = match payload {
+            CborValue::Map(claims) => claims,
+            _ => panic!("Invalid CWT payload"),
+        };
+
+        // Verify claims
+        let sub = claims
+            .iter()
+            .find(|(k, _)| k == &CborValue::Integer(SUBJECT.into()))
+            .unwrap()
+            .1
+            .clone();
+        assert_eq!(sub, CborValue::Text("test_subject".to_string()));
+
+        let status_list_map = claims
+            .iter()
+            .find(|(k, _)| k == &CborValue::Integer(STATUS_LIST.into()))
+            .unwrap()
+            .1
+            .clone();
+        let status_list = match status_list_map {
+            CborValue::Map(map) => map,
+            _ => panic!("Invalid status list"),
+        };
+
+        let bits = status_list
+            .iter()
+            .find(|(k, _)| k == &CborValue::Text("bits".to_string()))
+            .unwrap()
+            .1
+            .clone();
+        assert_eq!(bits, CborValue::Integer(8.into()));
+
+        let lst = status_list
+            .iter()
+            .find(|(k, _)| k == &CborValue::Text("lst".to_string()))
+            .unwrap()
+            .1
+            .clone();
+        assert_eq!(lst, CborValue::Text(encode_lst(vec![0, 0, 0])));
+
+        let ttl = claims
+            .iter()
+            .find(|(k, _)| k == &CborValue::Integer(TTL.into()))
+            .unwrap()
+            .1
+            .clone();
+        assert_eq!(ttl, CborValue::Integer(43200.into()));
     }
 
     #[tokio::test]
@@ -309,22 +663,43 @@ mod tests {
                 .into_connection(),
         );
 
-        let app_state = AppState {
-            credential_repository: Arc::new(SeaOrmStore::new(db_conn.clone())),
-            status_list_token_repository: Arc::new(SeaOrmStore::new(db_conn)),
-        };
+        let app_state = test_app_state(db_conn.clone());
 
         let mut headers = HeaderMap::new();
         headers.insert(
             http::header::ACCEPT,
-            STATUS_LISTS_HEADER_JWT.parse().unwrap(),
+            ACCEPT_STATUS_LISTS_HEADER_JWT.parse().unwrap(),
         );
 
-        let response = get_status_list(State(app_state), Path("test_list".to_string()), headers)
-            .await
-            .unwrap_err();
+        let result =
+            get_status_list(State(app_state), Path("test_list".to_string()), headers).await;
 
-        assert_eq!(response, StatusListError::StatusListNotFound);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert_eq!(err.clone().into_response().status(), StatusCode::NOT_FOUND);
+        assert_eq!(err, StatusListError::StatusListNotFound);
+    }
+
+    #[tokio::test]
+    async fn test_get_status_list_unsupported_accept_header() {
+        let mock_db = MockDatabase::new(DatabaseBackend::Postgres);
+        let db_conn = Arc::new(mock_db.into_connection());
+
+        let app_state = test_app_state(db_conn.clone());
+
+        let mut headers = HeaderMap::new();
+        headers.insert(http::header::ACCEPT, "application/xml".parse().unwrap()); // unsupported
+
+        let result =
+            get_status_list(State(app_state), Path("test_list".to_string()), headers).await;
+
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert_eq!(
+            err.clone().into_response().status(),
+            StatusCode::NOT_ACCEPTABLE
+        );
+        assert_eq!(err, StatusListError::InvalidAcceptHeader);
     }
 
     #[tokio::test]
@@ -334,12 +709,14 @@ mod tests {
             bits: 8,
             lst: encode_lst(vec![0, 0, 0]),
         };
+        let owner = "issuer1";
         let existing_token = StatusListToken::new(
             "test_list".to_string(),
+            "issuer1".to_string(),
             None,
             1234567890,
             initial_status_list.clone(),
-            "test_subject".to_string(),
+            owner.to_string(), // sub matches issuer
             None,
         );
         let updated_status_list = StatusList {
@@ -348,10 +725,11 @@ mod tests {
         };
         let updated_token = StatusListToken::new(
             "test_list".to_string(),
+            "issuer1".to_string(),
             None,
             1234567890,
             updated_status_list,
-            "test_subject".to_string(),
+            owner.to_string(), // sub matches issuer
             None,
         );
         let db_conn = Arc::new(
@@ -364,10 +742,7 @@ mod tests {
                 .into_connection(),
         );
 
-        let app_state = Arc::new(AppState {
-            credential_repository: Arc::new(SeaOrmStore::new(db_conn.clone())),
-            status_list_token_repository: Arc::new(SeaOrmStore::new(db_conn)),
-        });
+        let app_state = test_app_state(db_conn.clone());
 
         let update_body = json!({
             "updates": [
@@ -376,8 +751,9 @@ mod tests {
         });
 
         let response = update_statuslist(
-            State(app_state),
-            Path("test_list".to_string()),
+            State(app_state.into()),
+            Path(owner.to_string()),
+            AuthenticatedIssuer(owner.to_string()),
             Json(update_body),
         )
         .await
@@ -395,10 +771,7 @@ mod tests {
                 .into_connection(),
         );
 
-        let app_state = Arc::new(AppState {
-            credential_repository: Arc::new(SeaOrmStore::new(db_conn.clone())),
-            status_list_token_repository: Arc::new(SeaOrmStore::new(db_conn)),
-        });
+        let app_state = test_app_state(db_conn.clone());
 
         let update_body = json!({
             "updates": [
@@ -407,8 +780,9 @@ mod tests {
         });
 
         let response = update_statuslist(
-            State(app_state),
+            State(app_state.into()),
             Path("test_list".to_string()),
+            AuthenticatedIssuer("test_list".to_string()),
             Json(update_body),
         )
         .await

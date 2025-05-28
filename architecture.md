@@ -35,30 +35,8 @@
      2. It uses the `status_list.index` to locate the token's status in the Status List Token.
      3. The status is used to determine if the Referenced Token is valid, revoked, or expired.
 
-### **4. API Specifications**
-   - **Endpoint**: `/statuslists/{id}`
-   - **Method**: `GET`
-   - **Request Headers**:
-     - `Accept`: `application/statuslist+jwt` or `application/statuslist+cwt`.
-   - **Response**:
-     - **Status Code**: `200 OK` (success) or `3xx` (redirect).
-     - **Headers**:
-       - `Content-Type`: `application/statuslist+jwt` or `application/statuslist+cwt`.
-       - `Content-Encoding`: `gzip` (optional, for compression).
-       - **Body**: The Status List Token in JWT or CWT format.
-  
-   - **Endpoint**: `/statuslists/list1/tokens/42`
-   - **Method**: `PUT`
-   - **Response**:
-     - **Status Code**: `200 OK` (success) or `3xx` (redirect).
-  
-   - **Endpoint**: `/statuslists/list1/tokens/42` 
-   - **Method**: `POST`
-   - **Response**:
-     - **Status Code**: `200 OK` (success) or `3xx` (redirect). 
-     
 
-### **5. Data Formats**
+### **4. Data Formats**
    - **Referenced Token**:
      ```json
      {
@@ -76,8 +54,8 @@
    - **Status List Token (JWT Example)**:
      ```json
      {
-       "iss": "https://statuslist.example.com",
-       "sub": "https://issuer.example.com",
+       "iss": "https://issuer.example.com",
+       "sub": "https://statuslist.example.com/statuslists/1",
        "status_list": {
          "bits": 1,
          "lst": "eyJhbGciOiJFUzI1NiIsImtpZCI6IjEyIiwidHlwIjoic3RhdHVzbGlzdCtqd3QifQ..."
@@ -96,15 +74,12 @@
    b14f33aa899e532844778ba2fff80b5c1e56e5
    ``` 
 
-Here’s how you can add an **Application Design** section to the **developer guide and architecture documentation** for the **Status List Server**. This section will explain the **tech stack** used, the architecture, and how the components interact.
-
-
-## **7. Application Design**
+## **5. Application Design**
 
 This section provides an overview of the **technology stack** and **design principles** used to build the Status List Server.
 
 
-### **7.1. Tech Stack**
+### **5.1. Tech Stack**
 The Status List Server is built using modern, performant, and scalable technologies. Below is the tech stack used:
 
 #### **Web Framework**
@@ -117,9 +92,9 @@ The Status List Server is built using modern, performant, and scalable technolog
    - **JSON Web Tokens (JWT)**: Used for encoding and decoding Status List Tokens. The `jsonwebtoken` crate is used for JWT operations.
 
 #### **Storage**
-   - **Database**: to map and store statuslist to id and  credentials .
+   - **Database**: to map and store statuslist to id and credentials.
 
-### **7.2. Data Flow**
+### **5.2. Data Flow**
 The data flow in the Status List Server is as follows:
 
 1. **Token Issuer**:
@@ -138,13 +113,13 @@ The data flow in the Status List Server is as follows:
    - Updates token statuses in the Status List.
    - Serves Status List Tokens to Relying Parties.
 
-### **8. Security Considerations**
+### **6. Security Considerations**
    - **HTTPS**: All communication with the Status List Server must use HTTPS to ensure data integrity and confidentiality.
    - **Token Signing**: Status List Tokens must be signed (e.g., using JWT or CWT) to prevent tampering.
    - **CORS**: The Status List Server should support Cross-Origin Resource Sharing (CORS) for browser-based clients.
    - **Rate Limiting**: Implement rate limiting to prevent abuse of the Status List Server.
 
-### **9. Developer Integration**
+### **7. Developer Integration**
    - **Step 1**: Configure the Token Issuer to include the `status` claim in Referenced Tokens.
    - **Step 2**: Implement the Relying Party to:
      1. Extract the `status` claim from the Referenced Token.
@@ -153,7 +128,7 @@ The data flow in the Status List Server is as follows:
      4. Use the `index` to check the token's status.
    - **Step 3**: Test the integration using sample Referenced Tokens and Status List Tokens.
 
-### **10. Troubleshooting**
+### **8. Troubleshooting**
    - **Common Issues**:
      - Invalid `status_list.url` in the Referenced Token.
      - Missing or incorrect `Accept` header in the request.
@@ -162,8 +137,7 @@ The data flow in the Status List Server is as follows:
      - Check HTTP response codes and headers.
      - Validate the structure of the Referenced Token and Status List Token.
 
-### **11. References**
+### **9. References**
    - [IETF Draft: OAuth Status List](https://datatracker.ietf.org/doc/draft-ietf-oauth-status-list/)
    - [JWT (JSON Web Token) RFC 7519](https://tools.ietf.org/html/rfc7519)
    - [CWT (CBOR Web Token) RFC 8392](https://tools.ietf.org/html/rfc8392)
-

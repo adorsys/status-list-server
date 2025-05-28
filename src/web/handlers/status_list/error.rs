@@ -27,13 +27,19 @@ pub enum StatusListError {
     CompressionError(String),
     #[error("Status list already exists")]
     StatusListAlreadyExists,
+    #[error("Forbidden: {0}")]
+    Forbidden(String),
+    #[error("Token already exists")]
+    TokenAlreadyExists,
+    #[error("Issuer mismatch")]
+    IssuerMismatch,
 }
 
 impl IntoResponse for StatusListError {
     fn into_response(self) -> axum::response::Response {
         use StatusListError::*;
         let status_code = match self {
-            InvalidAcceptHeader => StatusCode::BAD_REQUEST,
+            InvalidAcceptHeader => StatusCode::NOT_ACCEPTABLE,
             InternalServerError => StatusCode::INTERNAL_SERVER_ERROR,
             InvalidIndex => StatusCode::BAD_REQUEST,
             Generic(_) => StatusCode::BAD_REQUEST,
@@ -45,6 +51,9 @@ impl IntoResponse for StatusListError {
             DecompressionError(_) => StatusCode::BAD_REQUEST,
             CompressionError(_) => StatusCode::INTERNAL_SERVER_ERROR,
             StatusListAlreadyExists => StatusCode::CONFLICT,
+            Forbidden(_) => StatusCode::FORBIDDEN,
+            TokenAlreadyExists => StatusCode::CONFLICT,
+            IssuerMismatch => StatusCode::FORBIDDEN,
         };
 
         (status_code, self.to_string()).into_response()
