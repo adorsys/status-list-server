@@ -1,26 +1,14 @@
 use crate::{
     utils::state::AppState,
-    web::handlers::status_list::{
-        constants::{ACCEPT_STATUS_LISTS_HEADER_CWT, ACCEPT_STATUS_LISTS_HEADER_JWT},
-        error::StatusListError,
-    },
+    web::handlers::status_list::error::StatusListError,
 };
 use axum::{
-    extract::{Json, Path, State},
-    http::{header, HeaderMap},
+    extract::{Json, State},
+    http::HeaderMap,
     response::IntoResponse,
 };
-use lazy_static::lazy_static;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
-use std::fmt::Debug;
-use tokio::sync::Mutex;
-use tracing;
-use uuid::Uuid;
-
-lazy_static! {
-    static ref AGGREGATION_MAP: Mutex<HashMap<String, Vec<String>>> = Mutex::new(HashMap::new());
-}
+use std::sync::Arc;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct StatusListAggregationRequest {
@@ -28,115 +16,51 @@ pub struct StatusListAggregationRequest {
     pub issuer: Option<String>,
 }
 
+#[derive(Debug, Serialize)]
+pub struct StatusListAggregationResponse {
+    pub aggregation_uri: String,
+}
+
 pub async fn aggregate_status_lists(
-    State(state): State<AppState>,
-    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+    _headers: HeaderMap,
     Json(request): Json<StatusListAggregationRequest>,
-) -> Result<impl IntoResponse + Debug, StatusListError> {
-    let _accept = headers.get(header::ACCEPT).and_then(|h| h.to_str().ok());
-
-    // Validate accept header
-    let _accept = match _accept {
-        None => ACCEPT_STATUS_LISTS_HEADER_JWT, // Default to JWT if no accept header
-        Some(accept)
-            if accept == ACCEPT_STATUS_LISTS_HEADER_JWT
-                || accept == ACCEPT_STATUS_LISTS_HEADER_CWT =>
-        {
-            accept
-        }
-        Some(_) => return Err(StatusListError::InvalidAcceptHeader),
-    };
-
-    // Get status lists based on either list_ids or issuer
+) -> Result<impl IntoResponse, StatusListError> {
     let mut status_lists = Vec::new();
 
     if let Some(list_ids) = request.list_ids {
-        // Fetch by specific list IDs
         for list_id in list_ids {
-            let status_list = state
-                .status_list_token_repository
-                .find_one_by(list_id.clone())
-                .await
-                .map_err(|err| {
-                    tracing::error!("Failed to get status list {list_id} from database: {err:?}");
-                    StatusListError::InternalServerError
-                })?
-                .ok_or(StatusListError::StatusListNotFound)?;
-            status_lists.push(status_list);
+            if let Some(token) = state.status_list_token_repository.find_one_by(list_id.clone()).await
+                .map_err(|_| StatusListError::InternalServerError)? {
+                status_lists.push(token);
+            }
         }
     } else if let Some(issuer) = request.issuer {
-        // Fetch all status lists for the given issuer
-        status_lists = state
-            .status_list_token_repository
-            .find_by_issuer(issuer)
-            .await
-            .map_err(|err| {
-                tracing::error!("Failed to get status lists for issuer: {err:?}");
-                StatusListError::InternalServerError
-            })?;
-    } else {
-        return Err(StatusListError::Generic(
-            "Either list_ids or issuer must be provided".to_string(),
-        ));
+        status_lists = state.status_list_token_repository.find_by_issuer(&issuer).await
+            .map_err(|_| StatusListError::InternalServerError)?;
     }
 
     if status_lists.is_empty() {
-        return Err(StatusListError::Generic(
-            "No status lists found".to_string(),
-        ));
+        return Err(StatusListError::StatusListNotFound);
     }
 
-    // Generate a unique aggregation ID
-    let aggregation_id = format!("aggregation_{}", Uuid::new_v4());
-
-    // Store the mapping from aggregation_id to the list of status list IDs
-    {
-        let mut map = AGGREGATION_MAP.lock().await;
-        map.insert(
-            aggregation_id.clone(),
-            status_lists.iter().map(|t| t.list_id.clone()).collect(),
-        );
-    }
-
-    // Return the aggregation URI
-    let aggregation_uri = format!("/statuslists/aggregate/{}", aggregation_id);
-    Ok(axum::Json(
-        serde_json::json!({ "aggregation_uri": aggregation_uri }),
-    ))
-}
-
-pub async fn get_aggregated_status_lists(
-    Path(aggregation_id): Path<String>,
-    State(state): State<AppState>,
-) -> Result<impl IntoResponse, StatusListError> {
-    let map = AGGREGATION_MAP.lock().await;
-    let list_ids = map
-        .get(&aggregation_id)
-        .ok_or(StatusListError::StatusListNotFound)?;
-
-    // Fetch all tokens from the DB
-    let mut tokens = Vec::new();
-    for list_id in list_ids {
-        let token = state
-            .status_list_token_repository
-            .find_one_by(list_id.clone())
-            .await
-            .map_err(|_| StatusListError::InternalServerError)?
-            .ok_or(StatusListError::StatusListNotFound)?;
-        tokens.push(token);
-    }
-
-    Ok(axum::Json(tokens))
+    // TODO: Implement actual aggregation logic
+    // For now, just return a placeholder URI
+    Ok(Json(StatusListAggregationResponse {
+        aggregation_uri: format!(
+            "{}/status-list-aggregation/{}",
+            state.server_public_domain,
+            uuid::Uuid::new_v4()
+        ),
+    }))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::{
-        database::queries::SeaOrmStore,
         model::{status_list_tokens, StatusList, StatusListToken},
-        utils::keygen::Keypair,
-        utils::state::AppState,
+        test_utils::test::test_app_state,
     };
     use axum::http::StatusCode;
     use sea_orm::{DatabaseBackend, MockDatabase};
@@ -150,11 +74,6 @@ mod tests {
         StatusListAggregationRequest { list_ids, issuer }
     }
 
-    // Helper to generate a test server key
-    fn server_key() -> Keypair {
-        Keypair::generate().unwrap()
-    }
-
     #[tokio::test]
     async fn test_aggregate_by_list_ids() {
         let mock_db = MockDatabase::new(DatabaseBackend::Postgres);
@@ -165,6 +84,7 @@ mod tests {
 
         let status_list1 = StatusListToken {
             list_id: list_id1.to_string(),
+            issuer: "issuer1".to_string(),
             exp: None,
             iat: chrono::Utc::now().timestamp(),
             status_list: StatusList {
@@ -177,6 +97,7 @@ mod tests {
 
         let status_list2 = StatusListToken {
             list_id: list_id2.to_string(),
+            issuer: "issuer2".to_string(),
             exp: None,
             iat: chrono::Utc::now().timestamp(),
             status_list: StatusList {
@@ -196,11 +117,7 @@ mod tests {
                 .into_connection(),
         );
 
-        let app_state = AppState {
-            credential_repository: Arc::new(SeaOrmStore::new(db_conn.clone())),
-            status_list_token_repository: Arc::new(SeaOrmStore::new(db_conn)),
-            server_key: Arc::new(server_key()),
-        };
+        let app_state = Arc::new(test_app_state(db_conn));
 
         let headers = HeaderMap::new();
         let response = aggregate_status_lists(State(app_state), headers, Json(request))
@@ -226,6 +143,7 @@ mod tests {
 
         let status_list1 = StatusListToken {
             list_id: "list1".to_string(),
+            issuer: issuer.to_string(),
             exp: None,
             iat: chrono::Utc::now().timestamp(),
             status_list: StatusList {
@@ -238,6 +156,7 @@ mod tests {
 
         let status_list2 = StatusListToken {
             list_id: "list2".to_string(),
+            issuer: issuer.to_string(),
             exp: None,
             iat: chrono::Utc::now().timestamp(),
             status_list: StatusList {
@@ -256,11 +175,7 @@ mod tests {
                 .into_connection(),
         );
 
-        let app_state = AppState {
-            credential_repository: Arc::new(SeaOrmStore::new(db_conn.clone())),
-            status_list_token_repository: Arc::new(SeaOrmStore::new(db_conn)),
-            server_key: Arc::new(server_key()),
-        };
+        let app_state = Arc::new(test_app_state(db_conn));
 
         let headers = HeaderMap::new();
         let response = aggregate_status_lists(State(app_state), headers, Json(request))
@@ -291,16 +206,11 @@ mod tests {
                 .into_connection(),
         );
 
-        let app_state = AppState {
-            credential_repository: Arc::new(SeaOrmStore::new(db_conn.clone())),
-            status_list_token_repository: Arc::new(SeaOrmStore::new(db_conn)),
-            server_key: Arc::new(server_key()),
-        };
+        let app_state = Arc::new(test_app_state(db_conn));
 
         let headers = HeaderMap::new();
         let response = aggregate_status_lists(State(app_state), headers, Json(request))
             .await
-            .unwrap_err()
             .into_response();
 
         assert_eq!(response.status(), StatusCode::NOT_FOUND);

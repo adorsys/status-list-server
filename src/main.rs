@@ -1,12 +1,19 @@
 use axum::{
     http::Method,
     response::IntoResponse,
-    routing::{get, patch, post},
+    routing::{get, post},
     Json, Router,
 };
 use dotenvy::dotenv;
 use serde::Serialize;
-use status_list_server::web::handlers::{credential_handler, get_status_list};
+use status_list_server::{
+    utils::state::setup,
+    web::handlers::{
+        credential_handler,
+        get_status_list,
+        status_list::publish_token_status::publish_token_status,
+    },
+};
 use tokio::net::TcpListener;
 use tower::ServiceBuilder;
 use tower_http::catch_panic::CatchPanicLayer;

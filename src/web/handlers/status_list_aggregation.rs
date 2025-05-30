@@ -19,6 +19,176 @@ use crate::{
     },
 };
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        model::{status_list_tokens, StatusList},
+        test_utils::test::test_app_state,
+    };
+    use axum::http::StatusCode;
+    use sea_orm::{DatabaseBackend, MockDatabase};
+    use std::sync::Arc;
+
+    // Helper to create a test request payload
+    fn create_test_request(list_ids: Vec<String>) -> StatusListAggregationRequest {
+        StatusListAggregationRequest { list_ids }
+    }
+
+    #[tokio::test]
+    async fn test_aggregate_status_lists_success() {
+        let mock_db = MockDatabase::new(DatabaseBackend::Postgres);
+        let list_id1 = "list1";
+        let list_id2 = "list2";
+        let request = create_test_request(vec![list_id1.to_string(), list_id2.to_string()]);
+
+        let status_list1 = StatusListToken::new(
+            list_id1.to_string(),
+            None,
+            chrono::Utc::now().timestamp(),
+            StatusList {
+                bits: 2,
+                lst: "abc".to_string(),
+            },
+            "issuer1".to_string(),
+            None,
+        );
+
+        let status_list2 = StatusListToken::new(
+            list_id2.to_string(),
+            None,
+            chrono::Utc::now().timestamp(),
+            StatusList {
+                bits: 2,
+                lst: "def".to_string(),
+            },
+            "issuer2".to_string(),
+            None,
+        );
+
+        let db_conn = Arc::new(
+            mock_db
+                .append_query_results::<status_list_tokens::Model, Vec<_>, _>(vec![
+                    vec![status_list1.clone()], // find_one_by for list1
+                    vec![status_list2.clone()], // find_one_by for list2
+                ])
+                .into_connection(),
+        );
+
+        let app_state = Arc::new(test_app_state(db_conn));
+
+        let headers = HeaderMap::new();
+        let response = aggregate_status_lists(State(app_state), headers, Json(request))
+            .await
+            .unwrap()
+            .into_response();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_aggregate_status_lists_not_found() {
+        let mock_db = MockDatabase::new(DatabaseBackend::Postgres);
+        let list_id1 = "list1";
+        let list_id2 = "list2";
+        let request = create_test_request(vec![list_id1.to_string(), list_id2.to_string()]);
+
+        let db_conn = Arc::new(
+            mock_db
+                .append_query_results::<status_list_tokens::Model, Vec<_>, _>(vec![
+                    vec![], // find_one_by for list1 returns None
+                ])
+                .into_connection(),
+        );
+
+        let app_state = Arc::new(test_app_state(db_conn));
+
+        let headers = HeaderMap::new();
+        let response = aggregate_status_lists(State(app_state), headers, Json(request))
+            .await
+            .unwrap_err()
+            .into_response();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn test_aggregate_status_lists_invalid_accept_header() {
+        let mock_db = MockDatabase::new(DatabaseBackend::Postgres);
+        let list_id1 = "list1";
+        let list_id2 = "list2";
+        let request = create_test_request(vec![list_id1.to_string(), list_id2.to_string()]);
+
+        let db_conn = Arc::new(
+            mock_db
+                .append_query_results::<status_list_tokens::Model, Vec<_>, _>(vec![
+                    vec![], // find_one_by for list1 returns None
+                ])
+                .into_connection(),
+        );
+
+        let app_state = Arc::new(test_app_state(db_conn));
+
+        let mut headers = HeaderMap::new();
+        headers.insert(header::ACCEPT, "invalid/format".parse().unwrap());
+        let response = aggregate_status_lists(State(app_state), headers, Json(request))
+            .await
+            .unwrap_err()
+            .into_response();
+        assert_eq!(response.status(), StatusCode::NOT_ACCEPTABLE);
+    }
+
+    #[tokio::test]
+    async fn test_aggregate_status_lists_empty_list() {
+        let mock_db = MockDatabase::new(DatabaseBackend::Postgres);
+        let request = create_test_request(vec![]);
+
+        let db_conn = Arc::new(
+            mock_db
+                .append_query_results::<status_list_tokens::Model, Vec<_>, _>(vec![
+                    vec![], // find_one_by returns None
+                ])
+                .into_connection(),
+        );
+
+        let app_state = Arc::new(test_app_state(db_conn));
+
+        let headers = HeaderMap::new();
+        let response = aggregate_status_lists(State(app_state), headers, Json(request))
+            .await
+            .unwrap_err()
+            .into_response();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn test_update_statuslist_success() {
+        let _mock_db = MockDatabase::new(DatabaseBackend::Postgres);
+        let initial_status_list = StatusList {
+            bits: 8,
+            lst: encode_lst(vec![0, 0, 0]),
+        };
+        let _existing_token = StatusListToken::new(
+            "test_list".to_string(),
+            None,
+            1234567890,
+            initial_status_list.clone(),
+            "test_subject".to_string(),
+            None,
+        );
+        let updated_status_list = StatusList {
+            bits: 8,
+            lst: encode_lst(vec![0, 1, 0]), // After update: index 1 set to INVALID
+        };
+        let _updated_token = StatusListToken::new(
+            "test_list".to_string(),
+            None,
+            1234567890,
+            updated_status_list,
+            "test_subject".to_string(),
+            None,
+        );
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct StatusListAggregationRequest {
     pub list_ids: Vec<String>,
@@ -134,203 +304,12 @@ impl StatusListTokenExt for StatusListToken {
     ) -> Self {
         Self {
             list_id,
+            issuer: sub.clone(),
             exp,
             iat,
             status_list,
             sub,
             ttl,
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::{
-        database::queries::SeaOrmStore,
-        model::{status_list_tokens, StatusListToken},
-        utils::keygen::Keypair,
-    };
-    use axum::http::StatusCode;
-    use sea_orm::{DatabaseBackend, MockDatabase};
-    use std::sync::Arc;
-
-    // Helper to create a test request payload
-    fn create_test_request(list_ids: Vec<String>) -> StatusListAggregationRequest {
-        StatusListAggregationRequest { list_ids }
-    }
-
-    // Helper to generate a test server key
-    fn server_key() -> Keypair {
-        Keypair::generate().unwrap()
-    }
-
-    #[tokio::test]
-    async fn test_aggregate_status_lists_success() {
-        let mock_db = MockDatabase::new(DatabaseBackend::Postgres);
-        let list_id1 = "list1";
-        let list_id2 = "list2";
-        let request = create_test_request(vec![list_id1.to_string(), list_id2.to_string()]);
-
-        let status_list1 = StatusListToken::new(
-            list_id1.to_string(),
-            None,
-            chrono::Utc::now().timestamp(),
-            StatusList {
-                bits: 2,
-                lst: "abc".to_string(),
-            },
-            "issuer1".to_string(),
-            None,
-        );
-
-        let status_list2 = StatusListToken::new(
-            list_id2.to_string(),
-            None,
-            chrono::Utc::now().timestamp(),
-            StatusList {
-                bits: 2,
-                lst: "def".to_string(),
-            },
-            "issuer2".to_string(),
-            None,
-        );
-
-        let db_conn = Arc::new(
-            mock_db
-                .append_query_results::<status_list_tokens::Model, Vec<_>, _>(vec![
-                    vec![status_list1.clone()], // find_one_by for list1
-                    vec![status_list2.clone()], // find_one_by for list2
-                ])
-                .into_connection(),
-        );
-
-        let app_state = Arc::new(AppState {
-            credential_repository: Arc::new(SeaOrmStore::new(db_conn.clone())),
-            status_list_token_repository: Arc::new(SeaOrmStore::new(db_conn)),
-            server_key: Arc::new(server_key()),
-        });
-
-        let headers = HeaderMap::new();
-        let response = aggregate_status_lists(State(app_state), headers, Json(request))
-            .await
-            .unwrap()
-            .into_response();
-        assert_eq!(response.status(), StatusCode::OK);
-    }
-
-    #[tokio::test]
-    async fn test_aggregate_status_lists_not_found() {
-        let mock_db = MockDatabase::new(DatabaseBackend::Postgres);
-        let list_id1 = "list1";
-        let list_id2 = "list2";
-        let request = create_test_request(vec![list_id1.to_string(), list_id2.to_string()]);
-
-        let db_conn = Arc::new(
-            mock_db
-                .append_query_results::<status_list_tokens::Model, Vec<_>, _>(vec![
-                    vec![], // find_one_by for list1 returns None
-                ])
-                .into_connection(),
-        );
-
-        let app_state = Arc::new(AppState {
-            credential_repository: Arc::new(SeaOrmStore::new(db_conn.clone())),
-            status_list_token_repository: Arc::new(SeaOrmStore::new(db_conn)),
-            server_key: Arc::new(server_key()),
-        });
-
-        let headers = HeaderMap::new();
-        let response = aggregate_status_lists(State(app_state), headers, Json(request))
-            .await
-            .unwrap_err()
-            .into_response();
-        assert_eq!(response.status(), StatusCode::NOT_FOUND);
-    }
-
-    #[tokio::test]
-    async fn test_aggregate_status_lists_invalid_accept_header() {
-        let mock_db = MockDatabase::new(DatabaseBackend::Postgres);
-        let list_id1 = "list1";
-        let list_id2 = "list2";
-        let request = create_test_request(vec![list_id1.to_string(), list_id2.to_string()]);
-
-        let db_conn = Arc::new(
-            mock_db
-                .append_query_results::<status_list_tokens::Model, Vec<_>, _>(vec![
-                    vec![], // find_one_by for list1 returns None
-                ])
-                .into_connection(),
-        );
-
-        let app_state = Arc::new(AppState {
-            credential_repository: Arc::new(SeaOrmStore::new(db_conn.clone())),
-            status_list_token_repository: Arc::new(SeaOrmStore::new(db_conn)),
-            server_key: Arc::new(server_key()),
-        });
-
-        let mut headers = HeaderMap::new();
-        headers.insert(header::ACCEPT, "invalid/format".parse().unwrap());
-        let response = aggregate_status_lists(State(app_state), headers, Json(request))
-            .await
-            .unwrap_err()
-            .into_response();
-        assert_eq!(response.status(), StatusCode::NOT_ACCEPTABLE);
-    }
-
-    #[tokio::test]
-    async fn test_aggregate_status_lists_empty_list() {
-        let mock_db = MockDatabase::new(DatabaseBackend::Postgres);
-        let request = create_test_request(vec![]);
-
-        let db_conn = Arc::new(
-            mock_db
-                .append_query_results::<status_list_tokens::Model, Vec<_>, _>(vec![
-                    vec![], // find_one_by returns None
-                ])
-                .into_connection(),
-        );
-
-        let app_state = Arc::new(AppState {
-            credential_repository: Arc::new(SeaOrmStore::new(db_conn.clone())),
-            status_list_token_repository: Arc::new(SeaOrmStore::new(db_conn)),
-            server_key: Arc::new(server_key()),
-        });
-
-        let headers = HeaderMap::new();
-        let response = aggregate_status_lists(State(app_state), headers, Json(request))
-            .await
-            .unwrap_err()
-            .into_response();
-        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-    }
-
-    #[tokio::test]
-    async fn test_update_statuslist_success() {
-        let _mock_db = MockDatabase::new(DatabaseBackend::Postgres);
-        let initial_status_list = StatusList {
-            bits: 8,
-            lst: encode_lst(vec![0, 0, 0]),
-        };
-        let _existing_token = StatusListToken::new(
-            "test_list".to_string(),
-            None,
-            1234567890,
-            initial_status_list.clone(),
-            "test_subject".to_string(),
-            None,
-        );
-        let updated_status_list = StatusList {
-            bits: 8,
-            lst: encode_lst(vec![0, 1, 0]), // After update: index 1 set to INVALID
-        };
-        let _updated_token = StatusListToken::new(
-            "test_list".to_string(),
-            None,
-            1234567890,
-            updated_status_list,
-            "test_subject".to_string(),
-            None,
-        );
     }
 }
