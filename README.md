@@ -71,7 +71,7 @@ By default, the server runs on `http://localhost:8000`. You can modify the port 
   ```
   - `issuer`: Unique identifier for the issuer
   - `public_key`: PEM-encoded public key in base64 format
-  - `alg`: Must be "ES256" (ECDSA with P-256 and SHA-256)
+  - `alg`: "ES256" (ECDSA with P-256 and SHA-256)
  
 ### Publish Status List
 - **Endpoint**: `POST /statuslists/publish` 
@@ -175,7 +175,7 @@ The server uses JWT-based authentication with the following requirements:
    Authorization: Bearer <jwt_token>
    ```
 3. The JWT token must:
-   - Be signed with the algorithm specified during issuer registration (currently only ES256 is supported)
+   - Be signed with the algorithm specified during issuer registration.
    - Include the issuer's ID as the `kid` (Key ID) in the header
    - Be signed with the private key corresponding to the registered public key
    - Have valid `exp` (expiration) and `iat` (issued at) claims
