@@ -1,6 +1,6 @@
 # Status List Server
 
-The Status List Server is a web service that manages and publishes status lists, allowing issuers to update statuses and verifiers to retrieve them. It implements the OAuth 2.0 Authorization Framework to secure its endpoints.
+The Status List Server is a web service that manages and publishes status lists, allowing issuers to update statuses and verifiers to retrieve them. It implements JWT-based authentication using ES256 (ECDSA with P-256 and SHA-256) for securing its endpoints.
 
 ## Prerequisites
 Before setting up the Status List Server, ensure you have the following installed:
@@ -14,7 +14,7 @@ Before setting up the Status List Server, ensure you have the following installe
 **Clone the Repository:**
 
    ```bash
-    https://github.com/adorsys/status-list-server.git
+    git clone https://github.com/adorsys/status-list-server.git
     cd status-list-server
    ```
 
@@ -58,38 +58,48 @@ By default, the server runs on `http://localhost:8000`. You can modify the port 
 - **Response:**
   - `200 OK`: Server is running.
   
-### Publish Credentials
+### Register Issuer
 - **Endpoint**: `POST /credentials/`
-- **Description**: Allow issuers to publish their credentials (`public_key` which is the pem base64 encoded form) and identifiers used to later for authorisation verification
+- **Description**: Allows issuers to register their public key and identifier for later authentication
 - **Request Body**
   ```json
-  {"issuer": "<value>", "public_key": "<public_key.pem>", "alg": "<alg>"}
+  {
+    "issuer": "<issuer_id>",
+    "public_key": "<public_key.pem>",
+    "alg": "ES256"
+  }
   ```
+  - `issuer`: Unique identifier for the issuer
+  - `public_key`: PEM-encoded public key in base64 format
+  - `alg`: "ES256" (ECDSA with P-256 and SHA-256)
  
-### Publish statuslist
+### Publish Status List
 - **Endpoint**: `POST /statuslists/publish` 
-- **Description**: Allows an issuer to publish his token status from which will be created a status list
-- **Authorization**: Requires a valid sign jwt with the issuer scope (a signed jwt with issuers as kid).
+- **Description**: Allows an issuer to publish their token status list
+- **Authorization**: Requires a valid signed JWT token with the corresponding registered private key with issuer's ID as the `kid` (Key ID) in the header
 - **Request Body**
   ```json
+  { "list_id": "30202cc6-1e3f-4479-a567-74e86ad73693",
   [
       { "index": 1, "status": "INVALID" },
       { "index": 8, "status": "VALID" }
   ]
+  }
   ```
+  - `index`: Position in the status list
+  - `status`: Status value (VALID, INVALID, SUSPENDED, APPLICATIONSPECIFIC)
 
 ### Update Status List
 
 - **Endpoint:** `PUT /statuslists/{list_id}`
-- **Description:** Allows an issuer to update the status list.
-- **Authorization:** Requires a valid sign jwt with the issuer scope (a signed jwt with issuer as kid).
+- **Description:** Allows an issuer to update an existing status list
+- **Authorization:** Requires a valid signed JWT token with the corresponding registered private key with issuer's ID as the `kid` (Key ID) in the header
   
 - **Request Body:** 
 
   ```json
   {
     "list_id": "755a0cf7-8289-4f65-9d24-0e01be92f4a6",
-    "bits": 4,
     "updates": [
         {
             "index": 1,
@@ -103,26 +113,84 @@ By default, the server runs on `http://localhost:8000`. You can modify the port 
   }
   ```
   
-  - `index`: The position in the status list to update.
-  - `status`: The new status value. Possible values: `VALID`, `INVALID`, `SUSPENDED`, `APPLICATIONSPECIFIC`.
-  
+  - `list_id`: UUID of the status list to update
+  - `updates`: Array of status updates
+    - `index`: Position in the status list
+    - `status`: New status value (VALID, INVALID, SUSPENDED, APPLICATIONSPECIFIC)
+
+  Example of a complete status update payload:
+  ```json
+  {
+    "list_id": "755a0cf7-8289-4f65-9d24-0e01be92f4a6",
+    "updates": [
+        {
+            "index": 1,
+            "status": "VALID"
+        },
+        {
+            "index": 2,
+            "status": "INVALID"
+        },
+        {
+            "index": 3,
+            "status": "SUSPENDED"
+        },
+        {
+            "index": 4,
+            "status": "APPLICATIONSPECIFIC"
+        }
+    ]
+  }
+  ```
 
 - **Responses:**
-  - `200 OK`: The update request has been processed successfully.
-  - `400 BAD REQUEST`: Invalid input data.
+  - `200 OK`: Update successful
+  - `400 BAD REQUEST`: Invalid input data
+  - `401 UNAUTHORIZED`: Invalid or missing JWT token
+  - `403 FORBIDDEN`: Token issuer doesn't match list owner
+  - `404 NOT FOUND`: Status list not found
+  - `500 INTERNAL SERVER ERROR`: System incurred an error
 
 ### Retrieve Status List
 
 - **Endpoint:** `GET /statuslists/{list_id}`
-- **Description:** Retrieves the current status list for the specified issuer. This endpoint is publicly accessible with no authentication required.
+- **Description:** Retrieves the current status list for the requested list_id. This endpoint is publicly accessible with no authentication required.
+- **Headers:**
+  - `Accept`: Specifies the desired response format
+    - `application/jwt`: Returns the status list as a JWT token
+    - `application/cwt`: Returns the status list as a CWT token
+    - Default: Returns the status list in a compressed and encoded format
 - **Responses:**
-  - `200 OK`: Returns the status list in a compressed and encoded format.
-  - `401 UNAUTHORIZED`: Missing or invalid authentication token.
-  - `403 FORBIDDEN`: Insufficient permissions.
-  - `404 NOT FOUND`: Issuer not found.
+  - `200 OK`: Returns the status list in the requested format
+  - `404 NOT FOUND`: Status list not found
+  - `406 NOT ACCEPTABLE`: Requested format not supported
 
+## Authentication
 
-### Issuer Authorization
-The issuer should construct and sign a sample jwt with issuer as kid which will be used to get the key to verify the jwt 
+The server uses JWT-based authentication with the following requirements:
 
-Ensure that the database is set up and the necessary environment variables are configured before running tests.
+1. Issuers must first register their public key using the `/credentials/` endpoint
+2. All authenticated requests must include a JWT token in the Authorization header:
+   ```
+   Authorization: Bearer <jwt_token>
+   ```
+3. The JWT token must:
+   - Be signed with the algorithm specified during issuer registration.
+   - Include the issuer's ID as the `kid` (Key ID) in the header
+   - Be signed with the private key corresponding to the registered public key
+   - Have valid `exp` (expiration) and `iat` (issued at) claims
+
+Example JWT header:
+```json
+{
+  "alg": "ES256",
+  "kid": "issuer-id"
+}
+```
+## Error Handling
+The server implements proper error handling and returns appropriate HTTP status codes:
+- `400 BAD REQUEST`: Invalid input data
+- `401 UNAUTHORIZED`: Missing or invalid authentication token
+- `403 FORBIDDEN`: Insufficient permissions
+- `404 NOT FOUND`: Resource not found
+- `500 INTERNAL SERVER ERROR`: Server-side error
