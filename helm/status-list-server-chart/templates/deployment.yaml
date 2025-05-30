@@ -37,4 +37,4 @@ spec:
             - name: POSTGRES_DB
               value: {{ .Values.postgresql.auth.database | quote }}
             - name: DATABASE_URL
-              value: {{ printf "postgres://%s:%s@%s/%s" .Values.postgresql.auth.username "$$(POSTGRES_PASSWORD)" (printf "%s-postgresql.%s.svc.cluster.local" .Release.Name .Release.Namespace) .Values.postgresql.auth.database | quote }}
+              value: {{ printf "postgres://%s:%s@%s/%s" .Values.postgresql.auth.username "$(POSTGRES_PASSWORD)" (printf "%s-postgresql.%s.svc.cluster.local" .Release.Name .Release.Namespace) .Values.postgresql.auth.database | quote }}
