@@ -1,16 +1,17 @@
 use axum::{
     http::Method,
     response::IntoResponse,
-    routing::{get, patch, post},
+    routing::{get, post},
     Json, Router,
 };
 use dotenvy::dotenv;
 use serde::Serialize;
-use status_list_server::web::handlers::{credential_handler, get_status_list};
 use status_list_server::{
     utils::state::setup,
-    web::handlers::status_list::{
-        publish_token_status::publish_token_status, update_token_status::update_token_status,
+    web::handlers::{
+        credential_handler,
+        get_status_list,
+        status_list::publish_token_status::publish_token_status,
     },
 };
 use tokio::net::TcpListener;
@@ -52,13 +53,8 @@ async fn main() {
         .route("/", get(welcome))
         .route("/health", get(health_check))
         .route("/credentials", post(credential_handler))
-        .nest(
-            "/statuslists",
-            Router::new()
-                .route("/list_id", get(get_status_list))
-                .route("/publish", post(publish_token_status))
-                .route("/update", patch(update_token_status)),
-        )
+        .route("/statuslists/{list_id}", get(get_status_list))
+        .route("/statuslists/publish", post(publish_token_status))
         .layer(
             ServiceBuilder::new()
                 .layer(TraceLayer::new_for_http())
