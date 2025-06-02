@@ -60,14 +60,14 @@ By default, the server runs on `http://localhost:8000`. You can modify the port 
   
 ### Publish Credentials
 - **Endpoint**: `POST /credentials/`
-- **Description**: allow issuers to publish their credentials (`public_key` which is the pem base64 encoded form) and identifiers used to later for authorisation verification
+- **Description**: Allow issuers to publish their credentials (`public_key` which is the pem base64 encoded form) and identifiers used to later for authorisation verification
 - **Request Body**
   ```json
   {"issuer": "<value>", "public_key": "<public_key.pem>", "alg": "<alg>"}
   ```
  
 ### Publish statuslist
-- **Endpoint**: `POST /statuslist/{issuer}` 
+- **Endpoint**: `POST /statuslists/publish` 
 - **Description**: Allows an issuer to publish his token status from which will be created a status list
 - **Authorization**: Requires a valid sign jwt with the issuer scope (a signed jwt with issuers as kid).
 - **Request Body**
@@ -75,22 +75,30 @@ By default, the server runs on `http://localhost:8000`. You can modify the port 
   [
       { "index": 1, "status": "INVALID" },
       { "index": 8, "status": "VALID" }
-    ]
+  ]
   ```
 
 ### Update Status List
 
-- **Endpoint:** `PUT /statuslist/{issuer}`
+- **Endpoint:** `PUT /statuslists/{list_id}`
 - **Description:** Allows an issuer to update the status list.
-- **Authorization:** Requires a valid sign jwt with the issuer scope (a signed jwt with issuers as kid).
+- **Authorization:** Requires a valid sign jwt with the issuer scope (a signed jwt with issuer as kid).
   
 - **Request Body:** 
 
   ```json
   {
+    "list_id": "755a0cf7-8289-4f65-9d24-0e01be92f4a6",
+    "bits": 4,
     "updates": [
-      { "index": 1, "status": "VALID" },
-      { "index": 8, "status": "INVALID" }
+        {
+            "index": 1,
+            "status": "VALID"
+        },
+        {
+            "index": 8,
+            "status": "INVALID"
+        }
     ]
   }
   ```
@@ -100,15 +108,13 @@ By default, the server runs on `http://localhost:8000`. You can modify the port 
   
 
 - **Responses:**
-  - `202 ACCEPTED`: The update request has been accepted and processed.
+  - `200 OK`: The update request has been processed successfully.
   - `400 BAD REQUEST`: Invalid input data.
-  - `401 UNAUTHORIZED`: Missing or invalid authentication token.
-  - `403 FORBIDDEN`: Insufficient permissions.
 
 ### Retrieve Status List
 
-- **Endpoint:** `GET /statuslist/{issuer}`
-- **Description:** Retrieves the current status list for the specified issuer.
+- **Endpoint:** `GET /statuslists/{list_id}`
+- **Description:** Retrieves the current status list for the specified issuer. This endpoint is publicly accessible with no authentication required.
 - **Responses:**
   - `200 OK`: Returns the status list in a compressed and encoded format.
   - `401 UNAUTHORIZED`: Missing or invalid authentication token.
