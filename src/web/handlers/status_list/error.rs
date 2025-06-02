@@ -27,6 +27,12 @@ pub enum StatusListError {
     CompressionError(String),
     #[error("Status list already exists")]
     StatusListAlreadyExists,
+    #[error("Forbidden: {0}")]
+    Forbidden(String),
+    #[error("Token already exists")]
+    TokenAlreadyExists,
+    #[error("Issuer mismatch")]
+    IssuerMismatch,
 }
 
 impl IntoResponse for StatusListError {
@@ -45,6 +51,9 @@ impl IntoResponse for StatusListError {
             DecompressionError(_) => StatusCode::BAD_REQUEST,
             CompressionError(_) => StatusCode::INTERNAL_SERVER_ERROR,
             StatusListAlreadyExists => StatusCode::CONFLICT,
+            Forbidden(_) => StatusCode::FORBIDDEN,
+            TokenAlreadyExists => StatusCode::CONFLICT,
+            IssuerMismatch => StatusCode::FORBIDDEN,
         };
 
         (status_code, self.to_string()).into_response()

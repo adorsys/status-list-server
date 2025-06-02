@@ -5,9 +5,9 @@ services:
     image: postgres:15
     container_name: status-list-server-db
     environment:
-      - POSTGRES_USER=postgres
-      - POSTGRES_PASSWORD=postgres
-      - POSTGRES_DB=status-list
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: status-list
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
@@ -23,6 +23,8 @@ services:
       context: .
       dockerfile: Dockerfile
     container_name: status-list-server
+    ports:
+      - 8000:8000
     environment:
       - RUST_LOG=info
       - DATABASE_URL=postgres://postgres:postgres@db/status-list

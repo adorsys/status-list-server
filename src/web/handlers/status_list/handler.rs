@@ -1,4 +1,4 @@
-use std::{fmt::Debug, sync::Arc};
+use std::{fmt::Debug, io::Write as _, sync::Arc};
 
 use axum::{
     extract::{Path, State},
@@ -11,6 +11,7 @@ use coset::{
     self, cbor::Value as CborValue, iana::Algorithm, CborSerializable, CoseSign1Builder,
     HeaderBuilder,
 };
+use flate2::{write::GzEncoder, Compression};
 use jsonwebtoken::{EncodingKey, Header};
 use p256::ecdsa::{signature::Signer, Signature};
 use serde::{Deserialize, Serialize};
@@ -19,12 +20,13 @@ use serde_json::Value;
 use crate::{
     model::{Status, StatusEntry, StatusList, StatusListToken},
     utils::{keygen::Keypair, state::AppState},
+    web::midlw::AuthenticatedIssuer,
 };
 
 use super::{
     constants::{
-        ACCEPT_STATUS_LISTS_HEADER_CWT, ACCEPT_STATUS_LISTS_HEADER_JWT, CWT_TYPE, EXP, ISSUED_AT,
-        STATUS_LIST, STATUS_LISTS_HEADER_CWT, STATUS_LISTS_HEADER_JWT, SUBJECT, TTL,
+        ACCEPT_STATUS_LISTS_HEADER_CWT, ACCEPT_STATUS_LISTS_HEADER_JWT, CWT_TYPE, EXP, GZIP_HEADER,
+        ISSUED_AT, STATUS_LIST, STATUS_LISTS_HEADER_CWT, STATUS_LISTS_HEADER_JWT, SUBJECT, TTL,
     },
     error::StatusListError,
 };
@@ -32,6 +34,7 @@ use super::{
 pub trait StatusListTokenExt {
     fn new(
         list_id: String,
+        issuer: String,
         exp: Option<i64>,
         iat: i64,
         status_list: StatusList,
@@ -43,6 +46,7 @@ pub trait StatusListTokenExt {
 impl StatusListTokenExt for StatusListToken {
     fn new(
         list_id: String,
+        issuer: String,
         exp: Option<i64>,
         iat: i64,
         status_list: StatusList,
@@ -51,6 +55,7 @@ impl StatusListTokenExt for StatusListToken {
     ) -> Self {
         Self {
             list_id,
+            issuer,
             exp,
             iat,
             status_list,
@@ -97,26 +102,56 @@ async fn build_status_list_token(
         .map_err(|err| {
             tracing::error!("Failed to get status list {list_id} from database: {err:?}");
             StatusListError::InternalServerError
+        })?;
+
+    let status_claims = match status_claims {
+        Some(status_claims) => status_claims,
+        None => {
+            return Err(StatusListError::StatusListNotFound);
+        }
+    };
+
+    // Load the server key from the secret manager
+    let pem = repo
+        .secret_manager
+        .get_server_secret()
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to load server key from cache: {e}");
+            StatusListError::InternalServerError
         })?
-        .ok_or(StatusListError::StatusListNotFound)?;
+        .ok_or(StatusListError::InternalServerError)?;
+    let server_key = Keypair::from_pkcs8_pem(&pem).map_err(|e| {
+        tracing::error!("Failed to parse server key: {e:?}");
+        StatusListError::InternalServerError
+    })?;
 
-    let server_key = repo.server_key.clone();
+    let apply_gzip = |data: &[u8]| -> Result<Vec<u8>, StatusListError> {
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+        encoder.write_all(data).map_err(|err| {
+            tracing::error!("Failed to compress payload: {err:?}");
+            StatusListError::InternalServerError
+        })?;
+        encoder.finish().map_err(|err| {
+            tracing::error!("Failed to finish compression: {err:?}");
+            StatusListError::InternalServerError
+        })
+    };
 
-    if ACCEPT_STATUS_LISTS_HEADER_JWT == accept {
-        Ok((
-            StatusCode::OK,
-            [(header::CONTENT_TYPE, accept)],
-            issue_jwt(&status_claims, &server_key)?,
-        )
-            .into_response())
-    } else {
-        Ok((
-            StatusCode::OK,
-            [(header::CONTENT_TYPE, accept)],
-            issue_cwt(&status_claims, &server_key)?,
-        )
-            .into_response())
-    }
+    let token_bytes = match accept {
+        ACCEPT_STATUS_LISTS_HEADER_CWT => issue_cwt(&status_claims, &server_key)?,
+        _ => issue_jwt(&status_claims, &server_key)?.into_bytes(),
+    };
+
+    Ok((
+        StatusCode::OK,
+        [
+            (header::CONTENT_TYPE, accept),
+            (header::CONTENT_ENCODING, GZIP_HEADER),
+        ],
+        apply_gzip(&token_bytes)?,
+    )
+        .into_response())
 }
 
 // Function to create a CWT per the specification
@@ -239,6 +274,7 @@ fn issue_jwt(token: &StatusListToken, server_key: &Keypair) -> Result<String, St
 pub async fn update_statuslist(
     State(appstate): State<Arc<AppState>>,
     Path(list_id): Path<String>,
+    AuthenticatedIssuer(issuer): AuthenticatedIssuer,
     Json(body): Json<Value>,
 ) -> impl IntoResponse {
     let updates = match body
@@ -303,6 +339,14 @@ pub async fn update_statuslist(
     };
 
     if let Some(status_list_token) = status_list_token {
+        // Ownership check: only the owner (token.sub) can update
+        if status_list_token.sub != issuer {
+            return (
+                StatusCode::FORBIDDEN,
+                StatusListError::Forbidden("Issuer does not own this list".to_string()),
+            )
+                .into_response();
+        }
         let lst = status_list_token.status_list;
         let updated_lst = match update_status(&lst.lst, updates) {
             Ok(updated_lst) => updated_lst,
@@ -328,6 +372,7 @@ pub async fn update_statuslist(
 
         let statuslisttoken = StatusListToken::new(
             list_id.clone(),
+            status_list_token.issuer,
             status_list_token.exp,
             status_list_token.iat,
             status_list,
@@ -388,9 +433,8 @@ fn update_status(lst: &str, updates: Vec<StatusEntry>) -> Result<String, StatusL
 mod tests {
     use super::*;
     use crate::{
-        database::queries::SeaOrmStore,
         model::{status_list_tokens, StatusList, StatusListToken},
-        utils::state::AppState,
+        test_utils::test::test_app_state,
     };
     use axum::{
         body::to_bytes,
@@ -406,11 +450,7 @@ mod tests {
     };
     use sea_orm::{DatabaseBackend, MockDatabase};
     use serde_json::json;
-    use std::sync::Arc;
-
-    fn server_key() -> Keypair {
-        Keypair::from_pkcs8_pem(include_str!("../../../test_resources/ec-private.pem")).unwrap()
-    }
+    use std::{io::Read, sync::Arc};
 
     #[tokio::test]
     async fn test_get_status_list_jwt_success() {
@@ -421,6 +461,7 @@ mod tests {
         };
         let status_list_token = StatusListToken::new(
             "test_list".to_string(),
+            "issuer1".to_string(),
             Some(1234767890),
             1234567890,
             status_list.clone(),
@@ -435,11 +476,7 @@ mod tests {
                 .into_connection(),
         );
 
-        let app_state = AppState {
-            credential_repository: Arc::new(SeaOrmStore::new(db_conn.clone())),
-            status_list_token_repository: Arc::new(SeaOrmStore::new(db_conn)),
-            server_key: Arc::new(server_key()),
-        };
+        let app_state = test_app_state(db_conn.clone());
 
         let mut headers = HeaderMap::new();
         headers.insert(
@@ -457,11 +494,24 @@ mod tests {
         .into_response();
 
         assert_eq!(response.status(), StatusCode::OK);
-        let body_bytes = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+        let headers = response.headers();
+        assert_eq!(headers.get(http::header::CONTENT_ENCODING).unwrap(), "gzip");
+
+        let compressed_body_bytes = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+        let mut decoder = flate2::read::GzDecoder::new(&compressed_body_bytes[..]);
+        let mut body_bytes = Vec::new();
+        decoder.read_to_end(&mut body_bytes).unwrap();
         let body_str = std::str::from_utf8(&body_bytes).unwrap();
 
-        let decoding_key_pem = app_state
-            .server_key
+        // Load the key from the cache
+        let pem = app_state
+            .secret_manager
+            .get_server_secret()
+            .await
+            .unwrap()
+            .unwrap();
+        let server_key = Keypair::from_pkcs8_pem(&pem).unwrap();
+        let decoding_key_pem = server_key
             .verifying_key()
             .to_public_key_pem(LineEnding::default())
             .unwrap()
@@ -491,6 +541,7 @@ mod tests {
         };
         let status_list_token = StatusListToken::new(
             "test_list".to_string(),
+            "issuer1".to_string(),
             None,
             1234567890,
             status_list.clone(),
@@ -505,11 +556,7 @@ mod tests {
                 .into_connection(),
         );
 
-        let app_state = AppState {
-            credential_repository: Arc::new(SeaOrmStore::new(db_conn.clone())),
-            status_list_token_repository: Arc::new(SeaOrmStore::new(db_conn)),
-            server_key: Arc::new(server_key()),
-        };
+        let app_state = test_app_state(db_conn.clone());
 
         let mut headers = HeaderMap::new();
         headers.insert(
@@ -527,14 +574,28 @@ mod tests {
         .into_response();
 
         assert_eq!(response.status(), StatusCode::OK);
-        let body_bytes = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+        let headers = response.headers();
+        assert_eq!(headers.get(http::header::CONTENT_ENCODING).unwrap(), "gzip");
+
+        let compressed_body_bytes = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+        let mut decoder = flate2::read::GzDecoder::new(&compressed_body_bytes[..]);
+        let mut body_bytes = Vec::new();
+        decoder.read_to_end(&mut body_bytes).unwrap();
 
         let cwt = CoseSign1::from_slice(&body_bytes).unwrap();
 
-        // verify signature
-        let binding = app_state.server_key.clone();
-        let signing_key = binding.signing_key();
+        // Load the key from the cache
+        let pem = app_state
+            .secret_manager
+            .get_server_secret()
+            .await
+            .unwrap()
+            .unwrap();
+        let server_key = Keypair::from_pkcs8_pem(&pem).unwrap();
+        let signing_key = server_key.signing_key();
         let verifying_key = VerifyingKey::from(signing_key);
+
+        // Verify signature
         let result = cwt.verify_signature(&[], |sig, data| {
             let signature = Signature::from_slice(sig).unwrap();
             verifying_key.verify(data, &signature)
@@ -602,11 +663,7 @@ mod tests {
                 .into_connection(),
         );
 
-        let app_state = AppState {
-            credential_repository: Arc::new(SeaOrmStore::new(db_conn.clone())),
-            status_list_token_repository: Arc::new(SeaOrmStore::new(db_conn)),
-            server_key: Arc::new(server_key()),
-        };
+        let app_state = test_app_state(db_conn.clone());
 
         let mut headers = HeaderMap::new();
         headers.insert(
@@ -628,11 +685,7 @@ mod tests {
         let mock_db = MockDatabase::new(DatabaseBackend::Postgres);
         let db_conn = Arc::new(mock_db.into_connection());
 
-        let app_state = AppState {
-            credential_repository: Arc::new(SeaOrmStore::new(db_conn.clone())),
-            status_list_token_repository: Arc::new(SeaOrmStore::new(db_conn)),
-            server_key: Arc::new(server_key()),
-        };
+        let app_state = test_app_state(db_conn.clone());
 
         let mut headers = HeaderMap::new();
         headers.insert(http::header::ACCEPT, "application/xml".parse().unwrap()); // unsupported
@@ -656,12 +709,14 @@ mod tests {
             bits: 8,
             lst: encode_lst(vec![0, 0, 0]),
         };
+        let owner = "issuer1";
         let existing_token = StatusListToken::new(
             "test_list".to_string(),
+            "issuer1".to_string(),
             None,
             1234567890,
             initial_status_list.clone(),
-            "test_subject".to_string(),
+            owner.to_string(), // sub matches issuer
             None,
         );
         let updated_status_list = StatusList {
@@ -670,10 +725,11 @@ mod tests {
         };
         let updated_token = StatusListToken::new(
             "test_list".to_string(),
+            "issuer1".to_string(),
             None,
             1234567890,
             updated_status_list,
-            "test_subject".to_string(),
+            owner.to_string(), // sub matches issuer
             None,
         );
         let db_conn = Arc::new(
@@ -686,11 +742,7 @@ mod tests {
                 .into_connection(),
         );
 
-        let app_state = Arc::new(AppState {
-            credential_repository: Arc::new(SeaOrmStore::new(db_conn.clone())),
-            status_list_token_repository: Arc::new(SeaOrmStore::new(db_conn)),
-            server_key: Arc::new(server_key()),
-        });
+        let app_state = test_app_state(db_conn.clone());
 
         let update_body = json!({
             "updates": [
@@ -699,8 +751,9 @@ mod tests {
         });
 
         let response = update_statuslist(
-            State(app_state),
-            Path("test_list".to_string()),
+            State(app_state.into()),
+            Path(owner.to_string()),
+            AuthenticatedIssuer(owner.to_string()),
             Json(update_body),
         )
         .await
@@ -718,11 +771,7 @@ mod tests {
                 .into_connection(),
         );
 
-        let app_state = Arc::new(AppState {
-            credential_repository: Arc::new(SeaOrmStore::new(db_conn.clone())),
-            status_list_token_repository: Arc::new(SeaOrmStore::new(db_conn)),
-            server_key: Arc::new(server_key()),
-        });
+        let app_state = test_app_state(db_conn.clone());
 
         let update_body = json!({
             "updates": [
@@ -731,8 +780,9 @@ mod tests {
         });
 
         let response = update_statuslist(
-            State(app_state),
+            State(app_state.into()),
             Path("test_list".to_string()),
+            AuthenticatedIssuer("test_list".to_string()),
             Json(update_body),
         )
         .await
