@@ -4,3 +4,4 @@
 .vscode/
 cert.yml
 tls.crt
+aws-credentials
