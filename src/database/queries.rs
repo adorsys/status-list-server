@@ -82,7 +82,7 @@ impl SeaOrmStore<StatusListToken> {
         Ok(result.rows_affected > 0)
     }
 
-    pub async fn find_by_issuer(
+    pub async fn find_all_by_issuer(
         &self,
         issuer: &str,
     ) -> Result<Vec<StatusListToken>, RepositoryError> {

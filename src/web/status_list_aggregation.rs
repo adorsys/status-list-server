@@ -39,7 +39,7 @@ pub async fn aggregate_status_lists(
     } else if let Some(issuer) = request.issuer {
         status_lists = state
             .status_list_token_repository
-            .find_by_issuer(&issuer)
+            .find_all_by_issuer(&issuer)
             .await
             .map_err(|_| StatusListError::InternalServerError)?;
     }
