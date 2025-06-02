@@ -55,4 +55,4 @@ jobs:
 
       - name: 🚀 Update Kubernetes deployment
         run: |
-          kubectl set image deployment/statuslist-status-list-server-deployment  statuslist-container=ghcr.io/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:${{ github.sha }} -n ${{ env.NAMESPACE }}
+          kubectl set image deployment/statuslist-status-list-server-deployment  statuslist-list-server=ghcr.io/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:${{ github.sha }} -n ${{ env.NAMESPACE }}
