@@ -9,8 +9,7 @@ use serde::Serialize;
 use status_list_server::{
     utils::state::setup,
     web::handlers::{
-        credential_handler,
-        get_status_list,
+        credential_handler, get_status_list,
         status_list::publish_token_status::publish_token_status,
     },
 };

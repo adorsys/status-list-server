@@ -95,7 +95,15 @@ pub async fn get_status_list(
         })?
         .ok_or(StatusListError::StatusListNotFound)?;
 
-    let server_key = Keypair::from_pkcs8_pem(&state.secret_manager.get_server_secret().await.map_err(|_| StatusListError::InternalServerError)?.unwrap()).map_err(|_| StatusListError::InternalServerError)?;
+    let server_key = Keypair::from_pkcs8_pem(
+        &state
+            .secret_manager
+            .get_server_secret()
+            .await
+            .map_err(|_| StatusListError::InternalServerError)?
+            .unwrap(),
+    )
+    .map_err(|_| StatusListError::InternalServerError)?;
 
     // Removed unused variable `status_claims`
 
@@ -396,7 +404,15 @@ pub async fn build_status_list_token(
     token: &StatusListToken,
     state: &AppState,
 ) -> Result<impl IntoResponse + Debug, StatusListError> {
-    let server_key = Keypair::from_pkcs8_pem(&state.secret_manager.get_server_secret().await.map_err(|_| StatusListError::InternalServerError)?.unwrap()).map_err(|_| StatusListError::InternalServerError)?;
+    let server_key = Keypair::from_pkcs8_pem(
+        &state
+            .secret_manager
+            .get_server_secret()
+            .await
+            .map_err(|_| StatusListError::InternalServerError)?
+            .unwrap(),
+    )
+    .map_err(|_| StatusListError::InternalServerError)?;
 
     if ACCEPT_STATUS_LISTS_HEADER_JWT == accept {
         Ok((

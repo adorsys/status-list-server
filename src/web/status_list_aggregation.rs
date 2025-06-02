@@ -1,7 +1,4 @@
-use crate::{
-    utils::state::AppState,
-    web::handlers::status_list::error::StatusListError,
-};
+use crate::{utils::state::AppState, web::handlers::status_list::error::StatusListError};
 use axum::{
     extract::{Json, State},
     http::HeaderMap,
@@ -30,13 +27,20 @@ pub async fn aggregate_status_lists(
 
     if let Some(list_ids) = request.list_ids {
         for list_id in list_ids {
-            if let Some(token) = state.status_list_token_repository.find_one_by(list_id.clone()).await
-                .map_err(|_| StatusListError::InternalServerError)? {
+            if let Some(token) = state
+                .status_list_token_repository
+                .find_one_by(list_id.clone())
+                .await
+                .map_err(|_| StatusListError::InternalServerError)?
+            {
                 status_lists.push(token);
             }
         }
     } else if let Some(issuer) = request.issuer {
-        status_lists = state.status_list_token_repository.find_by_issuer(&issuer).await
+        status_lists = state
+            .status_list_token_repository
+            .find_by_issuer(&issuer)
+            .await
             .map_err(|_| StatusListError::InternalServerError)?;
     }
 
