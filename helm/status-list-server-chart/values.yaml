@@ -3,7 +3,7 @@ statuslist:
   image:
     repository: ghcr.io/adorsys/status-list-server
     pullPolicy: IfNotPresent
-    tag: "1.0.0" # Replace with your actual version
+    tag: "latest"
   service:
     type: ClusterIP
     port: 80
@@ -24,6 +24,8 @@ statuslist:
     externalDnsHostname: statuslist.eudi-adorsys.com
   env:
     RUST_LOG: "info"
+    SERVER_KEY_SECRET_NAME: "statuslist-secret"
+    ENVIRONMENT: "prod"
   resources:
     requests:
       memory: "256Mi"

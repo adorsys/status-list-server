@@ -32,9 +32,25 @@ spec:
                 secretKeyRef:
                   name: {{ .Values.externalSecret.spec.target.name }}
                   key: postgres-password
+            - name: AWS_REGION
+              value: {{ .Values.secretStore.aws.region | quote }}
+            - name: SERVER_PUBLIC_DOMAIN
+              value: {{ .Values.statuslist.ingress.externalDnsHostname | quote }}
+            - name: SERVER_KEY_SECRET_NAME
+              value: {{ .Values.statuslist.env.SERVER_KEY_SECRET_NAME | quote }}
+            - name: ENVIRONMENT
+              value: {{ .Values.statuslist.env.ENVIRONMENT | quote }}
             - name: POSTGRES_HOST
               value: {{ printf "%s-postgresql.%s.svc.cluster.local" .Release.Name .Release.Namespace | quote }}
             - name: POSTGRES_DB
               value: {{ .Values.postgresql.auth.database | quote }}
             - name: DATABASE_URL
               value: {{ printf "postgres://%s:%s@%s/%s" .Values.postgresql.auth.username "$(POSTGRES_PASSWORD)" (printf "%s-postgresql.%s.svc.cluster.local" .Release.Name .Release.Namespace) .Values.postgresql.auth.database | quote }}
+          volumeMounts:
+            - name: aws-credentials-volume
+              mountPath: /root/.aws
+              readOnly: true
+      volumes:
+        - name: aws-credentials-volume
+          secret:
+            secretName: aws-credentials-secret
