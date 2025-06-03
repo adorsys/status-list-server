@@ -78,5 +78,4 @@ externalSecret:
 secretStore:
   aws:
     region: eu-central-1
-    authType: jwt
-    serviceAccountName: statuslist-secret-store-sa
+
