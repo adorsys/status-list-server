@@ -1,13 +1,9 @@
-version: '3.9'
-
 services:
   db:
     image: postgres:15
     container_name: status-list-server-db
-    environment:
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: postgres
-      POSTGRES_DB: status-list
+    env_file:
+      - .env
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
