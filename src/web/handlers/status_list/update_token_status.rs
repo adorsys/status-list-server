@@ -5,7 +5,8 @@ use crate::{
     model::StatusRequest,
     utils::{
         bits_validation::BitFlag, errors::Error, lst_gen::update_status_list, state::AppState,
-    }, web::midlw::AuthenticatedIssuer,
+    },
+    web::midlw::AuthenticatedIssuer,
 };
 
 use super::error::StatusListError;
@@ -99,7 +100,10 @@ mod test {
         },
         test_utils::test::test_app_state,
         utils::lst_gen::create_status_list,
-        web::{handlers::status_list::update_token_status::update_token_status, midlw::AuthenticatedIssuer},
+        web::{
+            handlers::status_list::update_token_status::update_token_status,
+            midlw::AuthenticatedIssuer,
+        },
     };
 
     #[tokio::test]
