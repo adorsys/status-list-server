@@ -1,9 +1,13 @@
+mod database;
+mod test_resources;
+#[cfg(test)]
+mod test_utils;
+mod utils;
+
 pub mod auth;
 pub mod config;
-mod database;
-pub mod model;
-mod test_resources;
-mod test_utils;
+pub mod models;
 pub mod startup;
-pub mod utils;
 pub mod web;
+
+pub use utils::{cert_manager, state};
