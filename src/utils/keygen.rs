@@ -57,7 +57,7 @@ impl Keypair {
         self.repr.key.verifying_key()
     }
 
-    /// Create a keypair from a pkcs8 PEM file
+    /// Create a keypair from a pkcs8 PEM string
     pub fn from_pkcs8_pem(pem: &str) -> Result<Self, Error> {
         let key = SigningKey::from_pkcs8_pem(pem).map_err(|err| {
             tracing::error!("Failed to create signing key from PEM: {err:?}");

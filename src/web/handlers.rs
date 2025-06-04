@@ -1,6 +1,8 @@
+mod acme;
 mod credential_issuance;
 pub mod status_list;
 
+pub use acme::serve_acme_challenge;
 pub use credential_issuance::credential_handler;
 pub use status_list::{
     error::StatusListError,

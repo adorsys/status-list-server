@@ -2,6 +2,7 @@ use jsonwebtoken::Algorithm;
 use sea_orm::ActiveValue::Set;
 use sea_orm::{entity::prelude::*, FromJsonQueryResult};
 use serde::{Deserialize, Serialize};
+use chrono::{DateTime, Utc};
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Alg(pub Algorithm);
@@ -148,6 +149,25 @@ pub mod status_list_tokens {
 }
 
 pub type StatusListToken = status_list_tokens::Model;
+
+pub mod certificate {
+    use super::*;
+
+    #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
+    #[sea_orm(table_name = "certificate")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = true)]
+        pub id: i32,
+        pub certificate: String,
+        pub expires_at: DateTime<Utc>,
+        pub updated_at: DateTime<Utc>,
+    }
+
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub enum Relation {}
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
 
 // Additional types for status list handling
 #[derive(Clone, Debug, Serialize, Deserialize)]

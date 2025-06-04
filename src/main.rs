@@ -1,3 +1,5 @@
+use core::panic;
+
 use axum::{
     http::Method,
     response::IntoResponse,
@@ -6,6 +8,9 @@ use axum::{
 };
 use dotenvy::dotenv;
 use serde::Serialize;
+use status_list_server::config::Config as AppConfig;
+use status_list_server::utils::state::setup;
+use status_list_server::web::handlers::status_list::publish_token_status::publish_token_status;
 use status_list_server::web::handlers::{credential_handler, get_status_list};
 use status_list_server::{
     utils::state::setup,
@@ -21,56 +26,18 @@ use tower_http::{
     trace::TraceLayer,
 };
 
-async fn welcome() -> impl IntoResponse {
-    "Status list Server"
-}
-
-#[derive(Serialize)]
-struct HealthCheckResponse {
-    status: String,
-}
-
-async fn health_check() -> impl IntoResponse {
-    Json(HealthCheckResponse {
-        status: "OK".to_string(),
-    })
-}
-
 #[tokio::main]
-async fn main() {
-    dotenv().ok();
+async fn main() -> Result<(), color_eyre::Result<()>> {
     config_tracing();
+    dotenv().ok();
+    color_eyre::install()?;
 
     let state = setup().await;
+    let config = AppConfig::load()?;
 
-    let cors = CorsLayer::new()
-        .allow_methods([Method::GET, Method::POST, Method::OPTIONS])
-        .allow_origin(Any)
-        .allow_headers(Any);
-
-    let router = Router::new()
-        .route("/", get(welcome))
-        .route("/health", get(health_check))
-        .route("/credentials", post(credential_handler))
-        .nest(
-            "/statuslists",
-            Router::new()
-                .route("/list_id", get(get_status_list))
-                .route("/publish", post(publish_token_status))
-                .route("/update", patch(update_token_status)),
-        )
-        .layer(
-            ServiceBuilder::new()
-                .layer(TraceLayer::new_for_http())
-                .layer(CatchPanicLayer::new())
-                .layer(cors),
-        )
-        .with_state(state);
-
-    let addr = "0.0.0.0:8000";
-    let listener = TcpListener::bind(addr).await.unwrap();
-    tracing::info!("listening on {addr}");
-    axum::serve(listener, router).await.unwrap()
+    let server = HttpServer::new(config, state).await?;
+    server.run().await?;
+    Ok(())
 }
 
 fn config_tracing() {

@@ -271,6 +271,18 @@ fn issue_jwt(token: &StatusListToken, server_key: &Keypair) -> Result<String, St
     Ok(token)
 }
 
+// Parse certificate chain for x5c/x5chain
+fn parse_cert_chain(pem: &str) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+    let certs = X509::stack_from_pem(pem.as_bytes())?;
+    let mut base64_certs = Vec::new();
+    for cert in certs {
+        let der = cert.to_der()?;
+        let base64_cert = base64::encode(&der);
+        base64_certs.push(base64_cert);
+    }
+    Ok(base64_certs)
+}
+
 pub async fn update_statuslist(
     State(appstate): State<Arc<AppState>>,
     Path(list_id): Path<String>,
