@@ -80,7 +80,10 @@ where
                 Err((StatusCode::UNAUTHORIZED, "Issuer not found").into_response())
             }
             // Map all other errors to 401 Unauthorized for token/format errors
-            Err(_) => Err((StatusCode::UNAUTHORIZED, "Invalid token").into_response()),
+            Err(err) => {
+                tracing::error!("Bearer token verification failed: {:?}", err);
+                Err((StatusCode::UNAUTHORIZED, "Invalid token").into_response())
+            }
         }
     }
 }
