@@ -20,6 +20,7 @@ pub mod migrations {
     /// Database tables module containing table creation migrations
     pub mod tables {
         use super::*;
+        use crate::model::certificate;
 
         /// Migration struct for creating database tables
         #[derive(DeriveMigrationName)]
@@ -79,6 +80,38 @@ pub mod migrations {
                     )
                     .await?;
 
+                manager
+                    .create_table(
+                        Table::create()
+                            .table(certificate::Entity)
+                            .if_not_exists()
+                            .col(
+                                ColumnDef::new(certificate::Column::Id)
+                                    .integer()
+                                    .not_null()
+                                    .auto_increment()
+                                    .primary_key(),
+                            )
+                            .col(
+                                ColumnDef::new(certificate::Column::Certificate)
+                                    .text()
+                                    .not_null(),
+                            )
+                            .col(
+                                ColumnDef::new(certificate::Column::ExpiresAt)
+                                    .timestamp()
+                                    .not_null(),
+                            )
+                            .col(
+                                ColumnDef::new(certificate::Column::UpdatedAt)
+                                    .timestamp()
+                                    .not_null()
+                                    .default(Expr::current_timestamp()),
+                            )
+                            .to_owned(),
+                    )
+                    .await?;
+
                 Ok(())
             }
 
@@ -90,6 +123,9 @@ pub mod migrations {
                     .await?;
                 manager
                     .drop_table(Table::drop().table(StatusListTokens::Table).to_owned())
+                    .await?;
+                manager
+                    .drop_table(Table::drop().table(certificate::Entity).to_owned())
                     .await?;
                 Ok(())
             }
