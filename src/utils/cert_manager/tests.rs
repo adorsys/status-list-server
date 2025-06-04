@@ -244,7 +244,7 @@ async fn test_certificate_storage_and_retrieval() {
     let cert_data: CertificateData = serde_json::from_str(serialized).unwrap();
 
     let cert_key = manager.cert_key();
-    cert_storage.store(&cert_key, &serialized).await.unwrap();
+    cert_storage.store(&cert_key, serialized).await.unwrap();
 
     let retrieved_cert = manager.certificate().await.unwrap();
     assert!(retrieved_cert.is_some());
@@ -330,7 +330,7 @@ async fn test_cert_chain_parts() {
     // there are 2 parts in the certificate chain
     let serialized = include_str!("../../test_resources/cert_data.json");
     cert_storage
-        .store("certs/example.com/cert_data.json", &serialized)
+        .store("certs/example.com/cert_data.json", serialized)
         .await
         .unwrap();
 
