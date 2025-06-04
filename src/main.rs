@@ -1,42 +1,41 @@
-use core::panic;
-
-use axum::{
-    http::Method,
-    response::IntoResponse,
-    routing::{get, patch, post},
-    Json, Router,
-};
+use color_eyre::eyre::eyre;
 use dotenvy::dotenv;
-use serde::Serialize;
-use status_list_server::config::Config as AppConfig;
-use status_list_server::utils::state::setup;
-use status_list_server::web::handlers::status_list::publish_token_status::publish_token_status;
-use status_list_server::web::handlers::{credential_handler, get_status_list};
-use status_list_server::{
-    utils::state::setup,
-    web::handlers::status_list::{
-        publish_token_status::publish_token_status, update_token_status::update_token_status,
-    },
-};
-use tokio::net::TcpListener;
-use tower::ServiceBuilder;
-use tower_http::catch_panic::CatchPanicLayer;
-use tower_http::{
-    cors::{Any, CorsLayer},
-    trace::TraceLayer,
-};
+use rustls::crypto::aws_lc_rs;
+use status_list_server::cert_manager::setup_cert_renewal_scheduler;
+use status_list_server::state::build_state;
+use status_list_server::{config::Config as AppConfig, startup::HttpServer};
+use tracing::warn;
 
 #[tokio::main]
-async fn main() -> Result<(), color_eyre::Result<()>> {
+async fn main() -> color_eyre::Result<()> {
     config_tracing();
     dotenv().ok();
+    // Install the default panic and error report hooks
     color_eyre::install()?;
 
-    let state = setup().await;
-    let config = AppConfig::load()?;
+    // Install the crypto provider
+    aws_lc_rs::default_provider()
+        .install_default()
+        .map_err(|e| eyre!("Failed to set crypto provider: {e:?}"))?;
 
-    let server = HttpServer::new(config, state).await?;
-    server.run().await?;
+    // Load configuration and build the app state
+    let config = AppConfig::load()?;
+    let app_state = build_state(&config).await?;
+
+    // Setup certificate renewal scheduler
+    let cert_manager = app_state.cert_manager.clone();
+    setup_cert_renewal_scheduler(cert_manager.clone()).await?;
+
+    let http_server = HttpServer::new(&config, app_state).await?;
+
+    // Initial certificate request
+    tokio::spawn(async move {
+        if let Err(e) = cert_manager.renew_cert_if_needed().await {
+            warn!("Certificate initialization failed: {e}");
+        }
+    });
+
+    http_server.run().await?;
     Ok(())
 }
 
