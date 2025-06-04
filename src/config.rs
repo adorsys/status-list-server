@@ -147,7 +147,7 @@ mod tests {
             "postgres://postgres:postgres@localhost:5432/status-list"
         );
         assert_eq!(config.redis.uri.expose_secret(), "redis://localhost:6379");
-        assert_eq!(config.redis.require_tls, false);
+        assert!(!config.redis.require_tls);
         assert_eq!(config.server.cert.email, "admin@example.com");
         assert_eq!(
             config.server.cert.acme_directory_url,
@@ -179,7 +179,7 @@ mod tests {
             config.redis.uri.expose_secret(),
             "rediss://user:password@localhost:6379/redis"
         );
-        assert_eq!(config.redis.require_tls, true);
+        assert!(config.redis.require_tls);
         assert_eq!(config.server.cert.email, "test@gmail.com");
         assert_eq!(
             config.server.cert.acme_directory_url,
