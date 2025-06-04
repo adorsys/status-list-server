@@ -307,7 +307,7 @@ fn test_tld_plus_one_function() {
 #[test]
 fn test_ts_to_local_helper() {
     init_crypto();
-    
+
     let timestamp = 1749045448;
     let result = ts_to_local(timestamp);
     assert_eq!("2025-06-04 14:57", result);
@@ -316,7 +316,7 @@ fn test_ts_to_local_helper() {
 #[tokio::test]
 async fn test_cert_chain_parts() {
     init_crypto();
-    
+
     let cert_storage = MockStorage::new();
     let cert_manager = CertManager::new(
         vec!["example.com"],
