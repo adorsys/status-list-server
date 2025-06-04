@@ -25,6 +25,7 @@ dependencies:
   - charset-normalizer=3.3.2=pyhd3eb1b0_0
   - click=8.1.8=py310h06a4308_0
   - comm=0.2.1=py310h06a4308_0
+  - cryptography=45.0.3=py310h2ccb017_0
   - debugpy=1.8.11=py310h6a678d5_0
   - decorator=5.1.1=pyhd3eb1b0_0
   - defusedxml=0.7.1=pyhd3eb1b0_0
