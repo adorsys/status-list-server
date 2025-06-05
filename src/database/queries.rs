@@ -46,18 +46,6 @@ impl SeaOrmStore<StatusListToken> {
             .map_err(|e| RepositoryError::FindError(e.to_string()))
     }
 
-    pub async fn find_all_by(
-        &self,
-        issuer: String,
-    ) -> Result<Vec<StatusListToken>, RepositoryError> {
-        status_list_tokens::Entity::find()
-            .filter(status_list_tokens::Column::ListId.eq(issuer))
-            .all(&*self.db)
-            .await
-            .map(|tokens| tokens.into_iter().collect())
-            .map_err(|e| RepositoryError::FindError(e.to_string()))
-    }
-
     pub async fn update_one(
         &self,
         list_id: String,
@@ -94,7 +82,7 @@ impl SeaOrmStore<StatusListToken> {
         Ok(result.rows_affected > 0)
     }
 
-    pub async fn find_by_issuer(
+    pub async fn find_all_by_issuer(
         &self,
         issuer: &str,
     ) -> Result<Vec<StatusListToken>, RepositoryError> {
