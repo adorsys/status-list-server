@@ -35,11 +35,12 @@ This command will pull and start postgres and also build the project image and s
 
 **Environment Variables:**
 
+> **TODO:** Document other required environment variables.
+
 Create a `.env` file in the root directory with the following configurations:
 
 ```env
 DATABASE_URL=postgres://username:password@localhost/status_list_db
-TODO: Document other required environment variables
 ```
 
 Replace `username` and `password` with your PostgreSQL credentials.
