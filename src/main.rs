@@ -1,4 +1,4 @@
-use color_eyre::eyre::eyre;
+use color_eyre::{eyre::eyre, Result};
 use dotenvy::dotenv;
 use rustls::crypto::aws_lc_rs;
 use status_list_server::cert_manager::setup_cert_renewal_scheduler;
@@ -7,7 +7,7 @@ use status_list_server::{config::Config as AppConfig, startup::HttpServer};
 use tracing::warn;
 
 #[tokio::main]
-async fn main() -> color_eyre::Result<()> {
+async fn main() -> Result<()> {
     config_tracing();
     dotenv().ok();
     // Install the default panic and error report hooks
