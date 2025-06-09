@@ -34,13 +34,15 @@ coset = "0.3"
 instant-acme = "0.7"
 jsonwebtoken = "9.3"
 rustls = "0.23"
+webpki-roots = "1"
 rustls-pki-types = "1.12"
 secrecy = { version = "0.10", features = ["serde"] }
 rcgen = { version = "0.13", features = ["pem"] }
 
 # Serialization
-serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+serde-aux = "4"
+serde = { version = "1.0", features = ["derive"] }
 
 # Configuration and Environment
 config = "0.15"
