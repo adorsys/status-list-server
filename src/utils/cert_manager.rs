@@ -200,7 +200,7 @@ impl CertManager {
         let identifiers: Vec<_> = self
             .domains
             .iter()
-            .map(|ident| Identifier::Dns(ident.clone()))
+            .map(|ident| Identifier::Dns(ident.into()))
             .collect();
 
         // Create the ACME order based on the given domain name(s).
@@ -250,8 +250,8 @@ impl CertManager {
                 OrderStatus::Invalid => {
                     error!("Failed to get certficate. The order is invalid");
                     return Err(CertError::Other(eyre!(
-                        "order with url {} is invalid",
-                        order.url()
+                        "order with url {} for domains {:?} has been invalidated",
+                        order.url(), self.domains
                     )));
                 }
                 _ => sleep(Duration::from_secs(2)).await,

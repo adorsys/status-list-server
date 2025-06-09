@@ -5,7 +5,7 @@ use http_body_util::Full;
 use hyper::Request;
 use hyper_rustls::{HttpsConnector, HttpsConnectorBuilder};
 use hyper_util::{
-    client::legacy::{connect::HttpConnector, Client as HyperClient},
+    client::legacy::{connect::HttpConnector, Client},
     rt::TokioExecutor,
 };
 use instant_acme::{BytesResponse, Error, HttpClient};
@@ -20,7 +20,7 @@ pub struct DefaultHttpClient(ClientInner);
 
 impl DefaultHttpClient {
     /// Create a new instance of [DefaultHttpClient] with optional root certificate chain pem
-    pub fn new(root_cert_pem: Option<&str>) -> Result<Self, CertError> {
+    pub fn new(root_cert_pem: Option<&[u8]>) -> Result<Self, CertError> {
         Ok(Self(ClientInner::try_new(root_cert_pem)?))
     }
 }
@@ -42,30 +42,30 @@ impl HttpClient for DefaultHttpClient {
 
 #[derive(Clone)]
 struct ClientInner {
-    client: HyperClient<HttpsConnector<HttpConnector>, Full<Bytes>>,
+    client: Client<HttpsConnector<HttpConnector>, Full<Bytes>>,
 }
 
 impl ClientInner {
-    pub fn try_new(root_cert_pem: Option<&str>) -> Result<Self, CertError> {
-        let http_builder = if let Some(root_pem) = root_cert_pem {
-            let der_certs: Vec<_> = CertificateDer::pem_slice_iter(root_pem.as_bytes())
+    pub fn try_new(root_cert_pem: Option<&[u8]>) -> Result<Self, CertError> {
+        let mut root_store = RootCertStore::empty();
+        if let Some(root_pem) = root_cert_pem {
+            let certs_der: Vec<_> = CertificateDer::pem_slice_iter(root_pem)
                 .collect::<Result<Vec<_>, _>>()
                 .map_err(|e| CertError::Parsing(e.to_string()))?;
-            let mut root_store = RootCertStore::empty();
-            root_store.add_parsable_certificates(der_certs);
-            let tls_config = ClientConfig::builder()
-                .with_root_certificates(root_store)
-                .with_no_client_auth();
-            HttpsConnectorBuilder::new().with_tls_config(tls_config)
-        } else {
-            HttpsConnectorBuilder::new()
-                .with_native_roots()
-                .map_err(|e| CertError::Other(e.into()))?
-        };
+            root_store.add_parsable_certificates(certs_der);
+        }
+        root_store.extend(webpki_roots::TLS_SERVER_ROOTS.to_vec());
+        let tls_config = ClientConfig::builder()
+            .with_root_certificates(root_store)
+            .with_no_client_auth();
+        let http_builder = HttpsConnectorBuilder::new()
+            .with_tls_config(tls_config)
+            .https_only()
+            .enable_all_versions()
+            .build();
 
         Ok(Self {
-            client: HyperClient::builder(TokioExecutor::new())
-                .build(http_builder.https_only().enable_all_versions().build()),
+            client: Client::builder(TokioExecutor::new()).build(http_builder),
         })
     }
 }
