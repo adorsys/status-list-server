@@ -4,7 +4,6 @@
 .vscode/
 cert.yml
 tls.crt
-aws-credentials
 
 ### JupyterNotebooks ###
 __pycache__
