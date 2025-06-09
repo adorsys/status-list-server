@@ -19,7 +19,7 @@ cd status-list-server
 
 ### Configuration
 
- **Environment Variables:**
+**Environment Variables:**
 
    Create a `.env` file in the root directory. Take a look at the [.env.template](.env.template) file for an example of the required variables.
 
@@ -53,7 +53,7 @@ By default, the server will listen on `http://localhost:8000`. You can modify th
 - **Description:** Checks the health status of the server.
 - **Response:**
   - `200 OK`: Server is running.
-  
+
 ### Register Issuer
 
 - **Endpoint**: `POST /credentials/`
@@ -69,7 +69,7 @@ By default, the server will listen on `http://localhost:8000`. You can modify th
   ```
 
   - `issuer`: Unique identifier for the issuer
-  - `public_key`: PEM-encoded public key in base64 format
+  - `public_key`: PEM-encoded public key
   - `alg`: "ES256" (ECDSA with P-256 and SHA-256)
 
 ### Publish Status List
@@ -80,8 +80,9 @@ By default, the server will listen on `http://localhost:8000`. You can modify th
 - **Request Body**
 
   ```json
-  { "list_id": "30202cc6-1e3f-4479-a567-74e86ad73693",
-    [
+  {
+    "list_id": "30202cc6-1e3f-4479-a567-74e86ad73693",
+    "status": [
       { "index": 1, "status": "INVALID" },
       { "index": 8, "status": "VALID" }
     ]
@@ -93,30 +94,29 @@ By default, the server will listen on `http://localhost:8000`. You can modify th
 
 ### Update Status List
 
-- **Endpoint:** `PUT /statuslists/{list_id}`
+- **Endpoint:** `PUT /statuslists/update`
 - **Description:** Allows an issuer to update an existing status list
 - **Authorization:** Requires a valid signed JWT token with the corresponding registered private key with issuer's ID as the `kid` (Key ID) in the header
-  
 - **Request Body:**
 
   ```json
   {
     "list_id": "755a0cf7-8289-4f65-9d24-0e01be92f4a6",
-    "updates": [
-        {
-            "index": 1,
-            "status": "VALID"
-        },
-        {
-            "index": 8,
-            "status": "INVALID"
-        }
+    "status": [
+      {
+        "index": 1,
+        "status": "VALID"
+      },
+      {
+        "index": 8,
+        "status": "INVALID"
+      }
     ]
   }
   ```
-  
+
   - `list_id`: UUID of the status list to update
-  - `updates`: Array of status updates
+  - `status`: Array of status updates
     - `index`: Position in the status list
     - `status`: New status value (VALID, INVALID, SUSPENDED, APPLICATIONSPECIFIC)
 
@@ -125,23 +125,23 @@ By default, the server will listen on `http://localhost:8000`. You can modify th
   ```json
   {
     "list_id": "755a0cf7-8289-4f65-9d24-0e01be92f4a6",
-    "updates": [
-        {
-            "index": 1,
-            "status": "VALID"
-        },
-        {
-            "index": 2,
-            "status": "INVALID"
-        },
-        {
-            "index": 3,
-            "status": "SUSPENDED"
-        },
-        {
-            "index": 4,
-            "status": "APPLICATIONSPECIFIC"
-        }
+    "status": [
+      {
+        "index": 1,
+        "status": "VALID"
+      },
+      {
+        "index": 2,
+        "status": "INVALID"
+      },
+      {
+        "index": 3,
+        "status": "SUSPENDED"
+      },
+      {
+        "index": 4,
+        "status": "APPLICATIONSPECIFIC"
+      }
     ]
   }
   ```
