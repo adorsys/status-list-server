@@ -165,7 +165,6 @@ mod tests {
     use p256::pkcs8::LineEnding;
     use sea_orm::{DatabaseBackend, MockDatabase};
     use std::time::{SystemTime, UNIX_EPOCH};
-    use uuid::Uuid;
 
     static INIT: Lazy<()> = Lazy::new(|| {
         dotenvy::dotenv().ok();
@@ -187,9 +186,7 @@ mod tests {
             .unwrap()
             .as_secs() as usize;
 
-        // TODO: This test is manipulating the real database, which is not wanted.
-        // In the meantime, we add a generated suffix to improve testing reliability.
-        let issuer_id = format!("test-issuer-demo-{}", Uuid::new_v4());
+        let issuer_id = "test-issuer";
 
         #[derive(serde::Serialize)]
         struct Claims {
