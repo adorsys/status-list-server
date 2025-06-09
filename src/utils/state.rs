@@ -48,31 +48,28 @@ pub async fn build_state(config: &AppConfig) -> EyeResult<AppState> {
 
     // Initialize the storage backends for the certificate manager
     let cache = Redis::new(redis_conn.clone());
-    let cert_storage = AwsS3::new(&aws_config, BUCKET_NAME).with_cache(cache.clone());
+    let cert_storage = AwsS3::new(&aws_config, BUCKET_NAME).with_cache(cache);
     let secrets_storage = AwsSecretsManager::new(&aws_config).await?;
     // Initialize the challenge handler
     let updater = AwsRoute53DnsUpdater::new(&aws_config);
     let challenge_handler = Dns01Handler::new(updater);
 
-    let mut certificate_manager = CertManager::new(
-        [&config.server.host],
+    let certificate_manager = CertManager::new(
+        [&config.server.domain],
         &config.server.cert.email,
         config.server.cert.organization.as_deref(),
         &config.server.cert.acme_directory_url,
     )?
     .with_cert_storage(cert_storage)
     .with_secrets_storage(secrets_storage)
-    .with_challenge_handler(challenge_handler);
-
-    if let Some(eku) = &config.server.cert.eku {
-        certificate_manager = certificate_manager.with_eku(eku);
-    }
+    .with_challenge_handler(challenge_handler)
+    .with_eku(&config.server.cert.eku);
 
     let db_clone = Arc::new(db);
     Ok(AppState {
         credential_repo: SeaOrmStore::new(db_clone.clone()),
         status_list_token_repo: SeaOrmStore::new(db_clone),
-        server_domain: config.server.host.clone(),
+        server_domain: config.server.domain.clone(),
         cert_manager: Arc::new(certificate_manager),
     })
 }
