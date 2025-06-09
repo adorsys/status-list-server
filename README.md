@@ -2,44 +2,40 @@
 
 The Status List Server is a web service that manages and publishes status lists, allowing issuers to update statuses and verifiers to retrieve them. It implements JWT-based authentication using ES256 (ECDSA with P-256 and SHA-256) for securing its endpoints.
 
-## Prerequisites
-Before setting up the Status List Server, ensure you have the following installed:
+## Getting Started
 
-- [Rust](https://www.rust-lang.org/tools/install): The programming language used to develop the server.
-- [Cargo](https://doc.rust-lang.org/cargo/getting-started/installation.html): The Rust package manager.
+Before running the server, ensure you have the following tools installed:
+
+- [Rust & Cargo](https://www.rust-lang.org/tools/install) (Latest stable version recommended).
 - [PostgreSQL](https://www.postgresql.org/download/): The database system used for storing status lists.
-
-## Installation
+- [Redis](https://redis.io/download): The in-memory data structure store used for caching.
 
 **Clone the Repository:**
 
-   ```bash
-    git clone https://github.com/adorsys/status-list-server.git
-    cd status-list-server
-   ```
-
-## Running with Docker Compose
-You can run the project directly using docker compose:
-
-- Execute the command below at the root of the project
-```sh
-docker-compose up
+```bash
+git clone https://github.com/adorsys/status-list-server.git
+cd status-list-server
 ```
-This command will pull and start postgres and also build the project image and start a container.
 
-## Configuration
+### Configuration
 
  **Environment Variables:**
 
-   Create a `.env` file in the root directory with the following configurations:
+   Create a `.env` file in the root directory. Take a look at the [.env.template](.env.template) file for an example of the required variables.
 
-   ```env
-   DATABASE_URL=postgres://username:password@localhost/status_list_db
-   ```
+### Running with Docker Compose
 
-   Replace `username` and `password` with your PostgreSQL credentials.
+The simplest way to run the project is with [docker compose](https://docs.docker.com/compose/):
 
-## Running the Server
+- Execute the command below at the root of the project
+
+```sh
+docker compose up --build -d
+```
+
+This command will pull all required images and start the server.
+
+### Running Manually
 
 To start the server, execute:
 
@@ -47,7 +43,7 @@ To start the server, execute:
 cargo run
 ```
 
-By default, the server runs on `http://localhost:8000`. You can modify the port in the configuration settings.
+By default, the server will listen on `http://localhost:8000`. You can modify the host and port in the configuration settings.
 
 ## API Endpoints
 
@@ -59,9 +55,11 @@ By default, the server runs on `http://localhost:8000`. You can modify the port 
   - `200 OK`: Server is running.
   
 ### Register Issuer
+
 - **Endpoint**: `POST /credentials/`
 - **Description**: Allows issuers to register their public key and identifier for later authentication
 - **Request Body**
+
   ```json
   {
     "issuer": "<issuer_id>",
@@ -69,23 +67,27 @@ By default, the server runs on `http://localhost:8000`. You can modify the port 
     "alg": "ES256"
   }
   ```
+
   - `issuer`: Unique identifier for the issuer
   - `public_key`: PEM-encoded public key in base64 format
   - `alg`: "ES256" (ECDSA with P-256 and SHA-256)
- 
+
 ### Publish Status List
-- **Endpoint**: `POST /statuslists/publish` 
+
+- **Endpoint**: `POST /statuslists/publish`
 - **Description**: Allows an issuer to publish their token status list
 - **Authorization**: Requires a valid signed JWT token with the corresponding registered private key with issuer's ID as the `kid` (Key ID) in the header
 - **Request Body**
+
   ```json
   { "list_id": "30202cc6-1e3f-4479-a567-74e86ad73693",
-  [
+    [
       { "index": 1, "status": "INVALID" },
       { "index": 8, "status": "VALID" }
-  ]
+    ]
   }
   ```
+
   - `index`: Position in the status list
   - `status`: Status value (VALID, INVALID, SUSPENDED, APPLICATIONSPECIFIC)
 
@@ -95,7 +97,7 @@ By default, the server runs on `http://localhost:8000`. You can modify the port 
 - **Description:** Allows an issuer to update an existing status list
 - **Authorization:** Requires a valid signed JWT token with the corresponding registered private key with issuer's ID as the `kid` (Key ID) in the header
   
-- **Request Body:** 
+- **Request Body:**
 
   ```json
   {
@@ -119,6 +121,7 @@ By default, the server runs on `http://localhost:8000`. You can modify the port 
     - `status`: New status value (VALID, INVALID, SUSPENDED, APPLICATIONSPECIFIC)
 
   Example of a complete status update payload:
+
   ```json
   {
     "list_id": "755a0cf7-8289-4f65-9d24-0e01be92f4a6",
@@ -171,9 +174,11 @@ The server uses JWT-based authentication with the following requirements:
 
 1. Issuers must first register their public key using the `/credentials/` endpoint
 2. All authenticated requests must include a JWT token in the Authorization header:
-   ```
+
+   ```http
    Authorization: Bearer <jwt_token>
    ```
+
 3. The JWT token must:
    - Be signed with the algorithm specified during issuer registration.
    - Include the issuer's ID as the `kid` (Key ID) in the header
@@ -181,14 +186,18 @@ The server uses JWT-based authentication with the following requirements:
    - Have valid `exp` (expiration) and `iat` (issued at) claims
 
 Example JWT header:
+
 ```json
 {
   "alg": "ES256",
   "kid": "issuer-id"
 }
 ```
+
 ## Error Handling
+
 The server implements proper error handling and returns appropriate HTTP status codes:
+
 - `400 BAD REQUEST`: Invalid input data
 - `401 UNAUTHORIZED`: Missing or invalid authentication token
 - `403 FORBIDDEN`: Insufficient permissions
