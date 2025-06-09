@@ -1,13 +1,12 @@
-version: '3.9'
-
 services:
   db:
-    image: postgres:15
-    container_name: status-list-server-db
+    image: postgres:17
+    restart: always
+    container_name: status-list-db
     environment:
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: postgres
-      POSTGRES_DB: status-list
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      POSTGRES_DB: ${POSTGRES_DB:-status-list}
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
@@ -18,19 +17,27 @@ services:
     networks:
       - status-list-network
 
+  redis:
+    image: redis:8
+    container_name: redis
+    command: ["redis-server", "--save", '""', "--appendonly", "no"]
+    networks:
+      - status-list-network
+
   app:
     build:
       context: .
       dockerfile: Dockerfile
     container_name: status-list-server
+    env_file:
+      - .env
     ports:
       - 8000:8000
-    environment:
-      - RUST_LOG=info
-      - DATABASE_URL=postgres://postgres:postgres@db/status-list
     depends_on:
       db:
         condition: service_healthy
+      redis:
+        condition: service_started
     networks:
       - status-list-network
 

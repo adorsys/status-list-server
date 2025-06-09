@@ -4,6 +4,7 @@ use redis::{
 };
 use secrecy::{ExposeSecret, SecretString};
 use serde::Deserialize;
+use serde_aux::field_attributes::deserialize_vec_from_string_or_vec;
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct Config {
@@ -16,6 +17,7 @@ pub struct Config {
 #[derive(Debug, Clone, Deserialize)]
 pub struct ServerConfig {
     pub host: String,
+    pub domain: String,
     pub port: u16,
     pub cert: CertConfig,
 }
@@ -25,8 +27,9 @@ pub struct CertConfig {
     pub email: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub organization: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub eku: Option<Vec<u64>>,
+    #[serde(deserialize_with = "deserialize_vec_from_string_or_vec")]
+    #[serde(default)]
+    pub eku: Vec<u64>,
     pub acme_directory_url: String,
 }
 
@@ -102,7 +105,8 @@ impl Config {
         let config = ConfigLib::builder()
             // Set default values
             .set_default("server.host", "localhost")?
-            .set_default("server.port", 3000)?
+            .set_default("server.domain", "localhost")?
+            .set_default("server.port", 8000)?
             .set_default(
                 "database.url",
                 "postgres://postgres:postgres@localhost:5432/status-list",
@@ -110,10 +114,11 @@ impl Config {
             .set_default("redis.uri", "redis://localhost:6379")?
             .set_default("redis.require_tls", false)?
             .set_default("server.cert.email", "admin@example.com")?
+            .set_default("server.cert.eku", vec![1, 3, 6, 1, 5, 5, 7, 3, 30])?
             .set_default("server.cert.organization", "Adorsys GmbH & CO KG")?
             .set_default(
                 "server.cert.acme_directory_url",
-                "https://acme-v02.api.letsencrypt.org/directory",
+                "https://localhost:14000/dir",
             )?
             .set_default("aws.region", "us-east-1")?
             // Override config values via environment variables
@@ -141,7 +146,7 @@ mod tests {
         let config = Config::load().expect("Failed to load config");
 
         assert_eq!(config.server.host, "localhost");
-        assert_eq!(config.server.port, 3000);
+        assert_eq!(config.server.port, 8000);
         assert_eq!(
             config.database.url.expose_secret(),
             "postgres://postgres:postgres@localhost:5432/status-list"
