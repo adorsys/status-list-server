@@ -3,7 +3,7 @@ use axum::{
     routing::{get, patch, post},
     Router,
 };
-use color_eyre::eyre::eyre;
+use color_eyre::eyre::Context;
 use hyper::Method;
 use tokio::net::TcpListener;
 use tower_http::{
@@ -52,7 +52,7 @@ impl HttpServer {
 
         let listener = TcpListener::bind(format!("{}:{}", config.server.host, config.server.port))
             .await
-            .map_err(|e| eyre!("failed to bind to port {}\n{e:?}", config.server.port))?;
+            .wrap_err_with(|| format!("Failed to bind to port {}", config.server.port))?;
 
         Ok(Self { router, listener })
     }
@@ -61,7 +61,7 @@ impl HttpServer {
         tracing::info!("listening on {}", self.listener.local_addr()?);
         axum::serve(self.listener, self.router)
             .await
-            .map_err(|e| eyre!("failed to start server: {e:?}"))?;
+            .wrap_err("Failed to start HTTP server")?;
         Ok(())
     }
 }
