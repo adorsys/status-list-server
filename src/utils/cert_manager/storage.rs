@@ -14,7 +14,7 @@ pub enum StorageError {
     Redis(#[from] RedisError),
 
     #[error("AWS SDK error: {0}")]
-    AwsSdk(#[from] Report),
+    AwsSdk(#[source] Report),
 
     #[error("The data is invalid: {0}")]
     InvalidData(String),

@@ -248,10 +248,10 @@ impl CertManager {
             match order.state().status {
                 OrderStatus::Ready => break,
                 OrderStatus::Invalid => {
-                    error!("Failed to get certficate. The order is invalid");
                     return Err(CertError::Other(eyre!(
                         "order with url {} for domains {:?} has been invalidated",
-                        order.url(), self.domains
+                        order.url(),
+                        self.domains
                     )));
                 }
                 _ => sleep(Duration::from_secs(2)).await,

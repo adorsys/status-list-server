@@ -9,7 +9,7 @@ use crate::{
     models::{Credentials, StatusListToken},
 };
 use aws_config::{BehaviorVersion, Region};
-use color_eyre::eyre::{eyre, Ok, Result as EyeResult};
+use color_eyre::eyre::{Context, Result as EyeResult};
 use sea_orm::Database;
 use sea_orm_migration::MigratorTrait;
 use secrecy::ExposeSecret;
@@ -29,11 +29,11 @@ pub struct AppState {
 pub async fn build_state(config: &AppConfig) -> EyeResult<AppState> {
     let db = Database::connect(config.database.url.expose_secret())
         .await
-        .map_err(|e| eyre!("Failed to connect to database: {e:?}"))?;
+        .wrap_err("Failed to connect to database")?;
 
     Migrator::up(&db, None)
         .await
-        .map_err(|e| eyre!("Failed to run database migrations: {e:?}"))?;
+        .wrap_err("Failed to run database migrations")?;
 
     let aws_config = aws_config::defaults(BehaviorVersion::latest())
         .region(Region::new(config.aws.region.clone()))
@@ -44,7 +44,7 @@ pub async fn build_state(config: &AppConfig) -> EyeResult<AppState> {
         .redis
         .start(None, None, None)
         .await
-        .map_err(|e| eyre!("Failed to connect to Redis: {e:?}"))?;
+        .wrap_err("Failed to connect to Redis")?;
 
     // Initialize the storage backends for the certificate manager
     let cache = Redis::new(redis_conn.clone());
