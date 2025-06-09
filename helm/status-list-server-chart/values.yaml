@@ -25,6 +25,7 @@ statuslist:
   env:
     RUST_LOG: "info"
     SERVER_KEY_SECRET_NAME: "statuslist-secret"
+    POSTGRES_USER: "postgres"
     ENVIRONMENT: "prod"
   resources:
     requests:

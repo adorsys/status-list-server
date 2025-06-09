@@ -26,7 +26,7 @@ spec:
             - name: RUST_LOG
               value: {{ .Values.statuslist.env.RUST_LOG | quote }}
             - name: POSTGRES_USER
-              value: {{ .Values.postgresql.auth.username | quote }}
+              value: {{ .Values.statuslist.env.POSTGRES_USER | quote }}
             - name: POSTGRES_PASSWORD
               valueFrom:
                 secretKeyRef:
