@@ -1,6 +1,6 @@
 services:
   db:
-    image: postgres:15
+    image: postgres:17.5
     container_name: status-list-server-db
     env_file: .env
     volumes:
