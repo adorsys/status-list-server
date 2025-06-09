@@ -39,6 +39,7 @@ sea-orm = { version = "1.1.7", features = [
 aws-config = {version = "1.6", features = ["behavior-version-latest"] }
 aws-sdk-secretsmanager = "1.71"
 aws_secretsmanager_caching = "1.2.1"
+uuid = { version = "1.17.0", features = ["v4"] }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
