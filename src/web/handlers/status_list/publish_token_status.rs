@@ -8,7 +8,6 @@ use axum::{
     extract::{Json, State},
     http::StatusCode,
     response::IntoResponse,
-    Extension,
 };
 use std::time::{SystemTime, UNIX_EPOCH};
 use tracing;
@@ -16,20 +15,9 @@ use tracing;
 // Handler to create a new status list token
 pub async fn publish_token_status(
     State(appstate): State<AppState>,
-    Extension(issuer): Extension<String>,
-    authenticated_issuer: AuthenticatedIssuer,
+    AuthenticatedIssuer(issuer): AuthenticatedIssuer,
     Json(payload): Json<StatusRequest>,
 ) -> Result<impl IntoResponse, StatusListError> {
-    // Verify that the authenticated issuer matches the extension issuer
-    if authenticated_issuer.0 != issuer {
-        tracing::error!(
-            "Issuer mismatch: authenticated={}, extension={}",
-            authenticated_issuer.0,
-            issuer
-        );
-        return Err(StatusListError::IssuerMismatch);
-    }
-
     let store = &appstate.status_list_token_repo;
 
     let stl = create_status_list(payload.status).map_err(|e| {
@@ -155,7 +143,6 @@ mod tests {
 
         let response = publish_token_status(
             State(app_state),
-            Extension("issuer".to_string()),
             AuthenticatedIssuer("issuer".to_string()),
             Json(payload),
         )
@@ -220,7 +207,6 @@ mod tests {
         // Perform the insertion
         let _ = publish_token_status(
             State(app_state.clone()),
-            Extension("issuer".to_string()),
             AuthenticatedIssuer("issuer".to_string()),
             Json(payload),
         )
@@ -277,7 +263,6 @@ mod tests {
 
         let response = match publish_token_status(
             State(app_state),
-            Extension("issuer".to_string()),
             AuthenticatedIssuer("issuer".to_string()),
             Json(payload),
         )
@@ -330,7 +315,6 @@ mod tests {
 
         let response = publish_token_status(
             State(app_state.clone()),
-            Extension("issuer".to_string()),
             AuthenticatedIssuer("issuer".to_string()),
             Json(payload),
         )
@@ -397,7 +381,6 @@ mod tests {
 
         let response = publish_token_status(
             State(app_state),
-            Extension("issuer".to_string()),
             AuthenticatedIssuer("issuer".to_string()),
             Json(payload),
         )
@@ -423,7 +406,6 @@ mod tests {
 
         let response = match publish_token_status(
             State(app_state),
-            Extension("issuer".to_string()),
             AuthenticatedIssuer("issuer".to_string()),
             Json(payload),
         )
