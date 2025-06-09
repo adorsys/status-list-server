@@ -118,7 +118,7 @@ impl Config {
             .set_default("server.cert.organization", "Adorsys GmbH & CO KG")?
             .set_default(
                 "server.cert.acme_directory_url",
-                "https://localhost:14000/dir",
+                "https://acme-v02.api.letsencrypt.org/directory",
             )?
             .set_default("aws.region", "us-east-1")?
             // Override config values via environment variables
