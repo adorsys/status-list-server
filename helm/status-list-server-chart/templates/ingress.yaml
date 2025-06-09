@@ -4,12 +4,12 @@ metadata:
   name: {{ include "status-list-server-chart.fullname" . }}-ingress
   namespace: {{ .Release.Namespace }}
   annotations:
-    external-dns.alpha.kubernetes.io/hostname: {{ .Values.statuslist.externalDnsHostname }}
+    external-dns.alpha.kubernetes.io/hostname: {{ .Values.statuslist.ingress.externalDnsHostname }}
     {{- toYaml .Values.statuslist.ingress.annotations | nindent 4 }}
 spec:
   ingressClassName: nginx
   rules:
-  - host: {{ .Values.statuslist.externalDnsHostname }}
+  - host: {{ .Values.statuslist.ingress.externalDnsHostname }}
     http:
       paths:
       - path: {{ .Values.statuslist.ingress.path }}
