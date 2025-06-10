@@ -38,11 +38,8 @@ pub async fn test_app_state(db_conn: Option<Arc<sea_orm::DatabaseConnection>>) -
     // Install the crypto provider for the tests
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 
-    let db = if let Some(db) = db_conn {
-        db
-    } else {
-        Arc::new(MockDatabase::new(DbBackend::Postgres).into_connection())
-    };
+    let db = db_conn
+        .unwrap_or_else(|| Arc::new(MockDatabase::new(DbBackend::Postgres).into_connection()));
 
     let key_pem = include_str!("test_resources/ec-private.pem").to_string();
     let secrets_storage = MockStorage {

@@ -1,4 +1,5 @@
 mod database;
+#[cfg(test)]
 mod test_resources;
 #[cfg(test)]
 mod test_utils;
