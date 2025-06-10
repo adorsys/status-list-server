@@ -81,12 +81,7 @@ fn test_cert_manager_builder() {
 fn test_renewal_strategy_days_before_expiry() {
     init_crypto();
 
-    let strategy = RenewalStrategy {
-        strategy_type: RenewalType::DaysBeforeExpiry,
-        threshold_days: Some(30),
-        threshold_percent: None,
-        interval_days: None,
-    };
+    let strategy = RenewalStrategy::DaysBeforeExpiry(Some(30));
 
     let manager = CertManager::new(
         vec!["example.com"],
@@ -97,7 +92,7 @@ fn test_renewal_strategy_days_before_expiry() {
     .unwrap()
     .with_renewal_strategy(strategy);
 
-    let now = 1749043205;
+    let now = Utc::now().timestamp();
 
     // Certificate expires in 20 days - should renew (threshold is 30 days)
     let cert_data_should_renew = CertificateData {
@@ -122,12 +117,7 @@ fn test_renewal_strategy_days_before_expiry() {
 async fn test_renewal_strategy_percentage_of_lifetime() {
     init_crypto();
 
-    let strategy = RenewalStrategy {
-        strategy_type: RenewalType::PercentageOfLifetime,
-        threshold_days: None,
-        threshold_percent: Some(0.8),
-        interval_days: None,
-    };
+    let strategy = RenewalStrategy::PercentageOfLifetime(Some(0.8));
 
     let manager = CertManager::new(
         vec!["example.com"],
@@ -138,7 +128,7 @@ async fn test_renewal_strategy_percentage_of_lifetime() {
     .unwrap()
     .with_renewal_strategy(strategy);
 
-    let now = 1749043205;
+    let now = Utc::now().timestamp();
     let cert_lifetime = days_to_secs(90);
 
     // Certificate is at 85% of its lifetime - should renew (threshold is 80%)
@@ -166,12 +156,7 @@ async fn test_renewal_strategy_percentage_of_lifetime() {
 async fn test_renewal_strategy_fixed_interval() {
     init_crypto();
 
-    let strategy = RenewalStrategy {
-        strategy_type: RenewalType::FixedInterval,
-        threshold_days: None,
-        threshold_percent: None,
-        interval_days: Some(60),
-    };
+    let strategy = RenewalStrategy::FixedInterval(Some(60));
 
     let manager = CertManager::new(
         vec!["example.com"],
@@ -182,7 +167,7 @@ async fn test_renewal_strategy_fixed_interval() {
     .unwrap()
     .with_renewal_strategy(strategy);
 
-    let now = 1749043205;
+    let now = Utc::now().timestamp();
 
     // Certificate issued 70 days ago - should renew (interval is 60 days)
     let cert_data_should_renew = CertificateData {

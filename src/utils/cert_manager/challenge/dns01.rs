@@ -177,6 +177,51 @@ impl AwsRoute53DnsUpdater {
         *self.zones.write().await = Some(all_zones);
         Ok(())
     }
+
+    async fn change_records(
+        &self,
+        domain: &str,
+        change_action: ChangeAction,
+        value: &str,
+    ) -> Result<String, ChallengeError> {
+        let record_name = format!("_acme-challenge.{}", domain);
+        let hosted_zone_id = self.find_hosted_zone(domain).await?;
+
+        // Prepare the TXT record to change
+        let change = Change::builder()
+            .action(change_action)
+            .resource_record_set(
+                ResourceRecordSet::builder()
+                    .name(&record_name)
+                    .r#type(RrType::Txt)
+                    .ttl(60)
+                    .resource_records(
+                        ResourceRecord::builder()
+                            .value(format!("\"{}\"", value))
+                            .build()
+                            .map_err(|e| ChallengeError::AwsSdk(e.into()))?,
+                    )
+                    .build()
+                    .map_err(|e| ChallengeError::AwsSdk(e.into()))?,
+            )
+            .build()
+            .map_err(|e| ChallengeError::AwsSdk(e.into()))?;
+        let change_batch = ChangeBatch::builder()
+            .changes(change)
+            .build()
+            .map_err(|e| ChallengeError::AwsSdk(e.into()))?;
+
+        // Try to change the record in Route53
+        self.client
+            .change_resource_record_sets()
+            .hosted_zone_id(&hosted_zone_id)
+            .change_batch(change_batch)
+            .send()
+            .await
+            .map_err(|e| ChallengeError::AwsSdk(e.into()))?;
+
+        Ok(record_name)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -198,84 +243,22 @@ impl ZoneInfo {
 #[async_trait]
 impl DnsUpdater for AwsRoute53DnsUpdater {
     async fn upsert_record(&self, domain: &str, value: &str) -> Result<(), ChallengeError> {
-        let record_name = format!("_acme-challenge.{}", domain);
-        let hosted_zone_id = self.find_hosted_zone(domain).await?;
-
-        // Prepare the TXT record to upsert
-        let change = Change::builder()
-            .action(ChangeAction::Upsert)
-            .resource_record_set(
-                ResourceRecordSet::builder()
-                    .name(&record_name)
-                    .r#type(RrType::Txt)
-                    .ttl(60)
-                    .resource_records(
-                        ResourceRecord::builder()
-                            .value(format!("\"{}\"", value))
-                            .build()
-                            .map_err(|e| ChallengeError::AwsSdk(e.into()))?,
-                    )
-                    .build()
-                    .map_err(|e| ChallengeError::AwsSdk(e.into()))?,
-            )
-            .build()
-            .map_err(|e| ChallengeError::AwsSdk(e.into()))?;
-        let change_batch = ChangeBatch::builder()
-            .changes(change)
-            .build()
-            .map_err(|e| ChallengeError::AwsSdk(e.into()))?;
-
         // Try to upsert the record in Route53
-        self.client
-            .change_resource_record_sets()
-            .hosted_zone_id(&hosted_zone_id)
-            .change_batch(change_batch)
-            .send()
-            .await
-            .map_err(|e| ChallengeError::AwsSdk(e.into()))?;
+        let record_name = self
+            .change_records(domain, ChangeAction::Upsert, value)
+            .await?;
 
         info!("DNS record {record_name} created for {domain}");
         Ok(())
     }
 
     async fn remove_record(&self, domain: &str, value: &str) -> Result<(), ChallengeError> {
-        let record_name = format!("_acme-challenge.{}", domain);
-        let hosted_zone_id = self.find_hosted_zone(domain).await?;
-
-        // Prepare the TXT record to delete
-        let change = Change::builder()
-            .action(ChangeAction::Delete)
-            .resource_record_set(
-                ResourceRecordSet::builder()
-                    .name(&record_name)
-                    .r#type(RrType::Txt)
-                    .ttl(60)
-                    .resource_records(
-                        ResourceRecord::builder()
-                            .value(format!("\"{}\"", value))
-                            .build()
-                            .map_err(|e| ChallengeError::AwsSdk(e.into()))?,
-                    )
-                    .build()
-                    .map_err(|e| ChallengeError::AwsSdk(e.into()))?,
-            )
-            .build()
-            .map_err(|e| ChallengeError::AwsSdk(e.into()))?;
-        let change_batch = ChangeBatch::builder()
-            .changes(change)
-            .build()
-            .map_err(|e| ChallengeError::AwsSdk(e.into()))?;
-
         // Try to delete the record in Route53
-        self.client
-            .change_resource_record_sets()
-            .hosted_zone_id(&hosted_zone_id)
-            .change_batch(change_batch)
-            .send()
-            .await
-            .map_err(|e| ChallengeError::AwsSdk(e.into()))?;
+        let record_name = self
+            .change_records(domain, ChangeAction::Delete, value)
+            .await?;
 
-        info!("DNS record {record_name} removed for {domain}");
+        info!("DNS record {record_name} deleted for {domain}");
         Ok(())
     }
 }

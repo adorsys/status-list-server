@@ -38,31 +38,18 @@ pub struct CertificateData {
     pub updated_at: i64,
 }
 
-/// Struct representing the certificate renewal strategy
+/// Type representing the certificate renewal strategy
 #[derive(Debug, Clone)]
-pub struct RenewalStrategy {
-    /// The type of renewal strategy to use
-    pub strategy_type: RenewalType,
-    /// The number of days before expiry to trigger certificate renewal
-    /// (used for [`RenewalStrategy::DaysBeforeExpiry`] strategy)
-    pub threshold_days: Option<u32>,
-    /// The percentage of the certificate's lifetime to renew before expiry
-    /// (used for [`RenewalStrategy::PercentageOfLifetime`] strategy)
-    pub threshold_percent: Option<f32>,
-    /// The number of days to trigger certificate renewal
-    /// (used for [`RenewalStrategy::FixedInterval`] strategy)
-    pub interval_days: Option<u32>,
-}
-
-/// Represent the type of renewal strategy
-#[derive(Debug, Clone)]
-pub enum RenewalType {
-    /// Renew the certificate at a fixed interval
-    FixedInterval,
-    /// Renew the certificate a certain number of days before it expires
-    DaysBeforeExpiry,
-    /// Renew the certificate a certain percentage of its lifetime
-    PercentageOfLifetime,
+pub enum RenewalStrategy {
+    /// Renew the certificate at a fixed interval.
+    /// If not specified, it defaults to 60 days starting from the issue date
+    FixedInterval(Option<u32>),
+    /// Renew the certificate a certain number of days before it expires.
+    /// Defaults to 30 days before expiry if not specified
+    DaysBeforeExpiry(Option<u32>),
+    /// Renew the certificate a certain percentage of its lifetime.
+    /// Defaults to 2/3 of the certificate lifetime if not specified
+    PercentageOfLifetime(Option<f32>),
 }
 
 type ACMEHttpClientFactory = Box<dyn Fn() -> Box<dyn HttpClient> + Send + Sync>;
@@ -105,12 +92,7 @@ impl CertManager {
         let http_client = DefaultHttpClient::new(None)?;
         let acme_http_client_factory =
             Box::new(move || Box::new(http_client.clone()) as Box<dyn HttpClient>);
-        let renewal_strategy = RenewalStrategy {
-            strategy_type: RenewalType::PercentageOfLifetime,
-            threshold_days: None,
-            threshold_percent: None,
-            interval_days: None,
-        };
+        let renewal_strategy = RenewalStrategy::PercentageOfLifetime(None);
 
         Ok(Self {
             cert_storage: None,
@@ -492,23 +474,23 @@ impl CertManager {
     fn should_renew_cert(&self, cert_data: &CertificateData) -> bool {
         let days_to_secs = |days: u32| (days as i64) * 24 * 60 * 60;
 
-        match self.renewal_strategy.strategy_type {
-            RenewalType::DaysBeforeExpiry => {
+        match self.renewal_strategy {
+            RenewalStrategy::DaysBeforeExpiry(value) => {
                 // Default to 30 days if not specified
-                let days_before = self.renewal_strategy.threshold_days.unwrap_or(30);
+                let days_before = value.unwrap_or(30);
                 let renewal_time = cert_data.expires_at - days_to_secs(days_before);
                 Utc::now().timestamp() >= renewal_time
             }
-            RenewalType::PercentageOfLifetime => {
+            RenewalStrategy::PercentageOfLifetime(value) => {
                 // Default to 2/3 of the lifetime if not specified
-                let percentage = self.renewal_strategy.threshold_percent.unwrap_or(2.0 / 3.0);
+                let percentage = value.unwrap_or(2.0 / 3.0);
                 let lifetime = cert_data.expires_at - cert_data.valid_from;
                 let elapsed = Utc::now().timestamp() - cert_data.valid_from;
                 (elapsed as f32 / lifetime as f32) >= percentage
             }
-            RenewalType::FixedInterval => {
+            RenewalStrategy::FixedInterval(value) => {
                 // Default to 60 days if not specified
-                let interval = self.renewal_strategy.interval_days.unwrap_or(60);
+                let interval = value.unwrap_or(60);
                 let renewal_time = cert_data.valid_from + days_to_secs(interval);
                 Utc::now().timestamp() >= renewal_time
             }
