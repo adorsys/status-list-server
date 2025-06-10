@@ -115,7 +115,7 @@ impl Config {
             .set_default("redis.require_tls", false)?
             .set_default("server.cert.email", "admin@example.com")?
             .set_default("server.cert.eku", vec![1, 3, 6, 1, 5, 5, 7, 3, 30])?
-            .set_default("server.cert.organization", "Adorsys GmbH & CO KG")?
+            .set_default("server.cert.organization", "adorsys GmbH & CO KG")?
             .set_default(
                 "server.cert.acme_directory_url",
                 "https://acme-v02.api.letsencrypt.org/directory",
