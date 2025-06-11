@@ -1,8 +1,5 @@
 use axum::{
-    http::Method,
-    response::IntoResponse,
-    routing::{get, patch, post},
-    Json, Router,
+    http::Method, middleware::from_fn_with_state, response::IntoResponse, routing::{get, patch, post}, Json, Router
 };
 use dotenvy::dotenv;
 use serde::Serialize;
@@ -13,6 +10,7 @@ use status_list_server::{
         publish_token_status::publish_token_status, update_token_status::update_token_status,
     },
 };
+use status_list_server::web::auth::auth_middleware;
 use tokio::net::TcpListener;
 use tower::ServiceBuilder;
 use tower_http::catch_panic::CatchPanicLayer;
@@ -52,6 +50,10 @@ async fn main() {
         .route("/", get(welcome))
         .route("/health", get(health_check))
         .route("/credentials", post(credential_handler))
+        .route_layer(from_fn_with_state(
+            state.clone(),
+            auth_middleware,
+        ))
         .nest(
             "/statuslists",
             Router::new()

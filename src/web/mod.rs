@@ -1,2 +1,2 @@
 pub mod handlers;
-pub mod midlw;
+pub mod auth;
