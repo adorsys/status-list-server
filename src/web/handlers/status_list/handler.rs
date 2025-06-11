@@ -1,10 +1,7 @@
 use std::{fmt::Debug, io::Write as _, sync::Arc};
 
 use axum::{
-    extract::{Path, State},
-    http::{header, HeaderMap, StatusCode},
-    response::IntoResponse,
-    Json,
+    extract::{Path, State}, http::{header, HeaderMap, StatusCode}, response::IntoResponse, Extension, Json
 };
 use chrono::Utc;
 use coset::{
@@ -20,7 +17,6 @@ use serde_json::Value;
 use crate::{
     model::{Status, StatusEntry, StatusList, StatusListToken},
     utils::{keygen::Keypair, state::AppState},
-    web::midlw::AuthenticatedIssuer,
 };
 
 use super::{
@@ -274,7 +270,7 @@ fn issue_jwt(token: &StatusListToken, server_key: &Keypair) -> Result<String, St
 pub async fn update_statuslist(
     State(appstate): State<Arc<AppState>>,
     Path(list_id): Path<String>,
-    AuthenticatedIssuer(issuer): AuthenticatedIssuer,
+    Extension(issuer): Extension<String>,
     Json(body): Json<Value>,
 ) -> impl IntoResponse {
     let updates = match body
@@ -753,7 +749,7 @@ mod tests {
         let response = update_statuslist(
             State(app_state.into()),
             Path(owner.to_string()),
-            AuthenticatedIssuer(owner.to_string()),
+            Extension(owner.to_string()),
             Json(update_body),
         )
         .await
@@ -782,7 +778,7 @@ mod tests {
         let response = update_statuslist(
             State(app_state.into()),
             Path("test_list".to_string()),
-            AuthenticatedIssuer("test_list".to_string()),
+            Extension("test_list".to_string()),
             Json(update_body),
         )
         .await
