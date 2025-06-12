@@ -1,6 +1,6 @@
 services:
   db:
-    image: postgres:15
+    image: postgres:17.5
     container_name: status-list-server-db
     env_file:
       - .env
@@ -19,13 +19,14 @@ services:
       context: .
       dockerfile: Dockerfile
     container_name: status-list-server
-    env_file:
-      - .env
-    ports:
-      - 8000:8000
+    env_file: .env
+    volumes:
+      - ~/.aws/credentials:/root/.aws/credentials
     depends_on:
       db:
         condition: service_healthy
+    ports:
+      - "8000:8000"
     networks:
       - status-list-network
 

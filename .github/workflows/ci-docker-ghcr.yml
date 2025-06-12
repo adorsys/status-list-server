@@ -42,8 +42,10 @@ jobs:
         with:
           images: ghcr.io/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}
           tags: |
-            ${{github.ref_name == 'refs/heads/main' && 'latest' || '' }}
-            ${{ startsWith(github.ref, 'refs/tags/v') && 'type=semver,pattern={{version}}' || '' }}
+            # For tagged releases (v*.*.*), use semantic version
+            type=semver,pattern={{version}},enable=${{ startsWith(github.ref, 'refs/tags/v') }}
+            # For main branch, use 'latest'
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
 
       # Build and push the Docker image
       - name: Build and push Docker image
@@ -54,4 +56,3 @@ jobs:
           push: true
           platforms: linux/amd64,linux/arm64
           tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
