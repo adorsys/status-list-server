@@ -1,4 +1,4 @@
-use std::{sync::Arc, time::Duration};
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use aws_config::SdkConfig;
@@ -10,6 +10,8 @@ use aws_sdk_route53::{
 };
 use color_eyre::eyre::eyre;
 use instant_acme::{Authorization, ChallengeType, Identifier, Order};
+use reqwest::Client;
+use serde_json::json;
 use tokio::sync::RwLock;
 use tracing::info;
 
@@ -65,10 +67,6 @@ impl ChallengeHandler for Dns01Handler {
         let cleanup_fut = CleanupFuture::new(cleanup);
 
         Ok((challenge.url.clone(), cleanup_fut))
-    }
-
-    fn propagation_delay(&self) -> Duration {
-        Duration::from_secs(60)
     }
 }
 
@@ -259,6 +257,58 @@ impl DnsUpdater for AwsRoute53DnsUpdater {
             .await?;
 
         info!("DNS record {record_name} deleted for {domain}");
+        Ok(())
+    }
+}
+
+// Handler for Pebble DNS (mainly for generating test certificates)
+pub struct PebbleDnsUpdater {
+    client: Client,
+    addr: String,
+}
+
+impl PebbleDnsUpdater {
+    pub fn new(addr: impl Into<String>) -> Self {
+        Self {
+            client: Client::new(),
+            addr: addr.into(),
+        }
+    }
+}
+
+#[async_trait]
+impl DnsUpdater for PebbleDnsUpdater {
+    async fn upsert_record(&self, domain: &str, value: &str) -> Result<(), ChallengeError> {
+        let record_name = format!("_acme-challenge.{}.", domain);
+        let url = format!("{}/set-txt", self.addr);
+        let body = json!({"host": record_name, "value": value});
+
+        self.client
+            .post(&url)
+            .body(body.to_string())
+            .send()
+            .await
+            .map_err(|e| ChallengeError::Other(eyre!("Failed to send request: {e}")))?
+            .error_for_status()
+            .map_err(|e| ChallengeError::Other(eyre!("Failed to set TXT record: {e}")))?;
+
+        Ok(())
+    }
+
+    async fn remove_record(&self, domain: &str, _value: &str) -> Result<(), ChallengeError> {
+        let record_name = format!("_acme-challenge.{}.", domain);
+        let url = format!("{}/clear-txt", self.addr);
+        let body = json!({"host": record_name});
+
+        self.client
+            .post(&url)
+            .body(body.to_string())
+            .send()
+            .await
+            .map_err(|e| ChallengeError::Other(eyre!("Failed to send request: {e}")))?
+            .error_for_status()
+            .map_err(|e| ChallengeError::Other(eyre!("Failed to clear TXT record: {e}")))?;
+
         Ok(())
     }
 }
