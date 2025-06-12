@@ -1,4 +1,4 @@
-use std::{sync::Arc, time::Duration};
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use axum::{
@@ -158,9 +158,5 @@ impl ChallengeHandler for Http01Handler {
         let cleanup_fut = CleanupFuture::new(cleanup);
 
         Ok((challenge.url.clone(), cleanup_fut))
-    }
-
-    fn propagation_delay(&self) -> Duration {
-        Duration::from_secs(10)
     }
 }
