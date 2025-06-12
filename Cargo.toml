@@ -10,21 +10,22 @@ async-trait = "0.1"
 
 # Web frameworks
 hyper = "1.6"
+hyper-util = "0.1"
+reqwest = "0.12"
 http-body-util = "0.1"
-hyper-util = "0.1.13"
 hyper-rustls = { version = "0.27", features = ["http2"] }
 axum = { version = "0.8", features = ["macros"] }
 tower-http = { version = "0.6", features = ["cors", "trace", "catch-panic"] }
 
 # Database and ORM
-sea-orm = { version = "1.1.7", features = [
+sea-orm = { version = "1.1", features = [
     "sqlx-postgres",
-    "runtime-tokio-native-tls",
+    "runtime-tokio-rustls",
     "macros",
 ] }
-sea-orm-migration = { version = "1.1.7", features = [
+sea-orm-migration = { version = "1.1", features = [
     "sqlx-postgres",
-    "runtime-tokio-native-tls",
+    "runtime-tokio-rustls",
 ] }
 
 # Cryptography and Security
@@ -83,7 +84,7 @@ features = ["pkcs8", "ecdsa", "alloc", "pem"]
 
 [dev-dependencies]
 sealed_test = "1.1.0"
-sea-orm = { version = "1.1.7", features = ["mock"] }
+sea-orm = { version = "1.1", features = ["mock"] }
 
 [profile.dev.package.backtrace]
 opt-level = 3
