@@ -1,7 +1,10 @@
 use std::{fmt::Debug, io::Write as _, sync::Arc};
 
 use axum::{
-    extract::{Path, State}, http::{header, HeaderMap, StatusCode}, response::IntoResponse, Extension, Json
+    extract::{Path, State},
+    http::{header, HeaderMap, StatusCode},
+    response::IntoResponse,
+    Extension, Json,
 };
 use chrono::Utc;
 use coset::{
