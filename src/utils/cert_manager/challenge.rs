@@ -1,10 +1,10 @@
 mod dns01;
 mod http01;
 
-pub use dns01::{AwsRoute53DnsUpdater, Dns01Handler};
+pub use dns01::{AwsRoute53DnsUpdater, Dns01Handler, PebbleDnsUpdater};
 pub use http01::Http01Handler;
 
-use std::{future::Future, pin::Pin, time::Duration};
+use std::{future::Future, pin::Pin};
 
 use async_trait::async_trait;
 use color_eyre::eyre::Error as Report;
@@ -44,10 +44,6 @@ pub trait ChallengeHandler: Send + Sync {
         authz: &Authorization,
         order: &mut Order,
     ) -> Result<(String, CleanupFuture), ChallengeError>;
-
-    /// Set the propagation delay for the challenge handler.
-    /// Used to determine how long to wait before cleaning up the resources
-    fn propagation_delay(&self) -> Duration;
 }
 
 type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
