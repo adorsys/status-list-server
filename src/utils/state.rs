@@ -15,8 +15,12 @@ use sea_orm_migration::MigratorTrait;
 use secrecy::ExposeSecret;
 use std::sync::Arc;
 
+use super::cert_manager::{challenge::PebbleDnsUpdater, http_client::DefaultHttpClient};
+
 // Could also be passed at runtime through environment variable
 const BUCKET_NAME: &str = "status-list-adorsys";
+const ENV_PRODUCTION: &str = "production";
+const ENV_DEVELOPMENT: &str = "development";
 
 #[derive(Clone)]
 pub struct AppState {
@@ -46,15 +50,24 @@ pub async fn build_state(config: &AppConfig) -> EyeResult<AppState> {
         .await
         .wrap_err("Failed to connect to Redis")?;
 
+    // Initialize the challenge handler based on the environment.
+    // Use a fake DNS server to validate the challenge in development.
+    let app_env = std::env::var("APP_ENV").unwrap_or(ENV_DEVELOPMENT.to_string());
+    let challenge_handler = if app_env == ENV_PRODUCTION {
+        let updater = AwsRoute53DnsUpdater::new(&aws_config);
+        Dns01Handler::new(updater)
+    } else {
+        // Use pebble as the DNS server in development
+        let updater = PebbleDnsUpdater::new("http://challtestsrv:8055");
+        Dns01Handler::new(updater)
+    };
+
     // Initialize the storage backends for the certificate manager
     let cache = Redis::new(redis_conn.clone());
     let cert_storage = AwsS3::new(&aws_config, BUCKET_NAME).with_cache(cache);
     let secrets_storage = AwsSecretsManager::new(&aws_config).await?;
-    // Initialize the challenge handler
-    let updater = AwsRoute53DnsUpdater::new(&aws_config);
-    let challenge_handler = Dns01Handler::new(updater);
 
-    let certificate_manager = CertManager::new(
+    let mut certificate_manager = CertManager::new(
         [&config.server.domain],
         &config.server.cert.email,
         config.server.cert.organization.as_deref(),
@@ -64,6 +77,15 @@ pub async fn build_state(config: &AppConfig) -> EyeResult<AppState> {
     .with_secrets_storage(secrets_storage)
     .with_challenge_handler(challenge_handler)
     .with_eku(&config.server.cert.eku);
+
+    if app_env == ENV_DEVELOPMENT {
+        // Override the default HTTP client to use the pebble root certificate
+        // It is necessary to avoid https errors since pebble uses localhost over https
+        // with a self-signed root certificate
+        let root_cert = include_bytes!("../test_resources/pebble.pem");
+        let http_client = DefaultHttpClient::new(Some(root_cert))?;
+        certificate_manager = certificate_manager.with_acme_http_client(http_client);
+    }
 
     let db_clone = Arc::new(db);
     Ok(AppState {
