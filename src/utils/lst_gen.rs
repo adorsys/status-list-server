@@ -2,7 +2,7 @@ use base64url::{decode, encode};
 use flate2::{read::ZlibDecoder, write::ZlibEncoder, Compression};
 use std::io::{Read, Write};
 
-use crate::model::{Status, StatusEntry, StatusList};
+use crate::models::{Status, StatusEntry, StatusList};
 
 use super::errors::Error;
 
@@ -201,7 +201,7 @@ pub fn update_status_list(
     let original_bits = current_bits as usize;
     let new_bits = determine_bits(&status_updates, Some(original_bits))?;
 
-    let compressed_data = decode(&existing_lst).map_err(|_| Error::DecodeError)?;
+    let compressed_data = decode(&existing_lst).map_err(|_| Error::DecodeFailed)?;
     let mut decoder = ZlibDecoder::new(&compressed_data[..]);
     let mut status_array = Vec::new();
     decoder

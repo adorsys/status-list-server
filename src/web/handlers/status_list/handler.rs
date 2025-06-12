@@ -8,8 +8,10 @@ use axum::{
 };
 use chrono::Utc;
 use coset::{
-    self, cbor::Value as CborValue, iana::Algorithm, CborSerializable, CoseSign1Builder,
-    HeaderBuilder,
+    self,
+    cbor::Value as CborValue,
+    iana::{Algorithm, EnumI64, HeaderParameter},
+    CborSerializable, CoseSign1Builder, HeaderBuilder,
 };
 use flate2::{write::GzEncoder, Compression};
 use jsonwebtoken::{EncodingKey, Header};
@@ -18,7 +20,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::{
-    model::{Status, StatusEntry, StatusList, StatusListToken},
+    models::{Status, StatusEntry, StatusList, StatusListToken},
     utils::{keygen::Keypair, state::AppState},
     web::midlw::AuthenticatedIssuer,
 };
@@ -92,16 +94,30 @@ pub async fn get_status_list(
 async fn build_status_list_token(
     accept: &str,
     list_id: &str,
-    repo: &AppState,
+    state: &AppState,
 ) -> Result<impl IntoResponse + Debug, StatusListError> {
     // Get status list claims from database
-    let status_claims = repo
-        .status_list_token_repository
+    let status_claims = state
+        .status_list_token_repo
         .find_one_by(list_id.to_string())
         .await
         .map_err(|err| {
             tracing::error!("Failed to get status list {list_id} from database: {err:?}");
             StatusListError::InternalServerError
+        })?;
+
+    // Get the certificate chain
+    let certs_parts = state
+        .cert_manager
+        .cert_chain_parts()
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to get certificate chain: {e:?}");
+            StatusListError::InternalServerError
+        })?
+        .ok_or_else(|| {
+            tracing::warn!("The server certificate is not yet provisioned.");
+            StatusListError::ServiceUnavailable
         })?;
 
     let status_claims = match status_claims {
@@ -111,17 +127,12 @@ async fn build_status_list_token(
         }
     };
 
-    // Load the server key from the secret manager
-    let pem = repo
-        .secret_manager
-        .get_server_secret()
-        .await
-        .map_err(|e| {
-            tracing::error!("Failed to load server key from cache: {e}");
-            StatusListError::InternalServerError
-        })?
-        .ok_or(StatusListError::InternalServerError)?;
-    let server_key = Keypair::from_pkcs8_pem(&pem).map_err(|e| {
+    // Load the signing key
+    let signing_key_pem = state.cert_manager.signing_key_pem().await.map_err(|e| {
+        tracing::error!("Failed to load signing key: {e:?}");
+        StatusListError::InternalServerError
+    })?;
+    let keypair = Keypair::from_pkcs8_pem(&signing_key_pem).map_err(|e| {
         tracing::error!("Failed to parse server key: {e:?}");
         StatusListError::InternalServerError
     })?;
@@ -139,8 +150,8 @@ async fn build_status_list_token(
     };
 
     let token_bytes = match accept {
-        ACCEPT_STATUS_LISTS_HEADER_CWT => issue_cwt(&status_claims, &server_key)?,
-        _ => issue_jwt(&status_claims, &server_key)?.into_bytes(),
+        ACCEPT_STATUS_LISTS_HEADER_CWT => issue_cwt(&status_claims, &keypair, certs_parts)?,
+        _ => issue_jwt(&status_claims, &keypair, certs_parts)?.into_bytes(),
     };
 
     Ok((
@@ -155,7 +166,11 @@ async fn build_status_list_token(
 }
 
 // Function to create a CWT per the specification
-fn issue_cwt(token: &StatusListToken, server_key: &Keypair) -> Result<Vec<u8>, StatusListError> {
+fn issue_cwt(
+    token: &StatusListToken,
+    keypair: &Keypair,
+    cert_chain: Vec<String>,
+) -> Result<Vec<u8>, StatusListError> {
     let mut claims = vec![];
 
     // Building the claims
@@ -206,13 +221,15 @@ fn issue_cwt(token: &StatusListToken, server_key: &Keypair) -> Result<Vec<u8>, S
         StatusListError::InternalServerError
     })?;
 
+    let x5chain_value = build_x5chain(&cert_chain)?;
     // Building the protected header
     let protected = HeaderBuilder::new()
         .algorithm(Algorithm::ES256)
+        .value(HeaderParameter::X5Chain.to_i64(), x5chain_value)
         .value(CWT_TYPE, CborValue::Text(STATUS_LISTS_HEADER_CWT.into()))
         .build();
 
-    let signing_key = server_key.signing_key();
+    let signing_key = keypair.signing_key();
 
     // Building the CWT
     let sign1 = CoseSign1Builder::new()
@@ -232,6 +249,28 @@ fn issue_cwt(token: &StatusListToken, server_key: &Keypair) -> Result<Vec<u8>, S
     Ok(cwt_bytes)
 }
 
+fn build_x5chain(cert_chain: &[String]) -> Result<CborValue, StatusListError> {
+    use base64::prelude::{Engine as _, BASE64_STANDARD};
+
+    let result: Result<Vec<Vec<u8>>, _> = cert_chain
+        .iter()
+        .map(|b64| BASE64_STANDARD.decode(b64))
+        .collect();
+    let certs_der = result.map_err(|err| {
+        tracing::error!("Failed to decode certificate chain to DER: {err:?}");
+        StatusListError::InternalServerError
+    })?;
+
+    let x5chain_value = if certs_der.len() == 1 {
+        CborValue::Bytes(certs_der.into_iter().next().unwrap())
+    } else {
+        let cert_array: Vec<CborValue> = certs_der.into_iter().map(CborValue::Bytes).collect();
+        CborValue::Array(cert_array)
+    };
+
+    Ok(x5chain_value)
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct StatusListClaims {
     pub exp: Option<i64>,
@@ -241,7 +280,11 @@ pub struct StatusListClaims {
     pub ttl: Option<i64>,
 }
 
-fn issue_jwt(token: &StatusListToken, server_key: &Keypair) -> Result<String, StatusListError> {
+fn issue_jwt(
+    token: &StatusListToken,
+    keypair: &Keypair,
+    cert_chain: Vec<String>,
+) -> Result<String, StatusListError> {
     let iat = Utc::now().timestamp();
     let ttl = token.ttl.unwrap_or(43200);
     // Building the claims
@@ -255,8 +298,9 @@ fn issue_jwt(token: &StatusListToken, server_key: &Keypair) -> Result<String, St
     // Building the header
     let mut header = Header::new(jsonwebtoken::Algorithm::ES256);
     header.typ = Some(STATUS_LISTS_HEADER_JWT.into());
+    header.x5c = Some(cert_chain);
 
-    let pem_bytes = server_key.to_pkcs8_pem_bytes().map_err(|err| {
+    let pem_bytes = keypair.to_pkcs8_pem_bytes().map_err(|err| {
         tracing::error!("Failed to convert signing key to PEM: {err:?}");
         StatusListError::InternalServerError
     })?;
@@ -324,7 +368,7 @@ pub async fn update_statuslist(
         }
     };
 
-    let store = &appstate.status_list_token_repository;
+    let store = &appstate.status_list_token_repo;
 
     let status_list_token = match store.find_one_by(list_id.clone()).await {
         Ok(token) => token,
@@ -340,7 +384,7 @@ pub async fn update_statuslist(
 
     if let Some(status_list_token) = status_list_token {
         // Ownership check: only the owner (token.sub) can update
-        if status_list_token.sub != issuer {
+        if status_list_token.issuer != issuer {
             return (
                 StatusCode::FORBIDDEN,
                 StatusListError::Forbidden("Issuer does not own this list".to_string()),
@@ -433,8 +477,8 @@ fn update_status(lst: &str, updates: Vec<StatusEntry>) -> Result<String, StatusL
 mod tests {
     use super::*;
     use crate::{
-        model::{status_list_tokens, StatusList, StatusListToken},
-        test_utils::test::test_app_state,
+        models::{status_list_tokens, StatusList, StatusListToken},
+        test_utils::test_app_state,
     };
     use axum::{
         body::to_bytes,
@@ -444,10 +488,8 @@ mod tests {
     };
     use coset::CoseSign1;
     use jsonwebtoken::{DecodingKey, Validation};
-    use p256::{
-        ecdsa::{signature::Verifier, VerifyingKey},
-        pkcs8::{EncodePublicKey, LineEnding},
-    };
+    use p256::ecdsa::{signature::Verifier, VerifyingKey};
+    use p256::pkcs8::{EncodePublicKey, LineEnding};
     use sea_orm::{DatabaseBackend, MockDatabase};
     use serde_json::json;
     use std::{io::Read, sync::Arc};
@@ -476,7 +518,7 @@ mod tests {
                 .into_connection(),
         );
 
-        let app_state = test_app_state(db_conn.clone());
+        let app_state = test_app_state(Some(db_conn.clone())).await;
 
         let mut headers = HeaderMap::new();
         headers.insert(
@@ -503,15 +545,10 @@ mod tests {
         decoder.read_to_end(&mut body_bytes).unwrap();
         let body_str = std::str::from_utf8(&body_bytes).unwrap();
 
-        // Load the key from the cache
-        let pem = app_state
-            .secret_manager
-            .get_server_secret()
-            .await
-            .unwrap()
-            .unwrap();
-        let server_key = Keypair::from_pkcs8_pem(&pem).unwrap();
-        let decoding_key_pem = server_key
+        // Load the decoding key
+        let signing_key_pem = app_state.cert_manager.signing_key_pem().await.unwrap();
+        let keypair = Keypair::from_pkcs8_pem(&signing_key_pem).unwrap();
+        let decoding_key_pem = keypair
             .verifying_key()
             .to_public_key_pem(LineEnding::default())
             .unwrap()
@@ -551,12 +588,12 @@ mod tests {
         let db_conn = Arc::new(
             mock_db
                 .append_query_results::<status_list_tokens::Model, Vec<_>, _>(vec![vec![
-                    status_list_token.clone(),
+                    status_list_token,
                 ]])
                 .into_connection(),
         );
 
-        let app_state = test_app_state(db_conn.clone());
+        let app_state = test_app_state(Some(db_conn.clone())).await;
 
         let mut headers = HeaderMap::new();
         headers.insert(
@@ -585,14 +622,9 @@ mod tests {
         let cwt = CoseSign1::from_slice(&body_bytes).unwrap();
 
         // Load the key from the cache
-        let pem = app_state
-            .secret_manager
-            .get_server_secret()
-            .await
-            .unwrap()
-            .unwrap();
-        let server_key = Keypair::from_pkcs8_pem(&pem).unwrap();
-        let signing_key = server_key.signing_key();
+        let signing_key_pem = app_state.cert_manager.signing_key_pem().await.unwrap();
+        let keypair = Keypair::from_pkcs8_pem(&signing_key_pem).unwrap();
+        let signing_key = keypair.signing_key();
         let verifying_key = VerifyingKey::from(signing_key);
 
         // Verify signature
@@ -663,7 +695,7 @@ mod tests {
                 .into_connection(),
         );
 
-        let app_state = test_app_state(db_conn.clone());
+        let app_state = test_app_state(Some(db_conn.clone())).await;
 
         let mut headers = HeaderMap::new();
         headers.insert(
@@ -682,10 +714,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_status_list_unsupported_accept_header() {
-        let mock_db = MockDatabase::new(DatabaseBackend::Postgres);
-        let db_conn = Arc::new(mock_db.into_connection());
-
-        let app_state = test_app_state(db_conn.clone());
+        let app_state = test_app_state(None).await;
 
         let mut headers = HeaderMap::new();
         headers.insert(http::header::ACCEPT, "application/xml".parse().unwrap()); // unsupported
@@ -742,7 +771,7 @@ mod tests {
                 .into_connection(),
         );
 
-        let app_state = test_app_state(db_conn.clone());
+        let app_state = test_app_state(Some(db_conn.clone())).await;
 
         let update_body = json!({
             "updates": [
@@ -771,7 +800,7 @@ mod tests {
                 .into_connection(),
         );
 
-        let app_state = test_app_state(db_conn.clone());
+        let app_state = test_app_state(Some(db_conn.clone())).await;
 
         let update_body = json!({
             "updates": [

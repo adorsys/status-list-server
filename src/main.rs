@@ -1,76 +1,42 @@
-use axum::{
-    http::Method,
-    response::IntoResponse,
-    routing::{get, patch, post},
-    Json, Router,
-};
+use color_eyre::{eyre::eyre, Result};
 use dotenvy::dotenv;
-use serde::Serialize;
-use status_list_server::web::handlers::{credential_handler, get_status_list};
-use status_list_server::{
-    utils::state::setup,
-    web::handlers::status_list::{
-        publish_token_status::publish_token_status, update_token_status::update_token_status,
-    },
-};
-use tokio::net::TcpListener;
-use tower::ServiceBuilder;
-use tower_http::catch_panic::CatchPanicLayer;
-use tower_http::{
-    cors::{Any, CorsLayer},
-    trace::TraceLayer,
-};
-
-async fn welcome() -> impl IntoResponse {
-    "Status list Server"
-}
-
-#[derive(Serialize)]
-struct HealthCheckResponse {
-    status: String,
-}
-
-async fn health_check() -> impl IntoResponse {
-    Json(HealthCheckResponse {
-        status: "OK".to_string(),
-    })
-}
+use rustls::crypto::aws_lc_rs;
+use status_list_server::cert_manager::setup_cert_renewal_scheduler;
+use status_list_server::state::build_state;
+use status_list_server::{config::Config as AppConfig, startup::HttpServer};
+use tracing::warn;
 
 #[tokio::main]
-async fn main() {
-    dotenv().ok();
+async fn main() -> Result<()> {
     config_tracing();
+    dotenv().ok();
+    // Install the default panic and error report hooks
+    color_eyre::install()?;
 
-    let state = setup().await;
+    // Install the crypto provider
+    aws_lc_rs::default_provider()
+        .install_default()
+        .map_err(|e| eyre!("Failed to set crypto provider: {e:?}"))?;
 
-    let cors = CorsLayer::new()
-        .allow_methods([Method::GET, Method::POST, Method::OPTIONS])
-        .allow_origin(Any)
-        .allow_headers(Any);
+    // Load configuration and build the app state
+    let config = AppConfig::load()?;
+    let app_state = build_state(&config).await?;
 
-    let router = Router::new()
-        .route("/", get(welcome))
-        .route("/health", get(health_check))
-        .route("/credentials", post(credential_handler))
-        .nest(
-            "/statuslists",
-            Router::new()
-                .route("/{list_id}", get(get_status_list))
-                .route("/publish", post(publish_token_status))
-                .route("/update", patch(update_token_status)),
-        )
-        .layer(
-            ServiceBuilder::new()
-                .layer(TraceLayer::new_for_http())
-                .layer(CatchPanicLayer::new())
-                .layer(cors),
-        )
-        .with_state(state);
+    // Setup certificate renewal scheduler
+    let cert_manager = app_state.cert_manager.clone();
+    setup_cert_renewal_scheduler(cert_manager.clone()).await?;
 
-    let addr = "0.0.0.0:8000";
-    let listener = TcpListener::bind(addr).await.unwrap();
-    tracing::info!("listening on {addr}");
-    axum::serve(listener, router).await.unwrap()
+    let http_server = HttpServer::new(&config, app_state).await?;
+
+    // Initial certificate request
+    tokio::spawn(async move {
+        if let Err(e) = cert_manager.renew_cert_if_needed().await {
+            warn!("Certificate initialization failed: {e}");
+        }
+    });
+
+    http_server.run().await?;
+    Ok(())
 }
 
 fn config_tracing() {

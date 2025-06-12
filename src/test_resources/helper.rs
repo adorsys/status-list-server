@@ -1,6 +1,6 @@
 #[cfg(test)]
-use crate::model::StatusEntry;
-use crate::model::StatusRequest;
+use crate::models::StatusEntry;
+use crate::models::StatusRequest;
 
 // Helper to create a test request payload with customizable bits
 #[cfg(test)]
