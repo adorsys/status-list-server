@@ -6,13 +6,14 @@ pub mod challenge;
 pub mod http_client;
 pub mod storage;
 
+use challenge::CleanupFuture;
 pub use errors::CertError;
 
 use chrono::{TimeZone, Utc};
 use color_eyre::eyre::eyre;
 use instant_acme::{
     Account, AccountCredentials, AuthorizationStatus, HttpClient, Identifier, NewAccount, NewOrder,
-    OrderStatus,
+    Order, OrderStatus,
 };
 use rcgen::{
     CertificateParams, DistinguishedName, DnType, ExtendedKeyUsagePurpose, KeyUsagePurpose,
@@ -213,32 +214,8 @@ impl CertManager {
             cleanup_futures.push(cleanup_future);
         }
 
-        // Wait for the ACME challenge to be propagated
-        let delay = challenge_handler.propagation_delay();
-        sleep(delay).await;
-
-        // perform clean up, regardless of success or failure
-        for future in cleanup_futures {
-            if let Err(e) = future.run().await {
-                warn!("Failed to clean up challenge: {e}");
-            }
-        }
-
-        // Poll the ACME server until the order becomes ready or invalid
-        loop {
-            order.refresh().await?;
-            match order.state().status {
-                OrderStatus::Ready => break,
-                OrderStatus::Invalid => {
-                    return Err(CertError::Other(eyre!(
-                        "order with url {} for domains {:?} has been invalidated",
-                        order.url(),
-                        self.domains
-                    )));
-                }
-                _ => sleep(Duration::from_secs(2)).await,
-            }
-        }
+        // poll order until it is ready or an error occurs
+        self.poll_order(&mut order, cleanup_futures).await?;
 
         // Generate the certificate signing request
         let server_key_pem = self.signing_key_pem().await?;
@@ -279,6 +256,53 @@ impl CertManager {
             ts_to_local(not_after)
         );
         Ok(cert_data)
+    }
+
+    async fn poll_order(
+        &self,
+        order: &mut Order,
+        cleanup_futures: Vec<CleanupFuture>,
+    ) -> Result<(), CertError> {
+        use tokio::time::{sleep, timeout};
+
+        const RETRY_DELAY: Duration = Duration::from_secs(2);
+        const TIMEOUT: Duration = Duration::from_secs(300);
+
+        let poll_future = async {
+            loop {
+                order.refresh().await?;
+                match order.state().status {
+                    OrderStatus::Ready => return Ok(()),
+                    OrderStatus::Invalid => {
+                        return Err(CertError::Other(eyre!(
+                            "Order with url {} for domains {:?} has been invalidated",
+                            order.url(),
+                            self.domains
+                        )));
+                    }
+                    _ => sleep(RETRY_DELAY).await,
+                }
+            }
+        };
+
+        let result = match timeout(TIMEOUT, poll_future).await {
+            Ok(result) => match result {
+                Ok(()) => Ok(()),
+                Err(e) => Err(e),
+            },
+            Err(_) => Err(CertError::Other(eyre!(
+                "Order validation timed out after {}s",
+                TIMEOUT.as_secs()
+            ))),
+        };
+
+        // perform clean up, regardless of success or failure
+        for cleanup_future in cleanup_futures {
+            if let Err(e) = cleanup_future.run().await {
+                warn!("Failed to clean up challenge: {e}");
+            }
+        }
+        result
     }
 
     /// Attempt to get the signing key
