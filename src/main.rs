@@ -62,8 +62,8 @@ async fn main() {
         .nest(
             "/statuslists",
             Router::new()
-            .merge(protected_routes)
-            .route("/{list_id}", get(get_status_list)),
+                .merge(protected_routes)
+                .route("/{list_id}", get(get_status_list)),
         )
         .layer(
             ServiceBuilder::new()
