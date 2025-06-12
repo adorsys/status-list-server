@@ -10,8 +10,8 @@ pub enum AuthenticationError {
     IssuerNotFound,
     #[error("Internal server error")]
     InternalServer,
-    #[error("Missing Authorization header")]
-    MissingAuthHeader,
+    #[error("Missing or invalid Authorization header")]
+    InvalidAuthorizationHeader,
     #[error("{0}")]
     JwtError(#[from] JwtError),
     #[error("Unsupported algorithm")]
