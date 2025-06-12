@@ -8,7 +8,6 @@ use axum::{
     extract::{Json, State},
     http::StatusCode,
     response::IntoResponse,
-    Extension,
 };
 use std::time::{SystemTime, UNIX_EPOCH};
 use tracing;
@@ -16,20 +15,9 @@ use tracing;
 // Handler to create a new status list token
 pub async fn publish_token_status(
     State(appstate): State<AppState>,
-    Extension(issuer): Extension<String>,
-    authenticated_issuer: AuthenticatedIssuer,
+    AuthenticatedIssuer(issuer): AuthenticatedIssuer,
     Json(payload): Json<StatusRequest>,
 ) -> Result<impl IntoResponse, StatusListError> {
-    // Verify that the authenticated issuer matches the extension issuer
-    if authenticated_issuer.0 != issuer {
-        tracing::error!(
-            "Issuer mismatch: authenticated={}, extension={}",
-            authenticated_issuer.0,
-            issuer
-        );
-        return Err(StatusListError::IssuerMismatch);
-    }
-
     let store = &appstate.status_list_token_repository;
 
     let stl = create_status_list(payload.status).map_err(|e| {
@@ -61,10 +49,15 @@ pub async fn publish_token_status(
                 lst: stl.lst,
             };
 
-            let sub = format!(
-                "https://{}/statuslist/{}",
-                appstate.server_public_domain, payload.list_id
-            );
+            // TODO: This field is used elsewhere to link status list tokens
+            // to issuers, hence the existence of a Foreign Key. We'll maybe
+            // have to switch to another field for this purpose.
+            //
+            // let sub = format!(
+            //     "https://{}/statuslist/{}",
+            //     appstate.server_public_domain, payload.list_id
+            // );
+            let sub = issuer.clone();
 
             // Build the new status list token
             let new_status_list_token = StatusListToken {
@@ -156,7 +149,6 @@ mod tests {
 
         let response = publish_token_status(
             State(app_state),
-            Extension("issuer".to_string()),
             AuthenticatedIssuer("issuer".to_string()),
             Json(payload),
         )
@@ -221,7 +213,6 @@ mod tests {
         // Perform the insertion
         let _ = publish_token_status(
             State(app_state.clone()),
-            Extension("issuer".to_string()),
             AuthenticatedIssuer("issuer".to_string()),
             Json(payload),
         )
@@ -278,7 +269,6 @@ mod tests {
 
         let response = match publish_token_status(
             State(app_state),
-            Extension("issuer".to_string()),
             AuthenticatedIssuer("issuer".to_string()),
             Json(payload),
         )
@@ -331,7 +321,6 @@ mod tests {
 
         let response = publish_token_status(
             State(app_state.clone()),
-            Extension("issuer".to_string()),
             AuthenticatedIssuer("issuer".to_string()),
             Json(payload),
         )
@@ -398,7 +387,6 @@ mod tests {
 
         let response = publish_token_status(
             State(app_state),
-            Extension("issuer".to_string()),
             AuthenticatedIssuer("issuer".to_string()),
             Json(payload),
         )
@@ -424,7 +412,6 @@ mod tests {
 
         let response = match publish_token_status(
             State(app_state),
-            Extension("issuer".to_string()),
             AuthenticatedIssuer("issuer".to_string()),
             Json(payload),
         )
