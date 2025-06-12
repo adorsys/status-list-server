@@ -1,9 +1,6 @@
 use axum::{extract::State, http::StatusCode, response::IntoResponse, Json};
 
-use crate::{
-    auth::authentication::publish_credentials, database::error::RepositoryError,
-    model::Credentials, utils::state::AppState,
-};
+use crate::{database::error::RepositoryError, model::Credentials, utils::state::AppState};
 
 pub async fn credential_handler(
     State(appstate): State<AppState>,
@@ -34,4 +31,24 @@ pub async fn credential_handler(
                 .into_response()
         }
     }
+}
+
+pub async fn publish_credentials(
+    credentials: Credentials,
+    state: AppState,
+) -> Result<(), RepositoryError> {
+    let store = &state.credential_repository;
+
+    // Check for existing issuer
+    if store
+        .find_one_by(credentials.issuer.clone())
+        .await?
+        .is_some()
+    {
+        return Err(RepositoryError::DuplicateEntry);
+    }
+
+    let credential = Credentials::new(credentials.issuer, credentials.public_key, credentials.alg);
+    store.insert_one(credential).await?;
+    Ok(())
 }

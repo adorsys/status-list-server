@@ -1,4 +1,4 @@
-use axum::{extract::State, response::IntoResponse, Json};
+use axum::{extract::State, response::IntoResponse, Extension, Json};
 use hyper::StatusCode;
 
 use crate::{
@@ -6,7 +6,6 @@ use crate::{
     utils::{
         bits_validation::BitFlag, errors::Error, lst_gen::update_status_list, state::AppState,
     },
-    web::midlw::AuthenticatedIssuer,
 };
 
 use super::error::StatusListError;
@@ -14,7 +13,7 @@ use super::error::StatusListError;
 // Handler to update an existing status list token
 pub async fn update_token_status(
     State(appstate): State<AppState>,
-    AuthenticatedIssuer(issuer): AuthenticatedIssuer,
+    Extension(issuer): Extension<String>,
     Json(payload): Json<StatusRequest>,
 ) -> Result<impl IntoResponse, StatusListError> {
     let store = &appstate.status_list_token_repository;
@@ -90,7 +89,7 @@ mod test {
         time::{SystemTime, UNIX_EPOCH},
     };
 
-    use axum::{extract::State, response::IntoResponse, Json};
+    use axum::{extract::State, response::IntoResponse, Extension, Json};
     use hyper::StatusCode;
     use sea_orm::{DatabaseBackend, MockDatabase};
 
@@ -100,10 +99,7 @@ mod test {
         },
         test_utils::test::test_app_state,
         utils::lst_gen::create_status_list,
-        web::{
-            handlers::status_list::update_token_status::update_token_status,
-            midlw::AuthenticatedIssuer,
-        },
+        web::handlers::status_list::update_token_status::update_token_status,
     };
 
     #[tokio::test]
@@ -169,7 +165,7 @@ mod test {
         let app_state = test_app_state(db_conn.clone());
         let response = update_token_status(
             State(app_state),
-            AuthenticatedIssuer("issuer".to_string()),
+            Extension("issuer".to_string()),
             Json(update_payload),
         )
         .await

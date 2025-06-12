@@ -1,11 +1,13 @@
 use axum::{
     http::Method,
+    middleware::from_fn_with_state,
     response::IntoResponse,
     routing::{get, patch, post},
     Json, Router,
 };
 use dotenvy::dotenv;
 use serde::Serialize;
+use status_list_server::web::auth::auth;
 use status_list_server::web::handlers::{credential_handler, get_status_list};
 use status_list_server::{
     utils::state::setup,
@@ -48,6 +50,11 @@ async fn main() {
         .allow_origin(Any)
         .allow_headers(Any);
 
+    let protected_routes = Router::new()
+        .route("/publish", post(publish_token_status))
+        .route("/update", patch(update_token_status))
+        .route_layer(from_fn_with_state(state.clone(), auth));
+
     let router = Router::new()
         .route("/", get(welcome))
         .route("/health", get(health_check))
@@ -55,9 +62,8 @@ async fn main() {
         .nest(
             "/statuslists",
             Router::new()
-                .route("/{list_id}", get(get_status_list))
-                .route("/publish", post(publish_token_status))
-                .route("/update", patch(update_token_status)),
+                .merge(protected_routes)
+                .route("/{list_id}", get(get_status_list)),
         )
         .layer(
             ServiceBuilder::new()
