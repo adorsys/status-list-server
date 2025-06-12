@@ -2,7 +2,8 @@ services:
   db:
     image: postgres:17.5
     container_name: status-list-server-db
-    env_file: .env
+    env_file:
+      - .env
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
