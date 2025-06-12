@@ -384,7 +384,7 @@ pub async fn update_statuslist(
 
     if let Some(status_list_token) = status_list_token {
         // Ownership check: only the owner (token.sub) can update
-        if status_list_token.sub != issuer {
+        if status_list_token.issuer != issuer {
             return (
                 StatusCode::FORBIDDEN,
                 StatusListError::Forbidden("Issuer does not own this list".to_string()),
