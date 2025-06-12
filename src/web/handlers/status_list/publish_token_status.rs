@@ -6,8 +6,7 @@ use crate::{
 use axum::{
     extract::{Json, State},
     http::StatusCode,
-    response::IntoResponse,
-    Extension,
+    response::IntoResponse, Extension,
 };
 use std::time::{SystemTime, UNIX_EPOCH};
 use tracing;
@@ -49,10 +48,15 @@ pub async fn publish_token_status(
                 lst: stl.lst,
             };
 
-            let sub = format!(
-                "https://{}/statuslist/{}",
-                appstate.server_public_domain, payload.list_id
-            );
+            // TODO: This field is used elsewhere to link status list tokens
+            // to issuers, hence the existence of a Foreign Key. We'll maybe
+            // have to switch to another field for this purpose.
+            //
+            // let sub = format!(
+            //     "https://{}/statuslist/{}",
+            //     appstate.server_public_domain, payload.list_id
+            // );
+            let sub = issuer.clone();
 
             // Build the new status list token
             let new_status_list_token = StatusListToken {

@@ -59,16 +59,20 @@ pub mod migrations {
                                     .not_null()
                                     .primary_key(),
                             )
-                            .col(ColumnDef::new(StatusListTokens::Exp).integer())
+                            .col(ColumnDef::new(StatusListTokens::Exp).big_integer())
                             .col(ColumnDef::new(StatusListTokens::Issuer).string().not_null())
-                            .col(ColumnDef::new(StatusListTokens::Iat).integer().not_null())
+                            .col(
+                                ColumnDef::new(StatusListTokens::Iat)
+                                    .big_integer()
+                                    .not_null(),
+                            )
                             .col(
                                 ColumnDef::new(StatusListTokens::StatusList)
                                     .json()
                                     .not_null(),
                             )
                             .col(ColumnDef::new(StatusListTokens::Sub).string().not_null())
-                            .col(ColumnDef::new(StatusListTokens::Ttl).string())
+                            .col(ColumnDef::new(StatusListTokens::Ttl).big_integer())
                             .foreign_key(
                                 ForeignKey::create()
                                     .name("fk_sub") // Foreign key name for the sub->issuer relationship
