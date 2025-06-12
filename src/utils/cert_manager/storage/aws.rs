@@ -127,8 +127,18 @@ pub struct AwsS3 {
 impl AwsS3 {
     /// Create a new instance of [AwsS3Storage] with the given AWS SDK config and bucket name
     pub fn new(config: &SdkConfig, bucket_name: impl Into<String>) -> Self {
+        let client = if std::env::var("APP_ENV").as_deref() == Ok("production") {
+            S3Client::new(config)
+        } else {
+            let dev_config = S3Client::new(config)
+                .config()
+                .to_builder()
+                .force_path_style(true)
+                .build();
+            S3Client::from_conf(dev_config)
+        };
         Self {
-            client: S3Client::new(config),
+            client,
             bucket: bucket_name.into(),
             cache: None,
             bucket_exists: AtomicBool::new(false),
