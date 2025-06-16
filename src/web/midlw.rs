@@ -150,26 +150,26 @@ pub async fn auth(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::utils::keygen::Keypair;
+    use crate::{
+        model::{credentials, Alg},
+        test_utils::test::test_app_state,
+        utils::keygen::Keypair,
+    };
     use axum::{
         body::to_bytes,
         http::{header, HeaderMap, Method, Request},
     };
     use jsonwebtoken::{encode, EncodingKey, Header as JwtHeader};
-    use once_cell::sync::Lazy;
     use p256::pkcs8::EncodePublicKey;
     use p256::pkcs8::LineEnding;
+    use sea_orm::{DatabaseBackend, MockDatabase};
     use std::time::{SystemTime, UNIX_EPOCH};
     use uuid::Uuid;
 
-    static INIT: Lazy<()> = Lazy::new(|| {
-        dotenvy::dotenv().ok();
-    });
-
     #[tokio::test]
-
     async fn test_authenticated_issuer_from_request_parts_success() {
-        *INIT;
+        let mock_db = MockDatabase::new(DatabaseBackend::Postgres);
+
         // Generate keypair and JWT
         let keypair = Keypair::generate().unwrap();
         let public_key_pem = keypair
@@ -183,8 +183,6 @@ mod tests {
             .unwrap()
             .as_secs() as usize;
 
-        // TODO: This test is manipulating the real database, which is not wanted.
-        // In the meantime, we add a generated suffix to improve testing reliability.
         let issuer_id = format!("test-issuer-demo-{}", Uuid::new_v4());
 
         #[derive(serde::Serialize)]
@@ -205,13 +203,20 @@ mod tests {
         )
         .unwrap();
 
+        let credential = credentials::Model {
+            issuer: issuer_id.clone(),
+            public_key: public_key_pem,
+            alg: Alg(jsonwebtoken::Algorithm::ES256),
+        };
+
+        let db_conn = Arc::new(
+            mock_db
+                .append_query_results::<credentials::Model, Vec<_>, _>(vec![vec![credential]])
+                .into_connection(),
+        );
+
         // Setup AppState with the issuer registered
-        let app_state = AppState::setup_test_with_credential(
-            &issuer_id,
-            &public_key_pem,
-            jsonwebtoken::Algorithm::ES256,
-        )
-        .await;
+        let app_state = test_app_state(db_conn);
 
         // Build request parts with Authorization header
         let mut headers = HeaderMap::new();
@@ -236,10 +241,10 @@ mod tests {
     }
 
     #[tokio::test]
-
     async fn test_missing_authorization_header() {
-        *INIT;
-        let app_state = crate::utils::state::setup().await;
+        let app_state = test_app_state(Arc::new(
+            MockDatabase::new(DatabaseBackend::Postgres).into_connection(),
+        ));
         let mut parts = Request::builder()
             .method(Method::GET)
             .uri("/")
@@ -261,8 +266,9 @@ mod tests {
     #[tokio::test]
 
     async fn test_invalid_authorization_header_format() {
-        *INIT;
-        let app_state = crate::utils::state::setup().await;
+        let app_state = test_app_state(Arc::new(
+            MockDatabase::new(DatabaseBackend::Postgres).into_connection(),
+        ));
         let mut headers = HeaderMap::new();
         headers.insert(header::AUTHORIZATION, "NotBearer token".parse().unwrap());
         let mut parts = Request::builder()
@@ -286,8 +292,9 @@ mod tests {
     #[tokio::test]
 
     async fn test_invalid_token_format() {
-        *INIT;
-        let app_state = crate::utils::state::setup().await;
+        let app_state = test_app_state(Arc::new(
+            MockDatabase::new(DatabaseBackend::Postgres).into_connection(),
+        ));
         let mut headers = HeaderMap::new();
         headers.insert(header::AUTHORIZATION, "Bearer not.a.jwt".parse().unwrap());
         let mut parts = Request::builder()
@@ -311,7 +318,6 @@ mod tests {
     #[tokio::test]
 
     async fn test_missing_issuer_identifier_in_token() {
-        *INIT;
         // Create a valid JWT but without kid
         let keypair = Keypair::generate().unwrap();
         let private_key_pem = keypair.to_pkcs8_pem_bytes().unwrap();
@@ -335,7 +341,10 @@ mod tests {
             &EncodingKey::from_ec_pem(&private_key_pem).unwrap(),
         )
         .unwrap();
-        let app_state = crate::utils::state::setup().await;
+
+        let app_state = test_app_state(Arc::new(
+            MockDatabase::new(DatabaseBackend::Postgres).into_connection(),
+        ));
         let mut headers = HeaderMap::new();
         headers.insert(
             header::AUTHORIZATION,
@@ -356,9 +365,7 @@ mod tests {
     }
 
     #[tokio::test]
-
     async fn test_invalid_token_verification() {
-        *INIT;
         // Create a valid JWT with kid, but not registered in DB
         let keypair = Keypair::generate().unwrap();
         let private_key_pem = keypair.to_pkcs8_pem_bytes().unwrap();
@@ -384,7 +391,14 @@ mod tests {
             &EncodingKey::from_ec_pem(&private_key_pem).unwrap(),
         )
         .unwrap();
-        let app_state = crate::utils::state::setup().await;
+
+        let mock_db = MockDatabase::new(DatabaseBackend::Postgres);
+        let db_conn = Arc::new(
+            mock_db
+                .append_query_results::<credentials::Model, Vec<_>, _>(vec![vec![]])
+                .into_connection(),
+        );
+        let app_state = test_app_state(db_conn);
         let mut headers = HeaderMap::new();
         headers.insert(
             header::AUTHORIZATION,
@@ -409,9 +423,7 @@ mod tests {
     }
 
     #[tokio::test]
-
     async fn test_other_authentication_error() {
-        *INIT;
         // Simulate a token with a valid kid, but with an unsupported algorithm
         let keypair = Keypair::generate().unwrap();
         let _public_key_pem = keypair
