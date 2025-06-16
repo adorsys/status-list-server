@@ -3735,8 +3735,6 @@ dependencies = [
  "sea-orm-migration",
  "serde",
  "serde_json",
- "sha2",
- "sqlx",
  "thiserror 2.0.12",
  "tokio",
  "tower",
