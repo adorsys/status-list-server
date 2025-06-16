@@ -194,6 +194,16 @@ Example JWT header:
 }
 ```
 
+## Certificate Provisioning and Renewal
+
+The Status List Server is provisioned with a cryptographic certificate that is embedded into all issued status list tokens. This certificate ensures the authenticity and integrity of the tokens distributed by the server.
+
+**Automatic Issuance and Renewal:**
+
+- Certificate issuance and renewal are managed according to the configured renewal strategy.
+- Every day at midnight, a cron job checks whether the certificate should be renewed based on this strategy.
+- If the certificate is still considered valid according to the configured strategy, no renewal occurs; renewal is only triggered when necessary.
+
 ## Error Handling
 
 The server implements proper error handling and returns appropriate HTTP status codes:
