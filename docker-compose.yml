@@ -69,10 +69,11 @@ services:
       context: .
       dockerfile: Dockerfile
     container_name: status-list-server
-    env_file:
-      - .env
+    env_file: .env
     ports:
       - 8000:8000
+    volumes:
+      - ~/.aws/credentials:/root/.aws/credentials
     depends_on:
       db:
         condition: service_healthy
