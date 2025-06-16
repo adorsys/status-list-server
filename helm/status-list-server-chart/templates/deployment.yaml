@@ -41,11 +41,11 @@ spec:
             - name: ENVIRONMENT
               value: {{ .Values.statuslist.env.ENVIRONMENT | quote }}
             - name: POSTGRES_HOST
-              value: {{ printf "%s-postgresql.%s.svc.cluster.local" .Release.Name .Release.Namespace | quote }}
+              value:  "{{ .Release.Name }}-postgresql.{{ .Release.Namespace }}.svc.cluster.local"
             - name: POSTGRES_DB
               value: {{ .Values.postgresql.auth.database | quote }}
             - name: DATABASE_URL
-              value: {{ printf "postgres://%s:%s@%s/%s" .Values.postgresql.auth.username "$(POSTGRES_PASSWORD)" (printf "%s-postgresql.%s.svc.cluster.local" .Release.Name .Release.Namespace) .Values.postgresql.auth.database | quote }}
+              value: "postgres://$(POSTGRES_USER):$(POSTGRES_PASSWORD)@$(POSTGRES_HOST):5432/$(POSTGRES_DB)"
           volumeMounts:
             - name: aws-credentials-volume
               mountPath: /root/.aws
