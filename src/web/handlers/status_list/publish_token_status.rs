@@ -18,6 +18,11 @@ pub async fn publish_token_status(
     AuthenticatedIssuer(issuer): AuthenticatedIssuer,
     Json(payload): Json<StatusRequest>,
 ) -> Result<impl IntoResponse, StatusListError> {
+    // Validate list_id as UUID
+    if let Err(e) = uuid::Uuid::try_parse(&payload.list_id) {
+        return Err(StatusListError::InvalidListId(e.to_string()));
+    }
+
     let store = &appstate.status_list_token_repository;
 
     let stl = create_status_list(payload.status).map_err(|e| {
@@ -87,6 +92,7 @@ pub async fn publish_token_status(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::web::handlers::status_list::error::StatusListError;
     use crate::{
         model::{status_list_tokens, Status, StatusEntry, StatusListToken},
         test_resources::helper::publish_test_token,
@@ -97,11 +103,31 @@ mod tests {
     use std::sync::Arc;
 
     #[tokio::test]
+    async fn test_publish_token_status_invalid_list_id() {
+        let mock_db = MockDatabase::new(DatabaseBackend::Postgres).into_connection();
+        let appstate = test_app_state(Arc::new(mock_db));
+        let issuer = "test-issuer".to_string();
+        let payload = StatusRequest {
+            list_id: "invalid-uuid".to_string(),
+            status: vec![],
+        };
+
+        let result = publish_token_status(
+            State(appstate.clone()),
+            AuthenticatedIssuer(issuer),
+            Json(payload),
+        )
+        .await;
+
+        assert!(matches!(result, Err(StatusListError::InvalidListId(_))));
+    }
+
+    #[tokio::test]
     async fn test_publish_status_creates_token() {
         let mock_db = MockDatabase::new(DatabaseBackend::Postgres);
-        let token_id = "token1";
+        let token_id = "477121aa-b598-419e-916f-1e74654ff38b".to_string();
         let payload = publish_test_token(
-            token_id,
+            &token_id,
             vec![
                 StatusEntry {
                     index: 0,
@@ -119,7 +145,7 @@ mod tests {
             lst: create_status_list(payload.status.clone()).unwrap().lst,
         };
         let new_token = StatusListToken {
-            list_id: token_id.to_string(),
+            list_id: token_id.clone(),
             issuer: "issuer".to_string(),
             exp: Some(
                 (SystemTime::now()
@@ -161,9 +187,9 @@ mod tests {
     #[tokio::test]
     async fn test_token_is_stored_after_publish() {
         let mock_db = MockDatabase::new(DatabaseBackend::Postgres);
-        let token_id = "token1";
+        let token_id = "8e4ebb4a-dd79-498f-ac97-966f22884037".to_string();
         let payload = publish_test_token(
-            token_id,
+            &token_id,
             vec![
                 StatusEntry {
                     index: 0,
@@ -181,7 +207,7 @@ mod tests {
             lst: create_status_list(payload.status.clone()).unwrap().lst,
         };
         let new_token = StatusListToken {
-            list_id: token_id.to_string(),
+            list_id: token_id.clone(),
             issuer: "issuer".to_string(),
             exp: Some(
                 (SystemTime::now()
@@ -222,7 +248,7 @@ mod tests {
         // Verify the token is stored
         let result = app_state
             .status_list_token_repository
-            .find_one_by(token_id.to_string())
+            .find_one_by(token_id.clone())
             .await
             .unwrap();
         assert!(result.is_some());
@@ -236,9 +262,9 @@ mod tests {
     #[tokio::test]
     async fn test_token_conflict() {
         let mock_db = MockDatabase::new(DatabaseBackend::Postgres);
-        let token_id = "token1";
+        let token_id = "8e4ebb4a-dd79-498f-ac97-966f22884037".to_string();
         let payload = publish_test_token(
-            token_id,
+            &token_id,
             vec![StatusEntry {
                 index: 0,
                 status: Status::VALID,
@@ -246,7 +272,7 @@ mod tests {
         );
 
         let existing_token = StatusListToken {
-            list_id: token_id.to_string(),
+            list_id: token_id.clone(),
             issuer: "issuer".to_string(),
             exp: None,
             iat: 1234567890,
@@ -283,14 +309,14 @@ mod tests {
     #[tokio::test]
     async fn test_empty_updates() {
         let mock_db = MockDatabase::new(DatabaseBackend::Postgres);
-        let token_id = "token_empty";
-        let payload = publish_test_token(token_id, vec![]);
+        let token_id = "477121aa-b598-419e-916f-1e74654ff38b".to_string();
+        let payload = publish_test_token(&token_id, vec![]);
         let status_list = StatusList {
             bits: 1,
             lst: base64url::encode([]),
         };
         let new_token = StatusListToken {
-            list_id: token_id.to_string(),
+            list_id: token_id.clone(),
             issuer: "issuer".to_string(),
             exp: Some(
                 (SystemTime::now()
@@ -331,7 +357,7 @@ mod tests {
 
         let result = app_state
             .status_list_token_repository
-            .find_one_by(token_id.to_string())
+            .find_one_by(token_id.clone())
             .await
             .unwrap();
         assert!(result.is_some());
@@ -343,9 +369,9 @@ mod tests {
     #[tokio::test]
     async fn test_repository_unavailable() {
         let mock_db = MockDatabase::new(DatabaseBackend::Postgres);
-        let token_id = "token_no_repo";
+        let token_id = "477121aa-b598-419e-916f-1e74654ff38b".to_string();
         let payload = publish_test_token(
-            token_id,
+            &token_id,
             vec![StatusEntry {
                 index: 0,
                 status: Status::VALID,
@@ -357,7 +383,7 @@ mod tests {
             lst: create_status_list(payload.status.clone()).unwrap().lst,
         };
         let new_token = StatusListToken {
-            list_id: token_id.to_string(),
+            list_id: token_id.clone(),
             issuer: "issuer".to_string(),
             exp: Some(
                 (SystemTime::now()
@@ -399,9 +425,9 @@ mod tests {
     #[tokio::test]
     async fn test_invalid_index() {
         let mock_db = MockDatabase::new(DatabaseBackend::Postgres);
-        let token_id = "token_invalid_index";
+        let token_id = "477121aa-b598-419e-916f-1e74654ff38b".to_string();
         let payload = publish_test_token(
-            token_id,
+            &token_id,
             vec![StatusEntry {
                 index: -1,
                 status: Status::VALID,
