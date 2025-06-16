@@ -35,7 +35,7 @@ services:
     environment:
       - SERVICES=s3,secretsmanager
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:4566/"]
+      test: ["CMD-SHELL", "curl -f http://localhost:4566/"]
       interval: 5s
       timeout: 5s
       retries: 5
@@ -72,8 +72,6 @@ services:
     env_file: .env
     ports:
       - 8000:8000
-    volumes:
-      - ~/.aws/credentials:/root/.aws/credentials
     depends_on:
       db:
         condition: service_healthy
