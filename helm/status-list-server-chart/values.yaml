@@ -6,7 +6,7 @@ statuslist:
     tag: "latest"
   service:
     type: ClusterIP
-    port: 80
+    port: 8080
     targetPort: 8000
   ingress:
     enabled: true
@@ -35,30 +35,23 @@ statuslist:
       memory: "512Mi"
       cpu: "500m"
 postgresql:
-  image:
-    registry: docker.io
-    repository: bitnami/postgresql
-    tag: 17.4.0-debian-12-r15
-    pullPolicy: Always
+  enabled: true
   auth:
-    enablePostgresUser: true
     username: "postgres"
     database: "status-list"
     existingSecret: "statuslist-secret"
     secretKeys:
       adminPasswordKey: postgres-password
-  containerPorts:
-    postgresql: 5432
+      userPasswordKey: postgres-password
   primary:
-    name: primary
-    service:
-      type: ClusterIP
-      ports:
-        postgresql: 5432
     persistence:
       enabled: true
       storageClass: "high-performance"
       size: 10Gi
+  service:
+    type: ClusterIP
+    ports:
+      postgresql: 5432
 externalSecret:
   metadata:
     name: statuslist-external-secret
@@ -79,4 +72,3 @@ externalSecret:
 secretStore:
   aws:
     region: eu-central-1
-
