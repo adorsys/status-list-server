@@ -1,11 +1,10 @@
 name: Deploy to Kubernetes
 
 on:
-  push:
-    branches:
-      - main
-    tags:
-      - v*.*.*
+  workflow_run:
+    workflows: ["Build and Push Docker Image"]
+    types:
+      - completed
 
 env:
   IMAGE_NAME: status-list-server
@@ -36,4 +35,4 @@ jobs:
 
       - name: Update Kubernetes deployment
         run: |
-          kubectl set image deployment/statustlist-status-list-server-deployment status-list-server=ghcr.io/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:${{ github.sha }} -n ${{ env.NAMESPACE }}
+          kubectl set image deployment/statuslist-status-list-server-deployment status-list-server=ghcr.io/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:${{ github.sha }} -n ${{ env.NAMESPACE }}
