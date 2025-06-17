@@ -2,50 +2,40 @@
 
 The Status List Server is a web service that manages and publishes status lists, allowing issuers to update statuses and verifiers to retrieve them. It implements JWT-based authentication using ES256 (ECDSA with P-256 and SHA-256) for securing its endpoints.
 
-## Prerequisites
+## Getting Started
 
-Before setting up the Status List Server, ensure you have the following installed:
+Before running the server, ensure you have the following tools installed:
 
-- [Rust](https://www.rust-lang.org/tools/install): The programming language used to develop the server.
-- [Cargo](https://doc.rust-lang.org/cargo/getting-started/installation.html): The Rust package manager.
+- [Rust & Cargo](https://www.rust-lang.org/tools/install) (Latest stable version recommended).
 - [PostgreSQL](https://www.postgresql.org/download/): The database system used for storing status lists.
-
-## Installation
+- [Redis](https://redis.io/download): The in-memory data structure store used for caching.
 
 **Clone the Repository:**
 
 ```bash
- git clone https://github.com/adorsys/status-list-server.git
- cd status-list-server
+git clone https://github.com/adorsys/status-list-server.git
+cd status-list-server
 ```
 
-## Running with Docker Compose
+### Configuration
 
-You can run the project directly using docker compose:
+**Environment Variables:**
+
+   Create a `.env` file in the root directory. Take a look at the [.env.template](.env.template) file for an example of the required variables.
+
+### Running with Docker Compose
+
+The simplest way to run the project is with [docker compose](https://docs.docker.com/compose/):
 
 - Execute the command below at the root of the project
 
 ```sh
-docker-compose up
+docker compose up --build -d
 ```
 
-This command will pull and start postgres and also build the project image and start a container.
+This command will pull all required images and start the server.
 
-## Configuration
-
-**Environment Variables:**
-
-> **TODO:** Document other required environment variables.
-
-Create a `.env` file in the root directory with the following configurations:
-
-```env
-DATABASE_URL=postgres://username:password@localhost/status_list_db
-```
-
-Replace `username` and `password` with your PostgreSQL credentials.
-
-## Running the Server
+### Running Manually
 
 To start the server, execute:
 
@@ -53,7 +43,7 @@ To start the server, execute:
 cargo run
 ```
 
-By default, the server runs on `http://localhost:8000`. You can modify the port in the configuration settings.
+By default, the server will listen on `http://localhost:8000`. You can modify the host and port in the configuration settings.
 
 ## API Endpoints
 
@@ -69,6 +59,7 @@ By default, the server runs on `http://localhost:8000`. You can modify the port 
 - **Endpoint**: `POST /credentials/`
 - **Description**: Allows issuers to register their public key and identifier for later authentication
 - **Request Body**
+
   ```json
   {
     "issuer": "<issuer_id>",
@@ -76,6 +67,7 @@ By default, the server runs on `http://localhost:8000`. You can modify the port 
     "alg": "ES256"
   }
   ```
+
   - `issuer`: Unique identifier for the issuer
   - `public_key`: PEM-encoded public key
   - `alg`: "ES256" (ECDSA with P-256 and SHA-256)
@@ -86,6 +78,7 @@ By default, the server runs on `http://localhost:8000`. You can modify the port 
 - **Description**: Allows an issuer to publish their token status list
 - **Authorization**: Requires a valid signed JWT token with the corresponding registered private key with issuer's ID as the `kid` (Key ID) in the header
 - **Request Body**
+
   ```json
   {
     "list_id": "30202cc6-1e3f-4479-a567-74e86ad73693",
@@ -95,6 +88,7 @@ By default, the server runs on `http://localhost:8000`. You can modify the port 
     ]
   }
   ```
+
   - `index`: Position in the status list
   - `status`: Status value (VALID, INVALID, SUSPENDED, APPLICATIONSPECIFIC)
 
@@ -180,9 +174,11 @@ The server uses JWT-based authentication with the following requirements:
 
 1. Issuers must first register their public key using the `/credentials/` endpoint
 2. All authenticated requests must include a JWT token in the Authorization header:
-   ```
+
+   ```http
    Authorization: Bearer <jwt_token>
    ```
+
 3. The JWT token must:
    - Be signed with the algorithm specified during issuer registration.
    - Include the issuer's ID as the `kid` (Key ID) in the header
@@ -197,6 +193,16 @@ Example JWT header:
   "kid": "issuer-id"
 }
 ```
+
+## Certificate Provisioning and Renewal
+
+The Status List Server is provisioned with a cryptographic certificate that is embedded into all issued status list tokens. This certificate ensures the authenticity and integrity of the tokens distributed by the server.
+
+**Automatic Issuance and Renewal:**
+
+- Certificate issuance and renewal are managed according to the configured renewal strategy.
+- Every day at midnight, a cron job checks whether the certificate should be renewed based on this strategy.
+- If the certificate is still considered valid according to the configured strategy, no renewal occurs; renewal is only triggered when necessary.
 
 ## Error Handling
 

@@ -2,7 +2,7 @@ use axum::{extract::State, response::IntoResponse, Extension, Json};
 use hyper::StatusCode;
 
 use crate::{
-    model::StatusRequest,
+    models::StatusRequest,
     utils::{
         bits_validation::BitFlag, errors::Error, lst_gen::update_status_list, state::AppState,
     },
@@ -16,7 +16,7 @@ pub async fn update_token_status(
     Extension(issuer): Extension<String>,
     Json(payload): Json<StatusRequest>,
 ) -> Result<impl IntoResponse, StatusListError> {
-    let store = &appstate.status_list_token_repository;
+    let store = &appstate.status_list_token_repo;
 
     // Fetch the existing token
     let token = match store.find_one_by(payload.list_id.clone()).await {
@@ -61,7 +61,6 @@ pub async fn update_token_status(
         match e {
             Error::Generic(msg) => StatusListError::Generic(msg),
             Error::InvalidIndex => StatusListError::InvalidIndex,
-            Error::UnsupportedBits => StatusListError::UnsupportedBits,
             _ => StatusListError::Generic(e.to_string()),
         }
     })?;
@@ -94,10 +93,10 @@ mod test {
     use sea_orm::{DatabaseBackend, MockDatabase};
 
     use crate::{
-        model::{
+        models::{
             status_list_tokens, Status, StatusEntry, StatusList, StatusListToken, StatusRequest,
         },
-        test_utils::test::test_app_state,
+        test_utils::test_app_state,
         utils::lst_gen::create_status_list,
         web::handlers::status_list::update_token_status::update_token_status,
     };
@@ -162,7 +161,7 @@ mod test {
                 .into_connection(),
         );
 
-        let app_state = test_app_state(db_conn.clone());
+        let app_state = test_app_state(Some(db_conn.clone())).await;
         let response = update_token_status(
             State(app_state),
             Extension("issuer".to_string()),

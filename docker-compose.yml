@@ -1,9 +1,14 @@
 services:
   db:
-    image: postgres:15
-    container_name: status-list-server-db
-    env_file:
-      - .env
+    image: postgres:17-alpine
+    restart: always
+    container_name: status-list-db
+    ports:
+      - 5432:5432
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      POSTGRES_DB: ${POSTGRES_DB:-status-list}
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
@@ -14,17 +19,67 @@ services:
     networks:
       - status-list-network
 
+  redis:
+    image: redis:8.0-alpine
+    container_name: redis
+    ports:
+      - 6379:6379
+    networks:
+      - status-list-network
+
+  localstack:
+    container_name: localstack
+    image: localstack/localstack
+    ports:
+      - 4566:4566
+    environment:
+      - SERVICES=s3,secretsmanager
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:4566/"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - status-list-network
+
+  challtestsrv:
+    image: ghcr.io/letsencrypt/pebble-challtestsrv:latest
+    command: -http01 "" -https01 "" -tlsalpn01 ""
+    ports:
+      - 8055:8055
+    networks:
+      - status-list-network
+
+  pebble:
+    image: ghcr.io/letsencrypt/pebble:latest
+    command: -config /test/pebble_config.json -strict -dnsserver challtestsrv:8053
+    ports:
+      - 14000:14000
+      - 15000:15000
+    depends_on:
+      challtestsrv:
+        condition: service_started
+    networks:
+      - status-list-network
+    volumes:
+      - ./src/test_resources/pebble_config.json:/test/pebble_config.json
+
   app:
     build:
       context: .
       dockerfile: Dockerfile
     container_name: status-list-server
-    env_file:
-      - .env
+    env_file: .env
     ports:
       - 8000:8000
     depends_on:
       db:
+        condition: service_healthy
+      redis:
+        condition: service_started
+      pebble:
+        condition: service_started
+      localstack:
         condition: service_healthy
     networks:
       - status-list-network

@@ -43,7 +43,7 @@ pub async fn auth(
 
     // Check if issuer is in database and get its credentials
     let credential = &state
-        .credential_repository
+        .credential_repo
         .find_one_by(issuer.clone())
         .await
         .map_err(|e| {
@@ -82,8 +82,8 @@ pub async fn auth(
 mod tests {
     use super::*;
     use crate::{
-        model::{credentials, Alg},
-        test_utils::test::test_app_state,
+        models::{credentials, Alg},
+        test_utils::test_app_state,
         utils::state::AppState,
     };
     use axum::{
@@ -143,8 +143,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_missing_authorization_header() {
-        let db_conn = MockDatabase::new(DatabaseBackend::Postgres).into_connection();
-        let state = test_app_state(Arc::new(db_conn));
+        let state = test_app_state(None).await;
         let app = create_test_router(state);
 
         let request = Request::builder().uri("/test").body(Body::empty()).unwrap();
@@ -159,8 +158,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_malformed_authorization_header() {
-        let db_conn = MockDatabase::new(DatabaseBackend::Postgres).into_connection();
-        let state = test_app_state(Arc::new(db_conn));
+        let state = test_app_state(None).await;
         let app = create_test_router(state);
 
         let request = Request::builder()
@@ -179,8 +177,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_invalid_jwt_token() {
-        let db_conn = MockDatabase::new(DatabaseBackend::Postgres).into_connection();
-        let state = test_app_state(Arc::new(db_conn));
+        let state = test_app_state(None).await;
         let app = create_test_router(state);
 
         let request = Request::builder()
@@ -204,7 +201,7 @@ mod tests {
             db.append_query_results::<credentials::Model, Vec<_>, _>(vec![vec![]])
                 .into_connection(),
         );
-        let state = test_app_state(db_conn);
+        let state = test_app_state(Some(db_conn)).await;
         let app = create_test_router(state);
 
         let (private_key, _public_key) = create_test_keypair();
@@ -238,7 +235,7 @@ mod tests {
         let db_conn = MockDatabase::new(DatabaseBackend::Postgres)
             .append_query_results::<credentials::Model, Vec<_>, _>(vec![vec![credential]])
             .into_connection();
-        let state = test_app_state(Arc::new(db_conn));
+        let state = test_app_state(Some(Arc::new(db_conn))).await;
         let app = create_test_router(state);
 
         // Create token
@@ -271,7 +268,7 @@ mod tests {
         let db_conn = MockDatabase::new(DatabaseBackend::Postgres)
             .append_query_results::<credentials::Model, Vec<_>, _>(vec![vec![credential]])
             .into_connection();
-        let state = test_app_state(Arc::new(db_conn));
+        let state = test_app_state(Some(Arc::new(db_conn))).await;
         let app = create_test_router(state);
 
         // Create token with wrong private key
@@ -303,7 +300,7 @@ mod tests {
         let db_conn = MockDatabase::new(DatabaseBackend::Postgres)
             .append_query_results::<credentials::Model, Vec<_>, _>(vec![vec![credential]])
             .into_connection();
-        let state = test_app_state(Arc::new(db_conn));
+        let state = test_app_state(Some(Arc::new(db_conn))).await;
         let app = create_test_router(state);
 
         // Create expired token
@@ -346,7 +343,7 @@ mod tests {
         let db_conn = MockDatabase::new(DatabaseBackend::Postgres)
             .append_query_results::<credentials::Model, Vec<_>, _>(vec![vec![credential]])
             .into_connection();
-        let state = test_app_state(Arc::new(db_conn));
+        let state = test_app_state(Some(Arc::new(db_conn))).await;
 
         // Custom handler to check extensions
         async fn extension_test_handler(Extension(issuer): Extension<String>) -> String {
