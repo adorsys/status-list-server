@@ -1,12 +1,20 @@
+use color_eyre::eyre::Report;
 use p256::{
     ecdsa::{SigningKey, VerifyingKey},
     pkcs8::{DecodePrivateKey, EncodePrivateKey, LineEnding},
 };
-use rand::{rngs::OsRng, TryRngCore};
-
-use super::errors::Error;
+use rand::{rand_core::OsError, rngs::OsRng, TryRngCore};
+use thiserror::Error;
 
 const SECRET_KEY_LENGTH: usize = 32;
+
+#[derive(Debug, Error)]
+pub enum Error {
+    #[error("Failed to generate key: {0}")]
+    KeyGen(#[from] OsError),
+    #[error("Failed to parse key: {0}")]
+    Parsing(#[source] Report),
+}
 
 /// A keypair for signing and verifying JWT
 #[derive(Debug, Clone)]
@@ -31,15 +39,12 @@ impl Keypair {
                 Err(err) => {
                     if attempt == MAX_ATTEMPTS - 1 {
                         tracing::error!("Failed to generate random bytes: {err:?}");
-                        return Err(Error::KeyGenFailed);
+                        return Err(Error::KeyGen(err));
                     }
                 }
             }
         }
-        let key = SigningKey::from_slice(&seed).map_err(|err| {
-            tracing::error!("Failed to create signing key: {err:?}");
-            Error::KeyGenFailed
-        })?;
+        let key = SigningKey::from_slice(&seed).map_err(|e| Error::Parsing(e.into()))?;
 
         let keypair = Keypair {
             repr: KeyRepr { key },
@@ -53,16 +58,14 @@ impl Keypair {
     }
 
     /// Get the verifying key
+    #[allow(dead_code)]
     pub fn verifying_key(&self) -> &VerifyingKey {
         self.repr.key.verifying_key()
     }
 
-    /// Create a keypair from a pkcs8 PEM file
+    /// Create a keypair from a pkcs8 PEM string
     pub fn from_pkcs8_pem(pem: &str) -> Result<Self, Error> {
-        let key = SigningKey::from_pkcs8_pem(pem).map_err(|err| {
-            tracing::error!("Failed to create signing key from PEM: {err:?}");
-            Error::KeyGenFailed
-        })?;
+        let key = SigningKey::from_pkcs8_pem(pem).map_err(|e| Error::Parsing(e.into()))?;
         Ok(Keypair {
             repr: KeyRepr { key },
         })
@@ -73,10 +76,7 @@ impl Keypair {
         self.repr
             .key
             .to_pkcs8_pem(LineEnding::default())
-            .map_err(|err| {
-                tracing::error!("Failed to convert signing key to PEM: {err:?}");
-                Error::PemGenFailed
-            })
+            .map_err(|e| Error::Parsing(e.into()))
             .map(|pem| pem.to_string())
     }
 

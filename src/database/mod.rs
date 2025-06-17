@@ -74,9 +74,10 @@ pub mod migrations {
                             .col(ColumnDef::new(StatusListTokens::Sub).string().not_null())
                             .col(ColumnDef::new(StatusListTokens::Ttl).big_integer())
                             .foreign_key(
+                                // Foreign key use to ensures that the Issuer in the StatusListTokens table references a valid Issuer in the Credentials table
                                 ForeignKey::create()
-                                    .name("fk_sub") // Foreign key name for the sub->issuer relationship
-                                    .from(StatusListTokens::Table, StatusListTokens::Sub)
+                                    .name("fk_issuer")
+                                    .from(StatusListTokens::Table, StatusListTokens::Issuer)
                                     .to(Credentials::Table, Credentials::Issuer),
                             )
                             .to_owned(),
