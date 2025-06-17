@@ -33,6 +33,8 @@ pub enum StatusListError {
     TokenAlreadyExists,
     #[error("Issuer mismatch")]
     IssuerMismatch,
+    #[error("The service is currently unavailable. Please try again later")]
+    ServiceUnavailable,
 }
 
 impl IntoResponse for StatusListError {
@@ -54,6 +56,7 @@ impl IntoResponse for StatusListError {
             Forbidden(_) => StatusCode::FORBIDDEN,
             TokenAlreadyExists => StatusCode::CONFLICT,
             IssuerMismatch => StatusCode::FORBIDDEN,
+            ServiceUnavailable => StatusCode::SERVICE_UNAVAILABLE,
         };
 
         (status_code, self.to_string()).into_response()
