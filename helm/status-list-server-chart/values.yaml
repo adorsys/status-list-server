@@ -2,11 +2,11 @@ statuslist:
   replicaCount: 1
   image:
     repository: ghcr.io/adorsys/status-list-server
-    pullPolicy: IfNotPresent
-    tag: latest
+    pullPolicy: Always
+    tag: "latest"
   service:
     type: ClusterIP
-    port: 80
+    port: 8080
     targetPort: 8000
   ingress:
     enabled: true
@@ -15,40 +15,43 @@ statuslist:
     annotations:
       cert-manager.io/cluster-issuer: letsencrypt-prod
       nginx.ingress.kubernetes.io/ssl-redirect: "true"
+      nginx.ingress.kubernetes.io/force-ssl-redirect: "true"
       nginx.ingress.kubernetes.io/proxy-body-size: "10m"
     tls:
       hosts:
-        - '*.eudi-adorsys.com'
-        - 'statuslist.eudi-adorsys.com'
+        - "*.eudi-adorsys.com"
       secretName: statuslist-tls
     externalDnsHostname: statuslist.eudi-adorsys.com
   env:
+    RUST_LOG: "info"
+    SERVER_KEY_SECRET_NAME: "statuslist-secret"
     POSTGRES_USER: "postgres"
-
+    ENVIRONMENT: "prod"
+  resources:
+    requests:
+      memory: "256Mi"
+      cpu: "250m"
+    limits:
+      memory: "512Mi"
+      cpu: "500m"
 postgresql:
-  image:
-    registry: docker.io
-    repository: bitnami/postgresql
-    tag: 17.4.0-debian-12-r15
-    pullPolicy: IfNotPresent
+  enabled: true
   auth:
-    enablePostgresUser: true
     username: "postgres"
     database: "status-list"
     existingSecret: "statuslist-secret"
     secretKeys:
       adminPasswordKey: postgres-password
-  containerPorts:
-    postgresql: 5432
+      userPasswordKey: postgres-password
   primary:
-    name: primary
-    service:
-      type: ClusterIP
-      ports:
-        postgresql: 5432
     persistence:
-      enabled: false
-
+      enabled: true
+      storageClass: "high-performance"
+      size: 10Gi
+  service:
+    type: ClusterIP
+    ports:
+      postgresql: 5432
 externalSecret:
   metadata:
     name: statuslist-external-secret
@@ -61,10 +64,11 @@ externalSecret:
       name: statuslist-secret
       creationPolicy: Owner
     data:
-      secretKey: postgres-password
-      remoteRef:
-        key: statuslist-secret
-        property: POSTGRES_PASSWORD
-    provider:
-      aws:
-        region: eu-central-1
+      - secretKey: postgres-password
+        remoteRef:
+          key: statuslist-secret
+          property: POSTGRES_PASSWORD
+
+secretStore:
+  aws:
+    region: eu-central-1

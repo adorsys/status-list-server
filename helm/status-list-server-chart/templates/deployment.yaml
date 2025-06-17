@@ -20,7 +20,8 @@ spec:
           image: {{ .Values.statuslist.image.repository }}:{{ .Values.statuslist.image.tag }}
           imagePullPolicy: {{ .Values.statuslist.image.pullPolicy }}
           ports:
-            - containerPort: {{ .Values.statuslist.service.targetPort }}
+            - name: http
+              containerPort: {{ .Values.statuslist.service.targetPort | int }}
           env:
             - name: RUST_LOG
               value: {{ .Values.statuslist.env.RUST_LOG | quote }}
@@ -30,6 +31,26 @@ spec:
               valueFrom:
                 secretKeyRef:
                   name: {{ .Values.externalSecret.spec.target.name }}
-                  key:  postgres-password
+                  key: postgres-password
+            - name: AWS_REGION
+              value: {{ .Values.secretStore.aws.region | quote }}
+            - name: SERVER_PUBLIC_DOMAIN
+              value: {{ .Values.statuslist.ingress.externalDnsHostname | quote }}
+            - name: SERVER_KEY_SECRET_NAME
+              value: {{ .Values.statuslist.env.SERVER_KEY_SECRET_NAME | quote }}
+            - name: ENVIRONMENT
+              value: {{ .Values.statuslist.env.ENVIRONMENT | quote }}
+            - name: POSTGRES_HOST
+              value:  "{{ .Release.Name }}-postgresql.{{ .Release.Namespace }}.svc.cluster.local"
+            - name: POSTGRES_DB
+              value: {{ .Values.postgresql.auth.database | quote }}
             - name: DATABASE_URL
-              value: {{ printf "postgres://%s:%s@%s-postgresql:5432/%s" .Values.statuslist.env.POSTGRES_USER "$(POSTGRES_PASSWORD)" .Release.Name .Values.postgresql.global.postgresql.auth.database | quote }}
+              value: "postgres://$(POSTGRES_USER):$(POSTGRES_PASSWORD)@$(POSTGRES_HOST):5432/$(POSTGRES_DB)"
+          volumeMounts:
+            - name: aws-credentials-volume
+              mountPath: /root/.aws
+              readOnly: true
+      volumes:
+        - name: aws-credentials-volume
+          secret:
+            secretName: aws-credentials-secret

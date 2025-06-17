@@ -1,13 +1,9 @@
-version: '3.9'
-
 services:
   db:
-    image: postgres:15
+    image: postgres:17.5
     container_name: status-list-server-db
-    environment:
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: postgres
-      POSTGRES_DB: status-list
+    env_file:
+      - .env
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
@@ -23,16 +19,14 @@ services:
       context: .
       dockerfile: Dockerfile
     container_name: status-list-server
-    ports:
-      - 8000:8000
-    environment:
-      - RUST_LOG=info
-      - DATABASE_URL=postgres://postgres:postgres@db/status-list
-    ports:
-      - "8000:8000"
+    env_file: .env
+    volumes:
+      - ~/.aws/credentials:/root/.aws/credentials
     depends_on:
       db:
         condition: service_healthy
+    ports:
+      - "8000:8000"
     networks:
       - status-list-network
 

@@ -52,8 +52,13 @@ async fn main() {
         .route("/", get(welcome))
         .route("/health", get(health_check))
         .route("/credentials", post(credential_handler))
-        .route("/statuslists/{list_id}", get(get_status_list))
-        .route("/statuslists/publish", post(publish_token_status))
+        .nest(
+            "/statuslists",
+            Router::new()
+                .route("/list_id", get(get_status_list))
+                .route("/publish", post(publish_token_status))
+                .route("/update", patch(update_token_status)),
+        )
         .layer(
             ServiceBuilder::new()
                 .layer(TraceLayer::new_for_http())

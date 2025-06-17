@@ -80,7 +80,10 @@ where
                 Err((StatusCode::UNAUTHORIZED, "Issuer not found").into_response())
             }
             // Map all other errors to 401 Unauthorized for token/format errors
-            Err(_) => Err((StatusCode::UNAUTHORIZED, "Invalid token").into_response()),
+            Err(err) => {
+                tracing::error!("Bearer token verification failed: {:?}", err);
+                Err((StatusCode::UNAUTHORIZED, "Invalid token").into_response())
+            }
         }
     }
 }
@@ -157,6 +160,7 @@ mod tests {
     use p256::pkcs8::EncodePublicKey;
     use p256::pkcs8::LineEnding;
     use std::time::{SystemTime, UNIX_EPOCH};
+    use uuid::Uuid;
 
     static INIT: Lazy<()> = Lazy::new(|| {
         dotenvy::dotenv().ok();
@@ -178,7 +182,11 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_secs() as usize;
-        let issuer_id = "test-issuer-demo";
+
+        // TODO: This test is manipulating the real database, which is not wanted.
+        // In the meantime, we add a generated suffix to improve testing reliability.
+        let issuer_id = format!("test-issuer-demo-{}", Uuid::new_v4());
+
         #[derive(serde::Serialize)]
         struct Claims {
             exp: usize,
@@ -199,7 +207,7 @@ mod tests {
 
         // Setup AppState with the issuer registered
         let app_state = AppState::setup_test_with_credential(
-            issuer_id,
+            &issuer_id,
             &public_key_pem,
             jsonwebtoken::Algorithm::ES256,
         )
