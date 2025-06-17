@@ -1,6 +1,6 @@
 use axum::{extract::State, http::StatusCode, response::IntoResponse, Json};
 
-use crate::{database::error::RepositoryError, model::Credentials, utils::state::AppState};
+use crate::{database::error::RepositoryError, models::Credentials, utils::state::AppState};
 
 pub async fn credential_handler(
     State(appstate): State<AppState>,
@@ -37,7 +37,7 @@ pub async fn publish_credentials(
     credentials: Credentials,
     state: AppState,
 ) -> Result<(), RepositoryError> {
-    let store = &state.credential_repository;
+    let store = &state.credential_repo;
 
     // Check for existing issuer
     if store
