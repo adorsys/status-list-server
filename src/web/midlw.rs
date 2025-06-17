@@ -151,8 +151,8 @@ pub async fn auth(
 mod tests {
     use super::*;
     use crate::{
-        model::{credentials, Alg},
-        test_utils::test::test_app_state,
+        models::{credentials, Alg},
+        test_utils::test_app_state,
         utils::keygen::Keypair,
     };
     use axum::{
@@ -164,7 +164,6 @@ mod tests {
     use p256::pkcs8::LineEnding;
     use sea_orm::{DatabaseBackend, MockDatabase};
     use std::time::{SystemTime, UNIX_EPOCH};
-    use uuid::Uuid;
 
     #[tokio::test]
     async fn test_authenticated_issuer_from_request_parts_success() {
@@ -183,7 +182,7 @@ mod tests {
             .unwrap()
             .as_secs() as usize;
 
-        let issuer_id = format!("test-issuer-demo-{}", Uuid::new_v4());
+        let issuer_id = "test-issuer".to_string();
 
         #[derive(serde::Serialize)]
         struct Claims {
@@ -195,7 +194,7 @@ mod tests {
             iat: now,
         };
         let mut header = JwtHeader::new(jsonwebtoken::Algorithm::ES256);
-        header.kid = Some(issuer_id.to_string());
+        header.kid = Some(issuer_id.clone());
         let token = encode(
             &header,
             &claims,
@@ -216,7 +215,16 @@ mod tests {
         );
 
         // Setup AppState with the issuer registered
-        let app_state = test_app_state(db_conn);
+        let creds = credentials::Model {
+            issuer: issuer_id.clone(),
+            public_key: public_key_pem.to_string(),
+            alg: Alg(jsonwebtoken::Algorithm::ES256),
+        };
+
+        let mock_db = MockDatabase::new(DatabaseBackend::Postgres)
+            .append_query_results(vec![vec![creds]])
+            .into_connection();
+        let app_state = test_app_state(Some(Arc::new(mock_db))).await;
 
         // Build request parts with Authorization header
         let mut headers = HeaderMap::new();
@@ -242,9 +250,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_missing_authorization_header() {
-        let app_state = test_app_state(Arc::new(
-            MockDatabase::new(DatabaseBackend::Postgres).into_connection(),
-        ));
+        let app_state = test_app_state(None).await;
         let mut parts = Request::builder()
             .method(Method::GET)
             .uri("/")
@@ -264,11 +270,8 @@ mod tests {
     }
 
     #[tokio::test]
-
     async fn test_invalid_authorization_header_format() {
-        let app_state = test_app_state(Arc::new(
-            MockDatabase::new(DatabaseBackend::Postgres).into_connection(),
-        ));
+        let app_state = test_app_state(None).await;
         let mut headers = HeaderMap::new();
         headers.insert(header::AUTHORIZATION, "NotBearer token".parse().unwrap());
         let mut parts = Request::builder()
@@ -290,11 +293,8 @@ mod tests {
     }
 
     #[tokio::test]
-
     async fn test_invalid_token_format() {
-        let app_state = test_app_state(Arc::new(
-            MockDatabase::new(DatabaseBackend::Postgres).into_connection(),
-        ));
+        let app_state = test_app_state(None).await;
         let mut headers = HeaderMap::new();
         headers.insert(header::AUTHORIZATION, "Bearer not.a.jwt".parse().unwrap());
         let mut parts = Request::builder()
@@ -316,7 +316,6 @@ mod tests {
     }
 
     #[tokio::test]
-
     async fn test_missing_issuer_identifier_in_token() {
         // Create a valid JWT but without kid
         let keypair = Keypair::generate().unwrap();
@@ -341,10 +340,7 @@ mod tests {
             &EncodingKey::from_ec_pem(&private_key_pem).unwrap(),
         )
         .unwrap();
-
-        let app_state = test_app_state(Arc::new(
-            MockDatabase::new(DatabaseBackend::Postgres).into_connection(),
-        ));
+        let app_state = test_app_state(None).await;
         let mut headers = HeaderMap::new();
         headers.insert(
             header::AUTHORIZATION,
@@ -392,13 +388,12 @@ mod tests {
         )
         .unwrap();
 
-        let mock_db = MockDatabase::new(DatabaseBackend::Postgres);
-        let db_conn = Arc::new(
-            mock_db
-                .append_query_results::<credentials::Model, Vec<_>, _>(vec![vec![]])
-                .into_connection(),
-        );
-        let app_state = test_app_state(db_conn);
+        // Set up mock database to return empty result (no issuer found)
+        let mock_db = MockDatabase::new(DatabaseBackend::Postgres)
+            .append_query_results::<credentials::Model, Vec<_>, _>(vec![vec![]])
+            .into_connection();
+        let app_state = test_app_state(Some(Arc::new(mock_db))).await;
+
         let mut headers = HeaderMap::new();
         headers.insert(
             header::AUTHORIZATION,
