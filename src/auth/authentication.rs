@@ -1,7 +1,7 @@
 use jsonwebtoken::{decode, decode_header, Algorithm, DecodingKey, Validation};
 use serde_json::Value;
 
-use crate::{database::error::RepositoryError, model::Credentials, utils::state::AppState};
+use crate::{database::error::RepositoryError, models::Credentials, utils::state::AppState};
 
 use super::errors::AuthenticationError;
 
@@ -9,7 +9,7 @@ pub async fn publish_credentials(
     credentials: Credentials,
     state: AppState,
 ) -> Result<(), RepositoryError> {
-    let store = &state.credential_repository;
+    let store = &state.credential_repo;
 
     // Check for existing issuer
     if store
@@ -26,7 +26,7 @@ pub async fn publish_credentials(
 }
 
 pub async fn verify_token(state: &AppState, token: &str) -> Result<(), AuthenticationError> {
-    let store = &state.credential_repository;
+    let store = &state.credential_repo;
 
     let header = decode_header(token).map_err(AuthenticationError::JwtError)?;
 

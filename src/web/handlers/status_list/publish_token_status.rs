@@ -1,5 +1,5 @@
 use crate::{
-    model::{StatusList, StatusListToken, StatusRequest},
+    models::{StatusList, StatusListToken, StatusRequest},
     utils::{errors::Error, lst_gen::create_status_list, state::AppState},
     web::handlers::status_list::error::StatusListError,
     web::midlw::AuthenticatedIssuer,
@@ -23,14 +23,13 @@ pub async fn publish_token_status(
         return Err(StatusListError::InvalidListId(e.to_string()));
     }
 
-    let store = &appstate.status_list_token_repository;
+    let store = &appstate.status_list_token_repo;
 
     let stl = create_status_list(payload.status).map_err(|e| {
         tracing::error!("lst_from failed: {:?}", e);
         match e {
             Error::Generic(msg) => StatusListError::Generic(msg),
             Error::InvalidIndex => StatusListError::InvalidIndex,
-            Error::UnsupportedBits => StatusListError::UnsupportedBits,
             _ => StatusListError::Generic(e.to_string()),
         }
     })?;
@@ -54,15 +53,10 @@ pub async fn publish_token_status(
                 lst: stl.lst,
             };
 
-            // TODO: This field is used elsewhere to link status list tokens
-            // to issuers, hence the existence of a Foreign Key. We'll maybe
-            // have to switch to another field for this purpose.
-            //
-            // let sub = format!(
-            //     "https://{}/statuslist/{}",
-            //     appstate.server_public_domain, payload.list_id
-            // );
-            let sub = issuer.clone();
+            let sub = format!(
+                "https://{}/statuslist/{}",
+                appstate.server_domain, payload.list_id
+            );
 
             // Build the new status list token
             let new_status_list_token = StatusListToken {
@@ -94,9 +88,9 @@ mod tests {
     use super::*;
     use crate::web::handlers::status_list::error::StatusListError;
     use crate::{
-        model::{status_list_tokens, Status, StatusEntry, StatusListToken},
+        models::{status_list_tokens, Status, StatusEntry, StatusListToken},
         test_resources::helper::publish_test_token,
-        test_utils::test::test_app_state,
+        test_utils::test_app_state,
     };
     use axum::{extract::State, Json};
     use sea_orm::{DatabaseBackend, MockDatabase};
@@ -104,8 +98,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_publish_token_status_invalid_list_id() {
-        let mock_db = MockDatabase::new(DatabaseBackend::Postgres).into_connection();
-        let appstate = test_app_state(Arc::new(mock_db));
+        let appstate = test_app_state(None).await;
         let issuer = "test-issuer".to_string();
         let payload = StatusRequest {
             list_id: "invalid-uuid".to_string(),
@@ -171,7 +164,7 @@ mod tests {
                 .into_connection(),
         );
 
-        let app_state = test_app_state(db_conn.clone());
+        let app_state = test_app_state(Some(db_conn.clone())).await;
 
         let response = publish_token_status(
             State(app_state),
@@ -234,7 +227,7 @@ mod tests {
                 .into_connection(),
         );
 
-        let app_state = test_app_state(db_conn.clone());
+        let app_state = test_app_state(Some(db_conn.clone())).await;
 
         // Perform the insertion
         let _ = publish_token_status(
@@ -247,7 +240,7 @@ mod tests {
 
         // Verify the token is stored
         let result = app_state
-            .status_list_token_repository
+            .status_list_token_repo
             .find_one_by(token_id.clone())
             .await
             .unwrap();
@@ -291,7 +284,7 @@ mod tests {
                 .into_connection(),
         );
 
-        let app_state = test_app_state(db_conn.clone());
+        let app_state = test_app_state(Some(db_conn.clone())).await;
 
         let response = match publish_token_status(
             State(app_state),
@@ -343,7 +336,7 @@ mod tests {
                 .into_connection(),
         );
 
-        let app_state = test_app_state(db_conn.clone());
+        let app_state = test_app_state(Some(db_conn.clone())).await;
 
         let response = publish_token_status(
             State(app_state.clone()),
@@ -356,7 +349,7 @@ mod tests {
         assert_eq!(response.status(), StatusCode::CREATED);
 
         let result = app_state
-            .status_list_token_repository
+            .status_list_token_repo
             .find_one_by(token_id.clone())
             .await
             .unwrap();
@@ -409,7 +402,7 @@ mod tests {
                 ])
                 .into_connection(),
         );
-        let app_state = test_app_state(db_conn.clone());
+        let app_state = test_app_state(Some(db_conn.clone())).await;
 
         let response = publish_token_status(
             State(app_state),
@@ -434,7 +427,7 @@ mod tests {
             }],
         );
         let db_conn = Arc::new(mock_db.into_connection());
-        let app_state = test_app_state(db_conn.clone());
+        let app_state = test_app_state(Some(db_conn.clone())).await;
 
         let response = match publish_token_status(
             State(app_state),
