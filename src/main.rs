@@ -55,7 +55,7 @@ async fn main() {
         .nest(
             "/statuslists",
             Router::new()
-                .route("/list_id", get(get_status_list))
+                .route("/{list_id}", get(get_status_list))
                 .route("/publish", post(publish_token_status))
                 .route("/update", patch(update_statuslist)),
         )
