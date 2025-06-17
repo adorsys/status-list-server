@@ -2,7 +2,7 @@ use axum::{extract::State, http::StatusCode, response::IntoResponse, Json};
 
 use crate::{
     auth::authentication::publish_credentials, database::error::RepositoryError,
-    model::Credentials, utils::state::AppState,
+    models::Credentials, utils::state::AppState,
 };
 
 pub async fn credential_handler(
