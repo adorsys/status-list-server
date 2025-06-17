@@ -242,7 +242,7 @@ fn issue_jwt(token: &StatusListToken, server_key: &Keypair) -> Result<String, St
 }
 
 pub async fn update_statuslist(
-    State(appstate): State<Arc<AppState>>,
+    State(appstate): State<AppState>,
     Path(list_id): Path<String>,
     AuthenticatedIssuer(issuer): AuthenticatedIssuer,
     Json(body): Json<Value>,
