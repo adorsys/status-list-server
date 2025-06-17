@@ -1,7 +1,7 @@
 use axum::{
     http::Method,
     response::IntoResponse,
-    routing::{get, post, patch},
+    routing::{get, patch, post},
     Json, Router,
 };
 use dotenvy::dotenv;
@@ -10,7 +10,7 @@ use status_list_server::{
     utils::state::setup,
     web::handlers::{
         credential_handler, get_status_list,
-        status_list::{publish_token_status::publish_token_status, handler::update_statuslist},
+        status_list::{handler::update_statuslist, publish_token_status::publish_token_status},
     },
 };
 use tokio::net::TcpListener;
