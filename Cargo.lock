@@ -4587,7 +4587,6 @@ dependencies = [
  "hyper-util",
  "instant-acme",
  "jsonwebtoken",
- "once_cell",
  "p256 0.13.2",
  "pem",
  "public-suffix",
@@ -4610,6 +4609,7 @@ dependencies = [
  "tower-http",
  "tracing",
  "tracing-subscriber",
+ "uuid",
  "webpki-roots 1.0.0",
  "x509-parser",
 ]

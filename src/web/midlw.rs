@@ -167,8 +167,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_authenticated_issuer_from_request_parts_success() {
-        let mock_db = MockDatabase::new(DatabaseBackend::Postgres);
-
         // Generate keypair and JWT
         let keypair = Keypair::generate().unwrap();
         let public_key_pem = keypair
@@ -202,22 +200,10 @@ mod tests {
         )
         .unwrap();
 
-        let credential = credentials::Model {
-            issuer: issuer_id.clone(),
-            public_key: public_key_pem,
-            alg: Alg(jsonwebtoken::Algorithm::ES256),
-        };
-
-        let db_conn = Arc::new(
-            mock_db
-                .append_query_results::<credentials::Model, Vec<_>, _>(vec![vec![credential]])
-                .into_connection(),
-        );
-
         // Setup AppState with the issuer registered
         let creds = credentials::Model {
             issuer: issuer_id.clone(),
-            public_key: public_key_pem.to_string(),
+            public_key: public_key_pem,
             alg: Alg(jsonwebtoken::Algorithm::ES256),
         };
 
