@@ -1,4 +1,5 @@
 use axum::{
+    middleware::from_fn_with_state,
     response::IntoResponse,
     routing::{get, patch, post},
     Router,
@@ -15,8 +16,11 @@ use tower_http::{
 use crate::{
     config::Config,
     utils::state::AppState,
-    web::handlers::{
-        credential_handler, get_status_list, publish_token_status, update_token_status,
+    web::{
+        auth::auth,
+        handlers::{
+            credential_handler, get_status_list, publish_token_status, update_token_status,
+        },
     },
 };
 
@@ -44,7 +48,7 @@ impl HttpServer {
             .route("/", get(welcome))
             .route("/health", get(health_check))
             .route("/credentials", post(credential_handler))
-            .nest("/statuslists", status_list_routes())
+            .nest("/statuslists", status_list_routes(state.clone()))
             .layer(TraceLayer::new_for_http())
             .layer(CatchPanicLayer::new())
             .layer(cors)
@@ -66,9 +70,13 @@ impl HttpServer {
     }
 }
 
-fn status_list_routes() -> Router<AppState> {
-    Router::new()
-        .route("/{list_id}", get(get_status_list))
+fn status_list_routes(state: AppState) -> Router<AppState> {
+    let protected_routes = Router::new()
         .route("/publish", post(publish_token_status))
         .route("/update", patch(update_token_status))
+        .route_layer(from_fn_with_state(state.clone(), auth));
+
+    Router::new()
+        .merge(protected_routes)
+        .route("/{list_id}", get(get_status_list))
 }
