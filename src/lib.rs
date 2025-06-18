@@ -5,7 +5,6 @@ mod test_resources;
 mod test_utils;
 mod utils;
 
-pub mod auth;
 pub mod config;
 pub mod models;
 pub mod startup;
