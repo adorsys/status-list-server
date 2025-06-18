@@ -21,7 +21,7 @@ cd status-list-server
 
 **Environment Variables:**
 
-   Create a `.env` file in the root directory. Take a look at the [.env.template](.env.template) file for an example of the required variables.
+  Create a `.env` file in the root directory. Take a look at the [.env.template](.env.template) file for an example of the required variables.
 
 ### Running with Docker Compose
 
