@@ -1,8 +1,8 @@
-ARG TARGETPLATFORM
 ARG APP_NAME=status-list-server
 
 FROM blackdex/rust-musl:x86_64-musl AS builder
 ARG APP_NAME
+ARG TARGETPLATFORM
 WORKDIR /app
 
 RUN --mount=type=bind,source=src,target=src \
