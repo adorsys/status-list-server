@@ -16,6 +16,11 @@ pub async fn update_token_status(
     Extension(issuer): Extension<String>,
     Json(payload): Json<StatusRequest>,
 ) -> Result<impl IntoResponse, StatusListError> {
+    // Validate list_id as UUID
+    if let Err(e) = uuid::Uuid::try_parse(&payload.list_id) {
+        return Err(StatusListError::InvalidListId(e.to_string()));
+    }
+
     let store = &appstate.status_list_token_repo;
 
     // Fetch the existing token
@@ -83,6 +88,7 @@ pub async fn update_token_status(
 
 #[cfg(test)]
 mod test {
+    use crate::web::handlers::status_list::error::StatusListError;
     use std::{
         sync::Arc,
         time::{SystemTime, UNIX_EPOCH},
@@ -102,9 +108,24 @@ mod test {
     };
 
     #[tokio::test]
+    async fn test_update_token_status_invalid_list_id() {
+        let appstate = test_app_state(None).await;
+        let issuer = "test-issuer".to_string();
+        let payload = StatusRequest {
+            list_id: "invalid-uuid".to_string(),
+            status: vec![],
+        };
+
+        let result =
+            update_token_status(State(appstate.clone()), Extension(issuer), Json(payload)).await;
+
+        assert!(matches!(result, Err(StatusListError::InvalidListId(_))));
+    }
+
+    #[tokio::test]
     async fn test_update_status_modifies_existing_token() {
         let mock_db = MockDatabase::new(DatabaseBackend::Postgres);
-        let token_id = "token1";
+        let token_id = uuid::Uuid::new_v4().to_string();
         let initial_bits = 2;
 
         // Initial token setup
@@ -125,7 +146,7 @@ mod test {
         };
 
         let existing_token = StatusListToken {
-            list_id: token_id.to_string(),
+            list_id: token_id.clone(),
             issuer: "issuer".to_string(),
             exp: Some(
                 (SystemTime::now()
@@ -145,7 +166,7 @@ mod test {
 
         // Update payload that flips status at index 1 to INVALID
         let update_payload = StatusRequest {
-            list_id: token_id.to_string(),
+            list_id: token_id,
             status: vec![StatusEntry {
                 index: 1,
                 status: Status::INVALID,
