@@ -63,9 +63,7 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Install cargo-nextest
-        uses: taiki-e/install-action@v2
-        with:
-          tool: nextest
+        uses: taiki-e/install-action@nextest
 
       - name: Run Cargo Tests
         run: cargo nextest run --workspace --all-targets --all-features
