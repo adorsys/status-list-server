@@ -3,6 +3,8 @@ use thiserror::Error;
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
 pub enum StatusListError {
+    #[error("Invalid list ID string: {0}")]
+    InvalidListId(String),
     #[error("Invalid accept header")]
     InvalidAcceptHeader,
     #[error("Internal server error")]
@@ -41,6 +43,7 @@ impl IntoResponse for StatusListError {
     fn into_response(self) -> axum::response::Response {
         use StatusListError::*;
         let status_code = match self {
+            InvalidListId(_) => StatusCode::BAD_REQUEST,
             InvalidAcceptHeader => StatusCode::NOT_ACCEPTABLE,
             InternalServerError => StatusCode::INTERNAL_SERVER_ERROR,
             InvalidIndex => StatusCode::BAD_REQUEST,

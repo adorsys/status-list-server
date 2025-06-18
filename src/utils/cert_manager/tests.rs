@@ -294,8 +294,8 @@ fn test_ts_to_local_helper() {
     init_crypto();
 
     let timestamp = 1749045448;
-    let result = ts_to_local(timestamp);
-    assert_eq!("2025-06-04 14:57", result);
+    let result = ts_to_utc(timestamp);
+    assert_eq!("2025-06-04 13:57 UTC", result);
 }
 
 #[tokio::test]
