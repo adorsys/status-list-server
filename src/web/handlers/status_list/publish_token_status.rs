@@ -105,12 +105,8 @@ mod tests {
             status: vec![],
         };
 
-        let result = publish_token_status(
-            State(appstate.clone()),
-            Extension(issuer),
-            Json(payload),
-        )
-        .await;
+        let result =
+            publish_token_status(State(appstate.clone()), Extension(issuer), Json(payload)).await;
 
         assert!(matches!(result, Err(StatusListError::InvalidListId(_))));
     }
