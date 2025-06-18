@@ -9,7 +9,7 @@ pub mod storage;
 use challenge::CleanupFuture;
 pub use errors::CertError;
 
-use chrono::{TimeZone, Utc};
+use chrono::Utc;
 use color_eyre::eyre::eyre;
 use instant_acme::{
     Account, AccountCredentials, AuthorizationStatus, HttpClient, Identifier, NewAccount, NewOrder,
@@ -252,8 +252,8 @@ impl CertManager {
 
         info!(
             "Certificate obtained successfully. Valid from {} to {}",
-            ts_to_local(not_before),
-            ts_to_local(not_after)
+            ts_to_utc(not_before),
+            ts_to_utc(not_after)
         );
         Ok(cert_data)
     }
@@ -575,13 +575,12 @@ pub async fn setup_cert_renewal_scheduler(cert_manager: Arc<CertManager>) -> Res
     Ok(())
 }
 
-// Helper function to format timestamp as local time
-fn ts_to_local(timestamp: i64) -> String {
-    use chrono::Local;
-    Local
-        .timestamp_opt(timestamp, 0)
-        .single()
-        .map(|dt| dt.format("%Y-%m-%d %H:%M").to_string())
+// Helper function to format timestamp as UTC time
+fn ts_to_utc(timestamp: i64) -> String {
+    use chrono::DateTime;
+
+    DateTime::from_timestamp(timestamp, 0)
+        .map(|dt| dt.format("%Y-%m-%d %H:%M UTC").to_string())
         .unwrap_or_else(|| format!("Invalid timestamp: {timestamp}"))
 }
 
