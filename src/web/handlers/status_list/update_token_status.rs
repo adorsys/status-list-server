@@ -113,7 +113,6 @@ mod test {
 
     #[tokio::test]
     async fn test_update_token_status_invalid_list_id() {
-        let db_conn = MockDatabase::new(DatabaseBackend::Postgres).into_connection();
         let appstate = test_app_state(None).await;
         let issuer = "test-issuer".to_string();
         let payload = StatusRequest {
