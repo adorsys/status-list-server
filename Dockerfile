@@ -1,3 +1,4 @@
+ARG TARGETPLATFORM
 ARG APP_NAME=status-list-server
 
 FROM blackdex/rust-musl:x86_64-musl AS builder
@@ -7,8 +8,8 @@ WORKDIR /app
 RUN --mount=type=bind,source=src,target=src \
     --mount=type=bind,source=Cargo.toml,target=Cargo.toml \
     --mount=type=bind,source=Cargo.lock,target=Cargo.lock \
-    --mount=type=cache,target=/app/target \
-    --mount=type=cache,target=/root/.cargo/registry \
+    --mount=type=cache,target=/app/target,id=target-cache-${TARGETPLATFORM} \
+    --mount=type=cache,target=/root/.cargo/registry,id=registry-cache-${TARGETPLATFORM} \
     cargo build --locked --release && \
     mv target/x86_64-unknown-linux-musl/release/${APP_NAME} .
 
