@@ -89,5 +89,5 @@ jobs:
       - name: Deploy updated image to Kubernetes
         run: |
           kubectl set image deployment/statuslist-status-list-server-deployment \
-            status-list-server=${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:${{ needs.build-and-push.outputs.image_tag }} \
+            status-list-server=${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:sha-${{ needs.build-and-push.outputs.image_tag }} \
             -n ${{ env.NAMESPACE }}
