@@ -1,16 +1,11 @@
-use axum::{
-    http::Method,
-    response::IntoResponse,
-    routing::{get, patch, post},
-    Json, Router,
-};
+use color_eyre::{eyre::eyre, Result};
 use dotenvy::dotenv;
 use serde::Serialize;
+use status_list_server::web::handlers::{credential_handler, get_status_list};
 use status_list_server::{
     utils::state::setup,
-    web::handlers::{
-        credential_handler, get_status_list,
-        status_list::{handler::update_statuslist, publish_token_status::publish_token_status},
+    web::handlers::status_list::{
+        publish_token_status::publish_token_status, update_token_status::update_token_status,
     },
 };
 use tokio::net::TcpListener;
@@ -37,8 +32,7 @@ async fn health_check() -> impl IntoResponse {
 }
 
 #[tokio::main]
-async fn main() {
-    dotenv().ok();
+async fn main() -> Result<()> {
     config_tracing();
 
     let state = setup().await;
@@ -57,7 +51,7 @@ async fn main() {
             Router::new()
                 .route("/{list_id}", get(get_status_list))
                 .route("/publish", post(publish_token_status))
-                .route("/update", patch(update_statuslist)),
+                .route("/update", patch(update_token_status)),
         )
         .layer(
             ServiceBuilder::new()
