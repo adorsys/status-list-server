@@ -1,6 +1,7 @@
 use crate::{
     cert_manager::storage::StorageError,
     utils::{
+        cache::Cache,
         cert_manager::{storage::Storage, CertManager},
         state::AppState,
     },
@@ -38,8 +39,9 @@ pub async fn test_app_state(db_conn: Option<Arc<sea_orm::DatabaseConnection>>) -
     // Install the crypto provider for the tests
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 
-    let db = db_conn
-        .unwrap_or_else(|| Arc::new(MockDatabase::new(DbBackend::Postgres).into_connection()));
+    let db = db_conn.unwrap_or(Arc::new(
+        MockDatabase::new(DbBackend::Postgres).into_connection(),
+    ));
 
     let key_pem = include_str!("test_resources/ec-private.pem").to_string();
     let secrets_storage = MockStorage {
@@ -66,5 +68,6 @@ pub async fn test_app_state(db_conn: Option<Arc<sea_orm::DatabaseConnection>>) -
         status_list_token_repo: SeaOrmStore::new(db),
         server_domain: "example.com".to_string(),
         cert_manager: Arc::new(certificate_manager),
+        cache: Cache::new(5 * 60, 100),
     }
 }
