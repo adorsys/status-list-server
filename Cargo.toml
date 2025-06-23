@@ -74,6 +74,7 @@ flate2 = "1.1.0"
 x509-parser = "0.17"
 public-suffix = "0.1"
 tokio-cron-scheduler = "0.14"
+blake3 = "1.5"
 
 [dependencies.redis]
 version = "0.31"

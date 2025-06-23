@@ -1,5 +1,6 @@
 use sea_orm::{ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, Set};
 use std::sync::Arc;
+use async_trait::async_trait;
 
 use super::error::RepositoryError;
 use crate::models::{credentials, status_list_tokens, Credentials, StatusListToken};
@@ -17,6 +18,11 @@ impl<T> SeaOrmStore<T> {
             _phantom: std::marker::PhantomData,
         }
     }
+}
+
+#[async_trait]
+pub trait Repository<T>: Send + Sync {
+    async fn find_all(&self) -> Result<Vec<T>, super::error::RepositoryError>;
 }
 
 impl SeaOrmStore<StatusListToken> {
@@ -101,6 +107,13 @@ impl SeaOrmStore<StatusListToken> {
     ) -> Result<Vec<StatusListToken>, RepositoryError> {
         status_list_tokens::Entity::find()
             .filter(status_list_tokens::Column::Sub.eq(issuer))
+            .all(&*self.db)
+            .await
+            .map_err(|e| RepositoryError::FindError(e.to_string()))
+    }
+
+    pub async fn find_all(&self) -> Result<Vec<StatusListToken>, RepositoryError> {
+        status_list_tokens::Entity::find()
             .all(&*self.db)
             .await
             .map_err(|e| RepositoryError::FindError(e.to_string()))
