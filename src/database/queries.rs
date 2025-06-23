@@ -1,6 +1,6 @@
+use async_trait::async_trait;
 use sea_orm::{ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, Set};
 use std::sync::Arc;
-use async_trait::async_trait;
 
 use super::error::RepositoryError;
 use crate::models::{credentials, status_list_tokens, Credentials, StatusListToken};
@@ -23,54 +23,40 @@ impl<T> SeaOrmStore<T> {
 #[async_trait]
 pub trait Repository<T>: Send + Sync {
     async fn find_all(&self) -> Result<Vec<T>, super::error::RepositoryError>;
+    async fn find_one_by(&self, id: String) -> Result<Option<T>, super::error::RepositoryError>;
+    async fn update_one(
+        &self,
+        id: String,
+        entity: T,
+    ) -> Result<bool, super::error::RepositoryError>;
+    async fn insert_one(&self, entity: T) -> Result<(), super::error::RepositoryError>;
 }
 
-impl SeaOrmStore<StatusListToken> {
-    pub async fn insert_one(&self, entity: StatusListToken) -> Result<(), RepositoryError> {
-        let active = status_list_tokens::ActiveModel {
-            list_id: Set(entity.list_id),
-            issuer: Set(entity.issuer),
-            exp: Set(entity.exp),
-            iat: Set(entity.iat),
-            status_list: Set(entity.status_list),
-            sub: Set(entity.sub),
-            ttl: Set(entity.ttl),
-        };
-        active
-            .insert(&*self.db)
+#[async_trait]
+impl Repository<StatusListToken> for SeaOrmStore<StatusListToken> {
+    async fn find_all(&self) -> Result<Vec<StatusListToken>, super::error::RepositoryError> {
+        status_list_tokens::Entity::find()
+            .all(&*self.db)
             .await
-            .map_err(|e| RepositoryError::InsertError(e.to_string()))?;
-        Ok(())
+            .map_err(|e| RepositoryError::FindError(e.to_string()))
     }
 
-    pub async fn find_one_by(
+    async fn find_one_by(
         &self,
-        value: String,
-    ) -> Result<Option<StatusListToken>, RepositoryError> {
-        status_list_tokens::Entity::find_by_id(value)
+        id: String,
+    ) -> Result<Option<StatusListToken>, super::error::RepositoryError> {
+        status_list_tokens::Entity::find_by_id(id)
             .one(&*self.db)
             .await
             .map_err(|e| RepositoryError::FindError(e.to_string()))
     }
 
-    pub async fn find_all_by(
+    async fn update_one(
         &self,
-        issuer: String,
-    ) -> Result<Vec<StatusListToken>, RepositoryError> {
-        status_list_tokens::Entity::find()
-            .filter(status_list_tokens::Column::ListId.eq(issuer))
-            .all(&*self.db)
-            .await
-            .map(|tokens| tokens.into_iter().collect())
-            .map_err(|e| RepositoryError::FindError(e.to_string()))
-    }
-
-    pub async fn update_one(
-        &self,
-        list_id: String,
+        id: String,
         entity: StatusListToken,
-    ) -> Result<bool, RepositoryError> {
-        let existing = status_list_tokens::Entity::find_by_id(&list_id)
+    ) -> Result<bool, super::error::RepositoryError> {
+        let existing = status_list_tokens::Entity::find_by_id(&id)
             .one(&*self.db)
             .await
             .map_err(|e| RepositoryError::FindError(e.to_string()))?;
@@ -93,6 +79,40 @@ impl SeaOrmStore<StatusListToken> {
         Ok(true)
     }
 
+    async fn insert_one(
+        &self,
+        entity: StatusListToken,
+    ) -> Result<(), super::error::RepositoryError> {
+        let active = status_list_tokens::ActiveModel {
+            list_id: Set(entity.list_id),
+            issuer: Set(entity.issuer),
+            exp: Set(entity.exp),
+            iat: Set(entity.iat),
+            status_list: Set(entity.status_list),
+            sub: Set(entity.sub),
+            ttl: Set(entity.ttl),
+        };
+        active
+            .insert(&*self.db)
+            .await
+            .map_err(|e| RepositoryError::InsertError(e.to_string()))?;
+        Ok(())
+    }
+}
+
+impl SeaOrmStore<StatusListToken> {
+    pub async fn find_all_by(
+        &self,
+        issuer: String,
+    ) -> Result<Vec<StatusListToken>, RepositoryError> {
+        status_list_tokens::Entity::find()
+            .filter(status_list_tokens::Column::ListId.eq(issuer))
+            .all(&*self.db)
+            .await
+            .map(|tokens| tokens.into_iter().collect())
+            .map_err(|e| RepositoryError::FindError(e.to_string()))
+    }
+
     pub async fn delete_by(&self, value: String) -> Result<bool, RepositoryError> {
         let result = status_list_tokens::Entity::delete_by_id(value)
             .exec(&*self.db)
@@ -107,13 +127,6 @@ impl SeaOrmStore<StatusListToken> {
     ) -> Result<Vec<StatusListToken>, RepositoryError> {
         status_list_tokens::Entity::find()
             .filter(status_list_tokens::Column::Sub.eq(issuer))
-            .all(&*self.db)
-            .await
-            .map_err(|e| RepositoryError::FindError(e.to_string()))
-    }
-
-    pub async fn find_all(&self) -> Result<Vec<StatusListToken>, RepositoryError> {
-        status_list_tokens::Entity::find()
             .all(&*self.db)
             .await
             .map_err(|e| RepositoryError::FindError(e.to_string()))

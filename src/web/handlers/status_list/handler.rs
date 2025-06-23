@@ -6,6 +6,7 @@ use axum::{
     response::{IntoResponse, Response},
     Extension, Json,
 };
+use blake3;
 use chrono::Utc;
 use coset::{
     self,
@@ -18,7 +19,6 @@ use jsonwebtoken::{EncodingKey, Header};
 use p256::ecdsa::{signature::Signer, Signature};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use blake3;
 
 use crate::{
     models::{Status, StatusEntry, StatusList, StatusListToken},
@@ -479,9 +479,7 @@ pub async fn status_list_aggregation(
     headers: HeaderMap,
 ) -> Response {
     // Fetch all status list tokens from the repository
-    let tokens_result = state.status_list_token_repo
-        .find_all()
-        .await;
+    let tokens_result = state.status_list_token_repo.find_all().await;
 
     let tokens = match tokens_result {
         Ok(tokens) => tokens,
@@ -490,14 +488,20 @@ pub async fn status_list_aggregation(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 [(header::CONTENT_TYPE, "application/json")],
                 json!({"error": "Failed to fetch status lists"}).to_string(),
-            ).into_response();
+            )
+                .into_response();
         }
     };
 
     // Build the list of URIs
     let status_lists: Vec<String> = tokens
         .iter()
-        .map(|token| format!("https://{}/statuslists/{}", state.server_domain, token.list_id))
+        .map(|token| {
+            format!(
+                "https://{}/statuslists/{}",
+                state.server_domain, token.list_id
+            )
+        })
         .collect();
 
     // ETag support (simple hash of the list)
@@ -507,8 +511,9 @@ pub async fn status_list_aggregation(
             return (
                 StatusCode::NOT_MODIFIED,
                 [(header::ETAG, etag.as_str())],
-                "" // No body for 304
-            ).into_response();
+                "", // No body for 304
+            )
+                .into_response();
         }
     }
 
@@ -519,7 +524,8 @@ pub async fn status_list_aggregation(
             (header::ETAG, etag.as_str()),
         ],
         json!({ "status_lists": status_lists }).to_string(),
-    ).into_response()
+    )
+        .into_response()
 }
 
 #[cfg(test)]
@@ -873,22 +879,49 @@ mod tests {
     async fn test_status_list_aggregation_non_empty() {
         let mock_db = MockDatabase::new(DatabaseBackend::Postgres);
         let token1 = StatusListToken::new(
-            "id1".to_string(), "issuer1".to_string(), None, 0, StatusList { bits: 1, lst: "foo".to_string() }, "sub1".to_string(), None
+            "id1".to_string(),
+            "issuer1".to_string(),
+            None,
+            0,
+            StatusList {
+                bits: 1,
+                lst: "foo".to_string(),
+            },
+            "sub1".to_string(),
+            None,
         );
         let token2 = StatusListToken::new(
-            "id2".to_string(), "issuer2".to_string(), None, 0, StatusList { bits: 1, lst: "bar".to_string() }, "sub2".to_string(), None
+            "id2".to_string(),
+            "issuer2".to_string(),
+            None,
+            0,
+            StatusList {
+                bits: 1,
+                lst: "bar".to_string(),
+            },
+            "sub2".to_string(),
+            None,
         );
         let db_conn = Arc::new(
             mock_db
-                .append_query_results::<status_list_tokens::Model, Vec<_>, _>(vec![vec![token1.clone(), token2.clone()]])
+                .append_query_results::<status_list_tokens::Model, Vec<_>, _>(vec![vec![
+                    token1.clone(),
+                    token2.clone(),
+                ]])
                 .into_connection(),
         );
         let app_state = test_app_state(Some(db_conn)).await;
-        
+
         // First request to get ETag
-        let initial_response = status_list_aggregation(State(app_state.clone()), HeaderMap::new()).await;
-        let etag = initial_response.headers().get(header::ETAG).unwrap().to_str().unwrap();
-        
+        let initial_response =
+            status_list_aggregation(State(app_state.clone()), HeaderMap::new()).await;
+        let etag = initial_response
+            .headers()
+            .get(header::ETAG)
+            .unwrap()
+            .to_str()
+            .unwrap();
+
         // Second request with If-None-Match
         let mut headers = HeaderMap::new();
         headers.insert(header::IF_NONE_MATCH, etag.parse().unwrap());
@@ -918,19 +951,36 @@ mod tests {
     async fn test_status_list_aggregation_etag_and_if_none_match() {
         let mock_db = MockDatabase::new(DatabaseBackend::Postgres);
         let token = StatusListToken::new(
-            "id1".to_string(), "issuer1".to_string(), None, 0, StatusList { bits: 1, lst: "foo".to_string() }, "sub1".to_string(), None
+            "id1".to_string(),
+            "issuer1".to_string(),
+            None,
+            0,
+            StatusList {
+                bits: 1,
+                lst: "foo".to_string(),
+            },
+            "sub1".to_string(),
+            None,
         );
         let db_conn = Arc::new(
             mock_db
-                .append_query_results::<status_list_tokens::Model, Vec<_>, _>(vec![vec![token.clone()]])
+                .append_query_results::<status_list_tokens::Model, Vec<_>, _>(vec![vec![
+                    token.clone()
+                ]])
                 .into_connection(),
         );
         let app_state = test_app_state(Some(db_conn)).await;
-        
+
         // First request to get ETag
-        let initial_response = status_list_aggregation(State(app_state.clone()), HeaderMap::new()).await;
-        let etag = initial_response.headers().get(header::ETAG).unwrap().to_str().unwrap();
-        
+        let initial_response =
+            status_list_aggregation(State(app_state.clone()), HeaderMap::new()).await;
+        let etag = initial_response
+            .headers()
+            .get(header::ETAG)
+            .unwrap()
+            .to_str()
+            .unwrap();
+
         // Second request with If-None-Match
         let mut headers = HeaderMap::new();
         headers.insert(header::IF_NONE_MATCH, etag.parse().unwrap());
@@ -940,25 +990,54 @@ mod tests {
 
     #[tokio::test]
     async fn test_status_list_aggregation_error() {
+        use crate::database::error::RepositoryError;
+        use crate::database::queries::Repository;
         use crate::models::StatusListToken;
-        use sea_orm::DbErr;
-        use crate::database::queries::SeaOrmStore;
-        use std::marker::PhantomData;
+        use async_trait::async_trait;
         use std::sync::Arc;
+
         struct FailingStore;
-        #[async_trait::async_trait]
-        impl crate::database::queries::Repository<StatusListToken> for FailingStore {
-            async fn find_all(&self) -> Result<Vec<StatusListToken>, crate::database::error::RepositoryError> {
-                Err(crate::database::error::RepositoryError::FindError("fail".to_string()))
+        #[async_trait]
+        impl Repository<StatusListToken> for FailingStore {
+            async fn find_all(&self) -> Result<Vec<StatusListToken>, RepositoryError> {
+                Err(RepositoryError::FindError("fail".to_string()))
             }
-            // ... other methods not needed for this test ...
+
+            async fn find_one_by(
+                &self,
+                _id: String,
+            ) -> Result<Option<StatusListToken>, RepositoryError> {
+                Err(RepositoryError::FindError("fail".to_string()))
+            }
+
+            async fn update_one(
+                &self,
+                _id: String,
+                _entity: StatusListToken,
+            ) -> Result<bool, RepositoryError> {
+                Err(RepositoryError::FindError("fail".to_string()))
+            }
+
+            async fn insert_one(&self, _entity: StatusListToken) -> Result<(), RepositoryError> {
+                Err(RepositoryError::InsertError("fail".to_string()))
+            }
         }
-        // Use a dummy AppState with a failing repo
+
         let app_state = AppState {
-            credential_repo: crate::database::queries::SeaOrmStore::new(Arc::new(MockDatabase::new(DatabaseBackend::Postgres).into_connection())),
+            credential_repo: crate::database::queries::SeaOrmStore::new(Arc::new(
+                MockDatabase::new(DatabaseBackend::Postgres).into_connection(),
+            )),
             status_list_token_repo: Arc::new(FailingStore),
             server_domain: "example.com".to_string(),
-            cert_manager: Arc::new(crate::cert_manager::CertManager::new(vec!["example.com"], "admin@example.com", None, "https://acme-v02.api.letsencrypt.org/directory").unwrap()),
+            cert_manager: Arc::new(
+                crate::cert_manager::CertManager::new(
+                    vec!["example.com".to_string()],
+                    "admin@example.com",
+                    None::<String>,
+                    "https://acme-v02.api.letsencrypt.org/directory",
+                )
+                .unwrap(),
+            ),
         };
         let headers = HeaderMap::new();
         let response = status_list_aggregation(State(app_state), headers).await;

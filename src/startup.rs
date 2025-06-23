@@ -19,7 +19,8 @@ use crate::{
     web::{
         auth::auth,
         handlers::{
-            credential_handler, get_status_list, publish_token_status, update_token_status, status_list_aggregation, metadata::openid_configuration,
+            credential_handler, get_status_list, metadata::openid_configuration,
+            publish_token_status, status_list_aggregation, update_token_status,
         },
     },
 };
@@ -49,7 +50,10 @@ impl HttpServer {
             .route("/health", get(health_check))
             .route("/credentials", post(credential_handler))
             .route("/status-lists", get(status_list_aggregation))
-            .route("/.well-known/openid-configuration", get(openid_configuration))
+            .route(
+                "/.well-known/openid-configuration",
+                get(openid_configuration),
+            )
             .nest("/statuslists", status_list_routes(state.clone()))
             .layer(TraceLayer::new_for_http())
             .layer(CatchPanicLayer::new())

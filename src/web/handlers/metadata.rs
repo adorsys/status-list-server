@@ -1,5 +1,9 @@
-use axum::{extract::State, response::IntoResponse, http::{StatusCode, header}};
 use crate::utils::state::AppState;
+use axum::{
+    extract::State,
+    http::{header, StatusCode},
+    response::IntoResponse,
+};
 use serde_json::json;
 
 pub async fn openid_configuration(State(state): State<AppState>) -> impl IntoResponse {
@@ -15,4 +19,4 @@ pub async fn openid_configuration(State(state): State<AppState>) -> impl IntoRes
         [(header::CONTENT_TYPE, "application/json")],
         metadata.to_string(),
     )
-} 
+}
