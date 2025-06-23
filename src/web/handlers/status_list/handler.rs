@@ -95,6 +95,14 @@ async fn build_status_list_token(
     list_id: &str,
     state: &AppState,
 ) -> Result<impl IntoResponse + Debug, StatusListError> {
+    // Check cache for status list token
+    if let Some(cached_token) = state.cache.status_list_token_cache.get(list_id).await {
+        tracing::info!("Cache hit for status list token: {list_id}");
+        // Token is in cache, proceed with building the response
+        return build_response_from_token(accept, &cached_token, state).await;
+    }
+
+    tracing::info!("Cache miss for status list token: {list_id}");
     // Get status list claims from database
     let status_claims = state
         .status_list_token_repo
@@ -103,8 +111,24 @@ async fn build_status_list_token(
         .map_err(|err| {
             tracing::error!("Failed to get status list {list_id} from database: {err:?}");
             StatusListError::InternalServerError
-        })?;
+        })?
+        .ok_or(StatusListError::StatusListNotFound)?;
 
+    // Store the token in the cache for future requests
+    state
+        .cache
+        .status_list_token_cache
+        .insert(list_id.to_string(), status_claims.clone())
+        .await;
+
+    build_response_from_token(accept, &status_claims, state).await
+}
+
+async fn build_response_from_token(
+    accept: &str,
+    token: &StatusListToken,
+    state: &AppState,
+) -> Result<impl IntoResponse + Debug, StatusListError> {
     // Get the certificate chain
     let certs_parts = state
         .cert_manager
@@ -118,13 +142,6 @@ async fn build_status_list_token(
             tracing::warn!("The server certificate is not yet provisioned.");
             StatusListError::ServiceUnavailable
         })?;
-
-    let status_claims = match status_claims {
-        Some(status_claims) => status_claims,
-        None => {
-            return Err(StatusListError::StatusListNotFound);
-        }
-    };
 
     // Load the signing key
     let signing_key_pem = state.cert_manager.signing_key_pem().await.map_err(|e| {
@@ -149,8 +166,8 @@ async fn build_status_list_token(
     };
 
     let token_bytes = match accept {
-        ACCEPT_STATUS_LISTS_HEADER_CWT => issue_cwt(&status_claims, &keypair, certs_parts)?,
-        _ => issue_jwt(&status_claims, &keypair, certs_parts)?.into_bytes(),
+        ACCEPT_STATUS_LISTS_HEADER_CWT => issue_cwt(token, &keypair, certs_parts)?,
+        _ => issue_jwt(token, &keypair, certs_parts)?.into_bytes(),
     };
 
     Ok((
@@ -320,6 +337,13 @@ pub async fn update_statuslist(
     Extension(issuer): Extension<String>,
     Json(body): Json<Value>,
 ) -> impl IntoResponse {
+    // Invalidate the cache for the updated status list
+    appstate
+        .cache
+        .status_list_token_cache
+        .invalidate(&list_id)
+        .await;
+
     let updates = match body
         .as_object()
         .and_then(|body| body.get("updates"))
