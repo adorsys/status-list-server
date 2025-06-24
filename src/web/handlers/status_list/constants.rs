@@ -12,3 +12,8 @@ pub(super) const TTL: i32 = 65534;
 pub(super) const STATUS_LIST: i32 = 65533;
 
 pub(super) const GZIP_HEADER: &str = "gzip";
+
+// 15 minutes expiration
+pub(super) const TOKEN_EXP: i64 = 900;
+// 5 minutes ttl
+pub(super) const TOKEN_TTL: i64 = 300;
