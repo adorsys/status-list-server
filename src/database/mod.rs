@@ -1,5 +1,5 @@
-pub mod error;
-pub mod queries;
+pub(crate) mod error;
+pub(crate) mod queries;
 
 pub use migrations::Migrator;
 
