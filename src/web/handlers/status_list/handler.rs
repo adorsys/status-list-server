@@ -878,7 +878,7 @@ mod tests {
     #[tokio::test]
     async fn test_status_list_aggregation_non_empty() {
         let mock_db = MockDatabase::new(DatabaseBackend::Postgres);
-        let token1 = StatusListToken::new(
+        let mock_token = StatusListToken::new(
             "id1".to_string(),
             "issuer1".to_string(),
             None,
@@ -890,23 +890,10 @@ mod tests {
             "sub1".to_string(),
             None,
         );
-        let token2 = StatusListToken::new(
-            "id2".to_string(),
-            "issuer2".to_string(),
-            None,
-            0,
-            StatusList {
-                bits: 1,
-                lst: "bar".to_string(),
-            },
-            "sub2".to_string(),
-            None,
-        );
         let db_conn = Arc::new(
             mock_db
                 .append_query_results::<status_list_tokens::Model, Vec<_>, _>(vec![vec![
-                    token1.clone(),
-                    token2.clone(),
+                    mock_token.clone(),
                 ]])
                 .into_connection(),
         );
@@ -923,8 +910,7 @@ mod tests {
             .unwrap();
 
         // Second request with If-None-Match
-        let mut headers = HeaderMap::new();
-        headers.insert(header::IF_NONE_MATCH, etag.parse().unwrap());
+        let headers = HeaderMap::from_iter([(header::IF_NONE_MATCH, etag.parse().unwrap())]);
         let response = status_list_aggregation(State(app_state.clone()), headers).await;
         assert_eq!(response.status(), StatusCode::NOT_MODIFIED);
     }
@@ -949,6 +935,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_status_list_aggregation_etag_and_if_none_match() {
+        // Initialize crypto provider
+        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+
         let mock_db = MockDatabase::new(DatabaseBackend::Postgres);
         let token = StatusListToken::new(
             "id1".to_string(),
@@ -964,9 +953,10 @@ mod tests {
         );
         let db_conn = Arc::new(
             mock_db
-                .append_query_results::<status_list_tokens::Model, Vec<_>, _>(vec![vec![
-                    token.clone()
-                ]])
+                .append_query_results::<status_list_tokens::Model, Vec<_>, _>(vec![
+                    vec![token.clone()],
+                    vec![token.clone()],
+                ])
                 .into_connection(),
         );
         let app_state = test_app_state(Some(db_conn)).await;
