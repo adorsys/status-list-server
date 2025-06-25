@@ -936,9 +936,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_status_list_aggregation_etag_and_if_none_match() {
-        // Initialize crypto provider
-        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
-
         let mock_db = MockDatabase::new(DatabaseBackend::Postgres);
         let token = StatusListToken::new(
             "id1".to_string(),
@@ -986,6 +983,8 @@ mod tests {
         use crate::models::StatusListToken;
         use async_trait::async_trait;
         use std::sync::Arc;
+
+        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 
         struct FailingStore;
         #[async_trait]
