@@ -892,9 +892,10 @@ mod tests {
         );
         let db_conn = Arc::new(
             mock_db
-                .append_query_results::<status_list_tokens::Model, Vec<_>, _>(vec![vec![
-                    mock_token.clone(),
-                ]])
+                .append_query_results::<status_list_tokens::Model, Vec<_>, _>(vec![
+                    vec![mock_token.clone()],
+                    vec![mock_token.clone()],
+                ])
                 .into_connection(),
         );
         let app_state = test_app_state(Some(db_conn)).await;
@@ -924,7 +925,7 @@ mod tests {
                 .into_connection(),
         );
         let app_state = test_app_state(Some(db_conn)).await;
-        let mut headers = HeaderMap::new();
+        let headers = HeaderMap::new();
         let response = status_list_aggregation(State(app_state.clone()), headers).await;
         assert_eq!(response.status(), StatusCode::OK);
         let body = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
@@ -981,7 +982,7 @@ mod tests {
     #[tokio::test]
     async fn test_status_list_aggregation_error() {
         use crate::database::error::RepositoryError;
-        use crate::database::queries::Repository;
+        use crate::database::repository::Repository;
         use crate::models::StatusListToken;
         use async_trait::async_trait;
         use std::sync::Arc;

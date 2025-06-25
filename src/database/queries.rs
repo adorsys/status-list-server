@@ -3,7 +3,10 @@ use sea_orm::{ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, Qu
 use std::sync::Arc;
 
 use super::error::RepositoryError;
-use crate::models::{credentials, status_list_tokens, Credentials, StatusListToken};
+use crate::{
+    database::repository::Repository,
+    models::{credentials, status_list_tokens, Credentials, StatusListToken},
+};
 
 #[derive(Clone)]
 pub struct SeaOrmStore<T> {
@@ -18,18 +21,6 @@ impl<T> SeaOrmStore<T> {
             _phantom: std::marker::PhantomData,
         }
     }
-}
-
-#[async_trait]
-pub trait Repository<T>: Send + Sync {
-    async fn find_all(&self) -> Result<Vec<T>, super::error::RepositoryError>;
-    async fn find_one_by(&self, id: String) -> Result<Option<T>, super::error::RepositoryError>;
-    async fn update_one(
-        &self,
-        id: String,
-        entity: T,
-    ) -> Result<bool, super::error::RepositoryError>;
-    async fn insert_one(&self, entity: T) -> Result<(), super::error::RepositoryError>;
 }
 
 #[async_trait]

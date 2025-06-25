@@ -26,7 +26,7 @@ const ENV_DEVELOPMENT: &str = "development";
 pub struct AppState {
     pub credential_repo: SeaOrmStore<Credentials>,
     pub status_list_token_repo:
-        Arc<dyn crate::database::queries::Repository<StatusListToken> + Send + Sync>,
+        Arc<dyn crate::database::repository::Repository<StatusListToken> + Send + Sync>,
     pub server_domain: String,
     pub cert_manager: Arc<CertManager>,
 }
