@@ -7,4 +7,4 @@ pub trait Repository<T>: Send + Sync {
     async fn find_one_by(&self, id: String) -> Result<Option<T>, RepositoryError>;
     async fn update_one(&self, id: String, entity: T) -> Result<bool, RepositoryError>;
     async fn insert_one(&self, entity: StatusListToken) -> Result<(), RepositoryError>;
-} 
+}
