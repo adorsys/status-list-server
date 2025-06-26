@@ -15,7 +15,10 @@ use sea_orm_migration::MigratorTrait;
 use secrecy::ExposeSecret;
 use std::sync::Arc;
 
-use super::cert_manager::{challenge::PebbleDnsUpdater, http_client::DefaultHttpClient};
+use super::{
+    cache::Cache,
+    cert_manager::{challenge::PebbleDnsUpdater, http_client::DefaultHttpClient},
+};
 
 // Could also be passed at runtime through environment variable
 const BUCKET_NAME: &str = "status-list-adorsys";
@@ -28,6 +31,7 @@ pub struct AppState {
     pub status_list_repo: SeaOrmStore<StatusListRecord>,
     pub server_domain: String,
     pub cert_manager: Arc<CertManager>,
+    pub cache: Cache,
 }
 
 pub async fn build_state(config: &AppConfig) -> EyeResult<AppState> {
@@ -93,5 +97,6 @@ pub async fn build_state(config: &AppConfig) -> EyeResult<AppState> {
         status_list_repo: SeaOrmStore::new(db_clone),
         server_domain: config.server.domain.clone(),
         cert_manager: Arc::new(certificate_manager),
+        cache: Cache::new(config.cache.ttl, config.cache.max_capacity),
     })
 }

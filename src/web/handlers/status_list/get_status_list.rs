@@ -60,6 +60,14 @@ async fn build_status_list_token(
     list_id: &str,
     state: &AppState,
 ) -> Result<impl IntoResponse + Debug, StatusListError> {
+    // Check cache for status list record
+    if let Some(cached_record) = state.cache.status_list_record_cache.get(list_id).await {
+        tracing::info!("Cache hit for status list record: {list_id}");
+        // Record is in cache, proceed with building the response
+        return build_response_from_record(accept, &cached_record, state).await;
+    }
+
+    tracing::info!("Cache miss for status list token: {list_id}");
     // Get status list claims from database
     let status_record = state
         .status_list_repo
@@ -68,8 +76,24 @@ async fn build_status_list_token(
         .map_err(|err| {
             tracing::error!("Failed to get status list {list_id} from database: {err:?}");
             StatusListError::InternalServerError
-        })?;
+        })?
+        .ok_or(StatusListError::StatusListNotFound)?;
 
+    // Store the token in the cache for future requests
+    state
+        .cache
+        .status_list_record_cache
+        .insert(list_id.to_string(), status_record.clone())
+        .await;
+
+    build_response_from_record(accept, &status_record, state).await
+}
+
+async fn build_response_from_record(
+    accept: &str,
+    status_record: &StatusListRecord,
+    state: &AppState,
+) -> Result<impl IntoResponse + Debug, StatusListError> {
     // Get the certificate chain
     let certs_parts = state
         .cert_manager
@@ -83,13 +107,6 @@ async fn build_status_list_token(
             tracing::warn!("The server certificate is not yet provisioned.");
             StatusListError::ServiceUnavailable
         })?;
-
-    let status_record = match status_record {
-        Some(status_record) => status_record,
-        None => {
-            return Err(StatusListError::StatusListNotFound);
-        }
-    };
 
     // Load the signing key
     let signing_key_pem = state.cert_manager.signing_key_pem().await.map_err(|e| {
