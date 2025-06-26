@@ -2,7 +2,7 @@ use sea_orm::{ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, Qu
 use std::sync::Arc;
 
 use super::error::RepositoryError;
-use crate::models::{credentials, status_list_tokens, Credentials, StatusListToken};
+use crate::models::{credentials, status_lists, Credentials, StatusListRecord};
 
 #[derive(Clone)]
 pub struct SeaOrmStore<T> {
@@ -19,16 +19,13 @@ impl<T> SeaOrmStore<T> {
     }
 }
 
-impl SeaOrmStore<StatusListToken> {
-    pub async fn insert_one(&self, entity: StatusListToken) -> Result<(), RepositoryError> {
-        let active = status_list_tokens::ActiveModel {
+impl SeaOrmStore<StatusListRecord> {
+    pub async fn insert_one(&self, entity: StatusListRecord) -> Result<(), RepositoryError> {
+        let active = status_lists::ActiveModel {
             list_id: Set(entity.list_id),
             issuer: Set(entity.issuer),
-            exp: Set(entity.exp),
-            iat: Set(entity.iat),
             status_list: Set(entity.status_list),
             sub: Set(entity.sub),
-            ttl: Set(entity.ttl),
         };
         active
             .insert(&*self.db)
@@ -40,8 +37,8 @@ impl SeaOrmStore<StatusListToken> {
     pub async fn find_one_by(
         &self,
         value: String,
-    ) -> Result<Option<StatusListToken>, RepositoryError> {
-        status_list_tokens::Entity::find_by_id(value)
+    ) -> Result<Option<StatusListRecord>, RepositoryError> {
+        status_lists::Entity::find_by_id(value)
             .one(&*self.db)
             .await
             .map_err(|e| RepositoryError::FindError(e.to_string()))
@@ -50,9 +47,9 @@ impl SeaOrmStore<StatusListToken> {
     pub async fn find_all_by(
         &self,
         issuer: String,
-    ) -> Result<Vec<StatusListToken>, RepositoryError> {
-        status_list_tokens::Entity::find()
-            .filter(status_list_tokens::Column::ListId.eq(issuer))
+    ) -> Result<Vec<StatusListRecord>, RepositoryError> {
+        status_lists::Entity::find()
+            .filter(status_lists::Column::ListId.eq(issuer))
             .all(&*self.db)
             .await
             .map(|tokens| tokens.into_iter().collect())
@@ -62,23 +59,20 @@ impl SeaOrmStore<StatusListToken> {
     pub async fn update_one(
         &self,
         list_id: String,
-        entity: StatusListToken,
+        entity: StatusListRecord,
     ) -> Result<bool, RepositoryError> {
-        let existing = status_list_tokens::Entity::find_by_id(&list_id)
+        let existing = status_lists::Entity::find_by_id(&list_id)
             .one(&*self.db)
             .await
             .map_err(|e| RepositoryError::FindError(e.to_string()))?;
         if existing.is_none() {
             return Ok(false);
         }
-        let active = status_list_tokens::ActiveModel {
+        let active = status_lists::ActiveModel {
             list_id: Set(entity.list_id),
             issuer: Set(entity.issuer),
-            exp: Set(entity.exp),
-            iat: Set(entity.iat),
             status_list: Set(entity.status_list),
             sub: Set(entity.sub),
-            ttl: Set(entity.ttl),
         };
         active
             .update(&*self.db)
@@ -88,7 +82,7 @@ impl SeaOrmStore<StatusListToken> {
     }
 
     pub async fn delete_by(&self, value: String) -> Result<bool, RepositoryError> {
-        let result = status_list_tokens::Entity::delete_by_id(value)
+        let result = status_lists::Entity::delete_by_id(value)
             .exec(&*self.db)
             .await
             .map_err(|e| RepositoryError::DeleteError(e.to_string()))?;
@@ -98,9 +92,9 @@ impl SeaOrmStore<StatusListToken> {
     pub async fn find_by_issuer(
         &self,
         issuer: &str,
-    ) -> Result<Vec<StatusListToken>, RepositoryError> {
-        status_list_tokens::Entity::find()
-            .filter(status_list_tokens::Column::Sub.eq(issuer))
+    ) -> Result<Vec<StatusListRecord>, RepositoryError> {
+        status_lists::Entity::find()
+            .filter(status_lists::Column::Sub.eq(issuer))
             .all(&*self.db)
             .await
             .map_err(|e| RepositoryError::FindError(e.to_string()))

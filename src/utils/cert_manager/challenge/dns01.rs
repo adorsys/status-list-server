@@ -261,7 +261,7 @@ impl DnsUpdater for AwsRoute53DnsUpdater {
     }
 }
 
-// Handler for Pebble DNS (mainly for generating test certificates)
+/// Handler for Pebble DNS (mainly for generating test certificates)
 pub struct PebbleDnsUpdater {
     client: Client,
     addr: String,

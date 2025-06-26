@@ -18,9 +18,7 @@ use crate::{
     utils::state::AppState,
     web::{
         auth::auth,
-        handlers::{
-            credential_handler, get_status_list, publish_token_status, update_token_status,
-        },
+        handlers::{credential_handler, get_status_list, publish_status, update_status},
     },
 };
 
@@ -72,8 +70,8 @@ impl HttpServer {
 
 fn status_list_routes(state: AppState) -> Router<AppState> {
     let protected_routes = Router::new()
-        .route("/publish", post(publish_token_status))
-        .route("/update", patch(update_token_status))
+        .route("/publish", post(publish_status))
+        .route("/update", patch(update_status))
         .route_layer(from_fn_with_state(state.clone(), auth));
 
     Router::new()

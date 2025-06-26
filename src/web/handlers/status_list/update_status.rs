@@ -11,7 +11,7 @@ use crate::{
 use super::error::StatusListError;
 
 // Handler to update an existing status list token
-pub async fn update_token_status(
+pub async fn update_status(
     State(appstate): State<AppState>,
     Extension(issuer): Extension<String>,
     Json(payload): Json<StatusRequest>,
@@ -21,23 +21,13 @@ pub async fn update_token_status(
         return Err(StatusListError::InvalidListId(e.to_string()));
     }
 
-    let store = &appstate.status_list_token_repo;
+    let store = &appstate.status_list_repo;
 
     // Fetch the existing token
-    let token = match store.find_one_by(payload.list_id.clone()).await {
-        Ok(tokens) => tokens,
-        Err(e) => {
+    let token = store.find_one_by(payload.list_id.clone()).await.map_err(|e| {
             tracing::error!(error = ?e, list_id = ?payload.list_id, "Database query failed for status list.");
-            return Err(StatusListError::InternalServerError);
-        }
-    };
-    let token = match token {
-        Some(token) => token,
-        None => {
-            tracing::error!("Token not found in the database.");
-            return Err(StatusListError::StatusListNotFound);
-        }
-    };
+            StatusListError::InternalServerError
+        })?.ok_or(StatusListError::StatusListNotFound)?;
 
     // check if the request issuer matches the token issuer
     if token.issuer != issuer {
@@ -52,8 +42,7 @@ pub async fn update_token_status(
             "Invalid 'bits' value: {}. Allowed values are 1, 2, 4, 8.",
             token.status_list.bits
         )))
-    };
-    let bits = bits?;
+    }?;
 
     // Update the status list
     let updated_lst = update_status_list(
@@ -88,23 +77,18 @@ pub async fn update_token_status(
 
 #[cfg(test)]
 mod test {
+    use super::*;
     use crate::web::handlers::status_list::error::StatusListError;
-    use std::{
-        sync::Arc,
-        time::{SystemTime, UNIX_EPOCH},
-    };
+    use std::sync::Arc;
 
     use axum::{extract::State, response::IntoResponse, Extension, Json};
     use hyper::StatusCode;
     use sea_orm::{DatabaseBackend, MockDatabase};
 
     use crate::{
-        models::{
-            status_list_tokens, Status, StatusEntry, StatusList, StatusListToken, StatusRequest,
-        },
+        models::{status_lists, Status, StatusEntry, StatusList, StatusListRecord, StatusRequest},
         test_utils::test_app_state,
         utils::lst_gen::create_status_list,
-        web::handlers::status_list::update_token_status::update_token_status,
     };
 
     #[tokio::test]
@@ -116,8 +100,7 @@ mod test {
             status: vec![],
         };
 
-        let result =
-            update_token_status(State(appstate.clone()), Extension(issuer), Json(payload)).await;
+        let result = update_status(State(appstate.clone()), Extension(issuer), Json(payload)).await;
 
         assert!(matches!(result, Err(StatusListError::InvalidListId(_))));
     }
@@ -145,23 +128,11 @@ mod test {
             .lst,
         };
 
-        let existing_token = StatusListToken {
+        let existing_token = StatusListRecord {
             list_id: token_id.clone(),
             issuer: "issuer".to_string(),
-            exp: Some(
-                (SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .unwrap()
-                    .as_secs() as i64)
-                    .saturating_add(3600),
-            ),
-            iat: SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_secs() as i64,
             status_list: original_status_list,
             sub: "issuer".to_string(),
-            ttl: Some(3600),
         };
 
         // Update payload that flips status at index 1 to INVALID
@@ -175,7 +146,7 @@ mod test {
 
         let db_conn = Arc::new(
             mock_db
-                .append_query_results::<status_list_tokens::Model, Vec<_>, _>(vec![
+                .append_query_results::<status_lists::Model, Vec<_>, _>(vec![
                     vec![existing_token.clone()], // for find_one_by
                     vec![],
                 ])
@@ -183,7 +154,7 @@ mod test {
         );
 
         let app_state = test_app_state(Some(db_conn.clone())).await;
-        let response = update_token_status(
+        let response = update_status(
             State(app_state),
             Extension("issuer".to_string()),
             Json(update_payload),

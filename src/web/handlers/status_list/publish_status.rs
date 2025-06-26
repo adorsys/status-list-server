@@ -1,5 +1,5 @@
 use crate::{
-    models::{StatusList, StatusListToken, StatusRequest},
+    models::{StatusList, StatusListRecord, StatusRequest},
     utils::{errors::Error, lst_gen::create_status_list, state::AppState},
     web::handlers::status_list::error::StatusListError,
 };
@@ -9,11 +9,10 @@ use axum::{
     response::IntoResponse,
     Extension,
 };
-use std::time::{SystemTime, UNIX_EPOCH};
 use tracing;
 
 // Handler to create a new status list token
-pub async fn publish_token_status(
+pub async fn publish_status(
     State(appstate): State<AppState>,
     Extension(issuer): Extension<String>,
     Json(payload): Json<StatusRequest>,
@@ -23,7 +22,7 @@ pub async fn publish_token_status(
         return Err(StatusListError::InvalidListId(e.to_string()));
     }
 
-    let store = &appstate.status_list_token_repo;
+    let store = &appstate.status_list_repo;
 
     let stl = create_status_list(payload.status).map_err(|e| {
         tracing::error!("lst_from failed: {:?}", e);
@@ -41,12 +40,6 @@ pub async fn publish_token_status(
             Err(StatusListError::StatusListAlreadyExists)
         }
         Ok(None) => {
-            // Calculate issuance and expiration timestamps
-            let iat = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_secs() as i64;
-
             // Serialize the status list before constructing the token
             let status_list = StatusList {
                 bits: stl.bits,
@@ -54,23 +47,20 @@ pub async fn publish_token_status(
             };
 
             let sub = format!(
-                "https://{}/statuslist/{}",
+                "https://{}/statuslists/{}",
                 appstate.server_domain, payload.list_id
             );
 
             // Build the new status list token
-            let new_status_list_token = StatusListToken {
+            let status_list_record = StatusListRecord {
                 list_id: payload.list_id.clone(),
                 issuer,
-                exp: None,
-                iat,
                 status_list,
                 sub,
-                ttl: None,
             };
 
             // Insert the token into the repository
-            store.insert_one(new_status_list_token).await.map_err(|e| {
+            store.insert_one(status_list_record).await.map_err(|e| {
                 tracing::error!("Failed to insert token: {:?}", e);
                 StatusListError::InternalServerError
             })?;
@@ -88,7 +78,7 @@ mod tests {
     use super::*;
     use crate::web::handlers::status_list::error::StatusListError;
     use crate::{
-        models::{status_list_tokens, Status, StatusEntry, StatusListToken},
+        models::{status_lists, Status, StatusEntry, StatusListRecord},
         test_resources::helper::publish_test_token,
         test_utils::test_app_state,
     };
@@ -106,7 +96,7 @@ mod tests {
         };
 
         let result =
-            publish_token_status(State(appstate.clone()), Extension(issuer), Json(payload)).await;
+            publish_status(State(appstate.clone()), Extension(issuer), Json(payload)).await;
 
         assert!(matches!(result, Err(StatusListError::InvalidListId(_))));
     }
@@ -133,27 +123,15 @@ mod tests {
             bits: 2,
             lst: create_status_list(payload.status.clone()).unwrap().lst,
         };
-        let new_token = StatusListToken {
+        let new_token = StatusListRecord {
             list_id: token_id.clone(),
             issuer: "issuer".to_string(),
-            exp: Some(
-                (SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .unwrap()
-                    .as_secs() as i64)
-                    .saturating_add(3600),
-            ),
-            iat: SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_secs() as i64,
             status_list,
             sub: "issuer".to_string(),
-            ttl: Some(3600),
         };
         let db_conn = Arc::new(
             mock_db
-                .append_query_results::<status_list_tokens::Model, Vec<_>, _>(vec![
+                .append_query_results::<status_lists::Model, Vec<_>, _>(vec![
                     vec![],                  // find_one_by in handler returns None
                     vec![new_token.clone()], // insert_one return
                 ])
@@ -162,7 +140,7 @@ mod tests {
 
         let app_state = test_app_state(Some(db_conn.clone())).await;
 
-        let response = publish_token_status(
+        let response = publish_status(
             State(app_state),
             Extension("issuer".to_string()),
             Json(payload),
@@ -195,27 +173,15 @@ mod tests {
             bits: 2,
             lst: create_status_list(payload.status.clone()).unwrap().lst,
         };
-        let new_token = StatusListToken {
+        let new_token = StatusListRecord {
             list_id: token_id.clone(),
             issuer: "issuer".to_string(),
-            exp: Some(
-                (SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .unwrap()
-                    .as_secs() as i64)
-                    .saturating_add(3600),
-            ),
-            iat: SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_secs() as i64,
             status_list,
             sub: "issuer".to_string(),
-            ttl: Some(3600),
         };
         let db_conn = Arc::new(
             mock_db
-                .append_query_results::<status_list_tokens::Model, Vec<_>, _>(vec![
+                .append_query_results::<status_lists::Model, Vec<_>, _>(vec![
                     vec![],                  // find_one_by in handler returns None
                     vec![new_token.clone()], // insert_one return
                     vec![new_token.clone()], // find_one_by in test verification
@@ -226,7 +192,7 @@ mod tests {
         let app_state = test_app_state(Some(db_conn.clone())).await;
 
         // Perform the insertion
-        let _ = publish_token_status(
+        let _ = publish_status(
             State(app_state.clone()),
             Extension("issuer".to_string()),
             Json(payload),
@@ -236,7 +202,7 @@ mod tests {
 
         // Verify the token is stored
         let result = app_state
-            .status_list_token_repo
+            .status_list_repo
             .find_one_by(token_id.clone())
             .await
             .unwrap();
@@ -245,7 +211,6 @@ mod tests {
         assert_eq!(token.list_id, token_id);
         assert_eq!(token.status_list.bits, 2);
         assert_eq!(token.sub, "issuer");
-        assert!(token.exp.is_some());
     }
 
     #[tokio::test]
@@ -260,29 +225,24 @@ mod tests {
             }],
         );
 
-        let existing_token = StatusListToken {
+        let existing_token = StatusListRecord {
             list_id: token_id.clone(),
             issuer: "issuer".to_string(),
-            exp: None,
-            iat: 1234567890,
             status_list: StatusList {
                 bits: 1,
                 lst: create_status_list(payload.status.clone()).unwrap().lst,
             },
             sub: "issuer".to_string(),
-            ttl: Some(3600),
         };
         let db_conn = Arc::new(
             mock_db
-                .append_query_results::<status_list_tokens::Model, Vec<_>, _>(vec![vec![
-                    existing_token,
-                ]])
+                .append_query_results::<status_lists::Model, Vec<_>, _>(vec![vec![existing_token]])
                 .into_connection(),
         );
 
         let app_state = test_app_state(Some(db_conn.clone())).await;
 
-        let response = match publish_token_status(
+        let response = match publish_status(
             State(app_state),
             Extension("issuer".to_string()),
             Json(payload),
@@ -304,27 +264,15 @@ mod tests {
             bits: 1,
             lst: base64url::encode([]),
         };
-        let new_token = StatusListToken {
+        let new_token = StatusListRecord {
             list_id: token_id.clone(),
             issuer: "issuer".to_string(),
-            exp: Some(
-                (SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .unwrap()
-                    .as_secs() as i64)
-                    .saturating_add(3600),
-            ),
-            iat: SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_secs() as i64,
             status_list,
             sub: "issuer".to_string(),
-            ttl: Some(3600),
         };
         let db_conn = Arc::new(
             mock_db
-                .append_query_results::<status_list_tokens::Model, Vec<_>, _>(vec![
+                .append_query_results::<status_lists::Model, Vec<_>, _>(vec![
                     vec![],                  // find_one_by in handler returns None
                     vec![new_token.clone()], // insert_one return
                     vec![new_token.clone()], // find_one_by in test verification
@@ -334,7 +282,7 @@ mod tests {
 
         let app_state = test_app_state(Some(db_conn.clone())).await;
 
-        let response = publish_token_status(
+        let response = publish_status(
             State(app_state.clone()),
             Extension("issuer".to_string()),
             Json(payload),
@@ -345,7 +293,7 @@ mod tests {
         assert_eq!(response.status(), StatusCode::CREATED);
 
         let result = app_state
-            .status_list_token_repo
+            .status_list_repo
             .find_one_by(token_id.clone())
             .await
             .unwrap();
@@ -371,27 +319,15 @@ mod tests {
             bits: 1,
             lst: create_status_list(payload.status.clone()).unwrap().lst,
         };
-        let new_token = StatusListToken {
+        let new_token = StatusListRecord {
             list_id: token_id.clone(),
             issuer: "issuer".to_string(),
-            exp: Some(
-                (SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .unwrap()
-                    .as_secs() as i64)
-                    .saturating_add(3600),
-            ),
-            iat: SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_secs() as i64,
             status_list,
             sub: "issuer".to_string(),
-            ttl: Some(3600),
         };
         let db_conn = Arc::new(
             mock_db
-                .append_query_results::<status_list_tokens::Model, Vec<_>, _>(vec![
+                .append_query_results::<status_lists::Model, Vec<_>, _>(vec![
                     vec![],                  // find_one_by in handler returns None
                     vec![new_token.clone()], // insert_one return
                     vec![new_token.clone()], // find_one_by in test verification
@@ -400,7 +336,7 @@ mod tests {
         );
         let app_state = test_app_state(Some(db_conn.clone())).await;
 
-        let response = publish_token_status(
+        let response = publish_status(
             State(app_state),
             Extension("issuer".to_string()),
             Json(payload),
@@ -425,7 +361,7 @@ mod tests {
         let db_conn = Arc::new(mock_db.into_connection());
         let app_state = test_app_state(Some(db_conn.clone())).await;
 
-        let response = match publish_token_status(
+        let response = match publish_status(
             State(app_state),
             Extension("issuer".to_string()),
             Json(payload),
