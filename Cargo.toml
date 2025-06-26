@@ -28,6 +28,7 @@ sea-orm-migration = { version = "1.1", features = [
     "sqlx-postgres",
     "runtime-tokio-rustls",
 ] }
+moka = { version = "0.12", features = ["future"] }
 
 # Cryptography and Security
 rand = "0.9"
