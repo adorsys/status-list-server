@@ -168,6 +168,40 @@ By default, the server will listen on `http://localhost:8000`. You can modify th
   - `404 NOT FOUND`: Status list not found
   - `406 NOT ACCEPTABLE`: Requested format not supported
 
+### Status List Aggregation
+
+- **Endpoint:** `GET /status-lists`
+- **Description:** Returns a JSON object containing a `status_lists` array, each element being the full URI to a Status List Token hosted under the base URL (`https://statuslist.eudi-adorsys.com/statuslists/{list_id}`).
+- **Response Example:**
+
+  ```json
+  {
+    "status_lists": [
+      "https://statuslist.eudi-adorsys.com/statuslists/1",
+      "https://statuslist.eudi-adorsys.com/statuslists/2"
+    ]
+  }
+  ```
+- **Headers:**
+  - `Content-Type: application/json`
+  - `ETag`: For caching support. Supports `If-None-Match` conditional requests.
+- **Behavior:**
+  - Returns `200 OK` with an empty `status_lists` array if no status lists exist.
+  - Returns `304 Not Modified` if the client ETag matches the current list.
+  - Enforces HTTPS for all URIs in the response.
+- **Discovery:**
+  - The endpoint is discoverable via the OpenID/OAuth metadata field `status_list_aggregation_endpoint` in the `.well-known` metadata file (if supported).
+  - Each Status List payload may include an `aggregation_uri` field referencing this endpoint.
+- **Usage:**
+  - Relying parties can fetch the aggregation list to iterate through and fetch each status list token for caching and offline token-status resolution.
+- **Edge Cases:**
+  - If no status lists exist, the response is:
+    ```json
+    { "status_lists": [] }
+    ```
+  - The endpoint supports standard HTTP conditional headers for caching (e.g., `If-None-Match`).
+  - No pagination is required per the spec.
+
 ## Authentication
 
 The server uses JWT-based authentication with the following requirements:
