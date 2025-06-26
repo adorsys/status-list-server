@@ -12,6 +12,7 @@ pub struct Config {
     pub database: DatabaseConfig,
     pub redis: RedisConfig,
     pub aws: AwsConfig,
+    pub cache: CacheConfig,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -47,6 +48,12 @@ pub struct DatabaseConfig {
 #[derive(Debug, Clone, Deserialize)]
 pub struct AwsConfig {
     pub region: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct CacheConfig {
+    pub ttl: u64,
+    pub max_capacity: u64,
 }
 
 impl RedisConfig {
@@ -121,6 +128,8 @@ impl Config {
                 "https://acme-v02.api.letsencrypt.org/directory",
             )?
             .set_default("aws.region", "us-east-1")?
+            .set_default("cache.ttl", 5 * 60)?
+            .set_default("cache.max_capacity", 100)?
             // Override config values via environment variables
             // The environment variables should be prefixed with 'APP_' and use '__' as a separator
             // Example: APP_REDIS__REQUIRE_TLS=true
