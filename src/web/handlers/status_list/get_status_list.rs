@@ -131,8 +131,8 @@ async fn build_response_from_record(
     };
 
     let token_bytes = match accept {
-        ACCEPT_STATUS_LISTS_HEADER_CWT => issue_cwt(&status_record, &keypair, certs_parts)?,
-        _ => issue_jwt(&status_record, &keypair, certs_parts)?.into_bytes(),
+        ACCEPT_STATUS_LISTS_HEADER_CWT => issue_cwt(status_record, &keypair, certs_parts)?,
+        _ => issue_jwt(status_record, &keypair, certs_parts)?.into_bytes(),
     };
 
     Ok((
