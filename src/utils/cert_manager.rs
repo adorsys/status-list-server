@@ -30,7 +30,7 @@ use crate::{
     utils::keygen::Keypair,
 };
 
-// Struct that hold the certificate and its metadata
+/// Struct that hold the certificate and its metadata
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct CertificateData {
     pub certificate: String,

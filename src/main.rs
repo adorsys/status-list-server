@@ -4,7 +4,13 @@ use rustls::crypto::aws_lc_rs;
 use status_list_server::cert_manager::setup_cert_renewal_scheduler;
 use status_list_server::state::build_state;
 use status_list_server::{config::Config as AppConfig, startup::HttpServer};
+#[cfg(not(target_env = "msvc"))]
+use tikv_jemallocator::Jemalloc;
 use tracing::warn;
+
+#[cfg(not(target_env = "msvc"))]
+#[global_allocator]
+static GLOBAL: Jemalloc = Jemalloc;
 
 #[tokio::main]
 async fn main() -> Result<()> {
