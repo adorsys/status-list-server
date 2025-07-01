@@ -123,22 +123,19 @@ impl From<Credentials> for credentials::ActiveModel {
     }
 }
 
-// StatusListToken entity
-pub mod status_list_tokens {
+// Statuses entries
+pub mod status_lists {
     use super::*;
 
     #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel, Serialize, Deserialize)]
-    #[sea_orm(table_name = "status_list_tokens")]
+    #[sea_orm(table_name = "status_lists")]
     pub struct Model {
         #[sea_orm(primary_key)]
         pub list_id: String,
         pub issuer: String,
-        pub exp: Option<i64>,
-        pub iat: i64,
         #[sea_orm(column_type = "Json")]
         pub status_list: StatusList,
         pub sub: String,
-        pub ttl: Option<i64>,
     }
 
     #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
@@ -147,7 +144,7 @@ pub mod status_list_tokens {
     impl ActiveModelBehavior for ActiveModel {}
 }
 
-pub type StatusListToken = status_list_tokens::Model;
+pub type StatusListRecord = status_lists::Model;
 
 // Additional types for status list handling
 #[derive(Clone, Debug, Serialize, Deserialize)]
