@@ -19,8 +19,8 @@ use crate::{
     web::{
         auth::auth,
         handlers::{
-            credential_handler, get_status_list, metadata::openid_configuration,
-            publish_token_status, status_list_aggregation, update_token_status,
+            credential_handler, get_status_list, publish_token_status, status_list_aggregation,
+            update_token_status,
         },
     },
 };
