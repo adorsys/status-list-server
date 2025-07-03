@@ -3,7 +3,7 @@ mod database;
 mod test_resources;
 #[cfg(test)]
 mod test_utils;
-pub mod utils;
+mod utils;
 
 pub mod config;
 pub mod models;

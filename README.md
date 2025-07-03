@@ -21,7 +21,7 @@ cd status-list-server
 
 **Environment Variables:**
 
-  Create a `.env` file in the root directory. Take a look at the [.env.template](.env.template) file for an example of the required variables.
+Create a `.env` file in the root directory. Take a look at the [.env.template](.env.template) file for an example of the required variables.
 
 ### Running with Docker Compose
 
@@ -170,8 +170,8 @@ By default, the server will listen on `http://localhost:8000`. You can modify th
 
 ### Status List Aggregation
 
-- **Endpoint:** `GET /status-lists`
-- **Description:** Returns a JSON object containing a `status_lists` array, each element being the full URI to a Status List Token hosted under the base URL (`https://statuslist.eudi-adorsys.com/statuslists/{list_id}`).
+- **Endpoint:** `GET /statuslists`
+- **Description:** This mechanism allows a Relying Party to retrieve a list of URIs for all Status List Tokens managed by the service..
 - **Response Example:**
 
   ```json
@@ -182,18 +182,23 @@ By default, the server will listen on `http://localhost:8000`. You can modify th
     ]
   }
   ```
+
 - **Headers:**
   - `Content-Type: application/json`
   - `ETag`: For caching support. Supports `If-None-Match` conditional requests.
+
 - **Behavior:**
   - Returns `200 OK` with an empty `status_lists` array if no status lists exist.
   - Returns `304 Not Modified` if the client ETag matches the current list.
   - Enforces HTTPS for all URIs in the response.
+
 - **Discovery:**
   - The endpoint is discoverable via the OpenID/OAuth metadata field `status_list_aggregation_endpoint` in the `.well-known` metadata file (if supported).
   - Each Status List payload may include an `aggregation_uri` field referencing this endpoint.
+
 - **Usage:**
   - Relying parties can fetch the aggregation list to iterate through and fetch each status list token for caching and offline token-status resolution.
+  
 - **Edge Cases:**
   - If no status lists exist, the response is:
     ```json

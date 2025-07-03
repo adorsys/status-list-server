@@ -50,10 +50,6 @@ impl HttpServer {
             .route("/health", get(health_check))
             .route("/credentials", post(credential_handler))
             .route("/status-lists", get(status_list_aggregation))
-            .route(
-                "/.well-known/openid-configuration",
-                get(openid_configuration),
-            )
             .nest("/statuslists", status_list_routes(state.clone()))
             .layer(TraceLayer::new_for_http())
             .layer(CatchPanicLayer::new())
