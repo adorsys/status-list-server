@@ -8,6 +8,7 @@ use crate::{
     models::{credentials, status_list_tokens, Credentials, StatusListToken},
 };
 
+
 #[derive(Clone)]
 pub struct SeaOrmStore<T> {
     db: Arc<DatabaseConnection>,
@@ -54,14 +55,11 @@ impl Repository<StatusListToken> for SeaOrmStore<StatusListToken> {
         if existing.is_none() {
             return Ok(false);
         }
-        let active = status_list_tokens::ActiveModel {
+        let active = status_lists::ActiveModel {
             list_id: Set(entity.list_id),
             issuer: Set(entity.issuer),
-            exp: Set(entity.exp),
-            iat: Set(entity.iat),
             status_list: Set(entity.status_list),
             sub: Set(entity.sub),
-            ttl: Set(entity.ttl),
         };
         active
             .update(&*self.db)
@@ -105,7 +103,7 @@ impl SeaOrmStore<StatusListToken> {
     }
 
     pub async fn delete_by(&self, value: String) -> Result<bool, RepositoryError> {
-        let result = status_list_tokens::Entity::delete_by_id(value)
+        let result = status_lists::Entity::delete_by_id(value)
             .exec(&*self.db)
             .await
             .map_err(|e| RepositoryError::DeleteError(e.to_string()))?;
@@ -115,9 +113,9 @@ impl SeaOrmStore<StatusListToken> {
     pub async fn find_by_issuer(
         &self,
         issuer: &str,
-    ) -> Result<Vec<StatusListToken>, RepositoryError> {
-        status_list_tokens::Entity::find()
-            .filter(status_list_tokens::Column::Sub.eq(issuer))
+    ) -> Result<Vec<StatusListRecord>, RepositoryError> {
+        status_lists::Entity::find()
+            .filter(status_lists::Column::Sub.eq(issuer))
             .all(&*self.db)
             .await
             .map_err(|e| RepositoryError::FindError(e.to_string()))

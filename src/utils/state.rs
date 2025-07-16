@@ -6,7 +6,7 @@ use crate::{
     },
     config::Config as AppConfig,
     database::{queries::SeaOrmStore, Migrator},
-    models::{Credentials, StatusListToken},
+    models::{Credentials, StatusListRecord},
 };
 use aws_config::{BehaviorVersion, Region};
 use color_eyre::eyre::{Context, Result as EyeResult};
@@ -15,7 +15,10 @@ use sea_orm_migration::MigratorTrait;
 use secrecy::ExposeSecret;
 use std::sync::Arc;
 
-use super::cert_manager::{challenge::PebbleDnsUpdater, http_client::DefaultHttpClient};
+use super::{
+    cache::Cache,
+    cert_manager::{challenge::PebbleDnsUpdater, http_client::DefaultHttpClient},
+};
 
 // Could also be passed at runtime through environment variable
 const BUCKET_NAME: &str = "status-list-adorsys";
@@ -25,10 +28,10 @@ const ENV_DEVELOPMENT: &str = "development";
 #[derive(Clone)]
 pub struct AppState {
     pub credential_repo: SeaOrmStore<Credentials>,
-    pub status_list_token_repo:
-        Arc<dyn crate::database::repository::Repository<StatusListToken> + Send + Sync>,
+    pub status_list_repo: SeaOrmStore<StatusListRecord>,
     pub server_domain: String,
     pub cert_manager: Arc<CertManager>,
+    pub cache: Cache,
 }
 
 pub async fn build_state(config: &AppConfig) -> EyeResult<AppState> {
@@ -91,8 +94,9 @@ pub async fn build_state(config: &AppConfig) -> EyeResult<AppState> {
     let db_clone = Arc::new(db);
     Ok(AppState {
         credential_repo: SeaOrmStore::new(db_clone.clone()),
-        status_list_token_repo: Arc::new(SeaOrmStore::new(db_clone)),
+        status_list_repo: SeaOrmStore::new(db_clone),
         server_domain: config.server.domain.clone(),
         cert_manager: Arc::new(certificate_manager),
+        cache: Cache::new(config.cache.ttl, config.cache.max_capacity),
     })
 }

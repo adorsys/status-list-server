@@ -74,8 +74,8 @@ impl HttpServer {
 
 fn status_list_routes(state: AppState) -> Router<AppState> {
     let protected_routes = Router::new()
-        .route("/publish", post(publish_token_status))
-        .route("/update", patch(update_token_status))
+        .route("/publish", post(publish_status))
+        .route("/update", patch(update_status))
         .route_layer(from_fn_with_state(state.clone(), auth));
 
     Router::new()
