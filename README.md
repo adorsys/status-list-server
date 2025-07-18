@@ -168,6 +168,38 @@ By default, the server will listen on `http://localhost:8000`. You can modify th
   - `404 NOT FOUND`: Status list not found
   - `406 NOT ACCEPTABLE`: Requested format not supported
 
+### Status List Aggregation
+
+- **Endpoint:** `GET /statuslists/aggregation`
+- **Description:** Returns a JSON object containing an array of all status list URIs managed by the server. This allows Relying Parties to discover and cache all available status lists for offline or batch validation.
+- **Response Example:**
+
+  ```json
+  {
+    "status_lists": [
+      "https://example.com/statuslists/1",
+      "https://example.com/statuslists/2",
+      "https://example.com/statuslists/3"
+    ]
+  }
+  ```
+- **Content-Type:** `application/json`
+- **Authentication:** Not required (public endpoint)
+
+### Status List Token Format Update
+
+- Every status list token (JWT or CWT) now includes an `aggregation_uri` claim, which provides the URI of the aggregation endpoint. Example JWT payload:
+
+  ```json
+  {
+    "sub": "https://example.com/statuslists/1",
+    "status_list": { "bits": 1, "lst": "..." },
+    "exp": 2291720170,
+    "ttl": 43200,
+    "aggregation_uri": "https://example.com/statuslists/aggregation"
+  }
+  ```
+
 ## Authentication
 
 The server uses JWT-based authentication with the following requirements:
