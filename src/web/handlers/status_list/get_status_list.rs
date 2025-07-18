@@ -131,8 +131,8 @@ async fn build_response_from_record(
     };
 
     let token_bytes = match accept {
-        ACCEPT_STATUS_LISTS_HEADER_CWT => issue_cwt(status_record, &keypair, certs_parts)?,
-        _ => issue_jwt(status_record, &keypair, certs_parts)?.into_bytes(),
+        ACCEPT_STATUS_LISTS_HEADER_CWT => issue_cwt(status_record, &keypair, certs_parts, state)?,
+        _ => issue_jwt(status_record, &keypair, certs_parts, state)?.into_bytes(),
     };
 
     Ok((
@@ -151,6 +151,7 @@ fn issue_cwt(
     status_record: &StatusListRecord,
     keypair: &Keypair,
     cert_chain: Vec<String>,
+    state: &AppState,
 ) -> Result<Vec<u8>, StatusListError> {
     let mut claims = vec![];
 
@@ -190,6 +191,10 @@ fn issue_cwt(
         CborValue::Integer(STATUS_LIST.into()),
         CborValue::Map(status_list),
     ));
+
+    // Add aggregation_uri claim
+    let aggregation_uri = format!("https://{}/statuslists/aggregation", state.server_domain);
+    claims.push((CborValue::Text("aggregation_uri".into()), CborValue::Text(aggregation_uri)));
 
     let payload = CborValue::Map(claims).to_vec().map_err(|err| {
         tracing::error!("Failed to serialize claims: {err:?}");
@@ -253,16 +258,19 @@ pub struct StatusListToken {
     pub status_list: StatusList,
     pub sub: String,
     pub ttl: Option<i64>,
+    pub aggregation_uri: Option<String>,
 }
 
 fn issue_jwt(
     status_record: &StatusListRecord,
     keypair: &Keypair,
     cert_chain: Vec<String>,
+    state: &AppState,
 ) -> Result<String, StatusListError> {
     let iat = Utc::now().timestamp();
     let ttl = TOKEN_TTL;
     let exp = iat + TOKEN_EXP;
+    let aggregation_uri = format!("https://{}/statuslists/aggregation", state.server_domain);
     // Building the claims
     let claims = StatusListToken {
         exp: Some(exp),
@@ -270,6 +278,7 @@ fn issue_jwt(
         status_list: status_record.status_list.clone(),
         sub: status_record.sub.to_owned(),
         ttl: Some(ttl),
+        aggregation_uri: Some(aggregation_uri),
     };
     // Building the header
     let mut header = Header::new(jsonwebtoken::Algorithm::ES256);
@@ -382,6 +391,7 @@ mod tests {
             token_data.claims.status_list.lst,
             encode_compressed(&[0, 0, 0]).unwrap()
         );
+        assert_eq!(token_data.claims.aggregation_uri, Some(format!("https://{}/statuslists/aggregation", app_state.server_domain)));
     }
 
     #[tokio::test]
@@ -496,6 +506,14 @@ mod tests {
             .1
             .clone();
         assert_eq!(ttl, CborValue::Integer(300.into()));
+
+        let aggregation_uri = claims
+            .iter()
+            .find(|(k, _)| k == &CborValue::Text("aggregation_uri".to_string()))
+            .unwrap()
+            .1
+            .clone();
+        assert_eq!(aggregation_uri, CborValue::Text(format!("https://{}/statuslists/aggregation", app_state.server_domain)));
     }
 
     #[tokio::test]
