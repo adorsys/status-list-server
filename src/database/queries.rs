@@ -99,6 +99,13 @@ impl SeaOrmStore<StatusListRecord> {
             .await
             .map_err(|e| RepositoryError::FindError(e.to_string()))
     }
+
+    pub async fn find_all(&self) -> Result<Vec<StatusListRecord>, RepositoryError> {
+        status_lists::Entity::find()
+            .all(&*self.db)
+            .await
+            .map_err(|e| RepositoryError::FindError(e.to_string()))
+    }
 }
 
 impl SeaOrmStore<Credentials> {
