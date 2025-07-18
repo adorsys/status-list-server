@@ -194,7 +194,10 @@ fn issue_cwt(
 
     // Add aggregation_uri claim
     let aggregation_uri = format!("https://{}/statuslists/aggregation", state.server_domain);
-    claims.push((CborValue::Text("aggregation_uri".into()), CborValue::Text(aggregation_uri)));
+    claims.push((
+        CborValue::Text("aggregation_uri".into()),
+        CborValue::Text(aggregation_uri),
+    ));
 
     let payload = CborValue::Map(claims).to_vec().map_err(|err| {
         tracing::error!("Failed to serialize claims: {err:?}");
@@ -391,7 +394,13 @@ mod tests {
             token_data.claims.status_list.lst,
             encode_compressed(&[0, 0, 0]).unwrap()
         );
-        assert_eq!(token_data.claims.aggregation_uri, Some(format!("https://{}/statuslists/aggregation", app_state.server_domain)));
+        assert_eq!(
+            token_data.claims.aggregation_uri,
+            Some(format!(
+                "https://{}/statuslists/aggregation",
+                app_state.server_domain
+            ))
+        );
     }
 
     #[tokio::test]
@@ -513,7 +522,13 @@ mod tests {
             .unwrap()
             .1
             .clone();
-        assert_eq!(aggregation_uri, CborValue::Text(format!("https://{}/statuslists/aggregation", app_state.server_domain)));
+        assert_eq!(
+            aggregation_uri,
+            CborValue::Text(format!(
+                "https://{}/statuslists/aggregation",
+                app_state.server_domain
+            ))
+        );
     }
 
     #[tokio::test]

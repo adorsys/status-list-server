@@ -18,7 +18,10 @@ use crate::{
     utils::state::AppState,
     web::{
         auth::auth,
-        handlers::{credential_handler, get_status_list, publish_status, update_status, status_list::aggregation::aggregation},
+        handlers::{
+            credential_handler, get_status_list, publish_status,
+            status_list::aggregation::aggregation, update_status,
+        },
     },
 };
 
