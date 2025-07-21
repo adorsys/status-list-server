@@ -19,8 +19,7 @@ use crate::{
     web::{
         auth::auth,
         handlers::{
-            credential_handler, get_status_list, publish_status,
-            status_list::aggregation::aggregation, update_status,
+            aggregation, credential_handler, get_status_list, publish_status, update_status,
         },
     },
 };
@@ -79,6 +78,6 @@ fn status_list_routes(state: AppState) -> Router<AppState> {
 
     Router::new()
         .merge(protected_routes)
-        .route("/aggregation", get(aggregation))
+        .route("/", get(aggregation))
         .route("/{list_id}", get(get_status_list))
 }

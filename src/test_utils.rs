@@ -69,5 +69,6 @@ pub async fn test_app_state(db_conn: Option<Arc<sea_orm::DatabaseConnection>>) -
         server_domain: "example.com".to_string(),
         cert_manager: Arc::new(certificate_manager),
         cache: Cache::new(5 * 60, 100),
+        aggregation_uri: Some("https://example.com/aggregation".to_string()),
     }
 }

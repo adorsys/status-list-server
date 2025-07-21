@@ -192,12 +192,12 @@ fn issue_cwt(
         CborValue::Map(status_list),
     ));
 
-    // Add aggregation_uri claim
-    let aggregation_uri = format!("https://{}/statuslists/aggregation", state.server_domain);
-    claims.push((
-        CborValue::Text("aggregation_uri".into()),
-        CborValue::Text(aggregation_uri),
-    ));
+    if let Some(aggregation_uri) = &state.aggregation_uri {
+        claims.push((
+            CborValue::Text("aggregation_uri".into()),
+            CborValue::Text(aggregation_uri.clone()),
+        ));
+    }
 
     let payload = CborValue::Map(claims).to_vec().map_err(|err| {
         tracing::error!("Failed to serialize claims: {err:?}");
@@ -261,6 +261,7 @@ pub struct StatusListToken {
     pub status_list: StatusList,
     pub sub: String,
     pub ttl: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub aggregation_uri: Option<String>,
 }
 
@@ -273,7 +274,6 @@ fn issue_jwt(
     let iat = Utc::now().timestamp();
     let ttl = TOKEN_TTL;
     let exp = iat + TOKEN_EXP;
-    let aggregation_uri = format!("https://{}/statuslists/aggregation", state.server_domain);
     // Building the claims
     let claims = StatusListToken {
         exp: Some(exp),
@@ -281,7 +281,7 @@ fn issue_jwt(
         status_list: status_record.status_list.clone(),
         sub: status_record.sub.to_owned(),
         ttl: Some(ttl),
-        aggregation_uri: Some(aggregation_uri),
+        aggregation_uri: state.aggregation_uri.clone(),
     };
     // Building the header
     let mut header = Header::new(jsonwebtoken::Algorithm::ES256);
