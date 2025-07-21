@@ -201,6 +201,9 @@ mod tests {
             config.server.cert.acme_directory_url,
             "https://acme-v02.api.letsencrypt.org/directory"
         );
-        assert_eq!(config.server.aggregation_uri, Some("https://example.com/aggregation".to_string()));
+        assert_eq!(
+            config.server.aggregation_uri,
+            Some("https://example.com/aggregation".to_string())
+        );
     }
 }

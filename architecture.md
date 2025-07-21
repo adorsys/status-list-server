@@ -92,7 +92,7 @@
       "https://statuslist.example.com/statuslists/2"
     ]
   }
-  ```
+   ``` 
 
 ## **5. Application Design**
 
