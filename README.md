@@ -170,7 +170,7 @@ By default, the server will listen on `http://localhost:8000`. You can modify th
 
 ### Status List Aggregation
 
-- **Endpoint:** `GET /statuslists/aggregation`
+- **Endpoint:** `GET /statuslists`
 - **Description:** Returns a JSON object containing an array of all status list URIs managed by the server. This allows Relying Parties to discover and cache all available status lists for offline or batch validation.
 - **Response Example:**
 
