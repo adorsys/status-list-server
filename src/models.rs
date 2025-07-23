@@ -38,7 +38,7 @@ impl sea_orm::sea_query::ValueType for Alg {
     }
 
     fn column_type() -> sea_orm::sea_query::ColumnType {
-        sea_orm::sea_query::ColumnType::String(sea_orm::sea_query::StringLen::N(255))
+        sea_orm::sea_query::ColumnType::Text
     }
 }
 

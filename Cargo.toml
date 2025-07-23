@@ -19,12 +19,12 @@ axum = { version = "0.8", features = ["macros"] }
 tower-http = { version = "0.6", features = ["cors", "trace", "catch-panic"] }
 
 # Database and ORM
-sea-orm = { version = "1.1", features = [
+sea-orm = { version = "0.12.15", features = [
     "sqlx-postgres",
     "runtime-tokio-rustls",
     "macros",
 ] }
-sea-orm-migration = { version = "1.1", features = [
+sea-orm-migration = { version = "0.12.15", features = [
     "sqlx-postgres",
     "runtime-tokio-rustls",
 ] }
@@ -39,7 +39,7 @@ jsonwebtoken = "9.3"
 rustls = "0.23"
 webpki-roots = "1"
 rustls-pki-types = "1.12"
-secrecy = { version = "0.10", features = ["serde"] }
+secrecy = { version = "0.8.0", features = ["serde"] }
 rcgen = { version = "0.13", features = ["pem"] }
 
 # Serialization
@@ -86,7 +86,7 @@ features = ["pkcs8", "ecdsa", "alloc", "pem"]
 
 [dev-dependencies]
 sealed_test = "1.1.0"
-sea-orm = { version = "1.1", features = ["mock"] }
+sea-orm = { version = "0.12.15", features = ["mock"] }
 
 [target.'cfg(not(target_env = "msvc"))'.dependencies]
 tikv-jemallocator = "0.6"

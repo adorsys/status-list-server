@@ -394,13 +394,7 @@ mod tests {
             token_data.claims.status_list.lst,
             encode_compressed(&[0, 0, 0]).unwrap()
         );
-        assert_eq!(
-            token_data.claims.aggregation_uri,
-            Some(format!(
-                "https://{}/statuslists/aggregation",
-                app_state.server_domain
-            ))
-        );
+        assert_eq!(token_data.claims.aggregation_uri, app_state.aggregation_uri);
     }
 
     #[tokio::test]
@@ -524,10 +518,7 @@ mod tests {
             .clone();
         assert_eq!(
             aggregation_uri,
-            CborValue::Text(format!(
-                "https://{}/statuslists/aggregation",
-                app_state.server_domain
-            ))
+            CborValue::Text(app_state.aggregation_uri.unwrap())
         );
     }
 
