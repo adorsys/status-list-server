@@ -40,7 +40,9 @@ pub async fn test_app_state(db_conn: Option<Arc<sea_orm::DatabaseConnection>>) -
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 
     let db = db_conn.unwrap_or(Arc::new(
-        MockDatabase::connect("postgres://username:password@localhost/test_db").await.unwrap(),
+        MockDatabase::connect("postgres://username:password@localhost/test_db")
+            .await
+            .unwrap(),
     ));
 
     let key_pem = include_str!("test_resources/ec-private.pem").to_string();
