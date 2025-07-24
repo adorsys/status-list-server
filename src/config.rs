@@ -21,6 +21,7 @@ pub struct ServerConfig {
     pub domain: String,
     pub port: u16,
     pub cert: CertConfig,
+    pub aggregation_uri: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -82,7 +83,7 @@ impl RedisConfig {
         root_cert: Option<&str>,
     ) -> RedisResult<ConnectionManager> {
         let client = if !self.require_tls {
-            RedisClient::open(self.uri.expose_secret())?
+            RedisClient::open(self.uri.expose_secret().to_string())?
         } else {
             let client_tls = match (cert_pem, key_pem) {
                 (Some(cert), Some(key)) => Some(ClientTlsConfig {
@@ -94,7 +95,7 @@ impl RedisConfig {
             let root_cert = root_cert.map(|cert| cert.as_bytes().to_vec());
 
             RedisClient::build_with_tls(
-                self.uri.expose_secret(),
+                self.uri.expose_secret().clone(),
                 TlsCertificates {
                     client_tls,
                     root_cert,
@@ -178,6 +179,7 @@ mod tests {
         ("APP_REDIS__REQUIRE_TLS", "true"),
         ("APP_SERVER__CERT__EMAIL", "test@gmail.com"),
         ("APP_SERVER__CERT__ACME_DIRECTORY_URL", "https://acme-v02.api.letsencrypt.org/directory"),
+        ("APP_SERVER__AGGREGATION_URI", "https://example.com/aggregation"),
     ])]
     fn test_env_config() {
         // Test configuration overrides via environment variables
@@ -198,6 +200,10 @@ mod tests {
         assert_eq!(
             config.server.cert.acme_directory_url,
             "https://acme-v02.api.letsencrypt.org/directory"
+        );
+        assert_eq!(
+            config.server.aggregation_uri,
+            Some("https://example.com/aggregation".to_string())
         );
     }
 }

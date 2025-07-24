@@ -1,6 +1,7 @@
 use crate::models::StatusEntry;
 use serde::Deserialize;
 
+pub(crate) mod aggregation;
 pub(super) mod constants;
 pub(super) mod error;
 pub(crate) mod get_status_list;

@@ -32,6 +32,7 @@ pub struct AppState {
     pub server_domain: String,
     pub cert_manager: Arc<CertManager>,
     pub cache: Cache,
+    pub aggregation_uri: Option<String>,
 }
 
 pub async fn build_state(config: &AppConfig) -> EyeResult<AppState> {
@@ -98,5 +99,6 @@ pub async fn build_state(config: &AppConfig) -> EyeResult<AppState> {
         server_domain: config.server.domain.clone(),
         cert_manager: Arc::new(certificate_manager),
         cache: Cache::new(config.cache.ttl, config.cache.max_capacity),
+        aggregation_uri: config.server.aggregation_uri.clone(),
     })
 }

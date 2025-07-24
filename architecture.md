@@ -61,7 +61,8 @@
          "lst": "eyJhbGciOiJFUzI1NiIsImtpZCI6IjEyIiwidHlwIjoic3RhdHVzbGlzdCtqd3QifQ..."
        },
        "exp": 2291720170,
-       "ttl": 43200
+       "ttl": 43200,
+       "aggregation_uri": "https://statuslist.example.com/statuslists/aggregation"
      }
      ```
    - **Status List Token (CWT Example)**:
@@ -72,6 +73,25 @@
    646269747301636c73744a78dadbb918000217015d5840251d844ecc6541b8b2fd24
    e681836c1a072cad61716fb174d57b162b4b392c1ea08b875a493ca8d1cf4328eee1
    b14f33aa899e532844778ba2fff80b5c1e56e5
+   aggregation_uri: "https://statuslist.example.com/statuslists/aggregation"
+   ``` 
+
+---
+
+### **Status List Aggregation**
+
+- The Status List Server exposes an aggregation endpoint at `/statuslists/aggregation`.
+- This endpoint returns a JSON object with a `status_lists` array containing all status list URIs managed by the server.
+- Each status list token (JWT or CWT) includes an `aggregation_uri` claim pointing to this endpoint, enabling Relying Parties to discover and cache all available status lists for offline or batch validation.
+- Example response:
+
+  ```json
+  {
+    "status_lists": [
+      "https://statuslist.example.com/statuslists/1",
+      "https://statuslist.example.com/statuslists/2"
+    ]
+  }
    ``` 
 
 ## **5. Application Design**

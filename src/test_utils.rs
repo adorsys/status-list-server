@@ -7,7 +7,7 @@ use crate::{
     },
 };
 use async_trait::async_trait;
-use sea_orm::{DbBackend, MockDatabase};
+use sea_orm::Database as MockDatabase;
 use std::{collections::HashMap, sync::Arc};
 
 pub struct MockStorage {
@@ -40,7 +40,9 @@ pub async fn test_app_state(db_conn: Option<Arc<sea_orm::DatabaseConnection>>) -
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 
     let db = db_conn.unwrap_or(Arc::new(
-        MockDatabase::new(DbBackend::Postgres).into_connection(),
+        MockDatabase::connect("postgres://username:password@localhost/test_db")
+            .await
+            .unwrap(),
     ));
 
     let key_pem = include_str!("test_resources/ec-private.pem").to_string();
@@ -69,5 +71,6 @@ pub async fn test_app_state(db_conn: Option<Arc<sea_orm::DatabaseConnection>>) -
         server_domain: "example.com".to_string(),
         cert_manager: Arc::new(certificate_manager),
         cache: Cache::new(5 * 60, 100),
+        aggregation_uri: Some("https://example.com/aggregation".to_string()),
     }
 }
