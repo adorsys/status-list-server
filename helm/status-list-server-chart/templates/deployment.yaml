@@ -15,6 +15,8 @@ spec:
       labels:
         app: {{ include "status-list-server-chart.name" . }}
     spec:
+      initContainers:
+        {{- toYaml .Values.statuslist.initContainers | nindent 8 }}
       containers:
         - name: {{ include "status-list-server-chart.name" . }}
           image: {{ .Values.statuslist.image.repository }}:{{ .Values.statuslist.image.tag }}
@@ -22,6 +24,7 @@ spec:
           ports:
             - name: http
               containerPort: {{ .Values.statuslist.service.targetPort | int }}
+              protocol: TCP
           env:
             - name: RUST_LOG
               value: {{ .Values.statuslist.env.RUST_LOG | quote }}
@@ -32,20 +35,36 @@ spec:
                 secretKeyRef:
                   name: {{ .Values.externalSecret.spec.target.name }}
                   key: postgres-password
-            - name: AWS_REGION
+            - name: APP_AWS__REGION
               value: {{ .Values.secretStore.aws.region | quote }}
-            - name: SERVER_PUBLIC_DOMAIN
+            - name: APP_SERVER__DOMAIN
               value: {{ .Values.statuslist.ingress.externalDnsHostname | quote }}
-            - name: SERVER_KEY_SECRET_NAME
-              value: {{ .Values.statuslist.env.SERVER_KEY_SECRET_NAME | quote }}
-            - name: ENVIRONMENT
-              value: {{ .Values.statuslist.env.ENVIRONMENT | quote }}
-            - name: POSTGRES_HOST
-              value:  "{{ .Release.Name }}-postgresql.{{ .Release.Namespace }}.svc.cluster.local"
+            - name: APP_ENV
+              value: {{ .Values.statuslist.env.APP_ENV | quote }}
             - name: POSTGRES_DB
               value: {{ .Values.postgresql.auth.database | quote }}
-            - name: DATABASE_URL
-              value: "postgres://$(POSTGRES_USER):$(POSTGRES_PASSWORD)@$(POSTGRES_HOST):5432/$(POSTGRES_DB)"
+            - name: APP_DATABASE__URL
+              value: "postgres://$(POSTGRES_USER):$(POSTGRES_PASSWORD)@{{ .Release.Name }}-postgresql.{{ .Release.Namespace }}.svc.cluster.local:5432/$(POSTGRES_DB)"
+            - name: APP_SERVER__HOST
+              value: {{ .Values.statuslist.env.APP_SERVER__HOST | quote }}
+            - name: APP_SERVER__PORT
+              value: {{ .Values.statuslist.env.APP_SERVER__PORT | quote }}
+            - name: APP_SERVER__CERT__EMAIL
+              value: {{ .Values.statuslist.env.APP_SERVER__CERT__EMAIL | quote }}
+            - name: APP_SERVER__CERT__ORGANIZATION
+              value: {{ .Values.statuslist.env.APP_SERVER__CERT__ORGANIZATION | quote }}
+            - name: APP_SERVER__CERT__ACME_DIRECTORY_URL
+              value: {{ .Values.statuslist.env.APP_SERVER__CERT__ACME_DIRECTORY_URL | quote }}
+            - name: APP_SERVER__CERT__EKU
+              value: {{ .Values.statuslist.env.APP_SERVER__CERT__EKU | quote }}
+            - name: APP_REDIS__REQUIRE_TLS
+              value: {{ .Values.statuslist.env.APP_REDIS__REQUIRE_TLS | quote }}
+            - name: APP_REDIS__URI
+              value: "redis://{{ .Release.Name }}-redis.{{ .Release.Namespace }}.svc.cluster.local:6379"
+            - name: APP_CACHE__TTL
+              value: {{ .Values.statuslist.env.APP_CACHE__TTL | quote }}
+            - name: APP_CACHE__MAX_CAPACITY
+              value: {{ .Values.statuslist.env.APP_CACHE__MAX_CAPACITY | quote }}
           volumeMounts:
             - name: aws-credentials-volume
               mountPath: /root/.aws
