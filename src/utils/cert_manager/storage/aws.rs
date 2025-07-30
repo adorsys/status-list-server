@@ -127,7 +127,11 @@ pub struct AwsS3 {
 
 impl AwsS3 {
     /// Create a new instance of [AwsS3Storage] with the given AWS SDK config and bucket name
-    pub fn new(config: &SdkConfig, bucket_name: impl Into<String>, region: impl Into<String>) -> Self {
+    pub fn new(
+        config: &SdkConfig,
+        bucket_name: impl Into<String>,
+        region: impl Into<String>,
+    ) -> Self {
         let client = if std::env::var("APP_ENV").as_deref() == Ok("production") {
             S3Client::new(config)
         } else {
@@ -180,8 +184,12 @@ impl AwsS3 {
                     if self.region != "us-east-1" {
                         req = req.create_bucket_configuration(
                             CreateBucketConfiguration::builder()
-                                .location_constraint(self.region.parse().expect("Invalid region for LocationConstraint"))
-                                .build()
+                                .location_constraint(
+                                    self.region
+                                        .parse()
+                                        .expect("Invalid region for LocationConstraint"),
+                                )
+                                .build(),
                         );
                     }
                     match req.send().await {

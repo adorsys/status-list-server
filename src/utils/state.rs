@@ -68,7 +68,8 @@ pub async fn build_state(config: &AppConfig) -> EyeResult<AppState> {
 
     // Initialize the storage backends for the certificate manager
     let cache = Redis::new(redis_conn.clone());
-    let cert_storage = AwsS3::new(&aws_config, BUCKET_NAME, config.aws.region.clone()).with_cache(cache);
+    let cert_storage =
+        AwsS3::new(&aws_config, BUCKET_NAME, config.aws.region.clone()).with_cache(cache);
     let secrets_storage = AwsSecretsManager::new(&aws_config).await?;
     let mut certificate_manager = CertManager::new(
         [&config.server.domain],
