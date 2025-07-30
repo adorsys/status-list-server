@@ -60,7 +60,7 @@ spec:
             - name: APP_REDIS__REQUIRE_TLS
               value: {{ .Values.statuslist.env.APP_REDIS__REQUIRE_TLS | quote }}
             - name: APP_REDIS__URI
-              value: "redis://{{ .Release.Name }}-redis.{{ .Release.Namespace }}.svc.cluster.local:6379"
+              value: "redis://{{ .Release.Name }}-redis-master.{{ .Release.Namespace }}.svc.cluster.local:6379"
             - name: APP_CACHE__TTL
               value: {{ .Values.statuslist.env.APP_CACHE__TTL | quote }}
             - name: APP_CACHE__MAX_CAPACITY
