@@ -30,7 +30,7 @@ statuslist:
           echo "Redis is up."
   replicaCount: 1
   image:
-    repository: ghcr.io/adorsys/status-list-server
+    repository: ghcr.io/adorsys/status-list-server # TODO: Change to forkimakwichek/status-list-server to avoid s3 error
     pullPolicy: Always
     tag: "latest"
   service:

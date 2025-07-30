@@ -120,13 +120,14 @@ impl Storage for AwsSecretsManager {
 pub struct AwsS3 {
     client: S3Client,
     bucket: String,
+    region: String,
     cache: Option<Box<dyn Storage>>,
     bucket_exists: AtomicBool,
 }
 
 impl AwsS3 {
     /// Create a new instance of [AwsS3Storage] with the given AWS SDK config and bucket name
-    pub fn new(config: &SdkConfig, bucket_name: impl Into<String>) -> Self {
+    pub fn new(config: &SdkConfig, bucket_name: impl Into<String>, region: impl Into<String>) -> Self {
         let client = if std::env::var("APP_ENV").as_deref() == Ok("production") {
             S3Client::new(config)
         } else {
@@ -140,6 +141,7 @@ impl AwsS3 {
         Self {
             client,
             bucket: bucket_name.into(),
+            region: region.into(),
             cache: None,
             bucket_exists: AtomicBool::new(false),
         }
@@ -173,13 +175,16 @@ impl AwsS3 {
                 }
                 Err(SdkError::ServiceError(err)) if err.err().is_not_found() => {
                     // Bucket not found, attempt to create it
-                    match self
-                        .client
-                        .create_bucket()
-                        .bucket(&self.bucket)
-                        .send()
-                        .await
-                    {
+                    use aws_sdk_s3::types::CreateBucketConfiguration;
+                    let mut req = self.client.create_bucket().bucket(&self.bucket);
+                    if self.region != "us-east-1" {
+                        req = req.create_bucket_configuration(
+                            CreateBucketConfiguration::builder()
+                                .location_constraint(self.region.parse().expect("Invalid region for LocationConstraint"))
+                                .build()
+                        );
+                    }
+                    match req.send().await {
                         Ok(_) => {
                             info!("Bucket {} created successfully", self.bucket);
                             self.bucket_exists.store(true, Ordering::Relaxed);
