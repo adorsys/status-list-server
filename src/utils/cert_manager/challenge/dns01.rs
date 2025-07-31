@@ -182,7 +182,7 @@ impl AwsRoute53DnsUpdater {
         change_action: ChangeAction,
         value: &str,
     ) -> Result<String, ChallengeError> {
-        let record_name = format!("_acme-challenge.{}", domain);
+        let record_name = format!("_acme-challenge.{domain}");
         let hosted_zone_id = self.find_hosted_zone(domain).await?;
 
         // Prepare the TXT record to change
@@ -195,7 +195,7 @@ impl AwsRoute53DnsUpdater {
                     .ttl(60)
                     .resource_records(
                         ResourceRecord::builder()
-                            .value(format!("\"{}\"", value))
+                            .value(format!("\"{value}\""))
                             .build()
                             .map_err(|e| ChallengeError::AwsSdk(e.into()))?,
                     )
@@ -279,7 +279,7 @@ impl PebbleDnsUpdater {
 #[async_trait]
 impl DnsUpdater for PebbleDnsUpdater {
     async fn upsert_record(&self, domain: &str, value: &str) -> Result<(), ChallengeError> {
-        let record_name = format!("_acme-challenge.{}.", domain);
+        let record_name = format!("_acme-challenge.{domain}.");
         let url = format!("{}/set-txt", self.addr);
         let body = json!({"host": record_name, "value": value});
 
@@ -296,7 +296,7 @@ impl DnsUpdater for PebbleDnsUpdater {
     }
 
     async fn remove_record(&self, domain: &str, _value: &str) -> Result<(), ChallengeError> {
-        let record_name = format!("_acme-challenge.{}.", domain);
+        let record_name = format!("_acme-challenge.{domain}.");
         let url = format!("{}/clear-txt", self.addr);
         let body = json!({"host": record_name});
 
