@@ -1,10 +1,11 @@
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 
 use async_trait::async_trait;
 use aws_config::SdkConfig;
 use aws_sdk_route53::{
     types::{
-        Change, ChangeAction, ChangeBatch, HostedZone, ResourceRecord, ResourceRecordSet, RrType,
+        Change, ChangeAction, ChangeBatch, ChangeStatus, HostedZone, ResourceRecord,
+        ResourceRecordSet, RrType,
     },
     Client as Route53Client,
 };
@@ -93,7 +94,8 @@ impl AwsRoute53DnsUpdater {
         // remove the trailing dot from the domain if any
         let domain = domain.trim_end_matches('.');
 
-        if let Some(zone_id) = Self::find_best_match(domain, zones) {
+        if let Some((zone_id, zone_name)) = Self::find_best_match(domain, zones) {
+            info!("Found best matching hosted zone: {zone_name}");
             Ok(zone_id.to_string())
         } else {
             Err(ChallengeError::ZoneNotFound(domain.to_string()))
@@ -101,7 +103,7 @@ impl AwsRoute53DnsUpdater {
     }
 
     // Find the best matching hosted zone for the given domain
-    fn find_best_match<'a>(lookup: &str, zones: &'a [ZoneInfo]) -> Option<&'a str> {
+    fn find_best_match<'a>(lookup: &str, zones: &'a [ZoneInfo]) -> Option<(&'a str, &'a str)> {
         let mut best_match = None;
 
         for zone in zones.iter() {
@@ -120,8 +122,7 @@ impl AwsRoute53DnsUpdater {
             } else if lookup.len() > zone_name.len() {
                 // Check if lookup ends with .zone_name
                 let idx = lookup.len() - zone_name.len() - 1;
-                lookup.as_bytes().get(idx) == Some(&b'.')
-                    && &lookup[idx + 1..] == zone_name.as_str()
+                lookup.as_bytes().get(idx) == Some(&b'.') && &lookup[idx + 1..] == zone_name
             } else {
                 false
             };
@@ -129,15 +130,15 @@ impl AwsRoute53DnsUpdater {
             if is_match {
                 let len = zone_name.len();
                 match best_match {
-                    None => best_match = Some((zone.id.as_str(), len)),
-                    Some((_, curr_len)) if len > curr_len => {
-                        best_match = Some((zone.id.as_str(), len));
+                    None => best_match = Some((zone.id.as_str(), zone_name, len)),
+                    Some((_, _, curr_len)) if len > curr_len => {
+                        best_match = Some((zone.id.as_str(), zone_name, len));
                     }
                     _ => {}
                 }
             }
         }
-        best_match.map(|(zone_id, _)| zone_id)
+        best_match.map(|(zone_id, zone_name, _)| (zone_id, zone_name.as_str()))
     }
 
     async fn try_cache_zones(&self) -> Result<(), ChallengeError> {
@@ -172,6 +173,7 @@ impl AwsRoute53DnsUpdater {
                 break;
             }
         }
+        info!("Found hosted zones: {:?}", all_zones);
         *self.zones.write().await = Some(all_zones);
         Ok(())
     }
@@ -181,7 +183,7 @@ impl AwsRoute53DnsUpdater {
         domain: &str,
         change_action: ChangeAction,
         value: &str,
-    ) -> Result<String, ChallengeError> {
+    ) -> Result<(String, String), ChallengeError> {
         let record_name = format!("_acme-challenge.{}", domain);
         let hosted_zone_id = self.find_hosted_zone(domain).await?;
 
@@ -210,7 +212,8 @@ impl AwsRoute53DnsUpdater {
             .map_err(|e| ChallengeError::AwsSdk(e.into()))?;
 
         // Try to change the record in Route53
-        self.client
+        let output = self
+            .client
             .change_resource_record_sets()
             .hosted_zone_id(&hosted_zone_id)
             .change_batch(change_batch)
@@ -218,7 +221,68 @@ impl AwsRoute53DnsUpdater {
             .await
             .map_err(|e| ChallengeError::AwsSdk(e.into()))?;
 
-        Ok(record_name)
+        let change_id = output.change_info.map(|info| info.id).ok_or_else(|| {
+            ChallengeError::Other(eyre!(
+                "Missing Change ID from AWS ChangeResourceRecordSets response"
+            ))
+        })?;
+
+        Ok((record_name, change_id))
+    }
+
+    // wait for the change to propagate across all Route53 authoritative name servers
+    async fn wait_for_propagation(&self, change_id: &str) -> Result<(), ChallengeError> {
+        use tokio::time::{sleep, timeout};
+
+        const INITIAL_DELAY: Duration = Duration::from_secs(2);
+        const TIMEOUT: Duration = Duration::from_secs(60 * 5);
+
+        let mut retries = 0;
+
+        let poll_future = async {
+            loop {
+                let output = self
+                    .client
+                    .get_change()
+                    .id(change_id)
+                    .send()
+                    .await
+                    .map_err(|e| ChallengeError::AwsSdk(e.into()))?;
+
+                match output.change_info.map(|info| info.status) {
+                    Some(ChangeStatus::Insync) => {
+                        info!("DNS change {change_id} propagated successfully");
+                        return Ok(());
+                    }
+                    Some(ChangeStatus::Pending) => {
+                        info!("DNS change {change_id} still pending. Waiting for propagation...");
+                    }
+                    status => {
+                        return Err(ChallengeError::Other(eyre!(
+                            "Unexpected status for change {change_id}: {status:?}",
+                        )));
+                    }
+                }
+
+                // We double the delay after each attempt
+                let delay = INITIAL_DELAY
+                    .checked_mul(2u32.pow(retries))
+                    .unwrap_or(Duration::MAX);
+                retries += 1;
+                sleep(delay).await;
+            }
+        };
+
+        match timeout(TIMEOUT, poll_future).await {
+            Ok(result) => match result {
+                Ok(()) => Ok(()),
+                Err(e) => Err(e),
+            },
+            Err(_) => Err(ChallengeError::Other(eyre!(
+                "DNS propagation timed out after {}s",
+                TIMEOUT.as_secs()
+            ))),
+        }
     }
 }
 
@@ -242,17 +306,19 @@ impl ZoneInfo {
 impl DnsUpdater for AwsRoute53DnsUpdater {
     async fn upsert_record(&self, domain: &str, value: &str) -> Result<(), ChallengeError> {
         // Try to upsert the record in Route53
-        let record_name = self
+        let (record_name, change_id) = self
             .change_records(domain, ChangeAction::Upsert, value)
             .await?;
 
         info!("DNS record {record_name} created for {domain}");
+        // Wait for the change to propagate before returning
+        self.wait_for_propagation(&change_id).await?;
         Ok(())
     }
 
     async fn remove_record(&self, domain: &str, value: &str) -> Result<(), ChallengeError> {
         // Try to delete the record in Route53
-        let record_name = self
+        let (record_name, _) = self
             .change_records(domain, ChangeAction::Delete, value)
             .await?;
 
@@ -338,16 +404,16 @@ mod tests {
             },
         ];
 
-        let id = AwsRoute53DnsUpdater::find_best_match("sub.example.com", &zones);
-        assert_eq!(id, Some("Z2"));
+        let result = AwsRoute53DnsUpdater::find_best_match("sub.example.com", &zones);
+        assert_eq!(result, Some(("Z2", "sub.example.com")));
 
-        let id = AwsRoute53DnsUpdater::find_best_match("www.example.com", &zones);
-        assert_eq!(id, Some("Z1"));
+        let result = AwsRoute53DnsUpdater::find_best_match("www.example.com", &zones);
+        assert_eq!(result, Some(("Z1", "example.com")));
 
-        let id = AwsRoute53DnsUpdater::find_best_match("acme.com", &zones);
-        assert_eq!(id, None);
+        let result = AwsRoute53DnsUpdater::find_best_match("acme.com", &zones);
+        assert_eq!(result, None);
 
-        let id = AwsRoute53DnsUpdater::find_best_match("wildcard.test.example.com", &zones);
-        assert_eq!(id, Some("Z4"));
+        let result = AwsRoute53DnsUpdater::find_best_match("wildcard.test.example.com", &zones);
+        assert_eq!(result, Some(("Z4", "*.test.example.com")));
     }
 }
