@@ -550,7 +550,7 @@ impl CertManager {
 
     #[inline]
     fn signing_secret_id(&self) -> String {
-        format!("keys/{}", tld_plus_one(&self.domains))
+        format!("keys/{}", self.domains.join("@"))
     }
 }
 

@@ -3,34 +3,34 @@ global:
 
 statuslist:
   initContainers:
-    - name: wait-for-postgres
-      image: busybox
-      command:
-        - "sh"
-        - "-c"
-        - |
-          echo "Waiting for PostgreSQL..."
-          until nc -z statuslist-postgresql.statuslist.svc.cluster.local 5432; do
-            echo "PostgreSQL not ready. Retrying in 2s...";
-            sleep 2;
-          done
-          echo "PostgreSQL is up."
+  - name: wait-for-postgres
+    image: busybox
+    command:
+    - "sh"
+    - "-c"
+    - |
+      echo "Waiting for PostgreSQL..."
+      until nc -z statuslist-postgresql.statuslist.svc.cluster.local 5432; do
+        echo "PostgreSQL not ready. Retrying in 2s...";
+        sleep 2;
+      done
+      echo "PostgreSQL is up."
 
-    - name: wait-for-redis
-      image: busybox
-      command:
-        - "sh"
-        - "-c"
-        - |
-          echo "Waiting for Redis..."
-          until nc -z statuslist-redis-master.statuslist.svc.cluster.local 6379; do
-            echo "Redis not ready. Retrying in 2s...";
-            sleep 2;
-          done
-          echo "Redis is up."
+  - name: wait-for-redis
+    image: busybox
+    command:
+    - "sh"
+    - "-c"
+    - |
+      echo "Waiting for Redis..."
+      until nc -z statuslist-redis-master.statuslist.svc.cluster.local 6379; do
+        echo "Redis not ready. Retrying in 2s...";
+        sleep 2;
+      done
+      echo "Redis is up."
   replicaCount: 1
   image:
-    repository: ghcr.io/adorsys/status-list-server # TODO: Change to forkimakwichek/status-list-server to avoid s3 error
+    repository: forkimakwichek/sl # TODO: Change to forkimakwichek/status-list-server to avoid s3 error
     pullPolicy: Always
     tag: "latest"
   service:
@@ -48,7 +48,7 @@ statuslist:
       nginx.ingress.kubernetes.io/proxy-body-size: "10m"
     tls:
       hosts:
-        - "*.eudi-adorsys.com"
+      - "*.eudi-adorsys.com"
       secretName: statuslist-tls
     externalDnsHostname: statuslist.eudi-adorsys.com
   env:
@@ -104,15 +104,14 @@ externalSecret:
       name: statuslist-secret
       creationPolicy: Owner
     data:
-      - secretKey: postgres-password
-        remoteRef:
-          key: statuslist-secret
-          property: POSTGRES_PASSWORD
-      - secretKey: redis-password
-        remoteRef:
-          key: statuslist-secret
-          property: REDIS_PASSWORD
-
+    - secretKey: postgres-password
+      remoteRef:
+        key: statuslist-secret
+        property: POSTGRES_PASSWORD
+    - secretKey: redis-password
+      remoteRef:
+        key: statuslist-secret
+        property: REDIS_PASSWORD
 secretStore:
   aws:
     region: eu-central-1
@@ -125,11 +124,16 @@ redis:
     pullPolicy: IfNotPresent
     debug: true
 
+  auth:
+    enabled: true
+    existingSecret: "statuslist-secret"
+    existingSecretPasswordKey: "redis-password"
+
   master:
     persistence:
       enabled: true
       accessModes:
-        - ReadWriteOnce
+      - ReadWriteOnce
       size: 12Gi
     service:
       type: ClusterIP
@@ -141,9 +145,8 @@ redis:
     persistence:
       enabled: true
       accessModes:
-        - ReadWriteOnce
+      - ReadWriteOnce
       size: 12Gi
-
   # tls:
   #   enabled: true
   #   authClients: false
