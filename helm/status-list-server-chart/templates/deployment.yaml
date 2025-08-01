@@ -59,8 +59,13 @@ spec:
               value: {{ .Values.statuslist.env.APP_SERVER__CERT__EKU | quote }}
             - name: APP_REDIS__REQUIRE_TLS
               value: {{ .Values.statuslist.env.APP_REDIS__REQUIRE_TLS | quote }}
+            - name: REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.externalSecret.spec.target.name }}
+                  key: redis-password
             - name: APP_REDIS__URI
-              value: "redis://{{ .Release.Name }}-redis-master.{{ .Release.Namespace }}.svc.cluster.local:6379"
+              value: "redis://:$(REDIS_PASSWORD)@{{ .Release.Name }}-redis-master.{{ .Release.Namespace }}.svc.cluster.local:6379"
             - name: APP_CACHE__TTL
               value: {{ .Values.statuslist.env.APP_CACHE__TTL | quote }}
             - name: APP_CACHE__MAX_CAPACITY
