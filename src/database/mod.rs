@@ -62,6 +62,14 @@ pub mod migrations {
                             .col(ColumnDef::new(StatusLists::Issuer).string().not_null())
                             .col(ColumnDef::new(StatusLists::StatusList).json().not_null())
                             .col(ColumnDef::new(StatusLists::Sub).string().not_null())
+                            .foreign_key(
+                                // Foreign key use to ensures that the Issuer in the StatusLists table references
+                                // a valid Issuer in the Credentials table
+                                ForeignKey::create()
+                                    .name("fk_issuer")
+                                    .from(StatusLists::Table, StatusLists::Issuer)
+                                    .to(Credentials::Table, Credentials::Issuer),
+                            )
                             .to_owned(),
                     )
                     .await?;
