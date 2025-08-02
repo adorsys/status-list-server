@@ -72,7 +72,7 @@ pub async fn update_status(
         .update_one(exact_status_list.list_id.clone(), exact_status_list.clone())
         .await
         .map_err(|e| {
-            tracing::error!("Failed to update token: {e:?}");
+            tracing::error!("Failed to update status list: {e:?}");
             StatusListError::InternalServerError
         })?;
 
