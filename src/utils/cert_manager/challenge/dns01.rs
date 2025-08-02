@@ -173,7 +173,7 @@ impl AwsRoute53DnsUpdater {
                 break;
             }
         }
-        info!("Found hosted zones: {:?}", all_zones);
+        info!("Found hosted zones: {all_zones:?}");
         *self.zones.write().await = Some(all_zones);
         Ok(())
     }
@@ -267,7 +267,7 @@ impl AwsRoute53DnsUpdater {
                 // We double the delay after each attempt
                 let delay = INITIAL_DELAY
                     .checked_mul(2u32.pow(retries))
-                    .unwrap_or(Duration::MAX);
+                    .unwrap_or(TIMEOUT);
                 retries += 1;
                 sleep(delay).await;
             }
