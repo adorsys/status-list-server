@@ -38,6 +38,8 @@ pub struct CertConfig {
 pub struct RedisConfig {
     pub uri: SecretString,
     pub require_tls: bool,
+    #[serde(default)]
+    pub root_cert_path: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -82,16 +84,36 @@ impl RedisConfig {
         root_cert: Option<&str>,
     ) -> RedisResult<ConnectionManager> {
         let client = if !self.require_tls {
+            tracing::info!("Connecting to Redis without TLS");
             RedisClient::open(self.uri.expose_secret())?
         } else {
+            tracing::info!("Connecting to Redis with TLS");
+            
             let client_tls = match (cert_pem, key_pem) {
-                (Some(cert), Some(key)) => Some(ClientTlsConfig {
-                    client_cert: cert.as_bytes().to_vec(),
-                    client_key: key.as_bytes().to_vec(),
-                }),
-                _ => None,
+                (Some(cert), Some(key)) => {
+                    tracing::debug!("Using client TLS certificates");
+                    Some(ClientTlsConfig {
+                        client_cert: cert.as_bytes().to_vec(),
+                        client_key: key.as_bytes().to_vec(),
+                    })
+                }
+                _ => {
+                    tracing::debug!("No client TLS certificates provided");
+                    None
+                }
             };
-            let root_cert = root_cert.map(|cert| cert.as_bytes().to_vec());
+            
+            // Handle root certificate for server validation
+            let root_cert = match root_cert {
+                Some(cert) => {
+                    tracing::info!("Using custom root certificate for Redis TLS validation");
+                    Some(cert.as_bytes().to_vec())
+                }
+                None => {
+                    tracing::warn!("No root certificate provided, using system certificates for Redis TLS validation");
+                    None
+                }
+            };
 
             RedisClient::build_with_tls(
                 self.uri.expose_secret(),
@@ -120,6 +142,7 @@ impl Config {
             )?
             .set_default("redis.uri", "redis://localhost:6379")?
             .set_default("redis.require_tls", false)?
+            .set_default("redis.root_cert_path", Option::<String>::None)?
             .set_default("server.cert.email", "admin@example.com")?
             .set_default("server.cert.eku", vec![1, 3, 6, 1, 5, 5, 7, 3, 30])?
             .set_default("server.cert.organization", "adorsys GmbH & CO KG")?
@@ -199,5 +222,39 @@ mod tests {
             config.server.cert.acme_directory_url,
             "https://acme-v02.api.letsencrypt.org/directory"
         );
+    }
+
+    #[sealed_test(env = [
+        ("APP_REDIS__URI", "rediss://user:password@localhost:6379/redis"),
+        ("APP_REDIS__REQUIRE_TLS", "true"),
+        ("APP_REDIS__ROOT_CERT_PATH", "/path/to/cert.pem"),
+        ("APP_SERVER__CERT__EMAIL", "test@gmail.com"),
+        ("APP_SERVER__CERT__ACME_DIRECTORY_URL", "https://acme-v02.api.letsencrypt.org/directory"),
+        ("APP_SERVER__CERT__ORGANIZATION", "Test Org"),
+        ("APP_SERVER__CERT__EKU", "1,3,6,1,5,5,7,3,30"),
+        ("APP_AWS__REGION", "us-west-2"),
+        ("APP_CACHE__TTL", "600"),
+        ("APP_CACHE__MAX_CAPACITY", "2000"),
+    ])]
+    fn test_env_config_with_root_cert() {
+        let config = Config::load().expect("Failed to load config");
+
+        assert_eq!(config.server.host, "localhost");
+        assert_eq!(config.server.port, 8000);
+        assert_eq!(
+            config.database.url.expose_secret(),
+            "postgres://postgres:postgres@localhost:5432/status-list"
+        );
+        assert_eq!(config.redis.uri.expose_secret(), "rediss://user:password@localhost:6379/redis");
+        assert!(config.redis.require_tls);
+        assert_eq!(config.redis.root_cert_path, Some("/path/to/cert.pem".to_string()));
+        assert_eq!(config.server.cert.email, "test@gmail.com");
+        assert_eq!(
+            config.server.cert.acme_directory_url,
+            "https://acme-v02.api.letsencrypt.org/directory"
+        );
+        assert_eq!(config.aws.region, "us-west-2");
+        assert_eq!(config.cache.ttl, 600);
+        assert_eq!(config.cache.max_capacity, 2000);
     }
 }
