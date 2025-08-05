@@ -48,9 +48,14 @@ pub async fn build_state(config: &AppConfig) -> EyeResult<AppState> {
         .load()
         .await;
 
+    // Read Redis root certificate if available
+    let redis_root_cert = std::env::var("APP_REDIS__ROOT_CERT_PATH")
+        .ok()
+        .and_then(|path| std::fs::read_to_string(path).ok());
+
     let redis_conn = config
         .redis
-        .start(None, None, None)
+        .start(None, None, redis_root_cert.as_deref())
         .await
         .wrap_err("Failed to connect to Redis")?;
 
