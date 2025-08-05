@@ -51,9 +51,12 @@ pub async fn build_state(config: &AppConfig) -> EyeResult<AppState> {
     // Read Redis root certificate if available
     let redis_root_cert = {
         // Try configuration first, then environment variable, then fallback paths
-        let cert_path = config.redis.root_cert_path.clone()
+        let cert_path = config
+            .redis
+            .root_cert_path
+            .clone()
             .or_else(|| std::env::var("APP_REDIS__ROOT_CERT_PATH").ok());
-        
+
         cert_path
             .and_then(|path| {
                 // Validate that the path exists and is readable
@@ -61,7 +64,7 @@ pub async fn build_state(config: &AppConfig) -> EyeResult<AppState> {
                     tracing::warn!("Redis CA certificate path does not exist: {}", path);
                     return None;
                 }
-                
+
                 // Try to read the certificate file
                 match std::fs::read_to_string(&path) {
                     Ok(cert) => {
@@ -82,7 +85,7 @@ pub async fn build_state(config: &AppConfig) -> EyeResult<AppState> {
                     "/etc/certs/redis-ca.crt",
                     "/etc/redis-certs/ca.crt", // Default Kubernetes mount path
                 ];
-                
+
                 for path in &alternative_paths {
                     if std::path::Path::new(path).exists() {
                         match std::fs::read_to_string(path) {
@@ -97,7 +100,7 @@ pub async fn build_state(config: &AppConfig) -> EyeResult<AppState> {
                         }
                     }
                 }
-                
+
                 tracing::warn!("No Redis CA certificate found in any of the expected locations");
                 None
             })
