@@ -59,6 +59,8 @@ spec:
               value: {{ .Values.statuslist.env.APP_SERVER__CERT__EKU | quote }}
             - name: APP_REDIS__REQUIRE_TLS
               value: {{ .Values.statuslist.env.APP_REDIS__REQUIRE_TLS | quote }}
+            - name: APP_REDIS__ROOT_CERT_PATH
+              value: {{ .Values.statuslist.env.APP_REDIS__ROOT_CERT_PATH | quote }}
             - name: REDIS_PASSWORD
               valueFrom:
                 secretKeyRef:
@@ -70,8 +72,6 @@ spec:
               value: {{ .Values.statuslist.env.APP_CACHE__TTL | quote }}
             - name: APP_CACHE__MAX_CAPACITY
               value: {{ .Values.statuslist.env.APP_CACHE__MAX_CAPACITY | quote }}
-            - name: APP_REDIS__ROOT_CERT_PATH
-              value: {{ .Values.statuslist.env.APP_REDIS__ROOT_CERT_PATH | quote }}
           volumeMounts:
             - name: aws-credentials-volume
               mountPath: /root/.aws
