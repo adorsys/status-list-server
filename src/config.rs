@@ -88,7 +88,7 @@ impl RedisConfig {
             RedisClient::open(self.uri.expose_secret())?
         } else {
             tracing::info!("Connecting to Redis with TLS");
-            
+
             let client_tls = match (cert_pem, key_pem) {
                 (Some(cert), Some(key)) => {
                     tracing::debug!("Using client TLS certificates");
@@ -102,7 +102,7 @@ impl RedisConfig {
                     None
                 }
             };
-            
+
             // Handle root certificate for server validation
             let root_cert = match root_cert {
                 Some(cert) => {
@@ -245,9 +245,15 @@ mod tests {
             config.database.url.expose_secret(),
             "postgres://postgres:postgres@localhost:5432/status-list"
         );
-        assert_eq!(config.redis.uri.expose_secret(), "rediss://user:password@localhost:6379/redis");
+        assert_eq!(
+            config.redis.uri.expose_secret(),
+            "rediss://user:password@localhost:6379/redis"
+        );
         assert!(config.redis.require_tls);
-        assert_eq!(config.redis.root_cert_path, Some("/path/to/cert.pem".to_string()));
+        assert_eq!(
+            config.redis.root_cert_path,
+            Some("/path/to/cert.pem".to_string())
+        );
         assert_eq!(config.server.cert.email, "test@gmail.com");
         assert_eq!(
             config.server.cert.acme_directory_url,

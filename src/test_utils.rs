@@ -45,12 +45,12 @@ pub async fn test_app_state(db_conn: Option<Arc<sea_orm::DatabaseConnection>>) -
 
     let key_pem = include_str!("test_resources/ec-private.pem").to_string();
     let secrets_storage = MockStorage {
-        key_value: HashMap::from([("keys/test.com".to_string(), key_pem)]),
+        key_value: HashMap::from([("keys-test.com".to_string(), key_pem)]),
     };
 
     let cert_data = include_str!("test_resources/cert_data.json").to_string();
     let cert_storage = MockStorage {
-        key_value: HashMap::from([("certs/test.com/cert_data.json".to_string(), cert_data)]),
+        key_value: HashMap::from([("certs-test.com-cert_data.json".to_string(), cert_data)]),
     };
 
     let certificate_manager = CertManager::new(
