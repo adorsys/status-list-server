@@ -70,11 +70,22 @@ spec:
               value: {{ .Values.statuslist.env.APP_CACHE__TTL | quote }}
             - name: APP_CACHE__MAX_CAPACITY
               value: {{ .Values.statuslist.env.APP_CACHE__MAX_CAPACITY | quote }}
+            - name: APP_REDIS__ROOT_CERT_PATH
+              value: {{ .Values.statuslist.env.APP_REDIS__ROOT_CERT_PATH | quote }}
           volumeMounts:
             - name: aws-credentials-volume
               mountPath: /root/.aws
+              readOnly: true
+            - name: redis-ca-cert
+              mountPath: /etc/redis-certs
               readOnly: true
       volumes:
         - name: aws-credentials-volume
           secret:
             secretName: aws-credentials-secret
+        - name: redis-ca-cert
+          secret:
+            secretName: {{ .Release.Name }}-redis-crt
+            items:
+              - key: ca.crt
+                path: ca.crt 
