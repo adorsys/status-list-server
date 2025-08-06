@@ -25,7 +25,7 @@ pub async fn publish_status(
     let store = &appstate.status_list_repo;
 
     let stl = create_status_list(payload.status).map_err(|e| {
-        tracing::error!("lst_from failed: {:?}", e);
+        tracing::error!("lst_from failed: {e:?}");
         match e {
             Error::Generic(msg) => StatusListError::Generic(msg),
             Error::InvalidIndex => StatusListError::InvalidIndex,
@@ -61,7 +61,7 @@ pub async fn publish_status(
 
             // Insert the token into the repository
             store.insert_one(status_list_record).await.map_err(|e| {
-                tracing::error!("Failed to insert token: {:?}", e);
+                tracing::error!("Failed to insert status list entry: {e:?}");
                 StatusListError::InternalServerError
             })?;
             Ok(StatusCode::CREATED.into_response())
