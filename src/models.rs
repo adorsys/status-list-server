@@ -160,6 +160,7 @@ pub struct StatusList {
     pub bits: u8,
     pub lst: String,
 }
+
 /// Request payload for perfoming actions(publish / update) on a status list token
 #[derive(Deserialize)]
 pub struct StatusRequest {
