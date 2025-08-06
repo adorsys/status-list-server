@@ -5,6 +5,7 @@ This document provides an overview of the database schema, including its tables,
 ## Tables
 
 ### `credentials`
+
 Stores information about issuers and their cryptographic public keys.
 
 | Column       | Type   | Description |
@@ -14,12 +15,17 @@ Stores information about issuers and their cryptographic public keys.
 | `public_key`| JSONB  | Public key associated with the issuer |
 | `alg`       | TEXT   | Algorithm used for cryptographic operations |
 
-### `status_list_tokens`
+### `status_lists`
+
+Stores information about status lists entries and their associated issuer.
+
 | Column | Type | Description|
 |--------|------|-------------|
 | `id`        | SERIAL | Auto-incrementing primary key |
+| `list_id`   | TEXT  | Unique identifier for the status list |
 | `issuer`    | TEXT  | Unique identifier for the issuer |
-| `statuslisttoken`| JSONB | status list token|
+| `status_list`| JSONB | status list entry |
+| `sub`       | TEXT  | Unique string identifier for the Status List Token |
 
 ## Usage
 
@@ -54,4 +60,3 @@ let store: Store<Credentials> = Store {
 // insert into database
 store.insert_one(credential).await?;
 ```
-
