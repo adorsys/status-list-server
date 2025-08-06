@@ -30,9 +30,9 @@ statuslist:
       echo "Redis is up."
   replicaCount: 1
   image:
-    repository: forkimakwichek/sl # TODO: For testing, change to forkimakwichek/sl:v1.0.4 to avoid s3, cert and redis tls error
+    repository: ghcr.io/adorsys/status-list-server # TODO: For testing, change to forkimakwichek/sl:v1.0.4 to avoid s3, cert and redis tls error
     pullPolicy: Always
-    tag: "v1.0.4"
+    tag: "latest"
   service:
     type: ClusterIP
     port: 8081
