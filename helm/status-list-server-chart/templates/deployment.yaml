@@ -57,8 +57,6 @@ spec:
               value: {{ .Values.statuslist.env.APP_SERVER__CERT__ACME_DIRECTORY_URL | quote }}
             - name: APP_SERVER__CERT__EKU
               value: {{ .Values.statuslist.env.APP_SERVER__CERT__EKU | quote }}
-            - name: APP_REDIS__REQUIRE_TLS
-              value: {{ .Values.statuslist.env.APP_REDIS__REQUIRE_TLS | quote }}
             - name: APP_REDIS__REQUIRE_CLIENT_AUTH
               value: {{ .Values.statuslist.env.APP_REDIS__REQUIRE_CLIENT_AUTH | quote }}
             - name: REDIS_PASSWORD
