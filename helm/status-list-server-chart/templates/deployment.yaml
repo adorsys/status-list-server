@@ -59,15 +59,15 @@ spec:
               value: {{ .Values.statuslist.env.APP_SERVER__CERT__EKU | quote }}
             - name: APP_REDIS__REQUIRE_TLS
               value: {{ .Values.statuslist.env.APP_REDIS__REQUIRE_TLS | quote }}
-            - name: APP_REDIS__ROOT_CERT_PATH
-              value: {{ .Values.statuslist.env.APP_REDIS__ROOT_CERT_PATH | quote }}
+            - name: APP_REDIS__REQUIRE_CLIENT_AUTH
+              value: {{ .Values.statuslist.env.APP_REDIS__REQUIRE_CLIENT_AUTH | quote }}
             - name: REDIS_PASSWORD
               valueFrom:
                 secretKeyRef:
                   name: {{ .Values.externalSecret.spec.target.name }}
                   key: redis-password
             - name: APP_REDIS__URI
-              value: "rediss://:$(REDIS_PASSWORD)@{{ .Release.Name }}-redis-master.{{ .Release.Namespace }}.svc.cluster.local:6379"
+              value: "rediss://:$(REDIS_PASSWORD)@{{ .Values.redis.externalDnsHostname }}:6379"
             - name: APP_CACHE__TTL
               value: {{ .Values.statuslist.env.APP_CACHE__TTL | quote }}
             - name: APP_CACHE__MAX_CAPACITY
@@ -76,16 +76,7 @@ spec:
             - name: aws-credentials-volume
               mountPath: /root/.aws
               readOnly: true
-            - name: redis-ca-cert
-              mountPath: /etc/redis-certs
-              readOnly: true
       volumes:
         - name: aws-credentials-volume
           secret:
             secretName: aws-credentials-secret
-        - name: redis-ca-cert
-          secret:
-            secretName: {{ .Release.Name }}-redis-crt
-            items:
-              - key: ca.crt
-                path: ca.crt 

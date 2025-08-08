@@ -38,8 +38,7 @@ pub struct CertConfig {
 pub struct RedisConfig {
     pub uri: SecretString,
     pub require_tls: bool,
-    #[serde(default)]
-    pub root_cert_path: Option<String>,
+    pub require_client_auth: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -61,19 +60,13 @@ pub struct CacheConfig {
 impl RedisConfig {
     /// Establishes a new Redis connection based on the configuration.
     ///
-    /// If [`RedisConfig::require_tls`] is `false`, a plain-text connection is used.
-    /// If it is `true`, the connection will use TLS, and the URI **must** use the `rediss://` scheme.
-    ///
-    /// To enable mutual TLS (mTLS), both `cert_pem` and `key_pem` must be provided.
-    /// If one is missing, the client-side authentication will not be effective.
-    ///
-    /// The optional `root_cert` parameter allows specifying a custom root certificate (in PEM format).
-    /// If omitted, system root certificates will be used.
+    /// If [`RedisConfig::require_tls`] is `true`, the connection will use TLS.
+    /// If [`RedisConfig::require_client_auth`] is `true`, client certificates are required for mutual TLS.
+    /// If both are `false`, a plain-text connection is used.
     ///
     /// # Parameters
     /// - `cert_pem`: The client certificate in PEM format (required for mTLS).
     /// - `key_pem`: The client private key in PEM format (required for mTLS).
-    /// - `root_cert`: An optional custom root certificate in PEM format.
     ///
     /// # Errors
     /// Returns an error if the connection cannot be established.
@@ -81,13 +74,14 @@ impl RedisConfig {
         &self,
         cert_pem: Option<&str>,
         key_pem: Option<&str>,
-        root_cert: Option<&str>,
     ) -> RedisResult<ConnectionManager> {
         let client = if !self.require_tls {
+            // PLAIN TEXT CONNECTION
             tracing::info!("Connecting to Redis without TLS");
             RedisClient::open(self.uri.expose_secret())?
-        } else {
-            tracing::info!("Connecting to Redis with TLS");
+        } else if self.require_client_auth {
+            // TLS WITH CLIENT AUTHENTICATION (Mutual TLS)
+            tracing::info!("Connecting to Redis with TLS and client authentication");
 
             let client_tls = match (cert_pem, key_pem) {
                 (Some(cert), Some(key)) => {
@@ -98,20 +92,11 @@ impl RedisConfig {
                     })
                 }
                 _ => {
-                    tracing::debug!("No client TLS certificates provided");
-                    None
-                }
-            };
-
-            // Handle root certificate for server validation
-            let root_cert = match root_cert {
-                Some(cert) => {
-                    tracing::info!("Using custom root certificate for Redis TLS validation");
-                    Some(cert.as_bytes().to_vec())
-                }
-                None => {
-                    tracing::warn!("No root certificate provided, using system certificates for Redis TLS validation");
-                    None
+                    tracing::warn!("Client authentication required but no certificates provided");
+                    return Err(redis::RedisError::from((
+                        redis::ErrorKind::IoError,
+                        "Client authentication required but no certificates provided",
+                    )));
                 }
             };
 
@@ -119,7 +104,17 @@ impl RedisConfig {
                 self.uri.expose_secret(),
                 TlsCertificates {
                     client_tls,
-                    root_cert,
+                    root_cert: None, // Use system certificates
+                },
+            )?
+        } else {
+            // TLS WITHOUT CLIENT AUTHENTICATION (Server-only TLS)
+            tracing::info!("Connecting to Redis with TLS (no client authentication)");
+            RedisClient::build_with_tls(
+                self.uri.expose_secret(),
+                TlsCertificates {
+                    client_tls: None, // No client certificates
+                    root_cert: None,  // Use system certificates
                 },
             )?
         };
@@ -142,7 +137,7 @@ impl Config {
             )?
             .set_default("redis.uri", "redis://localhost:6379")?
             .set_default("redis.require_tls", false)?
-            .set_default("redis.root_cert_path", Option::<String>::None)?
+            .set_default("redis.require_client_auth", false)?
             .set_default("server.cert.email", "admin@example.com")?
             .set_default("server.cert.eku", vec![1, 3, 6, 1, 5, 5, 7, 3, 30])?
             .set_default("server.cert.organization", "adorsys GmbH & CO KG")?
@@ -185,6 +180,7 @@ mod tests {
         );
         assert_eq!(config.redis.uri.expose_secret(), "redis://localhost:6379");
         assert!(!config.redis.require_tls);
+        assert!(!config.redis.require_client_auth);
         assert_eq!(config.server.cert.email, "admin@example.com");
         assert_eq!(
             config.server.cert.acme_directory_url,
@@ -217,6 +213,7 @@ mod tests {
             "rediss://user:password@localhost:6379/redis"
         );
         assert!(config.redis.require_tls);
+        assert!(!config.redis.require_client_auth); // Default to false
         assert_eq!(config.server.cert.email, "test@gmail.com");
         assert_eq!(
             config.server.cert.acme_directory_url,
@@ -227,7 +224,6 @@ mod tests {
     #[sealed_test(env = [
         ("APP_REDIS__URI", "rediss://user:password@localhost:6379/redis"),
         ("APP_REDIS__REQUIRE_TLS", "true"),
-        ("APP_REDIS__ROOT_CERT_PATH", "/path/to/cert.pem"),
         ("APP_SERVER__CERT__EMAIL", "test@gmail.com"),
         ("APP_SERVER__CERT__ACME_DIRECTORY_URL", "https://acme-v02.api.letsencrypt.org/directory"),
         ("APP_SERVER__CERT__ORGANIZATION", "Test Org"),
@@ -236,7 +232,7 @@ mod tests {
         ("APP_CACHE__TTL", "600"),
         ("APP_CACHE__MAX_CAPACITY", "2000"),
     ])]
-    fn test_env_config_with_root_cert() {
+    fn test_env_config_with_tls() {
         let config = Config::load().expect("Failed to load config");
 
         assert_eq!(config.server.host, "localhost");
@@ -250,10 +246,7 @@ mod tests {
             "rediss://user:password@localhost:6379/redis"
         );
         assert!(config.redis.require_tls);
-        assert_eq!(
-            config.redis.root_cert_path,
-            Some("/path/to/cert.pem".to_string())
-        );
+        assert!(!config.redis.require_client_auth); // Default to false
         assert_eq!(config.server.cert.email, "test@gmail.com");
         assert_eq!(
             config.server.cert.acme_directory_url,

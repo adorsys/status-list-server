@@ -6,7 +6,7 @@ use std::{
 
 use async_trait::async_trait;
 use aws_config::SdkConfig;
-use aws_sdk_s3::Client as S3Client;
+use aws_sdk_s3::{types::CreateBucketConfiguration, Client as S3Client};
 use aws_sdk_secretsmanager::{
     operation::get_secret_value::GetSecretValueError, Client as SecretsClient,
     Config as SecretsConfig,
@@ -179,16 +179,17 @@ impl AwsS3 {
                 }
                 Err(SdkError::ServiceError(err)) if err.err().is_not_found() => {
                     // Bucket not found, attempt to create it
-                    use aws_sdk_s3::types::CreateBucketConfiguration;
                     let mut req = self.client.create_bucket().bucket(&self.bucket);
                     if self.region != "us-east-1" {
+                        let location_constraint = self.region.parse().map_err(|_| {
+                            StorageError::AwsSdk(eyre!(
+                                "Invalid region '{}' for LocationConstraint",
+                                self.region
+                            ))
+                        })?;
                         req = req.create_bucket_configuration(
                             CreateBucketConfiguration::builder()
-                                .location_constraint(
-                                    self.region
-                                        .parse()
-                                        .expect("Invalid region for LocationConstraint"),
-                                )
+                                .location_constraint(location_constraint)
                                 .build(),
                         );
                     }
