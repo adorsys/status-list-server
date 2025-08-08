@@ -48,89 +48,11 @@ pub async fn build_state(config: &AppConfig) -> EyeResult<AppState> {
         .load()
         .await;
 
-    // Read Redis root certificate if available
-    let redis_root_cert = {
-        // Try configuration first, then environment variable, then fallback paths
-        let cert_path = config
-            .redis
-            .root_cert_path
-            .clone()
-            .or_else(|| std::env::var("APP_REDIS__ROOT_CERT_PATH").ok());
-
-        cert_path
-            .and_then(|path| {
-                // Validate that the path exists and is readable
-                if !std::path::Path::new(&path).exists() {
-                    tracing::warn!("Redis CA certificate path does not exist: {}", path);
-                    return None;
-                }
-
-                // Try to read the certificate file
-                match std::fs::read_to_string(&path) {
-                    Ok(cert) => {
-                        tracing::info!("Successfully loaded Redis CA certificate from: {}", path);
-                        Some(cert)
-                    }
-                    Err(e) => {
-                        tracing::warn!("Failed to read Redis CA certificate from {}: {}", path, e);
-                        None
-                    }
-                }
-            })
-            .or_else(|| {
-                // Fallback to alternative certificate paths
-                let alternative_paths = [
-                    "/etc/ssl/certs/redis-ca.crt",
-                    "/etc/redis/ca.crt",
-                    "/etc/certs/redis-ca.crt",
-                    "/etc/redis-certs/ca.crt", // Default Kubernetes mount path
-                ];
-
-                for path in &alternative_paths {
-                    if std::path::Path::new(path).exists() {
-                        match std::fs::read_to_string(path) {
-                            Ok(cert) => {
-                                tracing::info!("Successfully loaded Redis CA certificate from fallback path: {}", path);
-                                return Some(cert);
-                            }
-                            Err(e) => {
-                                tracing::debug!("Failed to read Redis CA certificate from fallback path {}: {}", path, e);
-                                continue;
-                            }
-                        }
-                    }
-                }
-
-                tracing::warn!("No Redis CA certificate found in any of the expected locations");
-                None
-            })
-    };
-
     let redis_conn = config
         .redis
-        .start(None, None, redis_root_cert.as_deref())
+        .start(None, None)
         .await
-        .map_err(|e| {
-            let error_msg = if config.redis.require_tls {
-                format!(
-                    "Failed to connect to Redis with TLS. URI: {}, Error: {}. {}",
-                    config.redis.uri.expose_secret(),
-                    e,
-                    if redis_root_cert.is_some() {
-                        "Certificate was provided but connection failed."
-                    } else {
-                        "No certificate provided - this may cause TLS validation to fail."
-                    }
-                )
-            } else {
-                format!(
-                    "Failed to connect to Redis without TLS. URI: {}, Error: {}",
-                    config.redis.uri.expose_secret(),
-                    e
-                )
-            };
-            color_eyre::eyre::eyre!(error_msg)
-        })?;
+        .wrap_err("Failed to connect to Redis")?;
 
     // Initialize the challenge handler based on the environment.
     // Use a fake DNS server to validate the challenge in development.
@@ -149,6 +71,7 @@ pub async fn build_state(config: &AppConfig) -> EyeResult<AppState> {
     let cert_storage =
         AwsS3::new(&aws_config, BUCKET_NAME, config.aws.region.clone()).with_cache(cache);
     let secrets_storage = AwsSecretsManager::new(&aws_config).await?;
+
     let mut certificate_manager = CertManager::new(
         [&config.server.domain],
         &config.server.cert.email,
