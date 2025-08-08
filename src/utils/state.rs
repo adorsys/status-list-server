@@ -48,11 +48,22 @@ pub async fn build_state(config: &AppConfig) -> EyeResult<AppState> {
         .load()
         .await;
 
-    let redis_conn = config
-        .redis
-        .start(None, None)
-        .await
-        .wrap_err("Failed to connect to Redis")?;
+    let redis_conn = config.redis.start(None, None).await.map_err(|e| {
+        let error_msg = if config.redis.require_client_auth {
+            format!(
+                "Failed to connect to Redis with client authentication. URI: {}, Error: {}",
+                config.redis.uri.expose_secret(),
+                e
+            )
+        } else {
+            format!(
+                "Failed to connect to Redis without TLS. URI: {}, Error: {}",
+                config.redis.uri.expose_secret(),
+                e
+            )
+        };
+        color_eyre::eyre::eyre!(error_msg)
+    })?;
 
     // Initialize the challenge handler based on the environment.
     // Use a fake DNS server to validate the challenge in development.

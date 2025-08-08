@@ -30,9 +30,9 @@ statuslist:
       echo "Redis is up."
   replicaCount: 1
   image:
-    repository: ghcr.io/adorsys/status-list-server # TODO: For testing, change to forkimakwichek/sl:v1.0.5 to avoid s3, cert and redis tls error
+    repository: forkimakwichek/sl # TODO: For testing, change to forkimakwichek/sl:v1.0.6 to avoid s3, cert and redis tls error
     pullPolicy: Always
-    tag: "latest"
+    tag: "v1.0.6"
   service:
     type: ClusterIP
     port: 8081
@@ -61,7 +61,6 @@ statuslist:
     APP_SERVER__CERT__ORGANIZATION: "adorsys GmbH & CO KG"
     APP_SERVER__CERT__ACME_DIRECTORY_URL: "https://acme-v02.api.letsencrypt.org/directory"
     APP_SERVER__CERT__EKU: "1,3,6,1,5,5,7,3,30"
-    APP_REDIS__REQUIRE_TLS: "true"
     APP_REDIS__REQUIRE_CLIENT_AUTH: "false"
     APP_CACHE__TTL: "300"
     APP_CACHE__MAX_CAPACITY: "1000"
