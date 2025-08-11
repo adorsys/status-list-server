@@ -59,7 +59,6 @@ pub struct CacheConfig {
 impl RedisConfig {
     /// Establishes a new Redis connection based on the configuration.
     ///
-    /// If [`RedisConfig::require_client_auth`] is `false`, a plain-text connection is used.
     /// If it is `true`, the connection will use TLS with client authentication, and the URI **must** use the `rediss://` scheme.
     ///
     /// To enable mutual TLS (mTLS), both `cert_pem` and `key_pem` must be provided.
@@ -68,6 +67,7 @@ impl RedisConfig {
     /// # Parameters
     /// - `cert_pem`: The client certificate in PEM format (required for mTLS).
     /// - `key_pem`: The client private key in PEM format (required for mTLS).
+    /// - `root_cert`: The custom root certificate in PEM format (required for client authentication).
     ///
     /// # Errors
     /// Returns an error if the connection cannot be established.
@@ -75,6 +75,7 @@ impl RedisConfig {
         &self,
         cert_pem: Option<&str>,
         key_pem: Option<&str>,
+        root_cert: Option<&str>,
     ) -> RedisResult<ConnectionManager> {
         let client = if !self.require_client_auth {
             tracing::info!("Connecting to Redis (no client authentication)");
@@ -99,11 +100,13 @@ impl RedisConfig {
                 }
             };
 
+            let root_cert = root_cert.map(|cert| cert.as_bytes().to_vec());
+
             RedisClient::build_with_tls(
                 self.uri.expose_secret(),
                 TlsCertificates {
                     client_tls,
-                    root_cert: None, // Use system certificates
+                    root_cert,
                 },
             )?
         };

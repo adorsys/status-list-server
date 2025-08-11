@@ -30,7 +30,7 @@ statuslist:
       echo "Redis is up."
   replicaCount: 1
   image:
-    repository: ghcr.io/adorsys/status-list-server # TODO: For testing, change to forkimakwichek/sl:v1.0.6 to avoid s3, cert and redis tls error
+    repository: ghcr.io/adorsys/status-list-server
     pullPolicy: Always
     tag: "latest"
   service:
@@ -52,7 +52,7 @@ statuslist:
       secretName: statuslist-tls
     externalDnsHostname: statuslist.eudi-adorsys.com
   env:
-    RUST_LOG: "debug" # TODO: Change to info for final release
+    RUST_LOG: "info"
     POSTGRES_USER: "postgres"
     APP_ENV: "production"
     APP_SERVER__HOST: "0.0.0.0"
