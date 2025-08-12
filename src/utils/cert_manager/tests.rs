@@ -265,7 +265,7 @@ async fn test_signing_key_generation_and_storage() {
 
     // The key should have been stored
     let stored_key = secrets_storage
-        .load("keys/example.com")
+        .load("keys-example.com")
         .await
         .unwrap()
         .unwrap();
@@ -315,7 +315,7 @@ async fn test_cert_chain_parts() {
     // there are 2 parts in the certificate chain
     let serialized = include_str!("../../test_resources/cert_data.json");
     cert_storage
-        .store("certs/example.com/cert_data.json", serialized)
+        .store("certs-example.com-cert_data.json", serialized)
         .await
         .unwrap();
 
