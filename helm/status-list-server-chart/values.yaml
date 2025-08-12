@@ -1,4 +1,33 @@
+global:
+  storageClass: "high-performance"
+
 statuslist:
+  initContainers:
+  - name: wait-for-postgres
+    image: busybox
+    command:
+    - "sh"
+    - "-c"
+    - |
+      echo "Waiting for PostgreSQL..."
+      until nc -z statuslist-postgresql.statuslist.svc.cluster.local 5432; do
+        echo "PostgreSQL not ready. Retrying in 2s...";
+        sleep 2;
+      done
+      echo "PostgreSQL is up."
+
+  - name: wait-for-redis
+    image: busybox
+    command:
+    - "sh"
+    - "-c"
+    - |
+      echo "Waiting for Redis..."
+      until nc -z statuslist-redis-master.statuslist.svc.cluster.local 6379; do
+        echo "Redis not ready. Retrying in 2s...";
+        sleep 2;
+      done
+      echo "Redis is up."
   replicaCount: 1
   image:
     repository: ghcr.io/adorsys/status-list-server
@@ -6,7 +35,7 @@ statuslist:
     tag: "latest"
   service:
     type: ClusterIP
-    port: 8080
+    port: 8081
     targetPort: 8000
   ingress:
     enabled: true
@@ -19,14 +48,22 @@ statuslist:
       nginx.ingress.kubernetes.io/proxy-body-size: "10m"
     tls:
       hosts:
-        - "*.eudi-adorsys.com"
+      - "*.eudi-adorsys.com"
       secretName: statuslist-tls
     externalDnsHostname: statuslist.eudi-adorsys.com
   env:
     RUST_LOG: "info"
-    SERVER_KEY_SECRET_NAME: "statuslist-secret"
     POSTGRES_USER: "postgres"
-    ENVIRONMENT: "prod"
+    APP_ENV: "production"
+    APP_SERVER__HOST: "0.0.0.0"
+    APP_SERVER__PORT: "8000"
+    APP_SERVER__CERT__EMAIL: "info@adorsys.com"
+    APP_SERVER__CERT__ORGANIZATION: "adorsys GmbH & CO KG"
+    APP_SERVER__CERT__ACME_DIRECTORY_URL: "https://acme-v02.api.letsencrypt.org/directory"
+    APP_SERVER__CERT__EKU: "1,3,6,1,5,5,7,3,30"
+    APP_REDIS__REQUIRE_CLIENT_AUTH: "false"
+    APP_CACHE__TTL: "300"
+    APP_CACHE__MAX_CAPACITY: "1000"
   resources:
     requests:
       memory: "256Mi"
@@ -34,8 +71,8 @@ statuslist:
     limits:
       memory: "512Mi"
       cpu: "500m"
+
 postgresql:
-  enabled: true
   auth:
     username: "postgres"
     database: "status-list"
@@ -46,12 +83,12 @@ postgresql:
   primary:
     persistence:
       enabled: true
-      storageClass: "high-performance"
       size: 10Gi
   service:
     type: ClusterIP
     ports:
       postgresql: 5432
+
 externalSecret:
   metadata:
     name: statuslist-external-secret
@@ -64,11 +101,53 @@ externalSecret:
       name: statuslist-secret
       creationPolicy: Owner
     data:
-      - secretKey: postgres-password
-        remoteRef:
-          key: statuslist-secret
-          property: POSTGRES_PASSWORD
-
+    - secretKey: postgres-password
+      remoteRef:
+        key: statuslist-secret
+        property: POSTGRES_PASSWORD
+    - secretKey: redis-password
+      remoteRef:
+        key: statuslist-secret
+        property: REDIS_PASSWORD
 secretStore:
   aws:
     region: eu-central-1
+
+redis:
+  externalDnsHostname: redis.eudi-adorsys.com
+  image:
+    registry: docker.io
+    repository: bitnami/redis
+    tag: 8.0.3-debian-12-r2
+    pullPolicy: IfNotPresent
+    debug: true
+
+  auth:
+    enabled: true
+    existingSecret: "statuslist-secret"
+    existingSecretPasswordKey: "redis-password"
+
+  master:
+    persistence:
+      enabled: true
+      accessModes:
+      - ReadWriteOnce
+      size: 12Gi
+    service:
+      type: LoadBalancer
+      ports:
+        redis: 6379
+      annotations:
+        service.beta.kubernetes.io/aws-load-balancer-type: "nlb"
+        external-dns.alpha.kubernetes.io/hostname: redis.eudi-adorsys.com
+        external-dns.alpha.kubernetes.io/delete: "true"
+
+  replica:
+    replicaCount: 0
+
+  tls:
+    enabled: true
+    authClients: false
+    existingSecret: "statuslist-tls"
+    certFilename: "tls.crt"
+    certKeyFilename: "tls.key"
