@@ -47,37 +47,27 @@ pub mod migrations {
                     )
                     .await?;
 
-                // Create StatusListTokens table for storing status list tokens
+                // Create StatusLists table for storing status list entries
                 manager
                     .create_table(
                         Table::create()
-                            .table(StatusListTokens::Table)
+                            .table(StatusLists::Table)
                             .if_not_exists()
                             .col(
-                                ColumnDef::new(StatusListTokens::ListId)
+                                ColumnDef::new(StatusLists::ListId)
                                     .string()
                                     .not_null()
                                     .primary_key(),
                             )
-                            .col(ColumnDef::new(StatusListTokens::Exp).big_integer())
-                            .col(ColumnDef::new(StatusListTokens::Issuer).string().not_null())
-                            .col(
-                                ColumnDef::new(StatusListTokens::Iat)
-                                    .big_integer()
-                                    .not_null(),
-                            )
-                            .col(
-                                ColumnDef::new(StatusListTokens::StatusList)
-                                    .json()
-                                    .not_null(),
-                            )
-                            .col(ColumnDef::new(StatusListTokens::Sub).string().not_null())
-                            .col(ColumnDef::new(StatusListTokens::Ttl).big_integer())
+                            .col(ColumnDef::new(StatusLists::Issuer).string().not_null())
+                            .col(ColumnDef::new(StatusLists::StatusList).json().not_null())
+                            .col(ColumnDef::new(StatusLists::Sub).string().not_null())
                             .foreign_key(
-                                // Foreign key use to ensures that the Issuer in the StatusListTokens table references a valid Issuer in the Credentials table
+                                // Foreign key use to ensures that the Issuer in the StatusLists table references
+                                // a valid Issuer in the Credentials table
                                 ForeignKey::create()
                                     .name("fk_issuer")
-                                    .from(StatusListTokens::Table, StatusListTokens::Issuer)
+                                    .from(StatusLists::Table, StatusLists::Issuer)
                                     .to(Credentials::Table, Credentials::Issuer),
                             )
                             .to_owned(),
@@ -94,7 +84,7 @@ pub mod migrations {
                     .drop_table(Table::drop().table(Credentials::Table).to_owned())
                     .await?;
                 manager
-                    .drop_table(Table::drop().table(StatusListTokens::Table).to_owned())
+                    .drop_table(Table::drop().table(StatusLists::Table).to_owned())
                     .await?;
                 Ok(())
             }
@@ -109,15 +99,12 @@ pub mod migrations {
         }
 
         #[derive(Iden)]
-        enum StatusListTokens {
+        enum StatusLists {
             Table,
-            Issuer,
             ListId,
-            Exp,
-            Iat,
+            Issuer,
             StatusList,
             Sub,
-            Ttl,
         }
     }
 }

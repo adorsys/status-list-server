@@ -24,34 +24,38 @@ pub async fn update_status(
     let store = &appstate.status_list_repo;
 
     // Fetch the existing token
-    let token = store.find_one_by(payload.list_id.clone()).await.map_err(|e| {
+    let record = store.find_one_by(payload.list_id.clone()).await.map_err(|e| {
             tracing::error!(error = ?e, list_id = ?payload.list_id, "Database query failed for status list.");
             StatusListError::InternalServerError
         })?.ok_or(StatusListError::StatusListNotFound)?;
 
     // check if the request issuer matches the token issuer
-    if token.issuer != issuer {
-        tracing::error!("Issuer mismatch: expected {}, got {}", token.issuer, issuer);
+    if record.issuer != issuer {
+        tracing::error!(
+            "Issuer mismatch: expected {}, got {}",
+            record.issuer,
+            issuer
+        );
         return Err(StatusListError::IssuerMismatch);
     }
 
-    let bits = if let Some(bits) = BitFlag::new(token.status_list.bits) {
+    let bits = if let Some(bits) = BitFlag::new(record.status_list.bits) {
         Ok(bits)
     } else {
         Err(StatusListError::Generic(format!(
             "Invalid 'bits' value: {}. Allowed values are 1, 2, 4, 8.",
-            token.status_list.bits
+            record.status_list.bits
         )))
     }?;
 
     // Update the status list
     let updated_lst = update_status_list(
-        token.status_list.lst.clone(),
+        record.status_list.lst.clone(),
         payload.status.clone(),
         bits.value(),
     )
     .map_err(|e| {
-        tracing::error!("update_status_list failed: {:?}", e);
+        tracing::error!("update_status_list failed: {e:?}");
         match e {
             Error::Generic(msg) => StatusListError::Generic(msg),
             Error::InvalidIndex => StatusListError::InvalidIndex,
@@ -59,16 +63,16 @@ pub async fn update_status(
         }
     })?;
 
-    let mut exact_token = token;
-    exact_token.status_list.lst = updated_lst.lst;
-    exact_token.status_list.bits = updated_lst.bits;
+    let mut exact_status_list = record;
+    exact_status_list.status_list.lst = updated_lst.lst;
+    exact_status_list.status_list.bits = updated_lst.bits;
 
     // Save the updated token
     store
-        .update_one(exact_token.list_id.clone(), exact_token.clone())
+        .update_one(exact_status_list.list_id.clone(), exact_status_list.clone())
         .await
         .map_err(|e| {
-            tracing::error!("Failed to update token: {:?}", e);
+            tracing::error!("Failed to update status list: {e:?}");
             StatusListError::InternalServerError
         })?;
 
