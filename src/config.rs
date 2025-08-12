@@ -1,6 +1,9 @@
+use std::time::Duration;
+
 use config::{Config as ConfigLib, ConfigError, Environment};
 use redis::{
-    aio::ConnectionManager, Client as RedisClient, ClientTlsConfig, RedisResult, TlsCertificates,
+    aio::{ConnectionManager, ConnectionManagerConfig},
+    Client as RedisClient, ClientTlsConfig, RedisResult, TlsCertificates,
 };
 use secrecy::{ExposeSecret, SecretString};
 use serde::Deserialize;
@@ -111,7 +114,8 @@ impl RedisConfig {
             )?
         };
 
-        client.get_connection_manager().await
+        let config = ConnectionManagerConfig::new().set_connection_timeout(Duration::from_secs(60));
+        client.get_connection_manager_with_config(config).await
     }
 }
 
