@@ -1,0 +1,29 @@
+{{- if .Values.statuslist.ingress.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ include "status-list-server-chart.fullname" . }}-ingress
+  labels:
+    {{- include "status-list-server-chart.labels" . | nindent 4 }}
+  {{- with .Values.statuslist.ingress.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  {{- if .Values.statuslist.ingress.className }}
+  ingressClassName: {{ .Values.statuslist.ingress.className }}
+  {{- end }}
+
+  # TLS disabled locally, so skip tls section
+  rules:
+    - host: {{ .Values.statuslist.ingress.host }}
+      http:
+        paths:
+          - path: {{ .Values.statuslist.ingress.path | default "/" }}
+            pathType: {{ .Values.statuslist.ingress.pathType | default "Prefix" }}
+            backend:
+              service:
+                name: {{ include "status-list-server-chart.fullname" . }}-service
+                port:
+                  number: {{ .Values.statuslist.service.port }}
+{{- end }}

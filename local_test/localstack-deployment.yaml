@@ -1,0 +1,49 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: localstack
+  namespace: localstack
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: localstack
+  template:
+    metadata:
+      labels:
+        app: localstack
+    spec:
+      containers:
+      - name: localstack
+        image: localstack/localstack:latest
+        ports:
+        - containerPort: 4566
+        env:
+        - name: SERVICES
+          value: "s3,secretsmanager,ssm,iam,sts"
+        - name: DEBUG
+          value: "1"
+        - name: DATA_DIR
+          value: "/tmp/localstack/data"
+        - name: DOCKER_HOST
+          value: "unix:///var/run/docker.sock"
+        volumeMounts:
+        - name: docker-sock
+          mountPath: /var/run/docker.sock
+      volumes:
+      - name: docker-sock
+        hostPath:
+          path: /var/run/docker.sock
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: localstack
+  namespace: localstack
+spec:
+  selector:
+    app: localstack
+  ports:
+  - port: 4566
+    targetPort: 4566
+  type: ClusterIP

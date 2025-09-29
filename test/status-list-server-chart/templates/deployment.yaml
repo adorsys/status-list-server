@@ -1,0 +1,72 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "status-list-server-chart.fullname" . }}-deployment
+  labels:
+    app: {{ include "status-list-server-chart.name" . }}
+  namespace: {{ .Release.Namespace }}
+spec:
+  replicas: {{ .Values.statuslist.replicaCount }}
+  selector:
+    matchLabels:
+      app: {{ include "status-list-server-chart.name" . }}
+  template:
+    metadata:
+      labels:
+        app: {{ include "status-list-server-chart.name" . }}
+    spec:
+      initContainers:
+        {{- toYaml .Values.statuslist.initContainers | nindent 8 }}
+      containers:
+        - name: {{ include "status-list-server-chart.name" . }}
+          image: {{ .Values.statuslist.image.repository }}:{{ .Values.statuslist.image.tag }}
+          imagePullPolicy: {{ .Values.statuslist.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.statuslist.service.targetPort | int }}
+              protocol: TCP
+          env:
+            - name: RUST_LOG
+              value: {{ .Values.statuslist.env.RUST_LOG | quote }}
+            - name: POSTGRES_USER
+              value: {{ .Values.statuslist.env.POSTGRES_USER | quote }}
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.externalSecret.spec.target.name }}
+                  key: postgres-password
+            - name: APP_AWS__REGION
+              value: {{ .Values.secretStore.aws.region | quote }}
+            - name: APP_SERVER__DOMAIN
+              value: {{ .Values.statuslist.ingress.externalDnsHostname | quote }}
+            - name: APP_ENV
+              value: {{ .Values.statuslist.env.APP_ENV | quote }}
+            - name: POSTGRES_DB
+              value: {{ .Values.postgresql.auth.database | quote }}
+            - name: APP_DATABASE__URL
+              value: "postgres://$(POSTGRES_USER):$(POSTGRES_PASSWORD)@{{ .Release.Name }}-postgresql.{{ .Release.Namespace }}.svc.cluster.local:5432/$(POSTGRES_DB)"
+            - name: APP_SERVER__HOST
+              value: {{ .Values.statuslist.env.APP_SERVER__HOST | quote }}
+            - name: APP_SERVER__PORT
+              value: {{ .Values.statuslist.env.APP_SERVER__PORT | quote }}
+            - name: APP_SERVER__CERT__EMAIL
+              value: {{ .Values.statuslist.env.APP_SERVER__CERT__EMAIL | quote }}
+            - name: APP_SERVER__CERT__ORGANIZATION
+              value: {{ .Values.statuslist.env.APP_SERVER__CERT__ORGANIZATION | quote }}
+            - name: APP_SERVER__CERT__ACME_DIRECTORY_URL
+              value: {{ .Values.statuslist.env.APP_SERVER__CERT__ACME_DIRECTORY_URL | quote }}
+            - name: APP_SERVER__CERT__EKU
+              value: {{ .Values.statuslist.env.APP_SERVER__CERT__EKU | quote }}
+            - name: APP_REDIS__REQUIRE_CLIENT_AUTH
+              value: {{ .Values.statuslist.env.APP_REDIS__REQUIRE_CLIENT_AUTH | quote }}
+            - name: REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.externalSecret.spec.target.name }}
+                  key: redis-password
+            - name: APP_REDIS__URI
+              value: "redis://:$(REDIS_PASSWORD)@{{ .Release.Name }}-redis-master.{{ .Release.Namespace }}.svc.cluster.local:6379"
+            - name: APP_CACHE__TTL
+              value: {{ .Values.statuslist.env.APP_CACHE__TTL | quote }}
+            - name: APP_CACHE__MAX_CAPACITY
+              value: {{ .Values.statuslist.env.APP_CACHE__MAX_CAPACITY | quote }}
