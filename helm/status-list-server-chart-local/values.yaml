@@ -50,8 +50,6 @@ postgresql:
     username: "postgres"
     database: "status-list"
     password: "postgres"
-    # Disable existing secret for local testing
-    existingSecret: ""
   primary:
     persistence:
       enabled: true
@@ -66,7 +64,7 @@ redis:
     repository: bitnamilegacy/redis
     tag: 7.4.1-debian-12-r0
   auth:
-    enabled: false
+    enabled: true
   # Disable TLS for local testing
   tls:
     enabled: false
