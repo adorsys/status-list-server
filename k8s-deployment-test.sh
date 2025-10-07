@@ -32,6 +32,44 @@ log_error() {
     echo -e "${RED}[ERROR]${NC} $1"
 }
 
+install_kind() {
+    log_info "Installing kind..."
+    
+    # Detect OS and architecture
+    OS=$(uname -s | tr '[:upper:]' '[:lower:]')
+    ARCH=$(uname -m)
+    
+    case $ARCH in
+        x86_64)
+            ARCH="amd64"
+            ;;
+        arm64|aarch64)
+            ARCH="arm64"
+            ;;
+        *)
+            log_error "Unsupported architecture: $ARCH"
+            exit 1
+            ;;
+    esac
+    
+    # Download URL for kind binary
+    KIND_VERSION="v0.20.0"
+    KIND_URL="https://kind.sigs.k8s.io/dl/${KIND_VERSION}/kind-${OS}-${ARCH}"
+    
+    log_info "Downloading kind ${KIND_VERSION} for ${OS}/${ARCH}..."
+    
+    # Download kind binary
+    if ! curl -Lo ./kind "${KIND_URL}"; then
+        log_error "Failed to download kind from ${KIND_URL}"
+        exit 1
+    fi
+    
+    # Make it executable
+    chmod +x ./kind
+    
+    log_info "kind installed successfully"
+}
+
 check_prerequisites() {
     log_info "Checking prerequisites..."
     
@@ -43,9 +81,10 @@ check_prerequisites() {
         KIND_CMD="kind"
         log_info "Using system kind binary: $KIND_CMD"
     else
-        log_error "kind is not available. Please install kind or ensure the local kind binary is executable"
-        log_error "Installation: https://kind.sigs.k8s.io/docs/user/quick-start/#installation"
-        exit 1
+        log_warn "kind is not available. Attempting to install it automatically..."
+        install_kind
+        KIND_CMD="./kind"
+        log_info "Using newly installed kind binary: $KIND_CMD"
     fi
     
     # Check if helm is available

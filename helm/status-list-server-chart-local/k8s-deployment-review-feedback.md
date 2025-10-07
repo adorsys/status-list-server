@@ -147,7 +147,7 @@ All services now use consistent naming:
 ### Manual Testing
 ```bash
 # Port forward to access the service
-kubectl port-forward svc/status-list-server-local 8081:8081 -n statuslist
+kubectl port-forward svc/status-list-test-status-list-server-local 8081:8081 -n statuslist
 
 # Test health endpoint
 curl http://localhost:8081/health
