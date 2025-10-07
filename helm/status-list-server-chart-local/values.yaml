@@ -67,8 +67,6 @@ redis:
     tag: 7.4.1-debian-12-r0
   auth:
     enabled: false
-    # Disable existing secret for local testing
-    existingSecret: ""
   # Disable TLS for local testing
   tls:
     enabled: false
@@ -78,10 +76,3 @@ redis:
       size: 2Gi
   replica:
     replicaCount: 0
-
-# Disable external secrets for local testing
-externalSecret:
-  enabled: false
-
-secretStore:
-  enabled: false

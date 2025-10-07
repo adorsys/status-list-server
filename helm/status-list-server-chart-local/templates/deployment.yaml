@@ -54,10 +54,6 @@ spec:
         - name: {{ $key }}
           value: {{ $value | quote }}
         {{- end }}
-        - name: POSTGRES_PASSWORD
-          value: "postgres"  # Password from secret
-        - name: REDIS_PASSWORD
-          value: ""  # Empty password for local testing
         resources:
           {{- toYaml .Values.statuslist.resources | nindent 10 }}
         livenessProbe:

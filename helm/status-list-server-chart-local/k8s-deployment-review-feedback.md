@@ -76,11 +76,6 @@ redis:
 **Problem**: Deployment script had hardcoded service names that didn't match new local chart
 **Solution**: Updated all service references in `k8s-deployment-test.sh`
 
-**Changes Made**:
-- Changed deployment name from `status-list-test-status-list-server-deployment` to `status-list-server-local`
-- Updated service name from `status-list-test-status-list-server-service` to `status-list-server-local`
-- Updated pod label selectors to use `status-list-server-local`
-
 ## Technical Implementation Details
 
 ### Local Chart Structure
