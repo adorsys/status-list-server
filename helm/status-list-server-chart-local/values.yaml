@@ -1,0 +1,76 @@
+global:
+  storageClass: "standard"
+  security:
+    allowInsecureImages: true
+
+statuslist:
+  replicaCount: 1
+  image:
+    repository: ghcr.io/adorsys/status-list-server
+    pullPolicy: IfNotPresent
+    tag: "latest"
+  service:
+    type: ClusterIP
+    port: 8081
+    targetPort: 8000
+  ingress:
+    enabled: false  # Disable ingress for local testing
+  env:
+    RUST_LOG: "info"
+    POSTGRES_USER: "postgres"
+    POSTGRES_PASSWORD: "postgres"
+    APP_ENV: "development"
+    APP_SERVER__HOST: "0.0.0.0"
+    APP_SERVER__PORT: "8000"
+    APP_SERVER__DOMAIN: "localhost"
+    APP_SERVER__CERT__EMAIL: "test@example.com"
+    APP_SERVER__CERT__ORGANIZATION: "Test Organization"
+    APP_SERVER__CERT__ACME_DIRECTORY_URL: "https://pebble:14000/dir"
+    APP_SERVER__CERT__EKU: "1,3,6,1,5,5,7,3,30"
+    APP_REDIS__REQUIRE_CLIENT_AUTH: "false"
+    APP_CACHE__TTL: "300"
+    APP_CACHE__MAX_CAPACITY: "100"
+    APP_DATABASE__URL: "postgres://postgres:postgres@status-list-test-postgresql.statuslist.svc.cluster.local:5432/status-list"
+    APP_REDIS__URI: "redis://status-list-test-redis-master.statuslist.svc.cluster.local:6379"
+  resources:
+    requests:
+      memory: "256Mi"
+      cpu: "250m"
+    limits:
+      memory: "512Mi"
+      cpu: "500m"
+
+postgresql:
+  enabled: true
+  image:
+    registry: docker.io
+    repository: bitnamilegacy/postgresql
+    tag: 17.4.0-debian-12-r2
+  auth:
+    username: "postgres"
+    database: "status-list"
+    password: "postgres"
+  primary:
+    persistence:
+      enabled: true
+      size: 5Gi
+  service:
+    type: ClusterIP
+
+redis:
+  enabled: true
+  image:
+    registry: docker.io
+    repository: bitnamilegacy/redis
+    tag: 7.4.1-debian-12-r0
+  auth:
+    enabled: true
+  # Disable TLS for local testing
+  tls:
+    enabled: false
+  master:
+    persistence:
+      enabled: true
+      size: 2Gi
+  replica:
+    replicaCount: 0
