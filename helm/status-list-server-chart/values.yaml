@@ -9,12 +9,12 @@ statuslist:
     - "sh"
     - "-c"
     - |
-      echo "Waiting for PostgreSQL..."
-      until nc -z statuslist-postgresql.statuslist.svc.cluster.local 5432; do
-        echo "PostgreSQL not ready. Retrying in 2s...";
+      echo "Waiting for postgres..."
+      until nc -z statuslist-postgres.statuslist.svc.cluster.local 5432; do
+        echo "postgres not ready. Retrying in 2s...";
         sleep 2;
       done
-      echo "PostgreSQL is up."
+      echo "Postgres is up."
 
   - name: wait-for-redis
     image: busybox
@@ -22,12 +22,17 @@ statuslist:
     - "sh"
     - "-c"
     - |
-      echo "Waiting for Redis..."
-      until nc -z statuslist-redis-master.statuslist.svc.cluster.local 6379; do
-        echo "Redis not ready. Retrying in 2s...";
+      echo "Waiting for Redis vanity DNS to resolve..."
+      until nslookup redis.eudi-adorsys.com >/dev/null 2>&1; do
+        echo "redis.eudi-adorsys.com not resolvable yet. Retrying in 2s...";
         sleep 2;
       done
-      echo "Redis is up."
+      echo "Vanity DNS resolved. Waiting for HAProxy (TLS) at 6379..."
+      until nc -z statuslist-redis-ha-haproxy.statuslist.svc.cluster.local 6379; do
+        echo "Redis (haproxy) not ready. Retrying in 2s...";
+        sleep 2;
+      done
+      echo "Redis (haproxy) is up."
   replicaCount: 1
   image:
     repository: ghcr.io/adorsys/status-list-server
@@ -72,22 +77,20 @@ statuslist:
       memory: "512Mi"
       cpu: "500m"
 
-postgresql:
+postgres:
   auth:
-    username: "postgres"
-    database: "status-list"
-    existingSecret: "statuslist-secret"
+    username: postgres
+    database: status-list
+    existingSecret: statuslist-secret
     secretKeys:
-      adminPasswordKey: postgres-password
-      userPasswordKey: postgres-password
-  primary:
-    persistence:
-      enabled: true
-      size: 10Gi
+      passwordKey: postgres-password
+  persistence:
+    enabled: true
+    size: 10Gi
+    storageClass: high-performance
   service:
     type: ClusterIP
-    ports:
-      postgresql: 5432
+    port: 5432
 
 externalSecret:
   metadata:
@@ -113,41 +116,46 @@ secretStore:
   aws:
     region: eu-central-1
 
-redis:
+redis-ha:
   externalDnsHostname: redis.eudi-adorsys.com
   image:
-    registry: docker.io
-    repository: bitnami/redis
-    tag: 8.0.3-debian-12-r2
-    pullPolicy: IfNotPresent
-    debug: true
-
-  auth:
+    repository: docker.io/redis
+    tag: 8.2
+  redis:
+    port: 6379
+    tlsPort: 6380
+    tlsReplication: true
+    authClients: "no"
+    config:
+      tls-port: 6380
+      tls-cert-file: /tls-certs/tls.crt
+      tls-key-file: /tls-certs/tls.key
+      tls-auth-clients: "no"
+  replicas: 1
+  auth: true
+  existingSecret: statuslist-secret
+  authKey: redis-password
+  persistentVolume:
     enabled: true
-    existingSecret: "statuslist-secret"
-    existingSecretPasswordKey: "redis-password"
-
-  master:
-    persistence:
-      enabled: true
-      accessModes:
+    storageClass: high-performance
+    accessModes:
       - ReadWriteOnce
-      size: 12Gi
+    size: 10Gi
+  tls:
+    secretName: statuslist-tls
+    certFile: tls.crt
+    keyFile: tls.key
+  haproxy:
+    enabled: true
+    replicas: 1
+    tls:
+      enabled: true
+      secretName: statuslist-haproxy-tls
+      keyName: redis.pem
     service:
       type: LoadBalancer
-      ports:
-        redis: 6379
       annotations:
         service.beta.kubernetes.io/aws-load-balancer-type: "nlb"
         external-dns.alpha.kubernetes.io/hostname: redis.eudi-adorsys.com
         external-dns.alpha.kubernetes.io/delete: "true"
 
-  replica:
-    replicaCount: 0
-
-  tls:
-    enabled: true
-    authClients: false
-    existingSecret: "statuslist-tls"
-    certFilename: "tls.crt"
-    certKeyFilename: "tls.key"

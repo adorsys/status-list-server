@@ -1,9 +1,9 @@
 dependencies:
-- name: postgresql
-  repository: https://charts.bitnami.com/bitnami
-  version: 16.7.6
-- name: redis
-  repository: https://charts.bitnami.com/bitnami
-  version: 21.2.13
-digest: sha256:248d7c26198ad6f10b69a2b4c7f8f9f54f91b5515ab3158470a13d8bc7e443b0
-generated: "2025-07-25T13:17:59.506276803+01:00"
+- name: postgres
+  repository: oci://registry-1.docker.io/cloudpirates
+  version: 0.8.2
+- name: redis-ha
+  repository: https://dandydeveloper.github.io/charts
+  version: 4.35.0
+digest: sha256:f1f581f7aee3669dcc25c5b46c7b4d1204621a53635973d48eb59b5266d00549
+generated: "2025-10-14T10:50:44.992940427+01:00"
