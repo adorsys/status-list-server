@@ -8,9 +8,12 @@ This document explains the Redis TLS configuration for the status-list-server de
 
 1. **Create HAProxy TLS secret:**
    ```bash
+   # Extract certificate and key from existing secret for HAProxy
    CRT=$(kubectl get secret statuslist-tls -n statuslist -o jsonpath='{.data.tls\.crt}' | base64 -d)
    KEY=$(kubectl get secret statuslist-tls -n statuslist -o jsonpath='{.data.tls\.key}' | base64 -d)
+   # Combine cert and key into single PEM file for HAProxy
    printf "%s\n%s\n" "$CRT" "$KEY" > redis.pem
+   # Create new secret for HAProxy with combined PEM
    kubectl create secret generic statuslist-haproxy-tls -n statuslist --from-file=redis.pem=redis.pem
    ```
 
@@ -22,6 +25,7 @@ This document explains the Redis TLS configuration for the status-list-server de
 3. **Verify:**
    ```bash
    kubectl get pods -n statuslist
+   kubectl logs statuslist-status-list-server-deployment-<pod-id> -n statuslist
    ```
 
 ## Why This Setup?
@@ -197,26 +201,6 @@ env:
 2. **In-cluster service**: Would require certificate with internal DNS name
 3. **DNS wait**: Most robust solution for production
 
-## Deployment Steps
-
-1. **Create HAProxy TLS secret**:
-   ```bash
-   CRT=$(kubectl get secret statuslist-tls -n statuslist -o jsonpath='{.data.tls\.crt}' | base64 -d)
-   KEY=$(kubectl get secret statuslist-tls -n statuslist -o jsonpath='{.data.tls\.key}' | base64 -d)
-   printf "%s\n%s\n" "$CRT" "$KEY" > redis.pem
-   kubectl create secret generic statuslist-haproxy-tls -n statuslist --from-file=redis.pem=redis.pem
-   ```
-
-2. **Deploy with Helm**:
-   ```bash
-   helm upgrade statuslist ./helm/status-list-server-chart --namespace statuslist
-   ```
-
-3. **Verify deployment**:
-   ```bash
-   kubectl get pods -n statuslist
-   kubectl logs statuslist-status-list-server-deployment-<pod-id> -n statuslist
-   ```
 
 ## Troubleshooting
 
