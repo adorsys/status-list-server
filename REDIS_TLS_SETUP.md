@@ -7,6 +7,7 @@ This document explains the Redis TLS configuration for the status-list-server de
 **For Redis TLS with HAProxy:**
 
 1. **Create HAProxy TLS secret:**
+
    ```bash
    # Extract certificate and key from existing secret for HAProxy
    CRT=$(kubectl get secret statuslist-tls -n statuslist -o jsonpath='{.data.tls\.crt}' | base64 -d)
@@ -18,6 +19,7 @@ This document explains the Redis TLS configuration for the status-list-server de
    ```
 
 2. **Deploy:**
+
    ```bash
    helm upgrade statuslist ./helm/status-list-server-chart --namespace statuslist
    ```
@@ -31,6 +33,7 @@ This document explains the Redis TLS configuration for the status-list-server de
 ## Why This Setup?
 
 **Problem:** App needs Redis with TLS, but:
+
 - Certificate must match hostname (`*.eudi-adorsys.com`)
 - No client certificates wanted (too complex)
 - External access required (outside Kubernetes)
@@ -49,6 +52,7 @@ This document explains the Redis TLS configuration for the status-list-server de
 ```
 
 **Flow:**
+
 1. App connects to `redis.eudi-adorsys.com:6379` (TLS encrypted)
 2. HAProxy terminates TLS using wildcard certificate
 3. HAProxy forwards plain Redis protocol to Redis cluster
@@ -99,11 +103,12 @@ kubectl create secret generic statuslist-haproxy-tls -n statuslist --from-file=r
 ```
 
 **HAProxy Configuration**:
+
 ```yaml
 redis-ha:
   haproxy:
     enabled: true
-    replicas: 1  # Reduced from 3 to save resources
+    replicas: 1 # Reduced from 3 to save resources
     tls:
       enabled: true
       secretName: statuslist-haproxy-tls
@@ -126,23 +131,23 @@ redis-ha:
 ```yaml
 statuslist:
   initContainers:
-  - name: wait-for-redis
-    image: busybox
-    command:
-    - "sh"
-    - "-c"
-    - |
-      echo "Waiting for Redis vanity DNS to resolve..."
-      until nslookup redis.eudi-adorsys.com >/dev/null 2>&1; do
-        echo "redis.eudi-adorsys.com not resolvable yet. Retrying in 2s...";
-        sleep 2;
-      done
-      echo "Vanity DNS resolved. Waiting for HAProxy (TLS) at 6379..."
-      until nc -z statuslist-redis-ha-haproxy.statuslist.svc.cluster.local 6379; do
-        echo "Redis (haproxy) not ready. Retrying in 2s...";
-        sleep 2;
-      done
-      echo "Redis (haproxy) is up."
+    - name: wait-for-redis
+      image: busybox
+      command:
+        - "sh"
+        - "-c"
+        - |
+          echo "Waiting for Redis vanity DNS to resolve..."
+          until nslookup redis.eudi-adorsys.com >/dev/null 2>&1; do
+            echo "redis.eudi-adorsys.com not resolvable yet. Retrying in 2s...";
+            sleep 2;
+          done
+          echo "Vanity DNS resolved. Waiting for HAProxy (TLS) at 6379..."
+          until nc -z statuslist-redis-ha-haproxy.statuslist.svc.cluster.local 6379; do
+            echo "Redis (haproxy) not ready. Retrying in 2s...";
+            sleep 2;
+          done
+          echo "Redis (haproxy) is up."
 ```
 
 ### 4. Application Configuration
@@ -158,6 +163,7 @@ env:
 ```
 
 **Key Points**:
+
 - `rediss://` scheme enables TLS
 - `APP_REDIS__REQUIRE_CLIENT_AUTH: "false"` disables client certificate authentication
 - Uses external DNS name that matches certificate CN (`*.eudi-adorsys.com`)
@@ -167,23 +173,27 @@ env:
 ### 1. HAProxy vs Direct Redis TLS
 
 **Why HAProxy?**
+
 - ✅ Certificate hostname validation: App connects to `redis.eudi-adorsys.com` which matches the certificate CN
 - ✅ Load balancing: HAProxy can distribute load across Redis replicas
 - ✅ TLS termination: Offloads TLS processing from Redis
 - ✅ External access: Provides external LoadBalancer for Redis access
 
 **Why not direct Redis TLS?**
+
 - ❌ Hostname mismatch: In-cluster service names don't match certificate CN
 - ❌ Certificate validation would fail with internal DNS names
 
 ### 2. Certificate Management
 
 **Certificate Requirements**:
+
 - Must be valid for `*.eudi-adorsys.com` (wildcard certificate)
 - HAProxy uses this certificate for TLS termination
 - App validates certificate against hostname `redis.eudi-adorsys.com`
 
 **Certificate Flow**:
+
 1. App connects to `redis.eudi-adorsys.com:6379`
 2. HAProxy terminates TLS using wildcard certificate
 3. HAProxy forwards plain Redis protocol to Redis cluster
@@ -192,15 +202,16 @@ env:
 ### 3. DNS Resolution Strategy
 
 **Why wait for DNS?**
+
 - External DNS propagation takes time
 - App crashes if hostname doesn't resolve
 - Init container ensures DNS is ready before app starts
 
 **Alternative Approaches Considered**:
+
 1. **ELB hostname**: Use AWS ELB hostname directly (temporary solution)
 2. **In-cluster service**: Would require certificate with internal DNS name
 3. **DNS wait**: Most robust solution for production
-
 
 ## Troubleshooting
 
@@ -241,6 +252,7 @@ kubectl run test-redis --image=busybox --rm -it --restart=Never -n statuslist --
 ## Conclusion
 
 This setup provides:
+
 - Redis TLS encryption in production
 - No client certificate authentication
 - Robust DNS resolution handling
