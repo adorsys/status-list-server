@@ -16,7 +16,37 @@ spec:
         app: {{ include "status-list-server-chart.name" . }}
     spec:
       initContainers:
-        {{- toYaml .Values.statuslist.initContainers | nindent 8 }}
+        {{- if eq .Values.statuslist.env.APP_ENV "production" }}
+        - name: wait-for-postgres
+          image: busybox
+          command:
+          - "sh"
+          - "-c"
+          - |
+            echo "Waiting for postgres..."
+            until nc -z statuslist-postgres.statuslist.svc.cluster.local 5432; do
+              echo "postgres not ready. Retrying in 2s...";
+              sleep 2;
+            done
+            echo "Postgres is up."
+        - name: wait-for-redis
+          image: busybox
+          command:
+          - "sh"
+          - "-c"
+          - |
+            echo "Waiting for Redis vanity DNS to resolve..."
+            until nslookup redis.eudi-adorsys.com >/dev/null 2>&1; do
+              echo "redis.eudi-adorsys.com not resolvable yet. Retrying in 2s...";
+              sleep 2;
+            done
+            echo "Vanity DNS resolved. Waiting for HAProxy (TLS) at 6379..."
+            until nc -z statuslist-redis-ha-haproxy.statuslist.svc.cluster.local 6379; do
+              echo "Redis (haproxy) not ready. Retrying in 2s...";
+              sleep 2;
+            done
+            echo "Redis (haproxy) is up."
+        {{- end }}
       containers:
         - name: {{ include "status-list-server-chart.name" . }}
           image: {{ .Values.statuslist.image.repository }}:{{ .Values.statuslist.image.tag }}
@@ -44,7 +74,7 @@ spec:
             - name: POSTGRES_DB
               value: {{ .Values.postgres.auth.database | quote }}
             - name: APP_DATABASE__URL
-              value: "postgres://$(POSTGRES_USER):$(POSTGRES_PASSWORD)@{{ .Release.Name }}-postgres.{{ .Release.Namespace }}.svc.cluster.local:5432/$(POSTGRES_DB)"
+              value: {{ .Values.statuslist.env.APP_DATABASE__URL | quote }}
             - name: APP_SERVER__HOST
               value: {{ .Values.statuslist.env.APP_SERVER__HOST | quote }}
             - name: APP_SERVER__PORT
@@ -65,7 +95,7 @@ spec:
                   name: {{ .Values.externalSecret.spec.target.name }}
                   key: redis-password
             - name: APP_REDIS__URI
-              value: "rediss://:$(REDIS_PASSWORD)@{{ index .Values "redis-ha" "externalDnsHostname" }}:6379"
+              value: {{ .Values.statuslist.env.APP_REDIS__URI | quote }}
             - name: APP_CACHE__TTL
               value: {{ .Values.statuslist.env.APP_CACHE__TTL | quote }}
             - name: APP_CACHE__MAX_CAPACITY

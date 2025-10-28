@@ -1,0 +1,57 @@
+global:
+  storageClass: "standard"
+
+statuslist:
+  image:
+    pullPolicy: IfNotPresent
+  ingress:
+    enabled: false
+  env:
+    APP_ENV: "development"
+    APP_SERVER__DOMAIN: "localhost"
+    APP_SERVER__CERT__EMAIL: "test@example.com"
+    APP_SERVER__CERT__ORGANIZATION: "Test Organization"
+    APP_SERVER__CERT__ACME_DIRECTORY_URL: "https://pebble:14000/dir"
+    APP_DATABASE__URL: "postgres://postgres:postgres@status-list-server-postgresql.statuslist.svc.cluster.local:5432/status-list"
+    APP_REDIS__URI: "redis://:password@status-list-server-redis-master.statuslist.svc.cluster.local:6379"
+
+postgres:
+  enabled: false
+
+redis-ha:
+  enabled: false
+
+postgresql:
+  enabled: true
+  image:
+    registry: docker.io
+    repository: bitnamicharts/postgresql
+    tag: 15.3.0
+  auth:
+    username: "postgres"
+    database: "status-list"
+    password: "postgres"
+  primary:
+    persistence:
+      enabled: true
+      size: 5Gi
+  service:
+    type: ClusterIP
+
+redis:
+  enabled: true
+  image:
+    registry: docker.io
+    repository: bitnamicharts/redis
+    tag: 7.0.11
+  auth:
+    enabled: true
+    password: "password"
+  tls:
+    enabled: false
+  master:
+    persistence:
+      enabled: true
+      size: 2Gi
+  replica:
+    replicaCount: 0
