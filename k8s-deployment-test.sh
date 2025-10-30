@@ -163,6 +163,35 @@ deploy_dependencies() {
     log_info "Dependencies ready"
 }
 
+deploy_external_secrets() {
+    log_info "Deploying External Secrets CRDs..."
+    
+    kubectl apply -f https://raw.githubusercontent.com/external-secrets/external-secrets/v0.9.9/deploy/crds/bundle.yaml
+    
+    helm repo add external-secrets https://charts.external-secrets.io
+    helm repo update
+    
+    helm install external-secrets external-secrets/external-secrets \
+        -n external-secrets --create-namespace --wait \
+        --set installCRDs=false
+    
+    log_info "Waiting for External Secrets CRDs to be established..."
+    kubectl wait --for condition=established --timeout=60s crd/externalsecrets.external-secrets.io
+    kubectl wait --for condition=established --timeout=60s crd/secretstores.external-secrets.io
+    
+    log_info "Waiting for API server to recognize new CRDs..."
+    until kubectl api-resources | grep -q externalsecrets; do
+        echo "Waiting for externalsecrets CRD to be available..."
+        sleep 1
+    done
+    until kubectl api-resources | grep -q secretstores; do
+        echo "Waiting for secretstores CRD to be available..."
+        sleep 1
+    done
+    
+    log_info "External Secrets CRDs deployed successfully"
+}
+
 deploy_status_list_server() {
     log_info "Deploying status list server..."
     
@@ -184,7 +213,7 @@ deploy_status_list_server() {
     
     # Install the Helm chart
     log_info "Installing Helm chart..."
-    if ! helm install status-list-test ${HELM_CHART_PATH} \
+    if ! helm install status-list-server ${HELM_CHART_PATH} \
         --namespace ${NAMESPACE} \
         --values ${TEST_VALUES} \
         --wait \
@@ -333,6 +362,7 @@ main() {
             create_test_values
             create_cluster
             deploy_dependencies
+            deploy_external_secrets
             deploy_status_list_server
             wait_for_deployment
             test_deployment

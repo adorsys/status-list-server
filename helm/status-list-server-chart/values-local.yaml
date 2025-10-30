@@ -2,6 +2,33 @@ global:
   storageClass: "standard"
 
 statuslist:
+  initContainers:
+  - name: wait-for-postgres
+    image: busybox
+    imagePullPolicy: IfNotPresent
+    command:
+    - "sh"
+    - "-c"
+    - |
+      echo "Waiting for postgres..."
+      until nc -z status-list-server-postgresql.statuslist.svc.cluster.local 5432; do
+        echo "postgres not ready. Retrying in 2s...";
+        sleep 2;
+      done
+      echo "Postgres is up."
+  - name: wait-for-redis
+    image: busybox
+    imagePullPolicy: IfNotPresent
+    command:
+    - "sh"
+    - "-c"
+    - |
+      echo "Waiting for Redis..."
+      until nc -z status-list-server-redis-master.statuslist.svc.cluster.local 6379; do
+        echo "Redis not ready. Retrying in 2s...";
+        sleep 2;
+      done
+      echo "Redis is up."
   image:
     pullPolicy: IfNotPresent
   ingress:
