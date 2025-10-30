@@ -1,3 +1,34 @@
+import http from 'k6/http';
+import { check, sleep } from 'k6';
+import crypto from 'k6/crypto';
+import encoding from 'k6/encoding';
+
+// Load test configuration for authenticated endpoints - Increased load for comprehensive testing
+export const options = {
+  stages: [
+    { duration: '2m', target: 30 },   // Ramp up to 30 users over 2 minutes
+    { duration: '5m', target: 60 },   // Increase to 60 users for 5 minutes
+    { duration: '10m', target: 100 }, // Peak load with 120 users for 10 minutes
+    { duration: '5m', target: 60 },   // Scale back to 60 users for 5 minutes
+    { duration: '3m', target: 0 },    // Ramp down to 0 users over 3 minutes
+  ],
+  thresholds: {
+    http_req_duration: ['p(95)<1200'], // 95% of requests must complete within 1.2s
+    http_req_failed: ['rate<0.08'],    // Error rate must be less than 8%
+    http_reqs: ['rate>80'],            // Must handle more than 80 requests per second
+  },
+};
+
+const BASE_URL = __ENV.BASE_URL || 'http://localhost:8000';
+
+// Sample ECDSA P-256 key pair for testing (ES256)
+// In production, use proper key management
+const PRIVATE_KEY = `-----BEGIN EC PRIVATE KEY-----
+MHcCAQEEIGY7ZGFhZ2FhZ2FhZ2FhZ2FhZ2FhZ2FhZ2FhZ2FhZ2FhoAoGCCqGSM49
+AwEHoUQDQgAE8uV8H8K2jvAY7TUJEPxCu1c1qfVF5z6dQ9z6dQ9z6dQ9z6dQ9z6d
+Q9z6dQ9z6dQ9z6dQ9z6dQ9z6dQ9z6dQ9z6dQ==
+-----END EC PRIVATE KEY-----`;
+
 const PUBLIC_KEY = `-----BEGIN PUBLIC KEY-----
 MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE8uV8H8K2jvAY7TUJEPxCu1c1qfVF
 5z6dQ9z6dQ9z6dQ9z6dQ9z6dQ9z6dQ9z6dQ9z6dQ9z6dQ9z6dQ9z6dQ9z6dQ==
