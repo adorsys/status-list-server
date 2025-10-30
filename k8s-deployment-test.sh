@@ -15,8 +15,8 @@ NC='\033[0m' # No Color
 CLUSTER_NAME="status-list-test"
 NAMESPACE="statuslist"
 KIND_CONFIG="kind-config.yaml"
-HELM_CHART_PATH="./helm/status-list-server-chart-local"
-TEST_VALUES="helm/status-list-server-chart-local/values.yaml"
+HELM_CHART_PATH="./helm/status-list-server-chart"
+TEST_VALUES="helm/status-list-server-chart/values-local.yaml"
 KIND_CMD="./kind"  # Use local kind binary
 
 # Functions

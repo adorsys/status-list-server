@@ -2,7 +2,37 @@ global:
   storageClass: "high-performance"
 
 statuslist:
-  initContainers: []
+  initContainers:
+  - name: wait-for-postgres
+    image: busybox
+    command:
+    - "sh"
+    - "-c"
+    - |
+      echo "Waiting for postgres..."
+      until nc -z statuslist-postgres.statuslist.svc.cluster.local 5432; do
+        echo "postgres not ready. Retrying in 2s...";
+        sleep 2;
+      done
+      echo "Postgres is up."
+
+  - name: wait-for-redis
+    image: busybox
+    command:
+    - "sh"
+    - "-c"
+    - |
+      echo "Waiting for Redis vanity DNS to resolve..."
+      until nslookup redis.eudi-adorsys.com >/dev/null 2>&1; do
+        echo "redis.eudi-adorsys.com not resolvable yet. Retrying in 2s...";
+        sleep 2;
+      done
+      echo "Vanity DNS resolved. Waiting for HAProxy (TLS) at 6379..."
+      until nc -z statuslist-redis-ha-haproxy.statuslist.svc.cluster.local 6379; do
+        echo "Redis (haproxy) not ready. Retrying in 2s...";
+        sleep 2;
+      done
+      echo "Redis (haproxy) is up."
   replicaCount: 1
   image:
     repository: ghcr.io/adorsys/status-list-server
