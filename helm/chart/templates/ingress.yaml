@@ -1,7 +1,7 @@
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
-  name: {{ include "status-list-server-chart.fullname" . }}-ingress
+  name: {{ include "chart.fullname" . }}-ingress
   namespace: {{ .Release.Namespace }}
   annotations:
     external-dns.alpha.kubernetes.io/hostname: {{ .Values.statuslist.ingress.externalDnsHostname }}
@@ -16,7 +16,7 @@ spec:
         pathType: {{ .Values.statuslist.ingress.pathType }}
         backend:
           service:
-            name: {{ include "status-list-server-chart.fullname" . }}-service
+            name: {{ include "chart.fullname" . }}-service
             port:
               number: {{ .Values.statuslist.service.port }}
   tls:

@@ -7,7 +7,7 @@ This document records all issues encountered during the deployment of the Status
 - **Kubernetes Cluster**: kind (Kubernetes in Docker)
 - **Cluster Configuration**: 3 nodes (1 control-plane, 2 workers)
 - **Namespace**: `statuslist`
-- **Helm Chart**: Custom status-list-server-chart with Bitnami dependencies
+- **Helm Chart**: Custom chart with Bitnami dependencies
 
 ## Issues Encountered and Solutions
 
@@ -27,8 +27,8 @@ secretStore:
   enabled: false
 ```
 **Files Modified**: 
-- `helm/status-list-server-chart/templates/external-secretes.yaml`
-- `helm/status-list-server-chart/templates/secret-store.yaml`
+- `helm/chart/templates/external-secretes.yaml`
+- `helm/chart/templates/secret-store.yaml`
 **Status**: ✅ Resolved
 
 ### 2. Missing Kubernetes Secrets
