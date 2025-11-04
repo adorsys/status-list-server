@@ -52,7 +52,7 @@ postgresql:
   enabled: true
   image:
     registry: docker.io
-    repository: bitnamicharts/postgresql
+    repository: postgres
     tag: 15.3.0
   auth:
     username: "postgres"
@@ -69,7 +69,7 @@ redis:
   enabled: true
   image:
     registry: docker.io
-    repository: bitnamicharts/redis
+    repository: redis
     tag: 7.0.11
   auth:
     enabled: true
