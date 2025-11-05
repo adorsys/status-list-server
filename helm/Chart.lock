@@ -1,0 +1,9 @@
+dependencies:
+- name: postgres
+  repository: oci://registry-1.docker.io/cloudpirates
+  version: 0.8.2
+- name: redis
+  repository: https://charts.bitnami.com/bitnami
+  version: 18.14.0
+digest: sha256:7c0f799b8a4b2a203a6335319127809817ca2f2567dc4bf741ab9d0df02e82e5
+generated: "2025-11-05T14:42:46.600728786+01:00"

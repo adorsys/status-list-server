@@ -8,6 +8,7 @@ dependencies:
   - name: postgres
     version: 0.8.2
     repository: oci://registry-1.docker.io/cloudpirates
-  - name: redis-ha
-    version: 4.35.0
-    repository: https://dandydeveloper.github.io/charts
+  - name: redis
+    version: "18.14.0"
+    repository: https://charts.bitnami.com/bitnami
+    condition: redis.enabled

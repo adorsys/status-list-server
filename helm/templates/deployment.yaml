@@ -4,19 +4,24 @@ metadata:
   name: {{ include "status-list-server-chart.fullname" . }}-deployment
   labels:
     app: {{ include "status-list-server-chart.name" . }}
+    {{- include "status-list-server-chart.labels" . | nindent 4 }}
   namespace: {{ .Release.Namespace }}
 spec:
   replicas: {{ .Values.statuslist.replicaCount }}
   selector:
     matchLabels:
       app: {{ include "status-list-server-chart.name" . }}
+      {{- include "status-list-server-chart.selectorLabels" . | nindent 6 }}
   template:
     metadata:
       labels:
         app: {{ include "status-list-server-chart.name" . }}
+        {{- include "status-list-server-chart.selectorLabels" . | nindent 8 }}
     spec:
+      {{- if .Values.statuslist.initContainers }}
       initContainers:
         {{- toYaml .Values.statuslist.initContainers | nindent 8 }}
+      {{- end }}
       containers:
         - name: {{ include "status-list-server-chart.name" . }}
           image: {{ .Values.statuslist.image.repository }}:{{ .Values.statuslist.image.tag }}
@@ -31,18 +36,34 @@ spec:
             - name: POSTGRES_USER
               value: {{ .Values.statuslist.env.POSTGRES_USER | quote }}
             - name: POSTGRES_PASSWORD
+              {{- if .Values.externalSecret.enabled }}
               valueFrom:
                 secretKeyRef:
                   name: {{ .Values.externalSecret.spec.target.name }}
                   key: postgres-password
+              {{- else }}
+              valueFrom:
+                secretKeyRef:
+                  name: statuslist-secret
+                  key: postgres-password
+              {{- end }}
+            {{- if .Values.secretStore.enabled }}
             - name: APP_AWS__REGION
               value: {{ .Values.secretStore.aws.region | quote }}
+            {{- end }}
+            {{- if .Values.statuslist.ingress.externalDnsHostname }}
             - name: APP_SERVER__DOMAIN
               value: {{ .Values.statuslist.ingress.externalDnsHostname | quote }}
+            {{- else }}
+            - name: APP_SERVER__DOMAIN
+              value: {{ .Values.statuslist.env.APP_SERVER__DOMAIN | quote }}
+            {{- end }}
             - name: APP_ENV
               value: {{ .Values.statuslist.env.APP_ENV | quote }}
+            {{- if .Values.postgres.auth.database }}
             - name: POSTGRES_DB
               value: {{ .Values.postgres.auth.database | quote }}
+            {{- end }}
             - name: APP_DATABASE__URL
               value: {{ .Values.statuslist.env.APP_DATABASE__URL | quote }}
             - name: APP_SERVER__HOST
@@ -60,21 +81,36 @@ spec:
             - name: APP_REDIS__REQUIRE_CLIENT_AUTH
               value: {{ .Values.statuslist.env.APP_REDIS__REQUIRE_CLIENT_AUTH | quote }}
             - name: REDIS_PASSWORD
+              {{- if .Values.externalSecret.enabled }}
               valueFrom:
                 secretKeyRef:
                   name: {{ .Values.externalSecret.spec.target.name }}
                   key: redis-password
+              {{- else }}
+              valueFrom:
+                secretKeyRef:
+                  name: statuslist-secret
+                  key: redis-password
+              {{- end }}
             - name: APP_REDIS__URI
               value: {{ .Values.statuslist.env.APP_REDIS__URI | quote }}
             - name: APP_CACHE__TTL
               value: {{ .Values.statuslist.env.APP_CACHE__TTL | quote }}
             - name: APP_CACHE__MAX_CAPACITY
               value: {{ .Values.statuslist.env.APP_CACHE__MAX_CAPACITY | quote }}
+          {{- if .Values.statuslist.resources }}
+          resources:
+            {{- toYaml .Values.statuslist.resources | nindent 12 }}
+          {{- end }}
+          {{- if .Values.secretStore.enabled }}
           volumeMounts:
             - name: aws-credentials-volume
               mountPath: /root/.aws
               readOnly: true
+          {{- end }}
+      {{- if .Values.secretStore.enabled }}
       volumes:
         - name: aws-credentials-volume
           secret:
             secretName: aws-credentials-secret
+      {{- end }}

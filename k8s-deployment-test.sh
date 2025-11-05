@@ -14,9 +14,10 @@ NC='\033[0m' # No Color
 # Configuration
 CLUSTER_NAME="status-list-test"
 NAMESPACE="statuslist"
+HELM_RELEASE_NAME="status-list-server"
 KIND_CONFIG="kind-config.yaml"
-HELM_CHART_PATH="./helm/status-list-server-chart"
-TEST_VALUES="helm/status-list-server-chart/values-local.yaml"
+HELM_CHART_PATH="./helm"
+TEST_VALUES="helm/values-local.yaml"
 KIND_CMD="./kind"  # Use local kind binary
 
 # Functions
@@ -122,24 +123,11 @@ nodes:
 EOF
 }
 
-create_test_values() {
-    log_info "Using local testing Helm chart values..."
-    
-    # The values are now in the dedicated local chart directory
-    # No need to create a separate file since we're using the chart's values.yaml
-    if [ ! -f "${TEST_VALUES}" ]; then
-        log_error "Local testing values file not found: ${TEST_VALUES}"
-        exit 1
-    fi
-    
-    log_info "Local testing values validated"
-}
-
 create_cluster() {
     log_info "Creating kind cluster: ${CLUSTER_NAME}"
     
     # Delete existing cluster if it exists
-    ${KIND_CMD} delete cluster --name ${CLUSTER_NAME} || true
+    ${KIND_CMD} delete cluster --name ${CLUSTER_NAME} 2>/dev/null || true
     
     # Create new cluster
     ${KIND_CMD} create cluster --name ${CLUSTER_NAME} --config ${KIND_CONFIG}
@@ -154,42 +142,34 @@ deploy_dependencies() {
     log_info "Deploying dependencies..."
     
     # Create namespace
-    kubectl create namespace ${NAMESPACE} || true
+    kubectl create namespace ${NAMESPACE} 2>/dev/null || true
     
-    # Add Bitnami repository
-    helm repo add bitnami https://charts.bitnami.com/bitnami
+    # Add Helm repositories
+    log_info "Adding Helm repositories..."
+    helm repo add dandydeveloper https://dandydeveloper.github.io/charts 2>/dev/null || true
+    helm repo add bitnami https://charts.bitnami.com/bitnami 2>/dev/null || true
     helm repo update
     
     log_info "Dependencies ready"
 }
 
-deploy_external_secrets() {
-    log_info "Deploying External Secrets CRDs..."
+create_secrets() {
+    log_info "Creating required Kubernetes secrets..."
     
-    kubectl apply -f https://raw.githubusercontent.com/external-secrets/external-secrets/v0.9.9/deploy/crds/bundle.yaml
+    # Create database and redis secrets
+    kubectl create secret generic statuslist-secret \
+        --from-literal=postgres-password=postgres \
+        --from-literal=redis-password=password \
+        --namespace=${NAMESPACE} \
+        --dry-run=client -o yaml | kubectl apply -f -
     
-    helm repo add external-secrets https://charts.external-secrets.io
-    helm repo update
+    # Create dummy AWS credentials secret (not used in local deployment but required by deployment)
+    kubectl create secret generic aws-credentials-secret \
+        --from-literal=credentials="[default]\naws_access_key_id=dummy\naws_secret_access_key=dummy" \
+        --namespace=${NAMESPACE} \
+        --dry-run=client -o yaml | kubectl apply -f -
     
-    helm install external-secrets external-secrets/external-secrets \
-        -n external-secrets --create-namespace --wait \
-        --set installCRDs=false
-    
-    log_info "Waiting for External Secrets CRDs to be established..."
-    kubectl wait --for condition=established --timeout=60s crd/externalsecrets.external-secrets.io
-    kubectl wait --for condition=established --timeout=60s crd/secretstores.external-secrets.io
-    
-    log_info "Waiting for API server to recognize new CRDs..."
-    until kubectl api-resources | grep -q externalsecrets; do
-        echo "Waiting for externalsecrets CRD to be available..."
-        sleep 1
-    done
-    until kubectl api-resources | grep -q secretstores; do
-        echo "Waiting for secretstores CRD to be available..."
-        sleep 1
-    done
-    
-    log_info "External Secrets CRDs deployed successfully"
+    log_info "Secrets created successfully"
 }
 
 deploy_status_list_server() {
@@ -201,47 +181,90 @@ deploy_status_list_server() {
         exit 1
     fi
     
+    # Validate values file exists
+    if [ ! -f "${TEST_VALUES}" ]; then
+        log_error "Values file does not exist: ${TEST_VALUES}"
+        exit 1
+    fi
+    
     # Build Helm dependencies
     log_info "Building Helm dependencies..."
     cd ${HELM_CHART_PATH}
-    if ! helm dependency build; then
+    if ! helm dependency update; then
         log_error "Failed to build Helm dependencies"
         cd - > /dev/null
         exit 1
     fi
     cd - > /dev/null
     
+    # Uninstall existing release if it exists
+    helm uninstall ${HELM_RELEASE_NAME} -n ${NAMESPACE} 2>/dev/null || true
+    sleep 5
+    
     # Install the Helm chart
     log_info "Installing Helm chart..."
-    if ! helm install status-list-server ${HELM_CHART_PATH} \
+    if ! helm install ${HELM_RELEASE_NAME} ${HELM_CHART_PATH} \
         --namespace ${NAMESPACE} \
         --values ${TEST_VALUES} \
         --wait \
         --timeout 10m; then
         log_error "Helm installation failed"
+        log_info "Checking Helm release status..."
+        helm status ${HELM_RELEASE_NAME} -n ${NAMESPACE} || true
+        log_info "Checking pod logs..."
+        kubectl logs -n ${NAMESPACE} -l app.kubernetes.io/name=status-list-server --tail=50 || true
         exit 1
     fi
     
     log_info "Status list server deployed successfully"
 }
 
+get_service_name() {
+    # Get the actual service name from the cluster
+    local service_name=$(kubectl get svc -n ${NAMESPACE} -l app.kubernetes.io/name=status-list-server -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
+    
+    if [ -z "$service_name" ]; then
+        # Fallback to constructed name based on Helm chart templates
+        service_name="${HELM_RELEASE_NAME}-status-list-server-chart-service"
+    fi
+    
+    echo "$service_name"
+}
+
+get_deployment_name() {
+    # Get the actual deployment name from the cluster
+    local deployment_name=$(kubectl get deployment -n ${NAMESPACE} -l app.kubernetes.io/name=status-list-server -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
+    
+    if [ -z "$deployment_name" ]; then
+        # Fallback to constructed name based on Helm chart templates
+        deployment_name="${HELM_RELEASE_NAME}-status-list-server-chart-deployment"
+    fi
+    
+    echo "$deployment_name"
+}
+
 wait_for_deployment() {
     log_info "Waiting for deployment to be ready..."
     
+    local deployment_name=$(get_deployment_name)
+    log_info "Waiting for deployment: ${deployment_name}"
+    
     # Wait for deployment with better error handling
-    if ! kubectl wait --for=condition=available --timeout=300s deployment/status-list-test-status-list-server-local -n ${NAMESPACE}; then
+    if ! kubectl wait --for=condition=available --timeout=300s deployment/${deployment_name} -n ${NAMESPACE} 2>/dev/null; then
         log_error "Deployment failed to become available within timeout"
         log_info "Checking deployment status..."
-        kubectl describe deployment status-list-test-status-list-server-deployment -n ${NAMESPACE}
+        kubectl describe deployment/${deployment_name} -n ${NAMESPACE} || true
+        log_info "Checking pod logs..."
+        kubectl logs -n ${NAMESPACE} -l app.kubernetes.io/name=status-list-server --tail=100 || true
         return 1
     fi
     
     # Wait for pods to be ready
-    if ! kubectl wait --for=condition=ready --timeout=300s pod -l app.kubernetes.io/name=status-list-server-local -n ${NAMESPACE}; then
+    if ! kubectl wait --for=condition=ready --timeout=300s pod -l app.kubernetes.io/name=status-list-server -n ${NAMESPACE} 2>/dev/null; then
         log_error "Pods failed to become ready within timeout"
         log_info "Checking pod status..."
         kubectl get pods -n ${NAMESPACE} -o wide
-        kubectl describe pods -n ${NAMESPACE} -l app.kubernetes.io/name=status-list-server-local
+        kubectl describe pods -n ${NAMESPACE} -l app.kubernetes.io/name=status-list-server || true
         return 1
     fi
     
@@ -251,20 +274,32 @@ wait_for_deployment() {
 test_deployment() {
     log_info "Testing deployment..."
     
+    local service_name=$(get_service_name)
+    log_info "Testing service: ${service_name}"
+    
     # Get service information
     kubectl get svc -n ${NAMESPACE}
     
     # Get pod information
     kubectl get pods -n ${NAMESPACE}
     
+    # Check if service exists
+    if ! kubectl get svc ${service_name} -n ${NAMESPACE} &>/dev/null; then
+        log_error "Service ${service_name} not found"
+        log_info "Available services:"
+        kubectl get svc -n ${NAMESPACE}
+        return 1
+    fi
+    
     # Port forward to test the service
     log_info "Setting up port forwarding for testing..."
     
     # Kill any existing port forwards
-    pkill -f "kubectl port-forward" || true
+    pkill -f "kubectl port-forward" 2>/dev/null || true
+    sleep 2
     
     # Start port forwarding in background
-    kubectl port-forward -n ${NAMESPACE} svc/status-list-test-status-list-server-local 8081:8081 &
+    kubectl port-forward -n ${NAMESPACE} svc/${service_name} 8081:8081 &
     PORT_FORWARD_PID=$!
     
     # Wait for port forward to be ready
@@ -275,12 +310,21 @@ test_deployment() {
     HEALTH_RESPONSE=$(curl -s --max-time 10 http://localhost:8081/health 2>/dev/null || echo "FAILED")
     
     if [ "$HEALTH_RESPONSE" = "OK" ]; then
-        log_info "[PASS] Health check passed"
+        log_info "✅ [PASS] Health check passed"
     else
-        log_error "[FAIL] Health check failed (response: $HEALTH_RESPONSE)"
-        log_info "Response details: $HEALTH_RESPONSE"
-        kill ${PORT_FORWARD_PID} || true
+        log_error "❌ [FAIL] Health check failed (response: $HEALTH_RESPONSE)"
+        kill ${PORT_FORWARD_PID} 2>/dev/null || true
         return 1
+    fi
+    
+    # Test root endpoint
+    log_info "Testing root endpoint..."
+    ROOT_RESPONSE=$(curl -s --max-time 10 http://localhost:8081/ 2>/dev/null || echo "FAILED")
+    
+    if [ "$ROOT_RESPONSE" != "FAILED" ]; then
+        log_info "✅ [PASS] Root endpoint accessible"
+    else
+        log_warn "⚠️  [WARN] Root endpoint failed"
     fi
     
     # Test status lists endpoint
@@ -288,69 +332,95 @@ test_deployment() {
     STATUS_LISTS_RESPONSE=$(curl -s --max-time 10 http://localhost:8081/status-lists 2>/dev/null || echo "FAILED")
     
     if [ "$STATUS_LISTS_RESPONSE" != "FAILED" ]; then
-        log_info "[PASS] Status lists endpoint passed"
+        log_info "✅ [PASS] Status lists endpoint accessible"
     else
-        log_error "[FAIL] Status lists endpoint failed"
-        log_info "Response details: $STATUS_LISTS_RESPONSE"
-        kill ${PORT_FORWARD_PID} || true
+        log_error "❌ [FAIL] Status lists endpoint failed"
+        kill ${PORT_FORWARD_PID} 2>/dev/null || true
         return 1
     fi
     
-    # Test creating a status list
-    log_info "Testing status list creation..."
-    CREATE_RESPONSE=$(curl -s --max-time 10 -X POST http://localhost:8081/status-lists \
-        -H "Content-Type: application/json" \
-        -d '{"issuer": "test-issuer", "sub": "test-subject"}' 2>/dev/null || echo "FAILED")
-    
-    if [ "$CREATE_RESPONSE" != "FAILED" ]; then
-        log_info "[PASS] Status list creation passed"
-        log_info "Response: $CREATE_RESPONSE"
-    else
-        log_warn "[WARN] Status list creation failed (may need issuer registration)"
-        log_info "This is expected if issuer is not registered in the system"
-    fi
-    
     # Clean up port forwarding
-    kill ${PORT_FORWARD_PID} || true
+    kill ${PORT_FORWARD_PID} 2>/dev/null || true
     
-    log_info "[PASS] All tests completed successfully!"
+    log_info "✅ [SUCCESS] All tests passed!"
 }
 
 show_status() {
     log_info "Deployment Status:"
     echo "Namespace: ${NAMESPACE}"
     echo "Cluster: ${CLUSTER_NAME}"
+    echo "Helm Release: ${HELM_RELEASE_NAME}"
+    echo ""
+    
+    # Check if namespace exists
+    if ! kubectl get namespace ${NAMESPACE} &>/dev/null; then
+        log_error "Namespace ${NAMESPACE} does not exist"
+        log_info "Run './k8s-deployment-test.sh deploy' to create the deployment"
+        return 1
+    fi
+    
+    log_info "Helm Releases:"
+    helm list -n ${NAMESPACE} || echo "No Helm releases found"
     echo ""
     
     log_info "Pods:"
-    kubectl get pods -n ${NAMESPACE}
+    kubectl get pods -n ${NAMESPACE} -o wide || echo "No pods found"
+    echo ""
     
     log_info "Services:"
-    kubectl get svc -n ${NAMESPACE}
+    kubectl get svc -n ${NAMESPACE} || echo "No services found"
+    echo ""
     
     log_info "Deployments:"
-    kubectl get deployments -n ${NAMESPACE}
+    kubectl get deployments -n ${NAMESPACE} || echo "No deployments found"
+    echo ""
+    
+    log_info "PersistentVolumeClaims:"
+    kubectl get pvc -n ${NAMESPACE} || echo "No PVCs found"
+    echo ""
+    
+    # If resources exist, show how to access
+    if kubectl get svc -n ${NAMESPACE} &>/dev/null; then
+        local service_name=$(get_service_name)
+        if kubectl get svc ${service_name} -n ${NAMESPACE} &>/dev/null; then
+            log_info "========================================"
+            log_info "Access Instructions"
+            log_info "========================================"
+            echo "To access the application, run:"
+            echo "  kubectl port-forward svc/${service_name} 8081:8081 -n ${NAMESPACE}"
+            echo ""
+            echo "Then test with:"
+            echo "  curl http://localhost:8081/health"
+            echo "  curl http://localhost:8081/status-lists"
+        fi
+    fi
 }
 
 cleanup() {
     log_info "Cleaning up..."
     
     # Kill port forwarding
-    pkill -f "kubectl port-forward" || true
+    pkill -f "kubectl port-forward" 2>/dev/null || true
     sleep 2
     
+    # Uninstall Helm release
+    log_info "Uninstalling Helm release..."
+    helm uninstall ${HELM_RELEASE_NAME} -n ${NAMESPACE} 2>/dev/null || true
+    
+    # Delete namespace
+    log_info "Deleting namespace..."
+    kubectl delete namespace ${NAMESPACE} --wait=false 2>/dev/null || true
+    
     # Delete cluster
-    ${KIND_CMD} delete cluster --name ${CLUSTER_NAME} || true
+    log_info "Deleting kind cluster..."
+    ${KIND_CMD} delete cluster --name ${CLUSTER_NAME} 2>/dev/null || true
     
     # Clean up files
     if [ -f "${KIND_CONFIG}" ]; then
         rm -f ${KIND_CONFIG}
     fi
-    if [ -f "${TEST_VALUES}" ]; then
-        rm -f ${TEST_VALUES}
-    fi
     
-    log_info "Cleanup completed"
+    log_info "✅ Cleanup completed"
 }
 
 # Main execution
@@ -359,10 +429,9 @@ main() {
         deploy)
             check_prerequisites
             create_kind_config
-            create_test_values
             create_cluster
             deploy_dependencies
-            deploy_external_secrets
+            create_secrets
             deploy_status_list_server
             wait_for_deployment
             test_deployment

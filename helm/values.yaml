@@ -78,6 +78,7 @@ statuslist:
       cpu: "500m"
 
 postgres:
+  enabled: true
   auth:
     username: postgres
     database: status-list
@@ -92,7 +93,9 @@ postgres:
     type: ClusterIP
     port: 5432
 
+# External Secrets configuration - enabled for production
 externalSecret:
+  enabled: true
   metadata:
     name: statuslist-external-secret
   spec:
@@ -112,11 +115,14 @@ externalSecret:
       remoteRef:
         key: statuslist-secret
         property: REDIS_PASSWORD
+
 secretStore:
+  enabled: true
   aws:
     region: eu-central-1
 
 redis-ha:
+  enabled: true
   externalDnsHostname: redis.eudi-adorsys.com
   image:
     repository: docker.io/redis
@@ -159,3 +165,6 @@ redis-ha:
         external-dns.alpha.kubernetes.io/hostname: redis.eudi-adorsys.com
         external-dns.alpha.kubernetes.io/delete: "true"
 
+# Simple Redis - disabled for production
+redis:
+  enabled: false
