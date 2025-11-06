@@ -50,6 +50,9 @@ spec:
             {{- if .Values.secretStore.enabled }}
             - name: APP_AWS__REGION
               value: {{ .Values.secretStore.aws.region | quote }}
+            {{- else }}
+            - name: APP_CERT_STORAGE_BACKEND
+              value: "redis"
             {{- end }}
             {{- if .Values.statuslist.ingress.externalDnsHostname }}
             - name: APP_SERVER__DOMAIN

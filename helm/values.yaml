@@ -92,6 +92,8 @@ postgres:
   service:
     type: ClusterIP
     port: 5432
+  image:
+    tag: 16.3.0-debian-12-r1
 
 # External Secrets configuration - enabled for production
 externalSecret:

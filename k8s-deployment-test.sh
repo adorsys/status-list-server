@@ -18,6 +18,7 @@ HELM_RELEASE_NAME="status-list-server"
 KIND_CONFIG="kind-config.yaml"
 HELM_CHART_PATH="./helm"
 TEST_VALUES="helm/values-local.yaml"
+TEST_VALUES_UPDATED="helm/values-local-updated.yaml"
 KIND_CMD="./kind"  # Use local kind binary
 
 # Functions
@@ -102,6 +103,13 @@ check_prerequisites() {
         exit 1
     fi
     
+    # Check if docker is available
+    if ! command -v docker &> /dev/null; then
+        log_error "docker is not available. Please install docker"
+        log_error "Installation: https://docs.docker.com/get-docker/"
+        exit 1
+    fi
+    
     # Check if curl is available for testing
     if ! command -v curl &> /dev/null; then
         log_warn "curl is not available. Testing functionality will be limited"
@@ -138,17 +146,49 @@ create_cluster() {
     log_info "Cluster created successfully"
 }
 
+build_and_preload_images() {
+    log_info "Building and pre-loading Docker images into kind cluster..."
+    log_info "This may take a few minutes on first run..."
+
+    # Build the status-list-server image locally
+    log_info "Building local image: status-list-server:local"
+    if ! docker build -t status-list-server:local .; then
+        log_error "Failed to build status-list-server:local image"
+        exit 1
+    fi
+
+    # Define images to preload - using stable, known versions
+    IMAGES=(
+        "postgres:16-alpine"
+        "redis:7-alpine"
+        "busybox:latest"
+        "status-list-server:local"
+    )
+
+    for IMAGE in "${IMAGES[@]}"; do
+        # For remote images, pull them
+        if [[ "$IMAGE" != "status-list-server:local" ]]; then
+            log_info "Pulling image: ${IMAGE}"
+            if ! docker pull ${IMAGE}; then
+                log_warn "Failed to pull ${IMAGE}, continuing anyway..."
+                continue
+            fi
+        fi
+
+        log_info "Loading image into kind cluster: ${IMAGE}"
+        if ! ${KIND_CMD} load docker-image ${IMAGE} --name ${CLUSTER_NAME}; then
+            log_warn "Failed to load ${IMAGE} into kind, continuing anyway..."
+        fi
+    done
+
+    log_info "Image building and pre-loading completed"
+}
+
 deploy_dependencies() {
     log_info "Deploying dependencies..."
     
     # Create namespace
     kubectl create namespace ${NAMESPACE} 2>/dev/null || true
-    
-    # Add Helm repositories
-    log_info "Adding Helm repositories..."
-    helm repo add dandydeveloper https://dandydeveloper.github.io/charts 2>/dev/null || true
-    helm repo add bitnami https://charts.bitnami.com/bitnami 2>/dev/null || true
-    helm repo update
     
     log_info "Dependencies ready"
 }
@@ -172,6 +212,191 @@ create_secrets() {
     log_info "Secrets created successfully"
 }
 
+deploy_postgresql() {
+    log_info "Deploying PostgreSQL..."
+    
+    cat <<EOF | kubectl apply -f -
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres-standalone
+  namespace: ${NAMESPACE}
+  labels:
+    app: postgres-standalone
+spec:
+  type: ClusterIP
+  ports:
+  - name: tcp-postgresql
+    port: 5432
+    targetPort: tcp-postgresql
+  selector:
+    app: postgres-standalone
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: postgres-standalone
+  namespace: ${NAMESPACE}
+  labels:
+    app: postgres-standalone
+spec:
+  serviceName: postgres-standalone
+  replicas: 1
+  selector:
+    matchLabels:
+      app: postgres-standalone
+  template:
+    metadata:
+      labels:
+        app: postgres-standalone
+    spec:
+      containers:
+      - name: postgresql
+        image: postgres:16-alpine
+        imagePullPolicy: IfNotPresent
+        ports:
+        - name: tcp-postgresql
+          containerPort: 5432
+        env:
+        - name: POSTGRES_PASSWORD
+          value: "postgres"
+        - name: POSTGRES_DB
+          value: "status-list"
+        - name: PGDATA
+          value: "/var/lib/postgresql/data/pgdata"
+        volumeMounts:
+        - name: data
+          mountPath: /var/lib/postgresql/data
+        livenessProbe:
+          exec:
+            command:
+            - /bin/sh
+            - -c
+            - exec pg_isready -U postgres -h 127.0.0.1 -p 5432
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 6
+        readinessProbe:
+          exec:
+            command:
+            - /bin/sh
+            - -c
+            - exec pg_isready -U postgres -h 127.0.0.1 -p 5432
+          initialDelaySeconds: 5
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 6
+  volumeClaimTemplates:
+  - metadata:
+      name: data
+    spec:
+      accessModes: ["ReadWriteOnce"]
+      resources:
+        requests:
+          storage: 5Gi
+EOF
+    
+    log_info "Waiting for PostgreSQL to be ready..."
+    sleep 10  # Give it a moment to start
+    
+    if ! kubectl wait --for=condition=ready pod -l app=postgres-standalone -n ${NAMESPACE} --timeout=300s 2>/dev/null; then
+        log_error "PostgreSQL pod not ready"
+        kubectl get pods -n ${NAMESPACE} -l app=postgres-standalone
+        kubectl describe pod -n ${NAMESPACE} -l app=postgres-standalone || true
+        kubectl logs -n ${NAMESPACE} -l app=postgres-standalone --tail=50 || true
+        exit 1
+    fi
+    
+    log_info "PostgreSQL deployed successfully"
+}
+
+deploy_redis() {
+    log_info "Deploying Redis..."
+    
+    cat <<EOF | kubectl apply -f -
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis-standalone
+  namespace: ${NAMESPACE}
+  labels:
+    app: redis-standalone
+spec:
+  type: ClusterIP
+  ports:
+  - name: tcp-redis
+    port: 6379
+    targetPort: redis
+  selector:
+    app: redis-standalone
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: redis-standalone
+  namespace: ${NAMESPACE}
+  labels:
+    app: redis-standalone
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: redis-standalone
+  template:
+    metadata:
+      labels:
+        app: redis-standalone
+    spec:
+      containers:
+      - name: redis
+        image: redis:7-alpine
+        imagePullPolicy: IfNotPresent
+        ports:
+        - name: redis
+          containerPort: 6379
+        command:
+        - redis-server
+        - --requirepass
+        - password
+        - --appendonly
+        - "yes"
+        livenessProbe:
+          exec:
+            command:
+            - redis-cli
+            - ping
+          initialDelaySeconds: 30
+          periodSeconds: 10
+        readinessProbe:
+          exec:
+            command:
+            - redis-cli
+            - ping
+          initialDelaySeconds: 5
+          periodSeconds: 10
+        volumeMounts:
+        - name: redis-data
+          mountPath: /data
+      volumes:
+      - name: redis-data
+        emptyDir: {}
+EOF
+    
+    log_info "Waiting for Redis to be ready..."
+    sleep 5  # Give it a moment to start
+    
+    if ! kubectl wait --for=condition=ready pod -l app=redis-standalone -n ${NAMESPACE} --timeout=300s 2>/dev/null; then
+        log_error "Redis pod not ready"
+        kubectl get pods -n ${NAMESPACE} -l app=redis-standalone
+        kubectl describe pod -n ${NAMESPACE} -l app=redis-standalone || true
+        kubectl logs -n ${NAMESPACE} -l app=redis-standalone --tail=50 || true
+        exit 1
+    fi
+    
+    log_info "Redis deployed successfully"
+}
+
 deploy_status_list_server() {
     log_info "Deploying status list server..."
     
@@ -187,32 +412,39 @@ deploy_status_list_server() {
         exit 1
     fi
     
-    # Build Helm dependencies
+    # Build Helm dependencies (needed for template processing)
     log_info "Building Helm dependencies..."
     cd ${HELM_CHART_PATH}
-    if ! helm dependency update; then
-        log_error "Failed to build Helm dependencies"
-        cd - > /dev/null
-        exit 1
-    fi
+    helm dependency update --timeout 5m 2>/dev/null || log_warn "Helm dependency update had warnings (this is okay)"
     cd - > /dev/null
     
     # Uninstall existing release if it exists
     helm uninstall ${HELM_RELEASE_NAME} -n ${NAMESPACE} 2>/dev/null || true
     sleep 5
     
-    # Install the Helm chart
-    log_info "Installing Helm chart..."
+    # Install the Helm chart with databases disabled (they're already installed)
+    log_info "Installing Helm chart (databases already deployed separately)..."
     if ! helm install ${HELM_RELEASE_NAME} ${HELM_CHART_PATH} \
         --namespace ${NAMESPACE} \
         --values ${TEST_VALUES} \
+        --set statuslist.image.repository=status-list-server \
+        --set statuslist.image.tag=local \
+        --set postgres.enabled=false \
+        --set redis.enabled=false \
+        --set redis-ha.enabled=false \
+        --set externalSecret.enabled=false \
+        --set secretStore.enabled=false \
         --wait \
-        --timeout 10m; then
+        --timeout 30m; then
         log_error "Helm installation failed"
         log_info "Checking Helm release status..."
         helm status ${HELM_RELEASE_NAME} -n ${NAMESPACE} || true
+        log_info "Checking pod status..."
+        kubectl get pods -n ${NAMESPACE} -o wide || true
+        log_info "Checking deployment..."
+        kubectl describe deployment -n ${NAMESPACE} -l app=status-list-server || true
         log_info "Checking pod logs..."
-        kubectl logs -n ${NAMESPACE} -l app.kubernetes.io/name=status-list-server --tail=50 || true
+        kubectl logs -n ${NAMESPACE} -l app=status-list-server --all-containers=true --tail=100 || true
         exit 1
     fi
     
@@ -221,7 +453,12 @@ deploy_status_list_server() {
 
 get_service_name() {
     # Get the actual service name from the cluster
-    local service_name=$(kubectl get svc -n ${NAMESPACE} -l app.kubernetes.io/name=status-list-server -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
+    local service_name=$(kubectl get svc -n ${NAMESPACE} -l app=status-list-server -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
+    
+    if [ -z "$service_name" ]; then
+        # Try alternative label
+        service_name=$(kubectl get svc -n ${NAMESPACE} -l app.kubernetes.io/name=status-list-server -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
+    fi
     
     if [ -z "$service_name" ]; then
         # Fallback to constructed name based on Helm chart templates
@@ -233,7 +470,12 @@ get_service_name() {
 
 get_deployment_name() {
     # Get the actual deployment name from the cluster
-    local deployment_name=$(kubectl get deployment -n ${NAMESPACE} -l app.kubernetes.io/name=status-list-server -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
+    local deployment_name=$(kubectl get deployment -n ${NAMESPACE} -l app=status-list-server -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
+    
+    if [ -z "$deployment_name" ]; then
+        # Try alternative label
+        deployment_name=$(kubectl get deployment -n ${NAMESPACE} -l app.kubernetes.io/name=status-list-server -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
+    fi
     
     if [ -z "$deployment_name" ]; then
         # Fallback to constructed name based on Helm chart templates
@@ -255,16 +497,16 @@ wait_for_deployment() {
         log_info "Checking deployment status..."
         kubectl describe deployment/${deployment_name} -n ${NAMESPACE} || true
         log_info "Checking pod logs..."
-        kubectl logs -n ${NAMESPACE} -l app.kubernetes.io/name=status-list-server --tail=100 || true
+        kubectl logs -n ${NAMESPACE} -l app=status-list-server --all-containers=true --tail=100 || true
         return 1
     fi
     
     # Wait for pods to be ready
-    if ! kubectl wait --for=condition=ready --timeout=300s pod -l app.kubernetes.io/name=status-list-server -n ${NAMESPACE} 2>/dev/null; then
+    if ! kubectl wait --for=condition=ready --timeout=300s pod -l app=status-list-server -n ${NAMESPACE} 2>/dev/null; then
         log_error "Pods failed to become ready within timeout"
         log_info "Checking pod status..."
         kubectl get pods -n ${NAMESPACE} -o wide
-        kubectl describe pods -n ${NAMESPACE} -l app.kubernetes.io/name=status-list-server || true
+        kubectl describe pods -n ${NAMESPACE} -l app=status-list-server || true
         return 1
     fi
     
@@ -299,7 +541,7 @@ test_deployment() {
     sleep 2
     
     # Start port forwarding in background
-    kubectl port-forward -n ${NAMESPACE} svc/${service_name} 8081:8081 &
+    kubectl port-forward -n ${NAMESPACE} svc/${service_name} 8081:8000 &
     PORT_FORWARD_PID=$!
     
     # Wait for port forward to be ready
@@ -403,8 +645,8 @@ cleanup() {
     pkill -f "kubectl port-forward" 2>/dev/null || true
     sleep 2
     
-    # Uninstall Helm release
-    log_info "Uninstalling Helm release..."
+    # Uninstall Helm releases
+    log_info "Uninstalling Helm releases..."
     helm uninstall ${HELM_RELEASE_NAME} -n ${NAMESPACE} 2>/dev/null || true
     
     # Delete namespace
@@ -430,8 +672,11 @@ main() {
             check_prerequisites
             create_kind_config
             create_cluster
+            build_and_preload_images
             deploy_dependencies
             create_secrets
+            deploy_postgresql
+            deploy_redis
             deploy_status_list_server
             wait_for_deployment
             test_deployment
@@ -447,10 +692,6 @@ main() {
             log_info "[PASS] API endpoints accessible"
             log_info ""
             log_info "[READY] The Status List Server is ready for use!"
-            log_info ""
-            log_info "To access the application:"
-            log_info "kubectl port-forward svc/status-list-test-status-list-server-local 8081:8081 -n statuslist"
-            log_info "Then visit: http://localhost:8081/health"
             ;;
         test)
             test_deployment

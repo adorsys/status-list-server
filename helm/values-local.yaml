@@ -11,7 +11,7 @@ statuslist:
     - "-c"
     - |
       echo "Waiting for postgres..."
-      until nc -z status-list-server-postgresql.statuslist.svc.cluster.local 5432; do
+      until nc -z postgres-standalone.statuslist.svc.cluster.local 5432; do
         echo "postgres not ready. Retrying in 2s...";
         sleep 2;
       done
@@ -24,7 +24,7 @@ statuslist:
     - "-c"
     - |
       echo "Waiting for Redis..."
-      until nc -z status-list-server-redis-master.statuslist.svc.cluster.local 6379; do
+      until nc -z redis-standalone.statuslist.svc.cluster.local 6379; do
         echo "Redis not ready. Retrying in 2s...";
         sleep 2;
       done
@@ -51,11 +51,12 @@ statuslist:
     APP_SERVER__CERT__ORGANIZATION: "Test Organization"
     APP_SERVER__CERT__ACME_DIRECTORY_URL: "https://acme-v02.api.letsencrypt.org/directory"
     APP_SERVER__CERT__EKU: "1,3,6,1,5,5,7,3,30"
-    APP_DATABASE__URL: "postgres://postgres:postgres@status-list-server-postgresql.statuslist.svc.cluster.local:5432/status-list"
+    APP_DATABASE__URL: "postgres://postgres:postgres@postgres-standalone.statuslist.svc.cluster.local:5432/status-list"
     APP_REDIS__REQUIRE_CLIENT_AUTH: "false"
-    APP_REDIS__URI: "redis://:password@status-list-server-redis-master.statuslist.svc.cluster.local:6379"
+    APP_REDIS__URI: "redis://:password@redis-standalone.statuslist.svc.cluster.local:6379"
     APP_CACHE__TTL: "300"
     APP_CACHE__MAX_CAPACITY: "1000"
+    APP_CERT_STORAGE_BACKEND: "redis"
   resources:
     requests:
       memory: "256Mi"
@@ -71,32 +72,10 @@ externalSecret:
 secretStore:
   enabled: false
 
-# PostgreSQL configuration
+# PostgreSQL configuration - disabled because we deploy it separately
 postgresql:
-  enabled: true
-  auth:
-    database: "status-list"
-    username: "postgres"
-    postgresPassword: "postgres"
-  primary:
-    persistence:
-      enabled: true
-      size: 5Gi
-
-# Redis HA configuration - disabled for local
-redis-ha:
   enabled: false
 
-# Simple Redis configuration for local
+# Redis configuration - disabled because we deploy it separately
 redis:
-  enabled: true
-  auth:
-    enabled: true
-    password: "password"
-  master:
-    persistence:
-      enabled: true
-      size: 2Gi
-  replica:
-    replicaCount: 0
-    
+  enabled: false
