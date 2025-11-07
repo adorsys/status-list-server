@@ -24,7 +24,9 @@ jobs:
       packages: write
 
     outputs:
-      image_tag: ${{ steps.vars.outputs.SHORT_SHA }}
+      image
+￼
+_tag: ${{ steps.vars.outputs.SHORT_SHA }}
 
     steps:
       - name: Checkout source code
