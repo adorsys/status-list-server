@@ -541,7 +541,7 @@ test_deployment() {
     sleep 2
     
     # Start port forwarding in background
-    kubectl port-forward -n ${NAMESPACE} svc/${service_name} 8081:8000 &
+    kubectl port-forward -n ${NAMESPACE} svc/${service_name} 8081 &
     PORT_FORWARD_PID=$!
     
     # Wait for port forward to be ready
