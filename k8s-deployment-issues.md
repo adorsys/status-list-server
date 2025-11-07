@@ -218,7 +218,7 @@ After successful deployment, access the Status List Server:
 
 **1. Set up port forwarding:**
 ```bash
-kubectl port-forward svc/status-list-test-status-list-server-service 8081:8081 -n statuslist
+kubectl port-forward svc/status-list-server-service 8081 -n statuslist
 ```
 
 **2. Test the endpoints:**

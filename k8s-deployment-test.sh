@@ -629,7 +629,7 @@ show_status() {
             log_info "Access Instructions"
             log_info "========================================"
             echo "To access the application, run:"
-            echo "  kubectl port-forward svc/${service_name} 8081:8081 -n ${NAMESPACE}"
+            echo "  kubectl port-forward svc/${service_name} 8081 -n ${NAMESPACE}"
             echo ""
             echo "Then test with:"
             echo "  curl http://localhost:8081/health"
