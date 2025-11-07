@@ -50,12 +50,13 @@ export default function () {
   }
 
   // Test 4: Concurrent credential registration attempts
+  const publicKey = `-----BEGIN PUBLIC KEY-----
+MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEHnylV5lCVtFs6wxmnn5fZJqAykVo
+t4R8AesZRagg2xQFfeWOqsKiUuFs2Au9UjvyaI8ZV0IC0/Bj7vdH2liWEA==
+-----END PUBLIC KEY-----`;
   const registrationPayload = {
-    issuer: `stress-issuer-${Math.random().toString(36).substr(2, 9)}`,
-    public_key: `-----BEGIN PUBLIC KEY-----
-MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE8uV8H8K2jvAY7TUJEPxCu1c1qfVF
-5z6dQ9z6dQ9z6dQ9z6dQ9z6dQ9z6dQ9z6dQ9z6dQ9z6dQ9z6dQ9z6dQ9z6dQ==
------END PUBLIC KEY-----`,
+    issuer: `load-test-issuer-${Math.random().toString(36).substr(2, 10)}`,
+    publicKey,
     alg: 'ES256'
   };
 

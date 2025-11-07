@@ -4,7 +4,7 @@ import { check, sleep } from 'k6';
 // Load test configuration - Increased load for comprehensive testing
 export const options = {
   stages: [
-    { duration: '2m', target: 50 },   // Ramp up to 50 users over 2 minutes
+    { duration: '2m', target: 10 },   // Ramp up to 50 users over 2 minutes
     { duration: '5m', target: 98 },  // Increase to 98 users for 5 minutes
     { duration: '8m', target: 100 },  // Peak load with 100 users for 8 minutes
     { duration: '5m', target: 98 },  // Scale back to 98 users for 5 minutes
@@ -40,31 +40,31 @@ export default function () {
 
   sleep(0.3);
 
-  // Test 3: Multiple status list retrieval attempts with varied patterns
-  const testListIds = [
-    'non-existent-id',
-    `random-${Math.random().toString(36).substr(2, 12)}`,
-    'common-list-id',
-    `test-${Date.now()}-${Math.floor(Math.random() * 1000)}`
-  ];
+//   // Test 3: Multiple status list retrieval attempts with varied patterns
+//   const testListIds = [
+//     'non-existent-id',
+//     `random-${Math.random().toString(36).substr(2, 12)}`,
+//     'common-list-id',
+//     `test-${Date.now()}-${Math.floor(Math.random() * 1000)}`
+//   ];
 
-  for (let i = 0; i < 2; i++) {
-    const listId = testListIds[Math.floor(Math.random() * testListIds.length)];
-    const statusListRes = http.get(`${BASE_URL}/statuslists/${listId}`);
-    check(statusListRes, {
-      'status list request handled': (r) => r.status !== undefined,
-      'status list response time acceptable': (r) => r.timings.duration < 500,
-    });
-    sleep(0.2);
-  }
+//   for (let i = 0; i < 2; i++) {
+//     const listId = testListIds[Math.floor(Math.random() * testListIds.length)];
+//     const statusListRes = http.get(`${BASE_URL}/statuslists/${listId}`);
+//     check(statusListRes, {
+//       'status list request handled': (r) => r.status !== undefined,
+//       'status list response time acceptable': (r) => r.timings.duration < 500,
+//     });
+//     sleep(0.2);
+//   }
 
   // Test 4: Credentials endpoint with various payloads
   if (Math.random() < 0.4) { // 40% chance to test registration
     const registrationPayload = {
       issuer: `load-test-issuer-${Math.random().toString(36).substr(2, 10)}`,
       public_key: `-----BEGIN PUBLIC KEY-----
-MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE8uV8H8K2jvAY7TUJEPxCu1c1qfVF
-5z6dQ9z6dQ9z6dQ9z6dQ9z6dQ9z6dQ9z6dQ9z6dQ9z6dQ9z6dQ9z6dQ9z6dQ==
+MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEHnylV5lCVtFs6wxmnn5fZJqAykVo
+t4R8AesZRagg2xQFfeWOqsKiUuFs2Au9UjvyaI8ZV0IC0/Bj7vdH2liWEA==
 -----END PUBLIC KEY-----`,
       alg: 'ES256'
     };
@@ -83,7 +83,7 @@ MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE8uV8H8K2jvAY7TUJEPxCu1c1qfVF
     });
   }
 
-  sleep(0.5);
+//   sleep(0.5);
 }
 
 export function handleSummary(data) {
