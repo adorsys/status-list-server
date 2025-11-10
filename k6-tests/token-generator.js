@@ -2,8 +2,22 @@ const jwt = require('jsonwebtoken');
 const fs = require('fs');
 const crypto = require('crypto');
 
-const privateKey = fs.readFileSync('ec-private-key.pem', 'utf8');
-const publicKey = fs.readFileSync('ec-public-key.pem', 'utf8');
+// Generate EC key pair (not RSA)
+const { publicKey, privateKey } = crypto.generateKeyPairSync('ec', {
+  namedCurve: 'P-256',
+  publicKeyEncoding: {
+    type: 'spki',
+    format: 'pem'
+  },
+  privateKeyEncoding: {
+    type: 'pkcs8',
+    format: 'pem'
+  }
+});
+
+// Save keys for reference
+fs.writeFileSync('ec-private-key.pem', privateKey);
+fs.writeFileSync('ec-public-key.pem', publicKey);
 
 const issuerId = `test-issuer-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
 
@@ -17,9 +31,9 @@ const now = Math.floor(Date.now() / 1000);
 for (let i = 0; i < 100; i++) {
   const token = jwt.sign(
     {
-      iss: issuerId,
+      iss: issuerId,  // ✅ Added issuer claim
       iat: now,
-      exp: now + 7200  // 2 hours expiration
+      exp: now + (365 * 24 * 60 * 60)  // ✅ Fixed: 1 year from now
     },
     privateKey,
     {
@@ -37,7 +51,7 @@ for (let i = 0; i < 100; i++) {
 const testData = {
   issuerId,
   publicKey,
-  privateKey,  // Save for reference, not used in tests
+  privateKey,
   tokens,
   generatedAt: new Date().toISOString()
 };

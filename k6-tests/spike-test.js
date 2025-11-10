@@ -43,11 +43,13 @@ export default function () {
 
   // Test 4: Credential registration during spike (database writes under pressure)
   if (Math.random() < 0.3) { // 30% chance to reduce database load
+    const randonIssuer = `spike-issuer-${Math.random().toString(36).substr(2, 9)}`
+
     const registrationPayload = {
-      issuer: `spike-issuer-${Math.random().toString(36).substr(2, 9)}`,
+      issuer: randonIssuer,
       public_key: `-----BEGIN PUBLIC KEY-----
-MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEHnylV5lCVtFs6wxmnn5fZJqAykVo
-t4R8AesZRagg2xQFfeWOqsKiUuFs2Au9UjvyaI8ZV0IC0/Bj7vdH2liWEA==
+MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEH7cVDLpljWF+OEpxhdSVWCD1qWiq
+IV/0Cq05gB6Ia7bClgK1zMoS5hHtx3+fhd9A62YEgLAOp8n1b6xh7TNG/A==
 -----END PUBLIC KEY-----
 `,
       alg: 'ES256'
@@ -65,6 +67,7 @@ t4R8AesZRagg2xQFfeWOqsKiUuFs2Au9UjvyaI8ZV0IC0/Bj7vdH2liWEA==
 
     check(registrationRes, {
       'registration handled during spike': (r) => r.status !== undefined,
+      'registration not 500': (r) => r.status !== 500,
     });
   }
 
@@ -83,12 +86,8 @@ t4R8AesZRagg2xQFfeWOqsKiUuFs2Au9UjvyaI8ZV0IC0/Bj7vdH2liWEA==
 
   check(statusListRes, {
     'status list request completed': (r) => r.status !== undefined,
+    'status list not 500': (r) => r.status !== 500,
     'status list response time reasonable': (r) => r.timings.duration < 1000,
   });
-}
-
-export function handleSummary(data) {
-  return {
-    'k6-results/spike-test-summary.json': JSON.stringify(data),
-  };
+  customHttpReqFailed.add(statusListRes.status === 200 || statusListRes.status === 404 ? 0 : 1);
 }

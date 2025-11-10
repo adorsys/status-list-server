@@ -5,15 +5,15 @@ const privateKey = fs.readFileSync('ec-private-key.pem', 'utf8');
 
 const token = jwt.sign(
   {
-    iss: 'test-issuer2',
-    exp: Math.floor(Date.now() / 1000) + (60 * 60 * 24),
+    iss: 'test-issuer3',
+    exp: Math.floor(Date.now() / 1000) + (365 * 24 * 60 * 60),
     iat: Math.floor(Date.now() / 1000)
   },
   privateKey,
   {
     algorithm: 'ES256',
     header: {
-      kid: 'test-issuer2'
+      kid: 'test-issuer3'
     }
   }
 );

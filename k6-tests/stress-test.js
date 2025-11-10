@@ -51,9 +51,10 @@ export default function () {
 
   // Test 4: Concurrent credential registration attempts
   const publicKey = `-----BEGIN PUBLIC KEY-----
-MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEHnylV5lCVtFs6wxmnn5fZJqAykVo
-t4R8AesZRagg2xQFfeWOqsKiUuFs2Au9UjvyaI8ZV0IC0/Bj7vdH2liWEA==
------END PUBLIC KEY-----`;
+MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEH7cVDLpljWF+OEpxhdSVWCD1qWiq
+IV/0Cq05gB6Ia7bClgK1zMoS5hHtx3+fhd9A62YEgLAOp8n1b6xh7TNG/A==
+-----END PUBLIC KEY-----
+`;
   const registrationPayload = {
     issuer: `load-test-issuer-${Math.random().toString(36).substr(2, 10)}`,
     publicKey,
@@ -61,13 +62,13 @@ t4R8AesZRagg2xQFfeWOqsKiUuFs2Au9UjvyaI8ZV0IC0/Bj7vdH2liWEA==
   };
 
   const registrationRes = http.post(
-      `${BASE_URL}/credentials`,
-      JSON.stringify(registrationPayload),
-      {
-        headers: {
-          'Content-Type': 'application/json',
-        },
-      }
+    `${BASE_URL}/credentials`,
+    JSON.stringify(registrationPayload),
+    {
+      headers: {
+        'Content-Type': 'application/json',
+      },
+    }
   );
 
   check(registrationRes, {
@@ -76,10 +77,4 @@ t4R8AesZRagg2xQFfeWOqsKiUuFs2Au9UjvyaI8ZV0IC0/Bj7vdH2liWEA==
   });
 
   sleep(0.5);
-}
-
-export function handleSummary(data) {
-  return {
-    'k6-results/stress-test-summary.json': JSON.stringify(data),
-  };
 }
