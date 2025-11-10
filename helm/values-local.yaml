@@ -56,7 +56,7 @@ statuslist:
     APP_REDIS__URI: "redis://:password@redis-standalone.statuslist.svc.cluster.local:6379"
     APP_CACHE__TTL: "300"
     APP_CACHE__MAX_CAPACITY: "1000"
-    APP_CERT_STORAGE_BACKEND: "redis"
+    APP_CERT_STORAGE_BACKEND: "none"
   resources:
     requests:
       memory: "256Mi"
@@ -73,9 +73,9 @@ secretStore:
   enabled: false
 
 # PostgreSQL configuration - disabled because we deploy it separately
-postgresql:
+postgres:
   enabled: false
 
 # Redis configuration - disabled because we deploy it separately
-redis:
+redis-ha:
   enabled: false

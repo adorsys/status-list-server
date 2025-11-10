@@ -5,11 +5,9 @@ type: application
 version: 0.1.0
 appVersion: "1.0.0"
 dependencies:
-  - name: postgresql
-    version: "14.2.3"
-    repository: https://charts.bitnami.com/bitnami
-    condition: postgres.enabled
-  - name: redis
-    version: "18.14.0"
-    repository: https://charts.bitnami.com/bitnami
-    condition: redis.enabled
+  - name: postgres
+    version: 0.8.2
+    repository: oci://registry-1.docker.io/cloudpirates
+  - name: redis-ha
+    version: 4.35.0
+    repository: https://dandydeveloper.github.io/charts
