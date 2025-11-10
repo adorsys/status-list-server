@@ -187,11 +187,7 @@ impl CertManager {
             .collect();
 
         // Create the ACME order based on the given domain name(s).
-        let mut order = account
-            .new_order(&NewOrder {
-                identifiers: &identifiers,
-            })
-            .await?;
+        let mut order = account.new_order(&NewOrder::new(&identifiers)).await?;
 
         let mut cleanup_futures = Vec::new();
         // Process the authorizations
@@ -222,7 +218,7 @@ impl CertManager {
         let csr_der_bytes = self.generate_csr(&server_key_pem)?;
 
         // Finalize the order and try to get the certificate
-        order.finalize(&csr_der_bytes).await?;
+        order.finalize_csr(&csr_der_bytes).await?;
         let cert_chain_pem = loop {
             match order.certificate().await? {
                 Some(cert_chain_pem) => break cert_chain_pem,
