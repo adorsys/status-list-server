@@ -12,7 +12,6 @@ async-trait = "0.1"
 hyper = "1.7"
 hyper-util = "0.1"
 reqwest = "0.12"
-http-body-util = "0.1"
 tower = "0.5"
 hyper-rustls = { version = "0.27", features = ["http2"] }
 axum = { version = "0.8", features = ["macros"] }
