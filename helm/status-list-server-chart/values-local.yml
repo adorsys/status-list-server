@@ -1,0 +1,140 @@
+global:
+  storageClass: "standard"
+
+statuslist:
+  initContainers:
+  - name: wait-for-postgres
+    image: busybox
+    command:
+    - "sh"
+    - "-c"
+    - |
+      echo "Waiting for postgres..."
+      until nc -z statuslist-postgres.statuslist.svc.cluster.local 5432; do
+        echo "postgres not ready. Retrying in 2s...";
+        sleep 2;
+      done
+      echo "Postgres is up."
+
+  - name: wait-for-redis
+    image: busybox
+    command:
+    - "sh"
+    - "-c"
+    - |
+      echo "Waiting for Redis..."
+      until nc -z statuslist-redis-ha-haproxy.statuslist.svc.cluster.local 6379; do
+        echo "Redis not ready. Retrying in 2s...";
+        sleep 2;
+      done
+      echo "Redis is up."
+  replicaCount: 1
+  image:
+    repository: ghcr.io/adorsys/status-list-server
+    pullPolicy: IfNotPresent
+    tag: "latest"
+  service:
+    type: ClusterIP
+    port: 8081
+    targetPort: 8000
+  ingress:
+    enabled: false  # Disable ingress for local testing, use port-forward instead
+    path: /
+    pathType: Prefix
+    annotations: {}
+    tls:
+      hosts: []
+      secretName: ""
+    externalDnsHostname: ""
+  env:
+    RUST_LOG: "debug"
+    POSTGRES_USER: "postgres"
+    APP_ENV: "local"
+    APP_SERVER__HOST: "0.0.0.0"
+    APP_SERVER__PORT: "8000"
+    APP_SERVER__CERT__EMAIL: "test@localhost"
+    APP_SERVER__CERT__ORGANIZATION: "Local Test"
+    APP_SERVER__CERT__ACME_DIRECTORY_URL: "https://acme-v02.api.letsencrypt.org/directory"
+    APP_SERVER__CERT__EKU: "1,3,6,1,5,5,7,3,30"
+    APP_REDIS__REQUIRE_CLIENT_AUTH: "false"
+    APP_CACHE__TTL: "300"
+    APP_CACHE__MAX_CAPACITY: "1000"
+  resources:
+    requests:
+      memory: "128Mi"
+      cpu: "100m"
+    limits:
+      memory: "256Mi"
+      cpu: "250m"
+
+postgres:
+  auth:
+    username: postgres
+    database: status-list
+    existingSecret: statuslist-secret
+    secretKeys:
+      passwordKey: postgres-password
+  persistence:
+    enabled: true
+    size: 5Gi
+    storageClass: "standard"
+  service:
+    type: ClusterIP
+    port: 5432
+
+# For local testing, we'll use a simple secret instead of external secrets
+# You'll need to create this secret manually before deploying
+# kubectl create secret generic statuslist-secret -n statuslist \
+#   --from-literal=postgres-password=your-postgres-password \
+#   --from-literal=redis-password=your-redis-password
+externalSecret:
+  enabled: false
+
+secretStore:
+  enabled: false
+
+redis-ha:
+  externalDnsHostname: ""
+  image:
+    repository: docker.io/redis
+    tag: 8.2
+  redis:
+    port: 6379
+    tlsPort: ~
+    tlsReplication: ~
+    authClients: "no"
+    # Use customConfig to completely override the generated config and avoid TLS
+    customConfig: |
+      port 6379
+      requirepass replace-default-auth
+      masterauth replace-default-auth
+      dir /data
+      save 900 1
+      repl-diskless-sync yes
+      rdbcompression yes
+      rdbchecksum yes
+      maxmemory 0
+      maxmemory-policy volatile-lru
+      min-replicas-to-write 1
+      min-replicas-max-lag 5
+  replicas: 1
+  auth: true
+  existingSecret: statuslist-secret
+  authKey: redis-password
+  persistentVolume:
+    enabled: true
+    storageClass: "standard"
+    accessModes:
+      - ReadWriteOnce
+    size: 5Gi
+  haproxy:
+    enabled: true
+    replicas: 1
+    tls:
+      enabled: false
+      secretName: ""
+      keyName: ""
+    service:
+      type: ClusterIP
+      annotations: {}
+

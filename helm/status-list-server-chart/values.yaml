@@ -93,6 +93,7 @@ postgres:
     port: 5432
 
 externalSecret:
+  enabled: true
   metadata:
     name: statuslist-external-secret
   spec:
@@ -113,6 +114,7 @@ externalSecret:
         key: statuslist-secret
         property: REDIS_PASSWORD
 secretStore:
+  enabled: true
   aws:
     region: eu-central-1
 

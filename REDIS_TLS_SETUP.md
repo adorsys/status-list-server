@@ -2,6 +2,8 @@
 
 This document explains the Redis TLS configuration for the status-list-server deployment, including the challenges encountered and solutions implemented.
 
+> **Note**: For local testing without TLS, see section 5 below and refer to [LOCAL_DEPLOYMENT.md](./LOCAL_DEPLOYMENT.md) for complete local deployment guide.
+
 ## Quick Start
 
 **For Redis TLS with HAProxy:**
@@ -168,6 +170,107 @@ env:
 - `APP_REDIS__REQUIRE_CLIENT_AUTH: "false"` disables client certificate authentication
 - Uses external DNS name that matches certificate CN (`*.eudi-adorsys.com`)
 
+### 5. Local Deployment Without TLS
+
+**Challenge**: When adapting the chart for local testing (minikube), Redis pods were crashing even after disabling TLS settings.
+
+**Problem**: The Redis pod was failing with `CrashLoopBackOff` and showing errors:
+```
+Failed to load certificate: /tls-certs/tls.crt: error:80000002:system library::No such file or directory
+Failed to configure TLS. Check logs for more info.
+```
+
+**Root Cause Analysis**:
+
+The redis-ha chart's configuration generation logic was still adding TLS directives to `redis.conf` even when TLS was supposedly disabled. The chart checks multiple conditions:
+- `redis.tlsPort` value
+- `tls.secretName` value  
+- Chart's internal defaults and template logic
+
+Even when these were set to `null` (`~`) or empty, the chart's template logic was still generating TLS configuration directives in the generated `redis.conf` file, causing Redis to attempt loading TLS certificates that didn't exist.
+
+**Attempted Solutions (That Didn't Work)**:
+
+1. **Setting `tlsPort: ~` and `tlsReplication: ~`** - Chart still generated TLS config
+2. **Removing `tls` section entirely** - Chart still generated TLS config
+3. **Setting `tls.secretName: ~` explicitly** - Chart still generated TLS config
+4. **Creating dummy TLS secret** - Redis still tried to load invalid certificates
+
+**Final Solution**: Use `redis.customConfig` to completely override the generated configuration.
+
+According to the redis-ha chart documentation, when `customConfig` is provided, it completely replaces the generated `redis.conf`, bypassing the chart's TLS detection logic entirely.
+
+**Local Configuration** (`values-local.yml`):
+
+```yaml
+redis-ha:
+  redis:
+    port: 6379
+    tlsPort: ~  # Set to null
+    tlsReplication: ~  # Set to null
+    authClients: "no"
+    # Use customConfig to completely override generated config and avoid TLS
+    customConfig: |
+      port 6379
+      requirepass replace-default-auth
+      masterauth replace-default-auth
+      dir /data
+      save 900 1
+      repl-diskless-sync yes
+      rdbcompression yes
+      rdbchecksum yes
+      maxmemory 0
+      maxmemory-policy volatile-lru
+      min-replicas-to-write 1
+      min-replicas-max-lag 5
+  haproxy:
+    enabled: true
+    tls:
+      enabled: false  # Disable HAProxy TLS for local
+    service:
+      type: ClusterIP  # Use ClusterIP instead of LoadBalancer
+```
+
+**Key Insights**:
+
+1. **`customConfig` Bypasses Chart Logic**: By providing `customConfig`, we completely bypass the chart's config generation, giving full control over the Redis configuration.
+
+2. **No TLS Directives Needed**: The `customConfig` doesn't include any TLS-related directives (`tls-port`, `tls-cert-file`, etc.), so Redis runs in plain mode.
+
+3. **Sentinel Configuration**: Sentinel uses its own separate `sentinel.conf` file, but when `redis.tlsPort` is null and `customConfig` is used, the chart automatically disables TLS for Sentinel as well.
+
+4. **HAProxy TLS**: Must be explicitly disabled with `haproxy.tls.enabled: false` since HAProxy configuration is separate from Redis configuration.
+
+**Verification**:
+
+After applying the `customConfig` solution:
+- ✅ Redis pod starts successfully
+- ✅ No TLS certificate errors in logs
+- ✅ Redis accepts plain TCP connections on port 6379
+- ✅ Sentinel config has no TLS directives
+- ✅ No TLS volumes mounted in the pod
+
+**Production vs Local Comparison**:
+
+| Configuration | Production (EKS) | Local (Minikube) |
+|--------------|------------------|------------------|
+| Redis Config | Generated with TLS | `customConfig` without TLS |
+| `tlsPort` | `6380` | `~` (null) |
+| `tls.secretName` | `statuslist-tls` | Not set |
+| HAProxy TLS | `enabled: true` | `enabled: false` |
+| Service Type | `LoadBalancer` | `ClusterIP` |
+| Connection URI | `rediss://` (TLS) | `redis://` (plain) |
+
+**Why This Solution Works**:
+
+The `customConfig` approach is the most reliable because:
+- It operates at the lowest level (the actual config file)
+- It completely bypasses the chart's template logic
+- It gives explicit control over every Redis configuration directive
+- It prevents any "smart" detection logic from re-enabling TLS
+
+This solution allows the same Helm chart to work in both production (with TLS) and local (without TLS) environments by simply using different values files.
+
 ## Why This Architecture?
 
 ### 1. HAProxy vs Direct Redis TLS
@@ -221,6 +324,7 @@ env:
 2. **DNS resolution fails**: Wait for external-dns propagation
 3. **Certificate validation fails**: Ensure certificate CN matches hostname
 4. **Redis connection fails**: Check HAProxy logs and Redis cluster status
+5. **Local deployment: Redis pod crashes with TLS errors**: See section 5 above - use `customConfig` to override generated config
 
 ### Debug Commands
 
