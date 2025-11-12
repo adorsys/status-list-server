@@ -4,24 +4,19 @@ metadata:
   name: {{ include "status-list-server-chart.fullname" . }}-deployment
   labels:
     app: {{ include "status-list-server-chart.name" . }}
-    {{- include "status-list-server-chart.labels" . | nindent 4 }}
   namespace: {{ .Release.Namespace }}
 spec:
   replicas: {{ .Values.statuslist.replicaCount }}
   selector:
     matchLabels:
       app: {{ include "status-list-server-chart.name" . }}
-      {{- include "status-list-server-chart.selectorLabels" . | nindent 6 }}
   template:
     metadata:
       labels:
         app: {{ include "status-list-server-chart.name" . }}
-        {{- include "status-list-server-chart.selectorLabels" . | nindent 8 }}
     spec:
-      {{- if .Values.statuslist.initContainers }}
       initContainers:
         {{- toYaml .Values.statuslist.initContainers | nindent 8 }}
-      {{- end }}
       containers:
         - name: {{ include "status-list-server-chart.name" . }}
           image: {{ .Values.statuslist.image.repository }}:{{ .Values.statuslist.image.tag }}
@@ -36,7 +31,6 @@ spec:
             - name: POSTGRES_USER
               value: {{ .Values.statuslist.env.POSTGRES_USER | quote }}
             - name: POSTGRES_PASSWORD
-              {{- if .Values.externalSecret.enabled }}
               valueFrom:
                 secretKeyRef:
                   name: {{ if .Values.externalSecret.enabled }}{{ .Values.externalSecret.spec.target.name }}{{ else }}statuslist-secret{{ end }}
@@ -49,12 +43,10 @@ spec:
               value: {{ if .Values.statuslist.ingress.externalDnsHostname }}{{ .Values.statuslist.ingress.externalDnsHostname | quote }}{{ else }}localhost{{ end }}
             - name: APP_ENV
               value: {{ .Values.statuslist.env.APP_ENV | quote }}
-            {{- if .Values.postgres.auth.database }}
             - name: POSTGRES_DB
               value: {{ .Values.postgres.auth.database | quote }}
-            {{- end }}
             - name: APP_DATABASE__URL
-              value: {{ .Values.statuslist.env.APP_DATABASE__URL | quote }}
+              value: "postgres://$(POSTGRES_USER):$(POSTGRES_PASSWORD)@{{ .Release.Name }}-postgres.{{ .Release.Namespace }}.svc.cluster.local:5432/$(POSTGRES_DB)"
             - name: APP_SERVER__HOST
               value: {{ .Values.statuslist.env.APP_SERVER__HOST | quote }}
             - name: APP_SERVER__PORT
@@ -70,17 +62,10 @@ spec:
             - name: APP_REDIS__REQUIRE_CLIENT_AUTH
               value: {{ .Values.statuslist.env.APP_REDIS__REQUIRE_CLIENT_AUTH | quote }}
             - name: REDIS_PASSWORD
-              {{- if .Values.externalSecret.enabled }}
               valueFrom:
                 secretKeyRef:
                   name: {{ if .Values.externalSecret.enabled }}{{ .Values.externalSecret.spec.target.name }}{{ else }}statuslist-secret{{ end }}
                   key: redis-password
-              {{- else }}
-              valueFrom:
-                secretKeyRef:
-                  name: statuslist-secret
-                  key: redis-password
-              {{- end }}
             - name: APP_REDIS__URI
               {{- if and (index .Values "redis-ha" "haproxy" "tls" "enabled") (index .Values "redis-ha" "externalDnsHostname") }}
               value: "rediss://:$(REDIS_PASSWORD)@{{ index .Values "redis-ha" "externalDnsHostname" }}:6379"

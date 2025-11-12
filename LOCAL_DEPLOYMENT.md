@@ -195,24 +195,32 @@ kubectl create secret generic statuslist-secret -n statuslist \
 ### Step 2: Update Helm Dependencies
 
 ```bash
-cd helm/status-list-server-chart
+cd helm/
 helm dependency update
+```
+### Step 3: Update Helm Dependencies
+```bash
+cd ../
+helm install statuslist ./helm 
+  --namespace statuslist   
+  --values ./helm/values-local.yml 
+  --create-namespace
 ```
 
 ### Step 3: Install/Upgrade Chart
 
 ```bash
-cd ../..
-helm install statuslist ./helm/status-list-server-chart \
+helm install statuslist ./helm \
   --namespace statuslist \
-  --values ./helm/status-list-server-chart/values-local.yml
+  --values ./helm/values-local.yml \
+  --create-namespace
 ```
 
 Or for upgrade:
 ```bash
-helm upgrade statuslist ./helm/status-list-server-chart \
-  --namespace statuslist \
-  --values ./helm/status-list-server-chart/values-local.yml
+helm upgrade statuslist ./helm   
+  --namespace statuslist   
+  --values ./helm/values-local.yml
 ```
 
 ### Step 4: Verify Deployment
