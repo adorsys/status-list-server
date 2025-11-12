@@ -1,7 +1,7 @@
 # Status List Server
 
-[![CI](https://github.com/adorsys/status-list-server/actions/workflows/ci.yml/badge.svg)](https://github.com/adorsys/status-list-server/actions/workflows/CI.yml)
-[![CD](https://github.com/adorsys/status-list-server/actions/workflows/deploy.yml/badge.svg)](https://github.com/adorsys/status-list-server/actions/workflows/build-and-deploy.yml)
+[![CI](https://github.com/adorsys/status-list-server/actions/workflows/CI.yml/badge.svg)](https://github.com/adorsys/status-list-server/actions/workflows/CI.yml)
+[![CD](https://github.com/adorsys/status-list-server/actions/workflows/build-and-deploy.yml/badge.svg)](https://github.com/adorsys/status-list-server/actions/workflows/build-and-deploy.yml)
 [![dependencies](https://deps.rs/repo/github/adorsys/status-list-server/status.svg)](https://deps.rs/repo/github/adorsys/status-list-server)
 [![License](https://img.shields.io/github/license/base-org/node?color=blue)](https://github.com/adorsys/status-list-server/blob/main/LICENSE-MIT)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue?style=flat-square)](https://github.com/adorsys/status-list-server/blob/main/LICENSE-APACHE)
