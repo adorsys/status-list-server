@@ -13,7 +13,7 @@ use chrono::Utc;
 use color_eyre::eyre::eyre;
 use instant_acme::{
     Account, AccountCredentials, AuthorizationStatus, HttpClient, Identifier, NewAccount, NewOrder,
-    Order, OrderStatus, RetryPolicy,
+    Order, OrderStatus,
 };
 use rcgen::{
     CertificateParams, DistinguishedName, DnType, ExtendedKeyUsagePurpose, KeyUsagePurpose,
@@ -251,6 +251,8 @@ impl CertManager {
         order: &mut Order,
         cleanup_futures: Vec<CleanupFuture>,
     ) -> Result<(), CertError> {
+        use instant_acme::RetryPolicy;
+
         let state = order.poll_ready(&RetryPolicy::default()).await?;
         let result = if state != OrderStatus::Ready {
             Err(CertError::Other(eyre!(
@@ -420,7 +422,7 @@ impl CertManager {
         let (account, credentials) = Account::builder_with_http(self.create_http_client())
             .create(
                 &NewAccount {
-                    contact: &[&self.email],
+                    contact: &[&format!("mailto:{}", self.email)],
                     terms_of_service_agreed: true,
                     only_return_existing: false,
                 },
