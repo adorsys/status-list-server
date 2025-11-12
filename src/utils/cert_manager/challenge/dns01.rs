@@ -10,7 +10,7 @@ use aws_sdk_route53::{
     Client as Route53Client,
 };
 use color_eyre::eyre::eyre;
-use instant_acme::{Authorization, ChallengeType, Identifier, Order};
+use instant_acme::{AuthorizationHandle, ChallengeType};
 use reqwest::Client;
 use serde_json::json;
 use tokio::sync::RwLock;
@@ -42,32 +42,34 @@ impl Dns01Handler {
 
 #[async_trait]
 impl ChallengeHandler for Dns01Handler {
-    async fn handle_authorization(
-        &self,
-        authz: &Authorization,
-        order: &mut Order,
-    ) -> Result<(String, CleanupFuture), ChallengeError> {
-        let challenge = authz
-            .challenges
-            .iter()
-            .find(|c| c.r#type == ChallengeType::Dns01)
+    async fn handle_authorization<'a>(
+        &'a self,
+        authz: &'a mut AuthorizationHandle<'a>,
+    ) -> Result<CleanupFuture, ChallengeError> {
+        let mut challenge = authz
+            .challenge(ChallengeType::Dns01)
             .ok_or_else(|| ChallengeError::Other(eyre!("No DNS-01 challenge found")))?;
 
-        let digest = order.key_authorization(challenge).dns_value();
-        let domain = match &authz.identifier {
-            Identifier::Dns(domain) => domain.clone(),
-        };
+        let digest = challenge.key_authorization().dns_value();
+        let domain = challenge.identifier().to_string();
+
         // Upsert the DNS record
         self.dns_updater.upsert_record(&domain, &digest).await?;
 
+        // Signal the server we are ready to respond to the challenge
+        challenge.set_ready().await?;
+
         let cleanup = {
             let dns_updater = self.dns_updater.clone();
-            let domain = domain.clone();
             async move { dns_updater.remove_record(&domain, &digest).await }
         };
-        let cleanup_fut = CleanupFuture::new(cleanup);
+        Ok(CleanupFuture::new(cleanup))
+    }
+}
 
-        Ok((challenge.url.clone(), cleanup_fut))
+impl From<instant_acme::Error> for ChallengeError {
+    fn from(err: instant_acme::Error) -> Self {
+        ChallengeError::Other(err.into())
     }
 }
 
