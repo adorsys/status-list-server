@@ -13,7 +13,7 @@ use chrono::Utc;
 use color_eyre::eyre::eyre;
 use instant_acme::{
     Account, AccountCredentials, AuthorizationStatus, HttpClient, Identifier, NewAccount, NewOrder,
-    Order, OrderStatus,
+    Order, OrderStatus, RetryPolicy,
 };
 use rcgen::{
     CertificateParams, DistinguishedName, DnType, ExtendedKeyUsagePurpose, KeyUsagePurpose,
@@ -163,6 +163,8 @@ impl CertManager {
         )
     )]
     pub async fn request_certificate(&self) -> Result<CertificateData, CertError> {
+        use instant_acme::RetryPolicy;
+
         let cert_storage = self
             .cert_storage
             .as_ref()
@@ -189,24 +191,19 @@ impl CertManager {
         // Create the ACME order based on the given domain name(s).
         let mut order = account.new_order(&NewOrder::new(&identifiers)).await?;
 
-        let mut cleanup_futures = Vec::new();
+        let mut cleanup_futures = vec![];
         // Process the authorizations
-        for authz in order.authorizations().await? {
+        let mut authorizations = order.authorizations();
+        while let Some(authz_result) = authorizations.next().await {
+            let mut authz = authz_result?;
+
             // Skip already valid authorizations
             if authz.status == AuthorizationStatus::Valid {
-                info!(
-                    "Authorization for {:?} is already valid. Skipping...",
-                    authz.identifier
-                );
                 continue;
             }
 
             // Handle the ACME challenge
-            let (challenge_url, cleanup_future) = challenge_handler
-                .handle_authorization(&authz, &mut order)
-                .await?;
-            // Signal the server we are ready to respond to the challenge
-            order.set_challenge_ready(&challenge_url).await?;
+            let cleanup_future = challenge_handler.handle_authorization(&mut authz).await?;
             cleanup_futures.push(cleanup_future);
         }
 
@@ -219,12 +216,7 @@ impl CertManager {
 
         // Finalize the order and try to get the certificate
         order.finalize_csr(&csr_der_bytes).await?;
-        let cert_chain_pem = loop {
-            match order.certificate().await? {
-                Some(cert_chain_pem) => break cert_chain_pem,
-                None => sleep(Duration::from_secs(1)).await,
-            }
-        };
+        let cert_chain_pem = order.poll_certificate(&RetryPolicy::default()).await?;
 
         let parsed_cert_pem = self.parse_cert_pem(&cert_chain_pem)?;
         let x509 = parsed_cert_pem.parse_x509().map_err(|e| {
@@ -259,37 +251,15 @@ impl CertManager {
         order: &mut Order,
         cleanup_futures: Vec<CleanupFuture>,
     ) -> Result<(), CertError> {
-        use tokio::time::{sleep, timeout};
-
-        const RETRY_DELAY: Duration = Duration::from_secs(2);
-        const TIMEOUT: Duration = Duration::from_secs(300);
-
-        let poll_future = async {
-            loop {
-                order.refresh().await?;
-                match order.state().status {
-                    OrderStatus::Ready => return Ok(()),
-                    OrderStatus::Invalid => {
-                        return Err(CertError::Other(eyre!(
-                            "Order with url {} for domains {:?} has been invalidated",
-                            order.url(),
-                            self.domains
-                        )));
-                    }
-                    _ => sleep(RETRY_DELAY).await,
-                }
-            }
-        };
-
-        let result = match timeout(TIMEOUT, poll_future).await {
-            Ok(result) => match result {
-                Ok(()) => Ok(()),
-                Err(e) => Err(e),
-            },
-            Err(_) => Err(CertError::Other(eyre!(
-                "Order validation timed out after {}s",
-                TIMEOUT.as_secs()
-            ))),
+        let state = order.poll_ready(&RetryPolicy::default()).await?;
+        let result = if state != OrderStatus::Ready {
+            Err(CertError::Other(eyre!(
+                "Order with url {} for domains {:?} has been invalidated",
+                order.url(),
+                self.domains
+            )))
+        } else {
+            Ok(())
         };
 
         // perform clean up, regardless of success or failure
@@ -431,7 +401,10 @@ impl CertManager {
             info!("Found existing credentials. Trying to load account...");
             let credentials: AccountCredentials = serde_json::from_str(&credentials)?;
             let http_client = self.create_http_client();
-            match Account::from_credentials_and_http(credentials, http_client).await {
+            match Account::builder_with_http(http_client)
+                .from_credentials(credentials)
+                .await
+            {
                 Ok(account) => {
                     info!("Account successfully loaded");
                     *client_guard = Some(account.clone());
@@ -444,17 +417,17 @@ impl CertManager {
             }
         }
         // Create a new ACME account
-        let (account, credentials) = Account::create_with_http(
-            &NewAccount {
-                contact: &[&format!("mailto:{}", self.email)],
-                terms_of_service_agreed: true,
-                only_return_existing: false,
-            },
-            &self.acme_directory_url,
-            None,
-            self.create_http_client(),
-        )
-        .await?;
+        let (account, credentials) = Account::builder_with_http(self.create_http_client())
+            .create(
+                &NewAccount {
+                    contact: &[&self.email],
+                    terms_of_service_agreed: true,
+                    only_return_existing: false,
+                },
+                self.acme_directory_url.clone(),
+                None,
+            )
+            .await?;
         // Store new credentials
         secrets_storage
             .store(&account_id, &serde_json::to_string(&credentials)?)
