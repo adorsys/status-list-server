@@ -1,0 +1,84 @@
+config:
+  target: "http://localhost:8000"
+  phases:
+    - duration: 180
+      arrivalRate: 50
+      name: "Stage 1 - 100 concurrent users"
+    - duration: 300
+      arrivalRate: 100
+      name: "Stage 2 - 200 concurrent users"
+    - duration: 480
+      arrivalRate: 175
+      name: "Stage 3 - 350 concurrent users (STRESS)"
+    - duration: 300
+      arrivalRate: 250
+      name: "Stage 4 - 500 concurrent users (PEAK STRESS)"
+    - duration: 180
+      arrivalRate: 100
+      name: "Stage 5 - Scale back to 200"
+    - duration: 180
+      arrivalRate: 0
+      name: "Stage 6 - Ramp down"
+  
+  processor: "./processor.js"
+  
+  ensure:
+    maxErrorRate: 25                   # Lenient for stress test
+    p99: 3000                          # 99th percentile < 3s
+  
+  plugins:
+    expect: {}
+    metrics-by-endpoint:
+      stripQueryString: true
+
+scenarios:
+  - name: "Health Check - Lightweight"
+    weight: 25
+    flow:
+      - get:
+          url: "/health"
+          expect:
+            - statusCode: 200
+            - contentType: text/plain; charset=utf-8
+            - equals:
+                - "OK"
+
+  - name: "Welcome Endpoint"
+    weight: 20
+    flow:
+      - get:
+          url: "/"
+          expect:
+            - statusCode: 200
+            - contentType: text/plain; charset=utf-8
+
+  - name: "Multiple Status List Queries - Database Load"
+    weight: 30
+    flow:
+      - loop:
+          - function: "generateRandomListId"
+          - get:
+              url: "/statuslists/{{ listId }}"
+              expect:
+                - statusCode:
+                    - 200
+                    - 404
+          - think: 0.2
+        count: 3
+
+  - name: "Concurrent Credential Registrations"
+    weight: 25
+    flow:
+      - function: "generateIssuerPayload"
+      - post:
+          url: "/credentials"
+          json:
+            issuer: "{{ issuer }}"
+            public_key: "{{ publicKey }}"
+            alg: "ES256"
+          expect:
+            - statusCode:
+                - 202
+                - 409
+          afterResponse: "handleCredentialResponse"
+      - think: 0.5

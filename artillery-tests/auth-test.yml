@@ -1,0 +1,122 @@
+config:
+  target: "http://localhost:8000"
+  phases:
+    - duration: 30
+      arrivalRate: 5
+      name: "Warm up - 10 users"
+    - duration: 120
+      arrivalRate: 25
+      name: "Ramp up - 50 users"
+    - duration: 180
+      arrivalRate: 50
+      name: "Peak load - 100 users"
+    - duration: 120
+      arrivalRate: 25
+      name: "Scale down - 50 users"
+    - duration: 60
+      arrivalRate: 0
+      name: "Cool down"
+  
+  processor: "./processor.js"
+  
+  ensure:
+    maxErrorRate: 5                    # Max 5% error rate (excluding expected 401s)
+    p95: 2000                          # 95th percentile < 2s
+  
+  plugins:
+    expect: {}
+    metrics-by-endpoint: {}
+
+scenarios:
+  - name: "Register Issuer (Setup)"
+    weight: 5
+    flow:
+      - function: "loadTestData"  # Load tokens first
+      - post:
+          url: "/credentials"
+          json:
+            issuer: "{{ issuerId }}"
+            public_key: "{{ publicKey }}"
+            alg: "ES256"
+          expect:
+            - statusCode:
+                - 202  # Accepted
+                - 409  # Already exists (acceptable)
+          afterResponse: "handleCredentialResponse"
+
+  - name: "Authenticated Publish Flow"
+    weight: 40
+    flow:
+      - function: "loadTestData"
+      - function: "selectRandomToken"
+      - function: "generateUUID"
+      - post:
+          url: "/statuslists/publish"
+          headers:
+            Authorization: "Bearer {{ token }}"
+          json:
+            list_id: "{{ listId }}"
+            status:
+              - index: 1
+                status: "VALID"
+              - index: 2
+                status: "INVALID"
+              - index: 3
+                status: "SUSPENDED"
+          expect:
+            - statusCode: 201
+          afterResponse: "handlePublishResponse"
+      - think: 1
+
+  - name: "Authenticated Update Flow"
+    weight: 40
+    flow:
+      - function: "loadTestData"
+      - function: "selectRandomToken"
+      - function: "generateUUID"
+      # First publish
+      - post:
+          url: "/statuslists/publish"
+          headers:
+            Authorization: "Bearer {{ token }}"
+          json:
+            list_id: "{{ listId }}"
+            status:
+              - index: 1
+                status: "VALID"
+          expect:
+            - statusCode: 201
+      # Then update
+      - think: 0.5
+      - patch:
+          url: "/statuslists/update"
+          headers:
+            Authorization: "Bearer {{ token }}"
+          json:
+            list_id: "{{ listId }}"
+            status:
+              - index: 1
+                status: "INVALID"
+              - index: 2
+                status: "VALID"
+          expect:
+            - statusCode: 200
+          afterResponse: "handleUpdateResponse"
+      - think: 1
+
+  - name: "Test Unauthorized Access (Expected 401)"
+    weight: 15
+    flow:
+      - function: "generateUUID"
+      - post:
+          url: "/statuslists/publish"
+          # NO Authorization header
+          json:
+            list_id: "{{ listId }}"
+            status:
+              - index: 0
+                status: "VALID"
+          expect:
+            - statusCode: 401  # Expected!
+          afterResponse: "handleUnauthorizedResponse"
+      - think: 1

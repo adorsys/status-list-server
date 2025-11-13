@@ -1,0 +1,23 @@
+{
+  "name": "status-list-performance-tests",
+  "version": "1.0.0",
+  "description": "Performance tests for Status List Server using Artillery",
+  "scripts": {
+    "generate-tokens": "node token-generator.js",
+    "test:load": "artillery run artillery-tests/load-test.yml",
+    "test:stress": "artillery run artillery-tests/stress-test.yml",
+    "test:spike": "artillery run artillery-tests/spike-test.yml",
+    "test:auth": "artillery run artillery-tests/auth-test.yml",
+    "test:all": "npm run test:load && npm run test:stress && npm run test:spike && npm run test:auth",
+    "test:load:report": "artillery run --output artillery-tests/results/load-test.json artillery-tests/load-test.yml && artillery report artillery-tests/results/load-test.json",
+    "test:stress:report": "artillery run --output artillery-tests/results/stress-test.json artillery-tests/stress-test.yml && artillery report artillery-tests/results/stress-test.json",
+    "test:spike:report": "artillery run --output artillery-tests/results/spike-test.json artillery-tests/spike-test.yml && artillery report artillery-tests/results/spike-test.json",
+    "test:auth:report": "artillery run --output artillery-tests/results/auth-test.json artillery-tests/auth-test.yml && artillery report artillery-tests/results/auth-test.json"
+  },
+  "devDependencies": {
+    "artillery": "^2.0.0"
+  },
+  "dependencies": {
+    "jsonwebtoken": "^9.0.2"
+  }
+}
