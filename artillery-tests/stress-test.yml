@@ -19,13 +19,13 @@ config:
     - duration: 180
       arrivalRate: 0
       name: "Stage 6 - Ramp down"
-  
+
   processor: "./processor.js"
-  
+
   ensure:
-    maxErrorRate: 25                   # Lenient for stress test
-    p99: 3000                          # 99th percentile < 3s
-  
+    maxErrorRate: 25 # Lenient for stress test
+    p99: 3000 # 99th percentile < 3s
+
   plugins:
     expect: {}
     metrics-by-endpoint:

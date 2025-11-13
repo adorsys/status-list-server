@@ -16,15 +16,15 @@ config:
     - duration: 60
       arrivalRate: 5
       name: "Cool down - 5 users/sec"
-  
+
   processor: "./processor.js"
-  
+
   # Performance thresholds
   ensure:
-    maxErrorRate: 5                    # Max 5% error rate
-    p95: 800                           # 95th percentile < 800ms
-    p99: 1500                          # 99th percentile < 1.5s
-  
+    maxErrorRate: 5 # Max 5% error rate
+    p95: 800 # 95th percentile < 800ms
+    p99: 1500 # 99th percentile < 1.5s
+
   # Custom metrics
   plugins:
     expect: {}
@@ -50,7 +50,7 @@ scenarios:
           expect:
             - statusCode: 200
             - contentType: text/plain; charset=utf-8
-            - matchesRegexp: "Status.*Server"  # Matches "Status list Server" or similar
+            - matchesRegexp: "Status.*Server" # Matches "Status list Server" or similar
 
   - name: "Status List Retrieval Flow"
     weight: 30
@@ -59,9 +59,9 @@ scenarios:
       - get:
           url: "/statuslists/{{ listId }}"
           expect:
-            - statusCode: 
+            - statusCode:
                 - 200
-                - 404  # 404 is expected for non-existent lists
+                - 404 # 404 is expected for non-existent lists
           afterResponse: "handleStatusListResponse"
 
   - name: "Credential Registration Flow"
@@ -76,6 +76,6 @@ scenarios:
             alg: "ES256"
           expect:
             - statusCode:
-                - 202  # Accepted
-                - 409  # Conflict (duplicate) is acceptable
+                - 202 # Accepted
+                - 409 # Conflict (duplicate) is acceptable
           afterResponse: "handleCredentialResponse"

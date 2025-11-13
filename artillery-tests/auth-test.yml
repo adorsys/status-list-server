@@ -16,13 +16,13 @@ config:
     - duration: 60
       arrivalRate: 0
       name: "Cool down"
-  
+
   processor: "./processor.js"
-  
+
   ensure:
-    maxErrorRate: 5                    # Max 5% error rate (excluding expected 401s)
-    p95: 2000                          # 95th percentile < 2s
-  
+    maxErrorRate: 5 # Max 5% error rate (excluding expected 401s)
+    p95: 2000 # 95th percentile < 2s
+
   plugins:
     expect: {}
     metrics-by-endpoint: {}
@@ -31,7 +31,7 @@ scenarios:
   - name: "Register Issuer (Setup)"
     weight: 5
     flow:
-      - function: "loadTestData"  # Load tokens first
+      - function: "loadTestData" # Load tokens first
       - post:
           url: "/credentials"
           json:
@@ -40,8 +40,8 @@ scenarios:
             alg: "ES256"
           expect:
             - statusCode:
-                - 202  # Accepted
-                - 409  # Already exists (acceptable)
+                - 202 # Accepted
+                - 409 # Already exists (acceptable)
           afterResponse: "handleCredentialResponse"
 
   - name: "Authenticated Publish Flow"
@@ -117,6 +117,6 @@ scenarios:
               - index: 0
                 status: "VALID"
           expect:
-            - statusCode: 401  # Expected!
+            - statusCode: 401 # Expected!
           afterResponse: "handleUnauthorizedResponse"
       - think: 1

@@ -24,13 +24,13 @@ config:
     - duration: 120
       arrivalRate: 0
       name: "Complete ramp down"
-  
+
   processor: "./processor.js"
-  
+
   ensure:
-    maxErrorRate: 20                   # Max 20% during spikes
-    p95: 2000                          # 95th percentile < 2s
-  
+    maxErrorRate: 20 # Max 20% during spikes
+    p95: 2000 # 95th percentile < 2s
+
   plugins:
     expect: {}
     metrics-by-endpoint: {}
@@ -44,7 +44,7 @@ scenarios:
           expect:
             - statusCode: 200
             - contentType: text/plain; charset=utf-8
-            - responseTime: 100        # Must respond in < 100ms
+            - responseTime: 100 # Must respond in < 100ms
             - equals:
                 - "OK"
 
@@ -72,7 +72,7 @@ scenarios:
             - statusCode:
                 - 202
                 - 409
-          ifTrue: "shouldRegister"  # Only 30% of requests
+          ifTrue: "shouldRegister" # Only 30% of requests
       - think: 0.3
 
   - name: "Random Status List Retrieval"
@@ -84,6 +84,6 @@ scenarios:
           expect:
             - statusCode:
                 - 200
-                - 404  # Expected for non-existent lists
+                - 404 # Expected for non-existent lists
             - responseTime: 1000
       - think: 0.3
