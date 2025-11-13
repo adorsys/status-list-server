@@ -31,9 +31,9 @@ const now = Math.floor(Date.now() / 1000);
 for (let i = 0; i < 100; i++) {
   const token = jwt.sign(
     {
-      iss: issuerId,  // ✅ Added issuer claim
+      iss: issuerId,
       iat: now,
-      exp: now + (365 * 24 * 60 * 60)  // ✅ Fixed: 1 year from now
+      exp: now + (365 * 24 * 60 * 60)
     },
     privateKey,
     {

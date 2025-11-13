@@ -1,5 +1,6 @@
 const crypto = require('crypto');
 const path = require('path');
+const fs = require('fs');
 
 // Load test tokens
 let testTokens = null;
@@ -12,10 +13,13 @@ try {
 }
 
 // EC Public Key for credential registration
-const TEST_PUBLIC_KEY = `-----BEGIN PUBLIC KEY-----
-MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEZJSQEClLuQcUZvwp6aJNRHZ0UlBH
-pq6E5gZFqH1pbejQurPrP+tvZk6YuZ+Cf9gm8oof/RTa4FHhIcz8bvjiQA==
------END PUBLIC KEY-----`;
+let TEST_PUBLIC_KEY = '';
+try {
+  TEST_PUBLIC_KEY = fs.readFileSync(path.resolve(__dirname, 'ec-public-key.pem'), 'utf8');
+} catch (error) {
+  console.error('⚠️  Could not load ec-public-key.pem. Make sure it exists!');
+  console.error('Error:', error.message);
+}
 
 // Counters for debugging
 let successCount = 0;
@@ -23,18 +27,17 @@ let errorCount = 0;
 
 /**
  * Load test data (tokens, issuer, public key) into context
- * This must be called before any authenticated requests
  */
 function loadTestData(context, events, done) {
   if (!testTokens) {
     return done(new Error('Test tokens not loaded. Run token-generator.js first!'));
   }
-  
+
   // Make tokens available to the scenario
   context.vars.issuerId = testTokens.issuerId;
   context.vars.publicKey = testTokens.publicKey;
   context.vars.allTokens = testTokens.tokens;
-  
+
   return done();
 }
 
@@ -44,10 +47,10 @@ function loadTestData(context, events, done) {
 function generateIssuerPayload(context, events, done) {
   const timestamp = Date.now();
   const randomStr = Math.random().toString(36).substring(2, 12);
-  
+
   context.vars.issuer = `load-test-issuer-${timestamp}-${randomStr}`;
   context.vars.publicKey = TEST_PUBLIC_KEY;
-  
+
   return done();
 }
 
@@ -59,10 +62,10 @@ function selectRandomToken(context, events, done) {
     console.error('No test tokens available in context!');
     return done(new Error('Test tokens not loaded'));
   }
-  
+
   const randomIndex = Math.floor(Math.random() * context.vars.allTokens.length);
   context.vars.token = context.vars.allTokens[randomIndex];
-  
+
   return done();
 }
 
@@ -93,10 +96,10 @@ function selectRandomListId(context, events, done) {
     'non-existent-list',
     `random-${Math.random().toString(36).substring(2, 11)}`
   ];
-  
+
   const randomIndex = Math.floor(Math.random() * listIds.length);
   context.vars.listId = listIds[randomIndex];
-  
+
   return done();
 }
 
