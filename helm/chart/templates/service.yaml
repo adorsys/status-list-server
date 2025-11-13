@@ -1,9 +1,9 @@
 apiVersion: v1
 kind: Service
 metadata:
-  name: {{ include "status-list-server-chart.fullname" . }}-service
+  name: {{ include "chart.fullname" . }}-service
   labels:
-    app: {{ include "status-list-server-chart.name" . }}
+    app: {{ include "chart.name" . }}
   namespace: {{ .Release.Namespace }}
 spec:
   type: {{ .Values.statuslist.service.type }}
@@ -13,4 +13,4 @@ spec:
     targetPort: {{ .Values.statuslist.service.targetPort }}
     protocol: TCP
   selector:
-    app: {{ include "status-list-server-chart.name" . }}
+    app: {{ include "chart.name" . }}

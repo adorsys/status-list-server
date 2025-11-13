@@ -1,24 +1,24 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: {{ include "status-list-server-chart.fullname" . }}-deployment
+  name: {{ include "chart.fullname" . }}-deployment
   labels:
-    app: {{ include "status-list-server-chart.name" . }}
+    app: {{ include "chart.name" . }}
   namespace: {{ .Release.Namespace }}
 spec:
   replicas: {{ .Values.statuslist.replicaCount }}
   selector:
     matchLabels:
-      app: {{ include "status-list-server-chart.name" . }}
+      app: {{ include "chart.name" . }}
   template:
     metadata:
       labels:
-        app: {{ include "status-list-server-chart.name" . }}
+        app: {{ include "chart.name" . }}
     spec:
       initContainers:
         {{- toYaml .Values.statuslist.initContainers | nindent 8 }}
       containers:
-        - name: {{ include "status-list-server-chart.name" . }}
+        - name: {{ include "chart.name" . }}
           image: {{ .Values.statuslist.image.repository }}:{{ .Values.statuslist.image.tag }}
           imagePullPolicy: {{ .Values.statuslist.image.pullPolicy }}
           ports:

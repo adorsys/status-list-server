@@ -21,7 +21,7 @@ This document explains the Redis TLS configuration for the status-list-server de
 2. **Deploy:**
 
    ```bash
-   helm upgrade statuslist ./helm/status-list-server-chart --namespace statuslist
+   helm upgrade statuslist ./helm/chart --namespace statuslist
    ```
 
 3. **Verify:**
