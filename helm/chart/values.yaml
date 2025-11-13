@@ -21,7 +21,7 @@ statuslist:
     command:
     - "sh"
     - "-c"
-    - |
+    - | 
       echo "Waiting for Redis vanity DNS to resolve..."
       until nslookup redis.eudi-adorsys.com >/dev/null 2>&1; do
         echo "redis.eudi-adorsys.com not resolvable yet. Retrying in 2s...";
