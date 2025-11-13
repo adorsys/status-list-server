@@ -6,9 +6,8 @@ pub use http01::Http01Handler;
 
 use std::{future::Future, pin::Pin};
 
-use async_trait::async_trait;
 use color_eyre::eyre::Error as Report;
-use instant_acme::{Authorization, Order};
+use instant_acme::AuthorizationHandle;
 
 use crate::cert_manager::storage::StorageError;
 
@@ -34,16 +33,15 @@ pub enum ChallengeError {
 }
 
 /// Abstract interface for handling ACME challenges
-#[async_trait]
+#[async_trait::async_trait]
 pub trait ChallengeHandler: Send + Sync {
     /// Handle the ACME challenge for the given authorization and order
     ///
     /// Returns a tuple containing the challenge url and a cleanup future
-    async fn handle_authorization(
-        &self,
-        authz: &Authorization,
-        order: &mut Order,
-    ) -> Result<(String, CleanupFuture), ChallengeError>;
+    async fn handle_authorization<'a>(
+        &'a self,
+        authz: &'a mut AuthorizationHandle<'a>,
+    ) -> Result<CleanupFuture, ChallengeError>;
 }
 
 type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
