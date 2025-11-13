@@ -33,12 +33,14 @@ spec:
             - name: POSTGRES_PASSWORD
               valueFrom:
                 secretKeyRef:
-                  name: {{ .Values.externalSecret.spec.target.name }}
+                  name: {{ if .Values.externalSecret.enabled }}{{ .Values.externalSecret.spec.target.name }}{{ else }}statuslist-secret{{ end }}
                   key: postgres-password
+            {{- if .Values.secretStore.enabled }}
             - name: APP_AWS__REGION
               value: {{ .Values.secretStore.aws.region | quote }}
+            {{- end }}
             - name: APP_SERVER__DOMAIN
-              value: {{ .Values.statuslist.ingress.externalDnsHostname | quote }}
+              value: {{ if .Values.statuslist.ingress.externalDnsHostname }}{{ .Values.statuslist.ingress.externalDnsHostname | quote }}{{ else }}localhost{{ end }}
             - name: APP_ENV
               value: {{ .Values.statuslist.env.APP_ENV | quote }}
             - name: POSTGRES_DB
@@ -62,19 +64,27 @@ spec:
             - name: REDIS_PASSWORD
               valueFrom:
                 secretKeyRef:
-                  name: {{ .Values.externalSecret.spec.target.name }}
+                  name: {{ if .Values.externalSecret.enabled }}{{ .Values.externalSecret.spec.target.name }}{{ else }}statuslist-secret{{ end }}
                   key: redis-password
             - name: APP_REDIS__URI
+              {{- if and (index .Values "redis-ha" "haproxy" "tls" "enabled") (index .Values "redis-ha" "externalDnsHostname") }}
               value: "rediss://:$(REDIS_PASSWORD)@{{ index .Values "redis-ha" "externalDnsHostname" }}:6379"
+              {{- else }}
+              value: "redis://:$(REDIS_PASSWORD)@{{ .Release.Name }}-redis-ha-haproxy.{{ .Release.Namespace }}.svc.cluster.local:6379"
+              {{- end }}
             - name: APP_CACHE__TTL
               value: {{ .Values.statuslist.env.APP_CACHE__TTL | quote }}
             - name: APP_CACHE__MAX_CAPACITY
               value: {{ .Values.statuslist.env.APP_CACHE__MAX_CAPACITY | quote }}
+          {{- if .Values.secretStore.enabled }}
           volumeMounts:
             - name: aws-credentials-volume
               mountPath: /root/.aws
               readOnly: true
+          {{- end }}
+      {{- if .Values.secretStore.enabled }}
       volumes:
         - name: aws-credentials-volume
           secret:
             secretName: aws-credentials-secret
+      {{- end }}

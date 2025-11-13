@@ -4,6 +4,7 @@ metadata:
   name: {{ include "status-list-server-chart.fullname" . }}-service
   labels:
     app: {{ include "status-list-server-chart.name" . }}
+    app.kubernetes.io/name: {{ include "status-list-server-chart.name" . }}
   namespace: {{ .Release.Namespace }}
 spec:
   type: {{ .Values.statuslist.service.type }}
