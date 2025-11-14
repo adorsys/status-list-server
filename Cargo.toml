@@ -9,10 +9,9 @@ tokio = { version = "1", features = ["full"] }
 async-trait = "0.1"
 
 # Web frameworks
-hyper = "1.6"
+hyper = "1.7"
 hyper-util = "0.1"
 reqwest = "0.12"
-http-body-util = "0.1"
 tower = "0.5"
 hyper-rustls = { version = "0.27", features = ["http2"] }
 axum = { version = "0.8", features = ["macros"] }
@@ -33,14 +32,14 @@ moka = { version = "0.12", features = ["future"] }
 # Cryptography and Security
 rand = "0.9"
 pem = "3"
-coset = "0.3"
-instant-acme = "0.7"
-jsonwebtoken = "9.3"
+coset = "0.4"
+instant-acme = "0.8"
 rustls = "0.23"
 webpki-roots = "1"
-rustls-pki-types = "1.12"
+rustls-pki-types = "1.13"
 secrecy = { version = "0.10", features = ["serde"] }
-rcgen = { version = "0.13", features = ["pem"] }
+rcgen = { version = "0.14", features = ["pem"] }
+jsonwebtoken = { version = "10", features = ["aws_lc_rs"] }
 
 # Serialization
 serde_json = "1.0"
@@ -52,11 +51,11 @@ config = "0.15"
 dotenvy = "0.15"
 
 # AWS related libraries
-aws-config = "1.6"
-aws-sdk-s3 = "1.88"
-aws-sdk-route53 = "1.79"
-aws-sdk-secretsmanager = "1.68"
-aws_secretsmanager_caching = "1.2"
+aws-config = "1"
+aws-sdk-s3 = "1"
+aws-sdk-route53 = "1"
+aws-sdk-secretsmanager = "1"
+aws_secretsmanager_caching = "2"
 
 # Logging and Tracing
 tracing = "0.1"
@@ -71,13 +70,13 @@ uuid = "1"
 base64 = "0.22"
 chrono = "0.4"
 base64url = "0.1"
-flate2 = "1.1.0"
-x509-parser = "0.17"
+flate2 = "1.1"
+x509-parser = "0.18"
 public-suffix = "0.1"
-tokio-cron-scheduler = "0.14"
+tokio-cron-scheduler = "0.15"
 
 [dependencies.redis]
-version = "0.31"
+version = "0.32"
 features = ["tokio-rustls-comp", "connection-manager"]
 
 [dependencies.p256]

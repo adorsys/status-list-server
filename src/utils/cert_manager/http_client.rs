@@ -1,14 +1,13 @@
 use std::{future::Future, pin::Pin};
 
 use axum::body::Bytes;
-use http_body_util::Full;
 use hyper::Request;
 use hyper_rustls::{HttpsConnector, HttpsConnectorBuilder};
 use hyper_util::{
     client::legacy::{connect::HttpConnector, Client},
     rt::TokioExecutor,
 };
-use instant_acme::{BytesResponse, Error, HttpClient};
+use instant_acme::{BodyWrapper, BytesResponse, Error, HttpClient};
 use rustls::{ClientConfig, RootCertStore};
 use rustls_pki_types::{pem::PemObject, CertificateDer};
 
@@ -28,13 +27,13 @@ impl DefaultHttpClient {
 impl HttpClient for DefaultHttpClient {
     fn request(
         &self,
-        req: Request<Full<Bytes>>,
+        req: Request<BodyWrapper<Bytes>>,
     ) -> Pin<Box<dyn Future<Output = Result<BytesResponse, Error>> + Send>> {
         let future = self.0.client.request(req);
         Box::pin(async move {
             match future.await {
-                Ok(resp) => Ok(BytesResponse::from(resp)),
-                Err(err) => Err(err.into()),
+                Ok(response) => Ok(BytesResponse::from(response)),
+                Err(e) => Err(Error::Other(Box::new(e))),
             }
         })
     }
@@ -42,7 +41,7 @@ impl HttpClient for DefaultHttpClient {
 
 #[derive(Clone)]
 struct ClientInner {
-    client: Client<HttpsConnector<HttpConnector>, Full<Bytes>>,
+    client: Client<HttpsConnector<HttpConnector>, BodyWrapper<Bytes>>,
 }
 
 impl ClientInner {

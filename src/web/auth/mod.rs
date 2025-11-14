@@ -25,6 +25,8 @@ pub async fn auth(
     mut request: Request<Body>,
     next: Next,
 ) -> Result<impl IntoResponse, AuthenticationError> {
+    use jsonwebtoken::dangerous::insecure_decode;
+
     // Try to extract token from Authorization header
     let token = request
         .headers()
@@ -34,12 +36,7 @@ pub async fn auth(
         .ok_or(AuthenticationError::InvalidAuthorizationHeader)?;
 
     // We decode without verification to get the issuer
-    let mut validation = Validation::default();
-    validation.insecure_disable_signature_validation();
-    let issuer =
-        jsonwebtoken::decode::<Claims>(token, &DecodingKey::from_secret(&[]), &validation)?
-            .claims
-            .iss;
+    let issuer = insecure_decode::<Claims>(token)?.claims.iss;
 
     // Check if issuer is in database and get its credentials
     let credential = &state
