@@ -30,9 +30,7 @@ kubectl create secret generic statuslist-secret -n local \
 
 ```bash
 helm dependency update ./helm/chart
-helm install statuslist-local ./helm/chart \
-  -n local --create-namespace \
-  -f ./helm/chart/values-local.yaml
+helm install statuslist-local ./helm/chart -n local -f ./helm/chart/values-local.yaml
 ```
 
 ## 5. Verify Pods
