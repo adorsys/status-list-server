@@ -3,6 +3,8 @@ apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
   name: {{ include "status-list-server-chart.fullname" . }}-ingress
+  labels:
+    {{- include "status-list-server-chart.labels" . | nindent 4 }}
   namespace: {{ .Release.Namespace }}
   {{- if .Values.statuslist.ingress.externalDnsHostname }}
   annotations:

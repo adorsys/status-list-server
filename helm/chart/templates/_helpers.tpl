@@ -46,6 +46,7 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
 Selector labels
 */}}
 {{- define "status-list-server-chart.selectorLabels" -}}
+app: {{ include "status-list-server-chart.name" . }}
 app.kubernetes.io/name: {{ include "status-list-server-chart.name" . }}
 app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end }}
@@ -59,4 +60,27 @@ Create the name of the service account to use
 {{- else }}
 {{- default "default" .Values.serviceAccount.name }}
 {{- end }}
+{{- end }}
+
+{{/*
+Resolve the Redis connection URI based on chart values.
+*/}}
+{{- define "status-list-server-chart.redisUri" -}}
+{{- $redisHA := index .Values "redis-ha" | default dict -}}
+{{- $redisCfg := index $redisHA "redis" | default dict -}}
+{{- $haproxy := index $redisHA "haproxy" | default dict -}}
+{{- $haproxyEnabled := default true (index $haproxy "enabled") -}}
+{{- $haproxyTls := index $haproxy "tls" | default dict -}}
+{{- $tlsEnabled := and $haproxyEnabled (eq (default false (index $haproxyTls "enabled")) true) -}}
+{{- $externalHostname := default "" (index $redisHA "externalDnsHostname") -}}
+{{- $port := default 6379 (index $redisCfg "port") -}}
+{{- $scheme := ternary "rediss" "redis" $tlsEnabled -}}
+{{- $host := printf "%s-redis-ha-haproxy.%s.svc.cluster.local" .Release.Name .Release.Namespace -}}
+{{- if not $haproxyEnabled }}
+  {{- $host = printf "%s-redis-ha.%s.svc.cluster.local" .Release.Name .Release.Namespace -}}
+{{- end }}
+{{- if and $tlsEnabled (ne $externalHostname "") }}
+  {{- $host = $externalHostname -}}
+{{- end }}
+{{- printf "%s://:$(REDIS_PASSWORD)@%s:%v" $scheme $host $port -}}
 {{- end }}

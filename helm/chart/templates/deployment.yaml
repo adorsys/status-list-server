@@ -1,22 +1,25 @@
+{{- if .Values.statuslist.enabled }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: {{ include "status-list-server-chart.fullname" . }}-deployment
   labels:
-    app: {{ include "status-list-server-chart.name" . }}
+    {{- include "status-list-server-chart.labels" . | nindent 4 }}
   namespace: {{ .Release.Namespace }}
 spec:
   replicas: {{ .Values.statuslist.replicaCount }}
   selector:
     matchLabels:
-      app: {{ include "status-list-server-chart.name" . }}
+      {{- include "status-list-server-chart.selectorLabels" . | nindent 6 }}
   template:
     metadata:
       labels:
-        app: {{ include "status-list-server-chart.name" . }}
+        {{- include "status-list-server-chart.labels" . | nindent 8 }}
     spec:
+      {{- with .Values.statuslist.initContainers }}
       initContainers:
-        {{- toYaml .Values.statuslist.initContainers | nindent 8 }}
+        {{- tpl (toYaml .) $ | nindent 8 }}
+      {{- end }}
       containers:
         - name: {{ include "status-list-server-chart.name" . }}
           image: {{ .Values.statuslist.image.repository }}:{{ .Values.statuslist.image.tag }}
@@ -26,10 +29,21 @@ spec:
               containerPort: {{ .Values.statuslist.service.targetPort | int }}
               protocol: TCP
           env:
-            - name: RUST_LOG
-              value: {{ .Values.statuslist.env.RUST_LOG | quote }}
-            - name: POSTGRES_USER
-              value: {{ .Values.statuslist.env.POSTGRES_USER | quote }}
+            {{- $env := dict }}
+            {{- range $name, $value := .Values.statuslist.env }}
+            {{- $_ := set $env $name $value }}
+            {{- end }}
+            {{- if not (hasKey $env "APP_SERVER__DOMAIN") }}
+              {{- if .Values.statuslist.ingress.externalDnsHostname }}
+                {{- $_ := set $env "APP_SERVER__DOMAIN" .Values.statuslist.ingress.externalDnsHostname }}
+              {{- else }}
+                {{- $_ := set $env "APP_SERVER__DOMAIN" "localhost" }}
+              {{- end }}
+            {{- end }}
+            {{- range $name, $value := $env }}
+            - name: {{ $name }}
+              value: {{ $value | quote }}
+            {{- end }}
             - name: POSTGRES_PASSWORD
               valueFrom:
                 secretKeyRef:
@@ -39,43 +53,17 @@ spec:
             - name: APP_AWS__REGION
               value: {{ .Values.secretStore.aws.region | quote }}
             {{- end }}
-            - name: APP_SERVER__DOMAIN
-              value: {{ if .Values.statuslist.ingress.externalDnsHostname }}{{ .Values.statuslist.ingress.externalDnsHostname | quote }}{{ else }}localhost{{ end }}
-            - name: APP_ENV
-              value: {{ .Values.statuslist.env.APP_ENV | quote }}
             - name: POSTGRES_DB
               value: {{ .Values.postgres.auth.database | quote }}
             - name: APP_DATABASE__URL
               value: "postgres://$(POSTGRES_USER):$(POSTGRES_PASSWORD)@{{ .Release.Name }}-postgres.{{ .Release.Namespace }}.svc.cluster.local:5432/$(POSTGRES_DB)"
-            - name: APP_SERVER__HOST
-              value: {{ .Values.statuslist.env.APP_SERVER__HOST | quote }}
-            - name: APP_SERVER__PORT
-              value: {{ .Values.statuslist.env.APP_SERVER__PORT | quote }}
-            - name: APP_SERVER__CERT__EMAIL
-              value: {{ .Values.statuslist.env.APP_SERVER__CERT__EMAIL | quote }}
-            - name: APP_SERVER__CERT__ORGANIZATION
-              value: {{ .Values.statuslist.env.APP_SERVER__CERT__ORGANIZATION | quote }}
-            - name: APP_SERVER__CERT__ACME_DIRECTORY_URL
-              value: {{ .Values.statuslist.env.APP_SERVER__CERT__ACME_DIRECTORY_URL | quote }}
-            - name: APP_SERVER__CERT__EKU
-              value: {{ .Values.statuslist.env.APP_SERVER__CERT__EKU | quote }}
-            - name: APP_REDIS__REQUIRE_CLIENT_AUTH
-              value: {{ .Values.statuslist.env.APP_REDIS__REQUIRE_CLIENT_AUTH | quote }}
             - name: REDIS_PASSWORD
               valueFrom:
                 secretKeyRef:
                   name: {{ if .Values.externalSecret.enabled }}{{ .Values.externalSecret.spec.target.name }}{{ else }}statuslist-secret{{ end }}
                   key: redis-password
             - name: APP_REDIS__URI
-              {{- if and (index .Values "redis-ha" "haproxy" "tls" "enabled") (index .Values "redis-ha" "externalDnsHostname") }}
-              value: "rediss://:$(REDIS_PASSWORD)@{{ index .Values "redis-ha" "externalDnsHostname" }}:6379"
-              {{- else }}
-              value: "redis://:$(REDIS_PASSWORD)@{{ .Release.Name }}-redis-ha-haproxy.{{ .Release.Namespace }}.svc.cluster.local:6379"
-              {{- end }}
-            - name: APP_CACHE__TTL
-              value: {{ .Values.statuslist.env.APP_CACHE__TTL | quote }}
-            - name: APP_CACHE__MAX_CAPACITY
-              value: {{ .Values.statuslist.env.APP_CACHE__MAX_CAPACITY | quote }}
+              value: {{ include "status-list-server-chart.redisUri" . | quote }}
           {{- if .Values.secretStore.enabled }}
           volumeMounts:
             - name: aws-credentials-volume
@@ -88,3 +76,4 @@ spec:
           secret:
             secretName: aws-credentials-secret
       {{- end }}
+{{- end }}
