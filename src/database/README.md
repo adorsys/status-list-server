@@ -8,24 +8,24 @@ This document provides an overview of the database schema, including its tables,
 
 Stores information about issuers and their cryptographic public keys.
 
-| Column       | Type   | Description |
-|-------------|--------|-------------|
-| `id`        | SERIAL | Auto-incrementing primary key |
-| `issuer`    | TEXT  | Unique identifier for the issuer |
-| `public_key`| JSONB  | Public key associated with the issuer |
-| `alg`       | TEXT   | Algorithm used for cryptographic operations |
+| Column       | Type   | Description                                 |
+| ------------ | ------ | ------------------------------------------- |
+| `id`         | SERIAL | Auto-incrementing primary key               |
+| `issuer`     | TEXT   | Unique identifier for the issuer            |
+| `public_key` | JSONB  | Public key associated with the issuer       |
+| `alg`        | TEXT   | Algorithm used for cryptographic operations |
 
 ### `status_lists`
 
 Stores information about status lists entries and their associated issuer.
 
-| Column | Type | Description|
-|--------|------|-------------|
-| `id`        | SERIAL | Auto-incrementing primary key |
-| `list_id`   | TEXT  | Unique identifier for the status list |
-| `issuer`    | TEXT  | Unique identifier for the issuer |
-| `status_list`| JSONB | status list entry |
-| `sub`       | TEXT  | Unique string identifier for the Status List Token |
+| Column        | Type   | Description                                        |
+| ------------- | ------ | -------------------------------------------------- |
+| `id`          | SERIAL | Auto-incrementing primary key                      |
+| `list_id`     | TEXT   | Unique identifier for the status list              |
+| `issuer`      | TEXT   | Unique identifier for the issuer                   |
+| `status_list` | JSONB  | status list entry                                  |
+| `sub`         | TEXT   | Unique string identifier for the Status List Token |
 
 ## Usage
 
