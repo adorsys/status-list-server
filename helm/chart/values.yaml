@@ -174,4 +174,4 @@ redis-ha:
 
 # Simple Redis - disabled for production
 redis:
-  enabled: false
+  enabled: true
