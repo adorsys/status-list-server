@@ -12,4 +12,3 @@ ipython_config.py
 .ipynb_checkpoints
 */.ipynb_checkpoints/*
 *.tgz
-minikube-linux-amd64

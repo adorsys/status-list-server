@@ -2,46 +2,49 @@ global:
   storageClass: "high-performance"
 
 statuslist:
+  enabled: true
   initContainers:
-  - name: wait-for-postgres
-    image: busybox
-    command:
-    - "sh"
-    - "-c"
-    - |
-      echo "Waiting for postgres..."
-      until nc -z statuslist-postgres.statuslist.svc.cluster.local 5432; do
-        echo "postgres not ready. Retrying in 2s...";
-        sleep 2;
-      done
-      echo "Postgres is up."
+    - name: wait-for-postgres
+      image: busybox
+      command:
+        - "sh"
+        - "-c"
+        - |
+          echo "Waiting for postgres..."
+          until nc -z statuslist-postgres.statuslist.svc.cluster.local 5432; do
+            echo "postgres not ready. Retrying in 2s...";
+            sleep 2;
+          done
+          echo "Postgres is up."
 
-  - name: wait-for-redis
-    image: busybox
-    command:
-    - "sh"
-    - "-c"
-    - | 
-      echo "Waiting for Redis vanity DNS to resolve..."
-      until nslookup redis.eudi-adorsys.com >/dev/null 2>&1; do
-        echo "redis.eudi-adorsys.com not resolvable yet. Retrying in 2s...";
-        sleep 2;
-      done
-      echo "Vanity DNS resolved. Waiting for HAProxy (TLS) at 6379..."
-      until nc -z statuslist-redis-ha-haproxy.statuslist.svc.cluster.local 6379; do
-        echo "Redis (haproxy) not ready. Retrying in 2s...";
-        sleep 2;
-      done
-      echo "Redis (haproxy) is up."
+    - name: wait-for-redis
+      image: busybox
+      command:
+        - "sh"
+        - "-c"
+        - |
+          echo "Waiting for Redis vanity DNS to resolve..."
+          until nslookup redis.eudi-adorsys.com >/dev/null 2>&1; do
+            echo "redis.eudi-adorsys.com not resolvable yet. Retrying in 2s...";
+            sleep 2;
+          done
+          echo "Vanity DNS resolved. Waiting for HAProxy (TLS) at 6379..."
+          until nc -z statuslist-redis-ha-haproxy.statuslist.svc.cluster.local 6379; do
+            echo "Redis (haproxy) not ready. Retrying in 2s...";
+            sleep 2;
+          done
+          echo "Redis (haproxy) is up."
   replicaCount: 1
   image:
     repository: ghcr.io/adorsys/status-list-server
     pullPolicy: Always
     tag: "latest"
   service:
+    enabled: true
     type: ClusterIP
     port: 8081
     targetPort: 8000
+    nodePort: null
   ingress:
     enabled: true
     path: /
@@ -53,7 +56,7 @@ statuslist:
       nginx.ingress.kubernetes.io/proxy-body-size: "10m"
     tls:
       hosts:
-      - "*.eudi-adorsys.com"
+        - "*.eudi-adorsys.com"
       secretName: statuslist-tls
     externalDnsHostname: statuslist.eudi-adorsys.com
   env:
@@ -93,7 +96,7 @@ postgres:
     type: ClusterIP
     port: 5432
   image:
-    tag: 16.3.0-debian-12-r1
+    tag: "18.0"
 
 # External Secrets configuration - enabled for production
 externalSecret:
@@ -109,14 +112,14 @@ externalSecret:
       name: statuslist-secret
       creationPolicy: Owner
     data:
-    - secretKey: postgres-password
-      remoteRef:
-        key: statuslist-secret
-        property: POSTGRES_PASSWORD
-    - secretKey: redis-password
-      remoteRef:
-        key: statuslist-secret
-        property: REDIS_PASSWORD
+      - secretKey: postgres-password
+        remoteRef:
+          key: statuslist-secret
+          property: POSTGRES_PASSWORD
+      - secretKey: redis-password
+        remoteRef:
+          key: statuslist-secret
+          property: REDIS_PASSWORD
 
 secretStore:
   enabled: true
