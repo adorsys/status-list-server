@@ -2,7 +2,32 @@ global:
   storageClass: "standard"
 
 statuslist:
-  initContainers: []
+  initContainers:
+    - name: wait-for-postgres
+      image: busybox
+      command:
+        - "sh"
+        - "-c"
+        - |
+          echo "Waiting for postgres..."
+          until nc -z {{ .Release.Name }}-postgres.{{ .Release.Namespace }}.svc.cluster.local 5432; do
+            echo "postgres not ready. Retrying in 2s...";
+            sleep 2;
+          done
+          echo "Postgres is up."
+
+    - name: wait-for-redis
+      image: busybox
+      command:
+        - "sh"
+        - "-c"
+        - |
+          echo "Waiting for Redis HAProxy..."
+          until nc -z {{ .Release.Name }}-redis-ha-haproxy.{{ .Release.Namespace }}.svc.cluster.local 6379; do
+            echo "Redis (haproxy) not ready. Retrying in 2s...";
+            sleep 2;
+          done
+          echo "Redis (haproxy) is up."
   image:
     pullPolicy: IfNotPresent
   service:

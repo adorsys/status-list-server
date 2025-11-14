@@ -11,7 +11,7 @@ statuslist:
         - "-c"
         - |
           echo "Waiting for postgres..."
-          until nc -z statuslist-postgres.statuslist.svc.cluster.local 5432; do
+          until nc -z {{ .Release.Name }}-postgres.{{ .Release.Namespace }}.svc.cluster.local 5432; do
             echo "postgres not ready. Retrying in 2s...";
             sleep 2;
           done
@@ -23,13 +23,15 @@ statuslist:
         - "sh"
         - "-c"
         - |
+          {{- if and (index .Values "redis-ha" "haproxy" "tls" "enabled") (index .Values "redis-ha" "externalDnsHostname") }}
           echo "Waiting for Redis vanity DNS to resolve..."
-          until nslookup redis.eudi-adorsys.com >/dev/null 2>&1; do
-            echo "redis.eudi-adorsys.com not resolvable yet. Retrying in 2s...";
+          until nslookup {{ index .Values "redis-ha" "externalDnsHostname" }} >/dev/null 2>&1; do
+            echo "{{ index .Values "redis-ha" "externalDnsHostname" }} not resolvable yet. Retrying in 2s...";
             sleep 2;
           done
           echo "Vanity DNS resolved. Waiting for HAProxy (TLS) at 6379..."
-          until nc -z statuslist-redis-ha-haproxy.statuslist.svc.cluster.local 6379; do
+          {{- end }}
+          until nc -z {{ .Release.Name }}-redis-ha-haproxy.{{ .Release.Namespace }}.svc.cluster.local 6379; do
             echo "Redis (haproxy) not ready. Retrying in 2s...";
             sleep 2;
           done

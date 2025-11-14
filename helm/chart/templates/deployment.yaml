@@ -18,7 +18,7 @@ spec:
     spec:
       {{- with .Values.statuslist.initContainers }}
       initContainers:
-        {{- toYaml . | nindent 8 }}
+        {{- tpl (toYaml .) $ | nindent 8 }}
       {{- end }}
       containers:
         - name: {{ include "status-list-server-chart.name" . }}
