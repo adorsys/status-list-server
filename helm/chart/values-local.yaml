@@ -1,0 +1,99 @@
+global:
+  storageClass: "standard"
+
+statuslist:
+  initContainers:
+    - name: wait-for-postgres
+      image: busybox
+      command:
+        - "sh"
+        - "-c"
+        - |
+          echo "Waiting for postgres..."
+          until nc -z {{ .Release.Name }}-postgres.{{ .Release.Namespace }}.svc.cluster.local 5432; do
+            echo "postgres not ready. Retrying in 2s...";
+            sleep 2;
+          done
+          echo "Postgres is up."
+
+    - name: wait-for-redis
+      image: busybox
+      command:
+        - "sh"
+        - "-c"
+        - |
+          echo "Waiting for Redis HAProxy..."
+          until nc -z {{ .Release.Name }}-redis-ha-haproxy.{{ .Release.Namespace }}.svc.cluster.local 6379; do
+            echo "Redis (haproxy) not ready. Retrying in 2s...";
+            sleep 2;
+          done
+          echo "Redis (haproxy) is up."
+  image:
+    pullPolicy: IfNotPresent
+  service:
+    type: NodePort
+    nodePort: 32081
+  ingress:
+    enabled: false
+  env:
+    RUST_LOG: "debug"
+    APP_ENV: "local"
+    APP_SERVER__CERT__ACME_DIRECTORY_URL: "https://acme-staging-v02.api.letsencrypt.org/directory"
+    APP_CACHE__TTL: "120"
+    APP_CACHE__MAX_CAPACITY: "500"
+  resources:
+    requests:
+      memory: "128Mi"
+      cpu: "100m"
+    limits:
+      memory: "256Mi"
+      cpu: "250m"
+
+postgres:
+  persistence:
+    enabled: false
+    size: 5Gi
+    storageClass: "standard"
+  image:
+    registry: docker.io
+    repository: postgres
+    tag: "16.3"
+
+externalSecret:
+  enabled: false
+
+secretStore:
+  enabled: false
+
+redis-ha:
+  externalDnsHostname: ""
+  redis:
+    tlsPort: null
+    tlsReplication: false
+    authClients: "no"
+    customConfig: |
+      port 6379
+      masterauth redis
+      requirepass redis
+      protected-mode no
+      dir /data
+      save 900 1
+      maxmemory 0
+      maxmemory-policy volatile-lru
+  persistentVolume:
+    enabled: false
+    storageClass: "standard"
+    size: 5Gi
+  tls:
+    secretName: ""
+    certFile: ""
+    keyFile: ""
+  haproxy:
+    tls:
+      enabled: false
+      secretName: ""
+      keyName: ""
+    service:
+      type: NodePort
+      annotations: {}
+      nodePort: 30679

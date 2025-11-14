@@ -1,0 +1,79 @@
+{{- if .Values.statuslist.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "status-list-server-chart.fullname" . }}-deployment
+  labels:
+    {{- include "status-list-server-chart.labels" . | nindent 4 }}
+  namespace: {{ .Release.Namespace }}
+spec:
+  replicas: {{ .Values.statuslist.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "status-list-server-chart.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "status-list-server-chart.labels" . | nindent 8 }}
+    spec:
+      {{- with .Values.statuslist.initContainers }}
+      initContainers:
+        {{- tpl (toYaml .) $ | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: {{ include "status-list-server-chart.name" . }}
+          image: {{ .Values.statuslist.image.repository }}:{{ .Values.statuslist.image.tag }}
+          imagePullPolicy: {{ .Values.statuslist.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.statuslist.service.targetPort | int }}
+              protocol: TCP
+          env:
+            {{- $env := dict }}
+            {{- range $name, $value := .Values.statuslist.env }}
+            {{- $_ := set $env $name $value }}
+            {{- end }}
+            {{- if not (hasKey $env "APP_SERVER__DOMAIN") }}
+              {{- if .Values.statuslist.ingress.externalDnsHostname }}
+                {{- $_ := set $env "APP_SERVER__DOMAIN" .Values.statuslist.ingress.externalDnsHostname }}
+              {{- else }}
+                {{- $_ := set $env "APP_SERVER__DOMAIN" "localhost" }}
+              {{- end }}
+            {{- end }}
+            {{- range $name, $value := $env }}
+            - name: {{ $name }}
+              value: {{ $value | quote }}
+            {{- end }}
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ if .Values.externalSecret.enabled }}{{ .Values.externalSecret.spec.target.name }}{{ else }}statuslist-secret{{ end }}
+                  key: postgres-password
+            {{- if .Values.secretStore.enabled }}
+            - name: APP_AWS__REGION
+              value: {{ .Values.secretStore.aws.region | quote }}
+            {{- end }}
+            - name: POSTGRES_DB
+              value: {{ .Values.postgres.auth.database | quote }}
+            - name: APP_DATABASE__URL
+              value: "postgres://$(POSTGRES_USER):$(POSTGRES_PASSWORD)@{{ .Release.Name }}-postgres.{{ .Release.Namespace }}.svc.cluster.local:5432/$(POSTGRES_DB)"
+            - name: REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ if .Values.externalSecret.enabled }}{{ .Values.externalSecret.spec.target.name }}{{ else }}statuslist-secret{{ end }}
+                  key: redis-password
+            - name: APP_REDIS__URI
+              value: {{ include "status-list-server-chart.redisUri" . | quote }}
+          {{- if .Values.secretStore.enabled }}
+          volumeMounts:
+            - name: aws-credentials-volume
+              mountPath: /root/.aws
+              readOnly: true
+          {{- end }}
+      {{- if .Values.secretStore.enabled }}
+      volumes:
+        - name: aws-credentials-volume
+          secret:
+            secretName: aws-credentials-secret
+      {{- end }}
+{{- end }}
