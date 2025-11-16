@@ -100,7 +100,6 @@ postgres:
   image:
     tag: "18.0"
 
-# External Secrets configuration - enabled for production
 externalSecret:
   enabled: true
   metadata:
@@ -172,6 +171,5 @@ redis-ha:
         external-dns.alpha.kubernetes.io/hostname: redis.eudi-adorsys.com
         external-dns.alpha.kubernetes.io/delete: "true"
 
-# Simple Redis - disabled for production
 redis:
   enabled: true
