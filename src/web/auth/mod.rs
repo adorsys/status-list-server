@@ -241,12 +241,7 @@ mod tests {
             .unwrap();
 
         let response = app.oneshot(request).await.unwrap();
-        assert_eq!(
-            response.status(),
-            StatusCode::OK,
-            "Status code : {}",
-            response.status()
-        );
+        assert_eq!(response.status(), StatusCode::OK);
 
         let bytes = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
         let body = String::from_utf8(bytes.to_vec()).unwrap();
@@ -288,7 +283,7 @@ mod tests {
 
         let bytes = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
         let body = String::from_utf8(bytes.to_vec()).unwrap();
-        assert!(body.contains("InvalidSignature"), "Body: {}", body);
+        assert!(body.contains("InvalidSignature"));
     }
 
     #[tokio::test]
