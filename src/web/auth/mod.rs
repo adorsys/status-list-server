@@ -63,7 +63,7 @@ pub async fn auth(
         .common
         .key_algorithm
         .and_then(|alg| Algorithm::from_str(alg.to_string().as_str()).ok())
-        .ok_or_else(|| AuthenticationError::UnsupportedAlgorithm)?;
+        .ok_or(AuthenticationError::UnsupportedAlgorithm)?;
 
     let mut validation = Validation::new(alg);
     validation.set_issuer(&[&credential.issuer]);

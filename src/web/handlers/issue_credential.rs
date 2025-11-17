@@ -70,7 +70,7 @@ pub async fn publish_credentials(
         .common
         .key_algorithm
         .and_then(|alg| Algorithm::from_str(alg.to_string().as_str()).ok())
-        .ok_or_else(|| AuthenticationError::UnsupportedAlgorithm)?;
+        .ok_or(AuthenticationError::UnsupportedAlgorithm)?;
 
     let store = &state.credential_repo;
     // Check for existing issuer
