@@ -14,7 +14,7 @@ pub enum AuthenticationError {
     InvalidAuthorizationHeader,
     #[error("{0}")]
     JwtError(#[from] JwtError),
-    #[error("Unsupported algorithm")]
+    #[error("Missing or unsupported algorithm")]
     UnsupportedAlgorithm,
 }
 
