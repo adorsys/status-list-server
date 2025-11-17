@@ -63,14 +63,12 @@ By default, the server will listen on `http://localhost:8000`. You can modify th
   ```json
   {
     "issuer": "<issuer_id>",
-    "public_key": "<public_key.pem>",
-    "alg": "ES256"
+    "public_key": "<public_key JWK>"
   }
   ```
 
   - `issuer`: Unique identifier for the issuer
-  - `public_key`: PEM-encoded public key
-  - `alg`: "ES256" (ECDSA with P-256 and SHA-256)
+  - `public_key`: Public key in JWK format with `alg` field set
 
 ### Publish Status List
 
