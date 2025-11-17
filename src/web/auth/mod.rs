@@ -25,8 +25,7 @@ pub async fn auth(
     mut request: Request<Body>,
     next: Next,
 ) -> Result<impl IntoResponse, AuthenticationError> {
-    use jsonwebtoken::{dangerous::insecure_decode, Algorithm};
-    use std::str::FromStr;
+    use jsonwebtoken::dangerous::insecure_decode;
 
     // Try to extract token from Authorization header
     let token = request
@@ -35,6 +34,9 @@ pub async fn auth(
         .and_then(|header| header.to_str().ok())
         .and_then(|auth| auth.strip_prefix("Bearer "))
         .ok_or(AuthenticationError::InvalidAuthorizationHeader)?;
+
+    // Get the algorithm from the token
+    let alg = jsonwebtoken::decode_header(token)?.alg;
 
     // We decode without verification to get the issuer
     let issuer = insecure_decode::<Claims>(token)?.claims.iss;
@@ -52,13 +54,6 @@ pub async fn auth(
 
     // Get the decoding key
     let decoding_key = DecodingKey::from_jwk(&credential.public_key)?;
-
-    let alg = credential
-        .public_key
-        .common
-        .key_algorithm
-        .and_then(|alg| Algorithm::from_str(alg.to_string().as_str()).ok())
-        .ok_or(AuthenticationError::UnsupportedAlgorithm)?;
 
     let mut validation = Validation::new(alg);
     validation.set_issuer(&[&credential.issuer]);
@@ -117,7 +112,6 @@ mod tests {
 
         let public_key = serde_json::from_str(
             r#"{
-                "alg": "ES256",
                 "kty": "EC",
                 "crv": "P-256",
                 "x": "NeyFv_2L67OEplNbJpR02IFis4_lFW9HYmhfF5Or6m8",

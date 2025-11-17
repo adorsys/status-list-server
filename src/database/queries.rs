@@ -160,7 +160,6 @@ mod test {
 
         let public_key: Jwk = serde_json::from_str(
             r#"{
-                "alg": "ES256",
                 "kty": "EC",
                 "crv": "P-256",
                 "x": "NeyFv_2L67OEplNbJpR02IFis4_lFW9HYmhfF5Or6m8",

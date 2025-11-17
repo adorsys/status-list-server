@@ -61,17 +61,6 @@ pub async fn publish_credentials(
     credentials: Credentials,
     state: AppState,
 ) -> Result<(), CredentialError> {
-    use jsonwebtoken::Algorithm;
-    use std::str::FromStr;
-
-    // validate public key
-    credentials
-        .public_key
-        .common
-        .key_algorithm
-        .and_then(|alg| Algorithm::from_str(alg.to_string().as_str()).ok())
-        .ok_or(AuthenticationError::UnsupportedAlgorithm)?;
-
     let store = &state.credential_repo;
     // Check for existing issuer
     if store.find_one_by(&credentials.issuer).await?.is_some() {
@@ -106,7 +95,6 @@ mod tests {
     fn test_jwk() -> Jwk {
         serde_json::from_str(
             r#"{
-                "alg": "ES256",
                 "kty": "EC",
                 "crv": "P-256",
                 "x": "4R_68o1GpW2SvRroSJnCqWzcEX0JRnK3fQf9Rl4Jqig",
