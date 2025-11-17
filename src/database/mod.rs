@@ -41,8 +41,7 @@ pub mod migrations {
                                     .not_null()
                                     .primary_key(),
                             )
-                            .col(ColumnDef::new(Credentials::PublicKey).text().not_null())
-                            .col(ColumnDef::new(Credentials::Alg).string().not_null())
+                            .col(ColumnDef::new(Credentials::PublicKey).json().not_null())
                             .to_owned(),
                     )
                     .await?;
@@ -66,10 +65,48 @@ pub mod migrations {
                                 // Foreign key use to ensures that the Issuer in the StatusLists table references
                                 // a valid Issuer in the Credentials table
                                 ForeignKey::create()
-                                    .name("fk_issuer")
+                                    .name("fk_status_lists_issuer")
                                     .from(StatusLists::Table, StatusLists::Issuer)
-                                    .to(Credentials::Table, Credentials::Issuer),
+                                    .to(Credentials::Table, Credentials::Issuer)
+                                    .on_delete(ForeignKeyAction::Cascade)
+                                    .on_update(ForeignKeyAction::Cascade),
                             )
+                            .to_owned(),
+                    )
+                    .await?;
+
+                // Create an index on list_id for faster lookups
+                manager
+                    .create_index(
+                        Index::create()
+                            .if_not_exists()
+                            .name("idx_status_lists_list_id")
+                            .table(StatusLists::Table)
+                            .col(StatusLists::ListId)
+                            .to_owned(),
+                    )
+                    .await?;
+
+                // Create index on issuer for faster lookups
+                manager
+                    .create_index(
+                        Index::create()
+                            .if_not_exists()
+                            .name("idx_status_lists_issuer")
+                            .table(StatusLists::Table)
+                            .col(StatusLists::Issuer)
+                            .to_owned(),
+                    )
+                    .await?;
+
+                // Create index on sub for faster lookups in find_by_issuer
+                manager
+                    .create_index(
+                        Index::create()
+                            .if_not_exists()
+                            .name("idx_status_lists_sub")
+                            .table(StatusLists::Table)
+                            .col(StatusLists::Sub)
                             .to_owned(),
                     )
                     .await?;
@@ -79,12 +116,54 @@ pub mod migrations {
 
             /// Drops the database tables
             async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+                // Drop indexes first
+                manager
+                    .drop_index(
+                        Index::drop()
+                            .if_exists()
+                            .name("idx_status_lists_list_id")
+                            .table(StatusLists::Table)
+                            .to_owned(),
+                    )
+                    .await?;
+
+                manager
+                    .drop_index(
+                        Index::drop()
+                            .if_exists()
+                            .name("idx_status_lists_sub")
+                            .table(StatusLists::Table)
+                            .to_owned(),
+                    )
+                    .await?;
+
+                manager
+                    .drop_index(
+                        Index::drop()
+                            .if_exists()
+                            .name("idx_status_lists_issuer")
+                            .table(StatusLists::Table)
+                            .to_owned(),
+                    )
+                    .await?;
+
                 // Drop tables in reverse order to handle foreign key constraints
                 manager
-                    .drop_table(Table::drop().table(Credentials::Table).to_owned())
+                    .drop_table(
+                        Table::drop()
+                            .if_exists()
+                            .table(StatusLists::Table)
+                            .to_owned(),
+                    )
                     .await?;
+
                 manager
-                    .drop_table(Table::drop().table(StatusLists::Table).to_owned())
+                    .drop_table(
+                        Table::drop()
+                            .if_exists()
+                            .table(Credentials::Table)
+                            .to_owned(),
+                    )
                     .await?;
                 Ok(())
             }
@@ -95,7 +174,6 @@ pub mod migrations {
             Table,
             Issuer,
             PublicKey,
-            Alg,
         }
 
         #[derive(Iden)]
