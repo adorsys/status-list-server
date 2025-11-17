@@ -68,7 +68,7 @@ By default, the server will listen on `http://localhost:8000`. You can modify th
   ```
 
   - `issuer`: Unique identifier for the issuer
-  - `public_key`: Public key in JWK format with `alg` field set
+  - `public_key`: Public key in JWK format
 
 ### Publish Status List
 
