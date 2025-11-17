@@ -1,5 +1,4 @@
 use axum::{extract::State, http::StatusCode, response::IntoResponse, Json};
-use jsonwebtoken::Algorithm;
 
 use crate::{
     database::error::RepositoryError, models::Credentials, utils::state::AppState,
@@ -62,74 +61,115 @@ pub async fn publish_credentials(
     credentials: Credentials,
     state: AppState,
 ) -> Result<(), CredentialError> {
-    // Validate public key
-    validate_pubkey(&credentials.public_key, credentials.alg)?;
+    use jsonwebtoken::Algorithm;
+    use std::str::FromStr;
+
+    // validate public key
+    credentials
+        .public_key
+        .common
+        .key_algorithm
+        .and_then(|alg| Algorithm::from_str(alg.to_string().as_str()).ok())
+        .ok_or_else(|| AuthenticationError::UnsupportedAlgorithm)?;
 
     let store = &state.credential_repo;
     // Check for existing issuer
-    if store
-        .find_one_by(credentials.issuer.clone())
-        .await?
-        .is_some()
-    {
+    if store.find_one_by(&credentials.issuer).await?.is_some() {
         return Err(CredentialError::RepoError(RepositoryError::DuplicateEntry));
     }
 
-    let credential = Credentials::new(credentials.issuer, credentials.public_key, credentials.alg);
+    let credential = Credentials::new(credentials.issuer, credentials.public_key);
     store.insert_one(credential).await?;
-    Ok(())
-}
-
-fn validate_pubkey(pubkey: &str, alg: Algorithm) -> Result<(), AuthenticationError> {
-    use jsonwebtoken::DecodingKey;
-
-    match alg {
-        Algorithm::RS256
-        | Algorithm::RS384
-        | Algorithm::RS512
-        | Algorithm::PS256
-        | Algorithm::PS384
-        | Algorithm::PS512 => DecodingKey::from_rsa_pem(pubkey.as_bytes()),
-        Algorithm::ES256 | Algorithm::ES384 => DecodingKey::from_ec_pem(pubkey.as_bytes()),
-        Algorithm::EdDSA => DecodingKey::from_ed_pem(pubkey.as_bytes()),
-        _ => return Err(AuthenticationError::UnsupportedAlgorithm),
-    }?;
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{models::credentials, test_utils::test_app_state};
+    use axum::{
+        body::Body,
+        extract::Request,
+        http::{header, Method},
+        routing::post,
+        Router,
+    };
+    use jsonwebtoken::jwk::Jwk;
+    use tower::ServiceExt;
 
-    #[test]
-    fn test_validate_pubkey_success() {
-        let publick_key = "-----BEGIN PUBLIC KEY-----\n
-            MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE4R/68o1GpW2SvRroSJnCqWzcEX0J
-            RnK3fQf9Rl4JqigPTBR5KEyGO1YgaKVucJ5uhX7CSIJSZg9dWN7MKaXVSQ==
-            -----END PUBLIC KEY-----\n";
-        let alg = Algorithm::ES256;
-        assert!(validate_pubkey(publick_key, alg).is_ok());
+    fn create_test_router(app_state: AppState) -> Router {
+        Router::new()
+            .route("/issue-credential", post(credential_handler))
+            .with_state(app_state)
     }
 
-    #[test]
-    fn test_validate_pubkey_invalid_algorithm() {
-        let publick_key = "-----BEGIN PUBLIC KEY-----\n
-            MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE4R/68o1GpW2SvRroSJnCqWzcEX0J
-            RnK3fQf9Rl4JqigPTBR5KEyGO1YgaKVucJ5uhX7CSIJSZg9dWN7MKaXVSQ==
-            -----END PUBLIC KEY-----\n";
-        let alg = Algorithm::RS256;
-
-        assert!(validate_pubkey(publick_key, alg).is_err());
+    fn test_jwk() -> Jwk {
+        serde_json::from_str(
+            r#"{
+                "alg": "ES256",
+                "kty": "EC",
+                "crv": "P-256",
+                "x": "4R_68o1GpW2SvRroSJnCqWzcEX0JRnK3fQf9Rl4Jqig",
+                "y": "D0wUeShMhjtWIGilbnCeboV-wkiCUmYPXVjezCml1Uk"
+            }
+            "#,
+        )
+        .unwrap()
     }
 
-    #[test]
-    fn test_validate_pubkey_invalid_key() {
-        let publick_key = "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE4R/68o1GpW2SvRroSJnCqWzcEX0J
-            RnK3fQf9Rl4JqigPTBR5KEyGO1YgaKVucJ5uhX7CSIJSZg9dWN7MKaXVSQ==";
-        let alg = Algorithm::ES256;
+    #[tokio::test]
+    async fn test_publish_credentials_success() {
+        use sea_orm::{DatabaseBackend, MockDatabase};
+        use std::sync::Arc;
 
-        let res = validate_pubkey(publick_key, alg);
-        assert!(res.is_err());
-        assert!(res.unwrap_err().to_string().contains("InvalidKeyFormat"));
+        let jwk = test_jwk();
+        let credentials = Credentials::new("test_issuer".into(), jwk.clone());
+        let model = credentials::Model {
+            issuer: credentials.issuer.clone(),
+            public_key: credentials.public_key.clone().into(),
+        };
+        let db_conn = Arc::new(
+            MockDatabase::new(DatabaseBackend::Postgres)
+                .append_query_results(vec![vec![], vec![model]])
+                .into_connection(),
+        );
+        let app_state = test_app_state(Some(db_conn)).await;
+        let app = create_test_router(app_state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/issue-credential")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(serde_json::to_string(&credentials).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+    }
+
+    #[tokio::test]
+    async fn test_publish_credentials_wrong_key_format() {
+        let app_state = test_app_state(None).await;
+        let app = create_test_router(app_state);
+
+        // the payload format is correct but the public key is in wrong format
+        // so we expect a 422 Unprocessable Entity
+        let body = r#"{"issuer": "test_issuer", "public_key": "wrong_key"}"#;
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/issue-credential")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
     }
 }
