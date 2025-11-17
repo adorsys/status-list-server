@@ -24,7 +24,7 @@ pub async fn update_status(
     let store = &appstate.status_list_repo;
 
     // Fetch the existing token
-    let record = store.find_one_by(payload.list_id.clone()).await.map_err(|e| {
+    let record = store.find_one_by(&payload.list_id).await.map_err(|e| {
             tracing::error!(error = ?e, list_id = ?payload.list_id, "Database query failed for status list.");
             StatusListError::InternalServerError
         })?.ok_or(StatusListError::StatusListNotFound)?;
@@ -69,7 +69,7 @@ pub async fn update_status(
 
     // Save the updated token
     store
-        .update_one(exact_status_list.list_id.clone(), exact_status_list.clone())
+        .update_one(&exact_status_list.list_id, exact_status_list.clone())
         .await
         .map_err(|e| {
             tracing::error!("Failed to update status list: {e:?}");
