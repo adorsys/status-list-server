@@ -10,7 +10,7 @@ use axum::{
 };
 use color_eyre::eyre::eyre;
 use hyper::{header, StatusCode};
-use instant_acme::{Authorization, ChallengeType, Order};
+use instant_acme::{AuthorizationHandle, ChallengeType};
 use tokio::{
     net::TcpListener,
     sync::{
@@ -113,16 +113,16 @@ async fn serve_challenge(
 
 #[async_trait]
 impl ChallengeHandler for Http01Handler {
-    async fn handle_authorization(
-        &self,
-        authz: &Authorization,
-        order: &mut Order,
-    ) -> Result<(String, CleanupFuture), ChallengeError> {
-        let challenge = authz
-            .challenges
-            .iter()
-            .find(|c| c.r#type == ChallengeType::Http01)
+    async fn handle_authorization<'a>(
+        &'a self,
+        authz: &'a mut AuthorizationHandle<'a>,
+    ) -> Result<CleanupFuture, ChallengeError> {
+        let mut challenge = authz
+            .challenge(ChallengeType::Http01)
             .ok_or_else(|| ChallengeError::Other(eyre!("No HTTP-01 challenge found")))?;
+
+        let token = challenge.token.clone();
+        let proof = challenge.key_authorization().as_str().to_string();
 
         // Start the server and wait for it to be ready
         self.start_server()
@@ -130,17 +130,14 @@ impl ChallengeHandler for Http01Handler {
             .await
             .map_err(|_| ChallengeError::Other(eyre!("HTTP-01 server failed to start")))?;
 
-        let token = &challenge.token;
-        let key_auth = order.key_authorization(challenge);
-
         // Store the key authorization
-        self.challenge_storage
-            .store(token, key_auth.as_str())
-            .await?;
+        self.challenge_storage.store(&token, &proof).await?;
+
+        // Signal the server we are ready to respond to the challenge
+        challenge.set_ready().await?;
 
         let cleanup = {
             let storage = self.challenge_storage.clone();
-            let token = token.to_string();
             let handle = self.server_handle.clone();
             async move {
                 let (result, _) = tokio::join!(
@@ -155,8 +152,6 @@ impl ChallengeHandler for Http01Handler {
                 result
             }
         };
-        let cleanup_fut = CleanupFuture::new(cleanup);
-
-        Ok((challenge.url.clone(), cleanup_fut))
+        Ok(CleanupFuture::new(cleanup))
     }
 }

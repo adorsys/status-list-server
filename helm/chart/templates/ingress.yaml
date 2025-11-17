@@ -1,0 +1,42 @@
+{{- if .Values.statuslist.ingress.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ include "status-list-server-chart.fullname" . }}-ingress
+  labels:
+    {{- include "status-list-server-chart.labels" . | nindent 4 }}
+  namespace: {{ .Release.Namespace }}
+  {{- if .Values.statuslist.ingress.externalDnsHostname }}
+  annotations:
+    external-dns.alpha.kubernetes.io/hostname: {{ .Values.statuslist.ingress.externalDnsHostname }}
+    {{- toYaml .Values.statuslist.ingress.annotations | nindent 4 }}
+  {{- else if .Values.statuslist.ingress.annotations }}
+  annotations:
+    {{- toYaml .Values.statuslist.ingress.annotations | nindent 4 }}
+  {{- end }}
+spec:
+  ingressClassName: nginx
+  rules:
+  {{- if .Values.statuslist.ingress.externalDnsHostname }}
+  - host: {{ .Values.statuslist.ingress.externalDnsHostname }}
+  {{- else }}
+  - host: localhost
+  {{- end }}
+    http:
+      paths:
+      - path: {{ .Values.statuslist.ingress.path }}
+        pathType: {{ .Values.statuslist.ingress.pathType }}
+        backend:
+          service:
+            name: {{ include "status-list-server-chart.fullname" . }}-service
+            port:
+              number: {{ .Values.statuslist.service.port }}
+  {{- if .Values.statuslist.ingress.tls.secretName }}
+  tls:
+  - hosts:
+    {{- range .Values.statuslist.ingress.tls.hosts }}
+    - {{ . | quote }}
+    {{- end }}
+    secretName: {{ .Values.statuslist.ingress.tls.secretName }}
+  {{- end }}
+{{- end }}
