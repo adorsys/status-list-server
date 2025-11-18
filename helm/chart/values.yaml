@@ -1,0 +1,175 @@
+global:
+  storageClass: "high-performance"
+
+statuslist:
+  enabled: true
+  initContainers:
+    - name: wait-for-postgres
+      image: busybox
+      command:
+        - "sh"
+        - "-c"
+        - |
+          echo "Waiting for postgres..."
+          until nc -z {{ .Release.Name }}-postgres.{{ .Release.Namespace }}.svc.cluster.local 5432; do
+            echo "postgres not ready. Retrying in 2s...";
+            sleep 2;
+          done
+          echo "Postgres is up."
+
+    - name: wait-for-redis
+      image: busybox
+      command:
+        - "sh"
+        - "-c"
+        - |
+          {{- if and (index .Values "redis-ha" "haproxy" "tls" "enabled") (index .Values "redis-ha" "externalDnsHostname") }}
+          echo "Waiting for Redis vanity DNS to resolve..."
+          until nslookup {{ index .Values "redis-ha" "externalDnsHostname" }} >/dev/null 2>&1; do
+            echo "{{ index .Values "redis-ha" "externalDnsHostname" }} not resolvable yet. Retrying in 2s...";
+            sleep 2;
+          done
+          echo "Vanity DNS resolved. Waiting for HAProxy (TLS) at 6379..."
+          {{- end }}
+          until nc -z {{ .Release.Name }}-redis-ha-haproxy.{{ .Release.Namespace }}.svc.cluster.local 6379; do
+            echo "Redis (haproxy) not ready. Retrying in 2s...";
+            sleep 2;
+          done
+          echo "Redis (haproxy) is up."
+  replicaCount: 1
+  image:
+    repository: ghcr.io/adorsys/status-list-server
+    pullPolicy: Always
+    tag: "latest"
+  service:
+    enabled: true
+    type: ClusterIP
+    port: 8081
+    targetPort: 8000
+    nodePort: null
+  ingress:
+    enabled: true
+    path: /
+    pathType: Prefix
+    annotations:
+      cert-manager.io/cluster-issuer: letsencrypt-prod
+      nginx.ingress.kubernetes.io/ssl-redirect: "true"
+      nginx.ingress.kubernetes.io/force-ssl-redirect: "true"
+      nginx.ingress.kubernetes.io/proxy-body-size: "10m"
+    tls:
+      hosts:
+        - "*.eudi-adorsys.com"
+      secretName: statuslist-tls
+    externalDnsHostname: statuslist.eudi-adorsys.com
+  env:
+    RUST_LOG: "info"
+    POSTGRES_USER: "postgres"
+    APP_ENV: "production"
+    APP_SERVER__HOST: "0.0.0.0"
+    APP_SERVER__PORT: "8000"
+    APP_SERVER__CERT__EMAIL: "info@adorsys.com"
+    APP_SERVER__CERT__ORGANIZATION: "adorsys GmbH & CO KG"
+    APP_SERVER__CERT__ACME_DIRECTORY_URL: "https://acme-v02.api.letsencrypt.org/directory"
+    APP_SERVER__CERT__EKU: "1,3,6,1,5,5,7,3,30"
+    APP_REDIS__REQUIRE_CLIENT_AUTH: "false"
+    APP_CACHE__TTL: "300"
+    APP_CACHE__MAX_CAPACITY: "1000"
+  resources:
+    requests:
+      memory: "256Mi"
+      cpu: "250m"
+    limits:
+      memory: "512Mi"
+      cpu: "500m"
+
+postgres:
+  enabled: true
+  auth:
+    username: postgres
+    database: status-list
+    existingSecret: statuslist-secret
+    secretKeys:
+      passwordKey: postgres-password
+  persistence:
+    enabled: true
+    size: 10Gi
+    storageClass: high-performance
+  service:
+    type: ClusterIP
+    port: 5432
+  image:
+    tag: "18.0"
+
+externalSecret:
+  enabled: true
+  metadata:
+    name: statuslist-external-secret
+  spec:
+    refreshInterval: 30m
+    secretStoreRef:
+      name: statuslist-secret-store
+      kind: SecretStore
+    target:
+      name: statuslist-secret
+      creationPolicy: Owner
+    data:
+      - secretKey: postgres-password
+        remoteRef:
+          key: statuslist-secret
+          property: POSTGRES_PASSWORD
+      - secretKey: redis-password
+        remoteRef:
+          key: statuslist-secret
+          property: REDIS_PASSWORD
+
+secretStore:
+  enabled: true
+  aws:
+    region: eu-central-1
+
+redis-ha:
+  enabled: true
+  externalDnsHostname: redis.eudi-adorsys.com
+  image:
+    repository: docker.io/redis
+    tag: 8.2
+  redis:
+    port: 6379
+    tlsPort: 6380
+    tlsReplication: true
+    authClients: "no"
+    config:
+      tls-port: 6380
+      tls-cert-file: /tls-certs/tls.crt
+      tls-key-file: /tls-certs/tls.key
+      tls-auth-clients: "no"
+  replicas: 1
+  auth: true
+  existingSecret: statuslist-secret
+  authKey: redis-password
+  persistentVolume:
+    enabled: true
+    storageClass: high-performance
+    accessModes:
+      - ReadWriteOnce
+    size: 10Gi
+  tls:
+    secretName: statuslist-tls
+    certFile: tls.crt
+    keyFile: tls.key
+  haproxy:
+    enabled: true
+    replicas: 1
+    tls:
+      enabled: true
+      secretName: statuslist-haproxy-tls
+      keyName: redis.pem
+    service:
+      type: LoadBalancer
+      annotations:
+        service.beta.kubernetes.io/aws-load-balancer-type: "nlb"
+        external-dns.alpha.kubernetes.io/hostname: redis.eudi-adorsys.com
+        external-dns.alpha.kubernetes.io/delete: "true"
+
+redis:
+  enabled: true
