@@ -8,7 +8,7 @@ use axum::{
 };
 use errors::AuthenticationError;
 use hyper::header;
-use jsonwebtoken::{Algorithm, DecodingKey, Validation};
+use jsonwebtoken::{DecodingKey, Validation};
 use serde::{Deserialize, Serialize};
 
 use crate::utils::state::AppState;
@@ -25,6 +25,8 @@ pub async fn auth(
     mut request: Request<Body>,
     next: Next,
 ) -> Result<impl IntoResponse, AuthenticationError> {
+    use jsonwebtoken::dangerous::insecure_decode;
+
     // Try to extract token from Authorization header
     let token = request
         .headers()
@@ -33,18 +35,16 @@ pub async fn auth(
         .and_then(|auth| auth.strip_prefix("Bearer "))
         .ok_or(AuthenticationError::InvalidAuthorizationHeader)?;
 
+    // Get the algorithm from the token
+    let alg = jsonwebtoken::decode_header(token)?.alg;
+
     // We decode without verification to get the issuer
-    let mut validation = Validation::default();
-    validation.insecure_disable_signature_validation();
-    let issuer =
-        jsonwebtoken::decode::<Claims>(token, &DecodingKey::from_secret(&[]), &validation)?
-            .claims
-            .iss;
+    let issuer = insecure_decode::<Claims>(token)?.claims.iss;
 
     // Check if issuer is in database and get its credentials
     let credential = &state
         .credential_repo
-        .find_one_by(issuer.clone())
+        .find_one_by(&issuer)
         .await
         .map_err(|e| {
             tracing::error!("Failed to find credential for {issuer}: {e:?}");
@@ -53,21 +53,9 @@ pub async fn auth(
         .ok_or(AuthenticationError::IssuerNotFound)?;
 
     // Get the decoding key
-    let decoding_key = match credential.alg {
-        Algorithm::RS256
-        | Algorithm::RS384
-        | Algorithm::RS512
-        | Algorithm::PS256
-        | Algorithm::PS384
-        | Algorithm::PS512 => DecodingKey::from_rsa_pem(credential.public_key.as_bytes()),
-        Algorithm::ES256 | Algorithm::ES384 => {
-            DecodingKey::from_ec_pem(credential.public_key.as_bytes())
-        }
-        Algorithm::EdDSA => DecodingKey::from_ed_pem(credential.public_key.as_bytes()),
-        _ => return Err(AuthenticationError::UnsupportedAlgorithm),
-    }?;
+    let decoding_key = DecodingKey::from_jwk(&credential.public_key)?;
 
-    let mut validation = Validation::new(credential.alg);
+    let mut validation = Validation::new(alg);
     validation.set_issuer(&[&credential.issuer]);
 
     // Verify the token to ensure that the issuer is the same as the one in the database
@@ -81,11 +69,7 @@ pub async fn auth(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        models::{credentials, Alg},
-        test_utils::test_app_state,
-        utils::state::AppState,
-    };
+    use crate::{models::credentials, test_utils::test_app_state, utils::state::AppState};
     use axum::{
         body::{to_bytes, Body},
         extract::Request,
@@ -94,6 +78,7 @@ mod tests {
         Extension, Router,
     };
     use jsonwebtoken::{encode, EncodingKey, Header};
+    use jsonwebtoken::{jwk::Jwk, Algorithm};
     use sea_orm::{DatabaseBackend, MockDatabase};
     use std::{
         sync::Arc,
@@ -116,18 +101,26 @@ mod tests {
         encode(&header, &claims, secret).unwrap()
     }
 
-    fn create_test_keypair() -> (String, String) {
-        use crate::utils::keygen::Keypair;
-        use p256::pkcs8::{EncodePublicKey, LineEnding};
+    fn create_test_keypair() -> (String, Jwk) {
+        let private_key_pem = "-----BEGIN PRIVATE KEY-----
+            MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgsJyilHyjhzXDVU2A
+            5ud6kfXPktY7wx5d8CQFe1nMzK2hRANCAAQ17IW//Yvrs4SmU1smlHTYgWKzj+UV
+            b0diaF8Xk6vqb3gB9qnvD4NxkNvLsQPPqjQKncEP831drigLydrC6WPT
+            -----END PRIVATE KEY-----
+        "
+        .to_string();
 
-        let keypair = Keypair::generate().unwrap();
-        let public_key_pem = keypair
-            .verifying_key()
-            .to_public_key_pem(LineEnding::default())
-            .unwrap();
-        let private_key_pem = keypair.to_pkcs8_pem().unwrap();
+        let public_key = serde_json::from_str(
+            r#"{
+                "kty": "EC",
+                "crv": "P-256",
+                "x": "NeyFv_2L67OEplNbJpR02IFis4_lFW9HYmhfF5Or6m8",
+                "y": "eAH2qe8Pg3GQ28uxA8-qNAqdwQ_zfV2uKAvJ2sLpY9M"
+            }"#,
+        )
+        .unwrap();
 
-        (private_key_pem, public_key_pem)
+        (private_key_pem, public_key)
     }
 
     async fn test_handler() -> &'static str {
@@ -226,11 +219,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_successful_authentication() {
-        let (private_pem, public_pem) = create_test_keypair();
+        let (private_pem, public_key) = create_test_keypair();
         let credential = credentials::Model {
             issuer: "test-issuer".to_string(),
-            public_key: public_pem.to_string(),
-            alg: Alg(Algorithm::ES256),
+            public_key: public_key.into(),
         };
         let db_conn = MockDatabase::new(DatabaseBackend::Postgres)
             .append_query_results::<credentials::Model, Vec<_>, _>(vec![vec![credential]])
@@ -258,12 +250,17 @@ mod tests {
 
     #[tokio::test]
     async fn test_token_verification_failure_wrong_key() {
-        let (_, public_pem) = create_test_keypair();
-        let (wrong_private_pem, _) = create_test_keypair();
+        let (_, public_key) = create_test_keypair();
+        let wrong_private_pem = "-----BEGIN PRIVATE KEY-----
+            MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgUBIUj4mRpgdolCfi
+            ajH0ju3KgSj8xQAlcvidrAkwOzChRANCAAQ4Wvc8XUs0zEqMKGtRYFnvYtDlzdH2
+            7N3Eo65Js7drssgg7eKUSIlnJWMXHxqr8SfECuXi7sewuw2+mxs2adC5
+            -----END PRIVATE KEY-----
+        "
+        .to_string();
         let credential = credentials::Model {
             issuer: "test-issuer".to_string(),
-            public_key: public_pem.to_string(),
-            alg: Alg(Algorithm::ES256),
+            public_key: public_key.into(),
         };
         let db_conn = MockDatabase::new(DatabaseBackend::Postgres)
             .append_query_results::<credentials::Model, Vec<_>, _>(vec![vec![credential]])
@@ -291,11 +288,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_expired_token() {
-        let (private_pem, public_pem) = create_test_keypair();
+        let (private_pem, public_key) = create_test_keypair();
         let credential = credentials::Model {
             issuer: "test-issuer".to_string(),
-            public_key: public_pem.to_string(),
-            alg: Alg(Algorithm::ES256),
+            public_key: public_key.into(),
         };
         let db_conn = MockDatabase::new(DatabaseBackend::Postgres)
             .append_query_results::<credentials::Model, Vec<_>, _>(vec![vec![credential]])
@@ -334,11 +330,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_request_extension_contains_issuer() {
-        let (private_pem, public_pem) = create_test_keypair();
+        let (private_pem, public_key) = create_test_keypair();
         let credential = credentials::Model {
             issuer: "test-issuer".to_string(),
-            public_key: public_pem.to_string(),
-            alg: Alg(Algorithm::ES256),
+            public_key: public_key.into(),
         };
         let db_conn = MockDatabase::new(DatabaseBackend::Postgres)
             .append_query_results::<credentials::Model, Vec<_>, _>(vec![vec![credential]])

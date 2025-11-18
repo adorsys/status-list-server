@@ -71,7 +71,7 @@ async fn build_status_list_token(
     // Get status list claims from database
     let status_record = state
         .status_list_repo
-        .find_one_by(list_id.to_string())
+        .find_one_by(list_id)
         .await
         .map_err(|err| {
             tracing::error!("Failed to get status list {list_id} from database: {err:?}");
