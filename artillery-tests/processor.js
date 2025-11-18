@@ -12,12 +12,13 @@ try {
   console.error('Error:', error.message);
 }
 
-// EC Public Key for credential registration
-let TEST_PUBLIC_KEY = '';
+// Public key for credential registration
+let TEST_PUBLIC_KEY_JWK = null;
 try {
-  TEST_PUBLIC_KEY = fs.readFileSync(path.resolve(__dirname, 'ec-public-key.pem'), 'utf8');
+  const jwkPath = path.resolve(__dirname, 'ec-public-key.jwk');
+  TEST_PUBLIC_KEY_JWK = JSON.parse(fs.readFileSync(jwkPath, 'utf8'));
 } catch (error) {
-  console.error('⚠️  Could not load ec-public-key.pem. Make sure it exists!');
+  console.error('⚠️ Could not load ec-public-key.jwk. Make sure it exists!');
   console.error('Error:', error.message);
 }
 
@@ -35,7 +36,7 @@ function loadTestData(context, events, done) {
 
   // Make tokens available to the scenario
   context.vars.issuerId = testTokens.issuerId;
-  context.vars.publicKey = testTokens.publicKey;
+  context.vars.publicKeyJwk = testTokens.publicKeyJwk;
   context.vars.allTokens = testTokens.tokens;
 
   return done();
@@ -49,7 +50,7 @@ function generateIssuerPayload(context, events, done) {
   const randomStr = Math.random().toString(36).substring(2, 12);
 
   context.vars.issuer = `load-test-issuer-${timestamp}-${randomStr}`;
-  context.vars.publicKey = TEST_PUBLIC_KEY;
+  context.vars.publicKeyJwk = TEST_PUBLIC_KEY_JWK;
 
   return done();
 }

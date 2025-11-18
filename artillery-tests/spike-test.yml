@@ -66,8 +66,7 @@ scenarios:
           url: "/credentials"
           json:
             issuer: "{{ issuer }}"
-            public_key: "{{ publicKey }}"
-            alg: "ES256"
+            public_key: "{{ publicKeyJwk }}"
           expect:
             - statusCode:
                 - 202
