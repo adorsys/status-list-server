@@ -20,7 +20,7 @@ config:
       arrivalRate: 0
       name: "Stage 6 - Ramp down"
 
-  processor: "./processor.js"
+  processor: "../scripts/processor.js"
 
   ensure:
     maxErrorRate: 25 # Lenient for stress test
@@ -75,7 +75,7 @@ scenarios:
           json:
             issuer: "{{ issuer }}"
             public_key: "{{ publicKeyJwk }}"
-``          expect:
+            expect:
             - statusCode:
                 - 202
                 - 409

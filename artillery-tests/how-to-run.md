@@ -1,6 +1,6 @@
 ## How to run the performance test
 
-In this test we have 4 test which are 
+In this tests we have 4 test which are 
  1. Load test
  2. Stress test
  3. Spike test
@@ -23,6 +23,7 @@ The next step is to generate multiple test tokens that we can use during the per
 cd artillery
 
 #run this
+cd scripts
 node token-generator.js
 ```
 ### Step 4
