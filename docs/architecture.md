@@ -1,6 +1,6 @@
 # Status List Server: Developer Guide and Architecture Documentation
 
-## 1. Introduction
+## Introduction
 
 - **Purpose**: The Status List Server is a service that provides **Status List Tokens** to Relying Parties for verifying the status of Referenced Tokens (e.g., OAuth 2.0 tokens). It enables efficient and scalable token status management.
 - **Key Features**:
@@ -9,7 +9,7 @@
   - Scalable and secure architecture.
 - **Audience**: This guide is intended for developers integrating with the Status List Server, including Relying Parties and Token Issuers.
 
-## 2. Architecture Overview
+## Architecture Overview
 
 **High-Level Diagram**:
 
@@ -20,7 +20,7 @@
   2. **Status List Server**: Hosts and serves Status List Tokens containing token statuses.
   3. **Relying Party**: Requests and uses Status List Tokens to verify the status of Referenced Tokens.
 
-## 3. Workflows
+## Workflows
 
 - **Token Issuance**:
   1. The **Token Issuer** creates a Referenced Token with a `status` claim containing:
@@ -38,7 +38,7 @@
   2. It uses the `status_list.index` to locate the token's status in the Status List Token.
   3. The status is used to determine if the Referenced Token is valid, revoked, or expired.
 
-## 4. Data Formats
+## Data Formats
 
 - **Referenced Token**:
 
@@ -81,32 +81,32 @@
   b14f33aa899e532844778ba2fff80b5c1e56e5
   ```
 
-## 5. Application Design
+## Application Design
 
 This section provides an overview of the **technology stack** and **design principles** used to build the Status List Server.
 
-### 5.1. Tech Stack
+### Tech Stack
 
 The Status List Server is built using modern, performant, and scalable technologies. Below is the tech stack used:
 
-#### **Web Framework**
+#### Web Framework
 
 - **Axum**: web application framework that focuses on ergonomics and modularity
 
-#### **Data Serialization**
+#### Data Serialization
 
 - **Serde**: A powerful serialization framework for Rust, used to serialize and deserialize JSON data (e.g., Status List Tokens, credentials).
 
-#### **Token Encoding/Decoding**
+#### Token Encoding/Decoding
 
 - **jsonwebtoken**: Used for encoding and decoding Status List Tokens in JWT (JSON Web Token) format.
 - **coset**: Used for encoding and decoding Status List Tokens in CWT (CBOR Web Token) format.
 
-#### **Storage**
+#### Storage
 
 - **Database**: to map and store statuslist to id and credentials.
 
-### **5.2. Data Flow**
+### Data Flow
 
 The data flow in the Status List Server is as follows:
 
@@ -126,14 +126,14 @@ The data flow in the Status List Server is as follows:
    - Updates token statuses in the Status List.
    - Serves Status List Tokens to Relying Parties.
 
-### **6. Security Considerations**
+## Security Considerations
 
 - **HTTPS**: All communication with the Status List Server must use HTTPS to ensure data integrity and confidentiality.
 - **Token Signing**: Status List Tokens must be signed (e.g., using JWT or CWT) to prevent tampering.
 - **CORS**: The Status List Server should support Cross-Origin Resource Sharing (CORS) for browser-based clients.
 - **Rate Limiting**: Implement rate limiting to prevent abuse of the Status List Server.
 
-### **7. Developer Integration**
+## Developer Integration
 
 - **Step 1**: Configure the Token Issuer to include the `status` claim in Referenced Tokens.
 - **Step 2**: Implement the Relying Party to:
@@ -143,7 +143,7 @@ The data flow in the Status List Server is as follows:
   4. Use the `index` to check the token's status.
 - **Step 3**: Test the integration using sample Referenced Tokens and Status List Tokens.
 
-### **8. Troubleshooting**
+## Troubleshooting
 
 - **Common Issues**:
   - Invalid `status_list.url` in the Referenced Token.
@@ -153,7 +153,7 @@ The data flow in the Status List Server is as follows:
   - Check HTTP response codes and headers.
   - Validate the structure of the Referenced Token and Status List Token.
 
-### **9. References**
+## References
 
 - [IETF Draft: OAuth Status List](https://datatracker.ietf.org/doc/draft-ietf-oauth-status-list/)
 - [JWT (JSON Web Token) RFC 7519](https://tools.ietf.org/html/rfc7519)
