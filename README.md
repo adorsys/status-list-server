@@ -107,7 +107,7 @@ By default, the server will listen on `http://localhost:8000`. You can modify th
 
 ### Update Status List
 
-- **Endpoint:** `PUT /statuslists/update`
+- **Endpoint:** `PATCH /statuslists/update`
 - **Description:** Allows an issuer to update an existing status list
 - **Authorization:** Requires a valid signed JWT Bearer token with the private key corresponding to the registered public key
 - **Request Body:**
@@ -147,13 +147,14 @@ By default, the server will listen on `http://localhost:8000`. You can modify th
 - **Description:** Retrieves the current status list for the requested `list_id`. This endpoint is publicly accessible with no authentication required.
 - **Headers:**
   - `Accept`: Specifies the desired response format
-    - `application/jwt`: Returns the compressed status list as a JWT token
-    - `application/cwt`: Returns the compressed status list as a CWT token
-    - Default: Returns the compressed status list as a JWT token
+    - `application/jwt`: Returns the gzip compressed status list as a JWT token
+    - `application/cwt`: Returns the gzip compressed status list as a CWT token
+    - Default: Returns the gzip compressed status list as a JWT token
 - **Responses:**
   - `200 OK`: Returns the status list in the requested format
   - `404 NOT FOUND`: Status list not found
   - `406 NOT ACCEPTABLE`: Requested format not supported
+  - `500 INTERNAL SERVER ERROR`: System incurred an error
 
 ## Security
 
@@ -169,7 +170,6 @@ The server uses JWT-based authentication with the following requirements:
    ```
 
 3. The JWT token must:
-   - Be signed with the algorithm specified during issuer registration
    - Be signed with the private key corresponding to the registered public key
    - Have `iss` (issuer) claim matching the registered issuer
    - Have valid `exp` (expiration) and `iat` (issued at) claims
