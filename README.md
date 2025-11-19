@@ -14,7 +14,7 @@ It allows issuers to register, publish, and update status lists, and verifiers t
 This service implements the [Token Status List specification](https://datatracker.ietf.org/doc/draft-ietf-oauth-status-list/).  
 It supports both **JWT** and **CWT** formats, with cryptographic signing using multiple algorithms (ECDSA, EdDSA, RSA with SHA-256, SHA-384, SHA-512 digest algorithms).
 
-For a detailed explanation of the architecture, see the [Architecture Documentation](docs/architecture.md).
+For a detailed explanation of the architecture, see the [Architecture Documentation](docs/ARCHITECTURE.md).
 
 ## Quick Start
 

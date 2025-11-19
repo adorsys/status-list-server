@@ -12,6 +12,7 @@
 ## 2. Architecture Overview
 
 **High-Level Diagram**:
+
 ![arc](arc.png)
 
 - **Components**:
