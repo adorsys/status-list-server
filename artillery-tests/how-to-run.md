@@ -22,8 +22,7 @@ The next step is to generate multiple test tokens that we can use during the per
 # go to the test directory
 cd artillery
 
-#run this
-cd scripts
+# run this
 npm run generate-tokens
 ```
 ### Step 4
