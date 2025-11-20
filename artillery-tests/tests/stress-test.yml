@@ -81,3 +81,39 @@ scenarios:
                 - 409
           afterResponse: "handleCredentialResponse"
       - think: 0.5
+
+  - name: "Authenticated Update Flow"
+    weight: 40
+    flow:
+      - function: "loadTestData"
+      - function: "selectRandomToken"
+      - function: "generateUUID"
+      # First publish
+      - post:
+          url: "/statuslists/publish"
+          headers:
+            Authorization: "Bearer {{ token }}"
+          json:
+            list_id: "{{ listId }}"
+            status:
+              - index: 1
+                status: "VALID"
+          expect:
+            - statusCode: 201
+      # Then update
+      - think: 0.5
+      - patch:
+          url: "/statuslists/update"
+          headers:
+            Authorization: "Bearer {{ token }}"
+          json:
+            list_id: "{{ listId }}"
+            status:
+              - index: 1
+                status: "INVALID"
+              - index: 2
+                status: "VALID"
+          expect:
+            - statusCode: 200
+          afterResponse: "handleUpdateResponse"
+      - think: 1
