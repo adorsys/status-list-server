@@ -1,7 +1,7 @@
 # Status List Server
 
-[![CI](https://github.com/adorsys/status-list-server/actions/workflows/CI.yml/badge.svg)](https://github.com/adorsys/status-list-server/actions/workflows/ci.yml)
-[![CD](https://github.com/adorsys/status-list-server/actions/workflows/build-and-deploy.yml/badge.svg)](https://github.com/adorsys/status-list-server/actions/workflows/deploy.yml)
+[![CI](https://github.com/adorsys/status-list-server/actions/workflows/CI.yml/badge.svg)](https://github.com/adorsys/status-list-server/actions/workflows/CI.yml)
+[![CD](https://github.com/adorsys/status-list-server/actions/workflows/deploy.yml/badge.svg)](https://github.com/adorsys/status-list-server/actions/workflows/deploy.yml)
 [![dependencies](https://deps.rs/repo/github/adorsys/status-list-server/status.svg)](https://deps.rs/repo/github/adorsys/status-list-server)
 [![License](https://img.shields.io/github/license/base-org/node?color=blue)](LICENSE-MIT)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue?style=flat-square)](LICENSE-APACHE)
@@ -14,7 +14,7 @@ It allows issuers to register, publish, and update status lists, and verifiers t
 This service implements the [Token Status List specification](https://datatracker.ietf.org/doc/draft-ietf-oauth-status-list/).  
 It supports both **JWT** and **CWT** formats, with cryptographic signing using multiple algorithms (ECDSA, EdDSA, RSA with SHA-256, SHA-384, SHA-512 digest algorithms).
 
-For a detailed explanation of the architecture, see the [Architecture Documentation](docs/ARCHITECTURE.md).
+For a detailed explanation of the architecture, see the [Architecture Documentation](docs/architecture.md).
 
 ## Quick Start
 
