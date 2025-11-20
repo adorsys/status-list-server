@@ -1,7 +1,7 @@
 # Status List Server
 
-[![CI](https://github.com/adorsys/status-list-server/actions/workflows/CI.yml/badge.svg)](https://github.com/adorsys/status-list-server/actions/workflows/CI.yml)
-[![CD](https://github.com/adorsys/status-list-server/actions/workflows/build-and-deploy.yml/badge.svg)](https://github.com/adorsys/status-list-server/actions/workflows/build-and-deploy.yml)
+[![CI](https://github.com/adorsys/status-list-server/actions/workflows/CI.yml/badge.svg)](https://github.com/adorsys/status-list-server/actions/workflows/ci.yml)
+[![CD](https://github.com/adorsys/status-list-server/actions/workflows/build-and-deploy.yml/badge.svg)](https://github.com/adorsys/status-list-server/actions/workflows/deploy.yml)
 [![dependencies](https://deps.rs/repo/github/adorsys/status-list-server/status.svg)](https://deps.rs/repo/github/adorsys/status-list-server)
 [![License](https://img.shields.io/github/license/base-org/node?color=blue)](LICENSE-MIT)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue?style=flat-square)](LICENSE-APACHE)
@@ -13,6 +13,8 @@ It allows issuers to register, publish, and update status lists, and verifiers t
 
 This service implements the [Token Status List specification](https://datatracker.ietf.org/doc/draft-ietf-oauth-status-list/).  
 It supports both **JWT** and **CWT** formats, with cryptographic signing using multiple algorithms (ECDSA, EdDSA, RSA with SHA-256, SHA-384, SHA-512 digest algorithms).
+
+For a detailed explanation of the architecture, see the [Architecture Documentation](docs/ARCHITECTURE.md).
 
 ## Quick Start
 
@@ -78,14 +80,12 @@ By default, the server will listen on `http://localhost:8000`. You can modify th
   ```json
   {
     "issuer": "<issuer_id>",
-    "public_key": "<public_key.pem>",
-    "alg": "ES256"
+    "public_key": "<public_key JWK>"
   }
   ```
 
   - `issuer`: Unique identifier for the issuer
-  - `public_key`: PEM-encoded public key
-  - `alg`: "ES256" (ECDSA with P-256 and SHA-256)
+  - `public_key`: Public key in JWK format
 
 ### Publish Status List
 
@@ -109,7 +109,7 @@ By default, the server will listen on `http://localhost:8000`. You can modify th
 
 ### Update Status List
 
-- **Endpoint:** `PUT /statuslists/update`
+- **Endpoint:** `PATCH /statuslists/update`
 - **Description:** Allows an issuer to update an existing status list
 - **Authorization:** Requires a valid signed JWT Bearer token with the private key corresponding to the registered public key
 - **Request Body:**
@@ -149,13 +149,14 @@ By default, the server will listen on `http://localhost:8000`. You can modify th
 - **Description:** Retrieves the current status list for the requested `list_id`. This endpoint is publicly accessible with no authentication required.
 - **Headers:**
   - `Accept`: Specifies the desired response format
-    - `application/jwt`: Returns the compressed status list as a JWT token
-    - `application/cwt`: Returns the compressed status list as a CWT token
-    - Default: Returns the compressed status list as a JWT token
+    - `application/jwt`: Returns the gzip compressed status list as a JWT token
+    - `application/cwt`: Returns the gzip compressed status list as a CWT token
+    - Default: Returns the gzip compressed status list as a JWT token
 - **Responses:**
   - `200 OK`: Returns the status list in the requested format
   - `404 NOT FOUND`: Status list not found
   - `406 NOT ACCEPTABLE`: Requested format not supported
+  - `500 INTERNAL SERVER ERROR`: System incurred an error
 
 ## Security
 
@@ -171,7 +172,6 @@ The server uses JWT-based authentication with the following requirements:
    ```
 
 3. The JWT token must:
-   - Be signed with the algorithm specified during issuer registration
    - Be signed with the private key corresponding to the registered public key
    - Have `iss` (issuer) claim matching the registered issuer
    - Have valid `exp` (expiration) and `iat` (issued at) claims
@@ -219,7 +219,10 @@ The server implements proper error handling and returns appropriate HTTP status 
 ## Deployment
 
 The server can be deployed using a containerization platform such as Docker.
-A Helm chart is provided in the [`helm`](helm) directory for easy deployment on Kubernetes.
+
+### Helm Chart Deployment
+
+A Helm chart is provided for easy deployment on Kubernetes. For detailed instructions, see the [Helm Deployment Guide](helm/README.md).
 
 ## Testing
 

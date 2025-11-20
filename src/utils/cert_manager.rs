@@ -371,7 +371,7 @@ impl CertManager {
                 return Ok(());
             }
         } else {
-            info!("No certificate found for this domain, requesting new one...");
+            warn!("No certificate found for this domain, requesting new one...");
             self.request_certificate().await?;
             info!("New certificate issued successfully");
             return Ok(());

@@ -25,6 +25,7 @@ This document explains the Redis TLS configuration for the status-list-server de
    ```
 
 3. **Verify:**
+
    ```bash
    kubectl get pods -n statuslist
    kubectl logs statuslist-status-list-server-deployment-<pod-id> -n statuslist
@@ -42,7 +43,7 @@ This document explains the Redis TLS configuration for the status-list-server de
 
 ## Architecture
 
-```
+```text
 ┌─────────────────┐    TLS     ┌──────────────┐    Plain    ┌─────────────┐
 │   Application   │ ────────── │   HAProxy    │ ────────── │   Redis     │
 │                 │  rediss:// │  (TLS Term)  │            │   Cluster   │

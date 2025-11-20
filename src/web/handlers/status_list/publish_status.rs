@@ -34,7 +34,7 @@ pub async fn publish_status(
     })?;
 
     // Check for existing token to prevent duplicates
-    match store.find_one_by(payload.list_id.clone()).await {
+    match store.find_one_by(&payload.list_id).await {
         Ok(Some(_)) => {
             tracing::info!("Status list {} already exists", payload.list_id);
             Err(StatusListError::StatusListAlreadyExists)
@@ -203,7 +203,7 @@ mod tests {
         // Verify the token is stored
         let result = app_state
             .status_list_repo
-            .find_one_by(token_id.clone())
+            .find_one_by(&token_id)
             .await
             .unwrap();
         assert!(result.is_some());
@@ -294,7 +294,7 @@ mod tests {
 
         let result = app_state
             .status_list_repo
-            .find_one_by(token_id.clone())
+            .find_one_by(&token_id)
             .await
             .unwrap();
         assert!(result.is_some());

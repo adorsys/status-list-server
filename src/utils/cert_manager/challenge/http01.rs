@@ -53,7 +53,7 @@ impl Http01Handler {
 
         // Check if server is already running
         if self.server_handle.read().await.is_some() {
-            info!("HTTP-01 challenge server already running");
+            warn!("HTTP-01 challenge server already running");
             ready_tx.send(()).unwrap();
             return Ok(ready_rx);
         }
