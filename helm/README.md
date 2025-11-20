@@ -1,4 +1,4 @@
-# Helm Chart Deployment Guide
+# Deployment Guide
 
 This guide provides instructions for deploying the Status List Server using the provided Helm chart.
 
