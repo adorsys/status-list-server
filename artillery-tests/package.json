@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "description": "Performance tests for Status List Server using Artillery",
   "scripts": {
-    "generate-tokens": "node ../scripts/-generator.js",
+    "generate-tokens": "node ./scripts/token-generator.js",
     "test:load": "artillery run artillery-tests/load-test.yml",
     "test:stress": "artillery run artillery-tests/stress-test.yml",
     "test:spike": "artillery run artillery-tests/spike-test.yml",

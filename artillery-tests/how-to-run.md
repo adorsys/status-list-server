@@ -24,7 +24,7 @@ cd artillery
 
 #run this
 cd scripts
-node token-generator.js
+npm run generate-tokens
 ```
 ### Step 4
 Create an artillery accoung at artillery.io. After creating the account, copy the access key, it should look like this (`artillery run test.yml --record --key YOUR_ACCESS_KEY`) on the welcom screen.
