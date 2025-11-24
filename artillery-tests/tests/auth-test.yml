@@ -1,5 +1,13 @@
 config:
   target: "http://localhost:8000"
+  plugins:
+    publish-metrics:
+      - type: prometheus
+        pushgateway: "http://localhost:9091"
+        tags:
+          - "test_id:status_list_auth"
+    expect: {}
+    metrics-by-endpoint: {}
   phases:
     - duration: 30
       arrivalRate: 5
@@ -22,10 +30,6 @@ config:
   ensure:
     maxErrorRate: 5 # Max 5% error rate (excluding expected 401s)
     p95: 2000 # 95th percentile < 2s
-
-  plugins:
-    expect: {}
-    metrics-by-endpoint: {}
 
 scenarios:
   - name: "Register Issuer (Setup)"

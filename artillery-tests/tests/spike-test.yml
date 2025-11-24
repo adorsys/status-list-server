@@ -1,5 +1,13 @@
 config:
   target: "http://localhost:8000"
+  plugins:
+    publish-metrics:
+      - type: prometheus
+        pushgateway: "http://localhost:9091"
+        tags:
+          - "test_id:status_list_spike"
+    expect: {}
+    metrics-by-endpoint: {}
   phases:
     - duration: 120
       arrivalRate: 25
@@ -30,10 +38,6 @@ config:
   ensure:
     maxErrorRate: 20 # Max 20% during spikes
     p95: 2000 # 95th percentile < 2s
-
-  plugins:
-    expect: {}
-    metrics-by-endpoint: {}
 
 scenarios:
   - name: "Health Check - Must Stay Responsive"

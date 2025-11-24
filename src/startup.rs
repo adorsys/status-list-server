@@ -6,6 +6,8 @@ use axum::{
 };
 use color_eyre::eyre::Context;
 use hyper::Method;
+use metrics_exporter_prometheus::PrometheusBuilder;
+use metrics_process::Collector;
 use tokio::net::TcpListener;
 use tower_http::{
     catch_panic::CatchPanicLayer,
@@ -37,6 +39,20 @@ pub struct HttpServer {
 
 impl HttpServer {
     pub async fn new(config: &Config, state: AppState) -> color_eyre::Result<Self> {
+        let builder = PrometheusBuilder::new();
+        let handle = builder
+            .install_recorder()
+            .expect("failed to install Prometheus recorder");
+
+        let collector = Collector::default();
+        collector.describe();
+        tokio::spawn(async move {
+            loop {
+                collector.collect();
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            }
+        });
+
         let cors = CorsLayer::new()
             .allow_methods([Method::GET, Method::POST, Method::OPTIONS])
             .allow_origin(Any)
@@ -45,6 +61,7 @@ impl HttpServer {
         let router = Router::new()
             .route("/", get(welcome))
             .route("/health", get(health_check))
+            .route("/metrics", get(move || std::future::ready(handle.render())))
             .route("/credentials", post(credential_handler))
             .nest("/statuslists", status_list_routes(state.clone()))
             .layer(TraceLayer::new_for_http())

@@ -19,8 +19,8 @@ const { publicKey, privateKey } = crypto.generateKeyPairSync('ec', {
 const jwk = crypto.createPublicKey(publicKey).export({ format: 'jwk' });
 
 // Save keys
-fs.writeFileSync('scripts/ec-private-key.pem', privateKey);
-fs.writeFileSync('scripts/ec-public-key.jwk', JSON.stringify(jwk, null, 2));
+fs.writeFileSync('artillery-tests/scripts/ec-private-key.pem', privateKey);
+fs.writeFileSync('artillery-tests/scripts/ec-public-key.jwk', JSON.stringify(jwk, null, 2));
 
 const issuerId = `test-issuer-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
 
@@ -60,7 +60,7 @@ const testData = {
   generatedAt: new Date().toISOString()
 };
 
-fs.writeFileSync('scripts/test-tokens.json', JSON.stringify(testData, null, 2));
+fs.writeFileSync('artillery-tests/scripts/test-tokens.json', JSON.stringify(testData, null, 2));
 
 console.log(`✓ Generated ${tokens.length} valid tokens`);
 console.log('✓ Saved to test-tokens.json');

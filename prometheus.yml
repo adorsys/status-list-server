@@ -1,0 +1,11 @@
+global:
+  scrape_interval: 2s 
+
+scrape_configs:
+  - job_name: 'status_list_server'
+    static_configs:
+      - targets: ['app:8000'] 
+
+  - job_name: 'pushgateway'
+    static_configs:
+      - targets: ['pushgateway:9091']

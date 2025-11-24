@@ -4,7 +4,7 @@ services:
     restart: always
     container_name: status-list-db
     ports:
-      - 5432:5432
+      - 5433:5432
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-postgres}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
@@ -84,6 +84,23 @@ services:
     networks:
       - status-list-network
 
+  prometheus:
+    image: prom/prometheus
+    container_name: prometheus
+    ports:
+      - 9090:9090
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml
+    networks:
+      - status-list-network
+
+  pushgateway:
+    image: prom/pushgateway
+    container_name: pushgateway
+    ports:
+      - 9091:9091
+    networks:
+      - status-list-network
 networks:
   status-list-network:
     driver: bridge

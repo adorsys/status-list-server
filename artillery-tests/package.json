@@ -4,7 +4,7 @@
   "description": "Performance tests for Status List Server using Artillery",
   "scripts": {
     "generate-tokens": "node ./scripts/token-generator.js",
-    "test:load": "artillery run artillery-tests/load-test.yml",
+    "test:load": "artillery run ./tests/load-test.yml",
     "test:stress": "artillery run artillery-tests/stress-test.yml",
     "test:spike": "artillery run artillery-tests/spike-test.yml",
     "test:auth": "artillery run artillery-tests/auth-test.yml",
@@ -15,7 +15,9 @@
     "test:auth:report": "artillery run --output artillery-tests/results/auth-test.json artillery-tests/auth-test.yml && artillery report artillery-tests/results/auth-test.json"
   },
   "devDependencies": {
-    "artillery": "^2.0.0"
+    "artillery": "^2.0.27",
+    "artillery-plugin-metrics-by-endpoint": "^1.21.0",
+    "artillery-plugin-statsd": "^2.2.1"
   },
   "dependencies": {
     "jsonwebtoken": "^9.0.2"

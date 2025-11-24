@@ -1,5 +1,13 @@
 config:
   target: "http://localhost:8000"
+  plugins:
+    publish-metrics:
+      - type: prometheus
+        pushgateway: "http://localhost:9091"
+        tags:
+          - "test_id:status_list_load"
+    expect: {}
+    metrics-by-endpoint: {}
   phases:
     - duration: 60
       arrivalRate: 5
@@ -25,10 +33,6 @@ config:
     p95: 800 # 95th percentile < 800ms
     p99: 1500 # 99th percentile < 1.5s
 
-  # Custom metrics
-  plugins:
-    expect: {}
-    metrics-by-endpoint: {}
 
 scenarios:
   - name: "Health Check Flow"
