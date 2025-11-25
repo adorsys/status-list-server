@@ -37,7 +37,7 @@ Run the test.
 
 ## Memory and CPU usage
 
-Go to `localhost:9090` to access the prometheus dashbord. After that, search for the memory or cpu usage
+Go to `localhost:9090` to access the prometheus dashboard. After that, search for the memory or cpu usage
 
 **Memory usage**: 
 ```
