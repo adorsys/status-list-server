@@ -24,6 +24,7 @@ pub struct ServerConfig {
     pub domain: String,
     pub port: u16,
     pub cert: CertConfig,
+    pub enable_metrics: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -127,6 +128,7 @@ impl Config {
             .set_default("server.host", "localhost")?
             .set_default("server.domain", "localhost")?
             .set_default("server.port", 8000)?
+            .set_default("server.enable_metrics", false)?
             .set_default(
                 "database.url",
                 "postgres://postgres:postgres@localhost:5432/status-list",

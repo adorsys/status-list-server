@@ -6,8 +6,7 @@ use axum::{
 };
 use color_eyre::eyre::Context;
 use hyper::Method;
-use metrics_exporter_prometheus::PrometheusBuilder;
-use metrics_process::Collector;
+use metrics_exporter_prometheus::PrometheusHandle;
 use tokio::net::TcpListener;
 use tower_http::{
     catch_panic::CatchPanicLayer,
@@ -17,6 +16,7 @@ use tower_http::{
 
 use crate::{
     config::Config,
+    utils::metrics::metrics_handler,
     utils::state::AppState,
     web::{
         auth::auth,
@@ -38,36 +38,36 @@ pub struct HttpServer {
 }
 
 impl HttpServer {
-    pub async fn new(config: &Config, state: AppState) -> color_eyre::Result<Self> {
-        let builder = PrometheusBuilder::new();
-        let handle = builder
-            .install_recorder()
-            .expect("failed to install Prometheus recorder");
-
-        let collector = Collector::default();
-        collector.describe();
-        tokio::spawn(async move {
-            loop {
-                collector.collect();
-                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-            }
-        });
-
+    pub async fn new(
+        config: &Config,
+        state: AppState,
+        metrics_handle: Option<PrometheusHandle>,
+    ) -> color_eyre::Result<Self> {
         let cors = CorsLayer::new()
             .allow_methods([Method::GET, Method::POST, Method::OPTIONS])
             .allow_origin(Any)
             .allow_headers(Any);
 
-        let router = Router::new()
+        let mut router = Router::new()
             .route("/", get(welcome))
             .route("/health", get(health_check))
-            .route("/metrics", get(move || std::future::ready(handle.render())))
             .route("/credentials", post(credential_handler))
             .nest("/statuslists", status_list_routes(state.clone()))
             .layer(TraceLayer::new_for_http())
             .layer(CatchPanicLayer::new())
             .layer(cors)
             .with_state(state);
+
+        if config.server.enable_metrics {
+            if let Some(handle) = metrics_handle {
+                tracing::info!("StatusList Monitor: ENABLED (Metrics at /metrics)");
+                router = router.route("/metrics", get(move || metrics_handler(handle)));
+            } else {
+                tracing::warn!("Metrics enabled in config but no handle provided");
+            }
+        } else {
+            tracing::info!("StatusList Monitor: DISABLED");
+        }
 
         let listener = TcpListener::bind(format!("{}:{}", config.server.host, config.server.port))
             .await
