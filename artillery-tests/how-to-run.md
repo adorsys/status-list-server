@@ -43,7 +43,7 @@ Go to `localhost:9090` to access the prometheus dashboard. After that, search fo
 
 **Memory usage**: 
 ```text
-process_resident_memory_bytes{job="rust_app"} / 1024 / 1024
+process_resident_memory_bytes{job="status_list_server"} / 1024 / 1024
 ```
 
 **CPU usage**: 
