@@ -3,7 +3,6 @@ use dotenvy::dotenv;
 use rustls::crypto::aws_lc_rs;
 use status_list_server::cert_manager::setup_cert_renewal_scheduler;
 use status_list_server::state::build_state;
-use status_list_server::utils::metrics::{setup_metrics, start_metrics_collector};
 use status_list_server::{config::Config as AppConfig, startup::HttpServer};
 #[cfg(not(target_env = "msvc"))]
 use tikv_jemallocator::Jemalloc;
@@ -33,23 +32,7 @@ async fn main() -> Result<()> {
     let cert_manager = app_state.cert_manager.clone();
     setup_cert_renewal_scheduler(cert_manager.clone()).await?;
 
-    // Setup metrics if enabled
-    let metrics_handle = if config.server.enable_metrics {
-        match setup_metrics() {
-            Ok(handle) => {
-                start_metrics_collector();
-                Some(handle)
-            }
-            Err(e) => {
-                warn!("Failed to setup metrics: {e}");
-                None
-            }
-        }
-    } else {
-        None
-    };
-
-    let http_server = HttpServer::new(&config, app_state, metrics_handle).await?;
+    let http_server = HttpServer::new(&config, app_state).await?;
 
     // Initial certificate request
     tokio::spawn(async move {

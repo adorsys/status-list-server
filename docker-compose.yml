@@ -73,7 +73,6 @@ services:
     environment:
       APP_ENV: ${APP_ENV:-development}
       APP_SERVER__ENABLE_METRICS: ${APP_SERVER__ENABLE_METRICS:-true}
-      APP_SERVER__EXPOSE_METRICS_ENDPOINT: ${APP_SERVER__EXPOSE_METRICS_ENDPOINT:-true}
     ports:
       - 8000:8000
     depends_on:

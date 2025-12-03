@@ -6,7 +6,6 @@ use axum::{
 };
 use color_eyre::eyre::Context;
 use hyper::Method;
-use metrics_exporter_prometheus::PrometheusHandle;
 use tokio::net::TcpListener;
 use tower_http::{
     catch_panic::CatchPanicLayer,
@@ -38,11 +37,7 @@ pub struct HttpServer {
 }
 
 impl HttpServer {
-    pub async fn new(
-        config: &Config,
-        state: AppState,
-        metrics_handle: Option<PrometheusHandle>,
-    ) -> color_eyre::Result<Self> {
+    pub async fn new(config: &Config, state: AppState) -> color_eyre::Result<Self> {
         let cors = CorsLayer::new()
             .allow_methods([Method::GET, Method::POST, Method::OPTIONS])
             .allow_origin(Any)
@@ -58,16 +53,7 @@ impl HttpServer {
             .layer(cors)
             .with_state(state);
 
-        if config.server.enable_metrics {
-            if let Some(handle) = metrics_handle {
-                tracing::info!("StatusList Monitor: ENABLED (Metrics at /metrics)");
-                router = router.route("/metrics", get(move || metrics_handler(handle)));
-            } else {
-                tracing::warn!("Metrics enabled in config but no handle provided");
-            }
-        } else {
-            tracing::info!("StatusList Monitor: DISABLED");
-        }
+        router = metrics(router, config);
 
         let listener = TcpListener::bind(format!("{}:{}", config.server.host, config.server.port))
             .await
@@ -94,4 +80,23 @@ fn status_list_routes(state: AppState) -> Router<AppState> {
     Router::new()
         .merge(protected_routes)
         .route("/{list_id}", get(get_status_list))
+}
+
+fn metrics(router: Router, config: &Config) -> Router {
+    if config.server.enable_metrics {
+        match crate::utils::metrics::setup_metrics() {
+            Ok(handle) => {
+                crate::utils::metrics::start_metrics_collector();
+                tracing::info!("StatusList Monitor: ENABLED (Metrics at /metrics)");
+                router.route("/metrics", get(move || metrics_handler(handle)))
+            }
+            Err(e) => {
+                tracing::warn!("Failed to setup metrics: {e}");
+                router
+            }
+        }
+    } else {
+        tracing::info!("StatusList Monitor: DISABLED");
+        router
+    }
 }
