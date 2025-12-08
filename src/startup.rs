@@ -15,8 +15,8 @@ use tower_http::{
 
 use crate::{
     config::Config,
-    utils::metrics::metrics_handler,
     utils::metrics,
+    utils::metrics::metrics_handler,
     utils::state::AppState,
     web::{
         auth::auth,
