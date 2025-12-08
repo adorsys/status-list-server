@@ -16,6 +16,7 @@ use tower_http::{
 use crate::{
     config::Config,
     utils::metrics::metrics_handler,
+    utils::metrics,
     utils::state::AppState,
     web::{
         auth::auth,
@@ -84,9 +85,9 @@ fn status_list_routes(state: AppState) -> Router<AppState> {
 
 fn metrics(router: Router, config: &Config) -> Router {
     if config.server.enable_metrics {
-        match crate::utils::metrics::setup_metrics() {
+        match metrics::setup_metrics() {
             Ok(handle) => {
-                crate::utils::metrics::start_metrics_collector();
+                metrics::start_metrics_collector();
                 tracing::info!("StatusList Monitor: ENABLED (Metrics at /metrics)");
                 router.route("/metrics", get(move || metrics_handler(handle)))
             }
