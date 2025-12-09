@@ -15,8 +15,7 @@ use tower_http::{
 
 use crate::{
     config::Config,
-    utils::metrics,
-    utils::metrics::metrics_handler,
+    utils::metrics::{metrics_handler, setup_metrics, start_metrics_collector},
     utils::state::AppState,
     web::{
         auth::auth,
@@ -54,7 +53,7 @@ impl HttpServer {
             .layer(cors)
             .with_state(state);
 
-        router = metrics(router, config);
+        router = attach_metrics(router, config);
 
         let listener = TcpListener::bind(format!("{}:{}", config.server.host, config.server.port))
             .await
@@ -83,21 +82,18 @@ fn status_list_routes(state: AppState) -> Router<AppState> {
         .route("/{list_id}", get(get_status_list))
 }
 
-fn metrics(router: Router, config: &Config) -> Router {
+fn attach_metrics(router: Router, config: &Config) -> Router {
     if config.server.enable_metrics {
-        match metrics::setup_metrics() {
+        match setup_metrics() {
             Ok(handle) => {
-                metrics::start_metrics_collector();
+                start_metrics_collector();
                 tracing::info!("StatusList Monitor: ENABLED (Metrics at /metrics)");
-                router.route("/metrics", get(move || metrics_handler(handle)))
+                return router.route("/metrics", get(move || metrics_handler(handle)));
             }
-            Err(e) => {
-                tracing::warn!("Failed to setup metrics: {e}");
-                router
-            }
+            Err(e) => tracing::warn!("Failed to setup metrics: {e}"),
         }
     } else {
         tracing::info!("StatusList Monitor: DISABLED");
-        router
     }
+    router
 }

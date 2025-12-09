@@ -10,7 +10,7 @@ In this tests we have 4 tests which are
 
 ### Step 1:
 
-Installed artillery.
+Install artillery.
 ```bash
 npm install -g artillery
 ```
@@ -21,6 +21,8 @@ The next step is to generate multiple test tokens that we can use during the per
 ```bash
 # go to the test directory
 cd artillery-tests
+
+# Install dependencies
 npm install
 
 # run this
@@ -28,7 +30,7 @@ npm run generate-tokens
 ```
 ### Step 4:
 
-Create an artillery account at [artillery.io](artillery.io). After creating the account, copy the access key, it should look like this (`artillery run test.yml --record --key YOUR_ACCESS_KEY`) on the welcome screen.
+Create an artillery account at [artillery.io](artillery.io). After creating the account, copy the access key, it should look like this `artillery run test.yml --record --key YOUR_ACCESS_KEY` on the welcome screen.
 
 ### Step 5:
 
