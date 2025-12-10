@@ -70,6 +70,9 @@ services:
       dockerfile: Dockerfile
     container_name: status-list-server
     env_file: .env
+    environment:
+      APP_ENV: ${APP_ENV:-development}
+      APP_SERVER__ENABLE_METRICS: ${APP_SERVER__ENABLE_METRICS:-true}
     ports:
       - 8000:8000
     depends_on:
@@ -81,6 +84,32 @@ services:
         condition: service_started
       localstack:
         condition: service_healthy
+      pushgateway:
+        condition: service_started
+    networks:
+      - status-list-network
+
+  prometheus:
+    image: prom/prometheus
+    container_name: prometheus
+    ports:
+      - 9090:9090
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml
+    networks:
+      - status-list-network
+    # Only scrape metrics if endpoint is exposed
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/usr/share/prometheus/console_libraries'
+      - '--web.console.templates=/usr/share/prometheus/consoles'
+
+  pushgateway:
+    image: prom/pushgateway
+    container_name: pushgateway
+    ports:
+      - 9091:9091
     networks:
       - status-list-network
 

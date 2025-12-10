@@ -4,4 +4,5 @@ pub mod cert_manager;
 pub mod errors;
 pub mod keygen;
 pub mod lst_gen;
+pub mod metrics;
 pub mod state;
