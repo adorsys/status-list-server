@@ -71,31 +71,31 @@ Base URL by default: http://localhost:8000
   - Register an issuer’s public key
   - Request
 
-    ```json
-    {
-      "issuer": "issuer-123",
-      "public_key": {
-        "kty": "EC",
-        "crv": "P-256",
-        "x": "...",
-        "y": "..."
+      ```json
+      {
+        "issuer": "issuer-123",
+        "public_key": {
+          "kty": "EC",
+          "crv": "P-256",
+          "x": "...",
+          "y": "..."
+        }
       }
-    }
-    ```
+      ```
 
 - POST /statuslists/publish (auth required)
   - Creates a new status list record for the authenticated issuer
   - Request
 
-    ```json
-    {
-      "list_id": "30202cc6-1e3f-4479-a567-74e86ad73693",
-      "status": [
-        { "index": 1, "status": "INVALID" },
-        { "index": 8, "status": "VALID" }
-      ]
-    }
-    ```
+      ```json
+      {
+        "list_id": "30202cc6-1e3f-4479-a567-74e86ad73693",
+        "status": [
+          { "index": 1, "status": "INVALID" },
+          { "index": 8, "status": "VALID" }
+        ]
+      }
+      ```
 
 - PATCH /statuslists/update (auth required)
   - Updates an existing status list for the authenticated issuer
@@ -142,17 +142,17 @@ Status encoding
 - Docker Compose (recommended)
   - Postgres, Redis, LocalStack (S3/Secrets Manager), Pebble (ACME), app
   - Start:
-    ```bash
-    docker compose up --build
-    ```
+      ```bash
+      docker compose up --build
+      ```
   - App listens on 8000 by default
 
 - Manual (ensure Postgres + Redis running)
   - .env based on .env.template (see repo)
   - Run:
-    ```bash
-    cargo run
-    ```
+      ```bash
+      cargo run
+      ```
 
 ## Configuration
 
