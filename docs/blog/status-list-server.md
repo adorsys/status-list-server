@@ -70,7 +70,7 @@ Base URL by default: http://localhost:8000
 - POST /credentials
   - Register an issuer’s public key
   - Request
- 
+
     ```json
     {
       "issuer": "issuer-123",
@@ -86,7 +86,7 @@ Base URL by default: http://localhost:8000
 - POST /statuslists/publish (auth required)
   - Creates a new status list record for the authenticated issuer
   - Request
- 
+
     ```json
     {
       "list_id": "30202cc6-1e3f-4479-a567-74e86ad73693",
@@ -225,7 +225,7 @@ Defaults are sensible for local dev; override via env. The config library maps A
 ## Example Workflows
 
 - Register an issuer
- 
+
   ```bash
   curl -X POST http://localhost:8000/credentials \
     -H "Content-Type: application/json" \
@@ -233,7 +233,7 @@ Defaults are sensible for local dev; override via env. The config library maps A
   ```
 
 - Publish a status list
- 
+
   ```bash
   curl -X POST http://localhost:8000/statuslists/publish \
     -H "Authorization: Bearer <issuer-signed-jwt>" \
@@ -242,7 +242,7 @@ Defaults are sensible for local dev; override via env. The config library maps A
   ```
 
 - Retrieve as JWT
- 
+
   ```bash
   curl -s http://localhost:8000/statuslists/<uuid> \
     -H "Accept: application/statuslist+jwt" \
