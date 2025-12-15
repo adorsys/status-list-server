@@ -34,17 +34,7 @@ image::arc.png[Architecture overview, width=720, align=center]
 2. The Status List Server hosts those compact lists and returns them as JWT or CWT, gzip-compressed.
 3. The Relying Party fetches the list occasionally and checks a token’s status by index—no per-request call to the issuer.
 
-[mermaid, target="status-sequence", format="svg"]
-....
-sequenceDiagram
-  participant Issuer
-  participant StatusList as Status List Server
-  participant RelyingParty as Relying Party
-  Issuer->>StatusList: Publish/update compact status list
-  RelyingParty->>StatusList: GET /statuslists/{id}\nAccept: +jwt or +cwt
-  StatusList-->>RelyingParty: Gzip-compressed token (JWT or CWT)
-  RelyingParty->>RelyingParty: Lookup status by index
-....
+image::sequence_diagram.png[Sequence Diagram]
 
 [NOTE]
 ====
