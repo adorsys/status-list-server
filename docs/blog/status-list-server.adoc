@@ -3,6 +3,8 @@
 :toclevels: 2
 :icons: font
 :imagesdir: ..
+:diagram-server-url: https://kroki.io
+:diagram-server-type: kroki
 
 toc::[]
 
@@ -26,13 +28,13 @@ If you issue or verify tokens, you need a fast, scalable way to tell whether a t
 
 image::arc.png[Architecture overview, width=720, align=center]
 
-== How it works (60 seconds)
+== How it works 
 
 1. The Token Issuer maintains a compact list of statuses for many referenced tokens (VALID, INVALID, SUSPENDED, etc.).
 2. The Status List Server hosts those compact lists and returns them as JWT or CWT, gzip-compressed.
 3. The Relying Party fetches the list occasionally and checks a token’s status by index—no per-request call to the issuer.
 
-[mermaid]
+[mermaid, target="status-sequence", format="svg"]
 ....
 sequenceDiagram
   participant Issuer
