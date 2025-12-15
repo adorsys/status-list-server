@@ -1,0 +1,114 @@
+= Token Status at Scale: A Simple Guide to the Status List Server (with Rust)
+:toc: macro
+:toclevels: 2
+:icons: font
+:imagesdir: ..
+
+toc::[]
+
+[.lead]
+If you issue or verify tokens, you need a fast, scalable way to tell whether a token is still good—without calling the issuer every time. A Status List Server solves this by publishing compact, cacheable “status list tokens” that verifiers can fetch and reuse.
+
+== What you will learn
+
+- What a Status List Server is and when to use it
+- How issuers, the server, and relying parties interact
+- How the Rust implementation works at a high level
+- How to run it locally and where to find deeper engineering details
+
+== Who this is for
+
+- Product and platform teams that own identity or API access
+- Engineers integrating token validation into apps or gateways
+- Security architects looking for a scalable revocation/status pattern
+
+== The idea in one picture
+
+image::arc.png[Architecture overview, width=720, align=center]
+
+== How it works (60 seconds)
+
+1. The Token Issuer maintains a compact list of statuses for many referenced tokens (VALID, INVALID, SUSPENDED, etc.).
+2. The Status List Server hosts those compact lists and returns them as JWT or CWT, gzip-compressed.
+3. The Relying Party fetches the list occasionally and checks a token’s status by index—no per-request call to the issuer.
+
+[mermaid]
+....
+sequenceDiagram
+  participant Issuer
+  participant StatusList as Status List Server
+  participant RelyingParty as Relying Party
+  Issuer->>StatusList: Publish/update compact status list
+  RelyingParty->>StatusList: GET /statuslists/{id}\nAccept: +jwt or +cwt
+  StatusList-->>RelyingParty: Gzip-compressed token (JWT or CWT)
+  RelyingParty->>RelyingParty: Lookup status by index
+....
+
+[NOTE]
+====
+If your viewer does not render the diagram, view the simple steps above or render with Asciidoctor Diagram.
+====
+
+== Goal and scope
+
+- Goal: give you a clear mental model, quick local run, and pointers to the details.
+- In scope: core concepts, basic flow, quickstart, links to API and architecture.
+- Out of scope: OAuth fundamentals, full crypto internals, and production hardening checklists.
+
+== Try it locally (5 minutes)
+
+- Prerequisites: Docker and Docker Compose
+- Start the stack:
++
+[source,bash]
+----
+docker compose up --build
+----
+- Check the server:
++
+[source,bash]
+----
+curl -s http://localhost:8000/health
+curl -s http://localhost:8000/
+----
+
+== For engineers: the Rust server at a glance
+
+- Formats
+  * Serves Status List Tokens as JWT or CWT on the same endpoint, chosen via `Accept`:
+    - `application/statuslist+jwt`
+    - `application/statuslist+cwt`
+  * Compact bit-packed representation (1/2/4/8 bits), zlib-compressed, base64url-encoded
+  * HTTP responses are gzip-compressed
+- Publisher workflow
+  * Register issuer public key (JWK)
+  * Authenticated publish/update using a JWT Bearer signed by the issuer’s private key
+- Reliability & ops
+  * ACME-based certificate provisioning/renewal
+  * Redis/TTL caches and DB indices for performance
+  * Multi-arch static builds and Helm deployment options
+
+=== API quick look
+
+- `GET /` → "Status list Server"
+- `GET /health` → liveness probe
+- `POST /credentials` → register an issuer’s public key (JWK)
+- `POST /statuslists/publish` (auth) → create a status list
+- `PATCH /statuslists/update` (auth) → update a status list
+- `GET /statuslists/{list_id}` (public) → gzip-compressed JWT or CWT
+
+=== Data model (high level)
+
+- `credentials(issuer, public_key)`
+- `status_lists(list_id, issuer, status_list{bits,lst}, sub)`
+
+== Learn more
+
+- Architecture deep dive: link:../architecture.md[architecture.md]
+- OAuth Status List draft: https://datatracker.ietf.org/doc/draft-ietf-oauth-status-list/
+
+== FAQ
+
+- Why not check every token with the issuer? Because it doesn’t scale. Caching a compact list cuts load and latency.
+- What about freshness? Lists carry lifetimes; clients refetch at safe intervals. Publishers can update quickly when needed.
+- JWT or CWT? Choose via `Accept`. Both carry the same `status_list` payload and certificate chain for verification.
