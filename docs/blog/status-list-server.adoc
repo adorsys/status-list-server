@@ -26,7 +26,7 @@ If you issue or verify tokens, you need a fast, scalable way to tell whether a t
 
 == The idea in one picture
 
-image::arc.png[Architecture overview, width=720, align=center]
+image::flow.png[Flow from specification, align=center]
 
 _Issuers publish compact status lists once; relying parties cache and reuse them._
 
@@ -36,7 +36,7 @@ _Issuers publish compact status lists once; relying parties cache and reuse them
 2. The Status List Server hosts those compact lists and returns them as JWT or CWT, gzip-compressed.
 3. The Relying Party fetches the list occasionally and checks a token’s status by index—no per-request call to the issuer.
 
-image::flow.png[Flow from specification, align=center]
+
 
 image::sequence_diagram.png[Sequence Diagram]
 
