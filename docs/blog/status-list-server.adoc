@@ -36,8 +36,6 @@ _Issuers publish compact status lists once; relying parties cache and reuse them
 2. The Status List Server hosts those compact lists and returns them as JWT or CWT, gzip-compressed.
 3. The Relying Party fetches the list occasionally and checks a token’s status by index—no per-request call to the issuer.
 
-
-
 image::sequence_diagram.png[Sequence Diagram]
 
 [NOTE]
