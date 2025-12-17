@@ -1,4 +1,4 @@
-= Token Status at Scale: A Simple Guide to the Status List Server (with Rust)
+= A Practical Guide to the OAuth Status List Server (with Rust)
 :toc: macro
 :toclevels: 2
 :icons: font
@@ -9,7 +9,7 @@
 toc::[]
 
 [.lead]
-If you issue or verify tokens, you need a fast, scalable way to tell whether a token is still good—without calling the issuer every time. A Status List Server solves this by publishing compact, cacheable “status list tokens” that verifiers can fetch and reuse.
+If you issue or verify tokens, you need a fast, scalable way to tell whether a token is still valid without calling the issuer every time. A Status List Server, as defined in the [IETF OAuth Status List draft](https://datatracker.ietf.org/doc/draft-ietf-oauth-status-list/), solves this by publishing compact, cacheable “status list tokens” that verifiers can fetch and reuse.
 
 == What you will learn
 
@@ -28,11 +28,15 @@ If you issue or verify tokens, you need a fast, scalable way to tell whether a t
 
 image::arc.png[Architecture overview, width=720, align=center]
 
+_Issuers publish compact status lists once; relying parties cache and reuse them._
+
 == How it works 
 
 1. The Token Issuer maintains a compact list of statuses for many referenced tokens (VALID, INVALID, SUSPENDED, etc.).
 2. The Status List Server hosts those compact lists and returns them as JWT or CWT, gzip-compressed.
 3. The Relying Party fetches the list occasionally and checks a token’s status by index—no per-request call to the issuer.
+
+image::flow.png[Flow from specification, align=center]
 
 image::sequence_diagram.png[Sequence Diagram]
 
@@ -71,7 +75,7 @@ curl -s http://localhost:8000/
     - `application/statuslist+jwt`
     - `application/statuslist+cwt`
   * Compact bit-packed representation (1/2/4/8 bits), zlib-compressed, base64url-encoded
-  * HTTP responses are gzip-compressed
+  * Status list payload compression follows the specification; HTTP gzip compression is applied independently at the transport layer.
 - Publisher workflow
   * Register issuer public key (JWK)
   * Authenticated publish/update using a JWT Bearer signed by the issuer’s private key
