@@ -9,7 +9,7 @@
 toc::[]
 
 [.lead]
-If you issue or verify tokens, you need a fast, scalable way to tell whether a token is still valid without calling the issuer every time. A Status List Server, as defined in the [IETF OAuth Status List draft](https://datatracker.ietf.org/doc/draft-ietf-oauth-status-list/), solves this by publishing compact, cacheable “status list tokens” that verifiers can fetch and reuse.
+If you issue or verify tokens, you need a fast, scalable way to tell whether a token is still valid without calling the issuer every time. A Status List Server, as defined in the https://datatracker.ietf.org/doc/draft-ietf-oauth-status-list/[IETF OAuth Status List draft], solves this by publishing compact, cacheable “status list tokens” that verifiers can fetch and reuse.
 
 == What you will learn
 
