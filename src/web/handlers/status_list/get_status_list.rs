@@ -113,27 +113,37 @@ async fn build_response_from_record(
         tracing::error!("Failed to load signing key: {e:?}");
         StatusListError::InternalServerError
     })?;
-    let keypair = Keypair::from_pkcs8_pem(&signing_key_pem).map_err(|e| {
-        tracing::error!("Failed to parse server key: {e:?}");
-        StatusListError::InternalServerError
-    })?;
 
-    let apply_gzip = |data: &[u8]| -> Result<Vec<u8>, StatusListError> {
+    let accept_header = accept.to_string();
+    let status_record = status_record.clone();
+
+    let compressed_token = tokio::task::spawn_blocking(move || {
+        let keypair = Keypair::from_pkcs8_pem(&signing_key_pem).map_err(|e| {
+            tracing::error!("Failed to parse server key: {e:?}");
+            StatusListError::InternalServerError
+        })?;
+
+        let token_bytes = match accept_header.as_str() {
+            ACCEPT_STATUS_LISTS_HEADER_CWT => issue_cwt(&status_record, &keypair, certs_parts)?,
+            _ => issue_jwt(&status_record, &keypair, certs_parts)?.into_bytes(),
+        };
+
         let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
-        encoder.write_all(data).map_err(|err| {
+        encoder.write_all(&token_bytes).map_err(|err| {
             tracing::error!("Failed to compress payload: {err:?}");
             StatusListError::InternalServerError
         })?;
+
         encoder.finish().map_err(|err| {
             tracing::error!("Failed to finish compression: {err:?}");
             StatusListError::InternalServerError
         })
-    };
-
-    let token_bytes = match accept {
-        ACCEPT_STATUS_LISTS_HEADER_CWT => issue_cwt(status_record, &keypair, certs_parts)?,
-        _ => issue_jwt(status_record, &keypair, certs_parts)?.into_bytes(),
-    };
+    })
+    .await
+    .map_err(|err| {
+        tracing::error!("Panicked while building token: {err:?}");
+        StatusListError::InternalServerError
+    })??;
 
     Ok((
         StatusCode::OK,
@@ -141,7 +151,7 @@ async fn build_response_from_record(
             (header::CONTENT_TYPE, accept),
             (header::CONTENT_ENCODING, GZIP_HEADER),
         ],
-        apply_gzip(&token_bytes)?,
+        compressed_token,
     )
         .into_response())
 }
