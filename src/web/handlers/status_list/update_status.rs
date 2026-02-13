@@ -76,6 +76,17 @@ pub async fn update_status(
             StatusListError::InternalServerError
         })?;
 
+    // Invalidate cache entry to ensure next read fetches the updated record
+    appstate
+        .cache
+        .status_list_record_cache
+        .invalidate(&exact_status_list.list_id)
+        .await;
+    tracing::info!(
+        "Invalidated cache for status list: {}",
+        exact_status_list.list_id
+    );
+
     Ok(StatusCode::OK.into_response())
 }
 
