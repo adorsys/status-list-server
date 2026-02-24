@@ -23,7 +23,7 @@ DNS / LB propagation is not instantaneous.
 apiVersion: v1
 kind: ServiceAccount
 metadata:
-  name: {{ include "status-list-server-chart.fullname" . }}-redis-cert-sync
+  name: redis-cert-sync-sa
   namespace: {{ .Release.Namespace }}
   labels:
     {{- include "status-list-server-chart.labels" . | nindent 4 }}
@@ -31,7 +31,7 @@ metadata:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
-  name: {{ include "status-list-server-chart.fullname" . }}-redis-cert-sync
+  name: redis-cert-sync-role
   namespace: {{ .Release.Namespace }}
   labels:
     {{- include "status-list-server-chart.labels" . | nindent 4 }}
@@ -51,23 +51,23 @@ rules:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
-  name: {{ include "status-list-server-chart.fullname" . }}-redis-cert-sync
+  name: redis-cert-sync-rb
   namespace: {{ .Release.Namespace }}
   labels:
     {{- include "status-list-server-chart.labels" . | nindent 4 }}
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role
-  name: {{ include "status-list-server-chart.fullname" . }}-redis-cert-sync
+  name: redis-cert-sync-role
 subjects:
   - kind: ServiceAccount
-    name: {{ include "status-list-server-chart.fullname" . }}-redis-cert-sync
+    name: redis-cert-sync-sa
     namespace: {{ .Release.Namespace }}
 ---
 apiVersion: batch/v1
 kind: CronJob
 metadata:
-  name: {{ include "status-list-server-chart.fullname" . }}-redis-cert-sync
+  name: redis-cert-sync
   namespace: {{ .Release.Namespace }}
   labels:
     {{- include "status-list-server-chart.labels" . | nindent 4 }}
@@ -86,7 +86,7 @@ spec:
           labels:
             {{- include "status-list-server-chart.labels" . | nindent 12 }}
         spec:
-          serviceAccountName: {{ include "status-list-server-chart.fullname" . }}-redis-cert-sync
+          serviceAccountName: redis-cert-sync-sa
           restartPolicy: OnFailure
           containers:
             - name: redis-cert-sync

@@ -23,7 +23,7 @@ This document explains the Redis TLS configuration for the status-list-server de
    ```bash
    kubectl get pods -n statuslist
    kubectl logs statuslist-status-list-server-deployment-<pod-id> -n statuslist
-   kubectl logs cronjob/statuslist-status-list-server-redis-cert-sync -n statuslist
+   kubectl logs cronjob/redis-cert-sync -n statuslist
    ```
 
 ## Why This Setup?
