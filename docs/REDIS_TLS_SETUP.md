@@ -4,31 +4,26 @@ This document explains the Redis TLS configuration for the status-list-server de
 
 ## Quick Start
 
-**For Redis TLS with HAProxy:**
+**For Redis TLS with HAProxy (automated sync):**
 
-1. **Create HAProxy TLS secret:**
-
-   ```bash
-   # Extract certificate and key from existing secret for HAProxy
-   CRT=$(kubectl get secret statuslist-tls -n statuslist -o jsonpath='{.data.tls\.crt}' | base64 -d)
-   KEY=$(kubectl get secret statuslist-tls -n statuslist -o jsonpath='{.data.tls\.key}' | base64 -d)
-   # Combine cert and key into single PEM file for HAProxy
-   printf "%s\n%s\n" "$CRT" "$KEY" > redis.pem
-   # Create new secret for HAProxy with combined PEM
-   kubectl create secret generic statuslist-haproxy-tls -n statuslist --from-file=redis.pem=redis.pem
-   ```
-
-2. **Deploy:**
+1. **Deploy / upgrade the chart (CronJob + RBAC included):**
 
    ```bash
    helm upgrade statuslist ./helm/status-list-server-chart --namespace statuslist
    ```
 
-3. **Verify:**
+   This will:
+
+   - Ensure the wildcard certificate `statuslist-tls` is managed by cert-manager
+   - Install a `CronJob` that automatically syncs `statuslist-tls` into `statuslist-haproxy-tls`
+   - Only update `statuslist-haproxy-tls` when the certificate actually changes
+
+2. **Verify:**
 
    ```bash
    kubectl get pods -n statuslist
    kubectl logs statuslist-status-list-server-deployment-<pod-id> -n statuslist
+   kubectl logs cronjob/redis-cert-sync -n statuslist
    ```
 
 ## Why This Setup?
@@ -85,23 +80,19 @@ redis-ha:
 
 ### 2. HAProxy TLS Termination
 
-**Challenge**: HAProxy needed TLS termination with proper certificate handling.
+**Challenge**: HAProxy needs TLS termination with proper certificate handling.
 
-**Problem**: HAProxy expects a single PEM file (cert + key), but Kubernetes TLS secrets store them separately.
+**Problem**: HAProxy expects a single PEM file (certificate + key), but Kubernetes TLS secrets store them as separate fields.
 
-**Solution**: Created a combined PEM secret for HAProxy:
+**Solution**: Automate the combined PEM secret creation for HAProxy using a Kubernetes CronJob.
 
-```bash
-# Extract certificate and key from existing secret
-CRT=$(kubectl get secret statuslist-tls -n statuslist -o jsonpath='{.data.tls\.crt}' | base64 -d)
-KEY=$(kubectl get secret statuslist-tls -n statuslist -o jsonpath='{.data.tls\.key}' | base64 -d)
+The CronJob is defined in the Helm chart templates and is responsible for:
 
-# Create combined PEM file
-printf "%s\n%s\n" "$CRT" "$KEY" > redis.pem
+- Reading the `statuslist-tls` secret (tls.crt + tls.key)
+- Concatenating them into a single `redis.pem` file
+- Creating or updating the `statuslist-haproxy-tls` secret used by HAProxy
 
-# Create new secret for HAProxy
-kubectl create secret generic statuslist-haproxy-tls -n statuslist --from-file=redis.pem=redis.pem
-```
+Please refer to the Helm template for the authoritative implementation: [redis-ha-cert-sync.yaml](../helm/chart/templates/redis-ha-cert-sync.yaml)
 
 **HAProxy Configuration**:
 
@@ -192,6 +183,13 @@ env:
 - Must be valid for `*.eudi-adorsys.com` (wildcard certificate)
 - HAProxy uses this certificate for TLS termination
 - App validates certificate against hostname `redis.eudi-adorsys.com`
+
+We intentionally **derive the Redis/HAProxy certificate from the same wildcard certificate used by the status-list-server ingress** (`statuslist-tls`) so that:
+
+- We only manage **one ACME certificate** for the entire `*.eudi-adorsys.com` namespace.
+- cert-manager handles issuance and renewal in a single place.
+- Both HTTP (`statuslist.eudi-adorsys.com`) and Redis (`redis.eudi-adorsys.com`) endpoints present certificates that are consistent and valid for their hostnames.
+- We avoid self-signed or cluster-internal certificates on the Redis endpoint, which would fail TLS validation in the Rust client unless we shipped and configured custom root CAs.
 
 **Certificate Flow**:
 
