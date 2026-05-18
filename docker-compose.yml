@@ -1,6 +1,6 @@
 services:
   db:
-    image: postgres:17-alpine
+    image: postgres:18.4
     restart: always
     container_name: status-list-db
     ports:
@@ -20,7 +20,7 @@ services:
       - status-list-network
 
   redis:
-    image: redis:8.0-alpine
+    image: redis:8.6
     container_name: redis
     ports:
       - 6379:6379
@@ -29,7 +29,7 @@ services:
 
   localstack:
     container_name: localstack
-    image: localstack/localstack
+    image: localstack/localstack:4.14
     ports:
       - 4566:4566
     environment:
@@ -43,7 +43,7 @@ services:
       - status-list-network
 
   challtestsrv:
-    image: ghcr.io/letsencrypt/pebble-challtestsrv:latest
+    image: ghcr.io/letsencrypt/pebble-challtestsrv:2.10
     command: -http01 "" -https01 "" -tlsalpn01 ""
     ports:
       - 8055:8055
@@ -51,7 +51,7 @@ services:
       - status-list-network
 
   pebble:
-    image: ghcr.io/letsencrypt/pebble:latest
+    image: ghcr.io/letsencrypt/pebble:2.10
     command: -config /test/pebble_config.json -strict -dnsserver challtestsrv:8053
     ports:
       - 14000:14000
@@ -90,7 +90,7 @@ services:
       - status-list-network
 
   prometheus:
-    image: prom/prometheus
+    image: prom/prometheus:v3.11.3
     container_name: prometheus
     ports:
       - 9090:9090
@@ -106,7 +106,7 @@ services:
       - '--web.console.templates=/usr/share/prometheus/consoles'
 
   pushgateway:
-    image: prom/pushgateway
+    image: prom/pushgateway:v3.11.2
     container_name: pushgateway
     ports:
       - 9091:9091
