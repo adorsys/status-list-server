@@ -10,7 +10,7 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
       POSTGRES_DB: ${POSTGRES_DB:-status-list}
     volumes:
-      - pgdata:/var/lib/postgresql/data
+      - pgdata:/var/lib/postgresql
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres"]
       interval: 5s
@@ -106,7 +106,7 @@ services:
       - '--web.console.templates=/usr/share/prometheus/consoles'
 
   pushgateway:
-    image: prom/pushgateway:v3.11.2
+    image: prom/pushgateway:v1.11.2
     container_name: pushgateway
     ports:
       - 9091:9091
