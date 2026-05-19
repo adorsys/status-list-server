@@ -5,40 +5,32 @@ use crate::models::StatusListRecord;
 
 #[derive(Clone)]
 pub struct Cache {
-    inner: Option<MokaCache<String, StatusListRecord>>,
+    inner: MokaCache<String, StatusListRecord>,
 }
 
 impl Cache {
-    /// Creates a cache; TTL=0 disables it.
+    /// Creates a cache; TTL=0 disables it naturally.
     pub fn new(ttl_secs: u64, max_capacity: u64) -> Self {
-        let inner = (ttl_secs > 0).then(|| {
-            MokaCache::builder()
-                .time_to_live(Duration::from_secs(ttl_secs))
-                .max_capacity(max_capacity)
-                .build()
-        });
-
-        if inner.is_none() {
+        if ttl_secs == 0 {
             tracing::info!("Cache disabled (TTL=0)");
         }
-
+        let inner = MokaCache::builder()
+            .time_to_live(Duration::from_secs(ttl_secs))
+            .max_capacity(max_capacity)
+            .build();
         Self { inner }
     }
 
     pub async fn get(&self, key: &str) -> Option<StatusListRecord> {
-        self.inner.as_ref()?.get(key).await
+        self.inner.get(key).await
     }
 
     pub async fn insert(&self, key: String, value: StatusListRecord) {
-        if let Some(cache) = &self.inner {
-            cache.insert(key, value).await;
-        }
+        self.inner.insert(key, value).await;
     }
 
     pub async fn invalidate(&self, key: &str) {
-        if let Some(cache) = &self.inner {
-            cache.invalidate(key).await;
-        }
+        self.inner.invalidate(key).await;
     }
 }
 

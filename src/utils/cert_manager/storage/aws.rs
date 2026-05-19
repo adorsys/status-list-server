@@ -21,7 +21,7 @@ use crate::{cert_manager::storage::StorageError, utils::cert_manager::Storage};
 /// Type used for AWS Secrets Manager operations
 pub struct AwsSecretsManager {
     client: SecretsClient,
-    cache: Option<SecretsCacheClient>,
+    cache: SecretsCacheClient,
 }
 
 impl AwsSecretsManager {
@@ -31,23 +31,16 @@ impl AwsSecretsManager {
         secrets_cache_ttl: Duration,
     ) -> Result<Self, StorageError> {
         let client = SecretsClient::new(config);
+        let asm_builder = SecretsConfig::from(config).to_builder();
 
-        let cache = if !secrets_cache_ttl.is_zero() {
-            let asm_builder = SecretsConfig::from(config).to_builder();
-
-            Some(
-                SecretsCacheClient::from_builder(
-                    asm_builder,
-                    NonZeroUsize::new(100).unwrap(),
-                    secrets_cache_ttl,
-                    true,
-                )
-                .await
-                .map_err(|e| StorageError::AwsSdk(e.into()))?,
-            )
-        } else {
-            None
-        };
+        let cache = SecretsCacheClient::from_builder(
+            asm_builder,
+            NonZeroUsize::new(100).unwrap(),
+            secrets_cache_ttl,
+            true,
+        )
+        .await
+        .map_err(|e| StorageError::AwsSdk(e.into()))?;
 
         Ok(Self { client, cache })
     }
@@ -82,31 +75,19 @@ impl Storage for AwsSecretsManager {
     async fn load(&self, name: &str) -> Result<Option<String>, StorageError> {
         use aws_sdk_secretsmanager::error::SdkError;
 
-        // Use cache if enabled
-        if let Some(cache) = &self.cache {
-            match cache.get_secret_value(name, None, None, false).await {
-                Ok(value) => return Ok(value.secret_string),
-                Err(err) => {
-                    // Check for ResourceNotFoundException
-                    if let Some(SdkError::ServiceError(service_err)) =
-                        err.downcast_ref::<SdkError<GetSecretValueError>>()
-                    {
-                        if service_err.err().is_resource_not_found_exception() {
-                            return Ok(None);
-                        }
-                    }
-                    return Err(StorageError::AwsSdk(eyre!("{err}")));
-                }
-            }
-        }
-
-        // Direct call if cache is disabled or bypass
-        match self.client.get_secret_value().secret_id(name).send().await {
+        match self.cache.get_secret_value(name, None, None, false).await {
             Ok(value) => Ok(value.secret_string),
-            Err(SdkError::ServiceError(err)) if err.err().is_resource_not_found_exception() => {
-                Ok(None)
+            Err(err) => {
+                // Check for ResourceNotFoundException
+                if let Some(SdkError::ServiceError(service_err)) =
+                    err.downcast_ref::<SdkError<GetSecretValueError>>()
+                {
+                    if service_err.err().is_resource_not_found_exception() {
+                        return Ok(None);
+                    }
+                }
+                Err(StorageError::AwsSdk(eyre!("{err}")))
             }
-            Err(sdk_err) => Err(StorageError::AwsSdk(sdk_err.into())),
         }
     }
 
@@ -119,10 +100,8 @@ impl Storage for AwsSecretsManager {
             .await
             .map_err(|e| StorageError::AwsSdk(e.into()))?;
 
-        // Force the secret refresh in the cache only if enabled
-        if let Some(cache) = &self.cache {
-            let _ = cache.get_secret_value(name, None, None, true).await;
-        }
+        // Force the secret refresh in the cache
+        let _ = self.cache.get_secret_value(name, None, None, true).await;
         Ok(())
     }
 
@@ -134,10 +113,8 @@ impl Storage for AwsSecretsManager {
             .await
             .map_err(|e| StorageError::AwsSdk(e.into()))?;
 
-        // Invalidate cache by refreshing the secret only if enabled
-        if let Some(cache) = &self.cache {
-            let _ = cache.get_secret_value(name, None, None, true).await;
-        }
+        // Invalidate cache by refreshing the secret
+        let _ = self.cache.get_secret_value(name, None, None, true).await;
         Ok(())
     }
 }
