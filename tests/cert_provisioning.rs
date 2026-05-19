@@ -241,7 +241,7 @@ async fn test_full_certificate_provisioning() {
         .expect("Failed to extract cert chain");
     assert!(cert_chain.is_some());
     let parts = cert_chain.unwrap();
-    assert!(parts.len() >= 1);
+    assert!(!parts.is_empty());
 }
 
 #[tokio::test]
