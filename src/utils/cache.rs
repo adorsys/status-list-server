@@ -11,17 +11,17 @@ pub struct Cache {
 impl Cache {
     /// Creates a cache; TTL=0 disables it.
     pub fn new(ttl_secs: u64, max_capacity: u64) -> Self {
-        let inner = if ttl_secs == 0 {
+        let inner = (ttl_secs > 0).then(|| {
+            MokaCache::builder()
+                .time_to_live(Duration::from_secs(ttl_secs))
+                .max_capacity(max_capacity)
+                .build()
+        });
+
+        if inner.is_none() {
             tracing::info!("Cache disabled (TTL=0)");
-            None
-        } else {
-            Some(
-                MokaCache::builder()
-                    .time_to_live(Duration::from_secs(ttl_secs))
-                    .max_capacity(max_capacity)
-                    .build(),
-            )
-        };
+        }
+
         Self { inner }
     }
 

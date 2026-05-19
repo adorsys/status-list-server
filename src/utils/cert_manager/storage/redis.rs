@@ -32,19 +32,13 @@ impl Storage for Redis {
         let mut conn = self.conn.clone();
         match self.ttl {
             Some(0) => Ok(()), // Cache disabled
-            Some(ttl) => {
-                let _: () = conn.set_ex(key, value, ttl).await?;
-                Ok(())
-            }
-            None => {
-                let _: () = conn.set(key, value).await?;
-                Ok(())
-            }
+            Some(ttl) => Ok(conn.set_ex(key, value, ttl).await?),
+            None => Ok(conn.set(key, value).await?),
         }
     }
 
     async fn load(&self, key: &str) -> Result<Option<String>, StorageError> {
-        if self.ttl == Some(0) {
+        if matches!(self.ttl, Some(0)) {
             return Ok(None);
         }
         let mut conn = self.conn.clone();
