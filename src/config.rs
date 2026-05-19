@@ -42,6 +42,8 @@ pub struct CertConfig {
 pub struct RedisConfig {
     pub uri: SecretString,
     pub require_client_auth: bool,
+    pub cert_cache_ttl: u64,
+    pub secrets_cache_ttl: u64,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -135,6 +137,8 @@ impl Config {
             )?
             .set_default("redis.uri", "redis://localhost:6379")?
             .set_default("redis.require_client_auth", false)?
+            .set_default("redis.cert_cache_ttl", 3600)? // Default 1 hour
+            .set_default("redis.secrets_cache_ttl", 300)? // Default 5 minutes
             .set_default("server.cert.email", "admin@example.com")?
             .set_default("server.cert.eku", vec![1, 3, 6, 1, 5, 5, 7, 3, 30])?
             .set_default("server.cert.organization", "adorsys GmbH & CO KG")?

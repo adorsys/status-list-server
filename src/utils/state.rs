@@ -13,7 +13,7 @@ use color_eyre::eyre::{Context, Result as EyeResult};
 use sea_orm::Database;
 use sea_orm_migration::MigratorTrait;
 use secrecy::ExposeSecret;
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 
 use super::{
     cache::Cache,
@@ -67,10 +67,14 @@ pub async fn build_state(config: &AppConfig) -> EyeResult<AppState> {
     };
 
     // Initialize the storage backends for the certificate manager
-    let cache = Redis::new(redis_conn.clone());
+    let cache = Redis::new(redis_conn.clone()).with_ttl(config.redis.cert_cache_ttl);
     let cert_storage =
         AwsS3::new(&aws_config, BUCKET_NAME, config.aws.region.clone()).with_cache(cache);
-    let secrets_storage = AwsSecretsManager::new(&aws_config).await?;
+    let secrets_storage = AwsSecretsManager::new(
+        &aws_config,
+        Duration::from_secs(config.redis.secrets_cache_ttl),
+    )
+    .await?;
 
     let mut certificate_manager = CertManager::new(
         [&config.server.domain],

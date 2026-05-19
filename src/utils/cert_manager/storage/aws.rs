@@ -22,24 +22,37 @@ use crate::{cert_manager::storage::StorageError, utils::cert_manager::Storage};
 pub struct AwsSecretsManager {
     client: SecretsClient,
     cache: SecretsCacheClient,
+    secrets_cache_ttl: Duration,
 }
 
 impl AwsSecretsManager {
     /// Create a new instance of [AwsSecretsManager] with the given AWS SDK config
-    pub async fn new(config: &SdkConfig) -> Result<Self, StorageError> {
+    pub async fn new(config: &SdkConfig, ttl: Duration) -> Result<Self, StorageError> {
         let client = SecretsClient::new(config);
         let asm_builder = SecretsConfig::from(config).to_builder();
-        // Cache size: 100 and a TTL of 5 minutes
+
+        // SecretsCacheClient requires a non-zero TTL to build.
+        // If the intended TTL is 0, we use a dummy 1s TTL and bypass it in our methods.
+        let internal_ttl = if ttl.is_zero() {
+            Duration::from_secs(1)
+        } else {
+            ttl
+        };
+
         let cache = SecretsCacheClient::from_builder(
             asm_builder,
             NonZeroUsize::new(100).unwrap(),
-            Duration::from_secs(300),
+            internal_ttl,
             true,
         )
         .await
         .map_err(|e| StorageError::AwsSdk(e.into()))?;
 
-        Ok(Self { client, cache })
+        Ok(Self {
+            client,
+            cache,
+            secrets_cache_ttl: ttl,
+        })
     }
 }
 
@@ -72,6 +85,17 @@ impl Storage for AwsSecretsManager {
     async fn load(&self, name: &str) -> Result<Option<String>, StorageError> {
         use aws_sdk_secretsmanager::error::SdkError;
 
+        // Bypass cache if TTL is 0
+        if self.secrets_cache_ttl.is_zero() {
+            match self.client.get_secret_value().secret_id(name).send().await {
+                Ok(value) => return Ok(value.secret_string),
+                Err(SdkError::ServiceError(err)) if err.err().is_resource_not_found_exception() => {
+                    return Ok(None);
+                }
+                Err(sdk_err) => return Err(StorageError::AwsSdk(sdk_err.into())),
+            }
+        }
+
         match self.cache.get_secret_value(name, None, None, false).await {
             Ok(value) => Ok(value.secret_string),
             Err(err) => {
@@ -97,8 +121,10 @@ impl Storage for AwsSecretsManager {
             .await
             .map_err(|e| StorageError::AwsSdk(e.into()))?;
 
-        // Force the secret refresh in the cache
-        let _ = self.cache.get_secret_value(name, None, None, true).await;
+        // Force the secret refresh in the cache only if enabled
+        if !self.secrets_cache_ttl.is_zero() {
+            let _ = self.cache.get_secret_value(name, None, None, true).await;
+        }
         Ok(())
     }
 
@@ -110,8 +136,10 @@ impl Storage for AwsSecretsManager {
             .await
             .map_err(|e| StorageError::AwsSdk(e.into()))?;
 
-        // Invalidate cache by refreshing the secret
-        let _ = self.cache.get_secret_value(name, None, None, true).await;
+        // Invalidate cache by refreshing the secret only if enabled
+        if !self.secrets_cache_ttl.is_zero() {
+            let _ = self.cache.get_secret_value(name, None, None, true).await;
+        }
         Ok(())
     }
 }

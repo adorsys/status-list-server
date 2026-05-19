@@ -30,15 +30,23 @@ impl Redis {
 impl Storage for Redis {
     async fn store(&self, key: &str, value: &str) -> Result<(), StorageError> {
         let mut conn = self.conn.clone();
-        if let Some(ttl) = self.ttl {
-            let _: () = conn.set_ex(key, value, ttl).await?;
-        } else {
-            let _: () = conn.set(key, value).await?;
+        match self.ttl {
+            Some(0) => Ok(()), // Cache disabled
+            Some(ttl) => {
+                let _: () = conn.set_ex(key, value, ttl).await?;
+                Ok(())
+            }
+            None => {
+                let _: () = conn.set(key, value).await?;
+                Ok(())
+            }
         }
-        Ok(())
     }
 
     async fn load(&self, key: &str) -> Result<Option<String>, StorageError> {
+        if self.ttl == Some(0) {
+            return Ok(None);
+        }
         let mut conn = self.conn.clone();
         Ok(conn.get(key).await?)
     }
