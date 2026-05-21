@@ -10,4 +10,4 @@ pub mod models;
 pub mod startup;
 pub mod web;
 
-pub use utils::{cert_manager, state};
+pub use utils::{bits_validation::BitFlag, cert_manager, state};

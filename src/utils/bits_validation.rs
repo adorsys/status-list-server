@@ -24,7 +24,7 @@ impl BitFlag {
     /// # Examples
     ///
     /// ```
-    /// use crate::status_list_server::utils::bits_validation::BitFlag;
+    /// use status_list_server::BitFlag;
     /// let valid = BitFlag::new(4);
     /// assert!(valid.is_some());
     ///
@@ -43,7 +43,7 @@ impl BitFlag {
     /// # Examples
     ///
     /// ```
-    /// use crate::status_list_server::utils::bits_validation::BitFlag;
+    /// use status_list_server::BitFlag;
     /// let bit = BitFlag::new(2).unwrap();
     /// assert_eq!(bit.value(), 2);
     /// ```
