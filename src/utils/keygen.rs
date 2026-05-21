@@ -3,7 +3,10 @@ use p256::{
     ecdsa::{SigningKey, VerifyingKey},
     pkcs8::{DecodePrivateKey, EncodePrivateKey, LineEnding},
 };
-use rand::{rand_core::OsError, rngs::OsRng, TryRngCore};
+use rand::{
+    rngs::{SysError, SysRng},
+    TryRng,
+};
 use thiserror::Error;
 
 const SECRET_KEY_LENGTH: usize = 32;
@@ -11,7 +14,7 @@ const SECRET_KEY_LENGTH: usize = 32;
 #[derive(Debug, Error)]
 pub enum Error {
     #[error("Failed to generate key: {0}")]
-    KeyGen(#[from] OsError),
+    KeyGen(#[from] SysError),
     #[error("Failed to parse key: {0}")]
     Parsing(#[source] Report),
 }
@@ -34,7 +37,7 @@ impl Keypair {
         const MAX_ATTEMPTS: u8 = 3;
         // Try up to 3 times to generate a random seed as a safeguard against bad RNG
         for attempt in 0..MAX_ATTEMPTS {
-            match OsRng.try_fill_bytes(&mut seed) {
+            match SysRng.try_fill_bytes(&mut seed) {
                 Ok(()) => break,
                 Err(err) => {
                     if attempt == MAX_ATTEMPTS - 1 {

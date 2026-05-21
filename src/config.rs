@@ -100,7 +100,7 @@ impl RedisConfig {
                 _ => {
                     tracing::warn!("Client authentication required but no certificates provided");
                     return Err(redis::RedisError::from((
-                        redis::ErrorKind::IoError,
+                        redis::ErrorKind::Io,
                         "Client authentication required but no certificates provided",
                     )));
                 }
@@ -117,7 +117,8 @@ impl RedisConfig {
             )?
         };
 
-        let config = ConnectionManagerConfig::new().set_connection_timeout(Duration::from_secs(60));
+        let config =
+            ConnectionManagerConfig::new().set_connection_timeout(Some(Duration::from_secs(60)));
         client.get_connection_manager_with_config(config).await
     }
 }
