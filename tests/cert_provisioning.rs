@@ -6,7 +6,7 @@
 //! - **LocalStack** (S3 + Secrets Manager)
 //! - **Redis** (S3 cache layer)
 
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 
 use aws_config::BehaviorVersion;
 use aws_sdk_s3::Client as S3Client;
@@ -149,7 +149,7 @@ impl TestInfra {
 
         let cache = RedisStorage::new(redis_conn);
         let cert_storage = AwsS3::new(&aws_config, BUCKET_NAME, AWS_REGION).with_cache(cache);
-        let secrets_storage = AwsSecretsManager::new(&aws_config)
+        let secrets_storage = AwsSecretsManager::new(&aws_config, Duration::from_millis(0))
             .await
             .expect("Failed to create AwsSecretsManager");
 
