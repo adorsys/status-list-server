@@ -72,7 +72,7 @@ pub async fn build_state(config: &AppConfig) -> EyeResult<AppState> {
         AwsS3::new(&aws_config, BUCKET_NAME, config.aws.region.clone()).with_cache(cache);
     let secrets_storage = AwsSecretsManager::new(
         &aws_config,
-        Duration::from_secs(config.redis.secrets_cache_ttl),
+        Duration::from_secs(config.aws.secrets_cache_ttl),
     )
     .await?;
 

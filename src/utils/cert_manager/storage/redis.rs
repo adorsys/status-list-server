@@ -7,34 +7,38 @@ use crate::cert_manager::storage::{Storage, StorageError};
 #[derive(Clone)]
 pub struct Redis {
     conn: ConnectionManager,
-    ttl: u64, // 0 means disabled
+    ttl: Option<u64>,
 }
 
 impl Redis {
     /// Create a new instance of [RedisStorage]
     /// with the given Redis connection manager
     pub fn new(conn: ConnectionManager) -> Self {
-        Self { conn, ttl: 0 }
+        Self { conn, ttl: None }
     }
 
     /// Set the time-to-live (TTL) for the stored data
     pub fn with_ttl(self, ttl: u64) -> Self {
-        Self { ttl, ..self }
+        Self {
+            ttl: Some(ttl),
+            ..self
+        }
     }
 }
 
 #[async_trait]
 impl Storage for Redis {
     async fn store(&self, key: &str, value: &str) -> Result<(), StorageError> {
-        if self.ttl == 0 {
-            return Ok(());
-        }
         let mut conn = self.conn.clone();
-        Ok(conn.set_ex(key, value, self.ttl).await?)
+        match self.ttl {
+            Some(0) => Ok(()), // Cache disabled
+            Some(v) => Ok(conn.set_ex(key, value, v).await?),
+            None => Ok(conn.set(key, value).await?),
+        }
     }
 
     async fn load(&self, key: &str) -> Result<Option<String>, StorageError> {
-        if self.ttl == 0 {
+        if matches!(self.ttl, Some(0)) {
             return Ok(None);
         }
         let mut conn = self.conn.clone();
