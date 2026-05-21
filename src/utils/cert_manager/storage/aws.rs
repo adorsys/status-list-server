@@ -26,14 +26,17 @@ pub struct AwsSecretsManager {
 
 impl AwsSecretsManager {
     /// Create a new instance of [AwsSecretsManager] with the given AWS SDK config
-    pub async fn new(config: &SdkConfig) -> Result<Self, StorageError> {
+    pub async fn new(
+        config: &SdkConfig,
+        secrets_cache_ttl: Duration,
+    ) -> Result<Self, StorageError> {
         let client = SecretsClient::new(config);
         let asm_builder = SecretsConfig::from(config).to_builder();
-        // Cache size: 100 and a TTL of 5 minutes
+
         let cache = SecretsCacheClient::from_builder(
             asm_builder,
             NonZeroUsize::new(100).unwrap(),
-            Duration::from_secs(300),
+            secrets_cache_ttl,
             true,
         )
         .await
