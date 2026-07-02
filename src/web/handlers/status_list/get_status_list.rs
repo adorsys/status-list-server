@@ -22,6 +22,8 @@ use crate::{
     utils::{keygen::Keypair, state::AppState},
     web::handlers::status_list::constants::{TOKEN_EXP, TOKEN_TTL},
 };
+use base64::prelude::{Engine as _, BASE64_STANDARD};
+use x509_parser::pem::Pem;
 
 use super::{
     constants::{
@@ -93,25 +95,65 @@ async fn build_response_from_record(
     status_record: &StatusListRecord,
     state: &AppState,
 ) -> Result<impl IntoResponse + Debug, StatusListError> {
-    // Get the certificate chain
-    let certs_parts = state
-        .cert_manager
-        .cert_chain_parts()
-        .await
-        .map_err(|e| {
-            tracing::error!("Failed to get certificate chain: {e:?}");
+    let (certs_parts, signing_key_pem) = if let Some(signing_files) = &state.signing_files {
+        let key_pem = tokio::fs::read_to_string(&signing_files.key_file)
+            .await
+            .map_err(|e| {
+                tracing::error!(path = ?signing_files.key_file, "Failed to read signing key file: {e:?}");
+                StatusListError::InternalServerError
+            })?;
+
+        let cert_pem_bytes = tokio::fs::read(&signing_files.cert_file).await.map_err(|e| {
+            tracing::error!(path = ?signing_files.cert_file, "Failed to read certificate file: {e:?}");
             StatusListError::InternalServerError
-        })?
-        .ok_or_else(|| {
-            tracing::warn!("The server certificate is not yet provisioned.");
-            StatusListError::ServiceUnavailable
         })?;
 
-    // Load the signing key
-    let signing_key_pem = state.cert_manager.signing_key_pem().await.map_err(|e| {
-        tracing::error!("Failed to load signing key: {e:?}");
-        StatusListError::InternalServerError
-    })?;
+        let certs: Vec<String> = Pem::iter_from_buffer(&cert_pem_bytes)
+            .map(|pem| {
+                pem.map(|p| BASE64_STANDARD.encode(&p.contents))
+                    .map_err(|e| {
+                        tracing::error!("Failed to parse certificate PEM: {e:?}");
+                        StatusListError::InternalServerError
+                    })
+            })
+            .collect::<Result<_, _>>()?;
+
+        if certs.is_empty() {
+            tracing::error!(path = ?signing_files.cert_file, "Certificate file contains no certificates");
+            return Err(StatusListError::InternalServerError);
+        }
+
+        (Some(certs), key_pem)
+    } else if let Some(cert_manager) = &state.cert_manager {
+        let certs = cert_manager
+            .cert_chain_parts()
+            .await
+            .map_err(|e| {
+                tracing::error!("Failed to get certificate chain: {e:?}");
+                StatusListError::InternalServerError
+            })?
+            .ok_or_else(|| {
+                tracing::warn!("The server certificate is not yet provisioned.");
+                StatusListError::ServiceUnavailable
+            })?;
+
+        let key_pem = cert_manager.signing_key_pem().await.map_err(|e| {
+            tracing::error!("Failed to load signing key: {e:?}");
+            StatusListError::InternalServerError
+        })?;
+
+        (Some(certs), key_pem)
+    } else {
+        let keypair = Keypair::generate().map_err(|e| {
+            tracing::error!("Failed to generate signing key: {e:?}");
+            StatusListError::InternalServerError
+        })?;
+        let key_pem = keypair.to_pkcs8_pem().map_err(|e| {
+            tracing::error!("Failed to serialize signing key: {e:?}");
+            StatusListError::InternalServerError
+        })?;
+        (None, key_pem)
+    };
 
     let accept_header = accept.to_string();
     let status_record = status_record.clone();
@@ -155,11 +197,11 @@ async fn build_response_from_record(
         .into_response())
 }
 
-// Function to create a CWT per the specification
+/// Creates a CWT (CBOR Web Token) per the specification.
 fn issue_cwt(
     status_record: &StatusListRecord,
     keypair: &Keypair,
-    cert_chain: Vec<String>,
+    cert_chain: Option<Vec<String>>,
 ) -> Result<Vec<u8>, StatusListError> {
     let mut claims = vec![];
 
@@ -205,13 +247,16 @@ fn issue_cwt(
         StatusListError::InternalServerError
     })?;
 
-    let x5chain_value = build_x5chain(&cert_chain)?;
-    // Building the protected header
-    let protected = HeaderBuilder::new()
+    let mut header_builder = HeaderBuilder::new()
         .algorithm(Algorithm::ES256)
-        .value(HeaderParameter::X5Chain.to_i64(), x5chain_value)
-        .value(CWT_TYPE, CborValue::Text(STATUS_LISTS_HEADER_CWT.into()))
-        .build();
+        .value(CWT_TYPE, CborValue::Text(STATUS_LISTS_HEADER_CWT.into()));
+
+    if let Some(chain) = &cert_chain {
+        let x5chain_value = build_x5chain(chain)?;
+        header_builder = header_builder.value(HeaderParameter::X5Chain.to_i64(), x5chain_value);
+    }
+
+    let protected = header_builder.build();
 
     let signing_key = keypair.signing_key();
 
@@ -267,12 +312,11 @@ pub struct StatusListToken {
 fn issue_jwt(
     status_record: &StatusListRecord,
     keypair: &Keypair,
-    cert_chain: Vec<String>,
+    cert_chain: Option<Vec<String>>,
 ) -> Result<String, StatusListError> {
     let iat = Utc::now().timestamp();
     let ttl = TOKEN_TTL;
     let exp = iat + TOKEN_EXP;
-    // Building the claims
     let claims = StatusListToken {
         exp: Some(exp),
         iat,
@@ -280,10 +324,9 @@ fn issue_jwt(
         sub: status_record.sub.to_owned(),
         ttl: Some(ttl),
     };
-    // Building the header
     let mut header = Header::new(jsonwebtoken::Algorithm::ES256);
     header.typ = Some(STATUS_LISTS_HEADER_JWT.into());
-    header.x5c = Some(cert_chain);
+    header.x5c = cert_chain;
 
     let pem_bytes = keypair.to_pkcs8_pem_bytes().map_err(|err| {
         tracing::error!("Failed to convert signing key to PEM: {err:?}");
@@ -368,8 +411,13 @@ mod tests {
         decoder.read_to_end(&mut body_bytes).unwrap();
         let body_str = std::str::from_utf8(&body_bytes).unwrap();
 
-        // Load the decoding key
-        let signing_key_pem = app_state.cert_manager.signing_key_pem().await.unwrap();
+        let signing_key_pem = app_state
+            .cert_manager
+            .as_ref()
+            .unwrap()
+            .signing_key_pem()
+            .await
+            .unwrap();
         let keypair = Keypair::from_pkcs8_pem(&signing_key_pem).unwrap();
         let decoding_key_pem = keypair
             .verifying_key()
@@ -442,8 +490,13 @@ mod tests {
 
         let cwt = CoseSign1::from_slice(&body_bytes).unwrap();
 
-        // Load the key from the cache
-        let signing_key_pem = app_state.cert_manager.signing_key_pem().await.unwrap();
+        let signing_key_pem = app_state
+            .cert_manager
+            .as_ref()
+            .unwrap()
+            .signing_key_pem()
+            .await
+            .unwrap();
         let keypair = Keypair::from_pkcs8_pem(&signing_key_pem).unwrap();
         let signing_key = keypair.signing_key();
         let verifying_key = VerifyingKey::from(signing_key);
@@ -550,5 +603,90 @@ mod tests {
             StatusCode::NOT_ACCEPTABLE
         );
         assert_eq!(err, StatusListError::InvalidAcceptHeader);
+    }
+
+    #[tokio::test]
+    async fn test_get_status_list_jwt_with_signing_files() {
+        use crate::utils::state::SigningFiles;
+        use std::path::PathBuf;
+        use tempfile::TempDir;
+
+        let key_pem = include_str!("../../../test_resources/ec-private.pem");
+        let cert_data_json: serde_json::Value =
+            serde_json::from_str(include_str!("../../../test_resources/cert_data.json")).unwrap();
+        let cert_pem = cert_data_json["certificate"].as_str().unwrap();
+
+        let tmp_dir = TempDir::new().unwrap();
+        let key_path = tmp_dir.path().join("tls.key");
+        let cert_path = tmp_dir.path().join("tls.crt");
+        std::fs::write(&key_path, key_pem).unwrap();
+        std::fs::write(&cert_path, cert_pem).unwrap();
+
+        let mock_db = MockDatabase::new(DatabaseBackend::Postgres);
+        let status_list = StatusList {
+            bits: 8,
+            lst: encode_compressed(&[0, 0, 0]).unwrap(),
+        };
+        let status_list_token = StatusListRecord {
+            list_id: "test_list".to_string(),
+            issuer: "issuer1".to_string(),
+            status_list,
+            sub: "test_subject".to_string(),
+        };
+        let db_conn = Arc::new(
+            mock_db
+                .append_query_results::<status_lists::Model, Vec<_>, _>(vec![vec![
+                    status_list_token,
+                ]])
+                .into_connection(),
+        );
+
+        let mut app_state = test_app_state(Some(db_conn)).await;
+        app_state.cert_manager = None;
+        app_state.signing_files = Some(SigningFiles {
+            key_file: PathBuf::from(&key_path),
+            cert_file: PathBuf::from(&cert_path),
+        });
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            http::header::ACCEPT,
+            ACCEPT_STATUS_LISTS_HEADER_JWT.parse().unwrap(),
+        );
+
+        let response = get_status_list(State(app_state), Path("test_list".to_string()), headers)
+            .await
+            .unwrap()
+            .into_response();
+
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let compressed_body_bytes = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+        let mut decoder = flate2::read::GzDecoder::new(&compressed_body_bytes[..]);
+        let mut body_bytes = Vec::new();
+        decoder.read_to_end(&mut body_bytes).unwrap();
+        let body_str = std::str::from_utf8(&body_bytes).unwrap();
+
+        let keypair = Keypair::from_pkcs8_pem(key_pem).unwrap();
+        let decoding_key_pem = keypair
+            .verifying_key()
+            .to_public_key_pem(LineEnding::default())
+            .unwrap()
+            .into_bytes();
+        let decoding_key = DecodingKey::from_ec_pem(&decoding_key_pem).unwrap();
+        let mut validation = Validation::new(jsonwebtoken::Algorithm::ES256);
+        validation.validate_exp = false;
+        let token_data =
+            jsonwebtoken::decode::<StatusListToken>(body_str, &decoding_key, &validation).unwrap();
+
+        assert_eq!(token_data.claims.sub, "test_subject");
+        assert_eq!(token_data.claims.status_list.bits, 8);
+
+        let jwt_header = jsonwebtoken::decode_header(body_str).unwrap();
+        assert!(
+            jwt_header.x5c.is_some(),
+            "x5c header should be present when signing files are configured"
+        );
+        assert_eq!(jwt_header.x5c.unwrap().len(), 2);
     }
 }

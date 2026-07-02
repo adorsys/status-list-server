@@ -67,7 +67,8 @@ pub async fn test_app_state(db_conn: Option<Arc<sea_orm::DatabaseConnection>>) -
         credential_repo: SeaOrmStore::new(db.clone()),
         status_list_repo: SeaOrmStore::new(db),
         server_domain: "example.com".to_string(),
-        cert_manager: Arc::new(certificate_manager),
+        cert_manager: Some(Arc::new(certificate_manager)),
+        signing_files: None,
         cache: Cache::new(5 * 60, 100),
     }
 }

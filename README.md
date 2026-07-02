@@ -204,6 +204,61 @@ The Status List Server is provisioned with a cryptographic certificate that is e
 - Every day, a cron job checks whether the certificate should be renewed based on this strategy.
 - If the certificate is still considered valid according to the configured strategy, no renewal occurs; renewal is only triggered when necessary.
 
+### External Certificate Management (Signing Files)
+
+As an alternative to the built-in ACME certificate lifecycle, the server can consume a signing key and certificate chain that are managed by an external system — for example, [cert-manager](https://cert-manager.io/) on Kubernetes.
+
+Set the two environment variables below to enable this mode. When they are present, the built-in ACME certificate manager is **not** started, and no AWS or ACME configuration is required.
+
+| Variable | Description | Example |
+|---|---|---|
+| `APP_SERVER__SIGNING__KEY_FILE` | Path to the PKCS8 PEM-encoded private signing key | `/certs/tls.key` |
+| `APP_SERVER__SIGNING__CERT_FILE` | Path to the PEM-encoded certificate chain (leaf + intermediates) | `/certs/tls.crt` |
+
+**Key points:**
+
+- The files are re-read on every request, so certificate rotation (e.g. cert-manager updating a mounted Kubernetes Secret) is picked up without a pod restart.
+- The certificate chain is included in the `x5c` header of both JWT and CWT tokens.
+- This mode is mutually exclusive with the built-in ACME mode (`APP_SERVER__CERT__*`). If both are configured, the signing files take precedence.
+
+**Kubernetes example** (using cert-manager):
+
+```yaml
+# Certificate resource
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: status-list-signing
+spec:
+  secretName: status-list-signing-tls
+  issuerRef:
+    name: my-issuer
+    kind: ClusterIssuer
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+    encoding: PKCS8
+  dnsNames:
+    - statuslist.example.com
+---
+# Deployment volume mount
+volumes:
+  - name: signing-certs
+    secret:
+      secretName: status-list-signing-tls
+containers:
+  - name: status-list-server
+    env:
+      - name: APP_SERVER__SIGNING__KEY_FILE
+        value: /certs/tls.key
+      - name: APP_SERVER__SIGNING__CERT_FILE
+        value: /certs/tls.crt
+    volumeMounts:
+      - name: signing-certs
+        mountPath: /certs
+        readOnly: true
+```
+
 ## Error Handling
 
 The server implements proper error handling and returns appropriate HTTP status codes:

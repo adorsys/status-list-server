@@ -28,18 +28,17 @@ async fn main() -> Result<()> {
     let config = AppConfig::load()?;
     let app_state = build_state(&config).await?;
 
-    // Setup certificate renewal scheduler
-    let cert_manager = app_state.cert_manager.clone();
-    setup_cert_renewal_scheduler(cert_manager.clone()).await?;
+    if let Some(cert_manager) = app_state.cert_manager.clone() {
+        setup_cert_renewal_scheduler(cert_manager.clone()).await?;
+
+        tokio::spawn(async move {
+            if let Err(e) = cert_manager.renew_cert_if_needed().await {
+                warn!("Certificate initialization failed: {e}");
+            }
+        });
+    }
 
     let http_server = HttpServer::new(&config, app_state).await?;
-
-    // Initial certificate request
-    tokio::spawn(async move {
-        if let Err(e) = cert_manager.renew_cert_if_needed().await {
-            warn!("Certificate initialization failed: {e}");
-        }
-    });
 
     http_server.run().await?;
     Ok(())

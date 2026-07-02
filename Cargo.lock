@@ -5720,6 +5720,7 @@ dependencies = [
  "serde",
  "serde-aux",
  "serde_json",
+ "tempfile",
  "testcontainers-modules",
  "thiserror",
  "tikv-jemallocator",
