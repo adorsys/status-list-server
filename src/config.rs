@@ -14,7 +14,7 @@ pub struct Config {
     pub server: ServerConfig,
     pub database: DatabaseConfig,
     pub redis: RedisConfig,
-    pub aws: AwsConfig,
+    pub aws: Option<AwsConfig>,
     pub cache: CacheConfig,
 }
 
@@ -23,8 +23,21 @@ pub struct ServerConfig {
     pub host: String,
     pub domain: String,
     pub port: u16,
-    pub cert: CertConfig,
+    pub cert: Option<CertConfig>,
+    pub signing: Option<SigningConfig>,
     pub enable_metrics: bool,
+}
+
+/// Configuration for loading signing key and certificate chain from files on disk.
+///
+/// Designed for environments where an external system (e.g. Kubernetes cert-manager)
+/// manages certificate lifecycle and mounts the key material as files.
+#[derive(Debug, Clone, Deserialize)]
+pub struct SigningConfig {
+    /// Path to the PKCS8 PEM-encoded private signing key (e.g. `tls.key`)
+    pub key_file: String,
+    /// Path to the PEM-encoded certificate chain (e.g. `tls.crt`)
+    pub cert_file: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -182,12 +195,17 @@ mod tests {
         );
         assert_eq!(config.redis.uri.expose_secret(), "redis://localhost:6379");
         assert!(!config.redis.require_client_auth);
-        assert_eq!(config.server.cert.email, "admin@example.com");
+        let cert = config
+            .server
+            .cert
+            .expect("cert config should have defaults");
+        assert_eq!(cert.email, "admin@example.com");
         assert_eq!(
-            config.server.cert.acme_directory_url,
+            cert.acme_directory_url,
             "https://acme-v02.api.letsencrypt.org/directory"
         );
-        assert_eq!(config.aws.region, "us-east-1");
+        let aws = config.aws.expect("aws config should have defaults");
+        assert_eq!(aws.region, "us-east-1");
     }
 
     #[sealed_test(env = [
@@ -200,7 +218,6 @@ mod tests {
         ("APP_SERVER__CERT__ACME_DIRECTORY_URL", "https://acme-v02.api.letsencrypt.org/directory"),
     ])]
     fn test_env_config() {
-        // Test configuration overrides via environment variables
         let config = Config::load().expect("Failed to load config");
 
         assert_eq!(config.server.host, "0.0.0.0");
@@ -214,11 +231,14 @@ mod tests {
             "rediss://user:password@localhost:6379/redis"
         );
         assert!(config.redis.require_client_auth);
-        assert_eq!(config.server.cert.email, "test@gmail.com");
+        let cert = config.server.cert.expect("cert config should be set");
+        assert_eq!(cert.email, "test@gmail.com");
         assert_eq!(
-            config.server.cert.acme_directory_url,
+            cert.acme_directory_url,
             "https://acme-v02.api.letsencrypt.org/directory"
         );
+        let aws = config.aws.expect("aws config should have defaults");
+        assert_eq!(aws.region, "us-east-1");
     }
 
     #[sealed_test(env = [
@@ -247,13 +267,31 @@ mod tests {
             "rediss://user:password@localhost:6379/redis"
         );
         assert!(config.redis.require_client_auth);
-        assert_eq!(config.server.cert.email, "test@gmail.com");
+        let cert = config.server.cert.expect("cert config should be set");
+        assert_eq!(cert.email, "test@gmail.com");
         assert_eq!(
-            config.server.cert.acme_directory_url,
+            cert.acme_directory_url,
             "https://acme-v02.api.letsencrypt.org/directory"
         );
-        assert_eq!(config.aws.region, "us-west-2");
+        let aws = config.aws.expect("aws config should be set");
+        assert_eq!(aws.region, "us-west-2");
         assert_eq!(config.cache.ttl, 600);
         assert_eq!(config.cache.max_capacity, 2000);
+    }
+
+    #[sealed_test(env = [
+        ("APP_SERVER__SIGNING__KEY_FILE", "/certs/tls.key"),
+        ("APP_SERVER__SIGNING__CERT_FILE", "/certs/tls.crt"),
+    ])]
+    fn test_env_config_with_signing_files() {
+        let config = Config::load().expect("Failed to load config");
+
+        assert!(
+            config.server.cert.is_some(),
+            "cert defaults should still be present"
+        );
+        let signing = config.server.signing.expect("signing config should be set");
+        assert_eq!(signing.key_file, "/certs/tls.key");
+        assert_eq!(signing.cert_file, "/certs/tls.crt");
     }
 }
