@@ -152,6 +152,15 @@ impl Config {
             .set_default("redis.uri", "redis://localhost:6379")?
             .set_default("redis.require_client_auth", false)?
             .set_default("redis.cert_cache_ttl", 3600)? // Default 1 hour
+            .set_default("aws.secrets_cache_ttl", 300)? // Default 5 minutes
+            .set_default("server.cert.email", "admin@example.com")?
+            .set_default("server.cert.eku", vec![1, 3, 6, 1, 5, 5, 7, 3, 30])?
+            .set_default("server.cert.organization", "adorsys GmbH & CO KG")?
+            .set_default(
+                "server.cert.acme_directory_url",
+                "https://acme-v02.api.letsencrypt.org/directory",
+            )?
+            .set_default("aws.region", "us-east-1")?
             .set_default("cache.ttl", 5 * 60)?
             .set_default("cache.max_capacity", 100)?
             // Override config values via environment variables
@@ -186,8 +195,17 @@ mod tests {
         );
         assert_eq!(config.redis.uri.expose_secret(), "redis://localhost:6379");
         assert!(!config.redis.require_client_auth);
-        assert!(config.server.cert.is_none());
-        assert!(config.aws.is_none());
+        let cert = config
+            .server
+            .cert
+            .expect("cert config should have defaults");
+        assert_eq!(cert.email, "admin@example.com");
+        assert_eq!(
+            cert.acme_directory_url,
+            "https://acme-v02.api.letsencrypt.org/directory"
+        );
+        let aws = config.aws.expect("aws config should have defaults");
+        assert_eq!(aws.region, "us-east-1");
     }
 
     #[sealed_test(env = [
@@ -219,6 +237,8 @@ mod tests {
             cert.acme_directory_url,
             "https://acme-v02.api.letsencrypt.org/directory"
         );
+        let aws = config.aws.expect("aws config should have defaults");
+        assert_eq!(aws.region, "us-east-1");
     }
 
     #[sealed_test(env = [
@@ -266,7 +286,10 @@ mod tests {
     fn test_env_config_with_signing_files() {
         let config = Config::load().expect("Failed to load config");
 
-        assert!(config.server.cert.is_none());
+        assert!(
+            config.server.cert.is_some(),
+            "cert defaults should still be present"
+        );
         let signing = config.server.signing.expect("signing config should be set");
         assert_eq!(signing.key_file, "/certs/tls.key");
         assert_eq!(signing.cert_file, "/certs/tls.crt");
