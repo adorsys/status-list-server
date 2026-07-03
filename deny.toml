@@ -1,0 +1,44 @@
+# Configuration for cargo-deny
+# https://embarkstudios.github.io/cargo-deny/
+
+[graph]
+all-features = true
+
+[advisories]
+# Warn for unmaintained/unmaintained- advisory types but do not fail the build.
+# Vulnerabilities (RUSTSEC advisories with a CVE) always fail.
+version = 2
+ignore = []
+
+[licenses]
+# Allow common permissive licenses; reject unknown / no-license crates.
+version = 2
+allow = [
+    "MIT",
+    "MIT-0",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-DFS-2016",
+    "Unicode-3.0",
+    "Zlib",
+    "CC0-1.0",
+    "0BSD",
+    "Unlicense",
+    "MPL-2.0",
+    "CDLA-Permissive-2.0",
+]
+confidence-threshold = 0.8
+
+[bans]
+# Disallow multiple versions of the same crate unless explicitly allowed.
+multiple-versions = "warn"
+wildcards = "allow"
+
+[sources]
+# Only allow crates from crates.io by default.
+unknown-registry = "warn"
+unknown-git = "warn"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
