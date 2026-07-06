@@ -20,3 +20,7 @@ COSE = "COSE"
 # Base64 fragments that appear inside EC point / private key literals.
 MIGH = "MIGH"
 Ue = "Ue"
+# conda package name in the demo environment lockfile.
+certifi = "certifi"
+# Pod/instance suffix fragment in a demo notebook (e.g. "p79iz").
+iz = "iz"

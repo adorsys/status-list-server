@@ -1,0 +1,19 @@
+# Configuration for cargo-audit
+# https://github.com/rustsec/cargo-audit
+
+[advisories]
+# Pre-existing transitive vulnerabilities. These are flagged in the current
+# dependency tree but are NOT introduced by CI changes and cannot be fixed
+# within a CI-hardening PR:
+#
+# - rsa 0.9.10 (RUSTSEC-2023-0071, Marvin Attack): no fixed version is
+#   available upstream. Pulled transitively; revisit when rsa publishes a fix.
+# - rustls-webpki 0.101.7 (RUSTSEC-2026-0098/0099/0104): pulled transitively
+#   through the old rustls 0.21 used by aws-smithy-http-client. Requires an
+#   AWS SDK bump to drop rustls 0.21; tracked separately.
+ignore = [
+    "RUSTSEC-2023-0071",
+    "RUSTSEC-2026-0098",
+    "RUSTSEC-2026-0099",
+    "RUSTSEC-2026-0104",
+]
