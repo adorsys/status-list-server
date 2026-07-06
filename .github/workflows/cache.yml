@@ -1,0 +1,17 @@
+# Workflow to clean the cache in case of issues
+name: Clean Cache
+
+permissions:
+  actions: write
+
+on:
+  workflow_dispatch:
+
+jobs:
+  clean-cache:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - run: gh cache delete --all
+        env:
+          GH_TOKEN: ${{ github.token }}
