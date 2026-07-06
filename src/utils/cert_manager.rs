@@ -110,22 +110,25 @@ impl CertManager {
         })
     }
 
-    /// Set the storage backend for the certificate
-    /// <p><b>Note</b>: This method is required.
+    /// Set the storage backend for the certificate.
+    ///
+    /// **Note:** This method is required.
     pub fn with_cert_storage(mut self, storage: impl Storage + 'static) -> Self {
         self.cert_storage = Some(Box::new(storage));
         self
     }
 
-    /// Set the storage backend for the sensitive data
-    /// <p><b>Note</b>: This method is required.
+    /// Set the storage backend for the sensitive data.
+    ///
+    /// **Note:** This method is required.
     pub fn with_secrets_storage(mut self, storage: impl Storage + 'static) -> Self {
         self.secrets_storage = Some(Box::new(storage));
         self
     }
 
-    /// Set the handler for the ACME challenge
-    /// <p><b>Note</b>: This method is required.
+    /// Set the handler for the ACME challenge.
+    ///
+    /// **Note:** This method is required.
     pub fn with_challenge_handler(mut self, handler: impl ChallengeHandler + 'static) -> Self {
         self.challenge_handler = Some(Box::new(handler));
         self
@@ -133,7 +136,7 @@ impl CertManager {
 
     /// Override the default http client used by the ACME client
     ///
-    /// Default: [`DefaultHttpClient`](http_client::DefaultHttpClient)
+    /// Default: [`DefaultHttpClient`]
     pub fn with_acme_http_client(mut self, client: impl HttpClient + Clone + 'static) -> Self {
         self.acme_http_client_factory = Box::new(move || Box::new(client.clone()));
         self
@@ -337,7 +340,7 @@ impl CertManager {
 
     /// Extract individual certificates from the certificate chain and return them as a vector of base64-encoded strings
     ///
-    /// This fuction will return `None` if the server certificate was not found.
+    /// This function will return `None` if the server certificate was not found.
     ///
     /// # Errors
     /// Returns an error if the certificate chain cannot be parsed or if there was an issue when trying to retrieve the server certificate

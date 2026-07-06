@@ -111,7 +111,7 @@ impl AwsRoute53DnsUpdater {
         for zone in zones.iter() {
             let zone_name = &zone.name;
             let is_match = if let Some(stripped) = zone_name.strip_prefix("*.") {
-                // Try to match wilcard domains
+                // Try to match wildcard domains
                 if lookup.ends_with(stripped) {
                     // We ensure there's at least one identifier before the wildcard
                     let diff = lookup.len() - stripped.len();

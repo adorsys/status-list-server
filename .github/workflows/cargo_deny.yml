@@ -1,40 +1,31 @@
 name: Cargo deny
-
 on:
   workflow_call:
   workflow_dispatch:
-
 jobs:
   cargo-deny:
     runs-on: ubuntu-latest
     steps:
       - name: Fetch Repository
         uses: actions/checkout@v6
-
       - name: Install stable toolchain
         uses: actions-rust-lang/setup-rust-toolchain@v1
-
       - name: Cargo deny
         uses: EmbarkStudios/cargo-deny-action@v2
         with:
           rust-version: "stable"
-
   cargo-audit:
     runs-on: ubuntu-latest
     steps:
       - name: Fetch Repository
         uses: actions/checkout@v6
-
       - name: Install stable toolchain
         uses: actions-rust-lang/setup-rust-toolchain@v1
-
       - name: Cache Cargo registry
         uses: Swatinem/rust-cache@v2
-
       - name: Install cargo-audit
         uses: taiki-e/install-action@v2
         with:
           tool: cargo-audit
-
       - name: Run cargo audit
         run: cargo audit

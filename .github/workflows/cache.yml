@@ -1,17 +1,21 @@
 # Workflow to clean the cache in case of issues
 name: Clean Cache
-
 permissions:
   actions: write
-
 on:
   workflow_dispatch:
-
 jobs:
   clean-cache:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
-      - run: gh cache delete --all
+      - name: Show caches that will be deleted
+        run: |
+          echo "The following caches will be deleted across ALL workflows and refs:"
+          gh cache list --limit 200 || true
+        env:
+          GH_TOKEN: ${{ github.token }}
+      - name: Delete all caches
+        run: gh cache delete --all
         env:
           GH_TOKEN: ${{ github.token }}
