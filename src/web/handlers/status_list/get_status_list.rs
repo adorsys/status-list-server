@@ -6,7 +6,7 @@ use axum::{
     response::IntoResponse,
 };
 use coset::{
-    self, CborSerializable, CoseSign1Builder, HeaderBuilder,
+    self, CborSerializable, CoseSign1Builder, HeaderBuilder, TaggedCborSerializable,
     cbor::Value as CborValue,
     iana::{Algorithm, EnumI64, HeaderParameter},
 };
@@ -24,7 +24,7 @@ use crate::{
 use super::{
     constants::{
         ACCEPT_STATUS_LISTS_HEADER_CWT, ACCEPT_STATUS_LISTS_HEADER_JWT, CWT_TYPE, EXP, GZIP_HEADER,
-        ISSUED_AT, STATUS_LIST, STATUS_LISTS_HEADER_CWT, STATUS_LISTS_HEADER_JWT, SUBJECT, TTL,
+        ISSUED_AT, STATUS_LIST, STATUS_LISTS_HEADER_JWT, STATUS_LIST_CWT_TYPE_VALUE, SUBJECT, TTL,
     },
     error::StatusListError,
 };
@@ -225,7 +225,7 @@ fn issue_cwt(
     let protected = HeaderBuilder::new()
         .algorithm(Algorithm::ES256)
         .value(HeaderParameter::X5Chain.to_i64(), x5chain_value)
-        .value(CWT_TYPE, CborValue::Text(STATUS_LISTS_HEADER_CWT.into()))
+        .value(CWT_TYPE, CborValue::Text(STATUS_LIST_CWT_TYPE_VALUE.into()))
         .build();
 
     let signing_key = keypair.signing_key();
@@ -240,7 +240,8 @@ fn issue_cwt(
         })
         .build();
 
-    let cwt_bytes = sign1.to_vec().map_err(|err| {
+    // Tagged as COSE_Sign1_Tagged (CBOR tag 18), per draft-ietf-oauth-status-list-21 §5.2.
+    let cwt_bytes = sign1.to_tagged_vec().map_err(|err| {
         tracing::error!("Failed to serialize CWT: {err:?}");
         StatusListError::InternalServerError
     })?;
@@ -330,7 +331,7 @@ mod tests {
         extract::{Path, State},
         http::{self, HeaderMap, StatusCode},
     };
-    use coset::CoseSign1;
+    use coset::{CoseSign1, Label, TaggedCborSerializable};
     use jsonwebtoken::{DecodingKey, Validation};
     use p256::ecdsa::{VerifyingKey, signature::Verifier};
     use p256::pkcs8::{EncodePublicKey, LineEnding};
@@ -457,7 +458,8 @@ mod tests {
         let mut body_bytes = Vec::new();
         decoder.read_to_end(&mut body_bytes).unwrap();
 
-        let cwt = CoseSign1::from_slice(&body_bytes).unwrap();
+        // Tagged decode: the CWT MUST be COSE_Sign1_Tagged (CBOR tag 18) per §5.2.
+        let cwt = CoseSign1::from_tagged_slice(&body_bytes).unwrap();
 
         // Load the key from the cache
         let signing_key_pem = app_state.cert_manager.signing_key_pem().await.unwrap();
@@ -479,10 +481,12 @@ mod tests {
             _ => panic!("Invalid CWT payload"),
         };
 
-        // Verify claims
+        // Verify claims. Claim keys are asserted as the literal values mandated by
+        // draft-ietf-oauth-status-list-21 §5.2 (2/6/4/65534/65533), not via the
+        // production constants, so a regression in `constants.rs` can't pass silently.
         let sub = claims
             .iter()
-            .find(|(k, _)| k == &CborValue::Integer(SUBJECT.into()))
+            .find(|(k, _)| k == &CborValue::Integer(2i32.into()))
             .unwrap()
             .1
             .clone();
@@ -490,7 +494,7 @@ mod tests {
 
         let status_list_map = claims
             .iter()
-            .find(|(k, _)| k == &CborValue::Integer(STATUS_LIST.into()))
+            .find(|(k, _)| k == &CborValue::Integer(65533i32.into()))
             .unwrap()
             .1
             .clone();
@@ -517,11 +521,26 @@ mod tests {
 
         let ttl = claims
             .iter()
-            .find(|(k, _)| k == &CborValue::Integer(TTL.into()))
+            .find(|(k, _)| k == &CborValue::Integer(65534i32.into()))
             .unwrap()
             .1
             .clone();
         assert_eq!(ttl, CborValue::Integer(300.into()));
+
+        // Verify the protected header's type (label 16) is the full media type, per §5.2 -
+        // distinct from the JWT `typ` header, which uses the abbreviated form.
+        let type_header = cwt
+            .protected
+            .header
+            .rest
+            .iter()
+            .find(|(label, _)| *label == Label::Int(CWT_TYPE))
+            .map(|(_, value)| value.clone())
+            .expect("label 16 (type) missing from CWT protected header");
+        assert_eq!(
+            type_header,
+            CborValue::Text(STATUS_LIST_CWT_TYPE_VALUE.to_string())
+        );
     }
 
     #[tokio::test]

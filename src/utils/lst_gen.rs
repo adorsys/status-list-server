@@ -728,4 +728,43 @@ mod tests {
             );
         }
     }
+
+    // The following two tests use the worked examples from
+    // draft-ietf-oauth-status-list-21 §4.1 / §4.2, rather than hand-rolled bit
+    // patterns, as an authoritative interop check.
+    //
+    // The decompress-direction assertion is the real interop guarantee: DEFLATE
+    // permits multiple valid encodings of the same input, so it must hold
+    // regardless of the zlib backend flate2 is built against. The encode-direction
+    // assertion additionally pins flate2's exact byte-for-byte output (and thus
+    // implicitly `Compression::best()`), but is coupled to the backend rather than
+    // being a pure spec requirement.
+
+    #[test]
+    fn test_spec_vector_1_bit() {
+        let expected_bytes = vec![0xB9, 0xA3];
+        let spec_lst = "eNrbuRgAAhcBXQ";
+
+        let decoded = decode(spec_lst).expect("Failed to decode base64url");
+        let mut decoder = ZlibDecoder::new(&decoded[..]);
+        let mut decompressed = Vec::new();
+        decoder.read_to_end(&mut decompressed).unwrap();
+        assert_eq!(decompressed, expected_bytes);
+
+        assert_eq!(encode_compressed(&expected_bytes).unwrap(), spec_lst);
+    }
+
+    #[test]
+    fn test_spec_vector_2_bit() {
+        let expected_bytes = vec![0xC9, 0x44, 0xF9];
+        let spec_lst = "eNo76fITAAPfAgc";
+
+        let decoded = decode(spec_lst).expect("Failed to decode base64url");
+        let mut decoder = ZlibDecoder::new(&decoded[..]);
+        let mut decompressed = Vec::new();
+        decoder.read_to_end(&mut decompressed).unwrap();
+        assert_eq!(decompressed, expected_bytes);
+
+        assert_eq!(encode_compressed(&expected_bytes).unwrap(), spec_lst);
+    }
 }
