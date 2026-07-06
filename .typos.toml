@@ -8,6 +8,11 @@ extend-exclude = [
   "target/",
   ".git/",
   "src/test_resources/",
+  # supply-chain/config.toml is managed by `cargo vet`. Its exemption
+  # sections contain crate names (e.g. `flate2`, `writeable`) and version
+  # strings embedding git SHA hashes, both of which trigger typos-cli
+  # false positives that cannot be reasonably hand-curated.
+  "supply-chain/config.toml",
 ]
 
 [default.extend-words]
