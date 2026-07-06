@@ -2,6 +2,11 @@
 # https://github.com/rustsec/cargo-audit
 
 [advisories]
+# NOTE: This ignore list MUST be kept in sync with the `[advisories].ignore`
+# list in `deny.toml` (cargo-deny). The two tools scan different graph views
+# of the dependency tree, so both are needed; if you add or remove an entry
+# here, update `deny.toml` in the same commit.
+#
 # Pre-existing transitive vulnerabilities. These are flagged in the current
 # dependency tree but are NOT introduced by CI changes and cannot be fixed
 # within a CI-hardening PR:

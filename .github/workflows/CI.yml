@@ -271,9 +271,8 @@ jobs:
         with:
           globs: |
             **/*.md
-            #target
-            #.git
-            #node_modules
+            # .gitignore already excludes target/ and .git/ from scanning;
+            # no need to negate them explicitly here.
   yaml-lint:
     name: YAML Lint and Format Check
     runs-on: ubuntu-latest

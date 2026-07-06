@@ -29,3 +29,22 @@ jobs:
           tool: cargo-audit
       - name: Run cargo audit
         run: cargo audit
+  cargo-vet:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Fetch Repository
+        uses: actions/checkout@v6
+      - name: Install stable toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+      - name: Cache Cargo registry
+        uses: Swatinem/rust-cache@v2
+      - name: Install cargo-vet
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-vet
+      - name: Run cargo vet
+        # Verifies that every crate in Cargo.lock has either an audit record
+        # (supply-chain/audits.toml) or a vetted exemption
+        # (supply-chain/config.toml). New or bumped dependencies that have
+        # not been signed off will fail here, gating supply-chain changes.
+        run: cargo vet
