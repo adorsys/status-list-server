@@ -75,7 +75,8 @@ jobs:
 
       - name: Cache Cargo registry and target
         uses: Swatinem/rust-cache@v2
-        key: release-${{ matrix.target }}
+        with:
+          key: release-${{ matrix.target }}
 
       - name: Install build dependencies
         run: |
