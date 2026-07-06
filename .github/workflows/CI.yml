@@ -192,6 +192,7 @@ jobs:
           tool: cargo-llvm-cov,nextest
       - name: Generate code coverage
         run: |
+          mkdir -p coverage
           cargo llvm-cov nextest \
             --workspace \
             --all-features \
