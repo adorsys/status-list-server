@@ -44,12 +44,6 @@ jobs:
     name: Cargo Build (release)
     runs-on: ubuntu-latest
     needs: cargo-fmt
-    # Only x86_64-unknown-linux-gnu is built natively here. The production
-    # deploy targets (x86_64 / aarch64 *-unknown-linux-musl) are compiled
-    # inside the Docker image by the docker-build job below, which is the
-    # source of truth for the actual deploy triples. Cross-compiling
-    # aws-lc-sys for aarch64 on a stock ubuntu runner needs a full cross
-    # C/CMake toolchain that is not worth the complexity of this matrix.
     steps:
       - name: Fetch Repository
         uses: actions/checkout@v6

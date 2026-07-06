@@ -39,9 +39,14 @@ jobs:
       - name: Cache Cargo registry
         uses: Swatinem/rust-cache@v2
       - name: Install cargo-vet
-        uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-vet
+        # taiki-e/install-action ships the latest GitHub binary release,
+        # which for cargo-vet is still v0.10.0 (2024-10-03). That version
+        # predates "Trusted Publishing" support (added in v0.10.2, see
+        # CHANGELOG), so it rejects [[publisher.<crate>]] entries in
+        # imports.lock that use `trusted-publisher` instead of `user-id`
+        # with "missing field `user-id`". Building 0.10.2 from source via
+        # crates.io avoids that parser incompatibility.
+        run: cargo install cargo-vet --version 0.10.2 --locked
       - name: Run cargo vet
         # Verifies that every crate in Cargo.lock has either an audit record
         # (supply-chain/audits.toml) or a vetted exemption
