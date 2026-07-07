@@ -24,7 +24,7 @@ use crate::{
 use super::{
     constants::{
         ACCEPT_STATUS_LISTS_HEADER_CWT, ACCEPT_STATUS_LISTS_HEADER_JWT, CWT_TYPE, EXP, GZIP_HEADER,
-        ISSUED_AT, STATUS_LIST, STATUS_LISTS_HEADER_JWT, STATUS_LIST_CWT_TYPE_VALUE, SUBJECT, TTL,
+        ISSUED_AT, STATUS_LIST, STATUS_LISTS_CWT_TYPE_VALUE, STATUS_LISTS_HEADER_JWT, SUBJECT, TTL,
     },
     error::StatusListError,
 };
@@ -189,7 +189,7 @@ fn issue_cwt(
         CborValue::Integer(iat.into()),
     ));
     // According to the spec, the lifetime of the token depends on the lifetime of the referenced token
-    // https://www.ietf.org/archive/id/draft-ietf-oauth-status-list-10.html#section-13.1
+    // https://datatracker.ietf.org/doc/html/draft-ietf-oauth-status-list-21#section-13.7
     let exp = iat + token_exp_secs as i64;
     claims.push((
         CborValue::Integer(EXP.into()),
@@ -225,7 +225,10 @@ fn issue_cwt(
     let protected = HeaderBuilder::new()
         .algorithm(Algorithm::ES256)
         .value(HeaderParameter::X5Chain.to_i64(), x5chain_value)
-        .value(CWT_TYPE, CborValue::Text(STATUS_LIST_CWT_TYPE_VALUE.into()))
+        .value(
+            CWT_TYPE,
+            CborValue::Text(STATUS_LISTS_CWT_TYPE_VALUE.into()),
+        )
         .build();
 
     let signing_key = keypair.signing_key();
@@ -539,7 +542,7 @@ mod tests {
             .expect("label 16 (type) missing from CWT protected header");
         assert_eq!(
             type_header,
-            CborValue::Text(STATUS_LIST_CWT_TYPE_VALUE.to_string())
+            CborValue::Text(STATUS_LISTS_CWT_TYPE_VALUE.to_string())
         );
     }
 

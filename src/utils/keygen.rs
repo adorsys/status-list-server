@@ -78,7 +78,7 @@ impl Keypair {
     pub fn to_pkcs8_pem(&self) -> Result<String, Error> {
         self.repr
             .key
-            .to_pkcs8_pem(LineEnding::default())
+            .to_pkcs8_pem(LineEnding::LF)
             .map_err(|e| Error::Parsing(e.into()))
             .map(|pem| pem.to_string())
     }

@@ -767,4 +767,31 @@ mod tests {
 
         assert_eq!(encode_compressed(&expected_bytes).unwrap(), spec_lst);
     }
+
+    #[test]
+    fn test_spec_vector_1_bit_through_create_status_list() {
+        // Same statuses as `test_spec_vector_1_bit` (draft-ietf-oauth-status-list-21 §4.1's
+        // 16-entry, 1-bit example), but driven through the actual `StatusEntry` ->
+        // `create_status_list` pipeline (`determine_bits` + `apply_updates`), not just the
+        // compression layer. This proves the real production code path a caller (e.g.
+        // `publish_status.rs`) uses reproduces the spec's own worked output, not merely that
+        // `encode_compressed` does.
+        let statuses = [1, 0, 0, 1, 1, 1, 0, 1, 1, 1, 0, 0, 0, 1, 0, 1];
+        let updates: Vec<StatusEntry> = statuses
+            .into_iter()
+            .enumerate()
+            .map(|(index, bit)| StatusEntry {
+                index: index as i32,
+                status: if bit == 1 {
+                    Status::INVALID
+                } else {
+                    Status::VALID
+                },
+            })
+            .collect();
+
+        let result = create_status_list(updates).unwrap();
+        assert_eq!(result.bits, 1);
+        assert_eq!(result.lst, "eNrbuRgAAhcBXQ");
+    }
 }
