@@ -106,7 +106,9 @@ mod test {
     use sea_orm::{DatabaseBackend, MockDatabase};
 
     use crate::{
-        models::{status_lists, Status, StatusEntry, StatusList, StatusListRecord, UpdateStatusRequest},
+        models::{
+            status_lists, Status, StatusEntry, StatusList, StatusListRecord, UpdateStatusRequest,
+        },
         test_utils::test_app_state,
         utils::lst_gen::create_status_list,
     };
@@ -117,8 +119,13 @@ mod test {
         let issuer = "test-issuer".to_string();
         let payload = UpdateStatusRequest { status: vec![] };
 
-        let result =
-            update_status(State(appstate.clone()), Extension(issuer), Path("invalid-uuid".to_string()), Json(payload)).await;
+        let result = update_status(
+            State(appstate.clone()),
+            Extension(issuer),
+            Path("invalid-uuid".to_string()),
+            Json(payload),
+        )
+        .await;
 
         assert!(matches!(result, Err(StatusListError::InvalidListId(_))));
     }

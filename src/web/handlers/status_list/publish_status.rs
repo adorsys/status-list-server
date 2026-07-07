@@ -47,10 +47,7 @@ pub async fn publish_status(
                 lst: stl.lst,
             };
 
-            let sub = format!(
-                "https://{}/statuslists/{}",
-                appstate.server_domain, list_id
-            );
+            let sub = format!("https://{}/statuslists/{}", appstate.server_domain, list_id);
 
             // Build the new status list token
             let status_list_record = StatusListRecord {
@@ -92,8 +89,13 @@ mod tests {
         let issuer = "test-issuer".to_string();
         let payload = CreateStatusRequest { status: vec![] };
 
-        let result =
-            publish_status(State(appstate.clone()), Extension(issuer), Path("invalid-uuid".to_string()), Json(payload)).await;
+        let result = publish_status(
+            State(appstate.clone()),
+            Extension(issuer),
+            Path("invalid-uuid".to_string()),
+            Json(payload),
+        )
+        .await;
 
         assert!(matches!(result, Err(StatusListError::InvalidListId(_))));
     }
@@ -138,7 +140,9 @@ mod tests {
             State(app_state),
             Extension("issuer".to_string()),
             Path(token_id),
-            Json(CreateStatusRequest { status: status_entries }),
+            Json(CreateStatusRequest {
+                status: status_entries,
+            }),
         )
         .await
         .unwrap()
@@ -187,7 +191,9 @@ mod tests {
             State(app_state.clone()),
             Extension("issuer".to_string()),
             Path(token_id.clone()),
-            Json(CreateStatusRequest { status: status_entries }),
+            Json(CreateStatusRequest {
+                status: status_entries,
+            }),
         )
         .await
         .unwrap();
@@ -234,7 +240,9 @@ mod tests {
             State(app_state),
             Extension("issuer".to_string()),
             Path(token_id),
-            Json(CreateStatusRequest { status: status_entries }),
+            Json(CreateStatusRequest {
+                status: status_entries,
+            }),
         )
         .await
         {
@@ -326,7 +334,9 @@ mod tests {
             State(app_state),
             Extension("issuer".to_string()),
             Path(token_id),
-            Json(CreateStatusRequest { status: status_entries }),
+            Json(CreateStatusRequest {
+                status: status_entries,
+            }),
         )
         .await
         .unwrap()
@@ -349,7 +359,9 @@ mod tests {
             State(app_state),
             Extension("issuer".to_string()),
             Path(token_id),
-            Json(CreateStatusRequest { status: status_entries }),
+            Json(CreateStatusRequest {
+                status: status_entries,
+            }),
         )
         .await
         {
