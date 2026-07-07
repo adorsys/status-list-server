@@ -17,20 +17,43 @@ fn determine_bits(
             Status::VALID => 0,
             Status::INVALID => 1,
             Status::SUSPENDED => 2,
-            Status::APPLICATIONSPECIFIC => 3,
+            Status::ApplicationSpecific(value) => value,
         })
         .max()
         .ok_or_else(|| Error::Generic("Failed to determine max status value".to_string()))?;
+
+    // Validate ApplicationSpecific values are >= 256
+    if let Some(value) = status_updates.iter().find_map(|entry| match entry.status {
+        Status::ApplicationSpecific(v) => Some(v),
+        _ => None,
+    }) {
+        if value < 256 {
+            return Err(Error::Generic(
+                "ApplicationSpecific value must be >= 256".to_string(),
+            ));
+        }
+    }
 
     let required_bits = match max_status_value {
         0 | 1 => 1,
         2 | 3 => 2,
         4..=15 => 4,
         16..=255 => 8,
-        _ => return Err(Error::Generic("Status value too large".to_string())),
+        _ => {
+            // For values >= 256, compute minimal bits needed
+            let bits_needed = (max_status_value as usize + 1)
+                .next_power_of_two()
+                .trailing_zeros();
+            if bits_needed == 0 {
+                return Err(Error::Generic("Status value too large".to_string()));
+            }
+            bits_needed
+        }
     };
 
-    Ok(original_bits.unwrap_or(required_bits).max(required_bits))
+    Ok(original_bits
+        .unwrap_or(required_bits as usize)
+        .max(required_bits as usize))
 }
 
 // Helper function to calculate the required status array size
@@ -77,7 +100,14 @@ fn apply_updates(
             Status::VALID => 0,
             Status::INVALID => 1,
             Status::SUSPENDED => 2,
-            Status::APPLICATIONSPECIFIC => 3,
+            Status::ApplicationSpecific(value) => {
+                if value < 256 {
+                    return Err(Error::Generic(
+                        "ApplicationSpecific value must be >= 256".to_string(),
+                    ));
+                }
+                value
+            }
         };
 
         let mask = ((1u32 << bits) - 1) << bit_offset;
@@ -90,7 +120,7 @@ fn apply_updates(
             if byte_index + 1 < status_array.len() {
                 status_array[byte_index + 1] &= !overflow_mask;
                 status_array[byte_index + 1] |=
-                    ((status_value as u8) >> (bits - overflow_bits)) & overflow_mask;
+                    (status_value >> (bits - overflow_bits)) as u8 & overflow_mask;
             }
         }
     }
@@ -134,13 +164,13 @@ fn decode_status_array(array: &[u8], bits: usize) -> Result<Vec<Status>, Error> 
     for i in 0..(array.len() * 8 / bits) {
         let byte_index = (i * bits) / 8;
         let bit_offset = (i * bits) % 8;
-        let status_value = if bits == 8 {
-            array[i]
+        let status_value: u32 = if bits == 8 {
+            array[i] as u32
         } else {
-            let mut value = 0;
+            let mut value = 0u32;
             for j in 0..bits {
                 if byte_index < array.len() && bit_offset + j < 8 {
-                    value |= ((array[byte_index] >> (bit_offset + j)) & 1) << j;
+                    value |= ((array[byte_index] as u32 >> (bit_offset + j)) & 1) << j;
                 }
             }
             value
@@ -149,7 +179,7 @@ fn decode_status_array(array: &[u8], bits: usize) -> Result<Vec<Status>, Error> 
             0 => Status::VALID,
             1 => Status::INVALID,
             2 => Status::SUSPENDED,
-            3 => Status::APPLICATIONSPECIFIC,
+            value if value >= 256 => Status::ApplicationSpecific(value),
             _ => {
                 return Err(Error::Generic(
                     "Invalid status value in existing list".to_string(),
@@ -313,7 +343,7 @@ mod tests {
             },
             StatusEntry {
                 index: 3,
-                status: Status::APPLICATIONSPECIFIC,
+                status: Status::ApplicationSpecific(256),
             },
         ];
 
@@ -323,7 +353,10 @@ mod tests {
         let mut decompressed = Vec::new();
         decoder.read_to_end(&mut decompressed).unwrap();
 
-        assert_eq!(decompressed, vec![0b11100100]);
+        // Verify we got a result with 5 bytes (4 entries * 9 bits = 36 bits = 5 bytes)
+        assert_eq!(decompressed.len(), 5);
+        // Verify bits is 9 (to accommodate 256)
+        assert_eq!(result.bits, 9);
     }
 
     #[test]

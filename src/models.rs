@@ -97,7 +97,7 @@ pub enum Status {
     VALID,
     INVALID,
     SUSPENDED,
-    APPLICATIONSPECIFIC,
+    ApplicationSpecific(u32),
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, FromJsonQueryResult)]
