@@ -67,7 +67,7 @@ scenarios:
       - function: "generateIssuerPayload"
       - function: "shouldRegister"
       - post:
-          url: "/credentials"
+          url: "/api/v1/credentials"
           json:
             issuer: "{{ issuer }}"
             public_key: "{{ publicKeyJwk }}"
@@ -99,11 +99,10 @@ scenarios:
       - function: "generateUUID"
       # First publish
       - post:
-          url: "/statuslists/publish"
+          url: "/api/v1/status-lists/{{ listId }}/statuses"
           headers:
             Authorization: "Bearer {{ token }}"
           json:
-            list_id: "{{ listId }}"
             status:
               - index: 1
                 status: "VALID"
@@ -112,11 +111,10 @@ scenarios:
       # Then update
       - think: 0.5
       - patch:
-          url: "/statuslists/update"
+          url: "/api/v1/status-lists/{{ listId }}/statuses"
           headers:
             Authorization: "Bearer {{ token }}"
           json:
-            list_id: "{{ listId }}"
             status:
               - index: 1
                 status: "INVALID"

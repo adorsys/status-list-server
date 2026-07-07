@@ -37,7 +37,7 @@ scenarios:
     flow:
       - function: "loadTestData" # Load tokens first
       - post:
-          url: "/credentials"
+          url: "/api/v1/credentials"
           json:
             issuer: "{{ issuerId }}"
             public_key: "{{ publicKeyJwk }}"
@@ -54,11 +54,10 @@ scenarios:
       - function: "selectRandomToken"
       - function: "generateUUID"
       - post:
-          url: "/statuslists/publish"
+          url: "/api/v1/status-lists/{{ listId }}/statuses"
           headers:
             Authorization: "Bearer {{ token }}"
           json:
-            list_id: "{{ listId }}"
             status:
               - index: 1
                 status: "VALID"
@@ -79,11 +78,10 @@ scenarios:
       - function: "generateUUID"
       # First publish
       - post:
-          url: "/statuslists/publish"
+          url: "/api/v1/status-lists/{{ listId }}/statuses"
           headers:
             Authorization: "Bearer {{ token }}"
           json:
-            list_id: "{{ listId }}"
             status:
               - index: 1
                 status: "VALID"
@@ -92,11 +90,10 @@ scenarios:
       # Then update
       - think: 0.5
       - patch:
-          url: "/statuslists/update"
+          url: "/api/v1/status-lists/{{ listId }}/statuses"
           headers:
             Authorization: "Bearer {{ token }}"
           json:
-            list_id: "{{ listId }}"
             status:
               - index: 1
                 status: "INVALID"
@@ -112,10 +109,9 @@ scenarios:
     flow:
       - function: "generateUUID"
       - post:
-          url: "/statuslists/publish"
+          url: "/api/v1/status-lists/{{ listId }}/statuses"
           # NO Authorization header
           json:
-            list_id: "{{ listId }}"
             status:
               - index: 0
                 status: "VALID"
