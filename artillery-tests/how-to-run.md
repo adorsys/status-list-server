@@ -1,15 +1,15 @@
-## How to run the performance test.
+## How to run the performance test
 
 In this tests we have 4 tests which are
 
-1.  Load test
-2.  Stress test
-3.  Spike test
-4.  Authentication test
+1. Load test
+2. Stress test
+3. Spike test
+4. Authentication test
 
 The main aim of each of these tests is to test the performance of the StatusList Server.
 
-### Step 1:
+### Step 1
 
 Install artillery.
 
@@ -17,7 +17,7 @@ Install artillery.
 npm install -g artillery
 ```
 
-### Step 3:
+### Step 3
 
 The next step is to generate multiple test tokens that we can use during the performance test
 
@@ -32,11 +32,11 @@ npm install
 npm run generate-tokens
 ```
 
-### Step 4:
+### Step 4
 
 Create an artillery account at [artillery.io](artillery.io). After creating the account, copy the access key, it should look like this `artillery run test.yml --record --key YOUR_ACCESS_KEY` on the welcome screen.
 
-### Step 5:
+### Step 5
 
 Run the test.
 
