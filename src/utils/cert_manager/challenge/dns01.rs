@@ -3,11 +3,11 @@ use std::{sync::Arc, time::Duration};
 use async_trait::async_trait;
 use aws_config::SdkConfig;
 use aws_sdk_route53::{
+    Client as Route53Client,
     types::{
         Change, ChangeAction, ChangeBatch, ChangeStatus, HostedZone, ResourceRecord,
         ResourceRecordSet, RrType,
     },
-    Client as Route53Client,
 };
 use color_eyre::eyre::eyre;
 use instant_acme::{AuthorizationHandle, ChallengeType};

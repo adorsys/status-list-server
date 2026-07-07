@@ -71,14 +71,14 @@ mod tests {
     use super::*;
     use crate::{models::credentials, test_utils::test_app_state, utils::state::AppState};
     use axum::{
-        body::{to_bytes, Body},
+        Extension, Router,
+        body::{Body, to_bytes},
         extract::Request,
         http::StatusCode,
         routing::get,
-        Extension, Router,
     };
-    use jsonwebtoken::{encode, EncodingKey, Header};
-    use jsonwebtoken::{jwk::Jwk, Algorithm};
+    use jsonwebtoken::{Algorithm, jwk::Jwk};
+    use jsonwebtoken::{EncodingKey, Header, encode};
     use sea_orm::{DatabaseBackend, MockDatabase};
     use std::{
         sync::Arc,

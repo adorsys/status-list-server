@@ -1,4 +1,4 @@
-use color_eyre::{eyre::eyre, Result};
+use color_eyre::{Result, eyre::eyre};
 use dotenvy::dotenv;
 use rustls::crypto::aws_lc_rs;
 use status_list_server::cert_manager::setup_cert_renewal_scheduler;
@@ -47,7 +47,9 @@ async fn main() -> Result<()> {
 
 fn config_tracing() {
     if std::env::var("RUST_LIB_BACKTRACE").is_err() {
-        std::env::set_var("RUST_LIB_BACKTRACE", "1")
+        // SAFETY: This runs during process startup before the application spawns
+        // background tasks or starts serving requests.
+        unsafe { std::env::set_var("RUST_LIB_BACKTRACE", "1") }
     }
 
     use tracing::Level;

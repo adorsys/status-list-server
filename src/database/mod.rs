@@ -1,188 +1,46 @@
 pub(crate) mod error;
 pub(crate) mod queries;
 
-pub use migrations::Migrator;
+use sea_orm::{ConnectionTrait, DatabaseConnection, DbErr};
 
-/// Database migrations module
-pub mod migrations {
-    use sea_orm_migration::prelude::*;
+pub async fn run_migrations(db: &DatabaseConnection) -> Result<(), DbErr> {
+    db.execute_unprepared(
+        r#"
+        CREATE TABLE IF NOT EXISTS credentials (
+            issuer TEXT PRIMARY KEY,
+            public_key JSON NOT NULL
+        )
+        "#,
+    )
+    .await?;
 
-    /// Main migrator struct for database migrations
-    pub struct Migrator;
+    db.execute_unprepared(
+        r#"
+        CREATE TABLE IF NOT EXISTS status_lists (
+            list_id TEXT PRIMARY KEY,
+            issuer TEXT NOT NULL,
+            status_list JSON NOT NULL,
+            sub TEXT NOT NULL,
+            CONSTRAINT fk_status_lists_issuer
+                FOREIGN KEY (issuer)
+                REFERENCES credentials (issuer)
+                ON DELETE CASCADE
+                ON UPDATE CASCADE
+        )
+        "#,
+    )
+    .await?;
 
-    #[async_trait::async_trait]
-    impl MigratorTrait for Migrator {
-        fn migrations() -> Vec<Box<dyn MigrationTrait>> {
-            vec![Box::new(tables::Migration)]
-        }
-    }
+    db.execute_unprepared(
+        "CREATE INDEX IF NOT EXISTS idx_status_lists_list_id ON status_lists (list_id)",
+    )
+    .await?;
+    db.execute_unprepared(
+        "CREATE INDEX IF NOT EXISTS idx_status_lists_issuer ON status_lists (issuer)",
+    )
+    .await?;
+    db.execute_unprepared("CREATE INDEX IF NOT EXISTS idx_status_lists_sub ON status_lists (sub)")
+        .await?;
 
-    /// Database tables module containing table creation migrations
-    pub mod tables {
-        use super::*;
-
-        /// Migration struct for creating database tables
-        #[derive(DeriveMigrationName)]
-        pub struct Migration;
-
-        #[async_trait::async_trait]
-        impl MigrationTrait for Migration {
-            /// Creates the necessary database tables if they don't exist
-            async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
-                // Create Credentials table for storing issuer credentials
-                manager
-                    .create_table(
-                        Table::create()
-                            .table(Credentials::Table)
-                            .if_not_exists()
-                            .col(
-                                ColumnDef::new(Credentials::Issuer)
-                                    .string()
-                                    .not_null()
-                                    .primary_key(),
-                            )
-                            .col(ColumnDef::new(Credentials::PublicKey).json().not_null())
-                            .to_owned(),
-                    )
-                    .await?;
-
-                // Create StatusLists table for storing status list entries
-                manager
-                    .create_table(
-                        Table::create()
-                            .table(StatusLists::Table)
-                            .if_not_exists()
-                            .col(
-                                ColumnDef::new(StatusLists::ListId)
-                                    .string()
-                                    .not_null()
-                                    .primary_key(),
-                            )
-                            .col(ColumnDef::new(StatusLists::Issuer).string().not_null())
-                            .col(ColumnDef::new(StatusLists::StatusList).json().not_null())
-                            .col(ColumnDef::new(StatusLists::Sub).string().not_null())
-                            .foreign_key(
-                                // Foreign key use to ensures that the Issuer in the StatusLists table references
-                                // a valid Issuer in the Credentials table
-                                ForeignKey::create()
-                                    .name("fk_status_lists_issuer")
-                                    .from(StatusLists::Table, StatusLists::Issuer)
-                                    .to(Credentials::Table, Credentials::Issuer)
-                                    .on_delete(ForeignKeyAction::Cascade)
-                                    .on_update(ForeignKeyAction::Cascade),
-                            )
-                            .to_owned(),
-                    )
-                    .await?;
-
-                // Create an index on list_id for faster lookups
-                manager
-                    .create_index(
-                        Index::create()
-                            .if_not_exists()
-                            .name("idx_status_lists_list_id")
-                            .table(StatusLists::Table)
-                            .col(StatusLists::ListId)
-                            .to_owned(),
-                    )
-                    .await?;
-
-                // Create index on issuer for faster lookups
-                manager
-                    .create_index(
-                        Index::create()
-                            .if_not_exists()
-                            .name("idx_status_lists_issuer")
-                            .table(StatusLists::Table)
-                            .col(StatusLists::Issuer)
-                            .to_owned(),
-                    )
-                    .await?;
-
-                // Create index on sub for faster lookups in find_by_issuer
-                manager
-                    .create_index(
-                        Index::create()
-                            .if_not_exists()
-                            .name("idx_status_lists_sub")
-                            .table(StatusLists::Table)
-                            .col(StatusLists::Sub)
-                            .to_owned(),
-                    )
-                    .await?;
-
-                Ok(())
-            }
-
-            /// Drops the database tables
-            async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
-                // Drop indexes first
-                manager
-                    .drop_index(
-                        Index::drop()
-                            .if_exists()
-                            .name("idx_status_lists_list_id")
-                            .table(StatusLists::Table)
-                            .to_owned(),
-                    )
-                    .await?;
-
-                manager
-                    .drop_index(
-                        Index::drop()
-                            .if_exists()
-                            .name("idx_status_lists_sub")
-                            .table(StatusLists::Table)
-                            .to_owned(),
-                    )
-                    .await?;
-
-                manager
-                    .drop_index(
-                        Index::drop()
-                            .if_exists()
-                            .name("idx_status_lists_issuer")
-                            .table(StatusLists::Table)
-                            .to_owned(),
-                    )
-                    .await?;
-
-                // Drop tables in reverse order to handle foreign key constraints
-                manager
-                    .drop_table(
-                        Table::drop()
-                            .if_exists()
-                            .table(StatusLists::Table)
-                            .to_owned(),
-                    )
-                    .await?;
-
-                manager
-                    .drop_table(
-                        Table::drop()
-                            .if_exists()
-                            .table(Credentials::Table)
-                            .to_owned(),
-                    )
-                    .await?;
-                Ok(())
-            }
-        }
-
-        #[derive(Iden)]
-        enum Credentials {
-            Table,
-            Issuer,
-            PublicKey,
-        }
-
-        #[derive(Iden)]
-        enum StatusLists {
-            Table,
-            ListId,
-            Issuer,
-            StatusList,
-            Sub,
-        }
-    }
+    Ok(())
 }

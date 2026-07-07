@@ -1,8 +1,8 @@
 use axum::{
+    Router,
     middleware::from_fn_with_state,
     response::IntoResponse,
     routing::{get, patch, post},
-    Router,
 };
 use color_eyre::eyre::Context;
 use hyper::Method;

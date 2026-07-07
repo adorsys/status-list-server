@@ -1,17 +1,16 @@
 use crate::{
     cert_manager::{
+        CertManager,
         challenge::{AwsRoute53DnsUpdater, Dns01Handler},
         storage::{AwsS3, AwsSecretsManager, Redis},
-        CertManager,
     },
     config::Config as AppConfig,
-    database::{queries::SeaOrmStore, Migrator},
+    database::{queries::SeaOrmStore, run_migrations},
     models::{Credentials, StatusListRecord},
 };
 use aws_config::{BehaviorVersion, Region};
 use color_eyre::eyre::{Context, Result as EyeResult};
 use sea_orm::Database;
-use sea_orm_migration::MigratorTrait;
 use secrecy::ExposeSecret;
 use std::{sync::Arc, time::Duration};
 
@@ -39,7 +38,7 @@ pub async fn build_state(config: &AppConfig) -> EyeResult<AppState> {
         .await
         .wrap_err("Failed to connect to database")?;
 
-    Migrator::up(&db, None)
+    run_migrations(&db)
         .await
         .wrap_err("Failed to run database migrations")?;
 

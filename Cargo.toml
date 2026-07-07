@@ -1,31 +1,28 @@
 [package]
 name = "status-list-server"
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
 
 [dependencies]
 # Async runtime and utilities
-tokio = { version = "1", features = ["full"] }
+tokio = { version = "1.5", features = ["full"] }
 async-trait = "0.1"
 
 # Web frameworks
-hyper = "1.9"
+hyper = "1.10"
 hyper-util = "0.1"
 reqwest = "0.13"
 tower = "0.5"
 hyper-rustls = { version = "0.27", features = ["http2"] }
 axum = { version = "0.8", features = ["macros"] }
-tower-http = { version = "0.6", features = ["cors", "trace", "catch-panic"] }
+tower-http = { version = "0.7", features = ["cors", "trace", "catch-panic"] }
 
 # Database and ORM
-sea-orm = { version = "1.1", features = [
+sea-orm = { version = "2.0.0-rc.42", default-features = false, features = [
     "sqlx-postgres",
     "runtime-tokio-rustls",
     "macros",
-] }
-sea-orm-migration = { version = "1.1", features = [
-    "sqlx-postgres",
-    "runtime-tokio-rustls",
+    "with-json",
 ] }
 moka = { version = "0.12", features = ["future"] }
 
@@ -36,14 +33,14 @@ coset = "0.4"
 instant-acme = "0.8"
 rustls = "0.23"
 webpki-roots = "1"
-rustls-pki-types = "1.14"
+rustls-pki-types = "1.15"
 secrecy = { version = "0.10", features = ["serde"] }
 rcgen = { version = "0.14", features = ["pem"] }
-jsonwebtoken = { version = "10", features = ["aws_lc_rs"] }
+jsonwebtoken = { version = "10.4", features = ["aws_lc_rs"] }
 
 # Serialization
 serde_json = "1.0"
-serde-aux = "4"
+serde-aux = "4.7"
 serde = { version = "1.0", features = ["derive"] }
 
 # Configuration and Environment
@@ -51,11 +48,10 @@ config = "0.15"
 dotenvy = "0.15"
 
 # AWS related libraries
-aws-config = "1"
-aws-sdk-s3 = "1"
-aws-sdk-route53 = "1"
-aws-sdk-secretsmanager = "1"
-aws_secretsmanager_caching = "2"
+aws-config = { version = "1.8", default-features = false, features = ["default-https-client", "rt-tokio"] }
+aws-sdk-s3 = { version = "1.13", default-features = false, features = ["default-https-client", "rt-tokio", "sigv4a"] }
+aws-sdk-route53 = { version = "1", default-features = false, features = ["default-https-client", "rt-tokio"] }
+aws-sdk-secretsmanager = { version = "1", default-features = false, features = ["default-https-client", "rt-tokio"] }
 
 # Logging and Tracing
 tracing = "0.1"
@@ -66,9 +62,9 @@ thiserror = "2.0"
 color-eyre = "0.6"
 
 # Utility Libraries
-uuid = "1"
+uuid = "1.23"
 base64 = "0.22"
-chrono = "0.4"
+time = { version = "0.3", features = ["formatting", "macros"] }
 base64url = "0.1"
 flate2 = "1.1"
 x509-parser = "0.18"
@@ -78,20 +74,20 @@ metrics-exporter-prometheus = "0.18"
 metrics-process = "2.4"
 
 [dependencies.redis]
-version = "1.2"
+version = "1.3"
 features = ["tokio-rustls-comp", "connection-manager"]
 
 [dependencies.p256]
-version = "0.13"
+version = "0.14"
 features = ["pkcs8", "ecdsa", "alloc", "pem"]
 
 [dev-dependencies]
-sealed_test = "1.1.0"
-sea-orm = { version = "1.1", features = ["mock"] }
+sealed_test = "1.1"
+sea-orm = { version = "2.0.0-rc.42", default-features = false, features = ["mock", "sqlx-postgres", "runtime-tokio-rustls", "macros", "with-json"] }
 testcontainers-modules = { version = "0.15", features = ["redis", "localstack"] }
 
 [target.'cfg(not(target_env = "msvc"))'.dependencies]
-tikv-jemallocator = "0.6"
+tikv-jemallocator = "0.7"
 
 [profile.dev.package.backtrace]
 opt-level = 3
