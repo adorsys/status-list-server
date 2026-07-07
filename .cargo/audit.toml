@@ -1,24 +1,21 @@
-# Configuration for cargo-audit
-# https://github.com/rustsec/cargo-audit
-
 [advisories]
-# NOTE: This ignore list MUST be kept in sync with the `[advisories].ignore`
-# list in `deny.toml` (cargo-deny). The two tools scan different graph views
-# of the dependency tree, so both are needed; if you add or remove an entry
-# here, update `deny.toml` in the same commit.
-#
-# Pre-existing transitive vulnerabilities. These are flagged in the current
-# dependency tree but are NOT introduced by CI changes and cannot be fixed
-# within a CI-hardening PR:
-#
-# - rsa 0.9.10 (RUSTSEC-2023-0071, Marvin Attack): no fixed version is
-#   available upstream. Pulled transitively; revisit when rsa publishes a fix.
-# - rustls-webpki 0.101.7 (RUSTSEC-2026-0098/0099/0104): pulled transitively
-#   through the old rustls 0.21 used by aws-smithy-http-client. Requires an
-#   AWS SDK bump to drop rustls 0.21; tracked separately.
 ignore = [
-    "RUSTSEC-2023-0071",
-    "RUSTSEC-2026-0098",
-    "RUSTSEC-2026-0099",
-    "RUSTSEC-2026-0104",
-]
+  # Present in rsa crate. As there is currently no available fix for this vulnerability,
+  # this change temporarily ignores the advisory to allow CI/CD pipelines to pass
+  "RUSTSEC-2023-0071",
+]  # advisory IDs to ignore
+
+informational_warnings = ["unmaintained"]
+severity_threshold = "low"
+
+# Output Configuration
+[output]
+deny = [
+  "unmaintained"
+]  # exit on error if unmaintained dependencies are found
+format = "terminal"  # "terminal" (human readable report) or "json"
+quiet = false  # Only print information on error
+
+[yanked]
+enabled = true  # Warn for yanked crates in Cargo.lock
+update_index = true  # Auto-update the crates.io index

@@ -15,18 +15,24 @@ reqwest = "0.13"
 tower = "0.5"
 hyper-rustls = { version = "0.27", features = ["http2"] }
 axum = { version = "0.8", features = ["macros"] }
-tower-http = { version = "0.6", features = ["cors", "trace", "catch-panic"] }
+tower-http = { version = "0.6", features = ["catch-panic", "cors", "trace"] }
 
 # Database and ORM
-sea-orm = { version = "1.1", features = [
-    "sqlx-postgres",
-    "runtime-tokio-rustls",
+sea-orm = {
+  version = "1.1",
+  features = [
     "macros",
-] }
-sea-orm-migration = { version = "1.1", features = [
-    "sqlx-postgres",
     "runtime-tokio-rustls",
-] }
+    "sqlx-postgres",
+  ]
+}
+sea-orm-migration = {
+  version = "1.1",
+  features = [
+    "runtime-tokio-rustls",
+    "sqlx-postgres",
+  ]
+}
 moka = { version = "0.12", features = ["future"] }
 
 # Cryptography and Security
@@ -79,16 +85,16 @@ metrics-process = "2.4"
 
 [dependencies.redis]
 version = "1.2"
-features = ["tokio-rustls-comp", "connection-manager"]
+features = ["connection-manager", "tokio-rustls-comp"]
 
 [dependencies.p256]
 version = "0.13"
-features = ["pkcs8", "ecdsa", "alloc", "pem"]
+features = ["alloc", "ecdsa", "pem", "pkcs8"]
 
 [dev-dependencies]
 sealed_test = "1.1.0"
 sea-orm = { version = "1.1", features = ["mock"] }
-testcontainers-modules = { version = "0.15", features = ["redis", "localstack"] }
+testcontainers-modules = { version = "0.15", features = ["localstack", "redis"] }
 
 [target.'cfg(not(target_env = "msvc"))'.dependencies]
 tikv-jemallocator = "0.6"

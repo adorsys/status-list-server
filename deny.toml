@@ -1,68 +1,75 @@
-# Configuration for cargo-deny
-# https://embarkstudios.github.io/cargo-deny/
+# See https://github.com/EmbarkStudios/cargo-deny/blob/main/deny.template.toml
 
 [graph]
+targets = [
+  { triple = "x86_64-unknown-linux-gnu" },
+  { triple = "aarch64-unknown-linux-gnu" },
+  { triple = "x86_64-unknown-linux-musl" },
+  { triple = "aarch64-apple-darwin" },
+  { triple = "x86_64-apple-darwin" },
+]
 all-features = true
+no-default-features = false
+
+[output]
+feature-depth = 1
 
 [advisories]
-# Unmaintained advisories only cause an error when the affected crate is a
-# direct dependency of a workspace crate. Transitive unmaintained crates
-# (e.g. proc-macro-error2 pulled via sea-orm/sea-bae) are reported but do not
-# fail the build. Vulnerabilities (RUSTSEC advisories with a CVE) always fail.
-version = 2
+# The lint level for unmaintained crates
 unmaintained = "workspace"
-# Some ignored IDs below are only visible when cargo-audit scans the full
-# lockfile and are not part of cargo-deny's resolved graph; suppress the
-# "advisory was not encountered" notice for those.
-unused-ignored-advisory = "allow"
-# Pre-existing transitive vulnerabilities that cannot be fixed within this
-# repository. These are tracked separately and match the `[advisories].ignore`
-# list in `.cargo/audit.toml`:
-#
-# - rsa 0.9.10 (RUSTSEC-2023-0071, Marvin Attack): no fixed version is
-#   available upstream. Pulled in only through sqlx-mysql, whose `mysql`
-#   feature is never enabled (we use sqlx-postgres); the crate is therefore
-#   part of Cargo.lock but not compiled. Revisit when rsa ships a fix.
-# - rustls-webpki 0.101.7 (RUSTSEC-2026-0098/0099/0104): pulled transitively
-#   through the old rustls 0.21 used by aws-smithy-http-client. Requires an
-#   AWS SDK bump to drop rustls 0.21; tracked separately.
 ignore = [
-    "RUSTSEC-2023-0071",
-    "RUSTSEC-2026-0098",
-    "RUSTSEC-2026-0099",
-    "RUSTSEC-2026-0104",
+  # Present in rsa crate. As there is currently no available fix for this vulnerability,
+  # this change temporarily ignores the advisory to allow CI/CD pipelines to pass
+  "RUSTSEC-2023-0071"
 ]
-
-[licenses]
-# Allow common permissive licenses; reject unknown / no-license crates.
-version = 2
-allow = [
-    "MIT",
-    "MIT-0",
-    "Apache-2.0",
-    "Apache-2.0 WITH LLVM-exception",
-    "BSD-2-Clause",
-    "BSD-3-Clause",
-    "ISC",
-    "Unicode-DFS-2016",
-    "Unicode-3.0",
-    "Zlib",
-    "CC0-1.0",
-    "0BSD",
-    "Unlicense",
-    "MPL-2.0",
-    "CDLA-Permissive-2.0",
-    "BSL-1.0",
-]
-confidence-threshold = 0.8
 
 [bans]
-# Disallow multiple versions of the same crate unless explicitly allowed.
+# Lint level for when multiple versions of the same crate are detected
 multiple-versions = "warn"
+# Lint level for when a crate version requirement is `*`
 wildcards = "allow"
+# The graph highlighting used when creating dotgraphs for crates
+# with multiple versions
+highlight = "all"
+# The default lint level for `default` features for crates that are members of
+# the workspace that is being checked. This can be overridden by allowing/denying
+# `default` on a crate-by-crate basis if desired.
+workspace-default-features = "allow"
+# The default lint level for `default` features for external crates that are not
+# members of the workspace. This can be overridden by allowing/denying `default`
+# on a crate-by-crate basis if desired.
+external-default-features = "allow"
+# Certain crates/versions that will be skipped when doing duplicate detection.
+skip = []
+# Similarly to `skip` allows you to skip certain crates during duplicate
+# detection. Unlike skip, it also includes the entire tree of transitive
+# dependencies starting at the specified crate, up to a certain depth, which is
+# by default infinite.
+skip-tree = []
 
 [sources]
-# Only allow crates from crates.io by default.
-unknown-registry = "warn"
-unknown-git = "warn"
-allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+# Lint level for what to happen when a crate from a crate registry that is not
+# in the allow list is encountered
+unknown-registry = "deny"
+# Lint level for what to happen when a crate from a git repository that is not
+# in the allow list is encountered
+unknown-git = "deny"
+
+[licenses]
+# List of explicitly allowed licenses
+# See https://spdx.org/licenses/ for list of possible licenses
+# [possible values: any SPDX 3.11 short identifier (+ optional exception)].
+confidence-threshold = 0.80
+allow = [
+  "Apache-2.0",
+  "MIT",
+  "BSD-2-Clause",
+  "BSD-3-Clause",
+  "ISC",
+  "Zlib",
+  "Unicode-3.0",
+  "CC0-1.0",
+  "CDLA-Permissive-2.0",
+  "BSL-1.0",
+]
+exceptions = []
