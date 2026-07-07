@@ -1,4 +1,4 @@
-## How to run the performance test
+# How to run the performance test
 
 In this tests we have 4 tests which are
 
@@ -9,7 +9,7 @@ In this tests we have 4 tests which are
 
 The main aim of each of these tests is to test the performance of the StatusList Server.
 
-### Step 1
+## Step 1
 
 Install artillery.
 
