@@ -12,8 +12,8 @@ Stores information about issuers and their cryptographic public keys. Each issue
 identified by its `issuer` value, which acts as the primary key.
 
 | Column       | Type | Null | Key | Description                           |
-| ------------ | ---- | ---- | --- | ------------------------------------- |
-| `issuer`     | TEXT | NO   | PK  | Unique identifier for the issuer     |
+|--------------|------|------|-----|---------------------------------------|
+| `issuer`     | TEXT | NO   | PK  | Unique identifier for the issuer      |
 | `public_key` | JSON | NO   |     | Public key associated with the issuer |
 
 ### `status_lists`
@@ -21,19 +21,19 @@ identified by its `issuer` value, which acts as the primary key.
 Stores status list entries and their associated issuer. Each status list is identified
 by its `list_id`, which acts as the primary key.
 
-| Column        | Type | Null | Key | Description                                        |
-| ------------- | ---- | ---- | --- | -------------------------------------------------- |
-| `list_id`     | TEXT | NO   | PK  | Unique identifier for the status list              |
+| Column        | Type | Null | Key | Description                                         |
+|---------------|------|------|-----|-----------------------------------------------------|
+| `list_id`     | TEXT | NO   | PK  | Unique identifier for the status list               |
 | `issuer`      | TEXT | NO   | FK  | References `credentials.issuer` (ON DELETE CASCADE) |
-| `status_list` | JSON | NO   |     | The status list entry                              |
-| `sub`         | TEXT | NO   |     | Unique string identifier for the Status List Token |
+| `status_list` | JSON | NO   |     | The status list entry                               |
+| `sub`         | TEXT | NO   |     | Unique string identifier for the Status List Token  |
 
 #### Indexes
 
 The following indexes are created on the `status_lists` table to speed up lookups:
 
-| Index name               | Column    |
-| ------------------------ | --------- |
+| Index name                 | Column    |
+|----------------------------|-----------|
 | `idx_status_lists_list_id` | `list_id` |
 | `idx_status_lists_issuer`  | `issuer`  |
 | `idx_status_lists_sub`     | `sub`     |
