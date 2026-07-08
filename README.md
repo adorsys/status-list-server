@@ -68,9 +68,9 @@ All runtime behavior is controlled via environment variables prefixed with `APP_
 
 > **⚠️ Breaking change (migration):** The Secrets Manager cache configuration was moved from the `APP_REDIS__` prefix to the `APP_AWS__` prefix:
 >
-> | Old variable                         | New variable                          |
-> |---------------------------------------|---------------------------------------|
-> | `APP_REDIS__SECRETS_CACHE_TTL`        | `APP_AWS__SECRETS_CACHE_TTL`          |
+> | Old variable                            | New variable                          |
+> |-----------------------------------------|---------------------------------------|
+> | `APP_REDIS__SECRETS_CACHE_TTL`          | `APP_AWS__SECRETS_CACHE_TTL`          |
 > | `APP_REDIS__SECRETS_CACHE_MAX_CAPACITY` | `APP_AWS__SECRETS_CACHE_MAX_CAPACITY` |
 >
 > Existing deployments using the old `APP_REDIS__`-prefixed variables will silently fall back to the defaults (300 s TTL, 100 entries) instead of the configured value. Update your environment to use the new `APP_AWS__`-prefixed names.
@@ -137,9 +137,9 @@ All runtime behavior is controlled via environment variables prefixed with `APP_
 
 ### Status List Token
 
-| Variable                          | Default | Description                                             |
-|-----------------------------------|---------|---------------------------------------------------------|
-| `APP_STATUS_LIST__TOKEN_EXP_SECS` | `900`   | Token expiration in seconds from issuance (must be > 0) |
+| Variable                          | Default | Description                                                |
+|-----------------------------------|---------|------------------------------------------------------------|
+| `APP_STATUS_LIST__TOKEN_EXP_SECS` | `900`   | Token expiration in seconds from issuance (must be > 0)    |
 | `APP_STATUS_LIST__TOKEN_TTL_SECS` | `300`   | Advertised token TTL in seconds (`ttl` claim, must be > 0) |
 
 ### Validation
