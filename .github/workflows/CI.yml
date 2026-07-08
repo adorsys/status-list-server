@@ -139,7 +139,7 @@ jobs:
 
       - name: Check for unused dependencies
         run: cargo machete --with-metadata
-  
+
   cargo-audit:
     name: Cargo vet check
     runs-on: ubuntu-latest
