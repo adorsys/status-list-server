@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use redis::{aio::ConnectionManager, AsyncCommands};
+use redis::{AsyncCommands, aio::ConnectionManager};
 
 use crate::cert_manager::storage::{Storage, StorageError};
 

@@ -4,8 +4,8 @@ use p256::{
     pkcs8::{DecodePrivateKey, EncodePrivateKey, LineEnding},
 };
 use rand::{
-    rngs::{SysError, SysRng},
     TryRng,
+    rngs::{SysError, SysRng},
 };
 use thiserror::Error;
 
@@ -92,7 +92,7 @@ impl Keypair {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use jsonwebtoken::{decode, encode, DecodingKey, EncodingKey, Header, Validation};
+    use jsonwebtoken::{DecodingKey, EncodingKey, Header, Validation, decode, encode};
     use p256::pkcs8::EncodePublicKey;
     use std::time::{SystemTime, UNIX_EPOCH};
 

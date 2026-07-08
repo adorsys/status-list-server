@@ -1,4 +1,4 @@
-use axum::{extract::State, response::IntoResponse, Extension, Json};
+use axum::{Extension, Json, extract::State, response::IntoResponse};
 use hyper::StatusCode;
 
 use crate::{
@@ -92,12 +92,12 @@ mod test {
     use crate::web::handlers::status_list::error::StatusListError;
     use std::sync::Arc;
 
-    use axum::{extract::State, response::IntoResponse, Extension, Json};
+    use axum::{Extension, Json, extract::State, response::IntoResponse};
     use hyper::StatusCode;
     use sea_orm::{DatabaseBackend, MockDatabase};
 
     use crate::{
-        models::{status_lists, Status, StatusEntry, StatusList, StatusListRecord, StatusRequest},
+        models::{Status, StatusEntry, StatusList, StatusListRecord, StatusRequest, status_lists},
         test_utils::test_app_state,
         utils::lst_gen::create_status_list,
     };

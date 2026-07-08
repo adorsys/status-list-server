@@ -2,20 +2,20 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use axum::{
+    Router,
     extract::{Path, State},
     http::HeaderValue,
     response::IntoResponse,
     routing::get,
-    Router,
 };
 use color_eyre::eyre::eyre;
-use hyper::{header, StatusCode};
+use hyper::{StatusCode, header};
 use instant_acme::{AuthorizationHandle, ChallengeType};
 use tokio::{
     net::TcpListener,
     sync::{
-        oneshot::{self, Receiver, Sender},
         RwLock,
+        oneshot::{self, Receiver, Sender},
     },
     task::JoinHandle,
 };
