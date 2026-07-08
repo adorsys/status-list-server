@@ -30,8 +30,8 @@ pub struct AppState {
     pub server_domain: String,
     pub cert_manager: Arc<CertManager>,
     pub cache: Cache,
-    pub token_exp_secs: i64,
-    pub token_ttl_secs: i64,
+    pub token_exp_secs: u64,
+    pub token_ttl_secs: u64,
 }
 
 pub async fn build_state(config: &AppConfig) -> EyeResult<AppState> {

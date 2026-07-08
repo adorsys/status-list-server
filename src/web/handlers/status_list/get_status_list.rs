@@ -173,8 +173,8 @@ fn issue_cwt(
     status_record: &StatusListRecord,
     keypair: &Keypair,
     cert_chain: Vec<String>,
-    token_exp_secs: i64,
-    token_ttl_secs: i64,
+    token_exp_secs: u64,
+    token_ttl_secs: u64,
 ) -> Result<Vec<u8>, StatusListError> {
     let mut claims = vec![];
 
@@ -190,7 +190,7 @@ fn issue_cwt(
     ));
     // According to the spec, the lifetime of the token depends on the lifetime of the referenced token
     // https://www.ietf.org/archive/id/draft-ietf-oauth-status-list-10.html#section-13.1
-    let exp = iat + token_exp_secs;
+    let exp = iat + token_exp_secs as i64;
     claims.push((
         CborValue::Integer(EXP.into()),
         CborValue::Integer(exp.into()),
@@ -283,12 +283,12 @@ fn issue_jwt(
     status_record: &StatusListRecord,
     keypair: &Keypair,
     cert_chain: Vec<String>,
-    token_exp_secs: i64,
-    token_ttl_secs: i64,
+    token_exp_secs: u64,
+    token_ttl_secs: u64,
 ) -> Result<String, StatusListError> {
     let iat = OffsetDateTime::now_utc().unix_timestamp();
-    let ttl = token_ttl_secs;
-    let exp = iat + token_exp_secs;
+    let ttl = token_ttl_secs as i64;
+    let exp = iat + token_exp_secs as i64;
     // Building the claims
     let claims = StatusListToken {
         exp: Some(exp),

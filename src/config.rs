@@ -1,6 +1,7 @@
 use std::time::Duration;
 
 use config::{Config as ConfigLib, ConfigError, Environment};
+use croner::parser::{CronParser, Seconds};
 use redis::{
     Client as RedisClient, ClientTlsConfig, RedisResult, TlsCertificates,
     aio::{ConnectionManager, ConnectionManagerConfig},
@@ -78,8 +79,8 @@ pub struct CacheConfig {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct StatusListConfig {
-    pub token_exp_secs: i64,
-    pub token_ttl_secs: i64,
+    pub token_exp_secs: u64,
+    pub token_ttl_secs: u64,
 }
 
 impl RedisConfig {
@@ -204,6 +205,7 @@ impl Config {
     }
 
     fn validate(&self) -> Result<(), ConfigError> {
+        // server.port is u16, so the type system already enforces the upper bound of 65535.
         if self.server.port == 0 {
             return Err(ConfigError::Message(
                 "server.port must be between 1 and 65535".into(),
@@ -246,15 +248,22 @@ impl Config {
             ));
         }
 
-        if self.status_list.token_exp_secs <= 0 {
-            return Err(ConfigError::Message(
-                "status_list.token_exp_secs must be greater than 0".into(),
-            ));
+        // Validate the cron schedule format using the same parser configuration as the
+        // JobScheduler (6-field cron with seconds required).
+        if let Err(e) = CronParser::builder()
+            .seconds(Seconds::Required)
+            .dom_and_dow(true)
+            .build()
+            .parse(&self.server.cert.renewal_cron_schedule)
+        {
+            return Err(ConfigError::Message(format!(
+                "server.cert.renewal_cron_schedule is not a valid 6-field cron expression: {e}"
+            )));
         }
 
-        if self.status_list.token_ttl_secs < 0 {
+        if self.status_list.token_exp_secs == 0 {
             return Err(ConfigError::Message(
-                "status_list.token_ttl_secs must not be negative".into(),
+                "status_list.token_exp_secs must be greater than 0".into(),
             ));
         }
 
@@ -463,6 +472,32 @@ mod tests {
         assert!(
             err.contains("connection_timeout_secs"),
             "Expected error about connection_timeout_secs, got: {err}"
+        );
+    }
+
+    #[sealed_test(env = [
+        ("APP_SERVER__CERT__RENEWAL_CRON_SCHEDULE", "not-a-cron"),
+    ])]
+    fn test_validation_invalid_cron_schedule() {
+        let result = Config::load();
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("renewal_cron_schedule"),
+            "Expected error about renewal_cron_schedule, got: {err}"
+        );
+    }
+
+    #[sealed_test(env = [
+        ("APP_SERVER__CERT__RENEWAL_CRON_SCHEDULE", "* * * * *"),
+    ])]
+    fn test_validation_five_field_cron_schedule() {
+        let result = Config::load();
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("renewal_cron_schedule"),
+            "Expected error about renewal_cron_schedule, got: {err}"
         );
     }
 }

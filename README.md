@@ -66,6 +66,15 @@ By default, the server will listen on `http://localhost:8000`. You can modify th
 
 All runtime behavior is controlled via environment variables prefixed with `APP_` and using `__` as a nested separator (e.g. `APP_SERVER__PORT=8000`). Sensible defaults are built in, so only non-default values need to be set. See [`.env.template`](.env.template) for a complete example.
 
+> **⚠️ Breaking change (migration):** The Secrets Manager cache configuration was moved from the `APP_REDIS__` prefix to the `APP_AWS__` prefix:
+>
+> | Old variable                         | New variable                          |
+> |---------------------------------------|---------------------------------------|
+> | `APP_REDIS__SECRETS_CACHE_TTL`        | `APP_AWS__SECRETS_CACHE_TTL`          |
+> | `APP_REDIS__SECRETS_CACHE_MAX_CAPACITY` | `APP_AWS__SECRETS_CACHE_MAX_CAPACITY` |
+>
+> Existing deployments using the old `APP_REDIS__`-prefixed variables will silently fall back to the defaults (300 s TTL, 100 entries) instead of the configured value. Update your environment to use the new `APP_AWS__`-prefixed names.
+
 ### Server
 
 | Variable                     | Default       | Description                                                          |
@@ -131,13 +140,14 @@ All runtime behavior is controlled via environment variables prefixed with `APP_
 | Variable                          | Default | Description                                             |
 |-----------------------------------|---------|---------------------------------------------------------|
 | `APP_STATUS_LIST__TOKEN_EXP_SECS` | `900`   | Token expiration in seconds from issuance (must be > 0) |
-| `APP_STATUS_LIST__TOKEN_TTL_SECS` | `300`   | Advertised token TTL in seconds (`ttl` claim)           |
+| `APP_STATUS_LIST__TOKEN_TTL_SECS` | `300`   | Advertised token TTL in seconds (`ttl` claim, must be > 0) |
 
 ### Validation
 
 The following constraints are validated at startup and will cause the server to fail fast if violated:
 
-- `server.port` must be between 1 and 65535
+- `server.port` must be between 1 and 65535 (the `u16` type enforces the upper bound)
+- `server.cert.renewal_cron_schedule` must be a valid 6-field cron expression (seconds required)
 - `redis.connection_timeout_secs` must be greater than 0
 - `aws.s3_bucket` must not be empty
 - `aws.s3_bucket_max_retries` must be greater than 0
@@ -145,7 +155,6 @@ The following constraints are validated at startup and will cause the server to 
 - `server.cert.dns_propagation_timeout_secs` must be greater than 0
 - `server.cert.signing_key_max_retries` must be greater than 0
 - `status_list.token_exp_secs` must be greater than 0
-- `status_list.token_ttl_secs` must not be negative
 
 ## API Overview
 
