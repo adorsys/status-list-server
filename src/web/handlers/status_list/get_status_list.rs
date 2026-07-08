@@ -123,9 +123,13 @@ async fn build_response_from_record(
         })?;
 
         let token_bytes = match accept_header.as_str() {
-            ACCEPT_STATUS_LISTS_HEADER_CWT => {
-                issue_cwt(&status_record, &keypair, certs_parts, token_exp_secs, token_ttl_secs)?
-            }
+            ACCEPT_STATUS_LISTS_HEADER_CWT => issue_cwt(
+                &status_record,
+                &keypair,
+                certs_parts,
+                token_exp_secs,
+                token_ttl_secs,
+            )?,
             _ => issue_jwt(
                 &status_record,
                 &keypair,
@@ -282,15 +286,9 @@ fn issue_jwt(
     token_exp_secs: i64,
     token_ttl_secs: i64,
 ) -> Result<String, StatusListError> {
-<<<<<<< HEAD
-    let iat = Utc::now().timestamp();
+    let iat = OffsetDateTime::now_utc().unix_timestamp();
     let ttl = token_ttl_secs;
     let exp = iat + token_exp_secs;
-=======
-    let iat = OffsetDateTime::now_utc().unix_timestamp();
-    let ttl = TOKEN_TTL;
-    let exp = iat + TOKEN_EXP;
->>>>>>> main
     // Building the claims
     let claims = StatusListToken {
         exp: Some(exp),

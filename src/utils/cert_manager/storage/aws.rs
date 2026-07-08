@@ -28,26 +28,12 @@ impl AwsSecretsManager {
         secrets_cache_max_capacity: usize,
     ) -> Result<Self, StorageError> {
         let client = SecretsClient::new(config);
-<<<<<<< HEAD
-        let asm_builder = SecretsConfig::from(config).to_builder();
-
-        let cache = SecretsCacheClient::from_builder(
-            asm_builder,
-            NonZeroUsize::new(secrets_cache_max_capacity)
-                .ok_or_else(|| StorageError::AwsSdk(eyre!("secrets_cache_max_capacity must be greater than 0")))?,
-            secrets_cache_ttl,
-            true,
-        )
-        .await
-        .map_err(|e| StorageError::AwsSdk(e.into()))?;
-=======
         let cache = (!secrets_cache_ttl.is_zero()).then(|| {
             Cache::builder()
-                .max_capacity(100)
+                .max_capacity(secrets_cache_max_capacity as u64)
                 .time_to_live(secrets_cache_ttl)
                 .build()
         });
->>>>>>> main
 
         Ok(Self { client, cache })
     }

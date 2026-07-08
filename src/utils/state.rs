@@ -67,8 +67,7 @@ pub async fn build_state(config: &AppConfig) -> EyeResult<AppState> {
         Dns01Handler::new(updater)
     } else {
         // Use pebble as the DNS server in development
-        let updater =
-            PebbleDnsUpdater::new(&config.server.cert.development_dns_challenge_url);
+        let updater = PebbleDnsUpdater::new(&config.server.cert.development_dns_challenge_url);
         Dns01Handler::new(updater)
     };
 

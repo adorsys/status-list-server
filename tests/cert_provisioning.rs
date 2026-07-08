@@ -157,10 +157,9 @@ impl TestInfra {
             Duration::from_millis(500),
         )
         .with_cache(cache);
-        let secrets_storage =
-            AwsSecretsManager::new(&aws_config, Duration::from_millis(0), 100)
-                .await
-                .expect("Failed to create AwsSecretsManager");
+        let secrets_storage = AwsSecretsManager::new(&aws_config, Duration::from_millis(0), 100)
+            .await
+            .expect("Failed to create AwsSecretsManager");
 
         let challtestsrv_url = format!("http://127.0.0.1:{}", self.challtestsrv_port);
         let dns_updater = PebbleDnsUpdater::new(&challtestsrv_url);

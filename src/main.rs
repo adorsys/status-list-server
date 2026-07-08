@@ -30,8 +30,11 @@ async fn main() -> Result<()> {
 
     // Setup certificate renewal scheduler
     let cert_manager = app_state.cert_manager.clone();
-    setup_cert_renewal_scheduler(cert_manager.clone(), &config.server.cert.renewal_cron_schedule)
-        .await?;
+    setup_cert_renewal_scheduler(
+        cert_manager.clone(),
+        &config.server.cert.renewal_cron_schedule,
+    )
+    .await?;
 
     let http_server = HttpServer::new(&config, app_state).await?;
 

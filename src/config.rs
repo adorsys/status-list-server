@@ -175,7 +175,10 @@ impl Config {
                 "https://acme-v02.api.letsencrypt.org/directory",
             )?
             .set_default("server.cert.renewal_cron_schedule", "0 0 0 * * *")?
-            .set_default("server.cert.development_dns_challenge_url", "http://challtestsrv:8055")?
+            .set_default(
+                "server.cert.development_dns_challenge_url",
+                "http://challtestsrv:8055",
+            )?
             .set_default("server.cert.dns_propagation_timeout_secs", 300)?
             .set_default("server.cert.dns_propagation_initial_delay_secs", 2)?
             .set_default("server.cert.signing_key_max_retries", 3)?
