@@ -1,8 +1,9 @@
 use axum::{Json, extract::State, http::StatusCode, response::IntoResponse};
+use serde_json::json;
 
 use crate::{
     database::error::RepositoryError, models::Credentials, utils::state::AppState,
-    web::auth::errors::AuthenticationError,
+    web::auth::errors::AuthenticationError, web::errors::ApiError,
 };
 
 #[derive(Debug)]
@@ -28,31 +29,28 @@ pub async fn credential_handler(
     Json(credential): Json<Credentials>,
 ) -> impl IntoResponse {
     match publish_credentials(credential.to_owned(), appstate).await {
-        Ok(_) => (StatusCode::ACCEPTED, "Credentials stored successfully").into_response(),
-        Err(CredentialError::AuthError(AuthenticationError::JwtError(err))) => {
-            (StatusCode::BAD_REQUEST, err.to_string()).into_response()
-        }
+        Ok(_) => (
+            StatusCode::ACCEPTED,
+            Json(json!({"status": "Credentials stored successfully"})),
+        )
+            .into_response(),
         Err(CredentialError::RepoError(RepositoryError::DuplicateEntry)) => {
             tracing::warn!(
                 "Attempted to publish credentials for existing issuer {}",
                 credential.issuer,
             );
-            (
-                StatusCode::CONFLICT,
-                "Credentials already exist for this issuer".to_string(),
+            ApiError::new(
+                "DUPLICATE_ENTRY",
+                "Credentials already exist for this issuer",
             )
-                .into_response()
+            .into_response()
         }
         Err(err) => {
-            tracing::error!(
-                "Failed to store credentials for issuer {}: {err:?}",
-                credential.issuer,
-            );
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Internal server error".to_string(),
-            )
-                .into_response()
+            let (code, msg) = match &err {
+                CredentialError::RepoError(_) => ("INTERNAL_SERVER_ERROR", "Internal server error"),
+                CredentialError::AuthError(_) => ("AUTH_ERROR", "Authentication error"),
+            };
+            ApiError::new(code, msg).into_response()
         }
     }
 }
