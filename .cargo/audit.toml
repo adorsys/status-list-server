@@ -3,6 +3,9 @@ ignore = [
   # Present in rsa crate. As there is currently no available fix for this vulnerability,
   # this change temporarily ignores the advisory to allow CI/CD pipelines to pass
   "RUSTSEC-2023-0071",
+  # proc-macro-error2 is unmaintained and is used in sea-orm.
+  # We temporarily ignore it until a fix is available.
+  "RUSTSEC-2026-0173",
 ]  # advisory IDs to ignore
 
 informational_warnings = ["unmaintained"]
@@ -10,9 +13,7 @@ severity_threshold = "low"
 
 # Output Configuration
 [output]
-deny = [
-  "unmaintained"
-]  # exit on error if unmaintained dependencies are found
+deny = ["unmaintained"]  # exit on error if unmaintained dependencies are found
 format = "terminal"  # "terminal" (human readable report) or "json"
 quiet = false  # Only print information on error
 
