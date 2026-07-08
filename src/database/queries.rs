@@ -2,7 +2,7 @@ use sea_orm::{ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, Qu
 use std::sync::Arc;
 
 use super::error::RepositoryError;
-use crate::models::{credentials, status_lists, Credentials, StatusListRecord};
+use crate::models::{Credentials, StatusListRecord, credentials, status_lists};
 
 #[derive(Clone)]
 pub struct SeaOrmStore<T> {

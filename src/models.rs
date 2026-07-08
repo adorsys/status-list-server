@@ -1,6 +1,6 @@
 use jsonwebtoken::jwk::Jwk;
 use sea_orm::ActiveValue::Set;
-use sea_orm::{entity::prelude::*, FromJsonQueryResult};
+use sea_orm::{FromJsonQueryResult, entity::prelude::*};
 use serde::{Deserialize, Serialize};
 
 /// Represents the public key in Json Web Key format

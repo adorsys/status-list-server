@@ -1,4 +1,4 @@
-use axum::{response::IntoResponse, Json};
+use axum::{Json, response::IntoResponse};
 use hyper::StatusCode;
 use jsonwebtoken::errors::Error as JwtError;
 use serde_json::json;

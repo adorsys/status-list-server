@@ -11,18 +11,18 @@ use std::{sync::Arc, time::Duration};
 use aws_config::BehaviorVersion;
 use aws_sdk_s3::Client as S3Client;
 use status_list_server::cert_manager::{
+    CertManager,
     challenge::{Dns01Handler, PebbleDnsUpdater},
     http_client::DefaultHttpClient,
     storage::{AwsS3, AwsSecretsManager, Redis as RedisStorage},
-    CertManager,
 };
 use testcontainers_modules::{
     localstack::LocalStack,
     redis::Redis,
     testcontainers::{
+        ContainerAsync, GenericImage, ImageExt,
         core::{IntoContainerPort, WaitFor},
         runners::AsyncRunner,
-        ContainerAsync, GenericImage, ImageExt,
     },
 };
 
@@ -203,9 +203,11 @@ async fn test_full_certificate_provisioning() {
         .expect("Certificate provisioning failed");
 
     // Verify the certificate
-    assert!(cert_data
-        .certificate
-        .contains("-----BEGIN CERTIFICATE-----"));
+    assert!(
+        cert_data
+            .certificate
+            .contains("-----BEGIN CERTIFICATE-----")
+    );
     assert!(cert_data.valid_from < cert_data.expires_at);
     assert!(cert_data.updated_at > 0);
 

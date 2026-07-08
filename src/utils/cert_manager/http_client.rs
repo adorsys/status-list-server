@@ -4,12 +4,12 @@ use axum::body::Bytes;
 use hyper::Request;
 use hyper_rustls::{HttpsConnector, HttpsConnectorBuilder};
 use hyper_util::{
-    client::legacy::{connect::HttpConnector, Client},
+    client::legacy::{Client, connect::HttpConnector},
     rt::TokioExecutor,
 };
 use instant_acme::{BodyWrapper, BytesResponse, Error, HttpClient};
 use rustls::{ClientConfig, RootCertStore};
-use rustls_pki_types::{pem::PemObject, CertificateDer};
+use rustls_pki_types::{CertificateDer, pem::PemObject};
 
 use crate::cert_manager::CertError;
 
