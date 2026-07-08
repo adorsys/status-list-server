@@ -44,6 +44,7 @@ pub async fn publish_status(
             let status_list = StatusList {
                 bits: stl.bits,
                 lst: stl.lst,
+                aggregation_uri: None,
             };
 
             let sub = format!(
@@ -122,6 +123,7 @@ mod tests {
         let status_list = StatusList {
             bits: 2,
             lst: create_status_list(payload.status.clone()).unwrap().lst,
+            aggregation_uri: None,
         };
         let new_token = StatusListRecord {
             list_id: token_id.clone(),
@@ -172,6 +174,7 @@ mod tests {
         let status_list = StatusList {
             bits: 2,
             lst: create_status_list(payload.status.clone()).unwrap().lst,
+            aggregation_uri: None,
         };
         let new_token = StatusListRecord {
             list_id: token_id.clone(),
@@ -231,6 +234,7 @@ mod tests {
             status_list: StatusList {
                 bits: 1,
                 lst: create_status_list(payload.status.clone()).unwrap().lst,
+                aggregation_uri: None,
             },
             sub: "issuer".to_string(),
         };
@@ -263,6 +267,7 @@ mod tests {
         let status_list = StatusList {
             bits: 1,
             lst: base64url::encode([]),
+            aggregation_uri: None,
         };
         let new_token = StatusListRecord {
             list_id: token_id.clone(),
@@ -318,6 +323,7 @@ mod tests {
         let status_list = StatusList {
             bits: 1,
             lst: create_status_list(payload.status.clone()).unwrap().lst,
+            aggregation_uri: None,
         };
         let new_token = StatusListRecord {
             list_id: token_id.clone(),

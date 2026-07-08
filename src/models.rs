@@ -104,6 +104,8 @@ pub enum Status {
 pub struct StatusList {
     pub bits: u8,
     pub lst: String,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub aggregation_uri: Option<String>,
 }
 
 /// Request payload for performing actions(publish / update) on a status list token

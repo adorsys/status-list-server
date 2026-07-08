@@ -113,6 +113,7 @@ pub fn create_status_list(status_updates: Vec<StatusEntry>) -> Result<StatusList
         let stl = StatusList {
             bits: 1,
             lst: String::new(),
+            aggregation_uri: None,
         };
         return Ok(stl);
     }
@@ -125,6 +126,7 @@ pub fn create_status_list(status_updates: Vec<StatusEntry>) -> Result<StatusList
     Ok(StatusList {
         bits: bits as u8,
         lst,
+        aggregation_uri: None,
     })
 }
 
@@ -196,6 +198,7 @@ pub fn update_status_list(
         return Ok(StatusList {
             bits: current_bits,
             lst: existing_lst,
+            aggregation_uri: None,
         });
     }
     let original_bits = current_bits as usize;
@@ -222,6 +225,7 @@ pub fn update_status_list(
     let stl = StatusList {
         bits: original_bits as u8,
         lst,
+        aggregation_uri: None,
     };
     Ok(stl)
 }

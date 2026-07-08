@@ -25,6 +25,10 @@ const BUCKET_NAME: &str = "status-list-adorsys";
 const ENV_PRODUCTION: &str = "production";
 const ENV_DEVELOPMENT: &str = "development";
 
+fn empty_to_none(value: Option<String>) -> Option<String> {
+    value.filter(|v| !v.trim().is_empty())
+}
+
 #[derive(Clone)]
 pub struct AppState {
     pub credential_repo: SeaOrmStore<Credentials>,
@@ -32,6 +36,7 @@ pub struct AppState {
     pub server_domain: String,
     pub cert_manager: Arc<CertManager>,
     pub cache: Cache,
+    pub aggregation_uri: Option<String>,
 }
 
 pub async fn build_state(config: &AppConfig) -> EyeResult<AppState> {
@@ -103,5 +108,6 @@ pub async fn build_state(config: &AppConfig) -> EyeResult<AppState> {
         server_domain: config.server.domain.clone(),
         cert_manager: Arc::new(certificate_manager),
         cache: Cache::new(config.cache.ttl, config.cache.max_capacity),
+        aggregation_uri: empty_to_none(config.server.aggregation_uri.clone()),
     })
 }
