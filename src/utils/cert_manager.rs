@@ -9,7 +9,6 @@ pub mod storage;
 use challenge::CleanupFuture;
 pub use errors::CertError;
 
-use chrono::Utc;
 use color_eyre::eyre::eyre;
 use instant_acme::{
     Account, AccountCredentials, AuthorizationStatus, HttpClient, Identifier, NewAccount, NewOrder,
@@ -20,6 +19,7 @@ use rcgen::{
 };
 use serde::{Deserialize, Serialize};
 use std::{sync::Arc, time::Duration};
+use time::{OffsetDateTime, macros::format_description};
 use tokio::{sync::Mutex, time::sleep};
 use tokio_cron_scheduler::{Job, JobScheduler};
 use tracing::{error, info, instrument, warn};
@@ -110,22 +110,25 @@ impl CertManager {
         })
     }
 
-    /// Set the storage backend for the certificate
-    /// <p><b>Note</b>: This method is required.
+    /// Set the storage backend for the certificate.
+    ///
+    /// **Note:** This method is required.
     pub fn with_cert_storage(mut self, storage: impl Storage + 'static) -> Self {
         self.cert_storage = Some(Box::new(storage));
         self
     }
 
-    /// Set the storage backend for the sensitive data
-    /// <p><b>Note</b>: This method is required.
+    /// Set the storage backend for the sensitive data.
+    ///
+    /// **Note:** This method is required.
     pub fn with_secrets_storage(mut self, storage: impl Storage + 'static) -> Self {
         self.secrets_storage = Some(Box::new(storage));
         self
     }
 
-    /// Set the handler for the ACME challenge
-    /// <p><b>Note</b>: This method is required.
+    /// Set the handler for the ACME challenge.
+    ///
+    /// **Note:** This method is required.
     pub fn with_challenge_handler(mut self, handler: impl ChallengeHandler + 'static) -> Self {
         self.challenge_handler = Some(Box::new(handler));
         self
@@ -133,7 +136,7 @@ impl CertManager {
 
     /// Override the default http client used by the ACME client
     ///
-    /// Default: [`DefaultHttpClient`](http_client::DefaultHttpClient)
+    /// Default: [`DefaultHttpClient`]
     pub fn with_acme_http_client(mut self, client: impl HttpClient + Clone + 'static) -> Self {
         self.acme_http_client_factory = Box::new(move || Box::new(client.clone()));
         self
@@ -230,7 +233,7 @@ impl CertManager {
             certificate: cert_chain_pem,
             valid_from: not_before,
             expires_at: not_after,
-            updated_at: Utc::now().timestamp(),
+            updated_at: now_unix_timestamp(),
         };
 
         // Store the certificate
@@ -337,12 +340,12 @@ impl CertManager {
 
     /// Extract individual certificates from the certificate chain and return them as a vector of base64-encoded strings
     ///
-    /// This fuction will return `None` if the server certificate was not found.
+    /// This function will return `None` if the server certificate was not found.
     ///
     /// # Errors
     /// Returns an error if the certificate chain cannot be parsed or if there was an issue when trying to retrieve the server certificate
     pub async fn cert_chain_parts(&self) -> Result<Option<Vec<String>>, CertError> {
-        use base64::prelude::{Engine as _, BASE64_STANDARD};
+        use base64::prelude::{BASE64_STANDARD, Engine as _};
 
         if let Some(cert_data) = self.certificate().await? {
             let certs = Pem::iter_from_buffer(cert_data.certificate.as_bytes())
@@ -474,20 +477,20 @@ impl CertManager {
                 // Default to 30 days if not specified
                 let days_before = value.unwrap_or(30);
                 let renewal_time = cert_data.expires_at - days_to_secs(days_before);
-                Utc::now().timestamp() >= renewal_time
+                now_unix_timestamp() >= renewal_time
             }
             RenewalStrategy::PercentageOfLifetime(value) => {
                 // Default to 2/3 of the lifetime if not specified
                 let percentage = value.unwrap_or(2.0 / 3.0);
                 let lifetime = cert_data.expires_at - cert_data.valid_from;
-                let elapsed = Utc::now().timestamp() - cert_data.valid_from;
+                let elapsed = now_unix_timestamp() - cert_data.valid_from;
                 (elapsed as f32 / lifetime as f32) >= percentage
             }
             RenewalStrategy::FixedInterval(value) => {
                 // Default to 60 days if not specified
                 let interval = value.unwrap_or(60);
                 let renewal_time = cert_data.valid_from + days_to_secs(interval);
-                Utc::now().timestamp() >= renewal_time
+                now_unix_timestamp() >= renewal_time
             }
         }
     }
@@ -548,16 +551,22 @@ pub async fn setup_cert_renewal_scheduler(cert_manager: Arc<CertManager>) -> Res
 
 // Helper function to format timestamp as UTC time
 fn ts_to_utc(timestamp: i64) -> String {
-    use chrono::DateTime;
+    const FORMAT: &[time::format_description::FormatItem<'_>] =
+        format_description!("[year]-[month]-[day] [hour]:[minute] UTC");
 
-    DateTime::from_timestamp(timestamp, 0)
-        .map(|dt| dt.format("%Y-%m-%d %H:%M UTC").to_string())
+    OffsetDateTime::from_unix_timestamp(timestamp)
+        .ok()
+        .and_then(|dt| dt.format(FORMAT).ok())
         .unwrap_or_else(|| format!("Invalid timestamp: {timestamp}"))
+}
+
+fn now_unix_timestamp() -> i64 {
+    OffsetDateTime::now_utc().unix_timestamp()
 }
 
 // Helper function to get the TLD+1
 fn tld_plus_one(domains: &[String]) -> String {
-    use public_suffix::{EffectiveTLDProvider, DEFAULT_PROVIDER};
+    use public_suffix::{DEFAULT_PROVIDER, EffectiveTLDProvider};
 
     let first = domains[0].clone();
 

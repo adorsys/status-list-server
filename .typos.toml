@@ -1,0 +1,31 @@
+# Configuration for typos
+# https://github.com/crate-ci/typos
+
+[files]
+# Generated build output and binary/base64 test fixtures are not prose and
+# should not be spell-checked.
+extend-exclude = [
+  "target/",
+  ".git/",
+  "src/test_resources/",
+  # supply-chain/config.toml is managed by `cargo vet`. Its exemption
+  # sections contain crate names (e.g. `flate2`, `writeable`) and version
+  # strings embedding git SHA hashes, both of which trigger typos-cli
+  # false positives that cannot be reasonably hand-curated.
+  "supply-chain/config.toml",
+]
+
+[default.extend-words]
+# Standard JWT/CWT header parameter name.
+typ = "typ"
+# COSE (CBOR Object Signing and Encryption) standard acronym and the `coset`
+# crate type names (e.g. CoseSign1, CoseSign1Builder).
+Cose = "Cose"
+COSE = "COSE"
+# Base64 fragments that appear inside EC point / private key literals.
+MIGH = "MIGH"
+Ue = "Ue"
+# conda package name in the demo environment lockfile.
+certifi = "certifi"
+# Pod/instance suffix fragment in a demo notebook (e.g. "p79iz").
+iz = "iz"

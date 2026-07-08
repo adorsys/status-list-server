@@ -2,7 +2,7 @@ use crate::{
     cert_manager::storage::StorageError,
     utils::{
         cache::Cache,
-        cert_manager::{storage::Storage, CertManager},
+        cert_manager::{CertManager, storage::Storage},
         state::AppState,
     },
 };

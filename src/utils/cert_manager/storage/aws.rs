@@ -1,18 +1,14 @@
 use std::{
-    num::NonZeroUsize,
     sync::atomic::{AtomicBool, Ordering},
     time::Duration,
 };
 
 use async_trait::async_trait;
 use aws_config::SdkConfig;
-use aws_sdk_s3::{types::CreateBucketConfiguration, Client as S3Client};
-use aws_sdk_secretsmanager::{
-    operation::get_secret_value::GetSecretValueError, Client as SecretsClient,
-    Config as SecretsConfig,
-};
-use aws_secretsmanager_caching::SecretsManagerCachingClient as SecretsCacheClient;
+use aws_sdk_s3::{Client as S3Client, types::CreateBucketConfiguration};
+use aws_sdk_secretsmanager::Client as SecretsClient;
 use color_eyre::eyre::eyre;
+use moka::future::Cache;
 use tokio::time::sleep;
 use tracing::{info, warn};
 
@@ -21,7 +17,7 @@ use crate::{cert_manager::storage::StorageError, utils::cert_manager::Storage};
 /// Type used for AWS Secrets Manager operations
 pub struct AwsSecretsManager {
     client: SecretsClient,
-    cache: SecretsCacheClient,
+    cache: Option<Cache<String, String>>,
 }
 
 impl AwsSecretsManager {
@@ -31,16 +27,12 @@ impl AwsSecretsManager {
         secrets_cache_ttl: Duration,
     ) -> Result<Self, StorageError> {
         let client = SecretsClient::new(config);
-        let asm_builder = SecretsConfig::from(config).to_builder();
-
-        let cache = SecretsCacheClient::from_builder(
-            asm_builder,
-            NonZeroUsize::new(100).unwrap(),
-            secrets_cache_ttl,
-            true,
-        )
-        .await
-        .map_err(|e| StorageError::AwsSdk(e.into()))?;
+        let cache = (!secrets_cache_ttl.is_zero()).then(|| {
+            Cache::builder()
+                .max_capacity(100)
+                .time_to_live(secrets_cache_ttl)
+                .build()
+        });
 
         Ok(Self { client, cache })
     }
@@ -75,19 +67,29 @@ impl Storage for AwsSecretsManager {
     async fn load(&self, name: &str) -> Result<Option<String>, StorageError> {
         use aws_sdk_secretsmanager::error::SdkError;
 
-        match self.cache.get_secret_value(name, None, None, false).await {
-            Ok(value) => Ok(value.secret_string),
-            Err(err) => {
-                // Check for ResourceNotFoundException
-                if let Some(SdkError::ServiceError(service_err)) =
-                    err.downcast_ref::<SdkError<GetSecretValueError>>()
-                {
-                    if service_err.err().is_resource_not_found_exception() {
-                        return Ok(None);
+        if let Some(cache) = &self.cache
+            && let Some(value) = cache.get(name).await
+        {
+            return Ok(Some(value));
+        }
+
+        match self.client.get_secret_value().secret_id(name).send().await {
+            Ok(value) => {
+                if let Some(secret_string) = value.secret_string {
+                    if let Some(cache) = &self.cache {
+                        cache.insert(name.to_string(), secret_string.clone()).await;
                     }
+                    Ok(Some(secret_string))
+                } else {
+                    Ok(None)
                 }
-                Err(StorageError::AwsSdk(eyre!("{err}")))
             }
+            Err(SdkError::ServiceError(service_err))
+                if service_err.err().is_resource_not_found_exception() =>
+            {
+                Ok(None)
+            }
+            Err(err) => Err(StorageError::AwsSdk(eyre!("{err}"))),
         }
     }
 
@@ -100,8 +102,9 @@ impl Storage for AwsSecretsManager {
             .await
             .map_err(|e| StorageError::AwsSdk(e.into()))?;
 
-        // Force the secret refresh in the cache
-        let _ = self.cache.get_secret_value(name, None, None, true).await;
+        if let Some(cache) = &self.cache {
+            cache.insert(name.to_string(), data.to_string()).await;
+        }
         Ok(())
     }
 
@@ -113,8 +116,9 @@ impl Storage for AwsSecretsManager {
             .await
             .map_err(|e| StorageError::AwsSdk(e.into()))?;
 
-        // Invalidate cache by refreshing the secret
-        let _ = self.cache.get_secret_value(name, None, None, true).await;
+        if let Some(cache) = &self.cache {
+            cache.invalidate(name).await;
+        }
         Ok(())
     }
 }
@@ -129,7 +133,7 @@ pub struct AwsS3 {
 }
 
 impl AwsS3 {
-    /// Create a new instance of [AwsS3Storage] with the given AWS SDK config and bucket name
+    /// Create a new instance of [`AwsS3`] with the given AWS SDK config and bucket name
     pub fn new(
         config: &SdkConfig,
         bucket_name: impl Into<String>,
@@ -237,10 +241,10 @@ impl Storage for AwsS3 {
         self.ensure_bucket_exists().await?;
 
         // Invalidate cache
-        if let Some(cache) = &self.cache {
-            if let Err(e) = cache.delete(key).await {
-                warn!("Failed to invalidate cache for {key}: {e}");
-            }
+        if let Some(cache) = &self.cache
+            && let Err(e) = cache.delete(key).await
+        {
+            warn!("Failed to invalidate cache for {key}: {e}");
         }
 
         // Store the object in the bucket
@@ -301,10 +305,10 @@ impl Storage for AwsS3 {
                 let data = String::from_utf8(bytes.into_bytes().into())
                     .map_err(|e| StorageError::InvalidData(e.to_string()))?;
                 // Update cache if it exists
-                if let Some(cache) = &self.cache {
-                    if let Err(e) = cache.store(key, &data).await {
-                        warn!("Failed to update cache for {key}: {e}");
-                    }
+                if let Some(cache) = &self.cache
+                    && let Err(e) = cache.store(key, &data).await
+                {
+                    warn!("Failed to update cache for {key}: {e}");
                 }
                 Ok(Some(data))
             }
@@ -324,10 +328,10 @@ impl Storage for AwsS3 {
         {
             Ok(_) => {
                 // Invalidate cache
-                if let Some(cache) = &self.cache {
-                    if let Err(e) = cache.delete(key).await {
-                        warn!("Failed to invalidate cache for {key}: {e}");
-                    }
+                if let Some(cache) = &self.cache
+                    && let Err(e) = cache.delete(key).await
+                {
+                    warn!("Failed to invalidate cache for {key}: {e}");
                 }
                 Ok(())
             }

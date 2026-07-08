@@ -1,5 +1,5 @@
 use base64url::{decode, encode};
-use flate2::{read::ZlibDecoder, write::ZlibEncoder, Compression};
+use flate2::{Compression, read::ZlibDecoder, write::ZlibEncoder};
 use std::io::{Read, Write};
 
 use crate::models::{Status, StatusEntry, StatusList};
@@ -153,7 +153,7 @@ fn decode_status_array(array: &[u8], bits: usize) -> Result<Vec<Status>, Error> 
             _ => {
                 return Err(Error::Generic(
                     "Invalid status value in existing list".to_string(),
-                ))
+                ));
             }
         });
     }
@@ -239,9 +239,9 @@ pub fn encode_compressed(status_array: &[u8]) -> Result<String, Error> {
 
 #[cfg(test)]
 mod tests {
+    use flate2::Compression;
     use flate2::read::ZlibDecoder;
     use flate2::write::ZlibEncoder;
-    use flate2::Compression;
     use std::io::Read;
 
     use super::*;

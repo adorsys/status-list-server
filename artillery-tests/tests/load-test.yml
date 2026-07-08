@@ -33,7 +33,6 @@ config:
     p95: 800 # 95th percentile < 800ms
     p99: 1500 # 99th percentile < 1.5s
 
-
 scenarios:
   - name: "Health Check Flow"
     weight: 30

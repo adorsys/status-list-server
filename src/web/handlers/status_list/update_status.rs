@@ -1,7 +1,7 @@
 use axum::{
+    Extension, Json,
     extract::{Path, State},
     response::IntoResponse,
-    Extension, Json,
 };
 use hyper::StatusCode;
 
@@ -98,16 +98,16 @@ mod test {
     use std::sync::Arc;
 
     use axum::{
+        Extension, Json,
         extract::{Path, State},
         response::IntoResponse,
-        Extension, Json,
     };
     use hyper::StatusCode;
     use sea_orm::{DatabaseBackend, MockDatabase};
 
     use crate::{
         models::{
-            status_lists, Status, StatusEntry, StatusList, StatusListRecord, UpdateStatusRequest,
+            Status, StatusEntry, StatusList, StatusListRecord, UpdateStatusRequest, status_lists,
         },
         test_utils::test_app_state,
         utils::lst_gen::create_status_list,
