@@ -61,11 +61,6 @@ jobs:
         with:
           components: clippy
 
-      - name: Install build dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y cmake golang-go
-
       - name: Clippy Check
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings
 
@@ -80,11 +75,6 @@ jobs:
 
       - name: Install Rust
         uses: actions-rust-lang/setup-rust-toolchain@v1
-
-      - name: Install build dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y cmake golang-go
 
       - name: Install cargo-nextest
         uses: taiki-e/install-action@v2
@@ -106,11 +96,6 @@ jobs:
       - name: Install Rust
         uses: actions-rust-lang/setup-rust-toolchain@v1
 
-      - name: Install build dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y cmake golang-go
-
       - name: Generate Documentation
         run: cargo doc --workspace --all-features --no-deps --document-private-items
         env:
@@ -131,11 +116,6 @@ jobs:
 
       - name: Install stable toolchain
         uses: actions-rust-lang/setup-rust-toolchain@v1
-
-      - name: Install build dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y cmake golang-go
 
       - name: Cargo test doc
         run: cargo test --doc --workspace --all-features
@@ -159,6 +139,26 @@ jobs:
 
       - name: Check for unused dependencies
         run: cargo machete --with-metadata
+  
+  cargo-audit:
+    name: Cargo vet check
+    runs-on: ubuntu-latest
+    needs: cargo-build
+
+    steps:
+      - name: Fetch Repository
+        uses: actions/checkout@v6
+
+      - name: Install Rust
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+
+      - name: Install cargo-vet
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-vet
+
+      - name: Run cargo-vet
+        run: cargo vet --locked
 
   cargo-deny:
     uses: ./.github/workflows/cargo_deny.yml
