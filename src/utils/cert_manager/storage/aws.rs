@@ -133,7 +133,7 @@ pub struct AwsS3 {
 }
 
 impl AwsS3 {
-    /// Create a new instance of [AwsS3Storage] with the given AWS SDK config and bucket name
+    /// Create a new instance of [`AwsS3`] with the given AWS SDK config and bucket name
     pub fn new(
         config: &SdkConfig,
         bucket_name: impl Into<String>,
