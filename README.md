@@ -89,7 +89,7 @@ By default, the server will listen on `http://localhost:8000`. You can modify th
 
 ### Publish Status List
 
-- **Endpoint**: `POST /api/v1/status-lists/{list_id}/statuses`
+- **Endpoint**: `PUT /api/v1/status-lists/{list_id}/statuses`
 - **Description**: Allows an issuer to publish their status lists
 - **Authorization**: Requires a valid signed JWT Bearer token with the private key corresponding to the registered public key
 - **Path Parameters:**

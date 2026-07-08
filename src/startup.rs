@@ -1,7 +1,7 @@
 use axum::{
     middleware::from_fn_with_state,
     response::IntoResponse,
-    routing::{get, patch, post},
+    routing::{get, patch, post, put},
     Router,
 };
 use color_eyre::eyre::Context;
@@ -39,7 +39,13 @@ pub struct HttpServer {
 impl HttpServer {
     pub async fn new(config: &Config, state: AppState) -> color_eyre::Result<Self> {
         let cors = CorsLayer::new()
-            .allow_methods([Method::GET, Method::POST, Method::PATCH, Method::OPTIONS])
+            .allow_methods([
+                Method::GET,
+                Method::POST,
+                Method::PUT,
+                Method::PATCH,
+                Method::OPTIONS,
+            ])
             .allow_origin(Any)
             .allow_headers(Any);
 
@@ -88,7 +94,7 @@ fn api_v1_routes(state: AppState) -> Router<AppState> {
         .nest(
             "/status-lists/{list_id}/statuses",
             Router::new()
-                .route("/", post(publish_status))
+                .route("/", put(publish_status))
                 .route("/", patch(update_status)),
         )
         .route_layer(from_fn_with_state(state.clone(), auth));

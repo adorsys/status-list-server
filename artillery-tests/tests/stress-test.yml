@@ -92,7 +92,7 @@ scenarios:
       - function: "selectRandomToken"
       - function: "generateUUID"
       # First publish
-      - post:
+      - put:
           url: "/api/v1/status-lists/{{ listId }}/statuses"
           headers:
             Authorization: "Bearer {{ token }}"
