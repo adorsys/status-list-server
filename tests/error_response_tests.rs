@@ -1,7 +1,7 @@
 use axum::response::IntoResponse;
+use status_list_server::web::auth::errors::AuthenticationError;
 use status_list_server::web::errors::ApiError;
 use status_list_server::web::handlers::status_list::error::StatusListError;
-use status_list_server::web::auth::errors::AuthenticationError;
 
 #[test]
 fn test_api_error_new_generates_trace_id() {
@@ -26,9 +26,15 @@ fn test_api_error_status_mapping() {
         ("INVALID_LIST_ID", axum::http::StatusCode::BAD_REQUEST),
         ("DUPLICATE_ENTRY", axum::http::StatusCode::CONFLICT),
         ("FORBIDDEN", axum::http::StatusCode::FORBIDDEN),
-        ("INTERNAL_SERVER_ERROR", axum::http::StatusCode::INTERNAL_SERVER_ERROR),
+        (
+            "INTERNAL_SERVER_ERROR",
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+        ),
         ("INVALID_AUTH_HEADER", axum::http::StatusCode::UNAUTHORIZED),
-        ("SERVICE_UNAVAILABLE", axum::http::StatusCode::SERVICE_UNAVAILABLE),
+        (
+            "SERVICE_UNAVAILABLE",
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+        ),
     ];
 
     for (code, expected_status) in cases {
@@ -85,12 +91,30 @@ fn test_status_list_error_all_variants_are_convertible() {
 #[test]
 fn test_status_list_error_status_codes() {
     let status_codes = vec![
-        (StatusListError::InvalidListId("id".into()), axum::http::StatusCode::BAD_REQUEST),
-        (StatusListError::InvalidAcceptHeader, axum::http::StatusCode::NOT_ACCEPTABLE),
-        (StatusListError::StatusListNotFound, axum::http::StatusCode::NOT_FOUND),
-        (StatusListError::StatusListAlreadyExists, axum::http::StatusCode::CONFLICT),
-        (StatusListError::ServiceUnavailable, axum::http::StatusCode::SERVICE_UNAVAILABLE),
-        (StatusListError::Forbidden("msg".into()), axum::http::StatusCode::FORBIDDEN),
+        (
+            StatusListError::InvalidListId("id".into()),
+            axum::http::StatusCode::BAD_REQUEST,
+        ),
+        (
+            StatusListError::InvalidAcceptHeader,
+            axum::http::StatusCode::NOT_ACCEPTABLE,
+        ),
+        (
+            StatusListError::StatusListNotFound,
+            axum::http::StatusCode::NOT_FOUND,
+        ),
+        (
+            StatusListError::StatusListAlreadyExists,
+            axum::http::StatusCode::CONFLICT,
+        ),
+        (
+            StatusListError::ServiceUnavailable,
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+        ),
+        (
+            StatusListError::Forbidden("msg".into()),
+            axum::http::StatusCode::FORBIDDEN,
+        ),
     ];
 
     for (error, expected_status) in status_codes {
@@ -109,5 +133,8 @@ fn test_authentication_error_into_response() {
 #[test]
 fn test_api_error_unknown_code_defaults_to_500() {
     let error = ApiError::new("UNKNOWN_CODE_XYZ", "test");
-    assert_eq!(error.determine_status_code(), axum::http::StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(
+        error.determine_status_code(),
+        axum::http::StatusCode::INTERNAL_SERVER_ERROR
+    );
 }
