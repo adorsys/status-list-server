@@ -96,7 +96,7 @@ fn test_renewal_strategy_days_before_expiry() {
     .unwrap()
     .with_renewal_strategy(strategy);
 
-    let now = Utc::now().timestamp();
+    let now = now_unix_timestamp();
 
     // Certificate expires in 20 days - should renew (threshold is 30 days)
     let cert_data_should_renew = CertificateData {
@@ -134,7 +134,7 @@ async fn test_renewal_strategy_percentage_of_lifetime() {
     .unwrap()
     .with_renewal_strategy(strategy);
 
-    let now = Utc::now().timestamp();
+    let now = now_unix_timestamp();
     let cert_lifetime = days_to_secs(90);
 
     // Certificate is at 85% of its lifetime - should renew (threshold is 80%)
@@ -175,7 +175,7 @@ async fn test_renewal_strategy_fixed_interval() {
     .unwrap()
     .with_renewal_strategy(strategy);
 
-    let now = Utc::now().timestamp();
+    let now = now_unix_timestamp();
 
     // Certificate issued 70 days ago - should renew (interval is 60 days)
     let cert_data_should_renew = CertificateData {

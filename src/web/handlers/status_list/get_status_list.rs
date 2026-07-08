@@ -2,20 +2,19 @@ use std::{fmt::Debug, io::Write as _};
 
 use axum::{
     extract::{Path, State},
-    http::{header, HeaderMap, StatusCode},
+    http::{HeaderMap, StatusCode, header},
     response::IntoResponse,
 };
-use chrono::Utc;
 use coset::{
-    self,
+    self, CborSerializable, CoseSign1Builder, HeaderBuilder,
     cbor::Value as CborValue,
     iana::{Algorithm, EnumI64, HeaderParameter},
-    CborSerializable, CoseSign1Builder, HeaderBuilder,
 };
-use flate2::{write::GzEncoder, Compression};
+use flate2::{Compression, write::GzEncoder};
 use jsonwebtoken::{EncodingKey, Header};
-use p256::ecdsa::{signature::Signer, Signature};
+use p256::ecdsa::{Signature, signature::Signer};
 use serde::{Deserialize, Serialize};
+use time::OffsetDateTime;
 
 use crate::{
     models::{StatusList, StatusListRecord},
@@ -34,7 +33,7 @@ pub async fn get_status_list(
     State(state): State<AppState>,
     Path(list_id): Path<String>,
     headers: HeaderMap,
-) -> Result<impl IntoResponse + Debug, StatusListError> {
+) -> Result<impl IntoResponse + Debug + use<>, StatusListError> {
     let accept = headers.get(header::ACCEPT).and_then(|h| h.to_str().ok());
 
     // build the token depending on the accept header
@@ -58,7 +57,7 @@ async fn build_status_list_token(
     accept: &str,
     list_id: &str,
     state: &AppState,
-) -> Result<impl IntoResponse + Debug, StatusListError> {
+) -> Result<impl IntoResponse + Debug + use<>, StatusListError> {
     // Check cache for status list record
     if let Some(cached_record) = state.cache.get(list_id).await {
         tracing::info!("Cache hit for status list record: {list_id}");
@@ -91,7 +90,7 @@ async fn build_response_from_record(
     accept: &str,
     status_record: &StatusListRecord,
     state: &AppState,
-) -> Result<impl IntoResponse + Debug, StatusListError> {
+) -> Result<impl IntoResponse + Debug + use<>, StatusListError> {
     // Get the certificate chain
     let certs_parts = state
         .cert_manager
@@ -180,7 +179,7 @@ fn issue_cwt(
         CborValue::Integer(SUBJECT.into()),
         CborValue::Text(status_record.sub.clone()),
     ));
-    let iat = Utc::now().timestamp();
+    let iat = OffsetDateTime::now_utc().unix_timestamp();
     claims.push((
         CborValue::Integer(ISSUED_AT.into()),
         CborValue::Integer(iat.into()),
@@ -246,7 +245,7 @@ fn issue_cwt(
 }
 
 fn build_x5chain(cert_chain: &[String]) -> Result<CborValue, StatusListError> {
-    use base64::prelude::{Engine as _, BASE64_STANDARD};
+    use base64::prelude::{BASE64_STANDARD, Engine as _};
 
     let result: Result<Vec<Vec<u8>>, _> = cert_chain
         .iter()
@@ -283,9 +282,15 @@ fn issue_jwt(
     token_exp_secs: i64,
     token_ttl_secs: i64,
 ) -> Result<String, StatusListError> {
+<<<<<<< HEAD
     let iat = Utc::now().timestamp();
     let ttl = token_ttl_secs;
     let exp = iat + token_exp_secs;
+=======
+    let iat = OffsetDateTime::now_utc().unix_timestamp();
+    let ttl = TOKEN_TTL;
+    let exp = iat + TOKEN_EXP;
+>>>>>>> main
     // Building the claims
     let claims = StatusListToken {
         exp: Some(exp),
@@ -318,7 +323,7 @@ fn issue_jwt(
 mod tests {
     use super::*;
     use crate::{
-        models::{status_lists, StatusList, StatusListRecord},
+        models::{StatusList, StatusListRecord, status_lists},
         test_utils::test_app_state,
         utils::lst_gen::encode_compressed,
     };
@@ -329,7 +334,7 @@ mod tests {
     };
     use coset::CoseSign1;
     use jsonwebtoken::{DecodingKey, Validation};
-    use p256::ecdsa::{signature::Verifier, VerifyingKey};
+    use p256::ecdsa::{VerifyingKey, signature::Verifier};
     use p256::pkcs8::{EncodePublicKey, LineEnding};
     use sea_orm::{DatabaseBackend, MockDatabase};
     use std::{io::Read, sync::Arc};

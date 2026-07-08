@@ -1,11 +1,11 @@
 use crate::{
     cert_manager::{
+        CertManager,
         challenge::{AwsRoute53DnsUpdater, Dns01Handler},
         storage::{AwsS3, AwsSecretsManager, Redis},
-        CertManager,
     },
     config::Config as AppConfig,
-    database::{queries::SeaOrmStore, Migrator},
+    database::{Migrator, queries::SeaOrmStore},
     models::{Credentials, StatusListRecord},
 };
 use aws_config::{BehaviorVersion, Region};

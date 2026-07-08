@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use redis::{aio::ConnectionManager, AsyncCommands};
+use redis::{AsyncCommands, aio::ConnectionManager};
 
 use crate::cert_manager::storage::{Storage, StorageError};
 
@@ -11,7 +11,7 @@ pub struct Redis {
 }
 
 impl Redis {
-    /// Create a new instance of [RedisStorage]
+    /// Create a new instance of [`Redis`]
     /// with the given Redis connection manager
     pub fn new(conn: ConnectionManager) -> Self {
         Self { conn, ttl: None }

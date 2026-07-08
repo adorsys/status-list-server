@@ -1,6 +1,6 @@
 use jsonwebtoken::jwk::Jwk;
 use sea_orm::ActiveValue::Set;
-use sea_orm::{entity::prelude::*, FromJsonQueryResult};
+use sea_orm::{FromJsonQueryResult, entity::prelude::*};
 use serde::{Deserialize, Serialize};
 
 /// Represents the public key in Json Web Key format
@@ -106,7 +106,7 @@ pub struct StatusList {
     pub lst: String,
 }
 
-/// Request payload for perfoming actions(publish / update) on a status list token
+/// Request payload for performing actions(publish / update) on a status list token
 #[derive(Deserialize)]
 pub struct StatusRequest {
     pub list_id: String,

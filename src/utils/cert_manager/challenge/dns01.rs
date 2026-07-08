@@ -3,11 +3,11 @@ use std::{sync::Arc, time::Duration};
 use async_trait::async_trait;
 use aws_config::SdkConfig;
 use aws_sdk_route53::{
+    Client as Route53Client,
     types::{
         Change, ChangeAction, ChangeBatch, ChangeStatus, HostedZone, ResourceRecord,
         ResourceRecordSet, RrType,
     },
-    Client as Route53Client,
 };
 use color_eyre::eyre::eyre;
 use instant_acme::{AuthorizationHandle, ChallengeType};
@@ -122,7 +122,7 @@ impl AwsRoute53DnsUpdater {
         for zone in zones.iter() {
             let zone_name = &zone.name;
             let is_match = if let Some(stripped) = zone_name.strip_prefix("*.") {
-                // Try to match wilcard domains
+                // Try to match wildcard domains
                 if lookup.ends_with(stripped) {
                     // We ensure there's at least one identifier before the wildcard
                     let diff = lookup.len() - stripped.len();

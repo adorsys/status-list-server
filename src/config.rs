@@ -2,8 +2,8 @@ use std::time::Duration;
 
 use config::{Config as ConfigLib, ConfigError, Environment};
 use redis::{
-    aio::{ConnectionManager, ConnectionManagerConfig},
     Client as RedisClient, ClientTlsConfig, RedisResult, TlsCertificates,
+    aio::{ConnectionManager, ConnectionManagerConfig},
 };
 use secrecy::{ExposeSecret, SecretString};
 use serde::Deserialize;

@@ -4,10 +4,10 @@ use crate::{
     web::handlers::status_list::error::StatusListError,
 };
 use axum::{
+    Extension,
     extract::{Json, State},
     http::StatusCode,
     response::IntoResponse,
-    Extension,
 };
 use tracing;
 
@@ -78,11 +78,11 @@ mod tests {
     use super::*;
     use crate::web::handlers::status_list::error::StatusListError;
     use crate::{
-        models::{status_lists, Status, StatusEntry, StatusListRecord},
+        models::{Status, StatusEntry, StatusListRecord, status_lists},
         test_resources::helper::publish_test_token,
         test_utils::test_app_state,
     };
-    use axum::{extract::State, Json};
+    use axum::{Json, extract::State};
     use sea_orm::{DatabaseBackend, MockDatabase};
     use std::sync::Arc;
 

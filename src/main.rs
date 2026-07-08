@@ -1,4 +1,4 @@
-use color_eyre::{eyre::eyre, Result};
+use color_eyre::{Result, eyre::eyre};
 use dotenvy::dotenv;
 use rustls::crypto::aws_lc_rs;
 use status_list_server::cert_manager::setup_cert_renewal_scheduler;
@@ -47,10 +47,6 @@ async fn main() -> Result<()> {
 }
 
 fn config_tracing() {
-    if std::env::var("RUST_LIB_BACKTRACE").is_err() {
-        std::env::set_var("RUST_LIB_BACKTRACE", "1")
-    }
-
     use tracing::Level;
     use tracing_subscriber::{filter, layer::SubscriberExt, util::SubscriberInitExt};
 
