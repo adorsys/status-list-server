@@ -199,16 +199,21 @@ fn issue_cwt(
         CborValue::Integer(TTL.into()),
         CborValue::Integer(token_ttl_secs.into()),
     ));
+    // The stored `lst` is base64url text (correct for the JSON/JWT representation, §4.2).
+    // The CBOR representation (§4.3) requires the raw compressed bytes as a byte string,
+    // so decode it back before building the CBOR status_list map.
+    let lst_bytes = base64url::decode(&status_record.status_list.lst).map_err(|err| {
+        tracing::error!("Failed to decode lst for CWT status_list claim: {err:?}");
+        StatusListError::InternalServerError
+    })?;
+
     // Adding the status list map to the claims
     let status_list = vec![
         (
             CborValue::Text("bits".into()),
             CborValue::Integer(status_record.status_list.bits.into()),
         ),
-        (
-            CborValue::Text("lst".into()),
-            CborValue::Text(status_record.status_list.lst.clone()),
-        ),
+        (CborValue::Text("lst".into()), CborValue::Bytes(lst_bytes)),
     ];
     claims.push((
         CborValue::Integer(STATUS_LIST.into()),
@@ -514,13 +519,17 @@ mod tests {
             .clone();
         assert_eq!(bits, CborValue::Integer(8.into()));
 
+        // §4.3: the CBOR `lst` MUST be a byte string of the raw compressed bytes, not the
+        // base64url text used in the JSON/JWT representation (§4.2).
         let lst = status_list
             .iter()
             .find(|(k, _)| k == &CborValue::Text("lst".to_string()))
             .unwrap()
             .1
             .clone();
-        assert_eq!(lst, CborValue::Text(encode_compressed(&[0, 0, 0]).unwrap()));
+        let expected_lst_bytes =
+            base64url::decode(&encode_compressed(&[0, 0, 0]).unwrap()).unwrap();
+        assert_eq!(lst, CborValue::Bytes(expected_lst_bytes));
 
         let ttl = claims
             .iter()

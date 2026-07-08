@@ -792,6 +792,17 @@ mod tests {
 
         let result = create_status_list(updates).unwrap();
         assert_eq!(result.bits, 1);
+
+        // Decompress direction: the backend-independent production guarantee (see the
+        // comment above `test_spec_vector_1_bit`). Checked first so this test still proves
+        // something if the encode-direction pin below ever breaks on a flate2 backend change.
+        let decoded = decode(&result.lst).expect("Failed to decode base64url");
+        let mut decoder = ZlibDecoder::new(&decoded[..]);
+        let mut decompressed = Vec::new();
+        decoder.read_to_end(&mut decompressed).unwrap();
+        assert_eq!(decompressed, vec![0xB9, 0xA3]);
+
+        // Encode direction: canonical-output pin, coupled to flate2's exact backend.
         assert_eq!(result.lst, "eNrbuRgAAhcBXQ");
     }
 }
