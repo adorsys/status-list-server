@@ -79,6 +79,10 @@ pub struct CertManager {
     eku: Option<Vec<u64>>,
     // The ACME directory URL
     acme_directory_url: String,
+    // Max retries for signing key storage
+    signing_key_max_retries: u32,
+    // Retry delay for signing key storage
+    signing_key_retry_delay: Duration,
 }
 
 impl CertManager {
@@ -88,6 +92,8 @@ impl CertManager {
         email: impl Into<String>,
         organization: Option<impl Into<String>>,
         acme_directory_url: impl Into<String>,
+        signing_key_max_retries: u32,
+        signing_key_retry_delay: Duration,
     ) -> Result<Self, CertError> {
         let acme_client = Arc::new(Mutex::new(None));
         let http_client = DefaultHttpClient::new(None)?;
@@ -107,6 +113,8 @@ impl CertManager {
             organization: organization.map(|o| o.into()),
             eku: None,
             acme_directory_url: acme_directory_url.into(),
+            signing_key_max_retries,
+            signing_key_retry_delay,
         })
     }
 
@@ -280,9 +288,6 @@ impl CertManager {
         fields(domains = ?self.domains)
     )]
     pub async fn signing_key_pem(&self) -> Result<String, CertError> {
-        const MAX_RETRIES: u32 = 3;
-        const RETRY_DELAY: Duration = Duration::from_millis(500);
-
         let secrets_storage = self
             .secrets_storage
             .as_ref()
@@ -309,11 +314,11 @@ impl CertManager {
                 }
                 Err(e) => {
                     retries += 1;
-                    if retries >= MAX_RETRIES {
+                    if retries >= self.signing_key_max_retries {
                         return Err(e.into());
                     }
                     warn!("Retrying secret storage after failure: {e:#}");
-                    sleep(RETRY_DELAY).await;
+                    sleep(self.signing_key_retry_delay).await;
                 }
             }
         }
@@ -526,12 +531,15 @@ impl CertManager {
 }
 
 /// Setup the certificate renewal scheduler
-pub async fn setup_cert_renewal_scheduler(cert_manager: Arc<CertManager>) -> Result<(), CertError> {
+pub async fn setup_cert_renewal_scheduler(
+    cert_manager: Arc<CertManager>,
+    cron_schedule: &str,
+) -> Result<(), CertError> {
     let scheduler = JobScheduler::new().await?;
 
-    // Schedule certificate renewal check every day at midnight
+    // Schedule certificate renewal check based on the configured cron schedule
     scheduler
-        .add(Job::new_async("0 0 0 * * *", move |_, _| {
+        .add(Job::new_async(cron_schedule, move |_, _| {
             let cert_manager = cert_manager.clone();
             Box::pin(async move {
                 info!("Running scheduled certificate renewal check");

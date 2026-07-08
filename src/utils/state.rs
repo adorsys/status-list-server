@@ -20,8 +20,6 @@ use super::{
     cert_manager::{challenge::PebbleDnsUpdater, http_client::DefaultHttpClient},
 };
 
-// Could also be passed at runtime through environment variable
-const BUCKET_NAME: &str = "status-list-adorsys";
 const ENV_PRODUCTION: &str = "production";
 const ENV_DEVELOPMENT: &str = "development";
 
@@ -32,6 +30,8 @@ pub struct AppState {
     pub server_domain: String,
     pub cert_manager: Arc<CertManager>,
     pub cache: Cache,
+    pub token_exp_secs: i64,
+    pub token_ttl_secs: i64,
 }
 
 pub async fn build_state(config: &AppConfig) -> EyeResult<AppState> {
@@ -58,21 +58,35 @@ pub async fn build_state(config: &AppConfig) -> EyeResult<AppState> {
     // Use a fake DNS server to validate the challenge in development.
     let app_env = std::env::var("APP_ENV").unwrap_or(ENV_DEVELOPMENT.to_string());
     let challenge_handler = if app_env == ENV_PRODUCTION {
-        let updater = AwsRoute53DnsUpdater::new(&aws_config);
+        let updater = AwsRoute53DnsUpdater::new(
+            &aws_config,
+            config.aws.route53_txt_ttl,
+            config.server.cert.dns_propagation_timeout_secs,
+            config.server.cert.dns_propagation_initial_delay_secs,
+        );
         Dns01Handler::new(updater)
     } else {
         // Use pebble as the DNS server in development
-        let updater = PebbleDnsUpdater::new("http://challtestsrv:8055");
+        let updater =
+            PebbleDnsUpdater::new(&config.server.cert.development_dns_challenge_url);
         Dns01Handler::new(updater)
     };
 
     // Initialize the storage backends for the certificate manager
     let cache = Redis::new(redis_conn.clone()).with_ttl(config.redis.cert_cache_ttl);
-    let cert_storage =
-        AwsS3::new(&aws_config, BUCKET_NAME, config.aws.region.clone()).with_cache(cache);
+    let cert_storage = AwsS3::new(
+        &aws_config,
+        &config.aws.s3_bucket,
+        &config.aws.region,
+        &config.aws.s3_key_prefix,
+        config.aws.s3_bucket_max_retries,
+        Duration::from_millis(config.aws.s3_bucket_retry_delay_ms),
+    )
+    .with_cache(cache);
     let secrets_storage = AwsSecretsManager::new(
         &aws_config,
         Duration::from_secs(config.aws.secrets_cache_ttl),
+        config.aws.secrets_cache_max_capacity,
     )
     .await?;
 
@@ -81,6 +95,8 @@ pub async fn build_state(config: &AppConfig) -> EyeResult<AppState> {
         &config.server.cert.email,
         config.server.cert.organization.as_deref(),
         &config.server.cert.acme_directory_url,
+        config.server.cert.signing_key_max_retries,
+        Duration::from_millis(config.server.cert.signing_key_retry_delay_ms),
     )?
     .with_cert_storage(cert_storage)
     .with_secrets_storage(secrets_storage)
@@ -103,5 +119,7 @@ pub async fn build_state(config: &AppConfig) -> EyeResult<AppState> {
         server_domain: config.server.domain.clone(),
         cert_manager: Arc::new(certificate_manager),
         cache: Cache::new(config.cache.ttl, config.cache.max_capacity),
+        token_exp_secs: config.status_list.token_exp_secs,
+        token_ttl_secs: config.status_list.token_ttl_secs,
     })
 }

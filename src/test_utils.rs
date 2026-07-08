@@ -58,6 +58,8 @@ pub async fn test_app_state(db_conn: Option<Arc<sea_orm::DatabaseConnection>>) -
         "test@example.com",
         None::<String>,
         "http://example.com/dir",
+        3,
+        std::time::Duration::from_millis(500),
     )
     .unwrap()
     .with_cert_storage(cert_storage)
@@ -69,5 +71,7 @@ pub async fn test_app_state(db_conn: Option<Arc<sea_orm::DatabaseConnection>>) -
         server_domain: "example.com".to_string(),
         cert_manager: Arc::new(certificate_manager),
         cache: Cache::new(5 * 60, 100),
+        token_exp_secs: 900,
+        token_ttl_secs: 300,
     }
 }

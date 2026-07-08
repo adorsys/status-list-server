@@ -77,13 +77,24 @@ impl From<instant_acme::Error> for ChallengeError {
 pub struct AwsRoute53DnsUpdater {
     client: Route53Client,
     zones: Arc<RwLock<Option<Vec<ZoneInfo>>>>,
+    txt_ttl: u64,
+    propagation_timeout: Duration,
+    propagation_initial_delay: Duration,
 }
 
 impl AwsRoute53DnsUpdater {
-    pub fn new(config: &SdkConfig) -> Self {
+    pub fn new(
+        config: &SdkConfig,
+        txt_ttl: u64,
+        propagation_timeout_secs: u64,
+        propagation_initial_delay_secs: u64,
+    ) -> Self {
         Self {
             client: Route53Client::new(config),
             zones: Arc::new(RwLock::new(None)),
+            txt_ttl,
+            propagation_timeout: Duration::from_secs(propagation_timeout_secs),
+            propagation_initial_delay: Duration::from_secs(propagation_initial_delay_secs),
         }
     }
 
@@ -196,7 +207,7 @@ impl AwsRoute53DnsUpdater {
                 ResourceRecordSet::builder()
                     .name(&record_name)
                     .r#type(RrType::Txt)
-                    .ttl(60)
+                    .ttl(self.txt_ttl as i64)
                     .resource_records(
                         ResourceRecord::builder()
                             .value(format!("\"{value}\""))
@@ -236,8 +247,8 @@ impl AwsRoute53DnsUpdater {
     async fn wait_for_propagation(&self, change_id: &str) -> Result<(), ChallengeError> {
         use tokio::time::{sleep, timeout};
 
-        const INITIAL_DELAY: Duration = Duration::from_secs(2);
-        const TIMEOUT: Duration = Duration::from_secs(60 * 5);
+        let initial_delay = self.propagation_initial_delay;
+        let timeout_duration = self.propagation_timeout;
 
         let mut retries = 0;
 
@@ -267,22 +278,22 @@ impl AwsRoute53DnsUpdater {
                 }
 
                 // We double the delay after each attempt
-                let delay = INITIAL_DELAY
+                let delay = initial_delay
                     .checked_mul(2u32.pow(retries))
-                    .unwrap_or(TIMEOUT);
+                    .unwrap_or(timeout_duration);
                 retries += 1;
                 sleep(delay).await;
             }
         };
 
-        match timeout(TIMEOUT, poll_future).await {
+        match timeout(timeout_duration, poll_future).await {
             Ok(result) => match result {
                 Ok(()) => Ok(()),
                 Err(e) => Err(e),
             },
             Err(_) => Err(ChallengeError::Other(eyre!(
                 "DNS propagation timed out after {}s",
-                TIMEOUT.as_secs()
+                timeout_duration.as_secs()
             ))),
         }
     }

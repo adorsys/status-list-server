@@ -20,7 +20,6 @@ use serde::{Deserialize, Serialize};
 use crate::{
     models::{StatusList, StatusListRecord},
     utils::{keygen::Keypair, state::AppState},
-    web::handlers::status_list::constants::{TOKEN_EXP, TOKEN_TTL},
 };
 
 use super::{
@@ -115,6 +114,8 @@ async fn build_response_from_record(
 
     let accept_header = accept.to_string();
     let status_record = status_record.clone();
+    let token_exp_secs = state.token_exp_secs;
+    let token_ttl_secs = state.token_ttl_secs;
 
     let compressed_token = tokio::task::spawn_blocking(move || {
         let keypair = Keypair::from_pkcs8_pem(&signing_key_pem).map_err(|e| {
@@ -123,8 +124,17 @@ async fn build_response_from_record(
         })?;
 
         let token_bytes = match accept_header.as_str() {
-            ACCEPT_STATUS_LISTS_HEADER_CWT => issue_cwt(&status_record, &keypair, certs_parts)?,
-            _ => issue_jwt(&status_record, &keypair, certs_parts)?.into_bytes(),
+            ACCEPT_STATUS_LISTS_HEADER_CWT => {
+                issue_cwt(&status_record, &keypair, certs_parts, token_exp_secs, token_ttl_secs)?
+            }
+            _ => issue_jwt(
+                &status_record,
+                &keypair,
+                certs_parts,
+                token_exp_secs,
+                token_ttl_secs,
+            )?
+            .into_bytes(),
         };
 
         let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
@@ -160,6 +170,8 @@ fn issue_cwt(
     status_record: &StatusListRecord,
     keypair: &Keypair,
     cert_chain: Vec<String>,
+    token_exp_secs: i64,
+    token_ttl_secs: i64,
 ) -> Result<Vec<u8>, StatusListError> {
     let mut claims = vec![];
 
@@ -175,14 +187,14 @@ fn issue_cwt(
     ));
     // According to the spec, the lifetime of the token depends on the lifetime of the referenced token
     // https://www.ietf.org/archive/id/draft-ietf-oauth-status-list-10.html#section-13.1
-    let exp = iat + TOKEN_EXP;
+    let exp = iat + token_exp_secs;
     claims.push((
         CborValue::Integer(EXP.into()),
         CborValue::Integer(exp.into()),
     ));
     claims.push((
         CborValue::Integer(TTL.into()),
-        CborValue::Integer(TOKEN_TTL.into()),
+        CborValue::Integer(token_ttl_secs.into()),
     ));
     // Adding the status list map to the claims
     let status_list = vec![
@@ -268,10 +280,12 @@ fn issue_jwt(
     status_record: &StatusListRecord,
     keypair: &Keypair,
     cert_chain: Vec<String>,
+    token_exp_secs: i64,
+    token_ttl_secs: i64,
 ) -> Result<String, StatusListError> {
     let iat = Utc::now().timestamp();
-    let ttl = TOKEN_TTL;
-    let exp = iat + TOKEN_EXP;
+    let ttl = token_ttl_secs;
+    let exp = iat + token_exp_secs;
     // Building the claims
     let claims = StatusListToken {
         exp: Some(exp),

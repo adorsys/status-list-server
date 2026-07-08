@@ -62,6 +62,91 @@ cargo run
 
 By default, the server will listen on `http://localhost:8000`. You can modify the host and port in the configuration settings.
 
+## Configuration
+
+All runtime behavior is controlled via environment variables prefixed with `APP_` and using `__` as a nested separator (e.g. `APP_SERVER__PORT=8000`). Sensible defaults are built in, so only non-default values need to be set. See [`.env.template`](.env.template) for a complete example.
+
+### Server
+
+| Variable | Default | Description |
+|---|---|---|
+| `APP_SERVER__HOST` | `localhost` | Bind address for the HTTP server |
+| `APP_SERVER__DOMAIN` | `localhost` | Server domain (used for certificate issuance and token `sub` claims) |
+| `APP_SERVER__PORT` | `8000` | HTTP server listen port (1–65535) |
+| `APP_SERVER__ENABLE_METRICS` | `false` | Enables the Prometheus metrics endpoint at `/metrics` |
+| `APP_ENV` | `development` | Environment mode (`development` or `production`) |
+
+### Certificate (ACME)
+
+| Variable | Default | Description |
+|---|---|---|
+| `APP_SERVER__CERT__EMAIL` | `admin@example.com` | Contact email for the ACME account |
+| `APP_SERVER__CERT__ORGANIZATION` | `adorsys GmbH & CO KG` | Organization name embedded in certificate CSRs |
+| `APP_SERVER__CERT__EKU` | `1,3,6,1,5,5,7,3,30` | Extended Key Usage OIDs (comma-separated) |
+| `APP_SERVER__CERT__ACME_DIRECTORY_URL` | `https://acme-v02.api.letsencrypt.org/directory` | ACME directory URL |
+| `APP_SERVER__CERT__RENEWAL_CRON_SCHEDULE` | `0 0 0 * * *` | 6-field cron schedule for certificate renewal checks |
+| `APP_SERVER__CERT__DEVELOPMENT_DNS_CHALLENGE_URL` | `http://challtestsrv:8055` | Pebble challenge test server URL (development only) |
+| `APP_SERVER__CERT__DNS_PROPAGATION_TIMEOUT_SECS` | `300` | Maximum seconds to wait for DNS change propagation (Route53) |
+| `APP_SERVER__CERT__DNS_PROPAGATION_INITIAL_DELAY_SECS` | `2` | Initial polling delay for DNS propagation (doubles each retry) |
+| `APP_SERVER__CERT__SIGNING_KEY_MAX_RETRIES` | `3` | Max retries when storing the server signing key |
+| `APP_SERVER__CERT__SIGNING_KEY_RETRY_DELAY_MS` | `500` | Delay in milliseconds between signing key storage retries |
+
+### Database
+
+| Variable | Default | Description |
+|---|---|---|
+| `APP_DATABASE__URL` | `postgres://postgres:postgres@localhost:5432/status-list` | PostgreSQL connection string |
+
+### Redis
+
+| Variable | Default | Description |
+|---|---|---|
+| `APP_REDIS__URI` | `redis://localhost:6379` | Redis connection URI (use `rediss://` for TLS) |
+| `APP_REDIS__REQUIRE_CLIENT_AUTH` | `false` | Enables mTLS for the Redis connection |
+| `APP_REDIS__CERT_CACHE_TTL` | `3600` | TTL in seconds for the certificate cache in Redis (0 disables) |
+| `APP_REDIS__CONNECTION_TIMEOUT_SECS` | `60` | Redis connection timeout in seconds (must be > 0) |
+
+### AWS
+
+| Variable | Default | Description |
+|---|---|---|
+| `APP_AWS__REGION` | `us-east-1` | AWS region for all AWS services |
+| `APP_AWS__SECRETS_CACHE_TTL` | `300` | TTL in seconds for the Secrets Manager cache (0 disables) |
+| `APP_AWS__SECRETS_CACHE_MAX_CAPACITY` | `100` | Maximum number of secrets cached in memory (must be > 0) |
+| `APP_AWS__S3_BUCKET` | `status-list-adorsys` | S3 bucket name for certificate storage (must not be empty) |
+| `APP_AWS__S3_KEY_PREFIX` | *(empty)* | Optional prefix prepended to all S3 object keys |
+| `APP_AWS__S3_BUCKET_MAX_RETRIES` | `3` | Max retries for S3 bucket creation/existence checks (must be > 0) |
+| `APP_AWS__S3_BUCKET_RETRY_DELAY_MS` | `500` | Delay in milliseconds between S3 bucket operation retries |
+| `APP_AWS__ROUTE53_TXT_TTL` | `60` | TTL in seconds for Route53 TXT records during DNS-01 challenges |
+
+### Cache
+
+| Variable | Default | Description |
+|---|---|---|
+| `APP_CACHE__TTL` | `300` | TTL in seconds for the in-memory status list cache (0 disables) |
+| `APP_CACHE__MAX_CAPACITY` | `100` | Maximum number of entries in the in-memory cache |
+
+### Status List Token
+
+| Variable | Default | Description |
+|---|---|---|
+| `APP_STATUS_LIST__TOKEN_EXP_SECS` | `900` | Token expiration in seconds from issuance (must be > 0) |
+| `APP_STATUS_LIST__TOKEN_TTL_SECS` | `300` | Advertised token TTL in seconds (`ttl` claim) |
+
+### Validation
+
+The following constraints are validated at startup and will cause the server to fail fast if violated:
+
+- `server.port` must be between 1 and 65535
+- `redis.connection_timeout_secs` must be greater than 0
+- `aws.s3_bucket` must not be empty
+- `aws.s3_bucket_max_retries` must be greater than 0
+- `aws.secrets_cache_max_capacity` must be greater than 0
+- `server.cert.dns_propagation_timeout_secs` must be greater than 0
+- `server.cert.signing_key_max_retries` must be greater than 0
+- `status_list.token_exp_secs` must be greater than 0
+- `status_list.token_ttl_secs` must not be negative
+
 ## API Overview
 
 ### Health Check

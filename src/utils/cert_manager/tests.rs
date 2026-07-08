@@ -65,6 +65,8 @@ fn test_cert_manager_builder() {
         "test@example.com",
         Some("Test Org"),
         "https://acme-staging-v02.api.letsencrypt.org/directory",
+        3,
+        Duration::from_millis(500),
     )
     .unwrap()
     .with_cert_storage(cert_storage)
@@ -88,6 +90,8 @@ fn test_renewal_strategy_days_before_expiry() {
         "test@example.com",
         None::<String>,
         "https://acme-staging-v02.api.letsencrypt.org/directory",
+        3,
+        Duration::from_millis(500),
     )
     .unwrap()
     .with_renewal_strategy(strategy);
@@ -124,6 +128,8 @@ async fn test_renewal_strategy_percentage_of_lifetime() {
         "test@example.com",
         None::<String>,
         "https://acme-staging-v02.api.letsencrypt.org/directory",
+        3,
+        Duration::from_millis(500),
     )
     .unwrap()
     .with_renewal_strategy(strategy);
@@ -163,6 +169,8 @@ async fn test_renewal_strategy_fixed_interval() {
         "test@example.com",
         None::<String>,
         "https://acme-staging-v02.api.letsencrypt.org/directory",
+        3,
+        Duration::from_millis(500),
     )
     .unwrap()
     .with_renewal_strategy(strategy);
@@ -198,6 +206,8 @@ async fn test_certificate_returns_none_if_not_found() {
         "test@example.com",
         None::<String>,
         "https://acme-staging-v02.api.letsencrypt.org/directory",
+        3,
+        Duration::from_millis(500),
     )
     .unwrap()
     .with_cert_storage(cert_storage);
@@ -217,6 +227,8 @@ async fn test_certificate_storage_and_retrieval() {
         "test@example.com",
         None::<String>,
         "https://acme-staging-v02.api.letsencrypt.org/directory",
+        3,
+        Duration::from_millis(500),
     )
     .unwrap()
     .with_cert_storage(cert_storage.clone());
@@ -250,6 +262,8 @@ async fn test_signing_key_generation_and_storage() {
         "test@example.com",
         None::<String>,
         "https://acme-staging-v02.api.letsencrypt.org/directory",
+        3,
+        Duration::from_millis(500),
     )
     .unwrap()
     .with_secrets_storage(secrets_storage.clone());
@@ -308,6 +322,8 @@ async fn test_cert_chain_parts() {
         "test@example.com",
         None::<String>,
         "https://acme-staging-v02.api.letsencrypt.org/directory",
+        3,
+        Duration::from_millis(500),
     )
     .unwrap()
     .with_cert_storage(cert_storage.clone());
