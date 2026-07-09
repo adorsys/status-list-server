@@ -108,7 +108,7 @@ fn apply_and_encode(
     encode_compressed(status_array)
 }
 
-pub fn create_status_list(status_updates: Vec<StatusEntry>) -> Result<StatusList, Error> {
+pub(crate) fn create_status_list(status_updates: Vec<StatusEntry>) -> Result<StatusList, Error> {
     if status_updates.is_empty() {
         let stl = StatusList {
             bits: 1,
@@ -187,7 +187,7 @@ fn reencode_status_array(
     create_status_list(full_statuses)
 }
 
-pub fn update_status_list(
+pub(crate) fn update_status_list(
     existing_lst: String,
     status_updates: Vec<StatusEntry>,
     current_bits: u8,
@@ -226,7 +226,7 @@ pub fn update_status_list(
     Ok(stl)
 }
 
-pub fn encode_compressed(status_array: &[u8]) -> Result<String, Error> {
+pub(crate) fn encode_compressed(status_array: &[u8]) -> Result<String, Error> {
     let mut encoder = ZlibEncoder::new(Vec::new(), Compression::best());
     encoder
         .write_all(status_array)

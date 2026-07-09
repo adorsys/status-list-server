@@ -255,7 +255,7 @@ fn build_x5chain(cert_chain: &[String]) -> Result<CborValue, StatusListError> {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct StatusListToken {
+pub(crate) struct StatusListToken {
     pub exp: Option<i64>,
     pub iat: i64,
     pub status_list: StatusList,
