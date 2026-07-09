@@ -1,7 +1,44 @@
-[package]
-name = "status-list-server"
+[workspace]
+resolver = "3"
+members = ["."]
+
+[workspace.package]
 version = "0.1.0"
 edition = "2024"
+
+[workspace.lints.rust]
+unsafe_code = "warn"
+unstable_features = "warn"
+unused_import_braces = "warn"
+unused_lifetimes = "warn"
+unused_macro_rules = "warn"
+unused_qualifications = "warn"
+
+[workspace.lints.clippy]
+all = "warn"
+
+[profile.dev]
+opt-level = 1
+debug = true
+incremental = true
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true
+
+[profile.test]
+inherits = "dev"
+opt-level = 1
+
+[package]
+name = "status-list-server"
+version.workspace = true
+edition.workspace = true
+
+[lints]
+workspace = true
 
 [dependencies]
 # Async runtime and utilities
