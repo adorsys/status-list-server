@@ -98,7 +98,7 @@ By default, the server will listen on `http://localhost:8000`. You can modify th
 
   ```json
   {
-    "status": [
+    "statuses": [
       { "index": 1, "status": "INVALID" },
       { "index": 8, "status": "VALID" }
     ]
@@ -106,6 +106,7 @@ By default, the server will listen on `http://localhost:8000`. You can modify th
   ```
 
   - `index`: Position in the status list
+  - `statuses`: Status entries to publish
   - `status`: Status value (VALID, INVALID, SUSPENDED)
 
 ### Update Status List
@@ -119,7 +120,7 @@ By default, the server will listen on `http://localhost:8000`. You can modify th
 
   ```json
   {
-    "status": [
+    "statuses": [
       {
         "index": 1,
         "status": "VALID"
@@ -132,7 +133,7 @@ By default, the server will listen on `http://localhost:8000`. You can modify th
   }
   ```
 
-  - `status`: Array of status updates
+  - `statuses`: Array of status updates
     - `index`: Position in the status list
     - `status`: New status value (VALID, INVALID, SUSPENDED)
 
@@ -146,7 +147,7 @@ By default, the server will listen on `http://localhost:8000`. You can modify th
 
 ### Retrieve Status List
 
-- **Endpoint:** `GET /statuslists/{list_id}`
+- **Endpoint:** `GET /api/v1/status-lists/{list_id}`
 - **Description:** Retrieves the current status list for the requested `list_id`. This endpoint is publicly accessible with no authentication required.
 - **Headers:**
   - `Accept`: Specifies the desired response format
