@@ -199,9 +199,7 @@ fn issue_cwt(
         CborValue::Integer(TTL.into()),
         CborValue::Integer(token_ttl_secs.into()),
     ));
-    // The stored `lst` is base64url text (correct for the JSON/JWT representation, §4.2).
-    // The CBOR representation (§4.3) requires the raw compressed bytes as a byte string,
-    // so decode it back before building the CBOR status_list map.
+    // §4.3 requires lst as a CBOR byte string, not the base64url text used for JSON (§4.2).
     let lst_bytes = base64url::decode(&status_record.status_list.lst).map_err(|err| {
         tracing::error!("Failed to decode lst for CWT status_list claim: {err:?}");
         StatusListError::InternalServerError
@@ -489,9 +487,7 @@ mod tests {
             _ => panic!("Invalid CWT payload"),
         };
 
-        // Verify claims. Claim keys are asserted as the literal values mandated by
-        // draft-ietf-oauth-status-list-21 §5.2 (2/6/4/65534/65533), not via the
-        // production constants, so a regression in `constants.rs` can't pass silently.
+        // Literal spec integers (§5.2), not the production constants — catches constants.rs regressions.
         let sub = claims
             .iter()
             .find(|(k, _)| k == &CborValue::Integer(2i32.into()))
@@ -519,8 +515,7 @@ mod tests {
             .clone();
         assert_eq!(bits, CborValue::Integer(8.into()));
 
-        // §4.3: the CBOR `lst` MUST be a byte string of the raw compressed bytes, not the
-        // base64url text used in the JSON/JWT representation (§4.2).
+        // §4.3: lst MUST be a CBOR byte string, not the base64url text used for JSON (§4.2).
         let lst = status_list
             .iter()
             .find(|(k, _)| k == &CborValue::Text("lst".to_string()))
@@ -539,8 +534,7 @@ mod tests {
             .clone();
         assert_eq!(ttl, CborValue::Integer(300.into()));
 
-        // Verify the protected header's type (label 16) is the full media type, per §5.2 -
-        // distinct from the JWT `typ` header, which uses the abbreviated form.
+        // Label 16 (type) MUST be the full media type per §5.2, unlike JWT's abbreviated typ.
         let type_header = cwt
             .protected
             .header

@@ -729,16 +729,8 @@ mod tests {
         }
     }
 
-    // The following two tests use the worked examples from
-    // draft-ietf-oauth-status-list-21 §4.1 / §4.2, rather than hand-rolled bit
-    // patterns, as an authoritative interop check.
-    //
-    // The decompress-direction assertion is the real interop guarantee: DEFLATE
-    // permits multiple valid encodings of the same input, so it must hold
-    // regardless of the zlib backend flate2 is built against. The encode-direction
-    // assertion additionally pins flate2's exact byte-for-byte output (and thus
-    // implicitly `Compression::best()`), but is coupled to the backend rather than
-    // being a pure spec requirement.
+    // §4.1/§4.2 worked vectors. Decompress-direction is the real (backend-independent)
+    // guarantee; encode-direction is a secondary pin coupled to flate2's exact output.
 
     #[test]
     fn test_spec_vector_1_bit() {
@@ -770,12 +762,8 @@ mod tests {
 
     #[test]
     fn test_spec_vector_1_bit_through_create_status_list() {
-        // Same statuses as `test_spec_vector_1_bit` (draft-ietf-oauth-status-list-21 §4.1's
-        // 16-entry, 1-bit example), but driven through the actual `StatusEntry` ->
-        // `create_status_list` pipeline (`determine_bits` + `apply_updates`), not just the
-        // compression layer. This proves the real production code path a caller (e.g.
-        // `publish_status.rs`) uses reproduces the spec's own worked output, not merely that
-        // `encode_compressed` does.
+        // Same §4.1 vector as test_spec_vector_1_bit, but through the real StatusEntry ->
+        // create_status_list pipeline, not just encode_compressed.
         let statuses = [1, 0, 0, 1, 1, 1, 0, 1, 1, 1, 0, 0, 0, 1, 0, 1];
         let updates: Vec<StatusEntry> = statuses
             .into_iter()
@@ -793,9 +781,7 @@ mod tests {
         let result = create_status_list(updates).unwrap();
         assert_eq!(result.bits, 1);
 
-        // Decompress direction: the backend-independent production guarantee (see the
-        // comment above `test_spec_vector_1_bit`). Checked first so this test still proves
-        // something if the encode-direction pin below ever breaks on a flate2 backend change.
+        // Decompress direction: backend-independent guarantee (see comment above test_spec_vector_1_bit).
         let decoded = decode(&result.lst).expect("Failed to decode base64url");
         let mut decoder = ZlibDecoder::new(&decoded[..]);
         let mut decompressed = Vec::new();
