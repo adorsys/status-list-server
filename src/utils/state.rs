@@ -91,7 +91,7 @@ pub async fn build_state(config: &AppConfig) -> EyeResult<AppState> {
         // Override the default HTTP client to use the pebble root certificate
         // It is necessary to avoid https errors since pebble uses localhost over https
         // with a self-signed root certificate
-        let root_cert = include_bytes!("../test_resources/pebble.pem");
+        let root_cert = include_bytes!("../../test_data/pebble.pem");
         let http_client = DefaultHttpClient::new(Some(root_cert))?;
         certificate_manager = certificate_manager.with_acme_http_client(http_client);
     }

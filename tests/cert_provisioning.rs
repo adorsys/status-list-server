@@ -36,7 +36,7 @@ const BUCKET_NAME: &str = "status-list-adorsys";
 const AWS_REGION: &str = "us-east-1";
 
 /// Minica root CA that signs Pebble's own TLS server certificate.
-const PEBBLE_MINICA_ROOT_CA: &[u8] = include_bytes!("../src/test_resources/pebble.pem");
+const PEBBLE_MINICA_ROOT_CA: &[u8] = include_bytes!("../test_data/pebble.pem");
 
 /// Holds all running containers and resolved ports for a single test run.
 /// Containers are stopped automatically when this is dropped.

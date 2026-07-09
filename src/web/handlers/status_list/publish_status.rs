@@ -79,7 +79,7 @@ mod tests {
     use crate::web::handlers::status_list::error::StatusListError;
     use crate::{
         models::{Status, StatusEntry, StatusListRecord, status_lists},
-        test_resources::helper::publish_test_token,
+        test_data::helper::publish_test_token,
         test_utils::test_app_state,
     };
     use axum::{Json, extract::State};
