@@ -310,7 +310,7 @@ mod tests {
     use axum::{
         body::to_bytes,
         extract::{Path, State},
-        http::{HeaderMap, StatusCode},
+        http::{self, HeaderMap, StatusCode},
     };
     use coset::CoseSign1;
     use jsonwebtoken::{DecodingKey, Validation};
@@ -344,7 +344,7 @@ mod tests {
 
         let mut headers = HeaderMap::new();
         headers.insert(
-            header::ACCEPT,
+            http::header::ACCEPT,
             ACCEPT_STATUS_LISTS_HEADER_JWT.parse().unwrap(),
         );
 
@@ -359,7 +359,7 @@ mod tests {
 
         assert_eq!(response.status(), StatusCode::OK);
         let headers = response.headers();
-        assert_eq!(headers.get(header::CONTENT_ENCODING).unwrap(), "gzip");
+        assert_eq!(headers.get(http::header::CONTENT_ENCODING).unwrap(), "gzip");
 
         let compressed_body_bytes = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
         let mut decoder = flate2::read::GzDecoder::new(&compressed_body_bytes[..]);
@@ -417,7 +417,7 @@ mod tests {
 
         let mut headers = HeaderMap::new();
         headers.insert(
-            header::ACCEPT,
+            http::header::ACCEPT,
             ACCEPT_STATUS_LISTS_HEADER_CWT.parse().unwrap(),
         );
 
@@ -432,7 +432,7 @@ mod tests {
 
         assert_eq!(response.status(), StatusCode::OK);
         let headers = response.headers();
-        assert_eq!(headers.get(header::CONTENT_ENCODING).unwrap(), "gzip");
+        assert_eq!(headers.get(http::header::CONTENT_ENCODING).unwrap(), "gzip");
 
         let compressed_body_bytes = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
         let mut decoder = flate2::read::GzDecoder::new(&compressed_body_bytes[..]);
@@ -519,7 +519,7 @@ mod tests {
 
         let mut headers = HeaderMap::new();
         headers.insert(
-            header::ACCEPT,
+            http::header::ACCEPT,
             ACCEPT_STATUS_LISTS_HEADER_JWT.parse().unwrap(),
         );
 
@@ -537,7 +537,7 @@ mod tests {
         let app_state = test_app_state(None).await;
 
         let mut headers = HeaderMap::new();
-        headers.insert(header::ACCEPT, "application/xml".parse().unwrap()); // unsupported
+        headers.insert(http::header::ACCEPT, "application/xml".parse().unwrap()); // unsupported
 
         let result =
             get_status_list(State(app_state), Path("test_list".to_string()), headers).await;

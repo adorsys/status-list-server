@@ -19,8 +19,10 @@ jobs:
       - name: Fetch Repository
         uses: actions/checkout@v6
 
-      - name: Install Rust toolchain
+      - name: Install stable toolchain
         uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          components: rustfmt
 
       - name: Rustfmt Check
         run: cargo fmt --all --check
@@ -34,7 +36,7 @@ jobs:
       - name: Fetch Repository
         uses: actions/checkout@v6
 
-      - name: Install Rust toolchain
+      - name: Install Rust
         uses: actions-rust-lang/setup-rust-toolchain@v1
 
       - name: Install build dependencies
@@ -54,8 +56,10 @@ jobs:
       - name: Fetch Repository
         uses: actions/checkout@v6
 
-      - name: Install Rust toolchain
+      - name: Install Rust
         uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          components: clippy
 
       - name: Clippy Check
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings
@@ -69,7 +73,7 @@ jobs:
       - name: Fetch Repository
         uses: actions/checkout@v6
 
-      - name: Install Rust toolchain
+      - name: Install Rust
         uses: actions-rust-lang/setup-rust-toolchain@v1
 
       - name: Install cargo-nextest
@@ -89,7 +93,7 @@ jobs:
       - name: Fetch Repository
         uses: actions/checkout@v6
 
-      - name: Install Rust toolchain
+      - name: Install Rust
         uses: actions-rust-lang/setup-rust-toolchain@v1
 
       - name: Generate Documentation
@@ -110,7 +114,7 @@ jobs:
       - name: Fetch Repository
         uses: actions/checkout@v6
 
-      - name: Install Rust toolchain
+      - name: Install stable toolchain
         uses: actions-rust-lang/setup-rust-toolchain@v1
 
       - name: Cargo test doc
@@ -125,7 +129,7 @@ jobs:
       - name: Fetch Repository
         uses: actions/checkout@v6
 
-      - name: Install Rust toolchain
+      - name: Install Rust
         uses: actions-rust-lang/setup-rust-toolchain@v1
 
       - name: Install cargo-machete
@@ -145,7 +149,7 @@ jobs:
       - name: Fetch Repository
         uses: actions/checkout@v6
 
-      - name: Install Rust toolchain
+      - name: Install Rust
         uses: actions-rust-lang/setup-rust-toolchain@v1
 
       - name: Install cargo-vet
@@ -232,8 +236,10 @@ jobs:
       - name: Fetch Repository
         uses: actions/checkout@v6
 
-      - name: Install Rust toolchain
+      - name: Install stable toolchain
         uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          components: llvm-tools-preview
 
       - name: Install cargo-llvm-cov and cargo-nextest
         uses: taiki-e/install-action@v2
