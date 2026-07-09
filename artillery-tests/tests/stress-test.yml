@@ -61,7 +61,7 @@ scenarios:
       - loop:
           - function: "generateRandomListId"
           - get:
-              url: "/statuslists/{{ listId }}"
+              url: "/api/v1/status-lists/{{ listId }}"
               expect:
                 - statusCode:
                     - 200
@@ -97,7 +97,7 @@ scenarios:
           headers:
             Authorization: "Bearer {{ token }}"
           json:
-            status:
+            statuses:
               - index: 1
                 status: "VALID"
           expect:
@@ -109,7 +109,7 @@ scenarios:
           headers:
             Authorization: "Bearer {{ token }}"
           json:
-            status:
+            statuses:
               - index: 1
                 status: "INVALID"
               - index: 2
