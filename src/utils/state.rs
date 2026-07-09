@@ -61,8 +61,16 @@ pub async fn build_state(config: &AppConfig) -> EyeResult<AppState> {
         let updater = AwsRoute53DnsUpdater::new(&aws_config);
         Dns01Handler::new(updater)
     } else {
-        // Use pebble as the DNS server in development
-        let updater = PebbleDnsUpdater::new(&config.server.cert.development_dns_challenge_url);
+        // Use pebble as the DNS server in development.
+        // The DNS channel server URL is optional and only used in dev mode;
+        // it falls back to the well-known Pebble challenge test server when unset.
+        let dns_url = config
+            .server
+            .cert
+            .dns_chanel_server_url
+            .as_deref()
+            .unwrap_or("http://challtestsrv:8055");
+        let updater = PebbleDnsUpdater::new(dns_url);
         Dns01Handler::new(updater)
     };
 

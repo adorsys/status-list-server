@@ -514,7 +514,7 @@ impl CertManager {
 
     #[inline]
     fn cert_key(&self) -> String {
-        format!("certs-{}-cert_data.json", &tld_plus_one(&self.domains))
+        format!("certs-{}-cert_data.json", tld_plus_one(&self.domains))
     }
 
     #[inline]

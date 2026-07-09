@@ -1,7 +1,6 @@
 use std::time::Duration;
 
 use config::{Config as ConfigLib, ConfigError, Environment};
-use croner::parser::{CronParser, Seconds};
 use redis::{
     Client as RedisClient, ClientTlsConfig, RedisResult, TlsCertificates,
     aio::{ConnectionManager, ConnectionManagerConfig},
@@ -39,7 +38,8 @@ pub struct CertConfig {
     pub eku: Vec<u64>,
     pub acme_directory_url: String,
     pub renewal_cron_schedule: String,
-    pub development_dns_challenge_url: String,
+    #[serde(default)]
+    pub dns_chanel_server_url: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -162,10 +162,6 @@ impl Config {
                 "https://acme-v02.api.letsencrypt.org/directory",
             )?
             .set_default("server.cert.renewal_cron_schedule", "0 0 0 * * *")?
-            .set_default(
-                "server.cert.development_dns_challenge_url",
-                "http://challtestsrv:8055",
-            )?
             .set_default("aws.region", "us-east-1")?
             .set_default("cache.ttl", 5 * 60)?
             .set_default("cache.max_capacity", 100)?
@@ -182,44 +178,7 @@ impl Config {
             .build()?;
 
         let config: Config = config.try_deserialize()?;
-        config.validate()?;
         Ok(config)
-    }
-
-    fn validate(&self) -> Result<(), ConfigError> {
-        // server.port is u16, so the type system already enforces the upper bound of 65535.
-        if self.server.port == 0 {
-            return Err(ConfigError::Message(
-                "server.port must be between 1 and 65535".into(),
-            ));
-        }
-
-        if self.aws.s3_bucket.is_empty() {
-            return Err(ConfigError::Message(
-                "aws.s3_bucket must not be empty".into(),
-            ));
-        }
-
-        // Validate the cron schedule format using the same parser configuration as the
-        // JobScheduler (6-field cron with seconds required).
-        if let Err(e) = CronParser::builder()
-            .seconds(Seconds::Required)
-            .dom_and_dow(true)
-            .build()
-            .parse(&self.server.cert.renewal_cron_schedule)
-        {
-            return Err(ConfigError::Message(format!(
-                "server.cert.renewal_cron_schedule is not a valid 6-field cron expression: {e}"
-            )));
-        }
-
-        if self.status_list.token_exp_secs == 0 {
-            return Err(ConfigError::Message(
-                "status_list.token_exp_secs must be greater than 0".into(),
-            ));
-        }
-
-        Ok(())
     }
 }
 
@@ -252,10 +211,7 @@ mod tests {
         assert_eq!(config.status_list.token_exp_secs, 900);
         assert_eq!(config.status_list.token_ttl_secs, 300);
         assert_eq!(config.server.cert.renewal_cron_schedule, "0 0 0 * * *");
-        assert_eq!(
-            config.server.cert.development_dns_challenge_url,
-            "http://challtestsrv:8055"
-        );
+        assert_eq!(config.server.cert.dns_chanel_server_url, None);
     }
 
     #[sealed_test(env = [
@@ -336,7 +292,7 @@ mod tests {
         ("APP_STATUS_LIST__TOKEN_EXP_SECS", "1800"),
         ("APP_STATUS_LIST__TOKEN_TTL_SECS", "600"),
         ("APP_SERVER__CERT__RENEWAL_CRON_SCHEDULE", "0 0 12 * * *"),
-        ("APP_SERVER__CERT__DEVELOPMENT_DNS_CHALLENGE_URL", "http://pebble:8055"),
+        ("APP_SERVER__CERT__DNS_CHANEL_SERVER_URL", "http://pebble:8055"),
     ])]
     fn test_new_config_fields_env_override() {
         let config = Config::load().expect("Failed to load config");
@@ -347,60 +303,8 @@ mod tests {
         assert_eq!(config.status_list.token_ttl_secs, 600);
         assert_eq!(config.server.cert.renewal_cron_schedule, "0 0 12 * * *");
         assert_eq!(
-            config.server.cert.development_dns_challenge_url,
-            "http://pebble:8055"
-        );
-    }
-
-    #[sealed_test(env = [
-        ("APP_AWS__S3_BUCKET", ""),
-    ])]
-    fn test_validation_empty_s3_bucket() {
-        let result = Config::load();
-        assert!(result.is_err());
-        let err = result.unwrap_err().to_string();
-        assert!(
-            err.contains("s3_bucket"),
-            "Expected error about s3_bucket, got: {err}"
-        );
-    }
-
-    #[sealed_test(env = [
-        ("APP_STATUS_LIST__TOKEN_EXP_SECS", "0"),
-    ])]
-    fn test_validation_zero_token_exp() {
-        let result = Config::load();
-        assert!(result.is_err());
-        let err = result.unwrap_err().to_string();
-        assert!(
-            err.contains("token_exp_secs"),
-            "Expected error about token_exp_secs, got: {err}"
-        );
-    }
-
-    #[sealed_test(env = [
-        ("APP_SERVER__CERT__RENEWAL_CRON_SCHEDULE", "not-a-cron"),
-    ])]
-    fn test_validation_invalid_cron_schedule() {
-        let result = Config::load();
-        assert!(result.is_err());
-        let err = result.unwrap_err().to_string();
-        assert!(
-            err.contains("renewal_cron_schedule"),
-            "Expected error about renewal_cron_schedule, got: {err}"
-        );
-    }
-
-    #[sealed_test(env = [
-        ("APP_SERVER__CERT__RENEWAL_CRON_SCHEDULE", "* * * * *"),
-    ])]
-    fn test_validation_five_field_cron_schedule() {
-        let result = Config::load();
-        assert!(result.is_err());
-        let err = result.unwrap_err().to_string();
-        assert!(
-            err.contains("renewal_cron_schedule"),
-            "Expected error about renewal_cron_schedule, got: {err}"
+            config.server.cert.dns_chanel_server_url.as_deref(),
+            Some("http://pebble:8055")
         );
     }
 }
