@@ -14,11 +14,6 @@
 **/Dockerfile*
 /bin
 /target
-# Note: test_data/ is NOT excluded here. It is bind-mounted into the build
-# stage (see Dockerfile) so that non-test code in src/ can embed fixtures
-# (e.g. pebble.pem) via include_bytes!/include_str! at compile time.
-# Bind mounts are ephemeral and never persist into the final image, so
-# test_data/ does not end up in the production image.
 LICENSE
 README.md
 
