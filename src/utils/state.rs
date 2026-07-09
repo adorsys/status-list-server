@@ -16,7 +16,7 @@ use secrecy::ExposeSecret;
 use std::{sync::Arc, time::Duration};
 
 use super::{
-    cache::Cache,
+    cache::StatusListCache,
     cert_manager::{challenge::PebbleDnsUpdater, http_client::DefaultHttpClient},
 };
 
@@ -31,7 +31,7 @@ pub struct AppState {
     pub status_list_repo: SeaOrmStore<StatusListRecord>,
     pub server_domain: String,
     pub cert_manager: Arc<CertManager>,
-    pub cache: Cache,
+    pub cache: StatusListCache,
 }
 
 pub async fn build_state(config: &AppConfig) -> EyeResult<AppState> {
@@ -85,6 +85,7 @@ pub async fn build_state(config: &AppConfig) -> EyeResult<AppState> {
     .with_cert_storage(cert_storage)
     .with_secrets_storage(secrets_storage)
     .with_challenge_handler(challenge_handler)
+    .with_cert_chain_cache_ttl(Duration::from_secs(config.server.cert.chain_cache_ttl))
     .with_eku(&config.server.cert.eku);
 
     if app_env == ENV_DEVELOPMENT {
@@ -102,6 +103,6 @@ pub async fn build_state(config: &AppConfig) -> EyeResult<AppState> {
         status_list_repo: SeaOrmStore::new(db_clone),
         server_domain: config.server.domain.clone(),
         cert_manager: Arc::new(certificate_manager),
-        cache: Cache::new(config.cache.ttl, config.cache.max_capacity),
+        cache: StatusListCache::new(config.cache.ttl, config.cache.max_capacity),
     })
 }

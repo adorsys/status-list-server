@@ -16,16 +16,18 @@ pub async fn update_status(
     Extension(issuer): Extension<String>,
     Json(payload): Json<StatusRequest>,
 ) -> Result<impl IntoResponse, StatusListError> {
+    let StatusRequest { list_id, status } = payload;
+
     // Validate list_id as UUID
-    if let Err(e) = uuid::Uuid::try_parse(&payload.list_id) {
+    if let Err(e) = uuid::Uuid::try_parse(&list_id) {
         return Err(StatusListError::InvalidListId(e.to_string()));
     }
 
     let store = &appstate.status_list_repo;
 
     // Fetch the existing token
-    let record = store.find_one_by(&payload.list_id).await.map_err(|e| {
-            tracing::error!(error = ?e, list_id = ?payload.list_id, "Database query failed for status list.");
+    let record = store.find_one_by(&list_id).await.map_err(|e| {
+            tracing::error!(error = ?e, list_id = ?list_id, "Database query failed for status list.");
             StatusListError::InternalServerError
         })?.ok_or(StatusListError::StatusListNotFound)?;
 
@@ -48,13 +50,9 @@ pub async fn update_status(
         )))
     }?;
 
-    // Update the status list
-    let updated_lst = update_status_list(
-        record.status_list.lst.clone(),
-        payload.status.clone(),
-        bits.value(),
-    )
-    .map_err(|e| {
+    let mut exact_status_list = record;
+    let existing_lst = std::mem::take(&mut exact_status_list.status_list.lst);
+    let updated_lst = update_status_list(existing_lst, status, bits.value()).map_err(|e| {
         tracing::error!("update_status_list failed: {e:?}");
         match e {
             Error::Generic(msg) => StatusListError::Generic(msg),
@@ -63,13 +61,12 @@ pub async fn update_status(
         }
     })?;
 
-    let mut exact_status_list = record;
     exact_status_list.status_list.lst = updated_lst.lst;
     exact_status_list.status_list.bits = updated_lst.bits;
 
     // Save the updated token
     store
-        .update_one(&exact_status_list.list_id, exact_status_list.clone())
+        .update_one(&list_id, exact_status_list)
         .await
         .map_err(|e| {
             tracing::error!("Failed to update status list: {e:?}");
@@ -77,11 +74,8 @@ pub async fn update_status(
         })?;
 
     // Invalidate cache entry to ensure next read fetches the updated record
-    appstate.cache.invalidate(&exact_status_list.list_id).await;
-    tracing::info!(
-        "Invalidated cache for status list: {}",
-        exact_status_list.list_id
-    );
+    appstate.cache.invalidate(&list_id).await;
+    tracing::info!("Invalidated cache for status list: {list_id}");
 
     Ok(StatusCode::OK.into_response())
 }

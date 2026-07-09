@@ -17,14 +17,16 @@ pub async fn publish_status(
     Extension(issuer): Extension<String>,
     Json(payload): Json<StatusRequest>,
 ) -> Result<impl IntoResponse, StatusListError> {
+    let StatusRequest { list_id, status } = payload;
+
     // Validate list_id as UUID
-    if let Err(e) = uuid::Uuid::try_parse(&payload.list_id) {
+    if let Err(e) = uuid::Uuid::try_parse(&list_id) {
         return Err(StatusListError::InvalidListId(e.to_string()));
     }
 
     let store = &appstate.status_list_repo;
 
-    let stl = create_status_list(payload.status).map_err(|e| {
+    let stl = create_status_list(status).map_err(|e| {
         tracing::error!("lst_from failed: {e:?}");
         match e {
             Error::Generic(msg) => StatusListError::Generic(msg),
@@ -34,9 +36,9 @@ pub async fn publish_status(
     })?;
 
     // Check for existing token to prevent duplicates
-    match store.find_one_by(&payload.list_id).await {
+    match store.find_one_by(&list_id).await {
         Ok(Some(_)) => {
-            tracing::info!("Status list {} already exists", payload.list_id);
+            tracing::info!("Status list {list_id} already exists");
             Err(StatusListError::StatusListAlreadyExists)
         }
         Ok(None) => {
@@ -46,14 +48,11 @@ pub async fn publish_status(
                 lst: stl.lst,
             };
 
-            let sub = format!(
-                "https://{}/statuslists/{}",
-                appstate.server_domain, payload.list_id
-            );
+            let sub = format!("https://{}/statuslists/{}", appstate.server_domain, list_id);
 
             // Build the new status list token
             let status_list_record = StatusListRecord {
-                list_id: payload.list_id.clone(),
+                list_id,
                 issuer,
                 status_list,
                 sub,
@@ -67,7 +66,7 @@ pub async fn publish_status(
             Ok(StatusCode::CREATED.into_response())
         }
         Err(e) => {
-            tracing::error!(error = ?e, list_id = ?payload.list_id, "Database query failed for status list.");
+            tracing::error!(error = ?e, list_id = ?list_id, "Database query failed for status list.");
             Err(StatusListError::InternalServerError)
         }
     }

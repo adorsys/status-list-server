@@ -36,6 +36,7 @@ pub struct CertConfig {
     #[serde(default)]
     pub eku: Vec<u64>,
     pub acme_directory_url: String,
+    pub chain_cache_ttl: u64,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -142,6 +143,7 @@ impl Config {
             .set_default("aws.secrets_cache_ttl", 300)? // Default 5 minutes
             .set_default("server.cert.email", "admin@example.com")?
             .set_default("server.cert.eku", vec![1, 3, 6, 1, 5, 5, 7, 3, 30])?
+            .set_default("server.cert.chain_cache_ttl", 3600)?
             .set_default("server.cert.organization", "adorsys GmbH & CO KG")?
             .set_default(
                 "server.cert.acme_directory_url",
