@@ -1,0 +1,7 @@
+[files]
+extend-exclude = [
+    "test_data/",
+]
+
+[default.extend-words]
+COSE = "COSE"

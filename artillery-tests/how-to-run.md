@@ -4,7 +4,7 @@ In this tests we have 4 tests which are
  1. Load test
  2. Stress test
  3. Spike test
- 4. Athentication test
+ 4. Authentication test
 
  The main aim of each of these tests is to test the performance of the StatusList Server.
 
