@@ -39,7 +39,7 @@ pub struct CertConfig {
     pub acme_directory_url: String,
     pub renewal_cron_schedule: String,
     #[serde(default)]
-    pub dns_channel_server_url: Option<String>,
+    pub dns_challenge_server_url: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -211,7 +211,7 @@ mod tests {
         assert_eq!(config.status_list.token_exp_secs, 900);
         assert_eq!(config.status_list.token_ttl_secs, 300);
         assert_eq!(config.server.cert.renewal_cron_schedule, "0 0 0 * * *");
-        assert_eq!(config.server.cert.dns_channel_server_url, None);
+        assert_eq!(config.server.cert.dns_challenge_server_url, None);
     }
 
     #[sealed_test(env = [
@@ -292,7 +292,7 @@ mod tests {
         ("APP_STATUS_LIST__TOKEN_EXP_SECS", "1800"),
         ("APP_STATUS_LIST__TOKEN_TTL_SECS", "600"),
         ("APP_SERVER__CERT__RENEWAL_CRON_SCHEDULE", "0 0 12 * * *"),
-        ("APP_SERVER__CERT__DNS_CHANNEL_SERVER_URL", "http://pebble:8055"),
+        ("APP_SERVER__CERT__DNS_CHALLENGE_SERVER_URL", "http://pebble:8055"),
     ])]
     fn test_new_config_fields_env_override() {
         let config = Config::load().expect("Failed to load config");
@@ -303,7 +303,7 @@ mod tests {
         assert_eq!(config.status_list.token_ttl_secs, 600);
         assert_eq!(config.server.cert.renewal_cron_schedule, "0 0 12 * * *");
         assert_eq!(
-            config.server.cert.dns_channel_server_url.as_deref(),
+            config.server.cert.dns_challenge_server_url.as_deref(),
             Some("http://pebble:8055")
         );
     }
