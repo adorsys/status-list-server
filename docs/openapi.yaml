@@ -1,0 +1,570 @@
+openapi: 3.1.0
+info:
+  title: Status List Server
+  version: 0.1.0
+  description: |
+    REST API for the Status List Server.
+
+    This service implements the
+    [Token Status List specification](https://datatracker.ietf.org/doc/draft-ietf-oauth-status-list/)
+    and allows credential issuers to register, publish, and update status lists.
+    Relying parties can retrieve status list tokens in JWT or CWT format.
+
+    Error responses are modelled as RFC 7807 problem details
+    (`application/problem+json`). This is the canonical error format intended
+    for the API; individual endpoints may migrate to this format over time.
+
+    Status list tokens are signed by the server and delivered gzip-compressed
+    via `application/statuslist+jwt` or `application/statuslist+cwt`.
+  contact:
+    name: adorsys Status List Server
+    url: https://github.com/adorsys/status-list-server
+  license:
+    name: MIT OR Apache-2.0
+    identifier: MIT OR Apache-2.0
+
+servers:
+  - url: https://{host}
+    description: Status List Server
+    variables:
+      host:
+        default: localhost:8000
+        description: Host name and port of the server.
+
+security:
+  - BearerAuth: []
+
+paths:
+  /:
+    get:
+      operationId: welcome
+      summary: Welcome message
+      description: Returns a short welcome message confirming the server is running.
+      security: []
+      responses:
+        "200":
+          description: Server welcome message
+          content:
+            text/plain:
+              schema:
+                type: string
+              example: "Status list Server"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+
+  /health:
+    get:
+      operationId: healthCheck
+      summary: Health check
+      description: Returns a simple health indicator.
+      security: []
+      responses:
+        "200":
+          description: Server is healthy
+          content:
+            text/plain:
+              schema:
+                type: string
+              example: "OK"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+
+  /openapi.json:
+    get:
+      operationId: getOpenApiSpec
+      summary: OpenAPI specification
+      description: Returns the OpenAPI 3.1 specification for this API in JSON format.
+      security: []
+      responses:
+        "200":
+          description: OpenAPI specification
+          content:
+            application/json:
+              schema:
+                type: object
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+
+  /metrics:
+    get:
+      operationId: getMetrics
+      summary: Prometheus metrics
+      description: |
+        Returns Prometheus exposition format metrics when the server is started
+        with `APP_SERVER__ENABLE_METRICS=true`. Returns a 404 response when
+        metrics are disabled.
+      security: []
+      responses:
+        "200":
+          description: Prometheus metrics
+          content:
+            text/plain:
+              schema:
+                type: string
+          headers:
+            Content-Type:
+              schema:
+                type: string
+              description: text/plain; version=0.0.4
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+
+  /api/v1/credentials:
+    post:
+      operationId: registerIssuer
+      summary: Register issuer credentials
+      description: |
+        Registers an issuer by storing its unique identifier and public key
+        (JWK). The registered public key is used later to validate signed JWT
+        Bearer tokens for the protected management endpoints.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CredentialsRequest"
+      responses:
+        "202":
+          description: Credentials accepted and stored successfully
+          content:
+            text/plain:
+              schema:
+                type: string
+              example: "Credentials stored successfully"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+
+  /api/v1/status-lists/{list_id}/statuses:
+    parameters:
+      - name: list_id
+        in: path
+        required: true
+        description: UUID of the status list.
+        schema:
+          type: string
+          format: uuid
+          example: "477121aa-b598-419e-916f-1e74654ff38b"
+
+    put:
+      operationId: publishStatusList
+      summary: Publish a new status list
+      description: |
+        Creates a new status list for the given `list_id`. The issuer is
+        derived from the validated JWT Bearer token. The request body defines
+        the initial status entries for the list.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/StatusUpdateRequest"
+      responses:
+        "201":
+          description: Status list created successfully
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+
+    patch:
+      operationId: updateStatusList
+      summary: Update an existing status list
+      description: |
+        Updates the status entries of an existing status list. The JWT Bearer
+        token must belong to the issuer that originally published the list.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/StatusUpdateRequest"
+      responses:
+        "200":
+          description: Status list updated successfully
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+
+  /statuslists/{list_id}:
+    get:
+      operationId: getStatusList
+      summary: Retrieve a status list token
+      description: |
+        Returns the status list token for the requested `list_id`. The response
+        is gzip-compressed and encoded as a JWT or CWT depending on the
+        `Accept` header.
+
+        The decoded token conforms to the
+        [OAuth Status List](https://datatracker.ietf.org/doc/draft-ietf-oauth-status-list/)
+        specification. The token is signed by the server and contains an `x5c`
+        certificate chain in the protected header (JWT) or protected header map
+        (CWT) for verification.
+      security: []
+      parameters:
+        - name: list_id
+          in: path
+          required: true
+          description: Identifier of the status list.
+          schema:
+            type: string
+            example: "477121aa-b598-419e-916f-1e74654ff38b"
+        - name: Accept
+          in: header
+          required: false
+          description: |
+            Desired token format. Defaults to `application/statuslist+jwt` if
+            omitted.
+          schema:
+            type: string
+            enum:
+              - application/statuslist+jwt
+              - application/statuslist+cwt
+            default: application/statuslist+jwt
+      responses:
+        "200":
+          description: |
+            Status list token returned successfully. The decoded token payload
+            conforms to `StatusListToken`.
+          content:
+            application/statuslist+jwt:
+              schema:
+                type: string
+                format: binary
+              example: "H4sIAAAAAAAAE6tW..."
+            application/statuslist+cwt:
+              schema:
+                type: string
+                format: binary
+              example: "H4sIAAAAAAAAE6tW..."
+          headers:
+            Content-Encoding:
+              schema:
+                type: string
+              description: Always `gzip`.
+              example: gzip
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "406":
+          $ref: "#/components/responses/NotAcceptable"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
+
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: |
+        Signed JWT Bearer token. The token must be signed with the private key
+        corresponding to the public key registered for the issuer. The payload
+        must contain:
+
+        - `iss`: the registered issuer identifier
+        - `iat`: issued-at timestamp
+        - `exp`: expiration timestamp
+
+        The server validates the signature using the registered JWK and verifies
+        that the `iss` claim matches the registered issuer.
+
+        Mutual TLS (mTLS) for issuer authentication is not implemented in the
+        current release; this security scheme may be added in a future version.
+
+  schemas:
+    CredentialsRequest:
+      type: object
+      required:
+        - issuer
+        - public_key
+      properties:
+        issuer:
+          type: string
+          description: Unique identifier of the issuer.
+          example: "my-issuer"
+        public_key:
+          $ref: "#/components/schemas/JWK"
+
+    JWK:
+      type: object
+      description: |
+        JSON Web Key representing the issuer's public key. The exact fields
+        depend on the key type (e.g., `kty`, `crv`, `x`, `y` for EC keys).
+      required:
+        - kty
+      properties:
+        kty:
+          type: string
+          description: Key type.
+          example: "EC"
+        crv:
+          type: string
+          description: Curve name for EC keys.
+          example: "P-256"
+        x:
+          type: string
+          description: X coordinate of the public key.
+          example: "NeyFv_2L67OEplNbJpR02IFis4_lFW9HYmhfF5Or6m8"
+        y:
+          type: string
+          description: Y coordinate of the public key.
+          example: "eAH2qe8Pg3GQ28uxA8-qNAqdwQ_zfV2uKAvJ2sLpY9M"
+      example:
+        kty: "EC"
+        crv: "P-256"
+        x: "NeyFv_2L67OEplNbJpR02IFis4_lFW9HYmhfF5Or6m8"
+        y: "eAH2qe8Pg3GQ28uxA8-qNAqdwQ_zfV2uKAvJ2sLpY9M"
+
+    StatusUpdateRequest:
+      type: object
+      required:
+        - status
+      properties:
+        status:
+          type: array
+          description: Array of status entries to create or update.
+          items:
+            $ref: "#/components/schemas/StatusEntry"
+
+    StatusEntry:
+      type: object
+      required:
+        - index
+        - status
+      properties:
+        index:
+          type: integer
+          format: int32
+          minimum: 0
+          description: Position of the referenced token in the status list.
+          example: 42
+        status:
+          $ref: "#/components/schemas/StatusValue"
+
+    StatusValue:
+      type: string
+      description: |
+        Status value. `APPLICATIONSPECIFIC` is the application-specific status
+        defined by the OAuth Status List specification.
+      enum:
+        - VALID
+        - INVALID
+        - SUSPENDED
+        - APPLICATIONSPECIFIC
+      example: "INVALID"
+
+    StatusList:
+      type: object
+      description: |
+        Bit-string representation of the status list. The `lst` field contains
+        a zlib-compressed, base64url-encoded byte array where each referenced
+        token occupies `bits` bits. The first bit of the byte array is the status
+        for index 0.
+      required:
+        - bits
+        - lst
+      properties:
+        bits:
+          type: integer
+          description: Number of bits used for each status entry.
+          enum:
+            - 1
+            - 2
+            - 4
+            - 8
+          example: 1
+        lst:
+          type: string
+          description: |
+            Base64url-encoded zlib-compressed status byte array.
+          example: "eJxLTAQAASUAw3s"
+
+    StatusListToken:
+      type: object
+      description: |
+        Decoded payload of a JWT or CWT status list token. The actual response
+        from `GET /statuslists/{list_id}` is the signed, gzip-compressed token
+        string. The token is signed by the server using the configured signing
+        key and contains the certificate chain in the `x5c` header (JWT) or
+        protected header (CWT).
+      required:
+        - sub
+        - iat
+        - status_list
+      properties:
+        iss:
+          type: string
+          description: Issuer identifier of the status list server.
+          example: "https://statuslist.example.com"
+        sub:
+          type: string
+          description: URI of the status list.
+          example: "https://statuslist.example.com/statuslists/477121aa-b598-419e-916f-1e74654ff38b"
+        iat:
+          type: integer
+          description: Issued-at timestamp (seconds since Unix epoch).
+          example: 1752515200
+        exp:
+          type: integer
+          description: Expiration timestamp (seconds since Unix epoch).
+          example: 1752516100
+        ttl:
+          type: integer
+          description: Recommended time-to-live in seconds for caching the token.
+          example: 300
+        status_list:
+          $ref: "#/components/schemas/StatusList"
+
+    ProblemDetails:
+      type: object
+      description: |
+        RFC 7807 problem details object. Error responses use
+        `application/problem+json` where applicable.
+      properties:
+        type:
+          type: string
+          format: uri
+          description: A URI reference that identifies the problem type.
+          default: "about:blank"
+          example: "about:blank"
+        title:
+          type: string
+          description: Short, human-readable summary of the problem.
+          example: "Bad Request"
+        status:
+          type: integer
+          description: HTTP status code.
+          example: 400
+        detail:
+          type: string
+          description: Human-readable explanation of the error.
+          example: "Invalid list ID string"
+        instance:
+          type: string
+          format: uri
+          description: URI reference that identifies the specific occurrence.
+          example: "/api/v1/status-lists/invalid-uuid/statuses"
+
+  responses:
+    BadRequest:
+      description: Invalid request data
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/ProblemDetails"
+          example:
+            type: "about:blank"
+            title: "Bad Request"
+            status: 400
+            detail: "Invalid list ID string"
+            instance: "/api/v1/status-lists/invalid-uuid/statuses"
+
+    Unauthorized:
+      description: Missing or invalid authentication token
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/ProblemDetails"
+          example:
+            type: "about:blank"
+            title: "Unauthorized"
+            status: 401
+            detail: "Missing or invalid Authorization header"
+            instance: "/api/v1/status-lists/477121aa-b598-419e-916f-1e74654ff38b/statuses"
+
+    Forbidden:
+      description: Insufficient permissions to access the resource
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/ProblemDetails"
+          example:
+            type: "about:blank"
+            title: "Forbidden"
+            status: 403
+            detail: "Issuer mismatch"
+            instance: "/api/v1/status-lists/477121aa-b598-419e-916f-1e74654ff38b/statuses"
+
+    NotFound:
+      description: Resource not found
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/ProblemDetails"
+          example:
+            type: "about:blank"
+            title: "Not Found"
+            status: 404
+            detail: "Status list not found"
+            instance: "/api/v1/status-lists/477121aa-b598-419e-916f-1e74654ff38b/statuses"
+
+    NotAcceptable:
+      description: Requested response format not supported
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/ProblemDetails"
+          example:
+            type: "about:blank"
+            title: "Not Acceptable"
+            status: 406
+            detail: "Invalid accept header"
+            instance: "/statuslists/477121aa-b598-419e-916f-1e74654ff38b"
+
+    Conflict:
+      description: Resource already exists
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/ProblemDetails"
+          example:
+            type: "about:blank"
+            title: "Conflict"
+            status: 409
+            detail: "Status list already exists"
+            instance: "/api/v1/status-lists/477121aa-b598-419e-916f-1e74654ff38b/statuses"
+
+    ServiceUnavailable:
+      description: Service temporarily unavailable
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/ProblemDetails"
+          example:
+            type: "about:blank"
+            title: "Service Unavailable"
+            status: 503
+            detail: "The service is currently unavailable. Please try again later"
+            instance: "/statuslists/477121aa-b598-419e-916f-1e74654ff38b"
+
+    InternalServerError:
+      description: Internal server error
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/ProblemDetails"
+          example:
+            type: "about:blank"
+            title: "Internal Server Error"
+            status: 500
+            detail: "Internal server error"
+            instance: "/api/v1/status-lists/477121aa-b598-419e-916f-1e74654ff38b/statuses"

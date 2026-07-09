@@ -64,6 +64,13 @@ By default, the server will listen on `http://localhost:8000`. You can modify th
 
 ## API Overview
 
+The public API is documented with an OpenAPI 3.1 specification:
+
+- Source: [`docs/openapi.yaml`](docs/openapi.yaml)
+- Discovery: `GET /openapi.json` (served by the running server)
+
+See the sections below for a quick overview of each endpoint.
+
 ### Health Check
 
 - **Endpoint:** `GET /health`

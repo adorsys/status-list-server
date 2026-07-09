@@ -19,7 +19,9 @@ use crate::{
     utils::state::AppState,
     web::{
         auth::auth,
-        handlers::{credential_handler, get_status_list, publish_status, update_status},
+        handlers::{
+            credential_handler, get_status_list, openapi_json, publish_status, update_status,
+        },
     },
 };
 
@@ -52,6 +54,7 @@ impl HttpServer {
         let mut router = Router::new()
             .route("/", get(welcome))
             .route("/health", get(health_check))
+            .route("/openapi.json", get(openapi_json))
             .nest("/statuslists", protocol_routes())
             .nest("/api/v1", api_v1_routes(state.clone()))
             .layer(TraceLayer::new_for_http())
