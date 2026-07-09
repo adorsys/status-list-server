@@ -1,4 +1,4 @@
-use std::{fmt::Debug, io::Write as _};
+use std::{fmt::Debug, io::Write as _, sync::Arc};
 
 use axum::{
     extract::{Path, State},
@@ -13,10 +13,13 @@ use coset::{
 use flate2::{Compression, write::GzEncoder};
 use jsonwebtoken::{EncodingKey, Header};
 use p256::ecdsa::{Signature, signature::Signer};
-use serde::{Deserialize, Serialize};
+#[cfg(test)]
+use serde::Deserialize;
+use serde::Serialize;
 use time::OffsetDateTime;
 
 use crate::{
+    cache::CertificateChain,
     models::{StatusList, StatusListRecord},
     utils::{keygen::Keypair, state::AppState},
     web::handlers::status_list::constants::{TOKEN_EXP, TOKEN_TTL},
@@ -63,7 +66,7 @@ async fn build_status_list_token(
     if let Some(cached_record) = state.cache.get(list_id).await {
         tracing::info!("Cache hit for status list record: {list_id}");
         // Record is in cache, proceed with building the response
-        return build_response_from_record(accept, &cached_record, state).await;
+        return build_response_from_record(accept, cached_record, state).await;
     }
 
     tracing::info!("Cache miss for status list token: {list_id}");
@@ -79,17 +82,18 @@ async fn build_status_list_token(
         .ok_or(StatusListError::StatusListNotFound)?;
 
     // Store the token in the cache for future requests
+    let status_record = Arc::new(status_record);
     state
         .cache
         .insert(list_id.to_string(), status_record.clone())
         .await;
 
-    build_response_from_record(accept, &status_record, state).await
+    build_response_from_record(accept, status_record, state).await
 }
 
 async fn build_response_from_record(
     accept: &str,
-    status_record: &StatusListRecord,
+    status_record: Arc<StatusListRecord>,
     state: &AppState,
 ) -> Result<impl IntoResponse + Debug + use<>, StatusListError> {
     // Get the certificate chain
@@ -113,7 +117,6 @@ async fn build_response_from_record(
     })?;
 
     let accept_header = accept.to_string();
-    let status_record = status_record.clone();
 
     let compressed_token = tokio::task::spawn_blocking(move || {
         let keypair = Keypair::from_pkcs8_pem(&signing_key_pem).map_err(|e| {
@@ -122,8 +125,10 @@ async fn build_response_from_record(
         })?;
 
         let token_bytes = match accept_header.as_str() {
-            ACCEPT_STATUS_LISTS_HEADER_CWT => issue_cwt(&status_record, &keypair, certs_parts)?,
-            _ => issue_jwt(&status_record, &keypair, certs_parts)?.into_bytes(),
+            ACCEPT_STATUS_LISTS_HEADER_CWT => {
+                issue_cwt(&status_record, &keypair, certs_parts.as_ref())?
+            }
+            _ => issue_jwt(&status_record, &keypair, &certs_parts)?.into_bytes(),
         };
 
         let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
@@ -158,7 +163,7 @@ async fn build_response_from_record(
 fn issue_cwt(
     status_record: &StatusListRecord,
     keypair: &Keypair,
-    cert_chain: Vec<String>,
+    cert_chain: &[String],
 ) -> Result<Vec<u8>, StatusListError> {
     let mut claims = vec![];
 
@@ -254,35 +259,35 @@ fn build_x5chain(cert_chain: &[String]) -> Result<CborValue, StatusListError> {
     Ok(x5chain_value)
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct StatusListToken {
-    pub exp: Option<i64>,
-    pub iat: i64,
-    pub status_list: StatusList,
-    pub sub: String,
-    pub ttl: Option<i64>,
+#[derive(Serialize)]
+struct StatusListClaims<'a> {
+    exp: Option<i64>,
+    iat: i64,
+    status_list: &'a StatusList,
+    sub: &'a str,
+    ttl: Option<i64>,
 }
 
 fn issue_jwt(
     status_record: &StatusListRecord,
     keypair: &Keypair,
-    cert_chain: Vec<String>,
+    cert_chain: &CertificateChain,
 ) -> Result<String, StatusListError> {
     let iat = OffsetDateTime::now_utc().unix_timestamp();
     let ttl = TOKEN_TTL;
     let exp = iat + TOKEN_EXP;
     // Building the claims
-    let claims = StatusListToken {
+    let claims = StatusListClaims {
         exp: Some(exp),
         iat,
-        status_list: status_record.status_list.clone(),
-        sub: status_record.sub.to_owned(),
+        status_list: &status_record.status_list,
+        sub: &status_record.sub,
         ttl: Some(ttl),
     };
     // Building the header
     let mut header = Header::new(jsonwebtoken::Algorithm::ES256);
     header.typ = Some(STATUS_LISTS_HEADER_JWT.into());
-    header.x5c = Some(cert_chain);
+    header.x5c = Some(cert_chain.to_vec());
 
     let pem_bytes = keypair.to_pkcs8_pem_bytes().map_err(|err| {
         tracing::error!("Failed to convert signing key to PEM: {err:?}");
@@ -318,6 +323,15 @@ mod tests {
     use p256::pkcs8::{EncodePublicKey, LineEnding};
     use sea_orm::{DatabaseBackend, MockDatabase};
     use std::{io::Read, sync::Arc};
+
+    #[derive(Serialize, Deserialize)]
+    struct StatusListToken {
+        exp: Option<i64>,
+        iat: i64,
+        status_list: StatusList,
+        sub: String,
+        ttl: Option<i64>,
+    }
 
     #[tokio::test]
     async fn test_get_status_list_jwt_success() {

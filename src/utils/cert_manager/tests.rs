@@ -3,7 +3,10 @@ use crate::cert_manager::storage::{Storage, StorageError};
 use super::*;
 use async_trait::async_trait;
 use std::collections::HashMap;
-use std::sync::{Arc, Once};
+use std::sync::{
+    Arc, Once,
+    atomic::{AtomicUsize, Ordering},
+};
 use tokio::sync::Mutex;
 
 fn days_to_secs(days: u32) -> i64 {
@@ -23,13 +26,19 @@ fn init_crypto() {
 #[derive(Clone)]
 struct MockStorage {
     data: Arc<Mutex<HashMap<String, String>>>,
+    load_count: Arc<AtomicUsize>,
 }
 
 impl MockStorage {
     fn new() -> Self {
         Self {
             data: Arc::new(Mutex::new(HashMap::new())),
+            load_count: Arc::new(AtomicUsize::new(0)),
         }
+    }
+
+    fn load_count(&self) -> usize {
+        self.load_count.load(Ordering::Relaxed)
     }
 }
 
@@ -44,6 +53,7 @@ impl Storage for MockStorage {
     }
 
     async fn load(&self, key: &str) -> Result<Option<String>, StorageError> {
+        self.load_count.fetch_add(1, Ordering::Relaxed);
         Ok(self.data.lock().await.get(key).cloned())
     }
 
@@ -321,4 +331,77 @@ async fn test_cert_chain_parts() {
 
     let parts = cert_manager.cert_chain_parts().await.unwrap().unwrap();
     assert_eq!(parts.len(), 2);
+}
+
+#[tokio::test]
+async fn test_cert_chain_parts_are_cached_after_first_load() {
+    init_crypto();
+
+    let cert_storage = MockStorage::new();
+    let cert_manager = CertManager::new(
+        vec!["example.com"],
+        "test@example.com",
+        None::<String>,
+        "https://acme-staging-v02.api.letsencrypt.org/directory",
+    )
+    .unwrap()
+    .with_cert_storage(cert_storage.clone());
+
+    let serialized = include_str!("../../test_resources/cert_data.json");
+    cert_storage
+        .store("certs-example.com-cert_data.json", serialized)
+        .await
+        .unwrap();
+
+    let first = cert_manager.cert_chain_parts().await.unwrap().unwrap();
+    let second = cert_manager.cert_chain_parts().await.unwrap().unwrap();
+
+    assert_eq!(first.len(), 2);
+    assert!(Arc::ptr_eq(&first, &second));
+    assert_eq!(cert_storage.load_count(), 1);
+}
+
+#[tokio::test]
+async fn test_cert_chain_cache_invalidation_reloads_chain() {
+    init_crypto();
+
+    let cert_storage = MockStorage::new();
+    let cert_manager = CertManager::new(
+        vec!["example.com"],
+        "test@example.com",
+        None::<String>,
+        "https://acme-staging-v02.api.letsencrypt.org/directory",
+    )
+    .unwrap()
+    .with_cert_storage(cert_storage.clone());
+
+    let cert_key = cert_manager.cert_key();
+    let serialized = include_str!("../../test_resources/cert_data.json");
+    cert_storage.store(&cert_key, serialized).await.unwrap();
+
+    let first = cert_manager.cert_chain_parts().await.unwrap().unwrap();
+    assert_eq!(first.len(), 2);
+
+    let replacement = CertificateData {
+        certificate: include_str!("../../test_resources/test_cert2.pem").to_string(),
+        valid_from: 1,
+        expires_at: 2,
+        updated_at: 3,
+    };
+    let serialized_replacement = serde_json::to_string(&replacement).unwrap();
+    cert_storage
+        .store(&cert_key, &serialized_replacement)
+        .await
+        .unwrap();
+
+    let stale_cached = cert_manager.cert_chain_parts().await.unwrap().unwrap();
+    assert!(Arc::ptr_eq(&first, &stale_cached));
+    assert_eq!(cert_storage.load_count(), 1);
+
+    cert_manager.cert_chain_cache.invalidate(&cert_key).await;
+    let reloaded = cert_manager.cert_chain_parts().await.unwrap().unwrap();
+
+    assert_eq!(reloaded.len(), 1);
+    assert!(!Arc::ptr_eq(&first, &reloaded));
+    assert_eq!(cert_storage.load_count(), 2);
 }

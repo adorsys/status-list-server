@@ -5591,6 +5591,7 @@ dependencies = [
  "hyper-util",
  "instant-acme",
  "jsonwebtoken",
+ "metrics",
  "metrics-exporter-prometheus",
  "metrics-process",
  "moka",

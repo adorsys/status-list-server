@@ -61,6 +61,7 @@ public-suffix = "0.1"
 tokio-cron-scheduler = "0.15"
 metrics-exporter-prometheus = "0.18"
 metrics-process = "2.4"
+metrics = "0.24"
 sea-orm-migration = "1.1.20"
 
 # AWS related libraries
