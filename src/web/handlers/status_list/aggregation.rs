@@ -13,12 +13,11 @@ pub struct AggregationResponse {
 pub async fn get_aggregation(
     State(state): State<AppState>,
 ) -> Result<impl IntoResponse, StatusListError> {
-    let records = state.status_list_repo.find_all().await.map_err(|e| {
+    let mut status_lists = state.status_list_repo.find_all_subs().await.map_err(|e| {
         tracing::error!("Failed to fetch status lists for aggregation: {e:?}");
         StatusListError::InternalServerError
     })?;
 
-    let mut status_lists: Vec<String> = records.into_iter().map(|r| r.sub).collect();
     status_lists.sort_unstable();
     status_lists.dedup();
 
@@ -37,36 +36,24 @@ pub async fn get_aggregation(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        models::{StatusList, StatusListRecord, status_lists},
-        test_utils::test_app_state,
-    };
+    use crate::test_utils::test_app_state;
     use axum::{body::to_bytes, response::IntoResponse};
-    use sea_orm::{DatabaseBackend, MockDatabase};
-    use std::sync::Arc;
+    use sea_orm::{DatabaseBackend, MockDatabase, Value};
+    use std::{collections::BTreeMap, sync::Arc};
 
-    fn record(list_id: &str, sub: &str) -> StatusListRecord {
-        StatusListRecord {
-            list_id: list_id.to_string(),
-            issuer: "issuer".to_string(),
-            status_list: StatusList {
-                bits: 1,
-                lst: "lst".to_string(),
-                aggregation_uri: None,
-            },
-            sub: sub.to_string(),
-        }
+    fn row_with_sub(sub: &str) -> BTreeMap<String, Value> {
+        BTreeMap::from([("sub".to_string(), Value::from(sub))])
     }
 
     #[tokio::test]
     async fn test_aggregation_returns_all_list_uris() {
-        let records = vec![
-            record("a", "https://example.com/statuslists/a"),
-            record("b", "https://example.com/statuslists/b"),
+        let rows = vec![
+            row_with_sub("https://example.com/statuslists/b"),
+            row_with_sub("https://example.com/statuslists/a"),
         ];
         let db_conn = Arc::new(
             MockDatabase::new(DatabaseBackend::Postgres)
-                .append_query_results::<status_lists::Model, Vec<_>, _>(vec![records])
+                .append_query_results::<BTreeMap<String, Value>, Vec<_>, _>(vec![rows])
                 .into_connection(),
         );
         let state = test_app_state(Some(db_conn)).await;
@@ -97,8 +84,8 @@ mod tests {
     async fn test_aggregation_empty_when_no_lists() {
         let db_conn = Arc::new(
             MockDatabase::new(DatabaseBackend::Postgres)
-                .append_query_results::<status_lists::Model, Vec<_>, _>(vec![Vec::<
-                    status_lists::Model,
+                .append_query_results::<BTreeMap<String, Value>, Vec<_>, _>(vec![Vec::<
+                    BTreeMap<String, Value>,
                 >::new(
                 )])
                 .into_connection(),
@@ -115,14 +102,14 @@ mod tests {
 
     #[tokio::test]
     async fn test_aggregation_deduplicates_and_sorts() {
-        let records = vec![
-            record("b", "https://example.com/statuslists/b"),
-            record("a", "https://example.com/statuslists/a"),
-            record("a-dup", "https://example.com/statuslists/a"),
+        let rows = vec![
+            row_with_sub("https://example.com/statuslists/b"),
+            row_with_sub("https://example.com/statuslists/a"),
+            row_with_sub("https://example.com/statuslists/a"),
         ];
         let db_conn = Arc::new(
             MockDatabase::new(DatabaseBackend::Postgres)
-                .append_query_results::<status_lists::Model, Vec<_>, _>(vec![records])
+                .append_query_results::<BTreeMap<String, Value>, Vec<_>, _>(vec![rows])
                 .into_connection(),
         );
         let state = test_app_state(Some(db_conn)).await;

@@ -111,3 +111,19 @@ pub async fn build_state(config: &AppConfig) -> EyeResult<AppState> {
         aggregation_uri: empty_to_none(config.server.aggregation_uri.clone()),
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::empty_to_none;
+
+    #[test]
+    fn test_empty_to_none() {
+        assert_eq!(empty_to_none(None), None);
+        assert_eq!(empty_to_none(Some("".to_string())), None);
+        assert_eq!(empty_to_none(Some("  ".to_string())), None);
+        assert_eq!(
+            empty_to_none(Some("https://x".to_string())),
+            Some("https://x".to_string())
+        );
+    }
+}

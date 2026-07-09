@@ -25,7 +25,6 @@ pub struct ServerConfig {
     pub port: u16,
     pub cert: CertConfig,
     pub enable_metrics: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub aggregation_uri: Option<String>,
 }
 
@@ -191,6 +190,19 @@ mod tests {
             "https://acme-v02.api.letsencrypt.org/directory"
         );
         assert_eq!(config.aws.region, "us-east-1");
+        assert_eq!(config.server.aggregation_uri, None);
+    }
+
+    #[sealed_test(env = [
+        ("APP_SERVER__AGGREGATION_URI", "https://example.com/aggregation"),
+    ])]
+    fn test_aggregation_uri_env_override() {
+        let config = Config::load().expect("Failed to load config");
+
+        assert_eq!(
+            config.server.aggregation_uri.as_deref(),
+            Some("https://example.com/aggregation")
+        );
     }
 
     #[sealed_test(env = [

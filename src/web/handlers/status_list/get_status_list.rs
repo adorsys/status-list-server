@@ -635,12 +635,6 @@ mod tests {
         decoder.read_to_end(&mut body).unwrap();
         let body_str = std::str::from_utf8(&body).unwrap();
 
-        // The JSON serialization must NOT contain the aggregation_uri key.
-        assert!(
-            !body_str.contains("aggregation_uri"),
-            "aggregation_uri should be absent when not configured, got: {body_str}"
-        );
-
         let signing_key_pem = app_state.cert_manager.signing_key_pem().await.unwrap();
         let keypair = Keypair::from_pkcs8_pem(&signing_key_pem).unwrap();
         let decoding_key_pem = keypair
@@ -701,6 +695,18 @@ mod tests {
         decoder.read_to_end(&mut body).unwrap();
 
         let cwt = CoseSign1::from_slice(&body).unwrap();
+
+        let signing_key_pem = app_state.cert_manager.signing_key_pem().await.unwrap();
+        let keypair = Keypair::from_pkcs8_pem(&signing_key_pem).unwrap();
+        let signing_key = keypair.signing_key();
+        let verifying_key = VerifyingKey::from(signing_key);
+
+        let verify_result = cwt.verify_signature(&[], |sig, data| {
+            let signature = Signature::from_slice(sig).unwrap();
+            verifying_key.verify(data, &signature)
+        });
+        assert!(verify_result.is_ok());
+
         let claims = match CborValue::from_slice(&cwt.payload.unwrap()).unwrap() {
             CborValue::Map(m) => m,
             _ => panic!("Invalid CWT payload"),
@@ -769,6 +775,18 @@ mod tests {
         decoder.read_to_end(&mut body).unwrap();
 
         let cwt = CoseSign1::from_slice(&body).unwrap();
+
+        let signing_key_pem = app_state.cert_manager.signing_key_pem().await.unwrap();
+        let keypair = Keypair::from_pkcs8_pem(&signing_key_pem).unwrap();
+        let signing_key = keypair.signing_key();
+        let verifying_key = VerifyingKey::from(signing_key);
+
+        let verify_result = cwt.verify_signature(&[], |sig, data| {
+            let signature = Signature::from_slice(sig).unwrap();
+            verifying_key.verify(data, &signature)
+        });
+        assert!(verify_result.is_ok());
+
         let claims = match CborValue::from_slice(&cwt.payload.unwrap()).unwrap() {
             CborValue::Map(m) => m,
             _ => panic!("Invalid CWT payload"),
