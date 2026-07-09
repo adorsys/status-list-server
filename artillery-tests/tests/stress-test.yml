@@ -79,9 +79,9 @@ scenarios:
             issuer: "{{ issuer }}"
             public_key: "{{ publicKeyJwk }}"
             expect:
-            - statusCode:
-                - 202
-                - 409
+              - statusCode:
+                  - 202
+                  - 409
           afterResponse: "handleCredentialResponse"
       - think: 0.5
 
