@@ -1,21 +1,24 @@
-[workspace]
-resolver = "3"
-members = ["."]
-
-[workspace.package]
+[package]
+name = "status-list-server"
 version = "0.1.0"
 edition = "2024"
 
-[workspace.lints.rust]
-unsafe_code = "warn"
-unstable_features = "warn"
-unused_import_braces = "warn"
+[lints.rust]
+elided_lifetimes_in_paths = "warn"
+explicit_outlives_requirements = "warn"
+unsafe_op_in_unsafe_fn = "warn"
+unused_extern_crates = "warn"
 unused_lifetimes = "warn"
-unused_macro_rules = "warn"
-unused_qualifications = "warn"
+unreachable_pub = "warn"
 
-[workspace.lints.clippy]
-all = "warn"
+[lints.clippy]
+## lint groups
+complexity = { level = "warn", priority = -1 }
+correctness = { level = "deny", priority = -1 }
+perf = { level = "deny", priority = -1 }
+restriction = { level = "allow", priority = -1 }
+style = { level = "warn", priority = -1 }
+suspicious = { level = "warn", priority = -1 }
 
 [profile.dev]
 opt-level = 1
@@ -31,14 +34,6 @@ strip = true
 [profile.test]
 inherits = "dev"
 opt-level = 1
-
-[package]
-name = "status-list-server"
-version.workspace = true
-edition.workspace = true
-
-[lints]
-workspace = true
 
 [dependencies]
 # Async runtime and utilities
