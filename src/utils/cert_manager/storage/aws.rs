@@ -25,12 +25,13 @@ impl AwsSecretsManager {
     pub async fn new(
         config: &SdkConfig,
         secrets_cache_ttl: Duration,
-        secrets_cache_max_capacity: usize,
     ) -> Result<Self, StorageError> {
+        const SECRETS_CACHE_MAX_CAPACITY: u64 = 100;
+
         let client = SecretsClient::new(config);
         let cache = (!secrets_cache_ttl.is_zero()).then(|| {
             Cache::builder()
-                .max_capacity(secrets_cache_max_capacity as u64)
+                .max_capacity(SECRETS_CACHE_MAX_CAPACITY)
                 .time_to_live(secrets_cache_ttl)
                 .build()
         });
@@ -130,21 +131,20 @@ pub struct AwsS3 {
     bucket: String,
     region: String,
     key_prefix: String,
-    max_retries: u32,
-    retry_delay: Duration,
     cache: Option<Box<dyn Storage>>,
     bucket_exists: AtomicBool,
 }
 
 impl AwsS3 {
+    const BUCKET_MAX_RETRIES: u32 = 3;
+    const BUCKET_RETRY_DELAY: Duration = Duration::from_millis(500);
+
     /// Create a new instance of [`AwsS3`] with the given AWS SDK config and bucket name
     pub fn new(
         config: &SdkConfig,
         bucket_name: impl Into<String>,
         region: impl Into<String>,
         key_prefix: impl Into<String>,
-        max_retries: u32,
-        retry_delay: Duration,
     ) -> Self {
         let client = if std::env::var("APP_ENV").as_deref() == Ok("production") {
             S3Client::new(config)
@@ -161,8 +161,6 @@ impl AwsS3 {
             bucket: bucket_name.into(),
             region: region.into(),
             key_prefix: key_prefix.into(),
-            max_retries,
-            retry_delay,
             cache: None,
             bucket_exists: AtomicBool::new(false),
         }
@@ -195,7 +193,7 @@ impl AwsS3 {
             return Ok(());
         }
 
-        let max_retries = self.max_retries;
+        let max_retries = Self::BUCKET_MAX_RETRIES;
 
         for attempt in 0..max_retries {
             // Check if the bucket exists
@@ -248,7 +246,7 @@ impl AwsS3 {
 
             // Wait a bit before retrying
             if attempt < max_retries - 1 {
-                sleep(self.retry_delay).await;
+                sleep(Self::BUCKET_RETRY_DELAY).await;
             }
         }
         Err(StorageError::BucketUnavailable(self.bucket.clone()))

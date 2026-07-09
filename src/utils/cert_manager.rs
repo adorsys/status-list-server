@@ -79,10 +79,6 @@ pub struct CertManager {
     eku: Option<Vec<u64>>,
     // The ACME directory URL
     acme_directory_url: String,
-    // Max retries for signing key storage
-    signing_key_max_retries: u32,
-    // Retry delay for signing key storage
-    signing_key_retry_delay: Duration,
 }
 
 impl CertManager {
@@ -92,8 +88,6 @@ impl CertManager {
         email: impl Into<String>,
         organization: Option<impl Into<String>>,
         acme_directory_url: impl Into<String>,
-        signing_key_max_retries: u32,
-        signing_key_retry_delay: Duration,
     ) -> Result<Self, CertError> {
         let acme_client = Arc::new(Mutex::new(None));
         let http_client = DefaultHttpClient::new(None)?;
@@ -113,8 +107,6 @@ impl CertManager {
             organization: organization.map(|o| o.into()),
             eku: None,
             acme_directory_url: acme_directory_url.into(),
-            signing_key_max_retries,
-            signing_key_retry_delay,
         })
     }
 
@@ -291,6 +283,9 @@ impl CertManager {
         fields(domains = ?self.domains)
     )]
     pub async fn signing_key_pem(&self) -> Result<String, CertError> {
+        const MAX_RETRIES: u32 = 3;
+        const RETRY_DELAY: Duration = Duration::from_millis(500);
+
         let secrets_storage = self
             .secrets_storage
             .as_ref()
@@ -317,11 +312,11 @@ impl CertManager {
                 }
                 Err(e) => {
                     retries += 1;
-                    if retries >= self.signing_key_max_retries {
+                    if retries >= MAX_RETRIES {
                         return Err(e.into());
                     }
                     warn!("Retrying secret storage after failure: {e:#}");
-                    sleep(self.signing_key_retry_delay).await;
+                    sleep(RETRY_DELAY).await;
                 }
             }
         }

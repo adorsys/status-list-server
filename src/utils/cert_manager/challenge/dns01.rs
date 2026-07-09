@@ -77,24 +77,17 @@ impl From<instant_acme::Error> for ChallengeError {
 pub struct AwsRoute53DnsUpdater {
     client: Route53Client,
     zones: Arc<RwLock<Option<Vec<ZoneInfo>>>>,
-    txt_ttl: u64,
-    propagation_timeout: Duration,
-    propagation_initial_delay: Duration,
 }
 
 impl AwsRoute53DnsUpdater {
-    pub fn new(
-        config: &SdkConfig,
-        txt_ttl: u64,
-        propagation_timeout_secs: u64,
-        propagation_initial_delay_secs: u64,
-    ) -> Self {
+    const TXT_TTL: i64 = 60;
+    const PROPAGATION_INITIAL_DELAY: Duration = Duration::from_secs(2);
+    const PROPAGATION_TIMEOUT: Duration = Duration::from_secs(60 * 5);
+
+    pub fn new(config: &SdkConfig) -> Self {
         Self {
             client: Route53Client::new(config),
             zones: Arc::new(RwLock::new(None)),
-            txt_ttl,
-            propagation_timeout: Duration::from_secs(propagation_timeout_secs),
-            propagation_initial_delay: Duration::from_secs(propagation_initial_delay_secs),
         }
     }
 
@@ -207,7 +200,7 @@ impl AwsRoute53DnsUpdater {
                 ResourceRecordSet::builder()
                     .name(&record_name)
                     .r#type(RrType::Txt)
-                    .ttl(self.txt_ttl as i64)
+                    .ttl(Self::TXT_TTL)
                     .resource_records(
                         ResourceRecord::builder()
                             .value(format!("\"{value}\""))
@@ -247,8 +240,8 @@ impl AwsRoute53DnsUpdater {
     async fn wait_for_propagation(&self, change_id: &str) -> Result<(), ChallengeError> {
         use tokio::time::{sleep, timeout};
 
-        let initial_delay = self.propagation_initial_delay;
-        let timeout_duration = self.propagation_timeout;
+        let initial_delay = Self::PROPAGATION_INITIAL_DELAY;
+        let timeout_duration = Self::PROPAGATION_TIMEOUT;
 
         let mut retries = 0;
 

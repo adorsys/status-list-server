@@ -66,14 +66,13 @@ By default, the server will listen on `http://localhost:8000`. You can modify th
 
 All runtime behavior is controlled via environment variables prefixed with `APP_` and using `__` as a nested separator (e.g. `APP_SERVER__PORT=8000`). Sensible defaults are built in, so only non-default values need to be set. See [`.env.template`](.env.template) for a complete example.
 
-> **⚠️ Breaking change (migration):** The Secrets Manager cache configuration was moved from the `APP_REDIS__` prefix to the `APP_AWS__` prefix:
+> **⚠️ Breaking change (migration):** The Secrets Manager cache TTL was moved from the `APP_REDIS__` prefix to the `APP_AWS__` prefix:
 >
-> | Old variable                            | New variable                          |
-> |-----------------------------------------|---------------------------------------|
-> | `APP_REDIS__SECRETS_CACHE_TTL`          | `APP_AWS__SECRETS_CACHE_TTL`          |
-> | `APP_REDIS__SECRETS_CACHE_MAX_CAPACITY` | `APP_AWS__SECRETS_CACHE_MAX_CAPACITY` |
+> | Old variable                   | New variable                 |
+> |--------------------------------|------------------------------|
+> | `APP_REDIS__SECRETS_CACHE_TTL` | `APP_AWS__SECRETS_CACHE_TTL` |
 >
-> Existing deployments using the old `APP_REDIS__`-prefixed variables will silently fall back to the defaults (300 s TTL, 100 entries) instead of the configured value. Update your environment to use the new `APP_AWS__`-prefixed names.
+> Existing deployments using the old `APP_REDIS__SECRETS_CACHE_TTL` variable will silently fall back to the default (300 s TTL) instead of the configured value. Update your environment to use the new `APP_AWS__SECRETS_CACHE_TTL` name.
 
 ### Server
 
@@ -95,10 +94,6 @@ All runtime behavior is controlled via environment variables prefixed with `APP_
 | `APP_SERVER__CERT__ACME_DIRECTORY_URL`                 | `https://acme-v02.api.letsencrypt.org/directory` | ACME directory URL                                             |
 | `APP_SERVER__CERT__RENEWAL_CRON_SCHEDULE`              | `0 0 0 * * *`                                    | 6-field cron schedule for certificate renewal checks           |
 | `APP_SERVER__CERT__DEVELOPMENT_DNS_CHALLENGE_URL`      | `http://challtestsrv:8055`                       | Pebble challenge test server URL (development only)            |
-| `APP_SERVER__CERT__DNS_PROPAGATION_TIMEOUT_SECS`       | `300`                                            | Maximum seconds to wait for DNS change propagation (Route53)   |
-| `APP_SERVER__CERT__DNS_PROPAGATION_INITIAL_DELAY_SECS` | `2`                                              | Initial polling delay for DNS propagation (doubles each retry) |
-| `APP_SERVER__CERT__SIGNING_KEY_MAX_RETRIES`            | `3`                                              | Max retries when storing the server signing key                |
-| `APP_SERVER__CERT__SIGNING_KEY_RETRY_DELAY_MS`         | `500`                                            | Delay in milliseconds between signing key storage retries      |
 
 ### Database
 
@@ -113,7 +108,6 @@ All runtime behavior is controlled via environment variables prefixed with `APP_
 | `APP_REDIS__URI`                     | `redis://localhost:6379` | Redis connection URI (use `rediss://` for TLS)                 |
 | `APP_REDIS__REQUIRE_CLIENT_AUTH`     | `false`                  | Enables mTLS for the Redis connection                          |
 | `APP_REDIS__CERT_CACHE_TTL`          | `3600`                   | TTL in seconds for the certificate cache in Redis (0 disables) |
-| `APP_REDIS__CONNECTION_TIMEOUT_SECS` | `60`                     | Redis connection timeout in seconds (must be > 0)              |
 
 ### AWS
 
@@ -121,12 +115,8 @@ All runtime behavior is controlled via environment variables prefixed with `APP_
 |---------------------------------------|-----------------------|-------------------------------------------------------------------|
 | `APP_AWS__REGION`                     | `us-east-1`           | AWS region for all AWS services                                   |
 | `APP_AWS__SECRETS_CACHE_TTL`          | `300`                 | TTL in seconds for the Secrets Manager cache (0 disables)         |
-| `APP_AWS__SECRETS_CACHE_MAX_CAPACITY` | `100`                 | Maximum number of secrets cached in memory (must be > 0)          |
 | `APP_AWS__S3_BUCKET`                  | `status-list-adorsys` | S3 bucket name for certificate storage (must not be empty)        |
 | `APP_AWS__S3_KEY_PREFIX`              | *(empty)*             | Optional prefix prepended to all S3 object keys                   |
-| `APP_AWS__S3_BUCKET_MAX_RETRIES`      | `3`                   | Max retries for S3 bucket creation/existence checks (must be > 0) |
-| `APP_AWS__S3_BUCKET_RETRY_DELAY_MS`   | `500`                 | Delay in milliseconds between S3 bucket operation retries         |
-| `APP_AWS__ROUTE53_TXT_TTL`            | `60`                  | TTL in seconds for Route53 TXT records during DNS-01 challenges   |
 
 ### Cache
 
@@ -148,12 +138,7 @@ The following constraints are validated at startup and will cause the server to 
 
 - `server.port` must be between 1 and 65535 (the `u16` type enforces the upper bound)
 - `server.cert.renewal_cron_schedule` must be a valid 6-field cron expression (seconds required)
-- `redis.connection_timeout_secs` must be greater than 0
 - `aws.s3_bucket` must not be empty
-- `aws.s3_bucket_max_retries` must be greater than 0
-- `aws.secrets_cache_max_capacity` must be greater than 0
-- `server.cert.dns_propagation_timeout_secs` must be greater than 0
-- `server.cert.signing_key_max_retries` must be greater than 0
 - `status_list.token_exp_secs` must be greater than 0
 
 ## API Overview

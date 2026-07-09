@@ -148,16 +148,8 @@ impl TestInfra {
         let redis_conn = self.redis_connection().await;
 
         let cache = RedisStorage::new(redis_conn);
-        let cert_storage = AwsS3::new(
-            &aws_config,
-            BUCKET_NAME,
-            AWS_REGION,
-            "",
-            3,
-            Duration::from_millis(500),
-        )
-        .with_cache(cache);
-        let secrets_storage = AwsSecretsManager::new(&aws_config, Duration::from_millis(0), 100)
+        let cert_storage = AwsS3::new(&aws_config, BUCKET_NAME, AWS_REGION, "").with_cache(cache);
+        let secrets_storage = AwsSecretsManager::new(&aws_config, Duration::from_millis(0))
             .await
             .expect("Failed to create AwsSecretsManager");
 
@@ -174,8 +166,6 @@ impl TestInfra {
             "test@example.com",
             Some("Test Org"),
             &acme_directory_url,
-            3,
-            Duration::from_millis(500),
         )
         .expect("Failed to create CertManager")
         .with_cert_storage(cert_storage)

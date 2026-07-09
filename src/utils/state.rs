@@ -58,12 +58,7 @@ pub async fn build_state(config: &AppConfig) -> EyeResult<AppState> {
     // Use a fake DNS server to validate the challenge in development.
     let app_env = std::env::var("APP_ENV").unwrap_or(ENV_DEVELOPMENT.to_string());
     let challenge_handler = if app_env == ENV_PRODUCTION {
-        let updater = AwsRoute53DnsUpdater::new(
-            &aws_config,
-            config.aws.route53_txt_ttl,
-            config.server.cert.dns_propagation_timeout_secs,
-            config.server.cert.dns_propagation_initial_delay_secs,
-        );
+        let updater = AwsRoute53DnsUpdater::new(&aws_config);
         Dns01Handler::new(updater)
     } else {
         // Use pebble as the DNS server in development
@@ -78,14 +73,11 @@ pub async fn build_state(config: &AppConfig) -> EyeResult<AppState> {
         &config.aws.s3_bucket,
         &config.aws.region,
         &config.aws.s3_key_prefix,
-        config.aws.s3_bucket_max_retries,
-        Duration::from_millis(config.aws.s3_bucket_retry_delay_ms),
     )
     .with_cache(cache);
     let secrets_storage = AwsSecretsManager::new(
         &aws_config,
         Duration::from_secs(config.aws.secrets_cache_ttl),
-        config.aws.secrets_cache_max_capacity,
     )
     .await?;
 
@@ -94,8 +86,6 @@ pub async fn build_state(config: &AppConfig) -> EyeResult<AppState> {
         &config.server.cert.email,
         config.server.cert.organization.as_deref(),
         &config.server.cert.acme_directory_url,
-        config.server.cert.signing_key_max_retries,
-        Duration::from_millis(config.server.cert.signing_key_retry_delay_ms),
     )?
     .with_cert_storage(cert_storage)
     .with_secrets_storage(secrets_storage)
