@@ -209,7 +209,7 @@ fn issue_cwt(
         StatusListError::InternalServerError
     })?;
 
-    let x5chain_value = build_x5chain(&cert_chain)?;
+    let x5chain_value = build_x5chain(cert_chain)?;
     // Building the protected header
     let protected = HeaderBuilder::new()
         .algorithm(Algorithm::ES256)
