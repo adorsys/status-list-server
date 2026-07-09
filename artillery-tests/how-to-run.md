@@ -1,10 +1,6 @@
 # How to run the performance test
 
-In this tests we have 4 tests which are 
- 1. Load test
- 2. Stress test
- 3. Spike test
- 4. Authentication test
+In this tests we have 4 tests which are
 
 1. Load test
 2. Stress test
