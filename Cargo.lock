@@ -5584,7 +5584,6 @@ dependencies = [
  "color-eyre",
  "config",
  "coset",
- "croner",
  "dotenvy",
  "flate2",
  "hyper",
