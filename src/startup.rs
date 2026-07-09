@@ -52,7 +52,6 @@ impl HttpServer {
         let mut router = Router::new()
             .route("/", get(welcome))
             .route("/health", get(health_check))
-            .nest("/statuslists", protocol_routes())
             .nest("/api/v1", api_v1_routes(state.clone()))
             .layer(TraceLayer::new_for_http())
             .layer(CatchPanicLayer::new())
@@ -77,17 +76,6 @@ impl HttpServer {
     }
 }
 
-/// Protocol endpoint for fetching status list tokens.
-///
-/// `GET /statuslists/{list_id}` — returns a status list token in JWT or CWT format.
-///
-/// This endpoint follows the OAuth Status List specification and is NOT prefixed
-/// with `/api/v1` because it is a protocol-level endpoint that must match the `uri`
-/// embedded in referenced tokens.
-fn protocol_routes() -> Router<AppState> {
-    Router::new().route("/{list_id}", get(get_status_list))
-}
-
 /// Management API v1 routes.
 fn api_v1_routes(state: AppState) -> Router<AppState> {
     let protected = Router::new()
@@ -102,6 +90,7 @@ fn api_v1_routes(state: AppState) -> Router<AppState> {
     Router::new()
         .merge(protected)
         .route("/credentials", post(credential_handler))
+        .route("/status-lists/{list_id}", get(get_status_list))
 }
 
 fn attach_metrics(router: Router, config: &Config) -> Router {

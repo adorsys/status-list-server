@@ -5,4 +5,4 @@ pub mod publish_status;
 pub mod update_status;
 
 // Re-export request types from models
-pub use crate::models::{CreateStatusRequest, UpdateStatusRequest};
+pub use crate::models::StatusesRequest;

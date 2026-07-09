@@ -1,5 +1,5 @@
 use crate::{
-    models::{CreateStatusRequest, StatusList, StatusListRecord},
+    models::{StatusList, StatusListRecord, StatusesRequest},
     utils::{errors::Error, lst_gen::create_status_list, state::AppState},
     web::handlers::status_list::error::StatusListError,
 };
@@ -16,7 +16,7 @@ pub async fn publish_status(
     State(appstate): State<AppState>,
     Extension(issuer): Extension<String>,
     Path(list_id): Path<String>,
-    Json(payload): Json<CreateStatusRequest>,
+    Json(payload): Json<StatusesRequest>,
 ) -> Result<impl IntoResponse, StatusListError> {
     // Validate list_id as UUID
     if let Err(e) = uuid::Uuid::try_parse(&list_id) {
@@ -25,7 +25,7 @@ pub async fn publish_status(
 
     let store = &appstate.status_list_repo;
 
-    let stl = create_status_list(payload.status).map_err(|e| {
+    let stl = create_status_list(payload.statuses).map_err(|e| {
         tracing::error!("lst_from failed: {e:?}");
         match e {
             Error::Generic(msg) => StatusListError::Generic(msg),
@@ -47,7 +47,10 @@ pub async fn publish_status(
                 lst: stl.lst,
             };
 
-            let sub = format!("https://{}/statuslists/{}", appstate.server_domain, list_id);
+            let sub = format!(
+                "https://{}/api/v1/status-lists/{}",
+                appstate.server_domain, list_id
+            );
 
             // Build the new status list token
             let status_list_record = StatusListRecord {
@@ -87,7 +90,7 @@ mod tests {
     async fn test_publish_token_status_invalid_list_id() {
         let appstate = test_app_state(None).await;
         let issuer = "test-issuer".to_string();
-        let payload = CreateStatusRequest { status: vec![] };
+        let payload = StatusesRequest { statuses: vec![] };
 
         let result = publish_status(
             State(appstate.clone()),
@@ -123,13 +126,13 @@ mod tests {
             list_id: token_id.clone(),
             issuer: "issuer".to_string(),
             status_list,
-            sub: "issuer".to_string(),
+            sub: format!("https://example.com/api/v1/status-lists/{token_id}"),
         };
         let db_conn = Arc::new(
             mock_db
                 .append_query_results::<status_lists::Model, Vec<_>, _>(vec![
-                    vec![],
-                    vec![new_token.clone()],
+                    vec![],                  // find_one_by in handler returns None
+                    vec![new_token.clone()], // insert_one return
                 ])
                 .into_connection(),
         );
@@ -140,8 +143,8 @@ mod tests {
             State(app_state),
             Extension("issuer".to_string()),
             Path(token_id),
-            Json(CreateStatusRequest {
-                status: status_entries,
+            Json(StatusesRequest {
+                statuses: status_entries,
             }),
         )
         .await
@@ -173,14 +176,14 @@ mod tests {
             list_id: token_id.clone(),
             issuer: "issuer".to_string(),
             status_list,
-            sub: "issuer".to_string(),
+            sub: format!("https://example.com/api/v1/status-lists/{token_id}"),
         };
         let db_conn = Arc::new(
             mock_db
                 .append_query_results::<status_lists::Model, Vec<_>, _>(vec![
-                    vec![],
-                    vec![new_token.clone()],
-                    vec![new_token.clone()],
+                    vec![],                  // find_one_by in handler returns None
+                    vec![new_token.clone()], // insert_one return
+                    vec![new_token.clone()], // find_one_by in test verification
                 ])
                 .into_connection(),
         );
@@ -191,8 +194,8 @@ mod tests {
             State(app_state.clone()),
             Extension("issuer".to_string()),
             Path(token_id.clone()),
-            Json(CreateStatusRequest {
-                status: status_entries,
+            Json(StatusesRequest {
+                statuses: status_entries,
             }),
         )
         .await
@@ -207,7 +210,10 @@ mod tests {
         let token = result.unwrap();
         assert_eq!(token.list_id, token_id);
         assert_eq!(token.status_list.bits, 2);
-        assert_eq!(token.sub, "issuer");
+        assert_eq!(
+            token.sub,
+            format!("https://example.com/api/v1/status-lists/{token_id}")
+        );
     }
 
     #[tokio::test]
@@ -240,8 +246,8 @@ mod tests {
             State(app_state),
             Extension("issuer".to_string()),
             Path(token_id),
-            Json(CreateStatusRequest {
-                status: status_entries,
+            Json(StatusesRequest {
+                statuses: status_entries,
             }),
         )
         .await
@@ -264,14 +270,14 @@ mod tests {
             list_id: token_id.clone(),
             issuer: "issuer".to_string(),
             status_list,
-            sub: "issuer".to_string(),
+            sub: format!("https://example.com/api/v1/status-lists/{token_id}"),
         };
         let db_conn = Arc::new(
             mock_db
                 .append_query_results::<status_lists::Model, Vec<_>, _>(vec![
-                    vec![],
-                    vec![new_token.clone()],
-                    vec![new_token.clone()],
+                    vec![],                  // find_one_by in handler returns None
+                    vec![new_token.clone()], // insert_one return
+                    vec![new_token.clone()], // find_one_by in test verification
                 ])
                 .into_connection(),
         );
@@ -282,7 +288,7 @@ mod tests {
             State(app_state.clone()),
             Extension("issuer".to_string()),
             Path(token_id.clone()),
-            Json(CreateStatusRequest { status: vec![] }),
+            Json(StatusesRequest { statuses: vec![] }),
         )
         .await
         .unwrap()
@@ -317,14 +323,14 @@ mod tests {
             list_id: token_id.clone(),
             issuer: "issuer".to_string(),
             status_list,
-            sub: "issuer".to_string(),
+            sub: format!("https://example.com/api/v1/status-lists/{token_id}"),
         };
         let db_conn = Arc::new(
             mock_db
                 .append_query_results::<status_lists::Model, Vec<_>, _>(vec![
-                    vec![],
-                    vec![new_token.clone()],
-                    vec![new_token.clone()],
+                    vec![],                  // find_one_by in handler returns None
+                    vec![new_token.clone()], // insert_one return
+                    vec![new_token.clone()], // find_one_by in test verification
                 ])
                 .into_connection(),
         );
@@ -334,8 +340,8 @@ mod tests {
             State(app_state),
             Extension("issuer".to_string()),
             Path(token_id),
-            Json(CreateStatusRequest {
-                status: status_entries,
+            Json(StatusesRequest {
+                statuses: status_entries,
             }),
         )
         .await
@@ -359,8 +365,8 @@ mod tests {
             State(app_state),
             Extension("issuer".to_string()),
             Path(token_id),
-            Json(CreateStatusRequest {
-                status: status_entries,
+            Json(StatusesRequest {
+                statuses: status_entries,
             }),
         )
         .await
