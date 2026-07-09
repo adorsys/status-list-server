@@ -22,16 +22,14 @@ fn determine_bits(
         .max()
         .ok_or_else(|| Error::Generic("Failed to determine max status value".to_string()))?;
 
-    // Validate ApplicationSpecific values are >= 256
-    if let Some(value) = status_updates.iter().find_map(|entry| match entry.status {
-        Status::ApplicationSpecific(v) => Some(v),
-        _ => None,
-    }) {
-        if value < 256 {
-            return Err(Error::Generic(
-                "ApplicationSpecific value must be >= 256".to_string(),
-            ));
-        }
+    // Validate ALL ApplicationSpecific values are >= 256
+    if status_updates
+        .iter()
+        .any(|e| matches!(e.status, Status::ApplicationSpecific(v) if v < 256))
+    {
+        return Err(Error::Generic(
+            "ApplicationSpecific value must be >= 256".to_string(),
+        ));
     }
 
     let required_bits = match max_status_value {
@@ -72,8 +70,8 @@ fn calculate_array_size(status_updates: &[StatusEntry], bits: usize) -> Result<u
         return Err(Error::InvalidIndex);
     }
 
-    let required_len = (max_index as usize + 1) * bits + 7;
-    Ok(required_len / 8)
+    let end_bit = (max_index as usize) * bits + bits - 1;
+    Ok(end_bit / 8 + 1)
 }
 
 // Helper function to apply updates
@@ -110,17 +108,40 @@ fn apply_updates(
             }
         };
 
-        let mask = ((1u32 << bits) - 1) << bit_offset;
-        status_array[byte_index] &= !(mask as u8);
-        status_array[byte_index] |= ((status_value as u8) << bit_offset) & (mask as u8);
+        let total_bit_pos = idx * bits;
+        let start_byte = total_bit_pos / 8;
+        let _start_offset = total_bit_pos % 8;
 
-        if bit_offset + bits > 8 {
-            let overflow_bits = (bit_offset + bits) - 8;
-            let overflow_mask = ((1u32 << overflow_bits) - 1) as u8;
-            if byte_index + 1 < status_array.len() {
-                status_array[byte_index + 1] &= !overflow_mask;
-                status_array[byte_index + 1] |=
-                    (status_value >> (bits - overflow_bits)) as u8 & overflow_mask;
+        if bit_offset + bits <= 8 {
+            let mask: u8 = (((1u32 << bits) - 1) << bit_offset) as u8;
+            status_array[byte_index] &= !mask;
+            status_array[byte_index] |= ((status_value as u8) << bit_offset) & mask;
+        } else {
+            let first_byte_bits = 8 - bit_offset;
+            let first_mask: u8 = (((1u32 << first_byte_bits) - 1) << bit_offset) as u8;
+            status_array[byte_index] &= !first_mask;
+            status_array[byte_index] |= ((status_value as u8) << bit_offset) & first_mask;
+
+            let mut bits_written = first_byte_bits;
+            let mut cur_byte = start_byte + 1;
+            let mut cur_offset = 0;
+
+            while bits_written < bits {
+                let remaining_bits = bits - bits_written;
+                let bits_this_byte = remaining_bits.min(8);
+
+                for i in 0..bits_this_byte {
+                    let global_bit = bits_written + i;
+                    let value_bit = (status_value >> global_bit) & 1;
+                    status_array[cur_byte] &= !(1u8 << cur_offset);
+                    status_array[cur_byte] |= (value_bit as u8) << cur_offset;
+                    cur_offset += 1;
+                    if cur_offset >= 8 {
+                        cur_byte += 1;
+                        cur_offset = 0;
+                    }
+                }
+                bits_written += bits_this_byte;
             }
         }
     }
@@ -162,20 +183,36 @@ pub fn create_status_list(status_updates: Vec<StatusEntry>) -> Result<StatusList
 fn decode_status_array(array: &[u8], bits: usize) -> Result<Vec<Status>, Error> {
     let mut statuses = Vec::new();
     for i in 0..(array.len() * 8 / bits) {
-        let byte_index = (i * bits) / 8;
-        let bit_offset = (i * bits) % 8;
-        let status_value: u32 = if bits == 8 {
-            array[i] as u32
-        } else {
-            let mut value = 0u32;
-            for j in 0..bits {
-                if byte_index < array.len() && bit_offset + j < 8 {
-                    value |= ((array[byte_index] as u32 >> (bit_offset + j)) & 1) << j;
-                }
+        let total_bit_pos = i * bits;
+        let start_byte = total_bit_pos / 8;
+        let start_offset = total_bit_pos % 8;
+
+        let mut value: u32 = 0;
+        let mut bits_read = 0;
+        let mut cur_byte = start_byte;
+        let mut cur_offset = start_offset;
+        let mut bits_in_current_byte = 8 - start_offset;
+
+        while bits_read < bits {
+            if cur_byte >= array.len() {
+                break;
             }
-            value
-        };
-        statuses.push(match status_value {
+            let bits_this_iter = bits_in_current_byte.min(bits - bits_read);
+
+            let extracted = ((array[cur_byte] as u16 >> cur_offset) & ((1u16 << bits_this_iter) - 1)) as u32;
+            value |= extracted << bits_read;
+
+            bits_read += bits_this_iter;
+            bits_in_current_byte -= bits_this_iter;
+
+            if bits_in_current_byte == 0 {
+                cur_byte += 1;
+                cur_offset = 0;
+                bits_in_current_byte = 8;
+            }
+        }
+
+        statuses.push(match value {
             0 => Status::VALID,
             1 => Status::INVALID,
             2 => Status::SUSPENDED,
@@ -500,5 +537,105 @@ mod tests {
             updated_status_array, expected_status_array,
             "The status array was not re-encoded correctly with wider bit size"
         );
+    }
+
+    #[test]
+    fn test_create_lst_with_2_bit_statuses_original() {
+        let updates = vec![
+            StatusEntry {
+                index: 0,
+                status: Status::VALID,
+            },
+            StatusEntry {
+                index: 1,
+                status: Status::INVALID,
+            },
+            StatusEntry {
+                index: 2,
+                status: Status::SUSPENDED,
+            },
+            StatusEntry {
+                index: 3,
+                status: Status::INVALID,
+            },
+        ];
+
+        let result = create_status_list(updates).unwrap();
+        let decoded = base64url::decode(&result.lst).unwrap();
+        let mut decoder = flate2::read::ZlibDecoder::new(&decoded[..]);
+        let mut decompressed = Vec::new();
+        decoder.read_to_end(&mut decompressed).unwrap();
+
+        assert_eq!(decompressed, vec![0b01100100]);
+    }
+
+    #[test]
+    fn test_app_specific_rejects_values_3_to_255() {
+        for val in [3u32, 100, 255] {
+            let updates = vec![StatusEntry {
+                index: 0,
+                status: Status::ApplicationSpecific(val),
+            }];
+            let result = create_status_list(updates);
+            assert!(
+                matches!(result, Err(Error::Generic(ref s)) if s.contains(">= 256")),
+                "value {} should be rejected",
+                val
+            );
+        }
+    }
+
+    #[test]
+    fn test_decode_rejects_values_3_to_255() {
+        let arr = vec![3u8];
+        let result = decode_status_array(&arr, 2);
+        assert!(matches!(result, Err(Error::Generic(_))));
+    }
+
+    #[test]
+    fn test_app_specific_multibyte_roundtrip() {
+        let updates = vec![
+            StatusEntry {
+                index: 0,
+                status: Status::ApplicationSpecific(512),
+            },
+            StatusEntry {
+                index: 3,
+                status: Status::ApplicationSpecific(256),
+            },
+        ];
+        let result = create_status_list(updates).unwrap();
+        let decoded_bytes = base64url::decode(&result.lst).unwrap();
+        let mut decoder = flate2::read::ZlibDecoder::new(&decoded_bytes[..]);
+        let mut raw = Vec::new();
+        decoder.read_to_end(&mut raw).unwrap();
+
+        let statuses = decode_status_array(&raw, result.bits as usize).unwrap();
+        assert_eq!(statuses[0], Status::ApplicationSpecific(512));
+        assert_eq!(statuses[3], Status::ApplicationSpecific(256));
+    }
+
+    #[test]
+    fn test_status_serde_integer_roundtrip() {
+        use crate::models::Status;
+        use serde_json;
+
+        assert_eq!(serde_json::from_str::<Status>("0").unwrap(), Status::VALID);
+        assert_eq!(serde_json::from_str::<Status>("1").unwrap(), Status::INVALID);
+        assert_eq!(serde_json::from_str::<Status>("2").unwrap(), Status::SUSPENDED);
+        assert_eq!(
+            serde_json::from_str::<Status>("256").unwrap(),
+            Status::ApplicationSpecific(256)
+        );
+        assert_eq!(serde_json::to_string(&Status::VALID).unwrap(), "0");
+        assert_eq!(serde_json::to_string(&Status::INVALID).unwrap(), "1");
+        assert_eq!(serde_json::to_string(&Status::SUSPENDED).unwrap(), "2");
+        assert_eq!(
+            serde_json::to_string(&Status::ApplicationSpecific(256)).unwrap(),
+            "256"
+        );
+        assert!(serde_json::from_str::<Status>("3").is_err());
+        assert!(serde_json::from_str::<Status>("100").is_err());
+        assert!(serde_json::from_str::<Status>("255").is_err());
     }
 }
