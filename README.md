@@ -62,6 +62,18 @@ cargo run
 
 By default, the server will listen on `http://localhost:8000`. You can modify the host and port in the configuration settings.
 
+## Configuration
+
+All runtime behavior is controlled via environment variables prefixed with `APP_` and using `__` as a nested separator (e.g. `APP_SERVER__PORT=8000`). Sensible defaults are built in, so only non-default values need to be set. See [`.env.template`](.env.template) for a complete example.
+
+### Validation
+
+The following constraints are validated at startup and will cause the server to fail fast if violated:
+
+- `server.port` must be between 1 and 65535 (the `u16` type enforces the upper bound)
+- `server.cert.renewal_cron_schedule` must be a valid 6-field cron expression (seconds required)
+- `aws.s3_bucket` must not be empty
+- `status_list.token_exp_secs` must be greater than 0
 
 ## API Overview
 

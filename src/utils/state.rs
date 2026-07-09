@@ -67,7 +67,7 @@ pub async fn build_state(config: &AppConfig) -> EyeResult<AppState> {
         let dns_url = config
             .server
             .cert
-            .dns_chanel_server_url
+            .dns_channel_server_url
             .as_deref()
             .unwrap_or("http://challtestsrv:8055");
         let updater = PebbleDnsUpdater::new(dns_url);
