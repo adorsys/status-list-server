@@ -346,4 +346,80 @@ mod tests {
             Some("http://pebble:8055")
         );
     }
+
+    #[sealed_test(env = [
+        ("APP_DATABASE__BACKEND", "mysql"),
+        ("APP_DATABASE__URL", "mysql://user:password@localhost:3306/status-list"),
+    ])]
+    fn test_mysql_backend_config() {
+        let config = Config::load().expect("Failed to load config");
+        assert_eq!(config.database.backend, DatabaseBackend::MySql);
+        assert_eq!(
+            config.database.url.expose_secret(),
+            "mysql://user:password@localhost:3306/status-list"
+        );
+    }
+
+    #[sealed_test(env = [
+        ("APP_DATABASE__BACKEND", "sqlite"),
+        ("APP_DATABASE__URL", "sqlite:./test.db"),
+    ])]
+    fn test_sqlite_backend_config() {
+        let config = Config::load().expect("Failed to load config");
+        assert_eq!(config.database.backend, DatabaseBackend::Sqlite);
+        assert_eq!(config.database.url.expose_secret(), "sqlite:./test.db");
+    }
+
+    #[sealed_test(env = [
+        ("APP_DATABASE__BACKEND", "mariadb"),
+        ("APP_DATABASE__URL", "mariadb://user:password@localhost:3306/status-list"),
+    ])]
+    fn test_mariadb_backend_config() {
+        let config = Config::load().expect("Failed to load config");
+        assert_eq!(config.database.backend, DatabaseBackend::Mariadb);
+        assert_eq!(
+            config.database.url.expose_secret(),
+            "mariadb://user:password@localhost:3306/status-list"
+        );
+    }
+
+    #[test]
+    fn test_database_backend_from_str() {
+        assert_eq!(
+            "postgres".parse::<DatabaseBackend>().unwrap(),
+            DatabaseBackend::Postgres
+        );
+        assert_eq!(
+            "mysql".parse::<DatabaseBackend>().unwrap(),
+            DatabaseBackend::MySql
+        );
+        assert_eq!(
+            "sqlite".parse::<DatabaseBackend>().unwrap(),
+            DatabaseBackend::Sqlite
+        );
+        assert_eq!(
+            "mariadb".parse::<DatabaseBackend>().unwrap(),
+            DatabaseBackend::Mariadb
+        );
+        assert_eq!(
+            "PostgreS".parse::<DatabaseBackend>().unwrap(),
+            DatabaseBackend::Postgres
+        );
+        assert!("unknown".parse::<DatabaseBackend>().is_err());
+    }
+
+    #[test]
+    fn test_database_backend_url_scheme() {
+        assert_eq!(DatabaseBackend::Postgres.url_scheme(), "postgres");
+        assert_eq!(DatabaseBackend::MySql.url_scheme(), "mysql");
+        assert_eq!(DatabaseBackend::Sqlite.url_scheme(), "sqlite");
+        assert_eq!(DatabaseBackend::Mariadb.url_scheme(), "mariadb");
+    }
+
+    #[test]
+    fn test_database_backend_default() {
+        let backend = DatabaseBackend::default();
+        assert_eq!(backend, DatabaseBackend::Postgres);
+    }
+}
 }
