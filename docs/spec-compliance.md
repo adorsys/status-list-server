@@ -7,7 +7,7 @@
 ## Project Feature Implementation Tracker
 
 | Spec Section | Feature | Spec Status | Implementation Status | Changes Required |
-|---|---|---|---|---|
+| :--- | :--- | :--- | :--- | :--- |
 | [§1](#section-1) | Introduction – Overview and motivation for OAuth Status List | DRAFT | ✅ | None |
 | [§2](#section-2) | Conventions and Definitions – RFC 2119 key words (MUST, SHOULD, etc.) | DRAFT | ✅ | None |
 | [§3](#section-3) | Terminology – Issuer, Holder, Relying Party, Status, Client definitions | DRAFT | ✅ | None |
@@ -43,3 +43,147 @@
 
 - [Draft 21](https://datatracker.ietf.org/doc/html/draft-ietf-oauth-status-list-21)
 - [RFC 9470: OAuth 2.0 JWT Status Lists](https://datatracker.ietf.org/doc/html/rfc9470)
+
+## Section 1 {#section-1}
+
+### Introduction
+
+See [Spec Section §1](https://datatracker.ietf.org/doc/html/draft-ietf-oauth-status-list-21#section-1) for overview and motivation.
+
+## Section 2 {#section-2}
+
+### Conventions and Definitions
+
+See [Spec Section §2](https://datatracker.ietf.org/doc/html/draft-ietf-oauth-status-list-21#section-2) for RFC 2119 keywords.
+
+## Section 3 {#section-3}
+
+### Terminology
+
+See [Spec Section §3](https://datatracker.ietf.org/doc/html/draft-ietf-oauth-status-list-21#section-3) for definitions.
+
+## Section 4 {#section-4}
+
+### Status List
+
+See [Spec Section §4](https://datatracker.ietf.org/doc/html/draft-ietf-oauth-status-list-21#section-4) for compressed bit array specification.
+
+## Section 5.1 {#section-5.1}
+
+### JWT Status List Token
+
+See [Spec Section §5.1](https://datatracker.ietf.org/doc/html/draft-ietf-oauth-status-list-21#section-5.1) for JWT token claims.
+
+## Section 5.2 {#section-5.2}
+
+### CWT Status List Token
+
+See [Spec Section §5.2](https://datatracker.ietf.org/doc/html/draft-ietf-oauth-status-list-21#section-5.2) for CWT token specification.
+
+## Section 6.1 {#section-6.1}
+
+### Status Claim
+
+See [Spec Section §6.1](https://datatracker.ietf.org/doc/html/draft-ietf-oauth-status-list-21#section-6.1) for status claim structure.
+
+## Section 6.2 {#section-6.2}
+
+### Referenced Token Index
+
+See [Spec Section §6.2](https://datatracker.ietf.org/doc/html/draft-ietf-oauth-status-list-21#section-6.2) for index specification.
+
+## Section 6.3 {#section-6.3}
+
+### Status CBOR Structure
+
+See [Spec Section §6.3](https://datatracker.ietf.org/doc/html/draft-ietf-oauth-status-list-21#section-6.3) for CBOR structure.
+
+## Section 7 {#section-7}
+
+### Status Types
+
+See [Spec Section §7](https://datatracker.ietf.org/doc/html/draft-ietf-oauth-status-list-21#section-7) for status type encodings.
+
+## Section 7.1 {#section-7.1}
+
+### Status Type Values
+
+See [Spec Section §7.1](https://datatracker.ietf.org/doc/html/draft-ietf-oauth-status-list-21#section-7.1) for defined values.
+
+## Section 8.1 {#section-8.1}
+
+### HTTP Content Negotiation
+
+See [Spec Section §8.1](https://datatracker.ietf.org/doc/html/draft-ietf-oauth-status-list-21#section-8.1) for HTTP negotiation.
+
+## Section 8.2 {#section-8.2}
+
+### GIFRS Encoding
+
+See [Spec Section §8.2](https://datatracker.ietf.org/doc/html/draft-ietf-oauth-status-list-21#section-8.2) for encoding specification.
+
+## Section 8.3 {#section-8.3}
+
+### Referenced Token Validation
+
+See [Spec Section §8.3](https://datatracker.ietf.org/doc/html/draft-ietf-oauth-status-list-21#section-8.3) for validation requirements.
+
+## Section 8.4 {#section-8.4}
+
+### Historical Resolution
+
+See [Spec Section §8.4](https://datatracker.ietf.org/doc/html/draft-ietf-oauth-status-list-21#section-8.4) for historical status retrieval.
+
+## Section 9 {#section-9}
+
+### Status List Aggregation
+
+See [Spec Section §9](https://datatracker.ietf.org/doc/html/draft-ietf-oauth-status-list-21#section-9) for aggregation specification.
+
+## Section 9.1 {#section-9.1}
+
+### Issuer Metadata
+
+See [Spec Section §9.1](https://datatracker.ietf.org/doc/html/draft-ietf-oauth-status-list-21#section-9.1) for issuer discovery.
+
+## Section 9.3 {#section-9.3}
+
+### Status List Data Structure
+
+See [Spec Section §9.3](https://datatracker.ietf.org/doc/html/draft-ietf-oauth-status-list-21#section-9.3) for data structure.
+
+## Section 10 {#section-10}
+
+### X.509 Certificate EKU
+
+See [Spec Section §10](https://datatracker.ietf.org/doc/html/draft-ietf-oauth-status-list-21#section-10) for EKU specification.
+
+## Section 11.2 {#section-11.2}
+
+### JWT/CWT Security
+
+See [Spec Section §11.2](https://datatracker.ietf.org/doc/html/draft-ietf-oauth-status-list-21#section-11.2) for security requirements.
+
+## Section 11.6 {#section-11.6}
+
+### Token Protection
+
+See [Spec Section §11.6](https://datatracker.ietf.org/doc/html/draft-ietf-oauth-status-list-21#section-11.6) for token protection.
+
+## Section 12 {#section-12}
+
+### Privacy Considerations
+
+See [Spec Section §12](https://datatracker.ietf.org/doc/html/draft-ietf-oauth-status-list-21#section-12) for privacy guidance.
+
+## Section 13 {#section-13}
+
+### Operational Considerations
+
+See [Spec Section §13](https://datatracker.ietf.org/doc/html/draft-ietf-oauth-status-list-21#section-13) for operational guidance.
+
+## Section 14 {#section-14}
+
+### IANA Considerations
+
+See [Spec Section §14](https://datatracker.ietf.org/doc/html/draft-ietf-oauth-status-list-21#section-14) for IANA registration requirements.
