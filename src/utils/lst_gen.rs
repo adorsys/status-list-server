@@ -364,7 +364,7 @@ mod tests {
     }
 
     #[test]
-    fn test_create_lst_with_2_bit_statuses() {
+    fn test_create_lst_with_9_bit_app_specific_exact_bytes() {
         let updates = vec![
             StatusEntry {
                 index: 0,
@@ -390,10 +390,14 @@ mod tests {
         let mut decompressed = Vec::new();
         decoder.read_to_end(&mut decompressed).unwrap();
 
-        // Verify we got a result with 5 bytes (4 entries * 9 bits = 36 bits = 5 bytes)
-        assert_eq!(decompressed.len(), 5);
-        // Verify bits is 9 (to accommodate 256)
-        assert_eq!(result.bits, 9);
+        assert_eq!(result.bits, 9, "Should require 9 bits for value 256");
+        assert_eq!(decompressed.len(), 5, "4 entries * 9 bits = 36 bits = 5 bytes");
+
+        let statuses = decode_status_array(&decompressed, 9).unwrap();
+        assert_eq!(statuses[0], Status::VALID);
+        assert_eq!(statuses[1], Status::INVALID);
+        assert_eq!(statuses[2], Status::SUSPENDED);
+        assert_eq!(statuses[3], Status::ApplicationSpecific(256));
     }
 
     #[test]
@@ -593,6 +597,25 @@ mod tests {
     }
 
     #[test]
+    fn test_app_specific_256_at_offset_exact_bytes() {
+        let updates = vec![StatusEntry {
+            index: 0,
+            status: Status::ApplicationSpecific(256),
+        }];
+        let result = create_status_list(updates).unwrap();
+        let decoded = base64url::decode(&result.lst).unwrap();
+        let mut decoder = flate2::read::ZlibDecoder::new(&decoded[..]);
+        let mut raw = Vec::new();
+        decoder.read_to_end(&mut raw).unwrap();
+
+        assert_eq!(result.bits, 9, "Value 256 requires 9 bits");
+        assert!(!raw.is_empty(), "Should have encoded bytes");
+
+        let statuses = decode_status_array(&raw, 9).unwrap();
+        assert_eq!(statuses[0], Status::ApplicationSpecific(256), "Round-trip should preserve value");
+    }
+
+    #[test]
     fn test_app_specific_multibyte_roundtrip() {
         let updates = vec![
             StatusEntry {
@@ -613,6 +636,35 @@ mod tests {
         let statuses = decode_status_array(&raw, result.bits as usize).unwrap();
         assert_eq!(statuses[0], Status::ApplicationSpecific(512));
         assert_eq!(statuses[3], Status::ApplicationSpecific(256));
+    }
+
+    #[test]
+    fn test_app_specific_large_value_at_offset() {
+        let updates = vec![
+            StatusEntry {
+                index: 0,
+                status: Status::INVALID,
+            },
+            StatusEntry {
+                index: 3,
+                status: Status::ApplicationSpecific(4096),
+            },
+        ];
+        let result = create_status_list(updates).unwrap();
+        let decoded = base64url::decode(&result.lst).unwrap();
+        let mut decoder = flate2::read::ZlibDecoder::new(&decoded[..]);
+        let mut raw = Vec::new();
+        decoder.read_to_end(&mut raw).unwrap();
+
+        assert_eq!(result.bits, 13, "Value 4096 requires 13 bits (2^13 = 8192)");
+
+        let statuses = decode_status_array(&raw, result.bits as usize).unwrap();
+        assert_eq!(statuses[0], Status::INVALID, "Index 0 should be INVALID");
+        assert_eq!(
+            statuses[3],
+            Status::ApplicationSpecific(4096),
+            "Index 3 should decode as 4096 (the reviewer's original failing case)"
+        );
     }
 
     #[test]
@@ -637,5 +689,28 @@ mod tests {
         assert!(serde_json::from_str::<Status>("3").is_err());
         assert!(serde_json::from_str::<Status>("100").is_err());
         assert!(serde_json::from_str::<Status>("255").is_err());
+    }
+
+    #[test]
+    fn test_legacy_status_3_is_rejected() {
+        let arr = vec![0b11100100];
+        let result = decode_status_array(&arr, 2);
+        assert!(
+            matches!(result, Err(Error::Generic(_))),
+            "Legacy value 3 (old APPLICATIONSPECIFIC) should be rejected per spec: values 3-255 are reserved"
+        );
+    }
+
+    #[test]
+    fn test_decode_rejects_values_3_to_255_various_bits() {
+        for (arr, bits) in &[(vec![3u8], 2), (vec![100u8], 8)] {
+            let result = decode_status_array(arr, *bits);
+            assert!(
+                matches!(result, Err(Error::Generic(_))),
+                "Value {} in {:?}-bit encoding should be rejected",
+                arr[0],
+                bits
+            );
+        }
     }
 }
