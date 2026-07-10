@@ -1,24 +1,23 @@
 use crate::{
-    models::{StatusList, StatusListRecord, StatusRequest},
+    models::{StatusList, StatusListRecord, StatusesRequest},
     utils::{errors::Error, lst_gen::create_status_list, state::AppState},
     web::handlers::status_list::error::StatusListError,
 };
 use axum::{
-    Extension,
-    extract::{Json, State},
+    Extension, Json,
+    extract::{Path, State},
     http::StatusCode,
     response::IntoResponse,
 };
 use tracing;
 
-// Handler to create a new status list token
+/// Create a new status list.
 pub async fn publish_status(
     State(appstate): State<AppState>,
     Extension(issuer): Extension<String>,
-    Json(payload): Json<StatusRequest>,
+    Path(list_id): Path<String>,
+    Json(payload): Json<StatusesRequest>,
 ) -> Result<impl IntoResponse, StatusListError> {
-    let StatusRequest { list_id, status } = payload;
-
     // Validate list_id as UUID
     if let Err(e) = uuid::Uuid::try_parse(&list_id) {
         return Err(StatusListError::InvalidListId(e.to_string()));
@@ -26,7 +25,7 @@ pub async fn publish_status(
 
     let store = &appstate.status_list_repo;
 
-    let stl = create_status_list(status).map_err(|e| {
+    let stl = create_status_list(payload.statuses).map_err(|e| {
         tracing::error!("lst_from failed: {e:?}");
         match e {
             Error::Generic(msg) => StatusListError::Generic(msg),
@@ -48,11 +47,14 @@ pub async fn publish_status(
                 lst: stl.lst,
             };
 
-            let sub = format!("https://{}/statuslists/{}", appstate.server_domain, list_id);
+            let sub = format!(
+                "https://{}/api/v1/status-lists/{}",
+                appstate.server_domain, list_id
+            );
 
             // Build the new status list token
             let status_list_record = StatusListRecord {
-                list_id,
+                list_id: list_id.clone(),
                 issuer,
                 status_list,
                 sub,
@@ -78,7 +80,6 @@ mod tests {
     use crate::web::handlers::status_list::error::StatusListError;
     use crate::{
         models::{Status, StatusEntry, StatusListRecord, status_lists},
-        test_data::helper::publish_test_token,
         test_utils::test_app_state,
     };
     use axum::{Json, extract::State};
@@ -89,13 +90,15 @@ mod tests {
     async fn test_publish_token_status_invalid_list_id() {
         let appstate = test_app_state(None).await;
         let issuer = "test-issuer".to_string();
-        let payload = StatusRequest {
-            list_id: "invalid-uuid".to_string(),
-            status: vec![],
-        };
+        let payload = StatusesRequest { statuses: vec![] };
 
-        let result =
-            publish_status(State(appstate.clone()), Extension(issuer), Json(payload)).await;
+        let result = publish_status(
+            State(appstate.clone()),
+            Extension(issuer),
+            Path("invalid-uuid".to_string()),
+            Json(payload),
+        )
+        .await;
 
         assert!(matches!(result, Err(StatusListError::InvalidListId(_))));
     }
@@ -104,29 +107,26 @@ mod tests {
     async fn test_publish_status_creates_token() {
         let mock_db = MockDatabase::new(DatabaseBackend::Postgres);
         let token_id = "477121aa-b598-419e-916f-1e74654ff38b".to_string();
-        let payload = publish_test_token(
-            &token_id,
-            vec![
-                StatusEntry {
-                    index: 0,
-                    status: Status::VALID,
-                },
-                StatusEntry {
-                    index: 1,
-                    status: Status::INVALID,
-                },
-            ],
-        );
+        let status_entries = vec![
+            StatusEntry {
+                index: 0,
+                status: Status::VALID,
+            },
+            StatusEntry {
+                index: 1,
+                status: Status::INVALID,
+            },
+        ];
 
         let status_list = StatusList {
             bits: 2,
-            lst: create_status_list(payload.status.clone()).unwrap().lst,
+            lst: create_status_list(status_entries.clone()).unwrap().lst,
         };
         let new_token = StatusListRecord {
             list_id: token_id.clone(),
             issuer: "issuer".to_string(),
             status_list,
-            sub: "issuer".to_string(),
+            sub: format!("https://example.com/api/v1/status-lists/{token_id}"),
         };
         let db_conn = Arc::new(
             mock_db
@@ -142,7 +142,10 @@ mod tests {
         let response = publish_status(
             State(app_state),
             Extension("issuer".to_string()),
-            Json(payload),
+            Path(token_id),
+            Json(StatusesRequest {
+                statuses: status_entries,
+            }),
         )
         .await
         .unwrap()
@@ -154,29 +157,26 @@ mod tests {
     async fn test_token_is_stored_after_publish() {
         let mock_db = MockDatabase::new(DatabaseBackend::Postgres);
         let token_id = "8e4ebb4a-dd79-498f-ac97-966f22884037".to_string();
-        let payload = publish_test_token(
-            &token_id,
-            vec![
-                StatusEntry {
-                    index: 0,
-                    status: Status::VALID,
-                },
-                StatusEntry {
-                    index: 1,
-                    status: Status::INVALID,
-                },
-            ],
-        );
+        let status_entries = vec![
+            StatusEntry {
+                index: 0,
+                status: Status::VALID,
+            },
+            StatusEntry {
+                index: 1,
+                status: Status::INVALID,
+            },
+        ];
 
         let status_list = StatusList {
             bits: 2,
-            lst: create_status_list(payload.status.clone()).unwrap().lst,
+            lst: create_status_list(status_entries.clone()).unwrap().lst,
         };
         let new_token = StatusListRecord {
             list_id: token_id.clone(),
             issuer: "issuer".to_string(),
             status_list,
-            sub: "issuer".to_string(),
+            sub: format!("https://example.com/api/v1/status-lists/{token_id}"),
         };
         let db_conn = Arc::new(
             mock_db
@@ -190,16 +190,17 @@ mod tests {
 
         let app_state = test_app_state(Some(db_conn.clone())).await;
 
-        // Perform the insertion
         let _ = publish_status(
             State(app_state.clone()),
             Extension("issuer".to_string()),
-            Json(payload),
+            Path(token_id.clone()),
+            Json(StatusesRequest {
+                statuses: status_entries,
+            }),
         )
         .await
         .unwrap();
 
-        // Verify the token is stored
         let result = app_state
             .status_list_repo
             .find_one_by(&token_id)
@@ -209,27 +210,27 @@ mod tests {
         let token = result.unwrap();
         assert_eq!(token.list_id, token_id);
         assert_eq!(token.status_list.bits, 2);
-        assert_eq!(token.sub, "issuer");
+        assert_eq!(
+            token.sub,
+            format!("https://example.com/api/v1/status-lists/{token_id}")
+        );
     }
 
     #[tokio::test]
     async fn test_token_conflict() {
         let mock_db = MockDatabase::new(DatabaseBackend::Postgres);
         let token_id = "8e4ebb4a-dd79-498f-ac97-966f22884037".to_string();
-        let payload = publish_test_token(
-            &token_id,
-            vec![StatusEntry {
-                index: 0,
-                status: Status::VALID,
-            }],
-        );
+        let status_entries = vec![StatusEntry {
+            index: 0,
+            status: Status::VALID,
+        }];
 
         let existing_token = StatusListRecord {
             list_id: token_id.clone(),
             issuer: "issuer".to_string(),
             status_list: StatusList {
                 bits: 1,
-                lst: create_status_list(payload.status.clone()).unwrap().lst,
+                lst: create_status_list(status_entries.clone()).unwrap().lst,
             },
             sub: "issuer".to_string(),
         };
@@ -244,7 +245,10 @@ mod tests {
         let response = match publish_status(
             State(app_state),
             Extension("issuer".to_string()),
-            Json(payload),
+            Path(token_id),
+            Json(StatusesRequest {
+                statuses: status_entries,
+            }),
         )
         .await
         {
@@ -258,7 +262,6 @@ mod tests {
     async fn test_empty_updates() {
         let mock_db = MockDatabase::new(DatabaseBackend::Postgres);
         let token_id = "477121aa-b598-419e-916f-1e74654ff38b".to_string();
-        let payload = publish_test_token(&token_id, vec![]);
         let status_list = StatusList {
             bits: 1,
             lst: base64url::encode([]),
@@ -267,7 +270,7 @@ mod tests {
             list_id: token_id.clone(),
             issuer: "issuer".to_string(),
             status_list,
-            sub: "issuer".to_string(),
+            sub: format!("https://example.com/api/v1/status-lists/{token_id}"),
         };
         let db_conn = Arc::new(
             mock_db
@@ -284,7 +287,8 @@ mod tests {
         let response = publish_status(
             State(app_state.clone()),
             Extension("issuer".to_string()),
-            Json(payload),
+            Path(token_id.clone()),
+            Json(StatusesRequest { statuses: vec![] }),
         )
         .await
         .unwrap()
@@ -306,23 +310,20 @@ mod tests {
     async fn test_repository_unavailable() {
         let mock_db = MockDatabase::new(DatabaseBackend::Postgres);
         let token_id = "477121aa-b598-419e-916f-1e74654ff38b".to_string();
-        let payload = publish_test_token(
-            &token_id,
-            vec![StatusEntry {
-                index: 0,
-                status: Status::VALID,
-            }],
-        );
+        let status_entries = vec![StatusEntry {
+            index: 0,
+            status: Status::VALID,
+        }];
 
         let status_list = StatusList {
             bits: 1,
-            lst: create_status_list(payload.status.clone()).unwrap().lst,
+            lst: create_status_list(status_entries.clone()).unwrap().lst,
         };
         let new_token = StatusListRecord {
             list_id: token_id.clone(),
             issuer: "issuer".to_string(),
             status_list,
-            sub: "issuer".to_string(),
+            sub: format!("https://example.com/api/v1/status-lists/{token_id}"),
         };
         let db_conn = Arc::new(
             mock_db
@@ -338,7 +339,10 @@ mod tests {
         let response = publish_status(
             State(app_state),
             Extension("issuer".to_string()),
-            Json(payload),
+            Path(token_id),
+            Json(StatusesRequest {
+                statuses: status_entries,
+            }),
         )
         .await
         .unwrap()
@@ -350,20 +354,20 @@ mod tests {
     async fn test_invalid_index() {
         let mock_db = MockDatabase::new(DatabaseBackend::Postgres);
         let token_id = "477121aa-b598-419e-916f-1e74654ff38b".to_string();
-        let payload = publish_test_token(
-            &token_id,
-            vec![StatusEntry {
-                index: -1,
-                status: Status::VALID,
-            }],
-        );
+        let status_entries = vec![StatusEntry {
+            index: -1,
+            status: Status::VALID,
+        }];
         let db_conn = Arc::new(mock_db.into_connection());
         let app_state = test_app_state(Some(db_conn.clone())).await;
 
         let response = match publish_status(
             State(app_state),
             Extension("issuer".to_string()),
-            Json(payload),
+            Path(token_id),
+            Json(StatusesRequest {
+                statuses: status_entries,
+            }),
         )
         .await
         {
