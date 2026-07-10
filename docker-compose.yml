@@ -62,7 +62,7 @@ services:
     networks:
       - status-list-network
     volumes:
-      - ./src/test_resources/pebble_config.json:/test/pebble_config.json
+      - ./test_data/pebble_config.json:/test/pebble_config.json
 
   app:
     build:

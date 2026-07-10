@@ -1,6 +1,7 @@
 mod database;
 #[cfg(test)]
-mod test_resources;
+#[path = "../test_data/mod.rs"]
+mod test_data;
 #[cfg(test)]
 mod test_utils;
 mod utils;
