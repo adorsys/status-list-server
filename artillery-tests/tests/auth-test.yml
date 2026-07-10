@@ -37,7 +37,7 @@ scenarios:
     flow:
       - function: "loadTestData" # Load tokens first
       - post:
-          url: "/credentials"
+          url: "/api/v1/credentials"
           json:
             issuer: "{{ issuerId }}"
             public_key: "{{ publicKeyJwk }}"
@@ -53,13 +53,12 @@ scenarios:
       - function: "loadTestData"
       - function: "selectRandomToken"
       - function: "generateUUID"
-      - post:
-          url: "/statuslists/publish"
+      - put:
+          url: "/api/v1/status-lists/{{ listId }}/statuses"
           headers:
             Authorization: "Bearer {{ token }}"
           json:
-            list_id: "{{ listId }}"
-            status:
+            statuses:
               - index: 1
                 status: "VALID"
               - index: 2
@@ -78,13 +77,12 @@ scenarios:
       - function: "selectRandomToken"
       - function: "generateUUID"
       # First publish
-      - post:
-          url: "/statuslists/publish"
+      - put:
+          url: "/api/v1/status-lists/{{ listId }}/statuses"
           headers:
             Authorization: "Bearer {{ token }}"
           json:
-            list_id: "{{ listId }}"
-            status:
+            statuses:
               - index: 1
                 status: "VALID"
           expect:
@@ -92,12 +90,11 @@ scenarios:
       # Then update
       - think: 0.5
       - patch:
-          url: "/statuslists/update"
+          url: "/api/v1/status-lists/{{ listId }}/statuses"
           headers:
             Authorization: "Bearer {{ token }}"
           json:
-            list_id: "{{ listId }}"
-            status:
+            statuses:
               - index: 1
                 status: "INVALID"
               - index: 2
@@ -111,12 +108,11 @@ scenarios:
     weight: 15
     flow:
       - function: "generateUUID"
-      - post:
-          url: "/statuslists/publish"
+      - put:
+          url: "/api/v1/status-lists/{{ listId }}/statuses"
           # NO Authorization header
           json:
-            list_id: "{{ listId }}"
-            status:
+            statuses:
               - index: 0
                 status: "VALID"
           expect:

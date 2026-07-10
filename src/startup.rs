@@ -2,7 +2,7 @@ use axum::{
     Router,
     middleware::from_fn_with_state,
     response::IntoResponse,
-    routing::{get, patch, post},
+    routing::{get, patch, post, put},
 };
 use color_eyre::eyre::Context;
 use hyper::Method;
@@ -39,15 +39,20 @@ pub struct HttpServer {
 impl HttpServer {
     pub async fn new(config: &Config, state: AppState) -> color_eyre::Result<Self> {
         let cors = CorsLayer::new()
-            .allow_methods([Method::GET, Method::POST, Method::OPTIONS])
+            .allow_methods([
+                Method::GET,
+                Method::POST,
+                Method::PUT,
+                Method::PATCH,
+                Method::OPTIONS,
+            ])
             .allow_origin(Any)
             .allow_headers(Any);
 
         let mut router = Router::new()
             .route("/", get(welcome))
             .route("/health", get(health_check))
-            .route("/credentials", post(credential_handler))
-            .nest("/statuslists", status_list_routes(state.clone()))
+            .nest("/api/v1", api_v1_routes(state.clone()))
             .layer(TraceLayer::new_for_http())
             .layer(CatchPanicLayer::new())
             .layer(cors)
@@ -71,15 +76,21 @@ impl HttpServer {
     }
 }
 
-fn status_list_routes(state: AppState) -> Router<AppState> {
-    let protected_routes = Router::new()
-        .route("/publish", post(publish_status))
-        .route("/update", patch(update_status))
+/// Management API v1 routes.
+fn api_v1_routes(state: AppState) -> Router<AppState> {
+    let protected = Router::new()
+        .nest(
+            "/status-lists/{list_id}/statuses",
+            Router::new()
+                .route("/", put(publish_status))
+                .route("/", patch(update_status)),
+        )
         .route_layer(from_fn_with_state(state.clone(), auth));
 
     Router::new()
-        .merge(protected_routes)
-        .route("/{list_id}", get(get_status_list))
+        .merge(protected)
+        .route("/credentials", post(credential_handler))
+        .route("/status-lists/{list_id}", get(get_status_list))
 }
 
 fn attach_metrics(router: Router, config: &Config) -> Router {
