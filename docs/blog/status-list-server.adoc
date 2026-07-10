@@ -89,7 +89,7 @@ curl -s http://localhost:8000/
 - `POST /api/v1/credentials` → register an issuer’s public key (JWK)
 - `PUT /api/v1/status-lists/{list_id}/statuses` (auth) → create a status list
 - `PATCH /api/v1/status-lists/{list_id}/statuses` (auth) → update a status list
-- `GET /statuslists/{list_id}` (public) → gzip-compressed JWT or CWT
+- `GET /api/v1/status-lists/{list_id}` (public) → gzip-compressed JWT or CWT
 
 === Data model (high level)
 

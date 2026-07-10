@@ -48,7 +48,7 @@
     "sub": "user123",
     "status": {
       "status_list": {
-        "url": "https://statuslist.example.com/statuslists/1",
+        "url": "https://statuslist.example.com/api/v1/status-lists/1",
         "index": 42
       }
     }
@@ -60,7 +60,7 @@
   ```json
   {
     "iss": "https://issuer.example.com",
-    "sub": "https://statuslist.example.com/statuslists/1",
+    "sub": "https://statuslist.example.com/api/v1/status-lists/1",
     "status_list": {
       "bits": 1,
       "lst": "eyJhbGciOiJFUzI1NiIsImtpZCI6IjEyIiwidHlwIjoic3RhdHVzbGlzdCtqd3QifQ..."

@@ -106,16 +106,10 @@ pub struct StatusList {
     pub lst: String,
 }
 
-/// Request payload for creating a new status list
+/// Request payload for creating or updating status entries in a status list.
 #[derive(Deserialize)]
-pub struct CreateStatusRequest {
-    pub status: Vec<StatusEntry>,
-}
-
-/// Request payload for updating status entries in an existing status list
-#[derive(Deserialize)]
-pub struct UpdateStatusRequest {
-    pub status: Vec<StatusEntry>,
+pub struct StatusesRequest {
+    pub statuses: Vec<StatusEntry>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

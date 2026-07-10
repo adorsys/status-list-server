@@ -105,7 +105,7 @@ See the sections below for a quick overview of each endpoint.
 
   ```json
   {
-    "status": [
+    "statuses": [
       { "index": 1, "status": "INVALID" },
       { "index": 8, "status": "VALID" }
     ]
@@ -113,6 +113,7 @@ See the sections below for a quick overview of each endpoint.
   ```
 
   - `index`: Position in the status list
+  - `statuses`: Status entries to publish
   - `status`: Status value (VALID, INVALID, SUSPENDED)
 
 ### Update Status List
@@ -126,7 +127,7 @@ See the sections below for a quick overview of each endpoint.
 
   ```json
   {
-    "status": [
+    "statuses": [
       {
         "index": 1,
         "status": "VALID"
@@ -139,7 +140,7 @@ See the sections below for a quick overview of each endpoint.
   }
   ```
 
-  - `status`: Array of status updates
+  - `statuses`: Array of status updates
     - `index`: Position in the status list
     - `status`: New status value (VALID, INVALID, SUSPENDED)
 
@@ -153,7 +154,7 @@ See the sections below for a quick overview of each endpoint.
 
 ### Retrieve Status List
 
-- **Endpoint:** `GET /statuslists/{list_id}`
+- **Endpoint:** `GET /api/v1/status-lists/{list_id}`
 - **Description:** Retrieves the current status list for the requested `list_id`. This endpoint is publicly accessible with no authentication required.
 - **Headers:**
   - `Accept`: Specifies the desired response format

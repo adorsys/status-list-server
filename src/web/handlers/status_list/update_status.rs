@@ -6,7 +6,7 @@ use axum::{
 use hyper::StatusCode;
 
 use crate::{
-    models::UpdateStatusRequest,
+    models::StatusesRequest,
     utils::{
         bits_validation::BitFlag, errors::Error, lst_gen::update_status_list, state::AppState,
     },
@@ -19,7 +19,7 @@ pub async fn update_status(
     State(appstate): State<AppState>,
     Extension(issuer): Extension<String>,
     Path(list_id): Path<String>,
-    Json(payload): Json<UpdateStatusRequest>,
+    Json(payload): Json<StatusesRequest>,
 ) -> Result<impl IntoResponse, StatusListError> {
     // Validate list_id as UUID
     if let Err(e) = uuid::Uuid::try_parse(&list_id) {
@@ -29,12 +29,16 @@ pub async fn update_status(
     let store = &appstate.status_list_repo;
 
     // Fetch the existing token
-    let record = store.find_one_by(&list_id).await.map_err(|e| {
+    let record = store
+        .find_one_by(&list_id)
+        .await
+        .map_err(|e| {
             tracing::error!(error = ?e, list_id = ?list_id, "Database query failed for status list.");
             StatusListError::InternalServerError
-        })?.ok_or(StatusListError::StatusListNotFound)?;
+        })?
+        .ok_or(StatusListError::StatusListNotFound)?;
 
-    // check if the request issuer matches the token issuer
+    // Check if the request issuer matches the token issuer
     if record.issuer != issuer {
         tracing::error!(
             "Issuer mismatch: expected {}, got {}",
@@ -56,7 +60,7 @@ pub async fn update_status(
     // Update the status list
     let updated_lst = update_status_list(
         record.status_list.lst.clone(),
-        payload.status.clone(),
+        payload.statuses,
         bits.value(),
     )
     .map_err(|e| {
@@ -107,7 +111,7 @@ mod test {
 
     use crate::{
         models::{
-            Status, StatusEntry, StatusList, StatusListRecord, UpdateStatusRequest, status_lists,
+            Status, StatusEntry, StatusList, StatusListRecord, StatusesRequest, status_lists,
         },
         test_utils::test_app_state,
         utils::lst_gen::create_status_list,
@@ -117,7 +121,7 @@ mod test {
     async fn test_update_token_status_invalid_list_id() {
         let appstate = test_app_state(None).await;
         let issuer = "test-issuer".to_string();
-        let payload = UpdateStatusRequest { status: vec![] };
+        let payload = StatusesRequest { statuses: vec![] };
 
         let result = update_status(
             State(appstate.clone()),
@@ -161,8 +165,8 @@ mod test {
         };
 
         // Update payload that flips status at index 1 to INVALID
-        let update_payload = UpdateStatusRequest {
-            status: vec![StatusEntry {
+        let update_payload = StatusesRequest {
+            statuses: vec![StatusEntry {
                 index: 1,
                 status: Status::INVALID,
             }],
