@@ -14,7 +14,7 @@ identified by its `issuer` value, which acts as the primary key.
 | Column       | Type | Null | Key | Description                           |
 |--------------|------|------|-----|---------------------------------------|
 | `issuer`     | TEXT | NO   | PK  | Unique identifier for the issuer      |
-| `public_key` | JSON | NO   |     | Public key associated with the issuer |
+| `public_key` | JSONB | NO   |     | Public key associated with the issuer |
 
 ### `status_lists`
 
@@ -25,8 +25,8 @@ by its `list_id`, which acts as the primary key.
 |---------------|------|------|-----|-----------------------------------------------------|
 | `list_id`     | TEXT | NO   | PK  | Unique identifier for the status list               |
 | `issuer`      | TEXT | NO   | FK  | References `credentials.issuer` (ON DELETE CASCADE) |
-| `status_list` | JSON | NO   |     | The status list entry                               |
-| `sub`         | TEXT | NO   |     | Unique string identifier for the Status List Token  |
+| `status_list` | JSONB | NO   |     | The status list entry                               |
+| `sub`         | TEXT | NO   |     | String identifier for the Status List Token         |
 
 #### Indexes
 
@@ -44,15 +44,15 @@ The following indexes are created on the `status_lists` table to speed up lookup
 erDiagram
     credentials {
         TEXT issuer PK "Unique identifier for the issuer"
-        JSON public_key "Public key associated with the issuer"
+        JSONB public_key "Public key associated with the issuer"
     }
     status_lists {
         TEXT list_id PK "Unique identifier for the status list"
         TEXT issuer FK "References credentials.issuer"
-        JSON status_list "The status list entry"
-        TEXT sub "Status List Token identifier"
+        JSONB status_list "The status list entry"
+        TEXT sub "String identifier for the Status List Token"
     }
-    credentials ||--o{ status_lists : "issuer (ON DELETE CASCADE, ON UPDATE CASCADE)"
+    credentials ||--|{ status_lists : "issuer (ON DELETE CASCADE, ON UPDATE CASCADE)"
 ```
 
 ## Notes
