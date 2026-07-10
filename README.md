@@ -16,6 +16,23 @@ It supports both **JWT** and **CWT** formats, with cryptographic signing using m
 
 For a detailed explanation of the architecture, see the [Architecture Documentation](docs/architecture.md).
 
+## Feature Implementation Status
+
+| Feature | Status | Notes |
+|---------|--------|-------|
+| Issuer Registration | ✅ Implemented | Public key registration via `/credentials/` |
+| Status List Publishing | ✅ Implemented | JWT-signed publishing via `/statuslists/publish` |
+| Status List Updates | ✅ Implemented | Partial updates via `/statuslists/update` |
+| JWT Status List Format | ✅ Implemented | JWS Compact Serialization with `exp`/`ttl` |
+| CWT Status List Format | ⚠️ Partial | COSE_Sign1 serialization needs verification |
+| Gzip Compression | ⚠️ Partial | Applied to JWT; spec makes optional for CWT |
+| HTTP Content Negotiation | ⚠️ Partial | Basic support; RFC 9110 pattern matching needs implementation |
+| Historical Resolution (`time=`) | ❌ Not Started | Optional feature for time-based status queries |
+| Status List Aggregation | ❌ Not Started | Fetching from multiple issuers via `aggregation_uri` |
+| X.509 Certificate EKU | ⚠️ Partial | Placeholder OID; rename pending spec finalization |
+
+For detailed spec compliance analysis, see [Spec Compliance Matrix](docs/spec-compliance.md).
+
 ## Quick Start
 
 ### Prerequisites
