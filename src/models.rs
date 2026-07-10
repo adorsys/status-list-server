@@ -123,7 +123,7 @@ impl<'de> Deserialize<'de> for Status {
                 return Err(serde::de::Error::custom(format!(
                     "status value {} is reserved (only 0, 1, 2, or >= 256 allowed)",
                     other
-                )))
+                )));
             }
         })
     }
