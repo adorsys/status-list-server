@@ -7,7 +7,7 @@
 ## Project Feature Implementation Tracker
 
 | Spec Section | Feature | Spec Status | Implementation Status | Changes Required |
-| :--- | :--- | :--- | :--- | :--- |
+| :---         | :---    | :---        | :---                  | :---             |
 | [§1](#section-1) | Introduction – Overview and motivation for OAuth Status List | DRAFT | ✅ | None |
 | [§2](#section-2) | Conventions and Definitions – RFC 2119 key words (MUST, SHOULD, etc.) | DRAFT | ✅ | None |
 | [§3](#section-3) | Terminology – Issuer, Holder, Relying Party, Status, Client definitions | DRAFT | ✅ | None |
