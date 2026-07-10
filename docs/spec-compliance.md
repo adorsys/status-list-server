@@ -1,5 +1,7 @@
 # OAuth Status List Specification Compliance Matrix (Draft 21)
 
+<!-- markdownlint-disable MD060 -->
+
 **Version:** [Draft 21](https://datatracker.ietf.org/doc/html/draft-ietf-oauth-status-list-21)
 **Last Updated:** 2026-07-09
 **Status:** In Progress
