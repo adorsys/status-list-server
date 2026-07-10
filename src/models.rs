@@ -119,10 +119,12 @@ impl<'de> Deserialize<'de> for Status {
             1 => Status::INVALID,
             2 => Status::SUSPENDED,
             n if n >= 256 => Status::ApplicationSpecific(n),
-            other => return Err(serde::de::Error::custom(format!(
-                "status value {} is reserved (only 0, 1, 2, or >= 256 allowed)",
-                other
-            ))),
+            other => {
+                return Err(serde::de::Error::custom(format!(
+                    "status value {} is reserved (only 0, 1, 2, or >= 256 allowed)",
+                    other
+                )))
+            }
         })
     }
 }

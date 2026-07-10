@@ -199,7 +199,8 @@ fn decode_status_array(array: &[u8], bits: usize) -> Result<Vec<Status>, Error> 
             }
             let bits_this_iter = bits_in_current_byte.min(bits - bits_read);
 
-            let extracted = ((array[cur_byte] as u16 >> cur_offset) & ((1u16 << bits_this_iter) - 1)) as u32;
+            let extracted =
+                ((array[cur_byte] as u16 >> cur_offset) & ((1u16 << bits_this_iter) - 1)) as u32;
             value |= extracted << bits_read;
 
             bits_read += bits_this_iter;
@@ -391,7 +392,11 @@ mod tests {
         decoder.read_to_end(&mut decompressed).unwrap();
 
         assert_eq!(result.bits, 9, "Should require 9 bits for value 256");
-        assert_eq!(decompressed.len(), 5, "4 entries * 9 bits = 36 bits = 5 bytes");
+        assert_eq!(
+            decompressed.len(),
+            5,
+            "4 entries * 9 bits = 36 bits = 5 bytes"
+        );
 
         let statuses = decode_status_array(&decompressed, 9).unwrap();
         assert_eq!(statuses[0], Status::VALID);
@@ -612,7 +617,11 @@ mod tests {
         assert!(!raw.is_empty(), "Should have encoded bytes");
 
         let statuses = decode_status_array(&raw, 9).unwrap();
-        assert_eq!(statuses[0], Status::ApplicationSpecific(256), "Round-trip should preserve value");
+        assert_eq!(
+            statuses[0],
+            Status::ApplicationSpecific(256),
+            "Round-trip should preserve value"
+        );
     }
 
     #[test]
@@ -673,8 +682,14 @@ mod tests {
         use serde_json;
 
         assert_eq!(serde_json::from_str::<Status>("0").unwrap(), Status::VALID);
-        assert_eq!(serde_json::from_str::<Status>("1").unwrap(), Status::INVALID);
-        assert_eq!(serde_json::from_str::<Status>("2").unwrap(), Status::SUSPENDED);
+        assert_eq!(
+            serde_json::from_str::<Status>("1").unwrap(),
+            Status::INVALID
+        );
+        assert_eq!(
+            serde_json::from_str::<Status>("2").unwrap(),
+            Status::SUSPENDED
+        );
         assert_eq!(
             serde_json::from_str::<Status>("256").unwrap(),
             Status::ApplicationSpecific(256)
