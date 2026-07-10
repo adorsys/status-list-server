@@ -9,7 +9,6 @@ services:
       POSTGRES_USER: ${POSTGRES_USER:-postgres}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
       POSTGRES_DB: ${POSTGRES_DB:-status-list}
-      POSTGRES_MULTIPLE_EXTENSIONS: uuid-ossp
     volumes:
       - pgdata:/var/lib/postgresql
     healthcheck:
@@ -34,7 +33,7 @@ services:
     volumes:
       - mysqldata:/var/lib/mysql
     healthcheck:
-      test: ["CMD-SHELL", "mysqladmin ping -h localhost"]
+      test: ["CMD-SHELL", "mysqladmin ping -h localhost -u root -p$$MYSQL_ROOT_PASSWORD"]
       interval: 5s
       timeout: 5s
       retries: 5

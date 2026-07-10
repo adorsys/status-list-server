@@ -4,7 +4,7 @@ use crate::{
         challenge::{AwsRoute53DnsUpdater, Dns01Handler},
         storage::{AwsS3, AwsSecretsManager, Redis},
     },
-    config::{Config as AppConfig, DatabaseBackend},
+    config::Config as AppConfig,
     database::{Migrator, queries::SeaOrmStore},
     models::{Credentials, StatusListRecord},
 };
@@ -36,11 +36,27 @@ pub struct AppState {
 
 pub async fn build_state(config: &AppConfig) -> EyeResult<AppState> {
     let db_url = config.database.url.expose_secret();
-    if config.database.backend == DatabaseBackend::Sqlite && !db_url.starts_with("sqlite:") {
+    let db_backend = config.database.backend;
+    let db_scheme = db_backend.db_scheme();
+
+    let url_ok = match db_backend {
+        crate::config::DatabaseBackend::Postgres => {
+            db_url.starts_with("postgres://") || db_url.starts_with("postgresql://")
+        }
+        crate::config::DatabaseBackend::MySql | crate::config::DatabaseBackend::Mariadb => {
+            db_url.starts_with("mysql://")
+        }
+        crate::config::DatabaseBackend::Sqlite => db_url.starts_with("sqlite:"),
+    };
+
+    if !url_ok {
         return Err(color_eyre::eyre::eyre!(
-            "SQLite URL must start with 'sqlite:'"
+            "URL scheme does not match configured backend {:?}. Expected URL starting with '{}://'",
+            db_backend.as_destination_db(),
+            db_scheme
         ));
     }
+
     let db = Database::connect(db_url)
         .await
         .wrap_err("Failed to connect to database")?;

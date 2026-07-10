@@ -20,12 +20,19 @@ pub enum DatabaseBackend {
 }
 
 impl DatabaseBackend {
-    pub fn url_scheme(&self) -> &'static str {
+    pub fn db_scheme(&self) -> &'static str {
         match self {
-            DatabaseBackend::Postgres => "postgres",
+            DatabaseBackend::Postgres | DatabaseBackend::Mariadb => "mysql",
             DatabaseBackend::MySql => "mysql",
             DatabaseBackend::Sqlite => "sqlite",
-            DatabaseBackend::Mariadb => "mariadb",
+        }
+    }
+
+    pub fn as_destination_db(&self) -> sea_orm::DbBackend {
+        match self {
+            DatabaseBackend::Postgres => sea_orm::DbBackend::Postgres,
+            DatabaseBackend::MySql | DatabaseBackend::Mariadb => sea_orm::DbBackend::MySql,
+            DatabaseBackend::Sqlite => sea_orm::DbBackend::Sqlite,
         }
     }
 }
@@ -372,14 +379,14 @@ mod tests {
 
     #[sealed_test(env = [
         ("APP_DATABASE__BACKEND", "mariadb"),
-        ("APP_DATABASE__URL", "mariadb://user:password@localhost:3306/status-list"),
+        ("APP_DATABASE__URL", "mysql://user:password@localhost:3306/status-list"),
     ])]
     fn test_mariadb_backend_config() {
         let config = Config::load().expect("Failed to load config");
         assert_eq!(config.database.backend, DatabaseBackend::Mariadb);
         assert_eq!(
             config.database.url.expose_secret(),
-            "mariadb://user:password@localhost:3306/status-list"
+            "mysql://user:password@localhost:3306/status-list"
         );
     }
 
@@ -409,11 +416,19 @@ mod tests {
     }
 
     #[test]
-    fn test_database_backend_url_scheme() {
-        assert_eq!(DatabaseBackend::Postgres.url_scheme(), "postgres");
-        assert_eq!(DatabaseBackend::MySql.url_scheme(), "mysql");
-        assert_eq!(DatabaseBackend::Sqlite.url_scheme(), "sqlite");
-        assert_eq!(DatabaseBackend::Mariadb.url_scheme(), "mariadb");
+    fn test_database_backend_db_scheme() {
+        assert_eq!(DatabaseBackend::Postgres.db_scheme(), "mysql");
+        assert_eq!(DatabaseBackend::MySql.db_scheme(), "mysql");
+        assert_eq!(DatabaseBackend::Sqlite.db_scheme(), "sqlite");
+        assert_eq!(DatabaseBackend::Mariadb.db_scheme(), "mysql");
+    }
+
+    #[test]
+    fn test_database_backend_destination() {
+        assert_eq!(DatabaseBackend::Postgres.as_destination_db(), sea_orm::DbBackend::Postgres);
+        assert_eq!(DatabaseBackend::MySql.as_destination_db(), sea_orm::DbBackend::MySql);
+        assert_eq!(DatabaseBackend::Sqlite.as_destination_db(), sea_orm::DbBackend::Sqlite);
+        assert_eq!(DatabaseBackend::Mariadb.as_destination_db(), sea_orm::DbBackend::MySql);
     }
 
     #[test]
