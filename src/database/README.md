@@ -1,15 +1,12 @@
 # Database Overview
 
-This document provides an overview of the database schema, including its tables,
-columns, indexes, and the relationships between them. The schema is defined by the
-SeaORM migrations in [`mod.rs`](./mod.rs) and the entity models in [`../models.rs`](../models.rs).
+This document provides an overview of the database schema, including its tables and columns.
 
 ## Tables
 
 ### `credentials`
 
-Stores information about issuers and their cryptographic public keys. Each issuer is
-identified by its `issuer` value, which acts as the primary key.
+Stores information about issuers and their cryptographic public keys.
 
 | Column       | Type  | Null | Key | Description                           |
 | ------------ | ----- | ---- | --- | ------------------------------------- |
@@ -54,11 +51,3 @@ erDiagram
     }
     credentials ||--|{ status_lists : "issuer (ON DELETE CASCADE, ON UPDATE CASCADE)"
 ```
-
-## Notes
-
-- Neither table has an auto-incrementing `id` column. The primary keys are the
-  natural keys `credentials.issuer` and `status_lists.list_id`, matching the
-  SeaORM migrations.
-- `status_lists.issuer` references `credentials.issuer` via the
-  `fk_status_lists_issuer` foreign key, which cascades on both delete and update.
