@@ -35,34 +35,73 @@ pub async fn get_status_list(
     headers: HeaderMap,
 ) -> Result<impl IntoResponse + Debug + use<>, StatusListError> {
     let accept = headers.get(header::ACCEPT).and_then(|h| h.to_str().ok());
+    let client_accepts_gzip = client_accepts_gzip(&headers);
 
     // build the token depending on the accept header
     match accept {
         None =>
         // assume jwt by default if no accept header is provided
         {
-            build_status_list_token(ACCEPT_STATUS_LISTS_HEADER_JWT, &list_id, &state).await
+            build_status_list_token(
+                ACCEPT_STATUS_LISTS_HEADER_JWT,
+                &list_id,
+                &state,
+                client_accepts_gzip,
+            )
+            .await
         }
         Some(accept)
             if accept == ACCEPT_STATUS_LISTS_HEADER_JWT
                 || accept == ACCEPT_STATUS_LISTS_HEADER_CWT =>
         {
-            build_status_list_token(accept, &list_id, &state).await
+            build_status_list_token(accept, &list_id, &state, client_accepts_gzip).await
         }
         Some(_) => Err(StatusListError::InvalidAcceptHeader),
     }
+}
+
+/// Parses the request's `Accept-Encoding` header (RFC 9110 content negotiation)
+/// and reports whether the client has advertised support for gzip.
+///
+/// Returns `false` when the header is absent, so responses are only compressed
+/// when the client has explicitly opted in (see draft-21 §8.2).
+fn client_accepts_gzip(headers: &HeaderMap) -> bool {
+    headers
+        .get(header::ACCEPT_ENCODING)
+        .and_then(|h| h.to_str().ok())
+        .is_some_and(|val| {
+            val.split(',')
+                .map(|s| {
+                    let s = s.trim();
+                    let (coding, params) = s
+                        .split_once(';')
+                        .map(|(c, p)| (c.trim(), p.trim()))
+                        .unwrap_or((s, ""));
+                    let q = params
+                        .split(';')
+                        .find_map(|p| p.trim().strip_prefix("q=").map(|q| q.trim()))
+                        .and_then(|q| q.parse::<f32>().ok());
+                    (coding, q)
+                })
+                .any(|(coding, q)| {
+                    (coding.eq_ignore_ascii_case("gzip") || coding == "*")
+                        && (q.is_none() || q > Some(0.0))
+                })
+        })
 }
 
 async fn build_status_list_token(
     accept: &str,
     list_id: &str,
     state: &AppState,
+    client_accepts_gzip: bool,
 ) -> Result<impl IntoResponse + Debug + use<>, StatusListError> {
     // Check cache for status list record
     if let Some(cached_record) = state.cache.get(list_id).await {
         tracing::info!("Cache hit for status list record: {list_id}");
         // Record is in cache, proceed with building the response
-        return build_response_from_record(accept, &cached_record, state).await;
+        return build_response_from_record(accept, &cached_record, state, client_accepts_gzip)
+            .await;
     }
 
     tracing::info!("Cache miss for status list token: {list_id}");
@@ -83,13 +122,14 @@ async fn build_status_list_token(
         .insert(list_id.to_string(), status_record.clone())
         .await;
 
-    build_response_from_record(accept, &status_record, state).await
+    build_response_from_record(accept, &status_record, state, client_accepts_gzip).await
 }
 
 async fn build_response_from_record(
     accept: &str,
     status_record: &StatusListRecord,
     state: &AppState,
+    client_accepts_gzip: bool,
 ) -> Result<impl IntoResponse + Debug + use<>, StatusListError> {
     // Get the certificate chain
     let certs_parts = state
@@ -117,7 +157,9 @@ async fn build_response_from_record(
     let token_exp_secs = state.token_exp_secs;
     let token_ttl_secs = state.token_ttl_secs;
 
-    let compressed_token = tokio::task::spawn_blocking(move || {
+    let should_gzip = client_accepts_gzip && accept_header == ACCEPT_STATUS_LISTS_HEADER_JWT;
+
+    let (body, gzipped) = tokio::task::spawn_blocking(move || {
         let keypair = Keypair::from_pkcs8_pem(&signing_key_pem).map_err(|e| {
             tracing::error!("Failed to parse server key: {e:?}");
             StatusListError::InternalServerError
@@ -143,16 +185,20 @@ async fn build_response_from_record(
             .into_bytes(),
         };
 
-        let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
-        encoder.write_all(&token_bytes).map_err(|err| {
-            tracing::error!("Failed to compress payload: {err:?}");
-            StatusListError::InternalServerError
-        })?;
-
-        encoder.finish().map_err(|err| {
-            tracing::error!("Failed to finish compression: {err:?}");
-            StatusListError::InternalServerError
-        })
+        if should_gzip {
+            let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+            encoder.write_all(&token_bytes).map_err(|err| {
+                tracing::error!("Failed to compress payload: {err:?}");
+                StatusListError::InternalServerError
+            })?;
+            let compressed = encoder.finish().map_err(|err| {
+                tracing::error!("Failed to finish compression: {err:?}");
+                StatusListError::InternalServerError
+            })?;
+            Ok::<(Vec<u8>, bool), StatusListError>((compressed, true))
+        } else {
+            Ok((token_bytes, false))
+        }
     })
     .await
     .map_err(|err| {
@@ -160,15 +206,21 @@ async fn build_response_from_record(
         StatusListError::InternalServerError
     })??;
 
-    Ok((
-        StatusCode::OK,
-        [
-            (header::CONTENT_TYPE, accept),
-            (header::CONTENT_ENCODING, GZIP_HEADER),
-        ],
-        compressed_token,
-    )
-        .into_response())
+    let response = if gzipped {
+        (
+            StatusCode::OK,
+            [
+                (header::CONTENT_TYPE, accept),
+                (header::CONTENT_ENCODING, GZIP_HEADER),
+            ],
+            body,
+        )
+            .into_response()
+    } else {
+        (StatusCode::OK, [(header::CONTENT_TYPE, accept)], body).into_response()
+    };
+
+    Ok(response)
 }
 
 // Function to create a CWT per the specification
@@ -388,6 +440,7 @@ mod tests {
             http::header::ACCEPT,
             ACCEPT_STATUS_LISTS_HEADER_JWT.parse().unwrap(),
         );
+        headers.insert(http::header::ACCEPT_ENCODING, "gzip".parse().unwrap());
 
         let response = get_status_list(
             State(app_state.clone()),
@@ -434,6 +487,76 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_get_status_list_jwt_no_gzip_when_client_does_not_accept() {
+        let mock_db = MockDatabase::new(DatabaseBackend::Postgres);
+        let status_list = StatusList {
+            bits: 8,
+            lst: encode_compressed(&[0, 0, 0]).unwrap(),
+        };
+        let status_list_token = StatusListRecord {
+            list_id: "test_list".to_string(),
+            issuer: "issuer1".to_string(),
+            status_list,
+            sub: "test_subject".to_string(),
+        };
+        let db_conn = Arc::new(
+            mock_db
+                .append_query_results::<status_lists::Model, Vec<_>, _>(vec![vec![
+                    status_list_token,
+                ]])
+                .into_connection(),
+        );
+
+        let app_state = test_app_state(Some(db_conn.clone())).await;
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            http::header::ACCEPT,
+            ACCEPT_STATUS_LISTS_HEADER_JWT.parse().unwrap(),
+        );
+        // No Accept-Encoding header: the client did not advertise gzip support.
+
+        let response = get_status_list(
+            State(app_state.clone()),
+            Path("test_list".to_string()),
+            headers,
+        )
+        .await
+        .unwrap()
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let headers = response.headers();
+        assert!(
+            headers.get(http::header::CONTENT_ENCODING).is_none(),
+            "Content-Encoding must not be present when gzip was not applied"
+        );
+
+        let body_bytes = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+        let body_str = std::str::from_utf8(&body_bytes).unwrap();
+
+        let signing_key_pem = app_state.cert_manager.signing_key_pem().await.unwrap();
+        let keypair = Keypair::from_pkcs8_pem(&signing_key_pem).unwrap();
+        let decoding_key_pem = keypair
+            .verifying_key()
+            .to_public_key_pem(LineEnding::default())
+            .unwrap()
+            .into_bytes();
+        let decoding_key = DecodingKey::from_ec_pem(&decoding_key_pem).unwrap();
+        let mut validation = Validation::new(jsonwebtoken::Algorithm::ES256);
+        validation.validate_exp = false;
+        let token_data =
+            jsonwebtoken::decode::<StatusListToken>(body_str, &decoding_key, &validation).unwrap();
+
+        assert_eq!(token_data.claims.sub, "test_subject");
+        assert_eq!(token_data.claims.status_list.bits, 8);
+        assert_eq!(
+            token_data.claims.status_list.lst,
+            encode_compressed(&[0, 0, 0]).unwrap()
+        );
+    }
+
+    #[tokio::test]
     async fn test_get_status_list_success_cwt() {
         let mock_db = MockDatabase::new(DatabaseBackend::Postgres);
         let status_list = StatusList {
@@ -461,6 +584,10 @@ mod tests {
             http::header::ACCEPT,
             ACCEPT_STATUS_LISTS_HEADER_CWT.parse().unwrap(),
         );
+        // Even though the client advertises gzip support, CWT responses must
+        // never be gzipped (draft-21 §8.2 recommends Content-Encoding only for
+        // JWT-format tokens).
+        headers.insert(http::header::ACCEPT_ENCODING, "gzip".parse().unwrap());
 
         let response = get_status_list(
             State(app_state.clone()),
@@ -473,12 +600,12 @@ mod tests {
 
         assert_eq!(response.status(), StatusCode::OK);
         let headers = response.headers();
-        assert_eq!(headers.get(http::header::CONTENT_ENCODING).unwrap(), "gzip");
+        assert!(
+            headers.get(http::header::CONTENT_ENCODING).is_none(),
+            "CWT responses must never be gzipped"
+        );
 
-        let compressed_body_bytes = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
-        let mut decoder = flate2::read::GzDecoder::new(&compressed_body_bytes[..]);
-        let mut body_bytes = Vec::new();
-        decoder.read_to_end(&mut body_bytes).unwrap();
+        let body_bytes = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
 
         // Tagged decode: the CWT MUST be COSE_Sign1_Tagged (CBOR tag 18) per §5.2.
         let cwt = CoseSign1::from_tagged_slice(&body_bytes).unwrap();
