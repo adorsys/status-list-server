@@ -73,7 +73,7 @@ By default, the server will listen on `http://localhost:8000`. You can modify th
 
 ### Register Issuer
 
-- **Endpoint**: `POST /credentials/`
+- **Endpoint**: `POST /api/v1/credentials`
 - **Description**: Allows issuers to register their public key and identifier for later authentication
 - **Request Body**
 
@@ -89,15 +89,16 @@ By default, the server will listen on `http://localhost:8000`. You can modify th
 
 ### Publish Status List
 
-- **Endpoint**: `POST /statuslists/publish`
+- **Endpoint**: `PUT /api/v1/status-lists/{list_id}/statuses`
 - **Description**: Allows an issuer to publish their status lists
 - **Authorization**: Requires a valid signed JWT Bearer token with the private key corresponding to the registered public key
+- **Path Parameters:**
+  - `list_id`: UUID of the status list to create
 - **Request Body**
 
   ```json
   {
-    "list_id": "30202cc6-1e3f-4479-a567-74e86ad73693",
-    "status": [
+    "statuses": [
       { "index": 1, "status": "INVALID" },
       { "index": 8, "status": "VALID" }
     ]
@@ -105,19 +106,21 @@ By default, the server will listen on `http://localhost:8000`. You can modify th
   ```
 
   - `index`: Position in the status list
+  - `statuses`: Status entries to publish
   - `status`: Status value (VALID, INVALID, SUSPENDED)
 
 ### Update Status List
 
-- **Endpoint:** `PATCH /statuslists/update`
+- **Endpoint:** `PATCH /api/v1/status-lists/{list_id}/statuses`
 - **Description:** Allows an issuer to update an existing status list
 - **Authorization:** Requires a valid signed JWT Bearer token with the private key corresponding to the registered public key
+- **Path Parameters:**
+  - `list_id`: UUID of the status list to update
 - **Request Body:**
 
   ```json
   {
-    "list_id": "755a0cf7-8289-4f65-9d24-0e01be92f4a6",
-    "status": [
+    "statuses": [
       {
         "index": 1,
         "status": "VALID"
@@ -130,8 +133,7 @@ By default, the server will listen on `http://localhost:8000`. You can modify th
   }
   ```
 
-  - `list_id`: UUID of the status list to update
-  - `status`: Array of status updates
+  - `statuses`: Array of status updates
     - `index`: Position in the status list
     - `status`: New status value (VALID, INVALID, SUSPENDED)
 
@@ -145,7 +147,7 @@ By default, the server will listen on `http://localhost:8000`. You can modify th
 
 ### Retrieve Status List
 
-- **Endpoint:** `GET /statuslists/{list_id}`
+- **Endpoint:** `GET /api/v1/status-lists/{list_id}`
 - **Description:** Retrieves the current status list for the requested `list_id`. This endpoint is publicly accessible with no authentication required.
 - **Headers:**
   - `Accept`: Specifies the desired response format
@@ -184,7 +186,7 @@ When the optional `APP_SERVER__AGGREGATION_URI` configuration is set, every emit
 
 The server uses JWT-based authentication with the following requirements:
 
-1. Issuers must provide valid public key during registration using the `/credentials/` endpoint
+1. Issuers must provide valid public key during registration using the `/api/v1/credentials` endpoint
 2. All authenticated requests must include a JWT token in the Authorization header:
 
    ```http

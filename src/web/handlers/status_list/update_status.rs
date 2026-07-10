@@ -1,8 +1,12 @@
-use axum::{Extension, Json, extract::State, response::IntoResponse};
+use axum::{
+    Extension, Json,
+    extract::{Path, State},
+    response::IntoResponse,
+};
 use hyper::StatusCode;
 
 use crate::{
-    models::StatusRequest,
+    models::StatusesRequest,
     utils::{
         bits_validation::BitFlag, errors::Error, lst_gen::update_status_list, state::AppState,
     },
@@ -10,26 +14,31 @@ use crate::{
 
 use super::error::StatusListError;
 
-// Handler to update an existing status list token
+/// Update status entries in an existing status list.
 pub async fn update_status(
     State(appstate): State<AppState>,
     Extension(issuer): Extension<String>,
-    Json(payload): Json<StatusRequest>,
+    Path(list_id): Path<String>,
+    Json(payload): Json<StatusesRequest>,
 ) -> Result<impl IntoResponse, StatusListError> {
     // Validate list_id as UUID
-    if let Err(e) = uuid::Uuid::try_parse(&payload.list_id) {
+    if let Err(e) = uuid::Uuid::try_parse(&list_id) {
         return Err(StatusListError::InvalidListId(e.to_string()));
     }
 
     let store = &appstate.status_list_repo;
 
     // Fetch the existing token
-    let record = store.find_one_by(&payload.list_id).await.map_err(|e| {
-            tracing::error!(error = ?e, list_id = ?payload.list_id, "Database query failed for status list.");
+    let record = store
+        .find_one_by(&list_id)
+        .await
+        .map_err(|e| {
+            tracing::error!(error = ?e, list_id = ?list_id, "Database query failed for status list.");
             StatusListError::InternalServerError
-        })?.ok_or(StatusListError::StatusListNotFound)?;
+        })?
+        .ok_or(StatusListError::StatusListNotFound)?;
 
-    // check if the request issuer matches the token issuer
+    // Check if the request issuer matches the token issuer
     if record.issuer != issuer {
         tracing::error!(
             "Issuer mismatch: expected {}, got {}",
@@ -51,7 +60,7 @@ pub async fn update_status(
     // Update the status list
     let updated_lst = update_status_list(
         record.status_list.lst.clone(),
-        payload.status.clone(),
+        payload.statuses,
         bits.value(),
     )
     .map_err(|e| {
@@ -92,12 +101,18 @@ mod test {
     use crate::web::handlers::status_list::error::StatusListError;
     use std::sync::Arc;
 
-    use axum::{Extension, Json, extract::State, response::IntoResponse};
+    use axum::{
+        Extension, Json,
+        extract::{Path, State},
+        response::IntoResponse,
+    };
     use hyper::StatusCode;
     use sea_orm::{DatabaseBackend, MockDatabase};
 
     use crate::{
-        models::{Status, StatusEntry, StatusList, StatusListRecord, StatusRequest, status_lists},
+        models::{
+            Status, StatusEntry, StatusList, StatusListRecord, StatusesRequest, status_lists,
+        },
         test_utils::test_app_state,
         utils::lst_gen::create_status_list,
     };
@@ -106,12 +121,15 @@ mod test {
     async fn test_update_token_status_invalid_list_id() {
         let appstate = test_app_state(None).await;
         let issuer = "test-issuer".to_string();
-        let payload = StatusRequest {
-            list_id: "invalid-uuid".to_string(),
-            status: vec![],
-        };
+        let payload = StatusesRequest { statuses: vec![] };
 
-        let result = update_status(State(appstate.clone()), Extension(issuer), Json(payload)).await;
+        let result = update_status(
+            State(appstate.clone()),
+            Extension(issuer),
+            Path("invalid-uuid".to_string()),
+            Json(payload),
+        )
+        .await;
 
         assert!(matches!(result, Err(StatusListError::InvalidListId(_))));
     }
@@ -148,9 +166,8 @@ mod test {
         };
 
         // Update payload that flips status at index 1 to INVALID
-        let update_payload = StatusRequest {
-            list_id: token_id,
-            status: vec![StatusEntry {
+        let update_payload = StatusesRequest {
+            statuses: vec![StatusEntry {
                 index: 1,
                 status: Status::INVALID,
             }],
@@ -169,6 +186,7 @@ mod test {
         let response = update_status(
             State(app_state),
             Extension("issuer".to_string()),
+            Path(token_id),
             Json(update_payload),
         )
         .await

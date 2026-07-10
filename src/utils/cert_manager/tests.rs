@@ -225,7 +225,7 @@ async fn test_certificate_storage_and_retrieval() {
     assert!(cert.is_none());
 
     // Store the certificate manually
-    let serialized = include_str!("../../test_resources/cert_data.json");
+    let serialized = include_str!("../../../test_data/cert_data.json");
     let cert_data: CertificateData = serde_json::from_str(serialized).unwrap();
 
     let cert_key = manager.cert_key();
@@ -313,7 +313,7 @@ async fn test_cert_chain_parts() {
     .with_cert_storage(cert_storage.clone());
 
     // there are 2 parts in the certificate chain
-    let serialized = include_str!("../../test_resources/cert_data.json");
+    let serialized = include_str!("../../../test_data/cert_data.json");
     cert_storage
         .store("certs-example.com-cert_data.json", serialized)
         .await

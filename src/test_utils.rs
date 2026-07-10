@@ -50,12 +50,12 @@ pub async fn test_app_state_with(
         MockDatabase::new(DbBackend::Postgres).into_connection(),
     ));
 
-    let key_pem = include_str!("test_resources/ec-private.pem").to_string();
+    let key_pem = include_str!("../test_data/ec-private.pem").to_string();
     let secrets_storage = MockStorage {
         key_value: HashMap::from([("keys-test.com".to_string(), key_pem)]),
     };
 
-    let cert_data = include_str!("test_resources/cert_data.json").to_string();
+    let cert_data = include_str!("../test_data/cert_data.json").to_string();
     let cert_storage = MockStorage {
         key_value: HashMap::from([("certs-test.com-cert_data.json".to_string(), cert_data)]),
     };
