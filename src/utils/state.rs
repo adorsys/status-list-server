@@ -4,7 +4,7 @@ use crate::{
         challenge::{AwsRoute53DnsUpdater, Dns01Handler},
         storage::{AwsS3, AwsSecretsManager, Redis},
     },
-    config::Config as AppConfig,
+    config::{Config as AppConfig, DatabaseBackend},
     database::{Migrator, queries::SeaOrmStore},
     models::{Credentials, StatusListRecord},
 };
@@ -35,7 +35,13 @@ pub struct AppState {
 }
 
 pub async fn build_state(config: &AppConfig) -> EyeResult<AppState> {
-    let db = Database::connect(config.database.url.expose_secret())
+    let db_url = config.database.url.expose_secret();
+    if config.database.backend == DatabaseBackend::Sqlite && !db_url.starts_with("sqlite:") {
+        return Err(color_eyre::eyre::eyre!(
+            "SQLite URL must start with 'sqlite:'"
+        ));
+    }
+    let db = Database::connect(db_url)
         .await
         .wrap_err("Failed to connect to database")?;
 

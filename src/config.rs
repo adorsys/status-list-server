@@ -9,6 +9,40 @@ use secrecy::{ExposeSecret, SecretString};
 use serde::Deserialize;
 use serde_aux::field_attributes::deserialize_vec_from_string_or_vec;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DatabaseBackend {
+    #[default]
+    Postgres,
+    MySql,
+    Sqlite,
+    Mariadb,
+}
+
+impl DatabaseBackend {
+    pub fn url_scheme(&self) -> &'static str {
+        match self {
+            DatabaseBackend::Postgres => "postgres",
+            DatabaseBackend::MySql => "mysql",
+            DatabaseBackend::Sqlite => "sqlite",
+            DatabaseBackend::Mariadb => "mariadb",
+        }
+    }
+}
+
+impl std::str::FromStr for DatabaseBackend {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "postgres" => Ok(DatabaseBackend::Postgres),
+            "mysql" => Ok(DatabaseBackend::MySql),
+            "sqlite" => Ok(DatabaseBackend::Sqlite),
+            "mariadb" => Ok(DatabaseBackend::Mariadb),
+            _ => Err(format!("Unknown database backend: {s}")),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct Config {
     pub server: ServerConfig,
@@ -52,6 +86,8 @@ pub struct RedisConfig {
 #[derive(Debug, Clone, Deserialize)]
 pub struct DatabaseConfig {
     pub url: SecretString,
+    #[serde(default)]
+    pub backend: DatabaseBackend,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -148,6 +184,7 @@ impl Config {
                 "database.url",
                 "postgres://postgres:postgres@localhost:5432/status-list",
             )?
+            .set_default("database.backend", "postgres")?
             .set_default("redis.uri", "redis://localhost:6379")?
             .set_default("redis.require_client_auth", false)?
             .set_default("redis.cert_cache_ttl", 3600)? // Default 1 hour
@@ -198,6 +235,7 @@ mod tests {
             config.database.url.expose_secret(),
             "postgres://postgres:postgres@localhost:5432/status-list"
         );
+        assert_eq!(config.database.backend, DatabaseBackend::Postgres);
         assert_eq!(config.redis.uri.expose_secret(), "redis://localhost:6379");
         assert!(!config.redis.require_client_auth);
         assert_eq!(config.server.cert.email, "admin@example.com");
@@ -218,6 +256,7 @@ mod tests {
         ("APP_SERVER__HOST", "0.0.0.0"),
         ("APP_SERVER__PORT", "5002"),
         ("APP_DATABASE__URL", "postgres://user:password@localhost:5432/status-list"),
+        ("APP_DATABASE__BACKEND", "postgres"),
         ("APP_REDIS__URI", "rediss://user:password@localhost:6379/redis"),
         ("APP_REDIS__REQUIRE_CLIENT_AUTH", "true"),
         ("APP_SERVER__CERT__EMAIL", "test@gmail.com"),
