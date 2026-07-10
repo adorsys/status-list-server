@@ -422,4 +422,3 @@ mod tests {
         assert_eq!(backend, DatabaseBackend::Postgres);
     }
 }
-}

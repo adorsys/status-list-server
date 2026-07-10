@@ -3,6 +3,7 @@
 .debug/
 .vscode/
 cert.yml
+.kilo/
 tls.crt
 
 ### JupyterNotebooks ###
