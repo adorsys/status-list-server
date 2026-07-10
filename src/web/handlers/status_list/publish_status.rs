@@ -1,7 +1,7 @@
 use crate::{
     models::{StatusList, StatusListRecord, StatusesRequest},
     utils::{errors::Error, lst_gen::create_status_list, state::AppState},
-    web::handlers::status_list::error::StatusListError,
+    web::errors::{ApiError, StatusListError},
 };
 use axum::{
     Extension, Json,
@@ -18,10 +18,9 @@ pub async fn publish_status(
     Extension(issuer): Extension<String>,
     Path(list_id): Path<String>,
     Json(payload): Json<StatusesRequest>,
-) -> Result<impl IntoResponse, StatusListError> {
-    // Validate list_id as UUID
+) -> Result<impl IntoResponse, ApiError> {
     if let Err(e) = uuid::Uuid::try_parse(&list_id) {
-        return Err(StatusListError::InvalidListId(e.to_string()));
+        return Err(StatusListError::InvalidListId(e.to_string()).into());
     }
 
     let store = &appstate.status_list_repo;
@@ -35,14 +34,12 @@ pub async fn publish_status(
         }
     })?;
 
-    // Check for existing token to prevent duplicates
     match store.find_one_by(&list_id).await {
         Ok(Some(_)) => {
-            tracing::info!("Status list {list_id} already exists");
-            Err(StatusListError::StatusListAlreadyExists)
+            tracing::info!("Status list {} already exists", list_id);
+            Err(StatusListError::StatusListAlreadyExists.into())
         }
         Ok(None) => {
-            // Serialize the status list before constructing the token
             let status_list = StatusList {
                 bits: stl.bits,
                 lst: stl.lst,
@@ -55,7 +52,6 @@ pub async fn publish_status(
 
             let updated_at = OffsetDateTime::now_utc().unix_timestamp();
 
-            // Build the new status list token
             let status_list_record = StatusListRecord {
                 list_id: list_id.clone(),
                 issuer,
@@ -64,16 +60,15 @@ pub async fn publish_status(
                 updated_at,
             };
 
-            // Insert the token into the repository
             store.insert_one(status_list_record).await.map_err(|e| {
                 tracing::error!("Failed to insert status list entry: {e:?}");
-                StatusListError::InternalServerError
+                ApiError::internal(e)
             })?;
             Ok(StatusCode::CREATED.into_response())
         }
         Err(e) => {
             tracing::error!(error = ?e, list_id = ?list_id, "Database query failed for status list.");
-            Err(StatusListError::InternalServerError)
+            Err(StatusListError::InternalServerError.into())
         }
     }
 }
@@ -81,7 +76,6 @@ pub async fn publish_status(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::web::handlers::status_list::error::StatusListError;
     use crate::{
         models::{Status, StatusEntry, StatusListRecord, status_lists},
         test_utils::test_app_state,
@@ -104,7 +98,12 @@ mod tests {
         )
         .await;
 
-        assert!(matches!(result, Err(StatusListError::InvalidListId(_))));
+        match result {
+            Err(err) => {
+                assert_eq!(err.into_response().status(), StatusCode::BAD_REQUEST);
+            }
+            Ok(_) => panic!("Expected error but got Ok"),
+        }
     }
 
     #[tokio::test]
@@ -138,6 +137,7 @@ mod tests {
             mock_db
                 .append_query_results::<status_lists::Model, Vec<_>, _>(vec![
                     vec![], // find_one_by in handler returns None
+                    vec![new_token.clone()],
                 ])
                 .append_exec_results(vec![MockExecResult {
                     rows_affected: 1,
@@ -188,41 +188,41 @@ mod tests {
             sub: format!("https://example.com/api/v1/status-lists/{token_id}"),
             updated_at: 0,
         };
-        let db_conn = Arc::new(
-            mock_db
-                .append_query_results::<status_lists::Model, Vec<_>, _>(vec![
-                    vec![],                  // find_one_by in handler returns None
-                    vec![new_token.clone()], // find_one_by in test verification
-                ])
-                .append_exec_results(vec![MockExecResult {
-                    rows_affected: 1,
-                    last_insert_id: 0,
-                }])
-                .into_connection(),
-        );
+         let db_conn = Arc::new(
+             mock_db
+                 .append_query_results::<status_lists::Model, Vec<_>, _>(vec![
+                     vec![],                  // find_one_by in handler returns None
+                     vec![new_token.clone()], // find_one_by in test verification
+                 ])
+                 .append_exec_results(vec![MockExecResult {
+                     rows_affected: 1,
+                     last_insert_id: 0,
+                 }])
+                 .into_connection(),
+         );
 
-        let app_state = test_app_state(Some(db_conn.clone())).await;
+         let app_state = test_app_state(Some(db_conn.clone())).await;
 
-        let _ = publish_status(
-            State(app_state.clone()),
-            Extension("issuer".to_string()),
-            Path(token_id.clone()),
-            Json(StatusesRequest {
-                statuses: status_entries,
-            }),
-        )
-        .await
-        .unwrap();
+         let _ = publish_status(
+             State(app_state.clone()),
+             Extension("issuer".to_string()),
+             Path(token_id.clone()),
+             Json(StatusesRequest {
+                 statuses: status_entries,
+             }),
+         )
+         .await
+         .unwrap();
 
-        let result = app_state
-            .status_list_repo
-            .find_one_by(&token_id)
-            .await
-            .unwrap();
-        assert!(result.is_some());
-        let token = result.unwrap();
-        assert_eq!(token.list_id, token_id);
-        assert_eq!(token.status_list.bits, 2);
+         let result = app_state
+             .status_list_repo
+             .find_one_by(&token_id)
+             .await
+             .unwrap();
+         assert!(result.is_some());
+         let token = result.unwrap();
+         assert_eq!(token.list_id, token_id);
+         assert_eq!(token.status_list.bits, 2);
         assert_eq!(
             token.sub,
             format!("https://example.com/api/v1/status-lists/{token_id}")
@@ -287,41 +287,41 @@ mod tests {
             sub: format!("https://example.com/api/v1/status-lists/{token_id}"),
             updated_at: 0,
         };
-        let db_conn = Arc::new(
-            mock_db
-                .append_query_results::<status_lists::Model, Vec<_>, _>(vec![
-                    vec![],                  // find_one_by in handler returns None
-                    vec![new_token.clone()], // find_one_by in test verification
-                ])
-                .append_exec_results(vec![MockExecResult {
-                    rows_affected: 1,
-                    last_insert_id: 0,
-                }])
-                .into_connection(),
-        );
+         let db_conn = Arc::new(
+             mock_db
+                 .append_query_results::<status_lists::Model, Vec<_>, _>(vec![
+                     vec![],                  // find_one_by in handler returns None
+                     vec![new_token.clone()], // find_one_by in test verification
+                 ])
+                 .append_exec_results(vec![MockExecResult {
+                     rows_affected: 1,
+                     last_insert_id: 0,
+                 }])
+                 .into_connection(),
+         );
 
-        let app_state = test_app_state(Some(db_conn.clone())).await;
+         let app_state = test_app_state(Some(db_conn.clone())).await;
 
-        let response = publish_status(
-            State(app_state.clone()),
-            Extension("issuer".to_string()),
-            Path(token_id.clone()),
-            Json(StatusesRequest { statuses: vec![] }),
-        )
-        .await
-        .unwrap()
-        .into_response();
-        assert_eq!(response.status(), StatusCode::CREATED);
+         let response = publish_status(
+             State(app_state.clone()),
+             Extension("issuer".to_string()),
+             Path(token_id.clone()),
+             Json(StatusesRequest { statuses: vec![] }),
+         )
+         .await
+         .unwrap()
+         .into_response();
+         assert_eq!(response.status(), StatusCode::CREATED);
 
-        let result = app_state
-            .status_list_repo
-            .find_one_by(&token_id)
-            .await
-            .unwrap();
-        assert!(result.is_some());
-        let token = result.unwrap();
-        assert_eq!(token.list_id, token_id);
-        assert_eq!(token.status_list.lst, base64url::encode([]));
+         let result = app_state
+             .status_list_repo
+             .find_one_by(&token_id)
+             .await
+             .unwrap();
+         assert!(result.is_some());
+         let token = result.unwrap();
+         assert_eq!(token.list_id, token_id);
+         assert_eq!(token.status_list.lst, base64url::encode([]));
     }
 
     #[tokio::test]
@@ -344,34 +344,34 @@ mod tests {
             sub: format!("https://example.com/api/v1/status-lists/{token_id}"),
             updated_at: 0,
         };
-        let db_conn = Arc::new(
-            mock_db
-                .append_query_results::<status_lists::Model, Vec<_>, _>(vec![
-                    vec![],                  // find_one_by in handler returns None
-                    vec![new_token.clone()], // find_one_by in test verification
-                ])
-                .append_exec_results(vec![MockExecResult {
-                    rows_affected: 1,
-                    last_insert_id: 0,
-                }])
-                .into_connection(),
-        );
+         let db_conn = Arc::new(
+             mock_db
+                 .append_query_results::<status_lists::Model, Vec<_>, _>(vec![
+                     vec![],                  // find_one_by in handler returns None
+                     vec![new_token.clone()], // find_one_by in test verification
+                 ])
+                 .append_exec_results(vec![MockExecResult {
+                     rows_affected: 1,
+                     last_insert_id: 0,
+                 }])
+                 .into_connection(),
+         );
 
-        let app_state = test_app_state(Some(db_conn.clone())).await;
+         let app_state = test_app_state(Some(db_conn.clone())).await;
 
-        let response = publish_status(
-            State(app_state),
-            Extension("issuer".to_string()),
-            Path(token_id),
-            Json(StatusesRequest {
-                statuses: status_entries,
-            }),
-        )
-        .await
-        .unwrap()
-        .into_response();
-        assert_eq!(response.status(), StatusCode::CREATED);
-    }
+         let response = publish_status(
+             State(app_state),
+             Extension("issuer".to_string()),
+             Path(token_id),
+             Json(StatusesRequest {
+                 statuses: status_entries,
+             }),
+         )
+         .await
+         .unwrap()
+         .into_response();
+         assert_eq!(response.status(), StatusCode::CREATED);
+     }
 
     #[tokio::test]
     async fn test_invalid_index() {

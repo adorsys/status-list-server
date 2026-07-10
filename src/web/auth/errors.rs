@@ -1,6 +1,8 @@
-use axum::{Json, http::StatusCode, response::IntoResponse};
+use axum::{Json, response::IntoResponse};
+use hyper::StatusCode;
 use jsonwebtoken::errors::Error as JwtError;
 use serde_json::json;
+use std::borrow::Cow;
 use thiserror::Error;
 
 #[derive(Error, Debug)]
@@ -17,33 +19,37 @@ pub enum AuthenticationError {
     UnsupportedAlgorithm,
 }
 
-impl IntoResponse for AuthenticationError {
-    fn into_response(self) -> axum::response::Response {
-        let status = match &self {
+impl AuthenticationError {
+    pub fn get_status(&self) -> StatusCode {
+        match self {
             AuthenticationError::InternalServer => StatusCode::INTERNAL_SERVER_ERROR,
             _ => StatusCode::UNAUTHORIZED,
-        };
-        let api_error = json!({
-            "error": self.get_error_code(),
-            "message": self.get_error_message(),
-        });
-        (status, Json(api_error)).into_response()
-    }
-}
-
-impl AuthenticationError {
-    fn get_error_code(&self) -> &'static str {
-        use AuthenticationError::*;
-        match self {
-            IssuerNotFound => "ISSUER_NOT_FOUND",
-            InternalServer => "INTERNAL_SERVER_ERROR",
-            InvalidAuthorizationHeader => "INVALID_AUTH_HEADER",
-            JwtError(_) => "JWT_ERROR",
-            UnsupportedAlgorithm => "UNSUPPORTED_ALGORITHM",
         }
     }
 
-    fn get_error_message(&self) -> String {
+    pub fn get_error_code(&self) -> Cow<'static, str> {
+        match self {
+            AuthenticationError::IssuerNotFound => Cow::Borrowed("issuer_not_found"),
+            AuthenticationError::InternalServer => Cow::Borrowed("internal_error"),
+            AuthenticationError::InvalidAuthorizationHeader => Cow::Borrowed("invalid_auth_header"),
+            AuthenticationError::JwtError(_) => Cow::Borrowed("jwt_error"),
+            AuthenticationError::UnsupportedAlgorithm => Cow::Borrowed("unsupported_algorithm"),
+        }
+    }
+
+    #[allow(dead_code)]
+    pub fn get_error_message(&self) -> String {
         self.to_string()
+    }
+}
+
+impl IntoResponse for AuthenticationError {
+    fn into_response(self) -> axum::response::Response {
+        let status = self.get_status();
+        let body = json!({
+            "error": self.get_error_code(),
+            "message": self.get_error_message(),
+        });
+        (status, Json(body)).into_response()
     }
 }

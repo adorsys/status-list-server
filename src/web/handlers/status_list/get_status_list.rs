@@ -17,8 +17,9 @@ use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 
 use crate::{
-    models::{StatusListClaims, StatusListRecord},
-    utils::{cache::CertificateChain, keygen::Keypair, state::AppState},
+    models::{StatusListRecord},
+    utils::{keygen::Keypair, state::AppState},
+    web::errors::ApiError,
 };
 
 use super::{
@@ -35,7 +36,7 @@ pub async fn get_status_list(
     State(state): State<AppState>,
     Path(list_id): Path<String>,
     headers: HeaderMap,
-) -> Result<impl IntoResponse + Debug + use<>, StatusListError> {
+) -> Result<impl IntoResponse + Debug + use<>, ApiError> {
     let accept = headers.get(header::ACCEPT).and_then(|h| h.to_str().ok());
     let client_accepts_gzip = client_accepts_gzip(&headers);
 
@@ -48,7 +49,7 @@ pub async fn get_status_list(
         {
             accept.to_string()
         }
-        Some(_) => return Err(StatusListError::InvalidAcceptHeader),
+        Some(_) => return Err(StatusListError::InvalidAcceptHeader.into()),
     };
 
     // Extract conditional request headers
@@ -131,7 +132,7 @@ pub async fn get_status_list(
 async fn fetch_status_record(
     list_id: &str,
     state: &AppState,
-) -> Result<Arc<StatusListRecord>, StatusListError> {
+) -> Result<Arc<StatusListRecord>, ApiError> {
     // Check cache for status list record
     if let Some(cached_record) = state.cache.get(list_id).await {
         tracing::info!("Cache hit for status list record: {list_id}");
@@ -146,9 +147,15 @@ async fn fetch_status_record(
         .await
         .map_err(|err| {
             tracing::error!("Failed to get status list {list_id} from database: {err:?}");
-            StatusListError::InternalServerError
+            ApiError::internal(err)
         })?
-        .ok_or(StatusListError::StatusListNotFound)?;
+        .ok_or_else(|| {
+            ApiError::new(
+                axum::http::StatusCode::NOT_FOUND,
+                "status_list_not_found",
+                "Status list not found",
+            )
+        })?;
 
     // Store the token in the cache for future requests
     state
@@ -222,8 +229,12 @@ async fn build_token(
     accept: &str,
     status_record: &StatusListRecord,
     state: &AppState,
+<<<<<<< HEAD
     client_accepts_gzip: bool,
 ) -> Result<(Vec<u8>, Option<&'static str>), StatusListError> {
+=======
+) -> Result<impl IntoResponse + Debug + use<>, ApiError> {
+>>>>>>> 57110dd (Address review: align ApiError with cloud-identity-wallet pattern)
     // Get the certificate chain
     let certs_parts = state
         .cert_manager
@@ -1139,6 +1150,7 @@ mod tests {
 
         assert!(result.is_err());
         let err = result.unwrap_err();
+<<<<<<< HEAD
         let response = err.clone().into_response();
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
         assert_eq!(err, StatusListError::StatusListNotFound);
@@ -1154,6 +1166,10 @@ mod tests {
             "no-store, max-age=0",
             "Error response should have no-store Cache-Control directive"
         );
+=======
+        assert_eq!(err.error.as_ref(), "status_list_not_found");
+        assert_eq!(err.into_response().status(), StatusCode::NOT_FOUND);
+>>>>>>> 57110dd (Address review: align ApiError with cloud-identity-wallet pattern)
     }
 
     #[tokio::test]
@@ -1168,6 +1184,7 @@ mod tests {
 
         assert!(result.is_err());
         let err = result.unwrap_err();
+<<<<<<< HEAD
         let response = err.clone().into_response();
         assert_eq!(response.status(), StatusCode::NOT_ACCEPTABLE);
         assert_eq!(err, StatusListError::InvalidAcceptHeader);
@@ -1639,5 +1656,9 @@ mod tests {
         let mut h = HeaderMap::new();
         h.insert(header::ACCEPT_ENCODING, "GZIP".parse().unwrap());
         assert!(client_accepts_gzip(&h));
+=======
+        assert_eq!(err.error.as_ref(), "invalid_accept_header");
+        assert_eq!(err.into_response().status(), StatusCode::NOT_ACCEPTABLE);
+>>>>>>> 57110dd (Address review: align ApiError with cloud-identity-wallet pattern)
     }
 }

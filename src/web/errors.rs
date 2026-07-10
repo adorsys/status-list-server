@@ -1,80 +1,203 @@
-use axum::{Json, http::StatusCode, response::IntoResponse};
+use std::borrow::Cow;
+
+use axum::{
+    Json,
+    extract::rejection::JsonRejection,
+    http::StatusCode,
+    response::{IntoResponse, Response},
+};
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
-use uuid::Uuid;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ApiError {
-    pub error: String,
-    pub message: String,
-    pub trace_id: String,
+    #[serde(skip)]
+    pub status: StatusCode,
+    pub error: Cow<'static, str>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub details: Option<Value>,
+    pub error_description: Option<String>,
 }
 
 impl ApiError {
     #[must_use]
-    pub fn new(error: impl Into<String>, message: impl Into<String>) -> Self {
+    pub fn new(
+        status: StatusCode,
+        error: impl Into<Cow<'static, str>>,
+        message: impl Into<String>,
+    ) -> Self {
         Self {
+            status,
             error: error.into(),
-            message: message.into(),
-            trace_id: Uuid::new_v4().to_string(),
-            details: None,
-        }
-    }
-
-    #[must_use]
-    pub fn with_details(mut self, details: Value) -> Self {
-        self.details = Some(details);
-        self
-    }
-
-    pub fn determine_status_code(&self) -> StatusCode {
-        match self.error.as_str() {
-            "INVALID_LIST_ID" => StatusCode::BAD_REQUEST,
-            "INVALID_ACCEPT_HEADER" => StatusCode::NOT_ACCEPTABLE,
-            "INTERNAL_SERVER_ERROR" => StatusCode::INTERNAL_SERVER_ERROR,
-            "INVALID_INDEX" => StatusCode::BAD_REQUEST,
-            "INVALID_INPUT" => StatusCode::BAD_REQUEST,
-            "UPDATE_FAILED" => StatusCode::INTERNAL_SERVER_ERROR,
-            "MALFORMED_BODY" => StatusCode::BAD_REQUEST,
-            "STATUS_LIST_NOT_FOUND" => StatusCode::NOT_FOUND,
-            "UNSUPPORTED_BITS" => StatusCode::BAD_REQUEST,
-            "DECODE_ERROR" => StatusCode::BAD_REQUEST,
-            "DECOMPRESSION_ERROR" => StatusCode::BAD_REQUEST,
-            "COMPRESSION_ERROR" => StatusCode::INTERNAL_SERVER_ERROR,
-            "STATUS_LIST_ALREADY_EXISTS" => StatusCode::CONFLICT,
-            "FORBIDDEN" => StatusCode::FORBIDDEN,
-            "TOKEN_ALREADY_EXISTS" => StatusCode::CONFLICT,
-            "ISSUER_MISMATCH" => StatusCode::FORBIDDEN,
-            "SERVICE_UNAVAILABLE" => StatusCode::SERVICE_UNAVAILABLE,
-            "ISSUER_NOT_FOUND" => StatusCode::UNAUTHORIZED,
-            "INVALID_AUTH_HEADER" => StatusCode::UNAUTHORIZED,
-            "JWT_ERROR" => StatusCode::UNAUTHORIZED,
-            "UNSUPPORTED_ALGORITHM" => StatusCode::UNAUTHORIZED,
-            "INSERT_ERROR" => StatusCode::INTERNAL_SERVER_ERROR,
-            "FIND_ERROR" => StatusCode::INTERNAL_SERVER_ERROR,
-            "UPDATE_ERROR" => StatusCode::INTERNAL_SERVER_ERROR,
-            "DELETE_ERROR" => StatusCode::INTERNAL_SERVER_ERROR,
-            "COULD_NOT_STORE_ENTITY" => StatusCode::INTERNAL_SERVER_ERROR,
-            "REPOSITORY_NOT_SET" => StatusCode::INTERNAL_SERVER_ERROR,
-            "DUPLICATE_ENTRY" => StatusCode::CONFLICT,
-            "REPO_ERROR" => StatusCode::INTERNAL_SERVER_ERROR,
-            "AUTH_ERROR" => StatusCode::UNAUTHORIZED,
-            _ => StatusCode::INTERNAL_SERVER_ERROR,
+            error_description: Some(message.into()),
         }
     }
 }
 
 impl IntoResponse for ApiError {
-    fn into_response(self) -> axum::response::Response {
-        let status = self.determine_status_code();
+    fn into_response(self) -> Response {
+        #[derive(Serialize)]
+        struct Body<'a> {
+            error: &'a str,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            error_description: Option<&'a str>,
+        }
+
         tracing::error!(
-            trace_id = %self.trace_id,
+            status = %self.status,
             error = %self.error,
-            message = %self.message,
+            error_description = ?self.error_description,
             "API error"
         );
-        (status, Json(self)).into_response()
+
+        let body = Body {
+            error: self.error.as_ref(),
+            error_description: self.error_description.as_deref(),
+        };
+
+        (self.status, Json(body)).into_response()
+    }
+}
+
+impl ApiError {
+    pub fn internal(source: impl std::fmt::Display) -> Self {
+        tracing::error!(error = %source, "internal server error");
+        Self {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            error: Cow::Borrowed("internal_error"),
+            error_description: Some("The server encountered an unexpected error.".into()),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum StatusListError {
+    #[error("Invalid list ID string: {0}")]
+    InvalidListId(String),
+    #[error("Invalid accept header")]
+    InvalidAcceptHeader,
+    #[error("Internal server error")]
+    InternalServerError,
+    #[error("invalid index, status not found")]
+    InvalidIndex,
+    #[error("error: {0}")]
+    Generic(String),
+    #[error("failed to update status")]
+    UpdateFailed,
+    #[error("Malformed body: {0}")]
+    MalformedBody(String),
+    #[error("Status list not found")]
+    StatusListNotFound,
+    #[error("Unsupported bits value")]
+    UnsupportedBits,
+    #[error("Could not decode lst")]
+    DecodeError,
+    #[error("Decompression error: {0}")]
+    DecompressionError(String),
+    #[error("Compression error: {0}")]
+    CompressionError(String),
+    #[error("Status list already exists")]
+    StatusListAlreadyExists,
+    #[error("Forbidden: {0}")]
+    Forbidden(String),
+    #[error("Token already exists")]
+    TokenAlreadyExists,
+    #[error("Issuer mismatch")]
+    IssuerMismatch,
+    #[error("The service is currently unavailable. Please try again later")]
+    ServiceUnavailable,
+}
+
+impl StatusListError {
+    fn get_status(&self) -> StatusCode {
+        use StatusListError::*;
+        match self {
+            InvalidListId(_) => StatusCode::BAD_REQUEST,
+            InvalidAcceptHeader => StatusCode::NOT_ACCEPTABLE,
+            InternalServerError => StatusCode::INTERNAL_SERVER_ERROR,
+            InvalidIndex => StatusCode::BAD_REQUEST,
+            Generic(_) => StatusCode::BAD_REQUEST,
+            UpdateFailed => StatusCode::INTERNAL_SERVER_ERROR,
+            MalformedBody(_) => StatusCode::BAD_REQUEST,
+            StatusListNotFound => StatusCode::NOT_FOUND,
+            UnsupportedBits => StatusCode::BAD_REQUEST,
+            DecodeError => StatusCode::BAD_REQUEST,
+            DecompressionError(_) => StatusCode::BAD_REQUEST,
+            CompressionError(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            StatusListAlreadyExists => StatusCode::CONFLICT,
+            Forbidden(_) => StatusCode::FORBIDDEN,
+            TokenAlreadyExists => StatusCode::CONFLICT,
+            IssuerMismatch => StatusCode::FORBIDDEN,
+            ServiceUnavailable => StatusCode::SERVICE_UNAVAILABLE,
+        }
+    }
+
+    fn get_error_code(&self) -> Cow<'static, str> {
+        use StatusListError::*;
+        match self {
+            InvalidListId(_) => Cow::Borrowed("invalid_list_id"),
+            InvalidAcceptHeader => Cow::Borrowed("invalid_accept_header"),
+            InternalServerError => Cow::Borrowed("internal_error"),
+            InvalidIndex => Cow::Borrowed("invalid_index"),
+            Generic(_) => Cow::Borrowed("invalid_input"),
+            UpdateFailed => Cow::Borrowed("update_failed"),
+            MalformedBody(_) => Cow::Borrowed("malformed_body"),
+            StatusListNotFound => Cow::Borrowed("status_list_not_found"),
+            UnsupportedBits => Cow::Borrowed("unsupported_bits"),
+            DecodeError => Cow::Borrowed("decode_error"),
+            DecompressionError(_) => Cow::Borrowed("decompression_error"),
+            CompressionError(_) => Cow::Borrowed("compression_error"),
+            StatusListAlreadyExists => Cow::Borrowed("status_list_already_exists"),
+            Forbidden(_) => Cow::Borrowed("forbidden"),
+            TokenAlreadyExists => Cow::Borrowed("token_already_exists"),
+            IssuerMismatch => Cow::Borrowed("issuer_mismatch"),
+            ServiceUnavailable => Cow::Borrowed("service_unavailable"),
+        }
+    }
+
+    pub(crate) fn get_error_message(&self) -> String {
+        self.to_string()
+    }
+}
+
+impl From<StatusListError> for ApiError {
+    fn from(err: StatusListError) -> Self {
+        Self {
+            status: err.get_status(),
+            error: err.get_error_code(),
+            error_description: Some(err.get_error_message()),
+        }
+    }
+}
+
+impl From<crate::web::auth::errors::AuthenticationError> for ApiError {
+    fn from(err: crate::web::auth::errors::AuthenticationError) -> Self {
+        Self {
+            status: err.get_status(),
+            error: err.get_error_code(),
+            error_description: Some(err.get_error_message()),
+        }
+    }
+}
+
+pub struct ApiJson<T>(pub T);
+
+impl<S, T> axum::extract::FromRequest<S> for ApiJson<T>
+where
+    S: Send + Sync,
+    T: serde::de::DeserializeOwned,
+{
+    type Rejection = ApiError;
+
+    async fn from_request(req: axum::extract::Request, state: &S) -> Result<Self, Self::Rejection> {
+        let Json(inner) =
+            Json::<T>::from_request(req, state)
+                .await
+                .map_err(|_: JsonRejection| {
+                    ApiError::new(
+                        StatusCode::BAD_REQUEST,
+                        "invalid_request",
+                        "request body is missing or malformed JSON",
+                    )
+                })?;
+        Ok(Self(inner))
     }
 }

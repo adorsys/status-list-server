@@ -11,9 +11,8 @@ use crate::{
     utils::{
         bits_validation::BitFlag, errors::Error, lst_gen::update_status_list, state::AppState,
     },
+    web::errors::{ApiError, StatusListError},
 };
-
-use super::error::StatusListError;
 
 /// Update status entries in an existing status list.
 pub async fn update_status(
@@ -21,23 +20,19 @@ pub async fn update_status(
     Extension(issuer): Extension<String>,
     Path(list_id): Path<String>,
     Json(payload): Json<StatusesRequest>,
-) -> Result<impl IntoResponse, StatusListError> {
+) -> Result<impl IntoResponse, ApiError> {
     // Validate list_id as UUID
     if let Err(e) = uuid::Uuid::try_parse(&list_id) {
-        return Err(StatusListError::InvalidListId(e.to_string()));
+        return Err(StatusListError::InvalidListId(e.to_string()).into());
     }
 
     let store = &appstate.status_list_repo;
 
     // Fetch the existing token
-    let record = store
-        .find_one_by(&list_id)
-        .await
-        .map_err(|e| {
-            tracing::error!(error = ?e, list_id = ?list_id, "Database query failed for status list.");
-            StatusListError::InternalServerError
-        })?
-        .ok_or(StatusListError::StatusListNotFound)?;
+    let record = store.find_one_by(&list_id).await.map_err(|e| {
+        tracing::error!(error = ?e, list_id = ?list_id, "Database query failed for status list.");
+        ApiError::internal(e)
+    })?.ok_or(StatusListError::StatusListNotFound)?;
 
     // Check if the request issuer matches the token issuer
     if record.issuer != issuer {
@@ -46,7 +41,7 @@ pub async fn update_status(
             record.issuer,
             issuer
         );
-        return Err(StatusListError::IssuerMismatch);
+        return Err(StatusListError::IssuerMismatch.into());
     }
 
     let bits = if let Some(bits) = BitFlag::new(record.status_list.bits) {
@@ -100,7 +95,6 @@ pub async fn update_status(
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::web::handlers::status_list::error::StatusListError;
     use std::sync::Arc;
 
     use axum::{
@@ -133,7 +127,12 @@ mod test {
         )
         .await;
 
-        assert!(matches!(result, Err(StatusListError::InvalidListId(_))));
+        match result {
+            Err(err) => {
+                assert_eq!(err.into_response().status(), StatusCode::BAD_REQUEST);
+            }
+            Ok(_) => panic!("Expected error but got Ok"),
+        }
     }
 
     #[tokio::test]
