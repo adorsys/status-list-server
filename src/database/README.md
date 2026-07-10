@@ -11,9 +11,9 @@ SeaORM migrations in [`mod.rs`](./mod.rs) and the entity models in [`../models.r
 Stores information about issuers and their cryptographic public keys. Each issuer is
 identified by its `issuer` value, which acts as the primary key.
 
-| Column       | Type | Null | Key | Description                           |
-|--------------|------|------|-----|---------------------------------------|
-| `issuer`     | TEXT | NO   | PK  | Unique identifier for the issuer      |
+| Column       | Type  | Null | Key | Description                           |
+| ------------ | ----- | ---- | --- | ------------------------------------- |
+| `issuer`     | TEXT  | NO   | PK  | Unique identifier for the issuer      |
 | `public_key` | JSONB | NO   |     | Public key associated with the issuer |
 
 ### `status_lists`
@@ -21,19 +21,19 @@ identified by its `issuer` value, which acts as the primary key.
 Stores status list entries and their associated issuer. Each status list is identified
 by its `list_id`, which acts as the primary key.
 
-| Column        | Type | Null | Key | Description                                         |
-|---------------|------|------|-----|-----------------------------------------------------|
-| `list_id`     | TEXT | NO   | PK  | Unique identifier for the status list               |
-| `issuer`      | TEXT | NO   | FK  | References `credentials.issuer` (ON DELETE CASCADE) |
+| Column        | Type  | Null | Key | Description                                         |
+| ------------- | ----- | ---- | --- | --------------------------------------------------- |
+| `list_id`     | TEXT  | NO   | PK  | Unique identifier for the status list               |
+| `issuer`      | TEXT  | NO   | FK  | References `credentials.issuer` (ON DELETE CASCADE) |
 | `status_list` | JSONB | NO   |     | The status list entry                               |
-| `sub`         | TEXT | NO   |     | String identifier for the Status List Token         |
+| `sub`         | TEXT  | NO   |     | String identifier for the Status List Token         |
 
 #### Indexes
 
 The following indexes are created on the `status_lists` table to speed up lookups:
 
 | Index name                 | Column    |
-|----------------------------|-----------|
+| -------------------------- | --------- |
 | `idx_status_lists_list_id` | `list_id` |
 | `idx_status_lists_issuer`  | `issuer`  |
 | `idx_status_lists_sub`     | `sub`     |
