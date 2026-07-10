@@ -20,8 +20,6 @@ use super::{
     cert_manager::{challenge::PebbleDnsUpdater, http_client::DefaultHttpClient},
 };
 
-// Could also be passed at runtime through environment variable
-const BUCKET_NAME: &str = "status-list-adorsys";
 const ENV_PRODUCTION: &str = "production";
 const ENV_DEVELOPMENT: &str = "development";
 
@@ -37,6 +35,8 @@ pub struct AppState {
     pub cert_manager: Arc<CertManager>,
     pub cache: Cache,
     pub aggregation_uri: Option<String>,
+    pub token_exp_secs: u64,
+    pub token_ttl_secs: u64,
 }
 
 pub async fn build_state(config: &AppConfig) -> EyeResult<AppState> {
@@ -66,15 +66,28 @@ pub async fn build_state(config: &AppConfig) -> EyeResult<AppState> {
         let updater = AwsRoute53DnsUpdater::new(&aws_config);
         Dns01Handler::new(updater)
     } else {
-        // Use pebble as the DNS server in development
-        let updater = PebbleDnsUpdater::new("http://challtestsrv:8055");
+        // Use pebble as the DNS server in development.
+        // The DNS channel server URL is optional and only used in dev mode;
+        // it falls back to the well-known Pebble challenge test server when unset.
+        let dns_url = config
+            .server
+            .cert
+            .dns_challenge_server_url
+            .as_deref()
+            .unwrap_or("http://challtestsrv:8055");
+        let updater = PebbleDnsUpdater::new(dns_url);
         Dns01Handler::new(updater)
     };
 
     // Initialize the storage backends for the certificate manager
     let cache = Redis::new(redis_conn.clone()).with_ttl(config.redis.cert_cache_ttl);
-    let cert_storage =
-        AwsS3::new(&aws_config, BUCKET_NAME, config.aws.region.clone()).with_cache(cache);
+    let cert_storage = AwsS3::new(
+        &aws_config,
+        &config.aws.s3_bucket,
+        &config.aws.region,
+        &config.aws.s3_key_prefix,
+    )
+    .with_cache(cache);
     let secrets_storage = AwsSecretsManager::new(
         &aws_config,
         Duration::from_secs(config.aws.secrets_cache_ttl),
@@ -109,6 +122,8 @@ pub async fn build_state(config: &AppConfig) -> EyeResult<AppState> {
         cert_manager: Arc::new(certificate_manager),
         cache: Cache::new(config.cache.ttl, config.cache.max_capacity),
         aggregation_uri: empty_to_none(config.server.aggregation_uri.clone()),
+        token_exp_secs: config.status_list.token_exp_secs,
+        token_ttl_secs: config.status_list.token_ttl_secs,
     })
 }
 

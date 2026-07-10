@@ -121,7 +121,7 @@ mod tests {
 
         let status_list = StatusList {
             bits: 2,
-            lst: create_status_list(payload.status.clone()).unwrap().lst,
+            lst: create_status_list(status_entries.clone()).unwrap().lst,
             aggregation_uri: None,
         };
         let new_token = StatusListRecord {
@@ -172,7 +172,7 @@ mod tests {
 
         let status_list = StatusList {
             bits: 2,
-            lst: create_status_list(payload.status.clone()).unwrap().lst,
+            lst: create_status_list(status_entries.clone()).unwrap().lst,
             aggregation_uri: None,
         };
         let new_token = StatusListRecord {
@@ -233,7 +233,7 @@ mod tests {
             issuer: "issuer".to_string(),
             status_list: StatusList {
                 bits: 1,
-                lst: create_status_list(payload.status.clone()).unwrap().lst,
+                lst: create_status_list(status_entries.clone()).unwrap().lst,
                 aggregation_uri: None,
             },
             sub: "issuer".to_string(),
@@ -322,7 +322,7 @@ mod tests {
 
         let status_list = StatusList {
             bits: 1,
-            lst: create_status_list(payload.status.clone()).unwrap().lst,
+            lst: create_status_list(status_entries.clone()).unwrap().lst,
             aggregation_uri: None,
         };
         let new_token = StatusListRecord {
