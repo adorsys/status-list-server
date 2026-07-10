@@ -425,10 +425,22 @@ mod tests {
 
     #[test]
     fn test_database_backend_destination() {
-        assert_eq!(DatabaseBackend::Postgres.as_destination_db(), sea_orm::DbBackend::Postgres);
-        assert_eq!(DatabaseBackend::MySql.as_destination_db(), sea_orm::DbBackend::MySql);
-        assert_eq!(DatabaseBackend::Sqlite.as_destination_db(), sea_orm::DbBackend::Sqlite);
-        assert_eq!(DatabaseBackend::Mariadb.as_destination_db(), sea_orm::DbBackend::MySql);
+        assert_eq!(
+            DatabaseBackend::Postgres.as_destination_db(),
+            sea_orm::DbBackend::Postgres
+        );
+        assert_eq!(
+            DatabaseBackend::MySql.as_destination_db(),
+            sea_orm::DbBackend::MySql
+        );
+        assert_eq!(
+            DatabaseBackend::Sqlite.as_destination_db(),
+            sea_orm::DbBackend::Sqlite
+        );
+        assert_eq!(
+            DatabaseBackend::Mariadb.as_destination_db(),
+            sea_orm::DbBackend::MySql
+        );
     }
 
     #[test]
