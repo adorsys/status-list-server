@@ -1876,6 +1876,10 @@ criteria = "safe-to-run"
 version = "3.21.0"
 criteria = "safe-to-run"
 
+[[exemptions.serde_yaml]]
+version = "0.9.34+deprecated"
+criteria = "safe-to-deploy"
+
 [[exemptions.serdect]]
 version = "0.4.3"
 criteria = "safe-to-deploy"
@@ -2266,6 +2270,10 @@ criteria = "safe-to-deploy"
 
 [[exemptions.unicode-xid]]
 version = "0.2.6"
+criteria = "safe-to-deploy"
+
+[[exemptions.unsafe-libyaml]]
+version = "0.2.11"
 criteria = "safe-to-deploy"
 
 [[exemptions.untrusted]]
