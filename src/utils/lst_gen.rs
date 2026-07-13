@@ -728,4 +728,67 @@ mod tests {
             );
         }
     }
+
+    // §4.1/§4.2 worked vectors. Decompress-direction is the real (backend-independent)
+    // guarantee; encode-direction is a secondary pin coupled to flate2's exact output.
+
+    #[test]
+    fn test_spec_vector_1_bit() {
+        let expected_bytes = vec![0xB9, 0xA3];
+        let spec_lst = "eNrbuRgAAhcBXQ";
+
+        let decoded = decode(spec_lst).expect("Failed to decode base64url");
+        let mut decoder = ZlibDecoder::new(&decoded[..]);
+        let mut decompressed = Vec::new();
+        decoder.read_to_end(&mut decompressed).unwrap();
+        assert_eq!(decompressed, expected_bytes);
+
+        assert_eq!(encode_compressed(&expected_bytes).unwrap(), spec_lst);
+    }
+
+    #[test]
+    fn test_spec_vector_2_bit() {
+        let expected_bytes = vec![0xC9, 0x44, 0xF9];
+        let spec_lst = "eNo76fITAAPfAgc";
+
+        let decoded = decode(spec_lst).expect("Failed to decode base64url");
+        let mut decoder = ZlibDecoder::new(&decoded[..]);
+        let mut decompressed = Vec::new();
+        decoder.read_to_end(&mut decompressed).unwrap();
+        assert_eq!(decompressed, expected_bytes);
+
+        assert_eq!(encode_compressed(&expected_bytes).unwrap(), spec_lst);
+    }
+
+    #[test]
+    fn test_spec_vector_1_bit_through_create_status_list() {
+        // Same §4.1 vector as test_spec_vector_1_bit, but through the real StatusEntry ->
+        // create_status_list pipeline, not just encode_compressed.
+        let statuses = [1, 0, 0, 1, 1, 1, 0, 1, 1, 1, 0, 0, 0, 1, 0, 1];
+        let updates: Vec<StatusEntry> = statuses
+            .into_iter()
+            .enumerate()
+            .map(|(index, bit)| StatusEntry {
+                index: index as i32,
+                status: if bit == 1 {
+                    Status::INVALID
+                } else {
+                    Status::VALID
+                },
+            })
+            .collect();
+
+        let result = create_status_list(updates).unwrap();
+        assert_eq!(result.bits, 1);
+
+        // Decompress direction: backend-independent guarantee (see comment above test_spec_vector_1_bit).
+        let decoded = decode(&result.lst).expect("Failed to decode base64url");
+        let mut decoder = ZlibDecoder::new(&decoded[..]);
+        let mut decompressed = Vec::new();
+        decoder.read_to_end(&mut decompressed).unwrap();
+        assert_eq!(decompressed, vec![0xB9, 0xA3]);
+
+        // Encode direction: canonical-output pin, coupled to flate2's exact backend.
+        assert_eq!(result.lst, "eNrbuRgAAhcBXQ");
+    }
 }

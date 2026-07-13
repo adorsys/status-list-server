@@ -2,7 +2,8 @@
 extend-ignore-identifiers-re = []
 
 [default.extend-words]
-COSE = "COSE"
+Cose = "Cose"
+flate = "flate"
 
 [files]
 extend-exclude = [
