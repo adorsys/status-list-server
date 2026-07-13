@@ -57,24 +57,28 @@ pub async fn update_status(
         )))
     }?;
 
-    let mut exact_status_list = record;
-    let existing_lst = std::mem::take(&mut exact_status_list.status_list.lst);
-    let updated_lst =
-        update_status_list(existing_lst, payload.statuses, bits.value()).map_err(|e| {
-            tracing::error!("update_status_list failed: {e:?}");
-            match e {
-                Error::Generic(msg) => StatusListError::Generic(msg),
-                Error::InvalidIndex => StatusListError::InvalidIndex,
-                _ => StatusListError::Generic(e.to_string()),
-            }
-        })?;
+    // Update the status list
+    let updated_lst = update_status_list(
+        record.status_list.lst.clone(),
+        payload.statuses,
+        bits.value(),
+    )
+    .map_err(|e| {
+        tracing::error!("update_status_list failed: {e:?}");
+        match e {
+            Error::Generic(msg) => StatusListError::Generic(msg),
+            Error::InvalidIndex => StatusListError::InvalidIndex,
+            _ => StatusListError::Generic(e.to_string()),
+        }
+    })?;
 
+    let mut exact_status_list = record;
     exact_status_list.status_list.lst = updated_lst.lst;
     exact_status_list.status_list.bits = updated_lst.bits;
 
     // Save the updated token
     store
-        .update_one(&list_id, exact_status_list)
+        .update_one(&exact_status_list.list_id, exact_status_list.clone())
         .await
         .map_err(|e| {
             tracing::error!("Failed to update status list: {e:?}");
@@ -82,8 +86,11 @@ pub async fn update_status(
         })?;
 
     // Invalidate cache entry to ensure next read fetches the updated record
-    appstate.cache.invalidate(&list_id).await;
-    tracing::info!("Invalidated cache for status list: {list_id}");
+    appstate.cache.invalidate(&exact_status_list.list_id).await;
+    tracing::info!(
+        "Invalidated cache for status list: {}",
+        exact_status_list.list_id
+    );
 
     Ok(StatusCode::OK.into_response())
 }

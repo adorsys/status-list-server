@@ -6,7 +6,7 @@ use crate::{
 };
 
 #[derive(Debug)]
-pub enum CredentialError {
+pub(super) enum CredentialError {
     RepoError(RepositoryError),
     AuthError(AuthenticationError),
 }
@@ -57,7 +57,7 @@ pub async fn credential_handler(
     }
 }
 
-pub async fn publish_credentials(
+pub(super) async fn publish_credentials(
     credentials: Credentials,
     state: AppState,
 ) -> Result<(), CredentialError> {

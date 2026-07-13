@@ -6,7 +6,7 @@ pub mod challenge;
 pub mod http_client;
 pub mod storage;
 
-pub use crate::cache::CertificateChain;
+use crate::utils::cache::CertificateChain;
 use challenge::CleanupFuture;
 pub use errors::CertError;
 
@@ -27,9 +27,8 @@ use tracing::{error, info, instrument, warn};
 use x509_parser::pem::Pem;
 
 use crate::{
-    cache::CertChainCache,
     cert_manager::{challenge::ChallengeHandler, http_client::DefaultHttpClient, storage::Storage},
-    utils::keygen::Keypair,
+    utils::{cache::CertChainCache, keygen::Keypair},
 };
 
 /// Default cache TTL when no override is supplied.

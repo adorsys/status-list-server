@@ -2,7 +2,7 @@ use std::{sync::Arc, time::Duration};
 
 use moka::future::Cache;
 
-pub type CertificateChain = Arc<[String]>;
+pub(crate) type CertificateChain = Arc<[String]>;
 
 // One CertManager serves a single TLD+1, so only one chain is ever cached.
 const CACHE_CAPACITY: u64 = 1;
@@ -15,7 +15,7 @@ const REPLACEMENT_METRIC: &str = "certificate_chain_cache_replacements_total";
 /// instance owns exactly one `CertChainCache`, so the cache holds at most one
 /// entry per running process.
 #[derive(Clone)]
-pub struct CertChainCache {
+pub(crate) struct CertChainCache {
     inner: Cache<String, CertificateChain>,
     // Pre-resolved handles so per-call counter increments don't repeat the
     // recorder lookup or allocate label strings on the hot path.
@@ -30,7 +30,7 @@ impl CertChainCache {
     /// `domain` is used as the value of the `domain` label on every emitted
     /// counter so multi-domain deployments don't aggregate blindly. Pass an
     /// empty string to opt out of the label entirely.
-    pub fn new(ttl: Duration, domain: impl AsRef<str>) -> Self {
+    pub(crate) fn new(ttl: Duration, domain: impl AsRef<str>) -> Self {
         metrics::describe_counter!(
             HIT_METRIC,
             metrics::Unit::Count,
@@ -78,7 +78,7 @@ impl CertChainCache {
         }
     }
 
-    pub async fn get(&self, key: &str) -> Option<CertificateChain> {
+    pub(crate) async fn get(&self, key: &str) -> Option<CertificateChain> {
         let cached = self.inner.get(key).await;
         if cached.is_some() {
             self.hit_counter.increment(1);
@@ -88,7 +88,7 @@ impl CertChainCache {
         cached
     }
 
-    pub async fn insert(&self, key: String, value: CertificateChain) {
+    pub(crate) async fn insert(&self, key: String, value: CertificateChain) {
         self.inner.insert(key, value).await;
     }
 
@@ -96,13 +96,13 @@ impl CertChainCache {
     ///
     /// Used after a new certificate is provisioned so the next read returns
     /// the fresh chain without an extra storage load and parse.
-    pub async fn replace(&self, key: String, value: CertificateChain) {
+    pub(crate) async fn replace(&self, key: String, value: CertificateChain) {
         self.replacement_counter.increment(1);
         self.inner.insert(key, value).await;
     }
 
     #[cfg(test)]
-    pub async fn invalidate(&self, key: &str) {
+    pub(crate) async fn invalidate(&self, key: &str) {
         self.inner.invalidate(key).await;
     }
 }

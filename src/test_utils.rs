@@ -10,7 +10,7 @@ use async_trait::async_trait;
 use sea_orm::{DbBackend, MockDatabase};
 use std::{collections::HashMap, sync::Arc};
 
-pub struct MockStorage {
+pub(crate) struct MockStorage {
     pub key_value: HashMap<String, String>,
 }
 
@@ -33,7 +33,14 @@ impl Storage for MockStorage {
     }
 }
 
-pub async fn test_app_state(db_conn: Option<Arc<sea_orm::DatabaseConnection>>) -> AppState {
+pub(crate) async fn test_app_state(db_conn: Option<Arc<sea_orm::DatabaseConnection>>) -> AppState {
+    test_app_state_with(db_conn, None).await
+}
+
+pub(crate) async fn test_app_state_with(
+    db_conn: Option<Arc<sea_orm::DatabaseConnection>>,
+    aggregation_uri: Option<String>,
+) -> AppState {
     use crate::database::queries::SeaOrmStore;
 
     // Install the crypto provider for the tests
@@ -69,6 +76,7 @@ pub async fn test_app_state(db_conn: Option<Arc<sea_orm::DatabaseConnection>>) -
         server_domain: "example.com".to_string(),
         cert_manager: Arc::new(certificate_manager),
         cache: StatusListCache::new(5 * 60, 100),
+        aggregation_uri,
         token_exp_secs: 900,
         token_ttl_secs: 300,
     }
