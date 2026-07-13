@@ -1,6 +1,5 @@
 use axum::{Json, extract::State, http::StatusCode, response::IntoResponse};
 use serde_json::json;
-use std::borrow::Cow;
 
 use crate::{
     database::error::RepositoryError, models::Credentials, utils::state::AppState,
@@ -22,29 +21,6 @@ impl From<RepositoryError> for CredentialError {
 impl From<AuthenticationError> for CredentialError {
     fn from(value: AuthenticationError) -> Self {
         CredentialError::AuthError(value)
-    }
-}
-
-impl From<CredentialError> for ApiError {
-    fn from(err: CredentialError) -> Self {
-        match err {
-            CredentialError::AuthError(err) => ApiError::from(err),
-            CredentialError::RepoError(err) => {
-                use RepositoryError::*;
-                let (status, error_code) = match err {
-                    DuplicateEntry => (StatusCode::CONFLICT, Cow::Borrowed("duplicate_entry")),
-                    _ => (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        Cow::Borrowed("internal_error"),
-                    ),
-                };
-                ApiError {
-                    status,
-                    error: error_code,
-                    error_description: Some(err.to_string()),
-                }
-            }
-        }
     }
 }
 

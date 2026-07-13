@@ -11,8 +11,10 @@ use crate::{
     utils::{
         bits_validation::BitFlag, errors::Error, lst_gen::update_status_list, state::AppState,
     },
-    web::errors::{ApiError, StatusListError},
+    web::errors::ApiError,
 };
+
+use super::error::StatusListError;
 
 /// Update status entries in an existing status list.
 pub async fn update_status(
@@ -29,10 +31,10 @@ pub async fn update_status(
     let store = &appstate.status_list_repo;
 
     // Fetch the existing token
-    let record = store.find_one_by(&list_id).await.map_err(|e| {
-        tracing::error!(error = ?e, list_id = ?list_id, "Database query failed for status list.");
-        ApiError::internal(e)
-    })?.ok_or(StatusListError::StatusListNotFound)?;
+    let record = store
+        .find_one_by(&list_id)
+        .await?
+        .ok_or(StatusListError::StatusListNotFound)?;
 
     // Check if the request issuer matches the token issuer
     if record.issuer != issuer {
@@ -76,11 +78,7 @@ pub async fn update_status(
     // Save the updated token
     store
         .update_one(&exact_status_list.list_id, exact_status_list.clone())
-        .await
-        .map_err(|e| {
-            tracing::error!("Failed to update status list: {e:?}");
-            StatusListError::InternalServerError
-        })?;
+        .await?;
 
     // Invalidate cache entry to ensure next read fetches the updated record
     appstate.cache.invalidate(&exact_status_list.list_id).await;

@@ -37,7 +37,6 @@ impl AuthenticationError {
         }
     }
 
-    #[allow(dead_code)]
     pub fn get_error_message(&self) -> String {
         self.to_string()
     }
@@ -51,5 +50,23 @@ impl IntoResponse for AuthenticationError {
             "message": self.get_error_message(),
         });
         (status, Json(body)).into_response()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::body::to_bytes;
+
+    #[tokio::test]
+    async fn test_authentication_error_into_response() {
+        let err = AuthenticationError::InvalidAuthorizationHeader;
+        let response = err.into_response();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["error"], "invalid_auth_header");
+        assert!(json.get("message").is_some());
     }
 }

@@ -144,11 +144,7 @@ async fn fetch_status_record(
     let status_record = state
         .status_list_repo
         .find_one_by(list_id)
-        .await
-        .map_err(|err| {
-            tracing::error!("Failed to get status list {list_id} from database: {err:?}");
-            ApiError::internal(err)
-        })?
+        .await?
         .ok_or_else(|| {
             ApiError::new(
                 axum::http::StatusCode::NOT_FOUND,

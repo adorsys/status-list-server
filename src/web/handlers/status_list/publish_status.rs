@@ -1,7 +1,7 @@
 use crate::{
     models::{StatusList, StatusListRecord, StatusesRequest},
     utils::{errors::Error, lst_gen::create_status_list, state::AppState},
-    web::errors::{ApiError, StatusListError},
+    web::errors::ApiError,
 };
 use axum::{
     Extension, Json,
@@ -11,6 +11,8 @@ use axum::{
 };
 use time::OffsetDateTime;
 use tracing;
+
+use super::error::StatusListError;
 
 /// Create a new status list.
 pub async fn publish_status(
@@ -60,16 +62,10 @@ pub async fn publish_status(
                 updated_at,
             };
 
-            store.insert_one(status_list_record).await.map_err(|e| {
-                tracing::error!("Failed to insert status list entry: {e:?}");
-                ApiError::internal(e)
-            })?;
+            store.insert_one(status_list_record).await?;
             Ok(StatusCode::CREATED.into_response())
         }
-        Err(e) => {
-            tracing::error!(error = ?e, list_id = ?list_id, "Database query failed for status list.");
-            Err(StatusListError::InternalServerError.into())
-        }
+        Err(e) => Err(ApiError::from(e)),
     }
 }
 
