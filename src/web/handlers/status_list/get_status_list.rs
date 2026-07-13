@@ -6,7 +6,7 @@ use axum::{
     response::IntoResponse,
 };
 use coset::{
-    self, CborSerializable, CoseSign1Builder, HeaderBuilder,
+    self, CborSerializable, CoseSign1Builder, HeaderBuilder, TaggedCborSerializable,
     cbor::Value as CborValue,
     iana::{Algorithm, EnumI64, HeaderParameter},
 };
@@ -24,7 +24,7 @@ use crate::{
 use super::{
     constants::{
         ACCEPT_STATUS_LISTS_HEADER_CWT, ACCEPT_STATUS_LISTS_HEADER_JWT, CWT_TYPE, EXP, GZIP_HEADER,
-        ISSUED_AT, STATUS_LIST, STATUS_LISTS_HEADER_CWT, STATUS_LISTS_HEADER_JWT, SUBJECT, TTL,
+        ISSUED_AT, STATUS_LIST, STATUS_LISTS_CWT_TYPE_VALUE, STATUS_LISTS_HEADER_JWT, SUBJECT, TTL,
     },
     error::StatusListError,
 };
@@ -189,7 +189,7 @@ fn issue_cwt(
         CborValue::Integer(iat.into()),
     ));
     // According to the spec, the lifetime of the token depends on the lifetime of the referenced token
-    // https://www.ietf.org/archive/id/draft-ietf-oauth-status-list-10.html#section-13.1
+    // https://datatracker.ietf.org/doc/html/draft-ietf-oauth-status-list-21#section-13.7
     let exp = iat + token_exp_secs as i64;
     claims.push((
         CborValue::Integer(EXP.into()),
@@ -199,16 +199,19 @@ fn issue_cwt(
         CborValue::Integer(TTL.into()),
         CborValue::Integer(token_ttl_secs.into()),
     ));
+    // §4.3 requires lst as a CBOR byte string, not the base64url text used for JSON (§4.2).
+    let lst_bytes = base64url::decode(&status_record.status_list.lst).map_err(|err| {
+        tracing::error!("Failed to decode lst for CWT status_list claim: {err:?}");
+        StatusListError::InternalServerError
+    })?;
+
     // Adding the status list map to the claims
     let status_list = vec![
         (
             CborValue::Text("bits".into()),
             CborValue::Integer(status_record.status_list.bits.into()),
         ),
-        (
-            CborValue::Text("lst".into()),
-            CborValue::Text(status_record.status_list.lst.clone()),
-        ),
+        (CborValue::Text("lst".into()), CborValue::Bytes(lst_bytes)),
     ];
     claims.push((
         CborValue::Integer(STATUS_LIST.into()),
@@ -225,7 +228,10 @@ fn issue_cwt(
     let protected = HeaderBuilder::new()
         .algorithm(Algorithm::ES256)
         .value(HeaderParameter::X5Chain.to_i64(), x5chain_value)
-        .value(CWT_TYPE, CborValue::Text(STATUS_LISTS_HEADER_CWT.into()))
+        .value(
+            CWT_TYPE,
+            CborValue::Text(STATUS_LISTS_CWT_TYPE_VALUE.into()),
+        )
         .build();
 
     let signing_key = keypair.signing_key();
@@ -240,7 +246,8 @@ fn issue_cwt(
         })
         .build();
 
-    let cwt_bytes = sign1.to_vec().map_err(|err| {
+    // Tagged as COSE_Sign1_Tagged (CBOR tag 18), per draft-ietf-oauth-status-list-21 §5.2.
+    let cwt_bytes = sign1.to_tagged_vec().map_err(|err| {
         tracing::error!("Failed to serialize CWT: {err:?}");
         StatusListError::InternalServerError
     })?;
@@ -271,7 +278,7 @@ fn build_x5chain(cert_chain: &[String]) -> Result<CborValue, StatusListError> {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct StatusListToken {
+pub(crate) struct StatusListToken {
     pub exp: Option<i64>,
     pub iat: i64,
     pub status_list: StatusList,
@@ -330,7 +337,7 @@ mod tests {
         extract::{Path, State},
         http::{self, HeaderMap, StatusCode},
     };
-    use coset::CoseSign1;
+    use coset::{CoseSign1, Label, TaggedCborSerializable};
     use jsonwebtoken::{DecodingKey, Validation};
     use p256::ecdsa::{VerifyingKey, signature::Verifier};
     use p256::pkcs8::{EncodePublicKey, LineEnding};
@@ -457,7 +464,8 @@ mod tests {
         let mut body_bytes = Vec::new();
         decoder.read_to_end(&mut body_bytes).unwrap();
 
-        let cwt = CoseSign1::from_slice(&body_bytes).unwrap();
+        // Tagged decode: the CWT MUST be COSE_Sign1_Tagged (CBOR tag 18) per §5.2.
+        let cwt = CoseSign1::from_tagged_slice(&body_bytes).unwrap();
 
         // Load the key from the cache
         let signing_key_pem = app_state.cert_manager.signing_key_pem().await.unwrap();
@@ -479,10 +487,10 @@ mod tests {
             _ => panic!("Invalid CWT payload"),
         };
 
-        // Verify claims
+        // Literal spec integers (§5.2), not the production constants — catches constants.rs regressions.
         let sub = claims
             .iter()
-            .find(|(k, _)| k == &CborValue::Integer(SUBJECT.into()))
+            .find(|(k, _)| k == &CborValue::Integer(2i32.into()))
             .unwrap()
             .1
             .clone();
@@ -490,7 +498,7 @@ mod tests {
 
         let status_list_map = claims
             .iter()
-            .find(|(k, _)| k == &CborValue::Integer(STATUS_LIST.into()))
+            .find(|(k, _)| k == &CborValue::Integer(65533i32.into()))
             .unwrap()
             .1
             .clone();
@@ -507,21 +515,38 @@ mod tests {
             .clone();
         assert_eq!(bits, CborValue::Integer(8.into()));
 
+        // §4.3: lst MUST be a CBOR byte string, not the base64url text used for JSON (§4.2).
         let lst = status_list
             .iter()
             .find(|(k, _)| k == &CborValue::Text("lst".to_string()))
             .unwrap()
             .1
             .clone();
-        assert_eq!(lst, CborValue::Text(encode_compressed(&[0, 0, 0]).unwrap()));
+        let expected_lst_bytes =
+            base64url::decode(&encode_compressed(&[0, 0, 0]).unwrap()).unwrap();
+        assert_eq!(lst, CborValue::Bytes(expected_lst_bytes));
 
         let ttl = claims
             .iter()
-            .find(|(k, _)| k == &CborValue::Integer(TTL.into()))
+            .find(|(k, _)| k == &CborValue::Integer(65534i32.into()))
             .unwrap()
             .1
             .clone();
         assert_eq!(ttl, CborValue::Integer(300.into()));
+
+        // Label 16 (type) MUST be the full media type per §5.2, unlike JWT's abbreviated typ.
+        let type_header = cwt
+            .protected
+            .header
+            .rest
+            .iter()
+            .find(|(label, _)| *label == Label::Int(CWT_TYPE))
+            .map(|(_, value)| value.clone())
+            .expect("label 16 (type) missing from CWT protected header");
+        assert_eq!(
+            type_header,
+            CborValue::Text(STATUS_LISTS_CWT_TYPE_VALUE.to_string())
+        );
     }
 
     #[tokio::test]
