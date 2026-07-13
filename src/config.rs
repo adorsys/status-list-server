@@ -157,7 +157,10 @@ impl Config {
             .set_default("aws.s3_key_prefix", "")?
             .set_default("server.cert.email", "admin@example.com")?
             .set_default("server.cert.eku", vec![1, 3, 6, 1, 5, 5, 7, 3, 30])?
-            .set_default("server.cert.chain_cache_ttl", 3600)?
+            .set_default(
+                "server.cert.chain_cache_ttl",
+                crate::utils::cert_manager::DEFAULT_CHAIN_CACHE_TTL.as_secs(),
+            )?
             .set_default("server.cert.organization", "adorsys GmbH & CO KG")?
             .set_default(
                 "server.cert.acme_directory_url",

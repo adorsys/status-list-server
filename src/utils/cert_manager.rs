@@ -32,7 +32,11 @@ use crate::{
     utils::keygen::Keypair,
 };
 
-const DEFAULT_CACHE_TTL: Duration = Duration::from_hours(1);
+/// Default cache TTL when no override is supplied.
+///
+/// Exported as a single source of truth: `Config::load` references this
+/// constant so the runtime default and the code fallback always agree.
+pub const DEFAULT_CHAIN_CACHE_TTL: Duration = Duration::from_hours(1);
 
 /// Struct that hold the certificate and its metadata
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -101,6 +105,10 @@ impl CertManager {
             Box::new(move || Box::new(http_client.clone()) as Box<dyn HttpClient>);
         let renewal_strategy = RenewalStrategy::PercentageOfLifetime(None);
 
+        let domains: Vec<String> = domains.into_iter().map(|d| d.into()).collect();
+        let domain_label = domains.first().map(String::as_str).unwrap_or_default();
+        let cert_chain_cache = CertChainCache::new(DEFAULT_CHAIN_CACHE_TTL, domain_label);
+
         Ok(Self {
             cert_storage: None,
             secrets_storage: None,
@@ -108,8 +116,8 @@ impl CertManager {
             acme_client,
             acme_http_client_factory,
             renewal_strategy,
-            cert_chain_cache: CertChainCache::new(DEFAULT_CACHE_TTL),
-            domains: domains.into_iter().map(|d| d.into()).collect(),
+            cert_chain_cache,
+            domains,
             email: email.into(),
             organization: organization.map(|o| o.into()),
             eku: None,
@@ -161,8 +169,17 @@ impl CertManager {
     ///
     /// A zero duration keeps the cache active with no TTL safety expiry; cache
     /// replacement still happens whenever this manager provisions a new certificate.
+    ///
+    /// **Multi-replica deployments:** Only the replica that performs the
+    /// provisioning call (`request_certificate`) replaces its in-memory cache.
+    /// Non-provisioning replicas therefore rely on the TTL as the only refresh
+    /// mechanism for picking up a newly provisioned chain. Set `ttl = 0` only
+    /// when the process is guaranteed to re-provision or restart on every
+    /// rotation — otherwise long-lived replicas with a disabled TTL will serve
+    /// the stale chain until they happen to re-provision.
     pub fn with_cert_chain_cache_ttl(mut self, ttl: Duration) -> Self {
-        self.cert_chain_cache = CertChainCache::new(ttl);
+        let domain_label = self.domains.first().map(String::as_str).unwrap_or_default();
+        self.cert_chain_cache = CertChainCache::new(ttl, domain_label);
         self
     }
 
