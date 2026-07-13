@@ -1,7 +1,10 @@
 use crate::{
     cert_manager::{
         CertManager,
-        challenge::{AcmeDnsProvider, AwsRoute53DnsUpdater, CloudflareDnsProvider, Dns01Handler},
+        challenge::{
+            AcmeDnsProvider, AwsRoute53DnsUpdater, AzureDnsProvider, CloudflareDnsProvider,
+            Dns01Handler, GoogleCloudDnsProvider, ServicePrincipal,
+        },
         storage::{AwsS3, AwsSecretsManager, Redis},
     },
     config::{Config as AppConfig, DnsProviderKind},
@@ -133,6 +136,34 @@ fn build_dns_challenge_handler(
                 .as_ref()
                 .ok_or_else(|| eyre!("Missing Cloudflare DNS settings"))?;
             Dns01Handler::new(CloudflareDnsProvider::new(cfg.api_token.clone()))
+        }
+        DnsProviderKind::Gcloud => {
+            let cfg = dns
+                .gcloud
+                .as_ref()
+                .ok_or_else(|| eyre!("Missing Google Cloud DNS settings"))?;
+            let key_json = match (&cfg.service_account_key, &cfg.service_account_key_path) {
+                (Some(key), _) => key.expose_secret().to_string(),
+                (None, Some(path)) => std::fs::read_to_string(path)
+                    .wrap_err_with(|| format!("Failed to read service account key at {path}"))?,
+                (None, None) => return Err(eyre!("Missing Google Cloud service account key")),
+            };
+            Dns01Handler::new(GoogleCloudDnsProvider::new(&key_json)?)
+        }
+        DnsProviderKind::Azure => {
+            let cfg = dns
+                .azure
+                .as_ref()
+                .ok_or_else(|| eyre!("Missing Azure DNS settings"))?;
+            Dns01Handler::new(AzureDnsProvider::new(
+                ServicePrincipal {
+                    tenant_id: cfg.tenant_id.clone(),
+                    client_id: cfg.client_id.clone(),
+                    client_secret: cfg.client_secret.clone(),
+                },
+                &cfg.subscription_id,
+                &cfg.resource_group,
+            ))
         }
         DnsProviderKind::Acmedns => {
             let cfg = dns

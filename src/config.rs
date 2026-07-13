@@ -51,6 +51,8 @@ pub struct CertConfig {
 pub enum DnsProviderKind {
     Route53,
     Cloudflare,
+    Gcloud,
+    Azure,
     Acmedns,
     Pebble,
 }
@@ -62,7 +64,27 @@ pub struct DnsConfig {
     #[serde(default)]
     pub provider: Option<DnsProviderKind>,
     pub cloudflare: Option<CloudflareDnsConfig>,
+    pub gcloud: Option<GcloudDnsConfig>,
+    pub azure: Option<AzureDnsConfig>,
     pub acmedns: Option<AcmeDnsConfig>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct GcloudDnsConfig {
+    /// Service account key JSON, inline
+    pub service_account_key: Option<SecretString>,
+    /// Path to the service account key JSON file
+    pub service_account_key_path: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct AzureDnsConfig {
+    pub tenant_id: String,
+    pub client_id: String,
+    pub client_secret: SecretString,
+    pub subscription_id: String,
+    /// Resource group holding the DNS zones
+    pub resource_group: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -92,6 +114,14 @@ impl DnsConfig {
 
         let missing = match kind {
             DnsProviderKind::Cloudflare if self.cloudflare.is_none() => Some("dns.cloudflare"),
+            DnsProviderKind::Gcloud
+                if self.gcloud.as_ref().is_none_or(|g| {
+                    g.service_account_key.is_none() && g.service_account_key_path.is_none()
+                }) =>
+            {
+                Some("dns.gcloud")
+            }
+            DnsProviderKind::Azure if self.azure.is_none() => Some("dns.azure"),
             DnsProviderKind::Acmedns if self.acmedns.is_none() => Some("dns.acmedns"),
             _ => None,
         };
@@ -342,6 +372,28 @@ mod tests {
         };
         let err = dns.resolve("production").unwrap_err();
         assert!(err.to_string().contains("dns.acmedns"));
+
+        // Gcloud needs the key inline or as a file path
+        let dns = DnsConfig {
+            provider: Some(DnsProviderKind::Gcloud),
+            gcloud: Some(GcloudDnsConfig {
+                service_account_key: None,
+                service_account_key_path: None,
+            }),
+            ..Default::default()
+        };
+        let err = dns.resolve("production").unwrap_err();
+        assert!(err.to_string().contains("dns.gcloud"));
+
+        let dns = DnsConfig {
+            provider: Some(DnsProviderKind::Gcloud),
+            gcloud: Some(GcloudDnsConfig {
+                service_account_key: None,
+                service_account_key_path: Some("/etc/gcloud/key.json".into()),
+            }),
+            ..Default::default()
+        };
+        assert_eq!(dns.resolve("production").unwrap(), DnsProviderKind::Gcloud);
     }
 
     #[sealed_test(env = [
