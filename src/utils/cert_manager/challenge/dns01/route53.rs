@@ -13,7 +13,7 @@ use color_eyre::eyre::eyre;
 use tokio::sync::RwLock;
 use tracing::info;
 
-use super::DnsUpdater;
+use super::DnsProvider;
 use crate::cert_manager::challenge::ChallengeError;
 
 /// A DNS updater for AWS Route 53
@@ -252,8 +252,8 @@ impl ZoneInfo {
 }
 
 #[async_trait]
-impl DnsUpdater for AwsRoute53DnsUpdater {
-    async fn upsert_record(&self, domain: &str, value: &str) -> Result<(), ChallengeError> {
+impl DnsProvider for AwsRoute53DnsUpdater {
+    async fn create_txt_record(&self, domain: &str, value: &str) -> Result<(), ChallengeError> {
         // Try to upsert the record in Route53
         let (record_name, change_id) = self
             .change_records(domain, ChangeAction::Upsert, value)
@@ -265,7 +265,7 @@ impl DnsUpdater for AwsRoute53DnsUpdater {
         Ok(())
     }
 
-    async fn remove_record(&self, domain: &str, value: &str) -> Result<(), ChallengeError> {
+    async fn delete_txt_record(&self, domain: &str, value: &str) -> Result<(), ChallengeError> {
         // Try to delete the record in Route53
         let (record_name, _) = self
             .change_records(domain, ChangeAction::Delete, value)

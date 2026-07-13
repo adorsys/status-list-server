@@ -12,24 +12,27 @@ use instant_acme::{AuthorizationHandle, ChallengeType};
 
 use crate::cert_manager::challenge::{ChallengeError, ChallengeHandler, CleanupFuture};
 
-/// Interface for updating DNS records
+/// Interface for managing the DNS TXT records used by DNS-01 challenges.
+///
+/// Implementations must wait internally until the created record is served
+/// by the provider's authoritative name servers before returning.
 #[async_trait]
-pub trait DnsUpdater: Send + Sync {
-    /// Upsert a DNS record for the given domain
-    async fn upsert_record(&self, domain: &str, value: &str) -> Result<(), ChallengeError>;
-    /// Remove a DNS record for the given domain
-    async fn remove_record(&self, domain: &str, value: &str) -> Result<(), ChallengeError>;
+pub trait DnsProvider: Send + Sync {
+    /// Create (or update) the TXT record for the given domain
+    async fn create_txt_record(&self, domain: &str, value: &str) -> Result<(), ChallengeError>;
+    /// Delete the TXT record for the given domain
+    async fn delete_txt_record(&self, domain: &str, value: &str) -> Result<(), ChallengeError>;
 }
 
 /// Handler for DNS-01 challenges
 pub struct Dns01Handler {
-    dns_updater: Arc<dyn DnsUpdater>,
+    dns_provider: Arc<dyn DnsProvider>,
 }
 
 impl Dns01Handler {
-    pub fn new(dns_updater: impl DnsUpdater + 'static) -> Self {
+    pub fn new(dns_provider: impl DnsProvider + 'static) -> Self {
         Self {
-            dns_updater: Arc::new(dns_updater),
+            dns_provider: Arc::new(dns_provider),
         }
     }
 }
@@ -47,15 +50,17 @@ impl ChallengeHandler for Dns01Handler {
         let digest = challenge.key_authorization().dns_value();
         let domain = challenge.identifier().to_string();
 
-        // Upsert the DNS record
-        self.dns_updater.upsert_record(&domain, &digest).await?;
+        // Create the DNS record
+        self.dns_provider
+            .create_txt_record(&domain, &digest)
+            .await?;
 
         // Signal the server we are ready to respond to the challenge
         challenge.set_ready().await?;
 
         let cleanup = {
-            let dns_updater = self.dns_updater.clone();
-            async move { dns_updater.remove_record(&domain, &digest).await }
+            let dns_provider = self.dns_provider.clone();
+            async move { dns_provider.delete_txt_record(&domain, &digest).await }
         };
         Ok(CleanupFuture::new(cleanup))
     }

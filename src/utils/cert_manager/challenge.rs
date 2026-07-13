@@ -1,7 +1,7 @@
 mod dns01;
 mod http01;
 
-pub use dns01::{AwsRoute53DnsUpdater, Dns01Handler, PebbleDnsUpdater};
+pub use dns01::{AwsRoute53DnsUpdater, Dns01Handler, DnsProvider, PebbleDnsUpdater};
 pub use http01::Http01Handler;
 
 use std::{future::Future, pin::Pin};
@@ -18,6 +18,13 @@ use thiserror::Error;
 pub enum ChallengeError {
     #[error("AWS SDK error: {0}")]
     AwsSdk(#[source] Report),
+
+    #[error("DNS provider {provider} error: {source}")]
+    Dns {
+        provider: &'static str,
+        #[source]
+        source: Report,
+    },
 
     #[error("No hosted zone found for domain {0}")]
     ZoneNotFound(String),

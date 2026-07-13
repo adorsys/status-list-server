@@ -3,7 +3,7 @@ use color_eyre::eyre::eyre;
 use reqwest::Client;
 use serde_json::json;
 
-use super::DnsUpdater;
+use super::DnsProvider;
 use crate::cert_manager::challenge::ChallengeError;
 
 /// Handler for Pebble DNS (mainly for generating test certificates)
@@ -22,8 +22,8 @@ impl PebbleDnsUpdater {
 }
 
 #[async_trait]
-impl DnsUpdater for PebbleDnsUpdater {
-    async fn upsert_record(&self, domain: &str, value: &str) -> Result<(), ChallengeError> {
+impl DnsProvider for PebbleDnsUpdater {
+    async fn create_txt_record(&self, domain: &str, value: &str) -> Result<(), ChallengeError> {
         let record_name = format!("_acme-challenge.{domain}.");
         let url = format!("{}/set-txt", self.addr);
         let body = json!({"host": record_name, "value": value});
@@ -40,7 +40,7 @@ impl DnsUpdater for PebbleDnsUpdater {
         Ok(())
     }
 
-    async fn remove_record(&self, domain: &str, _value: &str) -> Result<(), ChallengeError> {
+    async fn delete_txt_record(&self, domain: &str, _value: &str) -> Result<(), ChallengeError> {
         let record_name = format!("_acme-challenge.{domain}.");
         let url = format!("{}/clear-txt", self.addr);
         let body = json!({"host": record_name});

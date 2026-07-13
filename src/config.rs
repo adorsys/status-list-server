@@ -41,6 +41,36 @@ pub struct CertConfig {
     pub renewal_cron_schedule: String,
     #[serde(default)]
     pub dns_challenge_server_url: Option<String>,
+    #[serde(default)]
+    pub dns: DnsConfig,
+}
+
+/// DNS provider used to solve ACME DNS-01 challenges
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DnsProviderKind {
+    Route53,
+    Pebble,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct DnsConfig {
+    /// Selected DNS provider. When unset, defaults to Route53 in production
+    /// and Pebble in development, preserving the historical behavior.
+    #[serde(default)]
+    pub provider: Option<DnsProviderKind>,
+}
+
+impl DnsConfig {
+    /// Resolve the DNS provider to use and validate that its settings are present.
+    pub fn resolve(&self, app_env: &str) -> Result<DnsProviderKind, ConfigError> {
+        let kind = self.provider.unwrap_or(if app_env == "production" {
+            DnsProviderKind::Route53
+        } else {
+            DnsProviderKind::Pebble
+        });
+        Ok(kind)
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -215,6 +245,7 @@ mod tests {
         assert_eq!(config.server.cert.renewal_cron_schedule, "0 0 0 * * *");
         assert_eq!(config.server.cert.dns_challenge_server_url, None);
         assert_eq!(config.server.aggregation_uri, None);
+        assert_eq!(config.server.cert.dns.provider, None);
     }
 
     #[sealed_test(env = [
@@ -226,6 +257,41 @@ mod tests {
         assert_eq!(
             config.server.aggregation_uri.as_deref(),
             Some("https://example.com/aggregation")
+        );
+    }
+
+    #[test]
+    fn test_dns_provider_defaults_per_environment() {
+        let dns = DnsConfig::default();
+
+        assert_eq!(
+            dns.resolve("production").unwrap(),
+            DnsProviderKind::Route53
+        );
+        assert_eq!(
+            dns.resolve("development").unwrap(),
+            DnsProviderKind::Pebble
+        );
+    }
+
+    #[test]
+    fn test_dns_provider_explicit_selection_overrides_environment() {
+        let dns = DnsConfig {
+            provider: Some(DnsProviderKind::Pebble),
+        };
+
+        assert_eq!(dns.resolve("production").unwrap(), DnsProviderKind::Pebble);
+    }
+
+    #[sealed_test(env = [
+        ("APP_SERVER__CERT__DNS__PROVIDER", "route53"),
+    ])]
+    fn test_dns_provider_env_override() {
+        let config = Config::load().expect("Failed to load config");
+
+        assert_eq!(
+            config.server.cert.dns.provider,
+            Some(DnsProviderKind::Route53)
         );
     }
 

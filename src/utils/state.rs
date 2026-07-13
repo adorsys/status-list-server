@@ -4,11 +4,11 @@ use crate::{
         challenge::{AwsRoute53DnsUpdater, Dns01Handler},
         storage::{AwsS3, AwsSecretsManager, Redis},
     },
-    config::Config as AppConfig,
+    config::{Config as AppConfig, DnsProviderKind},
     database::{Migrator, queries::SeaOrmStore},
     models::{Credentials, StatusListRecord},
 };
-use aws_config::{BehaviorVersion, Region};
+use aws_config::{BehaviorVersion, Region, SdkConfig};
 use color_eyre::eyre::{Context, Result as EyeResult};
 use sea_orm::Database;
 use sea_orm_migration::MigratorTrait;
@@ -20,7 +20,6 @@ use super::{
     cert_manager::{challenge::PebbleDnsUpdater, http_client::DefaultHttpClient},
 };
 
-const ENV_PRODUCTION: &str = "production";
 const ENV_DEVELOPMENT: &str = "development";
 
 fn empty_to_none(value: Option<String>) -> Option<String> {
@@ -59,25 +58,17 @@ pub async fn build_state(config: &AppConfig) -> EyeResult<AppState> {
         .await
         .wrap_err("Failed to connect to Redis")?;
 
-    // Initialize the challenge handler based on the environment.
-    // Use a fake DNS server to validate the challenge in development.
+    // Initialize the challenge handler with the configured DNS provider.
+    // When no provider is configured, the environment decides: Route53 in
+    // production, Pebble (fake DNS server) in development.
     let app_env = std::env::var("APP_ENV").unwrap_or(ENV_DEVELOPMENT.to_string());
-    let challenge_handler = if app_env == ENV_PRODUCTION {
-        let updater = AwsRoute53DnsUpdater::new(&aws_config);
-        Dns01Handler::new(updater)
-    } else {
-        // Use pebble as the DNS server in development.
-        // The DNS channel server URL is optional and only used in dev mode;
-        // it falls back to the well-known Pebble challenge test server when unset.
-        let dns_url = config
-            .server
-            .cert
-            .dns_challenge_server_url
-            .as_deref()
-            .unwrap_or("http://challtestsrv:8055");
-        let updater = PebbleDnsUpdater::new(dns_url);
-        Dns01Handler::new(updater)
-    };
+    let dns_provider = config
+        .server
+        .cert
+        .dns
+        .resolve(&app_env)
+        .wrap_err("Invalid DNS provider configuration")?;
+    let challenge_handler = build_dns_challenge_handler(dns_provider, config, &aws_config);
 
     // Initialize the storage backends for the certificate manager
     let cache = Redis::new(redis_conn.clone()).with_ttl(config.redis.cert_cache_ttl);
@@ -125,6 +116,28 @@ pub async fn build_state(config: &AppConfig) -> EyeResult<AppState> {
         token_exp_secs: config.status_list.token_exp_secs,
         token_ttl_secs: config.status_list.token_ttl_secs,
     })
+}
+
+/// Build the DNS-01 challenge handler for the resolved DNS provider
+fn build_dns_challenge_handler(
+    provider: DnsProviderKind,
+    config: &AppConfig,
+    aws_config: &SdkConfig,
+) -> Dns01Handler {
+    match provider {
+        DnsProviderKind::Route53 => Dns01Handler::new(AwsRoute53DnsUpdater::new(aws_config)),
+        DnsProviderKind::Pebble => {
+            // The DNS challenge server URL is optional and only used in dev mode;
+            // it falls back to the well-known Pebble challenge test server when unset.
+            let dns_url = config
+                .server
+                .cert
+                .dns_challenge_server_url
+                .as_deref()
+                .unwrap_or("http://challtestsrv:8055");
+            Dns01Handler::new(PebbleDnsUpdater::new(dns_url))
+        }
+    }
 }
 
 #[cfg(test)]
