@@ -40,7 +40,9 @@ pub async fn build_state(config: &AppConfig) -> EyeResult<AppState> {
 
     let expected_schemes = match db_backend {
         crate::config::DatabaseBackend::Postgres => "'postgres://' or 'postgresql://'",
-        crate::config::DatabaseBackend::MySql => "'mysql://'",
+        crate::config::DatabaseBackend::MySql | crate::config::DatabaseBackend::Mariadb => {
+            "'mysql://'"
+        }
         crate::config::DatabaseBackend::Sqlite => "'sqlite:'",
     };
 
@@ -48,7 +50,9 @@ pub async fn build_state(config: &AppConfig) -> EyeResult<AppState> {
         crate::config::DatabaseBackend::Postgres => {
             db_url.starts_with("postgres://") || db_url.starts_with("postgresql://")
         }
-        crate::config::DatabaseBackend::MySql => db_url.starts_with("mysql://"),
+        crate::config::DatabaseBackend::MySql | crate::config::DatabaseBackend::Mariadb => {
+            db_url.starts_with("mysql://")
+        }
         crate::config::DatabaseBackend::Sqlite => db_url.starts_with("sqlite:"),
     };
 

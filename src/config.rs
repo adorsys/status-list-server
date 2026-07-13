@@ -16,14 +16,20 @@ pub enum DatabaseBackend {
     Postgres,
     MySql,
     Sqlite,
+    Mariadb,
 }
 
 impl DatabaseBackend {
+    /// Returns the URL scheme prefix expected for this backend.
+    ///
+    /// Note: `Sqlite` URLs use `sqlite:` (with a colon, not `://`),
+    /// and `Mariadb` reuses the MySQL driver so its scheme is `mysql://`.
     pub fn db_scheme(&self) -> &'static str {
         match self {
             DatabaseBackend::Postgres => "postgres",
             DatabaseBackend::MySql => "mysql",
-            DatabaseBackend::Sqlite => "sqlite",
+            DatabaseBackend::Sqlite => "sqlite:",
+            DatabaseBackend::Mariadb => "mysql",
         }
     }
 }
@@ -347,19 +353,33 @@ mod tests {
 
     #[sealed_test(env = [
         ("APP_DATABASE__BACKEND", "sqlite"),
-        ("APP_DATABASE__URL", "sqlite:./test.db"),
+        ("APP_DATABASE__URL", "sqlite::memory:"),
     ])]
     fn test_sqlite_backend_config() {
         let config = Config::load().expect("Failed to load config");
         assert_eq!(config.database.backend, DatabaseBackend::Sqlite);
-        assert_eq!(config.database.url.expose_secret(), "sqlite:./test.db");
+        assert_eq!(config.database.url.expose_secret(), "sqlite::memory:");
+    }
+
+    #[sealed_test(env = [
+        ("APP_DATABASE__BACKEND", "mariadb"),
+        ("APP_DATABASE__URL", "mysql://mariadb:mariadb@localhost:3306/status-list"),
+    ])]
+    fn test_mariadb_backend_config() {
+        let config = Config::load().expect("Failed to load config");
+        assert_eq!(config.database.backend, DatabaseBackend::Mariadb);
+        assert_eq!(
+            config.database.url.expose_secret(),
+            "mysql://mariadb:mariadb@localhost:3306/status-list"
+        );
     }
 
     #[test]
     fn test_database_backend_db_scheme() {
         assert_eq!(DatabaseBackend::Postgres.db_scheme(), "postgres");
         assert_eq!(DatabaseBackend::MySql.db_scheme(), "mysql");
-        assert_eq!(DatabaseBackend::Sqlite.db_scheme(), "sqlite");
+        assert_eq!(DatabaseBackend::Sqlite.db_scheme(), "sqlite:");
+        assert_eq!(DatabaseBackend::Mariadb.db_scheme(), "mysql");
     }
 
     #[test]

@@ -156,7 +156,9 @@ mod test {
     use sea_orm_migration::MigratorTrait;
 
     async fn sqlite_connection() -> Arc<DatabaseConnection> {
-        let db = sea_orm::Database::connect("sqlite::memory:?cache=shared")
+        let mut opt = sea_orm::ConnectOptions::new("sqlite::memory:?cache=shared");
+        opt.max_connections(1);
+        let db = sea_orm::Database::connect(opt)
             .await
             .expect("Failed to connect to in-memory SQLite");
         crate::database::Migrator::up(&db, None)
