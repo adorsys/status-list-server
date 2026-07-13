@@ -132,6 +132,10 @@ The Status List Server is provisioned with a cryptographic certificate that is e
 - Every day, a cron job checks whether the certificate should be renewed based on this strategy.
 - If the certificate is still considered valid according to the configured strategy, no renewal occurs; renewal is only triggered when necessary.
 
+**DNS Providers:**
+
+ACME DNS-01 challenges are solved through a configurable DNS provider. AWS Route53, Cloudflare, Google Cloud DNS, Azure DNS and self-hosted ACME-DNS are supported, selected via `APP_SERVER__CERT__DNS__PROVIDER`. See the [DNS Provider Documentation](docs/dns-providers.md) for setup instructions.
+
 ## Error Handling
 
 The server implements proper error handling and returns appropriate HTTP status codes:
