@@ -47,7 +47,6 @@ mod tests {
             status_list: StatusList {
                 bits: 1,
                 lst: "test".to_string(),
-                aggregation_uri: None,
             },
         }
     }

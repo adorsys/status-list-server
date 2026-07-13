@@ -4,7 +4,7 @@ use axum::{
     response::IntoResponse,
     routing::{get, patch, post, put},
 };
-use color_eyre::eyre::Context;
+use color_eyre::eyre::{Context, eyre};
 use hyper::Method;
 use tokio::net::TcpListener;
 use tower_http::{
@@ -12,6 +12,9 @@ use tower_http::{
     cors::{Any, CorsLayer},
     trace::TraceLayer,
 };
+
+/// Path of the aggregation route, as registered under `/api/v1`.
+const AGGREGATION_ROUTE_PATH: &str = "/api/v1/aggregation";
 
 use crate::{
     config::Config,
@@ -62,6 +65,8 @@ impl HttpServer {
 
         router = attach_metrics(router, config);
 
+        validate_aggregation_uri(config)?;
+
         let listener = TcpListener::bind(format!("{}:{}", config.server.host, config.server.port))
             .await
             .wrap_err_with(|| format!("Failed to bind to port {}", config.server.port))?;
@@ -110,4 +115,74 @@ fn attach_metrics(router: Router, config: &Config) -> Router {
         tracing::info!("StatusList Monitor: DISABLED");
     }
     router
+}
+
+/// Validates that the configured `aggregation_uri` (when set) has a path
+/// matching the actual aggregation route registered on the router.
+///
+/// This prevents operators from shipping tokens with a dead `aggregation_uri`
+/// member that points to a non-existent endpoint.
+fn validate_aggregation_uri(config: &Config) -> color_eyre::Result<()> {
+    let Some(uri) = config.server.aggregation_uri.as_deref() else {
+        return Ok(());
+    };
+    let uri = uri.trim();
+    if uri.is_empty() {
+        return Ok(());
+    }
+
+    let parsed = reqwest::Url::parse(uri).wrap_err("Invalid aggregation_uri: not a valid URL")?;
+    let path = parsed.path();
+    if path != AGGREGATION_ROUTE_PATH {
+        return Err(eyre!(
+            "Configured aggregation_uri path '{path}' does not match the actual route '{AGGREGATION_ROUTE_PATH}'"
+        ));
+    }
+
+    tracing::info!("aggregation_uri validated: {uri}");
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::Config;
+    use sealed_test::prelude::*;
+
+    #[sealed_test(env = [
+        ("APP_SERVER__AGGREGATION_URI", "https://statuslist.example.com/api/v1/aggregation"),
+    ])]
+    fn test_validate_aggregation_uri_accepts_matching_path() {
+        let config = Config::load().unwrap();
+        assert!(validate_aggregation_uri(&config).is_ok());
+    }
+
+    #[sealed_test(env = [
+        ("APP_SERVER__AGGREGATION_URI", "https://statuslist.example.com/statuslists/aggregation"),
+    ])]
+    fn test_validate_aggregation_uri_rejects_mismatched_path() {
+        let config = Config::load().unwrap();
+        let result = validate_aggregation_uri(&config);
+        assert!(
+            result.is_err(),
+            "Should reject mismatched aggregation_uri path"
+        );
+    }
+
+    #[sealed_test]
+    fn test_validate_aggregation_uri_passes_when_unset() {
+        // Ensure no leftover aggregation_uri from the environment.
+        unsafe { std::env::remove_var("APP_SERVER__AGGREGATION_URI") };
+        let config = Config::load().unwrap();
+        assert!(validate_aggregation_uri(&config).is_ok());
+    }
+
+    #[sealed_test(env = [
+        ("APP_SERVER__AGGREGATION_URI", "not a url"),
+    ])]
+    fn test_validate_aggregation_uri_rejects_invalid_url() {
+        let config = Config::load().unwrap();
+        let result = validate_aggregation_uri(&config);
+        assert!(result.is_err(), "Should reject invalid URL");
+    }
 }

@@ -104,6 +104,17 @@ pub enum Status {
 pub struct StatusList {
     pub bits: u8,
     pub lst: String,
+}
+
+/// Status list claims serialized inside Status List Tokens (JWT/CWT).
+///
+/// `aggregation_uri` is injected from server configuration at token-issuance
+/// time (draft-21 §4.2/§4.3) and is **not** part of the persisted `StatusList`
+/// storage model.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct StatusListClaims {
+    pub bits: u8,
+    pub lst: String,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub aggregation_uri: Option<String>,
 }

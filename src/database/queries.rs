@@ -1,5 +1,6 @@
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, QuerySelect, Set,
+    ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, QueryOrder,
+    QuerySelect, Set,
 };
 use std::sync::Arc;
 
@@ -109,10 +110,12 @@ impl SeaOrmStore<StatusListRecord> {
             .map_err(|e| RepositoryError::FindError(e.to_string()))
     }
 
-    pub async fn find_all_subs(&self) -> Result<Vec<String>, RepositoryError> {
+    pub async fn find_all_status_list_uris(&self) -> Result<Vec<String>, RepositoryError> {
         status_lists::Entity::find()
             .select_only()
             .column(status_lists::Column::Sub)
+            .group_by(status_lists::Column::Sub)
+            .order_by_asc(status_lists::Column::Sub)
             .into_tuple::<String>()
             .all(&*self.db)
             .await
@@ -183,7 +186,6 @@ mod test {
                 status_list: StatusList {
                     bits: 1,
                     lst: "abc".to_string(),
-                    aggregation_uri: None,
                 },
                 sub: "https://example.com/statuslists/list1".to_string(),
             },
@@ -193,7 +195,6 @@ mod test {
                 status_list: StatusList {
                     bits: 8,
                     lst: "xyz".to_string(),
-                    aggregation_uri: Some("https://agg.example.com".to_string()),
                 },
                 sub: "https://example.com/statuslists/list2".to_string(),
             },
@@ -214,20 +215,15 @@ mod test {
         assert_eq!(records[0].sub, "https://example.com/statuslists/list1");
         assert_eq!(records[0].status_list.bits, 1);
         assert_eq!(records[0].status_list.lst, "abc");
-        assert_eq!(records[0].status_list.aggregation_uri, None);
 
         assert_eq!(records[1].list_id, "list2");
         assert_eq!(records[1].sub, "https://example.com/statuslists/list2");
         assert_eq!(records[1].status_list.bits, 8);
         assert_eq!(records[1].status_list.lst, "xyz");
-        assert_eq!(
-            records[1].status_list.aggregation_uri,
-            Some("https://agg.example.com".to_string())
-        );
     }
 
     #[tokio::test]
-    async fn test_status_list_find_all_subs() {
+    async fn test_status_list_find_all_status_list_uris() {
         let rows = vec![
             std::collections::BTreeMap::from([(
                 "sub".to_string(),
@@ -249,7 +245,7 @@ mod test {
 
         let store = SeaOrmStore::<StatusListRecord>::new(db_conn);
 
-        let subs = store.find_all_subs().await.unwrap();
+        let subs = store.find_all_status_list_uris().await.unwrap();
 
         assert_eq!(subs.len(), 2);
         assert_eq!(subs[0], "https://example.com/statuslists/a");

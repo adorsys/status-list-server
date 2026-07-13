@@ -143,7 +143,6 @@ mod test {
         // Initial token setup
         let original_status_list = StatusList {
             bits: initial_bits,
-            aggregation_uri: None,
             lst: create_status_list(vec![
                 StatusEntry {
                     index: 0,

@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 
 use crate::{
-    models::{StatusList, StatusListRecord},
+    models::{StatusListClaims, StatusListRecord},
     utils::{keygen::Keypair, state::AppState},
 };
 
@@ -284,7 +284,7 @@ fn build_x5chain(cert_chain: &[String]) -> Result<CborValue, StatusListError> {
 pub struct StatusListToken {
     pub exp: Option<i64>,
     pub iat: i64,
-    pub status_list: StatusList,
+    pub status_list: StatusListClaims,
     pub sub: String,
     pub ttl: Option<i64>,
 }
@@ -300,8 +300,11 @@ fn issue_jwt(
     let iat = OffsetDateTime::now_utc().unix_timestamp();
     let ttl = token_ttl_secs as i64;
     let exp = iat + token_exp_secs as i64;
-    let mut status_list = status_record.status_list.clone();
-    status_list.aggregation_uri = aggregation_uri.clone();
+    let status_list = StatusListClaims {
+        bits: status_record.status_list.bits,
+        lst: status_record.status_list.lst.clone(),
+        aggregation_uri: aggregation_uri.clone(),
+    };
     // Building the claims
     let claims = StatusListToken {
         exp: Some(exp),
@@ -356,7 +359,6 @@ mod tests {
         let status_list = StatusList {
             bits: 8,
             lst: encode_compressed(&[0, 0, 0]).unwrap(),
-            aggregation_uri: None,
         };
         let status_list_token = StatusListRecord {
             list_id: "test_list".to_string(),
@@ -430,7 +432,6 @@ mod tests {
         let status_list = StatusList {
             bits: 8,
             lst: encode_compressed(&[0, 0, 0]).unwrap(),
-            aggregation_uri: None,
         };
         let status_list_token = StatusListRecord {
             list_id: "test_list".to_string(),
@@ -554,7 +555,6 @@ mod tests {
         let status_list = StatusList {
             bits: 8,
             lst: encode_compressed(&[0, 0, 0]).unwrap(),
-            aggregation_uri: None,
         };
         let status_list_token = record_with_bits_8("test_list", status_list);
         let db_conn = Arc::new(
@@ -618,7 +618,6 @@ mod tests {
         let status_list = StatusList {
             bits: 8,
             lst: encode_compressed(&[0, 0, 0]).unwrap(),
-            aggregation_uri: None,
         };
         let status_list_token = record_with_bits_8("test_list", status_list);
         let db_conn = Arc::new(
@@ -674,7 +673,6 @@ mod tests {
         let status_list = StatusList {
             bits: 8,
             lst: encode_compressed(&[0, 0, 0]).unwrap(),
-            aggregation_uri: None,
         };
         let status_list_token = record_with_bits_8("test_list", status_list);
         let db_conn = Arc::new(
@@ -758,7 +756,6 @@ mod tests {
         let status_list = StatusList {
             bits: 8,
             lst: encode_compressed(&[0, 0, 0]).unwrap(),
-            aggregation_uri: None,
         };
         let status_list_token = record_with_bits_8("test_list", status_list);
         let db_conn = Arc::new(
