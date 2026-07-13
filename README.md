@@ -66,6 +66,26 @@ By default, the server will listen on `http://localhost:8000`. You can modify th
 
 The public API is documented with an OpenAPI 3.1 specification. See [`docs/openapi.yaml`](docs/openapi.yaml) for the complete API contract.
 
+### Retrieve Status List Aggregation
+
+- **Endpoint:** `GET /api/v1/aggregation`
+- **Description:** Returns all Status List Token URIs hosted by this server in a single response (Token Status List draft-21 §9), enabling consumers to pre-fetch or keep an offline mirror of every list. The endpoint is publicly accessible with no authentication required. The aggregation is **issuer-agnostic** — every hosted status list URI is included regardless of which issuer owns it.
+- **Responses:**
+  - `200 OK`
+
+  ```json
+  {
+    "status_lists": [
+      "https://statuslist.example.com/api/v1/status-lists/30202cc6-1e3f-4479-a567-74e86ad73693",
+      "https://statuslist.example.com/api/v1/status-lists/755a0cf7-8289-4f65-9d24-0e01be92f4a6"
+    ]
+  }
+  ```
+
+  - `500 INTERNAL SERVER ERROR`: System incurred an error
+
+When the optional `APP_SERVER__AGGREGATION_URI` configuration is set, every emitted Status List Token (JWT and CWT) includes it as the optional `aggregation_uri` member (draft-21 §4.2 / §4.3), allowing a consumer to discover the aggregation link directly from any single list token. When unset, the member is omitted entirely.
+
 ## Security
 
 ### Authentication

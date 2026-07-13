@@ -514,7 +514,7 @@ impl CertManager {
 
     #[inline]
     fn cert_key(&self) -> String {
-        format!("certs-{}-cert_data.json", &tld_plus_one(&self.domains))
+        format!("certs-{}-cert_data.json", tld_plus_one(&self.domains))
     }
 
     #[inline]
@@ -529,12 +529,15 @@ impl CertManager {
 }
 
 /// Setup the certificate renewal scheduler
-pub async fn setup_cert_renewal_scheduler(cert_manager: Arc<CertManager>) -> Result<(), CertError> {
+pub async fn setup_cert_renewal_scheduler(
+    cert_manager: Arc<CertManager>,
+    cron_schedule: &str,
+) -> Result<(), CertError> {
     let scheduler = JobScheduler::new().await?;
 
-    // Schedule certificate renewal check every day at midnight
+    // Schedule certificate renewal check based on the configured cron schedule
     scheduler
-        .add(Job::new_async("0 0 0 * * *", move |_, _| {
+        .add(Job::new_async(cron_schedule, move |_, _| {
             let cert_manager = cert_manager.clone();
             Box::pin(async move {
                 info!("Running scheduled certificate renewal check");

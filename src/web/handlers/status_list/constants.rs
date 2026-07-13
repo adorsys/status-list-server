@@ -1,7 +1,9 @@
 pub(super) const ACCEPT_STATUS_LISTS_HEADER_JWT: &str = "application/statuslist+jwt";
 pub(super) const ACCEPT_STATUS_LISTS_HEADER_CWT: &str = "application/statuslist+cwt";
 pub(super) const STATUS_LISTS_HEADER_JWT: &str = "statuslist+jwt";
-pub(super) const STATUS_LISTS_HEADER_CWT: &str = "statuslist+cwt";
+
+/// COSE label 16 ("type") value — unlike JWT's abbreviated `typ`, CWT's MUST be the full media type (§5.2).
+pub(super) const STATUS_LISTS_CWT_TYPE_VALUE: &str = "application/statuslist+cwt";
 
 // CBOR Web Token (CWT) constants
 pub(super) const CWT_TYPE: i64 = 16;
@@ -12,8 +14,3 @@ pub(super) const TTL: i32 = 65534;
 pub(super) const STATUS_LIST: i32 = 65533;
 
 pub(super) const GZIP_HEADER: &str = "gzip";
-
-// 15 minutes expiration
-pub(super) const TOKEN_EXP: i64 = 900;
-// 5 minutes ttl
-pub(super) const TOKEN_TTL: i64 = 300;
