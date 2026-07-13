@@ -23,6 +23,7 @@ services:
     image: mysql:9.2
     restart: always
     container_name: status-list-mysql
+    profiles: ["mysql"]
     ports:
       - 3306:3306
     environment:
