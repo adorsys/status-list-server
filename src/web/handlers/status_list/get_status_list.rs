@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 
 use crate::{
-    models::{StatusList, StatusListRecord},
+    models::{StatusListClaims, StatusListRecord},
     utils::{keygen::Keypair, state::AppState},
 };
 
@@ -113,6 +113,7 @@ async fn build_response_from_record(
 
     let accept_header = accept.to_string();
     let status_record = status_record.clone();
+    let aggregation_uri = state.aggregation_uri.clone();
     let token_exp_secs = state.token_exp_secs;
     let token_ttl_secs = state.token_ttl_secs;
 
@@ -127,6 +128,7 @@ async fn build_response_from_record(
                 &status_record,
                 &keypair,
                 certs_parts,
+                &aggregation_uri,
                 token_exp_secs,
                 token_ttl_secs,
             )?,
@@ -134,6 +136,7 @@ async fn build_response_from_record(
                 &status_record,
                 &keypair,
                 certs_parts,
+                &aggregation_uri,
                 token_exp_secs,
                 token_ttl_secs,
             )?
@@ -173,6 +176,7 @@ fn issue_cwt(
     status_record: &StatusListRecord,
     keypair: &Keypair,
     cert_chain: Vec<String>,
+    aggregation_uri: &Option<String>,
     token_exp_secs: u64,
     token_ttl_secs: u64,
 ) -> Result<Vec<u8>, StatusListError> {
@@ -206,13 +210,19 @@ fn issue_cwt(
     })?;
 
     // Adding the status list map to the claims
-    let status_list = vec![
+    let mut status_list = vec![
         (
             CborValue::Text("bits".into()),
             CborValue::Integer(status_record.status_list.bits.into()),
         ),
         (CborValue::Text("lst".into()), CborValue::Bytes(lst_bytes)),
     ];
+    if let Some(uri) = aggregation_uri {
+        status_list.push((
+            CborValue::Text("aggregation_uri".into()),
+            CborValue::Text(uri.clone()),
+        ));
+    }
     claims.push((
         CborValue::Integer(STATUS_LIST.into()),
         CborValue::Map(status_list),
@@ -281,7 +291,7 @@ fn build_x5chain(cert_chain: &[String]) -> Result<CborValue, StatusListError> {
 pub(crate) struct StatusListToken {
     pub exp: Option<i64>,
     pub iat: i64,
-    pub status_list: StatusList,
+    pub status_list: StatusListClaims,
     pub sub: String,
     pub ttl: Option<i64>,
 }
@@ -290,17 +300,23 @@ fn issue_jwt(
     status_record: &StatusListRecord,
     keypair: &Keypair,
     cert_chain: Vec<String>,
+    aggregation_uri: &Option<String>,
     token_exp_secs: u64,
     token_ttl_secs: u64,
 ) -> Result<String, StatusListError> {
     let iat = OffsetDateTime::now_utc().unix_timestamp();
     let ttl = token_ttl_secs as i64;
     let exp = iat + token_exp_secs as i64;
+    let status_list = StatusListClaims {
+        bits: status_record.status_list.bits,
+        lst: status_record.status_list.lst.clone(),
+        aggregation_uri: aggregation_uri.clone(),
+    };
     // Building the claims
     let claims = StatusListToken {
         exp: Some(exp),
         iat,
-        status_list: status_record.status_list.clone(),
+        status_list,
         sub: status_record.sub.to_owned(),
         ttl: Some(ttl),
     };
@@ -329,7 +345,7 @@ mod tests {
     use super::*;
     use crate::{
         models::{StatusList, StatusListRecord, status_lists},
-        test_utils::test_app_state,
+        test_utils::{test_app_state, test_app_state_with},
         utils::lst_gen::encode_compressed,
     };
     use axum::{
@@ -546,6 +562,293 @@ mod tests {
         assert_eq!(
             type_header,
             CborValue::Text(STATUS_LISTS_CWT_TYPE_VALUE.to_string())
+        );
+    }
+
+    fn record_with_bits_8(list_id: &str, status_list: StatusList) -> StatusListRecord {
+        StatusListRecord {
+            list_id: list_id.to_string(),
+            issuer: "issuer1".to_string(),
+            status_list,
+            sub: "test_subject".to_string(),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_jwt_emits_aggregation_uri_when_configured() {
+        let mock_db = MockDatabase::new(DatabaseBackend::Postgres);
+        let status_list = StatusList {
+            bits: 8,
+            lst: encode_compressed(&[0, 0, 0]).unwrap(),
+        };
+        let status_list_token = record_with_bits_8("test_list", status_list);
+        let db_conn = Arc::new(
+            mock_db
+                .append_query_results::<status_lists::Model, Vec<_>, _>(vec![vec![
+                    status_list_token,
+                ]])
+                .into_connection(),
+        );
+
+        let app_state = test_app_state_with(
+            Some(db_conn.clone()),
+            Some("https://aggregation.example.com/statuslists/aggregation".to_string()),
+        )
+        .await;
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            http::header::ACCEPT,
+            ACCEPT_STATUS_LISTS_HEADER_JWT.parse().unwrap(),
+        );
+
+        let response = get_status_list(
+            State(app_state.clone()),
+            Path("test_list".to_string()),
+            headers,
+        )
+        .await
+        .unwrap()
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let compressed = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+        let mut decoder = flate2::read::GzDecoder::new(&compressed[..]);
+        let mut body = Vec::new();
+        decoder.read_to_end(&mut body).unwrap();
+        let body_str = std::str::from_utf8(&body).unwrap();
+
+        let signing_key_pem = app_state.cert_manager.signing_key_pem().await.unwrap();
+        let keypair = Keypair::from_pkcs8_pem(&signing_key_pem).unwrap();
+        let decoding_key_pem = keypair
+            .verifying_key()
+            .to_public_key_pem(LineEnding::default())
+            .unwrap()
+            .into_bytes();
+        let decoding_key = DecodingKey::from_ec_pem(&decoding_key_pem).unwrap();
+        let mut validation = Validation::new(jsonwebtoken::Algorithm::ES256);
+        validation.validate_exp = false;
+        let token_data =
+            jsonwebtoken::decode::<StatusListToken>(body_str, &decoding_key, &validation).unwrap();
+
+        assert_eq!(
+            token_data.claims.status_list.aggregation_uri.as_deref(),
+            Some("https://aggregation.example.com/statuslists/aggregation")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_jwt_omits_aggregation_uri_when_not_configured() {
+        let mock_db = MockDatabase::new(DatabaseBackend::Postgres);
+        let status_list = StatusList {
+            bits: 8,
+            lst: encode_compressed(&[0, 0, 0]).unwrap(),
+        };
+        let status_list_token = record_with_bits_8("test_list", status_list);
+        let db_conn = Arc::new(
+            mock_db
+                .append_query_results::<status_lists::Model, Vec<_>, _>(vec![vec![
+                    status_list_token,
+                ]])
+                .into_connection(),
+        );
+
+        let app_state = test_app_state(Some(db_conn.clone())).await;
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            http::header::ACCEPT,
+            ACCEPT_STATUS_LISTS_HEADER_JWT.parse().unwrap(),
+        );
+
+        let response = get_status_list(
+            State(app_state.clone()),
+            Path("test_list".to_string()),
+            headers,
+        )
+        .await
+        .unwrap()
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let compressed = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+        let mut decoder = flate2::read::GzDecoder::new(&compressed[..]);
+        let mut body = Vec::new();
+        decoder.read_to_end(&mut body).unwrap();
+        let body_str = std::str::from_utf8(&body).unwrap();
+
+        let signing_key_pem = app_state.cert_manager.signing_key_pem().await.unwrap();
+        let keypair = Keypair::from_pkcs8_pem(&signing_key_pem).unwrap();
+        let decoding_key_pem = keypair
+            .verifying_key()
+            .to_public_key_pem(LineEnding::default())
+            .unwrap()
+            .into_bytes();
+        let decoding_key = DecodingKey::from_ec_pem(&decoding_key_pem).unwrap();
+        let mut validation = Validation::new(jsonwebtoken::Algorithm::ES256);
+        validation.validate_exp = false;
+        let token_data =
+            jsonwebtoken::decode::<StatusListToken>(body_str, &decoding_key, &validation).unwrap();
+        assert_eq!(token_data.claims.status_list.aggregation_uri, None);
+    }
+
+    #[tokio::test]
+    async fn test_cwt_emits_aggregation_uri_when_configured() {
+        let mock_db = MockDatabase::new(DatabaseBackend::Postgres);
+        let status_list = StatusList {
+            bits: 8,
+            lst: encode_compressed(&[0, 0, 0]).unwrap(),
+        };
+        let status_list_token = record_with_bits_8("test_list", status_list);
+        let db_conn = Arc::new(
+            mock_db
+                .append_query_results::<status_lists::Model, Vec<_>, _>(vec![vec![
+                    status_list_token,
+                ]])
+                .into_connection(),
+        );
+
+        let app_state = test_app_state_with(
+            Some(db_conn.clone()),
+            Some("https://aggregation.example.com/statuslists/aggregation".to_string()),
+        )
+        .await;
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            http::header::ACCEPT,
+            ACCEPT_STATUS_LISTS_HEADER_CWT.parse().unwrap(),
+        );
+
+        let response = get_status_list(
+            State(app_state.clone()),
+            Path("test_list".to_string()),
+            headers,
+        )
+        .await
+        .unwrap()
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let compressed = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+        let mut decoder = flate2::read::GzDecoder::new(&compressed[..]);
+        let mut body = Vec::new();
+        decoder.read_to_end(&mut body).unwrap();
+
+        let cwt = CoseSign1::from_tagged_slice(&body).unwrap();
+
+        let signing_key_pem = app_state.cert_manager.signing_key_pem().await.unwrap();
+        let keypair = Keypair::from_pkcs8_pem(&signing_key_pem).unwrap();
+        let signing_key = keypair.signing_key();
+        let verifying_key = VerifyingKey::from(signing_key);
+
+        let verify_result = cwt.verify_signature(&[], |sig, data| {
+            let signature = Signature::from_slice(sig).unwrap();
+            verifying_key.verify(data, &signature)
+        });
+        assert!(verify_result.is_ok());
+
+        let claims = match CborValue::from_slice(&cwt.payload.unwrap()).unwrap() {
+            CborValue::Map(m) => m,
+            _ => panic!("Invalid CWT payload"),
+        };
+        let status_list_map = claims
+            .iter()
+            .find(|(k, _)| k == &CborValue::Integer(STATUS_LIST.into()))
+            .unwrap()
+            .1
+            .clone();
+        let status_list = match status_list_map {
+            CborValue::Map(m) => m,
+            _ => panic!("Invalid status list"),
+        };
+
+        let aggregation_uri = status_list
+            .iter()
+            .find(|(k, _)| k == &CborValue::Text("aggregation_uri".to_string()))
+            .map(|(_, v)| v.clone());
+        assert_eq!(
+            aggregation_uri,
+            Some(CborValue::Text(
+                "https://aggregation.example.com/statuslists/aggregation".to_string()
+            ))
+        );
+    }
+
+    #[tokio::test]
+    async fn test_cwt_omits_aggregation_uri_when_not_configured() {
+        let mock_db = MockDatabase::new(DatabaseBackend::Postgres);
+        let status_list = StatusList {
+            bits: 8,
+            lst: encode_compressed(&[0, 0, 0]).unwrap(),
+        };
+        let status_list_token = record_with_bits_8("test_list", status_list);
+        let db_conn = Arc::new(
+            mock_db
+                .append_query_results::<status_lists::Model, Vec<_>, _>(vec![vec![
+                    status_list_token,
+                ]])
+                .into_connection(),
+        );
+
+        let app_state = test_app_state(Some(db_conn.clone())).await;
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            http::header::ACCEPT,
+            ACCEPT_STATUS_LISTS_HEADER_CWT.parse().unwrap(),
+        );
+
+        let response = get_status_list(
+            State(app_state.clone()),
+            Path("test_list".to_string()),
+            headers,
+        )
+        .await
+        .unwrap()
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let compressed = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+        let mut decoder = flate2::read::GzDecoder::new(&compressed[..]);
+        let mut body = Vec::new();
+        decoder.read_to_end(&mut body).unwrap();
+
+        let cwt = CoseSign1::from_tagged_slice(&body).unwrap();
+
+        let signing_key_pem = app_state.cert_manager.signing_key_pem().await.unwrap();
+        let keypair = Keypair::from_pkcs8_pem(&signing_key_pem).unwrap();
+        let signing_key = keypair.signing_key();
+        let verifying_key = VerifyingKey::from(signing_key);
+
+        let verify_result = cwt.verify_signature(&[], |sig, data| {
+            let signature = Signature::from_slice(sig).unwrap();
+            verifying_key.verify(data, &signature)
+        });
+        assert!(verify_result.is_ok());
+
+        let claims = match CborValue::from_slice(&cwt.payload.unwrap()).unwrap() {
+            CborValue::Map(m) => m,
+            _ => panic!("Invalid CWT payload"),
+        };
+        let status_list_map = claims
+            .iter()
+            .find(|(k, _)| k == &CborValue::Integer(STATUS_LIST.into()))
+            .unwrap()
+            .1
+            .clone();
+        let status_list = match status_list_map {
+            CborValue::Map(m) => m,
+            _ => panic!("Invalid status list"),
+        };
+
+        let aggregation_uri = status_list
+            .iter()
+            .find(|(k, _)| k == &CborValue::Text("aggregation_uri".to_string()))
+            .map(|(_, v)| v.clone());
+        assert!(
+            aggregation_uri.is_none(),
+            "aggregation_uri should be absent when not configured"
         );
     }
 

@@ -73,6 +73,7 @@ The following constraints are validated at startup and will cause the server to 
 - `server.port` must be between 1 and 65535 (the `u16` type enforces the upper bound)
 - `server.cert.renewal_cron_schedule` must be a valid 6-field cron expression (seconds required)
 - `aws.s3_bucket` must not be empty
+- `server.aggregation_uri` (when set) must be a valid URL whose path matches the actual aggregation route `/api/v1/aggregation`
 
 ## API Overview
 
@@ -163,14 +164,34 @@ The following constraints are validated at startup and will cause the server to 
 - **Description:** Retrieves the current status list for the requested `list_id`. This endpoint is publicly accessible with no authentication required.
 - **Headers:**
   - `Accept`: Specifies the desired response format
-    - `application/jwt`: Returns the gzip compressed status list as a JWT token
-    - `application/cwt`: Returns the gzip compressed status list as a CWT token
+    - `application/statuslist+jwt`: Returns the gzip compressed status list as a JWT token
+    - `application/statuslist+cwt`: Returns the gzip compressed status list as a CWT token
     - Default: Returns the gzip compressed status list as a JWT token
 - **Responses:**
   - `200 OK`: Returns the status list in the requested format
   - `404 NOT FOUND`: Status list not found
   - `406 NOT ACCEPTABLE`: Requested format not supported
   - `500 INTERNAL SERVER ERROR`: System incurred an error
+
+### Retrieve Status List Aggregation
+
+- **Endpoint:** `GET /api/v1/aggregation`
+- **Description:** Returns all Status List Token URIs hosted by this server in a single response (Token Status List draft-21 §9), enabling consumers to pre-fetch or keep an offline mirror of every list. The endpoint is publicly accessible with no authentication required. The aggregation is **issuer-agnostic** — every hosted status list URI is included regardless of which issuer owns it.
+- **Responses:**
+  - `200 OK`
+
+  ```json
+  {
+    "status_lists": [
+      "https://statuslist.example.com/api/v1/status-lists/30202cc6-1e3f-4479-a567-74e86ad73693",
+      "https://statuslist.example.com/api/v1/status-lists/755a0cf7-8289-4f65-9d24-0e01be92f4a6"
+    ]
+  }
+  ```
+
+  - `500 INTERNAL SERVER ERROR`: System incurred an error
+
+When the optional `APP_SERVER__AGGREGATION_URI` configuration is set, every emitted Status List Token (JWT and CWT) includes it as the optional `aggregation_uri` member (draft-21 §4.2 / §4.3), allowing a consumer to discover the aggregation link directly from any single list token. When unset, the member is omitted entirely.
 
 ## Security
 
