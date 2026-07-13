@@ -16,7 +16,7 @@ Stores information about issuers and their cryptographic public keys.
 | Column       | Type  | Null | Key | Description                           |
 | ------------ | ----- | ---- | --- | ------------------------------------- |
 | `issuer`     | TEXT  | NO   | PK  | Unique identifier for the issuer      |
-| `public_key` | JSON  | NO   |     | Public key associated with the issuer  |
+| `public_key` | JSON  | NO   |     | Public key associated with the issuer |
 
 ### `status_lists`
 
