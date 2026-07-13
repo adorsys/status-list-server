@@ -7,7 +7,7 @@ use crate::{
 };
 
 #[derive(Debug)]
-pub(super) enum CredentialError {
+pub enum CredentialError {
     RepoError(RepositoryError),
     AuthError(AuthenticationError),
 }

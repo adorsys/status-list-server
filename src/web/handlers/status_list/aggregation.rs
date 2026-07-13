@@ -3,23 +3,21 @@ use serde::{Deserialize, Serialize};
 
 use crate::utils::state::AppState;
 
-use super::error::StatusListError;
+use crate::web::errors::ApiError;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub(super) struct AggregationResponse {
     pub(super) status_lists: Vec<String>,
 }
 
-pub async fn get_aggregation(
-    State(state): State<AppState>,
-) -> Result<impl IntoResponse, StatusListError> {
+pub async fn get_aggregation(State(state): State<AppState>) -> Result<impl IntoResponse, ApiError> {
     let status_lists = state
         .status_list_repo
         .find_all_status_list_uris()
         .await
         .map_err(|e| {
             tracing::error!("Failed to fetch status lists for aggregation: {e:?}");
-            StatusListError::InternalServerError
+            ApiError::internal(e)
         })?;
 
     tracing::info!(
