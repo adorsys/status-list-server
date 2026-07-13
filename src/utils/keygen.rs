@@ -21,7 +21,7 @@ pub enum Error {
 
 /// A keypair for signing and verifying JWT
 #[derive(Debug, Clone)]
-pub struct Keypair {
+pub(crate) struct Keypair {
     repr: KeyRepr,
 }
 
@@ -32,7 +32,7 @@ struct KeyRepr {
 
 impl Keypair {
     /// Generate a new random keypair
-    pub fn generate() -> Result<Self, Error> {
+    pub(crate) fn generate() -> Result<Self, Error> {
         let mut seed = [0u8; SECRET_KEY_LENGTH];
         const MAX_ATTEMPTS: u8 = 3;
         // Try up to 3 times to generate a random seed as a safeguard against bad RNG
@@ -56,18 +56,18 @@ impl Keypair {
     }
 
     /// Get the signing key
-    pub fn signing_key(&self) -> &SigningKey {
+    pub(crate) fn signing_key(&self) -> &SigningKey {
         &self.repr.key
     }
 
     /// Get the verifying key
     #[allow(dead_code)]
-    pub fn verifying_key(&self) -> &VerifyingKey {
+    pub(crate) fn verifying_key(&self) -> &VerifyingKey {
         self.repr.key.verifying_key()
     }
 
     /// Create a keypair from a pkcs8 PEM string
-    pub fn from_pkcs8_pem(pem: &str) -> Result<Self, Error> {
+    pub(crate) fn from_pkcs8_pem(pem: &str) -> Result<Self, Error> {
         let key = SigningKey::from_pkcs8_pem(pem).map_err(|e| Error::Parsing(e.into()))?;
         Ok(Keypair {
             repr: KeyRepr { key },
@@ -75,7 +75,7 @@ impl Keypair {
     }
 
     /// Convert the private key to a pkcs8 PEM string
-    pub fn to_pkcs8_pem(&self) -> Result<String, Error> {
+    pub(crate) fn to_pkcs8_pem(&self) -> Result<String, Error> {
         self.repr
             .key
             .to_pkcs8_pem(LineEnding::default())
@@ -84,7 +84,7 @@ impl Keypair {
     }
 
     /// Convert the private key to a pkcs8 PEM bytes
-    pub fn to_pkcs8_pem_bytes(&self) -> Result<Vec<u8>, Error> {
+    pub(crate) fn to_pkcs8_pem_bytes(&self) -> Result<Vec<u8>, Error> {
         self.to_pkcs8_pem().map(|pem| pem.into_bytes())
     }
 }

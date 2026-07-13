@@ -1,14 +1,14 @@
 pub(crate) mod error;
 pub(crate) mod queries;
 
-pub use migrations::Migrator;
+pub(crate) use migrations::Migrator;
 
 /// Database migrations module
-pub mod migrations {
+pub(crate) mod migrations {
     use sea_orm_migration::prelude::*;
 
     /// Main migrator struct for database migrations
-    pub struct Migrator;
+    pub(crate) struct Migrator;
 
     #[async_trait::async_trait]
     impl MigratorTrait for Migrator {
@@ -18,14 +18,15 @@ pub mod migrations {
     }
 
     /// Database tables module containing table creation migrations
-    pub mod tables {
+    pub(crate) mod tables {
         use super::*;
 
         /// Migration struct for creating database tables
         #[derive(DeriveMigrationName)]
-        pub struct Migration;
+        pub(crate) struct Migration;
 
         #[async_trait::async_trait]
+        #[allow(elided_lifetimes_in_paths)]
         impl MigrationTrait for Migration {
             /// Creates the necessary database tables if they don't exist
             async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
@@ -115,6 +116,7 @@ pub mod migrations {
             }
 
             /// Drops the database tables
+            #[allow(elided_lifetimes_in_paths)]
             async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
                 // Drop indexes first
                 manager

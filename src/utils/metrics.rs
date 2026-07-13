@@ -4,7 +4,7 @@ use metrics_process::Collector;
 use std::time::Duration;
 
 /// Initialize Prometheus metrics recorder
-pub fn setup_metrics() -> Result<PrometheusHandle> {
+pub(crate) fn setup_metrics() -> Result<PrometheusHandle> {
     let builder = metrics_exporter_prometheus::PrometheusBuilder::new();
     let handle = builder.install_recorder()?;
 
@@ -12,7 +12,7 @@ pub fn setup_metrics() -> Result<PrometheusHandle> {
 }
 
 /// Start the background metrics collector task
-pub fn start_metrics_collector() {
+pub(crate) fn start_metrics_collector() {
     let collector = Collector::default();
     collector.describe();
 
@@ -24,6 +24,6 @@ pub fn start_metrics_collector() {
     });
 }
 
-pub async fn metrics_handler(handle: PrometheusHandle) -> String {
+pub(crate) async fn metrics_handler(handle: PrometheusHandle) -> String {
     handle.render()
 }
