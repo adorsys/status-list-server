@@ -347,7 +347,7 @@ async fn test_cert_chain_parts_are_cached_after_first_load() {
     .unwrap()
     .with_cert_storage(cert_storage.clone());
 
-    let serialized = include_str!("../../test_resources/cert_data.json");
+    let serialized = include_str!("../../../test_data/cert_data.json");
     cert_storage
         .store("certs-example.com-cert_data.json", serialized)
         .await
@@ -358,6 +358,44 @@ async fn test_cert_chain_parts_are_cached_after_first_load() {
 
     assert_eq!(first.len(), 2);
     assert!(Arc::ptr_eq(&first, &second));
+    assert_eq!(cert_storage.load_count(), 1);
+}
+
+#[tokio::test]
+async fn test_cache_provisioned_chain_replaces_cached_entry() {
+    init_crypto();
+
+    let cert_storage = MockStorage::new();
+    let cert_manager = CertManager::new(
+        vec!["example.com"],
+        "test@example.com",
+        None::<String>,
+        "https://acme-staging-v02.api.letsencrypt.org/directory",
+    )
+    .unwrap()
+    .with_cert_storage(cert_storage.clone());
+
+    let cert_key = cert_manager.cert_key();
+    let serialized = include_str!("../../../test_data/cert_data.json");
+    cert_storage.store(&cert_key, serialized).await.unwrap();
+
+    // First read populates the cache from storage.
+    let first = cert_manager.cert_chain_parts().await.unwrap().unwrap();
+    assert_eq!(first.len(), 2);
+    assert_eq!(cert_storage.load_count(), 1);
+
+    // Simulate re-provisioning with a different certificate by invoking the
+    // same hook `request_certificate` calls after storing a new cert.
+    let replacement_pem = include_str!("../../../test_data/test_cert2.pem");
+    cert_manager
+        .cache_provisioned_chain(replacement_pem)
+        .await
+        .unwrap();
+
+    // The next read must return the replaced chain — no storage load needed.
+    let reloaded = cert_manager.cert_chain_parts().await.unwrap().unwrap();
+    assert_eq!(reloaded.len(), 1);
+    assert!(!Arc::ptr_eq(&first, &reloaded));
     assert_eq!(cert_storage.load_count(), 1);
 }
 
@@ -376,14 +414,14 @@ async fn test_cert_chain_cache_invalidation_reloads_chain() {
     .with_cert_storage(cert_storage.clone());
 
     let cert_key = cert_manager.cert_key();
-    let serialized = include_str!("../../test_resources/cert_data.json");
+    let serialized = include_str!("../../../test_data/cert_data.json");
     cert_storage.store(&cert_key, serialized).await.unwrap();
 
     let first = cert_manager.cert_chain_parts().await.unwrap().unwrap();
     assert_eq!(first.len(), 2);
 
     let replacement = CertificateData {
-        certificate: include_str!("../../test_resources/test_cert2.pem").to_string(),
+        certificate: include_str!("../../../test_data/test_cert2.pem").to_string(),
         valid_from: 1,
         expires_at: 2,
         updated_at: 3,

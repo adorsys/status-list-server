@@ -244,7 +244,6 @@ impl CertManager {
         })?;
         let not_after = x509.validity().not_after.timestamp();
         let not_before = x509.validity().not_before.timestamp();
-        let cert_chain_parts = self.parse_cert_chain_parts(&cert_chain_pem)?;
 
         let cert_data = CertificateData {
             certificate: cert_chain_pem,
@@ -257,9 +256,7 @@ impl CertManager {
         let cert_key = self.cert_key();
         let serialized_cert_data = serde_json::to_string(&cert_data)?;
         cert_storage.store(&cert_key, &serialized_cert_data).await?;
-        self.cert_chain_cache
-            .update(cert_key, cert_chain_parts)
-            .await;
+        self.cache_provisioned_chain(&cert_data.certificate).await?;
 
         info!(
             "Certificate obtained successfully. Valid from {} to {}",
@@ -535,6 +532,18 @@ impl CertManager {
             .collect::<Result<Vec<_>, _>>()?;
 
         Ok(certs.into())
+    }
+
+    /// Parse `cert_pem` into chain parts and replace the cached entry so the
+    /// next read returns the fresh chain without an extra storage load/parse.
+    ///
+    /// This is the hook called after a certificate is provisioned or renewed.
+    async fn cache_provisioned_chain(&self, cert_pem: &str) -> Result<(), CertError> {
+        let cert_key = self.cert_key();
+        let parts = self.parse_cert_chain_parts(cert_pem)?;
+        // Replace eagerly so the next request never hits storage for this key.
+        self.cert_chain_cache.replace(cert_key, parts).await;
+        Ok(())
     }
 
     #[inline]
