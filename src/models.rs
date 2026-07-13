@@ -92,12 +92,41 @@ pub mod status_lists {
 pub type StatusListRecord = status_lists::Model;
 
 // Additional types for status list handling
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Status {
     VALID,
     INVALID,
     SUSPENDED,
-    APPLICATIONSPECIFIC,
+    ApplicationSpecific(u32),
+}
+
+impl Serialize for Status {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_u32(match self {
+            Status::VALID => 0,
+            Status::INVALID => 1,
+            Status::SUSPENDED => 2,
+            Status::ApplicationSpecific(v) => *v,
+        })
+    }
+}
+
+impl<'de> Deserialize<'de> for Status {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let v = u32::deserialize(d)?;
+        Ok(match v {
+            0 => Status::VALID,
+            1 => Status::INVALID,
+            2 => Status::SUSPENDED,
+            n if n >= 256 => Status::ApplicationSpecific(n),
+            other => {
+                return Err(serde::de::Error::custom(format!(
+                    "status value {} is reserved (only 0, 1, 2, or >= 256 allowed)",
+                    other
+                )));
+            }
+        })
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, FromJsonQueryResult)]
