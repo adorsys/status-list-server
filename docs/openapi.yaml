@@ -346,8 +346,7 @@ components:
 
     StatusValue:
       type: string
-      description: |
-        Status value. 
+      description: "Status value."
       enum:
         - VALID
         - INVALID
