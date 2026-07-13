@@ -50,6 +50,8 @@ pub struct CertConfig {
 #[serde(rename_all = "lowercase")]
 pub enum DnsProviderKind {
     Route53,
+    Cloudflare,
+    Acmedns,
     Pebble,
 }
 
@@ -59,6 +61,24 @@ pub struct DnsConfig {
     /// and Pebble in development, preserving the historical behavior.
     #[serde(default)]
     pub provider: Option<DnsProviderKind>,
+    pub cloudflare: Option<CloudflareDnsConfig>,
+    pub acmedns: Option<AcmeDnsConfig>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct CloudflareDnsConfig {
+    /// API token with Zone:Read and DNS:Edit permissions
+    pub api_token: SecretString,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct AcmeDnsConfig {
+    /// Base URL of the ACME-DNS server, e.g. https://auth.example.org
+    pub server_url: String,
+    pub username: String,
+    pub password: SecretString,
+    /// Subdomain returned by the ACME-DNS registration
+    pub subdomain: String,
 }
 
 impl DnsConfig {
@@ -69,6 +89,17 @@ impl DnsConfig {
         } else {
             DnsProviderKind::Pebble
         });
+
+        let missing = match kind {
+            DnsProviderKind::Cloudflare if self.cloudflare.is_none() => Some("dns.cloudflare"),
+            DnsProviderKind::Acmedns if self.acmedns.is_none() => Some("dns.acmedns"),
+            _ => None,
+        };
+        if let Some(section) = missing {
+            return Err(ConfigError::Message(format!(
+                "DNS provider {kind:?} selected but the server.cert.{section} settings are missing"
+            )));
+        }
         Ok(kind)
     }
 }
@@ -278,9 +309,39 @@ mod tests {
     fn test_dns_provider_explicit_selection_overrides_environment() {
         let dns = DnsConfig {
             provider: Some(DnsProviderKind::Pebble),
+            ..Default::default()
         };
 
         assert_eq!(dns.resolve("production").unwrap(), DnsProviderKind::Pebble);
+    }
+
+    #[test]
+    fn test_dns_provider_requires_its_settings() {
+        let dns = DnsConfig {
+            provider: Some(DnsProviderKind::Cloudflare),
+            ..Default::default()
+        };
+        let err = dns.resolve("production").unwrap_err();
+        assert!(err.to_string().contains("dns.cloudflare"));
+
+        let dns = DnsConfig {
+            provider: Some(DnsProviderKind::Cloudflare),
+            cloudflare: Some(CloudflareDnsConfig {
+                api_token: "token".into(),
+            }),
+            ..Default::default()
+        };
+        assert_eq!(
+            dns.resolve("production").unwrap(),
+            DnsProviderKind::Cloudflare
+        );
+
+        let dns = DnsConfig {
+            provider: Some(DnsProviderKind::Acmedns),
+            ..Default::default()
+        };
+        let err = dns.resolve("production").unwrap_err();
+        assert!(err.to_string().contains("dns.acmedns"));
     }
 
     #[sealed_test(env = [

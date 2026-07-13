@@ -1,7 +1,7 @@
 use crate::{
     cert_manager::{
         CertManager,
-        challenge::{AwsRoute53DnsUpdater, Dns01Handler},
+        challenge::{AcmeDnsProvider, AwsRoute53DnsUpdater, CloudflareDnsProvider, Dns01Handler},
         storage::{AwsS3, AwsSecretsManager, Redis},
     },
     config::{Config as AppConfig, DnsProviderKind},
@@ -9,7 +9,7 @@ use crate::{
     models::{Credentials, StatusListRecord},
 };
 use aws_config::{BehaviorVersion, Region, SdkConfig};
-use color_eyre::eyre::{Context, Result as EyeResult};
+use color_eyre::eyre::{Context, Result as EyeResult, eyre};
 use sea_orm::Database;
 use sea_orm_migration::MigratorTrait;
 use secrecy::ExposeSecret;
@@ -68,7 +68,7 @@ pub async fn build_state(config: &AppConfig) -> EyeResult<AppState> {
         .dns
         .resolve(&app_env)
         .wrap_err("Invalid DNS provider configuration")?;
-    let challenge_handler = build_dns_challenge_handler(dns_provider, config, &aws_config);
+    let challenge_handler = build_dns_challenge_handler(dns_provider, config, &aws_config)?;
 
     // Initialize the storage backends for the certificate manager
     let cache = Redis::new(redis_conn.clone()).with_ttl(config.redis.cert_cache_ttl);
@@ -123,9 +123,29 @@ fn build_dns_challenge_handler(
     provider: DnsProviderKind,
     config: &AppConfig,
     aws_config: &SdkConfig,
-) -> Dns01Handler {
-    match provider {
+) -> EyeResult<Dns01Handler> {
+    let dns = &config.server.cert.dns;
+    let handler = match provider {
         DnsProviderKind::Route53 => Dns01Handler::new(AwsRoute53DnsUpdater::new(aws_config)),
+        DnsProviderKind::Cloudflare => {
+            let cfg = dns
+                .cloudflare
+                .as_ref()
+                .ok_or_else(|| eyre!("Missing Cloudflare DNS settings"))?;
+            Dns01Handler::new(CloudflareDnsProvider::new(cfg.api_token.clone()))
+        }
+        DnsProviderKind::Acmedns => {
+            let cfg = dns
+                .acmedns
+                .as_ref()
+                .ok_or_else(|| eyre!("Missing ACME-DNS settings"))?;
+            Dns01Handler::new(AcmeDnsProvider::new(
+                &cfg.server_url,
+                &cfg.username,
+                cfg.password.clone(),
+                &cfg.subdomain,
+            ))
+        }
         DnsProviderKind::Pebble => {
             // The DNS challenge server URL is optional and only used in dev mode;
             // it falls back to the well-known Pebble challenge test server when unset.
@@ -137,7 +157,8 @@ fn build_dns_challenge_handler(
                 .unwrap_or("http://challtestsrv:8055");
             Dns01Handler::new(PebbleDnsUpdater::new(dns_url))
         }
-    }
+    };
+    Ok(handler)
 }
 
 #[cfg(test)]

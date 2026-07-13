@@ -1,6 +1,10 @@
+mod acme_dns;
+mod cloudflare;
 mod pebble;
 mod route53;
 
+pub use acme_dns::AcmeDnsProvider;
+pub use cloudflare::CloudflareDnsProvider;
 pub use pebble::PebbleDnsUpdater;
 pub use route53::AwsRoute53DnsUpdater;
 
@@ -69,5 +73,91 @@ impl ChallengeHandler for Dns01Handler {
 impl From<instant_acme::Error> for ChallengeError {
     fn from(err: instant_acme::Error) -> Self {
         ChallengeError::Other(err.into())
+    }
+}
+
+/// A DNS zone known to a provider
+#[derive(Debug, Clone)]
+pub(crate) struct ZoneInfo {
+    pub(crate) name: String,
+    pub(crate) id: String,
+}
+
+impl ZoneInfo {
+    pub(crate) fn new(name: impl Into<String>, id: impl Into<String>) -> Self {
+        Self {
+            // remove the trailing dot from the zone name if any
+            name: name.into().trim_end_matches('.').to_string(),
+            id: id.into(),
+        }
+    }
+}
+
+// Find the best matching (longest suffix) zone for the given domain
+pub(crate) fn find_best_match<'a>(
+    lookup: &str,
+    zones: &'a [ZoneInfo],
+) -> Option<(&'a str, &'a str)> {
+    let mut best_match = None;
+
+    for zone in zones.iter() {
+        let zone_name = &zone.name;
+        let is_match = if let Some(stripped) = zone_name.strip_prefix("*.") {
+            // Try to match wildcard domains
+            if lookup.ends_with(stripped) {
+                // We ensure there's at least one identifier before the wildcard
+                let diff = lookup.len() - stripped.len();
+                lookup[..diff].contains('.')
+            } else {
+                false
+            }
+        } else if lookup == zone_name {
+            true
+        } else if lookup.len() > zone_name.len() {
+            // Check if lookup ends with .zone_name
+            let idx = lookup.len() - zone_name.len() - 1;
+            lookup.as_bytes().get(idx) == Some(&b'.') && &lookup[idx + 1..] == zone_name
+        } else {
+            false
+        };
+
+        if is_match {
+            let len = zone_name.len();
+            match best_match {
+                None => best_match = Some((zone.id.as_str(), zone_name, len)),
+                Some((_, _, curr_len)) if len > curr_len => {
+                    best_match = Some((zone.id.as_str(), zone_name, len));
+                }
+                _ => {}
+            }
+        }
+    }
+    best_match.map(|(zone_id, zone_name, _)| (zone_id, zone_name.as_str()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_find_best_match_exact_and_suffix() {
+        let zones = vec![
+            ZoneInfo::new("example.com", "Z1"),
+            ZoneInfo::new("sub.example.com", "Z2"),
+            ZoneInfo::new("test.acme.com", "Z3"),
+            ZoneInfo::new("*.test.example.com", "Z4"),
+        ];
+
+        let result = find_best_match("sub.example.com", &zones);
+        assert_eq!(result, Some(("Z2", "sub.example.com")));
+
+        let result = find_best_match("www.example.com", &zones);
+        assert_eq!(result, Some(("Z1", "example.com")));
+
+        let result = find_best_match("acme.com", &zones);
+        assert_eq!(result, None);
+
+        let result = find_best_match("wildcard.test.example.com", &zones);
+        assert_eq!(result, Some(("Z4", "*.test.example.com")));
     }
 }

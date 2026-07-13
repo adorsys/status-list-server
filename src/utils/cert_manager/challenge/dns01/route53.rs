@@ -5,15 +5,14 @@ use aws_config::SdkConfig;
 use aws_sdk_route53::{
     Client as Route53Client,
     types::{
-        Change, ChangeAction, ChangeBatch, ChangeStatus, HostedZone, ResourceRecord,
-        ResourceRecordSet, RrType,
+        Change, ChangeAction, ChangeBatch, ChangeStatus, ResourceRecord, ResourceRecordSet, RrType,
     },
 };
 use color_eyre::eyre::eyre;
 use tokio::sync::RwLock;
 use tracing::info;
 
-use super::DnsProvider;
+use super::{DnsProvider, ZoneInfo, find_best_match};
 use crate::cert_manager::challenge::ChallengeError;
 
 /// A DNS updater for AWS Route 53
@@ -43,51 +42,12 @@ impl AwsRoute53DnsUpdater {
         // remove the trailing dot from the domain if any
         let domain = domain.trim_end_matches('.');
 
-        if let Some((zone_id, zone_name)) = Self::find_best_match(domain, zones) {
+        if let Some((zone_id, zone_name)) = find_best_match(domain, zones) {
             info!("Found best matching hosted zone: {zone_name}");
             Ok(zone_id.to_string())
         } else {
             Err(ChallengeError::ZoneNotFound(domain.to_string()))
         }
-    }
-
-    // Find the best matching hosted zone for the given domain
-    fn find_best_match<'a>(lookup: &str, zones: &'a [ZoneInfo]) -> Option<(&'a str, &'a str)> {
-        let mut best_match = None;
-
-        for zone in zones.iter() {
-            let zone_name = &zone.name;
-            let is_match = if let Some(stripped) = zone_name.strip_prefix("*.") {
-                // Try to match wildcard domains
-                if lookup.ends_with(stripped) {
-                    // We ensure there's at least one identifier before the wildcard
-                    let diff = lookup.len() - stripped.len();
-                    lookup[..diff].contains('.')
-                } else {
-                    false
-                }
-            } else if lookup == zone_name {
-                true
-            } else if lookup.len() > zone_name.len() {
-                // Check if lookup ends with .zone_name
-                let idx = lookup.len() - zone_name.len() - 1;
-                lookup.as_bytes().get(idx) == Some(&b'.') && &lookup[idx + 1..] == zone_name
-            } else {
-                false
-            };
-
-            if is_match {
-                let len = zone_name.len();
-                match best_match {
-                    None => best_match = Some((zone.id.as_str(), zone_name, len)),
-                    Some((_, _, curr_len)) if len > curr_len => {
-                        best_match = Some((zone.id.as_str(), zone_name, len));
-                    }
-                    _ => {}
-                }
-            }
-        }
-        best_match.map(|(zone_id, zone_name, _)| (zone_id, zone_name.as_str()))
     }
 
     async fn try_cache_zones(&self) -> Result<(), ChallengeError> {
@@ -113,7 +73,7 @@ impl AwsRoute53DnsUpdater {
                 .map_err(|e| ChallengeError::AwsSdk(e.into()))?;
             let hosted_zones = resp.hosted_zones();
             for zone in hosted_zones {
-                all_zones.push(ZoneInfo::new(zone));
+                all_zones.push(ZoneInfo::new(zone.name(), zone.id()));
             }
             // Check if there are more hosted zones
             if resp.is_truncated() {
@@ -235,22 +195,6 @@ impl AwsRoute53DnsUpdater {
     }
 }
 
-#[derive(Debug, Clone)]
-struct ZoneInfo {
-    name: String,
-    id: String,
-}
-
-impl ZoneInfo {
-    fn new(z: &HostedZone) -> Self {
-        let trimmed = z.name().trim_end_matches('.').to_string();
-        ZoneInfo {
-            name: trimmed,
-            id: z.id().to_string(),
-        }
-    }
-}
-
 #[async_trait]
 impl DnsProvider for AwsRoute53DnsUpdater {
     async fn create_txt_record(&self, domain: &str, value: &str) -> Result<(), ChallengeError> {
@@ -273,44 +217,5 @@ impl DnsProvider for AwsRoute53DnsUpdater {
 
         info!("DNS record {record_name} deleted for {domain}");
         Ok(())
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_find_best_match_exact_and_suffix() {
-        let zones = vec![
-            ZoneInfo {
-                name: "example.com".into(),
-                id: "Z1".into(),
-            },
-            ZoneInfo {
-                name: "sub.example.com".into(),
-                id: "Z2".into(),
-            },
-            ZoneInfo {
-                name: "test.acme.com".into(),
-                id: "Z3".into(),
-            },
-            ZoneInfo {
-                name: "*.test.example.com".into(),
-                id: "Z4".into(),
-            },
-        ];
-
-        let result = AwsRoute53DnsUpdater::find_best_match("sub.example.com", &zones);
-        assert_eq!(result, Some(("Z2", "sub.example.com")));
-
-        let result = AwsRoute53DnsUpdater::find_best_match("www.example.com", &zones);
-        assert_eq!(result, Some(("Z1", "example.com")));
-
-        let result = AwsRoute53DnsUpdater::find_best_match("acme.com", &zones);
-        assert_eq!(result, None);
-
-        let result = AwsRoute53DnsUpdater::find_best_match("wildcard.test.example.com", &zones);
-        assert_eq!(result, Some(("Z4", "*.test.example.com")));
     }
 }
