@@ -6,8 +6,8 @@ use crate::utils::state::AppState;
 use super::error::StatusListError;
 
 #[derive(Debug, Serialize, Deserialize)]
-pub struct AggregationResponse {
-    pub status_lists: Vec<String>,
+pub(super) struct AggregationResponse {
+    pub(super) status_lists: Vec<String>,
 }
 
 pub async fn get_aggregation(
