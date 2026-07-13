@@ -735,7 +735,7 @@ mod tests {
         let mut body = Vec::new();
         decoder.read_to_end(&mut body).unwrap();
 
-        let cwt = CoseSign1::from_slice(&body).unwrap();
+        let cwt = CoseSign1::from_tagged_slice(&body).unwrap();
 
         let signing_key_pem = app_state.cert_manager.signing_key_pem().await.unwrap();
         let keypair = Keypair::from_pkcs8_pem(&signing_key_pem).unwrap();
@@ -814,7 +814,7 @@ mod tests {
         let mut body = Vec::new();
         decoder.read_to_end(&mut body).unwrap();
 
-        let cwt = CoseSign1::from_slice(&body).unwrap();
+        let cwt = CoseSign1::from_tagged_slice(&body).unwrap();
 
         let signing_key_pem = app_state.cert_manager.signing_key_pem().await.unwrap();
         let keypair = Keypair::from_pkcs8_pem(&signing_key_pem).unwrap();
