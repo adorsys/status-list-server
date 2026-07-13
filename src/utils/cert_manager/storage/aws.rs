@@ -26,10 +26,12 @@ impl AwsSecretsManager {
         config: &SdkConfig,
         secrets_cache_ttl: Duration,
     ) -> Result<Self, StorageError> {
+        const SECRETS_CACHE_MAX_CAPACITY: u64 = 100;
+
         let client = SecretsClient::new(config);
         let cache = (!secrets_cache_ttl.is_zero()).then(|| {
             Cache::builder()
-                .max_capacity(100)
+                .max_capacity(SECRETS_CACHE_MAX_CAPACITY)
                 .time_to_live(secrets_cache_ttl)
                 .build()
         });
@@ -128,16 +130,21 @@ pub struct AwsS3 {
     client: S3Client,
     bucket: String,
     region: String,
+    key_prefix: String,
     cache: Option<Box<dyn Storage>>,
     bucket_exists: AtomicBool,
 }
 
 impl AwsS3 {
+    const BUCKET_MAX_RETRIES: u32 = 3;
+    const BUCKET_RETRY_DELAY: Duration = Duration::from_millis(500);
+
     /// Create a new instance of [`AwsS3`] with the given AWS SDK config and bucket name
     pub fn new(
         config: &SdkConfig,
         bucket_name: impl Into<String>,
         region: impl Into<String>,
+        key_prefix: impl Into<String>,
     ) -> Self {
         let client = if std::env::var("APP_ENV").as_deref() == Ok("production") {
             S3Client::new(config)
@@ -153,6 +160,7 @@ impl AwsS3 {
             client,
             bucket: bucket_name.into(),
             region: region.into(),
+            key_prefix: key_prefix.into(),
             cache: None,
             bucket_exists: AtomicBool::new(false),
         }
@@ -164,6 +172,18 @@ impl AwsS3 {
         self
     }
 
+    /// Qualify a key by prepending the configured S3 key prefix.
+    /// If the prefix is empty, the key is returned as-is.
+    fn qualify_key(&self, key: &str) -> String {
+        if self.key_prefix.is_empty() {
+            key.to_string()
+        } else if self.key_prefix.ends_with('/') {
+            format!("{}{}", self.key_prefix, key)
+        } else {
+            format!("{}/{}", self.key_prefix, key)
+        }
+    }
+
     // Helper function to ensure the S3 bucket exists before any operation
     async fn ensure_bucket_exists(&self) -> Result<(), StorageError> {
         use aws_sdk_s3::error::SdkError;
@@ -173,10 +193,9 @@ impl AwsS3 {
             return Ok(());
         }
 
-        const MAX_RETRIES: u32 = 3;
-        const RETRY_DELAY: Duration = Duration::from_millis(500);
+        let max_retries = Self::BUCKET_MAX_RETRIES;
 
-        for attempt in 0..MAX_RETRIES {
+        for attempt in 0..max_retries {
             // Check if the bucket exists
             match self.client.head_bucket().bucket(&self.bucket).send().await {
                 Ok(_) => {
@@ -207,7 +226,7 @@ impl AwsS3 {
                             return Ok(());
                         }
                         Err(create_err) => {
-                            if attempt == MAX_RETRIES - 1 {
+                            if attempt == max_retries - 1 {
                                 return Err(StorageError::AwsSdk(create_err.into()));
                             }
                             warn!(
@@ -218,7 +237,7 @@ impl AwsS3 {
                     }
                 }
                 Err(err) => {
-                    if attempt == MAX_RETRIES - 1 {
+                    if attempt == max_retries - 1 {
                         return Err(StorageError::AwsSdk(err.into()));
                     }
                     warn!("Error checking bucket {}: {err}. Retrying...", self.bucket);
@@ -226,8 +245,8 @@ impl AwsS3 {
             }
 
             // Wait a bit before retrying
-            if attempt < MAX_RETRIES - 1 {
-                sleep(RETRY_DELAY).await;
+            if attempt < max_retries - 1 {
+                sleep(Self::BUCKET_RETRY_DELAY).await;
             }
         }
         Err(StorageError::BucketUnavailable(self.bucket.clone()))
@@ -248,12 +267,13 @@ impl Storage for AwsS3 {
         }
 
         // Store the object in the bucket
+        let s3_key = self.qualify_key(key);
         let body = data.as_bytes().to_vec();
         match self
             .client
             .put_object()
             .bucket(&self.bucket)
-            .key(key)
+            .key(&s3_key)
             .body(body.into())
             .send()
             .await
@@ -288,11 +308,12 @@ impl Storage for AwsS3 {
 
         // If not found in cache, try to get directly from S3
         self.ensure_bucket_exists().await?;
+        let s3_key = self.qualify_key(key);
         match self
             .client
             .get_object()
             .bucket(&self.bucket)
-            .key(key)
+            .key(&s3_key)
             .send()
             .await
         {
@@ -318,11 +339,12 @@ impl Storage for AwsS3 {
     }
 
     async fn delete(&self, key: &str) -> Result<(), StorageError> {
+        let s3_key = self.qualify_key(key);
         match self
             .client
             .delete_object()
             .bucket(&self.bucket)
-            .key(key)
+            .key(&s3_key)
             .send()
             .await
         {

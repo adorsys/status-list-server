@@ -86,10 +86,10 @@ curl -s http://localhost:8000/
 
 - `GET /` → "Status list Server"
 - `GET /health` → liveness probe
-- `POST /credentials` → register an issuer’s public key (JWK)
-- `POST /statuslists/publish` (auth) → create a status list
-- `PATCH /statuslists/update` (auth) → update a status list
-- `GET /statuslists/{list_id}` (public) → gzip-compressed JWT or CWT
+- `POST /api/v1/credentials` → register an issuer’s public key (JWK)
+- `PUT /api/v1/status-lists/{list_id}/statuses` (auth) → create a status list
+- `PATCH /api/v1/status-lists/{list_id}/statuses` (auth) → update a status list
+- `GET /api/v1/status-lists/{list_id}` (public) → gzip-compressed JWT or CWT
 
 === Data model (high level)
 
