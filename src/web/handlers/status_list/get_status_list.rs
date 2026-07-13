@@ -58,7 +58,7 @@ async fn build_status_list_token(
     list_id: &str,
     state: &AppState,
 ) -> Result<impl IntoResponse + Debug + use<>, StatusListError> {
-// Check cache for status list record
+    // Check cache for status list record
     if let Some(cached_record) = state.cache.get(list_id).await {
         tracing::info!("Cache hit for status list record: {list_id}");
         // Record is in cache, proceed with building the response
