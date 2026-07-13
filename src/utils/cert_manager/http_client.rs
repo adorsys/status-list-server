@@ -45,7 +45,7 @@ struct ClientInner {
 }
 
 impl ClientInner {
-    pub fn try_new(root_cert_pem: Option<&[u8]>) -> Result<Self, CertError> {
+    pub(crate) fn try_new(root_cert_pem: Option<&[u8]>) -> Result<Self, CertError> {
         let mut root_store = RootCertStore::empty();
         if let Some(root_pem) = root_cert_pem {
             let certs_der: Vec<_> = CertificateDer::pem_slice_iter(root_pem)

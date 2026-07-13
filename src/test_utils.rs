@@ -10,7 +10,7 @@ use async_trait::async_trait;
 use sea_orm::{DbBackend, MockDatabase};
 use std::{collections::HashMap, sync::Arc};
 
-pub struct MockStorage {
+pub(crate) struct MockStorage {
     pub key_value: HashMap<String, String>,
 }
 
@@ -33,11 +33,11 @@ impl Storage for MockStorage {
     }
 }
 
-pub async fn test_app_state(db_conn: Option<Arc<sea_orm::DatabaseConnection>>) -> AppState {
+pub(crate) async fn test_app_state(db_conn: Option<Arc<sea_orm::DatabaseConnection>>) -> AppState {
     test_app_state_with(db_conn, None).await
 }
 
-pub async fn test_app_state_with(
+pub(crate) async fn test_app_state_with(
     db_conn: Option<Arc<sea_orm::DatabaseConnection>>,
     aggregation_uri: Option<String>,
 ) -> AppState {

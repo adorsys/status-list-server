@@ -104,7 +104,7 @@ The Status List Server is built using modern, performant, and scalable technolog
 
 #### Storage
 
-- **Database**: to map and store statuslist to id and credentials.
+- **Database**: to map and store status lists (keyed by `list_id`) and issuer credentials (keyed by `issuer`). See [Database Overview](../src/database/README.md) for the schema.
 
 ### Data Flow
 
