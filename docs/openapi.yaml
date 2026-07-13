@@ -35,6 +35,23 @@ security:
   - BearerAuth: []
 
 paths:
+  /:
+    get:
+      operationId: welcome
+      summary: Welcome page
+      description: Returns a simple welcome message for the Status List Server.
+      security: []
+      responses:
+        "200":
+          description: Welcome message
+          content:
+            text/plain:
+              schema:
+                type: string
+              example: "Status list Server"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+
   /health:
     get:
       operationId: healthCheck
@@ -49,22 +66,6 @@ paths:
               schema:
                 type: string
               example: "OK"
-        "500":
-          $ref: "#/components/responses/InternalServerError"
-
-  /openapi.json:
-    get:
-      operationId: getOpenApiSpec
-      summary: OpenAPI specification
-      description: Returns the OpenAPI 3.1 specification for this API in JSON format.
-      security: []
-      responses:
-        "200":
-          description: OpenAPI specification
-          content:
-            application/json:
-              schema:
-                type: object
         "500":
           $ref: "#/components/responses/InternalServerError"
 
@@ -186,7 +187,7 @@ paths:
         "500":
           $ref: "#/components/responses/InternalServerError"
 
-  /statuslists/{list_id}:
+  /api/v1/statuslists/{list_id}:
     get:
       operationId: getStatusList
       summary: Retrieve a status list token
@@ -346,13 +347,11 @@ components:
     StatusValue:
       type: string
       description: |
-        Status value. `APPLICATIONSPECIFIC` is the application-specific status
-        defined by the OAuth Status List specification.
+        Status value. 
       enum:
         - VALID
         - INVALID
         - SUSPENDED
-        - APPLICATIONSPECIFIC
       example: "INVALID"
 
     StatusList:
