@@ -57,7 +57,6 @@ impl HttpServer {
         let mut router = Router::new()
             .route("/", get(welcome))
             .route("/health", get(health_check))
-            .nest("/statuslists", protocol_routes())
             .nest("/api/v1", api_v1_routes(state.clone()))
             .layer(TraceLayer::new_for_http())
             .layer(CatchPanicLayer::new())
@@ -82,11 +81,6 @@ impl HttpServer {
             .wrap_err("Failed to start HTTP server")?;
         Ok(())
     }
-}
-
-/// Protocol routes for public status list access.
-fn protocol_routes() -> Router<AppState> {
-    Router::new().route("/{list_id}", get(get_status_list))
 }
 
 /// Management API v1 routes.
