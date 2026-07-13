@@ -35,23 +35,6 @@ security:
   - BearerAuth: []
 
 paths:
-  /:
-    get:
-      operationId: welcome
-      summary: Welcome message
-      description: Returns a short welcome message confirming the server is running.
-      security: []
-      responses:
-        "200":
-          description: Server welcome message
-          content:
-            text/plain:
-              schema:
-                type: string
-              example: "Status list Server"
-        "500":
-          $ref: "#/components/responses/InternalServerError"
-
   /health:
     get:
       operationId: healthCheck
