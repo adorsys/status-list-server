@@ -1,0 +1,10 @@
+config:
+  md013: false
+  md022: false
+  md024: false
+  md032: false
+  md060:
+    style: aligned
+  md033:
+    allowed_elements:
+      - "a"
