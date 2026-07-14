@@ -41,28 +41,6 @@ services:
     networks:
       - status-list-network
 
-  mariadb:
-    image: mariadb:11.6
-    restart: always
-    container_name: status-list-mariadb
-    profiles: ["mariadb"]
-    ports:
-      - 3307:3306
-    environment:
-      MARIADB_ROOT_PASSWORD: ${MARIADB_ROOT_PASSWORD:-rootpassword}
-      MARIADB_DATABASE: ${MARIADB_DATABASE:-status-list}
-      MARIADB_USER: ${MARIADB_USER:-mariadb}
-      MARIADB_PASSWORD: ${MARIADB_PASSWORD:-mariadb}
-    volumes:
-      - mariadbdata:/var/lib/mysql
-    healthcheck:
-      test: ["CMD-SHELL", "mariadb-admin ping -h localhost -u root -p$$MARIADB_ROOT_PASSWORD"]
-      interval: 5s
-      timeout: 5s
-      retries: 5
-    networks:
-      - status-list-network
-
   redis:
     image: redis:8.6
     container_name: redis
@@ -168,6 +146,4 @@ volumes:
   pgdata:
     driver: local
   mysqldata:
-    driver: local
-  mariadbdata:
     driver: local

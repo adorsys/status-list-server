@@ -16,46 +16,43 @@ pub enum DatabaseBackend {
     Postgres,
     MySql,
     Sqlite,
-    Mariadb,
+}
+
+#[derive(Clone, Copy)]
+struct DatabaseBackendScheme {
+    prefixes: &'static [&'static str],
+    description: &'static str,
 }
 
 impl DatabaseBackend {
-    /// Returns the URL scheme prefix expected for this backend.
-    ///
-    /// Note: `Sqlite` URLs use `sqlite:` (with a colon, not `://`),
-    /// and `Mariadb` reuses the MySQL driver so its scheme is `mysql://`.
-    pub fn db_scheme(&self) -> &'static str {
+    fn scheme(&self) -> DatabaseBackendScheme {
         match self {
-            DatabaseBackend::Postgres => "postgres",
-            DatabaseBackend::MySql => "mysql",
-            DatabaseBackend::Sqlite => "sqlite:",
-            DatabaseBackend::Mariadb => "mysql",
+            DatabaseBackend::Postgres => DatabaseBackendScheme {
+                prefixes: &["postgres://", "postgresql://"],
+                description: "'postgres://' or 'postgresql://'",
+            },
+            DatabaseBackend::MySql => DatabaseBackendScheme {
+                prefixes: &["mysql://"],
+                description: "'mysql://'",
+            },
+            DatabaseBackend::Sqlite => DatabaseBackendScheme {
+                prefixes: &["sqlite:"],
+                description: "'sqlite:'",
+            },
         }
     }
 
     /// Returns a human-readable description of the expected URL scheme(s).
     pub fn expected_scheme_description(&self) -> &'static str {
-        match self {
-            DatabaseBackend::Postgres => "'postgres://' or 'postgresql://'",
-            DatabaseBackend::MySql => "'mysql://'",
-            DatabaseBackend::Sqlite => "'sqlite:'",
-            DatabaseBackend::Mariadb => "'mysql://' (MariaDB uses the MySQL driver)",
-        }
+        self.scheme().description
     }
 
     /// Validates that the given URL matches the expected scheme for this backend.
-    ///
-    /// PostgreSQL accepts both `postgres://` and `postgresql://` schemes.
-    /// MariaDB uses the MySQL driver, so it expects `mysql://`.
-    /// SQLite uses `sqlite:` (note: no `//`).
     pub fn validate_url_scheme(&self, url: &str) -> bool {
-        match self {
-            DatabaseBackend::Postgres => {
-                url.starts_with("postgres://") || url.starts_with("postgresql://")
-            }
-            DatabaseBackend::MySql | DatabaseBackend::Mariadb => url.starts_with("mysql://"),
-            DatabaseBackend::Sqlite => url.starts_with("sqlite:"),
-        }
+        self.scheme()
+            .prefixes
+            .iter()
+            .any(|prefix| url.starts_with(prefix))
     }
 }
 
@@ -102,6 +99,7 @@ pub struct RedisConfig {
 #[derive(Debug, Clone, Deserialize)]
 pub struct DatabaseConfig {
     pub url: SecretString,
+    /// Backend selection is used to validate the URL scheme at startup.
     #[serde(default)]
     pub backend: DatabaseBackend,
 }
@@ -386,25 +384,25 @@ mod tests {
         assert_eq!(config.database.url.expose_secret(), "sqlite::memory:");
     }
 
-    #[sealed_test(env = [
-        ("APP_DATABASE__BACKEND", "mariadb"),
-        ("APP_DATABASE__URL", "mysql://mariadb:mariadb@localhost:3306/status-list"),
-    ])]
-    fn test_mariadb_backend_config() {
-        let config = Config::load().expect("Failed to load config");
-        assert_eq!(config.database.backend, DatabaseBackend::Mariadb);
-        assert_eq!(
-            config.database.url.expose_secret(),
-            "mysql://mariadb:mariadb@localhost:3306/status-list"
-        );
-    }
-
     #[test]
-    fn test_database_backend_db_scheme() {
-        assert_eq!(DatabaseBackend::Postgres.db_scheme(), "postgres");
-        assert_eq!(DatabaseBackend::MySql.db_scheme(), "mysql");
-        assert_eq!(DatabaseBackend::Sqlite.db_scheme(), "sqlite:");
-        assert_eq!(DatabaseBackend::Mariadb.db_scheme(), "mysql");
+    fn test_database_backend_validate_url_scheme() {
+        assert!(
+            DatabaseBackend::Postgres
+                .validate_url_scheme("postgres://postgres:postgres@localhost:5432/status-list")
+        );
+        assert!(
+            DatabaseBackend::Postgres
+                .validate_url_scheme("postgresql://postgres:postgres@localhost:5432/status-list")
+        );
+        assert!(
+            DatabaseBackend::MySql
+                .validate_url_scheme("mysql://user:password@localhost:3306/status-list")
+        );
+        assert!(DatabaseBackend::Sqlite.validate_url_scheme("sqlite::memory:"));
+        assert!(
+            !DatabaseBackend::MySql
+                .validate_url_scheme("postgres://postgres:postgres@localhost:5432/status-list")
+        );
     }
 
     #[test]

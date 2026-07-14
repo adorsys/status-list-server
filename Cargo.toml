@@ -127,7 +127,7 @@ features = ["alloc", "ecdsa", "pem", "pkcs8"]
 [dev-dependencies]
 sealed_test = "1.1.0"
 sea-orm = { version = "1.1", features = ["mock"] }
-testcontainers-modules = { version = "0.15", features = ["localstack", "redis"] }
+testcontainers-modules = { version = "0.15", features = ["localstack", "mysql", "redis"] }
 
 [target.'cfg(not(target_env = "msvc"))'.dependencies]
 tikv-jemallocator = "0.7"

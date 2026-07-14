@@ -23,7 +23,7 @@ For a detailed explanation of the architecture, see the [Architecture Documentat
 Before running the server, ensure you have the following tools installed:
 
 - [Rust & Cargo](https://www.rust-lang.org/tools/install) (Latest stable).
-- [PostgreSQL](https://www.postgresql.org/download/): The database system used for storing status lists.
+- A supported database backend: PostgreSQL, MySQL, or SQLite.
 - [Redis](https://redis.io/download): The in-memory data structure store used for caching.
 - [Docker](https://www.docker.com/get-started/) (optional, for local testing).
 
@@ -65,6 +65,8 @@ By default, the server will listen on `http://localhost:8000`. You can modify th
 ## Configuration
 
 All runtime behavior is controlled via environment variables prefixed with `APP_` and using `__` as a nested separator (e.g. `APP_SERVER__PORT=8000`). Sensible defaults are built in, so only non-default values need to be set. See [`.env.template`](.env.template) for a complete example.
+
+For deployment guidance and backend tradeoffs, see [`docs/database-backends.md`](docs/database-backends.md).
 
 ### Validation
 

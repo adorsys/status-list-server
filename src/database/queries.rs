@@ -28,7 +28,7 @@ impl SeaOrmStore<StatusListRecord> {
             sub: Set(entity.sub),
         };
         status_lists::Entity::insert(active)
-            .exec(&*self.db)
+            .exec_without_returning(&*self.db)
             .await
             .map_err(|e| RepositoryError::InsertError(e.to_string()))?;
         Ok(())
@@ -105,7 +105,7 @@ impl SeaOrmStore<Credentials> {
     pub async fn insert_one(&self, entity: Credentials) -> Result<(), RepositoryError> {
         let active: credentials::ActiveModel = entity.into();
         credentials::Entity::insert(active)
-            .exec(&*self.db)
+            .exec_without_returning(&*self.db)
             .await
             .map_err(|e| RepositoryError::InsertError(e.to_string()))?;
         Ok(())
@@ -154,6 +154,16 @@ mod test {
     use jsonwebtoken::jwk::Jwk;
     use sea_orm::{DatabaseBackend, MockDatabase, MockExecResult};
     use sea_orm_migration::MigratorTrait;
+    use testcontainers_modules::{
+        mysql::Mysql as MysqlImage,
+        testcontainers::{ContainerAsync, runners::AsyncRunner},
+    };
+
+    struct MysqlTestDb {
+        #[allow(dead_code)]
+        _container: ContainerAsync<MysqlImage>,
+        db: Arc<DatabaseConnection>,
+    }
 
     async fn sqlite_connection() -> Arc<DatabaseConnection> {
         let mut opt = sea_orm::ConnectOptions::new("sqlite::memory:?cache=shared");
@@ -165,6 +175,33 @@ mod test {
             .await
             .expect("Failed to run migrations on SQLite");
         Arc::new(db)
+    }
+
+    async fn mysql_connection() -> MysqlTestDb {
+        let node = MysqlImage::default()
+            .start()
+            .await
+            .expect("Failed to start MySQL container");
+        let mysql_url = format!(
+            "mysql://root@{}:{}/test",
+            node.get_host().await.expect("Failed to resolve MySQL host"),
+            node.get_host_port_ipv4(3306)
+                .await
+                .expect("Failed to resolve MySQL port")
+        );
+
+        let mut opt = sea_orm::ConnectOptions::new(mysql_url);
+        opt.max_connections(5);
+        let db = sea_orm::Database::connect(opt)
+            .await
+            .expect("Failed to connect to MySQL");
+        crate::database::Migrator::up(&db, None)
+            .await
+            .expect("Failed to run migrations on MySQL");
+        MysqlTestDb {
+            _container: node,
+            db: Arc::new(db),
+        }
     }
 
     #[tokio::test]
@@ -195,6 +232,33 @@ mod test {
 
         let gone = store.find_one_by("issuer-sqlite").await.unwrap();
         assert!(gone.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_mysql_credentials_round_trip() {
+        let test_db = mysql_connection().await;
+        let store = SeaOrmStore::<Credentials>::new(test_db.db.clone());
+
+        let public_key: Jwk = serde_json::from_str(
+            r#"{
+                "kty": "EC",
+                "crv": "P-256",
+                "x": "NeyFv_2L67OEplNbJpR02IFis4_lFW9HYmhfF5Or6m8",
+                "y": "eAH2qe8Pg3GQ28uxA8-qNAqdwQ_zfV2uKAvJ2sLpY9M"
+            }"#,
+        )
+        .unwrap();
+
+        let entity = Credentials::new("issuer-mysql".to_string(), public_key.clone());
+
+        store.insert_one(entity.clone()).await.unwrap();
+
+        let found = store.find_one_by("issuer-mysql").await.unwrap().unwrap();
+        assert_eq!(found.issuer, "issuer-mysql");
+        assert_eq!(found.public_key, public_key);
+
+        let deleted = store.delete_by("issuer-mysql").await.unwrap();
+        assert!(deleted);
     }
 
     #[tokio::test]
