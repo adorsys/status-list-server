@@ -13,3 +13,6 @@ ipython_config.py
 .ipynb_checkpoints
 */.ipynb_checkpoints/*
 *.tgz
+
+# MacOs store files
+**/.DS_Store

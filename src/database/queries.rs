@@ -1,8 +1,11 @@
-use sea_orm::{ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, Set};
+use sea_orm::{
+    ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, QueryOrder,
+    QuerySelect, Set,
+};
 use std::sync::Arc;
 
 use super::error::RepositoryError;
-use crate::models::{credentials, status_lists, Credentials, StatusListRecord};
+use crate::models::{Credentials, StatusListRecord, credentials, status_lists};
 
 #[derive(Clone)]
 pub struct SeaOrmStore<T> {
@@ -99,6 +102,25 @@ impl SeaOrmStore<StatusListRecord> {
             .await
             .map_err(|e| RepositoryError::FindError(e.to_string()))
     }
+
+    pub async fn find_all(&self) -> Result<Vec<StatusListRecord>, RepositoryError> {
+        status_lists::Entity::find()
+            .all(&*self.db)
+            .await
+            .map_err(|e| RepositoryError::FindError(e.to_string()))
+    }
+
+    pub async fn find_all_status_list_uris(&self) -> Result<Vec<String>, RepositoryError> {
+        status_lists::Entity::find()
+            .select_only()
+            .column(status_lists::Column::Sub)
+            .group_by(status_lists::Column::Sub)
+            .order_by_asc(status_lists::Column::Sub)
+            .into_tuple::<String>()
+            .all(&*self.db)
+            .await
+            .map_err(|e| RepositoryError::FindError(e.to_string()))
+    }
 }
 
 impl SeaOrmStore<Credentials> {
@@ -151,8 +173,84 @@ impl SeaOrmStore<Credentials> {
 #[cfg(test)]
 mod test {
     use super::*;
+    use crate::models::StatusList;
     use jsonwebtoken::jwk::Jwk;
     use sea_orm::{DatabaseBackend, MockDatabase, MockExecResult};
+
+    #[tokio::test]
+    async fn test_status_list_find_all() {
+        let models = vec![
+            status_lists::Model {
+                list_id: "list1".to_string(),
+                issuer: "issuer1".to_string(),
+                status_list: StatusList {
+                    bits: 1,
+                    lst: "abc".to_string(),
+                },
+                sub: "https://example.com/statuslists/list1".to_string(),
+            },
+            status_lists::Model {
+                list_id: "list2".to_string(),
+                issuer: "issuer2".to_string(),
+                status_list: StatusList {
+                    bits: 8,
+                    lst: "xyz".to_string(),
+                },
+                sub: "https://example.com/statuslists/list2".to_string(),
+            },
+        ];
+
+        let db_conn = Arc::new(
+            MockDatabase::new(DatabaseBackend::Postgres)
+                .append_query_results::<status_lists::Model, Vec<_>, _>(vec![models.clone()])
+                .into_connection(),
+        );
+
+        let store = SeaOrmStore::<StatusListRecord>::new(db_conn);
+
+        let records = store.find_all().await.unwrap();
+
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0].list_id, "list1");
+        assert_eq!(records[0].sub, "https://example.com/statuslists/list1");
+        assert_eq!(records[0].status_list.bits, 1);
+        assert_eq!(records[0].status_list.lst, "abc");
+
+        assert_eq!(records[1].list_id, "list2");
+        assert_eq!(records[1].sub, "https://example.com/statuslists/list2");
+        assert_eq!(records[1].status_list.bits, 8);
+        assert_eq!(records[1].status_list.lst, "xyz");
+    }
+
+    #[tokio::test]
+    async fn test_status_list_find_all_status_list_uris() {
+        let rows = vec![
+            std::collections::BTreeMap::from([(
+                "sub".to_string(),
+                sea_orm::Value::from("https://example.com/statuslists/a"),
+            )]),
+            std::collections::BTreeMap::from([(
+                "sub".to_string(),
+                sea_orm::Value::from("https://example.com/statuslists/b"),
+            )]),
+        ];
+
+        let db_conn = Arc::new(
+            MockDatabase::new(DatabaseBackend::Postgres)
+                .append_query_results::<std::collections::BTreeMap<String, sea_orm::Value>, Vec<_>, _>(
+                    vec![rows],
+                )
+                .into_connection(),
+        );
+
+        let store = SeaOrmStore::<StatusListRecord>::new(db_conn);
+
+        let subs = store.find_all_status_list_uris().await.unwrap();
+
+        assert_eq!(subs.len(), 2);
+        assert_eq!(subs[0], "https://example.com/statuslists/a");
+        assert_eq!(subs[1], "https://example.com/statuslists/b");
+    }
 
     #[tokio::test]
     async fn test_seaorm_store() {

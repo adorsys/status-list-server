@@ -11,18 +11,18 @@ use std::{sync::Arc, time::Duration};
 use aws_config::BehaviorVersion;
 use aws_sdk_s3::Client as S3Client;
 use status_list_server::cert_manager::{
+    CertManager,
     challenge::{Dns01Handler, PebbleDnsUpdater},
     http_client::DefaultHttpClient,
     storage::{AwsS3, AwsSecretsManager, Redis as RedisStorage},
-    CertManager,
 };
 use testcontainers_modules::{
     localstack::LocalStack,
     redis::Redis,
     testcontainers::{
+        ContainerAsync, GenericImage, ImageExt,
         core::{IntoContainerPort, WaitFor},
         runners::AsyncRunner,
-        ContainerAsync, GenericImage, ImageExt,
     },
 };
 
@@ -36,7 +36,7 @@ const BUCKET_NAME: &str = "status-list-adorsys";
 const AWS_REGION: &str = "us-east-1";
 
 /// Minica root CA that signs Pebble's own TLS server certificate.
-const PEBBLE_MINICA_ROOT_CA: &[u8] = include_bytes!("../src/test_resources/pebble.pem");
+const PEBBLE_MINICA_ROOT_CA: &[u8] = include_bytes!("../test_data/pebble.pem");
 
 /// Holds all running containers and resolved ports for a single test run.
 /// Containers are stopped automatically when this is dropped.
@@ -148,7 +148,7 @@ impl TestInfra {
         let redis_conn = self.redis_connection().await;
 
         let cache = RedisStorage::new(redis_conn);
-        let cert_storage = AwsS3::new(&aws_config, BUCKET_NAME, AWS_REGION).with_cache(cache);
+        let cert_storage = AwsS3::new(&aws_config, BUCKET_NAME, AWS_REGION, "").with_cache(cache);
         let secrets_storage = AwsSecretsManager::new(&aws_config, Duration::from_millis(0))
             .await
             .expect("Failed to create AwsSecretsManager");
@@ -203,9 +203,11 @@ async fn test_full_certificate_provisioning() {
         .expect("Certificate provisioning failed");
 
     // Verify the certificate
-    assert!(cert_data
-        .certificate
-        .contains("-----BEGIN CERTIFICATE-----"));
+    assert!(
+        cert_data
+            .certificate
+            .contains("-----BEGIN CERTIFICATE-----")
+    );
     assert!(cert_data.valid_from < cert_data.expires_at);
     assert!(cert_data.updated_at > 0);
 

@@ -2,8 +2,8 @@ use std::time::Duration;
 
 use config::{Config as ConfigLib, ConfigError, Environment};
 use redis::{
-    aio::{ConnectionManager, ConnectionManagerConfig},
     Client as RedisClient, ClientTlsConfig, RedisResult, TlsCertificates,
+    aio::{ConnectionManager, ConnectionManagerConfig},
 };
 use secrecy::{ExposeSecret, SecretString};
 use serde::Deserialize;
@@ -16,6 +16,7 @@ pub struct Config {
     pub redis: RedisConfig,
     pub aws: AwsConfig,
     pub cache: CacheConfig,
+    pub status_list: StatusListConfig,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -25,6 +26,7 @@ pub struct ServerConfig {
     pub port: u16,
     pub cert: CertConfig,
     pub enable_metrics: bool,
+    pub aggregation_uri: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -36,6 +38,9 @@ pub struct CertConfig {
     #[serde(default)]
     pub eku: Vec<u64>,
     pub acme_directory_url: String,
+    pub renewal_cron_schedule: String,
+    #[serde(default)]
+    pub dns_challenge_server_url: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -54,12 +59,20 @@ pub struct DatabaseConfig {
 pub struct AwsConfig {
     pub region: String,
     pub secrets_cache_ttl: u64,
+    pub s3_bucket: String,
+    pub s3_key_prefix: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct CacheConfig {
     pub ttl: u64,
     pub max_capacity: u64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct StatusListConfig {
+    pub token_exp_secs: u64,
+    pub token_ttl_secs: u64,
 }
 
 impl RedisConfig {
@@ -132,6 +145,7 @@ impl Config {
             .set_default("server.domain", "localhost")?
             .set_default("server.port", 8000)?
             .set_default("server.enable_metrics", false)?
+            .set_default("server.aggregation_uri", Option::<String>::None)?
             .set_default(
                 "database.url",
                 "postgres://postgres:postgres@localhost:5432/status-list",
@@ -140,6 +154,8 @@ impl Config {
             .set_default("redis.require_client_auth", false)?
             .set_default("redis.cert_cache_ttl", 3600)? // Default 1 hour
             .set_default("aws.secrets_cache_ttl", 300)? // Default 5 minutes
+            .set_default("aws.s3_bucket", "status-list-adorsys")?
+            .set_default("aws.s3_key_prefix", "")?
             .set_default("server.cert.email", "admin@example.com")?
             .set_default("server.cert.eku", vec![1, 3, 6, 1, 5, 5, 7, 3, 30])?
             .set_default("server.cert.organization", "adorsys GmbH & CO KG")?
@@ -147,9 +163,12 @@ impl Config {
                 "server.cert.acme_directory_url",
                 "https://acme-v02.api.letsencrypt.org/directory",
             )?
+            .set_default("server.cert.renewal_cron_schedule", "0 0 0 * * *")?
             .set_default("aws.region", "us-east-1")?
             .set_default("cache.ttl", 5 * 60)?
             .set_default("cache.max_capacity", 100)?
+            .set_default("status_list.token_exp_secs", 900)? // 15 minutes
+            .set_default("status_list.token_ttl_secs", 300)? // 5 minutes
             // Override config values via environment variables
             // The environment variables should be prefixed with 'APP_' and use '__' as a separator
             // Example: APP_REDIS__REQUIRE_CLIENT_AUTH=false
@@ -160,7 +179,8 @@ impl Config {
             )
             .build()?;
 
-        config.try_deserialize()
+        let config: Config = config.try_deserialize()?;
+        Ok(config)
     }
 }
 
@@ -188,6 +208,25 @@ mod tests {
             "https://acme-v02.api.letsencrypt.org/directory"
         );
         assert_eq!(config.aws.region, "us-east-1");
+        assert_eq!(config.aws.s3_bucket, "status-list-adorsys");
+        assert_eq!(config.aws.s3_key_prefix, "");
+        assert_eq!(config.status_list.token_exp_secs, 900);
+        assert_eq!(config.status_list.token_ttl_secs, 300);
+        assert_eq!(config.server.cert.renewal_cron_schedule, "0 0 0 * * *");
+        assert_eq!(config.server.cert.dns_challenge_server_url, None);
+        assert_eq!(config.server.aggregation_uri, None);
+    }
+
+    #[sealed_test(env = [
+        ("APP_SERVER__AGGREGATION_URI", "https://example.com/aggregation"),
+    ])]
+    fn test_aggregation_uri_env_override() {
+        let config = Config::load().expect("Failed to load config");
+
+        assert_eq!(
+            config.server.aggregation_uri.as_deref(),
+            Some("https://example.com/aggregation")
+        );
     }
 
     #[sealed_test(env = [
@@ -230,6 +269,8 @@ mod tests {
         ("APP_SERVER__CERT__EKU", "1,3,6,1,5,5,7,3,30"),
         ("APP_AWS__REGION", "us-west-2"),
         ("APP_AWS__SECRETS_CACHE_TTL", "600"),
+        ("APP_AWS__S3_BUCKET", "my-custom-bucket"),
+        ("APP_AWS__S3_KEY_PREFIX", "status-list/prod"),
         ("APP_CACHE__TTL", "600"),
         ("APP_CACHE__MAX_CAPACITY", "2000"),
     ])]
@@ -253,7 +294,32 @@ mod tests {
             "https://acme-v02.api.letsencrypt.org/directory"
         );
         assert_eq!(config.aws.region, "us-west-2");
+        assert_eq!(config.aws.secrets_cache_ttl, 600);
+        assert_eq!(config.aws.s3_bucket, "my-custom-bucket");
+        assert_eq!(config.aws.s3_key_prefix, "status-list/prod");
         assert_eq!(config.cache.ttl, 600);
         assert_eq!(config.cache.max_capacity, 2000);
+    }
+
+    #[sealed_test(env = [
+        ("APP_AWS__S3_BUCKET", "my-bucket"),
+        ("APP_AWS__S3_KEY_PREFIX", "prefix"),
+        ("APP_STATUS_LIST__TOKEN_EXP_SECS", "1800"),
+        ("APP_STATUS_LIST__TOKEN_TTL_SECS", "600"),
+        ("APP_SERVER__CERT__RENEWAL_CRON_SCHEDULE", "0 0 12 * * *"),
+        ("APP_SERVER__CERT__DNS_CHALLENGE_SERVER_URL", "http://pebble:8055"),
+    ])]
+    fn test_new_config_fields_env_override() {
+        let config = Config::load().expect("Failed to load config");
+
+        assert_eq!(config.aws.s3_bucket, "my-bucket");
+        assert_eq!(config.aws.s3_key_prefix, "prefix");
+        assert_eq!(config.status_list.token_exp_secs, 1800);
+        assert_eq!(config.status_list.token_ttl_secs, 600);
+        assert_eq!(config.server.cert.renewal_cron_schedule, "0 0 12 * * *");
+        assert_eq!(
+            config.server.cert.dns_challenge_server_url.as_deref(),
+            Some("http://pebble:8055")
+        );
     }
 }

@@ -92,7 +92,7 @@ fn test_renewal_strategy_days_before_expiry() {
     .unwrap()
     .with_renewal_strategy(strategy);
 
-    let now = Utc::now().timestamp();
+    let now = now_unix_timestamp();
 
     // Certificate expires in 20 days - should renew (threshold is 30 days)
     let cert_data_should_renew = CertificateData {
@@ -128,7 +128,7 @@ async fn test_renewal_strategy_percentage_of_lifetime() {
     .unwrap()
     .with_renewal_strategy(strategy);
 
-    let now = Utc::now().timestamp();
+    let now = now_unix_timestamp();
     let cert_lifetime = days_to_secs(90);
 
     // Certificate is at 85% of its lifetime - should renew (threshold is 80%)
@@ -167,7 +167,7 @@ async fn test_renewal_strategy_fixed_interval() {
     .unwrap()
     .with_renewal_strategy(strategy);
 
-    let now = Utc::now().timestamp();
+    let now = now_unix_timestamp();
 
     // Certificate issued 70 days ago - should renew (interval is 60 days)
     let cert_data_should_renew = CertificateData {
@@ -225,7 +225,7 @@ async fn test_certificate_storage_and_retrieval() {
     assert!(cert.is_none());
 
     // Store the certificate manually
-    let serialized = include_str!("../../test_resources/cert_data.json");
+    let serialized = include_str!("../../../test_data/cert_data.json");
     let cert_data: CertificateData = serde_json::from_str(serialized).unwrap();
 
     let cert_key = manager.cert_key();
@@ -313,7 +313,7 @@ async fn test_cert_chain_parts() {
     .with_cert_storage(cert_storage.clone());
 
     // there are 2 parts in the certificate chain
-    let serialized = include_str!("../../test_resources/cert_data.json");
+    let serialized = include_str!("../../../test_data/cert_data.json");
     cert_storage
         .store("certs-example.com-cert_data.json", serialized)
         .await

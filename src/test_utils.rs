@@ -2,7 +2,7 @@ use crate::{
     cert_manager::storage::StorageError,
     utils::{
         cache::Cache,
-        cert_manager::{storage::Storage, CertManager},
+        cert_manager::{CertManager, storage::Storage},
         state::AppState,
     },
 };
@@ -10,7 +10,7 @@ use async_trait::async_trait;
 use sea_orm::{DbBackend, MockDatabase};
 use std::{collections::HashMap, sync::Arc};
 
-pub struct MockStorage {
+pub(crate) struct MockStorage {
     pub key_value: HashMap<String, String>,
 }
 
@@ -33,7 +33,14 @@ impl Storage for MockStorage {
     }
 }
 
-pub async fn test_app_state(db_conn: Option<Arc<sea_orm::DatabaseConnection>>) -> AppState {
+pub(crate) async fn test_app_state(db_conn: Option<Arc<sea_orm::DatabaseConnection>>) -> AppState {
+    test_app_state_with(db_conn, None).await
+}
+
+pub(crate) async fn test_app_state_with(
+    db_conn: Option<Arc<sea_orm::DatabaseConnection>>,
+    aggregation_uri: Option<String>,
+) -> AppState {
     use crate::database::queries::SeaOrmStore;
 
     // Install the crypto provider for the tests
@@ -43,12 +50,12 @@ pub async fn test_app_state(db_conn: Option<Arc<sea_orm::DatabaseConnection>>) -
         MockDatabase::new(DbBackend::Postgres).into_connection(),
     ));
 
-    let key_pem = include_str!("test_resources/ec-private.pem").to_string();
+    let key_pem = include_str!("../test_data/ec-private.pem").to_string();
     let secrets_storage = MockStorage {
         key_value: HashMap::from([("keys-test.com".to_string(), key_pem)]),
     };
 
-    let cert_data = include_str!("test_resources/cert_data.json").to_string();
+    let cert_data = include_str!("../test_data/cert_data.json").to_string();
     let cert_storage = MockStorage {
         key_value: HashMap::from([("certs-test.com-cert_data.json".to_string(), cert_data)]),
     };
@@ -69,5 +76,8 @@ pub async fn test_app_state(db_conn: Option<Arc<sea_orm::DatabaseConnection>>) -
         server_domain: "example.com".to_string(),
         cert_manager: Arc::new(certificate_manager),
         cache: Cache::new(5 * 60, 100),
+        aggregation_uri,
+        token_exp_secs: 900,
+        token_ttl_secs: 300,
     }
 }

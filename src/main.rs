@@ -1,4 +1,4 @@
-use color_eyre::{eyre::eyre, Result};
+use color_eyre::{Result, eyre::eyre};
 use dotenvy::dotenv;
 use rustls::crypto::aws_lc_rs;
 use status_list_server::cert_manager::setup_cert_renewal_scheduler;
@@ -30,7 +30,11 @@ async fn main() -> Result<()> {
 
     // Setup certificate renewal scheduler
     let cert_manager = app_state.cert_manager.clone();
-    setup_cert_renewal_scheduler(cert_manager.clone()).await?;
+    setup_cert_renewal_scheduler(
+        cert_manager.clone(),
+        &config.server.cert.renewal_cron_schedule,
+    )
+    .await?;
 
     let http_server = HttpServer::new(&config, app_state).await?;
 
@@ -46,10 +50,6 @@ async fn main() -> Result<()> {
 }
 
 fn config_tracing() {
-    if std::env::var("RUST_LIB_BACKTRACE").is_err() {
-        std::env::set_var("RUST_LIB_BACKTRACE", "1")
-    }
-
     use tracing::Level;
     use tracing_subscriber::{filter, layer::SubscriberExt, util::SubscriberInitExt};
 

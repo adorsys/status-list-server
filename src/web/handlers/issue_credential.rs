@@ -1,4 +1,4 @@
-use axum::{extract::State, http::StatusCode, response::IntoResponse, Json};
+use axum::{Json, extract::State, http::StatusCode, response::IntoResponse};
 
 use crate::{
     database::error::RepositoryError, models::Credentials, utils::state::AppState,
@@ -6,7 +6,7 @@ use crate::{
 };
 
 #[derive(Debug)]
-pub enum CredentialError {
+pub(super) enum CredentialError {
     RepoError(RepositoryError),
     AuthError(AuthenticationError),
 }
@@ -57,7 +57,7 @@ pub async fn credential_handler(
     }
 }
 
-pub async fn publish_credentials(
+pub(super) async fn publish_credentials(
     credentials: Credentials,
     state: AppState,
 ) -> Result<(), CredentialError> {
@@ -77,11 +77,11 @@ mod tests {
     use super::*;
     use crate::{models::credentials, test_utils::test_app_state};
     use axum::{
+        Router,
         body::Body,
         extract::Request,
-        http::{header, Method},
+        http::{Method, header},
         routing::post,
-        Router,
     };
     use jsonwebtoken::jwk::Jwk;
     use tower::ServiceExt;

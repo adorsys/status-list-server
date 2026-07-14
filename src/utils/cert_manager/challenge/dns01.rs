@@ -3,11 +3,11 @@ use std::{sync::Arc, time::Duration};
 use async_trait::async_trait;
 use aws_config::SdkConfig;
 use aws_sdk_route53::{
+    Client as Route53Client,
     types::{
         Change, ChangeAction, ChangeBatch, ChangeStatus, HostedZone, ResourceRecord,
         ResourceRecordSet, RrType,
     },
-    Client as Route53Client,
 };
 use color_eyre::eyre::eyre;
 use instant_acme::{AuthorizationHandle, ChallengeType};
@@ -80,6 +80,10 @@ pub struct AwsRoute53DnsUpdater {
 }
 
 impl AwsRoute53DnsUpdater {
+    const TXT_TTL: i64 = 60;
+    const PROPAGATION_INITIAL_DELAY: Duration = Duration::from_secs(2);
+    const PROPAGATION_TIMEOUT: Duration = Duration::from_secs(60 * 5);
+
     pub fn new(config: &SdkConfig) -> Self {
         Self {
             client: Route53Client::new(config),
@@ -111,7 +115,7 @@ impl AwsRoute53DnsUpdater {
         for zone in zones.iter() {
             let zone_name = &zone.name;
             let is_match = if let Some(stripped) = zone_name.strip_prefix("*.") {
-                // Try to match wilcard domains
+                // Try to match wildcard domains
                 if lookup.ends_with(stripped) {
                     // We ensure there's at least one identifier before the wildcard
                     let diff = lookup.len() - stripped.len();
@@ -196,7 +200,7 @@ impl AwsRoute53DnsUpdater {
                 ResourceRecordSet::builder()
                     .name(&record_name)
                     .r#type(RrType::Txt)
-                    .ttl(60)
+                    .ttl(Self::TXT_TTL)
                     .resource_records(
                         ResourceRecord::builder()
                             .value(format!("\"{value}\""))
@@ -236,8 +240,8 @@ impl AwsRoute53DnsUpdater {
     async fn wait_for_propagation(&self, change_id: &str) -> Result<(), ChallengeError> {
         use tokio::time::{sleep, timeout};
 
-        const INITIAL_DELAY: Duration = Duration::from_secs(2);
-        const TIMEOUT: Duration = Duration::from_secs(60 * 5);
+        let initial_delay = Self::PROPAGATION_INITIAL_DELAY;
+        let timeout_duration = Self::PROPAGATION_TIMEOUT;
 
         let mut retries = 0;
 
@@ -267,22 +271,22 @@ impl AwsRoute53DnsUpdater {
                 }
 
                 // We double the delay after each attempt
-                let delay = INITIAL_DELAY
+                let delay = initial_delay
                     .checked_mul(2u32.pow(retries))
-                    .unwrap_or(TIMEOUT);
+                    .unwrap_or(timeout_duration);
                 retries += 1;
                 sleep(delay).await;
             }
         };
 
-        match timeout(TIMEOUT, poll_future).await {
+        match timeout(timeout_duration, poll_future).await {
             Ok(result) => match result {
                 Ok(()) => Ok(()),
                 Err(e) => Err(e),
             },
             Err(_) => Err(ChallengeError::Other(eyre!(
                 "DNS propagation timed out after {}s",
-                TIMEOUT.as_secs()
+                timeout_duration.as_secs()
             ))),
         }
     }

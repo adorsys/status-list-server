@@ -4,12 +4,12 @@ use axum::body::Bytes;
 use hyper::Request;
 use hyper_rustls::{HttpsConnector, HttpsConnectorBuilder};
 use hyper_util::{
-    client::legacy::{connect::HttpConnector, Client},
+    client::legacy::{Client, connect::HttpConnector},
     rt::TokioExecutor,
 };
 use instant_acme::{BodyWrapper, BytesResponse, Error, HttpClient};
 use rustls::{ClientConfig, RootCertStore};
-use rustls_pki_types::{pem::PemObject, CertificateDer};
+use rustls_pki_types::{CertificateDer, pem::PemObject};
 
 use crate::cert_manager::CertError;
 
@@ -45,7 +45,7 @@ struct ClientInner {
 }
 
 impl ClientInner {
-    pub fn try_new(root_cert_pem: Option<&[u8]>) -> Result<Self, CertError> {
+    pub(crate) fn try_new(root_cert_pem: Option<&[u8]>) -> Result<Self, CertError> {
         let mut root_store = RootCertStore::empty();
         if let Some(root_pem) = root_cert_pem {
             let certs_der: Vec<_> = CertificateDer::pem_slice_iter(root_pem)

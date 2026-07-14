@@ -1,0 +1,154 @@
+
+# cargo-vet audits file
+
+[audits]
+
+[[trusted.aws-config]]
+criteria = "safe-to-deploy"
+user-id = 160111 # AWS SDK Rust Bot (aws-sdk-rust-ci)
+start = "2022-06-22"
+end = "2027-07-14"
+
+[[trusted.aws-credential-types]]
+criteria = "safe-to-deploy"
+user-id = 160111 # AWS SDK Rust Bot (aws-sdk-rust-ci)
+start = "2022-12-29"
+end = "2027-07-14"
+
+[[trusted.aws-runtime]]
+criteria = "safe-to-deploy"
+user-id = 160111 # AWS SDK Rust Bot (aws-sdk-rust-ci)
+start = "2023-04-06"
+end = "2027-07-14"
+
+[[trusted.aws-sdk-route53]]
+criteria = "safe-to-deploy"
+user-id = 160111 # AWS SDK Rust Bot (aws-sdk-rust-ci)
+start = "2022-06-22"
+end = "2027-07-14"
+
+[[trusted.aws-sdk-s3]]
+criteria = "safe-to-deploy"
+user-id = 160111 # AWS SDK Rust Bot (aws-sdk-rust-ci)
+start = "2022-06-22"
+end = "2027-07-14"
+
+[[trusted.aws-sdk-secretsmanager]]
+criteria = "safe-to-deploy"
+user-id = 160111 # AWS SDK Rust Bot (aws-sdk-rust-ci)
+start = "2022-06-22"
+end = "2027-07-14"
+
+[[trusted.aws-sdk-sts]]
+criteria = "safe-to-deploy"
+user-id = 160111 # AWS SDK Rust Bot (aws-sdk-rust-ci)
+start = "2022-06-22"
+end = "2027-07-14"
+
+[[trusted.aws-sigv4]]
+criteria = "safe-to-deploy"
+user-id = 160111 # AWS SDK Rust Bot (aws-sdk-rust-ci)
+start = "2022-06-22"
+end = "2027-07-14"
+
+[[trusted.aws-smithy-async]]
+criteria = "safe-to-deploy"
+user-id = 160111 # AWS SDK Rust Bot (aws-sdk-rust-ci)
+start = "2022-06-22"
+end = "2027-07-14"
+
+[[trusted.aws-smithy-checksums]]
+criteria = "safe-to-deploy"
+user-id = 160111 # AWS SDK Rust Bot (aws-sdk-rust-ci)
+start = "2022-07-20"
+end = "2027-07-14"
+
+[[trusted.aws-smithy-eventstream]]
+criteria = "safe-to-deploy"
+user-id = 160111 # AWS SDK Rust Bot (aws-sdk-rust-ci)
+start = "2022-06-22"
+end = "2027-07-14"
+
+[[trusted.aws-smithy-http]]
+criteria = "safe-to-deploy"
+user-id = 160111 # AWS SDK Rust Bot (aws-sdk-rust-ci)
+start = "2022-06-22"
+end = "2027-07-14"
+
+[[trusted.aws-smithy-http-client]]
+criteria = "safe-to-deploy"
+user-id = 160111 # AWS SDK Rust Bot (aws-sdk-rust-ci)
+start = "2025-03-10"
+end = "2027-07-14"
+
+[[trusted.aws-smithy-json]]
+criteria = "safe-to-deploy"
+user-id = 160111 # AWS SDK Rust Bot (aws-sdk-rust-ci)
+start = "2022-06-22"
+end = "2027-07-14"
+
+[[trusted.aws-smithy-observability]]
+criteria = "safe-to-deploy"
+user-id = 160111 # AWS SDK Rust Bot (aws-sdk-rust-ci)
+start = "2025-02-15"
+end = "2027-07-14"
+
+[[trusted.aws-smithy-query]]
+criteria = "safe-to-deploy"
+user-id = 160111 # AWS SDK Rust Bot (aws-sdk-rust-ci)
+start = "2022-06-22"
+end = "2027-07-14"
+
+[[trusted.aws-smithy-runtime]]
+criteria = "safe-to-deploy"
+user-id = 160111 # AWS SDK Rust Bot (aws-sdk-rust-ci)
+start = "2023-04-06"
+end = "2027-07-14"
+
+[[trusted.aws-smithy-runtime-api]]
+criteria = "safe-to-deploy"
+user-id = 160111 # AWS SDK Rust Bot (aws-sdk-rust-ci)
+start = "2023-04-06"
+end = "2027-07-14"
+
+[[trusted.aws-smithy-runtime-api-macros]]
+criteria = "safe-to-deploy"
+user-id = 160111 # AWS SDK Rust Bot (aws-sdk-rust-ci)
+start = "2026-04-15"
+end = "2027-07-14"
+
+[[trusted.aws-smithy-schema]]
+criteria = "safe-to-deploy"
+user-id = 160111 # AWS SDK Rust Bot (aws-sdk-rust-ci)
+start = "2026-05-15"
+end = "2027-07-14"
+
+[[trusted.aws-smithy-types]]
+criteria = "safe-to-deploy"
+user-id = 160111 # AWS SDK Rust Bot (aws-sdk-rust-ci)
+start = "2022-06-22"
+end = "2027-07-14"
+
+[[trusted.aws-smithy-xml]]
+criteria = "safe-to-deploy"
+user-id = 160111 # AWS SDK Rust Bot (aws-sdk-rust-ci)
+start = "2022-06-22"
+end = "2027-07-14"
+
+[[trusted.aws-types]]
+criteria = "safe-to-deploy"
+user-id = 160111 # AWS SDK Rust Bot (aws-sdk-rust-ci)
+start = "2022-06-22"
+end = "2027-07-14"
+
+[[trusted.regex]]
+criteria = "safe-to-deploy"
+user-id = 189 # Andrew Gallant (BurntSushi)
+start = "2019-02-27"
+end = "2027-07-14"
+
+[[trusted.tinyvec]]
+criteria = "safe-to-deploy"
+user-id = 7211 # Lokathor (Lokathor)
+start = "2020-01-07"
+end = "2027-07-14"
