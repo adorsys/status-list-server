@@ -34,13 +34,13 @@ use sha2::{Digest, Sha256};
 /// ```
 pub fn generate_etag(record: &StatusListRecord) -> String {
     let mut hasher = Sha256::new();
-    
+
     // Hash each component that defines the content identity
     hasher.update(record.status_list.bits.to_string().as_bytes());
     hasher.update(record.status_list.lst.as_bytes());
     hasher.update(record.issuer.as_bytes());
     hasher.update(record.sub.as_bytes());
-    
+
     let hash = hasher.finalize();
     format!("W/\"{}\"", hex::encode(hash))
 }
@@ -67,15 +67,22 @@ mod tests {
     fn test_generate_etag_format() {
         let record = create_test_record();
         let etag = generate_etag(&record);
-        
+
         // Should start with W/" and end with "
         assert!(etag.starts_with("W/\""), "ETag should start with W/\"");
         assert!(etag.ends_with('"'), "ETag should end with \"");
-        
+
         // Should be a hex string of appropriate length (SHA-256 is 64 hex chars)
         let hex_part = &etag[3..etag.len() - 1]; // Remove W/" and "
-        assert_eq!(hex_part.len(), 64, "SHA-256 hash should be 64 hex characters");
-        assert!(hex_part.chars().all(|c| c.is_ascii_hexdigit()), "Hash should contain only hex digits");
+        assert_eq!(
+            hex_part.len(),
+            64,
+            "SHA-256 hash should be 64 hex characters"
+        );
+        assert!(
+            hex_part.chars().all(|c| c.is_ascii_hexdigit()),
+            "Hash should contain only hex digits"
+        );
     }
 
     #[test]
@@ -83,7 +90,7 @@ mod tests {
         let record = create_test_record();
         let etag1 = generate_etag(&record);
         let etag2 = generate_etag(&record);
-        
+
         assert_eq!(etag1, etag2, "ETag should be deterministic");
     }
 
@@ -91,61 +98,73 @@ mod tests {
     fn test_generate_etag_bits_sensitivity() {
         let mut record = create_test_record();
         let original_etag = generate_etag(&record);
-        
+
         // Change bits field
         record.status_list.bits = 2;
         let new_etag = generate_etag(&record);
-        
-        assert_ne!(original_etag, new_etag, "ETag should change when bits changes");
+
+        assert_ne!(
+            original_etag, new_etag,
+            "ETag should change when bits changes"
+        );
     }
 
     #[test]
     fn test_generate_etag_lst_sensitivity() {
         let mut record = create_test_record();
         let original_etag = generate_etag(&record);
-        
+
         // Change lst field
         record.status_list.lst = "different_lst".to_string();
         let new_etag = generate_etag(&record);
-        
-        assert_ne!(original_etag, new_etag, "ETag should change when lst changes");
+
+        assert_ne!(
+            original_etag, new_etag,
+            "ETag should change when lst changes"
+        );
     }
 
     #[test]
     fn test_generate_etag_issuer_sensitivity() {
         let mut record = create_test_record();
         let original_etag = generate_etag(&record);
-        
+
         // Change issuer field
         record.issuer = "https://different-issuer.example".to_string();
         let new_etag = generate_etag(&record);
-        
-        assert_ne!(original_etag, new_etag, "ETag should change when issuer changes");
+
+        assert_ne!(
+            original_etag, new_etag,
+            "ETag should change when issuer changes"
+        );
     }
 
     #[test]
     fn test_generate_etag_sub_sensitivity() {
         let mut record = create_test_record();
         let original_etag = generate_etag(&record);
-        
+
         // Change sub field
         record.sub = "https://example.com/credentials/status/99".to_string();
         let new_etag = generate_etag(&record);
-        
-        assert_ne!(original_etag, new_etag, "ETag should change when sub changes");
+
+        assert_ne!(
+            original_etag, new_etag,
+            "ETag should change when sub changes"
+        );
     }
 
     #[test]
     fn test_generate_etag_list_id_independence() {
         let record1 = create_test_record();
         let mut record2 = create_test_record();
-        
+
         // Change only list_id (should not affect ETag)
         record2.list_id = "different-list-id".to_string();
-        
+
         let etag1 = generate_etag(&record1);
         let etag2 = generate_etag(&record2);
-        
+
         assert_eq!(etag1, etag2, "ETag should not depend on list_id");
     }
 
@@ -153,13 +172,13 @@ mod tests {
     fn test_generate_etag_updated_at_independence() {
         let record1 = create_test_record();
         let mut record2 = create_test_record();
-        
+
         // Change only updated_at (should not affect ETag)
         record2.updated_at = 9999999999;
-        
+
         let etag1 = generate_etag(&record1);
         let etag2 = generate_etag(&record2);
-        
+
         assert_eq!(etag1, etag2, "ETag should not depend on updated_at");
     }
 
@@ -175,9 +194,9 @@ mod tests {
             sub: "".to_string(),
             updated_at: 0,
         };
-        
+
         let etag = generate_etag(&record);
-        
+
         // Should still generate valid ETag format
         assert!(etag.starts_with("W/\""));
         assert!(etag.ends_with('"'));
@@ -195,9 +214,9 @@ mod tests {
             sub: "https://example.com/credentials/status/3#fragment".to_string(),
             updated_at: 0,
         };
-        
+
         let etag = generate_etag(&record);
-        
+
         // Should handle special characters without issues
         assert!(etag.starts_with("W/\""));
         assert!(etag.ends_with('"'));

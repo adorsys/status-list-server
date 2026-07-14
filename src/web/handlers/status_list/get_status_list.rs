@@ -91,12 +91,7 @@ pub async fn get_status_list(
         }
         ConditionalResponse::Modified => {
             // Build full token response
-            let compressed_token = build_token(
-                accept_type,
-                &status_record,
-                &state,
-            )
-            .await?;
+            let compressed_token = build_token(accept_type, &status_record, &state).await?;
 
             Ok((
                 StatusCode::OK,
@@ -955,10 +950,13 @@ mod tests {
         let response = err.clone().into_response();
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
         assert_eq!(err, StatusListError::StatusListNotFound);
-        
+
         // Verify error response includes no-store Cache-Control header
         let cache_control = response.headers().get(http::header::CACHE_CONTROL);
-        assert!(cache_control.is_some(), "Error response should include Cache-Control header");
+        assert!(
+            cache_control.is_some(),
+            "Error response should include Cache-Control header"
+        );
         assert_eq!(
             cache_control.unwrap().to_str().unwrap(),
             "no-store, max-age=0",
@@ -979,15 +977,15 @@ mod tests {
         assert!(result.is_err());
         let err = result.unwrap_err();
         let response = err.clone().into_response();
-        assert_eq!(
-            response.status(),
-            StatusCode::NOT_ACCEPTABLE
-        );
+        assert_eq!(response.status(), StatusCode::NOT_ACCEPTABLE);
         assert_eq!(err, StatusListError::InvalidAcceptHeader);
-        
+
         // Verify error response includes no-store Cache-Control header
         let cache_control = response.headers().get(http::header::CACHE_CONTROL);
-        assert!(cache_control.is_some(), "Error response should include Cache-Control header");
+        assert!(
+            cache_control.is_some(),
+            "Error response should include Cache-Control header"
+        );
         assert_eq!(
             cache_control.unwrap().to_str().unwrap(),
             "no-store, max-age=0",
@@ -1019,7 +1017,7 @@ mod tests {
         assert!(result.is_err());
         let response = result.unwrap_err().into_response();
         let response_headers = response.headers();
-        
+
         // Verify error responses do NOT include ETag or Last-Modified headers
         assert!(
             response_headers.get(http::header::ETAG).is_none(),
@@ -1029,7 +1027,7 @@ mod tests {
             response_headers.get(http::header::LAST_MODIFIED).is_none(),
             "Error response should not include Last-Modified header"
         );
-        
+
         // But should include Cache-Control
         assert!(
             response_headers.get(http::header::CACHE_CONTROL).is_some(),
@@ -1099,20 +1097,32 @@ mod tests {
         .into_response();
 
         assert_eq!(response.status(), StatusCode::OK);
-        
+
         let response_headers = response.headers();
-        
+
         // Verify ETag header is present and has correct format
-        let etag = response_headers.get(http::header::ETAG).unwrap().to_str().unwrap();
+        let etag = response_headers
+            .get(http::header::ETAG)
+            .unwrap()
+            .to_str()
+            .unwrap();
         assert!(etag.starts_with("W/\""), "ETag should be a weak validator");
         assert!(etag.ends_with('"'), "ETag should be quoted");
-        
+
         // Verify Last-Modified header is present
-        let last_modified = response_headers.get(http::header::LAST_MODIFIED).unwrap().to_str().unwrap();
+        let last_modified = response_headers
+            .get(http::header::LAST_MODIFIED)
+            .unwrap()
+            .to_str()
+            .unwrap();
         assert!(!last_modified.is_empty(), "Last-Modified should be present");
-        
+
         // Verify Cache-Control header is present and correct
-        let cache_control = response_headers.get(http::header::CACHE_CONTROL).unwrap().to_str().unwrap();
+        let cache_control = response_headers
+            .get(http::header::CACHE_CONTROL)
+            .unwrap()
+            .to_str()
+            .unwrap();
         assert_eq!(cache_control, "public, max-age=300, immutable");
     }
 
@@ -1130,13 +1140,13 @@ mod tests {
             sub: "test_subject".to_string(),
             updated_at: 1234567890,
         };
-        
+
         // Single query result - will be cached after first request
         let db_conn = Arc::new(
             mock_db
-                .append_query_results::<status_lists::Model, Vec<_>, _>(vec![
-                    vec![status_list_token],
-                ])
+                .append_query_results::<status_lists::Model, Vec<_>, _>(vec![vec![
+                    status_list_token,
+                ]])
                 .into_connection(),
         );
 
@@ -1172,10 +1182,7 @@ mod tests {
             http::header::ACCEPT,
             ACCEPT_STATUS_LISTS_HEADER_JWT.parse().unwrap(),
         );
-        conditional_headers.insert(
-            http::header::IF_NONE_MATCH,
-            etag.parse().unwrap(),
-        );
+        conditional_headers.insert(http::header::IF_NONE_MATCH, etag.parse().unwrap());
 
         let conditional_response = get_status_list(
             State(app_state),
@@ -1188,15 +1195,17 @@ mod tests {
 
         // Should return 304 Not Modified
         assert_eq!(conditional_response.status(), StatusCode::NOT_MODIFIED);
-        
+
         // Should still have caching headers
         let response_headers = conditional_response.headers();
         assert!(response_headers.contains_key(http::header::ETAG));
         assert!(response_headers.contains_key(http::header::LAST_MODIFIED));
         assert!(response_headers.contains_key(http::header::CACHE_CONTROL));
-        
+
         // Body should be empty
-        let body_bytes = to_bytes(conditional_response.into_body(), 1024 * 1024).await.unwrap();
+        let body_bytes = to_bytes(conditional_response.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
         assert_eq!(body_bytes.len(), 0, "304 response should have no body");
     }
 }

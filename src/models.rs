@@ -19,7 +19,7 @@ impl From<Jwk> for PublicKey {
     }
 }
 
-// Credentials entity 
+// Credentials entity
 pub mod credentials {
     use super::*;
 
