@@ -8,3 +8,8 @@ config:
   md033:
     allowed_elements:
       - "a"
+
+ignores:
+  - "node_modules/**"
+  - ".kilo/node_modules/**"
+  - "target/**"

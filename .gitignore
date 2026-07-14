@@ -4,6 +4,7 @@
 .vscode/
 cert.yml
 tls.crt
+.kilo/
 
 ### JupyterNotebooks ###
 __pycache__
