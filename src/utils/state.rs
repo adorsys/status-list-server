@@ -6,7 +6,7 @@ use crate::{
     },
     config::Config as AppConfig,
     database::{Migrator, queries::SeaOrmStore},
-    models::{Credentials, StatusListRecord},
+    models::{Credentials, StatusListRecord, StatusListSnapshotRecord},
 };
 use aws_config::{BehaviorVersion, Region};
 use color_eyre::eyre::{Context, Result as EyeResult};
@@ -29,6 +29,7 @@ const ENV_DEVELOPMENT: &str = "development";
 pub struct AppState {
     pub credential_repo: SeaOrmStore<Credentials>,
     pub status_list_repo: SeaOrmStore<StatusListRecord>,
+    pub snapshot_repo: SeaOrmStore<StatusListSnapshotRecord>,
     pub server_domain: String,
     pub cert_manager: Arc<CertManager>,
     pub cache: Cache,
@@ -99,7 +100,8 @@ pub async fn build_state(config: &AppConfig) -> EyeResult<AppState> {
     let db_clone = Arc::new(db);
     Ok(AppState {
         credential_repo: SeaOrmStore::new(db_clone.clone()),
-        status_list_repo: SeaOrmStore::new(db_clone),
+        status_list_repo: SeaOrmStore::new(db_clone.clone()),
+        snapshot_repo: SeaOrmStore::new(db_clone),
         server_domain: config.server.domain.clone(),
         cert_manager: Arc::new(certificate_manager),
         cache: Cache::new(config.cache.ttl, config.cache.max_capacity),

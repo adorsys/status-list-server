@@ -1,8 +1,8 @@
-use sea_orm::{ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, Set};
+use sea_orm::{ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, QueryOrder, Set};
 use std::sync::Arc;
 
 use super::error::RepositoryError;
-use crate::models::{Credentials, StatusListRecord, credentials, status_lists};
+use crate::models::{Credentials, StatusListRecord, StatusListSnapshotRecord, credentials, status_lists, status_list_snapshots};
 
 #[derive(Clone)]
 pub struct SeaOrmStore<T> {
@@ -96,6 +96,40 @@ impl SeaOrmStore<StatusListRecord> {
         status_lists::Entity::find()
             .filter(status_lists::Column::Sub.eq(issuer))
             .all(&*self.db)
+            .await
+            .map_err(|e| RepositoryError::FindError(e.to_string()))
+    }
+}
+
+impl SeaOrmStore<StatusListSnapshotRecord> {
+    pub async fn insert_one(&self, entity: StatusListSnapshotRecord) -> Result<(), RepositoryError> {
+        let active = status_list_snapshots::ActiveModel {
+            id: Set(0), // auto-generated
+            list_id: Set(entity.list_id),
+            issuer: Set(entity.issuer),
+            status_list: Set(entity.status_list),
+            sub: Set(entity.sub),
+            created_at: Set(entity.created_at),
+        };
+        active
+            .insert(&*self.db)
+            .await
+            .map_err(|e| RepositoryError::InsertError(e.to_string()))?;
+        Ok(())
+    }
+
+    /// Find the latest snapshot that was valid at the given timestamp.
+    /// Returns the snapshot with the most recent created_at <= timestamp.
+    pub async fn find_at_time(
+        &self,
+        list_id: &str,
+        timestamp: i64,
+    ) -> Result<Option<StatusListSnapshotRecord>, RepositoryError> {
+        status_list_snapshots::Entity::find()
+            .filter(status_list_snapshots::Column::ListId.eq(list_id))
+            .filter(status_list_snapshots::Column::CreatedAt.lte(timestamp))
+            .order_by_desc(status_list_snapshots::Column::CreatedAt)
+            .one(&*self.db)
             .await
             .map_err(|e| RepositoryError::FindError(e.to_string()))
     }

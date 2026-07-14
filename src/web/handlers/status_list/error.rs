@@ -37,6 +37,10 @@ pub enum StatusListError {
     IssuerMismatch,
     #[error("The service is currently unavailable. Please try again later")]
     ServiceUnavailable,
+    #[error("Status list not found at the requested time")]
+    StatusListNotFoundAtTime,
+    #[error("Invalid time parameter: {0}")]
+    InvalidTimeParameter(String),
 }
 
 impl IntoResponse for StatusListError {
@@ -60,6 +64,8 @@ impl IntoResponse for StatusListError {
             TokenAlreadyExists => StatusCode::CONFLICT,
             IssuerMismatch => StatusCode::FORBIDDEN,
             ServiceUnavailable => StatusCode::SERVICE_UNAVAILABLE,
+            StatusListNotFoundAtTime => StatusCode::NOT_FOUND,
+            InvalidTimeParameter(_) => StatusCode::BAD_REQUEST,
         };
 
         (status_code, self.to_string()).into_response()

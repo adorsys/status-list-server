@@ -1,7 +1,7 @@
 use std::{fmt::Debug, io::Write as _};
 
 use axum::{
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::{HeaderMap, StatusCode, header},
     response::IntoResponse,
 };
@@ -30,12 +30,25 @@ use super::{
     error::StatusListError,
 };
 
+/// Query parameters for the GET status list endpoint.
+#[derive(Debug, Deserialize)]
+pub struct StatusListQuery {
+    /// Optional unix timestamp for point-in-time queries (draft-21 §8.4).
+    pub time: Option<i64>,
+}
+
 pub async fn get_status_list(
     State(state): State<AppState>,
     Path(list_id): Path<String>,
     headers: HeaderMap,
-) -> Result<impl IntoResponse + Debug + use<>, StatusListError> {
+    Query(query): Query<StatusListQuery>,
+) -> Result<axum::response::Response, StatusListError> {
     let accept = headers.get(header::ACCEPT).and_then(|h| h.to_str().ok());
+
+    // If a time parameter is provided, handle point-in-time resolution
+    if let Some(time) = query.time {
+        return handle_time_query(accept, &list_id, time, &state).await;
+    }
 
     // build the token depending on the accept header
     match accept {
@@ -54,11 +67,55 @@ pub async fn get_status_list(
     }
 }
 
+/// Handle a point-in-time query per draft-21 §8.4.
+///
+/// 1. Look up the snapshot that was valid at the requested timestamp.
+/// 2. Return a Status List Token whose `iat`..`exp` window covers `time`.
+///    We set `iat = time` and `exp = time + TOKEN_EXP` so the spec check
+///    `iat <= time < exp` always passes for a found snapshot.
+async fn handle_time_query(
+    accept: Option<&str>,
+    list_id: &str,
+    time: i64,
+    state: &AppState,
+) -> Result<axum::response::Response, StatusListError> {
+    // Validate the accept header first
+    let accept_header = match accept {
+        None => ACCEPT_STATUS_LISTS_HEADER_JWT,
+        Some(a) if a == ACCEPT_STATUS_LISTS_HEADER_JWT || a == ACCEPT_STATUS_LISTS_HEADER_CWT => a,
+        Some(_) => return Err(StatusListError::InvalidAcceptHeader),
+    };
+
+    // Look up the snapshot that was valid at the requested timestamp
+    let snapshot = state
+        .snapshot_repo
+        .find_at_time(list_id, time)
+        .await
+        .map_err(|err| {
+            tracing::error!("Failed to query snapshots for {list_id}: {err:?}");
+            StatusListError::InternalServerError
+        })?
+        .ok_or(StatusListError::StatusListNotFoundAtTime)?;
+
+    // Build a synthetic StatusListRecord from the snapshot data
+    let record = StatusListRecord {
+        list_id: snapshot.list_id,
+        issuer: snapshot.issuer,
+        status_list: snapshot.status_list,
+        sub: snapshot.sub,
+    };
+
+    // For point-in-time queries, we set iat = time so that
+    // iat <= time < exp is always satisfied (exp = time + TOKEN_EXP).
+    // This makes the returned token cover the requested timestamp.
+    build_response_from_record_inner(accept_header, &record, time, state).await
+}
+
 async fn build_status_list_token(
     accept: &str,
     list_id: &str,
     state: &AppState,
-) -> Result<impl IntoResponse + Debug + use<>, StatusListError> {
+) -> Result<axum::response::Response, StatusListError> {
     // Check cache for status list record
     if let Some(cached_record) = state.cache.get(list_id).await {
         tracing::info!("Cache hit for status list record: {list_id}");
@@ -91,7 +148,17 @@ async fn build_response_from_record(
     accept: &str,
     status_record: &StatusListRecord,
     state: &AppState,
-) -> Result<impl IntoResponse + Debug + use<>, StatusListError> {
+) -> Result<axum::response::Response, StatusListError> {
+    let now = OffsetDateTime::now_utc().unix_timestamp();
+    build_response_from_record_inner(accept, status_record, now, state).await
+}
+
+async fn build_response_from_record_inner(
+    accept: &str,
+    status_record: &StatusListRecord,
+    iat: i64,
+    state: &AppState,
+) -> Result<axum::response::Response, StatusListError> {
     // Get the certificate chain
     let certs_parts = state
         .cert_manager
@@ -122,8 +189,8 @@ async fn build_response_from_record(
         })?;
 
         let token_bytes = match accept_header.as_str() {
-            ACCEPT_STATUS_LISTS_HEADER_CWT => issue_cwt(&status_record, &keypair, certs_parts)?,
-            _ => issue_jwt(&status_record, &keypair, certs_parts)?.into_bytes(),
+            ACCEPT_STATUS_LISTS_HEADER_CWT => issue_cwt(&status_record, &keypair, certs_parts, iat)?,
+            _ => issue_jwt(&status_record, &keypair, certs_parts, iat)?.into_bytes(),
         };
 
         let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
@@ -159,6 +226,7 @@ fn issue_cwt(
     status_record: &StatusListRecord,
     keypair: &Keypair,
     cert_chain: Vec<String>,
+    iat: i64,
 ) -> Result<Vec<u8>, StatusListError> {
     let mut claims = vec![];
 
@@ -167,7 +235,6 @@ fn issue_cwt(
         CborValue::Integer(SUBJECT.into()),
         CborValue::Text(status_record.sub.clone()),
     ));
-    let iat = OffsetDateTime::now_utc().unix_timestamp();
     claims.push((
         CborValue::Integer(ISSUED_AT.into()),
         CborValue::Integer(iat.into()),
@@ -267,8 +334,8 @@ fn issue_jwt(
     status_record: &StatusListRecord,
     keypair: &Keypair,
     cert_chain: Vec<String>,
+    iat: i64,
 ) -> Result<String, StatusListError> {
-    let iat = OffsetDateTime::now_utc().unix_timestamp();
     let ttl = TOKEN_TTL;
     let exp = iat + TOKEN_EXP;
     // Building the claims
@@ -303,7 +370,7 @@ fn issue_jwt(
 mod tests {
     use super::*;
     use crate::{
-        models::{StatusList, StatusListRecord, status_lists},
+        models::{StatusList, StatusListRecord, status_lists, status_list_snapshots},
         test_utils::test_app_state,
         utils::lst_gen::encode_compressed,
     };
@@ -352,14 +419,14 @@ mod tests {
             State(app_state.clone()),
             Path("test_list".to_string()),
             headers,
+            Query(StatusListQuery { time: None }),
         )
         .await
-        .unwrap()
-        .into_response();
+        .unwrap();
 
         assert_eq!(response.status(), StatusCode::OK);
-        let headers = response.headers();
-        assert_eq!(headers.get(http::header::CONTENT_ENCODING).unwrap(), "gzip");
+        let resp_headers = response.headers();
+        assert_eq!(resp_headers.get(http::header::CONTENT_ENCODING).unwrap(), "gzip");
 
         let compressed_body_bytes = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
         let mut decoder = flate2::read::GzDecoder::new(&compressed_body_bytes[..]);
@@ -425,14 +492,14 @@ mod tests {
             State(app_state.clone()),
             Path("test_list".to_string()),
             headers,
+            Query(StatusListQuery { time: None }),
         )
         .await
-        .unwrap()
-        .into_response();
+        .unwrap();
 
         assert_eq!(response.status(), StatusCode::OK);
-        let headers = response.headers();
-        assert_eq!(headers.get(http::header::CONTENT_ENCODING).unwrap(), "gzip");
+        let resp_headers = response.headers();
+        assert_eq!(resp_headers.get(http::header::CONTENT_ENCODING).unwrap(), "gzip");
 
         let compressed_body_bytes = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
         let mut decoder = flate2::read::GzDecoder::new(&compressed_body_bytes[..]);
@@ -524,7 +591,7 @@ mod tests {
         );
 
         let result =
-            get_status_list(State(app_state), Path("test_list".to_string()), headers).await;
+            get_status_list(State(app_state), Path("test_list".to_string()), headers, Query(StatusListQuery { time: None })).await;
 
         assert!(result.is_err());
         let err = result.unwrap_err();
@@ -540,7 +607,7 @@ mod tests {
         headers.insert(http::header::ACCEPT, "application/xml".parse().unwrap()); // unsupported
 
         let result =
-            get_status_list(State(app_state), Path("test_list".to_string()), headers).await;
+            get_status_list(State(app_state), Path("test_list".to_string()), headers, Query(StatusListQuery { time: None })).await;
 
         assert!(result.is_err());
         let err = result.unwrap_err();
@@ -549,5 +616,234 @@ mod tests {
             StatusCode::NOT_ACCEPTABLE
         );
         assert_eq!(err, StatusListError::InvalidAcceptHeader);
+    }
+
+    // --- Point-in-time query tests (draft-21 §8.4) ---
+
+    #[tokio::test]
+    async fn test_get_status_list_time_query_hit() {
+        let mock_db = MockDatabase::new(DatabaseBackend::Postgres);
+        let status_list = StatusList {
+            bits: 2,
+            lst: encode_compressed(&[0, 1]).unwrap(),
+        };
+        let snapshot = status_list_snapshots::Model {
+            id: 1,
+            list_id: "test_list".to_string(),
+            issuer: "issuer1".to_string(),
+            status_list: status_list.clone(),
+            sub: "test_subject".to_string(),
+            created_at: 1000,
+        };
+        let db_conn = Arc::new(
+            mock_db
+                .append_query_results::<status_list_snapshots::Model, Vec<_>, _>(vec![vec![
+                    snapshot,
+                ]])
+                .into_connection(),
+        );
+
+        let app_state = test_app_state(Some(db_conn.clone())).await;
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            http::header::ACCEPT,
+            ACCEPT_STATUS_LISTS_HEADER_JWT.parse().unwrap(),
+        );
+
+        // Request status at time 1500, which is after the snapshot at 1000
+        let response = get_status_list(
+            State(app_state.clone()),
+            Path("test_list".to_string()),
+            headers,
+            Query(StatusListQuery { time: Some(1500) }),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+
+        // Decompress and decode the JWT
+        let compressed_body_bytes = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+        let mut decoder = flate2::read::GzDecoder::new(&compressed_body_bytes[..]);
+        let mut body_bytes = Vec::new();
+        decoder.read_to_end(&mut body_bytes).unwrap();
+        let body_str = std::str::from_utf8(&body_bytes).unwrap();
+
+        // Load the decoding key
+        let signing_key_pem = app_state.cert_manager.signing_key_pem().await.unwrap();
+        let keypair = Keypair::from_pkcs8_pem(&signing_key_pem).unwrap();
+        let decoding_key_pem = keypair
+            .verifying_key()
+            .to_public_key_pem(LineEnding::default())
+            .unwrap()
+            .into_bytes();
+        let decoding_key = DecodingKey::from_ec_pem(&decoding_key_pem).unwrap();
+        let mut validation = Validation::new(jsonwebtoken::Algorithm::ES256);
+        validation.validate_exp = false;
+        let token_data =
+            jsonwebtoken::decode::<StatusListToken>(body_str, &decoding_key, &validation).unwrap();
+
+        // Verify the token covers the requested time:
+        // iat = 1500, exp = 1500 + 900 = 2400
+        assert_eq!(token_data.claims.iat, 1500);
+        assert_eq!(token_data.claims.exp, Some(1500 + TOKEN_EXP));
+        // Verify the snapshot data is in the token
+        assert_eq!(token_data.claims.sub, "test_subject");
+        assert_eq!(token_data.claims.status_list.bits, 2);
+        assert_eq!(
+            token_data.claims.status_list.lst,
+            encode_compressed(&[0, 1]).unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_get_status_list_time_query_not_found() {
+        let mock_db = MockDatabase::new(DatabaseBackend::Postgres);
+        // No snapshots exist for this list
+        let db_conn = Arc::new(
+            mock_db
+                .append_query_results::<status_list_snapshots::Model, Vec<_>, _>(vec![vec![]])
+                .into_connection(),
+        );
+
+        let app_state = test_app_state(Some(db_conn.clone())).await;
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            http::header::ACCEPT,
+            ACCEPT_STATUS_LISTS_HEADER_JWT.parse().unwrap(),
+        );
+
+        let result = get_status_list(
+            State(app_state),
+            Path("test_list".to_string()),
+            headers,
+            Query(StatusListQuery { time: Some(1000) }),
+        )
+        .await;
+
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert_eq!(
+            err.clone().into_response().status(),
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(err, StatusListError::StatusListNotFoundAtTime);
+    }
+
+    #[tokio::test]
+    async fn test_get_status_list_time_query_invalid_accept() {
+        let mock_db = MockDatabase::new(DatabaseBackend::Postgres);
+        let db_conn = Arc::new(mock_db.into_connection());
+
+        let app_state = test_app_state(Some(db_conn.clone())).await;
+
+        let mut headers = HeaderMap::new();
+        headers.insert(http::header::ACCEPT, "application/xml".parse().unwrap());
+
+        let result = get_status_list(
+            State(app_state),
+            Path("test_list".to_string()),
+            headers,
+            Query(StatusListQuery { time: Some(1000) }),
+        )
+        .await;
+
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert_eq!(
+            err.clone().into_response().status(),
+            StatusCode::NOT_ACCEPTABLE
+        );
+        assert_eq!(err, StatusListError::InvalidAcceptHeader);
+    }
+
+    #[tokio::test]
+    async fn test_get_status_list_time_query_cwt() {
+        let mock_db = MockDatabase::new(DatabaseBackend::Postgres);
+        let status_list = StatusList {
+            bits: 1,
+            lst: encode_compressed(&[0]).unwrap(),
+        };
+        let snapshot = status_list_snapshots::Model {
+            id: 1,
+            list_id: "test_list".to_string(),
+            issuer: "issuer1".to_string(),
+            status_list: status_list.clone(),
+            sub: "test_subject".to_string(),
+            created_at: 1000,
+        };
+        let db_conn = Arc::new(
+            mock_db
+                .append_query_results::<status_list_snapshots::Model, Vec<_>, _>(vec![vec![
+                    snapshot,
+                ]])
+                .into_connection(),
+        );
+
+        let app_state = test_app_state(Some(db_conn.clone())).await;
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            http::header::ACCEPT,
+            ACCEPT_STATUS_LISTS_HEADER_CWT.parse().unwrap(),
+        );
+
+        let response = get_status_list(
+            State(app_state.clone()),
+            Path("test_list".to_string()),
+            headers,
+            Query(StatusListQuery { time: Some(1500) }),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let compressed_body_bytes = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+        let mut decoder = flate2::read::GzDecoder::new(&compressed_body_bytes[..]);
+        let mut body_bytes = Vec::new();
+        decoder.read_to_end(&mut body_bytes).unwrap();
+
+        let cwt = CoseSign1::from_slice(&body_bytes).unwrap();
+
+        // Verify CWT signature
+        let signing_key_pem = app_state.cert_manager.signing_key_pem().await.unwrap();
+        let keypair = Keypair::from_pkcs8_pem(&signing_key_pem).unwrap();
+        let signing_key = keypair.signing_key();
+        let verifying_key = VerifyingKey::from(signing_key);
+
+        let result = cwt.verify_signature(&[], |sig, data| {
+            let signature = Signature::from_slice(sig).unwrap();
+            verifying_key.verify(data, &signature)
+        });
+        assert!(result.is_ok());
+
+        // Verify CWT claims
+        let payload_bytes = cwt.payload.unwrap();
+        let payload = CborValue::from_slice(&payload_bytes).unwrap();
+        let claims = match payload {
+            CborValue::Map(claims) => claims,
+            _ => panic!("Invalid CWT payload"),
+        };
+
+        let iat = claims
+            .iter()
+            .find(|(k, _)| k == &CborValue::Integer(ISSUED_AT.into()))
+            .unwrap()
+            .1
+            .clone();
+        // iat should be 1500 (the requested time)
+        assert_eq!(iat, CborValue::Integer(1500.into()));
+
+        let exp = claims
+            .iter()
+            .find(|(k, _)| k == &CborValue::Integer(EXP.into()))
+            .unwrap()
+            .1
+            .clone();
+        // exp should be 1500 + 900 = 2400
+        assert_eq!(exp, CborValue::Integer((1500 + TOKEN_EXP).into()));
     }
 }

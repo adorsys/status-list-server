@@ -1,5 +1,5 @@
 use crate::{
-    models::{StatusList, StatusListRecord, StatusRequest},
+    models::{StatusList, StatusListRecord, StatusListSnapshotRecord, StatusRequest},
     utils::{errors::Error, lst_gen::create_status_list, state::AppState},
     web::handlers::status_list::error::StatusListError,
 };
@@ -9,6 +9,7 @@ use axum::{
     http::StatusCode,
     response::IntoResponse,
 };
+use time::OffsetDateTime;
 use tracing;
 
 // Handler to create a new status list token
@@ -60,10 +61,27 @@ pub async fn publish_status(
             };
 
             // Insert the token into the repository
-            store.insert_one(status_list_record).await.map_err(|e| {
+            store.insert_one(status_list_record.clone()).await.map_err(|e| {
                 tracing::error!("Failed to insert status list entry: {e:?}");
                 StatusListError::InternalServerError
             })?;
+
+            // Create an initial snapshot for point-in-time queries (draft-21 §8.4)
+            let snapshot = StatusListSnapshotRecord {
+                id: 0, // auto-generated
+                list_id: status_list_record.list_id,
+                issuer: status_list_record.issuer,
+                status_list: status_list_record.status_list,
+                sub: status_list_record.sub,
+                created_at: OffsetDateTime::now_utc().unix_timestamp(),
+            };
+            let snap_result = appstate.snapshot_repo.insert_one(snapshot).await;
+            eprintln!("DEBUG: snapshot insert result = {:?}", snap_result);
+            snap_result.map_err(|e| {
+                tracing::error!("Failed to insert status list snapshot: {e:?}");
+                StatusListError::InternalServerError
+            })?;
+
             Ok(StatusCode::CREATED.into_response())
         }
         Err(e) => {
@@ -78,7 +96,7 @@ mod tests {
     use super::*;
     use crate::web::handlers::status_list::error::StatusListError;
     use crate::{
-        models::{Status, StatusEntry, StatusListRecord, status_lists},
+        models::{Status, StatusEntry, StatusList, StatusListRecord, status_lists, status_list_snapshots},
         test_data::helper::publish_test_token,
         test_utils::test_app_state,
     };
@@ -126,14 +144,25 @@ mod tests {
         let new_token = StatusListRecord {
             list_id: token_id.clone(),
             issuer: "issuer".to_string(),
+            status_list: status_list.clone(),
+            sub: "issuer".to_string(),
+        };
+        let snapshot = status_list_snapshots::Model {
+            id: 1,
+            list_id: token_id.clone(),
+            issuer: "issuer".to_string(),
             status_list,
             sub: "issuer".to_string(),
+            created_at: 1000,
         };
         let db_conn = Arc::new(
             mock_db
                 .append_query_results::<status_lists::Model, Vec<_>, _>(vec![
                     vec![],                  // find_one_by in handler returns None
                     vec![new_token.clone()], // insert_one return
+                ])
+                .append_query_results::<status_list_snapshots::Model, Vec<_>, _>(vec![
+                    vec![snapshot],          // snapshot insert_one return
                 ])
                 .into_connection(),
         );
@@ -176,14 +205,27 @@ mod tests {
         let new_token = StatusListRecord {
             list_id: token_id.clone(),
             issuer: "issuer".to_string(),
-            status_list,
+            status_list: status_list.clone(),
             sub: "issuer".to_string(),
+        };
+        let snapshot = status_list_snapshots::Model {
+            id: 1,
+            list_id: token_id.clone(),
+            issuer: "issuer".to_string(),
+            status_list: status_list.clone(),
+            sub: "issuer".to_string(),
+            created_at: 1000,
         };
         let db_conn = Arc::new(
             mock_db
                 .append_query_results::<status_lists::Model, Vec<_>, _>(vec![
                     vec![],                  // find_one_by in handler returns None
                     vec![new_token.clone()], // insert_one return
+                ])
+                .append_query_results::<status_list_snapshots::Model, Vec<_>, _>(vec![
+                    vec![snapshot],          // snapshot insert_one return
+                ])
+                .append_query_results::<status_lists::Model, Vec<_>, _>(vec![
                     vec![new_token.clone()], // find_one_by in test verification
                 ])
                 .into_connection(),
@@ -267,14 +309,27 @@ mod tests {
         let new_token = StatusListRecord {
             list_id: token_id.clone(),
             issuer: "issuer".to_string(),
+            status_list: status_list.clone(),
+            sub: "issuer".to_string(),
+        };
+        let snapshot = status_list_snapshots::Model {
+            id: 1,
+            list_id: token_id.clone(),
+            issuer: "issuer".to_string(),
             status_list,
             sub: "issuer".to_string(),
+            created_at: 1000,
         };
         let db_conn = Arc::new(
             mock_db
                 .append_query_results::<status_lists::Model, Vec<_>, _>(vec![
                     vec![],                  // find_one_by in handler returns None
                     vec![new_token.clone()], // insert_one return
+                ])
+                .append_query_results::<status_list_snapshots::Model, Vec<_>, _>(vec![
+                    vec![snapshot],          // snapshot insert_one return
+                ])
+                .append_query_results::<status_lists::Model, Vec<_>, _>(vec![
                     vec![new_token.clone()], // find_one_by in test verification
                 ])
                 .into_connection(),
@@ -322,14 +377,27 @@ mod tests {
         let new_token = StatusListRecord {
             list_id: token_id.clone(),
             issuer: "issuer".to_string(),
+            status_list: status_list.clone(),
+            sub: "issuer".to_string(),
+        };
+        let snapshot = status_list_snapshots::Model {
+            id: 1,
+            list_id: token_id.clone(),
+            issuer: "issuer".to_string(),
             status_list,
             sub: "issuer".to_string(),
+            created_at: 1000,
         };
         let db_conn = Arc::new(
             mock_db
                 .append_query_results::<status_lists::Model, Vec<_>, _>(vec![
                     vec![],                  // find_one_by in handler returns None
                     vec![new_token.clone()], // insert_one return
+                ])
+                .append_query_results::<status_list_snapshots::Model, Vec<_>, _>(vec![
+                    vec![snapshot],          // snapshot insert_one return
+                ])
+                .append_query_results::<status_lists::Model, Vec<_>, _>(vec![
                     vec![new_token.clone()], // find_one_by in test verification
                 ])
                 .into_connection(),

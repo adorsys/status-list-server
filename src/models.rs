@@ -91,6 +91,38 @@ pub mod status_lists {
 
 pub type StatusListRecord = status_lists::Model;
 
+// Status list snapshots for historical point-in-time queries
+pub mod status_list_snapshots {
+    use super::*;
+
+    #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel, Serialize, Deserialize)]
+    #[sea_orm(table_name = "status_list_snapshots")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = true)]
+        pub id: i32,
+        pub list_id: String,
+        pub issuer: String,
+        #[sea_orm(column_type = "Json")]
+        pub status_list: StatusList,
+        pub sub: String,
+        pub created_at: i64,
+    }
+
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub enum Relation {
+        #[sea_orm(
+            belongs_to = "super::status_lists::Entity",
+            from = "Column::ListId",
+            to = "super::status_lists::Column::ListId"
+        )]
+        StatusList,
+    }
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
+pub type StatusListSnapshotRecord = status_list_snapshots::Model;
+
 // Additional types for status list handling
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum Status {

@@ -1,8 +1,9 @@
 use axum::{Extension, Json, extract::State, response::IntoResponse};
 use hyper::StatusCode;
+use time::OffsetDateTime;
 
 use crate::{
-    models::StatusRequest,
+    models::{StatusListSnapshotRecord, StatusRequest},
     utils::{
         bits_validation::BitFlag, errors::Error, lst_gen::update_status_list, state::AppState,
     },
@@ -67,6 +68,23 @@ pub async fn update_status(
     exact_status_list.status_list.lst = updated_lst.lst;
     exact_status_list.status_list.bits = updated_lst.bits;
 
+    // Create a snapshot of the NEW state for point-in-time queries (draft-21 §8.4).
+    // The snapshot records what the status list became after this update,
+    // timestamped with the update moment. Future `?time=` queries will find
+    // this snapshot when `time >= created_at`.
+    let snapshot = StatusListSnapshotRecord {
+        id: 0, // auto-generated
+        list_id: exact_status_list.list_id.clone(),
+        issuer: exact_status_list.issuer.clone(),
+        status_list: exact_status_list.status_list.clone(),
+        sub: exact_status_list.sub.clone(),
+        created_at: OffsetDateTime::now_utc().unix_timestamp(),
+    };
+    appstate.snapshot_repo.insert_one(snapshot).await.map_err(|e| {
+        tracing::error!("Failed to insert status list snapshot: {e:?}");
+        StatusListError::InternalServerError
+    })?;
+
     // Save the updated token
     store
         .update_one(&exact_status_list.list_id, exact_status_list.clone())
@@ -97,7 +115,7 @@ mod test {
     use sea_orm::{DatabaseBackend, MockDatabase};
 
     use crate::{
-        models::{Status, StatusEntry, StatusList, StatusListRecord, StatusRequest, status_lists},
+        models::{Status, StatusEntry, StatusList, StatusListRecord, StatusRequest, status_lists, status_list_snapshots},
         test_utils::test_app_state,
         utils::lst_gen::create_status_list,
     };
@@ -142,24 +160,38 @@ mod test {
         let existing_token = StatusListRecord {
             list_id: token_id.clone(),
             issuer: "issuer".to_string(),
-            status_list: original_status_list,
+            status_list: original_status_list.clone(),
             sub: "issuer".to_string(),
         };
 
         // Update payload that flips status at index 1 to INVALID
         let update_payload = StatusRequest {
-            list_id: token_id,
+            list_id: token_id.clone(),
             status: vec![StatusEntry {
                 index: 1,
                 status: Status::INVALID,
             }],
         };
 
+        let snapshot = status_list_snapshots::Model {
+            id: 1,
+            list_id: token_id.clone(),
+            issuer: "issuer".to_string(),
+            status_list: original_status_list,
+            sub: "issuer".to_string(),
+            created_at: 1000,
+        };
+
         let db_conn = Arc::new(
             mock_db
                 .append_query_results::<status_lists::Model, Vec<_>, _>(vec![
                     vec![existing_token.clone()], // for find_one_by
-                    vec![],
+                ])
+                .append_query_results::<status_list_snapshots::Model, Vec<_>, _>(vec![
+                    vec![snapshot],               // snapshot insert_one return
+                ])
+                .append_query_results::<status_lists::Model, Vec<_>, _>(vec![
+                    vec![],                       // for update_one
                 ])
                 .into_connection(),
         );

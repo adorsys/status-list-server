@@ -75,6 +75,56 @@ pub mod migrations {
                     )
                     .await?;
 
+                // Create StatusListSnapshots table for storing historical versions
+                manager
+                    .create_table(
+                        Table::create()
+                            .table(StatusListSnapshots::Table)
+                            .if_not_exists()
+                            .col(
+                                ColumnDef::new(StatusListSnapshots::Id)
+                                    .integer()
+                                    .not_null()
+                                    .auto_increment()
+                                    .primary_key(),
+                            )
+                            .col(
+                                ColumnDef::new(StatusListSnapshots::ListId)
+                                    .string()
+                                    .not_null(),
+                            )
+                            .col(
+                                ColumnDef::new(StatusListSnapshots::Issuer)
+                                    .string()
+                                    .not_null(),
+                            )
+                            .col(
+                                ColumnDef::new(StatusListSnapshots::StatusList)
+                                    .json()
+                                    .not_null(),
+                            )
+                            .col(
+                                ColumnDef::new(StatusListSnapshots::Sub)
+                                    .string()
+                                    .not_null(),
+                            )
+                            .col(
+                                ColumnDef::new(StatusListSnapshots::CreatedAt)
+                                    .big_integer()
+                                    .not_null(),
+                            )
+                            .foreign_key(
+                                ForeignKey::create()
+                                    .name("fk_snapshots_list_id")
+                                    .from(StatusListSnapshots::Table, StatusListSnapshots::ListId)
+                                    .to(StatusLists::Table, StatusLists::ListId)
+                                    .on_delete(ForeignKeyAction::Cascade)
+                                    .on_update(ForeignKeyAction::Cascade),
+                            )
+                            .to_owned(),
+                    )
+                    .await?;
+
                 // Create an index on list_id for faster lookups
                 manager
                     .create_index(
@@ -111,12 +161,35 @@ pub mod migrations {
                     )
                     .await?;
 
+                // Create index on list_id for faster snapshot lookups
+                manager
+                    .create_index(
+                        Index::create()
+                            .if_not_exists()
+                            .name("idx_snapshots_list_id_created_at")
+                            .table(StatusListSnapshots::Table)
+                            .col(StatusListSnapshots::ListId)
+                            .col(StatusListSnapshots::CreatedAt)
+                            .to_owned(),
+                    )
+                    .await?;
+
                 Ok(())
             }
 
             /// Drops the database tables
             async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
                 // Drop indexes first
+                manager
+                    .drop_index(
+                        Index::drop()
+                            .if_exists()
+                            .name("idx_snapshots_list_id_created_at")
+                            .table(StatusListSnapshots::Table)
+                            .to_owned(),
+                    )
+                    .await?;
+
                 manager
                     .drop_index(
                         Index::drop()
@@ -152,6 +225,15 @@ pub mod migrations {
                     .drop_table(
                         Table::drop()
                             .if_exists()
+                            .table(StatusListSnapshots::Table)
+                            .to_owned(),
+                    )
+                    .await?;
+
+                manager
+                    .drop_table(
+                        Table::drop()
+                            .if_exists()
                             .table(StatusLists::Table)
                             .to_owned(),
                     )
@@ -183,6 +265,17 @@ pub mod migrations {
             Issuer,
             StatusList,
             Sub,
+        }
+
+        #[derive(Iden)]
+        enum StatusListSnapshots {
+            Table,
+            Id,
+            ListId,
+            Issuer,
+            StatusList,
+            Sub,
+            CreatedAt,
         }
     }
 }
