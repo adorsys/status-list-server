@@ -9,6 +9,7 @@ use axum::{
     http::StatusCode,
     response::IntoResponse,
 };
+use time::OffsetDateTime;
 use tracing;
 
 /// Create a new status list.
@@ -52,12 +53,15 @@ pub async fn publish_status(
                 appstate.server_domain, list_id
             );
 
+            let updated_at = OffsetDateTime::now_utc().unix_timestamp();
+
             // Build the new status list token
             let status_list_record = StatusListRecord {
                 list_id: list_id.clone(),
                 issuer,
                 status_list,
                 sub,
+                updated_at,
             };
 
             // Insert the token into the repository
@@ -127,6 +131,7 @@ mod tests {
             issuer: "issuer".to_string(),
             status_list,
             sub: format!("https://example.com/api/v1/status-lists/{token_id}"),
+            updated_at: 0,
         };
         let db_conn = Arc::new(
             mock_db
@@ -177,6 +182,7 @@ mod tests {
             issuer: "issuer".to_string(),
             status_list,
             sub: format!("https://example.com/api/v1/status-lists/{token_id}"),
+            updated_at: 0,
         };
         let db_conn = Arc::new(
             mock_db
@@ -233,6 +239,7 @@ mod tests {
                 lst: create_status_list(status_entries.clone()).unwrap().lst,
             },
             sub: "issuer".to_string(),
+            updated_at: 0,
         };
         let db_conn = Arc::new(
             mock_db
@@ -271,6 +278,7 @@ mod tests {
             issuer: "issuer".to_string(),
             status_list,
             sub: format!("https://example.com/api/v1/status-lists/{token_id}"),
+            updated_at: 0,
         };
         let db_conn = Arc::new(
             mock_db
@@ -324,6 +332,7 @@ mod tests {
             issuer: "issuer".to_string(),
             status_list,
             sub: format!("https://example.com/api/v1/status-lists/{token_id}"),
+            updated_at: 0,
         };
         let db_conn = Arc::new(
             mock_db

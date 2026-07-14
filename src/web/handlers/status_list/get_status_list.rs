@@ -22,11 +22,13 @@ use crate::{
 };
 
 use super::{
+    conditional::{ConditionalResponse, evaluate_conditional_request, format_http_date},
     constants::{
         ACCEPT_STATUS_LISTS_HEADER_CWT, ACCEPT_STATUS_LISTS_HEADER_JWT, CWT_TYPE, EXP, GZIP_HEADER,
         ISSUED_AT, STATUS_LIST, STATUS_LISTS_CWT_TYPE_VALUE, STATUS_LISTS_HEADER_JWT, SUBJECT, TTL,
     },
     error::StatusListError,
+    etag::generate_etag,
 };
 
 pub async fn get_status_list(
@@ -36,33 +38,91 @@ pub async fn get_status_list(
 ) -> Result<impl IntoResponse + Debug + use<>, StatusListError> {
     let accept = headers.get(header::ACCEPT).and_then(|h| h.to_str().ok());
 
-    // build the token depending on the accept header
-    match accept {
-        None =>
-        // assume jwt by default if no accept header is provided
-        {
-            build_status_list_token(ACCEPT_STATUS_LISTS_HEADER_JWT, &list_id, &state).await
-        }
+    // Validate accept header
+    let accept_type = match accept {
+        None => ACCEPT_STATUS_LISTS_HEADER_JWT, // Default to JWT
         Some(accept)
             if accept == ACCEPT_STATUS_LISTS_HEADER_JWT
                 || accept == ACCEPT_STATUS_LISTS_HEADER_CWT =>
         {
-            build_status_list_token(accept, &list_id, &state).await
+            accept
         }
-        Some(_) => Err(StatusListError::InvalidAcceptHeader),
+        Some(_) => return Err(StatusListError::InvalidAcceptHeader),
+    };
+
+    // Extract conditional request headers
+    let if_none_match = headers
+        .get(header::IF_NONE_MATCH)
+        .and_then(|h| h.to_str().ok());
+    let if_modified_since = headers
+        .get(header::IF_MODIFIED_SINCE)
+        .and_then(|h| h.to_str().ok());
+
+    // Fetch status list record (from cache or database)
+    let status_record = fetch_status_record(&list_id, &state).await?;
+
+    // Generate ETag from record content
+    let current_etag = generate_etag(&status_record);
+
+    // Format Last-Modified timestamp
+    let last_modified = format_http_date(status_record.updated_at);
+
+    // Build Cache-Control header
+    let cache_control = build_cache_control(state.token_ttl_secs);
+
+    // Evaluate conditional request
+    match evaluate_conditional_request(
+        if_none_match,
+        if_modified_since,
+        &current_etag,
+        status_record.updated_at,
+    ) {
+        ConditionalResponse::NotModified => {
+            // Return 304 with caching headers but no body
+            Ok((
+                StatusCode::NOT_MODIFIED,
+                [
+                    (header::ETAG, current_etag.as_str()),
+                    (header::LAST_MODIFIED, last_modified.as_str()),
+                    (header::CACHE_CONTROL, cache_control.as_str()),
+                ],
+            )
+                .into_response())
+        }
+        ConditionalResponse::Modified => {
+            // Build full token response
+            let compressed_token = build_token(
+                accept_type,
+                &status_record,
+                &state,
+            )
+            .await?;
+
+            Ok((
+                StatusCode::OK,
+                [
+                    (header::CONTENT_TYPE, accept_type),
+                    (header::CONTENT_ENCODING, GZIP_HEADER),
+                    (header::ETAG, current_etag.as_str()),
+                    (header::LAST_MODIFIED, last_modified.as_str()),
+                    (header::CACHE_CONTROL, cache_control.as_str()),
+                ],
+                compressed_token,
+            )
+                .into_response())
+        }
     }
 }
 
-async fn build_status_list_token(
-    accept: &str,
+/// Fetches status record from cache or database
+async fn fetch_status_record(
     list_id: &str,
     state: &AppState,
-) -> Result<impl IntoResponse + Debug + use<>, StatusListError> {
+) -> Result<StatusListRecord, StatusListError> {
     // Check cache for status list record
     if let Some(cached_record) = state.cache.get(list_id).await {
         tracing::info!("Cache hit for status list record: {list_id}");
-        // Record is in cache, proceed with building the response
-        return build_response_from_record(accept, &cached_record, state).await;
+        return Ok(cached_record);
     }
 
     tracing::info!("Cache miss for status list token: {list_id}");
@@ -83,14 +143,15 @@ async fn build_status_list_token(
         .insert(list_id.to_string(), status_record.clone())
         .await;
 
-    build_response_from_record(accept, &status_record, state).await
+    Ok(status_record)
 }
 
-async fn build_response_from_record(
+/// Builds and compresses the token (JWT or CWT)
+async fn build_token(
     accept: &str,
     status_record: &StatusListRecord,
     state: &AppState,
-) -> Result<impl IntoResponse + Debug + use<>, StatusListError> {
+) -> Result<Vec<u8>, StatusListError> {
     // Get the certificate chain
     let certs_parts = state
         .cert_manager
@@ -117,7 +178,7 @@ async fn build_response_from_record(
     let token_exp_secs = state.token_exp_secs;
     let token_ttl_secs = state.token_ttl_secs;
 
-    let compressed_token = tokio::task::spawn_blocking(move || {
+    tokio::task::spawn_blocking(move || {
         let keypair = Keypair::from_pkcs8_pem(&signing_key_pem).map_err(|e| {
             tracing::error!("Failed to parse server key: {e:?}");
             StatusListError::InternalServerError
@@ -158,17 +219,7 @@ async fn build_response_from_record(
     .map_err(|err| {
         tracing::error!("Panicked while building token: {err:?}");
         StatusListError::InternalServerError
-    })??;
-
-    Ok((
-        StatusCode::OK,
-        [
-            (header::CONTENT_TYPE, accept),
-            (header::CONTENT_ENCODING, GZIP_HEADER),
-        ],
-        compressed_token,
-    )
-        .into_response())
+    })?
 }
 
 // Function to create a CWT per the specification
@@ -340,6 +391,30 @@ fn issue_jwt(
     Ok(token)
 }
 
+/// Builds Cache-Control header value for successful responses
+///
+/// Returns a Cache-Control directive with public caching, max-age set to the token TTL,
+/// and immutable flag to indicate content won't change during cache lifetime.
+///
+/// # Arguments
+/// * `token_ttl_secs` - The token time-to-live in seconds
+///
+/// # Returns
+/// A string formatted as "public, max-age={token_ttl_secs}, immutable"
+fn build_cache_control(token_ttl_secs: u64) -> String {
+    format!("public, max-age={}, immutable", token_ttl_secs)
+}
+
+/// Builds Cache-Control header value for error responses
+///
+/// Returns a Cache-Control directive that prevents caching of error states.
+///
+/// # Returns
+/// A static string "no-store, max-age=0"
+fn build_error_cache_control() -> &'static str {
+    "no-store, max-age=0"
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -372,6 +447,7 @@ mod tests {
             issuer: "issuer1".to_string(),
             status_list,
             sub: "test_subject".to_string(),
+            updated_at: 0,
         };
         let db_conn = Arc::new(
             mock_db
@@ -445,6 +521,7 @@ mod tests {
             issuer: "issuer1".to_string(),
             status_list: status_list.clone(),
             sub: "test_subject".to_string(),
+            updated_at: 0,
         };
         let db_conn = Arc::new(
             mock_db
@@ -571,6 +648,7 @@ mod tests {
             issuer: "issuer1".to_string(),
             status_list,
             sub: "test_subject".to_string(),
+            updated_at: 0,
         }
     }
 
@@ -874,8 +952,18 @@ mod tests {
 
         assert!(result.is_err());
         let err = result.unwrap_err();
-        assert_eq!(err.clone().into_response().status(), StatusCode::NOT_FOUND);
+        let response = err.clone().into_response();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
         assert_eq!(err, StatusListError::StatusListNotFound);
+        
+        // Verify error response includes no-store Cache-Control header
+        let cache_control = response.headers().get(http::header::CACHE_CONTROL);
+        assert!(cache_control.is_some(), "Error response should include Cache-Control header");
+        assert_eq!(
+            cache_control.unwrap().to_str().unwrap(),
+            "no-store, max-age=0",
+            "Error response should have no-store Cache-Control directive"
+        );
     }
 
     #[tokio::test]
@@ -890,10 +978,225 @@ mod tests {
 
         assert!(result.is_err());
         let err = result.unwrap_err();
+        let response = err.clone().into_response();
         assert_eq!(
-            err.clone().into_response().status(),
+            response.status(),
             StatusCode::NOT_ACCEPTABLE
         );
         assert_eq!(err, StatusListError::InvalidAcceptHeader);
+        
+        // Verify error response includes no-store Cache-Control header
+        let cache_control = response.headers().get(http::header::CACHE_CONTROL);
+        assert!(cache_control.is_some(), "Error response should include Cache-Control header");
+        assert_eq!(
+            cache_control.unwrap().to_str().unwrap(),
+            "no-store, max-age=0",
+            "Error response should have no-store Cache-Control directive"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_error_responses_omit_etag_and_last_modified() {
+        // Test 404 Not Found error
+        let mock_db = MockDatabase::new(DatabaseBackend::Postgres);
+        let db_conn = Arc::new(
+            mock_db
+                .append_query_results::<status_lists::Model, Vec<_>, _>(vec![vec![]])
+                .into_connection(),
+        );
+
+        let app_state = test_app_state(Some(db_conn.clone())).await;
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            http::header::ACCEPT,
+            ACCEPT_STATUS_LISTS_HEADER_JWT.parse().unwrap(),
+        );
+
+        let result =
+            get_status_list(State(app_state), Path("test_list".to_string()), headers).await;
+
+        assert!(result.is_err());
+        let response = result.unwrap_err().into_response();
+        let response_headers = response.headers();
+        
+        // Verify error responses do NOT include ETag or Last-Modified headers
+        assert!(
+            response_headers.get(http::header::ETAG).is_none(),
+            "Error response should not include ETag header"
+        );
+        assert!(
+            response_headers.get(http::header::LAST_MODIFIED).is_none(),
+            "Error response should not include Last-Modified header"
+        );
+        
+        // But should include Cache-Control
+        assert!(
+            response_headers.get(http::header::CACHE_CONTROL).is_some(),
+            "Error response should include Cache-Control header"
+        );
+    }
+
+    #[test]
+    fn test_build_cache_control() {
+        // Test with specific TTL value
+        let cache_control = build_cache_control(300);
+        assert_eq!(cache_control, "public, max-age=300, immutable");
+
+        // Test with zero TTL
+        let cache_control_zero = build_cache_control(0);
+        assert_eq!(cache_control_zero, "public, max-age=0, immutable");
+
+        // Test with large TTL value
+        let cache_control_large = build_cache_control(86400);
+        assert_eq!(cache_control_large, "public, max-age=86400, immutable");
+    }
+
+    #[test]
+    fn test_build_error_cache_control() {
+        // Test error cache control header
+        let error_cache_control = build_error_cache_control();
+        assert_eq!(error_cache_control, "no-store, max-age=0");
+    }
+
+    #[tokio::test]
+    async fn test_get_status_list_includes_caching_headers() {
+        let mock_db = MockDatabase::new(DatabaseBackend::Postgres);
+        let status_list = StatusList {
+            bits: 8,
+            lst: encode_compressed(&[0, 0, 0]).unwrap(),
+        };
+        let status_list_token = StatusListRecord {
+            list_id: "test_list".to_string(),
+            issuer: "issuer1".to_string(),
+            status_list,
+            sub: "test_subject".to_string(),
+            updated_at: 1234567890,
+        };
+        let db_conn = Arc::new(
+            mock_db
+                .append_query_results::<status_lists::Model, Vec<_>, _>(vec![vec![
+                    status_list_token,
+                ]])
+                .into_connection(),
+        );
+
+        let app_state = test_app_state(Some(db_conn.clone())).await;
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            http::header::ACCEPT,
+            ACCEPT_STATUS_LISTS_HEADER_JWT.parse().unwrap(),
+        );
+
+        let response = get_status_list(
+            State(app_state.clone()),
+            Path("test_list".to_string()),
+            headers,
+        )
+        .await
+        .unwrap()
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        
+        let response_headers = response.headers();
+        
+        // Verify ETag header is present and has correct format
+        let etag = response_headers.get(http::header::ETAG).unwrap().to_str().unwrap();
+        assert!(etag.starts_with("W/\""), "ETag should be a weak validator");
+        assert!(etag.ends_with('"'), "ETag should be quoted");
+        
+        // Verify Last-Modified header is present
+        let last_modified = response_headers.get(http::header::LAST_MODIFIED).unwrap().to_str().unwrap();
+        assert!(!last_modified.is_empty(), "Last-Modified should be present");
+        
+        // Verify Cache-Control header is present and correct
+        let cache_control = response_headers.get(http::header::CACHE_CONTROL).unwrap().to_str().unwrap();
+        assert_eq!(cache_control, "public, max-age=300, immutable");
+    }
+
+    #[tokio::test]
+    async fn test_conditional_request_with_matching_etag() {
+        let mock_db = MockDatabase::new(DatabaseBackend::Postgres);
+        let status_list = StatusList {
+            bits: 8,
+            lst: encode_compressed(&[0, 0, 0]).unwrap(),
+        };
+        let status_list_token = StatusListRecord {
+            list_id: "test_list".to_string(),
+            issuer: "issuer1".to_string(),
+            status_list,
+            sub: "test_subject".to_string(),
+            updated_at: 1234567890,
+        };
+        
+        // Single query result - will be cached after first request
+        let db_conn = Arc::new(
+            mock_db
+                .append_query_results::<status_lists::Model, Vec<_>, _>(vec![
+                    vec![status_list_token],
+                ])
+                .into_connection(),
+        );
+
+        let app_state = test_app_state(Some(db_conn.clone())).await;
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            http::header::ACCEPT,
+            ACCEPT_STATUS_LISTS_HEADER_JWT.parse().unwrap(),
+        );
+
+        // First request - get the ETag
+        let first_response = get_status_list(
+            State(app_state.clone()),
+            Path("test_list".to_string()),
+            headers.clone(),
+        )
+        .await
+        .unwrap()
+        .into_response();
+
+        let etag = first_response
+            .headers()
+            .get(http::header::ETAG)
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_string();
+
+        // Second request - conditional request with the ETag (will use cache)
+        let mut conditional_headers = HeaderMap::new();
+        conditional_headers.insert(
+            http::header::ACCEPT,
+            ACCEPT_STATUS_LISTS_HEADER_JWT.parse().unwrap(),
+        );
+        conditional_headers.insert(
+            http::header::IF_NONE_MATCH,
+            etag.parse().unwrap(),
+        );
+
+        let conditional_response = get_status_list(
+            State(app_state),
+            Path("test_list".to_string()),
+            conditional_headers,
+        )
+        .await
+        .unwrap()
+        .into_response();
+
+        // Should return 304 Not Modified
+        assert_eq!(conditional_response.status(), StatusCode::NOT_MODIFIED);
+        
+        // Should still have caching headers
+        let response_headers = conditional_response.headers();
+        assert!(response_headers.contains_key(http::header::ETAG));
+        assert!(response_headers.contains_key(http::header::LAST_MODIFIED));
+        assert!(response_headers.contains_key(http::header::CACHE_CONTROL));
+        
+        // Body should be empty
+        let body_bytes = to_bytes(conditional_response.into_body(), 1024 * 1024).await.unwrap();
+        assert_eq!(body_bytes.len(), 0, "304 response should have no body");
     }
 }

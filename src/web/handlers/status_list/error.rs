@@ -42,6 +42,8 @@ pub enum StatusListError {
 impl IntoResponse for StatusListError {
     fn into_response(self) -> axum::response::Response {
         use StatusListError::*;
+        use axum::http::header;
+        
         let status_code = match self {
             InvalidListId(_) => StatusCode::BAD_REQUEST,
             InvalidAcceptHeader => StatusCode::NOT_ACCEPTABLE,
@@ -62,6 +64,13 @@ impl IntoResponse for StatusListError {
             ServiceUnavailable => StatusCode::SERVICE_UNAVAILABLE,
         };
 
-        (status_code, self.to_string()).into_response()
+        // Add Cache-Control header with no-store directive for error responses
+        // This prevents caching of error states per Requirements 8.1, 8.2, 8.3, 8.4
+        (
+            status_code,
+            [(header::CACHE_CONTROL, "no-store, max-age=0")],
+            self.to_string(),
+        )
+            .into_response()
     }
 }

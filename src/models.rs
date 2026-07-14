@@ -19,7 +19,7 @@ impl From<Jwk> for PublicKey {
     }
 }
 
-// Credentials entity
+// Credentials entity 
 pub mod credentials {
     use super::*;
 
@@ -81,6 +81,8 @@ pub mod status_lists {
         #[sea_orm(column_type = "Json")]
         pub status_list: StatusList,
         pub sub: String,
+        /// Unix timestamp (seconds) of last modification
+        pub updated_at: i64,
     }
 
     #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
