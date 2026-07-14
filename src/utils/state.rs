@@ -23,6 +23,10 @@ use super::{
 const ENV_PRODUCTION: &str = "production";
 const ENV_DEVELOPMENT: &str = "development";
 
+fn empty_to_none(value: Option<String>) -> Option<String> {
+    value.filter(|v| !v.trim().is_empty())
+}
+
 #[derive(Clone)]
 pub struct AppState {
     pub credential_repo: SeaOrmStore<Credentials>,
@@ -30,6 +34,7 @@ pub struct AppState {
     pub server_domain: String,
     pub cert_manager: Arc<CertManager>,
     pub cache: Cache,
+    pub aggregation_uri: Option<String>,
     pub token_exp_secs: u64,
     pub token_ttl_secs: u64,
 }
@@ -128,7 +133,24 @@ pub async fn build_state(config: &AppConfig) -> EyeResult<AppState> {
         server_domain: config.server.domain.clone(),
         cert_manager: Arc::new(certificate_manager),
         cache: Cache::new(config.cache.ttl, config.cache.max_capacity),
+        aggregation_uri: empty_to_none(config.server.aggregation_uri.clone()),
         token_exp_secs: config.status_list.token_exp_secs,
         token_ttl_secs: config.status_list.token_ttl_secs,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::empty_to_none;
+
+    #[test]
+    fn test_empty_to_none() {
+        assert_eq!(empty_to_none(None), None);
+        assert_eq!(empty_to_none(Some("".to_string())), None);
+        assert_eq!(empty_to_none(Some("  ".to_string())), None);
+        assert_eq!(
+            empty_to_none(Some("https://x".to_string())),
+            Some("https://x".to_string())
+        );
+    }
 }

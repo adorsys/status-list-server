@@ -73,6 +73,7 @@ pub struct ServerConfig {
     pub port: u16,
     pub cert: CertConfig,
     pub enable_metrics: bool,
+    pub aggregation_uri: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -194,6 +195,7 @@ impl Config {
             .set_default("server.domain", "localhost")?
             .set_default("server.port", 8000)?
             .set_default("server.enable_metrics", false)?
+            .set_default("server.aggregation_uri", Option::<String>::None)?
             .set_default(
                 "database.url",
                 "postgres://postgres:postgres@localhost:5432/status-list",
@@ -264,6 +266,19 @@ mod tests {
         assert_eq!(config.status_list.token_ttl_secs, 300);
         assert_eq!(config.server.cert.renewal_cron_schedule, "0 0 0 * * *");
         assert_eq!(config.server.cert.dns_challenge_server_url, None);
+        assert_eq!(config.server.aggregation_uri, None);
+    }
+
+    #[sealed_test(env = [
+        ("APP_SERVER__AGGREGATION_URI", "https://example.com/aggregation"),
+    ])]
+    fn test_aggregation_uri_env_override() {
+        let config = Config::load().expect("Failed to load config");
+
+        assert_eq!(
+            config.server.aggregation_uri.as_deref(),
+            Some("https://example.com/aggregation")
+        );
     }
 
     #[sealed_test(env = [
