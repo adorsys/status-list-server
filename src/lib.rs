@@ -3,8 +3,12 @@ mod database;
 mod test_utils;
 mod utils;
 
+pub mod adapters;
+pub mod application;
 pub mod config;
+pub mod domain;
 pub mod models;
+pub mod ports;
 pub mod startup;
 pub mod web;
 

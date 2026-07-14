@@ -1,0 +1,70 @@
+//! SeaORM implementations of the repository ports.
+use crate::{
+    database::queries::SeaOrmStore,
+    domain, models,
+    ports::{PortError, StatusListRepository},
+};
+use async_trait::async_trait;
+
+#[derive(Clone)]
+pub struct PostgresStatusListRepository {
+    store: SeaOrmStore<models::StatusListRecord>,
+}
+impl PostgresStatusListRepository {
+    pub fn new(store: SeaOrmStore<models::StatusListRecord>) -> Self {
+        Self { store }
+    }
+}
+
+fn from_persistence(record: models::StatusListRecord) -> domain::StatusListRecord {
+    domain::StatusListRecord {
+        list_id: record.list_id,
+        issuer: domain::Issuer(record.issuer),
+        sub: record.sub,
+        status_list: domain::StatusList {
+            bits: record.status_list.bits,
+            lst: record.status_list.lst,
+        },
+    }
+}
+fn to_persistence(record: domain::StatusListRecord) -> models::StatusListRecord {
+    models::StatusListRecord {
+        list_id: record.list_id,
+        issuer: record.issuer.0,
+        sub: record.sub,
+        status_list: models::StatusList {
+            bits: record.status_list.bits,
+            lst: record.status_list.lst,
+        },
+    }
+}
+
+#[async_trait]
+impl StatusListRepository for PostgresStatusListRepository {
+    async fn find(&self, list_id: &str) -> Result<Option<domain::StatusListRecord>, PortError> {
+        self.store
+            .find_one_by(list_id)
+            .await
+            .map(|value| value.map(from_persistence))
+            .map_err(|e| PortError::Dependency(e.to_string()))
+    }
+    async fn insert(&self, record: domain::StatusListRecord) -> Result<(), PortError> {
+        self.store
+            .insert_one(to_persistence(record))
+            .await
+            .map_err(|e| PortError::Dependency(e.to_string()))
+    }
+    async fn update(&self, record: domain::StatusListRecord) -> Result<bool, PortError> {
+        let id = record.list_id.clone();
+        self.store
+            .update_one(&id, to_persistence(record))
+            .await
+            .map_err(|e| PortError::Dependency(e.to_string()))
+    }
+    async fn list_uris(&self) -> Result<Vec<String>, PortError> {
+        self.store
+            .find_all_status_list_uris()
+            .await
+            .map_err(|e| PortError::Dependency(e.to_string()))
+    }
+}

@@ -2,6 +2,11 @@ use moka::future::Cache as MokaCache;
 use std::time::Duration;
 
 use crate::models::StatusListRecord;
+use crate::{
+    domain,
+    ports::{PortError, StatusListCache},
+};
+use async_trait::async_trait;
 
 #[derive(Clone)]
 pub struct Cache {
@@ -31,6 +36,43 @@ impl Cache {
 
     pub async fn invalidate(&self, key: &str) {
         self.inner.invalidate(key).await;
+    }
+}
+
+#[async_trait]
+impl StatusListCache for Cache {
+    async fn get(&self, key: &str) -> Result<Option<domain::StatusListRecord>, PortError> {
+        Ok(self.get(key).await.map(|record| domain::StatusListRecord {
+            list_id: record.list_id,
+            issuer: domain::Issuer(record.issuer),
+            status_list: domain::StatusList {
+                bits: record.status_list.bits,
+                lst: record.status_list.lst,
+            },
+            sub: record.sub,
+        }))
+    }
+
+    async fn put(&self, record: domain::StatusListRecord) -> Result<(), PortError> {
+        self.insert(
+            record.list_id.clone(),
+            StatusListRecord {
+                list_id: record.list_id,
+                issuer: record.issuer.0,
+                status_list: crate::models::StatusList {
+                    bits: record.status_list.bits,
+                    lst: record.status_list.lst,
+                },
+                sub: record.sub,
+            },
+        )
+        .await;
+        Ok(())
+    }
+
+    async fn invalidate(&self, key: &str) -> Result<(), PortError> {
+        self.invalidate(key).await;
+        Ok(())
     }
 }
 

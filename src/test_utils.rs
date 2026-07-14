@@ -1,4 +1,5 @@
 use crate::{
+    adapters::postgres::PostgresStatusListRepository,
     cert_manager::storage::StorageError,
     utils::{
         cache::Cache,
@@ -71,6 +72,9 @@ pub(crate) async fn test_app_state_with(
     .with_secrets_storage(secrets_storage);
 
     AppState {
+        status_lists: Arc::new(PostgresStatusListRepository::new(SeaOrmStore::new(
+            db.clone(),
+        ))),
         credential_repo: SeaOrmStore::new(db.clone()),
         status_list_repo: SeaOrmStore::new(db),
         server_domain: "example.com".to_string(),

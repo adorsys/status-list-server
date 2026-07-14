@@ -1,5 +1,7 @@
 use crate::{
-    models::{StatusList, StatusListRecord, StatusesRequest},
+    application::{PublishStatusList, UseCaseError},
+    domain,
+    models::StatusesRequest,
     utils::{errors::Error, lst_gen::create_status_list, state::AppState},
     web::handlers::status_list::error::StatusListError,
 };
@@ -23,8 +25,6 @@ pub async fn publish_status(
         return Err(StatusListError::InvalidListId(e.to_string()));
     }
 
-    let store = &appstate.status_list_repo;
-
     let stl = create_status_list(payload.statuses).map_err(|e| {
         tracing::error!("lst_from failed: {e:?}");
         match e {
@@ -34,41 +34,26 @@ pub async fn publish_status(
         }
     })?;
 
-    // Check for existing token to prevent duplicates
-    match store.find_one_by(&list_id).await {
-        Ok(Some(_)) => {
-            tracing::info!("Status list {list_id} already exists");
-            Err(StatusListError::StatusListAlreadyExists)
-        }
-        Ok(None) => {
-            // Serialize the status list before constructing the token
-            let status_list = StatusList {
-                bits: stl.bits,
-                lst: stl.lst,
-            };
-
-            let sub = format!(
-                "https://{}/api/v1/status-lists/{}",
-                appstate.server_domain, list_id
-            );
-
-            // Build the new status list token
-            let status_list_record = StatusListRecord {
-                list_id: list_id.clone(),
-                issuer,
-                status_list,
-                sub,
-            };
-
-            // Insert the token into the repository
-            store.insert_one(status_list_record).await.map_err(|e| {
-                tracing::error!("Failed to insert status list entry: {e:?}");
-                StatusListError::InternalServerError
-            })?;
-            Ok(StatusCode::CREATED.into_response())
-        }
-        Err(e) => {
-            tracing::error!(error = ?e, list_id = ?list_id, "Database query failed for status list.");
+    let record = domain::StatusListRecord {
+        list_id: list_id.clone(),
+        issuer: domain::Issuer(issuer),
+        status_list: domain::StatusList {
+            bits: stl.bits,
+            lst: stl.lst,
+        },
+        sub: format!(
+            "https://{}/api/v1/status-lists/{list_id}",
+            appstate.server_domain
+        ),
+    };
+    match PublishStatusList::new(appstate.status_lists.clone())
+        .execute(record)
+        .await
+    {
+        Ok(()) => Ok(StatusCode::CREATED.into_response()),
+        Err(UseCaseError::AlreadyExists) => Err(StatusListError::StatusListAlreadyExists),
+        Err(error) => {
+            tracing::error!(?error, list_id, "Failed to publish status list");
             Err(StatusListError::InternalServerError)
         }
     }
@@ -79,7 +64,7 @@ mod tests {
     use super::*;
     use crate::web::handlers::status_list::error::StatusListError;
     use crate::{
-        models::{Status, StatusEntry, StatusListRecord, status_lists},
+        models::{Status, StatusEntry, StatusList, StatusListRecord, status_lists},
         test_utils::test_app_state,
     };
     use axum::{Json, extract::State};

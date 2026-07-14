@@ -1,4 +1,5 @@
 use crate::{
+    adapters::postgres::PostgresStatusListRepository,
     cert_manager::{
         CertManager,
         challenge::{AwsRoute53DnsUpdater, Dns01Handler},
@@ -7,6 +8,7 @@ use crate::{
     config::Config as AppConfig,
     database::{Migrator, queries::SeaOrmStore},
     models::{Credentials, StatusListRecord},
+    ports::StatusListRepository,
 };
 use aws_config::{BehaviorVersion, Region};
 use color_eyre::eyre::{Context, Result as EyeResult};
@@ -29,6 +31,9 @@ fn empty_to_none(value: Option<String>) -> Option<String> {
 
 #[derive(Clone)]
 pub struct AppState {
+    /// Injected outbound port used by new application services. The concrete
+    /// SeaORM adapter is assembled at the composition root below.
+    pub status_lists: Arc<dyn StatusListRepository>,
     pub credential_repo: SeaOrmStore<Credentials>,
     pub status_list_repo: SeaOrmStore<StatusListRecord>,
     pub server_domain: String,
@@ -115,9 +120,11 @@ pub async fn build_state(config: &AppConfig) -> EyeResult<AppState> {
     }
 
     let db_clone = Arc::new(db);
+    let status_list_repo = SeaOrmStore::new(db_clone.clone());
     Ok(AppState {
+        status_lists: Arc::new(PostgresStatusListRepository::new(status_list_repo.clone())),
         credential_repo: SeaOrmStore::new(db_clone.clone()),
-        status_list_repo: SeaOrmStore::new(db_clone),
+        status_list_repo,
         server_domain: config.server.domain.clone(),
         cert_manager: Arc::new(certificate_manager),
         cache: Cache::new(config.cache.ttl, config.cache.max_capacity),
