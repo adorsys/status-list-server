@@ -3,5 +3,8 @@
   "MD022": false,
   "MD024": false,
   "MD032": false,
+  "MD033": {
+    "allowed_elements": ["a"]
+  },
   "MD060": { "style": "aligned" }
 }
