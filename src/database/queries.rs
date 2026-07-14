@@ -1,8 +1,13 @@
-use sea_orm::{ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, QueryOrder, Set};
+use sea_orm::{
+    ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, QueryOrder, Set,
+};
 use std::sync::Arc;
 
 use super::error::RepositoryError;
-use crate::models::{Credentials, StatusListRecord, StatusListSnapshotRecord, credentials, status_lists, status_list_snapshots};
+use crate::models::{
+    Credentials, StatusListRecord, StatusListSnapshotRecord, credentials, status_list_snapshots,
+    status_lists,
+};
 
 #[derive(Clone)]
 pub struct SeaOrmStore<T> {
@@ -102,7 +107,10 @@ impl SeaOrmStore<StatusListRecord> {
 }
 
 impl SeaOrmStore<StatusListSnapshotRecord> {
-    pub async fn insert_one(&self, entity: StatusListSnapshotRecord) -> Result<(), RepositoryError> {
+    pub async fn insert_one(
+        &self,
+        entity: StatusListSnapshotRecord,
+    ) -> Result<(), RepositoryError> {
         let active = status_list_snapshots::ActiveModel {
             id: Set(0), // auto-generated
             list_id: Set(entity.list_id),

@@ -103,11 +103,7 @@ pub mod migrations {
                                     .json()
                                     .not_null(),
                             )
-                            .col(
-                                ColumnDef::new(StatusListSnapshots::Sub)
-                                    .string()
-                                    .not_null(),
-                            )
+                            .col(ColumnDef::new(StatusListSnapshots::Sub).string().not_null())
                             .col(
                                 ColumnDef::new(StatusListSnapshots::CreatedAt)
                                     .big_integer()

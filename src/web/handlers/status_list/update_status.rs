@@ -80,10 +80,14 @@ pub async fn update_status(
         sub: exact_status_list.sub.clone(),
         created_at: OffsetDateTime::now_utc().unix_timestamp(),
     };
-    appstate.snapshot_repo.insert_one(snapshot).await.map_err(|e| {
-        tracing::error!("Failed to insert status list snapshot: {e:?}");
-        StatusListError::InternalServerError
-    })?;
+    appstate
+        .snapshot_repo
+        .insert_one(snapshot)
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to insert status list snapshot: {e:?}");
+            StatusListError::InternalServerError
+        })?;
 
     // Save the updated token
     store
@@ -115,7 +119,10 @@ mod test {
     use sea_orm::{DatabaseBackend, MockDatabase};
 
     use crate::{
-        models::{Status, StatusEntry, StatusList, StatusListRecord, StatusRequest, status_lists, status_list_snapshots},
+        models::{
+            Status, StatusEntry, StatusList, StatusListRecord, StatusRequest,
+            status_list_snapshots, status_lists,
+        },
         test_utils::test_app_state,
         utils::lst_gen::create_status_list,
     };
@@ -188,10 +195,10 @@ mod test {
                     vec![existing_token.clone()], // for find_one_by
                 ])
                 .append_query_results::<status_list_snapshots::Model, Vec<_>, _>(vec![
-                    vec![snapshot],               // snapshot insert_one return
+                    vec![snapshot], // snapshot insert_one return
                 ])
                 .append_query_results::<status_lists::Model, Vec<_>, _>(vec![
-                    vec![],                       // for update_one
+                    vec![], // for update_one
                 ])
                 .into_connection(),
         );

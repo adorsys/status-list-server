@@ -61,10 +61,13 @@ pub async fn publish_status(
             };
 
             // Insert the token into the repository
-            store.insert_one(status_list_record.clone()).await.map_err(|e| {
-                tracing::error!("Failed to insert status list entry: {e:?}");
-                StatusListError::InternalServerError
-            })?;
+            store
+                .insert_one(status_list_record.clone())
+                .await
+                .map_err(|e| {
+                    tracing::error!("Failed to insert status list entry: {e:?}");
+                    StatusListError::InternalServerError
+                })?;
 
             // Create an initial snapshot for point-in-time queries (draft-21 §8.4)
             let snapshot = StatusListSnapshotRecord {
@@ -96,7 +99,9 @@ mod tests {
     use super::*;
     use crate::web::handlers::status_list::error::StatusListError;
     use crate::{
-        models::{Status, StatusEntry, StatusList, StatusListRecord, status_lists, status_list_snapshots},
+        models::{
+            Status, StatusEntry, StatusList, StatusListRecord, status_list_snapshots, status_lists,
+        },
         test_data::helper::publish_test_token,
         test_utils::test_app_state,
     };
@@ -162,7 +167,7 @@ mod tests {
                     vec![new_token.clone()], // insert_one return
                 ])
                 .append_query_results::<status_list_snapshots::Model, Vec<_>, _>(vec![
-                    vec![snapshot],          // snapshot insert_one return
+                    vec![snapshot], // snapshot insert_one return
                 ])
                 .into_connection(),
         );
@@ -223,7 +228,7 @@ mod tests {
                     vec![new_token.clone()], // insert_one return
                 ])
                 .append_query_results::<status_list_snapshots::Model, Vec<_>, _>(vec![
-                    vec![snapshot],          // snapshot insert_one return
+                    vec![snapshot], // snapshot insert_one return
                 ])
                 .append_query_results::<status_lists::Model, Vec<_>, _>(vec![
                     vec![new_token.clone()], // find_one_by in test verification
@@ -327,7 +332,7 @@ mod tests {
                     vec![new_token.clone()], // insert_one return
                 ])
                 .append_query_results::<status_list_snapshots::Model, Vec<_>, _>(vec![
-                    vec![snapshot],          // snapshot insert_one return
+                    vec![snapshot], // snapshot insert_one return
                 ])
                 .append_query_results::<status_lists::Model, Vec<_>, _>(vec![
                     vec![new_token.clone()], // find_one_by in test verification
@@ -395,7 +400,7 @@ mod tests {
                     vec![new_token.clone()], // insert_one return
                 ])
                 .append_query_results::<status_list_snapshots::Model, Vec<_>, _>(vec![
-                    vec![snapshot],          // snapshot insert_one return
+                    vec![snapshot], // snapshot insert_one return
                 ])
                 .append_query_results::<status_lists::Model, Vec<_>, _>(vec![
                     vec![new_token.clone()], // find_one_by in test verification

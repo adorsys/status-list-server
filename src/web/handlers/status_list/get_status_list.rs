@@ -189,7 +189,9 @@ async fn build_response_from_record_inner(
         })?;
 
         let token_bytes = match accept_header.as_str() {
-            ACCEPT_STATUS_LISTS_HEADER_CWT => issue_cwt(&status_record, &keypair, certs_parts, iat)?,
+            ACCEPT_STATUS_LISTS_HEADER_CWT => {
+                issue_cwt(&status_record, &keypair, certs_parts, iat)?
+            }
             _ => issue_jwt(&status_record, &keypair, certs_parts, iat)?.into_bytes(),
         };
 
@@ -370,7 +372,7 @@ fn issue_jwt(
 mod tests {
     use super::*;
     use crate::{
-        models::{StatusList, StatusListRecord, status_lists, status_list_snapshots},
+        models::{StatusList, StatusListRecord, status_list_snapshots, status_lists},
         test_utils::test_app_state,
         utils::lst_gen::encode_compressed,
     };
@@ -426,7 +428,10 @@ mod tests {
 
         assert_eq!(response.status(), StatusCode::OK);
         let resp_headers = response.headers();
-        assert_eq!(resp_headers.get(http::header::CONTENT_ENCODING).unwrap(), "gzip");
+        assert_eq!(
+            resp_headers.get(http::header::CONTENT_ENCODING).unwrap(),
+            "gzip"
+        );
 
         let compressed_body_bytes = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
         let mut decoder = flate2::read::GzDecoder::new(&compressed_body_bytes[..]);
@@ -499,7 +504,10 @@ mod tests {
 
         assert_eq!(response.status(), StatusCode::OK);
         let resp_headers = response.headers();
-        assert_eq!(resp_headers.get(http::header::CONTENT_ENCODING).unwrap(), "gzip");
+        assert_eq!(
+            resp_headers.get(http::header::CONTENT_ENCODING).unwrap(),
+            "gzip"
+        );
 
         let compressed_body_bytes = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
         let mut decoder = flate2::read::GzDecoder::new(&compressed_body_bytes[..]);
@@ -590,8 +598,13 @@ mod tests {
             ACCEPT_STATUS_LISTS_HEADER_JWT.parse().unwrap(),
         );
 
-        let result =
-            get_status_list(State(app_state), Path("test_list".to_string()), headers, Query(StatusListQuery { time: None })).await;
+        let result = get_status_list(
+            State(app_state),
+            Path("test_list".to_string()),
+            headers,
+            Query(StatusListQuery { time: None }),
+        )
+        .await;
 
         assert!(result.is_err());
         let err = result.unwrap_err();
@@ -606,8 +619,13 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.insert(http::header::ACCEPT, "application/xml".parse().unwrap()); // unsupported
 
-        let result =
-            get_status_list(State(app_state), Path("test_list".to_string()), headers, Query(StatusListQuery { time: None })).await;
+        let result = get_status_list(
+            State(app_state),
+            Path("test_list".to_string()),
+            headers,
+            Query(StatusListQuery { time: None }),
+        )
+        .await;
 
         assert!(result.is_err());
         let err = result.unwrap_err();
@@ -725,10 +743,7 @@ mod tests {
 
         assert!(result.is_err());
         let err = result.unwrap_err();
-        assert_eq!(
-            err.clone().into_response().status(),
-            StatusCode::NOT_FOUND
-        );
+        assert_eq!(err.clone().into_response().status(), StatusCode::NOT_FOUND);
         assert_eq!(err, StatusListError::StatusListNotFoundAtTime);
     }
 
