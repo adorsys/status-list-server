@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 use async_trait::async_trait;
 use color_eyre::eyre::{Report, eyre};
 use reqwest::Client;
@@ -9,7 +7,7 @@ use serde_json::json;
 use tokio::sync::RwLock;
 use tracing::info;
 
-use super::{DnsProvider, ZoneInfo, find_best_match};
+use super::{DnsProvider, ZoneInfo, find_best_match, http_client};
 use crate::cert_manager::challenge::ChallengeError;
 
 const PROVIDER: &str = "cloudflare";
@@ -18,13 +16,16 @@ const DEFAULT_API_BASE: &str = "https://api.cloudflare.com/client/v4";
 /// A DNS provider for Cloudflare, authenticated with an API token.
 ///
 /// The token needs the `Zone.Zone:Read` and `Zone.DNS:Edit` permissions.
-/// Record changes are served by Cloudflare's authoritative name servers
-/// as soon as the API call returns, so no propagation wait is needed.
+/// Cloudflare gives no synchronous guarantee that a change is served by its
+/// authoritative name servers when the API call returns, but propagation is
+/// empirically sub-second to a few seconds; we knowingly accept that small
+/// residual race instead of polling, since Cloudflare exposes no
+/// change-status API to confirm it.
 pub struct CloudflareDnsProvider {
     client: Client,
     api_token: SecretString,
     api_base: String,
-    zones: Arc<RwLock<Option<Vec<ZoneInfo>>>>,
+    zones: RwLock<Option<Vec<ZoneInfo>>>,
 }
 
 /// Response envelope shared by all Cloudflare API endpoints
@@ -72,26 +73,28 @@ impl CloudflareDnsProvider {
 
     pub fn new(api_token: SecretString) -> Self {
         Self {
-            client: Client::new(),
+            client: http_client(),
             api_token,
             api_base: DEFAULT_API_BASE.to_string(),
-            zones: Arc::new(RwLock::new(None)),
+            zones: RwLock::new(None),
         }
     }
 
     /// Override the API base URL (used in tests)
     pub fn with_api_base(mut self, api_base: impl Into<String>) -> Self {
-        self.api_base = api_base.into();
+        self.api_base = api_base.into().trim_end_matches('/').to_string();
         self
     }
 
     async fn get_json<T: serde::de::DeserializeOwned>(
         &self,
         url: &str,
+        query: &[(&str, &str)],
     ) -> Result<ApiResponse<T>, ChallengeError> {
         let response = self
             .client
             .get(url)
+            .query(query)
             .bearer_auth(self.api_token.expose_secret())
             .send()
             .await
@@ -150,8 +153,11 @@ impl CloudflareDnsProvider {
 
         // try to get all zones
         loop {
-            let url = format!("{}/zones?page={page}&per_page=50", self.api_base);
-            let body: ApiResponse<Vec<ZoneEntry>> = self.get_json(&url).await?;
+            let url = format!("{}/zones", self.api_base);
+            let page_param = page.to_string();
+            let body: ApiResponse<Vec<ZoneEntry>> = self
+                .get_json(&url, &[("page", &page_param), ("per_page", "50")])
+                .await?;
 
             for zone in body.result.unwrap_or_default() {
                 all_zones.push(ZoneInfo::new(zone.name, zone.id));
@@ -175,11 +181,13 @@ impl CloudflareDnsProvider {
         record_name: &str,
         value: &str,
     ) -> Result<Vec<String>, ChallengeError> {
-        let url = format!(
-            "{}/zones/{zone_id}/dns_records?type=TXT&name={record_name}&content={value}",
-            self.api_base
-        );
-        let body: ApiResponse<Vec<RecordEntry>> = self.get_json(&url).await?;
+        let url = format!("{}/zones/{zone_id}/dns_records", self.api_base);
+        let body: ApiResponse<Vec<RecordEntry>> = self
+            .get_json(
+                &url,
+                &[("type", "TXT"), ("name", record_name), ("content", value)],
+            )
+            .await?;
         Ok(body
             .result
             .unwrap_or_default()
@@ -219,10 +227,7 @@ impl DnsProvider for CloudflareDnsProvider {
         let record_name = format!("_acme-challenge.{domain}");
         let zone_id = self.find_zone(domain).await?;
 
-        for record_id in self
-            .find_txt_records(&zone_id, &record_name, value)
-            .await?
-        {
+        for record_id in self.find_txt_records(&zone_id, &record_name, value).await? {
             let url = format!("{}/zones/{zone_id}/dns_records/{record_id}", self.api_base);
             let response = self
                 .client
@@ -318,6 +323,73 @@ mod tests {
                 .await;
         }
 
+        provider(&server)
+            .delete_txt_record("status.example.com", "digest-value")
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn delete_is_a_no_op_when_no_record_matches() {
+        let server = MockServer::start().await;
+        zone_list_mock().mount(&server).await;
+        Mock::given(method("GET"))
+            .and(path("/zones/z1/dns_records"))
+            .and(query_param("type", "TXT"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "success": true,
+                "errors": [],
+                "result": [],
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        // No DELETE mocks: any delete request would fail the test
+
+        provider(&server)
+            .delete_txt_record("status.example.com", "digest-value")
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn lists_zones_across_pages() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/zones"))
+            .and(query_param("page", "1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "success": true,
+                "errors": [],
+                "result": [{"id": "z0", "name": "other.org"}],
+                "result_info": {"page": 1, "total_pages": 2},
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/zones"))
+            .and(query_param("page", "2"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "success": true,
+                "errors": [],
+                "result": [{"id": "z1", "name": "example.com"}],
+                "result_info": {"page": 2, "total_pages": 2},
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/zones/z1/dns_records"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "success": true,
+                "errors": [],
+                "result": [],
+            })))
+            .mount(&server)
+            .await;
+
+        // The zone from the second page must be found
         provider(&server)
             .delete_txt_record("status.example.com", "digest-value")
             .await

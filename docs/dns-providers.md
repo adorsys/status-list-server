@@ -95,7 +95,10 @@ Setup:
    `_acme-challenge.<domain>` to the returned `fulldomain`.
 
 Note: ACME-DNS keeps only the two most recent TXT values and has no delete
-endpoint, so record cleanup after a challenge is a no-op.
+endpoint, so record cleanup after a challenge is a no-op. Because all domains
+share the single configured ACME-DNS subdomain, certificates with more than
+two identifiers (e.g. more than two SANs) are not supported with this
+provider — earlier challenge values would be rotated out before validation.
 
 ## Pebble (`pebble`)
 
@@ -121,7 +124,10 @@ pub trait DnsProvider: Send + Sync {
 }
 ```
 
-`create_txt_record` must not return before the record is served by the
-provider's authoritative name servers, since the ACME server queries them
-directly. Add a variant to `DnsProviderKind` in `src/config.rs`, a build arm in
+The ACME server queries the zone's authoritative name servers directly and
+validates only once, so `create_txt_record` must wait internally until the
+record is served, to the degree the provider's API allows confirming it: poll
+a change-status API where one exists (see Route53 and Google Cloud DNS), or
+wait out the provider's documented propagation window otherwise (see Azure).
+Add a variant to `DnsProviderKind` in `src/config.rs`, a build arm in
 `src/utils/state.rs`, and wiremock tests next to the implementation.

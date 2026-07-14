@@ -9,6 +9,10 @@ use secrecy::{ExposeSecret, SecretString};
 use serde::Deserialize;
 use serde_aux::field_attributes::deserialize_vec_from_string_or_vec;
 
+/// Recognized values of the APP_ENV environment variable
+pub const ENV_PRODUCTION: &str = "production";
+pub const ENV_DEVELOPMENT: &str = "development";
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct Config {
     pub server: ServerConfig,
@@ -106,7 +110,7 @@ pub struct AcmeDnsConfig {
 impl DnsConfig {
     /// Resolve the DNS provider to use and validate that its settings are present.
     pub fn resolve(&self, app_env: &str) -> Result<DnsProviderKind, ConfigError> {
-        let kind = self.provider.unwrap_or(if app_env == "production" {
+        let kind = self.provider.unwrap_or(if app_env == ENV_PRODUCTION {
             DnsProviderKind::Route53
         } else {
             DnsProviderKind::Pebble
@@ -325,14 +329,8 @@ mod tests {
     fn test_dns_provider_defaults_per_environment() {
         let dns = DnsConfig::default();
 
-        assert_eq!(
-            dns.resolve("production").unwrap(),
-            DnsProviderKind::Route53
-        );
-        assert_eq!(
-            dns.resolve("development").unwrap(),
-            DnsProviderKind::Pebble
-        );
+        assert_eq!(dns.resolve("production").unwrap(), DnsProviderKind::Route53);
+        assert_eq!(dns.resolve("development").unwrap(), DnsProviderKind::Pebble);
     }
 
     #[test]

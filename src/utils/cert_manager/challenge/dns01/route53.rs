@@ -1,4 +1,4 @@
-use std::{sync::Arc, time::Duration};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use aws_config::SdkConfig;
@@ -8,20 +8,29 @@ use aws_sdk_route53::{
         Change, ChangeAction, ChangeBatch, ChangeStatus, ResourceRecord, ResourceRecordSet, RrType,
     },
 };
-use color_eyre::eyre::eyre;
+use color_eyre::eyre::{Report, eyre};
 use tokio::sync::RwLock;
 use tracing::info;
 
 use super::{DnsProvider, ZoneInfo, find_best_match};
 use crate::cert_manager::challenge::ChallengeError;
 
-/// A DNS updater for AWS Route 53
-pub struct AwsRoute53DnsUpdater {
-    client: Route53Client,
-    zones: Arc<RwLock<Option<Vec<ZoneInfo>>>>,
+const PROVIDER: &str = "route53";
+
+fn dns_err(source: impl Into<Report>) -> ChallengeError {
+    ChallengeError::Dns {
+        provider: PROVIDER,
+        source: source.into(),
+    }
 }
 
-impl AwsRoute53DnsUpdater {
+/// A DNS provider for AWS Route 53
+pub struct AwsRoute53DnsProvider {
+    client: Route53Client,
+    zones: RwLock<Option<Vec<ZoneInfo>>>,
+}
+
+impl AwsRoute53DnsProvider {
     const TXT_TTL: i64 = 60;
     const PROPAGATION_INITIAL_DELAY: Duration = Duration::from_secs(2);
     const PROPAGATION_TIMEOUT: Duration = Duration::from_secs(60 * 5);
@@ -29,7 +38,7 @@ impl AwsRoute53DnsUpdater {
     pub fn new(config: &SdkConfig) -> Self {
         Self {
             client: Route53Client::new(config),
-            zones: Arc::new(RwLock::new(None)),
+            zones: RwLock::new(None),
         }
     }
 
@@ -67,10 +76,7 @@ impl AwsRoute53DnsUpdater {
             if let Some(marker) = &next_marker {
                 req = req.marker(marker);
             }
-            let resp = req
-                .send()
-                .await
-                .map_err(|e| ChallengeError::AwsSdk(e.into()))?;
+            let resp = req.send().await.map_err(dns_err)?;
             let hosted_zones = resp.hosted_zones();
             for zone in hosted_zones {
                 all_zones.push(ZoneInfo::new(zone.name(), zone.id()));
@@ -108,17 +114,17 @@ impl AwsRoute53DnsUpdater {
                         ResourceRecord::builder()
                             .value(format!("\"{value}\""))
                             .build()
-                            .map_err(|e| ChallengeError::AwsSdk(e.into()))?,
+                            .map_err(dns_err)?,
                     )
                     .build()
-                    .map_err(|e| ChallengeError::AwsSdk(e.into()))?,
+                    .map_err(dns_err)?,
             )
             .build()
-            .map_err(|e| ChallengeError::AwsSdk(e.into()))?;
+            .map_err(dns_err)?;
         let change_batch = ChangeBatch::builder()
             .changes(change)
             .build()
-            .map_err(|e| ChallengeError::AwsSdk(e.into()))?;
+            .map_err(dns_err)?;
 
         // Try to change the record in Route53
         let output = self
@@ -128,10 +134,10 @@ impl AwsRoute53DnsUpdater {
             .change_batch(change_batch)
             .send()
             .await
-            .map_err(|e| ChallengeError::AwsSdk(e.into()))?;
+            .map_err(dns_err)?;
 
         let change_id = output.change_info.map(|info| info.id).ok_or_else(|| {
-            ChallengeError::Other(eyre!(
+            dns_err(eyre!(
                 "Missing Change ID from AWS ChangeResourceRecordSets response"
             ))
         })?;
@@ -156,7 +162,7 @@ impl AwsRoute53DnsUpdater {
                     .id(change_id)
                     .send()
                     .await
-                    .map_err(|e| ChallengeError::AwsSdk(e.into()))?;
+                    .map_err(dns_err)?;
 
                 match output.change_info.map(|info| info.status) {
                     Some(ChangeStatus::Insync) => {
@@ -167,15 +173,16 @@ impl AwsRoute53DnsUpdater {
                         info!("DNS change {change_id} still pending. Waiting for propagation...");
                     }
                     status => {
-                        return Err(ChallengeError::Other(eyre!(
+                        return Err(dns_err(eyre!(
                             "Unexpected status for change {change_id}: {status:?}",
                         )));
                     }
                 }
 
                 // We double the delay after each attempt
-                let delay = initial_delay
-                    .checked_mul(2u32.pow(retries))
+                let delay = 2u32
+                    .checked_pow(retries)
+                    .and_then(|factor| initial_delay.checked_mul(factor))
                     .unwrap_or(timeout_duration);
                 retries += 1;
                 sleep(delay).await;
@@ -187,7 +194,7 @@ impl AwsRoute53DnsUpdater {
                 Ok(()) => Ok(()),
                 Err(e) => Err(e),
             },
-            Err(_) => Err(ChallengeError::Other(eyre!(
+            Err(_) => Err(dns_err(eyre!(
                 "DNS propagation timed out after {}s",
                 timeout_duration.as_secs()
             ))),
@@ -196,7 +203,7 @@ impl AwsRoute53DnsUpdater {
 }
 
 #[async_trait]
-impl DnsProvider for AwsRoute53DnsUpdater {
+impl DnsProvider for AwsRoute53DnsProvider {
     async fn create_txt_record(&self, domain: &str, value: &str) -> Result<(), ChallengeError> {
         // Try to upsert the record in Route53
         let (record_name, change_id) = self

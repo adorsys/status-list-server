@@ -2,12 +2,12 @@ use crate::{
     cert_manager::{
         CertManager,
         challenge::{
-            AcmeDnsProvider, AwsRoute53DnsUpdater, AzureDnsProvider, CloudflareDnsProvider,
+            AcmeDnsProvider, AwsRoute53DnsProvider, AzureDnsProvider, CloudflareDnsProvider,
             Dns01Handler, GoogleCloudDnsProvider, ServicePrincipal,
         },
         storage::{AwsS3, AwsSecretsManager, Redis},
     },
-    config::{Config as AppConfig, DnsProviderKind},
+    config::{Config as AppConfig, DnsProviderKind, ENV_DEVELOPMENT, ENV_PRODUCTION},
     database::{Migrator, queries::SeaOrmStore},
     models::{Credentials, StatusListRecord},
 };
@@ -17,13 +17,12 @@ use sea_orm::Database;
 use sea_orm_migration::MigratorTrait;
 use secrecy::ExposeSecret;
 use std::{sync::Arc, time::Duration};
+use tracing::warn;
 
 use super::{
     cache::Cache,
-    cert_manager::{challenge::PebbleDnsUpdater, http_client::DefaultHttpClient},
+    cert_manager::{challenge::PebbleDnsProvider, http_client::DefaultHttpClient},
 };
-
-const ENV_DEVELOPMENT: &str = "development";
 
 fn empty_to_none(value: Option<String>) -> Option<String> {
     value.filter(|v| !v.trim().is_empty())
@@ -71,6 +70,12 @@ pub async fn build_state(config: &AppConfig) -> EyeResult<AppState> {
         .dns
         .resolve(&app_env)
         .wrap_err("Invalid DNS provider configuration")?;
+    if dns_provider == DnsProviderKind::Pebble && app_env == ENV_PRODUCTION {
+        warn!(
+            "The 'pebble' DNS provider is a development-only fake DNS server \
+             but APP_ENV=production; ACME challenges will not succeed against a real CA"
+        );
+    }
     let challenge_handler = build_dns_challenge_handler(dns_provider, config, &aws_config)?;
 
     // Initialize the storage backends for the certificate manager
@@ -129,7 +134,7 @@ fn build_dns_challenge_handler(
 ) -> EyeResult<Dns01Handler> {
     let dns = &config.server.cert.dns;
     let handler = match provider {
-        DnsProviderKind::Route53 => Dns01Handler::new(AwsRoute53DnsUpdater::new(aws_config)),
+        DnsProviderKind::Route53 => Dns01Handler::new(AwsRoute53DnsProvider::new(aws_config)),
         DnsProviderKind::Cloudflare => {
             let cfg = dns
                 .cloudflare
@@ -186,7 +191,7 @@ fn build_dns_challenge_handler(
                 .dns_challenge_server_url
                 .as_deref()
                 .unwrap_or("http://challtestsrv:8055");
-            Dns01Handler::new(PebbleDnsUpdater::new(dns_url))
+            Dns01Handler::new(PebbleDnsProvider::new(dns_url))
         }
     };
     Ok(handler)
@@ -194,7 +199,70 @@ fn build_dns_challenge_handler(
 
 #[cfg(test)]
 mod tests {
-    use super::empty_to_none;
+    use super::*;
+    use crate::config::{AcmeDnsConfig, AzureDnsConfig, CloudflareDnsConfig, GcloudDnsConfig};
+    use sealed_test::prelude::*;
+
+    fn test_sdk_config() -> SdkConfig {
+        SdkConfig::builder()
+            .behavior_version(BehaviorVersion::latest())
+            .build()
+    }
+
+    #[sealed_test]
+    fn builds_handler_for_each_configured_provider() {
+        let sdk = test_sdk_config();
+        let mut config = AppConfig::load().expect("Failed to load config");
+
+        // Route53 and Pebble need no provider-specific settings
+        assert!(build_dns_challenge_handler(DnsProviderKind::Route53, &config, &sdk).is_ok());
+        assert!(build_dns_challenge_handler(DnsProviderKind::Pebble, &config, &sdk).is_ok());
+
+        config.server.cert.dns.cloudflare = Some(CloudflareDnsConfig {
+            api_token: "token".into(),
+        });
+        assert!(build_dns_challenge_handler(DnsProviderKind::Cloudflare, &config, &sdk).is_ok());
+
+        config.server.cert.dns.azure = Some(AzureDnsConfig {
+            tenant_id: "tenant".into(),
+            client_id: "client".into(),
+            client_secret: "secret".into(),
+            subscription_id: "sub".into(),
+            resource_group: "rg".into(),
+        });
+        assert!(build_dns_challenge_handler(DnsProviderKind::Azure, &config, &sdk).is_ok());
+
+        config.server.cert.dns.acmedns = Some(AcmeDnsConfig {
+            server_url: "https://auth.example.org".into(),
+            username: "user".into(),
+            password: "password".into(),
+            subdomain: "subdomain".into(),
+        });
+        assert!(build_dns_challenge_handler(DnsProviderKind::Acmedns, &config, &sdk).is_ok());
+
+        let key_json = serde_json::json!({
+            "client_email": "acme@test-project.iam.gserviceaccount.com",
+            "private_key": include_str!("../../test_data/gcloud_test_key.dummy.pem"),
+            "token_uri": "https://oauth2.googleapis.com/token",
+            "project_id": "test-project",
+        });
+        config.server.cert.dns.gcloud = Some(GcloudDnsConfig {
+            service_account_key: Some(key_json.to_string().into()),
+            service_account_key_path: None,
+        });
+        assert!(build_dns_challenge_handler(DnsProviderKind::Gcloud, &config, &sdk).is_ok());
+    }
+
+    #[sealed_test]
+    fn fails_when_provider_settings_are_missing() {
+        let sdk = test_sdk_config();
+        let config = AppConfig::load().expect("Failed to load config");
+
+        assert!(build_dns_challenge_handler(DnsProviderKind::Cloudflare, &config, &sdk).is_err());
+        assert!(build_dns_challenge_handler(DnsProviderKind::Gcloud, &config, &sdk).is_err());
+        assert!(build_dns_challenge_handler(DnsProviderKind::Azure, &config, &sdk).is_err());
+        assert!(build_dns_challenge_handler(DnsProviderKind::Acmedns, &config, &sdk).is_err());
+    }
 
     #[test]
     fn test_empty_to_none() {

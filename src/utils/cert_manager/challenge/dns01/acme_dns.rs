@@ -5,7 +5,7 @@ use secrecy::{ExposeSecret, SecretString};
 use serde_json::json;
 use tracing::info;
 
-use super::DnsProvider;
+use super::{DnsProvider, http_client};
 use crate::cert_manager::challenge::ChallengeError;
 
 const PROVIDER: &str = "acmedns";
@@ -38,8 +38,8 @@ impl AcmeDnsProvider {
         subdomain: impl Into<String>,
     ) -> Self {
         Self {
-            client: Client::new(),
-            server_url: server_url.into(),
+            client: http_client(),
+            server_url: server_url.into().trim_end_matches('/').to_string(),
             username: username.into(),
             password,
             subdomain: subdomain.into(),

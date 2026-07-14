@@ -2,8 +2,8 @@ mod dns01;
 mod http01;
 
 pub use dns01::{
-    AcmeDnsProvider, AwsRoute53DnsUpdater, AzureDnsProvider, CloudflareDnsProvider, Dns01Handler,
-    DnsProvider, GoogleCloudDnsProvider, PebbleDnsUpdater, ServicePrincipal,
+    AcmeDnsProvider, AwsRoute53DnsProvider, AzureDnsProvider, CloudflareDnsProvider, Dns01Handler,
+    DnsProvider, GoogleCloudDnsProvider, PebbleDnsProvider, ServicePrincipal,
 };
 pub use http01::Http01Handler;
 
@@ -19,9 +19,6 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum ChallengeError {
-    #[error("AWS SDK error: {0}")]
-    AwsSdk(#[source] Report),
-
     #[error("DNS provider {provider} error: {source}")]
     Dns {
         provider: &'static str,

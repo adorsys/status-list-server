@@ -10,10 +10,10 @@ pub use acme_dns::AcmeDnsProvider;
 pub use azure::{AzureDnsProvider, ServicePrincipal};
 pub use cloudflare::CloudflareDnsProvider;
 pub use gcloud::GoogleCloudDnsProvider;
-pub use pebble::PebbleDnsUpdater;
-pub use route53::AwsRoute53DnsUpdater;
+pub use pebble::PebbleDnsProvider;
+pub use route53::AwsRoute53DnsProvider;
 
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 
 use async_trait::async_trait;
 use color_eyre::eyre::eyre;
@@ -21,10 +21,25 @@ use instant_acme::{AuthorizationHandle, ChallengeType};
 
 use crate::cert_manager::challenge::{ChallengeError, ChallengeHandler, CleanupFuture};
 
+/// Timeout applied to every DNS provider HTTP request so a hung API or token
+/// endpoint cannot stall certificate renewal indefinitely.
+const HTTP_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Build the HTTP client shared by the DNS provider implementations
+pub(crate) fn http_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .timeout(HTTP_TIMEOUT)
+        .build()
+        .expect("failed to build DNS provider HTTP client")
+}
+
 /// Interface for managing the DNS TXT records used by DNS-01 challenges.
 ///
-/// Implementations must wait internally until the created record is served
-/// by the provider's authoritative name servers before returning.
+/// The ACME server queries the zone's authoritative name servers directly and
+/// validates only once, so implementations must wait internally until the
+/// created record is served, to the degree their provider's API allows
+/// confirming it (change-status polling where available, a bounded settle
+/// delay otherwise).
 #[async_trait]
 pub trait DnsProvider: Send + Sync {
     /// Create (or update) the TXT record for the given domain

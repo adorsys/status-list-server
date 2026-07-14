@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 use tracing::info;
 
-use super::{DnsProvider, ZoneInfo, find_best_match, token::TokenCache};
+use super::{DnsProvider, ZoneInfo, find_best_match, http_client, token::TokenCache};
 use crate::cert_manager::challenge::ChallengeError;
 
 const PROVIDER: &str = "azure";
@@ -19,8 +19,10 @@ const API_VERSION: &str = "2018-05-01";
 /// A DNS provider for Azure DNS, authenticated with a service principal.
 ///
 /// The service principal needs the `DNS Zone Contributor` role on the
-/// resource group holding the zones. Azure commits record changes to its
-/// authoritative name servers when the API call returns.
+/// resource group holding the zones. Azure documents that record changes
+/// reach its authoritative name servers typically within 60 seconds and
+/// offers no change-status API to poll, so `create_txt_record` waits a
+/// fixed settle delay after a successful change.
 pub struct AzureDnsProvider {
     client: Client,
     credentials: ServicePrincipal,
@@ -28,6 +30,7 @@ pub struct AzureDnsProvider {
     resource_group: String,
     login_base: String,
     api_base: String,
+    propagation_delay: Duration,
     token_cache: TokenCache,
     zones: RwLock<Option<Vec<ZoneInfo>>>,
 }
@@ -59,7 +62,19 @@ struct ZoneEntry {
 
 #[derive(Debug, Default, Serialize, Deserialize)]
 struct RecordSet {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    etag: Option<String>,
     properties: RecordSetProperties,
+}
+
+/// Concurrency guard for record set writes
+enum Precondition<'a> {
+    /// Apply only if the record set still has this etag
+    IfMatch(&'a str),
+    /// Apply only if the record set does not exist yet
+    IfNoneMatch,
+    /// Apply unconditionally (no etag available)
+    None,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -84,6 +99,9 @@ fn dns_err(source: impl Into<Report>) -> ChallengeError {
 
 impl AzureDnsProvider {
     const TXT_TTL: u32 = 60;
+    // Azure's documented propagation window for record changes
+    const PROPAGATION_DELAY: Duration = Duration::from_secs(60);
+    const CONFLICT_RETRIES: u32 = 3;
 
     pub fn new(
         credentials: ServicePrincipal,
@@ -91,12 +109,13 @@ impl AzureDnsProvider {
         resource_group: impl Into<String>,
     ) -> Self {
         Self {
-            client: Client::new(),
+            client: http_client(),
             credentials,
             subscription_id: subscription_id.into(),
             resource_group: resource_group.into(),
             login_base: DEFAULT_LOGIN_BASE.to_string(),
             api_base: DEFAULT_API_BASE.to_string(),
+            propagation_delay: Self::PROPAGATION_DELAY,
             token_cache: TokenCache::new(),
             zones: RwLock::new(None),
         }
@@ -108,8 +127,14 @@ impl AzureDnsProvider {
         login_base: impl Into<String>,
         api_base: impl Into<String>,
     ) -> Self {
-        self.login_base = login_base.into();
-        self.api_base = api_base.into();
+        self.login_base = login_base.into().trim_end_matches('/').to_string();
+        self.api_base = api_base.into().trim_end_matches('/').to_string();
+        self
+    }
+
+    /// Override the propagation settle delay (used in tests)
+    pub fn with_propagation_delay(mut self, delay: Duration) -> Self {
+        self.propagation_delay = delay;
         self
     }
 
@@ -127,7 +152,10 @@ impl AzureDnsProvider {
                     .form(&[
                         ("grant_type", "client_credentials"),
                         ("client_id", &self.credentials.client_id),
-                        ("client_secret", self.credentials.client_secret.expose_secret()),
+                        (
+                            "client_secret",
+                            self.credentials.client_secret.expose_secret(),
+                        ),
                         ("scope", &scope),
                     ])
                     .send()
@@ -230,7 +258,9 @@ impl AzureDnsProvider {
         let status = response.status();
         if !status.is_success() {
             let body = response.text().await.unwrap_or_default();
-            return Err(dns_err(eyre!("API request failed (status {status}): {body}")));
+            return Err(dns_err(eyre!(
+                "API request failed (status {status}): {body}"
+            )));
         }
         response
             .json()
@@ -258,29 +288,69 @@ impl AzureDnsProvider {
         Ok(Some(Self::parse_response(response).await?))
     }
 
+    // Write the record set under the given precondition.
+    // Returns false when the precondition failed (concurrent modification).
     async fn put_record_set(
         &self,
         zone: &str,
         relative_name: &str,
         records: Vec<TxtRecord>,
+        precondition: Precondition<'_>,
         token: &SecretString,
-    ) -> Result<(), ChallengeError> {
+    ) -> Result<bool, ChallengeError> {
         let record_set = RecordSet {
+            etag: None,
             properties: RecordSetProperties {
                 ttl: Self::TXT_TTL,
                 txt_records: records,
             },
         };
-        let response = self
+        let mut request = self
             .client
             .put(self.record_set_url(zone, relative_name))
             .bearer_auth(token.expose_secret())
-            .json(&record_set)
-            .send()
-            .await
-            .map_err(dns_err)?;
+            .json(&record_set);
+        request = match precondition {
+            Precondition::IfMatch(etag) => request.header(reqwest::header::IF_MATCH, etag),
+            Precondition::IfNoneMatch => request.header(reqwest::header::IF_NONE_MATCH, "*"),
+            Precondition::None => request,
+        };
+        let response = request.send().await.map_err(dns_err)?;
+        if response.status() == StatusCode::PRECONDITION_FAILED {
+            return Ok(false);
+        }
         Self::parse_response::<serde_json::Value>(response).await?;
-        Ok(())
+        Ok(true)
+    }
+
+    // Delete the whole record set under the given precondition.
+    // Returns false when the precondition failed (concurrent modification).
+    async fn delete_record_set(
+        &self,
+        zone: &str,
+        relative_name: &str,
+        precondition: Precondition<'_>,
+        token: &SecretString,
+    ) -> Result<bool, ChallengeError> {
+        let mut request = self
+            .client
+            .delete(self.record_set_url(zone, relative_name))
+            .bearer_auth(token.expose_secret());
+        if let Precondition::IfMatch(etag) = precondition {
+            request = request.header(reqwest::header::IF_MATCH, etag);
+        }
+        let response = request.send().await.map_err(dns_err)?;
+        let status = response.status();
+        if status == StatusCode::PRECONDITION_FAILED {
+            return Ok(false);
+        }
+        if !status.is_success() && status != StatusCode::NOT_FOUND {
+            let body = response.text().await.unwrap_or_default();
+            return Err(dns_err(eyre!(
+                "Failed to delete record set (status {status}): {body}"
+            )));
+        }
+        Ok(true)
     }
 }
 
@@ -288,23 +358,48 @@ impl AzureDnsProvider {
 impl DnsProvider for AzureDnsProvider {
     async fn create_txt_record(&self, domain: &str, value: &str) -> Result<(), ChallengeError> {
         let record_name = format!("_acme-challenge.{}", domain.trim_end_matches('.'));
-        let (zone, relative_name) = self.find_zone_and_relative_name(domain, &record_name).await?;
+        let (zone, relative_name) = self
+            .find_zone_and_relative_name(domain, &record_name)
+            .await?;
         let token = self.access_token().await?;
 
-        // Merge with the existing record set since PUT replaces it
-        let mut records = self
-            .get_record_set(&zone, &relative_name, &token)
-            .await?
-            .map(|r| r.properties.txt_records)
-            .unwrap_or_default();
-        let record = TxtRecord {
-            value: vec![value.to_string()],
-        };
-        if !records.contains(&record) {
-            records.push(record);
+        let mut attempts = 0;
+        loop {
+            // Merge with the existing record set since PUT replaces it
+            let existing = self.get_record_set(&zone, &relative_name, &token).await?;
+            let etag = existing.as_ref().and_then(|r| r.etag.clone());
+            let precondition = match (&existing, &etag) {
+                (Some(_), Some(etag)) => Precondition::IfMatch(etag),
+                (Some(_), None) => Precondition::None,
+                (None, _) => Precondition::IfNoneMatch,
+            };
+            let mut records = existing
+                .map(|r| r.properties.txt_records)
+                .unwrap_or_default();
+            let record = TxtRecord {
+                value: vec![value.to_string()],
+            };
+            if !records.contains(&record) {
+                records.push(record);
+            }
+
+            if self
+                .put_record_set(&zone, &relative_name, records, precondition, &token)
+                .await?
+            {
+                break;
+            }
+            attempts += 1;
+            if attempts > Self::CONFLICT_RETRIES {
+                return Err(dns_err(eyre!(
+                    "Record set {record_name} kept being modified concurrently"
+                )));
+            }
+            info!("Azure DNS record set conflict for {record_name}, retrying...");
         }
-        self.put_record_set(&zone, &relative_name, records, &token)
-            .await?;
+
+        // No change-status API to poll; wait out the documented propagation window
+        tokio::time::sleep(self.propagation_delay).await;
 
         info!("DNS record {record_name} created for {domain}");
         Ok(())
@@ -312,37 +407,47 @@ impl DnsProvider for AzureDnsProvider {
 
     async fn delete_txt_record(&self, domain: &str, value: &str) -> Result<(), ChallengeError> {
         let record_name = format!("_acme-challenge.{}", domain.trim_end_matches('.'));
-        let (zone, relative_name) = self.find_zone_and_relative_name(domain, &record_name).await?;
+        let (zone, relative_name) = self
+            .find_zone_and_relative_name(domain, &record_name)
+            .await?;
         let token = self.access_token().await?;
 
-        let records: Vec<TxtRecord> = self
-            .get_record_set(&zone, &relative_name, &token)
-            .await?
-            .map(|r| r.properties.txt_records)
-            .unwrap_or_default()
-            .into_iter()
-            .filter(|r| r.value != [value.to_string()])
-            .collect();
+        let mut attempts = 0;
+        loop {
+            let Some(existing) = self.get_record_set(&zone, &relative_name, &token).await? else {
+                // Nothing to delete
+                break;
+            };
+            let etag = existing.etag.clone();
+            let precondition = match &etag {
+                Some(etag) => Precondition::IfMatch(etag),
+                None => Precondition::None,
+            };
+            let records: Vec<TxtRecord> = existing
+                .properties
+                .txt_records
+                .into_iter()
+                .filter(|r| r.value != [value.to_string()])
+                .collect();
 
-        if records.is_empty() {
-            // Delete the whole record set when no values remain
-            let response = self
-                .client
-                .delete(self.record_set_url(&zone, &relative_name))
-                .bearer_auth(token.expose_secret())
-                .send()
-                .await
-                .map_err(dns_err)?;
-            let status = response.status();
-            if !status.is_success() && status != StatusCode::NOT_FOUND {
-                let body = response.text().await.unwrap_or_default();
+            let applied = if records.is_empty() {
+                // Delete the whole record set when no values remain
+                self.delete_record_set(&zone, &relative_name, precondition, &token)
+                    .await?
+            } else {
+                self.put_record_set(&zone, &relative_name, records, precondition, &token)
+                    .await?
+            };
+            if applied {
+                break;
+            }
+            attempts += 1;
+            if attempts > Self::CONFLICT_RETRIES {
                 return Err(dns_err(eyre!(
-                    "Failed to delete record set (status {status}): {body}"
+                    "Record set {record_name} kept being modified concurrently"
                 )));
             }
-        } else {
-            self.put_record_set(&zone, &relative_name, records, &token)
-                .await?;
+            info!("Azure DNS record set conflict for {record_name}, retrying...");
         }
 
         info!("DNS record {record_name} deleted for {domain}");
@@ -354,7 +459,7 @@ impl DnsProvider for AzureDnsProvider {
 mod tests {
     use super::*;
     use serde_json::json;
-    use wiremock::matchers::{body_partial_json, method, path, query_param};
+    use wiremock::matchers::{body_partial_json, header, method, path, query_param};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     const ZONES_PATH: &str =
@@ -371,6 +476,7 @@ mod tests {
             "rg-1",
         )
         .with_base_urls(server.uri(), server.uri())
+        .with_propagation_delay(Duration::ZERO)
     }
 
     async fn mount_token_mock(server: &MockServer, expected_mints: u64) {
@@ -477,6 +583,105 @@ mod tests {
             .mount(&server)
             .await;
 
+        provider(&server)
+            .delete_txt_record("status.example.com", "digest-value")
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn delete_is_a_no_op_when_record_absent() {
+        let server = MockServer::start().await;
+        mount_token_mock(&server, 1).await;
+        mount_zone_mock(&server).await;
+        let record_path = format!("{ZONES_PATH}/example.com/TXT/_acme-challenge.status");
+        Mock::given(method("GET"))
+            .and(path(&record_path))
+            .respond_with(ResponseTemplate::new(404).set_body_json(json!({
+                "error": {"code": "NotFound"},
+            })))
+            .mount(&server)
+            .await;
+        // No PUT/DELETE mocks: any write request would fail the test
+
+        provider(&server)
+            .delete_txt_record("status.example.com", "digest-value")
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn retries_on_etag_conflict() {
+        let server = MockServer::start().await;
+        mount_token_mock(&server, 1).await;
+        mount_zone_mock(&server).await;
+        let record_path = format!("{ZONES_PATH}/example.com/TXT/_acme-challenge.status");
+        Mock::given(method("GET"))
+            .and(path(&record_path))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "etag": "e1",
+                "properties": {"TTL": 60, "TXTRecords": [{"value": ["other-value"]}]},
+            })))
+            .expect(2)
+            .mount(&server)
+            .await;
+        // First write loses the etag race, the retry succeeds
+        Mock::given(method("PUT"))
+            .and(path(&record_path))
+            .and(header("if-match", "e1"))
+            .respond_with(ResponseTemplate::new(412).set_body_json(json!({
+                "error": {"code": "PreconditionFailed"},
+            })))
+            .up_to_n_times(1)
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("PUT"))
+            .and(path(&record_path))
+            .and(header("if-match", "e1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        provider(&server)
+            .create_txt_record("status.example.com", "digest-value")
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn lists_zones_across_pages() {
+        let server = MockServer::start().await;
+        mount_token_mock(&server, 1).await;
+        Mock::given(method("GET"))
+            .and(path(ZONES_PATH))
+            .and(query_param("api-version", API_VERSION))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "value": [{"name": "other.org"}],
+                "nextLink": format!("{}/zones-page-2", server.uri()),
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/zones-page-2"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "value": [{"name": "example.com"}],
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let record_path = format!("{ZONES_PATH}/example.com/TXT/_acme-challenge.status");
+        Mock::given(method("GET"))
+            .and(path(&record_path))
+            .respond_with(ResponseTemplate::new(404).set_body_json(json!({
+                "error": {"code": "NotFound"},
+            })))
+            .mount(&server)
+            .await;
+
+        // The zone from the second page must be found
         provider(&server)
             .delete_txt_record("status.example.com", "digest-value")
             .await

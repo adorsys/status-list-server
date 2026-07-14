@@ -10,7 +10,7 @@ use serde_json::json;
 use tokio::sync::RwLock;
 use tracing::info;
 
-use super::{DnsProvider, ZoneInfo, find_best_match, token::TokenCache};
+use super::{DnsProvider, ZoneInfo, find_best_match, http_client, token::TokenCache};
 use crate::cert_manager::challenge::ChallengeError;
 
 const PROVIDER: &str = "gcloud";
@@ -113,7 +113,7 @@ impl GoogleCloudDnsProvider {
         let encoding_key = EncodingKey::from_rsa_pem(key.private_key.as_bytes())
             .map_err(|e| dns_err(eyre!("Invalid service account private key: {e}")))?;
         Ok(Self {
-            client: Client::new(),
+            client: http_client(),
             key,
             encoding_key,
             api_base: DEFAULT_API_BASE.to_string(),
@@ -124,7 +124,7 @@ impl GoogleCloudDnsProvider {
 
     /// Override the API base URL (used in tests)
     pub fn with_api_base(mut self, api_base: impl Into<String>) -> Self {
-        self.api_base = api_base.into();
+        self.api_base = api_base.into().trim_end_matches('/').to_string();
         self
     }
 
@@ -139,9 +139,12 @@ impl GoogleCloudDnsProvider {
                     iat,
                     exp: iat + Self::TOKEN_LIFETIME.as_secs() as i64,
                 };
-                let assertion =
-                    jsonwebtoken::encode(&Header::new(Algorithm::RS256), &claims, &self.encoding_key)
-                        .map_err(|e| dns_err(eyre!("Failed to sign token request: {e}")))?;
+                let assertion = jsonwebtoken::encode(
+                    &Header::new(Algorithm::RS256),
+                    &claims,
+                    &self.encoding_key,
+                )
+                .map_err(|e| dns_err(eyre!("Failed to sign token request: {e}")))?;
 
                 let response = self
                     .client
@@ -206,17 +209,12 @@ impl GoogleCloudDnsProvider {
 
         // try to get all managed zones
         loop {
-            let mut url = format!("{}/managedZones", self.project_url());
+            let url = format!("{}/managedZones", self.project_url());
+            let mut request = self.client.get(&url).bearer_auth(token.expose_secret());
             if let Some(token) = &page_token {
-                url = format!("{url}?pageToken={token}");
+                request = request.query(&[("pageToken", token)]);
             }
-            let response = self
-                .client
-                .get(&url)
-                .bearer_auth(token.expose_secret())
-                .send()
-                .await
-                .map_err(dns_err)?;
+            let response = request.send().await.map_err(dns_err)?;
             let body: ManagedZoneList = Self::parse_response(response).await?;
 
             for zone in body.managed_zones {
@@ -238,7 +236,9 @@ impl GoogleCloudDnsProvider {
         let status = response.status();
         if !status.is_success() {
             let body = response.text().await.unwrap_or_default();
-            return Err(dns_err(eyre!("API request failed (status {status}): {body}")));
+            return Err(dns_err(eyre!(
+                "API request failed (status {status}): {body}"
+            )));
         }
         response
             .json()
@@ -253,13 +253,11 @@ impl GoogleCloudDnsProvider {
         record_name: &str,
         token: &SecretString,
     ) -> Result<Option<RrSet>, ChallengeError> {
-        let url = format!(
-            "{}/managedZones/{zone}/rrsets?name={record_name}&type=TXT",
-            self.project_url()
-        );
+        let url = format!("{}/managedZones/{zone}/rrsets", self.project_url());
         let response = self
             .client
             .get(&url)
+            .query(&[("name", record_name), ("type", "TXT")])
             .bearer_auth(token.expose_secret())
             .send()
             .await
@@ -287,6 +285,14 @@ impl GoogleCloudDnsProvider {
                 .map(|r| r.rrdatas.clone())
                 .unwrap_or_default();
             let new_rrdatas = merge(old_rrdatas);
+
+            // Nothing to change: the record is already absent or already holds
+            // the merged values. Cloud DNS rejects an empty or identity change.
+            if existing.as_ref().map(|r| &r.rrdatas) == Some(&new_rrdatas)
+                || (existing.is_none() && new_rrdatas.is_empty())
+            {
+                return Ok(());
+            }
 
             let mut change = json!({});
             if let Some(existing) = &existing {
@@ -341,8 +347,9 @@ impl GoogleCloudDnsProvider {
         let poll_future = async {
             loop {
                 // We double the delay after each attempt
-                let delay = Self::PROPAGATION_INITIAL_DELAY
-                    .checked_mul(2u32.pow(retries))
+                let delay = 2u32
+                    .checked_pow(retries)
+                    .and_then(|factor| Self::PROPAGATION_INITIAL_DELAY.checked_mul(factor))
                     .unwrap_or(Self::PROPAGATION_TIMEOUT);
                 retries += 1;
                 sleep(delay).await;
@@ -415,10 +422,14 @@ impl DnsProvider for GoogleCloudDnsProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wiremock::matchers::{body_partial_json, method, path, query_param};
+    use wiremock::matchers::{
+        body_partial_json, method, path, query_param, query_param_is_missing,
+    };
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
-    const TEST_KEY_PEM: &str = include_str!("../../../../../test_data/gcloud_test_key.pem");
+    // A throwaway RSA key generated only for these tests; it grants access to
+    // nothing and is deliberately named .dummy.pem for secret scanners.
+    const TEST_KEY_PEM: &str = include_str!("../../../../../test_data/gcloud_test_key.dummy.pem");
 
     fn provider(server: &MockServer) -> GoogleCloudDnsProvider {
         let key = json!({
@@ -471,7 +482,9 @@ mod tests {
         mount_token_mock(&server, 1).await;
         mount_zone_mock(&server).await;
         Mock::given(method("GET"))
-            .and(path("/projects/test-project/managedZones/example-zone/rrsets"))
+            .and(path(
+                "/projects/test-project/managedZones/example-zone/rrsets",
+            ))
             .and(query_param("type", "TXT"))
             .respond_with(rrsets_response(json!(["\"other-value\""])))
             .mount(&server)
@@ -504,7 +517,9 @@ mod tests {
         mount_token_mock(&server, 1).await;
         mount_zone_mock(&server).await;
         Mock::given(method("GET"))
-            .and(path("/projects/test-project/managedZones/example-zone/rrsets"))
+            .and(path(
+                "/projects/test-project/managedZones/example-zone/rrsets",
+            ))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({"rrsets": []})))
             .mount(&server)
             .await;
@@ -543,7 +558,9 @@ mod tests {
         mount_token_mock(&server, 1).await;
         mount_zone_mock(&server).await;
         Mock::given(method("GET"))
-            .and(path("/projects/test-project/managedZones/example-zone/rrsets"))
+            .and(path(
+                "/projects/test-project/managedZones/example-zone/rrsets",
+            ))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({"rrsets": []})))
             .mount(&server)
             .await;
@@ -576,13 +593,96 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn delete_is_a_no_op_when_record_absent() {
+        let server = MockServer::start().await;
+        mount_token_mock(&server, 1).await;
+        mount_zone_mock(&server).await;
+        Mock::given(method("GET"))
+            .and(path(
+                "/projects/test-project/managedZones/example-zone/rrsets",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"rrsets": []})))
+            .mount(&server)
+            .await;
+        // No POST /changes mock: an empty change request would fail the test
+
+        provider(&server)
+            .delete_txt_record("status.example.com", "digest-value")
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn create_is_a_no_op_when_value_already_present() {
+        let server = MockServer::start().await;
+        mount_token_mock(&server, 1).await;
+        mount_zone_mock(&server).await;
+        Mock::given(method("GET"))
+            .and(path(
+                "/projects/test-project/managedZones/example-zone/rrsets",
+            ))
+            .respond_with(rrsets_response(json!(["\"digest-value\""])))
+            .mount(&server)
+            .await;
+        // No POST /changes mock: an identity change request would fail the test
+
+        provider(&server)
+            .create_txt_record("status.example.com", "digest-value")
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn lists_zones_across_pages() {
+        let server = MockServer::start().await;
+        mount_token_mock(&server, 1).await;
+        Mock::given(method("GET"))
+            .and(path("/projects/test-project/managedZones"))
+            .and(query_param_is_missing("pageToken"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "managedZones": [{"name": "other-zone", "dnsName": "other.org."}],
+                "nextPageToken": "p2",
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/projects/test-project/managedZones"))
+            .and(query_param("pageToken", "p2"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "managedZones": [{"name": "example-zone", "dnsName": "example.com."}],
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path(
+                "/projects/test-project/managedZones/example-zone/rrsets",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"rrsets": []})))
+            .mount(&server)
+            .await;
+
+        // The zone from the second page must be found
+        provider(&server)
+            .delete_txt_record("status.example.com", "digest-value")
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
     async fn delete_removes_only_the_given_value() {
         let server = MockServer::start().await;
         mount_token_mock(&server, 1).await;
         mount_zone_mock(&server).await;
         Mock::given(method("GET"))
-            .and(path("/projects/test-project/managedZones/example-zone/rrsets"))
-            .respond_with(rrsets_response(json!(["\"digest-value\"", "\"other-value\""])))
+            .and(path(
+                "/projects/test-project/managedZones/example-zone/rrsets",
+            ))
+            .respond_with(rrsets_response(json!([
+                "\"digest-value\"",
+                "\"other-value\""
+            ])))
             .mount(&server)
             .await;
         Mock::given(method("POST"))
