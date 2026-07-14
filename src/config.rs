@@ -99,7 +99,7 @@ pub struct CloudflareDnsConfig {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct AcmeDnsConfig {
-    /// Base URL of the ACME-DNS server, e.g. https://auth.example.org
+    /// Base URL of the ACME-DNS server, e.g. <https://auth.example.org>
     pub server_url: String,
     pub username: String,
     pub password: SecretString,

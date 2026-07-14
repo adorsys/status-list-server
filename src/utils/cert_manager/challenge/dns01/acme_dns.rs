@@ -10,7 +10,7 @@ use crate::cert_manager::challenge::ChallengeError;
 
 const PROVIDER: &str = "acmedns";
 
-/// A DNS provider for a self-hosted ACME-DNS server (https://github.com/joohoi/acme-dns).
+/// A DNS provider for a self-hosted ACME-DNS server (<https://github.com/joohoi/acme-dns>).
 ///
 /// Requires a pre-registered account and a CNAME from `_acme-challenge.<domain>`
 /// to the registered ACME-DNS subdomain. ACME-DNS serves updates immediately
