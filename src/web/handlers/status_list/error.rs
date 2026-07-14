@@ -1,6 +1,8 @@
 use axum::{http::StatusCode, response::IntoResponse};
 use thiserror::Error;
 
+use super::get_status_list::build_error_cache_control;
+
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
 pub enum StatusListError {
     #[error("Invalid list ID string: {0}")]
@@ -64,11 +66,9 @@ impl IntoResponse for StatusListError {
             ServiceUnavailable => StatusCode::SERVICE_UNAVAILABLE,
         };
 
-        // Add Cache-Control header with no-store directive for error responses
-        // This prevents caching of error states per Requirements 8.1, 8.2, 8.3, 8.4
         (
             status_code,
-            [(header::CACHE_CONTROL, "no-store, max-age=0")],
+            [(header::CACHE_CONTROL, build_error_cache_control())],
             self.to_string(),
         )
             .into_response()

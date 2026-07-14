@@ -406,7 +406,7 @@ fn build_cache_control(token_ttl_secs: u64) -> String {
 ///
 /// # Returns
 /// A static string "no-store, max-age=0"
-fn build_error_cache_control() -> &'static str {
+pub(crate) fn build_error_cache_control() -> &'static str {
     "no-store, max-age=0"
 }
 
