@@ -32,6 +32,31 @@ impl DatabaseBackend {
             DatabaseBackend::Mariadb => "mysql",
         }
     }
+
+    /// Returns a human-readable description of the expected URL scheme(s).
+    pub fn expected_scheme_description(&self) -> &'static str {
+        match self {
+            DatabaseBackend::Postgres => "'postgres://' or 'postgresql://'",
+            DatabaseBackend::MySql => "'mysql://'",
+            DatabaseBackend::Sqlite => "'sqlite:'",
+            DatabaseBackend::Mariadb => "'mysql://' (MariaDB uses the MySQL driver)",
+        }
+    }
+
+    /// Validates that the given URL matches the expected scheme for this backend.
+    ///
+    /// PostgreSQL accepts both `postgres://` and `postgresql://` schemes.
+    /// MariaDB uses the MySQL driver, so it expects `mysql://`.
+    /// SQLite uses `sqlite:` (note: no `//`).
+    pub fn validate_url_scheme(&self, url: &str) -> bool {
+        match self {
+            DatabaseBackend::Postgres => {
+                url.starts_with("postgres://") || url.starts_with("postgresql://")
+            }
+            DatabaseBackend::MySql | DatabaseBackend::Mariadb => url.starts_with("mysql://"),
+            DatabaseBackend::Sqlite => url.starts_with("sqlite:"),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]

@@ -38,27 +38,12 @@ pub async fn build_state(config: &AppConfig) -> EyeResult<AppState> {
     let db_url = config.database.url.expose_secret();
     let db_backend = config.database.backend;
 
-    let expected_schemes = match db_backend {
-        crate::config::DatabaseBackend::Postgres => "'postgres://' or 'postgresql://'",
-        crate::config::DatabaseBackend::MySql | crate::config::DatabaseBackend::Mariadb => {
-            "'mysql://'"
-        }
-        crate::config::DatabaseBackend::Sqlite => "'sqlite:'",
-    };
-
-    let url_ok = match db_backend {
-        crate::config::DatabaseBackend::Postgres => {
-            db_url.starts_with("postgres://") || db_url.starts_with("postgresql://")
-        }
-        crate::config::DatabaseBackend::MySql | crate::config::DatabaseBackend::Mariadb => {
-            db_url.starts_with("mysql://")
-        }
-        crate::config::DatabaseBackend::Sqlite => db_url.starts_with("sqlite:"),
-    };
-
-    if !url_ok {
+    // Validate URL scheme matches the configured backend
+    let valid = db_backend.validate_url_scheme(db_url);
+    if !valid {
         return Err(color_eyre::eyre::eyre!(
-            "URL scheme does not match configured backend {db_backend:?}. Expected URL starting with {expected_schemes}",
+            "URL scheme does not match configured backend {db_backend:?}. Expected URL starting with {}",
+            db_backend.expected_scheme_description()
         ));
     }
 
