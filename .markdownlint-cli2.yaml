@@ -13,3 +13,4 @@ ignores:
   - "node_modules/**"
   - ".kilo/node_modules/**"
   - "target/**"
+  - "artillery-tests/**"
