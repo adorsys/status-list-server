@@ -62,115 +62,29 @@ cargo run
 
 By default, the server will listen on `http://localhost:8000`. You can modify the host and port in the configuration settings.
 
-## Configuration
+## API Documentation
 
-All runtime behavior is controlled via environment variables prefixed with `APP_` and using `__` as a nested separator (e.g. `APP_SERVER__PORT=8000`). Sensible defaults are built in, so only non-default values need to be set. See [`.env.template`](.env.template) for a complete example.
+The public API is documented with an OpenAPI 3.1 specification. See [`docs/openapi.yaml`](docs/openapi.yaml) for the complete API contract.
 
-### Validation
+### Retrieve Status List Aggregation
 
-The following constraints are validated at startup and will cause the server to fail fast if violated:
-
-- `server.port` must be between 1 and 65535 (the `u16` type enforces the upper bound)
-- `server.cert.renewal_cron_schedule` must be a valid 6-field cron expression (seconds required)
-- `aws.s3_bucket` must not be empty
-
-## API Overview
-
-### Health Check
-
-- **Endpoint:** `GET /health`
-- **Description:** Checks the health status of the server.
-- **Response:**
-  - `200 OK`: Server is running.
-
-### Register Issuer
-
-- **Endpoint**: `POST /api/v1/credentials`
-- **Description**: Allows issuers to register their public key and identifier for later authentication
-- **Request Body**
+- **Endpoint:** `GET /api/v1/aggregation`
+- **Description:** Returns all Status List Token URIs hosted by this server in a single response (Token Status List draft-21 §9), enabling consumers to pre-fetch or keep an offline mirror of every list. The endpoint is publicly accessible with no authentication required. The aggregation is **issuer-agnostic** — every hosted status list URI is included regardless of which issuer owns it.
+- **Responses:**
+  - `200 OK`
 
   ```json
   {
-    "issuer": "<issuer_id>",
-    "public_key": "<public_key JWK>"
-  }
-  ```
-
-  - `issuer`: Unique identifier for the issuer
-  - `public_key`: Public key in JWK format
-
-### Publish Status List
-
-- **Endpoint**: `PUT /api/v1/status-lists/{list_id}/statuses`
-- **Description**: Allows an issuer to publish their status lists
-- **Authorization**: Requires a valid signed JWT Bearer token with the private key corresponding to the registered public key
-- **Path Parameters:**
-  - `list_id`: UUID of the status list to create
-- **Request Body**
-
-  ```json
-  {
-    "statuses": [
-      { "index": 1, "status": "INVALID" },
-      { "index": 8, "status": "VALID" }
+    "status_lists": [
+      "https://statuslist.example.com/api/v1/status-lists/30202cc6-1e3f-4479-a567-74e86ad73693",
+      "https://statuslist.example.com/api/v1/status-lists/755a0cf7-8289-4f65-9d24-0e01be92f4a6"
     ]
   }
   ```
 
-  - `index`: Position in the status list
-  - `statuses`: Status entries to publish
-  - `status`: Status value (VALID, INVALID, SUSPENDED)
-
-### Update Status List
-
-- **Endpoint:** `PATCH /api/v1/status-lists/{list_id}/statuses`
-- **Description:** Allows an issuer to update an existing status list
-- **Authorization:** Requires a valid signed JWT Bearer token with the private key corresponding to the registered public key
-- **Path Parameters:**
-  - `list_id`: UUID of the status list to update
-- **Request Body:**
-
-  ```json
-  {
-    "statuses": [
-      {
-        "index": 1,
-        "status": "VALID"
-      },
-      {
-        "index": 8,
-        "status": "INVALID"
-      }
-    ]
-  }
-  ```
-
-  - `statuses`: Array of status updates
-    - `index`: Position in the status list
-    - `status`: New status value (VALID, INVALID, SUSPENDED)
-
-- **Responses:**
-  - `200 OK`: Update successful
-  - `400 BAD REQUEST`: Invalid input data
-  - `401 UNAUTHORIZED`: Invalid or missing JWT Bearer token
-  - `403 FORBIDDEN`: Token issuer doesn't match list owner
-  - `404 NOT FOUND`: Status list not found
   - `500 INTERNAL SERVER ERROR`: System incurred an error
 
-### Retrieve Status List
-
-- **Endpoint:** `GET /api/v1/status-lists/{list_id}`
-- **Description:** Retrieves the current status list for the requested `list_id`. This endpoint is publicly accessible with no authentication required.
-- **Headers:**
-  - `Accept`: Specifies the desired response format
-    - `application/jwt`: Returns the gzip compressed status list as a JWT token
-    - `application/cwt`: Returns the gzip compressed status list as a CWT token
-    - Default: Returns the gzip compressed status list as a JWT token
-- **Responses:**
-  - `200 OK`: Returns the status list in the requested format
-  - `404 NOT FOUND`: Status list not found
-  - `406 NOT ACCEPTABLE`: Requested format not supported
-  - `500 INTERNAL SERVER ERROR`: System incurred an error
+When the optional `APP_SERVER__AGGREGATION_URI` configuration is set, every emitted Status List Token (JWT and CWT) includes it as the optional `aggregation_uri` member (draft-21 §4.2 / §4.3), allowing a consumer to discover the aggregation link directly from any single list token. When unset, the member is omitted entirely.
 
 ## Security
 
