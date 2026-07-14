@@ -1,5 +1,5 @@
 use crate::{
-    models::{StatusList, StatusListRecord, StatusesRequest},
+    models::{StatusList, StatusListHistoryRecord, StatusListRecord, StatusesRequest},
     utils::{errors::Error, lst_gen::create_status_list, state::AppState},
     web::handlers::status_list::error::StatusListError,
 };
@@ -9,6 +9,7 @@ use axum::{
     http::StatusCode,
     response::IntoResponse,
 };
+use time::OffsetDateTime;
 use tracing;
 
 /// Create a new status list.
@@ -61,10 +62,15 @@ pub async fn publish_status(
             };
 
             // Insert the token into the repository
-            store.insert_one(status_list_record).await.map_err(|e| {
-                tracing::error!("Failed to insert status list entry: {e:?}");
-                StatusListError::InternalServerError
-            })?;
+            store
+                .insert_one(status_list_record.clone())
+                .await
+                .map_err(|e| {
+                    tracing::error!("Failed to insert status list entry: {e:?}");
+                    StatusListError::InternalServerError
+                })?;
+
+            persist_historical_snapshot(&appstate, &status_list_record).await?;
             Ok(StatusCode::CREATED.into_response())
         }
         Err(e) => {
@@ -72,6 +78,32 @@ pub async fn publish_status(
             Err(StatusListError::InternalServerError)
         }
     }
+}
+
+/// Records the exact payload and validity window issued at each state change.
+/// This retention is privacy-sensitive: §12.7 recommends enabling it only
+/// where historical resolution is justified and its privacy impact is known.
+pub(super) async fn persist_historical_snapshot(
+    appstate: &AppState,
+    status_list_record: &StatusListRecord,
+) -> Result<(), StatusListError> {
+    let iat = OffsetDateTime::now_utc().unix_timestamp();
+    let snapshot = StatusListHistoryRecord {
+        snapshot_id: uuid::Uuid::new_v4().to_string(),
+        list_id: status_list_record.list_id.clone(),
+        status_list: status_list_record.status_list.clone(),
+        sub: status_list_record.sub.clone(),
+        iat,
+        exp: iat + appstate.token_exp_secs as i64,
+    };
+    appstate
+        .status_list_history_repo
+        .insert_one(snapshot)
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to persist status list history: {e:?}");
+            StatusListError::InternalServerError
+        })
 }
 
 #[cfg(test)]
@@ -83,7 +115,7 @@ mod tests {
         test_utils::test_app_state,
     };
     use axum::{Json, extract::State};
-    use sea_orm::{DatabaseBackend, MockDatabase};
+    use sea_orm::{DatabaseBackend, MockDatabase, MockExecResult};
     use std::sync::Arc;
 
     #[tokio::test]
@@ -134,6 +166,10 @@ mod tests {
                     vec![],                  // find_one_by in handler returns None
                     vec![new_token.clone()], // insert_one return
                 ])
+                .append_exec_results(vec![MockExecResult {
+                    rows_affected: 1,
+                    last_insert_id: 0,
+                }])
                 .into_connection(),
         );
 
@@ -185,6 +221,10 @@ mod tests {
                     vec![new_token.clone()], // insert_one return
                     vec![new_token.clone()], // find_one_by in test verification
                 ])
+                .append_exec_results(vec![MockExecResult {
+                    rows_affected: 1,
+                    last_insert_id: 0,
+                }])
                 .into_connection(),
         );
 
@@ -279,6 +319,10 @@ mod tests {
                     vec![new_token.clone()], // insert_one return
                     vec![new_token.clone()], // find_one_by in test verification
                 ])
+                .append_exec_results(vec![MockExecResult {
+                    rows_affected: 1,
+                    last_insert_id: 0,
+                }])
                 .into_connection(),
         );
 
@@ -332,6 +376,10 @@ mod tests {
                     vec![new_token.clone()], // insert_one return
                     vec![new_token.clone()], // find_one_by in test verification
                 ])
+                .append_exec_results(vec![MockExecResult {
+                    rows_affected: 1,
+                    last_insert_id: 0,
+                }])
                 .into_connection(),
         );
         let app_state = test_app_state(Some(db_conn.clone())).await;

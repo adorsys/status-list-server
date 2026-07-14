@@ -5,7 +5,10 @@ use sea_orm::{
 use std::sync::Arc;
 
 use super::error::RepositoryError;
-use crate::models::{Credentials, StatusListRecord, credentials, status_lists};
+use crate::models::{
+    Credentials, StatusListHistoryRecord, StatusListRecord, credentials, status_list_history,
+    status_lists,
+};
 
 #[derive(Clone)]
 pub struct SeaOrmStore<T> {
@@ -118,6 +121,35 @@ impl SeaOrmStore<StatusListRecord> {
             .order_by_asc(status_lists::Column::Sub)
             .into_tuple::<String>()
             .all(&*self.db)
+            .await
+            .map_err(|e| RepositoryError::FindError(e.to_string()))
+    }
+}
+
+impl SeaOrmStore<StatusListHistoryRecord> {
+    pub async fn insert_one(&self, entity: StatusListHistoryRecord) -> Result<(), RepositoryError> {
+        let active: status_list_history::ActiveModel = entity.into();
+        status_list_history::Entity::insert(active)
+            .exec(&*self.db)
+            .await
+            .map_err(|e| RepositoryError::InsertError(e.to_string()))?;
+        Ok(())
+    }
+
+    /// Finds the snapshot whose half-open validity interval contains `time`.
+    /// Using `iat <= time < exp` ensures the token returned to a client passes
+    /// the draft-21 §8.4 `iat`/`exp` validation rule.
+    pub async fn find_valid_at(
+        &self,
+        list_id: &str,
+        time: i64,
+    ) -> Result<Option<StatusListHistoryRecord>, RepositoryError> {
+        status_list_history::Entity::find()
+            .filter(status_list_history::Column::ListId.eq(list_id))
+            .filter(status_list_history::Column::Iat.lte(time))
+            .filter(status_list_history::Column::Exp.gt(time))
+            .order_by_desc(status_list_history::Column::Iat)
+            .one(&*self.db)
             .await
             .map_err(|e| RepositoryError::FindError(e.to_string()))
     }

@@ -6,7 +6,7 @@ use crate::{
     },
     config::Config as AppConfig,
     database::{Migrator, queries::SeaOrmStore},
-    models::{Credentials, StatusListRecord},
+    models::{Credentials, StatusListHistoryRecord, StatusListRecord},
 };
 use aws_config::{BehaviorVersion, Region};
 use color_eyre::eyre::{Context, Result as EyeResult};
@@ -31,6 +31,7 @@ fn empty_to_none(value: Option<String>) -> Option<String> {
 pub struct AppState {
     pub credential_repo: SeaOrmStore<Credentials>,
     pub status_list_repo: SeaOrmStore<StatusListRecord>,
+    pub status_list_history_repo: SeaOrmStore<StatusListHistoryRecord>,
     pub server_domain: String,
     pub cert_manager: Arc<CertManager>,
     pub cache: Cache,
@@ -117,7 +118,8 @@ pub async fn build_state(config: &AppConfig) -> EyeResult<AppState> {
     let db_clone = Arc::new(db);
     Ok(AppState {
         credential_repo: SeaOrmStore::new(db_clone.clone()),
-        status_list_repo: SeaOrmStore::new(db_clone),
+        status_list_repo: SeaOrmStore::new(db_clone.clone()),
+        status_list_history_repo: SeaOrmStore::new(db_clone),
         server_domain: config.server.domain.clone(),
         cert_manager: Arc::new(certificate_manager),
         cache: Cache::new(config.cache.ttl, config.cache.max_capacity),

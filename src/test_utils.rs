@@ -72,7 +72,8 @@ pub(crate) async fn test_app_state_with(
 
     AppState {
         credential_repo: SeaOrmStore::new(db.clone()),
-        status_list_repo: SeaOrmStore::new(db),
+        status_list_repo: SeaOrmStore::new(db.clone()),
+        status_list_history_repo: SeaOrmStore::new(db),
         server_domain: "example.com".to_string(),
         cert_manager: Arc::new(certificate_manager),
         cache: Cache::new(5 * 60, 100),
