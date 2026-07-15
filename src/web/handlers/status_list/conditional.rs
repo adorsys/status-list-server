@@ -392,6 +392,9 @@ mod tests {
     fn test_parse_http_date_valid_imf_fixdate() {
         let date_str = "Sun, 06 Nov 1994 08:49:37 GMT";
         let result = parse_http_date(date_str);
-        assert!(result.is_some(), "Parser should accept IMF-fixdate with GMT");
+        assert!(
+            result.is_some(),
+            "Parser should accept IMF-fixdate with GMT"
+        );
     }
 }

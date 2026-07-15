@@ -1215,7 +1215,11 @@ mod tests {
             "304 response should include Vary: Accept"
         );
         assert_eq!(
-            response_headers.get(http::header::VARY).unwrap().to_str().unwrap(),
+            response_headers
+                .get(http::header::VARY)
+                .unwrap()
+                .to_str()
+                .unwrap(),
             "Accept"
         );
 
