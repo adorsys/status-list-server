@@ -61,13 +61,13 @@ pub async fn get_status_list(
     // Fetch status list record (from cache or database)
     let status_record = fetch_status_record(&list_id, &state).await?;
 
-    // Generate ETag from record content
-    let current_etag = generate_etag(&status_record);
+    let now = OffsetDateTime::now_utc().unix_timestamp();
+    let validity_bucket = now / state.token_exp_secs.max(1) as i64;
 
-    // Format Last-Modified timestamp
+    let current_etag = generate_etag(&status_record, validity_bucket);
+
     let last_modified = format_http_date(status_record.updated_at);
 
-    // Build Cache-Control header
     let cache_control = build_cache_control(state.token_ttl_secs);
 
     // Evaluate conditional request
@@ -85,6 +85,7 @@ pub async fn get_status_list(
                     (header::ETAG, current_etag.as_str()),
                     (header::LAST_MODIFIED, last_modified.as_str()),
                     (header::CACHE_CONTROL, cache_control.as_str()),
+                    (header::VARY, "Accept"),
                 ],
             )
                 .into_response())
@@ -101,6 +102,7 @@ pub async fn get_status_list(
                     (header::ETAG, current_etag.as_str()),
                     (header::LAST_MODIFIED, last_modified.as_str()),
                     (header::CACHE_CONTROL, cache_control.as_str()),
+                    (header::VARY, "Accept"),
                 ],
                 compressed_token,
             )
@@ -1124,6 +1126,13 @@ mod tests {
             .to_str()
             .unwrap();
         assert_eq!(cache_control, "public, max-age=300, immutable");
+
+        let vary = response_headers
+            .get(http::header::VARY)
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert_eq!(vary, "Accept");
     }
 
     #[tokio::test]
@@ -1201,6 +1210,14 @@ mod tests {
         assert!(response_headers.contains_key(http::header::ETAG));
         assert!(response_headers.contains_key(http::header::LAST_MODIFIED));
         assert!(response_headers.contains_key(http::header::CACHE_CONTROL));
+        assert!(
+            response_headers.contains_key(http::header::VARY),
+            "304 response should include Vary: Accept"
+        );
+        assert_eq!(
+            response_headers.get(http::header::VARY).unwrap().to_str().unwrap(),
+            "Accept"
+        );
 
         // Body should be empty
         let body_bytes = to_bytes(conditional_response.into_body(), 1024 * 1024)

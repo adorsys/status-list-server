@@ -1,4 +1,9 @@
+use time::macros::format_description;
 use tracing::warn;
+
+const IMF_FIXDATE: &[time::format_description::BorrowedFormatItem<'static>] = format_description!(
+    "[weekday repr:short], [day] [month repr:short] [year] [hour]:[minute]:[second] GMT"
+);
 
 /// Response type for conditional request evaluation
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -139,7 +144,7 @@ pub fn evaluate_conditional_request(
     evaluate_if_modified_since(if_modified_since, updated_at)
 }
 
-/// Formats Unix timestamp to HTTP-date format (RFC 7231 Section 7.1.1.1)
+/// Formats Unix timestamp to HTTP-date format (IMF-fixdate, RFC 9110 §5.6.7)
 ///
 /// HTTP-date format: "Day, DD Mon YYYY HH:MM:SS GMT"
 /// Example: "Mon, 27 Jul 2024 12:28:53 GMT"
@@ -148,22 +153,20 @@ pub fn evaluate_conditional_request(
 /// * `unix_timestamp` - Unix timestamp in seconds since epoch
 ///
 /// # Returns
-/// * Formatted HTTP-date string in RFC 2822 format
+/// * Formatted HTTP-date string in IMF-fixdate format
 pub fn format_http_date(unix_timestamp: i64) -> String {
     use time::OffsetDateTime;
 
     let datetime =
         OffsetDateTime::from_unix_timestamp(unix_timestamp).unwrap_or(OffsetDateTime::UNIX_EPOCH);
 
-    // Format as RFC 2822 (HTTP-date compatible)
     datetime
-        .format(&time::format_description::well_known::Rfc2822)
-        .unwrap_or_else(|_| "Thu, 01 Jan 1970 00:00:00 +0000".to_string())
+        .format(IMF_FIXDATE)
+        .unwrap_or_else(|_| "Thu, 01 Jan 1970 00:00:00 GMT".to_string())
 }
 
 /// Parses HTTP-date format to Unix timestamp
 ///
-/// Supports RFC 2822 date format used by HTTP-date.
 /// Returns None if parsing fails.
 ///
 /// # Arguments
@@ -175,8 +178,10 @@ pub fn format_http_date(unix_timestamp: i64) -> String {
 pub fn parse_http_date(date_str: &str) -> Option<i64> {
     use time::OffsetDateTime;
 
-    // Try parsing as RFC 2822 format
-    OffsetDateTime::parse(date_str, &time::format_description::well_known::Rfc2822)
+    OffsetDateTime::parse(date_str, IMF_FIXDATE)
+        .or_else(|_| {
+            OffsetDateTime::parse(date_str, &time::format_description::well_known::Rfc2822)
+        })
         .ok()
         .map(|dt| dt.unix_timestamp())
 }
@@ -338,10 +343,27 @@ mod tests {
         let timestamp = 1672531200; // 2023-01-01 00:00:00 UTC
         let formatted = format_http_date(timestamp);
 
-        // Should be in RFC 2822 format
         assert!(formatted.contains("2023"));
-        // RFC 2822 uses +0000 instead of GMT
-        assert!(formatted.contains("+0000") || formatted.contains("GMT"));
+        assert!(formatted.contains("GMT"), "Last-Modified must use GMT zone");
+        assert!(
+            !formatted.contains("+0000"),
+            "Last-Modified must NOT use RFC 2822 +0000 form"
+        );
+    }
+
+    #[test]
+    fn test_format_http_date_rejects_rfc2822_zone() {
+        let timestamp = 1672531200; // 2023-01-01 00:00:00 UTC
+        let formatted = format_http_date(timestamp);
+
+        assert!(
+            formatted.contains("GMT"),
+            "Emitted Last-Modified must use GMT zone"
+        );
+        assert!(
+            !formatted.contains("+0000"),
+            "Emitted Last-Modified must never use +0000"
+        );
     }
 
     #[test]
@@ -364,5 +386,12 @@ mod tests {
         let date_str = "Sun, 01 Jan 2023 00:00:00 +0000";
         let result = parse_http_date(date_str);
         assert!(result.is_some());
+    }
+
+    #[test]
+    fn test_parse_http_date_valid_imf_fixdate() {
+        let date_str = "Sun, 06 Nov 1994 08:49:37 GMT";
+        let result = parse_http_date(date_str);
+        assert!(result.is_some(), "Parser should accept IMF-fixdate with GMT");
     }
 }

@@ -1,13 +1,14 @@
 use crate::models::StatusListRecord;
 use sha2::{Digest, Sha256};
 
-/// Computes a weak ETag from status list content
+/// Computes a weak ETag from status list content and a validity bucket.
 ///
 /// The ETag is computed from the concatenation of:
 /// - bits (as string)
 /// - lst (base64url-encoded compressed bitstring)
 /// - issuer (string)
 /// - sub (string)
+/// - validity_bucket (token expiry time bucket)
 ///
 /// Returns a weak ETag formatted as: W/"<sha256_hex>"
 ///
@@ -28,11 +29,11 @@ use sha2::{Digest, Sha256};
 ///     updated_at: 1234567890,
 /// };
 ///
-/// let etag = generate_etag(&record);
+/// let etag = generate_etag(&record, 42);
 /// assert!(etag.starts_with("W/\""));
 /// assert!(etag.ends_with('"'));
 /// ```
-pub fn generate_etag(record: &StatusListRecord) -> String {
+pub fn generate_etag(record: &StatusListRecord, validity_bucket: i64) -> String {
     let mut hasher = Sha256::new();
 
     // Hash each component that defines the content identity
@@ -40,6 +41,7 @@ pub fn generate_etag(record: &StatusListRecord) -> String {
     hasher.update(record.status_list.lst.as_bytes());
     hasher.update(record.issuer.as_bytes());
     hasher.update(record.sub.as_bytes());
+    hasher.update(validity_bucket.to_le_bytes());
 
     let hash = hasher.finalize();
     format!("W/\"{}\"", hex::encode(hash))
@@ -66,7 +68,7 @@ mod tests {
     #[test]
     fn test_generate_etag_format() {
         let record = create_test_record();
-        let etag = generate_etag(&record);
+        let etag = generate_etag(&record, 1);
 
         // Should start with W/" and end with "
         assert!(etag.starts_with("W/\""), "ETag should start with W/\"");
@@ -88,8 +90,8 @@ mod tests {
     #[test]
     fn test_generate_etag_determinism() {
         let record = create_test_record();
-        let etag1 = generate_etag(&record);
-        let etag2 = generate_etag(&record);
+        let etag1 = generate_etag(&record, 1);
+        let etag2 = generate_etag(&record, 1);
 
         assert_eq!(etag1, etag2, "ETag should be deterministic");
     }
@@ -97,11 +99,11 @@ mod tests {
     #[test]
     fn test_generate_etag_bits_sensitivity() {
         let mut record = create_test_record();
-        let original_etag = generate_etag(&record);
+        let original_etag = generate_etag(&record, 1);
 
         // Change bits field
         record.status_list.bits = 2;
-        let new_etag = generate_etag(&record);
+        let new_etag = generate_etag(&record, 1);
 
         assert_ne!(
             original_etag, new_etag,
@@ -112,11 +114,11 @@ mod tests {
     #[test]
     fn test_generate_etag_lst_sensitivity() {
         let mut record = create_test_record();
-        let original_etag = generate_etag(&record);
+        let original_etag = generate_etag(&record, 1);
 
         // Change lst field
         record.status_list.lst = "different_lst".to_string();
-        let new_etag = generate_etag(&record);
+        let new_etag = generate_etag(&record, 1);
 
         assert_ne!(
             original_etag, new_etag,
@@ -127,11 +129,11 @@ mod tests {
     #[test]
     fn test_generate_etag_issuer_sensitivity() {
         let mut record = create_test_record();
-        let original_etag = generate_etag(&record);
+        let original_etag = generate_etag(&record, 1);
 
         // Change issuer field
         record.issuer = "https://different-issuer.example".to_string();
-        let new_etag = generate_etag(&record);
+        let new_etag = generate_etag(&record, 1);
 
         assert_ne!(
             original_etag, new_etag,
@@ -142,11 +144,11 @@ mod tests {
     #[test]
     fn test_generate_etag_sub_sensitivity() {
         let mut record = create_test_record();
-        let original_etag = generate_etag(&record);
+        let original_etag = generate_etag(&record, 1);
 
         // Change sub field
         record.sub = "https://example.com/credentials/status/99".to_string();
-        let new_etag = generate_etag(&record);
+        let new_etag = generate_etag(&record, 1);
 
         assert_ne!(
             original_etag, new_etag,
@@ -162,8 +164,8 @@ mod tests {
         // Change only list_id (should not affect ETag)
         record2.list_id = "different-list-id".to_string();
 
-        let etag1 = generate_etag(&record1);
-        let etag2 = generate_etag(&record2);
+        let etag1 = generate_etag(&record1, 1);
+        let etag2 = generate_etag(&record2, 1);
 
         assert_eq!(etag1, etag2, "ETag should not depend on list_id");
     }
@@ -176,8 +178,8 @@ mod tests {
         // Change only updated_at (should not affect ETag)
         record2.updated_at = 9999999999;
 
-        let etag1 = generate_etag(&record1);
-        let etag2 = generate_etag(&record2);
+        let etag1 = generate_etag(&record1, 1);
+        let etag2 = generate_etag(&record2, 1);
 
         assert_eq!(etag1, etag2, "ETag should not depend on updated_at");
     }
@@ -195,7 +197,7 @@ mod tests {
             updated_at: 0,
         };
 
-        let etag = generate_etag(&record);
+        let etag = generate_etag(&record, 1);
 
         // Should still generate valid ETag format
         assert!(etag.starts_with("W/\""));
@@ -215,12 +217,36 @@ mod tests {
             updated_at: 0,
         };
 
-        let etag = generate_etag(&record);
+        let etag = generate_etag(&record, 1);
 
         // Should handle special characters without issues
         assert!(etag.starts_with("W/\""));
         assert!(etag.ends_with('"'));
         let hex_part = &etag[3..etag.len() - 1];
         assert_eq!(hex_part.len(), 64);
+    }
+
+    #[test]
+    fn test_generate_etag_validity_bucket_sensitivity() {
+        let record = create_test_record();
+        let etag1 = generate_etag(&record, 1);
+        let etag2 = generate_etag(&record, 2);
+
+        assert_ne!(
+            etag1, etag2,
+            "ETag should change when validity bucket changes"
+        );
+    }
+
+    #[test]
+    fn test_generate_etag_validity_bucket_determinism() {
+        let record = create_test_record();
+        let etag1 = generate_etag(&record, 42);
+        let etag2 = generate_etag(&record, 42);
+
+        assert_eq!(
+            etag1, etag2,
+            "ETag should be deterministic for the same bucket"
+        );
     }
 }
