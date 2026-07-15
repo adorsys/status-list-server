@@ -5,12 +5,7 @@ use axum::{
 };
 use hyper::StatusCode;
 
-use crate::{
-    application::{UpdateStatuses, UseCaseError},
-    domain,
-    models::StatusesRequest,
-    utils::state::AppState,
-};
+use crate::{application::UseCaseError, domain, models::StatusesRequest, utils::state::AppState};
 
 use super::{error::StatusListError, to_domain_entry};
 
@@ -31,12 +26,10 @@ pub async fn update_status(
         .into_iter()
         .map(to_domain_entry)
         .collect::<Vec<_>>();
-    match UpdateStatuses::new(
-        appstate.status_lists.clone(),
-        appstate.status_list_cache.clone(),
-    )
-    .execute(&domain::Issuer(issuer), &list_id, statuses)
-    .await
+    match appstate
+        .status_lists
+        .update_statuses(&domain::Issuer(issuer), &list_id, statuses)
+        .await
     {
         Ok(()) => {}
         Err(UseCaseError::NotFound) => return Err(StatusListError::StatusListNotFound),

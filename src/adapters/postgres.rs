@@ -35,19 +35,30 @@ impl CredentialRepository for PostgresCredentialRepository {
             .map(|record| {
                 record.map(|record| domain::Credential {
                     issuer: domain::Issuer(record.issuer),
-                    public_key: serde_json::to_value(record.public_key)
-                        .expect("JWK is serializable"),
+                    public_key: domain::PublicJwk::new(
+                        serde_json::to_vec(&record.public_key).expect("JWK is serializable"),
+                    ),
                 })
             })
-            .map_err(|e| PortError::Dependency(e.to_string()))
+            .map_err(|e| PortError::StorageUnavailable {
+                operation: "find credential",
+                detail: e.to_string(),
+            })
     }
     async fn insert(&self, credential: domain::Credential) -> Result<(), PortError> {
-        let public_key = serde_json::from_value(credential.public_key)
-            .map_err(|e| PortError::Dependency(format!("invalid public JWK: {e}")))?;
+        let public_key = serde_json::from_slice(credential.public_key.as_bytes()).map_err(|e| {
+            PortError::InvalidData {
+                resource: "public JWK",
+                reason: e.to_string(),
+            }
+        })?;
         self.store
             .insert_one(models::Credentials::new(credential.issuer.0, public_key))
             .await
-            .map_err(|e| PortError::Dependency(e.to_string()))
+            .map_err(|e| PortError::StorageUnavailable {
+                operation: "insert credential",
+                detail: e.to_string(),
+            })
     }
 }
 
@@ -81,25 +92,37 @@ impl StatusListRepository for PostgresStatusListRepository {
             .find_one_by(list_id)
             .await
             .map(|value| value.map(from_persistence))
-            .map_err(|e| PortError::Dependency(e.to_string()))
+            .map_err(|e| PortError::StorageUnavailable {
+                operation: "find status list",
+                detail: e.to_string(),
+            })
     }
     async fn insert(&self, record: domain::StatusListRecord) -> Result<(), PortError> {
         self.store
             .insert_one(to_persistence(record))
             .await
-            .map_err(|e| PortError::Dependency(e.to_string()))
+            .map_err(|e| PortError::StorageUnavailable {
+                operation: "insert status list",
+                detail: e.to_string(),
+            })
     }
     async fn update(&self, record: domain::StatusListRecord) -> Result<bool, PortError> {
         let id = record.list_id.clone();
         self.store
             .update_one(&id, to_persistence(record))
             .await
-            .map_err(|e| PortError::Dependency(e.to_string()))
+            .map_err(|e| PortError::StorageUnavailable {
+                operation: "update status list",
+                detail: e.to_string(),
+            })
     }
     async fn list_uris(&self) -> Result<Vec<String>, PortError> {
         self.store
             .find_all_status_list_uris()
             .await
-            .map_err(|e| PortError::Dependency(e.to_string()))
+            .map_err(|e| PortError::StorageUnavailable {
+                operation: "list status list URIs",
+                detail: e.to_string(),
+            })
     }
 }

@@ -17,11 +17,24 @@ pub enum DomainError {
 pub struct Issuer(pub String);
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PublicJwk(pub Vec<u8>);
+
+impl PublicJwk {
+    pub fn new(bytes: Vec<u8>) -> Self {
+        Self(bytes)
+    }
+
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Credential {
     pub issuer: Issuer,
-    /// A serialized public JWK.  Parsing/verifying it belongs to the inbound
-    /// authentication adapter.
-    pub public_key: serde_json::Value,
+    /// Opaque public JWK document bytes. JSON parsing/validation belongs to
+    /// inbound or persistence adapters at the boundary.
+    pub public_key: PublicJwk,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

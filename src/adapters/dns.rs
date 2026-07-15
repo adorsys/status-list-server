@@ -37,14 +37,20 @@ impl DnsProvider for DnsUpdaterProvider {
         self.updater
             .upsert_record(name, value)
             .await
-            .map_err(|err| PortError::Dependency(err.to_string()))
+            .map_err(|err| PortError::ExternalServiceUnavailable {
+                operation: "present DNS TXT record",
+                detail: err.to_string(),
+            })
     }
 
     async fn remove_txt(&self, name: &str, value: &str) -> Result<(), PortError> {
         self.updater
             .remove_record(name, value)
             .await
-            .map_err(|err| PortError::Dependency(err.to_string()))
+            .map_err(|err| PortError::ExternalServiceUnavailable {
+                operation: "remove DNS TXT record",
+                detail: err.to_string(),
+            })
     }
 }
 

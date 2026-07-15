@@ -2,6 +2,8 @@
 //! be unit-tested with the memory adapters.
 use std::sync::Arc;
 
+use async_trait::async_trait;
+
 use crate::{
     domain::{Credential, DomainError, Issuer, StatusEntry, StatusList, StatusListRecord},
     ports::{CredentialRepository, PortError, StatusListCache, StatusListRepository},
@@ -21,6 +23,34 @@ pub enum UseCaseError {
     Port(#[from] PortError),
 }
 
+#[async_trait]
+pub trait CredentialService: Send + Sync {
+    async fn publish_credential(&self, credential: Credential) -> Result<(), UseCaseError>;
+    async fn find_credential(&self, issuer: &str) -> Result<Option<Credential>, UseCaseError>;
+}
+
+#[async_trait]
+pub trait StatusListService: Send + Sync {
+    async fn publish_status_list(
+        &self,
+        list_id: String,
+        issuer: Issuer,
+        sub: String,
+        statuses: Vec<StatusEntry>,
+    ) -> Result<(), UseCaseError>;
+
+    async fn update_statuses(
+        &self,
+        issuer: &Issuer,
+        list_id: &str,
+        statuses: Vec<StatusEntry>,
+    ) -> Result<(), UseCaseError>;
+
+    async fn get_status_list(&self, list_id: &str) -> Result<StatusListRecord, UseCaseError>;
+
+    async fn list_status_list_uris(&self) -> Result<Vec<String>, UseCaseError>;
+}
+
 pub struct PublishCredential<R: ?Sized> {
     repository: Arc<R>,
 }
@@ -34,6 +64,29 @@ impl<R: CredentialRepository + ?Sized> PublishCredential<R> {
         }
         self.repository.insert(credential).await?;
         Ok(())
+    }
+}
+
+pub struct CredentialApplicationService<R: ?Sized> {
+    repository: Arc<R>,
+}
+
+impl<R: CredentialRepository + ?Sized> CredentialApplicationService<R> {
+    pub fn new(repository: Arc<R>) -> Self {
+        Self { repository }
+    }
+}
+
+#[async_trait]
+impl<R: CredentialRepository + ?Sized> CredentialService for CredentialApplicationService<R> {
+    async fn publish_credential(&self, credential: Credential) -> Result<(), UseCaseError> {
+        PublishCredential::new(self.repository.clone())
+            .execute(credential)
+            .await
+    }
+
+    async fn find_credential(&self, issuer: &str) -> Result<Option<Credential>, UseCaseError> {
+        Ok(self.repository.find(issuer).await?)
     }
 }
 
@@ -66,6 +119,57 @@ impl<R: StatusListRepository + ?Sized> PublishStatusList<R> {
             sub,
         };
         self.execute(record).await
+    }
+}
+
+pub struct StatusListApplicationService<R: ?Sized, C: ?Sized> {
+    repository: Arc<R>,
+    cache: Arc<C>,
+}
+
+impl<R: StatusListRepository + ?Sized, C: StatusListCache + ?Sized>
+    StatusListApplicationService<R, C>
+{
+    pub fn new(repository: Arc<R>, cache: Arc<C>) -> Self {
+        Self { repository, cache }
+    }
+}
+
+#[async_trait]
+impl<R: StatusListRepository + ?Sized, C: StatusListCache + ?Sized> StatusListService
+    for StatusListApplicationService<R, C>
+{
+    async fn publish_status_list(
+        &self,
+        list_id: String,
+        issuer: Issuer,
+        sub: String,
+        statuses: Vec<StatusEntry>,
+    ) -> Result<(), UseCaseError> {
+        PublishStatusList::new(self.repository.clone())
+            .execute_new(list_id, issuer, sub, statuses)
+            .await
+    }
+
+    async fn update_statuses(
+        &self,
+        issuer: &Issuer,
+        list_id: &str,
+        statuses: Vec<StatusEntry>,
+    ) -> Result<(), UseCaseError> {
+        UpdateStatuses::new(self.repository.clone(), self.cache.clone())
+            .execute(issuer, list_id, statuses)
+            .await
+    }
+
+    async fn get_status_list(&self, list_id: &str) -> Result<StatusListRecord, UseCaseError> {
+        GetStatusListToken::new(self.repository.clone(), self.cache.clone())
+            .execute(list_id)
+            .await
+    }
+
+    async fn list_status_list_uris(&self) -> Result<Vec<String>, UseCaseError> {
+        Ok(self.repository.list_uris().await?)
     }
 }
 

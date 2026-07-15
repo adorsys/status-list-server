@@ -24,13 +24,19 @@ impl SecretStore for StorageSecretStore {
         self.storage
             .load(name)
             .await
-            .map_err(|err| PortError::Dependency(err.to_string()))
+            .map_err(|err| PortError::StorageUnavailable {
+                operation: "load secret",
+                detail: err.to_string(),
+            })
     }
 
     async fn put(&self, name: &str, value: &str) -> Result<(), PortError> {
         self.storage
             .store(name, value)
             .await
-            .map_err(|err| PortError::Dependency(err.to_string()))
+            .map_err(|err| PortError::StorageUnavailable {
+                operation: "store secret",
+                detail: err.to_string(),
+            })
     }
 }

@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 
 use crate::{
-    application::{GetStatusListToken, UseCaseError},
+    application::UseCaseError,
     models::{StatusListClaims, StatusListRecord},
     utils::{keygen::Keypair, state::AppState},
 };
@@ -59,18 +59,14 @@ async fn build_status_list_token(
     list_id: &str,
     state: &AppState,
 ) -> Result<impl IntoResponse + Debug + use<>, StatusListError> {
-    let record =
-        match GetStatusListToken::new(state.status_lists.clone(), state.status_list_cache.clone())
-            .execute(list_id)
-            .await
-        {
-            Ok(record) => record,
-            Err(UseCaseError::NotFound) => return Err(StatusListError::StatusListNotFound),
-            Err(error) => {
-                tracing::error!(?error, list_id, "Failed to retrieve status list");
-                return Err(StatusListError::InternalServerError);
-            }
-        };
+    let record = match state.status_lists.get_status_list(list_id).await {
+        Ok(record) => record,
+        Err(UseCaseError::NotFound) => return Err(StatusListError::StatusListNotFound),
+        Err(error) => {
+            tracing::error!(?error, list_id, "Failed to retrieve status list");
+            return Err(StatusListError::InternalServerError);
+        }
+    };
     let status_record = StatusListRecord {
         list_id: record.list_id,
         issuer: record.issuer.0,

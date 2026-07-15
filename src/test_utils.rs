@@ -4,7 +4,9 @@ use crate::{
         memory::{MemoryDnsProvider, MemoryMetricsCollector, MemorySecretStore},
         postgres::{PostgresCredentialRepository, PostgresStatusListRepository},
     },
+    application::{CredentialApplicationService, StatusListApplicationService},
     cert_manager::storage::StorageError,
+    ports::{CredentialRepository, StatusListCache, StatusListRepository},
     utils::{
         cert_manager::{CertManager, storage::Storage},
         state::AppState,
@@ -75,17 +77,22 @@ pub(crate) async fn test_app_state_with(
     .with_secrets_storage(secrets_storage);
 
     let cert_manager = Arc::new(certificate_manager);
+    let status_lists: Arc<dyn StatusListRepository> = Arc::new(PostgresStatusListRepository::new(
+        SeaOrmStore::new(db.clone()),
+    ));
+    let credentials: Arc<dyn CredentialRepository> = Arc::new(PostgresCredentialRepository::new(
+        SeaOrmStore::new(db.clone()),
+    ));
+    let status_list_cache: Arc<dyn StatusListCache> = Arc::new(
+        crate::adapters::cache::MokaStatusListCache::new(5 * 60, 100),
+    );
+
     AppState {
-        status_lists: Arc::new(PostgresStatusListRepository::new(SeaOrmStore::new(
-            db.clone(),
-        ))),
-        credentials: Arc::new(PostgresCredentialRepository::new(SeaOrmStore::new(
-            db.clone(),
-        ))),
-        status_list_cache: Arc::new(crate::adapters::cache::MokaStatusListCache::new(
-            5 * 60,
-            100,
+        status_lists: Arc::new(StatusListApplicationService::new(
+            status_lists,
+            status_list_cache,
         )),
+        credentials: Arc::new(CredentialApplicationService::new(credentials)),
         certificate_provider: Arc::new(AcmeCertificateProvider::new(cert_manager.clone())),
         secret_store: Arc::new(MemorySecretStore::default()),
         dns_provider: Arc::new(MemoryDnsProvider),

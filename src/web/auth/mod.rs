@@ -44,7 +44,7 @@ pub async fn auth(
     // Check if issuer is in database and get its credentials
     let credential = state
         .credentials
-        .find(&issuer)
+        .find_credential(&issuer)
         .await
         .map_err(|e| {
             tracing::error!("Failed to find credential for {issuer}: {e:?}");
@@ -53,7 +53,7 @@ pub async fn auth(
         .ok_or(AuthenticationError::IssuerNotFound)?;
 
     // Get the decoding key
-    let public_key = serde_json::from_value(credential.public_key)
+    let public_key = serde_json::from_slice(credential.public_key.as_bytes())
         .map_err(|_| AuthenticationError::InternalServer)?;
     let decoding_key = DecodingKey::from_jwk(&public_key)?;
 

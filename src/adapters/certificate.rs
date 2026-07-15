@@ -25,13 +25,19 @@ impl CertificateProvider for AcmeCertificateProvider {
         self.manager
             .cert_chain_parts()
             .await
-            .map_err(|e| PortError::Dependency(e.to_string()))
+            .map_err(|e| PortError::ExternalServiceUnavailable {
+                operation: "load certificate chain",
+                detail: e.to_string(),
+            })
     }
 
     async fn signing_key_pem(&self) -> Result<String, PortError> {
         self.manager
             .signing_key_pem()
             .await
-            .map_err(|e| PortError::Dependency(e.to_string()))
+            .map_err(|e| PortError::ExternalServiceUnavailable {
+                operation: "load signing key",
+                detail: e.to_string(),
+            })
     }
 }

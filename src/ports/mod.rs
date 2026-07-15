@@ -6,8 +6,36 @@ use crate::domain::{Credential, StatusListRecord};
 
 #[derive(Debug, thiserror::Error)]
 pub enum PortError {
-    #[error("outbound dependency failed: {0}")]
-    Dependency(String),
+    #[error("storage unavailable during {operation}: {detail}")]
+    StorageUnavailable {
+        operation: &'static str,
+        detail: String,
+    },
+    #[error("external service unavailable during {operation}: {detail}")]
+    ExternalServiceUnavailable {
+        operation: &'static str,
+        detail: String,
+    },
+    #[error("operation timed out during {operation}: {detail}")]
+    Timeout {
+        operation: &'static str,
+        detail: String,
+    },
+    #[error("unauthorized outbound operation during {operation}: {detail}")]
+    Unauthorized {
+        operation: &'static str,
+        detail: String,
+    },
+    #[error("resource conflict for {resource}: {reason}")]
+    Conflict {
+        resource: &'static str,
+        reason: String,
+    },
+    #[error("invalid data for {resource}: {reason}")]
+    InvalidData {
+        resource: &'static str,
+        reason: String,
+    },
 }
 
 #[async_trait]

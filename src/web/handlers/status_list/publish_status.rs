@@ -1,8 +1,5 @@
 use crate::{
-    application::{PublishStatusList, UseCaseError},
-    domain,
-    models::StatusesRequest,
-    utils::state::AppState,
+    application::UseCaseError, domain, models::StatusesRequest, utils::state::AppState,
     web::handlers::status_list::error::StatusListError,
 };
 use axum::{
@@ -32,8 +29,9 @@ pub async fn publish_status(
         .into_iter()
         .map(to_domain_entry)
         .collect::<Vec<_>>();
-    match PublishStatusList::new(appstate.status_lists.clone())
-        .execute_new(
+    match appstate
+        .status_lists
+        .publish_status_list(
             list_id.clone(),
             domain::Issuer(issuer),
             format!(
@@ -187,9 +185,11 @@ mod tests {
         .await
         .unwrap();
 
-        let result = app_state.status_lists.find(&token_id).await.unwrap();
-        assert!(result.is_some());
-        let token = result.unwrap();
+        let token = app_state
+            .status_lists
+            .get_status_list(&token_id)
+            .await
+            .unwrap();
         assert_eq!(token.list_id, token_id);
         assert_eq!(token.status_list.bits, 2);
         assert_eq!(
@@ -277,9 +277,11 @@ mod tests {
         .into_response();
         assert_eq!(response.status(), StatusCode::CREATED);
 
-        let result = app_state.status_lists.find(&token_id).await.unwrap();
-        assert!(result.is_some());
-        let token = result.unwrap();
+        let token = app_state
+            .status_lists
+            .get_status_list(&token_id)
+            .await
+            .unwrap();
         assert_eq!(token.list_id, token_id);
         assert_eq!(token.status_list.lst, base64url::encode([]));
     }

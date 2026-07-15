@@ -1,10 +1,7 @@
 use axum::{Json, extract::State, http::StatusCode, response::IntoResponse};
 
 use crate::{
-    application::{PublishCredential, UseCaseError},
-    domain,
-    models::Credentials,
-    utils::state::AppState,
+    application::UseCaseError, domain, models::Credentials, utils::state::AppState,
     web::auth::errors::AuthenticationError,
 };
 
@@ -60,15 +57,12 @@ pub(super) async fn publish_credentials(
     state: AppState,
 ) -> Result<(), CredentialError> {
     let public_key =
-        serde_json::to_value(credentials.public_key).map_err(|_| CredentialError::Port)?;
+        serde_json::to_vec(&credentials.public_key).map_err(|_| CredentialError::Port)?;
     let credential = domain::Credential {
         issuer: domain::Issuer(credentials.issuer),
-        public_key,
+        public_key: domain::PublicJwk::new(public_key),
     };
-    match PublishCredential::new(state.credentials)
-        .execute(credential)
-        .await
-    {
+    match state.credentials.publish_credential(credential).await {
         Ok(()) => Ok(()),
         Err(UseCaseError::AlreadyExists) => Err(CredentialError::AlreadyExists),
         Err(_) => Err(CredentialError::Port),

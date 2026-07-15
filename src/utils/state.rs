@@ -9,6 +9,10 @@ use crate::{
         redis::Redis,
         secret::StorageSecretStore,
     },
+    application::{
+        CredentialApplicationService, CredentialService, StatusListApplicationService,
+        StatusListService,
+    },
     cert_manager::{CertManager, challenge::Dns01Handler},
     config::Config as AppConfig,
     database::{Migrator, queries::SeaOrmStore},
@@ -35,9 +39,8 @@ fn empty_to_none(value: Option<String>) -> Option<String> {
 
 #[derive(Clone)]
 pub struct AppState {
-    pub status_lists: Arc<dyn StatusListRepository>,
-    pub credentials: Arc<dyn CredentialRepository>,
-    pub status_list_cache: Arc<dyn StatusListCache>,
+    pub status_lists: Arc<dyn StatusListService>,
+    pub credentials: Arc<dyn CredentialService>,
     pub certificate_provider: Arc<dyn CertificateProvider>,
     pub secret_store: Arc<dyn SecretStore>,
     pub dns_provider: Arc<dyn DnsProvider>,
@@ -149,12 +152,19 @@ pub async fn build_state_with_cert_manager(
     let status_list_repo = SeaOrmStore::new(db_clone.clone());
     let credential_repo = SeaOrmStore::new(db_clone.clone());
     let cache = MokaStatusListCache::new(config.cache.ttl, config.cache.max_capacity);
+    let status_lists: Arc<dyn StatusListRepository> =
+        Arc::new(PostgresStatusListRepository::new(status_list_repo));
+    let credentials: Arc<dyn CredentialRepository> =
+        Arc::new(PostgresCredentialRepository::new(credential_repo));
+    let status_list_cache: Arc<dyn StatusListCache> = Arc::new(cache);
     let cert_manager = Arc::new(certificate_manager);
     Ok((
         AppState {
-            status_lists: Arc::new(PostgresStatusListRepository::new(status_list_repo)),
-            credentials: Arc::new(PostgresCredentialRepository::new(credential_repo)),
-            status_list_cache: Arc::new(cache),
+            status_lists: Arc::new(StatusListApplicationService::new(
+                status_lists,
+                status_list_cache,
+            )),
+            credentials: Arc::new(CredentialApplicationService::new(credentials)),
             certificate_provider: Arc::new(AcmeCertificateProvider::new(cert_manager.clone())),
             secret_store,
             dns_provider,
