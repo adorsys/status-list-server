@@ -1364,14 +1364,10 @@ mod tests {
             http::header::IF_MODIFIED_SINCE,
             "Thu, 01 Jan 1970 00:00:00 GMT".parse().unwrap(),
         );
-        let response = get_status_list(
-            State(app_state),
-            Path("test_list".to_string()),
-            headers,
-        )
-        .await
-        .unwrap()
-        .into_response();
+        let response = get_status_list(State(app_state), Path("test_list".to_string()), headers)
+            .await
+            .unwrap()
+            .into_response();
 
         assert_eq!(response.status(), StatusCode::OK);
         assert!(
