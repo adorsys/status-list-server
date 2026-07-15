@@ -9,15 +9,21 @@ pub struct StatusListCache {
 }
 
 impl StatusListCache {
-    /// Creates a cache; TTL=0 disables it naturally.
+    /// Creates a cache.
+    ///
+    /// A **zero** TTL (`ttl_secs = 0`) keeps the cache active with **no
+    /// expiry**; entries persist until explicitly invalidated. This is
+    /// consistent with [`CertChainCache`](super::CertChainCache).
     pub fn new(ttl_secs: u64, max_capacity: u64) -> Self {
         if ttl_secs == 0 {
-            tracing::info!("Cache disabled (TTL=0)");
+            tracing::info!("Cache TTL=0: entries will never expire (no time-based eviction)");
         }
-        let inner = MokaCache::builder()
-            .time_to_live(Duration::from_secs(ttl_secs))
-            .max_capacity(max_capacity)
-            .build();
+        let builder = MokaCache::builder().max_capacity(max_capacity);
+        let inner = if ttl_secs == 0 {
+            builder.build()
+        } else {
+            builder.time_to_live(Duration::from_secs(ttl_secs)).build()
+        };
         Self { inner }
     }
 
@@ -60,11 +66,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cache_disabled_returns_none() {
+    async fn cache_ttl_zero_means_no_expiry() {
         let cache = StatusListCache::new(0, 10);
         cache
             .insert("list-1".to_string(), sample_record("list-1"))
             .await;
-        assert!(cache.get("list-1").await.is_none());
+        // TTL=0 means no time-based eviction — entries persist.
+        assert!(cache.get("list-1").await.is_some());
     }
 }

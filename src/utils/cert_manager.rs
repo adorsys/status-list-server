@@ -35,7 +35,7 @@ use crate::{
 ///
 /// Exported as a single source of truth: `Config::load` references this
 /// constant so the runtime default and the code fallback always agree.
-pub const DEFAULT_CHAIN_CACHE_TTL: Duration = Duration::from_hours(1);
+pub const DEFAULT_CHAIN_CACHE_TTL: Duration = Duration::from_secs(3600);
 
 /// Struct that hold the certificate and its metadata
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -176,6 +176,13 @@ impl CertManager {
     /// when the process is guaranteed to re-provision or restart on every
     /// rotation — otherwise long-lived replicas with a disabled TTL will serve
     /// the stale chain until they happen to re-provision.
+    ///
+    /// **Staleness safety:** This caching strategy is safe because the signing
+    /// key is stable across certificate renewals — the provisioning flow reuses
+    /// the stored secret key (`signing_key_pem`). If renewal ever rotates the
+    /// signing key, the staleness window becomes a token-validation outage:
+    /// verifiers would receive the old certificate chain while tokens are
+    /// signed with the new key.
     pub fn with_cert_chain_cache_ttl(mut self, ttl: Duration) -> Self {
         let domain_label = self.domains.first().map(String::as_str).unwrap_or_default();
         self.cert_chain_cache = CertChainCache::new(ttl, domain_label);
@@ -186,6 +193,15 @@ impl CertManager {
     pub fn with_eku(mut self, eku: &[u64]) -> Self {
         self.eku = Some(eku.to_vec());
         self
+    }
+
+    /// Zero-initialise the certificate chain cache counters so they appear
+    /// in Prometheus scrapes before first use.
+    ///
+    /// **Must** be called after the global metrics recorder has been installed.
+    /// If metrics are disabled this is a harmless no-op.
+    pub fn init_cert_chain_cache_counters(&self) {
+        self.cert_chain_cache.init_counters();
     }
 
     /// Request a certificate from the certificate authority
@@ -384,6 +400,14 @@ impl CertManager {
         }
         if let Some(cert_data) = self.certificate().await? {
             let certs = self.parse_cert_chain_parts(&cert_data.certificate)?;
+            // NOTE: There is a benign race between this read-path insert and
+            // the provisioning-path `replace` in `cache_provisioned_chain`.
+            // If a concurrent `request_certificate` replaces the cache entry
+            // between our miss and this insert, we overwrite the fresh chain
+            // with the (still valid) old chain. The stale entry is bounded by
+            // the cache TTL. This is acceptable because the signing key is
+            // stable across renewals, so the old chain remains valid for
+            // token verification.
             self.cert_chain_cache.insert(cert_key, certs.clone()).await;
             return Ok(Some(certs));
         }

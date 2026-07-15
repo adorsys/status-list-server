@@ -14,14 +14,19 @@ const REPLACEMENT_METRIC: &str = "certificate_chain_cache_replacements_total";
 /// key (`cert_key`). One [`CertManager`](crate::cert_manager::CertManager)
 /// instance owns exactly one `CertChainCache`, so the cache holds at most one
 /// entry per running process.
+///
+/// # TTL semantics
+///
+/// A **zero** TTL (`Duration::ZERO`) keeps the cache active with **no expiry**;
+/// entries persist until explicitly replaced by the provisioning hook. This
+/// differs from [`StatusListCache`](super::StatusListCache), where `ttl = 0`
+/// **disables** the cache entirely (inserts expire immediately).
 #[derive(Clone)]
 pub(crate) struct CertChainCache {
     inner: Cache<String, CertificateChain>,
-    // Pre-resolved handles so per-call counter increments don't repeat the
-    // recorder lookup or allocate label strings on the hot path.
-    hit_counter: metrics::Counter,
-    miss_counter: metrics::Counter,
-    replacement_counter: metrics::Counter,
+    /// Domain label attached to every emitted counter.  Empty string means
+    /// "no label".
+    domain_label: String,
 }
 
 impl CertChainCache {
@@ -30,7 +35,14 @@ impl CertChainCache {
     /// `domain` is used as the value of the `domain` label on every emitted
     /// counter so multi-domain deployments don't aggregate blindly. Pass an
     /// empty string to opt out of the label entirely.
+    ///
+    /// Counter descriptions are registered eagerly so they appear in
+    /// Prometheus immediately, but the counter handles themselves are resolved
+    /// lazily on each `get`/`replace` call. This makes the cache safe to
+    /// construct before the global metrics recorder is installed.
     pub(crate) fn new(ttl: Duration, domain: impl AsRef<str>) -> Self {
+        // Describe counters — these are idempotent and safe to call before
+        // a recorder is installed (descriptions are buffered).
         metrics::describe_counter!(
             HIT_METRIC,
             metrics::Unit::Count,
@@ -47,23 +59,6 @@ impl CertChainCache {
             "Certificate chain cache replacements (post-provisioning)"
         );
 
-        let domain = domain.as_ref();
-        let (hit_counter, miss_counter, replacement_counter) = if domain.is_empty() {
-            let h = metrics::counter!(HIT_METRIC);
-            let m = metrics::counter!(MISS_METRIC);
-            let r = metrics::counter!(REPLACEMENT_METRIC);
-            (h, m, r)
-        } else {
-            let h = metrics::counter!(HIT_METRIC, "domain" => domain.to_string());
-            let m = metrics::counter!(MISS_METRIC, "domain" => domain.to_string());
-            let r = metrics::counter!(REPLACEMENT_METRIC, "domain" => domain.to_string());
-            (h, m, r)
-        };
-        // Zero-init so the counters appear in Prometheus before first use.
-        hit_counter.increment(0);
-        miss_counter.increment(0);
-        replacement_counter.increment(0);
-
         let builder = Cache::builder().max_capacity(CACHE_CAPACITY);
         let inner = if ttl.is_zero() {
             builder.build()
@@ -72,18 +67,25 @@ impl CertChainCache {
         };
         Self {
             inner,
-            hit_counter,
-            miss_counter,
-            replacement_counter,
+            domain_label: domain.as_ref().to_string(),
         }
+    }
+
+    /// Zero-initialise all counters so they appear in Prometheus scrapes
+    /// before first use. **Must** be called after the global metrics recorder
+    /// has been installed.
+    pub(crate) fn init_counters(&self) {
+        self.hit_counter().increment(0);
+        self.miss_counter().increment(0);
+        self.replacement_counter().increment(0);
     }
 
     pub(crate) async fn get(&self, key: &str) -> Option<CertificateChain> {
         let cached = self.inner.get(key).await;
         if cached.is_some() {
-            self.hit_counter.increment(1);
+            self.hit_counter().increment(1);
         } else {
-            self.miss_counter.increment(1);
+            self.miss_counter().increment(1);
         }
         cached
     }
@@ -97,7 +99,7 @@ impl CertChainCache {
     /// Used after a new certificate is provisioned so the next read returns
     /// the fresh chain without an extra storage load and parse.
     pub(crate) async fn replace(&self, key: String, value: CertificateChain) {
-        self.replacement_counter.increment(1);
+        self.replacement_counter().increment(1);
         self.inner.insert(key, value).await;
     }
 
@@ -105,16 +107,49 @@ impl CertChainCache {
     pub(crate) async fn invalidate(&self, key: &str) {
         self.inner.invalidate(key).await;
     }
+
+    // -- private helpers for lazy counter resolution --------------------------
+
+    fn hit_counter(&self) -> metrics::Counter {
+        if self.domain_label.is_empty() {
+            metrics::counter!(HIT_METRIC)
+        } else {
+            metrics::counter!(HIT_METRIC, "domain" => self.domain_label.clone())
+        }
+    }
+
+    fn miss_counter(&self) -> metrics::Counter {
+        if self.domain_label.is_empty() {
+            metrics::counter!(MISS_METRIC)
+        } else {
+            metrics::counter!(MISS_METRIC, "domain" => self.domain_label.clone())
+        }
+    }
+
+    fn replacement_counter(&self) -> metrics::Counter {
+        if self.domain_label.is_empty() {
+            metrics::counter!(REPLACEMENT_METRIC)
+        } else {
+            metrics::counter!(REPLACEMENT_METRIC, "domain" => self.domain_label.clone())
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// Mimics production ordering: the cache is constructed **before** the
+    /// metrics recorder is installed. Counters must still land because they
+    /// are resolved lazily on each `get`/`replace` call.
     #[test]
-    fn test_hit_miss_counters_increment() {
+    fn test_counters_work_when_cache_constructed_before_recorder() {
         use metrics_util::debugging::{DebugValue, DebuggingRecorder};
 
+        // 1. Build the cache WITHOUT a recorder — mirrors build_state().
+        let cache = CertChainCache::new(Duration::ZERO, "example.com");
+
+        // 2. Install a recorder — mirrors attach_metrics() in HttpServer::new().
         let recorder = DebuggingRecorder::new();
         let snapshotter = recorder.snapshotter();
 
@@ -125,11 +160,16 @@ mod tests {
 
         metrics::with_local_recorder(&recorder, || {
             rt.block_on(async {
-                let cache = CertChainCache::new(Duration::ZERO, "example.com");
                 let chain: CertificateChain = Arc::from(vec!["a".to_string()]);
-                cache.insert("k".to_string(), chain).await;
+                cache.insert("k".to_string(), chain.clone()).await;
+
+                // hit
                 assert!(cache.get("k").await.is_some());
+                // miss
                 assert!(cache.get("missing").await.is_none());
+                // replacement
+                let new_chain: CertificateChain = Arc::from(vec!["b".to_string()]);
+                cache.replace("k".to_string(), new_chain).await;
             });
         });
 
@@ -148,6 +188,6 @@ mod tests {
         }
         assert_eq!(hits, 1, "exactly one hit expected");
         assert_eq!(misses, 1, "exactly one miss expected");
-        assert_eq!(replacements, 0, "zero replacements yet");
+        assert_eq!(replacements, 1, "exactly one replacement expected");
     }
 }
