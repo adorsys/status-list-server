@@ -3,8 +3,8 @@
 use std::sync::Arc;
 
 use crate::{
-    domain::{Issuer, StatusListRecord},
-    ports::{PortError, StatusListCache, StatusListRepository},
+    domain::{Credential, DomainError, Issuer, StatusEntry, StatusList, StatusListRecord},
+    ports::{CredentialRepository, PortError, StatusListCache, StatusListRepository},
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -16,7 +16,25 @@ pub enum UseCaseError {
     #[error("issuer does not own the status list")]
     IssuerMismatch,
     #[error(transparent)]
+    Domain(#[from] DomainError),
+    #[error(transparent)]
     Port(#[from] PortError),
+}
+
+pub struct PublishCredential<R: ?Sized> {
+    repository: Arc<R>,
+}
+impl<R: CredentialRepository + ?Sized> PublishCredential<R> {
+    pub fn new(repository: Arc<R>) -> Self {
+        Self { repository }
+    }
+    pub async fn execute(&self, credential: Credential) -> Result<(), UseCaseError> {
+        if self.repository.find(&credential.issuer.0).await?.is_some() {
+            return Err(UseCaseError::AlreadyExists);
+        }
+        self.repository.insert(credential).await?;
+        Ok(())
+    }
 }
 
 pub struct PublishStatusList<R: ?Sized> {
@@ -33,6 +51,22 @@ impl<R: StatusListRepository + ?Sized> PublishStatusList<R> {
         self.repository.insert(record).await?;
         Ok(())
     }
+
+    pub async fn execute_new(
+        &self,
+        list_id: String,
+        issuer: Issuer,
+        sub: String,
+        statuses: Vec<StatusEntry>,
+    ) -> Result<(), UseCaseError> {
+        let record = StatusListRecord {
+            list_id,
+            issuer,
+            status_list: StatusList::create(statuses)?,
+            sub,
+        };
+        self.execute(record).await
+    }
 }
 
 pub struct UpdateStatuses<R: ?Sized, C: ?Sized> {
@@ -46,18 +80,20 @@ impl<R: StatusListRepository + ?Sized, C: StatusListCache + ?Sized> UpdateStatus
     pub async fn execute(
         &self,
         issuer: &Issuer,
-        record: StatusListRecord,
+        list_id: &str,
+        statuses: Vec<StatusEntry>,
     ) -> Result<(), UseCaseError> {
-        let existing = self
+        let mut existing = self
             .repository
-            .find(&record.list_id)
+            .find(list_id)
             .await?
             .ok_or(UseCaseError::NotFound)?;
         if &existing.issuer != issuer {
             return Err(UseCaseError::IssuerMismatch);
         }
-        self.repository.update(record.clone()).await?;
-        self.cache.invalidate(&record.list_id).await?;
+        existing.status_list = existing.status_list.update(statuses)?;
+        self.repository.update(existing.clone()).await?;
+        self.cache.invalidate(&existing.list_id).await?;
         Ok(())
     }
 }

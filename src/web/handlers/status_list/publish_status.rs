@@ -2,7 +2,7 @@ use crate::{
     application::{PublishStatusList, UseCaseError},
     domain,
     models::StatusesRequest,
-    utils::{errors::Error, lst_gen::create_status_list, state::AppState},
+    utils::state::AppState,
     web::handlers::status_list::error::StatusListError,
 };
 use axum::{
@@ -12,6 +12,8 @@ use axum::{
     response::IntoResponse,
 };
 use tracing;
+
+use super::to_domain_entry;
 
 /// Create a new status list.
 pub async fn publish_status(
@@ -25,33 +27,31 @@ pub async fn publish_status(
         return Err(StatusListError::InvalidListId(e.to_string()));
     }
 
-    let stl = create_status_list(payload.statuses).map_err(|e| {
-        tracing::error!("lst_from failed: {e:?}");
-        match e {
-            Error::Generic(msg) => StatusListError::Generic(msg),
-            Error::InvalidIndex => StatusListError::InvalidIndex,
-            _ => StatusListError::Generic(e.to_string()),
-        }
-    })?;
-
-    let record = domain::StatusListRecord {
-        list_id: list_id.clone(),
-        issuer: domain::Issuer(issuer),
-        status_list: domain::StatusList {
-            bits: stl.bits,
-            lst: stl.lst,
-        },
-        sub: format!(
-            "https://{}/api/v1/status-lists/{list_id}",
-            appstate.server_domain
-        ),
-    };
+    let statuses = payload
+        .statuses
+        .into_iter()
+        .map(to_domain_entry)
+        .collect::<Vec<_>>();
     match PublishStatusList::new(appstate.status_lists.clone())
-        .execute(record)
+        .execute_new(
+            list_id.clone(),
+            domain::Issuer(issuer),
+            format!(
+                "https://{}/api/v1/status-lists/{list_id}",
+                appstate.server_domain
+            ),
+            statuses,
+        )
         .await
     {
         Ok(()) => Ok(StatusCode::CREATED.into_response()),
         Err(UseCaseError::AlreadyExists) => Err(StatusListError::StatusListAlreadyExists),
+        Err(UseCaseError::Domain(domain::DomainError::InvalidIndex)) => {
+            Err(StatusListError::InvalidIndex)
+        }
+        Err(UseCaseError::Domain(domain::DomainError::InvalidStatusList(msg))) => {
+            Err(StatusListError::Generic(msg))
+        }
         Err(error) => {
             tracing::error!(?error, list_id, "Failed to publish status list");
             Err(StatusListError::InternalServerError)
@@ -66,6 +66,7 @@ mod tests {
     use crate::{
         models::{Status, StatusEntry, StatusList, StatusListRecord, status_lists},
         test_utils::test_app_state,
+        utils::lst_gen::create_status_list,
     };
     use axum::{Json, extract::State};
     use sea_orm::{DatabaseBackend, MockDatabase};
@@ -186,11 +187,7 @@ mod tests {
         .await
         .unwrap();
 
-        let result = app_state
-            .status_list_repo
-            .find_one_by(&token_id)
-            .await
-            .unwrap();
+        let result = app_state.status_lists.find(&token_id).await.unwrap();
         assert!(result.is_some());
         let token = result.unwrap();
         assert_eq!(token.list_id, token_id);
@@ -280,11 +277,7 @@ mod tests {
         .into_response();
         assert_eq!(response.status(), StatusCode::CREATED);
 
-        let result = app_state
-            .status_list_repo
-            .find_one_by(&token_id)
-            .await
-            .unwrap();
+        let result = app_state.status_lists.find(&token_id).await.unwrap();
         assert!(result.is_some());
         let token = result.unwrap();
         assert_eq!(token.list_id, token_id);

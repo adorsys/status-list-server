@@ -6,13 +6,13 @@ use axum::{
 use hyper::StatusCode;
 
 use crate::{
+    application::{UpdateStatuses, UseCaseError},
+    domain,
     models::StatusesRequest,
-    utils::{
-        bits_validation::BitFlag, errors::Error, lst_gen::update_status_list, state::AppState,
-    },
+    utils::state::AppState,
 };
 
-use super::error::StatusListError;
+use super::{error::StatusListError, to_domain_entry};
 
 /// Update status entries in an existing status list.
 pub async fn update_status(
@@ -26,71 +26,33 @@ pub async fn update_status(
         return Err(StatusListError::InvalidListId(e.to_string()));
     }
 
-    let store = &appstate.status_list_repo;
-
-    // Fetch the existing token
-    let record = store
-        .find_one_by(&list_id)
-        .await
-        .map_err(|e| {
-            tracing::error!(error = ?e, list_id = ?list_id, "Database query failed for status list.");
-            StatusListError::InternalServerError
-        })?
-        .ok_or(StatusListError::StatusListNotFound)?;
-
-    // Check if the request issuer matches the token issuer
-    if record.issuer != issuer {
-        tracing::error!(
-            "Issuer mismatch: expected {}, got {}",
-            record.issuer,
-            issuer
-        );
-        return Err(StatusListError::IssuerMismatch);
-    }
-
-    let bits = if let Some(bits) = BitFlag::new(record.status_list.bits) {
-        Ok(bits)
-    } else {
-        Err(StatusListError::Generic(format!(
-            "Invalid 'bits' value: {}. Allowed values are 1, 2, 4, 8.",
-            record.status_list.bits
-        )))
-    }?;
-
-    // Update the status list
-    let updated_lst = update_status_list(
-        record.status_list.lst.clone(),
-        payload.statuses,
-        bits.value(),
+    let statuses = payload
+        .statuses
+        .into_iter()
+        .map(to_domain_entry)
+        .collect::<Vec<_>>();
+    match UpdateStatuses::new(
+        appstate.status_lists.clone(),
+        appstate.status_list_cache.clone(),
     )
-    .map_err(|e| {
-        tracing::error!("update_status_list failed: {e:?}");
-        match e {
-            Error::Generic(msg) => StatusListError::Generic(msg),
-            Error::InvalidIndex => StatusListError::InvalidIndex,
-            _ => StatusListError::Generic(e.to_string()),
+    .execute(&domain::Issuer(issuer), &list_id, statuses)
+    .await
+    {
+        Ok(()) => {}
+        Err(UseCaseError::NotFound) => return Err(StatusListError::StatusListNotFound),
+        Err(UseCaseError::IssuerMismatch) => return Err(StatusListError::IssuerMismatch),
+        Err(UseCaseError::Domain(domain::DomainError::InvalidIndex)) => {
+            return Err(StatusListError::InvalidIndex);
         }
-    })?;
-
-    let mut exact_status_list = record;
-    exact_status_list.status_list.lst = updated_lst.lst;
-    exact_status_list.status_list.bits = updated_lst.bits;
-
-    // Save the updated token
-    store
-        .update_one(&exact_status_list.list_id, exact_status_list.clone())
-        .await
-        .map_err(|e| {
-            tracing::error!("Failed to update status list: {e:?}");
-            StatusListError::InternalServerError
-        })?;
-
-    // Invalidate cache entry to ensure next read fetches the updated record
-    appstate.cache.invalidate(&exact_status_list.list_id).await;
-    tracing::info!(
-        "Invalidated cache for status list: {}",
-        exact_status_list.list_id
-    );
+        Err(UseCaseError::Domain(domain::DomainError::InvalidStatusList(msg))) => {
+            return Err(StatusListError::Generic(msg));
+        }
+        Err(error) => {
+            tracing::error!(?error, "Failed to update status list");
+            return Err(StatusListError::InternalServerError);
+        }
+    }
+    tracing::info!("Invalidated cache for status list: {}", list_id);
 
     Ok(StatusCode::OK.into_response())
 }

@@ -1,14 +1,21 @@
 use crate::{
-    adapters::postgres::PostgresStatusListRepository,
-    cert_manager::{
-        CertManager,
-        challenge::{AwsRoute53DnsUpdater, Dns01Handler},
-        storage::{AwsS3, AwsSecretsManager, Redis},
+    adapters::{
+        aws::{AwsS3, AwsSecretsManager},
+        cache::MokaStatusListCache,
+        certificate::AcmeCertificateProvider,
+        dns::{AwsRoute53DnsUpdater, DnsUpdaterProvider, PebbleDnsUpdater},
+        metrics::NoopMetricsCollector,
+        postgres::{PostgresCredentialRepository, PostgresStatusListRepository},
+        redis::Redis,
+        secret::StorageSecretStore,
     },
+    cert_manager::{CertManager, challenge::Dns01Handler},
     config::Config as AppConfig,
     database::{Migrator, queries::SeaOrmStore},
-    models::{Credentials, StatusListRecord},
-    ports::StatusListRepository,
+    ports::{
+        CertificateProvider, CredentialRepository, DnsProvider, MetricsCollector, SecretStore,
+        StatusListCache, StatusListRepository,
+    },
 };
 use aws_config::{BehaviorVersion, Region};
 use color_eyre::eyre::{Context, Result as EyeResult};
@@ -17,10 +24,7 @@ use sea_orm_migration::MigratorTrait;
 use secrecy::ExposeSecret;
 use std::{sync::Arc, time::Duration};
 
-use super::{
-    cache::Cache,
-    cert_manager::{challenge::PebbleDnsUpdater, http_client::DefaultHttpClient},
-};
+use super::cert_manager::http_client::DefaultHttpClient;
 
 const ENV_PRODUCTION: &str = "production";
 const ENV_DEVELOPMENT: &str = "development";
@@ -31,20 +35,28 @@ fn empty_to_none(value: Option<String>) -> Option<String> {
 
 #[derive(Clone)]
 pub struct AppState {
-    /// Injected outbound port used by new application services. The concrete
-    /// SeaORM adapter is assembled at the composition root below.
     pub status_lists: Arc<dyn StatusListRepository>,
-    pub credential_repo: SeaOrmStore<Credentials>,
-    pub status_list_repo: SeaOrmStore<StatusListRecord>,
+    pub credentials: Arc<dyn CredentialRepository>,
+    pub status_list_cache: Arc<dyn StatusListCache>,
+    pub certificate_provider: Arc<dyn CertificateProvider>,
+    pub secret_store: Arc<dyn SecretStore>,
+    pub dns_provider: Arc<dyn DnsProvider>,
+    pub metrics_collector: Arc<dyn MetricsCollector>,
     pub server_domain: String,
-    pub cert_manager: Arc<CertManager>,
-    pub cache: Cache,
     pub aggregation_uri: Option<String>,
     pub token_exp_secs: u64,
     pub token_ttl_secs: u64,
 }
 
 pub async fn build_state(config: &AppConfig) -> EyeResult<AppState> {
+    build_state_with_cert_manager(config)
+        .await
+        .map(|(state, _cert_manager)| state)
+}
+
+pub async fn build_state_with_cert_manager(
+    config: &AppConfig,
+) -> EyeResult<(AppState, Arc<CertManager>)> {
     let db = Database::connect(config.database.url.expose_secret())
         .await
         .wrap_err("Failed to connect to database")?;
@@ -67,22 +79,29 @@ pub async fn build_state(config: &AppConfig) -> EyeResult<AppState> {
     // Initialize the challenge handler based on the environment.
     // Use a fake DNS server to validate the challenge in development.
     let app_env = std::env::var("APP_ENV").unwrap_or(ENV_DEVELOPMENT.to_string());
-    let challenge_handler = if app_env == ENV_PRODUCTION {
-        let updater = AwsRoute53DnsUpdater::new(&aws_config);
-        Dns01Handler::new(updater)
-    } else {
-        // Use pebble as the DNS server in development.
-        // The DNS channel server URL is optional and only used in dev mode;
-        // it falls back to the well-known Pebble challenge test server when unset.
-        let dns_url = config
-            .server
-            .cert
-            .dns_challenge_server_url
-            .as_deref()
-            .unwrap_or("http://challtestsrv:8055");
-        let updater = PebbleDnsUpdater::new(dns_url);
-        Dns01Handler::new(updater)
-    };
+    let (challenge_handler, dns_provider): (Dns01Handler, Arc<dyn DnsProvider>) =
+        if app_env == ENV_PRODUCTION {
+            let updater = AwsRoute53DnsUpdater::new(&aws_config);
+            let dns_provider = Arc::new(DnsUpdaterProvider::new(Arc::new(
+                AwsRoute53DnsUpdater::new(&aws_config),
+            )));
+            (Dns01Handler::new(updater), dns_provider)
+        } else {
+            // Use pebble as the DNS server in development.
+            // The DNS channel server URL is optional and only used in dev mode;
+            // it falls back to the well-known Pebble challenge test server when unset.
+            let dns_url = config
+                .server
+                .cert
+                .dns_challenge_server_url
+                .as_deref()
+                .unwrap_or("http://challtestsrv:8055");
+            let updater = PebbleDnsUpdater::new(dns_url);
+            let dns_provider = Arc::new(DnsUpdaterProvider::new(Arc::new(PebbleDnsUpdater::new(
+                dns_url,
+            ))));
+            (Dns01Handler::new(updater), dns_provider)
+        };
 
     // Initialize the storage backends for the certificate manager
     let cache = Redis::new(redis_conn.clone()).with_ttl(config.redis.cert_cache_ttl);
@@ -98,6 +117,13 @@ pub async fn build_state(config: &AppConfig) -> EyeResult<AppState> {
         Duration::from_secs(config.aws.secrets_cache_ttl),
     )
     .await?;
+    let secret_store = Arc::new(StorageSecretStore::new(Arc::new(
+        AwsSecretsManager::new(
+            &aws_config,
+            Duration::from_secs(config.aws.secrets_cache_ttl),
+        )
+        .await?,
+    )));
 
     let mut certificate_manager = CertManager::new(
         [&config.server.domain],
@@ -121,17 +147,25 @@ pub async fn build_state(config: &AppConfig) -> EyeResult<AppState> {
 
     let db_clone = Arc::new(db);
     let status_list_repo = SeaOrmStore::new(db_clone.clone());
-    Ok(AppState {
-        status_lists: Arc::new(PostgresStatusListRepository::new(status_list_repo.clone())),
-        credential_repo: SeaOrmStore::new(db_clone.clone()),
-        status_list_repo,
-        server_domain: config.server.domain.clone(),
-        cert_manager: Arc::new(certificate_manager),
-        cache: Cache::new(config.cache.ttl, config.cache.max_capacity),
-        aggregation_uri: empty_to_none(config.server.aggregation_uri.clone()),
-        token_exp_secs: config.status_list.token_exp_secs,
-        token_ttl_secs: config.status_list.token_ttl_secs,
-    })
+    let credential_repo = SeaOrmStore::new(db_clone.clone());
+    let cache = MokaStatusListCache::new(config.cache.ttl, config.cache.max_capacity);
+    let cert_manager = Arc::new(certificate_manager);
+    Ok((
+        AppState {
+            status_lists: Arc::new(PostgresStatusListRepository::new(status_list_repo)),
+            credentials: Arc::new(PostgresCredentialRepository::new(credential_repo)),
+            status_list_cache: Arc::new(cache),
+            certificate_provider: Arc::new(AcmeCertificateProvider::new(cert_manager.clone())),
+            secret_store,
+            dns_provider,
+            metrics_collector: Arc::new(NoopMetricsCollector),
+            server_domain: config.server.domain.clone(),
+            aggregation_uri: empty_to_none(config.server.aggregation_uri.clone()),
+            token_exp_secs: config.status_list.token_exp_secs,
+            token_ttl_secs: config.status_list.token_ttl_secs,
+        },
+        cert_manager,
+    ))
 }
 
 #[cfg(test)]

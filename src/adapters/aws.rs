@@ -12,7 +12,7 @@ use moka::future::Cache;
 use tokio::time::sleep;
 use tracing::{info, warn};
 
-use crate::{cert_manager::storage::StorageError, utils::cert_manager::Storage};
+use crate::cert_manager::storage::{Storage, StorageError};
 
 /// Type used for AWS Secrets Manager operations
 pub struct AwsSecretsManager {

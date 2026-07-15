@@ -42,9 +42,9 @@ pub async fn auth(
     let issuer = insecure_decode::<Claims>(token)?.claims.iss;
 
     // Check if issuer is in database and get its credentials
-    let credential = &state
-        .credential_repo
-        .find_one_by(&issuer)
+    let credential = state
+        .credentials
+        .find(&issuer)
         .await
         .map_err(|e| {
             tracing::error!("Failed to find credential for {issuer}: {e:?}");
@@ -53,10 +53,12 @@ pub async fn auth(
         .ok_or(AuthenticationError::IssuerNotFound)?;
 
     // Get the decoding key
-    let decoding_key = DecodingKey::from_jwk(&credential.public_key)?;
+    let public_key = serde_json::from_value(credential.public_key)
+        .map_err(|_| AuthenticationError::InternalServer)?;
+    let decoding_key = DecodingKey::from_jwk(&public_key)?;
 
     let mut validation = Validation::new(alg);
-    validation.set_issuer(&[&credential.issuer]);
+    validation.set_issuer(&[&credential.issuer.0]);
 
     // Verify the token to ensure that the issuer is the same as the one in the database
     let token_data = jsonwebtoken::decode::<Claims>(token, &decoding_key, &validation)?;

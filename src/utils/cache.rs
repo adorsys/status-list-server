@@ -9,13 +9,13 @@ use crate::{
 use async_trait::async_trait;
 
 #[derive(Clone)]
-pub struct Cache {
+pub(crate) struct Cache {
     inner: MokaCache<String, StatusListRecord>,
 }
 
 impl Cache {
     /// Creates a cache; TTL=0 disables it naturally.
-    pub fn new(ttl_secs: u64, max_capacity: u64) -> Self {
+    pub(crate) fn new(ttl_secs: u64, max_capacity: u64) -> Self {
         if ttl_secs == 0 {
             tracing::info!("Cache disabled (TTL=0)");
         }
@@ -26,15 +26,15 @@ impl Cache {
         Self { inner }
     }
 
-    pub async fn get(&self, key: &str) -> Option<StatusListRecord> {
+    pub(crate) async fn get(&self, key: &str) -> Option<StatusListRecord> {
         self.inner.get(key).await
     }
 
-    pub async fn insert(&self, key: String, value: StatusListRecord) {
+    pub(crate) async fn insert(&self, key: String, value: StatusListRecord) {
         self.inner.insert(key, value).await;
     }
 
-    pub async fn invalidate(&self, key: &str) {
+    pub(crate) async fn invalidate(&self, key: &str) {
         self.inner.invalidate(key).await;
     }
 }

@@ -2,7 +2,7 @@
 use crate::{
     database::queries::SeaOrmStore,
     domain, models,
-    ports::{PortError, StatusListRepository},
+    ports::{CredentialRepository, PortError, StatusListRepository},
 };
 use async_trait::async_trait;
 
@@ -13,6 +13,41 @@ pub struct PostgresStatusListRepository {
 impl PostgresStatusListRepository {
     pub fn new(store: SeaOrmStore<models::StatusListRecord>) -> Self {
         Self { store }
+    }
+}
+
+#[derive(Clone)]
+pub struct PostgresCredentialRepository {
+    store: SeaOrmStore<models::Credentials>,
+}
+impl PostgresCredentialRepository {
+    pub fn new(store: SeaOrmStore<models::Credentials>) -> Self {
+        Self { store }
+    }
+}
+
+#[async_trait]
+impl CredentialRepository for PostgresCredentialRepository {
+    async fn find(&self, issuer: &str) -> Result<Option<domain::Credential>, PortError> {
+        self.store
+            .find_one_by(issuer)
+            .await
+            .map(|record| {
+                record.map(|record| domain::Credential {
+                    issuer: domain::Issuer(record.issuer),
+                    public_key: serde_json::to_value(record.public_key)
+                        .expect("JWK is serializable"),
+                })
+            })
+            .map_err(|e| PortError::Dependency(e.to_string()))
+    }
+    async fn insert(&self, credential: domain::Credential) -> Result<(), PortError> {
+        let public_key = serde_json::from_value(credential.public_key)
+            .map_err(|e| PortError::Dependency(format!("invalid public JWK: {e}")))?;
+        self.store
+            .insert_one(models::Credentials::new(credential.issuer.0, public_key))
+            .await
+            .map_err(|e| PortError::Dependency(e.to_string()))
     }
 }
 

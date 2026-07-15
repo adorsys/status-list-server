@@ -17,6 +17,7 @@ use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 
 use crate::{
+    application::{GetStatusListToken, UseCaseError},
     models::{StatusListClaims, StatusListRecord},
     utils::{keygen::Keypair, state::AppState},
 };
@@ -58,30 +59,27 @@ async fn build_status_list_token(
     list_id: &str,
     state: &AppState,
 ) -> Result<impl IntoResponse + Debug + use<>, StatusListError> {
-    // Check cache for status list record
-    if let Some(cached_record) = state.cache.get(list_id).await {
-        tracing::info!("Cache hit for status list record: {list_id}");
-        // Record is in cache, proceed with building the response
-        return build_response_from_record(accept, &cached_record, state).await;
-    }
-
-    tracing::info!("Cache miss for status list token: {list_id}");
-    // Get status list claims from database
-    let status_record = state
-        .status_list_repo
-        .find_one_by(list_id)
-        .await
-        .map_err(|err| {
-            tracing::error!("Failed to get status list {list_id} from database: {err:?}");
-            StatusListError::InternalServerError
-        })?
-        .ok_or(StatusListError::StatusListNotFound)?;
-
-    // Store the token in the cache for future requests
-    state
-        .cache
-        .insert(list_id.to_string(), status_record.clone())
-        .await;
+    let record =
+        match GetStatusListToken::new(state.status_lists.clone(), state.status_list_cache.clone())
+            .execute(list_id)
+            .await
+        {
+            Ok(record) => record,
+            Err(UseCaseError::NotFound) => return Err(StatusListError::StatusListNotFound),
+            Err(error) => {
+                tracing::error!(?error, list_id, "Failed to retrieve status list");
+                return Err(StatusListError::InternalServerError);
+            }
+        };
+    let status_record = StatusListRecord {
+        list_id: record.list_id,
+        issuer: record.issuer.0,
+        status_list: crate::models::StatusList {
+            bits: record.status_list.bits,
+            lst: record.status_list.lst,
+        },
+        sub: record.sub,
+    };
 
     build_response_from_record(accept, &status_record, state).await
 }
@@ -93,8 +91,8 @@ async fn build_response_from_record(
 ) -> Result<impl IntoResponse + Debug + use<>, StatusListError> {
     // Get the certificate chain
     let certs_parts = state
-        .cert_manager
-        .cert_chain_parts()
+        .certificate_provider
+        .certificate_chain()
         .await
         .map_err(|e| {
             tracing::error!("Failed to get certificate chain: {e:?}");
@@ -106,10 +104,14 @@ async fn build_response_from_record(
         })?;
 
     // Load the signing key
-    let signing_key_pem = state.cert_manager.signing_key_pem().await.map_err(|e| {
-        tracing::error!("Failed to load signing key: {e:?}");
-        StatusListError::InternalServerError
-    })?;
+    let signing_key_pem = state
+        .certificate_provider
+        .signing_key_pem()
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to load signing key: {e:?}");
+            StatusListError::InternalServerError
+        })?;
 
     let accept_header = accept.to_string();
     let status_record = status_record.clone();
@@ -409,7 +411,11 @@ mod tests {
         let body_str = std::str::from_utf8(&body_bytes).unwrap();
 
         // Load the decoding key
-        let signing_key_pem = app_state.cert_manager.signing_key_pem().await.unwrap();
+        let signing_key_pem = app_state
+            .certificate_provider
+            .signing_key_pem()
+            .await
+            .unwrap();
         let keypair = Keypair::from_pkcs8_pem(&signing_key_pem).unwrap();
         let decoding_key_pem = keypair
             .verifying_key()
@@ -484,7 +490,11 @@ mod tests {
         let cwt = CoseSign1::from_tagged_slice(&body_bytes).unwrap();
 
         // Load the key from the cache
-        let signing_key_pem = app_state.cert_manager.signing_key_pem().await.unwrap();
+        let signing_key_pem = app_state
+            .certificate_provider
+            .signing_key_pem()
+            .await
+            .unwrap();
         let keypair = Keypair::from_pkcs8_pem(&signing_key_pem).unwrap();
         let signing_key = keypair.signing_key();
         let verifying_key = VerifyingKey::from(signing_key);
@@ -618,7 +628,11 @@ mod tests {
         decoder.read_to_end(&mut body).unwrap();
         let body_str = std::str::from_utf8(&body).unwrap();
 
-        let signing_key_pem = app_state.cert_manager.signing_key_pem().await.unwrap();
+        let signing_key_pem = app_state
+            .certificate_provider
+            .signing_key_pem()
+            .await
+            .unwrap();
         let keypair = Keypair::from_pkcs8_pem(&signing_key_pem).unwrap();
         let decoding_key_pem = keypair
             .verifying_key()
@@ -677,7 +691,11 @@ mod tests {
         decoder.read_to_end(&mut body).unwrap();
         let body_str = std::str::from_utf8(&body).unwrap();
 
-        let signing_key_pem = app_state.cert_manager.signing_key_pem().await.unwrap();
+        let signing_key_pem = app_state
+            .certificate_provider
+            .signing_key_pem()
+            .await
+            .unwrap();
         let keypair = Keypair::from_pkcs8_pem(&signing_key_pem).unwrap();
         let decoding_key_pem = keypair
             .verifying_key()
@@ -737,7 +755,11 @@ mod tests {
 
         let cwt = CoseSign1::from_tagged_slice(&body).unwrap();
 
-        let signing_key_pem = app_state.cert_manager.signing_key_pem().await.unwrap();
+        let signing_key_pem = app_state
+            .certificate_provider
+            .signing_key_pem()
+            .await
+            .unwrap();
         let keypair = Keypair::from_pkcs8_pem(&signing_key_pem).unwrap();
         let signing_key = keypair.signing_key();
         let verifying_key = VerifyingKey::from(signing_key);
@@ -816,7 +838,11 @@ mod tests {
 
         let cwt = CoseSign1::from_tagged_slice(&body).unwrap();
 
-        let signing_key_pem = app_state.cert_manager.signing_key_pem().await.unwrap();
+        let signing_key_pem = app_state
+            .certificate_provider
+            .signing_key_pem()
+            .await
+            .unwrap();
         let keypair = Keypair::from_pkcs8_pem(&signing_key_pem).unwrap();
         let signing_key = keypair.signing_key();
         let verifying_key = VerifyingKey::from(signing_key);

@@ -160,6 +160,13 @@ You can run the tests using the following command:
 cargo test
 ```
 
+To verify the infrastructure-free application composition (domain, ports,
+application services, and in-memory adapters only), run:
+
+```bash
+cargo check --no-default-features --features memory-only
+```
+
 ## License
 
 Licensed under either of [Apache License, Version 2.0](LICENSE-APACHE) or [MIT license](LICENSE-MIT) at your option.

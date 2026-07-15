@@ -1,7 +1,10 @@
 //! In-memory adapters for application-service unit tests and memory-only use.
 use crate::{
-    domain::StatusListRecord,
-    ports::{PortError, StatusListCache, StatusListRepository},
+    domain::{Credential, StatusListRecord},
+    ports::{
+        CredentialRepository, DnsProvider, MetricsCollector, PortError, SecretStore,
+        StatusListCache, StatusListRepository,
+    },
 };
 use async_trait::async_trait;
 use std::{collections::HashMap, sync::Arc};
@@ -63,6 +66,67 @@ impl StatusListCache for MemoryStatusListCache {
     }
 }
 
+#[derive(Clone, Default)]
+pub struct MemoryCredentials {
+    values: Arc<RwLock<HashMap<String, Credential>>>,
+}
+
+#[async_trait]
+impl CredentialRepository for MemoryCredentials {
+    async fn find(&self, issuer: &str) -> Result<Option<Credential>, PortError> {
+        Ok(self.values.read().await.get(issuer).cloned())
+    }
+
+    async fn insert(&self, credential: Credential) -> Result<(), PortError> {
+        self.values
+            .write()
+            .await
+            .insert(credential.issuer.0.clone(), credential);
+        Ok(())
+    }
+}
+
+#[derive(Clone, Default)]
+pub struct MemorySecretStore {
+    values: Arc<RwLock<HashMap<String, String>>>,
+}
+
+#[async_trait]
+impl SecretStore for MemorySecretStore {
+    async fn get(&self, name: &str) -> Result<Option<String>, PortError> {
+        Ok(self.values.read().await.get(name).cloned())
+    }
+
+    async fn put(&self, name: &str, value: &str) -> Result<(), PortError> {
+        self.values
+            .write()
+            .await
+            .insert(name.to_string(), value.to_string());
+        Ok(())
+    }
+}
+
+#[derive(Clone, Default)]
+pub struct MemoryDnsProvider;
+
+#[async_trait]
+impl DnsProvider for MemoryDnsProvider {
+    async fn present_txt(&self, _name: &str, _value: &str) -> Result<(), PortError> {
+        Ok(())
+    }
+
+    async fn remove_txt(&self, _name: &str, _value: &str) -> Result<(), PortError> {
+        Ok(())
+    }
+}
+
+#[derive(Clone, Default)]
+pub struct MemoryMetricsCollector;
+
+impl MetricsCollector for MemoryMetricsCollector {
+    fn increment(&self, _name: &'static str) {}
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -100,7 +164,7 @@ mod tests {
             .unwrap();
         assert_eq!(fetched.list_id, "id");
         UpdateStatuses::new(repo, cache.clone())
-            .execute(&Issuer("issuer".into()), record())
+            .execute(&Issuer("issuer".into()), "id", Vec::new())
             .await
             .unwrap();
         assert!(cache.get("id").await.unwrap().is_none());

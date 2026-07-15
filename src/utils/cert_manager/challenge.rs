@@ -1,7 +1,7 @@
 mod dns01;
 mod http01;
 
-pub use dns01::{AwsRoute53DnsUpdater, Dns01Handler, PebbleDnsUpdater};
+pub use dns01::{Dns01Handler, DnsUpdater};
 pub use http01::Http01Handler;
 
 use std::{future::Future, pin::Pin};

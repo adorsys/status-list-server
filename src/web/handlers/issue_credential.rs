@@ -1,20 +1,18 @@
 use axum::{Json, extract::State, http::StatusCode, response::IntoResponse};
 
 use crate::{
-    database::error::RepositoryError, models::Credentials, utils::state::AppState,
+    application::{PublishCredential, UseCaseError},
+    domain,
+    models::Credentials,
+    utils::state::AppState,
     web::auth::errors::AuthenticationError,
 };
 
 #[derive(Debug)]
 pub(super) enum CredentialError {
-    RepoError(RepositoryError),
+    AlreadyExists,
+    Port,
     AuthError(AuthenticationError),
-}
-
-impl From<RepositoryError> for CredentialError {
-    fn from(value: RepositoryError) -> Self {
-        CredentialError::RepoError(value)
-    }
 }
 
 impl From<AuthenticationError> for CredentialError {
@@ -32,7 +30,7 @@ pub async fn credential_handler(
         Err(CredentialError::AuthError(AuthenticationError::JwtError(err))) => {
             (StatusCode::BAD_REQUEST, err.to_string()).into_response()
         }
-        Err(CredentialError::RepoError(RepositoryError::DuplicateEntry)) => {
+        Err(CredentialError::AlreadyExists) => {
             tracing::warn!(
                 "Attempted to publish credentials for existing issuer {}",
                 credential.issuer,
@@ -61,15 +59,20 @@ pub(super) async fn publish_credentials(
     credentials: Credentials,
     state: AppState,
 ) -> Result<(), CredentialError> {
-    let store = &state.credential_repo;
-    // Check for existing issuer
-    if store.find_one_by(&credentials.issuer).await?.is_some() {
-        return Err(CredentialError::RepoError(RepositoryError::DuplicateEntry));
+    let public_key =
+        serde_json::to_value(credentials.public_key).map_err(|_| CredentialError::Port)?;
+    let credential = domain::Credential {
+        issuer: domain::Issuer(credentials.issuer),
+        public_key,
+    };
+    match PublishCredential::new(state.credentials)
+        .execute(credential)
+        .await
+    {
+        Ok(()) => Ok(()),
+        Err(UseCaseError::AlreadyExists) => Err(CredentialError::AlreadyExists),
+        Err(_) => Err(CredentialError::Port),
     }
-
-    let credential = Credentials::new(credentials.issuer, credentials.public_key);
-    store.insert_one(credential).await?;
-    Ok(())
 }
 
 #[cfg(test)]

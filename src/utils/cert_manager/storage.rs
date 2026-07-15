@@ -1,16 +1,13 @@
-mod aws;
-mod redis;
-
-pub use crate::utils::cert_manager::storage::redis::Redis;
-use ::redis::RedisError;
 use async_trait::async_trait;
-pub use aws::{AwsS3, AwsSecretsManager};
 use color_eyre::eyre::Error as Report;
+#[cfg(feature = "redis")]
+use redis::RedisError;
 use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum StorageError {
     #[error("Redis error: {0}")]
+    #[cfg(feature = "redis")]
     Redis(#[from] RedisError),
 
     #[error("AWS SDK error: {0}")]

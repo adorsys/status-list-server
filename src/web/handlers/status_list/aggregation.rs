@@ -13,14 +13,10 @@ pub(super) struct AggregationResponse {
 pub async fn get_aggregation(
     State(state): State<AppState>,
 ) -> Result<impl IntoResponse, StatusListError> {
-    let status_lists = state
-        .status_list_repo
-        .find_all_status_list_uris()
-        .await
-        .map_err(|e| {
-            tracing::error!("Failed to fetch status lists for aggregation: {e:?}");
-            StatusListError::InternalServerError
-        })?;
+    let status_lists = state.status_lists.list_uris().await.map_err(|e| {
+        tracing::error!("Failed to fetch status lists for aggregation: {e:?}");
+        StatusListError::InternalServerError
+    })?;
 
     tracing::info!(
         "Serving status list aggregation with {} list(s)",
