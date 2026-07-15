@@ -62,11 +62,22 @@ pub async fn get_status_list(
     let status_record = fetch_status_record(&list_id, &state).await?;
 
     let now = OffsetDateTime::now_utc().unix_timestamp();
-    let validity_bucket = now / state.token_exp_secs.max(1) as i64;
+    let bucket_span = state.token_exp_secs.max(1) as i64;
+    let validity_bucket = now / bucket_span;
+    let bucket_start = validity_bucket * bucket_span;
 
     let current_etag = generate_etag(&status_record, validity_bucket);
 
-    let last_modified = format_http_date(status_record.updated_at);
+    // The served representation is a re-signed token that changes every
+    // validity bucket even when the list content does not, so Last-Modified
+    // must rotate with the bucket. Using the raw `updated_at` (bumped only by
+    // publish/update_status and never by token re-issuance) would let a client
+    // or CDN revalidating with If-Modified-Since alone receive 304
+    // indefinitely and keep replaying an expired signed token, defeating the
+    // ttl/exp staleness bound. `max(updated_at, bucket_start)` keeps content
+    // changes visible on the IMS path while bounding staleness to the bucket.
+    let last_modified_ts = status_record.updated_at.max(bucket_start);
+    let last_modified = format_http_date(last_modified_ts);
 
     let cache_control = build_cache_control(state.token_ttl_secs);
 
@@ -75,7 +86,7 @@ pub async fn get_status_list(
         if_none_match,
         if_modified_since,
         &current_etag,
-        status_record.updated_at,
+        last_modified_ts,
     ) {
         ConditionalResponse::NotModified => {
             // Return 304 with caching headers but no body
@@ -1228,5 +1239,144 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(body_bytes.len(), 0, "304 response should have no body");
+    }
+
+    #[tokio::test]
+    async fn test_conditional_request_if_modified_since_returns_304() {
+        let mock_db = MockDatabase::new(DatabaseBackend::Postgres);
+        let status_list = StatusList {
+            bits: 8,
+            lst: encode_compressed(&[0, 0, 0]).unwrap(),
+        };
+        let status_list_token = StatusListRecord {
+            list_id: "test_list".to_string(),
+            issuer: "issuer1".to_string(),
+            status_list,
+            sub: "test_subject".to_string(),
+            updated_at: 0,
+        };
+        let db_conn = Arc::new(
+            mock_db
+                .append_query_results::<status_lists::Model, Vec<_>, _>(vec![vec![
+                    status_list_token,
+                ]])
+                .into_connection(),
+        );
+
+        let app_state = test_app_state(Some(db_conn.clone())).await;
+
+        // First request: capture Last-Modified.
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            http::header::ACCEPT,
+            ACCEPT_STATUS_LISTS_HEADER_JWT.parse().unwrap(),
+        );
+        let first_response = get_status_list(
+            State(app_state.clone()),
+            Path("test_list".to_string()),
+            headers,
+        )
+        .await
+        .unwrap()
+        .into_response();
+        assert_eq!(first_response.status(), StatusCode::OK);
+        let last_modified = first_response
+            .headers()
+            .get(http::header::LAST_MODIFIED)
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_string();
+
+        // Second request with If-Modified-Since: the representation's
+        // Last-Modified (rotated to the current validity bucket) is <= the
+        // captured timestamp, so the handler must return 304 — no ETag sent.
+        let mut conditional_headers = HeaderMap::new();
+        conditional_headers.insert(
+            http::header::ACCEPT,
+            ACCEPT_STATUS_LISTS_HEADER_JWT.parse().unwrap(),
+        );
+        conditional_headers.insert(
+            http::header::IF_MODIFIED_SINCE,
+            last_modified.parse().unwrap(),
+        );
+        let conditional_response = get_status_list(
+            State(app_state),
+            Path("test_list".to_string()),
+            conditional_headers,
+        )
+        .await
+        .unwrap()
+        .into_response();
+
+        assert_eq!(conditional_response.status(), StatusCode::NOT_MODIFIED);
+        assert!(
+            conditional_response
+                .headers()
+                .contains_key(http::header::LAST_MODIFIED),
+            "304 response should include Last-Modified"
+        );
+        assert!(
+            conditional_response
+                .headers()
+                .contains_key(http::header::CACHE_CONTROL),
+            "304 response should include Cache-Control"
+        );
+        let body_bytes = to_bytes(conditional_response.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        assert_eq!(body_bytes.len(), 0, "304 response should have no body");
+    }
+
+    #[tokio::test]
+    async fn test_conditional_request_if_modified_since_returns_200() {
+        let mock_db = MockDatabase::new(DatabaseBackend::Postgres);
+        let status_list = StatusList {
+            bits: 8,
+            lst: encode_compressed(&[0, 0, 0]).unwrap(),
+        };
+        let status_list_token = StatusListRecord {
+            list_id: "test_list".to_string(),
+            issuer: "issuer1".to_string(),
+            status_list,
+            sub: "test_subject".to_string(),
+            updated_at: 0,
+        };
+        let db_conn = Arc::new(
+            mock_db
+                .append_query_results::<status_lists::Model, Vec<_>, _>(vec![vec![
+                    status_list_token,
+                ]])
+                .into_connection(),
+        );
+
+        let app_state = test_app_state(Some(db_conn.clone())).await;
+
+        // An If-Modified-Since older than the bucketed Last-Modified (~now)
+        // means the served representation is newer than the client's cached
+        // value, so the handler must return 200 with a fresh body.
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            http::header::ACCEPT,
+            ACCEPT_STATUS_LISTS_HEADER_JWT.parse().unwrap(),
+        );
+        headers.insert(
+            http::header::IF_MODIFIED_SINCE,
+            "Thu, 01 Jan 1970 00:00:00 GMT".parse().unwrap(),
+        );
+        let response = get_status_list(
+            State(app_state),
+            Path("test_list".to_string()),
+            headers,
+        )
+        .await
+        .unwrap()
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(
+            response.headers().contains_key(http::header::ETAG),
+            "200 response should include ETag"
+        );
     }
 }

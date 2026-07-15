@@ -53,15 +53,12 @@ pub fn evaluate_if_none_match(
             continue;
         }
 
-        // Compare directly - handles both W/"hash" and "hash" formats
+        // Exact comparison. Clients echo the ETag they received verbatim, which
+        // covers both W/"hash" and "hash" forms. This deliberately does not
+        // implement RFC 9110 §8.8.3.2 weak/strong comparison; the prior
+        // trim_matches('"') branch was non-spec (it ignored the W/ prefix and
+        // could only produce surprising equalities for malformed input).
         if etag == current_etag {
-            return ConditionalResponse::NotModified;
-        }
-
-        // Also try removing quotes for loose matching (some clients may send malformed ETags)
-        let normalized_etag = etag.trim_matches('"');
-        let normalized_current = current_etag.trim_matches('"');
-        if normalized_etag == normalized_current {
             return ConditionalResponse::NotModified;
         }
     }
@@ -81,7 +78,10 @@ pub fn evaluate_if_none_match(
 ///
 /// # Arguments
 /// * `if_modified_since` - The If-Modified-Since header value (HTTP-date format)
-/// * `updated_at` - Unix timestamp (seconds) of the resource's last modification
+/// * `updated_at` - Unix timestamp (seconds) of the Last-Modified header
+///   emitted for the served representation. For time-varying resources this
+///   MUST be the representation's modification time (e.g. the validity-bucket
+///   start), not the persisted content's `updated_at`, so staleness is bounded.
 ///
 /// # Returns
 /// * `NotModified` if resource not modified since provided time
@@ -124,7 +124,8 @@ pub fn evaluate_if_modified_since(
 /// * `if_none_match` - The If-None-Match header value (optional)
 /// * `if_modified_since` - The If-Modified-Since header value (optional)
 /// * `current_etag` - The ETag computed for the current resource state
-/// * `updated_at` - Unix timestamp (seconds) of the resource's last modification
+/// * `updated_at` - Unix timestamp (seconds) of the Last-Modified header
+///   emitted for the served representation (see [`evaluate_if_modified_since`]).
 ///
 /// # Returns
 /// * `NotModified` if conditional request conditions are met (return 304)

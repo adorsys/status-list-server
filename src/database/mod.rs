@@ -216,7 +216,23 @@ pub(crate) mod migrations {
                             )
                             .to_owned(),
                     )
+                    .await?;
+
+                // Backfill pre-existing rows. With default(0) every legacy row
+                // would report Last-Modified = 1970-01-01, so any
+                // If-Modified-Since date >= 1970 would yield 304 and fresh
+                // tokens would never be served via the IMS path until the first
+                // update touches the row. Setting them to the migration run
+                // time makes the validator meaningful immediately.
+                let now_secs = time::OffsetDateTime::now_utc().unix_timestamp();
+                manager
+                    .get_connection()
+                    .execute_unprepared(&format!(
+                        r#"UPDATE "status_lists" SET "updated_at" = {}"#,
+                        now_secs
+                    ))
                     .await
+                    .map(|_| ())
             }
 
             /// Removes updated_at column from status_lists table
