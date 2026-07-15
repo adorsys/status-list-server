@@ -31,6 +31,7 @@ pub struct ServerConfig {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct CertConfig {
+    pub provisioning_strategy: String,
     pub email: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub organization: Option<String>,
@@ -41,6 +42,20 @@ pub struct CertConfig {
     pub renewal_cron_schedule: String,
     #[serde(default)]
     pub dns_challenge_server_url: Option<String>,
+    pub store: CertStoreConfig,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct CertStoreConfig {
+    pub source: String,
+    #[serde(default)]
+    pub certificate_path: Option<String>,
+    #[serde(default)]
+    pub signing_key_path: Option<String>,
+    #[serde(default)]
+    pub certificate_key: Option<String>,
+    #[serde(default)]
+    pub signing_key_key: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -156,6 +171,7 @@ impl Config {
             .set_default("aws.secrets_cache_ttl", 300)? // Default 5 minutes
             .set_default("aws.s3_bucket", "status-list-adorsys")?
             .set_default("aws.s3_key_prefix", "")?
+            .set_default("server.cert.provisioning_strategy", "acme")?
             .set_default("server.cert.email", "admin@example.com")?
             .set_default("server.cert.eku", vec![1, 3, 6, 1, 5, 5, 7, 3, 30])?
             .set_default("server.cert.organization", "adorsys GmbH & CO KG")?
@@ -164,6 +180,11 @@ impl Config {
                 "https://acme-v02.api.letsencrypt.org/directory",
             )?
             .set_default("server.cert.renewal_cron_schedule", "0 0 0 * * *")?
+            .set_default("server.cert.store.source", "filesystem")?
+            .set_default("server.cert.store.certificate_path", Option::<String>::None)?
+            .set_default("server.cert.store.signing_key_path", Option::<String>::None)?
+            .set_default("server.cert.store.certificate_key", Option::<String>::None)?
+            .set_default("server.cert.store.signing_key_key", Option::<String>::None)?
             .set_default("aws.region", "us-east-1")?
             .set_default("cache.ttl", 5 * 60)?
             .set_default("cache.max_capacity", 100)?
@@ -214,6 +235,10 @@ mod tests {
         assert_eq!(config.status_list.token_ttl_secs, 300);
         assert_eq!(config.server.cert.renewal_cron_schedule, "0 0 0 * * *");
         assert_eq!(config.server.cert.dns_challenge_server_url, None);
+        assert_eq!(config.server.cert.provisioning_strategy, "acme");
+        assert_eq!(config.server.cert.store.source, "filesystem");
+        assert_eq!(config.server.cert.store.certificate_path, None);
+        assert_eq!(config.server.cert.store.signing_key_path, None);
         assert_eq!(config.server.aggregation_uri, None);
     }
 
@@ -308,6 +333,9 @@ mod tests {
         ("APP_STATUS_LIST__TOKEN_TTL_SECS", "600"),
         ("APP_SERVER__CERT__RENEWAL_CRON_SCHEDULE", "0 0 12 * * *"),
         ("APP_SERVER__CERT__DNS_CHALLENGE_SERVER_URL", "http://pebble:8055"),
+        ("APP_SERVER__CERT__PROVISIONING_STRATEGY", "store"),
+        ("APP_SERVER__CERT__STORE__CERTIFICATE_PATH", "/certs/tls.crt"),
+        ("APP_SERVER__CERT__STORE__SIGNING_KEY_PATH", "/certs/tls.key"),
     ])]
     fn test_new_config_fields_env_override() {
         let config = Config::load().expect("Failed to load config");
@@ -320,6 +348,15 @@ mod tests {
         assert_eq!(
             config.server.cert.dns_challenge_server_url.as_deref(),
             Some("http://pebble:8055")
+        );
+        assert_eq!(config.server.cert.provisioning_strategy, "store");
+        assert_eq!(
+            config.server.cert.store.certificate_path.as_deref(),
+            Some("/certs/tls.crt")
+        );
+        assert_eq!(
+            config.server.cert.store.signing_key_path.as_deref(),
+            Some("/certs/tls.key")
         );
     }
 }

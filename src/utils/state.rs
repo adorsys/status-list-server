@@ -1,6 +1,6 @@
 use crate::{
     cert_manager::{
-        CertManager,
+        CertManager, StoreProvisioningStrategy,
         challenge::{AwsRoute53DnsUpdater, Dns01Handler},
         storage::{AwsS3, AwsSecretsManager, Redis},
     },
@@ -9,7 +9,7 @@ use crate::{
     models::{Credentials, StatusListRecord},
 };
 use aws_config::{BehaviorVersion, Region};
-use color_eyre::eyre::{Context, Result as EyeResult};
+use color_eyre::eyre::{Context, Result as EyeResult, eyre};
 use sea_orm::Database;
 use sea_orm_migration::MigratorTrait;
 use secrecy::ExposeSecret;
@@ -94,16 +94,33 @@ pub async fn build_state(config: &AppConfig) -> EyeResult<AppState> {
     )
     .await?;
 
-    let mut certificate_manager = CertManager::new(
-        [&config.server.domain],
-        &config.server.cert.email,
-        config.server.cert.organization.as_deref(),
-        &config.server.cert.acme_directory_url,
-    )?
-    .with_cert_storage(cert_storage)
-    .with_secrets_storage(secrets_storage)
-    .with_challenge_handler(challenge_handler)
-    .with_eku(&config.server.cert.eku);
+    let cert_strategy = store_certificate_strategy(config)?;
+    let uses_acme_strategy = config
+        .server
+        .cert
+        .provisioning_strategy
+        .eq_ignore_ascii_case("acme");
+
+    let mut cert_manager_builder = CertManager::builder()
+        .domains([config.server.domain.as_str()])
+        .email(&config.server.cert.email)
+        .organization(config.server.cert.organization.as_deref())
+        .acme_directory_url(&config.server.cert.acme_directory_url)
+        .cert_storage(cert_storage)
+        .secrets_storage(secrets_storage)
+        .eku(&config.server.cert.eku);
+
+    cert_manager_builder = if uses_acme_strategy {
+        cert_manager_builder
+            .challenge_handler(challenge_handler)
+            .acme_strategy()
+    } else if let Some(cert_strategy) = cert_strategy {
+        cert_manager_builder.store_strategy(cert_strategy)
+    } else {
+        return Err(eyre!(
+            "store certificate provisioning strategy is missing after validation"
+        ));
+    };
 
     if app_env == ENV_DEVELOPMENT {
         // Override the default HTTP client to use the pebble root certificate
@@ -111,8 +128,10 @@ pub async fn build_state(config: &AppConfig) -> EyeResult<AppState> {
         // with a self-signed root certificate
         let root_cert = include_bytes!("../../test_data/pebble.pem");
         let http_client = DefaultHttpClient::new(Some(root_cert))?;
-        certificate_manager = certificate_manager.with_acme_http_client(http_client);
+        cert_manager_builder = cert_manager_builder.acme_http_client(http_client);
     }
+
+    let certificate_manager = cert_manager_builder.build()?;
 
     let db_clone = Arc::new(db);
     Ok(AppState {
@@ -127,9 +146,96 @@ pub async fn build_state(config: &AppConfig) -> EyeResult<AppState> {
     })
 }
 
+fn store_certificate_strategy(config: &AppConfig) -> EyeResult<Option<StoreProvisioningStrategy>> {
+    let cert_config = &config.server.cert;
+    if cert_config
+        .provisioning_strategy
+        .eq_ignore_ascii_case("acme")
+    {
+        return Ok(None);
+    }
+
+    if !cert_config
+        .provisioning_strategy
+        .eq_ignore_ascii_case("store")
+    {
+        return Err(eyre!(
+            "unsupported certificate provisioning strategy '{}'; expected 'acme' or 'store'",
+            cert_config.provisioning_strategy
+        ));
+    }
+
+    match cert_config.store.source.as_str() {
+        source if source.eq_ignore_ascii_case("filesystem") => {
+            let certificate_path = cert_config
+                .store
+                .certificate_path
+                .as_deref()
+                .ok_or_else(|| {
+                    eyre!(
+                        "server.cert.store.certificate_path is required for filesystem store provisioning"
+                    )
+                })?;
+            let signing_key_path = cert_config
+                .store
+                .signing_key_path
+                .as_deref()
+                .ok_or_else(|| {
+                    eyre!(
+                        "server.cert.store.signing_key_path is required for filesystem store provisioning"
+                    )
+                })?;
+            Ok(Some(StoreProvisioningStrategy::filesystem(
+                certificate_path,
+                signing_key_path,
+            )))
+        }
+        source if source.eq_ignore_ascii_case("storage") => {
+            let certificate_key = cert_config.store.certificate_key.as_deref().ok_or_else(|| {
+                eyre!("server.cert.store.certificate_key is required for storage store provisioning")
+            })?;
+            let signing_key_key = cert_config.store.signing_key_key.as_deref().ok_or_else(|| {
+                eyre!("server.cert.store.signing_key_key is required for storage store provisioning")
+            })?;
+            Ok(Some(StoreProvisioningStrategy::storage(
+                certificate_key,
+                signing_key_key,
+            )))
+        }
+        source
+            if source.eq_ignore_ascii_case("secrets")
+                || source.eq_ignore_ascii_case("secrets_manager")
+                || source.eq_ignore_ascii_case("aws_secrets_manager") =>
+        {
+            let certificate_key = cert_config.store.certificate_key.as_deref().ok_or_else(|| {
+                eyre!(
+                    "server.cert.store.certificate_key is required for secrets store provisioning"
+                )
+            })?;
+            let signing_key_key = cert_config.store.signing_key_key.as_deref().ok_or_else(|| {
+                eyre!(
+                    "server.cert.store.signing_key_key is required for secrets store provisioning"
+                )
+            })?;
+            Ok(Some(StoreProvisioningStrategy::secrets_storage(
+                certificate_key,
+                signing_key_key,
+            )))
+        }
+        other => Err(eyre!(
+            "unsupported certificate store source '{other}'; expected 'filesystem', 'storage', or 'secrets'"
+        )),
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::empty_to_none;
+    use super::{empty_to_none, store_certificate_strategy};
+    use crate::config::{
+        AwsConfig, CacheConfig, CertConfig, CertStoreConfig, Config, DatabaseConfig, RedisConfig,
+        ServerConfig, StatusListConfig,
+    };
+    use secrecy::SecretString;
 
     #[test]
     fn test_empty_to_none() {
@@ -139,6 +245,84 @@ mod tests {
         assert_eq!(
             empty_to_none(Some("https://x".to_string())),
             Some("https://x".to_string())
+        );
+    }
+
+    fn base_config() -> Config {
+        Config {
+            server: ServerConfig {
+                host: "localhost".to_string(),
+                domain: "example.com".to_string(),
+                port: 8000,
+                cert: CertConfig {
+                    provisioning_strategy: "store".to_string(),
+                    email: "admin@example.com".to_string(),
+                    organization: None,
+                    eku: vec![],
+                    acme_directory_url: "https://example.com/dir".to_string(),
+                    renewal_cron_schedule: "0 0 0 * * *".to_string(),
+                    dns_challenge_server_url: None,
+                    store: CertStoreConfig {
+                        source: "filesystem".to_string(),
+                        certificate_path: Some("/certs/tls.crt".to_string()),
+                        signing_key_path: Some("/certs/tls.key".to_string()),
+                        certificate_key: None,
+                        signing_key_key: None,
+                    },
+                },
+                enable_metrics: false,
+                aggregation_uri: None,
+            },
+            database: DatabaseConfig {
+                url: SecretString::from("postgres://postgres:postgres@localhost/status-list"),
+            },
+            redis: RedisConfig {
+                uri: SecretString::from("redis://localhost:6379"),
+                require_client_auth: false,
+                cert_cache_ttl: 300,
+            },
+            aws: AwsConfig {
+                region: "us-east-1".to_string(),
+                secrets_cache_ttl: 300,
+                s3_bucket: "bucket".to_string(),
+                s3_key_prefix: String::new(),
+            },
+            cache: CacheConfig {
+                ttl: 300,
+                max_capacity: 100,
+            },
+            status_list: StatusListConfig {
+                token_exp_secs: 900,
+                token_ttl_secs: 300,
+            },
+        }
+    }
+
+    #[test]
+    fn test_store_filesystem_strategy_requires_paths() {
+        let mut config = base_config();
+        config.server.cert.store.signing_key_path = None;
+
+        let err = store_certificate_strategy(&config).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("server.cert.store.signing_key_path")
+        );
+    }
+
+    #[test]
+    fn test_store_secrets_strategy_requires_keys() {
+        let mut config = base_config();
+        config.server.cert.store.source = "aws_secrets_manager".to_string();
+        config.server.cert.store.certificate_path = None;
+        config.server.cert.store.signing_key_path = None;
+        config.server.cert.store.certificate_key = Some("cert-secret".to_string());
+        config.server.cert.store.signing_key_key = None;
+
+        let err = store_certificate_strategy(&config).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("server.cert.store.signing_key_key")
         );
     }
 }
