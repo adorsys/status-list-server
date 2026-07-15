@@ -37,6 +37,12 @@ pub enum StatusListError {
     IssuerMismatch,
     #[error("The service is currently unavailable. Please try again later")]
     ServiceUnavailable,
+    #[error("Too many statuses in request: {count} > {max}")]
+    TooManyStatuses { count: usize, max: usize },
+    #[error("Status index {0} exceeds the configured maximum")]
+    IndexTooLarge(i32),
+    #[error("Serialized status list size exceeds the configured maximum")]
+    StatusTooLarge,
 }
 
 impl IntoResponse for StatusListError {
@@ -60,6 +66,9 @@ impl IntoResponse for StatusListError {
             TokenAlreadyExists => StatusCode::CONFLICT,
             IssuerMismatch => StatusCode::FORBIDDEN,
             ServiceUnavailable => StatusCode::SERVICE_UNAVAILABLE,
+            TooManyStatuses { .. } => StatusCode::BAD_REQUEST,
+            IndexTooLarge(_) => StatusCode::BAD_REQUEST,
+            StatusTooLarge => StatusCode::PAYLOAD_TOO_LARGE,
         };
 
         (status_code, self.to_string()).into_response()

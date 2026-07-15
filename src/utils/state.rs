@@ -37,6 +37,9 @@ pub struct AppState {
     pub aggregation_uri: Option<String>,
     pub token_exp_secs: u64,
     pub token_ttl_secs: u64,
+    pub max_status_index: i32,
+    pub max_statuses_per_request: usize,
+    pub max_serialized_list_size: usize,
 }
 
 pub async fn build_state(config: &AppConfig) -> EyeResult<AppState> {
@@ -124,6 +127,9 @@ pub async fn build_state(config: &AppConfig) -> EyeResult<AppState> {
         aggregation_uri: empty_to_none(config.server.aggregation_uri.clone()),
         token_exp_secs: config.status_list.token_exp_secs,
         token_ttl_secs: config.status_list.token_ttl_secs,
+        max_status_index: config.limits.max_status_index,
+        max_statuses_per_request: config.limits.max_statuses_per_request,
+        max_serialized_list_size: config.limits.max_serialized_list_size,
     })
 }
 

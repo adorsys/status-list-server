@@ -17,6 +17,26 @@ pub struct Config {
     pub aws: AwsConfig,
     pub cache: CacheConfig,
     pub status_list: StatusListConfig,
+    pub rate_limit: RateLimitConfig,
+    pub limits: LimitsConfig,
+}
+
+/// Rate-limit configuration with strict (writes) and permissive (reads) tiers.
+#[derive(Debug, Clone, Deserialize)]
+pub struct RateLimitConfig {
+    pub strict_burst_size: u32,
+    pub strict_period_secs: u64,
+    pub permissive_burst_size: u32,
+    pub permissive_period_secs: u64,
+}
+
+/// Hard bounds on incoming requests and persisted status lists.
+#[derive(Debug, Clone, Deserialize)]
+pub struct LimitsConfig {
+    pub max_body_size_bytes: usize,
+    pub max_status_index: i32,
+    pub max_statuses_per_request: usize,
+    pub max_serialized_list_size: usize,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -169,6 +189,14 @@ impl Config {
             .set_default("cache.max_capacity", 100)?
             .set_default("status_list.token_exp_secs", 900)? // 15 minutes
             .set_default("status_list.token_ttl_secs", 300)? // 5 minutes
+            .set_default("rate_limit.strict_burst_size", 10)?
+            .set_default("rate_limit.strict_period_secs", 60)?
+            .set_default("rate_limit.permissive_burst_size", 100)?
+            .set_default("rate_limit.permissive_period_secs", 60)?
+            .set_default("limits.max_body_size_bytes", 2_097_152)? // 2 MiB
+            .set_default("limits.max_status_index", 100_000)?
+            .set_default("limits.max_statuses_per_request", 5_000)?
+            .set_default("limits.max_serialized_list_size", 1_048_576)? // 1 MiB
             // Override config values via environment variables
             // The environment variables should be prefixed with 'APP_' and use '__' as a separator
             // Example: APP_REDIS__REQUIRE_CLIENT_AUTH=false
@@ -215,6 +243,14 @@ mod tests {
         assert_eq!(config.server.cert.renewal_cron_schedule, "0 0 0 * * *");
         assert_eq!(config.server.cert.dns_challenge_server_url, None);
         assert_eq!(config.server.aggregation_uri, None);
+        assert_eq!(config.rate_limit.strict_burst_size, 10);
+        assert_eq!(config.rate_limit.strict_period_secs, 60);
+        assert_eq!(config.rate_limit.permissive_burst_size, 100);
+        assert_eq!(config.rate_limit.permissive_period_secs, 60);
+        assert_eq!(config.limits.max_body_size_bytes, 2_097_152);
+        assert_eq!(config.limits.max_status_index, 100_000);
+        assert_eq!(config.limits.max_statuses_per_request, 5_000);
+        assert_eq!(config.limits.max_serialized_list_size, 1_048_576);
     }
 
     #[sealed_test(env = [
@@ -321,5 +357,44 @@ mod tests {
             config.server.cert.dns_challenge_server_url.as_deref(),
             Some("http://pebble:8055")
         );
+    }
+
+    #[sealed_test]
+    fn test_default_rate_limits_and_bounds() {
+        unsafe { std::env::remove_var("APP_RATE_LIMIT__STRICT_BURST_SIZE") };
+        unsafe { std::env::remove_var("APP_LIMITS__MAX_BODY_SIZE_BYTES") };
+        let config = Config::load().expect("Failed to load config");
+
+        assert_eq!(config.rate_limit.strict_burst_size, 10);
+        assert_eq!(config.rate_limit.strict_period_secs, 60);
+        assert_eq!(config.rate_limit.permissive_burst_size, 100);
+        assert_eq!(config.rate_limit.permissive_period_secs, 60);
+        assert_eq!(config.limits.max_body_size_bytes, 2_097_152);
+        assert_eq!(config.limits.max_status_index, 100_000);
+        assert_eq!(config.limits.max_statuses_per_request, 5_000);
+        assert_eq!(config.limits.max_serialized_list_size, 1_048_576);
+    }
+
+    #[sealed_test(env = [
+        ("APP_RATE_LIMIT__STRICT_BURST_SIZE", "3"),
+        ("APP_RATE_LIMIT__STRICT_PERIOD_SECS", "120"),
+        ("APP_RATE_LIMIT__PERMISSIVE_BURST_SIZE", "500"),
+        ("APP_RATE_LIMIT__PERMISSIVE_PERIOD_SECS", "10"),
+        ("APP_LIMITS__MAX_BODY_SIZE_BYTES", "65536"),
+        ("APP_LIMITS__MAX_STATUS_INDEX", "4096"),
+        ("APP_LIMITS__MAX_STATUSES_PER_REQUEST", "256"),
+        ("APP_LIMITS__MAX_SERIALIZED_LIST_SIZE", "32768"),
+    ])]
+    fn test_rate_limits_and_bounds_env_override() {
+        let config = Config::load().expect("Failed to load config");
+
+        assert_eq!(config.rate_limit.strict_burst_size, 3);
+        assert_eq!(config.rate_limit.strict_period_secs, 120);
+        assert_eq!(config.rate_limit.permissive_burst_size, 500);
+        assert_eq!(config.rate_limit.permissive_period_secs, 10);
+        assert_eq!(config.limits.max_body_size_bytes, 65_536);
+        assert_eq!(config.limits.max_status_index, 4_096);
+        assert_eq!(config.limits.max_statuses_per_request, 256);
+        assert_eq!(config.limits.max_serialized_list_size, 32_768);
     }
 }
