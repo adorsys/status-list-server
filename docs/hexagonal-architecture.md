@@ -1,18 +1,47 @@
 # Hexagonal architecture
 
 The service follows ports-and-adapters boundaries for new work:
+flowchart TB
+    subgraph Inbound["Inbound Adapters"]
+        Axum[Axum HTTP Handlers]
+    end
+    
+    subgraph Application["Application Layer"]
+        UC[Use Cases<br/>PublishStatusList<br/>UpdateStatuses<br/>GetStatusListToken]
+    end
+    
+    subgraph Domain["Domain Layer"]
+        Entities[Entities & Value Objects<br/>StatusList, StatusEntry<br/>Issuer, Credential]
+    end
+    
+    subgraph Ports["Outbound Ports"]
+        PortTraits[Trait Definitions<br/>StatusListRepository<br/>CredentialRepository<br/>StatusListCache<br/>CertificateProvider<br/>SecretStore<br/>DnsProvider<br/>MetricsCollector]
+    end
+    
+    subgraph Outbound["Outbound Adapters"]
+        Postgres[(Postgres)]
+        Cache[(Cache)]
+        ACME[ACME/Certificates]
+        Secrets[Secret Store]
+        DNS[(DNS)]
+        Metrics[Metrics]
+    end
 
-```text
-Axum handlers (inbound adapters)
-              |
-       application use cases
-              |
-        domain values/entities
-              |
-          outbound ports
-              |
-Postgres | cache | ACME/certificates | secret store | DNS | metrics
-```
+    Axum --> UC
+    UC --> Entities
+    Entities --> PortTraits
+    PortTraits --> Postgres
+    PortTraits --> Cache
+    PortTraits --> ACME
+    PortTraits --> Secrets
+    PortTraits --> DNS
+    PortTraits --> Metrics
+
+    style Inbound fill:#e1f5fe
+    style Application fill:#fff3e0
+    style Domain fill:#e8f5e9
+    style Ports fill:#fce4ec
+    style Outbound fill:#f3e5f5
 
 `src/domain` contains status-list and issuer values plus the status-list
 bitstring creation/update invariants. It only depends on serialization and
