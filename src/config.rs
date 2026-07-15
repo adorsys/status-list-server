@@ -47,6 +47,16 @@ impl DatabaseBackend {
         self.scheme().description
     }
 
+    /// Returns the lowercase name matching the config value (`"postgres"`,
+    /// `"mysql"`, `"sqlite"`), useful for user-facing messages.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            DatabaseBackend::Postgres => "postgres",
+            DatabaseBackend::MySql => "mysql",
+            DatabaseBackend::Sqlite => "sqlite",
+        }
+    }
+
     /// Validates that the given URL matches the expected scheme for this backend.
     pub fn validate_url_scheme(&self, url: &str) -> bool {
         self.scheme()
@@ -424,5 +434,24 @@ mod tests {
     fn test_database_backend_default() {
         let backend = DatabaseBackend::default();
         assert_eq!(backend, DatabaseBackend::Postgres);
+    }
+
+    #[test]
+    fn test_database_backend_as_str() {
+        assert_eq!(DatabaseBackend::Postgres.as_str(), "postgres");
+        assert_eq!(DatabaseBackend::MySql.as_str(), "mysql");
+        assert_eq!(DatabaseBackend::Sqlite.as_str(), "sqlite");
+    }
+
+    #[sealed_test(env = [
+        ("APP_DATABASE__BACKEND", "redis"),
+        ("APP_DATABASE__URL", "postgres://user:password@localhost:5432/status-list"),
+    ])]
+    fn test_invalid_database_backend_config() {
+        let result = Config::load();
+        assert!(
+            result.is_err(),
+            "an unknown backend value should fail to load config"
+        );
     }
 }

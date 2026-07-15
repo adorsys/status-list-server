@@ -1,6 +1,6 @@
 # Database Backend Guidance
 
-The server now validates the configured database backend at startup and supports the following runtime choices:
+The server validates the configured database backend at startup and supports the following runtime choices:
 
 - `postgres`
 - `mysql`
@@ -28,6 +28,16 @@ Good fit when your infrastructure already standardizes on MySQL-compatible servi
 Best for local development, fast unit and integration tests, and simple single-node deployments.
 
 SQLite is not a distributed database, so it is not a good match for horizontally scaled production storage. For in-memory tests, use a shared-cache URI such as `sqlite::memory:?cache=shared` and a single-connection pool.
+
+## Compose Profiles
+
+`docker compose up` starts PostgreSQL by default. To run the MySQL service instead:
+
+```bash
+docker compose --profile mysql up
+```
+
+There is no separate MariaDB service because MariaDB uses the same MySQL-driver path (`mysql://` URL). Connect to a MariaDB host by pointing `APP_DATABASE__URL` at your MariaDB instance on port 3306 (the default) and setting `APP_DATABASE__BACKEND=mysql`.
 
 ## HA And Distributed Storage
 
