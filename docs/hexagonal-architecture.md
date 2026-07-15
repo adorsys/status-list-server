@@ -38,12 +38,6 @@ flowchart TB
     PortTraits --> Secrets
     PortTraits --> DNS
     PortTraits --> Metrics
-
-    style Inbound fill:#e1f5fe
-    style Application fill:#fff3e0
-    style Domain fill:#e8f5e9
-    style Ports fill:#fce4ec
-    style Outbound fill:#f3e5f5
 ```
 
 `src/domain` contains status-list and issuer values plus the status-list
