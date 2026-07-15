@@ -126,11 +126,50 @@ Example JWT token claims:
 
 The Status List Server is provisioned with a cryptographic certificate that is embedded into all issued status list tokens. This certificate ensures the authenticity and integrity of the tokens distributed by the server.
 
-**Automatic Issuance and Renewal:**
+**Provisioning Modes:**
 
-- Certificate issuance and renewal are managed according to the configured renewal strategy.
-- Every day, a cron job checks whether the certificate should be renewed based on this strategy.
-- If the certificate is still considered valid according to the configured strategy, no renewal occurs; renewal is only triggered when necessary.
+- `server.cert.provisioning_strategy = "acme"` requests and renews certificates through ACME.
+- `server.cert.provisioning_strategy = "store"` loads externally managed certificate material and persists it into the configured certificate/secrets storage.
+- Store provisioning supports `server.cert.store.source = "filesystem"` with `certificate_path` and `signing_key_path`.
+- Store provisioning also supports `server.cert.store.source = "storage"` for the configured certificate/secrets storage backends, or `"aws_secrets_manager"` when both PEM values are stored in the configured secrets backend, using `certificate_key` and `signing_key_key`.
+- Filesystem store inputs may be PEM text or raw DER. Storage-backed store inputs may be PEM text or base64/base64url-encoded DER. Private keys must be PKCS#8 in PEM or DER form.
+- The renewal cron schedule is configured with `server.cert.renewal_cron_schedule`. For store provisioning, each scheduled run reloads the configured source and refreshes persisted material only when it changed.
+
+**Certificate Manager Builder Defaults:**
+
+- `CertManager::builder()` defaults to ACME provisioning.
+- The default renewal strategy is `PercentageOfLifetime(None)`, which renews at 2/3 of the certificate lifetime.
+- ACME uses `DefaultHttpClient` unless `.acme_http_client(...)` is supplied.
+- Store provisioning does not create ACME HTTP client state unless explicitly configured.
+- `email` defaults to an empty string, `organization` defaults to none, and `eku` defaults to none.
+- `domains`, `cert_storage`, and `secrets_storage` must always be provided.
+- ACME additionally requires `challenge_handler` and `acme_directory_url`.
+
+```rust
+let manager = CertManager::builder()
+    .domains(["statuslist.example.com"])
+    .email("support@example.com")
+    .organization(Some("example.com"))
+    .acme_directory_url("https://acme-v02.api.letsencrypt.org/directory")
+    .cert_storage(cert_storage)
+    .secrets_storage(secrets_storage)
+    .challenge_handler(challenge_handler)
+    .eku(&[1, 3, 6, 1, 5, 5, 7, 3, 30])
+    .acme_strategy()
+    .build()?;
+```
+
+```rust
+let manager = CertManager::builder()
+    .domains(["statuslist.example.com"])
+    .cert_storage(cert_storage)
+    .secrets_storage(secrets_storage)
+    .store_strategy(StoreProvisioningStrategy::filesystem(
+        "/etc/status-list/tls.crt",
+        "/etc/status-list/tls.key",
+    ))
+    .build()?;
+```
 
 ## Error Handling
 
