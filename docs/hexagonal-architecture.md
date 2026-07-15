@@ -1,6 +1,8 @@
 # Hexagonal architecture
 
 The service follows ports-and-adapters boundaries for new work:
+
+```mermaid
 flowchart TB
     subgraph Inbound["Inbound Adapters"]
         Axum[Axum HTTP Handlers]
@@ -42,6 +44,7 @@ flowchart TB
     style Domain fill:#e8f5e9
     style Ports fill:#fce4ec
     style Outbound fill:#f3e5f5
+```
 
 `src/domain` contains status-list and issuer values plus the status-list
 bitstring creation/update invariants. It only depends on serialization and
