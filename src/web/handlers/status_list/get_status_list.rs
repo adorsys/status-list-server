@@ -60,34 +60,55 @@ pub async fn get_status_list(
     }
 }
 
-/// Parses the request's `Accept-Encoding` header (RFC 9110 content negotiation)
-/// and reports whether the client has advertised support for gzip.
+/// Parses the request's `Accept-Encoding` header(s) (RFC 9110 content
+/// negotiation) and reports whether the client has advertised support for
+/// gzip.
 ///
 /// Returns `false` when the header is absent, so responses are only compressed
 /// when the client has explicitly opted in (see draft-21 §8.2).
+///
+/// Per RFC 9110 §12.5.3, an explicitly-named coding takes precedence over the
+/// `*` wildcard. This means `gzip;q=0, *` is treated as "anything but gzip"
+/// — the explicit `q=0` disables gzip even though the wildcard alone would
+/// accept it.
+///
+/// Multiple `Accept-Encoding` field lines are combined as if comma-separated
+/// (RFC 9110 §5.3), so all header lines are inspected via `get_all`.
 fn client_accepts_gzip(headers: &HeaderMap) -> bool {
-    headers
-        .get(header::ACCEPT_ENCODING)
-        .and_then(|h| h.to_str().ok())
-        .is_some_and(|val| {
-            val.split(',')
-                .map(|s| {
-                    let s = s.trim();
-                    let (coding, params) = s
-                        .split_once(';')
-                        .map(|(c, p)| (c.trim(), p.trim()))
-                        .unwrap_or((s, ""));
-                    let q = params
-                        .split(';')
-                        .find_map(|p| p.trim().strip_prefix("q=").map(|q| q.trim()))
-                        .and_then(|q| q.parse::<f32>().ok());
-                    (coding, q)
-                })
-                .any(|(coding, q)| {
-                    (coding.eq_ignore_ascii_case("gzip") || coding == "*")
-                        && (q.is_none() || q > Some(0.0))
-                })
-        })
+    let mut entries: Vec<(&str, Option<f32>)> = Vec::new();
+    for val in headers.get_all(header::ACCEPT_ENCODING) {
+        let Ok(val) = val.to_str() else { continue };
+        for s in val.split(',') {
+            let s = s.trim();
+            if s.is_empty() {
+                continue;
+            }
+            let (coding, params) = s
+                .split_once(';')
+                .map(|(c, p)| (c.trim(), p.trim()))
+                .unwrap_or((s, ""));
+            let q = params
+                .split(';')
+                .find_map(|p| p.trim().strip_prefix("q=").map(|q| q.trim()))
+                .and_then(|q| q.parse::<f32>().ok());
+            entries.push((coding, q));
+        }
+    }
+
+    match entries
+        .iter()
+        .find(|(c, _)| c.eq_ignore_ascii_case("gzip"))
+        .map(|(_, q)| *q)
+    {
+        // gzip explicitly named with no q -> default weight 1.0 -> accept
+        Some(None) => true,
+        // gzip;q=v -> accept only if v > 0
+        Some(Some(q)) => q > 0.0,
+        // gzip not named: consult the * wildcard only
+        None => entries.iter().any(|(c, q)| {
+            c.eq_ignore_ascii_case("*") && (q.is_none() || q.map(|v| v > 0.0).unwrap_or(false))
+        }),
+    }
 }
 
 async fn build_status_list_token(
@@ -212,12 +233,21 @@ async fn build_response_from_record(
             [
                 (header::CONTENT_TYPE, accept),
                 (header::CONTENT_ENCODING, GZIP_HEADER),
+                (header::VARY, "Accept-Encoding"),
             ],
             body,
         )
             .into_response()
     } else {
-        (StatusCode::OK, [(header::CONTENT_TYPE, accept)], body).into_response()
+        (
+            StatusCode::OK,
+            [
+                (header::CONTENT_TYPE, accept),
+                (header::VARY, "Accept-Encoding"),
+            ],
+            body,
+        )
+            .into_response()
     };
 
     Ok(response)
@@ -454,6 +484,7 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
         let headers = response.headers();
         assert_eq!(headers.get(http::header::CONTENT_ENCODING).unwrap(), "gzip");
+        assert_eq!(headers.get(http::header::VARY).unwrap(), "Accept-Encoding");
 
         let compressed_body_bytes = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
         let mut decoder = flate2::read::GzDecoder::new(&compressed_body_bytes[..]);
@@ -531,6 +562,8 @@ mod tests {
             headers.get(http::header::CONTENT_ENCODING).is_none(),
             "Content-Encoding must not be present when gzip was not applied"
         );
+        // Vary must be present even without gzip so caches key on Accept-Encoding.
+        assert_eq!(headers.get(http::header::VARY).unwrap(), "Accept-Encoding");
 
         let body_bytes = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
         let body_str = std::str::from_utf8(&body_bytes).unwrap();
@@ -604,6 +637,7 @@ mod tests {
             headers.get(http::header::CONTENT_ENCODING).is_none(),
             "CWT responses must never be gzipped"
         );
+        assert_eq!(headers.get(http::header::VARY).unwrap(), "Accept-Encoding");
 
         let body_bytes = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
 
@@ -728,6 +762,7 @@ mod tests {
             http::header::ACCEPT,
             ACCEPT_STATUS_LISTS_HEADER_JWT.parse().unwrap(),
         );
+        headers.insert(http::header::ACCEPT_ENCODING, "gzip".parse().unwrap());
 
         let response = get_status_list(
             State(app_state.clone()),
@@ -739,6 +774,9 @@ mod tests {
         .into_response();
 
         assert_eq!(response.status(), StatusCode::OK);
+        let headers = response.headers();
+        assert_eq!(headers.get(http::header::CONTENT_ENCODING).unwrap(), "gzip");
+        assert_eq!(headers.get(http::header::VARY).unwrap(), "Accept-Encoding");
         let compressed = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
         let mut decoder = flate2::read::GzDecoder::new(&compressed[..]);
         let mut body = Vec::new();
@@ -798,11 +836,14 @@ mod tests {
         .into_response();
 
         assert_eq!(response.status(), StatusCode::OK);
-        let compressed = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
-        let mut decoder = flate2::read::GzDecoder::new(&compressed[..]);
-        let mut body = Vec::new();
-        decoder.read_to_end(&mut body).unwrap();
-        let body_str = std::str::from_utf8(&body).unwrap();
+        let headers = response.headers();
+        assert!(
+            headers.get(http::header::CONTENT_ENCODING).is_none(),
+            "no gzip without Accept-Encoding"
+        );
+        assert_eq!(headers.get(http::header::VARY).unwrap(), "Accept-Encoding");
+        let raw = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+        let body_str = std::str::from_utf8(&raw).unwrap();
 
         let signing_key_pem = app_state.cert_manager.signing_key_pem().await.unwrap();
         let keypair = Keypair::from_pkcs8_pem(&signing_key_pem).unwrap();
@@ -857,10 +898,13 @@ mod tests {
         .into_response();
 
         assert_eq!(response.status(), StatusCode::OK);
-        let compressed = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
-        let mut decoder = flate2::read::GzDecoder::new(&compressed[..]);
-        let mut body = Vec::new();
-        decoder.read_to_end(&mut body).unwrap();
+        let headers = response.headers();
+        assert!(
+            headers.get(http::header::CONTENT_ENCODING).is_none(),
+            "CWT responses must never be gzipped"
+        );
+        assert_eq!(headers.get(http::header::VARY).unwrap(), "Accept-Encoding");
+        let body = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
 
         let cwt = CoseSign1::from_tagged_slice(&body).unwrap();
 
@@ -936,10 +980,13 @@ mod tests {
         .into_response();
 
         assert_eq!(response.status(), StatusCode::OK);
-        let compressed = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
-        let mut decoder = flate2::read::GzDecoder::new(&compressed[..]);
-        let mut body = Vec::new();
-        decoder.read_to_end(&mut body).unwrap();
+        let headers = response.headers();
+        assert!(
+            headers.get(http::header::CONTENT_ENCODING).is_none(),
+            "CWT responses must never be gzipped"
+        );
+        assert_eq!(headers.get(http::header::VARY).unwrap(), "Accept-Encoding");
+        let body = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
 
         let cwt = CoseSign1::from_tagged_slice(&body).unwrap();
 
@@ -1022,5 +1069,99 @@ mod tests {
             StatusCode::NOT_ACCEPTABLE
         );
         assert_eq!(err, StatusListError::InvalidAcceptHeader);
+    }
+
+    // --- client_accepts_gzip: RFC 9110 §12.5.3 wildcard precedence ---
+
+    #[test]
+    fn test_accepts_gzip_simple() {
+        let mut h = HeaderMap::new();
+        h.insert(header::ACCEPT_ENCODING, "gzip".parse().unwrap());
+        assert!(client_accepts_gzip(&h));
+    }
+
+    #[test]
+    fn test_accepts_gzip_with_qvalue() {
+        let mut h = HeaderMap::new();
+        h.insert(header::ACCEPT_ENCODING, "gzip;q=0.5".parse().unwrap());
+        assert!(client_accepts_gzip(&h));
+    }
+
+    #[test]
+    fn test_rejects_gzip_q0() {
+        let mut h = HeaderMap::new();
+        h.insert(header::ACCEPT_ENCODING, "gzip;q=0".parse().unwrap());
+        assert!(!client_accepts_gzip(&h));
+    }
+
+    #[test]
+    fn test_rejects_gzip_q0_with_wildcard_accept() {
+        // "gzip;q=0, *" means "anything except gzip" → must NOT gzip.
+        let mut h = HeaderMap::new();
+        h.insert(header::ACCEPT_ENCODING, "gzip;q=0, *".parse().unwrap());
+        assert!(!client_accepts_gzip(&h));
+    }
+
+    #[test]
+    fn test_accepts_via_wildcard_only() {
+        // gzip not named, only * → wildcard accepts gzip.
+        let mut h = HeaderMap::new();
+        h.insert(header::ACCEPT_ENCODING, "*".parse().unwrap());
+        assert!(client_accepts_gzip(&h));
+    }
+
+    #[test]
+    fn test_accepts_via_wildcard_q1() {
+        let mut h = HeaderMap::new();
+        h.insert(header::ACCEPT_ENCODING, "*;q=1".parse().unwrap());
+        assert!(client_accepts_gzip(&h));
+    }
+
+    #[test]
+    fn test_rejects_wildcard_q0() {
+        let mut h = HeaderMap::new();
+        h.insert(header::ACCEPT_ENCODING, "*;q=0".parse().unwrap());
+        assert!(!client_accepts_gzip(&h));
+    }
+
+    #[test]
+    fn test_rejects_identity_q0_gzip_q0() {
+        // identity;q=0, gzip;q=0 → gzip explicitly disabled.
+        let mut h = HeaderMap::new();
+        h.insert(
+            header::ACCEPT_ENCODING,
+            "identity;q=0, gzip;q=0".parse().unwrap(),
+        );
+        assert!(!client_accepts_gzip(&h));
+    }
+
+    #[test]
+    fn test_rejects_when_header_absent() {
+        let h = HeaderMap::new();
+        assert!(!client_accepts_gzip(&h));
+    }
+
+    #[test]
+    fn test_multiple_accept_encoding_lines() {
+        // RFC 9110 §5.3: multiple field lines are combined as comma-separated.
+        let mut h = HeaderMap::new();
+        h.append(header::ACCEPT_ENCODING, "deflate".parse().unwrap());
+        h.append(header::ACCEPT_ENCODING, "gzip".parse().unwrap());
+        assert!(client_accepts_gzip(&h));
+    }
+
+    #[test]
+    fn test_multiple_lines_explicit_gzip_q0_blocks_wildcard() {
+        let mut h = HeaderMap::new();
+        h.append(header::ACCEPT_ENCODING, "gzip;q=0".parse().unwrap());
+        h.append(header::ACCEPT_ENCODING, "*".parse().unwrap());
+        assert!(!client_accepts_gzip(&h));
+    }
+
+    #[test]
+    fn test_case_insensitive_gzip() {
+        let mut h = HeaderMap::new();
+        h.insert(header::ACCEPT_ENCODING, "GZIP".parse().unwrap());
+        assert!(client_accepts_gzip(&h));
     }
 }
