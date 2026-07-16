@@ -52,12 +52,12 @@ pub async fn build_state(config: &AppConfig) -> EyeResult<AppState> {
         ));
     }
 
+    #[cfg(feature = "sqlite")]
     let mut opt = ConnectOptions::new(db_url.to_string());
+    #[cfg(not(feature = "sqlite"))]
+    let opt = ConnectOptions::new(db_url.to_string());
+    #[cfg(feature = "sqlite")]
     if db_backend == crate::config::DatabaseBackend::Sqlite {
-        // SQLite uses a private in-memory DB per connection unless a shared-cache
-        // URL is given, and concurrent writes to a single file will surface
-        // "database is locked" errors unless the pool is bounded. Restrict the
-        // pool to one connection so the configured URL behaves predictably.
         opt.max_connections(1);
         opt.map_sqlx_sqlite_opts(|o| o.foreign_keys(true));
     }

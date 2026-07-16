@@ -177,17 +177,8 @@ mod test {
     use jsonwebtoken::jwk::Jwk;
     use sea_orm::{DatabaseBackend, MockDatabase, MockExecResult};
     use sea_orm_migration::MigratorTrait;
-    use testcontainers_modules::{
-        mysql::Mysql as MysqlImage,
-        testcontainers::{ContainerAsync, runners::AsyncRunner},
-    };
 
-    struct MysqlTestDb {
-        #[allow(dead_code)]
-        _container: ContainerAsync<MysqlImage>,
-        db: Arc<DatabaseConnection>,
-    }
-
+    #[cfg(feature = "sqlite")]
     async fn sqlite_connection() -> Arc<DatabaseConnection> {
         let mut opt = sea_orm::ConnectOptions::new("sqlite::memory:?cache=shared");
         opt.max_connections(1);
@@ -201,33 +192,49 @@ mod test {
         Arc::new(db)
     }
 
-    async fn mysql_connection() -> MysqlTestDb {
-        let node = MysqlImage::default()
-            .start()
-            .await
-            .expect("Failed to start MySQL container");
-        let mysql_url = format!(
-            "mysql://{}:{}/test",
-            node.get_host().await.expect("Failed to resolve MySQL host"),
-            node.get_host_port_ipv4(3306)
-                .await
-                .expect("Failed to resolve MySQL port")
-        );
+    #[cfg(feature = "mysql")]
+    mod mysql_helpers {
+        use super::*;
+        use testcontainers_modules::{
+            mysql::Mysql as MysqlImage,
+            testcontainers::{ContainerAsync, runners::AsyncRunner},
+        };
 
-        let mut opt = sea_orm::ConnectOptions::new(mysql_url);
-        opt.max_connections(5);
-        let db = sea_orm::Database::connect(opt)
-            .await
-            .expect("Failed to connect to MySQL");
-        crate::database::Migrator::up(&db, None)
-            .await
-            .expect("Failed to run migrations on MySQL");
-        MysqlTestDb {
-            _container: node,
-            db: Arc::new(db),
+        pub(super) struct MysqlTestDb {
+            #[allow(dead_code)]
+            pub(super) _container: ContainerAsync<MysqlImage>,
+            pub(super) db: Arc<DatabaseConnection>,
+        }
+
+        pub(super) async fn mysql_connection() -> MysqlTestDb {
+            let node = MysqlImage::default()
+                .start()
+                .await
+                .expect("Failed to start MySQL container");
+            let mysql_url = format!(
+                "mysql://{}:{}/test",
+                node.get_host().await.expect("Failed to resolve MySQL host"),
+                node.get_host_port_ipv4(3306)
+                    .await
+                    .expect("Failed to resolve MySQL port")
+            );
+
+            let mut opt = sea_orm::ConnectOptions::new(mysql_url);
+            opt.max_connections(5);
+            let db = sea_orm::Database::connect(opt)
+                .await
+                .expect("Failed to connect to MySQL");
+            crate::database::Migrator::up(&db, None)
+                .await
+                .expect("Failed to run migrations on MySQL");
+            MysqlTestDb {
+                _container: node,
+                db: Arc::new(db),
+            }
         }
     }
 
+    #[cfg(feature = "sqlite")]
     #[tokio::test]
     async fn test_sqlite_credentials_round_trip() {
         let db = sqlite_connection().await;
@@ -259,9 +266,10 @@ mod test {
         assert!(gone.is_none());
     }
 
+    #[cfg(feature = "mysql")]
     #[tokio::test]
     async fn test_mysql_credentials_round_trip() {
-        let test_db = mysql_connection().await;
+        let test_db = mysql_helpers::mysql_connection().await;
         let store = SeaOrmStore::<Credentials>::new(test_db.db.clone());
 
         let public_key: Jwk = serde_json::from_str(
@@ -286,6 +294,7 @@ mod test {
         assert!(deleted);
     }
 
+    #[cfg(feature = "sqlite")]
     #[tokio::test]
     async fn test_sqlite_status_list_round_trip() {
         let db = sqlite_connection().await;
@@ -453,59 +462,56 @@ mod test {
                     vec![credentials::Model {
                         issuer: entity.issuer.clone(),
                         public_key: entity.public_key.clone().into(),
-                    }], // Find after insert
+                    }],
                     vec![credentials::Model {
                         issuer: entity.issuer.clone(),
                         public_key: entity.public_key.clone().into(),
-                    }], // Find before update
+                    }],
                     vec![credentials::Model {
                         issuer: entity.issuer.clone(),
                         public_key: entity.public_key.clone().into(),
-                    }], // Update inner find
+                    }],
                     vec![credentials::Model {
                         issuer: updated_entity.issuer.clone(),
                         public_key: updated_entity.public_key.clone().into(),
-                    }], // Update return
+                    }],
                 ])
                 .append_exec_results(vec![
                     MockExecResult {
                         rows_affected: 1,
                         last_insert_id: 0,
-                    }, // Insert
+                    },
                     MockExecResult {
                         rows_affected: 1,
                         last_insert_id: 0,
-                    }, // Update
+                    },
                     MockExecResult {
                         rows_affected: 1,
                         last_insert_id: 0,
-                    }, // Delete
+                    },
                 ])
                 .into_connection(),
         );
 
         let store = SeaOrmStore::<Credentials>::new(db_conn);
 
-        // Insert
         store.insert_one(entity.clone()).await.unwrap();
 
-        // Find
         let credential = store.find_one_by("issuer1").await.unwrap().unwrap();
         assert_eq!(credential.issuer, "issuer1");
         assert_eq!(credential.public_key, public_key);
 
-        // Update
         let updated = store
             .update_one("issuer1", updated_entity.clone())
             .await
             .unwrap();
         assert!(updated);
 
-        // Delete
         let deleted = store.delete_by("issuer1").await.unwrap();
         assert!(deleted);
     }
 
+    #[cfg(feature = "sqlite")]
     #[tokio::test]
     async fn test_sqlite_negative_paths() {
         let db = sqlite_connection().await;
@@ -522,7 +528,6 @@ mod test {
         )
         .unwrap();
 
-        // Duplicate primary key: inserting the same issuer twice must fail.
         cred_store
             .insert_one(Credentials::new(
                 "issuer-neg-sqlite".to_string(),
@@ -538,7 +543,6 @@ mod test {
             .await;
         assert!(dup.is_err(), "duplicate PK insert should fail");
 
-        // Foreign-key violation: status list referencing an unknown issuer must fail.
         let rec = StatusListRecord {
             list_id: "list-neg-sqlite".to_string(),
             issuer: "nonexistent-issuer".to_string(),
@@ -551,7 +555,6 @@ mod test {
         let fk_err = store.insert_one(rec).await;
         assert!(fk_err.is_err(), "insert with dangling FK should fail");
 
-        // update_one on a missing row returns Ok(false), not an error.
         let missing = store
             .update_one(
                 "missing-list-sqlite",
@@ -569,7 +572,6 @@ mod test {
             .unwrap();
         assert!(!missing, "update on missing row should report no rows");
 
-        // Cleanup so parallel SQLite tests don't share stale rows.
         cred_store.delete_by("issuer-neg-sqlite").await.unwrap();
     }
 }
