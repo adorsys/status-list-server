@@ -15,7 +15,7 @@ type ACMEHttpClientFactory = Box<dyn Fn() -> Box<dyn HttpClient> + Send + Sync>;
 ///
 /// Defaults:
 /// - provisioning strategy: ACME
-/// - renewal strategy: [`RenewalStrategy::PercentageOfLifetime(None)`], which renews at 2/3 of the certificate lifetime
+/// - renewal strategy: `RenewalStrategy::PercentageOfLifetime(None)`, which renews at 2/3 of the certificate lifetime
 /// - ACME HTTP client: [`DefaultHttpClient`] for ACME, no client for store provisioning
 /// - email: empty string when omitted
 /// - organization: none
@@ -34,6 +34,8 @@ type ACMEHttpClientFactory = Box<dyn Fn() -> Box<dyn HttpClient> + Send + Sync>;
 ///
 /// Required for store provisioning:
 /// - a [`StoreProvisioningStrategy`] built from filesystem paths or storage keys
+///
+/// # Examples
 ///
 /// ACME example:
 /// ```ignore
