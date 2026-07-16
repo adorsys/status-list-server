@@ -23,6 +23,8 @@ use tower_http::{
     trace::TraceLayer,
 };
 
+use crate::web::rate_limit::IssuerKeyExtractor;
+
 /// Path of the aggregation route, as registered under `/api/v1`.
 const AGGREGATION_ROUTE_PATH: &str = "/api/v1/aggregation";
 
@@ -66,7 +68,8 @@ impl HttpServer {
 
         let max_body_size = config.limits.max_body_size_bytes;
 
-        let (strict_governor, permissive_governor) = build_governor_configs(&config.rate_limit);
+        let (strict_governor, issuer_governor, permissive_governor) =
+            build_governor_configs(&config.rate_limit);
 
         let mut router = Router::new()
             .route("/", get(welcome))
@@ -76,6 +79,7 @@ impl HttpServer {
                 api_v1_routes(
                     state.clone(),
                     strict_governor.clone(),
+                    issuer_governor.clone(),
                     permissive_governor.clone(),
                     max_body_size,
                 ),
@@ -106,9 +110,10 @@ impl HttpServer {
     }
 }
 
-/// Pair of strict/permissive governor configs keyed on the peer IP.
+/// Strict (writes), per-issuer (auth-protected writes), and permissive (reads) governor configs.
 type GovernorPolicies = (
     Arc<GovernorConfig<PeerIpKeyExtractor, NoOpMiddleware>>,
+    Arc<GovernorConfig<IssuerKeyExtractor, NoOpMiddleware>>,
     Arc<GovernorConfig<PeerIpKeyExtractor, NoOpMiddleware>>,
 );
 
@@ -120,6 +125,14 @@ fn build_governor_configs(config: &crate::config::RateLimitConfig) -> GovernorPo
             .finish()
             .expect("strict governor config requires non-zero burst_size and period"),
     );
+    let issuer = Arc::new(
+        GovernorConfigBuilder::default()
+            .burst_size(config.strict_burst_size)
+            .period(Duration::from_secs(config.strict_period_secs))
+            .key_extractor(IssuerKeyExtractor)
+            .finish()
+            .expect("issuer governor config requires non-zero burst_size and period"),
+    );
     let permissive = Arc::new(
         GovernorConfigBuilder::default()
             .burst_size(config.permissive_burst_size)
@@ -127,13 +140,14 @@ fn build_governor_configs(config: &crate::config::RateLimitConfig) -> GovernorPo
             .finish()
             .expect("permissive governor config requires non-zero burst_size and period"),
     );
-    (strict, permissive)
+    (strict, issuer, permissive)
 }
 
 /// Management API v1 routes with per-tier rate limiting and body-size bounds.
 fn api_v1_routes(
     state: AppState,
     strict_governor: Arc<GovernorConfig<PeerIpKeyExtractor, NoOpMiddleware>>,
+    issuer_governor: Arc<GovernorConfig<IssuerKeyExtractor, NoOpMiddleware>>,
     permissive_governor: Arc<GovernorConfig<PeerIpKeyExtractor, NoOpMiddleware>>,
     max_body_size: usize,
 ) -> Router<AppState> {
@@ -147,7 +161,7 @@ fn api_v1_routes(
                 .route("/", patch(update_status)),
         )
         .route_layer(from_fn_with_state(state.clone(), auth))
-        .layer(GovernorLayer::new(strict_governor.clone()))
+        .layer(GovernorLayer::new(issuer_governor))
         .layer(body_limit);
 
     let credentials = Router::new()
@@ -225,6 +239,8 @@ mod tests {
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
     use std::sync::Arc;
     use tower::ServiceExt;
+
+    use crate::web::rate_limit::IssuerKeyExtractor;
 
     #[sealed_test(env = [
         ("APP_SERVER__AGGREGATION_URI", "https://statuslist.example.com/api/v1/aggregation"),
@@ -386,5 +402,73 @@ mod tests {
 
         let response = router.oneshot(request).await.unwrap();
         assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    /// Per-issuer governor: two different issuers get independent rate-limit
+    /// buckets even from the same IP (#171).
+    #[tokio::test]
+    async fn test_per_issuer_governor_independent_quotas() {
+        async fn handler() -> impl IntoResponse {
+            "ok"
+        }
+        let router = Router::new();
+
+        let governor = Arc::new(
+            GovernorConfigBuilder::default()
+                .burst_size(1)
+                .period(Duration::from_secs(600))
+                .key_extractor(IssuerKeyExtractor)
+                .finish()
+                .expect("non-zero burst/period"),
+        );
+
+        let router = router
+            .route("/write", axum::routing::put(handler))
+            .layer(GovernorLayer::new(governor))
+            .with_state(());
+
+        let ci =
+            axum::extract::ConnectInfo(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 12345));
+
+        fn make_request(auth: &str, ci: axum::extract::ConnectInfo<SocketAddr>) -> Request<Body> {
+            Request::builder()
+                .method(Method::PUT)
+                .uri("/write")
+                .header("authorization", auth)
+                .extension(ci)
+                .body(Body::empty())
+                .unwrap()
+        }
+
+        fn dummy_jwt(iss: &str) -> String {
+            let header = base64url::encode(br#"{"alg":"ES256"}"#);
+            let payload_json = format!(r#"{{"iss":"{iss}","exp":9999999999}}"#);
+            let payload = base64url::encode(payload_json.as_bytes());
+            format!("Bearer {header}.{payload}.sig")
+        }
+
+        let issuer_a = dummy_jwt("issuer-a");
+        let issuer_b = dummy_jwt("issuer-b");
+
+        let resp = router
+            .clone()
+            .oneshot(make_request(&issuer_a, ci))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let resp = router
+            .clone()
+            .oneshot(make_request(&issuer_b, ci))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let resp = router
+            .clone()
+            .oneshot(make_request(&issuer_a, ci))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
     }
 }
