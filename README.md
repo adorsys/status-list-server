@@ -169,7 +169,7 @@ cargo test
 The server's configuration is normally loaded from the process environment
 (see [`.env.template`](.env.template) and [`Config::load`](src/config.rs)).
 In tests we must never mutate the process-wide environment, because
-`std::env::set_var` / `std::env::remove_var became `unsafe` on recent Rust
+`std::env::set_var` / `std::env::remove_var` became `unsafe` on recent Rust
 toolchains and our project does not introduce `unsafe` code.
 
 Instead, tests override configuration through an in-memory source that is
