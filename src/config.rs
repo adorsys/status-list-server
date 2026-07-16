@@ -363,8 +363,9 @@ impl Config {
 /// Returns a `config::ConfigBuilder` seeded with the built-in default values.
 ///
 /// Both production loading (via [`Config::load`]) and test loading (via
-/// [`Config::load_from_overrides`]) start from this shared set of defaults so
-/// that there is exactly one source of truth for the default configuration.
+/// `Config::load_from_overrides`, gated on `#[cfg(test)]`) start from this
+/// shared set of defaults so that there is exactly one source of truth for the
+/// default configuration.
 fn base_builder() -> ConfigBuilder<DefaultState> {
     ConfigLib::builder()
         .set_default("server.host", "localhost")
