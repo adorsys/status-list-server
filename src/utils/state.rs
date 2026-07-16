@@ -333,17 +333,9 @@ async fn build_dns_challenge_handler(
                 cfg.default_account().as_ref().map(acme_dns_credentials),
                 accounts,
             )?;
-            // Catch a credentials gap for any ordered domain at startup
-            // instead of at the first renewal
-            if let Some(domain) = cert_domains
-                .iter()
-                .find(|domain| !provider.has_credentials_for(domain))
-            {
-                return Err(eyre!(
-                    "ACME-DNS settings provide no account for domain {domain} \
-                     and no default account"
-                ));
-            }
+            // Catch a credentials gap or an overloaded two-value TXT window
+            // for the ordered domains at startup instead of at the first renewal
+            provider.check_order_domains(cert_domains)?;
             Dns01Handler::new(provider)
         }
         DnsProviderKind::Pebble => {
@@ -538,6 +530,43 @@ mod tests {
             .err()
             .expect("conflicting account entries must fail the boot-path builder");
         assert!(err.to_string().contains("Conflicting ACME-DNS accounts"));
+    }
+
+    #[sealed_test]
+    fn acme_dns_rejects_three_cert_domains_on_one_account() {
+        let sdk = test_sdk_config();
+        let mut config = AppConfig::load().expect("Failed to load config");
+        let domains = ["a.example.com", "b.example.com", "c.example.com"];
+
+        // All three fall back to the default account, whose two-value TXT
+        // window cannot hold three digests at once
+        config.server.cert.dns.acmedns = Some(AcmeDnsConfig {
+            server_url: "https://auth.example.org".into(),
+            username: Some("user".into()),
+            password: Some("password".into()),
+            subdomain: Some("subdomain".into()),
+            accounts: Default::default(),
+        });
+
+        let err = build_dns_challenge_handler(DnsProviderKind::Acmedns, &config, &sdk, &domains)
+            .err()
+            .expect("three identifiers on one account must fail the boot-path builder");
+        assert!(err.to_string().contains("two most recent TXT values"));
+
+        // Mapping one of them to its own account restores a valid setup
+        if let Some(acmedns) = &mut config.server.cert.dns.acmedns {
+            acmedns.accounts.insert(
+                "c.example.com".to_string(),
+                crate::config::AcmeDnsAccount {
+                    username: "user-c".into(),
+                    password: "password-c".into(),
+                    subdomain: "subdomain-c".into(),
+                },
+            );
+        }
+        assert!(
+            build_dns_challenge_handler(DnsProviderKind::Acmedns, &config, &sdk, &domains).is_ok()
+        );
     }
 
     #[test]

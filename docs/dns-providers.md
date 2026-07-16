@@ -121,7 +121,12 @@ Keys are matched case-insensitively, ignoring any trailing dot; two entries
 that reduce to the same domain but hold different credentials are rejected
 at startup. Domains without an entry fall back to the default account; at
 least one of the two must be configured. The server fails at startup when
-the configured server domain is covered by neither.
+a certificate domain is covered by neither, or when one account would have
+to serve more than two identifiers of the certificate at once.
+
+All accounts must be registered on the one ACME-DNS server named by
+`SERVER_URL`; spreading accounts across multiple ACME-DNS servers is not
+supported.
 
 ## Pebble (`pebble`)
 

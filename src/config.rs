@@ -1,4 +1,4 @@
-use std::{collections::HashMap, time::Duration};
+use std::{collections::HashMap, fmt, marker::PhantomData, time::Duration};
 
 use config::{Config as ConfigLib, ConfigError, Environment};
 use redis::{
@@ -243,6 +243,34 @@ impl AcmeDnsConfig {
                     .to_string(),
             ));
         }
+        // Reject unusable per-domain entries here instead of as an opaque
+        // HTTP 401 at the first renewal
+        for (domain, account) in &self.accounts {
+            let name = domain.trim();
+            let name = name.strip_prefix("*.").unwrap_or(name);
+            if name.trim_end_matches('.').is_empty() {
+                return Err(ConfigError::Message(format!(
+                    "ACME-DNS accounts entry {domain:?} does not name a domain"
+                )));
+            }
+            let empty: Vec<&str> = [
+                ("username", account.username.trim().is_empty()),
+                (
+                    "password",
+                    account.password.expose_secret().trim().is_empty(),
+                ),
+                ("subdomain", account.subdomain.trim().is_empty()),
+            ]
+            .into_iter()
+            .filter_map(|(field, is_empty)| is_empty.then_some(field))
+            .collect();
+            if !empty.is_empty() {
+                return Err(ConfigError::Message(format!(
+                    "ACME-DNS account for {domain} has empty required fields: {}",
+                    empty.join(", ")
+                )));
+            }
+        }
         Ok(())
     }
 }
@@ -257,18 +285,37 @@ where
     D: serde::Deserializer<'de>,
     V: serde::de::DeserializeOwned,
 {
-    #[derive(Deserialize)]
-    #[serde(untagged)]
-    enum MapOrString<V> {
-        Map(HashMap<String, V>),
-        String(String),
+    // A visitor (rather than an untagged enum) so errors inside a map value
+    // surface as-is instead of as "did not match any variant"
+    struct MapOrString<V>(PhantomData<V>);
+
+    impl<'de, V: serde::de::DeserializeOwned> serde::de::Visitor<'de> for MapOrString<V> {
+        type Value = HashMap<String, V>;
+
+        fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+            formatter.write_str("a map or a JSON object string")
+        }
+
+        fn visit_str<E: serde::de::Error>(self, raw: &str) -> Result<Self::Value, E> {
+            if raw.trim().is_empty() {
+                return Ok(HashMap::new());
+            }
+            serde_json::from_str(raw).map_err(E::custom)
+        }
+
+        fn visit_map<A: serde::de::MapAccess<'de>>(
+            self,
+            mut access: A,
+        ) -> Result<Self::Value, A::Error> {
+            let mut map = HashMap::with_capacity(access.size_hint().unwrap_or(0));
+            while let Some((key, value)) = access.next_entry()? {
+                map.insert(key, value);
+            }
+            Ok(map)
+        }
     }
 
-    match MapOrString::deserialize(deserializer)? {
-        MapOrString::Map(map) => Ok(map),
-        MapOrString::String(raw) if raw.trim().is_empty() => Ok(HashMap::new()),
-        MapOrString::String(raw) => serde_json::from_str(&raw).map_err(serde::de::Error::custom),
-    }
+    deserializer.deserialize_any(MapOrString(PhantomData))
 }
 
 impl AzureDnsConfig {
@@ -764,6 +811,45 @@ mod tests {
         };
         let err = dns.resolve("production").unwrap_err();
         assert!(err.to_string().contains("dns.gcloud"));
+    }
+
+    #[test]
+    fn test_acme_dns_rejects_unusable_account_entries() {
+        let acmedns = |accounts: HashMap<String, AcmeDnsAccount>| DnsConfig {
+            provider: Some(DnsProviderKind::Acmedns),
+            acmedns: Some(AcmeDnsConfig {
+                server_url: "https://auth.example.org".into(),
+                username: None,
+                password: None,
+                subdomain: None,
+                accounts,
+            }),
+            ..Default::default()
+        };
+        let account = |username: &str, subdomain: &str| AcmeDnsAccount {
+            username: username.into(),
+            password: "password".into(),
+            subdomain: subdomain.into(),
+        };
+
+        // An entry with empty fields is rejected, naming the domain and fields
+        let dns = acmedns([("status.example.com".to_string(), account("", " "))].into());
+        let err = dns.resolve("production").unwrap_err().to_string();
+        assert!(err.contains("status.example.com"));
+        assert!(err.contains("username"));
+        assert!(err.contains("subdomain"));
+        assert!(!err.contains("password"));
+
+        // A key that does not name a domain is rejected
+        for key in ["", "  ", "*.", "."] {
+            let dns = acmedns([(key.to_string(), account("user", "sub"))].into());
+            let err = dns.resolve("production").unwrap_err().to_string();
+            assert!(err.contains("does not name a domain"), "key {key:?}: {err}");
+        }
+
+        // A usable entry passes
+        let dns = acmedns([("status.example.com".to_string(), account("user", "sub"))].into());
+        assert_eq!(dns.resolve("production").unwrap(), DnsProviderKind::Acmedns);
     }
 
     #[sealed_test(env = [

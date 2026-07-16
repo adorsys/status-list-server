@@ -106,6 +106,32 @@ impl AcmeDnsProvider {
         self.credentials_for(domain).is_ok()
     }
 
+    /// Validate that a certificate order for `domains` can succeed: every
+    /// domain must resolve to an account, and no account may serve more than
+    /// two of them, since a third digest would rotate the first out of the
+    /// account's two-value TXT window before the CA validates it. Meant to
+    /// run at startup, so the gap is caught before the first renewal.
+    pub fn check_order_domains(&self, domains: &[&str]) -> Result<(), ChallengeError> {
+        let mut by_account: HashMap<&str, Vec<&str>> = HashMap::new();
+        for domain in domains {
+            let account = self.credentials_for(domain)?;
+            by_account
+                .entry(account.subdomain.as_str())
+                .or_default()
+                .push(domain);
+        }
+        if let Some((subdomain, domains)) = by_account.iter().find(|(_, d)| d.len() > 2) {
+            return Err(dns_err(eyre!(
+                "The ACME-DNS account with subdomain {subdomain} would serve {} identifiers \
+                 ({}), but ACME-DNS keeps only the two most recent TXT values; register a \
+                 separate account per domain in the accounts map",
+                domains.len(),
+                domains.join(", "),
+            )));
+        }
+        Ok(())
+    }
+
     /// Select the account for a domain: per-domain entry first, then the default
     fn credentials_for(&self, domain: &str) -> Result<&AcmeDnsCredentials, ChallengeError> {
         self.accounts
@@ -144,7 +170,12 @@ impl DnsProvider for AcmeDnsProvider {
             )));
         }
 
-        info!("ACME-DNS TXT record updated for {domain}");
+        // Naming the subdomain makes a wrong account selection (e.g. a typoed
+        // map key silently falling back to the default) visible in the logs
+        info!(
+            "ACME-DNS TXT record updated for {domain} via subdomain {}",
+            account.subdomain
+        );
         Ok(())
     }
 
@@ -322,6 +353,92 @@ mod tests {
             .create_txt_record("other.example.com", "digest-value")
             .await
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn mapped_account_wins_over_the_default() {
+        let server = MockServer::start().await;
+        let (default, mapped) = (account("default"), account("mapped"));
+        // Only the mapped account may be used; a request authenticated as the
+        // default account would not match this mock and fail the test
+        expect_update(&server, &mapped, "digest-value").await;
+
+        let provider = AcmeDnsProvider::new(
+            server.uri(),
+            Some(default),
+            HashMap::from([("mapped.example.com".to_string(), mapped)]),
+        )
+        .unwrap();
+
+        provider
+            .create_txt_record("mapped.example.com", "digest-value")
+            .await
+            .unwrap();
+    }
+
+    #[test]
+    fn check_order_domains_rejects_three_identifiers_on_one_account() {
+        let provider = AcmeDnsProvider::new(
+            "https://auth.example.org",
+            Some(account("default")),
+            HashMap::new(),
+        )
+        .unwrap();
+
+        // An apex + wildcard pair fits the account's two-value TXT window
+        provider
+            .check_order_domains(&["example.com", "*.example.com"])
+            .unwrap();
+
+        // A third identifier on the same account would rotate a digest out
+        let err = provider
+            .check_order_domains(&["a.example.com", "b.example.com", "c.example.com"])
+            .unwrap_err();
+        match err {
+            ChallengeError::Dns { provider, source } => {
+                assert_eq!(provider, "acmedns");
+                let message = source.to_string();
+                assert!(message.contains("sub-default"));
+                assert!(message.contains("a.example.com, b.example.com, c.example.com"));
+            }
+            other => panic!("Unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn check_order_domains_passes_when_identifiers_spread_across_accounts() {
+        // Two identifiers on the default plus one mapped: every two-value
+        // window holds at most two digests
+        let provider = AcmeDnsProvider::new(
+            "https://auth.example.org",
+            Some(account("default")),
+            HashMap::from([("c.example.com".to_string(), account("c"))]),
+        )
+        .unwrap();
+
+        provider
+            .check_order_domains(&["a.example.com", "b.example.com", "c.example.com"])
+            .unwrap();
+    }
+
+    #[test]
+    fn check_order_domains_reports_the_uncovered_domain() {
+        let provider = AcmeDnsProvider::new(
+            "https://auth.example.org",
+            None,
+            HashMap::from([("mapped.example.com".to_string(), account("mapped"))]),
+        )
+        .unwrap();
+
+        let err = provider
+            .check_order_domains(&["other.example.com"])
+            .unwrap_err();
+        match err {
+            ChallengeError::Dns { source, .. } => {
+                assert!(source.to_string().contains("other.example.com"));
+            }
+            other => panic!("Unexpected error: {other:?}"),
+        }
     }
 
     #[tokio::test]
