@@ -108,7 +108,7 @@ pub async fn build_state(config: &AppConfig) -> EyeResult<AppState> {
     // ACME order and the challenge handler's startup coverage checks
     let cert_domains = [config.server.domain.as_str()];
     let challenge_handler =
-        build_dns_challenge_handler(dns_provider, config, &aws_config, &cert_domains)?;
+        build_dns_challenge_handler(dns_provider, config, &aws_config, &cert_domains).await?;
 
     // Initialize the storage backends for the certificate manager
     let cache = Redis::new(redis_conn.clone()).with_ttl(config.redis.cert_cache_ttl);
@@ -264,7 +264,7 @@ fn store_certificate_strategy(config: &AppConfig) -> EyeResult<Option<StoreProvi
 ///
 /// `cert_domains` are the domains certificates will be ordered for, used to
 /// validate at startup that the provider can serve challenges for them.
-fn build_dns_challenge_handler(
+async fn build_dns_challenge_handler(
     provider: DnsProviderKind,
     config: &AppConfig,
     aws_config: &SdkConfig,
@@ -285,9 +285,19 @@ fn build_dns_challenge_handler(
                 .gcloud
                 .as_ref()
                 .ok_or_else(|| eyre!("Missing Google Cloud DNS settings"))?;
-            let key_json = match (&cfg.service_account_key, &cfg.service_account_key_path) {
+            // Empty values count as unset, matching DnsConfig::resolve
+            let inline = cfg
+                .service_account_key
+                .as_ref()
+                .filter(|k| !k.expose_secret().trim().is_empty());
+            let path = cfg
+                .service_account_key_path
+                .as_deref()
+                .filter(|p| !p.trim().is_empty());
+            let key_json = match (inline, path) {
                 (Some(key), _) => key.expose_secret().to_string(),
-                (None, Some(path)) => std::fs::read_to_string(path)
+                (None, Some(path)) => tokio::fs::read_to_string(path)
+                    .await
                     .wrap_err_with(|| format!("Failed to read service account key at {path}"))?,
                 (None, None) => return Err(eyre!("Missing Google Cloud service account key")),
             };
@@ -367,6 +377,24 @@ mod tests {
         SdkConfig::builder()
             .behavior_version(BehaviorVersion::latest())
             .build()
+    }
+
+    // Sync wrapper shadowing the async builder: sealed tests fork the
+    // process and run without an async runtime
+    fn build_dns_challenge_handler(
+        provider: DnsProviderKind,
+        config: &AppConfig,
+        aws_config: &SdkConfig,
+        cert_domains: &[&str],
+    ) -> EyeResult<Dns01Handler> {
+        tokio::runtime::Runtime::new()
+            .expect("failed to build test runtime")
+            .block_on(super::build_dns_challenge_handler(
+                provider,
+                config,
+                aws_config,
+                cert_domains,
+            ))
     }
 
     #[sealed_test]

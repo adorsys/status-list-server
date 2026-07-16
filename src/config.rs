@@ -195,25 +195,39 @@ pub struct AcmeDnsAccount {
     pub subdomain: String,
 }
 
+/// Treat unset and empty (e.g. an env var set to an empty string) alike
+fn non_empty(value: &Option<String>) -> Option<&String> {
+    value.as_ref().filter(|v| !v.trim().is_empty())
+}
+
 impl AcmeDnsConfig {
     /// The default account, when username, password and subdomain are all set
+    /// (empty values count as unset)
     pub fn default_account(&self) -> Option<AcmeDnsAccount> {
-        match (&self.username, &self.password, &self.subdomain) {
-            (Some(username), Some(password), Some(subdomain)) => Some(AcmeDnsAccount {
-                username: username.clone(),
-                password: password.clone(),
-                subdomain: subdomain.clone(),
-            }),
-            _ => None,
-        }
+        let password = self
+            .password
+            .as_ref()
+            .filter(|p| !p.expose_secret().trim().is_empty())?;
+        Some(AcmeDnsAccount {
+            username: non_empty(&self.username)?.clone(),
+            password: password.clone(),
+            subdomain: non_empty(&self.subdomain)?.clone(),
+        })
     }
 
     /// Validate that the settings describe at least one usable account
     fn validate(&self) -> Result<(), ConfigError> {
+        if self.server_url.trim().is_empty() {
+            return Err(ConfigError::Message(
+                "ACME-DNS settings have an empty server_url".to_string(),
+            ));
+        }
         let set = [
-            self.username.is_some(),
-            self.password.is_some(),
-            self.subdomain.is_some(),
+            non_empty(&self.username).is_some(),
+            self.password
+                .as_ref()
+                .is_some_and(|p| !p.expose_secret().trim().is_empty()),
+            non_empty(&self.subdomain).is_some(),
         ];
         if set.iter().any(|&s| s) && !set.iter().all(|&s| s) {
             return Err(ConfigError::Message(
@@ -257,6 +271,44 @@ where
     }
 }
 
+impl AzureDnsConfig {
+    /// Reject empty required fields so misconfigurations fail at startup
+    /// instead of surfacing as opaque API errors at the first renewal
+    fn validate(&self) -> Result<(), ConfigError> {
+        let empty: Vec<&str> = [
+            ("tenant_id", self.tenant_id.trim().is_empty()),
+            ("client_id", self.client_id.trim().is_empty()),
+            (
+                "client_secret",
+                self.client_secret.expose_secret().trim().is_empty(),
+            ),
+            ("subscription_id", self.subscription_id.trim().is_empty()),
+            ("resource_group", self.resource_group.trim().is_empty()),
+        ]
+        .into_iter()
+        .filter_map(|(name, is_empty)| is_empty.then_some(name))
+        .collect();
+        if !empty.is_empty() {
+            return Err(ConfigError::Message(format!(
+                "Azure DNS settings have empty required fields: {}",
+                empty.join(", ")
+            )));
+        }
+        Ok(())
+    }
+}
+
+impl CloudflareDnsConfig {
+    fn validate(&self) -> Result<(), ConfigError> {
+        if self.api_token.expose_secret().trim().is_empty() {
+            return Err(ConfigError::Message(
+                "Cloudflare DNS settings have an empty api_token".to_string(),
+            ));
+        }
+        Ok(())
+    }
+}
+
 impl DnsConfig {
     /// Resolve the DNS provider to use and validate that its settings are present.
     pub fn resolve(&self, app_env: &str) -> Result<DnsProviderKind, ConfigError> {
@@ -270,7 +322,10 @@ impl DnsConfig {
             DnsProviderKind::Cloudflare if self.cloudflare.is_none() => Some("dns.cloudflare"),
             DnsProviderKind::Gcloud
                 if self.gcloud.as_ref().is_none_or(|g| {
-                    g.service_account_key.is_none() && g.service_account_key_path.is_none()
+                    g.service_account_key
+                        .as_ref()
+                        .is_none_or(|k| k.expose_secret().trim().is_empty())
+                        && non_empty(&g.service_account_key_path).is_none()
                 }) =>
             {
                 Some("dns.gcloud")
@@ -284,10 +339,23 @@ impl DnsConfig {
                 "DNS provider {kind:?} selected but the server.cert.{section} settings are missing"
             )));
         }
-        if kind == DnsProviderKind::Acmedns
-            && let Some(acmedns) = &self.acmedns
-        {
-            acmedns.validate()?;
+        match kind {
+            DnsProviderKind::Cloudflare => {
+                if let Some(cloudflare) = &self.cloudflare {
+                    cloudflare.validate()?;
+                }
+            }
+            DnsProviderKind::Azure => {
+                if let Some(azure) = &self.azure {
+                    azure.validate()?;
+                }
+            }
+            DnsProviderKind::Acmedns => {
+                if let Some(acmedns) = &self.acmedns {
+                    acmedns.validate()?;
+                }
+            }
+            _ => {}
         }
         Ok(kind)
     }
@@ -618,6 +686,84 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(dns.resolve("production").unwrap(), DnsProviderKind::Gcloud);
+    }
+
+    #[test]
+    fn test_dns_provider_rejects_empty_required_fields() {
+        // Azure names exactly the empty fields
+        let azure = |tenant_id: &str, subscription_id: &str| DnsConfig {
+            provider: Some(DnsProviderKind::Azure),
+            azure: Some(AzureDnsConfig {
+                tenant_id: tenant_id.into(),
+                client_id: "client".into(),
+                client_secret: "secret".into(),
+                subscription_id: subscription_id.into(),
+                resource_group: "rg".into(),
+            }),
+            ..Default::default()
+        };
+        let err = azure("", " ")
+            .resolve("production")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("tenant_id"));
+        assert!(err.contains("subscription_id"));
+        assert!(!err.contains("client_id"));
+        assert_eq!(
+            azure("tenant", "sub").resolve("production").unwrap(),
+            DnsProviderKind::Azure
+        );
+
+        // Cloudflare rejects an empty api_token
+        let dns = DnsConfig {
+            provider: Some(DnsProviderKind::Cloudflare),
+            cloudflare: Some(CloudflareDnsConfig {
+                api_token: "".into(),
+            }),
+            ..Default::default()
+        };
+        let err = dns.resolve("production").unwrap_err();
+        assert!(err.to_string().contains("api_token"));
+
+        // ACME-DNS rejects an empty server_url
+        let acmedns = |cfg: AcmeDnsConfig| DnsConfig {
+            provider: Some(DnsProviderKind::Acmedns),
+            acmedns: Some(cfg),
+            ..Default::default()
+        };
+        let dns = acmedns(AcmeDnsConfig {
+            server_url: " ".into(),
+            username: Some("user".into()),
+            password: Some("password".into()),
+            subdomain: Some("subdomain".into()),
+            accounts: Default::default(),
+        });
+        let err = dns.resolve("production").unwrap_err();
+        assert!(err.to_string().contains("server_url"));
+
+        // An empty default-account field counts as unset, so the account
+        // is partial rather than silently unusable
+        let dns = acmedns(AcmeDnsConfig {
+            server_url: "https://auth.example.org".into(),
+            username: Some("user".into()),
+            password: Some("password".into()),
+            subdomain: Some("".into()),
+            accounts: Default::default(),
+        });
+        let err = dns.resolve("production").unwrap_err();
+        assert!(err.to_string().contains("must be set together"));
+
+        // Gcloud with both key sources empty counts as missing
+        let dns = DnsConfig {
+            provider: Some(DnsProviderKind::Gcloud),
+            gcloud: Some(GcloudDnsConfig {
+                service_account_key: Some("".into()),
+                service_account_key_path: Some(" ".into()),
+            }),
+            ..Default::default()
+        };
+        let err = dns.resolve("production").unwrap_err();
+        assert!(err.to_string().contains("dns.gcloud"));
     }
 
     #[sealed_test(env = [
