@@ -95,7 +95,7 @@ pub async fn update_status(
     Ok(StatusCode::OK.into_response())
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "postgres"))]
 mod test {
     use super::*;
     use crate::web::handlers::status_list::error::StatusListError;

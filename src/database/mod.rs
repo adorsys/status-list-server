@@ -1,9 +1,11 @@
 pub(crate) mod error;
 pub(crate) mod queries;
 
+#[cfg(feature = "postgres")]
 pub(crate) use migrations::Migrator;
 
 /// Database migrations module
+#[cfg(feature = "postgres")]
 pub(crate) mod migrations {
     use sea_orm_migration::prelude::*;
 

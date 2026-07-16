@@ -74,7 +74,7 @@ pub async fn publish_status(
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "postgres"))]
 mod tests {
     use super::*;
     use crate::web::handlers::status_list::error::StatusListError;

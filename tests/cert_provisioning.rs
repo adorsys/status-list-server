@@ -5,6 +5,10 @@
 //! - **challtestsrv** (DNS server for Pebble)
 //! - **LocalStack** (S3 + Secrets Manager)
 //! - **Redis** (S3 cache layer)
+//!
+//! Note: These tests require the `aws-s3`, `aws-secrets`, and `redis` features.
+
+#![cfg(all(feature = "aws-s3", feature = "aws-secrets", feature = "redis"))]
 
 use std::{sync::Arc, time::Duration};
 
@@ -190,6 +194,7 @@ impl TestInfra {
 }
 
 #[tokio::test]
+#[cfg(all(feature = "aws-s3", feature = "aws-secrets", feature = "redis"))]
 async fn test_full_certificate_provisioning() {
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 
@@ -247,6 +252,7 @@ async fn test_full_certificate_provisioning() {
 }
 
 #[tokio::test]
+#[cfg(all(feature = "aws-s3", feature = "aws-secrets", feature = "redis"))]
 async fn test_certificate_renewal_with_existing_cert() {
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 

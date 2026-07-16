@@ -1,17 +1,23 @@
+#[cfg(any(feature = "aws-s3", feature = "aws-secrets"))]
 mod aws;
+mod memory;
+#[cfg(feature = "redis")]
 mod redis;
 
+#[cfg(feature = "redis")]
 pub use crate::utils::cert_manager::storage::redis::Redis;
-use ::redis::RedisError;
 use async_trait::async_trait;
+#[cfg(any(feature = "aws-s3", feature = "aws-secrets"))]
 pub use aws::{AwsS3, AwsSecretsManager};
 use color_eyre::eyre::Error as Report;
+pub use memory::MemoryStorage;
 use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum StorageError {
+    #[cfg(feature = "redis")]
     #[error("Redis error: {0}")]
-    Redis(#[from] RedisError),
+    Redis(#[from] ::redis::RedisError),
 
     #[error("AWS SDK error: {0}")]
     AwsSdk(#[source] Report),

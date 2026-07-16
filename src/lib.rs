@@ -1,5 +1,5 @@
 mod database;
-#[cfg(test)]
+#[cfg(all(test, feature = "postgres"))]
 mod test_utils;
 mod utils;
 

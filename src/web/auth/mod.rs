@@ -66,7 +66,7 @@ pub async fn auth(
     Ok(next.run(request).await)
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "postgres"))]
 mod tests {
     use super::*;
     use crate::{models::credentials, test_utils::test_app_state, utils::state::AppState};

@@ -1,7 +1,11 @@
-use std::{sync::Arc, time::Duration};
+use std::sync::Arc;
+#[cfg(feature = "dns-route53")]
+use std::time::Duration;
 
 use async_trait::async_trait;
+#[cfg(feature = "dns-route53")]
 use aws_config::SdkConfig;
+#[cfg(feature = "dns-route53")]
 use aws_sdk_route53::{
     Client as Route53Client,
     types::{
@@ -13,7 +17,9 @@ use color_eyre::eyre::eyre;
 use instant_acme::{AuthorizationHandle, ChallengeType};
 use reqwest::Client;
 use serde_json::json;
+#[cfg(feature = "dns-route53")]
 use tokio::sync::RwLock;
+#[cfg(feature = "dns-route53")]
 use tracing::info;
 
 use crate::cert_manager::challenge::{ChallengeError, ChallengeHandler, CleanupFuture};
@@ -74,11 +80,13 @@ impl From<instant_acme::Error> for ChallengeError {
 }
 
 /// A DNS updater for AWS Route 53
+#[cfg(feature = "dns-route53")]
 pub struct AwsRoute53DnsUpdater {
     client: Route53Client,
     zones: Arc<RwLock<Option<Vec<ZoneInfo>>>>,
 }
 
+#[cfg(feature = "dns-route53")]
 impl AwsRoute53DnsUpdater {
     const TXT_TTL: i64 = 60;
     const PROPAGATION_INITIAL_DELAY: Duration = Duration::from_secs(2);
@@ -293,11 +301,13 @@ impl AwsRoute53DnsUpdater {
 }
 
 #[derive(Debug, Clone)]
+#[cfg(feature = "dns-route53")]
 struct ZoneInfo {
     name: String,
     id: String,
 }
 
+#[cfg(feature = "dns-route53")]
 impl ZoneInfo {
     fn new(z: &HostedZone) -> Self {
         let trimmed = z.name().trim_end_matches('.').to_string();
@@ -309,6 +319,7 @@ impl ZoneInfo {
 }
 
 #[async_trait]
+#[cfg(feature = "dns-route53")]
 impl DnsUpdater for AwsRoute53DnsUpdater {
     async fn upsert_record(&self, domain: &str, value: &str) -> Result<(), ChallengeError> {
         // Try to upsert the record in Route53
@@ -329,6 +340,173 @@ impl DnsUpdater for AwsRoute53DnsUpdater {
             .await?;
 
         info!("DNS record {record_name} deleted for {domain}");
+        Ok(())
+    }
+}
+
+/// A DNS updater for Cloudflare
+#[cfg(feature = "dns-cloudflare")]
+pub struct CloudflareDnsUpdater {
+    client: Client,
+    api_token: String,
+    zone_id: String,
+}
+
+#[cfg(feature = "dns-cloudflare")]
+impl CloudflareDnsUpdater {
+    const TXT_TTL: i32 = 60;
+
+    /// Create a new Cloudflare DNS updater with the given API token and zone ID.
+    ///
+    /// The API token needs the "Zone:Edit" permission for the target zone.
+    pub fn new(api_token: impl Into<String>, zone_id: impl Into<String>) -> Self {
+        Self {
+            client: Client::new(),
+            api_token: api_token.into(),
+            zone_id: zone_id.into(),
+        }
+    }
+
+    /// Find or create a TXT record for the ACME challenge.
+    /// Returns the record ID if found.
+    async fn find_txt_record(&self, name: &str) -> Result<Option<String>, ChallengeError> {
+        let url = format!(
+            "https://api.cloudflare.com/client/v4/zones/{}/dns_records",
+            self.zone_id
+        );
+
+        let response = self
+            .client
+            .get(&url)
+            .header("Authorization", format!("Bearer {}", self.api_token))
+            .query(&[("type", "TXT"), ("name", name)])
+            .send()
+            .await
+            .map_err(|e| ChallengeError::Other(eyre!("Failed to query Cloudflare API: {e}")))?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response
+                .text()
+                .await
+                .unwrap_or_default();
+            return Err(ChallengeError::Other(eyre!(
+                "Cloudflare API returned error status {status}: {body}"
+            )));
+        }
+
+        let json: serde_json::Value = response
+            .json()
+            .await
+            .map_err(|e| ChallengeError::Other(eyre!("Failed to parse Cloudflare response: {e}")))?;
+
+        let result = json
+            .get("result")
+            .and_then(|r| r.as_array())
+            .and_then(|arr| arr.first())
+            .and_then(|record| record.get("id"))
+            .and_then(|id| id.as_str());
+
+        Ok(result.map(String::from))
+    }
+}
+
+#[async_trait]
+#[cfg(feature = "dns-cloudflare")]
+impl DnsUpdater for CloudflareDnsUpdater {
+    async fn upsert_record(&self, domain: &str, value: &str) -> Result<(), ChallengeError> {
+        let record_name = format!("_acme-challenge.{domain}");
+
+        // Check if record already exists
+        let existing_id = self.find_txt_record(&record_name).await?;
+
+        let (url, method) = if let Some(ref id) = existing_id {
+            // Update existing record
+            let url = format!(
+                "https://api.cloudflare.com/client/v4/zones/{}/dns_records/{}",
+                self.zone_id, id
+            );
+            (url, "PUT")
+        } else {
+            // Create new record
+            let url = format!(
+                "https://api.cloudflare.com/client/v4/zones/{}/dns_records",
+                self.zone_id
+            );
+            (url, "POST")
+        };
+
+        let body = json!({
+            "type": "TXT",
+            "name": record_name,
+            "content": value,
+            "ttl": Self::TXT_TTL,
+        });
+
+        let request = if method == "PUT" {
+            self.client.put(&url)
+        } else {
+            self.client.post(&url)
+        };
+
+        let response = request
+            .header("Authorization", format!("Bearer {}", self.api_token))
+            .header("Content-Type", "application/json")
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| ChallengeError::Other(eyre!("Failed to update Cloudflare DNS: {e}")))?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response
+                .text()
+                .await
+                .unwrap_or_default();
+            return Err(ChallengeError::Other(eyre!(
+                "Cloudflare API returned error status {status}: {body}"
+            )));
+        }
+
+        // Cloudflare typically propagates changes quickly, but we give it a moment
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+
+        Ok(())
+    }
+
+    async fn remove_record(&self, domain: &str, _value: &str) -> Result<(), ChallengeError> {
+        let record_name = format!("_acme-challenge.{domain}");
+
+        // Find the record ID
+        let record_id = self
+            .find_txt_record(&record_name)
+            .await?
+            .ok_or_else(|| ChallengeError::Other(eyre!("TXT record not found for deletion")))?;
+
+        let url = format!(
+            "https://api.cloudflare.com/client/v4/zones/{}/dns_records/{}",
+            self.zone_id, record_id
+        );
+
+        let response = self
+            .client
+            .delete(&url)
+            .header("Authorization", format!("Bearer {}", self.api_token))
+            .send()
+            .await
+            .map_err(|e| ChallengeError::Other(eyre!("Failed to delete Cloudflare DNS record: {e}")))?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response
+                .text()
+                .await
+                .unwrap_or_default();
+            return Err(ChallengeError::Other(eyre!(
+                "Cloudflare API returned error status {status}: {body}"
+            )));
+        }
+
         Ok(())
     }
 }
@@ -385,7 +563,7 @@ impl DnsUpdater for PebbleDnsUpdater {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "dns-route53"))]
 mod tests {
     use super::*;
 

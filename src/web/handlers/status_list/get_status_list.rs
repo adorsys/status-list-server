@@ -422,7 +422,7 @@ fn issue_jwt(
     Ok(token)
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "postgres"))]
 mod tests {
     use super::*;
     use crate::{

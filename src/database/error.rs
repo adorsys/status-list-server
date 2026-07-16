@@ -1,5 +1,6 @@
 #[derive(Debug, thiserror::Error)]
-pub enum RepositoryError {
+#[allow(dead_code)]
+pub(crate) enum RepositoryError {
     #[error("Insert error: {0}")]
     InsertError(String),
     #[error("Find error: {0}")]

@@ -1,11 +1,15 @@
+#[cfg(feature = "redis")]
 use std::time::Duration;
 
 use config::{Config as ConfigLib, ConfigError, Environment};
+#[cfg(feature = "redis")]
 use redis::{
     Client as RedisClient, ClientTlsConfig, RedisResult, TlsCertificates,
     aio::{ConnectionManager, ConnectionManagerConfig},
 };
-use secrecy::{ExposeSecret, SecretString};
+#[cfg(feature = "redis")]
+use secrecy::ExposeSecret;
+use secrecy::SecretString;
 use serde::Deserialize;
 use serde_aux::field_attributes::deserialize_vec_from_string_or_vec;
 
@@ -90,6 +94,7 @@ impl RedisConfig {
     ///
     /// # Errors
     /// Returns an error if the connection cannot be established.
+    #[cfg(feature = "redis")]
     pub async fn start(
         &self,
         cert_pem: Option<&str>,

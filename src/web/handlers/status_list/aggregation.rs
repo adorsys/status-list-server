@@ -30,7 +30,7 @@ pub async fn get_aggregation(
     Ok((StatusCode::OK, Json(AggregationResponse { status_lists })))
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "postgres"))]
 mod tests {
     use super::*;
     use crate::test_utils::{test_app_state, test_app_state_with};

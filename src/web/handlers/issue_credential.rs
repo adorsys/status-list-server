@@ -72,7 +72,7 @@ pub(super) async fn publish_credentials(
     Ok(())
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "postgres"))]
 mod tests {
     use super::*;
     use crate::{models::credentials, test_utils::test_app_state};

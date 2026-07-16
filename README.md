@@ -62,6 +62,60 @@ cargo run
 
 By default, the server will listen on `http://localhost:8000`. You can modify the host and port in the configuration settings.
 
+## Backend Feature Flags
+
+The server supports compile-time backend selection via Cargo features. This allows you to build a fully in-memory version for local development and testing without requiring external services.
+
+### Available Features
+
+| Feature | Description | Default |
+|---------|-------------|---------|
+| `postgres` | PostgreSQL database backend | ✓ |
+| `aws-s3` | AWS S3 for certificate storage | ✓ |
+| `aws-secrets` | AWS Secrets Manager for secrets | ✓ |
+| `redis` | Redis for certificate chain caching | ✓ |
+| `dns-route53` | AWS Route53 for DNS challenges | ✓ |
+| `dns-cloudflare` | Cloudflare DNS for DNS challenges | ✗ |
+| `memory` | In-memory backends (for local dev) | ✗ |
+
+### Building with Memory Feature (Local Development)
+
+To build a version that uses only in-memory backends (no PostgreSQL, AWS, or Redis required):
+
+```bash
+cargo build --no-default-features --features memory
+cargo test --no-default-features --features memory
+```
+
+This is useful for:
+- Fast local development and testing
+- CI/CD pipelines where external services are not available
+- Portable deployments with no external dependencies
+
+### Building with Production Features
+
+To build with all production backends:
+
+```bash
+cargo build --release
+cargo test --all-features
+```
+
+### Feature Combinations
+
+- **Memory only**: `--features memory` - No external services required
+- **Production**: `--features postgres,aws-s3,aws-secrets,redis,dns-route53` - Full production setup
+- **Custom**: Mix and match features as needed (e.g., `--features postgres,aws-s3,aws-secrets,dns-cloudflare`)
+
+### Required Environment Variables
+
+**Memory mode**: No credentials required.
+
+**Production mode** requires:
+- `APP_DATABASE__URL` - PostgreSQL connection string
+- AWS credentials (via standard AWS credential chain)
+- `APP_REDIS__URI` - Redis connection string
+
 ## API Documentation
 
 The public API is documented with an OpenAPI 3.1 specification. See [`docs/openapi.yaml`](docs/openapi.yaml) for the complete API contract.

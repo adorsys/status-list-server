@@ -1,7 +1,11 @@
 mod dns01;
 mod http01;
 
-pub use dns01::{AwsRoute53DnsUpdater, Dns01Handler, PebbleDnsUpdater};
+#[cfg(feature = "dns-route53")]
+pub use dns01::AwsRoute53DnsUpdater;
+#[cfg(feature = "dns-cloudflare")]
+pub use dns01::CloudflareDnsUpdater;
+pub use dns01::{Dns01Handler, PebbleDnsUpdater};
 pub use http01::Http01Handler;
 
 use std::{future::Future, pin::Pin};

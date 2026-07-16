@@ -1,5 +1,6 @@
 use crate::{
     cert_manager::storage::StorageError,
+    database::queries::SeaOrmStore,
     utils::{
         cache::Cache,
         cert_manager::{CertManager, storage::Storage},
@@ -41,8 +42,6 @@ pub(crate) async fn test_app_state_with(
     db_conn: Option<Arc<sea_orm::DatabaseConnection>>,
     aggregation_uri: Option<String>,
 ) -> AppState {
-    use crate::database::queries::SeaOrmStore;
-
     // Install the crypto provider for the tests
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 
@@ -71,8 +70,8 @@ pub(crate) async fn test_app_state_with(
     .with_secrets_storage(secrets_storage);
 
     AppState {
-        credential_repo: SeaOrmStore::new(db.clone()),
-        status_list_repo: SeaOrmStore::new(db),
+        credential_repo: Arc::new(SeaOrmStore::<crate::models::Credentials>::new(db.clone())),
+        status_list_repo: Arc::new(SeaOrmStore::<crate::models::StatusListRecord>::new(db)),
         server_domain: "example.com".to_string(),
         cert_manager: Arc::new(certificate_manager),
         cache: Cache::new(5 * 60, 100),

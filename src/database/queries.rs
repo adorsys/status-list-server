@@ -1,20 +1,54 @@
+#[cfg(feature = "postgres")]
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, QueryOrder,
     QuerySelect, Set,
 };
-use std::sync::Arc;
+use std::{
+    collections::HashMap,
+    sync::{Arc, RwLock},
+};
 
 use super::error::RepositoryError;
-use crate::models::{Credentials, StatusListRecord, credentials, status_lists};
+use crate::models::{Credentials, StatusListRecord};
+#[cfg(feature = "postgres")]
+use crate::models::{credentials, status_lists};
+
+#[async_trait::async_trait]
+#[allow(dead_code)]
+pub(crate) trait CredentialRepository: Send + Sync {
+    async fn insert_one(&self, entity: Credentials) -> Result<(), RepositoryError>;
+    async fn find_one_by(&self, value: &str) -> Result<Option<Credentials>, RepositoryError>;
+    async fn update_one(&self, issuer: &str, entity: Credentials) -> Result<bool, RepositoryError>;
+    async fn delete_by(&self, value: &str) -> Result<bool, RepositoryError>;
+}
+
+#[async_trait::async_trait]
+#[allow(dead_code)]
+pub(crate) trait StatusListRepository: Send + Sync {
+    async fn insert_one(&self, entity: StatusListRecord) -> Result<(), RepositoryError>;
+    async fn find_one_by(&self, value: &str) -> Result<Option<StatusListRecord>, RepositoryError>;
+    async fn find_all_by(&self, issuer: &str) -> Result<Vec<StatusListRecord>, RepositoryError>;
+    async fn update_one(
+        &self,
+        list_id: &str,
+        entity: StatusListRecord,
+    ) -> Result<bool, RepositoryError>;
+    async fn delete_by(&self, value: &str) -> Result<bool, RepositoryError>;
+    async fn find_by_issuer(&self, issuer: &str) -> Result<Vec<StatusListRecord>, RepositoryError>;
+    async fn find_all(&self) -> Result<Vec<StatusListRecord>, RepositoryError>;
+    async fn find_all_status_list_uris(&self) -> Result<Vec<String>, RepositoryError>;
+}
 
 #[derive(Clone)]
-pub struct SeaOrmStore<T> {
+#[cfg(feature = "postgres")]
+pub(crate) struct SeaOrmStore<T> {
     db: Arc<DatabaseConnection>,
     _phantom: std::marker::PhantomData<T>,
 }
 
+#[cfg(feature = "postgres")]
 impl<T> SeaOrmStore<T> {
-    pub fn new(db: Arc<DatabaseConnection>) -> Self {
+    pub(crate) fn new(db: Arc<DatabaseConnection>) -> Self {
         Self {
             db,
             _phantom: std::marker::PhantomData,
@@ -22,8 +56,31 @@ impl<T> SeaOrmStore<T> {
     }
 }
 
+#[derive(Clone, Default)]
+pub(crate) struct MemoryCredentialRepository {
+    values: Arc<RwLock<HashMap<String, Credentials>>>,
+}
+
+impl MemoryCredentialRepository {
+    pub(crate) fn new() -> Self {
+        Self::default()
+    }
+}
+
+#[derive(Clone, Default)]
+pub(crate) struct MemoryStatusListRepository {
+    values: Arc<RwLock<HashMap<String, StatusListRecord>>>,
+}
+
+impl MemoryStatusListRepository {
+    pub(crate) fn new() -> Self {
+        Self::default()
+    }
+}
+
+#[cfg(feature = "postgres")]
 impl SeaOrmStore<StatusListRecord> {
-    pub async fn insert_one(&self, entity: StatusListRecord) -> Result<(), RepositoryError> {
+    pub(crate) async fn insert_one(&self, entity: StatusListRecord) -> Result<(), RepositoryError> {
         let active = status_lists::ActiveModel {
             list_id: Set(entity.list_id),
             issuer: Set(entity.issuer),
@@ -37,7 +94,7 @@ impl SeaOrmStore<StatusListRecord> {
         Ok(())
     }
 
-    pub async fn find_one_by(
+    pub(crate) async fn find_one_by(
         &self,
         value: &str,
     ) -> Result<Option<StatusListRecord>, RepositoryError> {
@@ -47,7 +104,7 @@ impl SeaOrmStore<StatusListRecord> {
             .map_err(|e| RepositoryError::FindError(e.to_string()))
     }
 
-    pub async fn find_all_by(
+    pub(crate) async fn find_all_by(
         &self,
         issuer: &str,
     ) -> Result<Vec<StatusListRecord>, RepositoryError> {
@@ -59,7 +116,7 @@ impl SeaOrmStore<StatusListRecord> {
             .map_err(|e| RepositoryError::FindError(e.to_string()))
     }
 
-    pub async fn update_one(
+    pub(crate) async fn update_one(
         &self,
         list_id: &str,
         entity: StatusListRecord,
@@ -84,7 +141,7 @@ impl SeaOrmStore<StatusListRecord> {
         Ok(true)
     }
 
-    pub async fn delete_by(&self, value: &str) -> Result<bool, RepositoryError> {
+    pub(crate) async fn delete_by(&self, value: &str) -> Result<bool, RepositoryError> {
         let result = status_lists::Entity::delete_by_id(value)
             .exec(&*self.db)
             .await
@@ -92,7 +149,7 @@ impl SeaOrmStore<StatusListRecord> {
         Ok(result.rows_affected > 0)
     }
 
-    pub async fn find_by_issuer(
+    pub(crate) async fn find_by_issuer(
         &self,
         issuer: &str,
     ) -> Result<Vec<StatusListRecord>, RepositoryError> {
@@ -103,14 +160,14 @@ impl SeaOrmStore<StatusListRecord> {
             .map_err(|e| RepositoryError::FindError(e.to_string()))
     }
 
-    pub async fn find_all(&self) -> Result<Vec<StatusListRecord>, RepositoryError> {
+    pub(crate) async fn find_all(&self) -> Result<Vec<StatusListRecord>, RepositoryError> {
         status_lists::Entity::find()
             .all(&*self.db)
             .await
             .map_err(|e| RepositoryError::FindError(e.to_string()))
     }
 
-    pub async fn find_all_status_list_uris(&self) -> Result<Vec<String>, RepositoryError> {
+    pub(crate) async fn find_all_status_list_uris(&self) -> Result<Vec<String>, RepositoryError> {
         status_lists::Entity::find()
             .select_only()
             .column(status_lists::Column::Sub)
@@ -123,8 +180,49 @@ impl SeaOrmStore<StatusListRecord> {
     }
 }
 
+#[async_trait::async_trait]
+#[cfg(feature = "postgres")]
+impl StatusListRepository for SeaOrmStore<StatusListRecord> {
+    async fn insert_one(&self, entity: StatusListRecord) -> Result<(), RepositoryError> {
+        Self::insert_one(self, entity).await
+    }
+
+    async fn find_one_by(&self, value: &str) -> Result<Option<StatusListRecord>, RepositoryError> {
+        Self::find_one_by(self, value).await
+    }
+
+    async fn find_all_by(&self, issuer: &str) -> Result<Vec<StatusListRecord>, RepositoryError> {
+        Self::find_all_by(self, issuer).await
+    }
+
+    async fn update_one(
+        &self,
+        list_id: &str,
+        entity: StatusListRecord,
+    ) -> Result<bool, RepositoryError> {
+        Self::update_one(self, list_id, entity).await
+    }
+
+    async fn delete_by(&self, value: &str) -> Result<bool, RepositoryError> {
+        Self::delete_by(self, value).await
+    }
+
+    async fn find_by_issuer(&self, issuer: &str) -> Result<Vec<StatusListRecord>, RepositoryError> {
+        Self::find_by_issuer(self, issuer).await
+    }
+
+    async fn find_all(&self) -> Result<Vec<StatusListRecord>, RepositoryError> {
+        Self::find_all(self).await
+    }
+
+    async fn find_all_status_list_uris(&self) -> Result<Vec<String>, RepositoryError> {
+        Self::find_all_status_list_uris(self).await
+    }
+}
+
+#[cfg(feature = "postgres")]
 impl SeaOrmStore<Credentials> {
-    pub async fn insert_one(&self, entity: Credentials) -> Result<(), RepositoryError> {
+    pub(crate) async fn insert_one(&self, entity: Credentials) -> Result<(), RepositoryError> {
         let active: credentials::ActiveModel = entity.into();
         active
             .insert(&*self.db)
@@ -133,7 +231,10 @@ impl SeaOrmStore<Credentials> {
         Ok(())
     }
 
-    pub async fn find_one_by(&self, value: &str) -> Result<Option<Credentials>, RepositoryError> {
+    pub(crate) async fn find_one_by(
+        &self,
+        value: &str,
+    ) -> Result<Option<Credentials>, RepositoryError> {
         credentials::Entity::find_by_id(value)
             .one(&*self.db)
             .await
@@ -141,7 +242,7 @@ impl SeaOrmStore<Credentials> {
             .map_err(|e| RepositoryError::FindError(e.to_string()))
     }
 
-    pub async fn update_one(
+    pub(crate) async fn update_one(
         &self,
         issuer: &str,
         entity: Credentials,
@@ -161,7 +262,7 @@ impl SeaOrmStore<Credentials> {
         Ok(true)
     }
 
-    pub async fn delete_by(&self, value: &str) -> Result<bool, RepositoryError> {
+    pub(crate) async fn delete_by(&self, value: &str) -> Result<bool, RepositoryError> {
         let result = credentials::Entity::delete_by_id(value)
             .exec(&*self.db)
             .await
@@ -170,7 +271,176 @@ impl SeaOrmStore<Credentials> {
     }
 }
 
-#[cfg(test)]
+#[async_trait::async_trait]
+#[cfg(feature = "postgres")]
+impl CredentialRepository for SeaOrmStore<Credentials> {
+    async fn insert_one(&self, entity: Credentials) -> Result<(), RepositoryError> {
+        Self::insert_one(self, entity).await
+    }
+
+    async fn find_one_by(&self, value: &str) -> Result<Option<Credentials>, RepositoryError> {
+        Self::find_one_by(self, value).await
+    }
+
+    async fn update_one(&self, issuer: &str, entity: Credentials) -> Result<bool, RepositoryError> {
+        Self::update_one(self, issuer, entity).await
+    }
+
+    async fn delete_by(&self, value: &str) -> Result<bool, RepositoryError> {
+        Self::delete_by(self, value).await
+    }
+}
+
+#[async_trait::async_trait]
+impl CredentialRepository for MemoryCredentialRepository {
+    async fn insert_one(&self, entity: Credentials) -> Result<(), RepositoryError> {
+        self.values
+            .write()
+            .map_err(|_| {
+                RepositoryError::Generic("memory credential repository lock poisoned".into())
+            })?
+            .insert(entity.issuer.clone(), entity);
+        Ok(())
+    }
+
+    async fn find_one_by(&self, value: &str) -> Result<Option<Credentials>, RepositoryError> {
+        Ok(self
+            .values
+            .read()
+            .map_err(|_| {
+                RepositoryError::Generic("memory credential repository lock poisoned".into())
+            })?
+            .get(value)
+            .cloned())
+    }
+
+    async fn update_one(&self, issuer: &str, entity: Credentials) -> Result<bool, RepositoryError> {
+        let mut values = self.values.write().map_err(|_| {
+            RepositoryError::Generic("memory credential repository lock poisoned".into())
+        })?;
+        if !values.contains_key(issuer) {
+            return Ok(false);
+        }
+        values.insert(entity.issuer.clone(), entity);
+        Ok(true)
+    }
+
+    async fn delete_by(&self, value: &str) -> Result<bool, RepositoryError> {
+        Ok(self
+            .values
+            .write()
+            .map_err(|_| {
+                RepositoryError::Generic("memory credential repository lock poisoned".into())
+            })?
+            .remove(value)
+            .is_some())
+    }
+}
+
+#[async_trait::async_trait]
+impl StatusListRepository for MemoryStatusListRepository {
+    async fn insert_one(&self, entity: StatusListRecord) -> Result<(), RepositoryError> {
+        self.values
+            .write()
+            .map_err(|_| {
+                RepositoryError::Generic("memory status-list repository lock poisoned".into())
+            })?
+            .insert(entity.list_id.clone(), entity);
+        Ok(())
+    }
+
+    async fn find_one_by(&self, value: &str) -> Result<Option<StatusListRecord>, RepositoryError> {
+        Ok(self
+            .values
+            .read()
+            .map_err(|_| {
+                RepositoryError::Generic("memory status-list repository lock poisoned".into())
+            })?
+            .get(value)
+            .cloned())
+    }
+
+    async fn find_all_by(&self, issuer: &str) -> Result<Vec<StatusListRecord>, RepositoryError> {
+        Ok(self
+            .values
+            .read()
+            .map_err(|_| {
+                RepositoryError::Generic("memory status-list repository lock poisoned".into())
+            })?
+            .values()
+            .filter(|record| record.issuer == issuer)
+            .cloned()
+            .collect())
+    }
+
+    async fn update_one(
+        &self,
+        list_id: &str,
+        entity: StatusListRecord,
+    ) -> Result<bool, RepositoryError> {
+        let mut values = self.values.write().map_err(|_| {
+            RepositoryError::Generic("memory status-list repository lock poisoned".into())
+        })?;
+        if !values.contains_key(list_id) {
+            return Ok(false);
+        }
+        values.insert(entity.list_id.clone(), entity);
+        Ok(true)
+    }
+
+    async fn delete_by(&self, value: &str) -> Result<bool, RepositoryError> {
+        Ok(self
+            .values
+            .write()
+            .map_err(|_| {
+                RepositoryError::Generic("memory status-list repository lock poisoned".into())
+            })?
+            .remove(value)
+            .is_some())
+    }
+
+    async fn find_by_issuer(&self, issuer: &str) -> Result<Vec<StatusListRecord>, RepositoryError> {
+        Ok(self
+            .values
+            .read()
+            .map_err(|_| {
+                RepositoryError::Generic("memory status-list repository lock poisoned".into())
+            })?
+            .values()
+            .filter(|record| record.sub == issuer)
+            .cloned()
+            .collect())
+    }
+
+    async fn find_all(&self) -> Result<Vec<StatusListRecord>, RepositoryError> {
+        Ok(self
+            .values
+            .read()
+            .map_err(|_| {
+                RepositoryError::Generic("memory status-list repository lock poisoned".into())
+            })?
+            .values()
+            .cloned()
+            .collect())
+    }
+
+    async fn find_all_status_list_uris(&self) -> Result<Vec<String>, RepositoryError> {
+        let mut uris: Vec<_> = self
+            .values
+            .read()
+            .map_err(|_| {
+                RepositoryError::Generic("memory status-list repository lock poisoned".into())
+            })?
+            .values()
+            .map(|record| record.sub.clone())
+            .collect();
+        uris.sort();
+        uris.dedup();
+        Ok(uris)
+    }
+}
+
+#[cfg(all(test, feature = "postgres"))]
 mod test {
     use super::*;
     use crate::models::StatusList;
