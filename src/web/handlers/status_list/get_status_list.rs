@@ -25,8 +25,7 @@ use super::{
     conditional::{ConditionalResponse, evaluate_conditional_request, format_http_date},
     constants::{
         ACCEPT_STATUS_LISTS_HEADER_CWT, ACCEPT_STATUS_LISTS_HEADER_JWT, CWT_TYPE, EXP, GZIP_HEADER,
-        ISSUED_AT, STATUS_LIST, STATUS_LISTS_CWT_TYPE_VALUE, STATUS_LISTS_HEADER_JWT, SUBJECT,
-        TTL,
+        ISSUED_AT, STATUS_LIST, STATUS_LISTS_CWT_TYPE_VALUE, STATUS_LISTS_HEADER_JWT, SUBJECT, TTL,
     },
     error::StatusListError,
     etag::generate_etag,
@@ -115,7 +114,10 @@ pub async fn get_status_list(
                 header::CACHE_CONTROL,
                 HeaderValue::from_str(&cache_control).unwrap(),
             );
-            h.insert(header::VARY, HeaderValue::from_static("Accept, Accept-Encoding"));
+            h.insert(
+                header::VARY,
+                HeaderValue::from_static("Accept, Accept-Encoding"),
+            );
             if let Some(enc) = encoding {
                 h.insert(header::CONTENT_ENCODING, HeaderValue::from_static(enc));
             }

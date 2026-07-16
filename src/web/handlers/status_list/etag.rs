@@ -240,9 +240,6 @@ mod tests {
         // the same content must produce the same ETag regardless of any token
         // expiry rotation.
         let etag2 = generate_etag(&record);
-        assert_eq!(
-            etag, etag2,
-            "ETag must be stable for identical content"
-        );
+        assert_eq!(etag, etag2, "ETag must be stable for identical content");
     }
 }
