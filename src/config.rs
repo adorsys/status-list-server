@@ -250,6 +250,10 @@ pub struct CacheConfig {
 pub struct StatusListConfig {
     pub token_exp_secs: u64,
     pub token_ttl_secs: u64,
+    /// Retention period for historical status list snapshots in seconds.
+    /// Snapshots older than this will be deleted. Default is 90 days.
+    /// Set to 0 to disable historical snapshots entirely.
+    pub history_retention_secs: u64,
 }
 
 impl RedisConfig {
@@ -346,6 +350,7 @@ impl Config {
             .set_default("cache.max_capacity", 100)?
             .set_default("status_list.token_exp_secs", 900)? // 15 minutes
             .set_default("status_list.token_ttl_secs", 300)? // 5 minutes
+            .set_default("status_list.history_retention_secs", 7776000)? // 90 days
             // Override config values via environment variables
             // The environment variables should be prefixed with 'APP_' and use '__' as a separator
             // Example: APP_REDIS__REQUIRE_CLIENT_AUTH=false

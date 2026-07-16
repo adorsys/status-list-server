@@ -21,6 +21,8 @@ pub enum StatusListError {
     StatusListNotFound,
     #[error("No status list token is available for the requested time")]
     HistoricalStatusListNotFound,
+    #[error("Invalid historical time: must be positive and not in the future")]
+    InvalidHistoricalTime,
     #[error("Unsupported bits value")]
     UnsupportedBits,
     #[error("Could not decode lst")]
@@ -54,6 +56,7 @@ impl IntoResponse for StatusListError {
             MalformedBody(_) => StatusCode::BAD_REQUEST,
             StatusListNotFound => StatusCode::NOT_FOUND,
             HistoricalStatusListNotFound => StatusCode::NOT_FOUND,
+            InvalidHistoricalTime => StatusCode::BAD_REQUEST,
             UnsupportedBits => StatusCode::BAD_REQUEST,
             DecodeError => StatusCode::BAD_REQUEST,
             DecompressionError(_) => StatusCode::BAD_REQUEST,

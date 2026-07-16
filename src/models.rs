@@ -102,6 +102,7 @@ pub mod status_list_history {
         #[sea_orm(primary_key, auto_increment = false)]
         pub snapshot_id: String,
         pub list_id: String,
+        pub issuer: String,
         pub status_list: StatusList,
         pub sub: String,
         pub iat: i64,

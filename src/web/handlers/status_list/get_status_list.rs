@@ -127,6 +127,23 @@ async fn build_status_list_token(
     client_accepts_gzip: bool,
 ) -> Result<impl IntoResponse + Debug + use<>, StatusListError> {
     if let Some(time) = requested_time {
+        // Validate time parameter: must be positive and not in the future
+        let now = OffsetDateTime::now_utc().unix_timestamp();
+        if time <= 0 {
+            tracing::warn!("Historical query rejected: time must be positive, got {time}");
+            return Err(StatusListError::InvalidHistoricalTime);
+        }
+        if time > now {
+            tracing::warn!("Historical query rejected: time is in the future ({time} > {now})");
+            return Err(StatusListError::InvalidHistoricalTime);
+        }
+
+        // §12.7 privacy warning: historical queries leak timing information
+        tracing::info!(
+            "Historical query for list {list_id} at time {time} (age: {} seconds)",
+            now - time
+        );
+
         // Historical requests are deliberately never served from the current
         // list cache: that cache contains mutable, present-day state.
         let snapshot = state
@@ -141,7 +158,7 @@ async fn build_status_list_token(
 
         let record = StatusListRecord {
             list_id: snapshot.list_id,
-            issuer: String::new(),
+            issuer: snapshot.issuer,
             status_list: snapshot.status_list,
             sub: snapshot.sub,
         };
@@ -1143,6 +1160,7 @@ mod tests {
         let snapshot = StatusListHistoryRecord {
             snapshot_id: "snapshot-1".to_string(),
             list_id: "test_list".to_string(),
+            issuer: "test_issuer".to_string(),
             status_list: StatusList {
                 bits: 8,
                 lst: encode_compressed(&[42]).unwrap(),
@@ -1219,6 +1237,60 @@ mod tests {
         assert_eq!(
             result.unwrap_err().into_response().status(),
             StatusCode::NOT_FOUND
+        );
+    }
+
+    #[tokio::test]
+    async fn test_get_status_list_rejects_negative_time() {
+        let app_state = test_app_state(None).await;
+        let result = get_status_list(
+            State(app_state),
+            Path("test_list".to_string()),
+            Query(StatusListQuery { time: Some(-1) }),
+            HeaderMap::new(),
+        )
+        .await;
+
+        assert_eq!(
+            result.unwrap_err().into_response().status(),
+            StatusCode::BAD_REQUEST
+        );
+    }
+
+    #[tokio::test]
+    async fn test_get_status_list_rejects_zero_time() {
+        let app_state = test_app_state(None).await;
+        let result = get_status_list(
+            State(app_state),
+            Path("test_list".to_string()),
+            Query(StatusListQuery { time: Some(0) }),
+            HeaderMap::new(),
+        )
+        .await;
+
+        assert_eq!(
+            result.unwrap_err().into_response().status(),
+            StatusCode::BAD_REQUEST
+        );
+    }
+
+    #[tokio::test]
+    async fn test_get_status_list_rejects_future_time() {
+        let app_state = test_app_state(None).await;
+        // Use a time far in the future
+        let result = get_status_list(
+            State(app_state),
+            Path("test_list".to_string()),
+            Query(StatusListQuery {
+                time: Some(i64::MAX),
+            }),
+            HeaderMap::new(),
+        )
+        .await;
+
+        assert_eq!(
+            result.unwrap_err().into_response().status(),
+            StatusCode::BAD_REQUEST
         );
     }
 

@@ -91,6 +91,7 @@ pub(super) async fn persist_historical_snapshot(
     let snapshot = StatusListHistoryRecord {
         snapshot_id: uuid::Uuid::new_v4().to_string(),
         list_id: status_list_record.list_id.clone(),
+        issuer: status_list_record.issuer.clone(),
         status_list: status_list_record.status_list.clone(),
         sub: status_list_record.sub.clone(),
         iat,
