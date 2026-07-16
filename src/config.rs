@@ -1,6 +1,9 @@
 use std::time::Duration;
 
-use config::{Config as ConfigLib, ConfigError, Environment};
+use config::{
+    Config as ConfigLib, ConfigBuilder, ConfigError, Environment,
+    builder::DefaultState,
+};
 use redis::{
     Client as RedisClient, ClientTlsConfig, RedisResult, TlsCertificates,
     aio::{ConnectionManager, ConnectionManagerConfig},
@@ -137,41 +140,14 @@ impl RedisConfig {
 }
 
 impl Config {
+    /// Loads configuration from built-in defaults, then overrides them with
+    /// values sourced from the process environment.
+    ///
+    /// Environment variables must be prefixed with `APP_` and use `__` as the
+    /// separator between nested keys. For example `APP_SERVER__PORT=5002`
+    /// maps to the `server.port` configuration value.
     pub fn load() -> Result<Self, ConfigError> {
-        // Build the config
-        let config = ConfigLib::builder()
-            // Set default values
-            .set_default("server.host", "localhost")?
-            .set_default("server.domain", "localhost")?
-            .set_default("server.port", 8000)?
-            .set_default("server.enable_metrics", false)?
-            .set_default("server.aggregation_uri", Option::<String>::None)?
-            .set_default(
-                "database.url",
-                "postgres://postgres:postgres@localhost:5432/status-list",
-            )?
-            .set_default("redis.uri", "redis://localhost:6379")?
-            .set_default("redis.require_client_auth", false)?
-            .set_default("redis.cert_cache_ttl", 3600)? // Default 1 hour
-            .set_default("aws.secrets_cache_ttl", 300)? // Default 5 minutes
-            .set_default("aws.s3_bucket", "status-list-adorsys")?
-            .set_default("aws.s3_key_prefix", "")?
-            .set_default("server.cert.email", "admin@example.com")?
-            .set_default("server.cert.eku", vec![1, 3, 6, 1, 5, 5, 7, 3, 30])?
-            .set_default("server.cert.organization", "adorsys GmbH & CO KG")?
-            .set_default(
-                "server.cert.acme_directory_url",
-                "https://acme-v02.api.letsencrypt.org/directory",
-            )?
-            .set_default("server.cert.renewal_cron_schedule", "0 0 0 * * *")?
-            .set_default("aws.region", "us-east-1")?
-            .set_default("cache.ttl", 5 * 60)?
-            .set_default("cache.max_capacity", 100)?
-            .set_default("status_list.token_exp_secs", 900)? // 15 minutes
-            .set_default("status_list.token_ttl_secs", 300)? // 5 minutes
-            // Override config values via environment variables
-            // The environment variables should be prefixed with 'APP_' and use '__' as a separator
-            // Example: APP_REDIS__REQUIRE_CLIENT_AUTH=false
+        let config = base_builder()
             .add_source(
                 Environment::with_prefix("APP")
                     .prefix_separator("_")
@@ -182,17 +158,79 @@ impl Config {
         let config: Config = config.try_deserialize()?;
         Ok(config)
     }
+
+    /// Builds a `Config` from the built-in defaults layered with the supplied
+    /// `overrides`, without ever touching the process environment.
+    ///
+    /// Each override is a `(path, value)` pair where `path` is a configuration
+    /// key using `.` as the nested-key separator (e.g. `server.aggregation_uri`)
+    /// and `value` is the textual representation of the desired setting. This
+    /// mirrors how environment variables are interpreted, so any value that is
+    /// valid as an `APP_*` environment variable is also valid here.
+    ///
+    /// This helper exists so that tests can exercise configuration loading and
+    /// overrides without relying on `std::env::set_var` / `std::env::remove_var`,
+    /// which became `unsafe` on recent Rust toolchains. Because nothing mutates
+    /// the process-wide environment, tests are fully isolated from each other
+    /// and from the host environment regardless of execution order or threading.
+    #[cfg(test)]
+    pub(crate) fn load_from_overrides(
+        overrides: &[(&'static str, &'static str)],
+    ) -> Result<Self, ConfigError> {
+        let mut builder = base_builder();
+        for &(key, value) in overrides {
+            builder = builder.set_override(key, value)?;
+        }
+        let config = builder.build()?;
+        config.try_deserialize()
+    }
+}
+
+/// Returns a `config::ConfigBuilder` seeded with the built-in default values.
+///
+/// Both production loading (via [`Config::load`]) and test loading (via
+/// [`Config::load_from_overrides`]) start from this shared set of defaults so
+/// that there is exactly one source of truth for the default configuration.
+fn base_builder() -> ConfigBuilder<DefaultState> {
+    ConfigLib::builder()
+        .set_default("server.host", "localhost").expect("hardcoded default")
+        .set_default("server.domain", "localhost").expect("hardcoded default")
+        .set_default("server.port", 8000).expect("hardcoded default")
+        .set_default("server.enable_metrics", false).expect("hardcoded default")
+        .set_default("server.aggregation_uri", Option::<String>::None).expect("hardcoded default")
+        .set_default(
+            "database.url",
+            "postgres://postgres:postgres@localhost:5432/status-list",
+        ).expect("hardcoded default")
+        .set_default("redis.uri", "redis://localhost:6379").expect("hardcoded default")
+        .set_default("redis.require_client_auth", false).expect("hardcoded default")
+        .set_default("redis.cert_cache_ttl", 3600).expect("hardcoded default")
+        .set_default("aws.secrets_cache_ttl", 300).expect("hardcoded default")
+        .set_default("aws.s3_bucket", "status-list-adorsys").expect("hardcoded default")
+        .set_default("aws.s3_key_prefix", "").expect("hardcoded default")
+        .set_default("server.cert.email", "admin@example.com").expect("hardcoded default")
+        .set_default("server.cert.eku", vec![1, 3, 6, 1, 5, 5, 7, 3, 30]).expect("hardcoded default")
+        .set_default("server.cert.organization", "adorsys GmbH & CO KG").expect("hardcoded default")
+        .set_default(
+            "server.cert.acme_directory_url",
+            "https://acme-v02.api.letsencrypt.org/directory",
+        ).expect("hardcoded default")
+        .set_default("server.cert.renewal_cron_schedule", "0 0 0 * * *").expect("hardcoded default")
+        .set_default("aws.region", "us-east-1").expect("hardcoded default")
+        .set_default("cache.ttl", 5 * 60).expect("hardcoded default")
+        .set_default("cache.max_capacity", 100).expect("hardcoded default")
+        .set_default("status_list.token_exp_secs", 900).expect("hardcoded default")
+        .set_default("status_list.token_ttl_secs", 300).expect("hardcoded default")
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use sealed_test::prelude::*;
     use secrecy::ExposeSecret;
 
-    #[sealed_test]
+    #[test]
     fn test_default_config() {
-        let config = Config::load().expect("Failed to load config");
+        let config = Config::load_from_overrides(&[]).expect("Failed to load config");
 
         assert_eq!(config.server.host, "localhost");
         assert_eq!(config.server.port, 8000);
@@ -217,11 +255,10 @@ mod tests {
         assert_eq!(config.server.aggregation_uri, None);
     }
 
-    #[sealed_test(env = [
-        ("APP_SERVER__AGGREGATION_URI", "https://example.com/aggregation"),
-    ])]
+    #[test]
     fn test_aggregation_uri_env_override() {
-        let config = Config::load().expect("Failed to load config");
+        let config = Config::load_from_overrides(&[("server.aggregation_uri", "https://example.com/aggregation")])
+            .expect("Failed to load config");
 
         assert_eq!(
             config.server.aggregation_uri.as_deref(),
@@ -229,18 +266,18 @@ mod tests {
         );
     }
 
-    #[sealed_test(env = [
-        ("APP_SERVER__HOST", "0.0.0.0"),
-        ("APP_SERVER__PORT", "5002"),
-        ("APP_DATABASE__URL", "postgres://user:password@localhost:5432/status-list"),
-        ("APP_REDIS__URI", "rediss://user:password@localhost:6379/redis"),
-        ("APP_REDIS__REQUIRE_CLIENT_AUTH", "true"),
-        ("APP_SERVER__CERT__EMAIL", "test@gmail.com"),
-        ("APP_SERVER__CERT__ACME_DIRECTORY_URL", "https://acme-v02.api.letsencrypt.org/directory"),
-    ])]
+    #[test]
     fn test_env_config() {
-        // Test configuration overrides via environment variables
-        let config = Config::load().expect("Failed to load config");
+        let config = Config::load_from_overrides(&[
+            ("server.host", "0.0.0.0"),
+            ("server.port", "5002"),
+            ("database.url", "postgres://user:password@localhost:5432/status-list"),
+            ("redis.uri", "rediss://user:password@localhost:6379/redis"),
+            ("redis.require_client_auth", "true"),
+            ("server.cert.email", "test@gmail.com"),
+            ("server.cert.acme_directory_url", "https://acme-v02.api.letsencrypt.org/directory"),
+        ])
+        .expect("Failed to load config");
 
         assert_eq!(config.server.host, "0.0.0.0");
         assert_eq!(config.server.port, 5002);
@@ -260,22 +297,23 @@ mod tests {
         );
     }
 
-    #[sealed_test(env = [
-        ("APP_REDIS__URI", "rediss://user:password@localhost:6379/redis"),
-        ("APP_REDIS__REQUIRE_CLIENT_AUTH", "true"),
-        ("APP_SERVER__CERT__EMAIL", "test@gmail.com"),
-        ("APP_SERVER__CERT__ACME_DIRECTORY_URL", "https://acme-v02.api.letsencrypt.org/directory"),
-        ("APP_SERVER__CERT__ORGANIZATION", "Test Org"),
-        ("APP_SERVER__CERT__EKU", "1,3,6,1,5,5,7,3,30"),
-        ("APP_AWS__REGION", "us-west-2"),
-        ("APP_AWS__SECRETS_CACHE_TTL", "600"),
-        ("APP_AWS__S3_BUCKET", "my-custom-bucket"),
-        ("APP_AWS__S3_KEY_PREFIX", "status-list/prod"),
-        ("APP_CACHE__TTL", "600"),
-        ("APP_CACHE__MAX_CAPACITY", "2000"),
-    ])]
+    #[test]
     fn test_env_config_with_tls() {
-        let config = Config::load().expect("Failed to load config");
+        let config = Config::load_from_overrides(&[
+            ("redis.uri", "rediss://user:password@localhost:6379/redis"),
+            ("redis.require_client_auth", "true"),
+            ("server.cert.email", "test@gmail.com"),
+            ("server.cert.acme_directory_url", "https://acme-v02.api.letsencrypt.org/directory"),
+            ("server.cert.organization", "Test Org"),
+            ("server.cert.eku", "1,3,6,1,5,5,7,3,30"),
+            ("aws.region", "us-west-2"),
+            ("aws.secrets_cache_ttl", "600"),
+            ("aws.s3_bucket", "my-custom-bucket"),
+            ("aws.s3_key_prefix", "status-list/prod"),
+            ("cache.ttl", "600"),
+            ("cache.max_capacity", "2000"),
+        ])
+        .expect("Failed to load config");
 
         assert_eq!(config.server.host, "localhost");
         assert_eq!(config.server.port, 8000);
@@ -301,16 +339,17 @@ mod tests {
         assert_eq!(config.cache.max_capacity, 2000);
     }
 
-    #[sealed_test(env = [
-        ("APP_AWS__S3_BUCKET", "my-bucket"),
-        ("APP_AWS__S3_KEY_PREFIX", "prefix"),
-        ("APP_STATUS_LIST__TOKEN_EXP_SECS", "1800"),
-        ("APP_STATUS_LIST__TOKEN_TTL_SECS", "600"),
-        ("APP_SERVER__CERT__RENEWAL_CRON_SCHEDULE", "0 0 12 * * *"),
-        ("APP_SERVER__CERT__DNS_CHALLENGE_SERVER_URL", "http://pebble:8055"),
-    ])]
+    #[test]
     fn test_new_config_fields_env_override() {
-        let config = Config::load().expect("Failed to load config");
+        let config = Config::load_from_overrides(&[
+            ("aws.s3_bucket", "my-bucket"),
+            ("aws.s3_key_prefix", "prefix"),
+            ("status_list.token_exp_secs", "1800"),
+            ("status_list.token_ttl_secs", "600"),
+            ("server.cert.renewal_cron_schedule", "0 0 12 * * *"),
+            ("server.cert.dns_challenge_server_url", "http://pebble:8055"),
+        ])
+        .expect("Failed to load config");
 
         assert_eq!(config.aws.s3_bucket, "my-bucket");
         assert_eq!(config.aws.s3_key_prefix, "prefix");
