@@ -1,7 +1,7 @@
 use axum::{http::StatusCode, response::IntoResponse};
 use thiserror::Error;
 
-use super::get_status_list::build_error_cache_control;
+use super::constants::ERROR_CACHE_CONTROL;
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
 pub enum StatusListError {
@@ -68,7 +68,7 @@ impl IntoResponse for StatusListError {
 
         (
             status_code,
-            [(header::CACHE_CONTROL, build_error_cache_control())],
+            [(header::CACHE_CONTROL, ERROR_CACHE_CONTROL)],
             self.to_string(),
         )
             .into_response()

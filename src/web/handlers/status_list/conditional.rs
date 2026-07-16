@@ -14,6 +14,29 @@ pub enum ConditionalResponse {
     Modified,
 }
 
+/// Strips the `W/` prefix and surrounding quotes from an ETag, returning the
+/// opaque-entity-tag value for weak comparison per RFC 9110 §8.8.3.2.
+///
+/// Examples:
+///   `W/"abc"`  → `abc`
+///   `"abc"`    → `abc`
+///   `abc`      → `abc`  (malformed but tolerated)
+fn normalize_etag(etag: &str) -> String {
+    etag.trim()
+        .trim_start_matches("W/")
+        .trim_matches('"')
+        .to_string()
+}
+
+/// Compares two ETags using weak comparison (RFC 9110 §8.8.3.2).
+///
+/// The `W/` prefix is ignored, so a strong ETag `"abc"` matches a weak ETag
+/// `W/"abc"` and vice-versa. This is appropriate for `If-None-Match`, which
+/// per RFC 9110 §13.1.2 uses the weak comparison function.
+fn etag_eq_weak(a: &str, b: &str) -> bool {
+    normalize_etag(a) == normalize_etag(b)
+}
+
 /// Evaluates If-None-Match header against current ETag
 ///
 /// Returns NotModified if any ETag in the header matches the current ETag,
@@ -53,12 +76,10 @@ pub fn evaluate_if_none_match(
             continue;
         }
 
-        // Exact comparison. Clients echo the ETag they received verbatim, which
-        // covers both W/"hash" and "hash" forms. This deliberately does not
-        // implement RFC 9110 §8.8.3.2 weak/strong comparison; the prior
-        // trim_matches('"') branch was non-spec (it ignored the W/ prefix and
-        // could only produce surprising equalities for malformed input).
-        if etag == current_etag {
+        // Weak comparison per RFC 9110 §8.8.3.2: the W/ prefix is not
+        // significant for If-None-Match, so a client that echoes a strong
+        // ETag ("hash") will still match a weak ETag (W/"hash") we emitted.
+        if etag_eq_weak(etag, current_etag) {
             return ConditionalResponse::NotModified;
         }
     }
@@ -210,6 +231,24 @@ mod tests {
     }
 
     #[test]
+    fn test_evaluate_if_none_match_weak_strong_match() {
+        let current_etag = r#"W/"abc123""#;
+        let if_none_match = r#""abc123""#; // strong form, same opaque value
+
+        let result = evaluate_if_none_match(Some(if_none_match), current_etag);
+        assert_eq!(result, ConditionalResponse::NotModified);
+    }
+
+    #[test]
+    fn test_evaluate_if_none_match_strong_weak_match() {
+        let current_etag = r#""abc123""#; // strong form
+        let if_none_match = r#"W/"abc123""#; // weak form
+
+        let result = evaluate_if_none_match(Some(if_none_match), current_etag);
+        assert_eq!(result, ConditionalResponse::NotModified);
+    }
+
+    #[test]
     fn test_evaluate_if_none_match_multiple_etags_with_match() {
         let current_etag = r#"W/"abc123""#;
         let if_none_match = r#"W/"xyz789", W/"abc123", W/"def456""#;
@@ -249,9 +288,10 @@ mod tests {
         let current_etag = r#"W/"abc123""#;
         let if_none_match = "abc123"; // Malformed - missing W/ prefix and quotes
 
-        // Malformed ETag should not match
+        // With weak comparison (RFC 9110 §8.8.3.2), the W/ prefix and quotes
+        // are stripped, so the bare opaque value "abc123" matches W/"abc123".
         let result = evaluate_if_none_match(Some(if_none_match), current_etag);
-        assert_eq!(result, ConditionalResponse::Modified);
+        assert_eq!(result, ConditionalResponse::NotModified);
     }
 
     #[test]

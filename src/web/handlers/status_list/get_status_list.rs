@@ -2,8 +2,8 @@ use std::{fmt::Debug, io::Write as _};
 
 use axum::{
     extract::{Path, State},
-    http::{HeaderMap, StatusCode, header},
-    response::IntoResponse,
+    http::{HeaderMap, HeaderValue, StatusCode, header},
+    response::{IntoResponse, Response},
 };
 use coset::{
     self, CborSerializable, CoseSign1Builder, HeaderBuilder, TaggedCborSerializable,
@@ -25,7 +25,8 @@ use super::{
     conditional::{ConditionalResponse, evaluate_conditional_request, format_http_date},
     constants::{
         ACCEPT_STATUS_LISTS_HEADER_CWT, ACCEPT_STATUS_LISTS_HEADER_JWT, CWT_TYPE, EXP, GZIP_HEADER,
-        ISSUED_AT, STATUS_LIST, STATUS_LISTS_CWT_TYPE_VALUE, STATUS_LISTS_HEADER_JWT, SUBJECT, TTL,
+        ISSUED_AT, STATUS_LIST, STATUS_LISTS_CWT_TYPE_VALUE, STATUS_LISTS_HEADER_JWT, SUBJECT,
+        TTL,
     },
     error::StatusListError,
     etag::generate_etag,
@@ -40,12 +41,12 @@ pub async fn get_status_list(
 
     // Validate accept header
     let accept_type = match accept {
-        None => ACCEPT_STATUS_LISTS_HEADER_JWT, // Default to JWT
+        None => ACCEPT_STATUS_LISTS_HEADER_JWT.to_string(), // Default to JWT
         Some(accept)
             if accept == ACCEPT_STATUS_LISTS_HEADER_JWT
                 || accept == ACCEPT_STATUS_LISTS_HEADER_CWT =>
         {
-            accept
+            accept.to_string()
         }
         Some(_) => return Err(StatusListError::InvalidAcceptHeader),
     };
@@ -61,22 +62,13 @@ pub async fn get_status_list(
     // Fetch status list record (from cache or database)
     let status_record = fetch_status_record(&list_id, &state).await?;
 
-    let now = OffsetDateTime::now_utc().unix_timestamp();
-    let bucket_span = state.token_exp_secs.max(1) as i64;
-    let validity_bucket = now / bucket_span;
-    let bucket_start = validity_bucket * bucket_span;
+    let current_etag = generate_etag(&status_record);
 
-    let current_etag = generate_etag(&status_record, validity_bucket);
-
-    // The served representation is a re-signed token that changes every
-    // validity bucket even when the list content does not, so Last-Modified
-    // must rotate with the bucket. Using the raw `updated_at` (bumped only by
-    // publish/update_status and never by token re-issuance) would let a client
-    // or CDN revalidating with If-Modified-Since alone receive 304
-    // indefinitely and keep replaying an expired signed token, defeating the
-    // ttl/exp staleness bound. `max(updated_at, bucket_start)` keeps content
-    // changes visible on the IMS path while bounding staleness to the bucket.
-    let last_modified_ts = status_record.updated_at.max(bucket_start);
+    // Last-Modified reflects the persisted content's last modification time.
+    // The served token is re-signed every validity bucket, but ETag is
+    // content-based and `max-age` (= token_ttl_secs < token_exp_secs) bounds
+    // staleness so clients/CDNs cannot replay an expired token indefinitely.
+    let last_modified_ts = status_record.updated_at;
     let last_modified = format_http_date(last_modified_ts);
 
     let cache_control = build_cache_control(state.token_ttl_secs);
@@ -103,21 +95,24 @@ pub async fn get_status_list(
         }
         ConditionalResponse::Modified => {
             // Build full token response
-            let compressed_token = build_token(accept_type, &status_record, &state).await?;
+            let (token_bytes, encoding) = build_token(&accept_type, &status_record, &state, &headers).await?;
 
-            Ok((
-                StatusCode::OK,
-                [
-                    (header::CONTENT_TYPE, accept_type),
-                    (header::CONTENT_ENCODING, GZIP_HEADER),
-                    (header::ETAG, current_etag.as_str()),
-                    (header::LAST_MODIFIED, last_modified.as_str()),
-                    (header::CACHE_CONTROL, cache_control.as_str()),
-                    (header::VARY, "Accept"),
-                ],
-                compressed_token,
-            )
-                .into_response())
+            let mut response = Response::new(token_bytes.into());
+            *response.status_mut() = StatusCode::OK;
+            let h = response.headers_mut();
+            h.insert(
+                header::CONTENT_TYPE,
+                HeaderValue::from_str(&accept_type).unwrap(),
+            );
+            h.insert(header::ETAG, HeaderValue::from_str(&current_etag).unwrap());
+            h.insert(header::LAST_MODIFIED, HeaderValue::from_str(&last_modified).unwrap());
+            h.insert(header::CACHE_CONTROL, HeaderValue::from_str(&cache_control).unwrap());
+            h.insert(header::VARY, HeaderValue::from_static("Accept"));
+            if let Some(enc) = encoding {
+                h.insert(header::CONTENT_ENCODING, HeaderValue::from_static(enc));
+            }
+
+            Ok(response)
         }
     }
 }
@@ -154,12 +149,18 @@ async fn fetch_status_record(
     Ok(status_record)
 }
 
-/// Builds and compresses the token (JWT or CWT)
+/// Builds and conditionally compresses the token (JWT or CWT).
+///
+/// Gzip compression is only applied when the client signals support via the
+/// `Accept-Encoding` header, per HTTP semantics (RFC 9110 §8.4). When gzip is
+/// negotiated the returned encoding hint is `Some("gzip")`; otherwise the raw
+/// token bytes are returned with `None`.
 async fn build_token(
     accept: &str,
     status_record: &StatusListRecord,
     state: &AppState,
-) -> Result<Vec<u8>, StatusListError> {
+    headers: &HeaderMap,
+) -> Result<(Vec<u8>, Option<&'static str>), StatusListError> {
     // Get the certificate chain
     let certs_parts = state
         .cert_manager
@@ -179,6 +180,11 @@ async fn build_token(
         tracing::error!("Failed to load signing key: {e:?}");
         StatusListError::InternalServerError
     })?;
+
+    let accepts_gzip = headers
+        .get(header::ACCEPT_ENCODING)
+        .and_then(|h| h.to_str().ok())
+        .is_some_and(|enc| enc.split(',').any(|e| e.trim() == "gzip" || e.trim().starts_with("gzip")));
 
     let accept_header = accept.to_string();
     let status_record = status_record.clone();
@@ -212,16 +218,21 @@ async fn build_token(
             .into_bytes(),
         };
 
-        let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
-        encoder.write_all(&token_bytes).map_err(|err| {
-            tracing::error!("Failed to compress payload: {err:?}");
-            StatusListError::InternalServerError
-        })?;
+        if accepts_gzip {
+            let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+            encoder.write_all(&token_bytes).map_err(|err| {
+                tracing::error!("Failed to compress payload: {err:?}");
+                StatusListError::InternalServerError
+            })?;
 
-        encoder.finish().map_err(|err| {
-            tracing::error!("Failed to finish compression: {err:?}");
-            StatusListError::InternalServerError
-        })
+            let compressed = encoder.finish().map_err(|err| {
+                tracing::error!("Failed to finish compression: {err:?}");
+                StatusListError::InternalServerError
+            })?;
+            Ok((compressed, Some(GZIP_HEADER)))
+        } else {
+            Ok((token_bytes, None))
+        }
     })
     .await
     .map_err(|err| {
@@ -401,26 +412,16 @@ fn issue_jwt(
 
 /// Builds Cache-Control header value for successful responses
 ///
-/// Returns a Cache-Control directive with public caching, max-age set to the token TTL,
-/// and immutable flag to indicate content won't change during cache lifetime.
+/// Returns a Cache-Control directive with max-age set to the token TTL and the
+/// immutable flag, indicating content won't change during cache lifetime.
 ///
 /// # Arguments
 /// * `token_ttl_secs` - The token time-to-live in seconds
 ///
 /// # Returns
-/// A string formatted as "public, max-age={token_ttl_secs}, immutable"
+/// A string formatted as "max-age={token_ttl_secs}, immutable"
 fn build_cache_control(token_ttl_secs: u64) -> String {
-    format!("public, max-age={}, immutable", token_ttl_secs)
-}
-
-/// Builds Cache-Control header value for error responses
-///
-/// Returns a Cache-Control directive that prevents caching of error states.
-///
-/// # Returns
-/// A static string "no-store, max-age=0"
-pub(crate) fn build_error_cache_control() -> &'static str {
-    "no-store, max-age=0"
+    format!("max-age={}, immutable", token_ttl_secs)
 }
 
 #[cfg(test)]
@@ -472,6 +473,7 @@ mod tests {
             http::header::ACCEPT,
             ACCEPT_STATUS_LISTS_HEADER_JWT.parse().unwrap(),
         );
+        headers.insert(http::header::ACCEPT_ENCODING, "gzip".parse().unwrap());
 
         let response = get_status_list(
             State(app_state.clone()),
@@ -546,6 +548,7 @@ mod tests {
             http::header::ACCEPT,
             ACCEPT_STATUS_LISTS_HEADER_CWT.parse().unwrap(),
         );
+        headers.insert(http::header::ACCEPT_ENCODING, "gzip".parse().unwrap());
 
         let response = get_status_list(
             State(app_state.clone()),
@@ -687,6 +690,7 @@ mod tests {
             http::header::ACCEPT,
             ACCEPT_STATUS_LISTS_HEADER_JWT.parse().unwrap(),
         );
+        headers.insert(http::header::ACCEPT_ENCODING, "gzip".parse().unwrap());
 
         let response = get_status_list(
             State(app_state.clone()),
@@ -746,6 +750,7 @@ mod tests {
             http::header::ACCEPT,
             ACCEPT_STATUS_LISTS_HEADER_JWT.parse().unwrap(),
         );
+        headers.insert(http::header::ACCEPT_ENCODING, "gzip".parse().unwrap());
 
         let response = get_status_list(
             State(app_state.clone()),
@@ -805,6 +810,7 @@ mod tests {
             http::header::ACCEPT,
             ACCEPT_STATUS_LISTS_HEADER_CWT.parse().unwrap(),
         );
+        headers.insert(http::header::ACCEPT_ENCODING, "gzip".parse().unwrap());
 
         let response = get_status_list(
             State(app_state.clone()),
@@ -884,6 +890,7 @@ mod tests {
             http::header::ACCEPT,
             ACCEPT_STATUS_LISTS_HEADER_CWT.parse().unwrap(),
         );
+        headers.insert(http::header::ACCEPT_ENCODING, "gzip".parse().unwrap());
 
         let response = get_status_list(
             State(app_state.clone()),
@@ -1052,22 +1059,15 @@ mod tests {
     fn test_build_cache_control() {
         // Test with specific TTL value
         let cache_control = build_cache_control(300);
-        assert_eq!(cache_control, "public, max-age=300, immutable");
+        assert_eq!(cache_control, "max-age=300, immutable");
 
         // Test with zero TTL
         let cache_control_zero = build_cache_control(0);
-        assert_eq!(cache_control_zero, "public, max-age=0, immutable");
+        assert_eq!(cache_control_zero, "max-age=0, immutable");
 
         // Test with large TTL value
         let cache_control_large = build_cache_control(86400);
-        assert_eq!(cache_control_large, "public, max-age=86400, immutable");
-    }
-
-    #[test]
-    fn test_build_error_cache_control() {
-        // Test error cache control header
-        let error_cache_control = build_error_cache_control();
-        assert_eq!(error_cache_control, "no-store, max-age=0");
+        assert_eq!(cache_control_large, "max-age=86400, immutable");
     }
 
     #[tokio::test]
@@ -1136,7 +1136,7 @@ mod tests {
             .unwrap()
             .to_str()
             .unwrap();
-        assert_eq!(cache_control, "public, max-age=300, immutable");
+        assert_eq!(cache_control, "max-age=300, immutable");
 
         let vary = response_headers
             .get(http::header::VARY)
@@ -1253,7 +1253,7 @@ mod tests {
             issuer: "issuer1".to_string(),
             status_list,
             sub: "test_subject".to_string(),
-            updated_at: 0,
+            updated_at: 1672531200, // 2023-01-01 00:00:00 UTC
         };
         let db_conn = Arc::new(
             mock_db
@@ -1288,9 +1288,8 @@ mod tests {
             .unwrap()
             .to_string();
 
-        // Second request with If-Modified-Since: the representation's
-        // Last-Modified (rotated to the current validity bucket) is <= the
-        // captured timestamp, so the handler must return 304 — no ETag sent.
+        // Second request with If-Modified-Since: Last-Modified (updated_at) is
+        // <= the captured timestamp, so the handler must return 304 — no ETag sent.
         let mut conditional_headers = HeaderMap::new();
         conditional_headers.insert(
             http::header::ACCEPT,
@@ -1340,7 +1339,7 @@ mod tests {
             issuer: "issuer1".to_string(),
             status_list,
             sub: "test_subject".to_string(),
-            updated_at: 0,
+            updated_at: 1672531200, // 2023-01-01 00:00:00 UTC
         };
         let db_conn = Arc::new(
             mock_db
@@ -1352,9 +1351,9 @@ mod tests {
 
         let app_state = test_app_state(Some(db_conn.clone())).await;
 
-        // An If-Modified-Since older than the bucketed Last-Modified (~now)
-        // means the served representation is newer than the client's cached
-        // value, so the handler must return 200 with a fresh body.
+        // An If-Modified-Since older than updated_at means the served
+        // representation is newer than the client's cached value, so the
+        // handler must return 200 with a fresh body.
         let mut headers = HeaderMap::new();
         headers.insert(
             http::header::ACCEPT,
