@@ -1,9 +1,6 @@
 use std::time::Duration;
 
-use config::{
-    Config as ConfigLib, ConfigBuilder, ConfigError, Environment,
-    builder::DefaultState,
-};
+use config::{Config as ConfigLib, ConfigBuilder, ConfigError, Environment, builder::DefaultState};
 use redis::{
     Client as RedisClient, ClientTlsConfig, RedisResult, TlsCertificates,
     aio::{ConnectionManager, ConnectionManagerConfig},
@@ -370,34 +367,56 @@ impl Config {
 /// that there is exactly one source of truth for the default configuration.
 fn base_builder() -> ConfigBuilder<DefaultState> {
     ConfigLib::builder()
-        .set_default("server.host", "localhost").expect("hardcoded default")
-        .set_default("server.domain", "localhost").expect("hardcoded default")
-        .set_default("server.port", 8000).expect("hardcoded default")
-        .set_default("server.enable_metrics", false).expect("hardcoded default")
-        .set_default("server.aggregation_uri", Option::<String>::None).expect("hardcoded default")
+        .set_default("server.host", "localhost")
+        .expect("hardcoded default")
+        .set_default("server.domain", "localhost")
+        .expect("hardcoded default")
+        .set_default("server.port", 8000)
+        .expect("hardcoded default")
+        .set_default("server.enable_metrics", false)
+        .expect("hardcoded default")
+        .set_default("server.aggregation_uri", Option::<String>::None)
+        .expect("hardcoded default")
         .set_default(
             "database.url",
             "postgres://postgres:postgres@localhost:5432/status-list",
-        ).expect("hardcoded default")
-        .set_default("redis.uri", "redis://localhost:6379").expect("hardcoded default")
-        .set_default("redis.require_client_auth", false).expect("hardcoded default")
-        .set_default("redis.cert_cache_ttl", 3600).expect("hardcoded default")
-        .set_default("aws.secrets_cache_ttl", 300).expect("hardcoded default")
-        .set_default("aws.s3_bucket", "status-list-adorsys").expect("hardcoded default")
-        .set_default("aws.s3_key_prefix", "").expect("hardcoded default")
-        .set_default("server.cert.email", "admin@example.com").expect("hardcoded default")
-        .set_default("server.cert.eku", vec![1, 3, 6, 1, 5, 5, 7, 3, 30]).expect("hardcoded default")
-        .set_default("server.cert.organization", "adorsys GmbH & CO KG").expect("hardcoded default")
+        )
+        .expect("hardcoded default")
+        .set_default("redis.uri", "redis://localhost:6379")
+        .expect("hardcoded default")
+        .set_default("redis.require_client_auth", false)
+        .expect("hardcoded default")
+        .set_default("redis.cert_cache_ttl", 3600)
+        .expect("hardcoded default")
+        .set_default("aws.secrets_cache_ttl", 300)
+        .expect("hardcoded default")
+        .set_default("aws.s3_bucket", "status-list-adorsys")
+        .expect("hardcoded default")
+        .set_default("aws.s3_key_prefix", "")
+        .expect("hardcoded default")
+        .set_default("server.cert.email", "admin@example.com")
+        .expect("hardcoded default")
+        .set_default("server.cert.eku", vec![1, 3, 6, 1, 5, 5, 7, 3, 30])
+        .expect("hardcoded default")
+        .set_default("server.cert.organization", "adorsys GmbH & CO KG")
+        .expect("hardcoded default")
         .set_default(
             "server.cert.acme_directory_url",
             "https://acme-v02.api.letsencrypt.org/directory",
-        ).expect("hardcoded default")
-        .set_default("server.cert.renewal_cron_schedule", "0 0 0 * * *").expect("hardcoded default")
-        .set_default("aws.region", "us-east-1").expect("hardcoded default")
-        .set_default("cache.ttl", 5 * 60).expect("hardcoded default")
-        .set_default("cache.max_capacity", 100).expect("hardcoded default")
-        .set_default("status_list.token_exp_secs", 900).expect("hardcoded default")
-        .set_default("status_list.token_ttl_secs", 300).expect("hardcoded default")
+        )
+        .expect("hardcoded default")
+        .set_default("server.cert.renewal_cron_schedule", "0 0 0 * * *")
+        .expect("hardcoded default")
+        .set_default("aws.region", "us-east-1")
+        .expect("hardcoded default")
+        .set_default("cache.ttl", 5 * 60)
+        .expect("hardcoded default")
+        .set_default("cache.max_capacity", 100)
+        .expect("hardcoded default")
+        .set_default("status_list.token_exp_secs", 900)
+        .expect("hardcoded default")
+        .set_default("status_list.token_ttl_secs", 300)
+        .expect("hardcoded default")
 }
 
 #[cfg(test)]
@@ -435,8 +454,11 @@ mod tests {
 
     #[test]
     fn test_aggregation_uri_env_override() {
-        let config = Config::load_from_overrides(&[("server.aggregation_uri", "https://example.com/aggregation")])
-            .expect("Failed to load config");
+        let config = Config::load_from_overrides(&[(
+            "server.aggregation_uri",
+            "https://example.com/aggregation",
+        )])
+        .expect("Failed to load config");
 
         assert_eq!(
             config.server.aggregation_uri.as_deref(),
@@ -581,10 +603,8 @@ mod tests {
 
     #[test]
     fn test_dns_provider_env_override() {
-        let config = Config::load_from_overrides(&[
-            ("server.cert.dns.provider", "route53"),
-        ])
-        .expect("Failed to load config");
+        let config = Config::load_from_overrides(&[("server.cert.dns.provider", "route53")])
+            .expect("Failed to load config");
 
         assert_eq!(
             config.server.cert.dns.provider,
@@ -597,11 +617,17 @@ mod tests {
         let config = Config::load_from_overrides(&[
             ("server.host", "0.0.0.0"),
             ("server.port", "5002"),
-            ("database.url", "postgres://user:password@localhost:5432/status-list"),
+            (
+                "database.url",
+                "postgres://user:password@localhost:5432/status-list",
+            ),
             ("redis.uri", "rediss://user:password@localhost:6379/redis"),
             ("redis.require_client_auth", "true"),
             ("server.cert.email", "test@gmail.com"),
-            ("server.cert.acme_directory_url", "https://acme-v02.api.letsencrypt.org/directory"),
+            (
+                "server.cert.acme_directory_url",
+                "https://acme-v02.api.letsencrypt.org/directory",
+            ),
         ])
         .expect("Failed to load config");
 
@@ -629,7 +655,10 @@ mod tests {
             ("redis.uri", "rediss://user:password@localhost:6379/redis"),
             ("redis.require_client_auth", "true"),
             ("server.cert.email", "test@gmail.com"),
-            ("server.cert.acme_directory_url", "https://acme-v02.api.letsencrypt.org/directory"),
+            (
+                "server.cert.acme_directory_url",
+                "https://acme-v02.api.letsencrypt.org/directory",
+            ),
             ("server.cert.organization", "Test Org"),
             ("server.cert.eku", "1,3,6,1,5,5,7,3,30"),
             ("aws.region", "us-west-2"),

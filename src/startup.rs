@@ -180,8 +180,8 @@ mod tests {
 
     #[test]
     fn test_validate_aggregation_uri_rejects_invalid_url() {
-        let config = Config::load_from_overrides(&[("server.aggregation_uri", "not a url")])
-            .unwrap();
+        let config =
+            Config::load_from_overrides(&[("server.aggregation_uri", "not a url")]).unwrap();
         let result = validate_aggregation_uri(&config);
         assert!(result.is_err(), "Should reject invalid URL");
     }
