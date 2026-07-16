@@ -23,15 +23,19 @@ const OAUTH_SCOPE: &str = "https://www.googleapis.com/auth/ndev.clouddns.readwri
 /// is served by all of the zone's authoritative name servers.
 pub struct GoogleCloudDnsProvider {
     client: Client,
-    key: ServiceAccountKey,
+    client_email: String,
+    token_uri: String,
+    project_id: String,
     encoding_key: EncodingKey,
     api_base: String,
     token_cache: TokenCache,
     zones: RwLock<Option<Vec<ZoneInfo>>>,
 }
 
-/// Relevant fields of a Google service account key JSON
-#[derive(Clone, Deserialize)]
+/// Relevant fields of a Google service account key JSON. Only parsed
+/// transiently in `new`, so the plaintext private key is not retained;
+/// the signing material lives on in the `EncodingKey`.
+#[derive(Deserialize)]
 struct ServiceAccountKey {
     client_email: String,
     private_key: String,
@@ -114,7 +118,9 @@ impl GoogleCloudDnsProvider {
             .map_err(|e| dns_err(eyre!("Invalid service account private key: {e}")))?;
         Ok(Self {
             client: http_client(),
-            key,
+            client_email: key.client_email,
+            token_uri: key.token_uri,
+            project_id: key.project_id,
             encoding_key,
             api_base: DEFAULT_API_BASE.to_string(),
             token_cache: TokenCache::new(),
@@ -133,9 +139,9 @@ impl GoogleCloudDnsProvider {
             .get_or_mint(|| async {
                 let iat = time::OffsetDateTime::now_utc().unix_timestamp();
                 let claims = TokenClaims {
-                    iss: &self.key.client_email,
+                    iss: &self.client_email,
                     scope: OAUTH_SCOPE,
-                    aud: &self.key.token_uri,
+                    aud: &self.token_uri,
                     iat,
                     exp: iat + Self::TOKEN_LIFETIME.as_secs() as i64,
                 };
@@ -148,7 +154,7 @@ impl GoogleCloudDnsProvider {
 
                 let response = self
                     .client
-                    .post(&self.key.token_uri)
+                    .post(&self.token_uri)
                     .form(&[
                         ("grant_type", "urn:ietf:params:oauth:grant-type:jwt-bearer"),
                         ("assertion", &assertion),
@@ -176,7 +182,7 @@ impl GoogleCloudDnsProvider {
     }
 
     fn project_url(&self) -> String {
-        format!("{}/projects/{}", self.api_base, self.key.project_id)
+        format!("{}/projects/{}", self.api_base, self.project_id)
     }
 
     // Find the managed zone for the given domain and return its name
