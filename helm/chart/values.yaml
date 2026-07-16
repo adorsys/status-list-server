@@ -74,6 +74,12 @@ statuslist:
     APP_SERVER__CERT__RENEWAL_CRON_SCHEDULE: "0 0 0 * * *"
     # Parsed certificate chain cache TTL in seconds. "0" means no expiry; non-provisioning replicas rely on this TTL for renewed chains.
     APP_SERVER__CERT__CHAIN_CACHE_TTL: "3600"
+    # DNS provider for ACME DNS-01 challenges: route53 | cloudflare | gcloud | azure | acmedns
+    # (pebble also exists but is a development-only fake, not for deployments)
+    # See docs/dns-providers.md for the settings each provider needs.
+    # Provider credentials (e.g. APP_SERVER__CERT__DNS__CLOUDFLARE__API_TOKEN) must come
+    # from a secret (see externalSecret below), not from plain env values.
+    APP_SERVER__CERT__DNS__PROVIDER: "route53"
     APP_REDIS__REQUIRE_CLIENT_AUTH: "false"
     APP_AWS__SECRETS_CACHE_TTL: "300"
     APP_AWS__S3_BUCKET: "status-list-adorsys"

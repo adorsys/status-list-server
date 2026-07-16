@@ -14,8 +14,10 @@ info:
     (`application/problem+json`). This is the canonical error format intended
     for the API; individual endpoints may migrate to this format over time.
 
-    Status list tokens are signed by the server and delivered gzip-compressed
-    via `application/statuslist+jwt` or `application/statuslist+cwt`.
+    Status list tokens are signed by the server and delivered as
+    `application/statuslist+jwt` or `application/statuslist+cwt`. JWT-format
+    tokens are gzip-compressed only when the client requests it via
+    `Accept-Encoding: gzip`; CWT-format tokens are never compressed.
   contact:
     name: adorsys Status List Server
     url: https://github.com/adorsys/status-list-server
@@ -192,9 +194,14 @@ paths:
       operationId: getStatusList
       summary: Retrieve a status list token
       description: |
-        Returns the status list token for the requested `list_id`. The response
-        is gzip-compressed and encoded as a JWT or CWT depending on the
-        `Accept` header.
+        Returns the status list token for the requested `list_id`, encoded as a
+        JWT or CWT depending on the `Accept` header.
+
+        JWT-format responses are gzip-compressed (`Content-Encoding: gzip`)
+        only when the client has advertised support via `Accept-Encoding: gzip`
+        (see draft-ietf-oauth-status-list-21 §8.2). CWT-format responses are
+        never gzip-compressed. Because the representation varies by
+        `Accept-Encoding`, every response carries `Vary: Accept-Encoding`.
 
         The decoded token conforms to the
         [OAuth Status List](https://datatracker.ietf.org/doc/draft-ietf-oauth-status-list/)
@@ -222,6 +229,17 @@ paths:
               - application/statuslist+jwt
               - application/statuslist+cwt
             default: application/statuslist+jwt
+        - name: Accept-Encoding
+          in: header
+          required: false
+          description: |
+            Content codings the client is willing to accept. When `gzip` is
+            advertised (default q-value), JWT-format responses are
+            gzip-compressed and carry `Content-Encoding: gzip`. CWT-format
+            responses are never compressed regardless of this header.
+          schema:
+            type: string
+            example: gzip
       responses:
         "200":
           description: |
@@ -237,13 +255,31 @@ paths:
               schema:
                 type: string
                 format: binary
-              example: "H4sIAAAAAAAAE6tW..."
+              description: |
+                Raw COSE_Sign1_Tagged CBOR bytes (CBOR tag 18). Never
+                gzip-compressed regardless of the request's `Accept-Encoding`.
+              example: "0gEAAQ..."
           headers:
             Content-Encoding:
               schema:
                 type: string
-              description: Always `gzip`.
+              description: |
+                Present with value `gzip` only when the response body has been
+                gzip-compressed. Compression is applied to JWT-format tokens
+                (`application/statuslist+jwt`) exclusively, and only when the
+                client has advertised support for it via an
+                `Accept-Encoding: gzip` request header. CWT-format tokens are
+                never compressed. Absent otherwise.
               example: gzip
+            Vary:
+              schema:
+                type: string
+              description: |
+                Always `Accept-Encoding`. Because the response body varies by
+                the request's `Accept-Encoding` header, this is required so
+                that shared caches/CDNs do not serve a gzipped variant to a
+                client that did not request one (RFC 9111 §4.2).
+              example: Accept-Encoding
         "404":
           $ref: "#/components/responses/NotFound"
         "406":
@@ -383,10 +419,11 @@ components:
       type: object
       description: |
         Decoded payload of a JWT or CWT status list token. The actual response
-        from `GET /statuslists/{list_id}` is the signed, gzip-compressed token
-        string. The token is signed by the server using the configured signing
-        key and contains the certificate chain in the `x5c` header (JWT) or
-        protected header (CWT).
+        from `GET /statuslists/{list_id}` is the signed token — a JWT string
+        (optionally gzip-compressed when the client requests it) or raw
+        COSE_Sign1_Tagged CBOR bytes for CWT. The token is signed by the server
+        using the configured signing key and contains the certificate chain in
+        the `x5c` header (JWT) or protected header (CWT).
       required:
         - sub
         - iat
