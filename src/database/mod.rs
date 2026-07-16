@@ -218,7 +218,11 @@ pub(crate) mod migrations {
                                     .string()
                                     .not_null(),
                             )
-                            .col(ColumnDef::new(StatusListHistory::Issuer).string().not_null())
+                            .col(
+                                ColumnDef::new(StatusListHistory::Issuer)
+                                    .string()
+                                    .not_null(),
+                            )
                             .col(
                                 ColumnDef::new(StatusListHistory::StatusList)
                                     .json()

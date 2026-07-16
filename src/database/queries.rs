@@ -156,10 +156,7 @@ impl SeaOrmStore<StatusListHistoryRecord> {
 
     /// Deletes snapshots older than the given cutoff timestamp.
     /// Returns the number of rows deleted.
-    pub async fn delete_older_than(
-        &self,
-        cutoff: i64,
-    ) -> Result<u64, RepositoryError> {
+    pub async fn delete_older_than(&self, cutoff: i64) -> Result<u64, RepositoryError> {
         let result = status_list_history::Entity::delete_many()
             .filter(status_list_history::Column::Exp.lt(cutoff))
             .exec(&*self.db)
