@@ -18,20 +18,18 @@ For a detailed explanation of the architecture, see the [Architecture Documentat
 
 ## Feature Implementation Status
 
-| Feature                         | Status         | Notes                                                         |
-| ------------------------------- | -------------- | ------------------------------------------------------------- |
-| Issuer Registration             | ✅ Implemented | Public key registration via `/credentials/`                   |
-| Status List Publishing          | ✅ Implemented | JWT-signed publishing via `/statuslists/publish`              |
-| Status List Updates             | ✅ Implemented | Partial updates via `/statuslists/update`                     |
-| JWT Status List Format          | ✅ Implemented | JWS Compact Serialization with `exp`/`ttl`                    |
-| CWT Status List Format          | ⚠️ Partial     | COSE_Sign1 serialization needs verification                   |
-| Gzip Compression                | ⚠️ Partial     | Applied to JWT; spec makes optional for CWT                   |
-| HTTP Content Negotiation        | ⚠️ Partial     | Basic support; RFC 9110 pattern matching needs implementation |
-| Historical Resolution (`time=`) | ❌ Not Started | Optional feature for time-based status queries                |
-| Status List Aggregation         | ❌ Not Started | Fetching from multiple issuers via `aggregation_uri`          |
-| X.509 Certificate EKU           | ⚠️ Partial     | Placeholder OID; rename pending spec finalization             |
-
-For detailed spec compliance analysis, see [Spec Compliance Matrix](docs/spec-compliance.md).
+| Feature                         | Status         | Notes                                                                     |
+| ------------------------------- | -------------- | ------------------------------------------------------------------------- |
+| Issuer Registration             | ✅ Implemented | Public key registration via `POST /api/v1/credentials`                    |
+| Status List Publishing          | ✅ Implemented | JWT-signed publishing via `PUT /api/v1/status-lists/{id}/statuses`        |
+| Status List Updates             | ✅ Implemented | Partial updates via `PATCH /api/v1/status-lists/{id}/statuses`            |
+| JWT Status List Format          | ✅ Implemented | JWS Compact Serialization with `exp`/`ttl`                               |
+| CWT Status List Format          | ✅ Implemented | COSE_Sign1_Tagged (tag 18) with `exp`/`ttl`                               |
+| Gzip Compression                | ✅ Implemented | Applied to both JWT and CWT responses                                      |
+| HTTP Content Negotiation        | ⚠️ Partial     | Exact match only; RFC 9110 patterns (`*/*`, `q=`) not yet supported        |
+| Historical Resolution (`time=`) | ❌ Not Started | Optional feature for time-based status queries                            |
+| Status List Aggregation         | ✅ Implemented | `GET /api/v1/aggregation` + optional `aggregation_uri` token member       |
+| X.509 Certificate EKU           | ⚠️ Partial     | Placeholder OID (`...3.30`); rename pending spec finalization              |
 
 ## Quick Start
 
