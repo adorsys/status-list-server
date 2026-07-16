@@ -68,7 +68,7 @@ impl IntoResponse for StatusListError {
             ServiceUnavailable => StatusCode::SERVICE_UNAVAILABLE,
             TooManyStatuses { .. } => StatusCode::BAD_REQUEST,
             IndexTooLarge(_) => StatusCode::BAD_REQUEST,
-            StatusTooLarge => StatusCode::PAYLOAD_TOO_LARGE,
+            StatusTooLarge => StatusCode::UNPROCESSABLE_ENTITY,
         };
 
         (status_code, self.to_string()).into_response()

@@ -69,7 +69,7 @@ impl HttpServer {
         let max_body_size = config.limits.max_body_size_bytes;
 
         let (strict_governor, issuer_governor, permissive_governor) =
-            build_governor_configs(&config.rate_limit);
+            build_governor_configs(&config.rate_limit)?;
 
         let mut router = Router::new()
             .route("/", get(welcome))
@@ -81,7 +81,6 @@ impl HttpServer {
                     strict_governor.clone(),
                     issuer_governor.clone(),
                     permissive_governor.clone(),
-                    max_body_size,
                 ),
             )
             .layer(TraceLayer::new_for_http())
@@ -117,13 +116,15 @@ type GovernorPolicies = (
     Arc<GovernorConfig<PeerIpKeyExtractor, NoOpMiddleware>>,
 );
 
-fn build_governor_configs(config: &crate::config::RateLimitConfig) -> GovernorPolicies {
+fn build_governor_configs(
+    config: &crate::config::RateLimitConfig,
+) -> color_eyre::Result<GovernorPolicies> {
     let strict = Arc::new(
         GovernorConfigBuilder::default()
             .burst_size(config.strict_burst_size)
             .period(Duration::from_secs(config.strict_period_secs))
             .finish()
-            .expect("strict governor config requires non-zero burst_size and period"),
+            .ok_or_else(|| eyre!("strict governor requires non-zero burst_size and period"))?,
     );
     let issuer = Arc::new(
         GovernorConfigBuilder::default()
@@ -131,16 +132,16 @@ fn build_governor_configs(config: &crate::config::RateLimitConfig) -> GovernorPo
             .period(Duration::from_secs(config.strict_period_secs))
             .key_extractor(IssuerKeyExtractor)
             .finish()
-            .expect("issuer governor config requires non-zero burst_size and period"),
+            .ok_or_else(|| eyre!("issuer governor requires non-zero burst_size and period"))?,
     );
     let permissive = Arc::new(
         GovernorConfigBuilder::default()
             .burst_size(config.permissive_burst_size)
             .period(Duration::from_secs(config.permissive_period_secs))
             .finish()
-            .expect("permissive governor config requires non-zero burst_size and period"),
+            .ok_or_else(|| eyre!("permissive governor requires non-zero burst_size and period"))?,
     );
-    (strict, issuer, permissive)
+    Ok((strict, issuer, permissive))
 }
 
 /// Management API v1 routes with per-tier rate limiting and body-size bounds.
@@ -149,10 +150,7 @@ fn api_v1_routes(
     strict_governor: Arc<GovernorConfig<PeerIpKeyExtractor, NoOpMiddleware>>,
     issuer_governor: Arc<GovernorConfig<IssuerKeyExtractor, NoOpMiddleware>>,
     permissive_governor: Arc<GovernorConfig<PeerIpKeyExtractor, NoOpMiddleware>>,
-    max_body_size: usize,
 ) -> Router<AppState> {
-    let body_limit = RequestBodyLimitLayer::new(max_body_size);
-
     let protected = Router::new()
         .nest(
             "/status-lists/{list_id}/statuses",
@@ -161,19 +159,16 @@ fn api_v1_routes(
                 .route("/", patch(update_status)),
         )
         .route_layer(from_fn_with_state(state.clone(), auth))
-        .layer(GovernorLayer::new(issuer_governor))
-        .layer(body_limit);
+        .layer(GovernorLayer::new(issuer_governor));
 
     let credentials = Router::new()
         .route("/credentials", post(credential_handler))
-        .layer(GovernorLayer::new(strict_governor))
-        .layer(body_limit);
+        .layer(GovernorLayer::new(strict_governor));
 
     let public_reads = Router::new()
         .route("/aggregation", get(get_aggregation))
         .route("/status-lists/{list_id}", get(get_status_list))
-        .layer(GovernorLayer::new(permissive_governor))
-        .layer(body_limit);
+        .layer(GovernorLayer::new(permissive_governor));
 
     Router::new()
         .merge(protected)

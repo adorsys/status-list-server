@@ -310,7 +310,7 @@ mod test {
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     }
 
-    /// Serialized list exceeding `max_serialized_list_size` returns 413 (#171).
+    /// Serialized list exceeding `max_serialized_list_size` returns 422 (#171).
     #[tokio::test]
     async fn test_update_status_rejects_serialized_list_too_large() {
         let mock_db = MockDatabase::new(DatabaseBackend::Postgres);
@@ -363,6 +363,6 @@ mod test {
             Ok(_) => panic!("Expected an error but got Ok"),
             Err(err) => err.into_response(),
         };
-        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
     }
 }
