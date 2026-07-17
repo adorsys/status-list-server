@@ -1,32 +1,35 @@
 use moka::future::Cache as MokaCache;
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 
 use crate::models::StatusListRecord;
 
 #[derive(Clone)]
-pub struct Cache {
-    inner: MokaCache<String, StatusListRecord>,
+pub struct StatusListCache {
+    inner: MokaCache<String, Arc<StatusListRecord>>,
 }
 
-impl Cache {
-    /// Creates a cache; TTL=0 disables it naturally.
+impl StatusListCache {
+    /// Creates a cache.
+    ///
+    /// A **zero** TTL (`ttl_secs = 0`) disables the status-list cache: inserts
+    /// expire immediately and reads fall through to storage. This intentionally
+    /// differs from [`CertChainCache`](super::CertChainCache), where a zero TTL
+    /// means entries never expire.
     pub fn new(ttl_secs: u64, max_capacity: u64) -> Self {
         if ttl_secs == 0 {
-            tracing::info!("Cache disabled (TTL=0)");
+            tracing::info!("Status-list cache TTL=0: entries expire immediately");
         }
-        let inner = MokaCache::builder()
-            .time_to_live(Duration::from_secs(ttl_secs))
-            .max_capacity(max_capacity)
-            .build();
+        let builder = MokaCache::builder().max_capacity(max_capacity);
+        let inner = builder.time_to_live(Duration::from_secs(ttl_secs)).build();
         Self { inner }
     }
 
-    pub async fn get(&self, key: &str) -> Option<StatusListRecord> {
+    pub async fn get(&self, key: &str) -> Option<Arc<StatusListRecord>> {
         self.inner.get(key).await
     }
 
-    pub async fn insert(&self, key: String, value: StatusListRecord) {
-        self.inner.insert(key, value).await;
+    pub async fn insert(&self, key: String, value: impl Into<Arc<StatusListRecord>>) {
+        self.inner.insert(key, value.into()).await;
     }
 
     pub async fn invalidate(&self, key: &str) {
@@ -53,7 +56,7 @@ mod tests {
 
     #[tokio::test]
     async fn cache_enabled_works() {
-        let cache = Cache::new(60, 10);
+        let cache = StatusListCache::new(60, 10);
         let record = sample_record("list-1");
         cache.insert("list-1".to_string(), record.clone()).await;
         assert!(cache.get("list-1").await.is_some());
@@ -61,7 +64,7 @@ mod tests {
 
     #[tokio::test]
     async fn cache_disabled_returns_none() {
-        let cache = Cache::new(0, 10);
+        let cache = StatusListCache::new(0, 10);
         cache
             .insert("list-1".to_string(), sample_record("list-1"))
             .await;
