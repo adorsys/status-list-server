@@ -32,6 +32,9 @@ pub enum CertError {
     #[error("Key operation error: {0}")]
     KeyOp(#[from] KeyOpError),
 
+    #[error("Configuration validation error: {0}")]
+    Validation(String),
+
     #[error("Uncategorized error: {0}")]
     Other(#[source] EyreError),
 }
