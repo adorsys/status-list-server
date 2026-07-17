@@ -226,12 +226,23 @@ pub(crate) mod migrations {
                 // update touches the row. Setting them to the migration run
                 // time makes the validator meaningful immediately.
                 let now_secs = time::OffsetDateTime::now_utc().unix_timestamp();
+
+                // Use database-specific identifier quoting:
+                // - MySQL uses backticks
+                // - PostgreSQL and SQLite use double quotes
+                let (table_quote, col_quote) = match manager.get_database_backend() {
+                    sea_orm::DatabaseBackend::MySql => ("`", "`"),
+                    _ => ("\"", "\""),
+                };
+
+                let sql = format!(
+                    "UPDATE {0}status_lists{0} SET {1}updated_at{1} = {2}",
+                    table_quote, col_quote, now_secs
+                );
+
                 manager
                     .get_connection()
-                    .execute_unprepared(&format!(
-                        r#"UPDATE "status_lists" SET "updated_at" = {}"#,
-                        now_secs
-                    ))
+                    .execute_unprepared(&sql)
                     .await
                     .map(|_| ())
             }

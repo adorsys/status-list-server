@@ -225,7 +225,13 @@ mod test {
 
     #[cfg(feature = "sqlite")]
     async fn sqlite_connection() -> Arc<DatabaseConnection> {
-        let mut opt = sea_orm::ConnectOptions::new("sqlite::memory:?cache=shared");
+        // Use a unique in-memory database for each test to avoid migration conflicts
+        // when tests run concurrently. The random UUID ensures each test gets its own database.
+        let db_url = format!(
+            "sqlite:memdb:{}?mode=memory&cache=shared",
+            uuid::Uuid::new_v4()
+        );
+        let mut opt = sea_orm::ConnectOptions::new(db_url);
         opt.max_connections(1);
         opt.map_sqlx_sqlite_opts(|o| o.foreign_keys(true));
         let db = sea_orm::Database::connect(opt)
