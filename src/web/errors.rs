@@ -2,8 +2,7 @@ use std::borrow::Cow;
 
 use axum::{
     Json,
-    extract::rejection::JsonRejection,
-    http::StatusCode,
+    http::{StatusCode, header},
     response::{IntoResponse, Response},
 };
 use serde::{Deserialize, Serialize};
@@ -64,7 +63,12 @@ impl IntoResponse for ApiError {
             error_description: self.error_description.as_deref(),
         };
 
-        (self.status, Json(body)).into_response()
+        (
+            self.status,
+            [(header::CACHE_CONTROL, "no-store, max-age=0")],
+            Json(body),
+        )
+            .into_response()
     }
 }
 
@@ -74,30 +78,6 @@ impl From<CredentialError> for ApiError {
             CredentialError::AuthError(err) => ApiError::from(err),
             CredentialError::RepoError(err) => ApiError::from(err),
         }
-    }
-}
-
-pub struct ApiJson<T>(pub T);
-
-impl<S, T> axum::extract::FromRequest<S> for ApiJson<T>
-where
-    S: Send + Sync,
-    T: serde::de::DeserializeOwned,
-{
-    type Rejection = ApiError;
-
-    async fn from_request(req: axum::extract::Request, state: &S) -> Result<Self, Self::Rejection> {
-        let Json(inner) =
-            Json::<T>::from_request(req, state)
-                .await
-                .map_err(|_: JsonRejection| {
-                    ApiError::new(
-                        StatusCode::BAD_REQUEST,
-                        "invalid_request",
-                        "request body is missing or malformed JSON",
-                    )
-                })?;
-        Ok(Self(inner))
     }
 }
 

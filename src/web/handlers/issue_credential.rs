@@ -2,11 +2,8 @@ use axum::{Json, extract::State, http::StatusCode, response::IntoResponse};
 use serde_json::json;
 
 use crate::{
-    database::error::RepositoryError,
-    models::Credentials,
-    utils::state::AppState,
-    web::auth::errors::AuthenticationError,
-    web::errors::{ApiError, ApiJson},
+    database::error::RepositoryError, models::Credentials, utils::state::AppState,
+    web::auth::errors::AuthenticationError, web::errors::ApiError,
 };
 
 #[derive(Debug)]
@@ -29,7 +26,7 @@ impl From<AuthenticationError> for CredentialError {
 
 pub async fn credential_handler(
     State(appstate): State<AppState>,
-    ApiJson(credential): ApiJson<Credentials>,
+    Json(credential): Json<Credentials>,
 ) -> Result<impl IntoResponse, ApiError> {
     publish_credentials(credential.to_owned(), appstate).await?;
     Ok((
@@ -141,6 +138,6 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
     }
 }

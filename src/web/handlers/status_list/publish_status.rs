@@ -1,11 +1,11 @@
 use crate::{
     models::{StatusList, StatusListRecord, StatusesRequest},
     utils::{errors::Error, lst_gen::create_status_list, state::AppState},
-    web::errors::{ApiError, ApiJson},
+    web::errors::ApiError,
 };
 use axum::{
     Extension,
-    extract::{Path, State},
+    extract::{Json, Path, State},
     http::StatusCode,
     response::IntoResponse,
 };
@@ -18,7 +18,7 @@ pub async fn publish_status(
     State(appstate): State<AppState>,
     Extension(issuer): Extension<String>,
     Path(list_id): Path<String>,
-    ApiJson(payload): ApiJson<StatusesRequest>,
+    Json(payload): Json<StatusesRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
     // Validate list_id as UUID
     if let Err(e) = uuid::Uuid::try_parse(&list_id) {
@@ -92,7 +92,7 @@ mod tests {
             State(appstate.clone()),
             Extension(issuer),
             Path("invalid-uuid".to_string()),
-            ApiJson(payload),
+            Json(payload),
         )
         .await;
 
@@ -144,7 +144,7 @@ mod tests {
             State(app_state),
             Extension("issuer".to_string()),
             Path(token_id),
-            ApiJson(StatusesRequest {
+            Json(StatusesRequest {
                 statuses: status_entries,
             }),
         )
@@ -195,7 +195,7 @@ mod tests {
             State(app_state.clone()),
             Extension("issuer".to_string()),
             Path(token_id.clone()),
-            ApiJson(StatusesRequest {
+            Json(StatusesRequest {
                 statuses: status_entries,
             }),
         )
@@ -247,7 +247,7 @@ mod tests {
             State(app_state),
             Extension("issuer".to_string()),
             Path(token_id),
-            ApiJson(StatusesRequest {
+            Json(StatusesRequest {
                 statuses: status_entries,
             }),
         )
@@ -289,7 +289,7 @@ mod tests {
             State(app_state.clone()),
             Extension("issuer".to_string()),
             Path(token_id.clone()),
-            ApiJson(StatusesRequest { statuses: vec![] }),
+            Json(StatusesRequest { statuses: vec![] }),
         )
         .await
         .unwrap()
@@ -341,7 +341,7 @@ mod tests {
             State(app_state),
             Extension("issuer".to_string()),
             Path(token_id),
-            ApiJson(StatusesRequest {
+            Json(StatusesRequest {
                 statuses: status_entries,
             }),
         )
@@ -366,7 +366,7 @@ mod tests {
             State(app_state),
             Extension("issuer".to_string()),
             Path(token_id),
-            ApiJson(StatusesRequest {
+            Json(StatusesRequest {
                 statuses: status_entries,
             }),
         )

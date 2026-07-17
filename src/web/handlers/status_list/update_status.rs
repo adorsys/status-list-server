@@ -1,6 +1,6 @@
 use axum::{
     Extension,
-    extract::{Path, State},
+    extract::{Json, Path, State},
     response::IntoResponse,
 };
 use hyper::StatusCode;
@@ -11,7 +11,7 @@ use crate::{
     utils::{
         bits_validation::BitFlag, errors::Error, lst_gen::update_status_list, state::AppState,
     },
-    web::errors::{ApiError, ApiJson},
+    web::errors::ApiError,
 };
 
 use super::error::StatusListError;
@@ -21,7 +21,7 @@ pub async fn update_status(
     State(appstate): State<AppState>,
     Extension(issuer): Extension<String>,
     Path(list_id): Path<String>,
-    ApiJson(payload): ApiJson<StatusesRequest>,
+    Json(payload): Json<StatusesRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
     // Validate list_id as UUID
     if let Err(e) = uuid::Uuid::try_parse(&list_id) {
@@ -121,7 +121,7 @@ mod test {
             State(appstate.clone()),
             Extension(issuer),
             Path("invalid-uuid".to_string()),
-            ApiJson(payload),
+            Json(payload),
         )
         .await;
 
@@ -186,7 +186,7 @@ mod test {
             State(app_state),
             Extension("issuer".to_string()),
             Path(token_id),
-            ApiJson(update_payload),
+            Json(update_payload),
         )
         .await
         .unwrap()
