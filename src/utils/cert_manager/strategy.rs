@@ -216,6 +216,9 @@ impl CertProvisioningStrategy for StoreProvisioningStrategy {
 
         manager.persist_certificate_data(&certificate_data).await?;
         manager.persist_signing_key(&signing_key_pem).await?;
+        manager
+            .cache_provisioned_chain(&certificate_data.certificate)
+            .await?;
         info!("Store certificate material refreshed");
         Ok(certificate_data)
     }
