@@ -183,7 +183,7 @@ mod test {
 
     #[cfg(feature = "sqlite")]
     async fn sqlite_connection() -> Arc<DatabaseConnection> {
-        let mut opt = sea_orm::ConnectOptions::new("sqlite::memory:?cache=shared");
+        let mut opt = sea_orm::ConnectOptions::new("sqlite::memory:");
         opt.max_connections(1);
         opt.map_sqlx_sqlite_opts(|o| o.foreign_keys(true));
         let db = sea_orm::Database::connect(opt)
