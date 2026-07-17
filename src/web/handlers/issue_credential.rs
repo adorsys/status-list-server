@@ -107,7 +107,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_publish_credentials_success() {
-        use sea_orm::{DatabaseBackend, MockDatabase};
+        use sea_orm::{DatabaseBackend, MockDatabase, MockExecResult};
         use std::sync::Arc;
 
         let jwk = test_jwk();
@@ -119,6 +119,10 @@ mod tests {
         let db_conn = Arc::new(
             MockDatabase::new(DatabaseBackend::Postgres)
                 .append_query_results(vec![vec![], vec![model]])
+                .append_exec_results(vec![MockExecResult {
+                    rows_affected: 1,
+                    last_insert_id: 0,
+                }])
                 .into_connection(),
         );
         let app_state = test_app_state(Some(db_conn)).await;

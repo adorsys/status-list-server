@@ -13,7 +13,7 @@ use crate::{
 };
 use aws_config::{BehaviorVersion, Region, SdkConfig};
 use color_eyre::eyre::{Context, Result as EyeResult, eyre};
-use sea_orm::Database;
+use sea_orm::{ConnectOptions, Database};
 use sea_orm_migration::MigratorTrait;
 use secrecy::ExposeSecret;
 use std::{sync::Arc, time::Duration};
@@ -38,7 +38,28 @@ pub struct AppState {
 }
 
 pub async fn build_state(config: &AppConfig) -> EyeResult<AppState> {
-    let db = Database::connect(config.database.url.expose_secret())
+    let db_url = config.database.url.expose_secret();
+    let db_backend = config.database.backend;
+
+    // Validate URL scheme matches the configured backend
+    if !db_backend.validate_url_scheme(db_url) {
+        return Err(color_eyre::eyre::eyre!(
+            "URL scheme does not match configured backend '{}'. Expected URL starting with {}",
+            db_backend.as_str(),
+            db_backend.expected_scheme_description()
+        ));
+    }
+
+    #[cfg(feature = "sqlite")]
+    let mut opt = ConnectOptions::new(db_url.to_string());
+    #[cfg(not(feature = "sqlite"))]
+    let opt = ConnectOptions::new(db_url.to_string());
+    #[cfg(feature = "sqlite")]
+    if db_backend == crate::config::DatabaseBackend::Sqlite {
+        opt.max_connections(1);
+        opt.map_sqlx_sqlite_opts(|o| o.foreign_keys(true));
+    }
+    let db = Database::connect(opt)
         .await
         .wrap_err("Failed to connect to database")?;
 
