@@ -78,6 +78,9 @@ impl TestInfra {
             .with_exposed_port(14000.tcp())
             .with_wait_for(WaitFor::message_on_stdout("ACME directory available at"))
             .with_env_var("PEBBLE_VA_NOSLEEP", "1")
+            // Disable Pebble's intentional nonce rejection to prevent flaky tests
+            // See: https://github.com/letsencrypt/pebble#invalid-anti-replay-nonce-errors
+            .with_env_var("PEBBLE_WFE_NONCEREJECT", "0")
             .with_network(&network)
             .with_container_name(&pebble_name)
             .with_cmd(vec![
