@@ -454,6 +454,7 @@ mod tests {
             },
             database: DatabaseConfig {
                 url: SecretString::from("postgres://postgres:postgres@localhost/status-list"),
+                backend: crate::config::DatabaseBackend::Postgres,
             },
             redis: RedisConfig {
                 uri: SecretString::from("redis://localhost:6379"),
