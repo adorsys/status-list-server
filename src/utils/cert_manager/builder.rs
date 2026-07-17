@@ -1,13 +1,14 @@
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 
 use instant_acme::{Account, HttpClient};
 use tokio::sync::Mutex;
 
 use super::{
-    AcmeProvisioningStrategy, CertError, CertManager, CertProvisioningStrategy, RenewalStrategy,
-    StoreProvisioningStrategy, challenge::ChallengeHandler, http_client::DefaultHttpClient,
-    storage::Storage,
+    AcmeProvisioningStrategy, CertError, CertManager, CertProvisioningStrategy,
+    DEFAULT_CHAIN_CACHE_TTL, RenewalStrategy, StoreProvisioningStrategy,
+    challenge::ChallengeHandler, http_client::DefaultHttpClient, storage::Storage,
 };
+use crate::utils::cache::CertChainCache;
 
 type ACMEHttpClientFactory = Box<dyn Fn() -> Box<dyn HttpClient> + Send + Sync>;
 
@@ -71,6 +72,7 @@ pub struct CertificateManagerBuilder {
     acme_http_client_factory: Option<ACMEHttpClientFactory>,
     provisioning_strategy: Option<Box<dyn CertProvisioningStrategy>>,
     renewal_strategy: RenewalStrategy,
+    chain_cache_ttl: Option<Duration>,
     domains: Vec<String>,
     email: Option<String>,
     organization: Option<String>,
@@ -87,6 +89,7 @@ impl Default for CertificateManagerBuilder {
             acme_http_client_factory: None,
             provisioning_strategy: None,
             renewal_strategy: RenewalStrategy::PercentageOfLifetime(None),
+            chain_cache_ttl: None,
             domains: Vec::new(),
             email: None,
             organization: None,
@@ -162,6 +165,12 @@ impl CertificateManagerBuilder {
         self
     }
 
+    /// Set the certificate chain cache TTL.
+    pub fn chain_cache_ttl(mut self, ttl: Duration) -> Self {
+        self.chain_cache_ttl = Some(ttl);
+        self
+    }
+
     /// Use ACME provisioning.
     pub fn acme_strategy(mut self) -> Self {
         self.provisioning_strategy = Some(Box::new(AcmeProvisioningStrategy));
@@ -224,6 +233,10 @@ impl CertificateManagerBuilder {
             None => None,
         };
 
+        let ttl = self.chain_cache_ttl.unwrap_or(DEFAULT_CHAIN_CACHE_TTL);
+        let domain_label = self.domains.first().map(String::as_str).unwrap_or_default();
+        let cert_chain_cache = CertChainCache::new(ttl, domain_label);
+
         Ok(CertManager {
             cert_storage: Some(cert_storage),
             secrets_storage: Some(secrets_storage),
@@ -232,6 +245,7 @@ impl CertificateManagerBuilder {
             acme_http_client_factory: http_client_factory,
             provisioning_strategy: strategy,
             renewal_strategy: self.renewal_strategy,
+            cert_chain_cache,
             domains: self.domains,
             email: self.email.unwrap_or_default(),
             organization: self.organization,

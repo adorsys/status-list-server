@@ -83,6 +83,10 @@ criteria = "safe-to-deploy"
 version = "0.2.0"
 criteria = "safe-to-deploy"
 
+[[exemptions.assert-json-diff]]
+version = "2.0.2"
+criteria = "safe-to-run"
+
 [[exemptions.astral-tokio-tar]]
 version = "0.6.3"
 criteria = "safe-to-run"
@@ -463,6 +467,14 @@ criteria = "safe-to-run"
 version = "2.11.0"
 criteria = "safe-to-deploy"
 
+[[exemptions.deadpool]]
+version = "0.12.3"
+criteria = "safe-to-run"
+
+[[exemptions.deadpool-runtime]]
+version = "0.1.4"
+criteria = "safe-to-run"
+
 [[exemptions.der]]
 version = "0.7.10"
 criteria = "safe-to-deploy"
@@ -553,6 +565,14 @@ criteria = "safe-to-deploy"
 
 [[exemptions.encoding_rs]]
 version = "0.8.35"
+criteria = "safe-to-deploy"
+
+[[exemptions.endian-type]]
+version = "0.1.2"
+criteria = "safe-to-deploy"
+
+[[exemptions.equivalent]]
+version = "1.0.2"
 criteria = "safe-to-deploy"
 
 [[exemptions.erased-serde]]
@@ -754,6 +774,10 @@ criteria = "safe-to-deploy"
 [[exemptions.heck]]
 version = "0.5.0"
 criteria = "safe-to-deploy"
+
+[[exemptions.hermit-abi]]
+version = "0.5.2"
+criteria = "safe-to-run"
 
 [[exemptions.hex]]
 version = "0.4.3"
@@ -1071,6 +1095,10 @@ criteria = "safe-to-deploy"
 version = "0.12.15"
 criteria = "safe-to-deploy"
 
+[[exemptions.nibble_vec]]
+version = "0.1.0"
+criteria = "safe-to-deploy"
+
 [[exemptions.nix]]
 version = "0.29.0"
 criteria = "safe-to-deploy"
@@ -1107,6 +1135,18 @@ criteria = "safe-to-deploy"
 version = "0.1.46"
 criteria = "safe-to-deploy"
 
+[[exemptions.num-rational]]
+version = "0.4.2"
+criteria = "safe-to-run"
+
+[[exemptions.num-traits]]
+version = "0.2.19"
+criteria = "safe-to-deploy"
+
+[[exemptions.num_cpus]]
+version = "1.17.0"
+criteria = "safe-to-run"
+
 [[exemptions.object]]
 version = "0.37.3"
 criteria = "safe-to-deploy"
@@ -1133,6 +1173,10 @@ criteria = "safe-to-deploy"
 
 [[exemptions.ordered-float]]
 version = "4.6.0"
+criteria = "safe-to-deploy"
+
+[[exemptions.ordered-float]]
+version = "5.3.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.ordered-multimap]]
@@ -1377,6 +1421,10 @@ criteria = "safe-to-deploy"
 
 [[exemptions.radium]]
 version = "0.7.0"
+criteria = "safe-to-deploy"
+
+[[exemptions.radix_trie]]
+version = "0.2.1"
 criteria = "safe-to-deploy"
 
 [[exemptions.rand]]
@@ -2378,6 +2426,10 @@ criteria = "safe-to-deploy"
 [[exemptions.winnow]]
 version = "1.0.3"
 criteria = "safe-to-deploy"
+
+[[exemptions.wiremock]]
+version = "0.6.5"
+criteria = "safe-to-run"
 
 [[exemptions.wit-bindgen]]
 version = "0.57.1"

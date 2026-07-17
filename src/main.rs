@@ -38,6 +38,10 @@ async fn main() -> Result<()> {
 
     let http_server = HttpServer::new(&config, app_state).await?;
 
+    // Zero-init cert-chain cache counters now that the metrics recorder is
+    // installed (HttpServer::new → attach_metrics → setup_metrics).
+    cert_manager.init_cert_chain_cache_counters();
+
     // Initial certificate request
     tokio::spawn(async move {
         if let Err(e) = cert_manager.renew_cert_if_needed().await {
