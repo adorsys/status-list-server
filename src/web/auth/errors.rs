@@ -5,6 +5,8 @@ use serde_json::json;
 use std::borrow::Cow;
 use thiserror::Error;
 
+use crate::web::errors::ApiError;
+
 #[derive(Error, Debug)]
 pub enum AuthenticationError {
     #[error("Issuer not registered")]
@@ -39,6 +41,16 @@ impl AuthenticationError {
 
     pub fn get_error_message(&self) -> String {
         self.to_string()
+    }
+}
+
+impl From<AuthenticationError> for ApiError {
+    fn from(err: AuthenticationError) -> Self {
+        Self {
+            status: err.get_status(),
+            error: err.get_error_code(),
+            error_description: Some(err.get_error_message()),
+        }
     }
 }
 
