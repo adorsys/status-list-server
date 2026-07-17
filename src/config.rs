@@ -752,7 +752,7 @@ mod tests {
         );
     }
 
-#[sealed_test]
+    #[sealed_test]
     fn test_default_rate_limits_and_bounds() {
         unsafe { std::env::remove_var("APP_RATE_LIMIT__STRICT_BURST_SIZE") };
         unsafe { std::env::remove_var("APP_LIMITS__MAX_BODY_SIZE_BYTES") };

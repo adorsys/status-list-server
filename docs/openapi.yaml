@@ -18,6 +18,47 @@ info:
     `application/statuslist+jwt` or `application/statuslist+cwt`. JWT-format
     tokens are gzip-compressed only when the client requests it via
     `Accept-Encoding: gzip`; CWT-format tokens are never compressed.
+
+    ## Rate limiting
+
+    The server applies three independent token-bucket governor tiers, each
+    operator-configurable through the `APP_RATE_LIMIT__*` environment
+    variables (see `RateLimitConfig`):
+
+      * **strict** (per source IP) — `POST /api/v1/credentials`.
+        Tunables: `strict_burst_size`, `strict_period_secs`
+        (defaults: 10 / 60s).
+      * **per-issuer** (keyed by the JWT `iss` claim, falling back to the
+        peer IP when the token is absent or malformed) — `PUT`/`PATCH`
+        `/api/v1/status-lists/{list_id}/statuses`, applied behind the `auth`
+        middleware. Tunables: `strict_burst_size`, `strict_period_secs`.
+      * **permissive** (per source IP) — public read routes
+        (`GET /api/v1/aggregation`,
+        `GET /api/v1/status-lists/{list_id}`).
+        Tunables: `permissive_burst_size`, `permissive_period_secs`
+        (defaults: 100 / 60s).
+
+    When a quota is exhausted the server returns `429 Too Many Requests` with
+    a plain-text body of the form `Too Many Requests! Wait for <n>s` (emitted by
+    the `tower-governor` middleware; it is not RFC 7807 problem+json).
+
+    ## Request bounds
+
+    In addition to the rate limiter, the server enforces hard bounds on
+    incoming requests and persisted status lists through the `APP_LIMITS__*`
+    environment variables (see `LimitsConfig`):
+
+    | Bound | Default | Exceeded response |
+    |---|---|---|
+    | `max_body_size_bytes` | 2 MiB | `413 Payload Too Large` |
+    | `max_status_index` | 100000 | `400 Bad Request` (`index` too large) |
+    | `max_statuses_per_request` | 5000 | `400 Bad Request` (too many entries) |
+    | `max_serialized_list_size` | 1 MiB | `422 Unprocessable Entity` |
+
+    These bounds are reflected on the request schemas (`StatusEntry.index`
+    `maximum`, `StatusUpdateRequest.statuses` `maxItems`) for the default
+    configuration; operators who lower a bound via configuration should treat
+    the documented schema maximums as defaults, not guarantees.
   contact:
     name: adorsys Status List Server
     url: https://github.com/adorsys/status-list-server
@@ -124,8 +165,45 @@ paths:
           $ref: "#/components/responses/BadRequest"
         "409":
           $ref: "#/components/responses/Conflict"
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
+        "422":
+          $ref: "#/components/responses/UnprocessableEntity"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
         "500":
           $ref: "#/components/responses/InternalServerError"
+
+  /api/v1/aggregation:
+    get:
+      operationId: getAggregation
+      summary: Aggregate all status list URIs
+      description: |
+        Returns the `sub` URIs of every status list hosted by this server,
+        issuer-agnostic. Intended for relying parties that need to enumerate
+        the set of status lists to poll. The response is a JSON object with a
+        single `status_lists` array of URI strings.
+
+        When `server.aggregation_uri` is configured, that URI is advertised
+        inside issued status list tokens (draft-21 §4.2/§4.3).
+      security: []
+      responses:
+        "200":
+          description: Aggregation of all hosted status list URIs.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AggregationResponse"
+              example:
+                status_lists:
+                  - "https://statuslist.example.com/api/v1/status-lists/477121aa-b598-419e-916f-1e74654ff38b"
+                  - "https://statuslist.example.com/api/v1/status-lists/8e4ebb4a-dd79-498f-ac97-966f22884037"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
 
   /api/v1/status-lists/{list_id}/statuses:
     parameters:
@@ -160,6 +238,12 @@ paths:
           $ref: "#/components/responses/Unauthorized"
         "409":
           $ref: "#/components/responses/Conflict"
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
+        "422":
+          $ref: "#/components/responses/UnprocessableEntity"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
         "500":
           $ref: "#/components/responses/InternalServerError"
 
@@ -186,10 +270,16 @@ paths:
           $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NotFound"
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
+        "422":
+          $ref: "#/components/responses/UnprocessableEntity"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
         "500":
           $ref: "#/components/responses/InternalServerError"
 
-  /api/v1/statuslists/{list_id}:
+  /api/v1/status-lists/{list_id}:
     get:
       operationId: getStatusList
       summary: Retrieve a status list token
@@ -284,6 +374,8 @@ paths:
           $ref: "#/components/responses/NotFound"
         "406":
           $ref: "#/components/responses/NotAcceptable"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
         "500":
           $ref: "#/components/responses/InternalServerError"
         "503":
@@ -356,12 +448,18 @@ components:
 
     StatusUpdateRequest:
       type: object
+      description: |
+        Request payload for creating (`PUT`) or updating (`PATCH`) status
+        entries in a status list. The number of entries is bounded by the
+        operator-configurable `limits.max_statuses_per_request` (default 5000);
+        a request exceeding that bound is rejected with `400 Bad Request`.
       required:
-        - status
+        - statuses
       properties:
-        status:
+        statuses:
           type: array
           description: Array of status entries to create or update.
+          maxItems: 5000
           items:
             $ref: "#/components/schemas/StatusEntry"
 
@@ -375,7 +473,12 @@ components:
           type: integer
           format: int32
           minimum: 0
-          description: Position of the referenced token in the status list.
+          maximum: 100000
+          description: |
+            Position of the referenced token in the status list. The maximum
+            accepted value is bounded by the operator-configurable
+            `limits.max_status_index` (default 100000); a request with an
+            index above that bound is rejected with `400 Bad Request`.
           example: 42
         status:
           $ref: "#/components/schemas/StatusValue"
@@ -452,6 +555,24 @@ components:
         status_list:
           $ref: "#/components/schemas/StatusList"
 
+    AggregationResponse:
+      type: object
+      description: |
+        Response body of `GET /api/v1/aggregation`. Contains the `sub` URIs of
+        every status list hosted by the server, issuer-agnostic.
+      required:
+        - status_lists
+      properties:
+        status_lists:
+          type: array
+          description: URIs of all hosted status lists.
+          items:
+            type: string
+            format: uri
+          example:
+            - "https://statuslist.example.com/api/v1/status-lists/477121aa-b598-419e-916f-1e74654ff38b"
+            - "https://statuslist.example.com/api/v1/status-lists/8e4ebb4a-dd79-498f-ac97-966f22884037"
+
     ProblemDetails:
       type: object
       description: |
@@ -484,7 +605,17 @@ components:
 
   responses:
     BadRequest:
-      description: Invalid request data
+      description: |
+        Invalid request data. In addition to schema/validation failures
+        (e.g. a non-UUID `list_id`), this status is returned when an enforced
+        request bound is exceeded:
+
+          * number of status entries exceeds
+            `limits.max_statuses_per_request` (default 5000) —
+            `Too many statuses in request: <count> > <max>`; or
+          * a status `index` exceeds `limits.max_status_index`
+            (default 100000) — `Status index <n> exceeds the configured
+            maximum`.
       content:
         application/problem+json:
           schema:
@@ -493,8 +624,8 @@ components:
             type: "about:blank"
             title: "Bad Request"
             status: 400
-            detail: "Invalid list ID string"
-            instance: "/api/v1/status-lists/invalid-uuid/statuses"
+            detail: "Too many statuses in request: 6000 > 5000"
+            instance: "/api/v1/status-lists/477121aa-b598-419e-916f-1e74654ff38b/statuses"
 
     Unauthorized:
       description: Missing or invalid authentication token
@@ -560,6 +691,47 @@ components:
             status: 409
             detail: "Status list already exists"
             instance: "/api/v1/status-lists/477121aa-b598-419e-916f-1e74654ff38b/statuses"
+
+    PayloadTooLarge:
+      description: |
+        The request body exceeds the operator-configurable
+        `limits.max_body_size_bytes` (default 2 MiB). Rejected by the
+        `RequestBodyLimitLayer` before the handler runs.
+      content:
+        text/plain:
+          schema:
+            type: string
+          example: "length limit reached"
+
+    UnprocessableEntity:
+      description: |
+        The request was well-formed but the resulting serialized status list
+        exceeds the operator-configurable `limits.max_serialized_list_size`
+        (default 1 MiB), or (for `POST /api/v1/credentials`) the supplied
+        public key could not be parsed into a JWK.
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/ProblemDetails"
+          example:
+            type: "about:blank"
+            title: "Unprocessable Entity"
+            status: 422
+            detail: "Serialized status list size exceeds the configured maximum"
+            instance: "/api/v1/status-lists/477121aa-b598-419e-916f-1e74654ff38b/statuses"
+
+    TooManyRequests:
+      description: |
+        The client has exceeded the configured rate-limit quota for the route
+        tier (strict, per-issuer, or permissive — see the Rate limiting section
+        in the API description). Emitted by the `tower-governor` middleware as a
+        plain-text body of the form `Too Many Requests! Wait for <n>s`; it is
+        not RFC 7807 problem+json.
+      content:
+        text/plain:
+          schema:
+            type: string
+          example: "Too Many Requests! Wait for 42s"
 
     ServiceUnavailable:
       description: Service temporarily unavailable

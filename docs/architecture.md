@@ -130,8 +130,68 @@ The data flow in the Status List Server is as follows:
 
 - **HTTPS**: All communication with the Status List Server must use HTTPS to ensure data integrity and confidentiality.
 - **Token Signing**: Status List Tokens must be signed (e.g., using JWT or CWT) to prevent tampering.
-- **CORS**: The Status List Server should support Cross-Origin Resource Sharing (CORS) for browser-based clients.
-- **Rate Limiting**: Implement rate limiting to prevent abuse of the Status List Server.
+- **CORS**: The Status List Server supports Cross-Origin Resource Sharing (CORS) for browser-based clients.
+- **Bearer Authentication**: Management endpoints (`PUT`/`PATCH /api/v1/status-lists/{list_id}/statuses`) are protected by a JWT Bearer middleware (`auth`) that validates the signature against the JWK registered for the issuer and checks that the `iss` claim matches the registered issuer.
+- **Rate Limiting & Request Bounds**: The server applies layered defense-in-depth controls to prevent abuse. See [Rate Limiting & Request Bounds](#rate-limiting--request-bounds) below.
+
+## Rate Limiting & Request Bounds
+
+The server enforces two complementary layers of abuse protection, both
+operator-configurable through environment variables prefixed with `APP_`.
+
+### Rate-limiting tiers (`APP_RATE_LIMIT__*`)
+
+A token-bucket governor (`tower-governor`) is applied per route group, with
+each tier keyed and tuned independently:
+
+| Tier | Routes | Key | Tunables (defaults) |
+|---|---|---|---|
+| **strict** | `POST /api/v1/credentials` | source IP | `strict_burst_size` (10), `strict_period_secs` (60s) |
+| **per-issuer** | `PUT`/`PATCH /api/v1/status-lists/{list_id}/statuses` | JWT `iss` claim, falling back to source IP when the token is absent/malformed | `strict_burst_size` (10), `strict_period_secs` (60s) |
+| **permissive** | `GET /api/v1/aggregation`, `GET /api/v1/status-lists/{list_id}` | source IP | `permissive_burst_size` (100), `permissive_period_secs` (60s) |
+
+The per-issuer tier is applied **behind** the `auth` middleware, so a valid
+authenticated issuer determines the bucket. When a bucket is exhausted the
+server returns `429 Too Many Requests` with a plain-text body
+`Too Many Requests! Wait for <n>s` (emitted by the governor middleware; it is
+not RFC 7807 problem+json).
+
+### Request & persistence bounds (`APP_LIMITS__*`)
+
+Beyond rate limiting, hard bounds cap incoming request size and the size of
+persisted status lists:
+
+| Bound | Default | Exceeded response | Where enforced |
+|---|---|---|---|
+| `max_body_size_bytes` | 2 MiB | `413 Payload Too Large` | `RequestBodyLimitLayer` (all routes) |
+| `max_status_index` | 100000 | `400 Bad Request` — `index` too large | publish / update handlers |
+| `max_statuses_per_request` | 5000 | `400 Bad Request` — too many entries | publish / update handlers |
+| `max_serialized_list_size` | 1 MiB | `422 Unprocessable Entity` | list creation/update (`lst_gen`) |
+
+These bounds protect the server from oversized payloads and unbounded list
+growth. The default schema maximums (`StatusEntry.index.maximum`,
+`StatusUpdateRequest.statuses.maxItems`) document the defaults; operators who
+lower a bound via configuration should treat the documented maximums as
+defaults, not guarantees.
+
+### Error response summary
+
+| Status | Meaning |
+|---|---|
+| `400` | Malformed/invalid request, or an enforced count/index bound exceeded |
+| `401` | Missing or invalid Bearer token |
+| `403` | Authenticated issuer does not own the list |
+| `404` | Status list not found |
+| `406` | Unsupported `Accept` value |
+| `409` | List/credentials already exist |
+| `413` | Request body exceeds `max_body_size_bytes` |
+| `422` | Serialized list exceeds `max_serialized_list_size`, or unparseable JWK |
+| `429` | Rate-limit quota exhausted |
+| `500` | Internal server error |
+| `503` | Service temporarily unavailable |
+
+Handler-level errors use RFC 7807 `application/problem+json`; the body also
+carries `Cache-Control: no-store, max-age=0` so error states are not cached.
 
 ## Developer Integration
 
