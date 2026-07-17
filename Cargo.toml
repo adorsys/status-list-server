@@ -93,6 +93,7 @@ flate2 = "1.1"
 x509-parser = "0.18"
 public-suffix = "0.1"
 tokio-cron-scheduler = "0.15"
+metrics = "0.24"
 metrics-exporter-prometheus = "0.18"
 metrics-process = "2.4"
 sea-orm-migration = "1.1.20"
@@ -131,6 +132,7 @@ sealed_test = "1.1.0"
 wiremock = "0.6"
 sea-orm = { version = "1.1", features = ["mock"] }
 testcontainers-modules = { version = "0.15", features = ["localstack", "redis"] }
+metrics-util = "0.20"
 
 [target.'cfg(not(target_env = "msvc"))'.dependencies]
 tikv-jemallocator = "0.7"

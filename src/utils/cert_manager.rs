@@ -6,6 +6,7 @@ pub mod challenge;
 pub mod http_client;
 pub mod storage;
 
+use crate::utils::cache::CertificateChain;
 use challenge::CleanupFuture;
 pub use errors::CertError;
 
@@ -27,8 +28,14 @@ use x509_parser::pem::Pem;
 
 use crate::{
     cert_manager::{challenge::ChallengeHandler, http_client::DefaultHttpClient, storage::Storage},
-    utils::keygen::Keypair,
+    utils::{cache::CertChainCache, keygen::Keypair},
 };
+
+/// Default cache TTL when no override is supplied.
+///
+/// Exported as a single source of truth: `Config::load` references this
+/// constant so the runtime default and the code fallback always agree.
+pub const DEFAULT_CHAIN_CACHE_TTL: Duration = Duration::from_secs(3600);
 
 /// Struct that hold the certificate and its metadata
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -69,6 +76,8 @@ pub struct CertManager {
     acme_http_client_factory: ACMEHttpClientFactory,
     // Certificate renewal strategy
     renewal_strategy: RenewalStrategy,
+    // Parsed certificate chain cache
+    cert_chain_cache: CertChainCache,
     // The subject alternative names
     domains: Vec<String>,
     // The company email
@@ -95,6 +104,10 @@ impl CertManager {
             Box::new(move || Box::new(http_client.clone()) as Box<dyn HttpClient>);
         let renewal_strategy = RenewalStrategy::PercentageOfLifetime(None);
 
+        let domains: Vec<String> = domains.into_iter().map(|d| d.into()).collect();
+        let domain_label = domains.first().map(String::as_str).unwrap_or_default();
+        let cert_chain_cache = CertChainCache::new(DEFAULT_CHAIN_CACHE_TTL, domain_label);
+
         Ok(Self {
             cert_storage: None,
             secrets_storage: None,
@@ -102,7 +115,8 @@ impl CertManager {
             acme_client,
             acme_http_client_factory,
             renewal_strategy,
-            domains: domains.into_iter().map(|d| d.into()).collect(),
+            cert_chain_cache,
+            domains,
             email: email.into(),
             organization: organization.map(|o| o.into()),
             eku: None,
@@ -150,10 +164,44 @@ impl CertManager {
         self
     }
 
+    /// Override the in-memory parsed certificate chain cache TTL.
+    ///
+    /// A zero duration keeps the cache active with no TTL safety expiry; cache
+    /// replacement still happens whenever this manager provisions a new certificate.
+    ///
+    /// **Multi-replica deployments:** Only the replica that performs the
+    /// provisioning call (`request_certificate`) replaces its in-memory cache.
+    /// Non-provisioning replicas therefore rely on the TTL as the only refresh
+    /// mechanism for picking up a newly provisioned chain. Set `ttl = 0` only
+    /// when the process is guaranteed to re-provision or restart on every
+    /// rotation — otherwise long-lived replicas with a disabled TTL will serve
+    /// the stale chain until they happen to re-provision.
+    ///
+    /// **Staleness safety:** This caching strategy is safe because the signing
+    /// key is stable across certificate renewals — the provisioning flow reuses
+    /// the stored secret key (`signing_key_pem`). If renewal ever rotates the
+    /// signing key, the staleness window becomes a token-validation outage:
+    /// verifiers would receive the old certificate chain while tokens are
+    /// signed with the new key.
+    pub fn with_cert_chain_cache_ttl(mut self, ttl: Duration) -> Self {
+        let domain_label = self.domains.first().map(String::as_str).unwrap_or_default();
+        self.cert_chain_cache = CertChainCache::new(ttl, domain_label);
+        self
+    }
+
     /// Set the key usage extensions code
     pub fn with_eku(mut self, eku: &[u64]) -> Self {
         self.eku = Some(eku.to_vec());
         self
+    }
+
+    /// Zero-initialise the certificate chain cache counters so they appear
+    /// in Prometheus scrapes before first use.
+    ///
+    /// **Must** be called after the global metrics recorder has been installed.
+    /// If metrics are disabled this is a harmless no-op.
+    pub fn init_cert_chain_cache_counters(&self) {
+        self.cert_chain_cache.init_counters();
     }
 
     /// Request a certificate from the certificate authority
@@ -240,6 +288,7 @@ impl CertManager {
         let cert_key = self.cert_key();
         let serialized_cert_data = serde_json::to_string(&cert_data)?;
         cert_storage.store(&cert_key, &serialized_cert_data).await?;
+        self.cache_provisioned_chain(&cert_data.certificate).await?;
 
         info!(
             "Certificate obtained successfully. Valid from {} to {}",
@@ -338,23 +387,28 @@ impl CertManager {
         Ok(None)
     }
 
-    /// Extract individual certificates from the certificate chain and return them as a vector of base64-encoded strings
+    /// Extract individual certificates from the certificate chain and return shared base64-encoded chain parts.
     ///
     /// This function will return `None` if the server certificate was not found.
     ///
     /// # Errors
     /// Returns an error if the certificate chain cannot be parsed or if there was an issue when trying to retrieve the server certificate
-    pub async fn cert_chain_parts(&self) -> Result<Option<Vec<String>>, CertError> {
-        use base64::prelude::{BASE64_STANDARD, Engine as _};
-
+    pub async fn cert_chain_parts(&self) -> Result<Option<CertificateChain>, CertError> {
+        let cert_key = self.cert_key();
+        if let Some(certs) = self.cert_chain_cache.get(&cert_key).await {
+            return Ok(Some(certs));
+        }
         if let Some(cert_data) = self.certificate().await? {
-            let certs = Pem::iter_from_buffer(cert_data.certificate.as_bytes())
-                .map(|cert| {
-                    cert.map(|pem| BASE64_STANDARD.encode(&pem.contents))
-                        .map_err(|e| CertError::Parsing(e.to_string()))
-                })
-                .collect::<Result<_, _>>()?;
-
+            let certs = self.parse_cert_chain_parts(&cert_data.certificate)?;
+            // NOTE: There is a benign race between this read-path insert and
+            // the provisioning-path `replace` in `cache_provisioned_chain`.
+            // If a concurrent `request_certificate` replaces the cache entry
+            // between our miss and this insert, we overwrite the fresh chain
+            // with the (still valid) old chain. The stale entry is bounded by
+            // the cache TTL. This is acceptable because the signing key is
+            // stable across renewals, so the old chain remains valid for
+            // token verification.
+            self.cert_chain_cache.insert(cert_key, certs.clone()).await;
             return Ok(Some(certs));
         }
         Ok(None)
@@ -505,6 +559,31 @@ impl CertManager {
             return Err(CertError::Parsing("Invalid X509 certificate".into()));
         }
         Ok(pem)
+    }
+
+    fn parse_cert_chain_parts(&self, cert_pem: &str) -> Result<CertificateChain, CertError> {
+        use base64::prelude::{BASE64_STANDARD, Engine as _};
+
+        let certs = Pem::iter_from_buffer(cert_pem.as_bytes())
+            .map(|cert| {
+                cert.map(|pem| BASE64_STANDARD.encode(&pem.contents))
+                    .map_err(|e| CertError::Parsing(e.to_string()))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+
+        Ok(certs.into())
+    }
+
+    /// Parse `cert_pem` into chain parts and replace the cached entry so the
+    /// next read returns the fresh chain without an extra storage load/parse.
+    ///
+    /// This is the hook called after a certificate is provisioned or renewed.
+    async fn cache_provisioned_chain(&self, cert_pem: &str) -> Result<(), CertError> {
+        let cert_key = self.cert_key();
+        let parts = self.parse_cert_chain_parts(cert_pem)?;
+        // Replace eagerly so the next request never hits storage for this key.
+        self.cert_chain_cache.replace(cert_key, parts).await;
+        Ok(())
     }
 
     #[inline]

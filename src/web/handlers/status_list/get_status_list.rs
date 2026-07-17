@@ -1,4 +1,4 @@
-use std::{fmt::Debug, io::Write as _};
+use std::{fmt::Debug, io::Write as _, sync::Arc};
 
 use axum::{
     extract::{Path, State},
@@ -18,7 +18,7 @@ use time::OffsetDateTime;
 
 use crate::{
     models::{StatusListClaims, StatusListRecord},
-    utils::{keygen::Keypair, state::AppState},
+    utils::{cache::CertificateChain, keygen::Keypair, state::AppState},
 };
 
 use super::{
@@ -131,7 +131,7 @@ pub async fn get_status_list(
 async fn fetch_status_record(
     list_id: &str,
     state: &AppState,
-) -> Result<StatusListRecord, StatusListError> {
+) -> Result<Arc<StatusListRecord>, StatusListError> {
     // Check cache for status list record
     if let Some(cached_record) = state.cache.get(list_id).await {
         tracing::info!("Cache hit for status list record: {list_id}");
@@ -156,7 +156,7 @@ async fn fetch_status_record(
         .insert(list_id.to_string(), status_record.clone())
         .await;
 
-    Ok(status_record)
+    Ok(Arc::new(status_record))
 }
 
 /// Parses the request's `Accept-Encoding` header(s) (RFC 9110 content
@@ -264,7 +264,7 @@ async fn build_token(
             ACCEPT_STATUS_LISTS_HEADER_CWT => issue_cwt(
                 &status_record,
                 &keypair,
-                certs_parts,
+                &certs_parts,
                 &aggregation_uri,
                 token_exp_secs,
                 token_ttl_secs,
@@ -272,7 +272,7 @@ async fn build_token(
             _ => issue_jwt(
                 &status_record,
                 &keypair,
-                certs_parts,
+                &certs_parts,
                 &aggregation_uri,
                 token_exp_secs,
                 token_ttl_secs,
@@ -306,7 +306,7 @@ async fn build_token(
 fn issue_cwt(
     status_record: &StatusListRecord,
     keypair: &Keypair,
-    cert_chain: Vec<String>,
+    cert_chain: &CertificateChain,
     aggregation_uri: &Option<String>,
     token_exp_secs: u64,
     token_ttl_secs: u64,
@@ -364,7 +364,7 @@ fn issue_cwt(
         StatusListError::InternalServerError
     })?;
 
-    let x5chain_value = build_x5chain(&cert_chain)?;
+    let x5chain_value = build_x5chain(cert_chain)?;
     // Building the protected header
     let protected = HeaderBuilder::new()
         .algorithm(Algorithm::ES256)
@@ -430,7 +430,7 @@ pub(crate) struct StatusListToken {
 fn issue_jwt(
     status_record: &StatusListRecord,
     keypair: &Keypair,
-    cert_chain: Vec<String>,
+    cert_chain: &CertificateChain,
     aggregation_uri: &Option<String>,
     token_exp_secs: u64,
     token_ttl_secs: u64,
@@ -454,7 +454,7 @@ fn issue_jwt(
     // Building the header
     let mut header = Header::new(jsonwebtoken::Algorithm::ES256);
     header.typ = Some(STATUS_LISTS_HEADER_JWT.into());
-    header.x5c = Some(cert_chain);
+    header.x5c = Some(cert_chain.to_vec());
 
     let pem_bytes = keypair.to_pkcs8_pem_bytes().map_err(|err| {
         tracing::error!("Failed to convert signing key to PEM: {err:?}");

@@ -140,7 +140,7 @@ pub struct StatusList {
 /// Status list claims serialized inside Status List Tokens (JWT/CWT).
 ///
 /// `aggregation_uri` is injected from server configuration at token-issuance
-/// time (draft-21 §4.2/§4.3) and is **not** part of the persisted `StatusList`
+/// time (draft-21 §4.2/§4.3) and is not part of the persisted `StatusList`
 /// storage model.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct StatusListClaims {
