@@ -131,6 +131,7 @@ The Status List Server is provisioned with a cryptographic certificate that is e
 - Certificate issuance and renewal are managed according to the configured renewal strategy.
 - Every day, a cron job checks whether the certificate should be renewed based on this strategy.
 - If the certificate is still considered valid according to the configured strategy, no renewal occurs; renewal is only triggered when necessary.
+- Parsed certificate chains are cached in memory for `APP_SERVER__CERT__CHAIN_CACHE_TTL` seconds (default: `3600`). A value of `0` keeps entries indefinitely. In multi-replica deployments, replicas that did not perform renewal rely on this TTL to refresh their in-memory chain.
 
 **DNS Providers:**
 
