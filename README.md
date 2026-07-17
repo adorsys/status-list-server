@@ -38,7 +38,7 @@ For a detailed explanation of the architecture, see the [Architecture Documentat
 Before running the server, ensure you have the following tools installed:
 
 - [Rust & Cargo](https://www.rust-lang.org/tools/install) (Latest stable).
-- [PostgreSQL](https://www.postgresql.org/download/): The database system used for storing status lists.
+- A supported database backend: PostgreSQL, MySQL, or SQLite.
 - [Redis](https://redis.io/download): The in-memory data structure store used for caching.
 - [Docker](https://www.docker.com/get-started/) (optional, for local testing).
 
@@ -77,6 +77,8 @@ cargo run
 
 By default, the server will listen on `http://localhost:8000`. You can modify the host and port in the configuration settings.
 
+For deployment guidance and backend tradeoffs, see [`docs/database-backends.md`](docs/database-backends.md).
+
 ## API Documentation
 
 The public API is documented with an OpenAPI 3.1 specification. See [`docs/openapi.yaml`](docs/openapi.yaml) for the complete API contract.
@@ -100,6 +102,20 @@ The public API is documented with an OpenAPI 3.1 specification. See [`docs/opena
   - `500 INTERNAL SERVER ERROR`: System incurred an error
 
 When the optional `APP_SERVER__AGGREGATION_URI` configuration is set, every emitted Status List Token (JWT and CWT) includes it as the optional `aggregation_uri` member (draft-21 §4.2 / §4.3), allowing a consumer to discover the aggregation link directly from any single list token. When unset, the member is omitted entirely.
+
+## Configuration
+
+All runtime behavior is controlled via environment variables prefixed with `APP_` and using `__` as a nested separator (e.g. `APP_SERVER__PORT=8000`). Sensible defaults are built in, so only non-default values need to be set. See [`.env.template`](.env.template) for a complete example.
+
+For deployment guidance and backend tradeoffs, see [`docs/database-backends.md`](docs/database-backends.md).
+
+### Validation
+
+The following constraints are validated at startup and will cause the server to fail fast if violated:
+
+- `server.port` must be between 1 and 65535 (the `u16` type enforces the upper bound)
+- `server.cert.renewal_cron_schedule` must be a valid 6-field cron expression (seconds required)
+- `aws.s3_bucket` must not be empty
 
 ## Security
 

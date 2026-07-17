@@ -35,6 +35,12 @@ strip = true
 inherits = "dev"
 opt-level = 1
 
+[features]
+default = ["postgres"]
+postgres = ["sea-orm/sqlx-postgres", "sea-orm-migration/sqlx-postgres"]
+mysql = ["sea-orm/sqlx-mysql", "sea-orm-migration/sqlx-mysql"]
+sqlite = ["sea-orm/sqlx-sqlite", "sea-orm-migration/sqlx-sqlite"]
+
 [dependencies]
 # Async runtime and utilities
 tokio = { version = "1.5", features = ["full"] }
@@ -50,7 +56,7 @@ axum = { version = "0.8", features = ["macros"] }
 tower-http = { version = "0.7", features = ["catch-panic", "cors", "trace"] }
 
 # Database and ORM
-sea-orm = { version = "1.1", features = ["macros", "runtime-tokio-rustls", "sqlx-postgres"] }
+sea-orm = { version = "1.1", default-features = false, features = ["macros", "runtime-tokio-rustls", "with-json"] }
 moka = { version = "0.12", features = ["future"] }
 
 # Cryptography and Security
@@ -94,7 +100,7 @@ tokio-cron-scheduler = "0.15"
 metrics = "0.24"
 metrics-exporter-prometheus = "0.18"
 metrics-process = "2.4"
-sea-orm-migration = "1.1.20"
+sea-orm-migration = { version = "1.1.20", default-features = false, features = ["runtime-tokio-rustls"] }
 
 # AWS related libraries
 [dependencies.aws-config]
@@ -129,7 +135,7 @@ features = ["alloc", "ecdsa", "pem", "pkcs8"]
 sealed_test = "1.1.0"
 wiremock = "0.6"
 sea-orm = { version = "1.1", features = ["mock"] }
-testcontainers-modules = { version = "0.15", features = ["localstack", "redis"] }
+testcontainers-modules = { version = "0.15", features = ["localstack", "mysql", "redis"] }
 metrics-util = "0.20"
 
 [target.'cfg(not(target_env = "msvc"))'.dependencies]
