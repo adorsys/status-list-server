@@ -8,8 +8,8 @@ pub mod challenge;
 pub mod http_client;
 pub mod storage;
 
-pub use builder::CertificateManagerBuilder;
 use crate::utils::cache::CertificateChain;
+pub use builder::CertificateManagerBuilder;
 use challenge::CleanupFuture;
 pub use errors::CertError;
 pub use strategy::{

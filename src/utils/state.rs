@@ -306,11 +306,10 @@ async fn build_dns_challenge_handler(
     Ok(handler)
 }
 
-
 #[cfg(test)]
 mod tests {
-    use super::{empty_to_none, store_certificate_strategy};
     use super::*;
+    use super::{empty_to_none, store_certificate_strategy};
     use crate::config::{
         AcmeDnsConfig, AwsConfig, AzureDnsConfig, CacheConfig, CertConfig, CertStoreConfig,
         CloudflareDnsConfig, Config, DatabaseConfig, DnsConfig, GcloudDnsConfig, RedisConfig,
