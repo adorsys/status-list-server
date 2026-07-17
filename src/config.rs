@@ -244,7 +244,9 @@ impl AcmeDnsConfig {
             ));
         }
         // Reject unusable per-domain entries here instead of as an opaque
-        // HTTP 401 at the first renewal
+        // HTTP 401 at the first renewal. Key conflicts under normalization
+        // are the provider's own invariant and are rejected in
+        // AcmeDnsProvider::new, also at startup.
         for (domain, account) in &self.accounts {
             let name = domain.trim();
             let name = name.strip_prefix("*.").unwrap_or(name);

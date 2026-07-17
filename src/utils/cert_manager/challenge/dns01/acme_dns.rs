@@ -44,7 +44,10 @@ fn dns_err(source: impl Into<Report>) -> ChallengeError {
 }
 
 /// Normalize a domain for account lookup (lowercase, no trailing dot, no
-/// wildcard label) so config keys and ACME identifiers compare equal
+/// wildcard label) so config keys and ACME identifiers compare equal.
+/// No IDNA mapping is done: ACME identifiers arrive as punycode A-labels,
+/// so a config key written as a U-label (e.g. `münchen.example.com`) never
+/// matches and the domain falls back to the default account or "no account".
 fn normalize_domain(domain: &str) -> String {
     let domain = domain.trim().trim_end_matches('.');
     domain
@@ -109,8 +112,11 @@ impl AcmeDnsProvider {
     /// Validate that a certificate order for `domains` can succeed: every
     /// domain must resolve to an account, and no account may serve more than
     /// two of them, since a third digest would rotate the first out of the
-    /// account's two-value TXT window before the CA validates it. Meant to
-    /// run at startup, so the gap is caught before the first renewal.
+    /// account's two-value TXT window before the CA validates it.
+    ///
+    /// A startup sanity check over the configured domains only: it is not
+    /// invoked on the order path, so it cannot protect orders whose
+    /// identifiers diverge from the domains checked here.
     pub fn check_order_domains(&self, domains: &[&str]) -> Result<(), ChallengeError> {
         let mut by_account: HashMap<&str, Vec<&str>> = HashMap::new();
         for domain in domains {
@@ -376,14 +382,13 @@ mod tests {
             .unwrap();
     }
 
-    #[test]
-    fn check_order_domains_rejects_three_identifiers_on_one_account() {
-        let provider = AcmeDnsProvider::new(
-            "https://auth.example.org",
-            Some(account("default")),
-            HashMap::new(),
-        )
-        .unwrap();
+    #[tokio::test]
+    async fn check_order_domains_rejects_three_identifiers_on_one_account() {
+        // No mocks mounted: the check must reject the overloaded account
+        // before any request is sent
+        let server = MockServer::start().await;
+        let provider =
+            AcmeDnsProvider::new(server.uri(), Some(account("default")), HashMap::new()).unwrap();
 
         // An apex + wildcard pair fits the account's two-value TXT window
         provider
