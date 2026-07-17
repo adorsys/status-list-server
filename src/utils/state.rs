@@ -8,7 +8,10 @@ use crate::{
         },
         storage::{AwsS3, AwsSecretsManager, Redis},
     },
-    config::{Config as AppConfig, DnsProviderKind, ENV_DEVELOPMENT, ENV_PRODUCTION},
+    config::{
+        Config as AppConfig, DnsProviderKind, ENV_DEVELOPMENT, ENV_PRODUCTION, GcloudKeySource,
+        ResolvedDnsProvider,
+    },
     database::{Migrator, queries::SeaOrmStore},
     models::{Credentials, StatusListRecord},
 };
@@ -98,7 +101,7 @@ pub async fn build_state(config: &AppConfig) -> EyeResult<AppState> {
         .dns
         .resolve(&app_env)
         .wrap_err("Invalid DNS provider configuration")?;
-    if dns_provider == DnsProviderKind::Pebble && app_env == ENV_PRODUCTION {
+    if dns_provider.kind() == DnsProviderKind::Pebble && app_env == ENV_PRODUCTION {
         warn!(
             "The 'pebble' DNS provider is a development-only fake DNS server \
              but APP_ENV=production; ACME challenges will not succeed against a real CA"
@@ -265,64 +268,35 @@ fn store_certificate_strategy(config: &AppConfig) -> EyeResult<Option<StoreProvi
 /// `cert_domains` are the domains certificates will be ordered for, used to
 /// validate at startup that the provider can serve challenges for them.
 async fn build_dns_challenge_handler(
-    provider: DnsProviderKind,
+    provider: ResolvedDnsProvider<'_>,
     config: &AppConfig,
     aws_config: &SdkConfig,
     cert_domains: &[&str],
 ) -> EyeResult<Dns01Handler> {
-    let dns = &config.server.cert.dns;
     let handler = match provider {
-        DnsProviderKind::Route53 => Dns01Handler::new(AwsRoute53DnsProvider::new(aws_config)),
-        DnsProviderKind::Cloudflare => {
-            let cfg = dns
-                .cloudflare
-                .as_ref()
-                .ok_or_else(|| eyre!("Missing Cloudflare DNS settings"))?;
+        ResolvedDnsProvider::Route53 => Dns01Handler::new(AwsRoute53DnsProvider::new(aws_config)),
+        ResolvedDnsProvider::Cloudflare(cfg) => {
             Dns01Handler::new(CloudflareDnsProvider::new(cfg.api_token.clone()))
         }
-        DnsProviderKind::Gcloud => {
-            let cfg = dns
-                .gcloud
-                .as_ref()
-                .ok_or_else(|| eyre!("Missing Google Cloud DNS settings"))?;
-            // Empty values count as unset, matching DnsConfig::resolve
-            let inline = cfg
-                .service_account_key
-                .as_ref()
-                .filter(|k| !k.expose_secret().trim().is_empty());
-            let path = cfg
-                .service_account_key_path
-                .as_deref()
-                .filter(|p| !p.trim().is_empty());
-            let key_json = match (inline, path) {
-                (Some(key), _) => key.expose_secret().to_string(),
-                (None, Some(path)) => tokio::fs::read_to_string(path)
+        ResolvedDnsProvider::Gcloud(key) => {
+            let key_json = match key {
+                GcloudKeySource::Inline(key) => key.expose_secret().to_string(),
+                GcloudKeySource::Path(path) => tokio::fs::read_to_string(path)
                     .await
                     .wrap_err_with(|| format!("Failed to read service account key at {path}"))?,
-                (None, None) => return Err(eyre!("Missing Google Cloud service account key")),
             };
             Dns01Handler::new(GoogleCloudDnsProvider::new(&key_json)?)
         }
-        DnsProviderKind::Azure => {
-            let cfg = dns
-                .azure
-                .as_ref()
-                .ok_or_else(|| eyre!("Missing Azure DNS settings"))?;
-            Dns01Handler::new(AzureDnsProvider::new(
-                ServicePrincipal {
-                    tenant_id: cfg.tenant_id.clone(),
-                    client_id: cfg.client_id.clone(),
-                    client_secret: cfg.client_secret.clone(),
-                },
-                &cfg.subscription_id,
-                &cfg.resource_group,
-            ))
-        }
-        DnsProviderKind::Acmedns => {
-            let cfg = dns
-                .acmedns
-                .as_ref()
-                .ok_or_else(|| eyre!("Missing ACME-DNS settings"))?;
+        ResolvedDnsProvider::Azure(cfg) => Dns01Handler::new(AzureDnsProvider::new(
+            ServicePrincipal {
+                tenant_id: cfg.tenant_id.clone(),
+                client_id: cfg.client_id.clone(),
+                client_secret: cfg.client_secret.clone(),
+            },
+            &cfg.subscription_id,
+            &cfg.resource_group,
+        )),
+        ResolvedDnsProvider::Acmedns(cfg) => {
             let accounts = cfg
                 .accounts
                 .iter()
@@ -338,7 +312,7 @@ async fn build_dns_challenge_handler(
             provider.check_order_domains(cert_domains)?;
             Dns01Handler::new(provider)
         }
-        DnsProviderKind::Pebble => {
+        ResolvedDnsProvider::Pebble => {
             // The DNS challenge server URL is optional and only used in dev mode;
             // it falls back to the well-known Pebble challenge test server when unset.
             let dns_url = config
@@ -373,16 +347,19 @@ mod tests {
 
     // Sync wrapper shadowing the async builder: sealed tests fork the
     // process and run without an async runtime
+    // and resolves the given provider first, exactly as the boot path does
     fn build_dns_challenge_handler(
         provider: DnsProviderKind,
-        config: &AppConfig,
+        config: &mut AppConfig,
         aws_config: &SdkConfig,
         cert_domains: &[&str],
     ) -> EyeResult<Dns01Handler> {
+        config.server.cert.dns.provider = Some(provider);
+        let resolved = config.server.cert.dns.resolve(ENV_PRODUCTION)?;
         tokio::runtime::Runtime::new()
             .expect("failed to build test runtime")
             .block_on(super::build_dns_challenge_handler(
-                provider,
+                resolved,
                 config,
                 aws_config,
                 cert_domains,
@@ -398,17 +375,19 @@ mod tests {
 
         // Route53 and Pebble need no provider-specific settings
         assert!(
-            build_dns_challenge_handler(DnsProviderKind::Route53, &config, &sdk, &domains).is_ok()
+            build_dns_challenge_handler(DnsProviderKind::Route53, &mut config, &sdk, &domains)
+                .is_ok()
         );
         assert!(
-            build_dns_challenge_handler(DnsProviderKind::Pebble, &config, &sdk, &domains).is_ok()
+            build_dns_challenge_handler(DnsProviderKind::Pebble, &mut config, &sdk, &domains)
+                .is_ok()
         );
 
         config.server.cert.dns.cloudflare = Some(CloudflareDnsConfig {
             api_token: "token".into(),
         });
         assert!(
-            build_dns_challenge_handler(DnsProviderKind::Cloudflare, &config, &sdk, &domains)
+            build_dns_challenge_handler(DnsProviderKind::Cloudflare, &mut config, &sdk, &domains)
                 .is_ok()
         );
 
@@ -420,7 +399,8 @@ mod tests {
             resource_group: "rg".into(),
         });
         assert!(
-            build_dns_challenge_handler(DnsProviderKind::Azure, &config, &sdk, &domains).is_ok()
+            build_dns_challenge_handler(DnsProviderKind::Azure, &mut config, &sdk, &domains)
+                .is_ok()
         );
 
         config.server.cert.dns.acmedns = Some(AcmeDnsConfig {
@@ -431,7 +411,8 @@ mod tests {
             accounts: Default::default(),
         });
         assert!(
-            build_dns_challenge_handler(DnsProviderKind::Acmedns, &config, &sdk, &domains).is_ok()
+            build_dns_challenge_handler(DnsProviderKind::Acmedns, &mut config, &sdk, &domains)
+                .is_ok()
         );
 
         let key_json = serde_json::json!({
@@ -445,15 +426,19 @@ mod tests {
             service_account_key_path: None,
         });
         assert!(
-            build_dns_challenge_handler(DnsProviderKind::Gcloud, &config, &sdk, &domains).is_ok()
+            build_dns_challenge_handler(DnsProviderKind::Gcloud, &mut config, &sdk, &domains)
+                .is_ok()
         );
     }
 
+    // Boot cannot proceed on missing provider settings; since the builder
+    // takes a resolved provider, the rejection now comes from resolve()
     #[sealed_test]
     fn fails_when_provider_settings_are_missing() {
         let sdk = test_sdk_config();
-        let config = AppConfig::load().expect("Failed to load config");
-        let domains = [config.server.domain.as_str()];
+        let mut config = AppConfig::load().expect("Failed to load config");
+        let domain = config.server.domain.clone();
+        let domains = [domain.as_str()];
 
         for kind in [
             DnsProviderKind::Cloudflare,
@@ -461,7 +446,7 @@ mod tests {
             DnsProviderKind::Azure,
             DnsProviderKind::Acmedns,
         ] {
-            assert!(build_dns_challenge_handler(kind, &config, &sdk, &domains).is_err());
+            assert!(build_dns_challenge_handler(kind, &mut config, &sdk, &domains).is_err());
         }
     }
 
@@ -487,16 +472,18 @@ mod tests {
 
         // Map-only config not covering the server domain fails at startup
         config.server.cert.dns.acmedns = Some(acmedns.clone());
-        let err = build_dns_challenge_handler(DnsProviderKind::Acmedns, &config, &sdk, &domains)
-            .err()
-            .expect("startup must fail without an account for the server domain");
+        let err =
+            build_dns_challenge_handler(DnsProviderKind::Acmedns, &mut config, &sdk, &domains)
+                .err()
+                .expect("startup must fail without an account for the server domain");
         assert!(err.to_string().contains(&domain));
 
         // An entry for the server domain (any cosmetic form) makes it build
         acmedns.accounts.insert(domain.to_uppercase(), account);
         config.server.cert.dns.acmedns = Some(acmedns);
         assert!(
-            build_dns_challenge_handler(DnsProviderKind::Acmedns, &config, &sdk, &domains).is_ok()
+            build_dns_challenge_handler(DnsProviderKind::Acmedns, &mut config, &sdk, &domains)
+                .is_ok()
         );
     }
 
@@ -526,9 +513,10 @@ mod tests {
             .into(),
         });
 
-        let err = build_dns_challenge_handler(DnsProviderKind::Acmedns, &config, &sdk, &domains)
-            .err()
-            .expect("conflicting account entries must fail the boot-path builder");
+        let err =
+            build_dns_challenge_handler(DnsProviderKind::Acmedns, &mut config, &sdk, &domains)
+                .err()
+                .expect("conflicting account entries must fail the boot-path builder");
         assert!(err.to_string().contains("Conflicting ACME-DNS accounts"));
     }
 
@@ -548,9 +536,10 @@ mod tests {
             accounts: Default::default(),
         });
 
-        let err = build_dns_challenge_handler(DnsProviderKind::Acmedns, &config, &sdk, &domains)
-            .err()
-            .expect("three identifiers on one account must fail the boot-path builder");
+        let err =
+            build_dns_challenge_handler(DnsProviderKind::Acmedns, &mut config, &sdk, &domains)
+                .err()
+                .expect("three identifiers on one account must fail the boot-path builder");
         assert!(err.to_string().contains("two most recent TXT values"));
 
         // Mapping one of them to its own account restores a valid setup
@@ -565,7 +554,8 @@ mod tests {
             );
         }
         assert!(
-            build_dns_challenge_handler(DnsProviderKind::Acmedns, &config, &sdk, &domains).is_ok()
+            build_dns_challenge_handler(DnsProviderKind::Acmedns, &mut config, &sdk, &domains)
+                .is_ok()
         );
     }
 

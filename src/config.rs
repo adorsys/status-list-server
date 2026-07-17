@@ -134,6 +134,44 @@ pub enum DnsProviderKind {
     Pebble,
 }
 
+/// A DNS provider resolved by [`DnsConfig::resolve`], carrying its validated
+/// settings so the boot path can build the provider without re-checking them
+#[derive(Debug, Clone, Copy)]
+pub enum ResolvedDnsProvider<'a> {
+    /// Uses the ambient AWS credentials; no provider-specific settings
+    Route53,
+    Cloudflare(&'a CloudflareDnsConfig),
+    Gcloud(GcloudKeySource<'a>),
+    Azure(&'a AzureDnsConfig),
+    Acmedns(&'a AcmeDnsConfig),
+    /// Development-only; its challenge server URL lives outside [`DnsConfig`]
+    Pebble,
+}
+
+/// The Google Cloud service account key source, with empty values counting
+/// as unset and the inline key winning when both are configured
+#[derive(Debug, Clone, Copy)]
+pub enum GcloudKeySource<'a> {
+    /// The key JSON itself
+    Inline(&'a SecretString),
+    /// Path to the key JSON file
+    Path(&'a str),
+}
+
+impl ResolvedDnsProvider<'_> {
+    /// The plain provider kind, without the settings
+    pub fn kind(&self) -> DnsProviderKind {
+        match self {
+            Self::Route53 => DnsProviderKind::Route53,
+            Self::Cloudflare(_) => DnsProviderKind::Cloudflare,
+            Self::Gcloud(_) => DnsProviderKind::Gcloud,
+            Self::Azure(_) => DnsProviderKind::Azure,
+            Self::Acmedns(_) => DnsProviderKind::Acmedns,
+            Self::Pebble => DnsProviderKind::Pebble,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct DnsConfig {
     /// Selected DNS provider. When unset, defaults to Route53 in production
@@ -359,54 +397,60 @@ impl CloudflareDnsConfig {
 }
 
 impl DnsConfig {
-    /// Resolve the DNS provider to use and validate that its settings are present.
-    pub fn resolve(&self, app_env: &str) -> Result<DnsProviderKind, ConfigError> {
+    /// Resolve the DNS provider to use, validate its settings and return them
+    /// borrowed, so consumers need no re-validation. Synchronous and
+    /// network-free by design; anything needing I/O belongs to the boot path.
+    pub fn resolve(&self, app_env: &str) -> Result<ResolvedDnsProvider<'_>, ConfigError> {
         let kind = self.provider.unwrap_or(if app_env == ENV_PRODUCTION {
             DnsProviderKind::Route53
         } else {
             DnsProviderKind::Pebble
         });
 
-        let missing = match kind {
-            DnsProviderKind::Cloudflare if self.cloudflare.is_none() => Some("dns.cloudflare"),
-            DnsProviderKind::Gcloud
-                if self.gcloud.as_ref().is_none_or(|g| {
+        let missing = |section: &str| {
+            ConfigError::Message(format!(
+                "DNS provider {kind:?} selected but the server.cert.{section} settings are missing"
+            ))
+        };
+        let resolved = match kind {
+            DnsProviderKind::Route53 => ResolvedDnsProvider::Route53,
+            DnsProviderKind::Pebble => ResolvedDnsProvider::Pebble,
+            DnsProviderKind::Cloudflare => {
+                let cloudflare = self
+                    .cloudflare
+                    .as_ref()
+                    .ok_or_else(|| missing("dns.cloudflare"))?;
+                cloudflare.validate()?;
+                ResolvedDnsProvider::Cloudflare(cloudflare)
+            }
+            DnsProviderKind::Gcloud => {
+                let key = self.gcloud.as_ref().and_then(|g| {
                     g.service_account_key
                         .as_ref()
-                        .is_none_or(|k| k.expose_secret().trim().is_empty())
-                        && non_empty(&g.service_account_key_path).is_none()
-                }) =>
-            {
-                Some("dns.gcloud")
-            }
-            DnsProviderKind::Azure if self.azure.is_none() => Some("dns.azure"),
-            DnsProviderKind::Acmedns if self.acmedns.is_none() => Some("dns.acmedns"),
-            _ => None,
-        };
-        if let Some(section) = missing {
-            return Err(ConfigError::Message(format!(
-                "DNS provider {kind:?} selected but the server.cert.{section} settings are missing"
-            )));
-        }
-        match kind {
-            DnsProviderKind::Cloudflare => {
-                if let Some(cloudflare) = &self.cloudflare {
-                    cloudflare.validate()?;
-                }
+                        .filter(|k| !k.expose_secret().trim().is_empty())
+                        .map(GcloudKeySource::Inline)
+                        .or_else(|| {
+                            non_empty(&g.service_account_key_path)
+                                .map(|path| GcloudKeySource::Path(path))
+                        })
+                });
+                ResolvedDnsProvider::Gcloud(key.ok_or_else(|| missing("dns.gcloud"))?)
             }
             DnsProviderKind::Azure => {
-                if let Some(azure) = &self.azure {
-                    azure.validate()?;
-                }
+                let azure = self.azure.as_ref().ok_or_else(|| missing("dns.azure"))?;
+                azure.validate()?;
+                ResolvedDnsProvider::Azure(azure)
             }
             DnsProviderKind::Acmedns => {
-                if let Some(acmedns) = &self.acmedns {
-                    acmedns.validate()?;
-                }
+                let acmedns = self
+                    .acmedns
+                    .as_ref()
+                    .ok_or_else(|| missing("dns.acmedns"))?;
+                acmedns.validate()?;
+                ResolvedDnsProvider::Acmedns(acmedns)
             }
-            _ => {}
-        }
-        Ok(kind)
+        };
+        Ok(resolved)
     }
 }
 
@@ -620,8 +664,14 @@ mod tests {
     fn test_dns_provider_defaults_per_environment() {
         let dns = DnsConfig::default();
 
-        assert_eq!(dns.resolve("production").unwrap(), DnsProviderKind::Route53);
-        assert_eq!(dns.resolve("development").unwrap(), DnsProviderKind::Pebble);
+        assert_eq!(
+            dns.resolve("production").unwrap().kind(),
+            DnsProviderKind::Route53
+        );
+        assert_eq!(
+            dns.resolve("development").unwrap().kind(),
+            DnsProviderKind::Pebble
+        );
     }
 
     #[test]
@@ -631,7 +681,10 @@ mod tests {
             ..Default::default()
         };
 
-        assert_eq!(dns.resolve("production").unwrap(), DnsProviderKind::Pebble);
+        assert_eq!(
+            dns.resolve("production").unwrap().kind(),
+            DnsProviderKind::Pebble
+        );
     }
 
     #[test]
@@ -651,7 +704,7 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(
-            dns.resolve("production").unwrap(),
+            dns.resolve("production").unwrap().kind(),
             DnsProviderKind::Cloudflare
         );
 
@@ -675,7 +728,10 @@ mod tests {
             subdomain: Some("subdomain".into()),
             accounts: Default::default(),
         });
-        assert_eq!(dns.resolve("production").unwrap(), DnsProviderKind::Acmedns);
+        assert_eq!(
+            dns.resolve("production").unwrap().kind(),
+            DnsProviderKind::Acmedns
+        );
 
         // A per-domain accounts map alone is enough
         let account = AcmeDnsAccount {
@@ -690,7 +746,10 @@ mod tests {
             subdomain: None,
             accounts: [("status.example.com".to_string(), account)].into(),
         });
-        assert_eq!(dns.resolve("production").unwrap(), DnsProviderKind::Acmedns);
+        assert_eq!(
+            dns.resolve("production").unwrap().kind(),
+            DnsProviderKind::Acmedns
+        );
 
         // A partial default account is rejected
         let dns = acmedns(AcmeDnsConfig {
@@ -734,7 +793,10 @@ mod tests {
             }),
             ..Default::default()
         };
-        assert_eq!(dns.resolve("production").unwrap(), DnsProviderKind::Gcloud);
+        assert_eq!(
+            dns.resolve("production").unwrap().kind(),
+            DnsProviderKind::Gcloud
+        );
     }
 
     #[test]
@@ -759,7 +821,7 @@ mod tests {
         assert!(err.contains("subscription_id"));
         assert!(!err.contains("client_id"));
         assert_eq!(
-            azure("tenant", "sub").resolve("production").unwrap(),
+            azure("tenant", "sub").resolve("production").unwrap().kind(),
             DnsProviderKind::Azure
         );
 
@@ -851,7 +913,10 @@ mod tests {
 
         // A usable entry passes
         let dns = acmedns([("status.example.com".to_string(), account("user", "sub"))].into());
-        assert_eq!(dns.resolve("production").unwrap(), DnsProviderKind::Acmedns);
+        assert_eq!(
+            dns.resolve("production").unwrap().kind(),
+            DnsProviderKind::Acmedns
+        );
     }
 
     #[sealed_test(env = [
