@@ -9,6 +9,63 @@ use secrecy::{ExposeSecret, SecretString};
 use serde::Deserialize;
 use serde_aux::field_attributes::deserialize_vec_from_string_or_vec;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DatabaseBackend {
+    #[default]
+    Postgres,
+    MySql,
+    Sqlite,
+}
+
+#[derive(Clone, Copy)]
+struct DatabaseBackendScheme {
+    prefixes: &'static [&'static str],
+    description: &'static str,
+}
+
+impl DatabaseBackend {
+    fn scheme(&self) -> DatabaseBackendScheme {
+        match self {
+            DatabaseBackend::Postgres => DatabaseBackendScheme {
+                prefixes: &["postgres://", "postgresql://"],
+                description: "'postgres://' or 'postgresql://'",
+            },
+            DatabaseBackend::MySql => DatabaseBackendScheme {
+                prefixes: &["mysql://"],
+                description: "'mysql://'",
+            },
+            DatabaseBackend::Sqlite => DatabaseBackendScheme {
+                prefixes: &["sqlite:"],
+                description: "'sqlite:'",
+            },
+        }
+    }
+
+    /// Returns a human-readable description of the expected URL scheme(s).
+    pub fn expected_scheme_description(&self) -> &'static str {
+        self.scheme().description
+    }
+
+    /// Returns the lowercase name matching the config value (`"postgres"`,
+    /// `"mysql"`, `"sqlite"`), useful for user-facing messages.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            DatabaseBackend::Postgres => "postgres",
+            DatabaseBackend::MySql => "mysql",
+            DatabaseBackend::Sqlite => "sqlite",
+        }
+    }
+
+    /// Validates that the given URL matches the expected scheme for this backend.
+    pub fn validate_url_scheme(&self, url: &str) -> bool {
+        self.scheme()
+            .prefixes
+            .iter()
+            .any(|prefix| url.starts_with(prefix))
+    }
+}
+
 /// Recognized values of the APP_ENV environment variable
 pub const ENV_PRODUCTION: &str = "production";
 pub const ENV_DEVELOPMENT: &str = "development";
@@ -231,6 +288,9 @@ pub struct RedisConfig {
 #[derive(Debug, Clone, Deserialize)]
 pub struct DatabaseConfig {
     pub url: SecretString,
+    /// Backend selection is used to validate the URL scheme at startup.
+    #[serde(default)]
+    pub backend: DatabaseBackend,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -384,6 +444,8 @@ fn base_builder() -> ConfigBuilder<DefaultState> {
             "postgres://postgres:postgres@localhost:5432/status-list",
         )
         .expect("hardcoded default")
+        .set_default("database.backend", "postgres")
+        .expect("hardcoded default")
         .set_default("redis.uri", "redis://localhost:6379")
         .expect("hardcoded default")
         .set_default("redis.require_client_auth", false)
@@ -430,6 +492,7 @@ fn base_builder() -> ConfigBuilder<DefaultState> {
 mod tests {
     use super::*;
     use secrecy::ExposeSecret;
+    use sealed_test::prelude::*;
 
     #[test]
     fn test_default_config() {
@@ -441,6 +504,7 @@ mod tests {
             config.database.url.expose_secret(),
             "postgres://postgres:postgres@localhost:5432/status-list"
         );
+        assert_eq!(config.database.backend, DatabaseBackend::Postgres);
         assert_eq!(config.redis.uri.expose_secret(), "redis://localhost:6379");
         assert!(!config.redis.require_client_auth);
         assert_eq!(config.server.cert.email, "admin@example.com");
@@ -619,7 +683,7 @@ mod tests {
         );
     }
 
-    #[test]
+#[test]
     fn test_env_config() {
         let config = Config::load_from_overrides(&[
             ("server.host", "0.0.0.0"),
@@ -721,6 +785,75 @@ mod tests {
         assert_eq!(
             config.server.cert.dns_challenge_server_url.as_deref(),
             Some("http://pebble:8055")
+        );
+    }
+
+    #[sealed_test(env = [
+        ("APP_DATABASE__BACKEND", "mysql"),
+        ("APP_DATABASE__URL", "mysql://user:password@localhost:3306/status-list"),
+    ])]
+    fn test_mysql_backend_config() {
+        let config = Config::load().expect("Failed to load config");
+        assert_eq!(config.database.backend, DatabaseBackend::MySql);
+        assert_eq!(
+            config.database.url.expose_secret(),
+            "mysql://user:password@localhost:3306/status-list"
+        );
+    }
+
+    #[sealed_test(env = [
+        ("APP_DATABASE__BACKEND", "sqlite"),
+        ("APP_DATABASE__URL", "sqlite::memory:"),
+    ])]
+    fn test_sqlite_backend_config() {
+        let config = Config::load().expect("Failed to load config");
+        assert_eq!(config.database.backend, DatabaseBackend::Sqlite);
+        assert_eq!(config.database.url.expose_secret(), "sqlite::memory:");
+    }
+
+    #[test]
+    fn test_database_backend_validate_url_scheme() {
+        assert!(
+            DatabaseBackend::Postgres
+                .validate_url_scheme("postgres://postgres:postgres@localhost:5432/status-list")
+        );
+        assert!(
+            DatabaseBackend::Postgres
+                .validate_url_scheme("postgresql://postgres:postgres@localhost:5432/status-list")
+        );
+        assert!(
+            DatabaseBackend::MySql
+                .validate_url_scheme("mysql://user:password@localhost:3306/status-list")
+        );
+        assert!(DatabaseBackend::Sqlite.validate_url_scheme("sqlite::memory:"));
+        assert!(
+            !DatabaseBackend::MySql
+                .validate_url_scheme("postgres://postgres:postgres@localhost:5432/status-list")
+        );
+    }
+
+    #[test]
+    fn test_database_backend_default() {
+        let backend = DatabaseBackend::default();
+        assert_eq!(backend, DatabaseBackend::Postgres);
+    }
+
+    #[test]
+    fn test_database_backend_as_str() {
+        assert_eq!(DatabaseBackend::Postgres.as_str(), "postgres");
+        assert_eq!(DatabaseBackend::MySql.as_str(), "mysql");
+        assert_eq!(DatabaseBackend::Sqlite.as_str(), "sqlite");
+    }
+
+    #[sealed_test(env = [
+        ("APP_DATABASE__BACKEND", "redis"),
+        ("APP_DATABASE__URL", "postgres://user:password@localhost:5432/status-list"),
+    ])]
+    fn test_invalid_database_backend_config() {
+        let result = Config::load();
+        assert!(
+            result.is_err(),
+            "an unknown backend value should fail to load config"
         );
     }
 }

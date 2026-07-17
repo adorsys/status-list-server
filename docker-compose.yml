@@ -19,6 +19,28 @@ services:
     networks:
       - status-list-network
 
+  mysql:
+    image: mysql:9.2
+    restart: always
+    container_name: status-list-mysql
+    profiles: ["mysql"]
+    ports:
+      - 3306:3306
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-rootpassword}
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-status-list}
+      MYSQL_USER: ${MYSQL_USER:-mysql}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-mysql}
+    volumes:
+      - mysqldata:/var/lib/mysql
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h localhost -u root -p$$MYSQL_ROOT_PASSWORD"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - status-list-network
+
   redis:
     image: redis:8.6
     container_name: redis
@@ -122,4 +144,6 @@ networks:
 
 volumes:
   pgdata:
+    driver: local
+  mysqldata:
     driver: local
