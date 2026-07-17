@@ -1,6 +1,8 @@
 use axum::{http::StatusCode, response::IntoResponse};
 use thiserror::Error;
 
+use super::constants::ERROR_CACHE_CONTROL;
+
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
 pub enum StatusListError {
     #[error("Invalid list ID string: {0}")]
@@ -48,6 +50,8 @@ pub enum StatusListError {
 impl IntoResponse for StatusListError {
     fn into_response(self) -> axum::response::Response {
         use StatusListError::*;
+        use axum::http::header;
+
         let status_code = match self {
             InvalidListId(_) => StatusCode::BAD_REQUEST,
             InvalidAcceptHeader => StatusCode::NOT_ACCEPTABLE,
@@ -71,6 +75,11 @@ impl IntoResponse for StatusListError {
             StatusTooLarge => StatusCode::UNPROCESSABLE_ENTITY,
         };
 
-        (status_code, self.to_string()).into_response()
+        (
+            status_code,
+            [(header::CACHE_CONTROL, ERROR_CACHE_CONTROL)],
+            self.to_string(),
+        )
+            .into_response()
     }
 }

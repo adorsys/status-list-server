@@ -4,6 +4,7 @@ use axum::{
     response::IntoResponse,
 };
 use hyper::StatusCode;
+use time::OffsetDateTime;
 
 use crate::{
     models::StatusesRequest,
@@ -95,6 +96,7 @@ pub async fn update_status(
     let mut exact_status_list = record;
     exact_status_list.status_list.lst = updated_lst.lst;
     exact_status_list.status_list.bits = updated_lst.bits;
+    exact_status_list.updated_at = OffsetDateTime::now_utc().unix_timestamp();
 
     // Save the updated token
     store
@@ -187,6 +189,7 @@ mod test {
             issuer: "issuer".to_string(),
             status_list: original_status_list,
             sub: "issuer".to_string(),
+            updated_at: 0,
         };
 
         // Update payload that flips status at index 1 to INVALID
@@ -278,6 +281,7 @@ mod test {
             issuer: "issuer".to_string(),
             status_list: original_status_list,
             sub: "issuer".to_string(),
+            updated_at: 0,
         };
         let db_conn = Arc::new(
             mock_db
@@ -334,6 +338,7 @@ mod test {
             issuer: "issuer".to_string(),
             status_list: original_status_list,
             sub: "issuer".to_string(),
+            updated_at: 0,
         };
         let db_conn = Arc::new(
             mock_db

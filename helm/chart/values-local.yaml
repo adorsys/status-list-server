@@ -39,6 +39,9 @@ statuslist:
     RUST_LOG: "debug"
     APP_ENV: "local"
     APP_SERVER__CERT__ACME_DIRECTORY_URL: "https://acme-staging-v02.api.letsencrypt.org/directory"
+    # Parsed certificate chain cache TTL in seconds. "0" means no expiry; non-provisioning replicas rely on this TTL for renewed chains.
+    APP_SERVER__CERT__CHAIN_CACHE_TTL: "3600"
+    # Status-list record cache TTL in seconds. "0" disables this cache.
     APP_CACHE__TTL: "120"
     APP_CACHE__MAX_CAPACITY: "500"
   resources:
