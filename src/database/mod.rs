@@ -26,8 +26,13 @@ pub(crate) mod migrations {
         use super::*;
 
         /// Migration struct for creating database tables
-        #[derive(DeriveMigrationName)]
         pub(crate) struct Migration;
+
+        impl MigrationName for Migration {
+            fn name(&self) -> &str {
+                "m20250101_000001_tables"
+            }
+        }
 
         #[async_trait::async_trait]
         #[allow(elided_lifetimes_in_paths)]
@@ -197,8 +202,13 @@ pub(crate) mod migrations {
         use super::*;
 
         /// Migration struct for adding updated_at column
-        #[derive(DeriveMigrationName)]
         pub(crate) struct Migration;
+
+        impl MigrationName for Migration {
+            fn name(&self) -> &str {
+                "m20250101_000002_add_updated_at"
+            }
+        }
 
         #[async_trait::async_trait]
         impl MigrationTrait for Migration {
@@ -272,8 +282,13 @@ pub(crate) mod migrations {
     pub(crate) mod status_list_history {
         use super::*;
 
-        #[derive(DeriveMigrationName)]
         pub(crate) struct Migration;
+
+        impl MigrationName for Migration {
+            fn name(&self) -> &str {
+                "m20250101_000003_status_list_history"
+            }
+        }
 
         #[async_trait::async_trait]
         #[allow(elided_lifetimes_in_paths)]
