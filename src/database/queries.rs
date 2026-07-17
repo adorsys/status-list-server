@@ -29,6 +29,7 @@ impl SeaOrmStore<StatusListRecord> {
             issuer: Set(entity.issuer),
             status_list: Set(entity.status_list),
             sub: Set(entity.sub),
+            updated_at: Set(entity.updated_at),
         };
         status_lists::Entity::insert(active)
             .exec_without_returning(&*self.db)
@@ -76,6 +77,7 @@ impl SeaOrmStore<StatusListRecord> {
             issuer: Set(entity.issuer),
             status_list: Set(entity.status_list),
             sub: Set(entity.sub),
+            updated_at: Set(entity.updated_at),
         };
         active
             .update(&*self.db)
@@ -375,6 +377,7 @@ mod test {
                     lst: "abc".to_string(),
                 },
                 sub: "https://example.com/statuslists/list1".to_string(),
+                updated_at: 0,
             },
             status_lists::Model {
                 list_id: "list2".to_string(),
@@ -384,6 +387,7 @@ mod test {
                     lst: "xyz".to_string(),
                 },
                 sub: "https://example.com/statuslists/list2".to_string(),
+                updated_at: 0,
             },
         ];
 
