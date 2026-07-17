@@ -225,18 +225,18 @@ mod test {
 
     #[cfg(feature = "sqlite")]
     async fn sqlite_connection() -> Arc<DatabaseConnection> {
-        // Use a unique in-memory database for each test to avoid migration conflicts
-        // when tests run concurrently. The random UUID ensures each test gets its own database.
-        let db_url = format!(
-            "sqlite:memdb:{}?mode=memory&cache=shared",
-            uuid::Uuid::new_v4()
-        );
+        // Use a unique temp file database for each test to ensure complete isolation
+        // when tests run concurrently. Using temp files instead of shared memory
+        // avoids migration conflicts with seaql_migrations table.
+        let temp_dir = std::env::temp_dir();
+        let db_path = temp_dir.join(format!("test-{}.db", uuid::Uuid::new_v4()));
+        let db_url = format!("sqlite://{}?mode=rwc", db_path.display());
         let mut opt = sea_orm::ConnectOptions::new(db_url);
         opt.max_connections(1);
         opt.map_sqlx_sqlite_opts(|o| o.foreign_keys(true));
         let db = sea_orm::Database::connect(opt)
             .await
-            .expect("Failed to connect to in-memory SQLite");
+            .expect("Failed to connect to SQLite");
         crate::database::Migrator::up(&db, None)
             .await
             .expect("Failed to run migrations on SQLite");
@@ -246,6 +246,7 @@ mod test {
     #[cfg(feature = "mysql")]
     mod mysql_helpers {
         use super::*;
+        use sea_orm::ConnectionTrait;
         use testcontainers_modules::{
             mysql::Mysql as MysqlImage,
             testcontainers::{ContainerAsync, runners::AsyncRunner},
@@ -262,14 +263,30 @@ mod test {
                 .start()
                 .await
                 .expect("Failed to start MySQL container");
-            let mysql_url = format!(
-                "mysql://{}:{}/test",
-                node.get_host().await.expect("Failed to resolve MySQL host"),
-                node.get_host_port_ipv4(3306)
-                    .await
-                    .expect("Failed to resolve MySQL port")
-            );
+            let host = node.get_host().await.expect("Failed to resolve MySQL host");
+            let port = node
+                .get_host_port_ipv4(3306)
+                .await
+                .expect("Failed to resolve MySQL port");
 
+            // Connect without database first to create a unique database
+            let admin_url = format!("mysql://{}:{}", host, port);
+            let db_name = format!("test_{}", uuid::Uuid::new_v4().simple());
+
+            // Create the database
+            let admin_conn = sea_orm::Database::connect(&admin_url)
+                .await
+                .expect("Failed to connect to MySQL admin");
+            admin_conn
+                .execute_unprepared(&format!(
+                    "CREATE DATABASE {} CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci",
+                    db_name
+                ))
+                .await
+                .expect("Failed to create test database");
+
+            // Connect to the new database and run migrations
+            let mysql_url = format!("mysql://{}:{}/{}", host, port, db_name);
             let mut opt = sea_orm::ConnectOptions::new(mysql_url);
             opt.max_connections(5);
             let db = sea_orm::Database::connect(opt)
