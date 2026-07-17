@@ -221,17 +221,12 @@ mod test {
     use crate::models::StatusList;
     use jsonwebtoken::jwk::Jwk;
     use sea_orm::{DatabaseBackend, MockDatabase, MockExecResult};
+    #[cfg(feature = "sqlite")]
     use sea_orm_migration::MigratorTrait;
 
     #[cfg(feature = "sqlite")]
     async fn sqlite_connection() -> Arc<DatabaseConnection> {
-        // Use a unique temp file database for each test to ensure complete isolation
-        // when tests run concurrently. Using temp files instead of shared memory
-        // avoids migration conflicts with seaql_migrations table.
-        let temp_dir = std::env::temp_dir();
-        let db_path = temp_dir.join(format!("test-{}.db", uuid::Uuid::new_v4()));
-        let db_url = format!("sqlite://{}?mode=rwc", db_path.display());
-        let mut opt = sea_orm::ConnectOptions::new(db_url);
+        let mut opt = sea_orm::ConnectOptions::new("sqlite::memory:");
         opt.max_connections(1);
         opt.map_sqlx_sqlite_opts(|o| o.foreign_keys(true));
         let db = sea_orm::Database::connect(opt)

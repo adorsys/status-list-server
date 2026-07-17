@@ -30,7 +30,7 @@ pub(crate) mod migrations {
 
         impl MigrationName for Migration {
             fn name(&self) -> &str {
-                "m20250101_000001_tables"
+                "mod"
             }
         }
 
@@ -206,7 +206,7 @@ pub(crate) mod migrations {
 
         impl MigrationName for Migration {
             fn name(&self) -> &str {
-                "m20250101_000002_add_updated_at"
+                "add_updated_at"
             }
         }
 
@@ -236,23 +236,13 @@ pub(crate) mod migrations {
                 // update touches the row. Setting them to the migration run
                 // time makes the validator meaningful immediately.
                 let now_secs = time::OffsetDateTime::now_utc().unix_timestamp();
-
-                // Use database-specific identifier quoting:
-                // - MySQL uses backticks
-                // - PostgreSQL and SQLite use double quotes
-                let (table_quote, col_quote) = match manager.get_database_backend() {
-                    sea_orm::DatabaseBackend::MySql => ("`", "`"),
-                    _ => ("\"", "\""),
-                };
-
-                let sql = format!(
-                    "UPDATE {0}status_lists{0} SET {1}updated_at{1} = {2}",
-                    table_quote, col_quote, now_secs
-                );
-
+                let update_stmt = sea_query::Query::update()
+                    .table(StatusLists::Table)
+                    .value(StatusLists::UpdatedAt, now_secs)
+                    .to_owned();
                 manager
                     .get_connection()
-                    .execute_unprepared(&sql)
+                    .execute(manager.get_database_backend().build(&update_stmt))
                     .await
                     .map(|_| ())
             }
