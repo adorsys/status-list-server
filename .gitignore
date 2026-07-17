@@ -5,6 +5,7 @@
 cert.yml
 .kilo/
 tls.crt
+.kilo/
 
 ### JupyterNotebooks ###
 __pycache__

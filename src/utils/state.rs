@@ -3,7 +3,7 @@ use crate::{
         CertManager,
         challenge::{
             AcmeDnsProvider, AwsRoute53DnsProvider, AzureDnsProvider, CloudflareDnsProvider,
-            Dns01Handler, GoogleCloudDnsProvider, ServicePrincipal,
+            Dns01Handler, GoogleCloudDnsProvider, PebbleDnsProvider, ServicePrincipal,
         },
         storage::{AwsS3, AwsSecretsManager, Redis},
     },
@@ -19,10 +19,7 @@ use secrecy::ExposeSecret;
 use std::{sync::Arc, time::Duration};
 use tracing::warn;
 
-use super::{
-    cache::Cache,
-    cert_manager::{challenge::PebbleDnsProvider, http_client::DefaultHttpClient},
-};
+use super::{cache::StatusListCache, cert_manager::http_client::DefaultHttpClient};
 
 fn empty_to_none(value: Option<String>) -> Option<String> {
     value.filter(|v| !v.trim().is_empty())
@@ -34,7 +31,7 @@ pub struct AppState {
     pub status_list_repo: SeaOrmStore<StatusListRecord>,
     pub server_domain: String,
     pub cert_manager: Arc<CertManager>,
-    pub cache: Cache,
+    pub cache: StatusListCache,
     pub aggregation_uri: Option<String>,
     pub token_exp_secs: u64,
     pub token_ttl_secs: u64,
@@ -123,6 +120,7 @@ pub async fn build_state(config: &AppConfig) -> EyeResult<AppState> {
     .with_cert_storage(cert_storage)
     .with_secrets_storage(secrets_storage)
     .with_challenge_handler(challenge_handler)
+    .with_cert_chain_cache_ttl(Duration::from_secs(config.server.cert.chain_cache_ttl))
     .with_eku(&config.server.cert.eku);
 
     if app_env == ENV_DEVELOPMENT {
@@ -140,7 +138,7 @@ pub async fn build_state(config: &AppConfig) -> EyeResult<AppState> {
         status_list_repo: SeaOrmStore::new(db_clone),
         server_domain: config.server.domain.clone(),
         cert_manager: Arc::new(certificate_manager),
-        cache: Cache::new(config.cache.ttl, config.cache.max_capacity),
+        cache: StatusListCache::new(config.cache.ttl, config.cache.max_capacity),
         aggregation_uri: empty_to_none(config.server.aggregation_uri.clone()),
         token_exp_secs: config.status_list.token_exp_secs,
         token_ttl_secs: config.status_list.token_ttl_secs,

@@ -99,6 +99,7 @@ pub struct CertConfig {
     #[serde(default)]
     pub eku: Vec<u64>,
     pub acme_directory_url: String,
+    pub chain_cache_ttl: u64,
     pub renewal_cron_schedule: String,
     #[serde(default)]
     pub dns_challenge_server_url: Option<String>,
@@ -400,6 +401,10 @@ impl Config {
             .set_default(
                 "server.cert.acme_directory_url",
                 "https://acme-v02.api.letsencrypt.org/directory",
+            )?
+            .set_default(
+                "server.cert.chain_cache_ttl",
+                crate::utils::cert_manager::DEFAULT_CHAIN_CACHE_TTL.as_secs(),
             )?
             .set_default("server.cert.renewal_cron_schedule", "0 0 0 * * *")?
             .set_default("aws.region", "us-east-1")?
