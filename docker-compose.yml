@@ -1,8 +1,26 @@
+# Docker Compose Configuration
+#
+# This file provides multiple service profiles for different deployment scenarios.
+# The server supports compile-time feature flags for backend selection.
+#
+# Feature Quick Reference:
+#   - memory: SQLite + in-memory storage (development)
+#   - postgres + aws-s3 + aws-secrets-manager + redis-cache + dns-route53 (production)
+#
+# Build with specific features:
+#   docker compose build --build-arg FEATURES="memory"
+#
+# Profiles:
+#   - default: Full stack with PostgreSQL, Redis, LocalStack (AWS mock), Pebble (ACME)
+#   - memory: Lightweight SQLite with in-memory storage (no external dependencies)
+#   - mysql: MySQL database instead of PostgreSQL
+
 services:
   db:
     image: postgres:18.4
     restart: always
     container_name: status-list-db
+    profiles: ["default", "postgres"]
     ports:
       - 5432:5432
     environment:
@@ -44,6 +62,7 @@ services:
   redis:
     image: redis:8.6
     container_name: redis
+    profiles: ["default", "redis"]
     ports:
       - 6379:6379
     networks:
@@ -52,6 +71,7 @@ services:
   localstack:
     container_name: localstack
     image: localstack/localstack:4.14
+    profiles: ["default", "aws"]
     ports:
       - 4566:4566
     environment:
@@ -86,11 +106,13 @@ services:
     volumes:
       - ./test_data/pebble_config.json:/test/pebble_config.json
 
+  # Full-stack app with PostgreSQL, Redis, and LocalStack (default)
   app:
     build:
       context: .
       dockerfile: Dockerfile
     container_name: status-list-server
+    profiles: ["default"]
     env_file: .env
     environment:
       APP_ENV: ${APP_ENV:-development}
@@ -111,6 +133,34 @@ services:
         condition: service_healthy
       pushgateway:
         condition: service_started
+    networks:
+      - status-list-network
+
+  # Lightweight app with SQLite and in-memory storage (memory profile)
+  # Build with: docker compose --profile memory up --build
+  app-memory:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        FEATURES: "memory"
+    container_name: status-list-server-memory
+    profiles: ["memory"]
+    env_file: .env
+    environment:
+      APP_ENV: ${APP_ENV:-development}
+      APP_SERVER__ENABLE_METRICS: ${APP_SERVER__ENABLE_METRICS:-false}
+      APP_DATABASE__URL: "sqlite:///data/status-list.db"
+      APP_DATABASE__BACKEND: "sqlite"
+      APP_STATUS_LIST__TOKEN_EXP_SECS: ${APP_STATUS_LIST__TOKEN_EXP_SECS:-900}
+      APP_STATUS_LIST__TOKEN_TTL_SECS: ${APP_STATUS_LIST__TOKEN_TTL_SECS:-300}
+    ports:
+      - 8000:8000
+    depends_on:
+      pebble:
+        condition: service_started
+    volumes:
+      - sqlite_data:/data
     networks:
       - status-list-network
 
@@ -146,4 +196,6 @@ volumes:
   pgdata:
     driver: local
   mysqldata:
+    driver: local
+  sqlite_data:
     driver: local

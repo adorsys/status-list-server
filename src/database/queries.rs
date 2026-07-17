@@ -327,6 +327,7 @@ mod test {
                 lst: "compressed".to_string(),
             },
             sub: "sub-sqlite-test".to_string(),
+            updated_at: 0,
         };
 
         store.insert_one(record.clone()).await.unwrap();
@@ -555,6 +556,7 @@ mod test {
                 lst: "compressed".to_string(),
             },
             sub: "sub-neg-sqlite".to_string(),
+            updated_at: 0,
         };
         let fk_err = store.insert_one(rec).await;
         assert!(fk_err.is_err(), "insert with dangling FK should fail");
@@ -570,6 +572,7 @@ mod test {
                         lst: "compressed".to_string(),
                     },
                     sub: "sub-neg-sqlite".to_string(),
+                    updated_at: 0,
                 },
             )
             .await

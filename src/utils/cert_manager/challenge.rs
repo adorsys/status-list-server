@@ -1,10 +1,26 @@
 mod dns01;
 mod http01;
 
-pub use dns01::{
-    AcmeDnsProvider, AwsRoute53DnsProvider, AzureDnsProvider, CloudflareDnsProvider, Dns01Handler,
-    DnsProvider, GoogleCloudDnsProvider, PebbleDnsProvider, ServicePrincipal,
-};
+pub use dns01::{Dns01Handler, DnsProvider};
+
+#[cfg(feature = "dns-acmedns")]
+pub use dns01::AcmeDnsProvider;
+
+#[cfg(feature = "dns-azure")]
+pub use dns01::{AzureDnsProvider, ServicePrincipal};
+
+#[cfg(feature = "dns-cloudflare")]
+pub use dns01::CloudflareDnsProvider;
+
+#[cfg(feature = "dns-gcloud")]
+pub use dns01::GoogleCloudDnsProvider;
+
+#[cfg(feature = "dns-pebble")]
+pub use dns01::PebbleDnsProvider;
+
+#[cfg(feature = "dns-route53")]
+pub use dns01::AwsRoute53DnsProvider;
+
 pub use http01::Http01Handler;
 
 use std::{future::Future, pin::Pin};

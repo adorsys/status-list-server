@@ -1,4 +1,5 @@
 ARG APP_NAME=status-list-server
+ARG FEATURES=default
 
 # Use buildx's automatic platform detection
 FROM --platform=$BUILDPLATFORM blackdex/rust-musl:x86_64-musl AS builder-amd64
@@ -9,6 +10,7 @@ FROM builder-${TARGETARCH} AS builder
 ARG APP_NAME
 ARG TARGETPLATFORM
 ARG TARGETARCH
+ARG FEATURES
 WORKDIR /app
 
 # Set the Rust target and build the application
@@ -23,7 +25,11 @@ RUN --mount=type=bind,source=src,target=src \
         arm64) RUST_TARGET="aarch64-unknown-linux-musl" ;; \
         *) echo "Unsupported architecture: $TARGETARCH" && exit 1 ;; \
     esac; \
-    cargo build --locked --release --target=${RUST_TARGET}; \
+    if [ "$FEATURES" = "default" ]; then \
+        cargo build --locked --release --target=${RUST_TARGET}; \
+    else \
+        cargo build --locked --release --target=${RUST_TARGET} --no-default-features --features="${FEATURES}"; \
+    fi; \
     mv target/${RUST_TARGET}/release/${APP_NAME} .
 
 FROM gcr.io/distroless/static-debian12 AS runtime

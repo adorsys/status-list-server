@@ -1,16 +1,29 @@
-mod acme_dns;
-mod azure;
-mod cloudflare;
-mod gcloud;
-mod pebble;
-mod route53;
 mod token;
 
+#[cfg(feature = "dns-acmedns")]
+mod acme_dns;
+#[cfg(feature = "dns-azure")]
+mod azure;
+#[cfg(feature = "dns-cloudflare")]
+mod cloudflare;
+#[cfg(feature = "dns-gcloud")]
+mod gcloud;
+#[cfg(feature = "dns-pebble")]
+mod pebble;
+#[cfg(feature = "dns-route53")]
+mod route53;
+
+#[cfg(feature = "dns-acmedns")]
 pub use acme_dns::AcmeDnsProvider;
+#[cfg(feature = "dns-azure")]
 pub use azure::{AzureDnsProvider, ServicePrincipal};
+#[cfg(feature = "dns-cloudflare")]
 pub use cloudflare::CloudflareDnsProvider;
+#[cfg(feature = "dns-gcloud")]
 pub use gcloud::GoogleCloudDnsProvider;
+#[cfg(feature = "dns-pebble")]
 pub use pebble::PebbleDnsProvider;
+#[cfg(feature = "dns-route53")]
 pub use route53::AwsRoute53DnsProvider;
 
 use std::{sync::Arc, time::Duration};

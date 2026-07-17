@@ -1,10 +1,14 @@
+#[cfg(feature = "redis-cache")]
 use std::time::Duration;
 
 use config::{Config as ConfigLib, ConfigError, Environment};
+
+#[cfg(feature = "redis-cache")]
 use redis::{
     Client as RedisClient, ClientTlsConfig, RedisResult, TlsCertificates,
     aio::{ConnectionManager, ConnectionManagerConfig},
 };
+
 use secrecy::{ExposeSecret, SecretString};
 use serde::Deserialize;
 use serde_aux::field_attributes::deserialize_vec_from_string_or_vec;
@@ -74,6 +78,10 @@ pub const ENV_DEVELOPMENT: &str = "development";
 pub struct Config {
     pub server: ServerConfig,
     pub database: DatabaseConfig,
+    #[cfg(feature = "redis-cache")]
+    pub redis: RedisConfig,
+    #[cfg(not(feature = "redis-cache"))]
+    #[serde(default)]
     pub redis: RedisConfig,
     pub aws: AwsConfig,
     pub cache: CacheConfig,
@@ -279,9 +287,22 @@ impl DnsConfig {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[cfg(feature = "redis-cache")]
 pub struct RedisConfig {
     pub uri: SecretString,
     pub require_client_auth: bool,
+    pub cert_cache_ttl: u64,
+}
+
+/// Stub RedisConfig when redis-cache feature is disabled
+#[derive(Debug, Clone, Deserialize, Default)]
+#[cfg(not(feature = "redis-cache"))]
+pub struct RedisConfig {
+    #[serde(default)]
+    pub uri: SecretString,
+    #[serde(default)]
+    pub require_client_auth: bool,
+    #[serde(default)]
     pub cert_cache_ttl: u64,
 }
 
@@ -313,6 +334,7 @@ pub struct StatusListConfig {
     pub token_ttl_secs: u64,
 }
 
+#[cfg(feature = "redis-cache")]
 impl RedisConfig {
     /// Establishes a new Redis connection based on the configuration.
     ///
@@ -377,7 +399,7 @@ impl RedisConfig {
 impl Config {
     pub fn load() -> Result<Self, ConfigError> {
         // Build the config
-        let config = ConfigLib::builder()
+        let mut builder = ConfigLib::builder()
             // Set default values
             .set_default("server.host", "localhost")?
             .set_default("server.domain", "localhost")?
@@ -389,9 +411,6 @@ impl Config {
                 "postgres://postgres:postgres@localhost:5432/status-list",
             )?
             .set_default("database.backend", "postgres")?
-            .set_default("redis.uri", "redis://localhost:6379")?
-            .set_default("redis.require_client_auth", false)?
-            .set_default("redis.cert_cache_ttl", 3600)? // Default 1 hour
             .set_default("aws.secrets_cache_ttl", 300)? // Default 5 minutes
             .set_default("aws.s3_bucket", "status-list-adorsys")?
             .set_default("aws.s3_key_prefix", "")?
@@ -411,7 +430,27 @@ impl Config {
             .set_default("cache.ttl", 5 * 60)?
             .set_default("cache.max_capacity", 100)?
             .set_default("status_list.token_exp_secs", 900)? // 15 minutes
-            .set_default("status_list.token_ttl_secs", 300)? // 5 minutes
+            .set_default("status_list.token_ttl_secs", 300)?; // 5 minutes
+
+        // Set Redis defaults only when redis-cache feature is enabled
+        #[cfg(feature = "redis-cache")]
+        {
+            builder = builder
+                .set_default("redis.uri", "redis://localhost:6379")?
+                .set_default("redis.require_client_auth", false)?
+                .set_default("redis.cert_cache_ttl", 3600)?; // Default 1 hour
+        }
+
+        #[cfg(not(feature = "redis-cache"))]
+        {
+            // Provide dummy defaults when Redis is not used
+            builder = builder
+                .set_default("redis.uri", "redis://localhost:6379")?
+                .set_default("redis.require_client_auth", false)?
+                .set_default("redis.cert_cache_ttl", 0)?;
+        }
+
+        let config = builder
             // Override config values via environment variables
             // The environment variables should be prefixed with 'APP_' and use '__' as a separator
             // Example: APP_REDIS__REQUIRE_CLIENT_AUTH=false
@@ -444,6 +483,7 @@ mod tests {
             "postgres://postgres:postgres@localhost:5432/status-list"
         );
         assert_eq!(config.database.backend, DatabaseBackend::Postgres);
+        // Redis config is only available when redis-cache feature is enabled
         assert_eq!(config.redis.uri.expose_secret(), "redis://localhost:6379");
         assert!(!config.redis.require_client_auth);
         assert_eq!(config.server.cert.email, "admin@example.com");
