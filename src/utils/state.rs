@@ -3,7 +3,7 @@ use crate::{
         CertManager,
         challenge::{
             AcmeDnsProvider, AwsRoute53DnsProvider, AzureDnsProvider, CloudflareDnsProvider,
-            Dns01Handler, GoogleCloudDnsProvider, ServicePrincipal,
+            Dns01Handler, GoogleCloudDnsProvider, PebbleDnsProvider, ServicePrincipal,
         },
         storage::{AwsS3, AwsSecretsManager, Redis},
     },
@@ -13,16 +13,13 @@ use crate::{
 };
 use aws_config::{BehaviorVersion, Region, SdkConfig};
 use color_eyre::eyre::{Context, Result as EyeResult, eyre};
-use sea_orm::Database;
+use sea_orm::{ConnectOptions, Database};
 use sea_orm_migration::MigratorTrait;
 use secrecy::ExposeSecret;
 use std::{sync::Arc, time::Duration};
 use tracing::warn;
 
-use super::{
-    cache::Cache,
-    cert_manager::{challenge::PebbleDnsProvider, http_client::DefaultHttpClient},
-};
+use super::{cache::StatusListCache, cert_manager::http_client::DefaultHttpClient};
 
 fn empty_to_none(value: Option<String>) -> Option<String> {
     value.filter(|v| !v.trim().is_empty())
@@ -35,14 +32,35 @@ pub struct AppState {
     pub status_list_history_repo: SeaOrmStore<StatusListHistoryRecord>,
     pub server_domain: String,
     pub cert_manager: Arc<CertManager>,
-    pub cache: Cache,
+    pub cache: StatusListCache,
     pub aggregation_uri: Option<String>,
     pub token_exp_secs: u64,
     pub token_ttl_secs: u64,
 }
 
 pub async fn build_state(config: &AppConfig) -> EyeResult<AppState> {
-    let db = Database::connect(config.database.url.expose_secret())
+    let db_url = config.database.url.expose_secret();
+    let db_backend = config.database.backend;
+
+    // Validate URL scheme matches the configured backend
+    if !db_backend.validate_url_scheme(db_url) {
+        return Err(color_eyre::eyre::eyre!(
+            "URL scheme does not match configured backend '{}'. Expected URL starting with {}",
+            db_backend.as_str(),
+            db_backend.expected_scheme_description()
+        ));
+    }
+
+    #[cfg(feature = "sqlite")]
+    let mut opt = ConnectOptions::new(db_url.to_string());
+    #[cfg(not(feature = "sqlite"))]
+    let opt = ConnectOptions::new(db_url.to_string());
+    #[cfg(feature = "sqlite")]
+    if db_backend == crate::config::DatabaseBackend::Sqlite {
+        opt.max_connections(1);
+        opt.map_sqlx_sqlite_opts(|o| o.foreign_keys(true));
+    }
+    let db = Database::connect(opt)
         .await
         .wrap_err("Failed to connect to database")?;
 
@@ -103,6 +121,7 @@ pub async fn build_state(config: &AppConfig) -> EyeResult<AppState> {
     .with_cert_storage(cert_storage)
     .with_secrets_storage(secrets_storage)
     .with_challenge_handler(challenge_handler)
+    .with_cert_chain_cache_ttl(Duration::from_secs(config.server.cert.chain_cache_ttl))
     .with_eku(&config.server.cert.eku);
 
     if app_env == ENV_DEVELOPMENT {
@@ -121,7 +140,7 @@ pub async fn build_state(config: &AppConfig) -> EyeResult<AppState> {
         status_list_history_repo: SeaOrmStore::new(db_clone),
         server_domain: config.server.domain.clone(),
         cert_manager: Arc::new(certificate_manager),
-        cache: Cache::new(config.cache.ttl, config.cache.max_capacity),
+        cache: StatusListCache::new(config.cache.ttl, config.cache.max_capacity),
         aggregation_uri: empty_to_none(config.server.aggregation_uri.clone()),
         token_exp_secs: config.status_list.token_exp_secs,
         token_ttl_secs: config.status_list.token_ttl_secs,

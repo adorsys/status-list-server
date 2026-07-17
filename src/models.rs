@@ -81,6 +81,8 @@ pub mod status_lists {
         #[sea_orm(column_type = "Json")]
         pub status_list: StatusList,
         pub sub: String,
+        /// Unix timestamp (seconds) of last modification
+        pub updated_at: i64,
     }
 
     #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
@@ -164,7 +166,7 @@ pub struct StatusList {
 /// Status list claims serialized inside Status List Tokens (JWT/CWT).
 ///
 /// `aggregation_uri` is injected from server configuration at token-issuance
-/// time (draft-21 §4.2/§4.3) and is **not** part of the persisted `StatusList`
+/// time (draft-21 §4.2/§4.3) and is not part of the persisted `StatusList`
 /// storage model.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct StatusListClaims {

@@ -1,7 +1,7 @@
 use crate::{
     cert_manager::storage::StorageError,
     utils::{
-        cache::Cache,
+        cache::StatusListCache,
         cert_manager::{CertManager, storage::Storage},
         state::AppState,
     },
@@ -76,7 +76,7 @@ pub(crate) async fn test_app_state_with(
         status_list_history_repo: SeaOrmStore::new(db),
         server_domain: "example.com".to_string(),
         cert_manager: Arc::new(certificate_manager),
-        cache: Cache::new(5 * 60, 100),
+        cache: StatusListCache::new(5 * 60, 100),
         aggregation_uri,
         token_exp_secs: 900,
         token_ttl_secs: 300,
