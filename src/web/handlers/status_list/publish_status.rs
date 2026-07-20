@@ -1,6 +1,10 @@
 use crate::{
     models::{StatusList, StatusListHistoryRecord, StatusListRecord, StatusesRequest},
-    utils::{errors::Error, lst_gen::create_status_list, state::AppState},
+    utils::{
+        errors::Error,
+        lst_gen::{AbuseLimits, create_status_list},
+        state::AppState,
+    },
     web::errors::ApiError,
 };
 use axum::{
@@ -35,7 +39,8 @@ pub async fn publish_status(
         return Err(StatusListError::TooManyStatuses {
             count,
             max: appstate.max_statuses_per_request,
-        });
+        }
+        .into());
     }
 
     let store = &appstate.status_list_repo;

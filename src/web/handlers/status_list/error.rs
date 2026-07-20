@@ -74,6 +74,9 @@ impl StatusListError {
             TokenAlreadyExists => StatusCode::CONFLICT,
             IssuerMismatch => StatusCode::FORBIDDEN,
             ServiceUnavailable => StatusCode::SERVICE_UNAVAILABLE,
+            TooManyStatuses { .. } => StatusCode::BAD_REQUEST,
+            IndexTooLarge(_) => StatusCode::BAD_REQUEST,
+            StatusTooLarge => StatusCode::UNPROCESSABLE_ENTITY,
         }
     }
 
@@ -99,6 +102,9 @@ impl StatusListError {
             TokenAlreadyExists => Cow::Borrowed("token_already_exists"),
             IssuerMismatch => Cow::Borrowed("issuer_mismatch"),
             ServiceUnavailable => Cow::Borrowed("service_unavailable"),
+            TooManyStatuses { .. } => Cow::Borrowed("too_many_statuses"),
+            IndexTooLarge(_) => Cow::Borrowed("index_too_large"),
+            StatusTooLarge => Cow::Borrowed("status_too_large"),
         }
     }
 

@@ -41,7 +41,8 @@ pub async fn update_status(
         return Err(StatusListError::TooManyStatuses {
             count,
             max: appstate.max_statuses_per_request,
-        });
+        }
+        .into());
     }
 
     let store = &appstate.status_list_repo;
