@@ -1,12 +1,13 @@
 use axum::{Json, extract::State, http::StatusCode, response::IntoResponse};
+use serde_json::json;
 
 use crate::{
     database::error::RepositoryError, models::Credentials, utils::state::AppState,
-    web::auth::errors::AuthenticationError,
+    web::auth::errors::AuthenticationError, web::errors::ApiError,
 };
 
 #[derive(Debug)]
-pub(super) enum CredentialError {
+pub enum CredentialError {
     RepoError(RepositoryError),
     AuthError(AuthenticationError),
 }
@@ -26,35 +27,13 @@ impl From<AuthenticationError> for CredentialError {
 pub async fn credential_handler(
     State(appstate): State<AppState>,
     Json(credential): Json<Credentials>,
-) -> impl IntoResponse {
-    match publish_credentials(credential.to_owned(), appstate).await {
-        Ok(_) => (StatusCode::ACCEPTED, "Credentials stored successfully").into_response(),
-        Err(CredentialError::AuthError(AuthenticationError::JwtError(err))) => {
-            (StatusCode::BAD_REQUEST, err.to_string()).into_response()
-        }
-        Err(CredentialError::RepoError(RepositoryError::DuplicateEntry)) => {
-            tracing::warn!(
-                "Attempted to publish credentials for existing issuer {}",
-                credential.issuer,
-            );
-            (
-                StatusCode::CONFLICT,
-                "Credentials already exist for this issuer".to_string(),
-            )
-                .into_response()
-        }
-        Err(err) => {
-            tracing::error!(
-                "Failed to store credentials for issuer {}: {err:?}",
-                credential.issuer,
-            );
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Internal server error".to_string(),
-            )
-                .into_response()
-        }
-    }
+) -> Result<impl IntoResponse, ApiError> {
+    publish_credentials(credential.to_owned(), appstate).await?;
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(json!({"status": "Credentials stored successfully"})),
+    )
+        .into_response())
 }
 
 pub(super) async fn publish_credentials(
@@ -62,7 +41,6 @@ pub(super) async fn publish_credentials(
     state: AppState,
 ) -> Result<(), CredentialError> {
     let store = &state.credential_repo;
-    // Check for existing issuer
     if store.find_one_by(&credentials.issuer).await?.is_some() {
         return Err(CredentialError::RepoError(RepositoryError::DuplicateEntry));
     }
@@ -147,8 +125,6 @@ mod tests {
         let app_state = test_app_state(None).await;
         let app = create_test_router(app_state);
 
-        // the payload format is correct but the public key is in wrong format
-        // so we expect a 422 Unprocessable Entity
         let body = r#"{"issuer": "test_issuer", "public_key": "wrong_key"}"#;
 
         let response = app

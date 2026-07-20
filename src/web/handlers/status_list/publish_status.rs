@@ -5,16 +5,18 @@ use crate::{
         lst_gen::{AbuseLimits, create_status_list},
         state::AppState,
     },
-    web::handlers::status_list::error::StatusListError,
+    web::errors::ApiError,
 };
 use axum::{
-    Extension, Json,
-    extract::{Path, State},
+    Extension,
+    extract::{Json, Path, State},
     http::StatusCode,
     response::IntoResponse,
 };
 use time::OffsetDateTime;
 use tracing;
+
+use super::error::StatusListError;
 
 /// Create a new status list.
 pub async fn publish_status(
@@ -22,10 +24,10 @@ pub async fn publish_status(
     Extension(issuer): Extension<String>,
     Path(list_id): Path<String>,
     Json(payload): Json<StatusesRequest>,
-) -> Result<impl IntoResponse, StatusListError> {
+) -> Result<impl IntoResponse, ApiError> {
     // Validate list_id as UUID
     if let Err(e) = uuid::Uuid::try_parse(&list_id) {
-        return Err(StatusListError::InvalidListId(e.to_string()));
+        return Err(StatusListError::InvalidListId(e.to_string()).into());
     }
 
     let count = payload.statuses.len();
@@ -37,7 +39,8 @@ pub async fn publish_status(
         return Err(StatusListError::TooManyStatuses {
             count,
             max: appstate.max_statuses_per_request,
-        });
+        }
+        .into());
     }
 
     let store = &appstate.status_list_repo;
@@ -57,8 +60,8 @@ pub async fn publish_status(
     // Check for existing token to prevent duplicates
     match store.find_one_by(&list_id).await {
         Ok(Some(_)) => {
-            tracing::info!("Status list {list_id} already exists");
-            Err(StatusListError::StatusListAlreadyExists)
+            tracing::info!("Status list {} already exists", list_id);
+            Err(StatusListError::StatusListAlreadyExists.into())
         }
         Ok(None) => {
             // Serialize the status list before constructing the token
@@ -74,7 +77,6 @@ pub async fn publish_status(
 
             let updated_at = OffsetDateTime::now_utc().unix_timestamp();
 
-            // Build the new status list token
             let status_list_record = StatusListRecord {
                 list_id: list_id.clone(),
                 issuer,
@@ -84,21 +86,12 @@ pub async fn publish_status(
             };
 
             // Insert the token into the repository
-            store
-                .insert_one(status_list_record.clone())
-                .await
-                .map_err(|e| {
-                    tracing::error!("Failed to insert status list entry: {e:?}");
-                    StatusListError::InternalServerError
-                })?;
+            store.insert_one(status_list_record.clone()).await?;
 
             persist_historical_snapshot(&appstate, &status_list_record).await?;
             Ok(StatusCode::CREATED.into_response())
         }
-        Err(e) => {
-            tracing::error!(error = ?e, list_id = ?list_id, "Database query failed for status list.");
-            Err(StatusListError::InternalServerError)
-        }
+        Err(e) => Err(ApiError::from(e)),
     }
 }
 
@@ -144,12 +137,12 @@ pub(super) async fn persist_historical_snapshot(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::web::handlers::status_list::error::StatusListError;
     use crate::{
         models::{Status, StatusEntry, StatusListRecord, status_lists},
         test_utils::test_app_state,
     };
-    use axum::{Json, extract::State};
+    use axum::extract::State;
+    use hyper::StatusCode;
     use sea_orm::{DatabaseBackend, MockDatabase, MockExecResult};
     use std::sync::Arc;
 
@@ -169,7 +162,12 @@ mod tests {
         )
         .await;
 
-        assert!(matches!(result, Err(StatusListError::InvalidListId(_))));
+        match result {
+            Err(err) => {
+                assert_eq!(err.into_response().status(), StatusCode::BAD_REQUEST);
+            }
+            Ok(_) => panic!("Expected error but got Ok"),
+        }
     }
 
     #[tokio::test]
@@ -200,11 +198,11 @@ mod tests {
             sub: format!("https://example.com/api/v1/status-lists/{token_id}"),
             updated_at: 0,
         };
-        let _ = &new_token;
         let db_conn = Arc::new(
             mock_db
                 .append_query_results::<status_lists::Model, Vec<_>, _>(vec![
-                    vec![], // find_one_by in handler returns None
+                    vec![],                  // find_one_by in handler returns None
+                    vec![new_token.clone()], // insert_one return
                 ])
                 .append_exec_results(vec![
                     MockExecResult {
@@ -267,6 +265,7 @@ mod tests {
             mock_db
                 .append_query_results::<status_lists::Model, Vec<_>, _>(vec![
                     vec![],                  // find_one_by in handler returns None
+                    vec![new_token.clone()], // insert_one return
                     vec![new_token.clone()], // find_one_by in test verification
                 ])
                 .append_exec_results(vec![
@@ -374,6 +373,7 @@ mod tests {
             mock_db
                 .append_query_results::<status_lists::Model, Vec<_>, _>(vec![
                     vec![],                  // find_one_by in handler returns None
+                    vec![new_token.clone()], // insert_one return
                     vec![new_token.clone()], // find_one_by in test verification
                 ])
                 .append_exec_results(vec![
@@ -439,6 +439,7 @@ mod tests {
             mock_db
                 .append_query_results::<status_lists::Model, Vec<_>, _>(vec![
                     vec![],                  // find_one_by in handler returns None
+                    vec![new_token.clone()], // insert_one return
                     vec![new_token.clone()], // find_one_by in test verification
                 ])
                 .append_exec_results(vec![
@@ -453,7 +454,6 @@ mod tests {
                 ])
                 .into_connection(),
         );
-
         let app_state = test_app_state(Some(db_conn.clone())).await;
 
         let response = publish_status(

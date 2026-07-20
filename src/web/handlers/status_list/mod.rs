@@ -1,7 +1,7 @@
 pub(super) mod aggregation;
 pub mod conditional;
 pub(super) mod constants;
-pub(super) mod error;
+pub mod error;
 pub mod etag;
 pub(crate) mod get_status_list;
 pub mod publish_status;
