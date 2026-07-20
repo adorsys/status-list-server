@@ -1,5 +1,5 @@
 use crate::{
-    models::{StatusList, StatusListRecord, StatusesRequest},
+    models::{StatusList, StatusListHistoryRecord, StatusListRecord, StatusesRequest},
     utils::{errors::Error, lst_gen::create_status_list, state::AppState},
     web::handlers::status_list::error::StatusListError,
 };
@@ -65,10 +65,15 @@ pub async fn publish_status(
             };
 
             // Insert the token into the repository
-            store.insert_one(status_list_record).await.map_err(|e| {
-                tracing::error!("Failed to insert status list entry: {e:?}");
-                StatusListError::InternalServerError
-            })?;
+            store
+                .insert_one(status_list_record.clone())
+                .await
+                .map_err(|e| {
+                    tracing::error!("Failed to insert status list entry: {e:?}");
+                    StatusListError::InternalServerError
+                })?;
+
+            persist_historical_snapshot(&appstate, &status_list_record).await?;
             Ok(StatusCode::CREATED.into_response())
         }
         Err(e) => {
@@ -76,6 +81,45 @@ pub async fn publish_status(
             Err(StatusListError::InternalServerError)
         }
     }
+}
+
+/// Records the exact payload and validity window issued at each state change.
+/// This retention is privacy-sensitive: §12.7 recommends enabling it only
+/// where historical resolution is justified and its privacy impact is known.
+///
+/// If `history_retention_secs` is 0, this function returns immediately without
+/// creating a snapshot, effectively disabling historical resolution.
+pub(super) async fn persist_historical_snapshot(
+    appstate: &AppState,
+    status_list_record: &StatusListRecord,
+) -> Result<(), StatusListError> {
+    // Skip snapshot creation if historical resolution is disabled
+    if appstate.history_retention_secs == 0 {
+        tracing::debug!(
+            "Historical snapshots are disabled, skipping snapshot for list {}",
+            status_list_record.list_id
+        );
+        return Ok(());
+    }
+
+    let iat = OffsetDateTime::now_utc().unix_timestamp();
+    let snapshot = StatusListHistoryRecord {
+        snapshot_id: uuid::Uuid::new_v4().to_string(),
+        list_id: status_list_record.list_id.clone(),
+        issuer: status_list_record.issuer.clone(),
+        status_list: status_list_record.status_list.clone(),
+        sub: status_list_record.sub.clone(),
+        iat,
+        exp: iat + appstate.token_exp_secs as i64,
+    };
+    appstate
+        .status_list_history_repo
+        .insert_one(snapshot)
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to persist status list history: {e:?}");
+            StatusListError::InternalServerError
+        })
 }
 
 #[cfg(test)]
@@ -139,10 +183,16 @@ mod tests {
                 .append_query_results::<status_lists::Model, Vec<_>, _>(vec![
                     vec![], // find_one_by in handler returns None
                 ])
-                .append_exec_results(vec![MockExecResult {
-                    rows_affected: 1,
-                    last_insert_id: 0,
-                }])
+                .append_exec_results(vec![
+                    MockExecResult {
+                        rows_affected: 1,
+                        last_insert_id: 0,
+                    }, // status_lists insert
+                    MockExecResult {
+                        rows_affected: 1,
+                        last_insert_id: 0,
+                    }, // status_list_history insert
+                ])
                 .into_connection(),
         );
 
@@ -194,10 +244,16 @@ mod tests {
                     vec![],                  // find_one_by in handler returns None
                     vec![new_token.clone()], // find_one_by in test verification
                 ])
-                .append_exec_results(vec![MockExecResult {
-                    rows_affected: 1,
-                    last_insert_id: 0,
-                }])
+                .append_exec_results(vec![
+                    MockExecResult {
+                        rows_affected: 1,
+                        last_insert_id: 0,
+                    }, // status_lists insert
+                    MockExecResult {
+                        rows_affected: 1,
+                        last_insert_id: 0,
+                    }, // status_list_history insert
+                ])
                 .into_connection(),
         );
 
@@ -293,10 +349,16 @@ mod tests {
                     vec![],                  // find_one_by in handler returns None
                     vec![new_token.clone()], // find_one_by in test verification
                 ])
-                .append_exec_results(vec![MockExecResult {
-                    rows_affected: 1,
-                    last_insert_id: 0,
-                }])
+                .append_exec_results(vec![
+                    MockExecResult {
+                        rows_affected: 1,
+                        last_insert_id: 0,
+                    }, // status_lists insert
+                    MockExecResult {
+                        rows_affected: 1,
+                        last_insert_id: 0,
+                    }, // status_list_history insert
+                ])
                 .into_connection(),
         );
 
@@ -350,10 +412,16 @@ mod tests {
                     vec![],                  // find_one_by in handler returns None
                     vec![new_token.clone()], // find_one_by in test verification
                 ])
-                .append_exec_results(vec![MockExecResult {
-                    rows_affected: 1,
-                    last_insert_id: 0,
-                }])
+                .append_exec_results(vec![
+                    MockExecResult {
+                        rows_affected: 1,
+                        last_insert_id: 0,
+                    }, // status_lists insert
+                    MockExecResult {
+                        rows_affected: 1,
+                        last_insert_id: 0,
+                    }, // status_list_history insert
+                ])
                 .into_connection(),
         );
 

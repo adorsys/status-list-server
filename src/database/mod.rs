@@ -16,6 +16,7 @@ pub(crate) mod migrations {
             vec![
                 Box::new(tables::Migration),
                 Box::new(add_updated_at::Migration),
+                Box::new(status_list_history::Migration),
             ]
         }
     }
@@ -264,6 +265,111 @@ pub(crate) mod migrations {
         enum StatusLists {
             Table,
             UpdatedAt,
+        }
+    }
+
+    /// Historical Status List Token payloads used for draft-21 §8.4 queries.
+    pub(crate) mod status_list_history {
+        use super::*;
+
+        pub(crate) struct Migration;
+
+        impl MigrationName for Migration {
+            fn name(&self) -> &str {
+                "m20250101_000003_status_list_history"
+            }
+        }
+
+        #[async_trait::async_trait]
+        #[allow(elided_lifetimes_in_paths)]
+        impl MigrationTrait for Migration {
+            async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+                manager
+                    .create_table(
+                        Table::create()
+                            .table(StatusListHistory::Table)
+                            .if_not_exists()
+                            .col(
+                                ColumnDef::new(StatusListHistory::SnapshotId)
+                                    .string()
+                                    .not_null()
+                                    .primary_key(),
+                            )
+                            .col(
+                                ColumnDef::new(StatusListHistory::ListId)
+                                    .string()
+                                    .not_null(),
+                            )
+                            .col(
+                                ColumnDef::new(StatusListHistory::Issuer)
+                                    .string()
+                                    .not_null(),
+                            )
+                            .col(
+                                ColumnDef::new(StatusListHistory::StatusList)
+                                    .json()
+                                    .not_null(),
+                            )
+                            .col(ColumnDef::new(StatusListHistory::Sub).string().not_null())
+                            .col(
+                                ColumnDef::new(StatusListHistory::Iat)
+                                    .big_integer()
+                                    .not_null(),
+                            )
+                            .col(
+                                ColumnDef::new(StatusListHistory::Exp)
+                                    .big_integer()
+                                    .not_null(),
+                            )
+                            .to_owned(),
+                    )
+                    .await?;
+                manager
+                    .create_index(
+                        Index::create()
+                            .if_not_exists()
+                            .name("idx_status_list_history_resolution")
+                            .table(StatusListHistory::Table)
+                            .col(StatusListHistory::ListId)
+                            .col(StatusListHistory::Iat)
+                            .col(StatusListHistory::Exp)
+                            .to_owned(),
+                    )
+                    .await
+            }
+
+            #[allow(elided_lifetimes_in_paths)]
+            async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+                manager
+                    .drop_index(
+                        Index::drop()
+                            .if_exists()
+                            .name("idx_status_list_history_resolution")
+                            .table(StatusListHistory::Table)
+                            .to_owned(),
+                    )
+                    .await?;
+                manager
+                    .drop_table(
+                        Table::drop()
+                            .if_exists()
+                            .table(StatusListHistory::Table)
+                            .to_owned(),
+                    )
+                    .await
+            }
+        }
+
+        #[derive(Iden)]
+        enum StatusListHistory {
+            Table,
+            SnapshotId,
+            ListId,
+            Issuer,
+            StatusList,
+            Sub,
+            Iat,
+            Exp,
         }
     }
 }

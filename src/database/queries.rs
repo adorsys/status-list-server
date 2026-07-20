@@ -5,7 +5,10 @@ use sea_orm::{
 use std::sync::Arc;
 
 use super::error::RepositoryError;
-use crate::models::{Credentials, StatusListRecord, credentials, status_lists};
+use crate::models::{
+    Credentials, StatusListHistoryRecord, StatusListRecord, credentials, status_list_history,
+    status_lists,
+};
 
 #[derive(Clone)]
 pub struct SeaOrmStore<T> {
@@ -125,6 +128,46 @@ impl SeaOrmStore<StatusListRecord> {
     }
 }
 
+impl SeaOrmStore<StatusListHistoryRecord> {
+    pub async fn insert_one(&self, entity: StatusListHistoryRecord) -> Result<(), RepositoryError> {
+        let active: status_list_history::ActiveModel = entity.into();
+        status_list_history::Entity::insert(active)
+            .exec(&*self.db)
+            .await
+            .map_err(|e| RepositoryError::InsertError(e.to_string()))?;
+        Ok(())
+    }
+
+    /// Finds the snapshot whose half-open validity interval contains `time`.
+    /// Using `iat <= time < exp` ensures the token returned to a client passes
+    /// the draft-21 §8.4 `iat`/`exp` validation rule.
+    pub async fn find_valid_at(
+        &self,
+        list_id: &str,
+        time: i64,
+    ) -> Result<Option<StatusListHistoryRecord>, RepositoryError> {
+        status_list_history::Entity::find()
+            .filter(status_list_history::Column::ListId.eq(list_id))
+            .filter(status_list_history::Column::Iat.lte(time))
+            .filter(status_list_history::Column::Exp.gt(time))
+            .order_by_desc(status_list_history::Column::Iat)
+            .one(&*self.db)
+            .await
+            .map_err(|e| RepositoryError::FindError(e.to_string()))
+    }
+
+    /// Deletes snapshots older than the given cutoff timestamp.
+    /// Returns the number of rows deleted.
+    pub async fn delete_older_than(&self, cutoff: i64) -> Result<u64, RepositoryError> {
+        let result = status_list_history::Entity::delete_many()
+            .filter(status_list_history::Column::Exp.lt(cutoff))
+            .exec(&*self.db)
+            .await
+            .map_err(|e| RepositoryError::DeleteError(e.to_string()))?;
+        Ok(result.rows_affected)
+    }
+}
+
 impl SeaOrmStore<Credentials> {
     pub async fn insert_one(&self, entity: Credentials) -> Result<(), RepositoryError> {
         let active: credentials::ActiveModel = entity.into();
@@ -188,7 +231,7 @@ mod test {
         opt.map_sqlx_sqlite_opts(|o| o.foreign_keys(true));
         let db = sea_orm::Database::connect(opt)
             .await
-            .expect("Failed to connect to in-memory SQLite");
+            .expect("Failed to connect to SQLite");
         crate::database::Migrator::up(&db, None)
             .await
             .expect("Failed to run migrations on SQLite");
@@ -198,6 +241,7 @@ mod test {
     #[cfg(feature = "mysql")]
     mod mysql_helpers {
         use super::*;
+        use sea_orm::ConnectionTrait;
         use testcontainers_modules::{
             mysql::Mysql as MysqlImage,
             testcontainers::{ContainerAsync, runners::AsyncRunner},
@@ -214,14 +258,30 @@ mod test {
                 .start()
                 .await
                 .expect("Failed to start MySQL container");
-            let mysql_url = format!(
-                "mysql://{}:{}/test",
-                node.get_host().await.expect("Failed to resolve MySQL host"),
-                node.get_host_port_ipv4(3306)
-                    .await
-                    .expect("Failed to resolve MySQL port")
-            );
+            let host = node.get_host().await.expect("Failed to resolve MySQL host");
+            let port = node
+                .get_host_port_ipv4(3306)
+                .await
+                .expect("Failed to resolve MySQL port");
 
+            // Connect without database first to create a unique database
+            let admin_url = format!("mysql://{}:{}", host, port);
+            let db_name = format!("test_{}", uuid::Uuid::new_v4().simple());
+
+            // Create the database
+            let admin_conn = sea_orm::Database::connect(&admin_url)
+                .await
+                .expect("Failed to connect to MySQL admin");
+            admin_conn
+                .execute_unprepared(&format!(
+                    "CREATE DATABASE {} CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci",
+                    db_name
+                ))
+                .await
+                .expect("Failed to create test database");
+
+            // Connect to the new database and run migrations
+            let mysql_url = format!("mysql://{}:{}/{}", host, port, db_name);
             let mut opt = sea_orm::ConnectOptions::new(mysql_url);
             opt.max_connections(5);
             let db = sea_orm::Database::connect(opt)
@@ -581,5 +641,151 @@ mod test {
         assert!(!missing, "update on missing row should report no rows");
 
         cred_store.delete_by("issuer-neg-sqlite").await.unwrap();
+    }
+
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn test_delete_older_than_deletes_expired_snapshots() {
+        let db = sqlite_connection().await;
+        let store = SeaOrmStore::<StatusListHistoryRecord>::new(db);
+
+        let list_id = "test-list-delete-old";
+        let issuer = "test-issuer";
+
+        // Insert snapshots with different expiration times
+        let old_snapshot = StatusListHistoryRecord {
+            snapshot_id: "old-snapshot-001".to_string(),
+            list_id: list_id.to_string(),
+            issuer: issuer.to_string(),
+            status_list: StatusList {
+                bits: 1,
+                lst: "compressed_old".to_string(),
+            },
+            sub: format!("https://example.com/statuslists/{}", list_id),
+            iat: 1000,
+            exp: 2000, // Expires at 2000
+        };
+
+        let recent_snapshot = StatusListHistoryRecord {
+            snapshot_id: "recent-snapshot-002".to_string(),
+            list_id: list_id.to_string(),
+            issuer: issuer.to_string(),
+            status_list: StatusList {
+                bits: 1,
+                lst: "compressed_recent".to_string(),
+            },
+            sub: format!("https://example.com/statuslists/{}", list_id),
+            iat: 3000,
+            exp: 5000, // Expires at 5000
+        };
+
+        let future_snapshot = StatusListHistoryRecord {
+            snapshot_id: "future-snapshot-003".to_string(),
+            list_id: list_id.to_string(),
+            issuer: issuer.to_string(),
+            status_list: StatusList {
+                bits: 1,
+                lst: "compressed_future".to_string(),
+            },
+            sub: format!("https://example.com/statuslists/{}", list_id),
+            iat: 6000,
+            exp: 8000, // Expires at 8000
+        };
+
+        // Insert all snapshots
+        store.insert_one(old_snapshot).await.unwrap();
+        store.insert_one(recent_snapshot).await.unwrap();
+        store.insert_one(future_snapshot).await.unwrap();
+
+        // Delete snapshots with exp < 5500 (should delete old_snapshot and recent_snapshot)
+        let cutoff = 5500;
+        let deleted = store.delete_older_than(cutoff).await.unwrap();
+        assert_eq!(deleted, 2, "Should delete 2 snapshots with exp < 5500");
+
+        // Verify old snapshots are gone
+        let old_result = store.find_valid_at(list_id, 1500).await.unwrap();
+        assert!(old_result.is_none(), "Old snapshot should be deleted");
+
+        let recent_result = store.find_valid_at(list_id, 3500).await.unwrap();
+        assert!(recent_result.is_none(), "Recent snapshot should be deleted");
+
+        // Verify future snapshot still exists
+        let future_result = store.find_valid_at(list_id, 6500).await.unwrap();
+        assert!(
+            future_result.is_some(),
+            "Future snapshot should still exist"
+        );
+    }
+
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn test_delete_older_than_with_no_matching_snapshots() {
+        let db = sqlite_connection().await;
+        let store = SeaOrmStore::<StatusListHistoryRecord>::new(db);
+
+        let list_id = "test-list-no-delete";
+        let issuer = "test-issuer";
+
+        // Insert a single future snapshot
+        let snapshot = StatusListHistoryRecord {
+            snapshot_id: "future-snapshot-001".to_string(),
+            list_id: list_id.to_string(),
+            issuer: issuer.to_string(),
+            status_list: StatusList {
+                bits: 1,
+                lst: "compressed".to_string(),
+            },
+            sub: format!("https://example.com/statuslists/{}", list_id),
+            iat: 5000,
+            exp: 8000,
+        };
+
+        store.insert_one(snapshot).await.unwrap();
+
+        // Delete with cutoff before the snapshot's exp
+        let deleted = store.delete_older_than(3000).await.unwrap();
+        assert_eq!(
+            deleted, 0,
+            "Should delete 0 snapshots when cutoff is before any exp"
+        );
+
+        // Verify snapshot still exists
+        let result = store.find_valid_at(list_id, 6500).await.unwrap();
+        assert!(result.is_some(), "Future snapshot should still exist");
+    }
+
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn test_delete_older_than_deletes_all_snapshots() {
+        let db = sqlite_connection().await;
+        let store = SeaOrmStore::<StatusListHistoryRecord>::new(db);
+
+        let list_id = "test-list-delete-all";
+        let issuer = "test-issuer";
+
+        // Insert multiple old snapshots
+        for i in 0..3 {
+            let snapshot = StatusListHistoryRecord {
+                snapshot_id: format!("old-snapshot-{}", i),
+                list_id: list_id.to_string(),
+                issuer: issuer.to_string(),
+                status_list: StatusList {
+                    bits: 1,
+                    lst: format!("compressed_{}", i),
+                },
+                sub: format!("https://example.com/statuslists/{}", list_id),
+                iat: 1000 + i * 100,
+                exp: 2000 + i * 100,
+            };
+            store.insert_one(snapshot).await.unwrap();
+        }
+
+        // Delete with cutoff far in the future
+        let deleted = store.delete_older_than(10000).await.unwrap();
+        assert_eq!(deleted, 3, "Should delete all 3 snapshots");
+
+        // Verify all snapshots are gone
+        let result = store.find_valid_at(list_id, 1500).await.unwrap();
+        assert!(result.is_none(), "All snapshots should be deleted");
     }
 }
