@@ -95,7 +95,10 @@ pub(super) async fn persist_historical_snapshot(
 ) -> Result<(), StatusListError> {
     // Skip snapshot creation if historical resolution is disabled
     if appstate.history_retention_secs == 0 {
-        tracing::debug!("Historical snapshots are disabled, skipping snapshot for list {}", status_list_record.list_id);
+        tracing::debug!(
+            "Historical snapshots are disabled, skipping snapshot for list {}",
+            status_list_record.list_id
+        );
         return Ok(());
     }
 

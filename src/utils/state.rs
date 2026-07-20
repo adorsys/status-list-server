@@ -195,7 +195,9 @@ pub async fn setup_history_cleanup_scheduler(
 
     // Skip scheduling if historical snapshots are disabled
     if app_state.history_retention_secs == 0 {
-        info!("Historical snapshots are disabled (history_retention_secs=0), skipping cleanup scheduler");
+        info!(
+            "Historical snapshots are disabled (history_retention_secs=0), skipping cleanup scheduler"
+        );
         return Ok(());
     }
 
