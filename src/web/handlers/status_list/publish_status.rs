@@ -86,10 +86,19 @@ pub async fn publish_status(
 /// Records the exact payload and validity window issued at each state change.
 /// This retention is privacy-sensitive: §12.7 recommends enabling it only
 /// where historical resolution is justified and its privacy impact is known.
+///
+/// If `history_retention_secs` is 0, this function returns immediately without
+/// creating a snapshot, effectively disabling historical resolution.
 pub(super) async fn persist_historical_snapshot(
     appstate: &AppState,
     status_list_record: &StatusListRecord,
 ) -> Result<(), StatusListError> {
+    // Skip snapshot creation if historical resolution is disabled
+    if appstate.history_retention_secs == 0 {
+        tracing::debug!("Historical snapshots are disabled, skipping snapshot for list {}", status_list_record.list_id);
+        return Ok(());
+    }
+
     let iat = OffsetDateTime::now_utc().unix_timestamp();
     let snapshot = StatusListHistoryRecord {
         snapshot_id: uuid::Uuid::new_v4().to_string(),

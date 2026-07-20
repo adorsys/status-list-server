@@ -327,8 +327,13 @@ pub struct StatusListConfig {
     pub token_exp_secs: u64,
     pub token_ttl_secs: u64,
     /// Retention period for historical status list snapshots in seconds.
-    /// Snapshots older than this will be deleted. Default is 90 days.
-    /// Set to 0 to disable historical snapshots entirely.
+    /// Snapshots older than this will be deleted by a scheduled cleanup task.
+    /// Default is 90 days (7776000 seconds).
+    ///
+    /// **Privacy note:** Set to 0 to disable historical snapshots entirely.
+    /// This prevents unbounded database growth and mitigates timing leak
+    /// risks described in draft-21 §12.7. When disabled, historical resolution
+    /// via `?time=` query parameter will not be available.
     pub history_retention_secs: u64,
 }
 
