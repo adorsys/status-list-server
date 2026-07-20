@@ -1723,7 +1723,7 @@ mod tests {
             issuer: "test_issuer".to_string(),
             status_list: StatusList {
                 bits: 8,
-                lst: encode_compressed(&[42]).unwrap(),
+                lst: encode_compressed(&[42], &LIMITS).unwrap(),
             },
             sub: "test_subject".to_string(),
             iat: 1_700_000_000,
