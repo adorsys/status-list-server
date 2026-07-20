@@ -1157,6 +1157,6 @@ mod tests {
             get_status_list(State(app_state), Path("test_list".to_string()), headers).await;
 
         assert!(result.is_err());
-        let err = result.unwrap_err();
+        let _err = result.unwrap_err();
     }
 }
