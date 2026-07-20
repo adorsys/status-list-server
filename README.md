@@ -37,13 +37,13 @@ This server uses Cargo feature flags to select backends at compile time. This en
 
 ### Feature Naming Convention
 
-| Backend Type | Available Features | Notes |
-|--------------|-------------------|-------|
-| **Database** | `postgres`, `mysql`, `sqlite` | Exactly one required |
-| **Certificate Storage** | `aws-s3`, `memory-storage` | `aws-s3` for production, `memory-storage` for dev |
-| **Secrets Storage** | `aws-secrets-manager`, `memory-secrets` | `aws-secrets-manager` for production, `memory-secrets` for dev |
-| **Certificate Chain Cache** | `redis-cache`, `memory-cache` | `redis-cache` for multi-replica, `memory-cache` for single instance |
-| **DNS Provider** | `dns-route53`, `dns-cloudflare`, `dns-gcloud`, `dns-azure`, `dns-acmedns`, `dns-pebble` | At least one required for ACME DNS-01 challenges |
+| Backend Type              | Available Features                                                                      | Notes                                                               |
+| ------------------------- | --------------------------------------------------------------------------------------- | ------------------------------------------------------------------- |
+| **Database**              | `postgres`, `mysql`, `sqlite`                                                           | Exactly one required                                                |
+| **Certificate Storage**   | `aws-s3`, `memory-storage`                                                              | `aws-s3` for production, `memory-storage` for dev                     |
+| **Secrets Storage**       | `aws-secrets-manager`, `memory-secrets`                                                   | `aws-secrets-manager` for production, `memory-secrets` for dev      |
+| **Certificate Chain Cache** | `redis-cache`, `memory-cache`                                                       | `redis-cache` for multi-replica, `memory-cache` for single instance   |
+| **DNS Provider**          | `dns-route53`, `dns-cloudflare`, `dns-gcloud`, `dns-azure`, `dns-acmedns`, `dns-pebble` | At least one required for ACME DNS-01 challenges                    |
 
 ### Convenience Features
 
