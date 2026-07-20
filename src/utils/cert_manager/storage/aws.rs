@@ -21,7 +21,15 @@ pub struct AwsSecretsManager {
 }
 
 impl AwsSecretsManager {
-    /// Create a new instance of [AwsSecretsManager] with the given AWS SDK config
+    /// Create a new instance of [AwsSecretsManager] with the given AWS SDK config.
+    ///
+    /// # Caching Behavior
+    /// - If `secrets_cache_ttl` is zero, **caching is disabled**: all secret requests go directly to AWS.
+    /// - If `secrets_cache_ttl` is non-zero, an in-memory cache is created with that TTL.
+    ///
+    /// This TTL semantics is consistent with other caches in the application:
+    /// [`Cache`](crate::utils::cache::Cache) for status-lists and
+    /// [`Redis`](Redis) for certificate data.
     pub async fn new(
         config: &SdkConfig,
         secrets_cache_ttl: Duration,
@@ -35,6 +43,9 @@ impl AwsSecretsManager {
                 .time_to_live(secrets_cache_ttl)
                 .build()
         });
+        if secrets_cache_ttl.is_zero() {
+            tracing::info!("AWS Secrets cache disabled (TTL=0)");
+        }
 
         Ok(Self { client, cache })
     }

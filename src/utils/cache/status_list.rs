@@ -9,12 +9,17 @@ pub struct StatusListCache {
 }
 
 impl StatusListCache {
-    /// Creates a cache.
+    /// Creates a new status-list cache with a time-to-live (TTL) setting.
     ///
-    /// A **zero** TTL (`ttl_secs = 0`) disables the status-list cache: inserts
-    /// expire immediately and reads fall through to storage. This intentionally
-    /// differs from [`CertChainCache`](super::CertChainCache), where a zero TTL
-    /// means entries never expire.
+    /// # TTL Semantics
+    /// A value of `ttl_secs = 0` **disables caching**: entries expire immediately and all reads
+    /// fall through to the underlying storage. This is consistent with other cache implementations
+    /// in the application ([`CertChainCache`](super::CertChainCache) and
+    /// [`Redis`](crate::cert_manager::storage::Redis) for certificates).
+    ///
+    /// # Parameters
+    /// * `ttl_secs` - Time-to-live in seconds (0 = disabled, >0 = cache enabled with that TTL)
+    /// * `max_capacity` - Maximum number of entries to cache
     pub fn new(ttl_secs: u64, max_capacity: u64) -> Self {
         if ttl_secs == 0 {
             tracing::info!("Status-list cache TTL=0: entries expire immediately");
