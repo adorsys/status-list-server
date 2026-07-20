@@ -697,10 +697,10 @@ mod test {
         store.insert_one(recent_snapshot).await.unwrap();
         store.insert_one(future_snapshot).await.unwrap();
 
-        // Delete snapshots with exp < 4000 (should delete old_snapshot and recent_snapshot)
-        let cutoff = 4000;
+        // Delete snapshots with exp < 5500 (should delete old_snapshot and recent_snapshot)
+        let cutoff = 5500;
         let deleted = store.delete_older_than(cutoff).await.unwrap();
-        assert_eq!(deleted, 2, "Should delete 2 snapshots with exp < 4000");
+        assert_eq!(deleted, 2, "Should delete 2 snapshots with exp < 5500");
 
         // Verify old snapshots are gone
         let old_result = store.find_valid_at(list_id, 1500).await.unwrap();
