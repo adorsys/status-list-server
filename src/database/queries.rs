@@ -178,11 +178,12 @@ mod test {
     use crate::models::StatusList;
     use jsonwebtoken::jwk::Jwk;
     use sea_orm::{DatabaseBackend, MockDatabase, MockExecResult};
+    #[cfg(feature = "sqlite")]
     use sea_orm_migration::MigratorTrait;
 
     #[cfg(feature = "sqlite")]
     async fn sqlite_connection() -> Arc<DatabaseConnection> {
-        let mut opt = sea_orm::ConnectOptions::new("sqlite::memory:?cache=shared");
+        let mut opt = sea_orm::ConnectOptions::new("sqlite::memory:");
         opt.max_connections(1);
         opt.map_sqlx_sqlite_opts(|o| o.foreign_keys(true));
         let db = sea_orm::Database::connect(opt)

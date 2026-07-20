@@ -43,7 +43,10 @@ impl Storage for MemoryStorage {
         debug!("MemoryStorage[{}]: storing key '{}'", self.name, key);
         let mut data = self.data.write().await;
         data.insert(key.to_string(), value.to_string());
-        info!("MemoryStorage[{}]: successfully stored key '{}'", self.name, key);
+        info!(
+            "MemoryStorage[{}]: successfully stored key '{}'",
+            self.name, key
+        );
         Ok(())
     }
 
@@ -63,7 +66,10 @@ impl Storage for MemoryStorage {
         debug!("MemoryStorage[{}]: updating key '{}'", self.name, key);
         let mut data = self.data.write().await;
         data.insert(key.to_string(), value.to_string());
-        debug!("MemoryStorage[{}]: successfully updated key '{}'", self.name, key);
+        debug!(
+            "MemoryStorage[{}]: successfully updated key '{}'",
+            self.name, key
+        );
         Ok(())
     }
 
@@ -71,7 +77,10 @@ impl Storage for MemoryStorage {
         debug!("MemoryStorage[{}]: deleting key '{}'", self.name, key);
         let mut data = self.data.write().await;
         data.remove(key);
-        debug!("MemoryStorage[{}]: successfully deleted key '{}'", self.name, key);
+        debug!(
+            "MemoryStorage[{}]: successfully deleted key '{}'",
+            self.name, key
+        );
         Ok(())
     }
 }
@@ -83,14 +92,14 @@ mod tests {
     #[tokio::test]
     async fn test_memory_storage_store_and_load() {
         let storage = MemoryStorage::new("test");
-        
+
         // Store a value
         storage.store("key1", "value1").await.unwrap();
-        
+
         // Load the value
         let loaded = storage.load("key1").await.unwrap();
         assert_eq!(loaded, Some("value1".to_string()));
-        
+
         // Load a non-existent key
         let missing = storage.load("nonexistent").await.unwrap();
         assert_eq!(missing, None);
@@ -99,11 +108,11 @@ mod tests {
     #[tokio::test]
     async fn test_memory_storage_update() {
         let storage = MemoryStorage::new("test");
-        
+
         // Store and update
         storage.store("key1", "value1").await.unwrap();
         storage.update("key1", "value2").await.unwrap();
-        
+
         let loaded = storage.load("key1").await.unwrap();
         assert_eq!(loaded, Some("value2".to_string()));
     }
@@ -111,10 +120,10 @@ mod tests {
     #[tokio::test]
     async fn test_memory_storage_delete() {
         let storage = MemoryStorage::new("test");
-        
+
         storage.store("key1", "value1").await.unwrap();
         storage.delete("key1").await.unwrap();
-        
+
         let loaded = storage.load("key1").await.unwrap();
         assert_eq!(loaded, None);
     }
@@ -123,14 +132,14 @@ mod tests {
     async fn test_memory_storage_isolation() {
         let storage1 = MemoryStorage::new("storage1");
         let storage2 = MemoryStorage::new("storage2");
-        
+
         storage1.store("key1", "value1").await.unwrap();
         storage2.store("key1", "value2").await.unwrap();
-        
+
         // Each storage should have its own data
         let loaded1 = storage1.load("key1").await.unwrap();
         let loaded2 = storage2.load("key1").await.unwrap();
-        
+
         assert_eq!(loaded1, Some("value1".to_string()));
         assert_eq!(loaded2, Some("value2".to_string()));
     }
@@ -139,10 +148,10 @@ mod tests {
     async fn test_memory_storage_clone_shares_data() {
         let storage1 = MemoryStorage::new("test");
         let storage2 = storage1.clone();
-        
+
         // Store in one clone
         storage1.store("key1", "value1").await.unwrap();
-        
+
         // Should be visible in the other clone
         let loaded = storage2.load("key1").await.unwrap();
         assert_eq!(loaded, Some("value1".to_string()));

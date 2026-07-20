@@ -150,6 +150,11 @@ sea-orm = { version = "1.1", features = ["mock"] }
 testcontainers-modules = { version = "0.15", features = ["localstack", "mysql", "redis"] }
 metrics-util = "0.20"
 
+[[test]]
+name = "cert_provisioning"
+path = "tests/cert_provisioning.rs"
+required-features = ["dns-pebble", "aws-s3", "aws-secrets-manager", "redis-cache"]
+
 [target.'cfg(not(target_env = "msvc"))'.dependencies]
 tikv-jemallocator = "0.7"
 

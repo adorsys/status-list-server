@@ -77,8 +77,9 @@ statuslist:
     # DNS provider for ACME DNS-01 challenges: route53 | cloudflare | gcloud | azure | acmedns
     # (pebble also exists but is a development-only fake, not for deployments)
     # See docs/dns-providers.md for the settings each provider needs.
-    # Provider credentials (e.g. APP_SERVER__CERT__DNS__CLOUDFLARE__API_TOKEN) must come
-    # from a secret (see externalSecret below), not from plain env values.
+    # Provider credentials (e.g. APP_SERVER__CERT__DNS__CLOUDFLARE__API_TOKEN, or the
+    # APP_SERVER__CERT__DNS__ACMEDNS__ACCOUNTS JSON, which holds every account password)
+    # must come from a secret (see externalSecret below), not from plain env values.
     APP_SERVER__CERT__DNS__PROVIDER: "route53"
     APP_REDIS__REQUIRE_CLIENT_AUTH: "false"
     APP_AWS__SECRETS_CACHE_TTL: "300"
