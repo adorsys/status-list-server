@@ -1,8 +1,10 @@
+use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
 use axum::{
     Router,
+    extract::DefaultBodyLimit,
     middleware::from_fn_with_state,
     response::IntoResponse,
     routing::{get, patch, post, put},
@@ -14,7 +16,7 @@ use tokio::net::TcpListener;
 use tower_governor::{
     GovernorLayer,
     governor::{GovernorConfig, GovernorConfigBuilder},
-    key_extractor::PeerIpKeyExtractor,
+    key_extractor::{PeerIpKeyExtractor, SmartIpKeyExtractor},
 };
 use tower_http::{
     catch_panic::CatchPanicLayer,
@@ -22,8 +24,6 @@ use tower_http::{
     limit::RequestBodyLimitLayer,
     trace::TraceLayer,
 };
-
-use crate::web::rate_limit::IssuerKeyExtractor;
 
 /// Path of the aggregation route, as registered under `/api/v1`.
 const AGGREGATION_ROUTE_PATH: &str = "/api/v1/aggregation";
@@ -87,6 +87,7 @@ impl HttpServer {
             .layer(CatchPanicLayer::new())
             .layer(cors)
             .layer(RequestBodyLimitLayer::new(max_body_size))
+            .layer(DefaultBodyLimit::disable())
             .with_state(state);
 
         router = attach_metrics(router, config);
@@ -102,17 +103,21 @@ impl HttpServer {
 
     pub async fn run(self) -> color_eyre::Result<()> {
         tracing::info!("listening on {}", self.listener.local_addr()?);
-        axum::serve(self.listener, self.router)
-            .await
-            .wrap_err("Failed to start HTTP server")?;
+        axum::serve(
+            self.listener,
+            self.router
+                .into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .await
+        .wrap_err("Failed to start HTTP server")?;
         Ok(())
     }
 }
 
-/// Strict (writes), per-issuer (auth-protected writes), and permissive (reads) governor configs.
+/// Strict (credentials), per-issuer writes (IP-based via SmartIpKeyExtractor), and permissive (reads) governor configs.
 type GovernorPolicies = (
     Arc<GovernorConfig<PeerIpKeyExtractor, NoOpMiddleware>>,
-    Arc<GovernorConfig<IssuerKeyExtractor, NoOpMiddleware>>,
+    Arc<GovernorConfig<SmartIpKeyExtractor, NoOpMiddleware>>,
     Arc<GovernorConfig<PeerIpKeyExtractor, NoOpMiddleware>>,
 );
 
@@ -130,7 +135,7 @@ fn build_governor_configs(
         GovernorConfigBuilder::default()
             .burst_size(config.strict_burst_size)
             .period(Duration::from_secs(config.strict_period_secs))
-            .key_extractor(IssuerKeyExtractor)
+            .key_extractor(SmartIpKeyExtractor)
             .finish()
             .ok_or_else(|| eyre!("issuer governor requires non-zero burst_size and period"))?,
     );
@@ -148,7 +153,7 @@ fn build_governor_configs(
 fn api_v1_routes(
     state: AppState,
     strict_governor: Arc<GovernorConfig<PeerIpKeyExtractor, NoOpMiddleware>>,
-    issuer_governor: Arc<GovernorConfig<IssuerKeyExtractor, NoOpMiddleware>>,
+    issuer_governor: Arc<GovernorConfig<SmartIpKeyExtractor, NoOpMiddleware>>,
     permissive_governor: Arc<GovernorConfig<PeerIpKeyExtractor, NoOpMiddleware>>,
 ) -> Router<AppState> {
     let protected = Router::new()
@@ -234,8 +239,6 @@ mod tests {
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
     use std::sync::Arc;
     use tower::ServiceExt;
-
-    use crate::web::rate_limit::IssuerKeyExtractor;
 
     #[sealed_test(env = [
         ("APP_SERVER__AGGREGATION_URI", "https://statuslist.example.com/api/v1/aggregation"),
@@ -399,71 +402,92 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
     }
 
-    /// Per-issuer governor: two different issuers get independent rate-limit
-    /// buckets even from the same IP (#171).
+    /// SmartIpKeyExtractor governor: different IPs get independent rate-limit
+    /// buckets; the same IP shares a bucket regardless of request metadata.
     #[tokio::test]
-    async fn test_per_issuer_governor_independent_quotas() {
+    async fn test_smart_ip_governor_independent_buckets_per_ip() {
         async fn handler() -> impl IntoResponse {
             "ok"
         }
-        let router = Router::new();
 
         let governor = Arc::new(
             GovernorConfigBuilder::default()
                 .burst_size(1)
                 .period(Duration::from_secs(600))
-                .key_extractor(IssuerKeyExtractor)
+                .key_extractor(SmartIpKeyExtractor)
                 .finish()
                 .expect("non-zero burst/period"),
         );
 
-        let router = router
+        let router = Router::new()
             .route("/write", axum::routing::put(handler))
             .layer(GovernorLayer::new(governor))
             .with_state(());
 
-        let ci =
-            axum::extract::ConnectInfo(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 12345));
-
-        fn make_request(auth: &str, ci: axum::extract::ConnectInfo<SocketAddr>) -> Request<Body> {
+        fn make_request(ip: IpAddr) -> Request<Body> {
             Request::builder()
                 .method(Method::PUT)
                 .uri("/write")
-                .header("authorization", auth)
-                .extension(ci)
+                .extension(axum::extract::ConnectInfo(SocketAddr::new(ip, 12345)))
                 .body(Body::empty())
                 .unwrap()
         }
 
-        fn dummy_jwt(iss: &str) -> String {
-            let header = base64url::encode(br#"{"alg":"ES256"}"#);
-            let payload_json = format!(r#"{{"iss":"{iss}","exp":9999999999}}"#);
-            let payload = base64url::encode(payload_json.as_bytes());
-            format!("Bearer {header}.{payload}.sig")
+        let ip_a = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let ip_b = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+
+        // First request from ip_a succeeds.
+        let resp = router.clone().oneshot(make_request(ip_a)).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // First request from ip_b succeeds (different bucket).
+        let resp = router.clone().oneshot(make_request(ip_b)).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // Second request from ip_a is rate-limited (same bucket exhausted).
+        let resp = router.clone().oneshot(make_request(ip_a)).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
+    }
+
+    /// Integration test that boots a real HTTP server with
+    /// into_make_service_with_connect_info and verifies that ConnectInfo is
+    /// populated for real TCP connections.
+    #[tokio::test]
+    async fn test_connect_info_populated_for_real_http_requests() {
+        use axum::extract::ConnectInfo;
+        use reqwest::Client;
+
+        async fn handler(ConnectInfo(addr): ConnectInfo<SocketAddr>) -> impl IntoResponse {
+            addr.ip().to_string()
         }
 
-        let issuer_a = dummy_jwt("issuer-a");
-        let issuer_b = dummy_jwt("issuer-b");
+        let router = Router::new().route("/info", get(handler));
 
-        let resp = router
-            .clone()
-            .oneshot(make_request(&issuer_a, ci))
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let local_addr = listener.local_addr().unwrap();
+
+        let serve = axum::serve(
+            listener,
+            router.into_make_service_with_connect_info::<SocketAddr>(),
+        );
+
+        tokio::spawn(async move {
+            serve.await.unwrap();
+        });
+
+        // Allow the server to start accepting connections.
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        let client = Client::new();
+        let resp = client
+            .get(format!("http://{}/info", local_addr))
+            .send()
             .await
             .unwrap();
+
         assert_eq!(resp.status(), StatusCode::OK);
-
-        let resp = router
-            .clone()
-            .oneshot(make_request(&issuer_b, ci))
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
-
-        let resp = router
-            .clone()
-            .oneshot(make_request(&issuer_a, ci))
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
+        let body = resp.text().await.unwrap();
+        let parsed: IpAddr = body.parse().unwrap();
+        assert!(parsed.is_loopback());
     }
 }

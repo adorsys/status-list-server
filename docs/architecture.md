@@ -144,17 +144,25 @@ operator-configurable through environment variables prefixed with `APP_`.
 A token-bucket governor (`tower-governor`) is applied per route group, with
 each tier keyed and tuned independently:
 
-| Tier           | Routes                                                          | Key                                                                           | Tunables (defaults)                                           |
-| ----           | ------                                                          | ---                                                                           | -------------------                                           |
-| **strict**     | `POST /api/v1/credentials`                                      | source IP                                                                     | `strict_burst_size` (10), `strict_period_secs` (60s)          |
-| **per-issuer** | `PUT`/`PATCH /api/v1/status-lists/{list_id}/statuses`           | JWT `iss` claim, falling back to source IP when the token is absent/malformed | `strict_burst_size` (10), `strict_period_secs` (60s)          |
-| **permissive** | `GET /api/v1/aggregation`, `GET /api/v1/status-lists/{list_id}` | source IP                                                                     | `permissive_burst_size` (100), `permissive_period_secs` (60s) |
+| Tier               | Routes                                                          | Key                                                               | Tunables (defaults)                                           |
+| ----               | ------                                                          | ---                                                               | -------------------                                           |
+| **strict**         | `POST /api/v1/credentials`                                      | peer IP (`PeerIpKeyExtractor`)                                    | `strict_burst_size` (10), `strict_period_secs` (60s)          |
+| **writes**         | `PUT`/`PATCH /api/v1/status-lists/{list_id}/statuses`           | smart IP (`SmartIpKeyExtractor`) — reads `X-Forwarded-For`,       | `strict_burst_size` (10), `strict_period_secs` (60s)          |
+|                    |                                                                    | `X-Real-Ip`, `Forwarded` headers, fallback to peer IP             |                                                               |
+| **permissive**     | `GET /api/v1/aggregation`, `GET /api/v1/status-lists/{list_id}` | peer IP (`PeerIpKeyExtractor`)                                    | `permissive_burst_size` (100), `permissive_period_secs` (60s) |
 
-The per-issuer tier is applied **behind** the `auth` middleware, so a valid
-authenticated issuer determines the bucket. When a bucket is exhausted the
-server returns `429 Too Many Requests` with a plain-text body
-`Too Many Requests! Wait for <n>s` (emitted by the governor middleware; it is
-not RFC 7807 problem+json).
+The writes tier is applied **before** the `auth` middleware (rate limiting by IP
+happens first, then authentication rejects unauthenticated requests with `401`).
+When a bucket is exhausted the server returns `429 Too Many Requests` with a
+plain-text body `Too Many Requests! Wait for <n>s` (emitted by the governor
+middleware; it is not RFC 7807 problem+json).
+
+> **Note:** Governor state is held in-memory per-replica. In a horizontally
+> scaled deployment each instance maintains its own token bucket, so the
+> effective cluster-wide rate limit is `burst_size × replica_count`. A
+> shared backend (e.g. Redis) is **not** used for rate-limit state; see
+> [tower-governor](https://crates.io/crates/tower-governor) for
+> alternative storage backends.
 
 ### Request & persistence bounds (`APP_LIMITS__*`)
 
@@ -190,8 +198,10 @@ defaults, not guarantees.
 | `500`  | Internal server error                                                 |
 | `503`  | Service temporarily unavailable                                       |
 
-Handler-level errors use RFC 7807 `application/problem+json`; the body also
+Authentication errors use RFC 7807 `application/problem+json`; the body
 carries `Cache-Control: no-store, max-age=0` so error states are not cached.
+Handler-level status-list errors (`StatusListError`) return plain-text bodies
+(see tracking issue #156 for RFC 7807 adoption).
 
 ## Developer Integration
 

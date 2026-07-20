@@ -28,10 +28,11 @@ info:
       * **strict** (per source IP) — `POST /api/v1/credentials`.
         Tunables: `strict_burst_size`, `strict_period_secs`
         (defaults: 10 / 60s).
-      * **per-issuer** (keyed by the JWT `iss` claim, falling back to the
-        peer IP when the token is absent or malformed) — `PUT`/`PATCH`
-        `/api/v1/status-lists/{list_id}/statuses`, applied behind the `auth`
-        middleware. Tunables: `strict_burst_size`, `strict_period_secs`.
+      * **writes** (per smart IP via `SmartIpKeyExtractor`, reading
+        `X-Forwarded-For`, `X-Real-Ip`, and `Forwarded` headers, falling back to
+        the peer IP) — `PUT`/`PATCH`
+        `/api/v1/status-lists/{list_id}/statuses`.
+        Tunables: `strict_burst_size`, `strict_period_secs`.
       * **permissive** (per source IP) — public read routes
         (`GET /api/v1/aggregation`,
         `GET /api/v1/status-lists/{list_id}`).
@@ -709,16 +710,14 @@ components:
         exceeds the operator-configurable `limits.max_serialized_list_size`
         (default 1 MiB), or (for `POST /api/v1/credentials`) the supplied
         public key could not be parsed into a JWK.
+
+        > **Note:** This error currently returns a plain-text body.  RFC 7807
+        > `application/problem+json` adoption is tracked in issue #156.
       content:
-        application/problem+json:
+        text/plain:
           schema:
-            $ref: "#/components/schemas/ProblemDetails"
-          example:
-            type: "about:blank"
-            title: "Unprocessable Entity"
-            status: 422
-            detail: "Serialized status list size exceeds the configured maximum"
-            instance: "/api/v1/status-lists/477121aa-b598-419e-916f-1e74654ff38b/statuses"
+            type: string
+          example: "Serialized status list size exceeds the configured maximum"
 
     TooManyRequests:
       description: |
