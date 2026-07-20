@@ -1159,4 +1159,433 @@ mod tests {
         assert!(result.is_err());
         let _err = result.unwrap_err();
     }
+
+    #[tokio::test]
+    async fn test_error_responses_omit_etag_and_last_modified() {
+        let mock_db = MockDatabase::new(DatabaseBackend::Postgres);
+        let db_conn = Arc::new(
+            mock_db
+                .append_query_results::<status_lists::Model, Vec<_>, _>(vec![vec![]])
+                .into_connection(),
+        );
+
+        let app_state = test_app_state(Some(db_conn.clone())).await;
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            http::header::ACCEPT,
+            ACCEPT_STATUS_LISTS_HEADER_JWT.parse().unwrap(),
+        );
+
+        let result =
+            get_status_list(State(app_state), Path("test_list".to_string()), headers).await;
+
+        assert!(result.is_err());
+        let response = result.unwrap_err().into_response();
+        let response_headers = response.headers();
+
+        assert!(
+            response_headers.get(http::header::ETAG).is_none(),
+            "Error response should not include ETag header"
+        );
+        assert!(
+            response_headers.get(http::header::LAST_MODIFIED).is_none(),
+            "Error response should not include Last-Modified header"
+        );
+
+        assert!(
+            response_headers.get(http::header::CACHE_CONTROL).is_some(),
+            "Error response should include Cache-Control header"
+        );
+    }
+
+    #[test]
+    fn test_build_cache_control() {
+        let cache_control = build_cache_control(300);
+        assert_eq!(cache_control, "max-age=300, immutable");
+
+        let cache_control_zero = build_cache_control(0);
+        assert_eq!(cache_control_zero, "max-age=0, immutable");
+
+        let cache_control_large = build_cache_control(86400);
+        assert_eq!(cache_control_large, "max-age=86400, immutable");
+    }
+
+    #[tokio::test]
+    async fn test_get_status_list_includes_caching_headers() {
+        let mock_db = MockDatabase::new(DatabaseBackend::Postgres);
+        let status_list = StatusList {
+            bits: 8,
+            lst: encode_compressed(&[0, 0, 0]).unwrap(),
+        };
+        let status_list_token = StatusListRecord {
+            list_id: "test_list".to_string(),
+            issuer: "issuer1".to_string(),
+            status_list,
+            sub: "test_subject".to_string(),
+            updated_at: 1234567890,
+        };
+        let db_conn = Arc::new(
+            mock_db
+                .append_query_results::<status_lists::Model, Vec<_>, _>(vec![vec![
+                    status_list_token,
+                ]])
+                .into_connection(),
+        );
+
+        let app_state = test_app_state(Some(db_conn.clone())).await;
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            http::header::ACCEPT,
+            ACCEPT_STATUS_LISTS_HEADER_JWT.parse().unwrap(),
+        );
+
+        let response = get_status_list(
+            State(app_state.clone()),
+            Path("test_list".to_string()),
+            headers,
+        )
+        .await
+        .unwrap()
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let response_headers = response.headers();
+
+        let etag = response_headers
+            .get(http::header::ETAG)
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert!(etag.starts_with("W/\""), "ETag should be a weak validator");
+        assert!(etag.ends_with('"'), "ETag should be quoted");
+
+        let last_modified = response_headers
+            .get(http::header::LAST_MODIFIED)
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert!(!last_modified.is_empty(), "Last-Modified should be present");
+
+        let cache_control = response_headers
+            .get(http::header::CACHE_CONTROL)
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert_eq!(cache_control, "max-age=300, immutable");
+
+        let vary = response_headers
+            .get(http::header::VARY)
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert_eq!(vary, "Accept, Accept-Encoding");
+    }
+
+    #[tokio::test]
+    async fn test_conditional_request_with_matching_etag() {
+        let mock_db = MockDatabase::new(DatabaseBackend::Postgres);
+        let status_list = StatusList {
+            bits: 8,
+            lst: encode_compressed(&[0, 0, 0]).unwrap(),
+        };
+        let status_list_token = StatusListRecord {
+            list_id: "test_list".to_string(),
+            issuer: "issuer1".to_string(),
+            status_list,
+            sub: "test_subject".to_string(),
+            updated_at: 1234567890,
+        };
+
+        let db_conn = Arc::new(
+            mock_db
+                .append_query_results::<status_lists::Model, Vec<_>, _>(vec![vec![
+                    status_list_token,
+                ]])
+                .into_connection(),
+        );
+
+        let app_state = test_app_state(Some(db_conn.clone())).await;
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            http::header::ACCEPT,
+            ACCEPT_STATUS_LISTS_HEADER_JWT.parse().unwrap(),
+        );
+
+        let first_response = get_status_list(
+            State(app_state.clone()),
+            Path("test_list".to_string()),
+            headers.clone(),
+        )
+        .await
+        .unwrap()
+        .into_response();
+
+        let etag = first_response
+            .headers()
+            .get(http::header::ETAG)
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_string();
+
+        let mut conditional_headers = HeaderMap::new();
+        conditional_headers.insert(
+            http::header::ACCEPT,
+            ACCEPT_STATUS_LISTS_HEADER_JWT.parse().unwrap(),
+        );
+        conditional_headers.insert(http::header::IF_NONE_MATCH, etag.parse().unwrap());
+
+        let conditional_response = get_status_list(
+            State(app_state),
+            Path("test_list".to_string()),
+            conditional_headers,
+        )
+        .await
+        .unwrap()
+        .into_response();
+
+        assert_eq!(conditional_response.status(), StatusCode::NOT_MODIFIED);
+
+        let response_headers = conditional_response.headers();
+        assert!(response_headers.contains_key(http::header::ETAG));
+        assert!(response_headers.contains_key(http::header::LAST_MODIFIED));
+        assert!(response_headers.contains_key(http::header::CACHE_CONTROL));
+        assert!(
+            response_headers.contains_key(http::header::VARY),
+            "304 response should include Vary: Accept, Accept-Encoding"
+        );
+        assert_eq!(
+            response_headers
+                .get(http::header::VARY)
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            "Accept, Accept-Encoding"
+        );
+
+        let body_bytes = to_bytes(conditional_response.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        assert_eq!(body_bytes.len(), 0, "304 response should have no body");
+    }
+
+    #[tokio::test]
+    async fn test_conditional_request_if_modified_since_returns_304() {
+        let mock_db = MockDatabase::new(DatabaseBackend::Postgres);
+        let status_list = StatusList {
+            bits: 8,
+            lst: encode_compressed(&[0, 0, 0]).unwrap(),
+        };
+        let status_list_token = StatusListRecord {
+            list_id: "test_list".to_string(),
+            issuer: "issuer1".to_string(),
+            status_list,
+            sub: "test_subject".to_string(),
+            updated_at: 1672531200,
+        };
+        let db_conn = Arc::new(
+            mock_db
+                .append_query_results::<status_lists::Model, Vec<_>, _>(vec![vec![
+                    status_list_token,
+                ]])
+                .into_connection(),
+        );
+
+        let app_state = test_app_state(Some(db_conn.clone())).await;
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            http::header::ACCEPT,
+            ACCEPT_STATUS_LISTS_HEADER_JWT.parse().unwrap(),
+        );
+        let first_response = get_status_list(
+            State(app_state.clone()),
+            Path("test_list".to_string()),
+            headers,
+        )
+        .await
+        .unwrap()
+        .into_response();
+        assert_eq!(first_response.status(), StatusCode::OK);
+        let last_modified = first_response
+            .headers()
+            .get(http::header::LAST_MODIFIED)
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_string();
+
+        let mut conditional_headers = HeaderMap::new();
+        conditional_headers.insert(
+            http::header::ACCEPT,
+            ACCEPT_STATUS_LISTS_HEADER_JWT.parse().unwrap(),
+        );
+        conditional_headers.insert(
+            http::header::IF_MODIFIED_SINCE,
+            last_modified.parse().unwrap(),
+        );
+        let conditional_response = get_status_list(
+            State(app_state),
+            Path("test_list".to_string()),
+            conditional_headers,
+        )
+        .await
+        .unwrap()
+        .into_response();
+
+        assert_eq!(conditional_response.status(), StatusCode::NOT_MODIFIED);
+        assert!(
+            conditional_response
+                .headers()
+                .contains_key(http::header::LAST_MODIFIED),
+            "304 response should include Last-Modified"
+        );
+        assert!(
+            conditional_response
+                .headers()
+                .contains_key(http::header::CACHE_CONTROL),
+            "304 response should include Cache-Control"
+        );
+        let body_bytes = to_bytes(conditional_response.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        assert_eq!(body_bytes.len(), 0, "304 response should have no body");
+    }
+
+    #[tokio::test]
+    async fn test_conditional_request_if_modified_since_returns_200() {
+        let mock_db = MockDatabase::new(DatabaseBackend::Postgres);
+        let status_list = StatusList {
+            bits: 8,
+            lst: encode_compressed(&[0, 0, 0]).unwrap(),
+        };
+        let status_list_token = StatusListRecord {
+            list_id: "test_list".to_string(),
+            issuer: "issuer1".to_string(),
+            status_list,
+            sub: "test_subject".to_string(),
+            updated_at: 1672531200,
+        };
+        let db_conn = Arc::new(
+            mock_db
+                .append_query_results::<status_lists::Model, Vec<_>, _>(vec![vec![
+                    status_list_token,
+                ]])
+                .into_connection(),
+        );
+
+        let app_state = test_app_state(Some(db_conn.clone())).await;
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            http::header::ACCEPT,
+            ACCEPT_STATUS_LISTS_HEADER_JWT.parse().unwrap(),
+        );
+        headers.insert(
+            http::header::IF_MODIFIED_SINCE,
+            "Thu, 01 Jan 1970 00:00:00 GMT".parse().unwrap(),
+        );
+        let response = get_status_list(State(app_state), Path("test_list".to_string()), headers)
+            .await
+            .unwrap()
+            .into_response();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(
+            response.headers().contains_key(http::header::ETAG),
+            "200 response should include ETag"
+        );
+    }
+
+    #[test]
+    fn test_accepts_gzip_simple() {
+        let mut h = HeaderMap::new();
+        h.insert(header::ACCEPT_ENCODING, "gzip".parse().unwrap());
+        assert!(client_accepts_gzip(&h));
+    }
+
+    #[test]
+    fn test_accepts_gzip_with_qvalue() {
+        let mut h = HeaderMap::new();
+        h.insert(header::ACCEPT_ENCODING, "gzip;q=0.5".parse().unwrap());
+        assert!(client_accepts_gzip(&h));
+    }
+
+    #[test]
+    fn test_rejects_gzip_q0() {
+        let mut h = HeaderMap::new();
+        h.insert(header::ACCEPT_ENCODING, "gzip;q=0".parse().unwrap());
+        assert!(!client_accepts_gzip(&h));
+    }
+
+    #[test]
+    fn test_rejects_gzip_q0_with_wildcard_accept() {
+        let mut h = HeaderMap::new();
+        h.insert(header::ACCEPT_ENCODING, "gzip;q=0, *".parse().unwrap());
+        assert!(!client_accepts_gzip(&h));
+    }
+
+    #[test]
+    fn test_accepts_via_wildcard_only() {
+        let mut h = HeaderMap::new();
+        h.insert(header::ACCEPT_ENCODING, "*".parse().unwrap());
+        assert!(client_accepts_gzip(&h));
+    }
+
+    #[test]
+    fn test_accepts_via_wildcard_q1() {
+        let mut h = HeaderMap::new();
+        h.insert(header::ACCEPT_ENCODING, "*;q=1".parse().unwrap());
+        assert!(client_accepts_gzip(&h));
+    }
+
+    #[test]
+    fn test_rejects_wildcard_q0() {
+        let mut h = HeaderMap::new();
+        h.insert(header::ACCEPT_ENCODING, "*;q=0".parse().unwrap());
+        assert!(!client_accepts_gzip(&h));
+    }
+
+    #[test]
+    fn test_rejects_identity_q0_gzip_q0() {
+        let mut h = HeaderMap::new();
+        h.insert(
+            header::ACCEPT_ENCODING,
+            "identity;q=0, gzip;q=0".parse().unwrap(),
+        );
+        assert!(!client_accepts_gzip(&h));
+    }
+
+    #[test]
+    fn test_rejects_when_header_absent() {
+        let h = HeaderMap::new();
+        assert!(!client_accepts_gzip(&h));
+    }
+
+    #[test]
+    fn test_multiple_accept_encoding_lines() {
+        let mut h = HeaderMap::new();
+        h.append(header::ACCEPT_ENCODING, "deflate".parse().unwrap());
+        h.append(header::ACCEPT_ENCODING, "gzip".parse().unwrap());
+        assert!(client_accepts_gzip(&h));
+    }
+
+    #[test]
+    fn test_multiple_lines_explicit_gzip_q0_blocks_wildcard() {
+        let mut h = HeaderMap::new();
+        h.append(header::ACCEPT_ENCODING, "gzip;q=0".parse().unwrap());
+        h.append(header::ACCEPT_ENCODING, "*".parse().unwrap());
+        assert!(!client_accepts_gzip(&h));
+    }
+
+    #[test]
+    fn test_case_insensitive_gzip() {
+        let mut h = HeaderMap::new();
+        h.insert(header::ACCEPT_ENCODING, "GZIP".parse().unwrap());
+        assert!(client_accepts_gzip(&h));
+    }
 }
