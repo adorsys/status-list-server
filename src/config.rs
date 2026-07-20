@@ -1,4 +1,4 @@
-use std::time::Duration;
+use std::{collections::HashMap, fmt, marker::PhantomData, time::Duration};
 
 use config::{Config as ConfigLib, ConfigError, Environment};
 use redis::{
@@ -194,26 +194,157 @@ pub struct CloudflareDnsConfig {
 pub struct AcmeDnsConfig {
     /// Base URL of the ACME-DNS server, e.g. <https://auth.example.org>
     pub server_url: String,
+    /// Default account, used for domains without an entry in `accounts`.
+    /// The three fields must be set together.
+    pub username: Option<String>,
+    pub password: Option<SecretString>,
+    /// Subdomain returned by the ACME-DNS registration
+    pub subdomain: Option<String>,
+    /// Per-domain accounts keyed by identifier (e.g. `status.example.com`),
+    /// so each identifier gets its own two-value TXT window. Accepts a map
+    /// or a JSON object string, allowing the whole map in one env var.
+    #[serde(default, deserialize_with = "deserialize_map_from_string_or_map")]
+    pub accounts: HashMap<String, AcmeDnsAccount>,
+}
+
+/// A single registered ACME-DNS account
+#[derive(Debug, Clone, Deserialize)]
+pub struct AcmeDnsAccount {
     pub username: String,
     pub password: SecretString,
-    /// Subdomain returned by the ACME-DNS registration
     pub subdomain: String,
 }
 
-/// Report the required fields whose value is empty, so misconfigurations
-/// (e.g. an env var set to an empty string) fail at startup instead of
-/// surfacing as opaque API errors at the first renewal
-fn empty_fields(fields: &[(&'static str, bool)]) -> Option<String> {
-    let empty: Vec<&str> = fields
-        .iter()
-        .filter_map(|&(name, is_empty)| is_empty.then_some(name))
-        .collect();
-    (!empty.is_empty()).then(|| empty.join(", "))
+/// Treat unset and empty (e.g. an env var set to an empty string) alike
+fn non_empty(value: &Option<String>) -> Option<&String> {
+    value.as_ref().filter(|v| !v.trim().is_empty())
+}
+
+impl AcmeDnsConfig {
+    /// The default account, when username, password and subdomain are all set
+    /// (empty values count as unset)
+    pub fn default_account(&self) -> Option<AcmeDnsAccount> {
+        let password = self
+            .password
+            .as_ref()
+            .filter(|p| !p.expose_secret().trim().is_empty())?;
+        Some(AcmeDnsAccount {
+            username: non_empty(&self.username)?.clone(),
+            password: password.clone(),
+            subdomain: non_empty(&self.subdomain)?.clone(),
+        })
+    }
+
+    /// Validate that the settings describe at least one usable account
+    fn validate(&self) -> Result<(), ConfigError> {
+        if self.server_url.trim().is_empty() {
+            return Err(ConfigError::Message(
+                "ACME-DNS settings have an empty server_url".to_string(),
+            ));
+        }
+        let set = [
+            non_empty(&self.username).is_some(),
+            self.password
+                .as_ref()
+                .is_some_and(|p| !p.expose_secret().trim().is_empty()),
+            non_empty(&self.subdomain).is_some(),
+        ];
+        if set.iter().any(|&s| s) && !set.iter().all(|&s| s) {
+            return Err(ConfigError::Message(
+                "Incomplete ACME-DNS default account: username, password and subdomain \
+                 must be set together"
+                    .to_string(),
+            ));
+        }
+        if self.default_account().is_none() && self.accounts.is_empty() {
+            return Err(ConfigError::Message(
+                "ACME-DNS settings need a default account (username/password/subdomain) \
+                 or a non-empty accounts map"
+                    .to_string(),
+            ));
+        }
+        // Reject unusable per-domain entries here instead of as an opaque
+        // HTTP 401 at the first renewal. Key conflicts under normalization
+        // are the provider's own invariant and are rejected in
+        // AcmeDnsProvider::new, also at startup.
+        for (domain, account) in &self.accounts {
+            let name = domain.trim();
+            let name = name.strip_prefix("*.").unwrap_or(name);
+            if name.trim_end_matches('.').is_empty() {
+                return Err(ConfigError::Message(format!(
+                    "ACME-DNS accounts entry {domain:?} does not name a domain"
+                )));
+            }
+            let empty: Vec<&str> = [
+                ("username", account.username.trim().is_empty()),
+                (
+                    "password",
+                    account.password.expose_secret().trim().is_empty(),
+                ),
+                ("subdomain", account.subdomain.trim().is_empty()),
+            ]
+            .into_iter()
+            .filter_map(|(field, is_empty)| is_empty.then_some(field))
+            .collect();
+            if !empty.is_empty() {
+                return Err(ConfigError::Message(format!(
+                    "ACME-DNS account for {domain} has empty required fields: {}",
+                    empty.join(", ")
+                )));
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Deserialize a map either directly or from a JSON object string, so it can
+/// be provided via a single environment variable (map keys such as domain
+/// names cannot be encoded in `__`-separated env var names).
+fn deserialize_map_from_string_or_map<'de, D, V>(
+    deserializer: D,
+) -> Result<HashMap<String, V>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    V: serde::de::DeserializeOwned,
+{
+    // A visitor (rather than an untagged enum) so errors inside a map value
+    // surface as-is instead of as "did not match any variant"
+    struct MapOrString<V>(PhantomData<V>);
+
+    impl<'de, V: serde::de::DeserializeOwned> serde::de::Visitor<'de> for MapOrString<V> {
+        type Value = HashMap<String, V>;
+
+        fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+            formatter.write_str("a map or a JSON object string")
+        }
+
+        fn visit_str<E: serde::de::Error>(self, raw: &str) -> Result<Self::Value, E> {
+            if raw.trim().is_empty() {
+                return Ok(HashMap::new());
+            }
+            serde_json::from_str(raw).map_err(E::custom)
+        }
+
+        fn visit_map<A: serde::de::MapAccess<'de>>(
+            self,
+            mut access: A,
+        ) -> Result<Self::Value, A::Error> {
+            let mut map = HashMap::with_capacity(access.size_hint().unwrap_or(0));
+            while let Some((key, value)) = access.next_entry()? {
+                map.insert(key, value);
+            }
+            Ok(map)
+        }
+    }
+
+    deserializer.deserialize_any(MapOrString(PhantomData))
 }
 
 impl AzureDnsConfig {
+    /// Reject empty required fields so misconfigurations fail at startup
+    /// instead of surfacing as opaque API errors at the first renewal
     fn validate(&self) -> Result<(), ConfigError> {
-        if let Some(fields) = empty_fields(&[
+        let empty: Vec<&str> = [
             ("tenant_id", self.tenant_id.trim().is_empty()),
             ("client_id", self.client_id.trim().is_empty()),
             (
@@ -222,9 +353,14 @@ impl AzureDnsConfig {
             ),
             ("subscription_id", self.subscription_id.trim().is_empty()),
             ("resource_group", self.resource_group.trim().is_empty()),
-        ]) {
+        ]
+        .into_iter()
+        .filter_map(|(name, is_empty)| is_empty.then_some(name))
+        .collect();
+        if !empty.is_empty() {
             return Err(ConfigError::Message(format!(
-                "Azure DNS settings have empty required fields: {fields}"
+                "Azure DNS settings have empty required fields: {}",
+                empty.join(", ")
             )));
         }
         Ok(())
@@ -242,22 +378,6 @@ impl CloudflareDnsConfig {
     }
 }
 
-impl AcmeDnsConfig {
-    fn validate(&self) -> Result<(), ConfigError> {
-        if let Some(fields) = empty_fields(&[
-            ("server_url", self.server_url.trim().is_empty()),
-            ("username", self.username.trim().is_empty()),
-            ("password", self.password.expose_secret().trim().is_empty()),
-            ("subdomain", self.subdomain.trim().is_empty()),
-        ]) {
-            return Err(ConfigError::Message(format!(
-                "ACME-DNS settings have empty required fields: {fields}"
-            )));
-        }
-        Ok(())
-    }
-}
-
 impl DnsConfig {
     /// Resolve the DNS provider to use and validate that its settings are present.
     pub fn resolve(&self, app_env: &str) -> Result<DnsProviderKind, ConfigError> {
@@ -269,15 +389,12 @@ impl DnsConfig {
 
         let missing = match kind {
             DnsProviderKind::Cloudflare if self.cloudflare.is_none() => Some("dns.cloudflare"),
-            // Empty key sources count as unset
             DnsProviderKind::Gcloud
                 if self.gcloud.as_ref().is_none_or(|g| {
                     g.service_account_key
                         .as_ref()
                         .is_none_or(|k| k.expose_secret().trim().is_empty())
-                        && g.service_account_key_path
-                            .as_ref()
-                            .is_none_or(|p| p.trim().is_empty())
+                        && non_empty(&g.service_account_key_path).is_none()
                 }) =>
             {
                 Some("dns.gcloud")
@@ -346,6 +463,15 @@ pub struct CacheConfig {
 pub struct StatusListConfig {
     pub token_exp_secs: u64,
     pub token_ttl_secs: u64,
+    /// Retention period for historical status list snapshots in seconds.
+    /// Snapshots older than this will be deleted by a scheduled cleanup task.
+    /// Default is 90 days (7776000 seconds).
+    ///
+    /// **Privacy note:** Set to 0 to disable historical snapshots entirely.
+    /// This prevents unbounded database growth and mitigates timing leak
+    /// risks described in draft-21 §12.7. When disabled, historical resolution
+    /// via `?time=` query parameter will not be available.
+    pub history_retention_secs: u64,
 }
 
 impl RedisConfig {
@@ -461,6 +587,7 @@ impl Config {
             .set_default("limits.max_status_index", 100_000)?
             .set_default("limits.max_statuses_per_request", 5_000)?
             .set_default("limits.max_serialized_list_size", 1_048_576)? // 1 MiB
+            .set_default("status_list.history_retention_secs", 7776000)? // 90 days
             // Override config values via environment variables
             // The environment variables should be prefixed with 'APP_' and use '__' as a separator
             // Example: APP_REDIS__REQUIRE_CLIENT_AUTH=false
@@ -581,6 +708,58 @@ mod tests {
         let err = dns.resolve("production").unwrap_err();
         assert!(err.to_string().contains("dns.acmedns"));
 
+        // Legacy single-account config still resolves unchanged
+        let acmedns = |cfg: AcmeDnsConfig| DnsConfig {
+            provider: Some(DnsProviderKind::Acmedns),
+            acmedns: Some(cfg),
+            ..Default::default()
+        };
+        let dns = acmedns(AcmeDnsConfig {
+            server_url: "https://auth.example.org".into(),
+            username: Some("user".into()),
+            password: Some("password".into()),
+            subdomain: Some("subdomain".into()),
+            accounts: Default::default(),
+        });
+        assert_eq!(dns.resolve("production").unwrap(), DnsProviderKind::Acmedns);
+
+        // A per-domain accounts map alone is enough
+        let account = AcmeDnsAccount {
+            username: "user".into(),
+            password: "password".into(),
+            subdomain: "subdomain".into(),
+        };
+        let dns = acmedns(AcmeDnsConfig {
+            server_url: "https://auth.example.org".into(),
+            username: None,
+            password: None,
+            subdomain: None,
+            accounts: [("status.example.com".to_string(), account)].into(),
+        });
+        assert_eq!(dns.resolve("production").unwrap(), DnsProviderKind::Acmedns);
+
+        // A partial default account is rejected
+        let dns = acmedns(AcmeDnsConfig {
+            server_url: "https://auth.example.org".into(),
+            username: Some("user".into()),
+            password: None,
+            subdomain: None,
+            accounts: Default::default(),
+        });
+        let err = dns.resolve("production").unwrap_err();
+        assert!(err.to_string().contains("must be set together"));
+
+        // Neither a default account nor a map is rejected
+        let dns = acmedns(AcmeDnsConfig {
+            server_url: "https://auth.example.org".into(),
+            username: None,
+            password: None,
+            subdomain: None,
+            accounts: Default::default(),
+        });
+        let err = dns.resolve("production").unwrap_err();
+        assert!(err.to_string().contains("default account"));
+
         // Gcloud needs the key inline or as a file path
         let dns = DnsConfig {
             provider: Some(DnsProviderKind::Gcloud),
@@ -641,21 +820,33 @@ mod tests {
         let err = dns.resolve("production").unwrap_err();
         assert!(err.to_string().contains("api_token"));
 
-        // ACME-DNS names exactly the empty fields
-        let dns = DnsConfig {
+        // ACME-DNS rejects an empty server_url
+        let acmedns = |cfg: AcmeDnsConfig| DnsConfig {
             provider: Some(DnsProviderKind::Acmedns),
-            acmedns: Some(AcmeDnsConfig {
-                server_url: " ".into(),
-                username: "".into(),
-                password: "password".into(),
-                subdomain: "subdomain".into(),
-            }),
+            acmedns: Some(cfg),
             ..Default::default()
         };
-        let err = dns.resolve("production").unwrap_err().to_string();
-        assert!(err.contains("server_url"));
-        assert!(err.contains("username"));
-        assert!(!err.contains("subdomain"));
+        let dns = acmedns(AcmeDnsConfig {
+            server_url: " ".into(),
+            username: Some("user".into()),
+            password: Some("password".into()),
+            subdomain: Some("subdomain".into()),
+            accounts: Default::default(),
+        });
+        let err = dns.resolve("production").unwrap_err();
+        assert!(err.to_string().contains("server_url"));
+
+        // An empty default-account field counts as unset, so the account
+        // is partial rather than silently unusable
+        let dns = acmedns(AcmeDnsConfig {
+            server_url: "https://auth.example.org".into(),
+            username: Some("user".into()),
+            password: Some("password".into()),
+            subdomain: Some("".into()),
+            accounts: Default::default(),
+        });
+        let err = dns.resolve("production").unwrap_err();
+        assert!(err.to_string().contains("must be set together"));
 
         // Gcloud with both key sources empty counts as missing
         let dns = DnsConfig {
@@ -668,6 +859,84 @@ mod tests {
         };
         let err = dns.resolve("production").unwrap_err();
         assert!(err.to_string().contains("dns.gcloud"));
+    }
+
+    #[test]
+    fn test_acme_dns_rejects_unusable_account_entries() {
+        let acmedns = |accounts: HashMap<String, AcmeDnsAccount>| DnsConfig {
+            provider: Some(DnsProviderKind::Acmedns),
+            acmedns: Some(AcmeDnsConfig {
+                server_url: "https://auth.example.org".into(),
+                username: None,
+                password: None,
+                subdomain: None,
+                accounts,
+            }),
+            ..Default::default()
+        };
+        let account = |username: &str, subdomain: &str| AcmeDnsAccount {
+            username: username.into(),
+            password: "password".into(),
+            subdomain: subdomain.into(),
+        };
+
+        // An entry with empty fields is rejected, naming the domain and fields
+        let dns = acmedns([("status.example.com".to_string(), account("", " "))].into());
+        let err = dns.resolve("production").unwrap_err().to_string();
+        assert!(err.contains("status.example.com"));
+        assert!(err.contains("username"));
+        assert!(err.contains("subdomain"));
+        assert!(!err.contains("password"));
+
+        // A key that does not name a domain is rejected
+        for key in ["", "  ", "*.", "."] {
+            let dns = acmedns([(key.to_string(), account("user", "sub"))].into());
+            let err = dns.resolve("production").unwrap_err().to_string();
+            assert!(err.contains("does not name a domain"), "key {key:?}: {err}");
+        }
+
+        // A usable entry passes
+        let dns = acmedns([("status.example.com".to_string(), account("user", "sub"))].into());
+        assert_eq!(dns.resolve("production").unwrap(), DnsProviderKind::Acmedns);
+    }
+
+    #[sealed_test(env = [
+        ("APP_SERVER__CERT__DNS__ACMEDNS__SERVER_URL", "https://auth.example.org"),
+        ("APP_SERVER__CERT__DNS__ACMEDNS__ACCOUNTS", r#"{
+            "a.example.com": {"username": "u1", "password": "p1", "subdomain": "s1"},
+            "b.example.com": {"username": "u2", "password": "p2", "subdomain": "s2"}
+        }"#),
+    ])]
+    fn test_acme_dns_accounts_parse_from_env_json() {
+        let config = Config::load().expect("Failed to load config");
+
+        let acmedns = config.server.cert.dns.acmedns.expect("acmedns settings");
+        assert_eq!(acmedns.server_url, "https://auth.example.org");
+        assert!(acmedns.default_account().is_none());
+        assert_eq!(acmedns.accounts.len(), 2);
+        let account = &acmedns.accounts["b.example.com"];
+        assert_eq!(account.username, "u2");
+        assert_eq!(account.password.expose_secret(), "p2");
+        assert_eq!(account.subdomain, "s2");
+    }
+
+    #[sealed_test(env = [
+        ("APP_SERVER__CERT__DNS__ACMEDNS__SERVER_URL", "https://auth.example.org"),
+        ("APP_SERVER__CERT__DNS__ACMEDNS__ACCOUNTS", r#"{"a.example.com": not valid json"#),
+    ])]
+    fn test_acme_dns_accounts_reject_malformed_json() {
+        Config::load().expect_err("malformed accounts JSON must fail config loading");
+    }
+
+    #[sealed_test(env = [
+        ("APP_SERVER__CERT__DNS__ACMEDNS__SERVER_URL", "https://auth.example.org"),
+        ("APP_SERVER__CERT__DNS__ACMEDNS__ACCOUNTS", ""),
+    ])]
+    fn test_acme_dns_accounts_empty_env_var_means_no_accounts() {
+        let config = Config::load().expect("Failed to load config");
+
+        let acmedns = config.server.cert.dns.acmedns.expect("acmedns settings");
+        assert!(acmedns.accounts.is_empty());
     }
 
     #[sealed_test(env = [

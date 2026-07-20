@@ -72,7 +72,8 @@ pub(crate) async fn test_app_state_with(
 
     AppState {
         credential_repo: SeaOrmStore::new(db.clone()),
-        status_list_repo: SeaOrmStore::new(db),
+        status_list_repo: SeaOrmStore::new(db.clone()),
+        status_list_history_repo: SeaOrmStore::new(db),
         server_domain: "example.com".to_string(),
         cert_manager: Arc::new(certificate_manager),
         cache: StatusListCache::new(5 * 60, 100),
@@ -82,5 +83,6 @@ pub(crate) async fn test_app_state_with(
         max_status_index: 100_000,
         max_statuses_per_request: 5_000,
         max_serialized_list_size: 1_048_576,
+        history_retention_secs: 7776000, // 90 days default for tests
     }
 }
