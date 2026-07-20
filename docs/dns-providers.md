@@ -82,6 +82,7 @@ needs no credentials for it.
 ```bash
 APP_SERVER__CERT__DNS__PROVIDER=acmedns
 APP_SERVER__CERT__DNS__ACMEDNS__SERVER_URL=https://auth.example.org
+# Default account, used for every domain without a per-domain entry:
 APP_SERVER__CERT__DNS__ACMEDNS__USERNAME=<username from registration>
 APP_SERVER__CERT__DNS__ACMEDNS__PASSWORD=<password from registration>
 APP_SERVER__CERT__DNS__ACMEDNS__SUBDOMAIN=<subdomain from registration>
@@ -94,11 +95,38 @@ Setup:
 2. Create a CNAME record at your primary DNS provider from
    `_acme-challenge.<domain>` to the returned `fulldomain`.
 
-Note: ACME-DNS keeps only the two most recent TXT values and has no delete
-endpoint, so record cleanup after a challenge is a no-op. Because all domains
-share the single configured ACME-DNS subdomain, certificates with more than
-two identifiers (e.g. more than two SANs) are not supported with this
-provider — earlier challenge values would be rotated out before validation.
+### Per-domain accounts
+
+ACME-DNS keeps only the two most recent TXT values per subdomain and has no
+delete endpoint, so record cleanup after a challenge is a no-op. With a single
+account, all identifiers of an order share that two-value window, which limits
+a certificate to two identifiers (an apex + wildcard pair fits, since both TXT
+values live at the same name). To lift the limit, register one account per
+domain and map them — the same model lego and acme.sh use:
+
+```bash
+APP_SERVER__CERT__DNS__ACMEDNS__ACCOUNTS='{
+  "a.example.com": {"username": "<u1>", "password": "<p1>", "subdomain": "<s1>"},
+  "b.example.com": {"username": "<u2>", "password": "<p2>", "subdomain": "<s2>"}
+}'
+```
+
+Each mapped domain needs its own registration (step 1) and its own
+`_acme-challenge.<domain>` CNAME to that account's `fulldomain` (step 2).
+Write keys as they appear in the certificate order — punycode (a-labels,
+e.g. `xn--mnchen-3ya.example.com`) for internationalized names — and write
+wildcard domains as their base domain (`example.com`, not `*.example.com`),
+since an apex and its wildcard share one CNAME and therefore one account.
+Keys are matched case-insensitively, ignoring any trailing dot; two entries
+that reduce to the same domain but hold different credentials are rejected
+at startup. Domains without an entry fall back to the default account; at
+least one of the two must be configured. The server fails at startup when
+a certificate domain is covered by neither, or when one account would have
+to serve more than two identifiers of the certificate at once.
+
+All accounts must be registered on the one ACME-DNS server named by
+`SERVER_URL`; spreading accounts across multiple ACME-DNS servers is not
+supported.
 
 ## Pebble (`pebble`)
 
