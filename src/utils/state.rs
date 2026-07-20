@@ -67,6 +67,9 @@ pub struct AppState {
     pub aggregation_uri: Option<String>,
     pub token_exp_secs: u64,
     pub token_ttl_secs: u64,
+    pub max_status_index: i32,
+    pub max_statuses_per_request: usize,
+    pub max_serialized_list_size: usize,
     /// Retention period for historical status list snapshots in seconds.
     /// Set to 0 to disable historical snapshots entirely.
     pub history_retention_secs: u64,
@@ -240,6 +243,9 @@ pub async fn build_state_with_cert_manager(
             aggregation_uri: empty_to_none(config.server.aggregation_uri.clone()),
             token_exp_secs: config.status_list.token_exp_secs,
             token_ttl_secs: config.status_list.token_ttl_secs,
+            max_status_index: config.limits.max_status_index,
+            max_statuses_per_request: config.limits.max_statuses_per_request,
+            max_serialized_list_size: config.limits.max_serialized_list_size,
             history_retention_secs: config.status_list.history_retention_secs,
         },
         cert_manager,
@@ -499,8 +505,8 @@ mod tests {
     use super::{empty_to_none, store_certificate_strategy};
     use crate::config::{
         AcmeDnsConfig, AwsConfig, AzureDnsConfig, CacheConfig, CertConfig, CertStoreConfig,
-        CloudflareDnsConfig, Config, DatabaseConfig, DnsConfig, GcloudDnsConfig, RedisConfig,
-        ServerConfig, StatusListConfig,
+        CloudflareDnsConfig, Config, DatabaseConfig, DnsConfig, GcloudDnsConfig, LimitsConfig,
+        RateLimitConfig, RedisConfig, ServerConfig, StatusListConfig,
     };
     use sealed_test::prelude::*;
     use secrecy::SecretString;
@@ -770,6 +776,18 @@ mod tests {
                 token_exp_secs: 900,
                 token_ttl_secs: 300,
                 history_retention_secs: 7776000, // 90 days
+            },
+            rate_limit: RateLimitConfig {
+                strict_burst_size: 10,
+                strict_period_secs: 60,
+                permissive_burst_size: 100,
+                permissive_period_secs: 60,
+            },
+            limits: LimitsConfig {
+                max_body_size_bytes: 2_097_152,
+                max_status_index: 100_000,
+                max_statuses_per_request: 5_000,
+                max_serialized_list_size: 1_048_576,
             },
         }
     }

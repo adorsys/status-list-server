@@ -19,7 +19,7 @@ server = [
 ]
 http = [
     "dep:axum", "dep:hyper", "dep:hyper-util", "dep:reqwest", "dep:tower",
-    "dep:tower-http", "dep:tracing", "dep:tracing-subscriber",
+    "dep:tower-http", "dep:tower_governor", "dep:governor", "dep:tracing", "dep:tracing-subscriber",
 ]
 postgres = ["dep:jsonwebtoken", "dep:sea-orm", "dep:sea-orm-migration", "sea-orm?/sqlx-postgres"]
 sqlite = ["dep:jsonwebtoken", "dep:sea-orm", "dep:sea-orm-migration", "sea-orm?/sqlx-sqlite"]
@@ -86,7 +86,9 @@ reqwest = { version = "0.13", features = ["json", "form", "query"], optional = t
 tower = { version = "0.5", optional = true }
 hyper-rustls = { version = "0.27", features = ["http2"], optional = true }
 axum = { version = "0.8", features = ["macros"], optional = true }
-tower-http = { version = "0.7", features = ["catch-panic", "cors", "trace"], optional = true }
+tower-http = { version = "0.7", features = ["catch-panic", "cors", "limit", "trace"], optional = true }
+tower_governor = { version = "0.8", optional = true }
+governor = { version = "0.10", optional = true }
 
 # Database and ORM
 sea-orm = { version = "1.1", default-features = false, features = ["macros", "runtime-tokio-rustls", "with-json"], optional = true }
