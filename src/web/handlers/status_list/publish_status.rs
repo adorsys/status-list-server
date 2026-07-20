@@ -67,7 +67,7 @@ mod tests {
         utils::lst_gen::create_status_list,
     };
     use axum::{Json, extract::State};
-    use sea_orm::{DatabaseBackend, MockDatabase};
+    use sea_orm::{DatabaseBackend, MockDatabase, MockExecResult};
     use std::sync::Arc;
 
     #[tokio::test]
@@ -111,13 +111,18 @@ mod tests {
             issuer: "issuer".to_string(),
             status_list,
             sub: format!("https://example.com/api/v1/status-lists/{token_id}"),
+            updated_at: 0,
         };
+        let _ = &new_token;
         let db_conn = Arc::new(
             mock_db
                 .append_query_results::<status_lists::Model, Vec<_>, _>(vec![
-                    vec![],                  // find_one_by in handler returns None
-                    vec![new_token.clone()], // insert_one return
+                    vec![], // find_one_by in handler returns None
                 ])
+                .append_exec_results(vec![MockExecResult {
+                    rows_affected: 1,
+                    last_insert_id: 0,
+                }])
                 .into_connection(),
         );
 
@@ -161,14 +166,18 @@ mod tests {
             issuer: "issuer".to_string(),
             status_list,
             sub: format!("https://example.com/api/v1/status-lists/{token_id}"),
+            updated_at: 0,
         };
         let db_conn = Arc::new(
             mock_db
                 .append_query_results::<status_lists::Model, Vec<_>, _>(vec![
                     vec![],                  // find_one_by in handler returns None
-                    vec![new_token.clone()], // insert_one return
                     vec![new_token.clone()], // find_one_by in test verification
                 ])
+                .append_exec_results(vec![MockExecResult {
+                    rows_affected: 1,
+                    last_insert_id: 0,
+                }])
                 .into_connection(),
         );
 
@@ -215,6 +224,7 @@ mod tests {
                 lst: create_status_list(status_entries.clone()).unwrap().lst,
             },
             sub: "issuer".to_string(),
+            updated_at: 0,
         };
         let db_conn = Arc::new(
             mock_db
@@ -253,14 +263,18 @@ mod tests {
             issuer: "issuer".to_string(),
             status_list,
             sub: format!("https://example.com/api/v1/status-lists/{token_id}"),
+            updated_at: 0,
         };
         let db_conn = Arc::new(
             mock_db
                 .append_query_results::<status_lists::Model, Vec<_>, _>(vec![
                     vec![],                  // find_one_by in handler returns None
-                    vec![new_token.clone()], // insert_one return
                     vec![new_token.clone()], // find_one_by in test verification
                 ])
+                .append_exec_results(vec![MockExecResult {
+                    rows_affected: 1,
+                    last_insert_id: 0,
+                }])
                 .into_connection(),
         );
 
@@ -304,16 +318,21 @@ mod tests {
             issuer: "issuer".to_string(),
             status_list,
             sub: format!("https://example.com/api/v1/status-lists/{token_id}"),
+            updated_at: 0,
         };
         let db_conn = Arc::new(
             mock_db
                 .append_query_results::<status_lists::Model, Vec<_>, _>(vec![
                     vec![],                  // find_one_by in handler returns None
-                    vec![new_token.clone()], // insert_one return
                     vec![new_token.clone()], // find_one_by in test verification
                 ])
+                .append_exec_results(vec![MockExecResult {
+                    rows_affected: 1,
+                    last_insert_id: 0,
+                }])
                 .into_connection(),
         );
+
         let app_state = test_app_state(Some(db_conn.clone())).await;
 
         let response = publish_status(

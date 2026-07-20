@@ -82,6 +82,7 @@ fn to_persistence(record: domain::StatusListRecord) -> models::StatusListRecord 
             bits: record.status_list.bits,
             lst: record.status_list.lst,
         },
+        updated_at: 0, // Domain model doesn't track updated_at; set to default
     }
 }
 

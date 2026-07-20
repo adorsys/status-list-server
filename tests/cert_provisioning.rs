@@ -11,12 +11,13 @@ use std::{sync::Arc, time::Duration};
 use aws_config::BehaviorVersion;
 use aws_sdk_s3::Client as S3Client;
 use status_list_server::{
-    adapters::{
-        aws::{AwsS3, AwsSecretsManager},
-        dns::PebbleDnsUpdater,
-        redis::Redis as RedisStorage,
+    adapters::aws::{AwsS3, AwsSecretsManager},
+    adapters::redis::Redis as RedisStorage,
+    cert_manager::{
+        CertManager,
+        challenge::{Dns01Handler, PebbleDnsProvider},
+        http_client::DefaultHttpClient,
     },
-    cert_manager::{CertManager, challenge::Dns01Handler, http_client::DefaultHttpClient},
 };
 use testcontainers_modules::{
     localstack::LocalStack,
@@ -156,8 +157,8 @@ impl TestInfra {
             .expect("Failed to create AwsSecretsManager");
 
         let challtestsrv_url = format!("http://127.0.0.1:{}", self.challtestsrv_port);
-        let dns_updater = PebbleDnsUpdater::new(&challtestsrv_url);
-        let challenge_handler = Dns01Handler::new(dns_updater);
+        let dns_provider = PebbleDnsProvider::new(&challtestsrv_url);
+        let challenge_handler = Dns01Handler::new(dns_provider);
 
         let acme_directory_url = format!("https://127.0.0.1:{}/dir", self.pebble_acme_port);
         let http_client = DefaultHttpClient::new(Some(PEBBLE_MINICA_ROOT_CA))

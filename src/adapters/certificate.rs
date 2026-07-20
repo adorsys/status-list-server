@@ -29,6 +29,7 @@ impl CertificateProvider for AcmeCertificateProvider {
                 operation: "load certificate chain",
                 detail: e.to_string(),
             })
+            .map(|opt| opt.map(|arc| arc.to_vec()))
     }
 
     async fn signing_key_pem(&self) -> Result<String, PortError> {

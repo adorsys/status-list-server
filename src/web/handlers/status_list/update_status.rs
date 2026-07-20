@@ -117,6 +117,7 @@ mod test {
             issuer: "issuer".to_string(),
             status_list: original_status_list,
             sub: "issuer".to_string(),
+            updated_at: 0,
         };
 
         // Update payload that flips status at index 1 to INVALID

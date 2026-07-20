@@ -1,7 +1,11 @@
 mod dns01;
 mod http01;
 
-pub use dns01::{Dns01Handler, DnsUpdater};
+pub use dns01::{
+    AcmeDnsCredentials, AcmeDnsProvider, AwsRoute53DnsProvider, AzureDnsProvider,
+    CloudflareDnsProvider, Dns01Handler, DnsProvider, GoogleCloudDnsProvider, PebbleDnsProvider,
+    ServicePrincipal,
+};
 pub use http01::Http01Handler;
 
 use std::{future::Future, pin::Pin};
@@ -16,8 +20,12 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum ChallengeError {
-    #[error("AWS SDK error: {0}")]
-    AwsSdk(#[source] Report),
+    #[error("DNS provider {provider} error: {source}")]
+    Dns {
+        provider: &'static str,
+        #[source]
+        source: Report,
+    },
 
     #[error("No hosted zone found for domain {0}")]
     ZoneNotFound(String),
@@ -27,6 +35,9 @@ pub enum ChallengeError {
 
     #[error("I/O error: {0}")]
     Io(#[from] io::Error),
+
+    #[error("AWS SDK error: {0}")]
+    AwsSdk(#[source] Report),
 
     #[error("Another error occurred: {0}")]
     Other(#[source] Report),

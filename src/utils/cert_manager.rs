@@ -1,4 +1,6 @@
+mod builder;
 mod errors;
+mod strategy;
 #[cfg(test)]
 mod tests;
 
@@ -6,8 +8,14 @@ pub mod challenge;
 pub mod http_client;
 pub mod storage;
 
+use crate::utils::cache::CertificateChain;
+pub use builder::CertificateManagerBuilder;
 use challenge::CleanupFuture;
 pub use errors::CertError;
+pub use strategy::{
+    AcmeProvisioningStrategy, CertProvisioningStrategy, StoreProvisioningSource,
+    StoreProvisioningStrategy,
+};
 
 use color_eyre::eyre::eyre;
 use instant_acme::{
@@ -23,12 +31,18 @@ use time::{OffsetDateTime, macros::format_description};
 use tokio::{sync::Mutex, time::sleep};
 use tokio_cron_scheduler::{Job, JobScheduler};
 use tracing::{error, info, instrument, warn};
-use x509_parser::pem::Pem;
+use x509_parser::pem::Pem as X509Pem;
 
 use crate::{
     cert_manager::{challenge::ChallengeHandler, http_client::DefaultHttpClient, storage::Storage},
-    utils::keygen::Keypair,
+    utils::{cache::CertChainCache, keygen::Keypair},
 };
+
+/// Default cache TTL when no override is supplied.
+///
+/// Exported as a single source of truth: `Config::load` references this
+/// constant so the runtime default and the code fallback always agree.
+pub const DEFAULT_CHAIN_CACHE_TTL: Duration = Duration::from_secs(3600);
 
 /// Struct that hold the certificate and its metadata
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -66,9 +80,13 @@ pub struct CertManager {
     // ACME client
     acme_client: Arc<Mutex<Option<Account>>>,
     // ACME HTTP client factory
-    acme_http_client_factory: ACMEHttpClientFactory,
+    acme_http_client_factory: Option<ACMEHttpClientFactory>,
+    // Certificate provisioning strategy
+    provisioning_strategy: Box<dyn CertProvisioningStrategy>,
     // Certificate renewal strategy
     renewal_strategy: RenewalStrategy,
+    // Parsed certificate chain cache
+    cert_chain_cache: CertChainCache,
     // The subject alternative names
     domains: Vec<String>,
     // The company email
@@ -82,6 +100,11 @@ pub struct CertManager {
 }
 
 impl CertManager {
+    /// Create a certificate manager builder.
+    pub fn builder() -> CertificateManagerBuilder {
+        CertificateManagerBuilder::default()
+    }
+
     /// Create a new instance of [CertManager] with required parameters
     pub fn new(
         domains: impl IntoIterator<Item = impl Into<String>>,
@@ -89,20 +112,25 @@ impl CertManager {
         organization: Option<impl Into<String>>,
         acme_directory_url: impl Into<String>,
     ) -> Result<Self, CertError> {
-        let acme_client = Arc::new(Mutex::new(None));
         let http_client = DefaultHttpClient::new(None)?;
         let acme_http_client_factory =
             Box::new(move || Box::new(http_client.clone()) as Box<dyn HttpClient>);
         let renewal_strategy = RenewalStrategy::PercentageOfLifetime(None);
 
+        let domains: Vec<String> = domains.into_iter().map(|d| d.into()).collect();
+        let domain_label = domains.first().map(String::as_str).unwrap_or_default();
+        let cert_chain_cache = CertChainCache::new(DEFAULT_CHAIN_CACHE_TTL, domain_label);
+
         Ok(Self {
             cert_storage: None,
             secrets_storage: None,
             challenge_handler: None,
-            acme_client,
-            acme_http_client_factory,
+            acme_client: Arc::new(Mutex::new(None)),
+            acme_http_client_factory: Some(acme_http_client_factory),
+            provisioning_strategy: Box::new(AcmeProvisioningStrategy),
             renewal_strategy,
-            domains: domains.into_iter().map(|d| d.into()).collect(),
+            cert_chain_cache,
+            domains,
             email: email.into(),
             organization: organization.map(|o| o.into()),
             eku: None,
@@ -138,7 +166,7 @@ impl CertManager {
     ///
     /// Default: [`DefaultHttpClient`]
     pub fn with_acme_http_client(mut self, client: impl HttpClient + Clone + 'static) -> Self {
-        self.acme_http_client_factory = Box::new(move || Box::new(client.clone()));
+        self.acme_http_client_factory = Some(Box::new(move || Box::new(client.clone())));
         self
     }
 
@@ -150,22 +178,69 @@ impl CertManager {
         self
     }
 
+    /// Override the certificate provisioning strategy.
+    pub fn with_provisioning_strategy(
+        mut self,
+        strategy: impl CertProvisioningStrategy + 'static,
+    ) -> Self {
+        self.provisioning_strategy = Box::new(strategy);
+        self
+    }
+
+    /// Override the in-memory parsed certificate chain cache TTL.
+    ///
+    /// A zero duration keeps the cache active with no TTL safety expiry; cache
+    /// replacement still happens whenever this manager provisions a new certificate.
+    ///
+    /// **Multi-replica deployments:** Only the replica that performs the
+    /// provisioning call (`request_certificate`) replaces its in-memory cache.
+    /// Non-provisioning replicas therefore rely on the TTL as the only refresh
+    /// mechanism for picking up a newly provisioned chain. Set `ttl = 0` only
+    /// when the process is guaranteed to re-provision or restart on every
+    /// rotation — otherwise long-lived replicas with a disabled TTL will serve
+    /// the stale chain until they happen to re-provision.
+    ///
+    /// **Staleness safety:** This caching strategy is safe because the signing
+    /// key is stable across certificate renewals — the provisioning flow reuses
+    /// the stored secret key (`signing_key_pem`). If renewal ever rotates the
+    /// signing key, the staleness window becomes a token-validation outage:
+    /// verifiers would receive the old certificate chain while tokens are
+    /// signed with the new key.
+    pub fn with_cert_chain_cache_ttl(mut self, ttl: Duration) -> Self {
+        let domain_label = self.domains.first().map(String::as_str).unwrap_or_default();
+        self.cert_chain_cache = CertChainCache::new(ttl, domain_label);
+        self
+    }
+
     /// Set the key usage extensions code
     pub fn with_eku(mut self, eku: &[u64]) -> Self {
         self.eku = Some(eku.to_vec());
         self
     }
 
-    /// Request a certificate from the certificate authority
+    /// Zero-initialise the certificate chain cache counters so they appear
+    /// in Prometheus scrapes before first use.
+    ///
+    /// **Must** be called after the global metrics recorder has been installed.
+    /// If metrics are disabled this is a harmless no-op.
+    pub fn init_cert_chain_cache_counters(&self) {
+        self.cert_chain_cache.init_counters();
+    }
+
+    /// Provision a certificate with the configured strategy.
     #[instrument(
-        name = "Running the ACME state machine",
+        name = "Provisioning certificate",
         skip(self),
         fields(
             domains = ?self.domains,
-            acme_directory_url = %self.acme_directory_url
+            strategy = %self.provisioning_strategy.name()
         )
     )]
     pub async fn request_certificate(&self) -> Result<CertificateData, CertError> {
+        self.provisioning_strategy.provision(self).await
+    }
+
+    pub(crate) async fn request_acme_certificate(&self) -> Result<CertificateData, CertError> {
         use instant_acme::RetryPolicy;
 
         let cert_storage = self
@@ -229,17 +304,12 @@ impl CertManager {
         let not_after = x509.validity().not_after.timestamp();
         let not_before = x509.validity().not_before.timestamp();
 
-        let cert_data = CertificateData {
-            certificate: cert_chain_pem,
-            valid_from: not_before,
-            expires_at: not_after,
-            updated_at: now_unix_timestamp(),
-        };
+        let cert_data = CertificateData::new(cert_chain_pem, not_before, not_after);
 
         // Store the certificate
-        let cert_key = self.cert_key();
-        let serialized_cert_data = serde_json::to_string(&cert_data)?;
-        cert_storage.store(&cert_key, &serialized_cert_data).await?;
+        self.persist_certificate_data_with_storage(cert_storage.as_ref(), &cert_data)
+            .await?;
+        self.cache_provisioned_chain(&cert_data.certificate).await?;
 
         info!(
             "Certificate obtained successfully. Valid from {} to {}",
@@ -286,10 +356,7 @@ impl CertManager {
         const MAX_RETRIES: u32 = 3;
         const RETRY_DELAY: Duration = Duration::from_millis(500);
 
-        let secrets_storage = self
-            .secrets_storage
-            .as_ref()
-            .ok_or_else(|| CertError::Other(eyre!("Secrets storage not set")))?;
+        let secrets_storage = self.secrets_storage()?;
 
         // Try to load the existing signing key
         let secret_id = self.signing_secret_id();
@@ -327,34 +394,36 @@ impl CertManager {
     /// # Errors
     /// Returns an error if the certificate data cannot be parsed or if there was an issue when trying to retrieve the certificate data.
     pub async fn certificate(&self) -> Result<Option<CertificateData>, CertError> {
-        if let Some(cert_storage) = &self.cert_storage {
-            let cert_key = self.cert_key();
-            if let Some(cert_data) = cert_storage.load(&cert_key).await? {
-                return Ok(Some(serde_json::from_str(&cert_data)?));
-            }
-        } else {
-            return Err(CertError::Other(eyre!("Certificate storage not set")));
+        let cert_storage = self.cert_storage()?;
+        let cert_key = self.cert_key();
+        if let Some(cert_data) = cert_storage.load(&cert_key).await? {
+            return Ok(Some(serde_json::from_str(&cert_data)?));
         }
         Ok(None)
     }
 
-    /// Extract individual certificates from the certificate chain and return them as a vector of base64-encoded strings
+    /// Extract individual certificates from the certificate chain and return shared base64-encoded chain parts.
     ///
     /// This function will return `None` if the server certificate was not found.
     ///
     /// # Errors
     /// Returns an error if the certificate chain cannot be parsed or if there was an issue when trying to retrieve the server certificate
-    pub async fn cert_chain_parts(&self) -> Result<Option<Vec<String>>, CertError> {
-        use base64::prelude::{BASE64_STANDARD, Engine as _};
-
+    pub async fn cert_chain_parts(&self) -> Result<Option<CertificateChain>, CertError> {
+        let cert_key = self.cert_key();
+        if let Some(certs) = self.cert_chain_cache.get(&cert_key).await {
+            return Ok(Some(certs));
+        }
         if let Some(cert_data) = self.certificate().await? {
-            let certs = Pem::iter_from_buffer(cert_data.certificate.as_bytes())
-                .map(|cert| {
-                    cert.map(|pem| BASE64_STANDARD.encode(&pem.contents))
-                        .map_err(|e| CertError::Parsing(e.to_string()))
-                })
-                .collect::<Result<_, _>>()?;
-
+            let certs = self.parse_cert_chain_parts(&cert_data.certificate)?;
+            // NOTE: There is a benign race between this read-path insert and
+            // the provisioning-path `replace` in `cache_provisioned_chain`.
+            // If a concurrent `request_certificate` replaces the cache entry
+            // between our miss and this insert, we overwrite the fresh chain
+            // with the (still valid) old chain. The stale entry is bounded by
+            // the cache TTL. This is acceptable because the signing key is
+            // stable across renewals, so the old chain remains valid for
+            // token verification.
+            self.cert_chain_cache.insert(cert_key, certs.clone()).await;
             return Ok(Some(certs));
         }
         Ok(None)
@@ -368,18 +437,27 @@ impl CertManager {
     )]
     pub async fn renew_cert_if_needed(&self) -> Result<(), CertError> {
         if let Some(cert_data) = self.certificate().await? {
-            if self.should_renew_cert(&cert_data) {
+            if self
+                .provisioning_strategy
+                .should_provision_existing(self, &cert_data)
+            {
                 self.request_certificate().await?;
-                info!("Certificate renewed successfully");
+                info!(
+                    "Certificate provisioned successfully with {} strategy",
+                    self.provisioning_strategy.name()
+                );
                 return Ok(());
             }
         } else {
-            warn!("No certificate found for this domain, requesting new one...");
+            warn!(
+                "No certificate found for this domain, provisioning with {} strategy...",
+                self.provisioning_strategy.name()
+            );
             self.request_certificate().await?;
-            info!("New certificate issued successfully");
+            info!("New certificate provisioned successfully");
             return Ok(());
         }
-        info!("Certificate is still valid. No need to renew");
+        info!("Certificate is still valid. No need to provision");
         Ok(())
     }
 
@@ -390,10 +468,7 @@ impl CertManager {
         fields(domains = ?self.domains, email = %self.email)
     )]
     async fn acme_account(&self) -> Result<Account, CertError> {
-        let secrets_storage = self
-            .secrets_storage
-            .as_ref()
-            .ok_or_else(|| CertError::Other(eyre!("Secrets storage not set")))?;
+        let secrets_storage = self.secrets_storage()?;
 
         let mut client_guard = self.acme_client.lock().await;
         if let Some(account) = client_guard.as_ref() {
@@ -405,7 +480,7 @@ impl CertManager {
         if let Some(credentials) = secrets_storage.load(&account_id).await? {
             info!("Found existing credentials. Trying to load account...");
             let credentials: AccountCredentials = serde_json::from_str(&credentials)?;
-            let http_client = self.create_http_client();
+            let http_client = self.create_http_client()?;
             match Account::builder_with_http(http_client)
                 .from_credentials(credentials)
                 .await
@@ -422,7 +497,7 @@ impl CertManager {
             }
         }
         // Create a new ACME account
-        let (account, credentials) = Account::builder_with_http(self.create_http_client())
+        let (account, credentials) = Account::builder_with_http(self.create_http_client()?)
             .create(
                 &NewAccount {
                     contact: &[&format!("mailto:{}", self.email)],
@@ -469,7 +544,7 @@ impl CertManager {
         Ok(csr.der().to_vec())
     }
 
-    fn should_renew_cert(&self, cert_data: &CertificateData) -> bool {
+    pub(crate) fn should_renew_cert(&self, cert_data: &CertificateData) -> bool {
         let days_to_secs = |days: u32| (days as i64) * 24 * 60 * 60;
 
         match self.renewal_strategy {
@@ -495,7 +570,7 @@ impl CertManager {
         }
     }
 
-    fn parse_cert_pem(&self, cert_pem: &str) -> Result<Pem, CertError> {
+    fn parse_cert_pem(&self, cert_pem: &str) -> Result<X509Pem, CertError> {
         use x509_parser::pem::parse_x509_pem;
 
         let pem = parse_x509_pem(cert_pem.as_bytes())
@@ -507,9 +582,122 @@ impl CertManager {
         Ok(pem)
     }
 
+    pub(crate) fn certificate_data_from_pem(
+        &self,
+        certificate_pem: String,
+    ) -> Result<CertificateData, CertError> {
+        let parsed_cert_pem = self.parse_cert_pem(&certificate_pem)?;
+        let x509 = parsed_cert_pem.parse_x509().map_err(|e| {
+            error!("configured certificate appears to be invalid: {e}");
+            CertError::Parsing(e.to_string())
+        })?;
+        Ok(CertificateData::new(
+            certificate_pem,
+            x509.validity().not_before.timestamp(),
+            x509.validity().not_after.timestamp(),
+        ))
+    }
+
+    pub(crate) fn certificate_data_from_der_or_pem(
+        &self,
+        certificate: Vec<u8>,
+    ) -> Result<CertificateData, CertError> {
+        if is_pem_certificate(&certificate) {
+            let certificate_pem = String::from_utf8(certificate).map_err(|e| {
+                CertError::Validation(format!("certificate PEM is not valid UTF-8: {e}"))
+            })?;
+            return self.certificate_data_from_pem(certificate_pem);
+        }
+
+        let (certificate_pem, valid_from, expires_at) = cert_der_chain_to_pem(certificate)?;
+        Ok(CertificateData::new(
+            certificate_pem,
+            valid_from,
+            expires_at,
+        ))
+    }
+
+    pub(crate) fn cert_storage(&self) -> Result<&dyn Storage, CertError> {
+        self.cert_storage
+            .as_deref()
+            .ok_or_else(|| CertError::Other(eyre!("Certificate storage not set")))
+    }
+
+    pub(crate) fn secrets_storage(&self) -> Result<&dyn Storage, CertError> {
+        self.secrets_storage
+            .as_deref()
+            .ok_or_else(|| CertError::Other(eyre!("Secrets storage not set")))
+    }
+
+    pub(crate) async fn signing_key_from_storage(&self) -> Result<Option<String>, CertError> {
+        self.secrets_storage()?
+            .load(&self.signing_secret_id())
+            .await
+            .map_err(Into::into)
+    }
+
+    pub(crate) async fn persist_certificate_data(
+        &self,
+        cert_data: &CertificateData,
+    ) -> Result<(), CertError> {
+        self.persist_certificate_data_with_storage(self.cert_storage()?, cert_data)
+            .await
+    }
+
+    async fn persist_certificate_data_with_storage(
+        &self,
+        cert_storage: &dyn Storage,
+        cert_data: &CertificateData,
+    ) -> Result<(), CertError> {
+        let serialized_cert_data = serde_json::to_string(cert_data)?;
+        cert_storage
+            .store(&self.cert_key(), &serialized_cert_data)
+            .await?;
+        Ok(())
+    }
+
+    pub(crate) async fn persist_signing_key(&self, signing_key: &str) -> Result<(), CertError> {
+        let secrets_storage = self.secrets_storage()?;
+        let secret_id = self.signing_secret_id();
+        if secrets_storage.load(&secret_id).await?.is_some() {
+            secrets_storage.update(&secret_id, signing_key).await?;
+        } else {
+            secrets_storage.store(&secret_id, signing_key).await?;
+        }
+        Ok(())
+    }
+
+    fn parse_cert_chain_parts(&self, cert_pem: &str) -> Result<CertificateChain, CertError> {
+        use base64::prelude::{BASE64_STANDARD, Engine as _};
+
+        let certs = X509Pem::iter_from_buffer(cert_pem.as_bytes())
+            .map(|cert| {
+                cert.map(|pem| BASE64_STANDARD.encode(&pem.contents))
+                    .map_err(|e| CertError::Parsing(e.to_string()))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+
+        Ok(certs.into())
+    }
+
+    /// Parse `cert_pem` into chain parts and replace the cached entry so the
+    /// next read returns the fresh chain without an extra storage load/parse.
+    ///
+    /// This is the hook called after a certificate is provisioned or renewed.
+    async fn cache_provisioned_chain(&self, cert_pem: &str) -> Result<(), CertError> {
+        let cert_key = self.cert_key();
+        let parts = self.parse_cert_chain_parts(cert_pem)?;
+        // Replace eagerly so the next request never hits storage for this key.
+        self.cert_chain_cache.replace(cert_key, parts).await;
+        Ok(())
+    }
+
     #[inline]
-    fn create_http_client(&self) -> Box<dyn HttpClient> {
-        (self.acme_http_client_factory)()
+    fn create_http_client(&self) -> Result<Box<dyn HttpClient>, CertError> {
+        self.acme_http_client_factory
+            .as_ref()
+            .map(|factory| factory())
+            .ok_or_else(|| CertError::Other(eyre!("ACME HTTP client factory not set")))
     }
 
     #[inline]
@@ -526,6 +714,58 @@ impl CertManager {
     fn signing_secret_id(&self) -> String {
         format!("keys-{}", self.domains.join("-"))
     }
+}
+
+impl CertificateData {
+    fn new(certificate: String, valid_from: i64, expires_at: i64) -> Self {
+        Self {
+            certificate,
+            valid_from,
+            expires_at,
+            updated_at: now_unix_timestamp(),
+        }
+    }
+}
+
+fn is_pem_certificate(bytes: &[u8]) -> bool {
+    bytes
+        .windows(b"-----BEGIN CERTIFICATE-----".len())
+        .any(|window| window == b"-----BEGIN CERTIFICATE-----")
+}
+
+fn cert_der_chain_to_pem(certificate_der: Vec<u8>) -> Result<(String, i64, i64), CertError> {
+    use x509_parser::parse_x509_certificate;
+
+    let mut remaining = certificate_der.as_slice();
+    let mut certs = Vec::new();
+    let mut validity = None;
+
+    while !remaining.is_empty() {
+        let before_len = remaining.len();
+        let (next, cert) = parse_x509_certificate(remaining)
+            .map_err(|e| CertError::Parsing(format!("invalid DER certificate chain: {e}")))?;
+        let consumed_len = before_len - next.len();
+        if consumed_len == 0 {
+            return Err(CertError::Parsing(
+                "invalid DER certificate chain: parser made no progress".to_string(),
+            ));
+        }
+
+        if validity.is_none() {
+            validity = Some((
+                cert.validity().not_before.timestamp(),
+                cert.validity().not_after.timestamp(),
+            ));
+        }
+
+        let der = &remaining[..consumed_len];
+        certs.push(::pem::Pem::new("CERTIFICATE", der));
+        remaining = next;
+    }
+
+    let (valid_from, expires_at) =
+        validity.ok_or_else(|| CertError::Parsing("empty DER certificate chain".to_string()))?;
+    Ok((::pem::encode_many(&certs), valid_from, expires_at))
 }
 
 /// Setup the certificate renewal scheduler
@@ -571,11 +811,13 @@ fn now_unix_timestamp() -> i64 {
 fn tld_plus_one(domains: &[String]) -> String {
     use public_suffix::{DEFAULT_PROVIDER, EffectiveTLDProvider};
 
-    let first = domains[0].clone();
+    let Some(first) = domains.first() else {
+        return String::new();
+    };
 
     // Get the effective TLD+1 for the first domain
     DEFAULT_PROVIDER
-        .effective_tld_plus_one(&first)
-        .unwrap_or(&first)
+        .effective_tld_plus_one(first)
+        .unwrap_or(first)
         .to_string()
 }

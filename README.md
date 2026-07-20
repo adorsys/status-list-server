@@ -1,7 +1,7 @@
 # Status List Server
 
-[![CI](https://github.com/adorsys/status-list-server/actions/workflows/CI.yml/badge.svg)](https://github.com/adorsys/status-list-server/actions/workflows/CI.yml)
-[![CD](https://github.com/adorsys/status-list-server/actions/workflows/deploy.yml/badge.svg)](https://github.com/adorsys/status-list-server/actions/workflows/deploy.yml)
+[![CI](https://github.com/adorsys/status-list-server/actions/workflows/CI.yml/badge.svg?branch=main)](https://github.com/adorsys/status-list-server/actions/workflows/CI.yml?query=branch%3Amain)
+[![CD](https://github.com/adorsys/status-list-server/actions/workflows/deploy.yml/badge.svg?branch=main)](https://github.com/adorsys/status-list-server/actions/workflows/deploy.yml?query=branch%3Amain)
 [![dependencies](https://deps.rs/repo/github/adorsys/status-list-server/status.svg)](https://deps.rs/repo/github/adorsys/status-list-server)
 [![License](https://img.shields.io/github/license/base-org/node?color=blue)](LICENSE-MIT)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue?style=flat-square)](LICENSE-APACHE)
@@ -16,6 +16,21 @@ It supports both **JWT** and **CWT** formats, with cryptographic signing using m
 
 For a detailed explanation of the architecture, see the [hexagonal architecture documentation](docs/hexagonal-architecture.md).
 
+## Feature Implementation Status
+
+| Feature                         | Status         | Notes                                                               |
+| ------------------------------- | -------------- | ------------------------------------------------------------------- |
+| Issuer Registration             | ✅ Implemented | Public key registration via `POST /api/v1/credentials`              |
+| Status List Publishing          | ✅ Implemented | JWT-signed publishing via `PUT /api/v1/status-lists/{id}/statuses`  |
+| Status List Updates             | ✅ Implemented | Partial updates via `PATCH /api/v1/status-lists/{id}/statuses`      |
+| JWT Status List Format          | ✅ Implemented | JWS Compact Serialization with `exp`/`ttl`                          |
+| CWT Status List Format          | ✅ Implemented | COSE_Sign1_Tagged (tag 18) with `exp`/`ttl`                         |
+| Gzip Compression                | ✅ Implemented | Applied to both JWT and CWT responses                               |
+| HTTP Content Negotiation        | ⚠️ Partial     | Exact match only; RFC 9110 patterns (`*/*`, `q=`) not yet supported |
+| Historical Resolution (`time=`) | ❌ Not Started | Optional feature for time-based status queries                      |
+| Status List Aggregation         | ✅ Implemented | `GET /api/v1/aggregation` + optional `aggregation_uri` token member |
+| X.509 Certificate EKU           | ⚠️ Partial     | Placeholder OID (`...3.30`); rename pending spec finalization       |
+
 ## Quick Start
 
 ### Prerequisites
@@ -23,7 +38,7 @@ For a detailed explanation of the architecture, see the [hexagonal architecture 
 Before running the server, ensure you have the following tools installed:
 
 - [Rust & Cargo](https://www.rust-lang.org/tools/install) (Latest stable).
-- [PostgreSQL](https://www.postgresql.org/download/): The database system used for storing status lists.
+- A supported database backend: PostgreSQL, MySQL, or SQLite.
 - [Redis](https://redis.io/download): The in-memory data structure store used for caching.
 - [Docker](https://www.docker.com/get-started/) (optional, for local testing).
 
@@ -62,6 +77,8 @@ cargo run
 
 By default, the server will listen on `http://localhost:8000`. You can modify the host and port in the configuration settings.
 
+For deployment guidance and backend tradeoffs, see [`docs/database-backends.md`](docs/database-backends.md).
+
 ## API Documentation
 
 The public API is documented with an OpenAPI 3.1 specification. See [`docs/openapi.yaml`](docs/openapi.yaml) for the complete API contract.
@@ -85,6 +102,20 @@ The public API is documented with an OpenAPI 3.1 specification. See [`docs/opena
   - `500 INTERNAL SERVER ERROR`: System incurred an error
 
 When the optional `APP_SERVER__AGGREGATION_URI` configuration is set, every emitted Status List Token (JWT and CWT) includes it as the optional `aggregation_uri` member (draft-21 §4.2 / §4.3), allowing a consumer to discover the aggregation link directly from any single list token. When unset, the member is omitted entirely.
+
+## Configuration
+
+All runtime behavior is controlled via environment variables prefixed with `APP_` and using `__` as a nested separator (e.g. `APP_SERVER__PORT=8000`). Sensible defaults are built in, so only non-default values need to be set. See [`.env.template`](.env.template) for a complete example.
+
+For deployment guidance and backend tradeoffs, see [`docs/database-backends.md`](docs/database-backends.md).
+
+### Validation
+
+The following constraints are validated at startup and will cause the server to fail fast if violated:
+
+- `server.port` must be between 1 and 65535 (the `u16` type enforces the upper bound)
+- `server.cert.renewal_cron_schedule` must be a valid 6-field cron expression (seconds required)
+- `aws.s3_bucket` must not be empty
 
 ## Security
 
@@ -126,11 +157,59 @@ Example JWT token claims:
 
 The Status List Server is provisioned with a cryptographic certificate that is embedded into all issued status list tokens. This certificate ensures the authenticity and integrity of the tokens distributed by the server.
 
-**Automatic Issuance and Renewal:**
-
 - Certificate issuance and renewal are managed according to the configured renewal strategy.
 - Every day, a cron job checks whether the certificate should be renewed based on this strategy.
 - If the certificate is still considered valid according to the configured strategy, no renewal occurs; renewal is only triggered when necessary.
+- Parsed certificate chains are cached in memory for `APP_SERVER__CERT__CHAIN_CACHE_TTL` seconds (default: `3600`). A value of `0` keeps entries indefinitely. In multi-replica deployments, replicas that did not perform renewal rely on this TTL to refresh their in-memory chain.
+
+**Provisioning Modes:**
+
+- `server.cert.provisioning_strategy = "acme"` requests and renews certificates through ACME.
+- `server.cert.provisioning_strategy = "store"` loads externally managed certificate material and persists it into the configured certificate/secrets storage.
+- Store provisioning supports `server.cert.store.source = "filesystem"` with `certificate_path` and `signing_key_path`.
+- Store provisioning also supports `server.cert.store.source = "storage"` for the configured certificate/secrets storage backends, or `"aws_secrets_manager"` when both PEM values are stored in the configured secrets backend, using `certificate_key` and `signing_key_key`.
+- Filesystem store inputs may be PEM text or raw DER. Storage-backed store inputs may be PEM text or base64/base64url-encoded DER. Private keys must be PKCS#8 in PEM or DER form.
+- The renewal cron schedule is configured with `server.cert.renewal_cron_schedule`. For store provisioning, each scheduled run reloads the configured source and refreshes persisted material only when it changed.
+
+**Certificate Manager Builder Defaults:**
+
+- `CertManager::builder()` defaults to ACME provisioning.
+- The default renewal strategy is `PercentageOfLifetime(None)`, which renews at 2/3 of the certificate lifetime.
+- ACME uses `DefaultHttpClient` unless `.acme_http_client(...)` is supplied.
+- Store provisioning does not create ACME HTTP client state unless explicitly configured.
+- `email` defaults to an empty string, `organization` defaults to none, and `eku` defaults to none.
+- `domains`, `cert_storage`, and `secrets_storage` must always be provided.
+- ACME additionally requires `challenge_handler` and `acme_directory_url`.
+
+```rust
+let manager = CertManager::builder()
+    .domains(["statuslist.example.com"])
+    .email("support@example.com")
+    .organization(Some("example.com"))
+    .acme_directory_url("https://acme-v02.api.letsencrypt.org/directory")
+    .cert_storage(cert_storage)
+    .secrets_storage(secrets_storage)
+    .challenge_handler(challenge_handler)
+    .eku(&[1, 3, 6, 1, 5, 5, 7, 3, 30])
+    .acme_strategy()
+    .build()?;
+```
+
+```rust
+let manager = CertManager::builder()
+    .domains(["statuslist.example.com"])
+    .cert_storage(cert_storage)
+    .secrets_storage(secrets_storage)
+    .store_strategy(StoreProvisioningStrategy::filesystem(
+        "/etc/status-list/tls.crt",
+        "/etc/status-list/tls.key",
+    ))
+    .build()?;
+```
+
+**DNS Providers:**
+
+ACME DNS-01 challenges are solved through a configurable DNS provider. AWS Route53, Cloudflare, Google Cloud DNS, Azure DNS and self-hosted ACME-DNS are supported, selected via `APP_SERVER__CERT__DNS__PROVIDER`. See the [DNS Provider Documentation](docs/dns-providers.md) for setup instructions.
 
 ## Error Handling
 

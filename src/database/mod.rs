@@ -15,7 +15,10 @@ pub(crate) mod migrations {
     #[async_trait::async_trait]
     impl MigratorTrait for Migrator {
         fn migrations() -> Vec<Box<dyn MigrationTrait>> {
-            vec![Box::new(tables::Migration)]
+            vec![
+                Box::new(tables::Migration),
+                Box::new(add_updated_at::Migration),
+            ]
         }
     }
 
@@ -24,8 +27,13 @@ pub(crate) mod migrations {
         use super::*;
 
         /// Migration struct for creating database tables
-        #[derive(DeriveMigrationName)]
         pub(crate) struct Migration;
+
+        impl MigrationName for Migration {
+            fn name(&self) -> &str {
+                "mod"
+            }
+        }
 
         #[async_trait::async_trait]
         #[allow(elided_lifetimes_in_paths)]
@@ -187,6 +195,77 @@ pub(crate) mod migrations {
             Issuer,
             StatusList,
             Sub,
+        }
+    }
+
+    /// Migration to add updated_at column to status_lists table
+    pub(crate) mod add_updated_at {
+        use super::*;
+
+        /// Migration struct for adding updated_at column
+        pub(crate) struct Migration;
+
+        impl MigrationName for Migration {
+            fn name(&self) -> &str {
+                "add_updated_at"
+            }
+        }
+
+        #[async_trait::async_trait]
+        impl MigrationTrait for Migration {
+            /// Adds updated_at column to status_lists table
+            #[allow(elided_lifetimes_in_paths)]
+            async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+                manager
+                    .alter_table(
+                        Table::alter()
+                            .table(StatusLists::Table)
+                            .add_column(
+                                ColumnDef::new(StatusLists::UpdatedAt)
+                                    .big_integer()
+                                    .not_null()
+                                    .default(0),
+                            )
+                            .to_owned(),
+                    )
+                    .await?;
+
+                // Backfill pre-existing rows. With default(0) every legacy row
+                // would report Last-Modified = 1970-01-01, so any
+                // If-Modified-Since date >= 1970 would yield 304 and fresh
+                // tokens would never be served via the IMS path until the first
+                // update touches the row. Setting them to the migration run
+                // time makes the validator meaningful immediately.
+                let now_secs = time::OffsetDateTime::now_utc().unix_timestamp();
+                let update_stmt = sea_query::Query::update()
+                    .table(StatusLists::Table)
+                    .value(StatusLists::UpdatedAt, now_secs)
+                    .to_owned();
+                manager
+                    .get_connection()
+                    .execute(manager.get_database_backend().build(&update_stmt))
+                    .await
+                    .map(|_| ())
+            }
+
+            /// Removes updated_at column from status_lists table
+            #[allow(elided_lifetimes_in_paths)]
+            async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+                manager
+                    .alter_table(
+                        Table::alter()
+                            .table(StatusLists::Table)
+                            .drop_column(StatusLists::UpdatedAt)
+                            .to_owned(),
+                    )
+                    .await
+            }
+        }
+
+        #[derive(Iden)]
+        enum StatusLists {
+            Table,
+            UpdatedAt,
         }
     }
 }

@@ -1,6 +1,6 @@
 #[cfg(feature = "server")]
 pub mod bits_validation;
-#[cfg(test)]
+#[cfg(any(feature = "server", feature = "certificate-acme"))]
 pub(crate) mod cache;
 #[cfg(any(feature = "server", feature = "certificate-acme"))]
 pub mod cert_manager;

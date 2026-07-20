@@ -16,17 +16,17 @@ use tokio::sync::RwLock;
 use tracing::info;
 
 use crate::{
-    cert_manager::challenge::{ChallengeError, DnsUpdater},
+    cert_manager::challenge::{ChallengeError, DnsProvider as DnsChallengeProvider},
     ports::{DnsProvider, PortError},
 };
 
 #[derive(Clone)]
 pub struct DnsUpdaterProvider {
-    updater: Arc<dyn DnsUpdater>,
+    updater: Arc<dyn DnsChallengeProvider>,
 }
 
 impl DnsUpdaterProvider {
-    pub fn new(updater: Arc<dyn DnsUpdater>) -> Self {
+    pub fn new(updater: Arc<dyn DnsChallengeProvider>) -> Self {
         Self { updater }
     }
 }
@@ -35,7 +35,7 @@ impl DnsUpdaterProvider {
 impl DnsProvider for DnsUpdaterProvider {
     async fn present_txt(&self, name: &str, value: &str) -> Result<(), PortError> {
         self.updater
-            .upsert_record(name, value)
+            .create_txt_record(name, value)
             .await
             .map_err(|err| PortError::ExternalServiceUnavailable {
                 operation: "present DNS TXT record",
@@ -45,7 +45,7 @@ impl DnsProvider for DnsUpdaterProvider {
 
     async fn remove_txt(&self, name: &str, value: &str) -> Result<(), PortError> {
         self.updater
-            .remove_record(name, value)
+            .delete_txt_record(name, value)
             .await
             .map_err(|err| PortError::ExternalServiceUnavailable {
                 operation: "remove DNS TXT record",
@@ -273,8 +273,8 @@ impl ZoneInfo {
 }
 
 #[async_trait]
-impl DnsUpdater for AwsRoute53DnsUpdater {
-    async fn upsert_record(&self, domain: &str, value: &str) -> Result<(), ChallengeError> {
+impl DnsChallengeProvider for AwsRoute53DnsUpdater {
+    async fn create_txt_record(&self, domain: &str, value: &str) -> Result<(), ChallengeError> {
         let (record_name, change_id) = self
             .change_records(domain, ChangeAction::Upsert, value)
             .await?;
@@ -284,7 +284,7 @@ impl DnsUpdater for AwsRoute53DnsUpdater {
         Ok(())
     }
 
-    async fn remove_record(&self, domain: &str, value: &str) -> Result<(), ChallengeError> {
+    async fn delete_txt_record(&self, domain: &str, value: &str) -> Result<(), ChallengeError> {
         let (record_name, _) = self
             .change_records(domain, ChangeAction::Delete, value)
             .await?;
@@ -310,8 +310,8 @@ impl PebbleDnsUpdater {
 }
 
 #[async_trait]
-impl DnsUpdater for PebbleDnsUpdater {
-    async fn upsert_record(&self, domain: &str, value: &str) -> Result<(), ChallengeError> {
+impl DnsChallengeProvider for PebbleDnsUpdater {
+    async fn create_txt_record(&self, domain: &str, value: &str) -> Result<(), ChallengeError> {
         let record_name = format!("_acme-challenge.{domain}.");
         let url = format!("{}/set-txt", self.addr);
         let body = json!({"host": record_name, "value": value});
@@ -328,7 +328,7 @@ impl DnsUpdater for PebbleDnsUpdater {
         Ok(())
     }
 
-    async fn remove_record(&self, domain: &str, _value: &str) -> Result<(), ChallengeError> {
+    async fn delete_txt_record(&self, domain: &str, _value: &str) -> Result<(), ChallengeError> {
         let record_name = format!("_acme-challenge.{domain}.");
         let url = format!("{}/clear-txt", self.addr);
         let body = json!({"host": record_name});
