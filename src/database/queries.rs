@@ -711,7 +711,10 @@ mod test {
 
         // Verify future snapshot still exists
         let future_result = store.find_valid_at(list_id, 6500).await.unwrap();
-        assert!(future_result.is_some(), "Future snapshot should still exist");
+        assert!(
+            future_result.is_some(),
+            "Future snapshot should still exist"
+        );
     }
 
     #[cfg(feature = "sqlite")]
@@ -741,7 +744,10 @@ mod test {
 
         // Delete with cutoff before the snapshot's exp
         let deleted = store.delete_older_than(3000).await.unwrap();
-        assert_eq!(deleted, 0, "Should delete 0 snapshots when cutoff is before any exp");
+        assert_eq!(
+            deleted, 0,
+            "Should delete 0 snapshots when cutoff is before any exp"
+        );
 
         // Verify snapshot still exists
         let result = store.find_valid_at(list_id, 6500).await.unwrap();

@@ -1,8 +1,8 @@
 use std::{fmt::Debug, io::Write as _, sync::Arc};
 
 use axum::{
-    extract::{Path, Query, State},
     extract::rejection::QueryRejection,
+    extract::{Path, Query, State},
     http::{HeaderMap, HeaderValue, StatusCode, header},
     response::{IntoResponse, Response},
 };
