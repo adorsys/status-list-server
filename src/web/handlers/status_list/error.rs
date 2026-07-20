@@ -3,8 +3,6 @@ use std::borrow::Cow;
 use axum::http::StatusCode;
 use thiserror::Error;
 
-use crate::web::errors::ApiError;
-
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum StatusListError {
     #[error("Invalid list ID string: {0}")]
@@ -95,22 +93,11 @@ impl StatusListError {
     }
 }
 
-impl From<StatusListError> for ApiError {
-    fn from(err: StatusListError) -> Self {
-        Self {
-            status: err.get_status(),
-            error: err.get_error_code(),
-            error_description: Some(err.get_error_message()),
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::web::errors::ApiError;
     use axum::{body::to_bytes, response::IntoResponse};
-
     #[test]
     fn test_status_list_error_converted_to_api_error() {
         let err = StatusListError::StatusListNotFound;

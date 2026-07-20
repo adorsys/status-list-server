@@ -7,7 +7,10 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 
+use crate::database::error::RepositoryError;
+use crate::web::auth::errors::AuthenticationError;
 use crate::web::handlers::issue_credential::CredentialError;
+use crate::web::handlers::status_list::error::StatusListError;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ApiError {
@@ -77,6 +80,47 @@ impl From<CredentialError> for ApiError {
         match err {
             CredentialError::AuthError(err) => ApiError::from(err),
             CredentialError::RepoError(err) => ApiError::from(err),
+        }
+    }
+}
+
+impl From<RepositoryError> for ApiError {
+    fn from(err: RepositoryError) -> Self {
+        tracing::error!(error = %err, "repository error");
+        let description = err.to_string();
+        let (status, error_code) = match &err {
+            RepositoryError::DuplicateEntry => {
+                (StatusCode::CONFLICT, Cow::Borrowed("duplicate_entry"))
+            }
+            _ => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Cow::Borrowed("internal_error"),
+            ),
+        };
+        Self {
+            status,
+            error: error_code,
+            error_description: Some(description),
+        }
+    }
+}
+
+impl From<AuthenticationError> for ApiError {
+    fn from(err: AuthenticationError) -> Self {
+        Self {
+            status: err.get_status(),
+            error: err.get_error_code(),
+            error_description: Some(err.get_error_message()),
+        }
+    }
+}
+
+impl From<StatusListError> for ApiError {
+    fn from(err: StatusListError) -> Self {
+        Self {
+            status: err.get_status(),
+            error: err.get_error_code(),
+            error_description: Some(err.get_error_message()),
         }
     }
 }
