@@ -2,6 +2,7 @@ use std::{fmt::Debug, io::Write as _, sync::Arc};
 
 use axum::{
     extract::{Path, Query, State},
+    extract::rejection::QueryRejection,
     http::{HeaderMap, HeaderValue, StatusCode, header},
     response::{IntoResponse, Response},
 };
@@ -28,15 +29,24 @@ use super::{
         ISSUED_AT, STATUS_LIST, STATUS_LISTS_CWT_TYPE_VALUE, STATUS_LISTS_HEADER_JWT, SUBJECT, TTL,
     },
     error::StatusListError,
-    etag::generate_etag,
+    etag::{generate_etag, generate_historical_etag},
 };
 
 pub async fn get_status_list(
     State(state): State<AppState>,
     Path(list_id): Path<String>,
-    Query(query): Query<StatusListQuery>,
+    query_result: Result<Query<StatusListQuery>, QueryRejection>,
     headers: HeaderMap,
 ) -> Result<impl IntoResponse + Debug + use<>, StatusListError> {
+    // Handle query extraction failures with StatusListError
+    let query = match query_result {
+        Ok(Query(q)) => q,
+        Err(e) => {
+            tracing::warn!("Failed to parse query parameters: {e}");
+            return Err(StatusListError::InvalidHistoricalTime);
+        }
+    };
+
     let accept = headers.get(header::ACCEPT).and_then(|h| h.to_str().ok());
     let client_accepts_gzip = client_accepts_gzip(&headers);
 
@@ -187,6 +197,12 @@ async fn handle_historical_request(
         })?
         .ok_or(StatusListError::HistoricalStatusListNotFound)?;
 
+    // Generate ETag and extract values before consuming snapshot
+    let etag = generate_historical_etag(&snapshot);
+    let last_modified = format_http_date(snapshot.iat);
+    let validity_duration = (snapshot.exp - snapshot.iat) as u64;
+    let cache_control = format!("max-age={}, immutable", validity_duration.max(86400)); // At least 1 day
+
     // Build the status record from the snapshot
     let status_record = StatusListRecord {
         list_id: snapshot.list_id,
@@ -206,10 +222,6 @@ async fn handle_historical_request(
     )
     .await?;
 
-    // Build response with caching headers
-    let last_modified = format_http_date(snapshot.iat);
-    let cache_control = build_cache_control(state.token_ttl_secs);
-
     let mut response = Response::new(token_bytes.into());
     *response.status_mut() = StatusCode::OK;
     let h = response.headers_mut();
@@ -217,6 +229,7 @@ async fn handle_historical_request(
         header::CONTENT_TYPE,
         HeaderValue::from_str(accept_type).unwrap(),
     );
+    h.insert(header::ETAG, HeaderValue::from_str(&etag).unwrap());
     h.insert(
         header::LAST_MODIFIED,
         HeaderValue::from_str(&last_modified).unwrap(),
@@ -660,7 +673,7 @@ mod tests {
         let response = get_status_list(
             State(app_state.clone()),
             Path("test_list".to_string()),
-            Query(StatusListQuery { time: None }),
+            Ok(Query(StatusListQuery { time: None })),
             headers,
         )
         .await
@@ -740,7 +753,7 @@ mod tests {
         let response = get_status_list(
             State(app_state.clone()),
             Path("test_list".to_string()),
-            Query(StatusListQuery { time: None }),
+            Ok(Query(StatusListQuery { time: None })),
             headers,
         )
         .await
@@ -820,7 +833,7 @@ mod tests {
         let response = get_status_list(
             State(app_state.clone()),
             Path("test_list".to_string()),
-            Query(StatusListQuery { time: None }),
+            Ok(Query(StatusListQuery { time: None })),
             headers,
         )
         .await
@@ -967,7 +980,7 @@ mod tests {
         let response = get_status_list(
             State(app_state.clone()),
             Path("test_list".to_string()),
-            Query(StatusListQuery { time: None }),
+            Ok(Query(StatusListQuery { time: None })),
             headers,
         )
         .await
@@ -1034,7 +1047,7 @@ mod tests {
         let response = get_status_list(
             State(app_state.clone()),
             Path("test_list".to_string()),
-            Query(StatusListQuery { time: None }),
+            Ok(Query(StatusListQuery { time: None })),
             headers,
         )
         .await
@@ -1101,7 +1114,7 @@ mod tests {
         let response = get_status_list(
             State(app_state.clone()),
             Path("test_list".to_string()),
-            Query(StatusListQuery { time: None }),
+            Ok(Query(StatusListQuery { time: None })),
             headers,
         )
         .await
@@ -1188,7 +1201,7 @@ mod tests {
         let response = get_status_list(
             State(app_state.clone()),
             Path("test_list".to_string()),
-            Query(StatusListQuery { time: None }),
+            Ok(Query(StatusListQuery { time: None })),
             headers,
         )
         .await
@@ -1265,7 +1278,7 @@ mod tests {
         let result = get_status_list(
             State(app_state),
             Path("test_list".to_string()),
-            Query(StatusListQuery { time: None }),
+            Ok(Query(StatusListQuery { time: None })),
             headers,
         )
         .await;
@@ -1299,7 +1312,7 @@ mod tests {
         let result = get_status_list(
             State(app_state),
             Path("test_list".to_string()),
-            Query(StatusListQuery { time: None }),
+            Ok(Query(StatusListQuery { time: None })),
             headers,
         )
         .await;
@@ -1344,7 +1357,7 @@ mod tests {
         let result = get_status_list(
             State(app_state),
             Path("test_list".to_string()),
-            Query(StatusListQuery { time: None }),
+            Ok(Query(StatusListQuery { time: None })),
             headers,
         )
         .await;
@@ -1418,7 +1431,7 @@ mod tests {
         let response = get_status_list(
             State(app_state.clone()),
             Path("test_list".to_string()),
-            Query(StatusListQuery { time: None }),
+            Ok(Query(StatusListQuery { time: None })),
             headers,
         )
         .await
@@ -1498,7 +1511,7 @@ mod tests {
         let first_response = get_status_list(
             State(app_state.clone()),
             Path("test_list".to_string()),
-            Query(StatusListQuery { time: None }),
+            Ok(Query(StatusListQuery { time: None })),
             headers.clone(),
         )
         .await
@@ -1524,7 +1537,7 @@ mod tests {
         let conditional_response = get_status_list(
             State(app_state),
             Path("test_list".to_string()),
-            Query(StatusListQuery { time: None }),
+            Ok(Query(StatusListQuery { time: None })),
             conditional_headers,
         )
         .await
@@ -1592,7 +1605,7 @@ mod tests {
         let first_response = get_status_list(
             State(app_state.clone()),
             Path("test_list".to_string()),
-            Query(StatusListQuery { time: None }),
+            Ok(Query(StatusListQuery { time: None })),
             headers,
         )
         .await
@@ -1621,7 +1634,7 @@ mod tests {
         let conditional_response = get_status_list(
             State(app_state),
             Path("test_list".to_string()),
-            Query(StatusListQuery { time: None }),
+            Ok(Query(StatusListQuery { time: None })),
             conditional_headers,
         )
         .await
@@ -1686,7 +1699,7 @@ mod tests {
         let response = get_status_list(
             State(app_state),
             Path("test_list".to_string()),
-            Query(StatusListQuery { time: None }),
+            Ok(Query(StatusListQuery { time: None })),
             headers,
         )
         .await
@@ -1726,9 +1739,9 @@ mod tests {
         let response = get_status_list(
             State(app_state.clone()),
             Path("test_list".to_string()),
-            Query(StatusListQuery {
+            Ok(Query(StatusListQuery {
                 time: Some(1_700_000_450),
-            }),
+            })),
             HeaderMap::new(),
         )
         .await
@@ -1774,7 +1787,7 @@ mod tests {
         let result = get_status_list(
             State(test_app_state(Some(db_conn)).await),
             Path("test_list".to_string()),
-            Query(StatusListQuery { time: Some(1) }),
+            Ok(Query(StatusListQuery { time: Some(1) })),
             HeaderMap::new(),
         )
         .await;
@@ -1791,7 +1804,7 @@ mod tests {
         let result = get_status_list(
             State(app_state),
             Path("test_list".to_string()),
-            Query(StatusListQuery { time: Some(-1) }),
+            Ok(Query(StatusListQuery { time: Some(-1) })),
             HeaderMap::new(),
         )
         .await;
@@ -1808,7 +1821,7 @@ mod tests {
         let result = get_status_list(
             State(app_state),
             Path("test_list".to_string()),
-            Query(StatusListQuery { time: Some(0) }),
+            Ok(Query(StatusListQuery { time: Some(0) })),
             HeaderMap::new(),
         )
         .await;
@@ -1826,9 +1839,9 @@ mod tests {
         let result = get_status_list(
             State(app_state),
             Path("test_list".to_string()),
-            Query(StatusListQuery {
+            Ok(Query(StatusListQuery {
                 time: Some(i64::MAX),
-            }),
+            })),
             HeaderMap::new(),
         )
         .await;
