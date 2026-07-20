@@ -15,6 +15,7 @@ use crate::{
 };
 
 use super::error::StatusListError;
+use super::publish_status::persist_historical_snapshot;
 
 /// Update status entries in an existing status list.
 pub async fn update_status(
@@ -80,6 +81,8 @@ pub async fn update_status(
         .update_one(&exact_status_list.list_id, exact_status_list.clone())
         .await?;
 
+    persist_historical_snapshot(&appstate, &exact_status_list).await?;
+
     // Invalidate cache entry to ensure next read fetches the updated record
     appstate.cache.invalidate(&exact_status_list.list_id).await;
     tracing::info!(
@@ -101,7 +104,7 @@ mod test {
         response::IntoResponse,
     };
     use hyper::StatusCode;
-    use sea_orm::{DatabaseBackend, MockDatabase};
+    use sea_orm::{DatabaseBackend, MockDatabase, MockExecResult};
 
     use crate::{
         models::{
@@ -178,6 +181,10 @@ mod test {
                     vec![existing_token.clone()], // for find_one_by
                     vec![],
                 ])
+                .append_exec_results(vec![MockExecResult {
+                    rows_affected: 1,
+                    last_insert_id: 0,
+                }])
                 .into_connection(),
         );
 

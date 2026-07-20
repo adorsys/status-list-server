@@ -72,12 +72,14 @@ pub(crate) async fn test_app_state_with(
 
     AppState {
         credential_repo: SeaOrmStore::new(db.clone()),
-        status_list_repo: SeaOrmStore::new(db),
+        status_list_repo: SeaOrmStore::new(db.clone()),
+        status_list_history_repo: SeaOrmStore::new(db),
         server_domain: "example.com".to_string(),
         cert_manager: Arc::new(certificate_manager),
         cache: StatusListCache::new(5 * 60, 100),
         aggregation_uri,
         token_exp_secs: 900,
         token_ttl_secs: 300,
+        history_retention_secs: 7776000, // 90 days default for tests
     }
 }

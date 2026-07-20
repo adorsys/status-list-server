@@ -10,7 +10,7 @@ use crate::{
     },
     config::{Config as AppConfig, DnsProviderKind, ENV_DEVELOPMENT, ENV_PRODUCTION},
     database::{Migrator, queries::SeaOrmStore},
-    models::{Credentials, StatusListRecord},
+    models::{Credentials, StatusListHistoryRecord, StatusListRecord},
 };
 use aws_config::{BehaviorVersion, Region, SdkConfig};
 use color_eyre::eyre::{Context, Result as EyeResult, eyre};
@@ -39,12 +39,16 @@ fn acme_dns_credentials(account: &crate::config::AcmeDnsAccount) -> AcmeDnsCrede
 pub struct AppState {
     pub credential_repo: SeaOrmStore<Credentials>,
     pub status_list_repo: SeaOrmStore<StatusListRecord>,
+    pub status_list_history_repo: SeaOrmStore<StatusListHistoryRecord>,
     pub server_domain: String,
     pub cert_manager: Arc<CertManager>,
     pub cache: StatusListCache,
     pub aggregation_uri: Option<String>,
     pub token_exp_secs: u64,
     pub token_ttl_secs: u64,
+    /// Retention period for historical status list snapshots in seconds.
+    /// Set to 0 to disable historical snapshots entirely.
+    pub history_retention_secs: u64,
 }
 
 pub async fn build_state(config: &AppConfig) -> EyeResult<AppState> {
@@ -168,14 +172,60 @@ pub async fn build_state(config: &AppConfig) -> EyeResult<AppState> {
     let db_clone = Arc::new(db);
     Ok(AppState {
         credential_repo: SeaOrmStore::new(db_clone.clone()),
-        status_list_repo: SeaOrmStore::new(db_clone),
+        status_list_repo: SeaOrmStore::new(db_clone.clone()),
+        status_list_history_repo: SeaOrmStore::new(db_clone.clone()),
         server_domain: config.server.domain.clone(),
         cert_manager: Arc::new(certificate_manager),
         cache: StatusListCache::new(config.cache.ttl, config.cache.max_capacity),
         aggregation_uri: empty_to_none(config.server.aggregation_uri.clone()),
         token_exp_secs: config.status_list.token_exp_secs,
         token_ttl_secs: config.status_list.token_ttl_secs,
+        history_retention_secs: config.status_list.history_retention_secs,
     })
+}
+
+/// Setup the scheduled task to clean up old status list history snapshots.
+/// This runs daily at midnight UTC by default.
+pub async fn setup_history_cleanup_scheduler(
+    app_state: AppState,
+    cron_schedule: &str,
+) -> color_eyre::Result<()> {
+    use tokio_cron_scheduler::{Job, JobScheduler};
+    use tracing::{error, info};
+
+    // Skip scheduling if historical snapshots are disabled
+    if app_state.history_retention_secs == 0 {
+        info!(
+            "Historical snapshots are disabled (history_retention_secs=0), skipping cleanup scheduler"
+        );
+        return Ok(());
+    }
+
+    let scheduler = JobScheduler::new().await?;
+
+    // Schedule the cleanup task
+    scheduler
+        .add(Job::new_async(cron_schedule, move |_, _| {
+            let app_state = app_state.clone();
+            Box::pin(async move {
+                let now = time::OffsetDateTime::now_utc().unix_timestamp();
+                let cutoff = now - app_state.history_retention_secs as i64;
+
+                match app_state.status_list_history_repo.delete_older_than(cutoff).await {
+                    Ok(deleted) => {
+                        info!("Cleaned up {deleted} historical status list snapshots older than {cutoff}");
+                    }
+                    Err(e) => {
+                        error!("Failed to clean up historical snapshots: {e:?}");
+                    }
+                }
+            })
+        })?)
+        .await?;
+
+    scheduler.start().await?;
+    info!("Historical snapshot cleanup scheduler started with schedule: {cron_schedule}");
+    Ok(())
 }
 
 fn store_certificate_strategy(config: &AppConfig) -> EyeResult<Option<StoreProvisioningStrategy>> {
@@ -629,6 +679,7 @@ mod tests {
             status_list: StatusListConfig {
                 token_exp_secs: 900,
                 token_ttl_secs: 300,
+                history_retention_secs: 7776000, // 90 days
             },
         }
     }

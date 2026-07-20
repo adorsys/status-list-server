@@ -21,6 +21,10 @@ pub enum StatusListError {
     MalformedBody(String),
     #[error("Status list not found")]
     StatusListNotFound,
+    #[error("No status list token is available for the requested time")]
+    HistoricalStatusListNotFound,
+    #[error("Invalid historical time: must be positive and not in the future")]
+    InvalidHistoricalTime,
     #[error("Unsupported bits value")]
     UnsupportedBits,
     #[error("Could not decode lst")]
@@ -53,6 +57,8 @@ impl StatusListError {
             UpdateFailed => StatusCode::INTERNAL_SERVER_ERROR,
             MalformedBody(_) => StatusCode::BAD_REQUEST,
             StatusListNotFound => StatusCode::NOT_FOUND,
+            HistoricalStatusListNotFound => StatusCode::NOT_FOUND,
+            InvalidHistoricalTime => StatusCode::BAD_REQUEST,
             UnsupportedBits => StatusCode::BAD_REQUEST,
             DecodeError => StatusCode::BAD_REQUEST,
             DecompressionError(_) => StatusCode::BAD_REQUEST,
@@ -76,6 +82,8 @@ impl StatusListError {
             UpdateFailed => Cow::Borrowed("update_failed"),
             MalformedBody(_) => Cow::Borrowed("malformed_body"),
             StatusListNotFound => Cow::Borrowed("status_list_not_found"),
+            HistoricalStatusListNotFound => Cow::Borrowed("historical_status_list_not_found"),
+            InvalidHistoricalTime => Cow::Borrowed("invalid_historical_time"),
             UnsupportedBits => Cow::Borrowed("unsupported_bits"),
             DecodeError => Cow::Borrowed("decode_error"),
             DecompressionError(_) => Cow::Borrowed("decompression_error"),
@@ -151,6 +159,14 @@ mod tests {
             assert_eq!(api_err.status, expected_status, "Status mismatch");
             assert_eq!(api_err.error.as_ref(), expected_code, "Code mismatch");
         }
+
+        let api_err: ApiError = StatusListError::HistoricalStatusListNotFound.into();
+        assert_eq!(api_err.status, StatusCode::NOT_FOUND);
+        assert_eq!(api_err.error.as_ref(), "historical_status_list_not_found");
+
+        let api_err: ApiError = StatusListError::InvalidHistoricalTime.into();
+        assert_eq!(api_err.status, StatusCode::BAD_REQUEST);
+        assert_eq!(api_err.error.as_ref(), "invalid_historical_time");
     }
 
     #[test]
