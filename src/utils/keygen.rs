@@ -74,6 +74,14 @@ impl Keypair {
         })
     }
 
+    /// Create a keypair from PKCS#8 DER bytes.
+    pub(crate) fn from_pkcs8_der(der: &[u8]) -> Result<Self, Error> {
+        let key = SigningKey::from_pkcs8_der(der).map_err(|e| Error::Parsing(e.into()))?;
+        Ok(Keypair {
+            repr: KeyRepr { key },
+        })
+    }
+
     /// Convert the private key to a pkcs8 PEM string
     pub(crate) fn to_pkcs8_pem(&self) -> Result<String, Error> {
         self.repr
@@ -86,6 +94,16 @@ impl Keypair {
     /// Convert the private key to a pkcs8 PEM bytes
     pub(crate) fn to_pkcs8_pem_bytes(&self) -> Result<Vec<u8>, Error> {
         self.to_pkcs8_pem().map(|pem| pem.into_bytes())
+    }
+
+    /// Convert the private key to PKCS#8 DER bytes.
+    #[cfg(test)]
+    pub(crate) fn to_pkcs8_der_bytes(&self) -> Result<Vec<u8>, Error> {
+        self.repr
+            .key
+            .to_pkcs8_der()
+            .map_err(|e| Error::Parsing(e.into()))
+            .map(|doc| doc.as_bytes().to_vec())
     }
 }
 

@@ -25,8 +25,13 @@ pub(crate) mod migrations {
         use super::*;
 
         /// Migration struct for creating database tables
-        #[derive(DeriveMigrationName)]
         pub(crate) struct Migration;
+
+        impl MigrationName for Migration {
+            fn name(&self) -> &str {
+                "mod"
+            }
+        }
 
         #[async_trait::async_trait]
         #[allow(elided_lifetimes_in_paths)]
@@ -196,8 +201,13 @@ pub(crate) mod migrations {
         use super::*;
 
         /// Migration struct for adding updated_at column
-        #[derive(DeriveMigrationName)]
         pub(crate) struct Migration;
+
+        impl MigrationName for Migration {
+            fn name(&self) -> &str {
+                "add_updated_at"
+            }
+        }
 
         #[async_trait::async_trait]
         impl MigrationTrait for Migration {
@@ -225,12 +235,13 @@ pub(crate) mod migrations {
                 // update touches the row. Setting them to the migration run
                 // time makes the validator meaningful immediately.
                 let now_secs = time::OffsetDateTime::now_utc().unix_timestamp();
+                let update_stmt = sea_query::Query::update()
+                    .table(StatusLists::Table)
+                    .value(StatusLists::UpdatedAt, now_secs)
+                    .to_owned();
                 manager
                     .get_connection()
-                    .execute_unprepared(&format!(
-                        r#"UPDATE "status_lists" SET "updated_at" = {}"#,
-                        now_secs
-                    ))
+                    .execute(manager.get_database_backend().build(&update_stmt))
                     .await
                     .map(|_| ())
             }
