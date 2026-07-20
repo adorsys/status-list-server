@@ -63,6 +63,8 @@ pub struct StatusListRecord {
     pub issuer: Issuer,
     pub status_list: StatusList,
     pub sub: String,
+    /// Unix timestamp (seconds) of last modification
+    pub updated_at: i64,
 }
 
 fn status_value(status: &Status) -> Result<u32, DomainError> {

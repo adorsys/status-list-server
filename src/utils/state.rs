@@ -13,7 +13,7 @@ use crate::{
         secret::StorageSecretStore,
     },
     application::{
-        CredentialApplicationService, CredentialService, StatusListApplicationService,
+        CredentialApplicationService, CredentialService, StatusListApplicationServiceWithHistory,
         StatusListService,
     },
     cert_manager::{
@@ -222,7 +222,7 @@ pub async fn build_state_with_cert_manager(
     let token_exp_secs = config.status_list.token_exp_secs;
     Ok((
         AppState {
-            status_lists: Arc::new(StatusListApplicationService::new(
+            status_lists: Arc::new(StatusListApplicationServiceWithHistory::new(
                 status_lists,
                 status_list_cache,
                 status_list_history,

@@ -1,12 +1,13 @@
 //! In-memory adapters for application-service unit tests and memory-only use.
 use crate::{
     domain::{Credential, StatusListRecord},
-    models::StatusListHistoryRecord,
     ports::{
         CredentialRepository, DnsProvider, MetricsCollector, PortError, SecretStore,
-        StatusListCache, StatusListHistoryRepository, StatusListRepository,
+        StatusListCache, StatusListRepository,
     },
 };
+#[cfg(any(feature = "server", feature = "postgres"))]
+use crate::{models::StatusListHistoryRecord, ports::StatusListHistoryRepository};
 use async_trait::async_trait;
 use std::{collections::HashMap, sync::Arc};
 use tokio::sync::RwLock;
@@ -128,11 +129,13 @@ impl MetricsCollector for MemoryMetricsCollector {
     fn increment(&self, _name: &'static str) {}
 }
 
+#[cfg(any(feature = "server", feature = "postgres"))]
 #[derive(Clone, Default)]
 pub struct MemoryStatusListHistory {
     values: Arc<RwLock<HashMap<String, StatusListHistoryRecord>>>,
 }
 
+#[cfg(any(feature = "server", feature = "postgres"))]
 #[async_trait]
 impl StatusListHistoryRepository for MemoryStatusListHistory {
     async fn insert(&self, record: StatusListHistoryRecord) -> Result<(), PortError> {
@@ -189,20 +192,48 @@ mod tests {
                 lst: "".into(),
             },
             sub: "https://example/id".into(),
+            updated_at: 1672531200,
         }
     }
+
     #[tokio::test]
     async fn application_services_work_without_infrastructure() {
         let repo = Arc::new(MemoryStatusLists::default());
         let cache = Arc::new(MemoryStatusListCache::default());
-        let history = Arc::new(MemoryStatusListHistory::default());
-        let token_exp_secs = 900u64;
-        PublishStatusList::new(repo.clone(), history.clone(), token_exp_secs)
+        PublishStatusList::new(repo.clone())
             .execute(record())
             .await
             .unwrap();
         assert!(matches!(
-            PublishStatusList::new(repo.clone(), history.clone(), token_exp_secs)
+            PublishStatusList::new(repo.clone()).execute(record()).await,
+            Err(UseCaseError::AlreadyExists)
+        ));
+        let fetched = GetStatusListToken::new(repo.clone(), cache.clone())
+            .execute("id")
+            .await
+            .unwrap();
+        assert_eq!(fetched.list_id, "id");
+        UpdateStatuses::new(repo, cache.clone())
+            .execute(&Issuer("issuer".into()), "id", Vec::new())
+            .await
+            .unwrap();
+        assert!(cache.get("id").await.unwrap().is_none());
+    }
+
+    #[cfg(any(feature = "server", feature = "postgres"))]
+    #[tokio::test]
+    async fn application_services_work_with_history() {
+        use crate::application::{PublishStatusListWithHistory, UpdateStatusesWithHistory};
+        let repo = Arc::new(MemoryStatusLists::default());
+        let cache = Arc::new(MemoryStatusListCache::default());
+        let history = Arc::new(MemoryStatusListHistory::default());
+        let token_exp_secs = 900u64;
+        PublishStatusListWithHistory::new(repo.clone(), history.clone(), token_exp_secs)
+            .execute(record())
+            .await
+            .unwrap();
+        assert!(matches!(
+            PublishStatusListWithHistory::new(repo.clone(), history.clone(), token_exp_secs)
                 .execute(record())
                 .await,
             Err(UseCaseError::AlreadyExists)
@@ -212,7 +243,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(fetched.list_id, "id");
-        UpdateStatuses::new(repo, cache.clone(), history)
+        UpdateStatusesWithHistory::new(repo, cache.clone(), history)
             .execute(&Issuer("issuer".into()), "id", Vec::new(), token_exp_secs)
             .await
             .unwrap();

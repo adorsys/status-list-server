@@ -275,7 +275,7 @@ async fn fetch_status_record(
                     lst: record.status_list.lst,
                 },
                 sub: record.sub,
-                updated_at: 0, // Domain model doesn't track updated_at; this is a persistence concern
+                updated_at: record.updated_at,
             };
             Ok(Arc::new(status_record))
         }

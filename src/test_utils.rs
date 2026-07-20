@@ -7,7 +7,7 @@ use crate::{
             PostgresStatusListRepository,
         },
     },
-    application::{CredentialApplicationService, StatusListApplicationService},
+    application::{CredentialApplicationService, StatusListApplicationServiceWithHistory},
     cert_manager::storage::StorageError,
     ports::{
         CredentialRepository, StatusListCache, StatusListHistoryRepository, StatusListRepository,
@@ -97,7 +97,7 @@ pub(crate) async fn test_app_state_with(
     let token_exp_secs = 900u64;
 
     AppState {
-        status_lists: Arc::new(StatusListApplicationService::new(
+        status_lists: Arc::new(StatusListApplicationServiceWithHistory::new(
             status_lists,
             status_list_cache,
             status_list_history,

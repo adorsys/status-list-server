@@ -6,12 +6,10 @@ use async_trait::async_trait;
 
 use crate::{
     domain::{Credential, DomainError, Issuer, StatusEntry, StatusList, StatusListRecord},
-    models::StatusListHistoryRecord,
-    ports::{
-        CredentialRepository, PortError, StatusListCache, StatusListHistoryRepository,
-        StatusListRepository,
-    },
+    ports::{CredentialRepository, PortError, StatusListCache, StatusListRepository},
 };
+#[cfg(any(feature = "server", feature = "postgres"))]
+use crate::{models::StatusListHistoryRecord, ports::StatusListHistoryRepository};
 
 #[derive(Debug, thiserror::Error)]
 pub enum UseCaseError {
@@ -55,6 +53,7 @@ pub trait StatusListService: Send + Sync {
     async fn list_status_list_uris(&self) -> Result<Vec<String>, UseCaseError>;
 
     /// Get a historical snapshot valid at the given time (draft-21 §8.4).
+    #[cfg(any(feature = "server", feature = "postgres"))]
     async fn get_historical_status_list(
         &self,
         list_id: &str,
@@ -62,6 +61,7 @@ pub trait StatusListService: Send + Sync {
     ) -> Result<StatusListHistoryRecord, UseCaseError>;
 
     /// Delete historical snapshots older than the cutoff.
+    #[cfg(any(feature = "server", feature = "postgres"))]
     async fn cleanup_history(&self, cutoff: i64) -> Result<u64, UseCaseError>;
 }
 
@@ -104,14 +104,54 @@ impl<R: CredentialRepository + ?Sized> CredentialService for CredentialApplicati
     }
 }
 
-pub struct PublishStatusList<R: ?Sized, H: ?Sized> {
+pub struct PublishStatusList<R: ?Sized> {
+    repository: Arc<R>,
+}
+
+impl<R: StatusListRepository + ?Sized> PublishStatusList<R> {
+    pub fn new(repository: Arc<R>) -> Self {
+        Self { repository }
+    }
+
+    pub async fn execute(&self, record: StatusListRecord) -> Result<(), UseCaseError> {
+        if self.repository.find(&record.list_id).await?.is_some() {
+            return Err(UseCaseError::AlreadyExists);
+        }
+        self.repository.insert(record).await?;
+        Ok(())
+    }
+
+    pub async fn execute_new(
+        &self,
+        list_id: String,
+        issuer: Issuer,
+        sub: String,
+        statuses: Vec<StatusEntry>,
+    ) -> Result<(), UseCaseError> {
+        let record = StatusListRecord {
+            list_id,
+            issuer,
+            status_list: StatusList::create(statuses)?,
+            sub,
+            updated_at: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs() as i64,
+        };
+        self.execute(record).await
+    }
+}
+
+#[cfg(any(feature = "server", feature = "postgres"))]
+pub struct PublishStatusListWithHistory<R: ?Sized, H: ?Sized> {
     repository: Arc<R>,
     history: Arc<H>,
     token_exp_secs: u64,
 }
 
+#[cfg(any(feature = "server", feature = "postgres"))]
 impl<R: StatusListRepository + ?Sized, H: StatusListHistoryRepository + ?Sized>
-    PublishStatusList<R, H>
+    PublishStatusListWithHistory<R, H>
 {
     pub fn new(repository: Arc<R>, history: Arc<H>, token_exp_secs: u64) -> Self {
         Self {
@@ -161,23 +201,42 @@ impl<R: StatusListRepository + ?Sized, H: StatusListHistoryRepository + ?Sized>
             issuer,
             status_list: StatusList::create(statuses)?,
             sub,
+            updated_at: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs() as i64,
         };
         self.execute(record).await
     }
 }
 
-pub struct StatusListApplicationService<R: ?Sized, C: ?Sized, H: ?Sized> {
+pub struct StatusListApplicationService<R: ?Sized, C: ?Sized> {
+    repository: Arc<R>,
+    cache: Arc<C>,
+}
+
+impl<R: StatusListRepository + ?Sized, C: StatusListCache + ?Sized>
+    StatusListApplicationService<R, C>
+{
+    pub fn new(repository: Arc<R>, cache: Arc<C>) -> Self {
+        Self { repository, cache }
+    }
+}
+
+#[cfg(any(feature = "server", feature = "postgres"))]
+pub struct StatusListApplicationServiceWithHistory<R: ?Sized, C: ?Sized, H: ?Sized> {
     repository: Arc<R>,
     cache: Arc<C>,
     history: Arc<H>,
     token_exp_secs: u64,
 }
 
+#[cfg(any(feature = "server", feature = "postgres"))]
 impl<
     R: StatusListRepository + ?Sized,
     C: StatusListCache + ?Sized,
     H: StatusListHistoryRepository + ?Sized,
-> StatusListApplicationService<R, C, H>
+> StatusListApplicationServiceWithHistory<R, C, H>
 {
     pub fn new(repository: Arc<R>, cache: Arc<C>, history: Arc<H>, token_exp_secs: u64) -> Self {
         Self {
@@ -190,11 +249,8 @@ impl<
 }
 
 #[async_trait]
-impl<
-    R: StatusListRepository + ?Sized,
-    C: StatusListCache + ?Sized,
-    H: StatusListHistoryRepository + ?Sized,
-> StatusListService for StatusListApplicationService<R, C, H>
+impl<R: StatusListRepository + ?Sized, C: StatusListCache + ?Sized> StatusListService
+    for StatusListApplicationService<R, C>
 {
     async fn publish_status_list(
         &self,
@@ -203,7 +259,63 @@ impl<
         sub: String,
         statuses: Vec<StatusEntry>,
     ) -> Result<(), UseCaseError> {
-        PublishStatusList::new(
+        PublishStatusList::new(self.repository.clone())
+            .execute_new(list_id, issuer, sub, statuses)
+            .await
+    }
+
+    async fn update_statuses(
+        &self,
+        issuer: &Issuer,
+        list_id: &str,
+        statuses: Vec<StatusEntry>,
+    ) -> Result<(), UseCaseError> {
+        UpdateStatuses::new(self.repository.clone(), self.cache.clone())
+            .execute(issuer, list_id, statuses)
+            .await
+    }
+
+    async fn get_status_list(&self, list_id: &str) -> Result<StatusListRecord, UseCaseError> {
+        GetStatusListToken::new(self.repository.clone(), self.cache.clone())
+            .execute(list_id)
+            .await
+    }
+
+    async fn list_status_list_uris(&self) -> Result<Vec<String>, UseCaseError> {
+        Ok(self.repository.list_uris().await?)
+    }
+
+    #[cfg(any(feature = "server", feature = "postgres"))]
+    async fn get_historical_status_list(
+        &self,
+        _list_id: &str,
+        _time: i64,
+    ) -> Result<StatusListHistoryRecord, UseCaseError> {
+        Err(UseCaseError::NotFound)
+    }
+
+    #[cfg(any(feature = "server", feature = "postgres"))]
+    async fn cleanup_history(&self, _cutoff: i64) -> Result<u64, UseCaseError> {
+        Ok(0)
+    }
+}
+
+#[cfg(any(feature = "server", feature = "postgres"))]
+#[async_trait]
+impl<
+    R: StatusListRepository + ?Sized,
+    C: StatusListCache + ?Sized,
+    H: StatusListHistoryRepository + ?Sized,
+> StatusListService for StatusListApplicationServiceWithHistory<R, C, H>
+{
+    async fn publish_status_list(
+        &self,
+        list_id: String,
+        issuer: Issuer,
+        sub: String,
+        statuses: Vec<StatusEntry>,
+    ) -> Result<(), UseCaseError> {
+        PublishStatusListWithHistory::new(
             self.repository.clone(),
             self.history.clone(),
             self.token_exp_secs,
@@ -218,7 +330,7 @@ impl<
         list_id: &str,
         statuses: Vec<StatusEntry>,
     ) -> Result<(), UseCaseError> {
-        UpdateStatuses::new(
+        UpdateStatusesWithHistory::new(
             self.repository.clone(),
             self.cache.clone(),
             self.history.clone(),
@@ -257,17 +369,50 @@ impl<
     }
 }
 
-pub struct UpdateStatuses<R: ?Sized, C: ?Sized, H: ?Sized> {
+pub struct UpdateStatuses<R: ?Sized, C: ?Sized> {
+    repository: Arc<R>,
+    cache: Arc<C>,
+}
+
+impl<R: StatusListRepository + ?Sized, C: StatusListCache + ?Sized> UpdateStatuses<R, C> {
+    pub fn new(repository: Arc<R>, cache: Arc<C>) -> Self {
+        Self { repository, cache }
+    }
+
+    pub async fn execute(
+        &self,
+        issuer: &Issuer,
+        list_id: &str,
+        statuses: Vec<StatusEntry>,
+    ) -> Result<(), UseCaseError> {
+        let mut existing = self
+            .repository
+            .find(list_id)
+            .await?
+            .ok_or(UseCaseError::NotFound)?;
+        if &existing.issuer != issuer {
+            return Err(UseCaseError::IssuerMismatch);
+        }
+        existing.status_list = existing.status_list.update(statuses)?;
+        self.repository.update(existing.clone()).await?;
+        self.cache.invalidate(&existing.list_id).await?;
+        Ok(())
+    }
+}
+
+#[cfg(any(feature = "server", feature = "postgres"))]
+pub struct UpdateStatusesWithHistory<R: ?Sized, C: ?Sized, H: ?Sized> {
     repository: Arc<R>,
     cache: Arc<C>,
     history: Arc<H>,
 }
 
+#[cfg(any(feature = "server", feature = "postgres"))]
 impl<
     R: StatusListRepository + ?Sized,
     C: StatusListCache + ?Sized,
     H: StatusListHistoryRepository + ?Sized,
-> UpdateStatuses<R, C, H>
+> UpdateStatusesWithHistory<R, C, H>
 {
     pub fn new(repository: Arc<R>, cache: Arc<C>, history: Arc<H>) -> Self {
         Self {
