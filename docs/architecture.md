@@ -148,7 +148,7 @@ each tier keyed and tuned independently:
 | ----               | ------                                                          | ---                                                               | -------------------                                           |
 | **strict**         | `POST /api/v1/credentials`                                      | peer IP (`PeerIpKeyExtractor`)                                    | `strict_burst_size` (10), `strict_period_secs` (60s)          |
 | **writes**         | `PUT`/`PATCH /api/v1/status-lists/{list_id}/statuses`           | smart IP (`SmartIpKeyExtractor`) — reads `X-Forwarded-For`,       | `strict_burst_size` (10), `strict_period_secs` (60s)          |
-|                    |                                                                    | `X-Real-Ip`, `Forwarded` headers, fallback to peer IP             |                                                               |
+|                    |                                                                 | `X-Real-Ip`, `Forwarded` headers, fallback to peer IP             |                                                               |
 | **permissive**     | `GET /api/v1/aggregation`, `GET /api/v1/status-lists/{list_id}` | peer IP (`PeerIpKeyExtractor`)                                    | `permissive_burst_size` (100), `permissive_period_secs` (60s) |
 
 The writes tier is applied **before** the `auth` middleware (rate limiting by IP
