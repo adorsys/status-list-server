@@ -22,8 +22,7 @@ impl Redis {
     /// # TTL Semantics
     /// A value of `ttl = 0` **disables caching**: no data is stored or retrieved.
     /// This is consistent with other cache implementations in the application
-    /// ([`Cache`](crate::utils::cache::Cache) for status-lists and
-    /// [`AwsSecretsManager`](crate::cert_manager::storage::AwsSecretsManager) for secrets).
+    /// (status-list cache for status-lists and AWS Secrets Manager for secrets).
     /// All certificate requests will fall through to the underlying storage.
     pub fn with_ttl(self, ttl: u64) -> Self {
         Self {
