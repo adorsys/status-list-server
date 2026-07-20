@@ -1162,6 +1162,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_error_responses_omit_etag_and_last_modified() {
+        // Test 404 Not Found error
         let mock_db = MockDatabase::new(DatabaseBackend::Postgres);
         let db_conn = Arc::new(
             mock_db
@@ -1184,6 +1185,7 @@ mod tests {
         let response = result.unwrap_err().into_response();
         let response_headers = response.headers();
 
+        // Verify error responses do NOT include ETag or Last-Modified headers
         assert!(
             response_headers.get(http::header::ETAG).is_none(),
             "Error response should not include ETag header"
@@ -1193,6 +1195,7 @@ mod tests {
             "Error response should not include Last-Modified header"
         );
 
+        // But should include Cache-Control
         assert!(
             response_headers.get(http::header::CACHE_CONTROL).is_some(),
             "Error response should include Cache-Control header"
@@ -1201,12 +1204,15 @@ mod tests {
 
     #[test]
     fn test_build_cache_control() {
+        // Test with specific TTL value
         let cache_control = build_cache_control(300);
         assert_eq!(cache_control, "max-age=300, immutable");
 
+        // Test with zero TTL
         let cache_control_zero = build_cache_control(0);
         assert_eq!(cache_control_zero, "max-age=0, immutable");
 
+        // Test with large TTL value
         let cache_control_large = build_cache_control(86400);
         assert_eq!(cache_control_large, "max-age=86400, immutable");
     }
@@ -1254,6 +1260,7 @@ mod tests {
 
         let response_headers = response.headers();
 
+        // Verify ETag header is present and has correct format
         let etag = response_headers
             .get(http::header::ETAG)
             .unwrap()
@@ -1262,6 +1269,7 @@ mod tests {
         assert!(etag.starts_with("W/\""), "ETag should be a weak validator");
         assert!(etag.ends_with('"'), "ETag should be quoted");
 
+        // Verify Last-Modified header is present
         let last_modified = response_headers
             .get(http::header::LAST_MODIFIED)
             .unwrap()
@@ -1269,6 +1277,7 @@ mod tests {
             .unwrap();
         assert!(!last_modified.is_empty(), "Last-Modified should be present");
 
+        // Verify Cache-Control header is present and correct
         let cache_control = response_headers
             .get(http::header::CACHE_CONTROL)
             .unwrap()
@@ -1299,6 +1308,7 @@ mod tests {
             updated_at: 1234567890,
         };
 
+        // Single query result - will be cached after first request
         let db_conn = Arc::new(
             mock_db
                 .append_query_results::<status_lists::Model, Vec<_>, _>(vec![vec![
@@ -1315,6 +1325,7 @@ mod tests {
             ACCEPT_STATUS_LISTS_HEADER_JWT.parse().unwrap(),
         );
 
+        // First request - get the ETag
         let first_response = get_status_list(
             State(app_state.clone()),
             Path("test_list".to_string()),
@@ -1332,6 +1343,7 @@ mod tests {
             .unwrap()
             .to_string();
 
+        // Second request - conditional request with the ETag (will use cache)
         let mut conditional_headers = HeaderMap::new();
         conditional_headers.insert(
             http::header::ACCEPT,
@@ -1348,8 +1360,10 @@ mod tests {
         .unwrap()
         .into_response();
 
+        // Should return 304 Not Modified
         assert_eq!(conditional_response.status(), StatusCode::NOT_MODIFIED);
 
+        // Should still have caching headers
         let response_headers = conditional_response.headers();
         assert!(response_headers.contains_key(http::header::ETAG));
         assert!(response_headers.contains_key(http::header::LAST_MODIFIED));
@@ -1367,6 +1381,7 @@ mod tests {
             "Accept, Accept-Encoding"
         );
 
+        // Body should be empty
         let body_bytes = to_bytes(conditional_response.into_body(), 1024 * 1024)
             .await
             .unwrap();
@@ -1385,7 +1400,7 @@ mod tests {
             issuer: "issuer1".to_string(),
             status_list,
             sub: "test_subject".to_string(),
-            updated_at: 1672531200,
+            updated_at: 1672531200, // 2023-01-01 00:00:00 UTC
         };
         let db_conn = Arc::new(
             mock_db
@@ -1397,6 +1412,7 @@ mod tests {
 
         let app_state = test_app_state(Some(db_conn.clone())).await;
 
+        // First request: capture Last-Modified.
         let mut headers = HeaderMap::new();
         headers.insert(
             http::header::ACCEPT,
@@ -1419,6 +1435,8 @@ mod tests {
             .unwrap()
             .to_string();
 
+        // Second request with If-Modified-Since: Last-Modified (updated_at) is
+        // <= the captured timestamp, so the handler must return 304 — no ETag sent.
         let mut conditional_headers = HeaderMap::new();
         conditional_headers.insert(
             http::header::ACCEPT,
@@ -1468,7 +1486,7 @@ mod tests {
             issuer: "issuer1".to_string(),
             status_list,
             sub: "test_subject".to_string(),
-            updated_at: 1672531200,
+            updated_at: 1672531200, // 2023-01-01 00:00:00 UTC
         };
         let db_conn = Arc::new(
             mock_db
@@ -1480,6 +1498,9 @@ mod tests {
 
         let app_state = test_app_state(Some(db_conn.clone())).await;
 
+        // An If-Modified-Since older than updated_at means the served
+        // representation is newer than the client's cached value, so the
+        // handler must return 200 with a fresh body.
         let mut headers = HeaderMap::new();
         headers.insert(
             http::header::ACCEPT,
@@ -1500,6 +1521,8 @@ mod tests {
             "200 response should include ETag"
         );
     }
+
+    // --- client_accepts_gzip: RFC 9110 §12.5.3 wildcard precedence ---
 
     #[test]
     fn test_accepts_gzip_simple() {
@@ -1524,6 +1547,7 @@ mod tests {
 
     #[test]
     fn test_rejects_gzip_q0_with_wildcard_accept() {
+        // "gzip;q=0, *" means "anything except gzip" → must NOT gzip.
         let mut h = HeaderMap::new();
         h.insert(header::ACCEPT_ENCODING, "gzip;q=0, *".parse().unwrap());
         assert!(!client_accepts_gzip(&h));
@@ -1531,6 +1555,7 @@ mod tests {
 
     #[test]
     fn test_accepts_via_wildcard_only() {
+        // gzip not named, only * → wildcard accepts gzip.
         let mut h = HeaderMap::new();
         h.insert(header::ACCEPT_ENCODING, "*".parse().unwrap());
         assert!(client_accepts_gzip(&h));
@@ -1552,6 +1577,7 @@ mod tests {
 
     #[test]
     fn test_rejects_identity_q0_gzip_q0() {
+        // identity;q=0, gzip;q=0 → gzip explicitly disabled.
         let mut h = HeaderMap::new();
         h.insert(
             header::ACCEPT_ENCODING,
@@ -1568,6 +1594,7 @@ mod tests {
 
     #[test]
     fn test_multiple_accept_encoding_lines() {
+        // RFC 9110 §5.3: multiple field lines are combined as comma-separated.
         let mut h = HeaderMap::new();
         h.append(header::ACCEPT_ENCODING, "deflate".parse().unwrap());
         h.append(header::ACCEPT_ENCODING, "gzip".parse().unwrap());
