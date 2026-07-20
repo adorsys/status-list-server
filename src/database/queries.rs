@@ -178,11 +178,12 @@ mod test {
     use crate::models::StatusList;
     use jsonwebtoken::jwk::Jwk;
     use sea_orm::{DatabaseBackend, MockDatabase, MockExecResult};
+    #[cfg(feature = "sqlite")]
     use sea_orm_migration::MigratorTrait;
 
     #[cfg(feature = "sqlite")]
     async fn sqlite_connection() -> Arc<DatabaseConnection> {
-        let mut opt = sea_orm::ConnectOptions::new("sqlite::memory:?cache=shared");
+        let mut opt = sea_orm::ConnectOptions::new("sqlite::memory:");
         opt.max_connections(1);
         opt.map_sqlx_sqlite_opts(|o| o.foreign_keys(true));
         let db = sea_orm::Database::connect(opt)
@@ -327,6 +328,7 @@ mod test {
                 lst: "compressed".to_string(),
             },
             sub: "sub-sqlite-test".to_string(),
+            updated_at: 0,
         };
 
         store.insert_one(record.clone()).await.unwrap();
@@ -555,6 +557,7 @@ mod test {
                 lst: "compressed".to_string(),
             },
             sub: "sub-neg-sqlite".to_string(),
+            updated_at: 0,
         };
         let fk_err = store.insert_one(rec).await;
         assert!(fk_err.is_err(), "insert with dangling FK should fail");
@@ -570,6 +573,7 @@ mod test {
                         lst: "compressed".to_string(),
                     },
                     sub: "sub-neg-sqlite".to_string(),
+                    updated_at: 0,
                 },
             )
             .await
