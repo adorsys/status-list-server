@@ -8,4 +8,8 @@ pub(crate) enum Error {
     InvalidIndex,
     #[error("Failed to decode lst")]
     DecodeFailed,
+    #[error("status index {0} exceeds the configured maximum")]
+    IndexTooLarge(i32),
+    #[error("serialized status list size {actual} bytes exceeds maximum {max} bytes")]
+    SerializedListTooLarge { actual: usize, max: usize },
 }

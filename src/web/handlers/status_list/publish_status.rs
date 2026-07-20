@@ -26,13 +26,28 @@ pub async fn publish_status(
         return Err(StatusListError::InvalidListId(e.to_string()).into());
     }
 
+    let count = payload.statuses.len();
+    if count > appstate.max_statuses_per_request {
+        tracing::warn!(
+            "Rejecting publish: {count} statuses exceeds maximum {}",
+            appstate.max_statuses_per_request
+        );
+        return Err(StatusListError::TooManyStatuses {
+            count,
+            max: appstate.max_statuses_per_request,
+        });
+    }
+
     let store = &appstate.status_list_repo;
 
-    let stl = create_status_list(payload.statuses).map_err(|e| {
+    let limits = AbuseLimits::new(appstate.max_status_index, appstate.max_serialized_list_size);
+    let stl = create_status_list(payload.statuses, &limits).map_err(|e| {
         tracing::error!("lst_from failed: {e:?}");
         match e {
             Error::Generic(msg) => StatusListError::Generic(msg),
             Error::InvalidIndex => StatusListError::InvalidIndex,
+            Error::IndexTooLarge(idx) => StatusListError::IndexTooLarge(idx),
+            Error::SerializedListTooLarge { .. } => StatusListError::StatusTooLarge,
             _ => StatusListError::Generic(e.to_string()),
         }
     })?;
@@ -126,6 +141,8 @@ mod tests {
     use sea_orm::{DatabaseBackend, MockDatabase, MockExecResult};
     use std::sync::Arc;
 
+    const LIMITS: AbuseLimits = AbuseLimits::unlimited();
+
     #[tokio::test]
     async fn test_publish_token_status_invalid_list_id() {
         let appstate = test_app_state(None).await;
@@ -165,7 +182,9 @@ mod tests {
 
         let status_list = StatusList {
             bits: 2,
-            lst: create_status_list(status_entries.clone()).unwrap().lst,
+            lst: create_status_list(status_entries.clone(), &LIMITS)
+                .unwrap()
+                .lst,
         };
         let new_token = StatusListRecord {
             list_id: token_id.clone(),
@@ -226,7 +245,9 @@ mod tests {
 
         let status_list = StatusList {
             bits: 2,
-            lst: create_status_list(status_entries.clone()).unwrap().lst,
+            lst: create_status_list(status_entries.clone(), &LIMITS)
+                .unwrap()
+                .lst,
         };
         let new_token = StatusListRecord {
             list_id: token_id.clone(),
@@ -297,7 +318,9 @@ mod tests {
             issuer: "issuer".to_string(),
             status_list: StatusList {
                 bits: 1,
-                lst: create_status_list(status_entries.clone()).unwrap().lst,
+                lst: create_status_list(status_entries.clone(), &LIMITS)
+                    .unwrap()
+                    .lst,
             },
             sub: "issuer".to_string(),
             updated_at: 0,
@@ -396,7 +419,9 @@ mod tests {
 
         let status_list = StatusList {
             bits: 1,
-            lst: create_status_list(status_entries.clone()).unwrap().lst,
+            lst: create_status_list(status_entries.clone(), &LIMITS)
+                .unwrap()
+                .lst,
         };
         let new_token = StatusListRecord {
             list_id: token_id.clone(),
@@ -465,5 +490,96 @@ mod tests {
             Err(err) => err.into_response(),
         };
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    /// Exceeding `max_statuses_per_request` returns 400 (#171).
+    #[tokio::test]
+    async fn test_publish_status_rejects_too_many_statuses() {
+        let token_id = "477121aa-b598-419e-916f-1e74654ff38b".to_string();
+        let status_entries = vec![
+            StatusEntry {
+                index: 0,
+                status: Status::VALID,
+            },
+            StatusEntry {
+                index: 1,
+                status: Status::INVALID,
+            },
+        ];
+        let mut app_state = test_app_state(None).await;
+        app_state.max_statuses_per_request = 1;
+
+        let response = match publish_status(
+            State(app_state),
+            Extension("issuer".to_string()),
+            Path(token_id.clone()),
+            Json(StatusesRequest {
+                statuses: status_entries.clone(),
+            }),
+        )
+        .await
+        {
+            Ok(_) => panic!("Expected an error but got Ok"),
+            Err(err) => err.into_response(),
+        };
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    /// Index exceeding `max_status_index` returns 400 (#171).
+    #[tokio::test]
+    async fn test_publish_status_rejects_index_too_large() {
+        let token_id = "477121aa-b598-419e-916f-1e74654ff38b".to_string();
+        let status_entries = vec![StatusEntry {
+            index: 999_999,
+            status: Status::VALID,
+        }];
+        let mut app_state = test_app_state(None).await;
+        app_state.max_status_index = 1;
+
+        let response = match publish_status(
+            State(app_state),
+            Extension("issuer".to_string()),
+            Path(token_id),
+            Json(StatusesRequest {
+                statuses: status_entries,
+            }),
+        )
+        .await
+        {
+            Ok(_) => panic!("Expected an error but got Ok"),
+            Err(err) => err.into_response(),
+        };
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    /// Serialized list exceeding `max_serialized_list_size` returns 422 (#171).
+    #[tokio::test]
+    async fn test_publish_status_rejects_serialized_list_too_large() {
+        let token_id = "477121aa-b598-419e-916f-1e74654ff38b".to_string();
+        // Enough entries that the gzip+base64 encoding exceeds 16 bytes.
+        let mut status_entries = Vec::new();
+        for i in 0..200u32 {
+            status_entries.push(StatusEntry {
+                index: i as i32,
+                status: Status::INVALID,
+            });
+        }
+        let mut app_state = test_app_state(None).await;
+        app_state.max_serialized_list_size = 8;
+
+        let response = match publish_status(
+            State(app_state),
+            Extension("issuer".to_string()),
+            Path(token_id),
+            Json(StatusesRequest {
+                statuses: status_entries,
+            }),
+        )
+        .await
+        {
+            Ok(_) => panic!("Expected an error but got Ok"),
+            Err(err) => err.into_response(),
+        };
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
     }
 }

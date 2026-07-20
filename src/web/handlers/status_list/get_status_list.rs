@@ -626,8 +626,10 @@ mod tests {
             status_lists,
         },
         test_utils::{test_app_state, test_app_state_with},
-        utils::lst_gen::encode_compressed,
+        utils::lst_gen::{AbuseLimits, encode_compressed},
     };
+
+    const LIMITS: AbuseLimits = AbuseLimits::unlimited();
     use axum::{
         body::to_bytes,
         extract::{Path, State},
@@ -645,7 +647,7 @@ mod tests {
         let mock_db = MockDatabase::new(DatabaseBackend::Postgres);
         let status_list = StatusList {
             bits: 8,
-            lst: encode_compressed(&[0, 0, 0]).unwrap(),
+            lst: encode_compressed(&[0, 0, 0], &LIMITS).unwrap(),
         };
         let status_list_token = StatusListRecord {
             list_id: "test_list".to_string(),
@@ -716,7 +718,7 @@ mod tests {
         assert_eq!(token_data.claims.status_list.bits, 8);
         assert_eq!(
             token_data.claims.status_list.lst,
-            encode_compressed(&[0, 0, 0]).unwrap()
+            encode_compressed(&[0, 0, 0], &LIMITS).unwrap()
         );
     }
 
@@ -725,7 +727,7 @@ mod tests {
         let mock_db = MockDatabase::new(DatabaseBackend::Postgres);
         let status_list = StatusList {
             bits: 8,
-            lst: encode_compressed(&[0, 0, 0]).unwrap(),
+            lst: encode_compressed(&[0, 0, 0], &LIMITS).unwrap(),
         };
         let status_list_token = StatusListRecord {
             list_id: "test_list".to_string(),
@@ -793,7 +795,7 @@ mod tests {
         assert_eq!(token_data.claims.status_list.bits, 8);
         assert_eq!(
             token_data.claims.status_list.lst,
-            encode_compressed(&[0, 0, 0]).unwrap()
+            encode_compressed(&[0, 0, 0], &LIMITS).unwrap()
         );
     }
 
@@ -802,7 +804,7 @@ mod tests {
         let mock_db = MockDatabase::new(DatabaseBackend::Postgres);
         let status_list = StatusList {
             bits: 8,
-            lst: encode_compressed(&[0, 0, 0]).unwrap(),
+            lst: encode_compressed(&[0, 0, 0], &LIMITS).unwrap(),
         };
         let status_list_token = StatusListRecord {
             list_id: "test_list".to_string(),
@@ -913,7 +915,7 @@ mod tests {
             .1
             .clone();
         let expected_lst_bytes =
-            base64url::decode(&encode_compressed(&[0, 0, 0]).unwrap()).unwrap();
+            base64url::decode(&encode_compressed(&[0, 0, 0], &LIMITS).unwrap()).unwrap();
         assert_eq!(lst, CborValue::Bytes(expected_lst_bytes));
 
         let ttl = claims
@@ -954,7 +956,7 @@ mod tests {
         let mock_db = MockDatabase::new(DatabaseBackend::Postgres);
         let status_list = StatusList {
             bits: 8,
-            lst: encode_compressed(&[0, 0, 0]).unwrap(),
+            lst: encode_compressed(&[0, 0, 0], &LIMITS).unwrap(),
         };
         let status_list_token = record_with_bits_8("test_list", status_list);
         let db_conn = Arc::new(
@@ -1025,7 +1027,7 @@ mod tests {
         let mock_db = MockDatabase::new(DatabaseBackend::Postgres);
         let status_list = StatusList {
             bits: 8,
-            lst: encode_compressed(&[0, 0, 0]).unwrap(),
+            lst: encode_compressed(&[0, 0, 0], &LIMITS).unwrap(),
         };
         let status_list_token = record_with_bits_8("test_list", status_list);
         let db_conn = Arc::new(
@@ -1088,7 +1090,7 @@ mod tests {
         let mock_db = MockDatabase::new(DatabaseBackend::Postgres);
         let status_list = StatusList {
             bits: 8,
-            lst: encode_compressed(&[0, 0, 0]).unwrap(),
+            lst: encode_compressed(&[0, 0, 0], &LIMITS).unwrap(),
         };
         let status_list_token = record_with_bits_8("test_list", status_list);
         let db_conn = Arc::new(
@@ -1179,7 +1181,7 @@ mod tests {
         let mock_db = MockDatabase::new(DatabaseBackend::Postgres);
         let status_list = StatusList {
             bits: 8,
-            lst: encode_compressed(&[0, 0, 0]).unwrap(),
+            lst: encode_compressed(&[0, 0, 0], &LIMITS).unwrap(),
         };
         let status_list_token = record_with_bits_8("test_list", status_list);
         let db_conn = Arc::new(
@@ -1376,7 +1378,7 @@ mod tests {
         let mock_db = MockDatabase::new(DatabaseBackend::Postgres);
         let status_list = StatusList {
             bits: 8,
-            lst: encode_compressed(&[0, 0, 0]).unwrap(),
+            lst: encode_compressed(&[0, 0, 0], &LIMITS).unwrap(),
         };
         let status_list_token = StatusListRecord {
             list_id: "test_list".to_string(),
@@ -1453,7 +1455,7 @@ mod tests {
         let mock_db = MockDatabase::new(DatabaseBackend::Postgres);
         let status_list = StatusList {
             bits: 8,
-            lst: encode_compressed(&[0, 0, 0]).unwrap(),
+            lst: encode_compressed(&[0, 0, 0], &LIMITS).unwrap(),
         };
         let status_list_token = StatusListRecord {
             list_id: "test_list".to_string(),
@@ -1550,7 +1552,7 @@ mod tests {
         let mock_db = MockDatabase::new(DatabaseBackend::Postgres);
         let status_list = StatusList {
             bits: 8,
-            lst: encode_compressed(&[0, 0, 0]).unwrap(),
+            lst: encode_compressed(&[0, 0, 0], &LIMITS).unwrap(),
         };
         let status_list_token = StatusListRecord {
             list_id: "test_list".to_string(),
@@ -1638,7 +1640,7 @@ mod tests {
         let mock_db = MockDatabase::new(DatabaseBackend::Postgres);
         let status_list = StatusList {
             bits: 8,
-            lst: encode_compressed(&[0, 0, 0]).unwrap(),
+            lst: encode_compressed(&[0, 0, 0], &LIMITS).unwrap(),
         };
         let status_list_token = StatusListRecord {
             list_id: "test_list".to_string(),
@@ -1694,7 +1696,7 @@ mod tests {
             issuer: "test_issuer".to_string(),
             status_list: StatusList {
                 bits: 8,
-                lst: encode_compressed(&[42]).unwrap(),
+                lst: encode_compressed(&[42], &LIMITS).unwrap(),
             },
             sub: "test_subject".to_string(),
             iat: 1_700_000_000,

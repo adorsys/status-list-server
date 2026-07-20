@@ -43,6 +43,12 @@ pub enum StatusListError {
     IssuerMismatch,
     #[error("The service is currently unavailable. Please try again later")]
     ServiceUnavailable,
+    #[error("Too many statuses in request: {count} > {max}")]
+    TooManyStatuses { count: usize, max: usize },
+    #[error("Status index {0} exceeds the configured maximum")]
+    IndexTooLarge(i32),
+    #[error("Serialized status list size exceeds the configured maximum")]
+    StatusTooLarge,
 }
 
 impl StatusListError {

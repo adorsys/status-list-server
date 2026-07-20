@@ -80,6 +80,9 @@ pub(crate) async fn test_app_state_with(
         aggregation_uri,
         token_exp_secs: 900,
         token_ttl_secs: 300,
+        max_status_index: 100_000,
+        max_statuses_per_request: 5_000,
+        max_serialized_list_size: 1_048_576,
         history_retention_secs: 7776000, // 90 days default for tests
     }
 }

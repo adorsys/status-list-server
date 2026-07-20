@@ -221,7 +221,6 @@ mod test {
     use crate::models::StatusList;
     use jsonwebtoken::jwk::Jwk;
     use sea_orm::{DatabaseBackend, MockDatabase, MockExecResult};
-    #[cfg(feature = "sqlite")]
     use sea_orm_migration::MigratorTrait;
 
     #[cfg(feature = "sqlite")]
