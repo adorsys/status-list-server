@@ -23,7 +23,7 @@ fn help() {
     eprintln!("Usage: cargo xtask <task>");
     eprintln!();
     eprintln!("Tasks:");
-    eprintln!("  test       Start required services and run the test suite");
+    eprintln!("  test       Start db/redis/localstack and run the test suite");
     eprintln!("  lint       Run formatting, clippy, audit, and machete checks");
     eprintln!("  build      Build the workspace with all targets and features");
     eprintln!("  compose    Start docker compose services");
@@ -54,17 +54,7 @@ fn cmd_test() {
     println!("Starting required services...");
     run(
         "docker",
-        &[
-            "compose",
-            "up",
-            "-d",
-            "db",
-            "redis",
-            "localstack",
-            "challtestsrv",
-            "pebble",
-            "--wait",
-        ],
+        &["compose", "up", "-d", "db", "redis", "localstack", "--wait"],
     );
 
     println!("Running tests...");
