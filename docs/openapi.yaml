@@ -189,7 +189,7 @@ paths:
         "500":
           $ref: "#/components/responses/InternalServerError"
 
-  /api/v1/statuslists/{list_id}:
+  /api/v1/status-lists/{list_id}:
     get:
       operationId: getStatusList
       summary: Retrieve a status list token
@@ -208,6 +208,11 @@ paths:
         specification. The token is signed by the server and contains an `x5c`
         certificate chain in the protected header (JWT) or protected header map
         (CWT) for verification.
+
+        Supplying `?time=<unix-timestamp>` performs draft-21 §8.4 historical
+        resolution. Historical snapshots are privacy-sensitive because they
+        disclose timing information; deploy this capability only after
+        considering the privacy implications in §12.7.
       security: []
       parameters:
         - name: list_id
@@ -229,6 +234,17 @@ paths:
               - application/statuslist+jwt
               - application/statuslist+cwt
             default: application/statuslist+jwt
+        - name: time
+          in: query
+          required: false
+          description: |
+            Unix timestamp for a historical Status List Token. A response is
+            returned only when a retained token validity window covers this
+            instant (`iat <= time < exp`).
+          schema:
+            type: integer
+            format: int64
+            example: 1686925000
         - name: Accept-Encoding
           in: header
           required: false

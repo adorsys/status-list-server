@@ -62,7 +62,7 @@ mod test {
         response::IntoResponse,
     };
     use hyper::StatusCode;
-    use sea_orm::{DatabaseBackend, MockDatabase};
+    use sea_orm::{DatabaseBackend, MockDatabase, MockExecResult};
 
     use crate::{
         models::{
@@ -134,6 +134,10 @@ mod test {
                     vec![existing_token.clone()], // for find_one_by
                     vec![],
                 ])
+                .append_exec_results(vec![MockExecResult {
+                    rows_affected: 1,
+                    last_insert_id: 0,
+                }])
                 .into_connection(),
         );
 

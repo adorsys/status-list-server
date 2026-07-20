@@ -59,6 +59,22 @@ pub trait StatusListCache: Send + Sync {
     async fn invalidate(&self, list_id: &str) -> Result<(), PortError>;
 }
 
+/// Repository for historical status list snapshots (draft-21 §8.4).
+#[async_trait]
+pub trait StatusListHistoryRepository: Send + Sync {
+    /// Insert a new historical snapshot.
+    async fn insert(&self, record: crate::models::StatusListHistoryRecord)
+    -> Result<(), PortError>;
+    /// Find the snapshot valid at the given timestamp (iat <= time < exp).
+    async fn find_valid_at(
+        &self,
+        list_id: &str,
+        time: i64,
+    ) -> Result<Option<crate::models::StatusListHistoryRecord>, PortError>;
+    /// Delete snapshots older than the cutoff (exp < cutoff).
+    async fn delete_older_than(&self, cutoff: i64) -> Result<u64, PortError>;
+}
+
 /// Certificate material required to issue a token. Concrete ACME/S3/secret
 /// implementations stay behind this boundary.
 #[async_trait]

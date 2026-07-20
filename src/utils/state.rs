@@ -5,7 +5,10 @@ use crate::{
         certificate::AcmeCertificateProvider,
         dns::{AwsRoute53DnsUpdater, DnsUpdaterProvider, PebbleDnsUpdater},
         metrics::NoopMetricsCollector,
-        postgres::{PostgresCredentialRepository, PostgresStatusListRepository},
+        postgres::{
+            PostgresCredentialRepository, PostgresStatusListHistoryRepository,
+            PostgresStatusListRepository,
+        },
         redis::Redis,
         secret::StorageSecretStore,
     },
@@ -25,7 +28,7 @@ use crate::{
     database::{Migrator, queries::SeaOrmStore},
     ports::{
         CertificateProvider, CredentialRepository, DnsProvider, MetricsCollector, SecretStore,
-        StatusListCache, StatusListRepository,
+        StatusListCache, StatusListHistoryRepository, StatusListRepository,
     },
 };
 use aws_config::{BehaviorVersion, Region, SdkConfig};
@@ -64,6 +67,9 @@ pub struct AppState {
     pub aggregation_uri: Option<String>,
     pub token_exp_secs: u64,
     pub token_ttl_secs: u64,
+    /// Retention period for historical status list snapshots in seconds.
+    /// Set to 0 to disable historical snapshots entirely.
+    pub history_retention_secs: u64,
 }
 
 pub async fn build_state(config: &AppConfig) -> EyeResult<AppState> {
@@ -202,18 +208,25 @@ pub async fn build_state_with_cert_manager(
     let db_clone = Arc::new(db);
     let status_list_repo = SeaOrmStore::new(db_clone.clone());
     let credential_repo = SeaOrmStore::new(db_clone.clone());
+    let status_list_history_repo = SeaOrmStore::new(db_clone.clone());
     let cache = MokaStatusListCache::new(config.cache.ttl, config.cache.max_capacity);
     let status_lists: Arc<dyn StatusListRepository> =
         Arc::new(PostgresStatusListRepository::new(status_list_repo));
     let credentials: Arc<dyn CredentialRepository> =
         Arc::new(PostgresCredentialRepository::new(credential_repo));
+    let status_list_history: Arc<dyn StatusListHistoryRepository> = Arc::new(
+        PostgresStatusListHistoryRepository::new(status_list_history_repo),
+    );
     let status_list_cache: Arc<dyn StatusListCache> = Arc::new(cache);
     let cert_manager = Arc::new(certificate_manager);
+    let token_exp_secs = config.status_list.token_exp_secs;
     Ok((
         AppState {
             status_lists: Arc::new(StatusListApplicationService::new(
                 status_lists,
                 status_list_cache,
+                status_list_history,
+                token_exp_secs,
             )),
             credentials: Arc::new(CredentialApplicationService::new(credentials)),
             certificate_provider: Arc::new(AcmeCertificateProvider::new(cert_manager.clone())),
@@ -227,6 +240,7 @@ pub async fn build_state_with_cert_manager(
             aggregation_uri: empty_to_none(config.server.aggregation_uri.clone()),
             token_exp_secs: config.status_list.token_exp_secs,
             token_ttl_secs: config.status_list.token_ttl_secs,
+            history_retention_secs: config.status_list.history_retention_secs,
         },
         cert_manager,
     ))
@@ -258,6 +272,50 @@ async fn build_dns_updater(
         }
     };
     Ok(updater)
+}
+
+/// Setup the scheduled task to clean up old status list history snapshots.
+/// This runs daily at midnight UTC by default.
+pub async fn setup_history_cleanup_scheduler(
+    app_state: AppState,
+    cron_schedule: &str,
+) -> color_eyre::Result<()> {
+    use tokio_cron_scheduler::{Job, JobScheduler};
+    use tracing::{error, info};
+
+    // Skip scheduling if historical snapshots are disabled
+    if app_state.history_retention_secs == 0 {
+        info!(
+            "Historical snapshots are disabled (history_retention_secs=0), skipping cleanup scheduler"
+        );
+        return Ok(());
+    }
+
+    let scheduler = JobScheduler::new().await?;
+
+    // Schedule the cleanup task
+    scheduler
+        .add(Job::new_async(cron_schedule, move |_, _| {
+            let app_state = app_state.clone();
+            Box::pin(async move {
+                let now = time::OffsetDateTime::now_utc().unix_timestamp();
+                let cutoff = now - app_state.history_retention_secs as i64;
+
+                match app_state.status_lists.cleanup_history(cutoff).await {
+                    Ok(deleted) => {
+                        info!("Cleaned up {deleted} historical status list snapshots older than {cutoff}");
+                    }
+                    Err(e) => {
+                        error!("Failed to clean up historical snapshots: {e:?}");
+                    }
+                }
+            })
+        })?)
+        .await?;
+
+    scheduler.start().await?;
+    info!("Historical snapshot cleanup scheduler started with schedule: {cron_schedule}");
+    Ok(())
 }
 
 fn store_certificate_strategy(config: &AppConfig) -> EyeResult<Option<StoreProvisioningStrategy>> {
@@ -711,6 +769,7 @@ mod tests {
             status_list: StatusListConfig {
                 token_exp_secs: 900,
                 token_ttl_secs: 300,
+                history_retention_secs: 7776000, // 90 days
             },
         }
     }

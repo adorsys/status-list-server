@@ -119,10 +119,16 @@ mod tests {
                 .append_query_results::<status_lists::Model, Vec<_>, _>(vec![
                     vec![], // find_one_by in handler returns None
                 ])
-                .append_exec_results(vec![MockExecResult {
-                    rows_affected: 1,
-                    last_insert_id: 0,
-                }])
+                .append_exec_results(vec![
+                    MockExecResult {
+                        rows_affected: 1,
+                        last_insert_id: 0,
+                    }, // status_lists insert
+                    MockExecResult {
+                        rows_affected: 1,
+                        last_insert_id: 0,
+                    }, // status_list_history insert
+                ])
                 .into_connection(),
         );
 
@@ -174,10 +180,16 @@ mod tests {
                     vec![],                  // find_one_by in handler returns None
                     vec![new_token.clone()], // find_one_by in test verification
                 ])
-                .append_exec_results(vec![MockExecResult {
-                    rows_affected: 1,
-                    last_insert_id: 0,
-                }])
+                .append_exec_results(vec![
+                    MockExecResult {
+                        rows_affected: 1,
+                        last_insert_id: 0,
+                    }, // status_lists insert
+                    MockExecResult {
+                        rows_affected: 1,
+                        last_insert_id: 0,
+                    }, // status_list_history insert
+                ])
                 .into_connection(),
         );
 
@@ -271,10 +283,16 @@ mod tests {
                     vec![],                  // find_one_by in handler returns None
                     vec![new_token.clone()], // find_one_by in test verification
                 ])
-                .append_exec_results(vec![MockExecResult {
-                    rows_affected: 1,
-                    last_insert_id: 0,
-                }])
+                .append_exec_results(vec![
+                    MockExecResult {
+                        rows_affected: 1,
+                        last_insert_id: 0,
+                    }, // status_lists insert
+                    MockExecResult {
+                        rows_affected: 1,
+                        last_insert_id: 0,
+                    }, // status_list_history insert
+                ])
                 .into_connection(),
         );
 
@@ -326,10 +344,16 @@ mod tests {
                     vec![],                  // find_one_by in handler returns None
                     vec![new_token.clone()], // find_one_by in test verification
                 ])
-                .append_exec_results(vec![MockExecResult {
-                    rows_affected: 1,
-                    last_insert_id: 0,
-                }])
+                .append_exec_results(vec![
+                    MockExecResult {
+                        rows_affected: 1,
+                        last_insert_id: 0,
+                    }, // status_lists insert
+                    MockExecResult {
+                        rows_affected: 1,
+                        last_insert_id: 0,
+                    }, // status_list_history insert
+                ])
                 .into_connection(),
         );
 

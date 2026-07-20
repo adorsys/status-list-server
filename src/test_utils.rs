@@ -2,11 +2,16 @@ use crate::{
     adapters::{
         certificate::AcmeCertificateProvider,
         memory::{MemoryDnsProvider, MemoryMetricsCollector, MemorySecretStore},
-        postgres::{PostgresCredentialRepository, PostgresStatusListRepository},
+        postgres::{
+            PostgresCredentialRepository, PostgresStatusListHistoryRepository,
+            PostgresStatusListRepository,
+        },
     },
     application::{CredentialApplicationService, StatusListApplicationService},
     cert_manager::storage::StorageError,
-    ports::{CredentialRepository, StatusListCache, StatusListRepository},
+    ports::{
+        CredentialRepository, StatusListCache, StatusListHistoryRepository, StatusListRepository,
+    },
     utils::{
         cert_manager::{CertManager, storage::Storage},
         state::AppState,
@@ -83,14 +88,20 @@ pub(crate) async fn test_app_state_with(
     let credentials: Arc<dyn CredentialRepository> = Arc::new(PostgresCredentialRepository::new(
         SeaOrmStore::new(db.clone()),
     ));
+    let status_list_history: Arc<dyn StatusListHistoryRepository> = Arc::new(
+        PostgresStatusListHistoryRepository::new(SeaOrmStore::new(db.clone())),
+    );
     let status_list_cache: Arc<dyn StatusListCache> = Arc::new(
         crate::adapters::cache::MokaStatusListCache::new(5 * 60, 100),
     );
+    let token_exp_secs = 900u64;
 
     AppState {
         status_lists: Arc::new(StatusListApplicationService::new(
             status_lists,
             status_list_cache,
+            status_list_history,
+            token_exp_secs,
         )),
         credentials: Arc::new(CredentialApplicationService::new(credentials)),
         certificate_provider: Arc::new(AcmeCertificateProvider::new(cert_manager.clone())),
@@ -102,5 +113,6 @@ pub(crate) async fn test_app_state_with(
         aggregation_uri,
         token_exp_secs: 900,
         token_ttl_secs: 300,
+        history_retention_secs: 7776000, // 90 days default for tests
     }
 }

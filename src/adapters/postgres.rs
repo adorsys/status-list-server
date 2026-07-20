@@ -2,7 +2,7 @@
 use crate::{
     database::queries::SeaOrmStore,
     domain, models,
-    ports::{CredentialRepository, PortError, StatusListRepository},
+    ports::{CredentialRepository, PortError, StatusListHistoryRepository, StatusListRepository},
 };
 use async_trait::async_trait;
 
@@ -22,6 +22,16 @@ pub struct PostgresCredentialRepository {
 }
 impl PostgresCredentialRepository {
     pub fn new(store: SeaOrmStore<models::Credentials>) -> Self {
+        Self { store }
+    }
+}
+
+#[derive(Clone)]
+pub struct PostgresStatusListHistoryRepository {
+    store: SeaOrmStore<models::StatusListHistoryRecord>,
+}
+impl PostgresStatusListHistoryRepository {
+    pub fn new(store: SeaOrmStore<models::StatusListHistoryRecord>) -> Self {
         Self { store }
     }
 }
@@ -123,6 +133,43 @@ impl StatusListRepository for PostgresStatusListRepository {
             .await
             .map_err(|e| PortError::StorageUnavailable {
                 operation: "list status list URIs",
+                detail: e.to_string(),
+            })
+    }
+}
+
+#[async_trait]
+impl StatusListHistoryRepository for PostgresStatusListHistoryRepository {
+    async fn insert(&self, record: models::StatusListHistoryRecord) -> Result<(), PortError> {
+        self.store
+            .insert_one(record)
+            .await
+            .map_err(|e| PortError::StorageUnavailable {
+                operation: "insert status list history",
+                detail: e.to_string(),
+            })
+    }
+
+    async fn find_valid_at(
+        &self,
+        list_id: &str,
+        time: i64,
+    ) -> Result<Option<models::StatusListHistoryRecord>, PortError> {
+        self.store
+            .find_valid_at(list_id, time)
+            .await
+            .map_err(|e| PortError::StorageUnavailable {
+                operation: "find valid status list history",
+                detail: e.to_string(),
+            })
+    }
+
+    async fn delete_older_than(&self, cutoff: i64) -> Result<u64, PortError> {
+        self.store
+            .delete_older_than(cutoff)
+            .await
+            .map_err(|e| PortError::StorageUnavailable {
+                operation: "delete old status list history",
                 detail: e.to_string(),
             })
     }
