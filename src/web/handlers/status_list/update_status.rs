@@ -9,7 +9,10 @@ use time::OffsetDateTime;
 use crate::{
     models::StatusesRequest,
     utils::{
-        bits_validation::BitFlag, errors::Error, lst_gen::update_status_list, state::AppState,
+        bits_validation::BitFlag,
+        errors::Error,
+        lst_gen::{AbuseLimits, update_status_list},
+        state::AppState,
     },
 };
 
@@ -26,6 +29,18 @@ pub async fn update_status(
     // Validate list_id as UUID
     if let Err(e) = uuid::Uuid::try_parse(&list_id) {
         return Err(StatusListError::InvalidListId(e.to_string()));
+    }
+
+    let count = payload.statuses.len();
+    if count > appstate.max_statuses_per_request {
+        tracing::warn!(
+            "Rejecting update: {count} statuses exceeds maximum {}",
+            appstate.max_statuses_per_request
+        );
+        return Err(StatusListError::TooManyStatuses {
+            count,
+            max: appstate.max_statuses_per_request,
+        });
     }
 
     let store = &appstate.status_list_repo;
@@ -59,17 +74,22 @@ pub async fn update_status(
         )))
     }?;
 
+    let limits = AbuseLimits::new(appstate.max_status_index, appstate.max_serialized_list_size);
+
     // Update the status list
     let updated_lst = update_status_list(
         record.status_list.lst.clone(),
         payload.statuses,
         bits.value(),
+        &limits,
     )
     .map_err(|e| {
         tracing::error!("update_status_list failed: {e:?}");
         match e {
             Error::Generic(msg) => StatusListError::Generic(msg),
             Error::InvalidIndex => StatusListError::InvalidIndex,
+            Error::IndexTooLarge(idx) => StatusListError::IndexTooLarge(idx),
+            Error::SerializedListTooLarge { .. } => StatusListError::StatusTooLarge,
             _ => StatusListError::Generic(e.to_string()),
         }
     })?;
@@ -119,8 +139,10 @@ mod test {
             Status, StatusEntry, StatusList, StatusListRecord, StatusesRequest, status_lists,
         },
         test_utils::test_app_state,
-        utils::lst_gen::create_status_list,
+        utils::lst_gen::{AbuseLimits, create_status_list},
     };
+
+    const LIMITS: AbuseLimits = AbuseLimits::unlimited();
 
     #[tokio::test]
     async fn test_update_token_status_invalid_list_id() {
@@ -148,16 +170,19 @@ mod test {
         // Initial token setup
         let original_status_list = StatusList {
             bits: initial_bits,
-            lst: create_status_list(vec![
-                StatusEntry {
-                    index: 0,
-                    status: Status::VALID,
-                },
-                StatusEntry {
-                    index: 1,
-                    status: Status::VALID,
-                },
-            ])
+            lst: create_status_list(
+                vec![
+                    StatusEntry {
+                        index: 0,
+                        status: Status::VALID,
+                    },
+                    StatusEntry {
+                        index: 1,
+                        status: Status::VALID,
+                    },
+                ],
+                &LIMITS,
+            )
             .unwrap()
             .lst,
         };
@@ -203,5 +228,153 @@ mod test {
         .into_response();
 
         assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    /// Exceeding `max_statuses_per_request` returns 400 (#171).
+    #[tokio::test]
+    async fn test_update_status_rejects_too_many_statuses() {
+        let appstate = test_app_state(None).await;
+        let mut appstate = appstate;
+        appstate.max_statuses_per_request = 1;
+        let token_id = uuid::Uuid::new_v4().to_string();
+        let payload = StatusesRequest {
+            statuses: vec![
+                StatusEntry {
+                    index: 0,
+                    status: Status::VALID,
+                },
+                StatusEntry {
+                    index: 1,
+                    status: Status::INVALID,
+                },
+            ],
+        };
+
+        let response = match update_status(
+            State(appstate),
+            Extension("issuer".to_string()),
+            Path(token_id),
+            Json(payload),
+        )
+        .await
+        {
+            Ok(_) => panic!("Expected an error but got Ok"),
+            Err(err) => err.into_response(),
+        };
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    /// Index exceeding `max_status_index` returns 400 (#171).
+    #[tokio::test]
+    async fn test_update_status_rejects_index_too_large() {
+        let mock_db = MockDatabase::new(DatabaseBackend::Postgres);
+        let token_id = uuid::Uuid::new_v4().to_string();
+        let initial_bits = 1;
+
+        let original_status_list = StatusList {
+            bits: initial_bits,
+            lst: create_status_list(
+                vec![StatusEntry {
+                    index: 0,
+                    status: Status::VALID,
+                }],
+                &LIMITS,
+            )
+            .unwrap()
+            .lst,
+        };
+        let existing_token = StatusListRecord {
+            list_id: token_id.clone(),
+            issuer: "issuer".to_string(),
+            status_list: original_status_list,
+            sub: "issuer".to_string(),
+            updated_at: 0,
+        };
+        let db_conn = Arc::new(
+            mock_db
+                .append_query_results::<status_lists::Model, Vec<_>, _>(vec![
+                    vec![existing_token],
+                    vec![],
+                ])
+                .into_connection(),
+        );
+        let mut appstate = test_app_state(Some(db_conn.clone())).await;
+        appstate.max_status_index = 1;
+        let payload = StatusesRequest {
+            statuses: vec![StatusEntry {
+                index: 999_999,
+                status: Status::INVALID,
+            }],
+        };
+
+        let response = match update_status(
+            State(appstate),
+            Extension("issuer".to_string()),
+            Path(token_id),
+            Json(payload),
+        )
+        .await
+        {
+            Ok(_) => panic!("Expected an error but got Ok"),
+            Err(err) => err.into_response(),
+        };
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    /// Serialized list exceeding `max_serialized_list_size` returns 422 (#171).
+    #[tokio::test]
+    async fn test_update_status_rejects_serialized_list_too_large() {
+        let mock_db = MockDatabase::new(DatabaseBackend::Postgres);
+        let token_id = uuid::Uuid::new_v4().to_string();
+        let initial_bits = 1;
+
+        let original_status_list = StatusList {
+            bits: initial_bits,
+            lst: create_status_list(
+                vec![StatusEntry {
+                    index: 0,
+                    status: Status::VALID,
+                }],
+                &LIMITS,
+            )
+            .unwrap()
+            .lst,
+        };
+        let existing_token = StatusListRecord {
+            list_id: token_id.clone(),
+            issuer: "issuer".to_string(),
+            status_list: original_status_list,
+            sub: "issuer".to_string(),
+            updated_at: 0,
+        };
+        let db_conn = Arc::new(
+            mock_db
+                .append_query_results::<status_lists::Model, Vec<_>, _>(vec![
+                    vec![existing_token],
+                    vec![],
+                ])
+                .into_connection(),
+        );
+        let mut appstate = test_app_state(Some(db_conn.clone())).await;
+        appstate.max_serialized_list_size = 1;
+        let payload = StatusesRequest {
+            statuses: vec![StatusEntry {
+                index: 9999,
+                status: Status::INVALID,
+            }],
+        };
+
+        let response = match update_status(
+            State(appstate),
+            Extension("issuer".to_string()),
+            Path(token_id),
+            Json(payload),
+        )
+        .await
+        {
+            Ok(_) => panic!("Expected an error but got Ok"),
+            Err(err) => err.into_response(),
+        };
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
     }
 }
