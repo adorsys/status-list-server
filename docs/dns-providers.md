@@ -157,5 +157,6 @@ validates only once, so `create_txt_record` must wait internally until the
 record is served, to the degree the provider's API allows confirming it: poll
 a change-status API where one exists (see Route53 and Google Cloud DNS), or
 wait out the provider's documented propagation window otherwise (see Azure).
-Add a variant to `DnsProviderKind` in `src/config.rs`, a build arm in
-`src/utils/state.rs`, and wiremock tests next to the implementation.
+Add a variant to `DnsProviderKind` and to `ResolvedDnsProvider` (carrying the
+validated settings) in `src/config.rs`, a build arm in `src/utils/state.rs`,
+and wiremock tests next to the implementation.
