@@ -642,4 +642,150 @@ mod test {
 
         cred_store.delete_by("issuer-neg-sqlite").await.unwrap();
     }
+
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn test_delete_older_than_deletes_expired_snapshots() {
+        let db = sqlite_connection().await;
+        let store = SeaOrmStore::<StatusListHistoryRecord>::new(db);
+
+        let list_id = "test-list-delete-old";
+        let issuer = "test-issuer";
+
+        // Insert snapshots with different expiration times
+        let old_snapshot = StatusListHistoryRecord {
+            snapshot_id: "old-snapshot-001".to_string(),
+            list_id: list_id.to_string(),
+            issuer: issuer.to_string(),
+            status_list: StatusList {
+                bits: 1,
+                lst: "compressed_old".to_string(),
+            },
+            sub: format!("https://example.com/statuslists/{}", list_id),
+            iat: 1000,
+            exp: 2000, // Expires at 2000
+        };
+
+        let recent_snapshot = StatusListHistoryRecord {
+            snapshot_id: "recent-snapshot-002".to_string(),
+            list_id: list_id.to_string(),
+            issuer: issuer.to_string(),
+            status_list: StatusList {
+                bits: 1,
+                lst: "compressed_recent".to_string(),
+            },
+            sub: format!("https://example.com/statuslists/{}", list_id),
+            iat: 3000,
+            exp: 5000, // Expires at 5000
+        };
+
+        let future_snapshot = StatusListHistoryRecord {
+            snapshot_id: "future-snapshot-003".to_string(),
+            list_id: list_id.to_string(),
+            issuer: issuer.to_string(),
+            status_list: StatusList {
+                bits: 1,
+                lst: "compressed_future".to_string(),
+            },
+            sub: format!("https://example.com/statuslists/{}", list_id),
+            iat: 6000,
+            exp: 8000, // Expires at 8000
+        };
+
+        // Insert all snapshots
+        store.insert_one(old_snapshot).await.unwrap();
+        store.insert_one(recent_snapshot).await.unwrap();
+        store.insert_one(future_snapshot).await.unwrap();
+
+        // Delete snapshots with exp < 5500 (should delete old_snapshot and recent_snapshot)
+        let cutoff = 5500;
+        let deleted = store.delete_older_than(cutoff).await.unwrap();
+        assert_eq!(deleted, 2, "Should delete 2 snapshots with exp < 5500");
+
+        // Verify old snapshots are gone
+        let old_result = store.find_valid_at(list_id, 1500).await.unwrap();
+        assert!(old_result.is_none(), "Old snapshot should be deleted");
+
+        let recent_result = store.find_valid_at(list_id, 3500).await.unwrap();
+        assert!(recent_result.is_none(), "Recent snapshot should be deleted");
+
+        // Verify future snapshot still exists
+        let future_result = store.find_valid_at(list_id, 6500).await.unwrap();
+        assert!(
+            future_result.is_some(),
+            "Future snapshot should still exist"
+        );
+    }
+
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn test_delete_older_than_with_no_matching_snapshots() {
+        let db = sqlite_connection().await;
+        let store = SeaOrmStore::<StatusListHistoryRecord>::new(db);
+
+        let list_id = "test-list-no-delete";
+        let issuer = "test-issuer";
+
+        // Insert a single future snapshot
+        let snapshot = StatusListHistoryRecord {
+            snapshot_id: "future-snapshot-001".to_string(),
+            list_id: list_id.to_string(),
+            issuer: issuer.to_string(),
+            status_list: StatusList {
+                bits: 1,
+                lst: "compressed".to_string(),
+            },
+            sub: format!("https://example.com/statuslists/{}", list_id),
+            iat: 5000,
+            exp: 8000,
+        };
+
+        store.insert_one(snapshot).await.unwrap();
+
+        // Delete with cutoff before the snapshot's exp
+        let deleted = store.delete_older_than(3000).await.unwrap();
+        assert_eq!(
+            deleted, 0,
+            "Should delete 0 snapshots when cutoff is before any exp"
+        );
+
+        // Verify snapshot still exists
+        let result = store.find_valid_at(list_id, 6500).await.unwrap();
+        assert!(result.is_some(), "Future snapshot should still exist");
+    }
+
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn test_delete_older_than_deletes_all_snapshots() {
+        let db = sqlite_connection().await;
+        let store = SeaOrmStore::<StatusListHistoryRecord>::new(db);
+
+        let list_id = "test-list-delete-all";
+        let issuer = "test-issuer";
+
+        // Insert multiple old snapshots
+        for i in 0..3 {
+            let snapshot = StatusListHistoryRecord {
+                snapshot_id: format!("old-snapshot-{}", i),
+                list_id: list_id.to_string(),
+                issuer: issuer.to_string(),
+                status_list: StatusList {
+                    bits: 1,
+                    lst: format!("compressed_{}", i),
+                },
+                sub: format!("https://example.com/statuslists/{}", list_id),
+                iat: 1000 + i * 100,
+                exp: 2000 + i * 100,
+            };
+            store.insert_one(snapshot).await.unwrap();
+        }
+
+        // Delete with cutoff far in the future
+        let deleted = store.delete_older_than(10000).await.unwrap();
+        assert_eq!(deleted, 3, "Should delete all 3 snapshots");
+
+        // Verify all snapshots are gone
+        let result = store.find_valid_at(list_id, 1500).await.unwrap();
+        assert!(result.is_none(), "All snapshots should be deleted");
+    }
 }
