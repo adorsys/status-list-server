@@ -109,7 +109,6 @@ pub(crate) async fn test_app_state_with(
         dns_provider: Arc::new(MemoryDnsProvider),
         metrics_collector: Arc::new(MemoryMetricsCollector),
         server_domain: "example.com".to_string(),
-        cert_manager,
         aggregation_uri,
         token_exp_secs: 900,
         token_ttl_secs: 300,

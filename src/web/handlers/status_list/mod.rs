@@ -23,3 +23,44 @@ fn to_domain_entry(entry: crate::models::StatusEntry) -> crate::domain::StatusEn
         },
     }
 }
+
+fn validate_status_request_limits(
+    statuses: &[crate::models::StatusEntry],
+    max_statuses_per_request: usize,
+    max_status_index: i32,
+) -> Result<(), error::StatusListError> {
+    if statuses.len() > max_statuses_per_request {
+        return Err(error::StatusListError::TooManyStatuses {
+            count: statuses.len(),
+            max: max_statuses_per_request,
+        });
+    }
+
+    if let Some(entry) = statuses.iter().find(|entry| entry.index > max_status_index) {
+        return Err(error::StatusListError::IndexTooLarge(entry.index));
+    }
+
+    Ok(())
+}
+
+fn ensure_serialized_list_size(
+    status_list: &crate::domain::StatusList,
+    max_serialized_list_size: usize,
+) -> Result<(), error::StatusListError> {
+    if status_list.lst.len() > max_serialized_list_size {
+        return Err(error::StatusListError::StatusTooLarge);
+    }
+    Ok(())
+}
+
+fn map_domain_error(error: crate::domain::DomainError) -> error::StatusListError {
+    match error {
+        crate::domain::DomainError::InvalidIndex => error::StatusListError::InvalidIndex,
+        crate::domain::DomainError::InvalidStatusList(message) => {
+            error::StatusListError::Generic(message)
+        }
+        crate::domain::DomainError::InvalidPublicJwk(message) => {
+            error::StatusListError::Generic(message)
+        }
+    }
+}

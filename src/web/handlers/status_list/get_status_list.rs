@@ -1787,7 +1787,11 @@ mod tests {
         let body_bytes = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
         let body_str = std::str::from_utf8(&body_bytes).unwrap();
 
-        let signing_key_pem = app_state.cert_manager.signing_key_pem().await.unwrap();
+        let signing_key_pem = app_state
+            .certificate_provider
+            .signing_key_pem()
+            .await
+            .unwrap();
         let keypair = Keypair::from_pkcs8_pem(&signing_key_pem).unwrap();
         let decoding_key_pem = keypair
             .verifying_key()

@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use crate::{
     cert_manager::CertManager,
-    ports::{CertificateProvider, PortError},
+    ports::{CertificateProvider, PortError, PortOperation},
 };
 
 #[derive(Clone)]
@@ -26,7 +26,7 @@ impl CertificateProvider for AcmeCertificateProvider {
             .cert_chain_parts()
             .await
             .map_err(|e| PortError::ExternalServiceUnavailable {
-                operation: "load certificate chain",
+                operation: PortOperation::CertificateChain,
                 detail: e.to_string(),
             })
             .map(|opt| opt.map(|arc| arc.to_vec()))
@@ -37,7 +37,7 @@ impl CertificateProvider for AcmeCertificateProvider {
             .signing_key_pem()
             .await
             .map_err(|e| PortError::ExternalServiceUnavailable {
-                operation: "load signing key",
+                operation: PortOperation::SigningKey,
                 detail: e.to_string(),
             })
     }

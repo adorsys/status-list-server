@@ -11,6 +11,8 @@ pub enum DomainError {
     InvalidIndex,
     #[error("{0}")]
     InvalidStatusList(String),
+    #[error("invalid public JWK: {0}")]
+    InvalidPublicJwk(String),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -20,8 +22,20 @@ pub struct Issuer(pub String);
 pub struct PublicJwk(pub Vec<u8>);
 
 impl PublicJwk {
-    pub fn new(bytes: Vec<u8>) -> Self {
-        Self(bytes)
+    /// Create public JWK bytes from UTF-8 JSON.
+    ///
+    /// The bytes stay opaque to the domain after construction, but they must be
+    /// a syntactically valid JSON object so every adapter can safely parse them
+    /// as a serialized JWK at the boundary.
+    pub fn try_new(bytes: Vec<u8>) -> Result<Self, DomainError> {
+        let value: serde_json::Value = serde_json::from_slice(&bytes)
+            .map_err(|err| DomainError::InvalidPublicJwk(format!("expected UTF-8 JSON: {err}")))?;
+        if !value.is_object() {
+            return Err(DomainError::InvalidPublicJwk(
+                "expected a JSON object".to_string(),
+            ));
+        }
+        Ok(Self(bytes))
     }
 
     pub fn as_bytes(&self) -> &[u8] {
@@ -42,6 +56,9 @@ pub enum Status {
     Valid,
     Invalid,
     Suspended,
+    /// Specification-defined custom values start at 256. Values 3..=255 are
+    /// intentionally rejected because the status-list bit-width table reserves
+    /// them for future standard statuses and compact encodings.
     ApplicationSpecific(u32),
 }
 
@@ -67,6 +84,11 @@ pub struct StatusListRecord {
     pub updated_at: i64,
 }
 
+/// Convert the status enum to its packed integer representation.
+///
+/// `ApplicationSpecific` is valid only for values greater than or equal to 256;
+/// lower non-standard values are reserved by the status-list encoding table and
+/// must not enter newly created or updated lists.
 fn status_value(status: &Status) -> Result<u32, DomainError> {
     match status {
         Status::Valid => Ok(0),
@@ -135,6 +157,14 @@ fn calculate_array_size(status_updates: &[StatusEntry], bits: usize) -> Result<u
     Ok(end_bit / 8 + 1)
 }
 
+/// Write status values into the little-endian bit-packed status array.
+///
+/// Each entry occupies `bits` consecutive bits. The first bit of an entry is
+/// placed at `index * bits`, with bit offset `0` meaning the least-significant
+/// bit of the byte. When an entry spans multiple bytes, the low-order bits are
+/// written into the first byte and the remaining bits continue into subsequent
+/// bytes. Before writing, the target bits are cleared so updates overwrite only
+/// their own slot.
 fn apply_updates(
     status_array: &mut [u8],
     status_updates: &[StatusEntry],
@@ -259,6 +289,13 @@ fn decode_status_array(array: &[u8], bits: usize) -> Result<Vec<Status>, DomainE
 }
 
 impl StatusList {
+    /// Create a compressed status list from sparse status entries.
+    ///
+    /// The domain stores `lst` using the Status List Token format: status
+    /// values are bit-packed least-significant-bit first, compressed with zlib,
+    /// then base64url encoded without padding. The `bits` width is the minimum
+    /// required by the highest status value, except that `ApplicationSpecific`
+    /// values may require more than eight bits.
     pub fn create(status_updates: Vec<StatusEntry>) -> Result<Self, DomainError> {
         if status_updates.is_empty() {
             return Ok(Self {
@@ -277,6 +314,14 @@ impl StatusList {
         })
     }
 
+    /// Apply updates while preserving the existing compression and packing
+    /// rules.
+    ///
+    /// Existing lists are decoded from base64url+zlib, modified in-place when
+    /// the current bit width is sufficient, and re-created at a wider bit width
+    /// when a new status value needs more bits. This keeps previously stored
+    /// statuses stable while allowing spec evolution to introduce larger custom
+    /// status values.
     pub fn update(&self, status_updates: Vec<StatusEntry>) -> Result<Self, DomainError> {
         if status_updates.is_empty() {
             return Ok(self.clone());

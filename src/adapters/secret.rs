@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use crate::{
     cert_manager::storage::Storage,
-    ports::{PortError, SecretStore},
+    ports::{PortError, PortOperation, SecretStore},
 };
 
 #[derive(Clone)]
@@ -25,7 +25,7 @@ impl SecretStore for StorageSecretStore {
             .load(name)
             .await
             .map_err(|err| PortError::StorageUnavailable {
-                operation: "load secret",
+                operation: PortOperation::ReadSecret,
                 detail: err.to_string(),
             })
     }
@@ -35,7 +35,7 @@ impl SecretStore for StorageSecretStore {
             .store(name, value)
             .await
             .map_err(|err| PortError::StorageUnavailable {
-                operation: "store secret",
+                operation: PortOperation::StoreSecret,
                 detail: err.to_string(),
             })
     }

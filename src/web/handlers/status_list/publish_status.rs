@@ -10,7 +10,9 @@ use axum::{
 };
 use tracing;
 
-use super::to_domain_entry;
+use super::{
+    ensure_serialized_list_size, map_domain_error, to_domain_entry, validate_status_request_limits,
+};
 
 /// Create a new status list.
 pub async fn publish_status(
@@ -24,11 +26,21 @@ pub async fn publish_status(
         return Err(StatusListError::InvalidListId(e.to_string()));
     }
 
+    validate_status_request_limits(
+        &payload.statuses,
+        appstate.max_statuses_per_request,
+        appstate.max_status_index,
+    )?;
+
     let statuses = payload
         .statuses
         .into_iter()
         .map(to_domain_entry)
         .collect::<Vec<_>>();
+    let status_list_preview =
+        domain::StatusList::create(statuses.clone()).map_err(map_domain_error)?;
+    ensure_serialized_list_size(&status_list_preview, appstate.max_serialized_list_size)?;
+
     match appstate
         .status_lists
         .publish_status_list(
@@ -64,7 +76,7 @@ mod tests {
     use crate::{
         models::{Status, StatusEntry, StatusList, StatusListRecord, status_lists},
         test_utils::test_app_state,
-        utils::lst_gen::create_status_list,
+        utils::lst_gen::{AbuseLimits, create_status_list},
     };
     use axum::{Json, extract::State};
     use sea_orm::{DatabaseBackend, MockDatabase, MockExecResult};

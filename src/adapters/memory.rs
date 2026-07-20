@@ -180,7 +180,7 @@ mod tests {
     use super::*;
     use crate::{
         application::{GetStatusListToken, PublishStatusList, UpdateStatuses, UseCaseError},
-        domain::{Issuer, StatusList, StatusListRecord},
+        domain::{DomainError, Issuer, Status, StatusEntry, StatusList, StatusListRecord},
         ports::StatusListCache,
     };
     fn record() -> StatusListRecord {
@@ -248,5 +248,59 @@ mod tests {
             .await
             .unwrap();
         assert!(cache.get("id").await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn update_statuses_rejects_wrong_issuer() {
+        let repo = Arc::new(MemoryStatusLists::default());
+        let cache = Arc::new(MemoryStatusListCache::default());
+        PublishStatusList::new(repo.clone())
+            .execute(record())
+            .await
+            .unwrap();
+
+        let result = UpdateStatuses::new(repo, cache)
+            .execute(&Issuer("other-issuer".into()), "id", Vec::new())
+            .await;
+
+        assert!(matches!(result, Err(UseCaseError::IssuerMismatch)));
+    }
+
+    #[tokio::test]
+    async fn get_status_list_reports_not_found() {
+        let repo = Arc::new(MemoryStatusLists::default());
+        let cache = Arc::new(MemoryStatusListCache::default());
+
+        let result = GetStatusListToken::new(repo, cache)
+            .execute("missing")
+            .await;
+
+        assert!(matches!(result, Err(UseCaseError::NotFound)));
+    }
+
+    #[tokio::test]
+    async fn update_statuses_propagates_domain_errors() {
+        let repo = Arc::new(MemoryStatusLists::default());
+        let cache = Arc::new(MemoryStatusListCache::default());
+        PublishStatusList::new(repo.clone())
+            .execute(record())
+            .await
+            .unwrap();
+
+        let result = UpdateStatuses::new(repo, cache)
+            .execute(
+                &Issuer("issuer".into()),
+                "id",
+                vec![StatusEntry {
+                    index: 0,
+                    status: Status::ApplicationSpecific(3),
+                }],
+            )
+            .await;
+
+        assert!(matches!(
+            result,
+            Err(UseCaseError::Domain(DomainError::InvalidStatusList(_)))
+        ));
     }
 }

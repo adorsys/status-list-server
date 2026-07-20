@@ -7,7 +7,10 @@ use hyper::StatusCode;
 
 use crate::{application::UseCaseError, domain, models::StatusesRequest, utils::state::AppState};
 
-use super::{error::StatusListError, to_domain_entry};
+use super::{
+    ensure_serialized_list_size, error::StatusListError, map_domain_error, to_domain_entry,
+    validate_status_request_limits,
+};
 
 /// Update status entries in an existing status list.
 pub async fn update_status(
@@ -21,11 +24,37 @@ pub async fn update_status(
         return Err(StatusListError::InvalidListId(e.to_string()));
     }
 
+    validate_status_request_limits(
+        &payload.statuses,
+        appstate.max_statuses_per_request,
+        appstate.max_status_index,
+    )?;
+
     let statuses = payload
         .statuses
         .into_iter()
         .map(to_domain_entry)
         .collect::<Vec<_>>();
+
+    let existing = appstate.status_lists.get_status_list(&list_id).await;
+    match existing {
+        Ok(existing) if existing.issuer != domain::Issuer(issuer.clone()) => {
+            return Err(StatusListError::IssuerMismatch);
+        }
+        Ok(existing) => {
+            let preview = existing
+                .status_list
+                .update(statuses.clone())
+                .map_err(map_domain_error)?;
+            ensure_serialized_list_size(&preview, appstate.max_serialized_list_size)?;
+        }
+        Err(UseCaseError::NotFound) => return Err(StatusListError::StatusListNotFound),
+        Err(error) => {
+            tracing::error!(?error, "Failed to preview status list update");
+            return Err(StatusListError::InternalServerError);
+        }
+    }
+
     match appstate
         .status_lists
         .update_statuses(&domain::Issuer(issuer), &list_id, statuses)

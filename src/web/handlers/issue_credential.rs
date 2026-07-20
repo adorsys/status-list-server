@@ -60,7 +60,7 @@ pub(super) async fn publish_credentials(
         serde_json::to_vec(&credentials.public_key).map_err(|_| CredentialError::Port)?;
     let credential = domain::Credential {
         issuer: domain::Issuer(credentials.issuer),
-        public_key: domain::PublicJwk::new(public_key),
+        public_key: domain::PublicJwk::try_new(public_key).map_err(|_| CredentialError::Port)?,
     };
     match state.credentials.publish_credential(credential).await {
         Ok(()) => Ok(()),

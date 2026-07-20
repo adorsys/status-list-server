@@ -4,26 +4,82 @@ use async_trait::async_trait;
 
 use crate::domain::{Credential, StatusListRecord};
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PortOperation {
+    CertificateChain,
+    DeleteOldStatusListHistory,
+    FindCredential,
+    FindStatusList,
+    FindStatusListHistory,
+    InsertCredential,
+    InsertStatusList,
+    InsertStatusListHistory,
+    ListStatusListUris,
+    ReadSecret,
+    RemoveDnsTxt,
+    SigningKey,
+    StoreSecret,
+    PresentDnsTxt,
+    UpdateStatusList,
+}
+
+impl std::fmt::Display for PortOperation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let label = match self {
+            Self::CertificateChain => "certificate chain",
+            Self::DeleteOldStatusListHistory => "delete old status list history",
+            Self::FindCredential => "find credential",
+            Self::FindStatusList => "find status list",
+            Self::FindStatusListHistory => "find valid status list history",
+            Self::InsertCredential => "insert credential",
+            Self::InsertStatusList => "insert status list",
+            Self::InsertStatusListHistory => "insert status list history",
+            Self::ListStatusListUris => "list status list URIs",
+            Self::ReadSecret => "read secret",
+            Self::RemoveDnsTxt => "remove DNS TXT record",
+            Self::SigningKey => "signing key",
+            Self::StoreSecret => "store secret",
+            Self::PresentDnsTxt => "present DNS TXT record",
+            Self::UpdateStatusList => "update status list",
+        };
+        f.write_str(label)
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AuthFailureKind {
+    Permanent,
+    Transient,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum InvalidDataKind {
+    Parse,
+    Semantic,
+    Serialization,
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum PortError {
     #[error("storage unavailable during {operation}: {detail}")]
     StorageUnavailable {
-        operation: &'static str,
+        operation: PortOperation,
         detail: String,
     },
     #[error("external service unavailable during {operation}: {detail}")]
     ExternalServiceUnavailable {
-        operation: &'static str,
+        operation: PortOperation,
         detail: String,
     },
     #[error("operation timed out during {operation}: {detail}")]
     Timeout {
-        operation: &'static str,
+        operation: PortOperation,
         detail: String,
     },
-    #[error("unauthorized outbound operation during {operation}: {detail}")]
+    #[error("unauthorized outbound operation during {operation} ({kind:?}): {detail}")]
     Unauthorized {
-        operation: &'static str,
+        operation: PortOperation,
+        kind: AuthFailureKind,
         detail: String,
     },
     #[error("resource conflict for {resource}: {reason}")]
@@ -31,9 +87,10 @@ pub enum PortError {
         resource: &'static str,
         reason: String,
     },
-    #[error("invalid data for {resource}: {reason}")]
+    #[error("invalid data for {resource} ({kind:?}): {reason}")]
     InvalidData {
         resource: &'static str,
+        kind: InvalidDataKind,
         reason: String,
     },
 }

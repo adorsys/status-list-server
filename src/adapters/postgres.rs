@@ -2,7 +2,10 @@
 use crate::{
     database::queries::SeaOrmStore,
     domain, models,
-    ports::{CredentialRepository, PortError, StatusListHistoryRepository, StatusListRepository},
+    ports::{
+        CredentialRepository, InvalidDataKind, PortError, PortOperation,
+        StatusListHistoryRepository, StatusListRepository,
+    },
 };
 use async_trait::async_trait;
 
@@ -42,23 +45,35 @@ impl CredentialRepository for PostgresCredentialRepository {
         self.store
             .find_one_by(issuer)
             .await
+            .map_err(|e| PortError::StorageUnavailable {
+                operation: PortOperation::FindCredential,
+                detail: e.to_string(),
+            })?
             .map(|record| {
-                record.map(|record| domain::Credential {
+                let public_key =
+                    serde_json::to_vec(&record.public_key).map_err(|e| PortError::InvalidData {
+                        resource: "stored JWK",
+                        kind: InvalidDataKind::Serialization,
+                        reason: format!("serialization failed: {e}"),
+                    })?;
+                Ok(domain::Credential {
                     issuer: domain::Issuer(record.issuer),
-                    public_key: domain::PublicJwk::new(
-                        serde_json::to_vec(&record.public_key).expect("JWK is serializable"),
-                    ),
+                    public_key: domain::PublicJwk::try_new(public_key).map_err(|e| {
+                        PortError::InvalidData {
+                            resource: "stored JWK",
+                            kind: InvalidDataKind::Parse,
+                            reason: e.to_string(),
+                        }
+                    })?,
                 })
             })
-            .map_err(|e| PortError::StorageUnavailable {
-                operation: "find credential",
-                detail: e.to_string(),
-            })
+            .transpose()
     }
     async fn insert(&self, credential: domain::Credential) -> Result<(), PortError> {
         let public_key = serde_json::from_slice(credential.public_key.as_bytes()).map_err(|e| {
             PortError::InvalidData {
                 resource: "public JWK",
+                kind: InvalidDataKind::Parse,
                 reason: e.to_string(),
             }
         })?;
@@ -66,7 +81,7 @@ impl CredentialRepository for PostgresCredentialRepository {
             .insert_one(models::Credentials::new(credential.issuer.0, public_key))
             .await
             .map_err(|e| PortError::StorageUnavailable {
-                operation: "insert credential",
+                operation: PortOperation::InsertCredential,
                 detail: e.to_string(),
             })
     }
@@ -105,7 +120,7 @@ impl StatusListRepository for PostgresStatusListRepository {
             .await
             .map(|value| value.map(from_persistence))
             .map_err(|e| PortError::StorageUnavailable {
-                operation: "find status list",
+                operation: PortOperation::FindStatusList,
                 detail: e.to_string(),
             })
     }
@@ -114,7 +129,7 @@ impl StatusListRepository for PostgresStatusListRepository {
             .insert_one(to_persistence(record))
             .await
             .map_err(|e| PortError::StorageUnavailable {
-                operation: "insert status list",
+                operation: PortOperation::InsertStatusList,
                 detail: e.to_string(),
             })
     }
@@ -124,7 +139,7 @@ impl StatusListRepository for PostgresStatusListRepository {
             .update_one(&id, to_persistence(record))
             .await
             .map_err(|e| PortError::StorageUnavailable {
-                operation: "update status list",
+                operation: PortOperation::UpdateStatusList,
                 detail: e.to_string(),
             })
     }
@@ -133,7 +148,7 @@ impl StatusListRepository for PostgresStatusListRepository {
             .find_all_status_list_uris()
             .await
             .map_err(|e| PortError::StorageUnavailable {
-                operation: "list status list URIs",
+                operation: PortOperation::ListStatusListUris,
                 detail: e.to_string(),
             })
     }
@@ -146,7 +161,7 @@ impl StatusListHistoryRepository for PostgresStatusListHistoryRepository {
             .insert_one(record)
             .await
             .map_err(|e| PortError::StorageUnavailable {
-                operation: "insert status list history",
+                operation: PortOperation::InsertStatusListHistory,
                 detail: e.to_string(),
             })
     }
@@ -160,7 +175,7 @@ impl StatusListHistoryRepository for PostgresStatusListHistoryRepository {
             .find_valid_at(list_id, time)
             .await
             .map_err(|e| PortError::StorageUnavailable {
-                operation: "find valid status list history",
+                operation: PortOperation::FindStatusListHistory,
                 detail: e.to_string(),
             })
     }
@@ -170,7 +185,7 @@ impl StatusListHistoryRepository for PostgresStatusListHistoryRepository {
             .delete_older_than(cutoff)
             .await
             .map_err(|e| PortError::StorageUnavailable {
-                operation: "delete old status list history",
+                operation: PortOperation::DeleteOldStatusListHistory,
                 detail: e.to_string(),
             })
     }

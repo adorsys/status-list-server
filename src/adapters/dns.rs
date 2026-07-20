@@ -17,7 +17,7 @@ use tracing::info;
 
 use crate::{
     cert_manager::challenge::{ChallengeError, DnsProvider as DnsChallengeProvider},
-    ports::{DnsProvider, PortError},
+    ports::{DnsProvider, PortError, PortOperation},
 };
 
 #[derive(Clone)]
@@ -38,7 +38,7 @@ impl DnsProvider for DnsUpdaterProvider {
             .create_txt_record(name, value)
             .await
             .map_err(|err| PortError::ExternalServiceUnavailable {
-                operation: "present DNS TXT record",
+                operation: PortOperation::PresentDnsTxt,
                 detail: err.to_string(),
             })
     }
@@ -48,7 +48,7 @@ impl DnsProvider for DnsUpdaterProvider {
             .delete_txt_record(name, value)
             .await
             .map_err(|err| PortError::ExternalServiceUnavailable {
-                operation: "remove DNS TXT record",
+                operation: PortOperation::RemoveDnsTxt,
                 detail: err.to_string(),
             })
     }
