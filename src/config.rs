@@ -919,6 +919,43 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_gcloud_inline_key_wins_over_path() {
+        // Both sources configured: the inline key must be selected, not the path
+        let dns = DnsConfig {
+            provider: Some(DnsProviderKind::Gcloud),
+            gcloud: Some(GcloudDnsConfig {
+                service_account_key: Some("inline-key-json".into()),
+                service_account_key_path: Some("/etc/gcloud/key.json".into()),
+            }),
+            ..Default::default()
+        };
+        let resolved = dns.resolve("production").unwrap();
+        match resolved {
+            ResolvedDnsProvider::Gcloud(GcloudKeySource::Inline(key)) => {
+                assert_eq!(key.expose_secret(), "inline-key-json");
+            }
+            other => panic!("Expected an inline key source, got {other:?}"),
+        }
+
+        // An empty inline key counts as unset, so the path is used instead
+        let dns = DnsConfig {
+            provider: Some(DnsProviderKind::Gcloud),
+            gcloud: Some(GcloudDnsConfig {
+                service_account_key: Some("".into()),
+                service_account_key_path: Some("/etc/gcloud/key.json".into()),
+            }),
+            ..Default::default()
+        };
+        let resolved = dns.resolve("production").unwrap();
+        match resolved {
+            ResolvedDnsProvider::Gcloud(GcloudKeySource::Path(path)) => {
+                assert_eq!(path, "/etc/gcloud/key.json");
+            }
+            other => panic!("Expected a path key source, got {other:?}"),
+        }
+    }
+
     #[sealed_test(env = [
         ("APP_SERVER__CERT__DNS__ACMEDNS__SERVER_URL", "https://auth.example.org"),
         ("APP_SERVER__CERT__DNS__ACMEDNS__ACCOUNTS", r#"{
