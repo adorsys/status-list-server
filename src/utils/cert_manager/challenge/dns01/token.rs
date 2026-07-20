@@ -1,26 +1,33 @@
+#[cfg(any(feature = "dns-azure", feature = "dns-gcloud"))]
 use std::{
     future::Future,
     time::{Duration, Instant},
 };
 
+#[cfg(any(feature = "dns-azure", feature = "dns-gcloud"))]
 use secrecy::SecretString;
+#[cfg(any(feature = "dns-azure", feature = "dns-gcloud"))]
 use tokio::sync::Mutex;
 
+#[cfg(any(feature = "dns-azure", feature = "dns-gcloud"))]
 use crate::cert_manager::challenge::ChallengeError;
 
 /// Cache for short-lived OAuth2 access tokens.
 ///
 /// The lock is held across minting so concurrent callers wait for the
 /// in-flight mint instead of minting duplicate tokens.
+#[cfg(any(feature = "dns-azure", feature = "dns-gcloud"))]
 pub(crate) struct TokenCache {
     inner: Mutex<Option<CachedToken>>,
 }
 
+#[cfg(any(feature = "dns-azure", feature = "dns-gcloud"))]
 struct CachedToken {
     token: SecretString,
     expires_at: Instant,
 }
 
+#[cfg(any(feature = "dns-azure", feature = "dns-gcloud"))]
 impl TokenCache {
     // Refresh tokens slightly before they expire
     const EXPIRY_SKEW: Duration = Duration::from_secs(60);
@@ -54,6 +61,7 @@ impl TokenCache {
 }
 
 #[cfg(test)]
+#[cfg(any(feature = "dns-azure", feature = "dns-gcloud"))]
 mod tests {
     use super::*;
     use secrecy::ExposeSecret;
@@ -68,7 +76,7 @@ mod tests {
             let token = cache
                 .get_or_mint(|| async {
                     mints.fetch_add(1, Ordering::SeqCst);
-                    Ok(("token".into(), Duration::from_secs(3600)))
+                    Ok(("token".into(), std::time::Duration::from_secs(3600)))
                 })
                 .await
                 .unwrap();
@@ -87,7 +95,7 @@ mod tests {
             cache
                 .get_or_mint(|| async {
                     mints.fetch_add(1, Ordering::SeqCst);
-                    Ok(("token".into(), Duration::from_secs(30)))
+                    Ok(("token".into(), std::time::Duration::from_secs(30)))
                 })
                 .await
                 .unwrap();

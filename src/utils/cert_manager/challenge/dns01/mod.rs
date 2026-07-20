@@ -1,19 +1,40 @@
-mod acme_dns;
-mod azure;
-mod cloudflare;
-mod gcloud;
-mod pebble;
-mod route53;
 mod token;
 
+#[cfg(feature = "dns-acmedns")]
+mod acme_dns;
+#[cfg(feature = "dns-azure")]
+mod azure;
+#[cfg(feature = "dns-cloudflare")]
+mod cloudflare;
+#[cfg(feature = "dns-gcloud")]
+mod gcloud;
+#[cfg(feature = "dns-pebble")]
+mod pebble;
+#[cfg(feature = "dns-route53")]
+mod route53;
+
+#[cfg(feature = "dns-acmedns")]
 pub use acme_dns::{AcmeDnsCredentials, AcmeDnsProvider};
+#[cfg(feature = "dns-azure")]
 pub use azure::{AzureDnsProvider, ServicePrincipal};
+#[cfg(feature = "dns-cloudflare")]
 pub use cloudflare::CloudflareDnsProvider;
+#[cfg(feature = "dns-gcloud")]
 pub use gcloud::GoogleCloudDnsProvider;
+#[cfg(feature = "dns-pebble")]
 pub use pebble::PebbleDnsProvider;
+#[cfg(feature = "dns-route53")]
 pub use route53::AwsRoute53DnsProvider;
 
-use std::{sync::Arc, time::Duration};
+use std::sync::Arc;
+#[cfg(any(
+    feature = "dns-acmedns",
+    feature = "dns-pebble",
+    feature = "dns-azure",
+    feature = "dns-gcloud",
+    feature = "dns-cloudflare"
+))]
+use std::time::Duration;
 
 use async_trait::async_trait;
 use color_eyre::eyre::eyre;
@@ -23,9 +44,23 @@ use crate::cert_manager::challenge::{ChallengeError, ChallengeHandler, CleanupFu
 
 /// Timeout applied to every DNS provider HTTP request so a hung API or token
 /// endpoint cannot stall certificate renewal indefinitely.
+#[cfg(any(
+    feature = "dns-acmedns",
+    feature = "dns-pebble",
+    feature = "dns-azure",
+    feature = "dns-gcloud",
+    feature = "dns-cloudflare"
+))]
 const HTTP_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Build the HTTP client shared by the DNS provider implementations
+#[cfg(any(
+    feature = "dns-acmedns",
+    feature = "dns-pebble",
+    feature = "dns-azure",
+    feature = "dns-gcloud",
+    feature = "dns-cloudflare"
+))]
 pub(crate) fn http_client() -> reqwest::Client {
     reqwest::Client::builder()
         .timeout(HTTP_TIMEOUT)

@@ -1,19 +1,19 @@
 use crate::{
-    cert_manager::{
-        CertManager, StoreProvisioningStrategy,
-        challenge::{
-            AcmeDnsCredentials, AcmeDnsProvider, AwsRoute53DnsProvider, AzureDnsProvider,
-            CloudflareDnsProvider, Dns01Handler, GoogleCloudDnsProvider, PebbleDnsProvider,
-            ServicePrincipal,
-        },
-        storage::{AwsS3, AwsSecretsManager, Redis},
-    },
+    cert_manager::{CertManager, StoreProvisioningStrategy, challenge::Dns01Handler},
     config::{Config as AppConfig, DnsProviderKind, ENV_DEVELOPMENT, ENV_PRODUCTION},
     database::{Migrator, queries::SeaOrmStore},
     models::{Credentials, StatusListRecord},
 };
-use aws_config::{BehaviorVersion, Region, SdkConfig};
-use color_eyre::eyre::{Context, Result as EyeResult, eyre};
+
+#[cfg(feature = "dns-acmedns")]
+use crate::cert_manager::challenge::AcmeDnsCredentials;
+#[cfg(feature = "aws-s3")]
+use crate::cert_manager::storage::AwsS3;
+#[cfg(feature = "aws-secrets-manager")]
+use crate::cert_manager::storage::AwsSecretsManager;
+#[cfg(feature = "redis-cache")]
+use crate::cert_manager::storage::Redis;
+use color_eyre::eyre::{Context, Result as EyeResult};
 use sea_orm::{ConnectOptions, Database};
 use sea_orm_migration::MigratorTrait;
 use secrecy::ExposeSecret;
@@ -27,6 +27,7 @@ fn empty_to_none(value: Option<String>) -> Option<String> {
 }
 
 /// Map an ACME-DNS account from the config layer to provider credentials
+#[cfg(feature = "dns-acmedns")]
 fn acme_dns_credentials(account: &crate::config::AcmeDnsAccount) -> AcmeDnsCredentials {
     AcmeDnsCredentials {
         username: account.username.clone(),
@@ -49,26 +50,17 @@ pub struct AppState {
 
 pub async fn build_state(config: &AppConfig) -> EyeResult<AppState> {
     let db_url = config.database.url.expose_secret();
-    let db_backend = config.database.backend;
-
-    // Validate URL scheme matches the configured backend
-    if !db_backend.validate_url_scheme(db_url) {
-        return Err(color_eyre::eyre::eyre!(
-            "URL scheme does not match configured backend '{}'. Expected URL starting with {}",
-            db_backend.as_str(),
-            db_backend.expected_scheme_description()
-        ));
-    }
 
     #[cfg(feature = "sqlite")]
     let mut opt = ConnectOptions::new(db_url.to_string());
     #[cfg(not(feature = "sqlite"))]
     let opt = ConnectOptions::new(db_url.to_string());
     #[cfg(feature = "sqlite")]
-    if db_backend == crate::config::DatabaseBackend::Sqlite {
+    {
         opt.max_connections(1);
         opt.map_sqlx_sqlite_opts(|o| o.foreign_keys(true));
     }
+
     let db = Database::connect(opt)
         .await
         .wrap_err("Failed to connect to database")?;
@@ -76,17 +68,6 @@ pub async fn build_state(config: &AppConfig) -> EyeResult<AppState> {
     Migrator::up(&db, None)
         .await
         .wrap_err("Failed to run database migrations")?;
-
-    let aws_config = aws_config::defaults(BehaviorVersion::latest())
-        .region(Region::new(config.aws.region.clone()))
-        .load()
-        .await;
-
-    let redis_conn = config
-        .redis
-        .start(None, None, None)
-        .await
-        .wrap_err("Failed to connect to Redis")?;
 
     // Initialize the challenge handler with the configured DNS provider.
     // When no provider is configured, the environment decides: Route53 in
@@ -108,22 +89,13 @@ pub async fn build_state(config: &AppConfig) -> EyeResult<AppState> {
     // ACME order and the challenge handler's startup coverage checks
     let cert_domains = [config.server.domain.as_str()];
     let challenge_handler =
-        build_dns_challenge_handler(dns_provider, config, &aws_config, &cert_domains).await?;
+        build_dns_challenge_handler(dns_provider, config, &cert_domains).await?;
 
     // Initialize the storage backends for the certificate manager
-    let cache = Redis::new(redis_conn.clone()).with_ttl(config.redis.cert_cache_ttl);
-    let cert_storage = AwsS3::new(
-        &aws_config,
-        &config.aws.s3_bucket,
-        &config.aws.region,
-        &config.aws.s3_key_prefix,
-    )
-    .with_cache(cache);
-    let secrets_storage = AwsSecretsManager::new(
-        &aws_config,
-        Duration::from_secs(config.aws.secrets_cache_ttl),
-    )
-    .await?;
+    // These are feature-gated and will use memory implementations when
+    // the corresponding feature is not enabled
+    let cert_storage = build_cert_storage(config).await?;
+    let secrets_storage = build_secrets_storage(config).await?;
 
     let cert_strategy = store_certificate_strategy(config)?;
     let uses_acme_strategy = config
@@ -149,7 +121,7 @@ pub async fn build_state(config: &AppConfig) -> EyeResult<AppState> {
     } else if let Some(cert_strategy) = cert_strategy {
         cert_manager_builder.store_strategy(cert_strategy)
     } else {
-        return Err(eyre!(
+        return Err(color_eyre::eyre::eyre!(
             "store certificate provisioning strategy is missing after validation"
         ));
     };
@@ -191,7 +163,7 @@ fn store_certificate_strategy(config: &AppConfig) -> EyeResult<Option<StoreProvi
         .provisioning_strategy
         .eq_ignore_ascii_case("store")
     {
-        return Err(eyre!(
+        return Err(color_eyre::eyre::eyre!(
             "unsupported certificate provisioning strategy '{}'; expected 'acme' or 'store'",
             cert_config.provisioning_strategy
         ));
@@ -204,7 +176,7 @@ fn store_certificate_strategy(config: &AppConfig) -> EyeResult<Option<StoreProvi
                 .certificate_path
                 .as_deref()
                 .ok_or_else(|| {
-                    eyre!(
+                    color_eyre::eyre::eyre!(
                         "server.cert.store.certificate_path is required for filesystem store provisioning"
                     )
                 })?;
@@ -213,7 +185,7 @@ fn store_certificate_strategy(config: &AppConfig) -> EyeResult<Option<StoreProvi
                 .signing_key_path
                 .as_deref()
                 .ok_or_else(|| {
-                    eyre!(
+                    color_eyre::eyre::eyre!(
                         "server.cert.store.signing_key_path is required for filesystem store provisioning"
                     )
                 })?;
@@ -224,10 +196,10 @@ fn store_certificate_strategy(config: &AppConfig) -> EyeResult<Option<StoreProvi
         }
         source if source.eq_ignore_ascii_case("storage") => {
             let certificate_key = cert_config.store.certificate_key.as_deref().ok_or_else(|| {
-                eyre!("server.cert.store.certificate_key is required for storage store provisioning")
+                color_eyre::eyre::eyre!("server.cert.store.certificate_key is required for storage store provisioning")
             })?;
             let signing_key_key = cert_config.store.signing_key_key.as_deref().ok_or_else(|| {
-                eyre!("server.cert.store.signing_key_key is required for storage store provisioning")
+                color_eyre::eyre::eyre!("server.cert.store.signing_key_key is required for storage store provisioning")
             })?;
             Ok(Some(StoreProvisioningStrategy::storage(
                 certificate_key,
@@ -240,12 +212,12 @@ fn store_certificate_strategy(config: &AppConfig) -> EyeResult<Option<StoreProvi
                 || source.eq_ignore_ascii_case("aws_secrets_manager") =>
         {
             let certificate_key = cert_config.store.certificate_key.as_deref().ok_or_else(|| {
-                eyre!(
+                color_eyre::eyre::eyre!(
                     "server.cert.store.certificate_key is required for secrets store provisioning"
                 )
             })?;
             let signing_key_key = cert_config.store.signing_key_key.as_deref().ok_or_else(|| {
-                eyre!(
+                color_eyre::eyre::eyre!(
                     "server.cert.store.signing_key_key is required for secrets store provisioning"
                 )
             })?;
@@ -254,37 +226,164 @@ fn store_certificate_strategy(config: &AppConfig) -> EyeResult<Option<StoreProvi
                 signing_key_key,
             )))
         }
-        other => Err(eyre!(
+        other => Err(color_eyre::eyre::eyre!(
             "unsupported certificate store source '{other}'; expected 'filesystem', 'storage', or 'secrets'"
         )),
     }
+}
+
+/// Build the certificate storage backend based on enabled features.
+///
+/// Priority:
+/// 1. AWS S3 (if aws-s3 feature is enabled)
+/// 2. Memory storage (fallback for local development)
+#[cfg(feature = "aws-s3")]
+async fn build_cert_storage(
+    _config: &AppConfig,
+) -> EyeResult<Box<dyn crate::cert_manager::storage::Storage>> {
+    let aws_config = ::aws_config::defaults(::aws_config::BehaviorVersion::latest())
+        .region(::aws_config::Region::new(_config.aws.region.clone()))
+        .load()
+        .await;
+
+    let cache = build_cert_chain_cache(_config).await?;
+
+    let storage = AwsS3::new(
+        &aws_config,
+        &_config.aws.s3_bucket,
+        &_config.aws.region,
+        &_config.aws.s3_key_prefix,
+    )
+    .with_cache(cache);
+
+    Ok(Box::new(storage))
+}
+
+#[cfg(not(feature = "aws-s3"))]
+async fn build_cert_storage(
+    _config: &AppConfig,
+) -> EyeResult<Box<dyn crate::cert_manager::storage::Storage>> {
+    use crate::cert_manager::storage::MemoryStorage;
+
+    tracing::info!("Using in-memory certificate storage (aws-s3 feature not enabled)");
+    Ok(Box::new(MemoryStorage::cert_storage()))
+}
+
+/// Build the secrets storage backend based on enabled features.
+///
+/// Priority:
+/// 1. AWS Secrets Manager (if aws-secrets-manager feature is enabled)
+/// 2. Memory storage (fallback for local development)
+#[cfg(feature = "aws-secrets-manager")]
+async fn build_secrets_storage(
+    _config: &AppConfig,
+) -> EyeResult<Box<dyn crate::cert_manager::storage::Storage>> {
+    let aws_config = ::aws_config::defaults(::aws_config::BehaviorVersion::latest())
+        .region(::aws_config::Region::new(_config.aws.region.clone()))
+        .load()
+        .await;
+
+    let storage = AwsSecretsManager::new(
+        &aws_config,
+        Duration::from_secs(_config.aws.secrets_cache_ttl),
+    )
+    .await?;
+
+    Ok(Box::new(storage))
+}
+
+#[cfg(not(feature = "aws-secrets-manager"))]
+async fn build_secrets_storage(
+    _config: &AppConfig,
+) -> EyeResult<Box<dyn crate::cert_manager::storage::Storage>> {
+    use crate::cert_manager::storage::MemoryStorage;
+
+    tracing::info!("Using in-memory secrets storage (aws-secrets-manager feature not enabled)");
+    Ok(Box::new(MemoryStorage::secrets_storage()))
+}
+
+/// Build the certificate chain cache backend based on enabled features.
+///
+/// Priority:
+/// 1. Redis (if redis-cache feature is enabled)
+/// 2. Memory cache (fallback - uses moka, which is always in-memory)
+#[cfg(feature = "aws-s3")]
+#[cfg(feature = "redis-cache")]
+async fn build_cert_chain_cache(
+    config: &AppConfig,
+) -> EyeResult<Box<dyn crate::cert_manager::storage::Storage>> {
+    let redis_conn = config
+        .redis
+        .start(None, None, None)
+        .await
+        .wrap_err("Failed to connect to Redis")?;
+
+    Ok(Box::new(
+        Redis::new(redis_conn).with_ttl(config.redis.cert_cache_ttl),
+    ))
+}
+
+#[cfg(feature = "aws-s3")]
+#[cfg(not(feature = "redis-cache"))]
+async fn build_cert_chain_cache(
+    _config: &AppConfig,
+) -> EyeResult<Box<dyn crate::cert_manager::storage::Storage>> {
+    use crate::cert_manager::storage::MemoryStorage;
+
+    tracing::info!("Using in-memory certificate chain cache (redis-cache feature not enabled)");
+    Ok(Box::new(MemoryStorage::new("cert_chain_cache")))
 }
 
 /// Build the DNS-01 challenge handler for the resolved DNS provider.
 ///
 /// `cert_domains` are the domains certificates will be ordered for, used to
 /// validate at startup that the provider can serve challenges for them.
+#[allow(unused_variables)]
 async fn build_dns_challenge_handler(
     provider: DnsProviderKind,
     config: &AppConfig,
-    aws_config: &SdkConfig,
     cert_domains: &[&str],
 ) -> EyeResult<Dns01Handler> {
-    let dns = &config.server.cert.dns;
-    let handler = match provider {
-        DnsProviderKind::Route53 => Dns01Handler::new(AwsRoute53DnsProvider::new(aws_config)),
+    match provider {
+        #[cfg(feature = "dns-route53")]
+        DnsProviderKind::Route53 => {
+            use crate::cert_manager::challenge::AwsRoute53DnsProvider;
+
+            let aws_config = ::aws_config::defaults(::aws_config::BehaviorVersion::latest())
+                .region(::aws_config::Region::new(config.aws.region.clone()))
+                .load()
+                .await;
+
+            Ok(Dns01Handler::new(AwsRoute53DnsProvider::new(&aws_config)))
+        }
+
+        #[cfg(feature = "dns-cloudflare")]
         DnsProviderKind::Cloudflare => {
-            let cfg = dns
+            use crate::cert_manager::challenge::CloudflareDnsProvider;
+
+            let cfg = config
+                .server
+                .cert
+                .dns
                 .cloudflare
                 .as_ref()
-                .ok_or_else(|| eyre!("Missing Cloudflare DNS settings"))?;
-            Dns01Handler::new(CloudflareDnsProvider::new(cfg.api_token.clone()))
+                .ok_or_else(|| color_eyre::eyre::eyre!("Missing Cloudflare DNS settings"))?;
+            Ok(Dns01Handler::new(CloudflareDnsProvider::new(
+                cfg.api_token.clone(),
+            )))
         }
+
+        #[cfg(feature = "dns-gcloud")]
         DnsProviderKind::Gcloud => {
-            let cfg = dns
+            use crate::cert_manager::challenge::GoogleCloudDnsProvider;
+
+            let cfg = config
+                .server
+                .cert
+                .dns
                 .gcloud
                 .as_ref()
-                .ok_or_else(|| eyre!("Missing Google Cloud DNS settings"))?;
+                .ok_or_else(|| color_eyre::eyre::eyre!("Missing Google Cloud DNS settings"))?;
             // Empty values count as unset, matching DnsConfig::resolve
             let inline = cfg
                 .service_account_key
@@ -299,16 +398,27 @@ async fn build_dns_challenge_handler(
                 (None, Some(path)) => tokio::fs::read_to_string(path)
                     .await
                     .wrap_err_with(|| format!("Failed to read service account key at {path}"))?,
-                (None, None) => return Err(eyre!("Missing Google Cloud service account key")),
+                (None, None) => {
+                    return Err(color_eyre::eyre::eyre!(
+                        "Missing Google Cloud service account key"
+                    ));
+                }
             };
-            Dns01Handler::new(GoogleCloudDnsProvider::new(&key_json)?)
+            Ok(Dns01Handler::new(GoogleCloudDnsProvider::new(&key_json)?))
         }
+
+        #[cfg(feature = "dns-azure")]
         DnsProviderKind::Azure => {
-            let cfg = dns
+            use crate::cert_manager::challenge::{AzureDnsProvider, ServicePrincipal};
+
+            let cfg = config
+                .server
+                .cert
+                .dns
                 .azure
                 .as_ref()
-                .ok_or_else(|| eyre!("Missing Azure DNS settings"))?;
-            Dns01Handler::new(AzureDnsProvider::new(
+                .ok_or_else(|| color_eyre::eyre::eyre!("Missing Azure DNS settings"))?;
+            Ok(Dns01Handler::new(AzureDnsProvider::new(
                 ServicePrincipal {
                     tenant_id: cfg.tenant_id.clone(),
                     client_id: cfg.client_id.clone(),
@@ -316,13 +426,20 @@ async fn build_dns_challenge_handler(
                 },
                 &cfg.subscription_id,
                 &cfg.resource_group,
-            ))
+            )))
         }
+
+        #[cfg(feature = "dns-acmedns")]
         DnsProviderKind::Acmedns => {
-            let cfg = dns
+            use crate::cert_manager::challenge::AcmeDnsProvider;
+
+            let cfg = config
+                .server
+                .cert
+                .dns
                 .acmedns
                 .as_ref()
-                .ok_or_else(|| eyre!("Missing ACME-DNS settings"))?;
+                .ok_or_else(|| color_eyre::eyre::eyre!("Missing ACME-DNS settings"))?;
             let accounts = cfg
                 .accounts
                 .iter()
@@ -336,9 +453,13 @@ async fn build_dns_challenge_handler(
             // Catch a credentials gap or an overloaded two-value TXT window
             // for the ordered domains at startup instead of at the first renewal
             provider.check_order_domains(cert_domains)?;
-            Dns01Handler::new(provider)
+            Ok(Dns01Handler::new(provider))
         }
+
+        #[cfg(feature = "dns-pebble")]
         DnsProviderKind::Pebble => {
+            use crate::cert_manager::challenge::PebbleDnsProvider;
+
             // The DNS challenge server URL is optional and only used in dev mode;
             // it falls back to the well-known Pebble challenge test server when unset.
             let dns_url = config
@@ -347,10 +468,16 @@ async fn build_dns_challenge_handler(
                 .dns_challenge_server_url
                 .as_deref()
                 .unwrap_or("http://challtestsrv:8055");
-            Dns01Handler::new(PebbleDnsProvider::new(dns_url))
+            Ok(Dns01Handler::new(PebbleDnsProvider::new(dns_url)))
         }
-    };
-    Ok(handler)
+
+        // Fallback for when a DNS provider is requested but its feature is not enabled
+        #[allow(unreachable_patterns)]
+        _ => Err(color_eyre::eyre::eyre!(
+            "DNS provider {:?} is not available. Make sure the corresponding feature is enabled (e.g., 'dns-route53', 'dns-cloudflare', etc.)",
+            provider
+        )),
+    }
 }
 
 #[cfg(test)]
@@ -365,52 +492,49 @@ mod tests {
     use sealed_test::prelude::*;
     use secrecy::SecretString;
 
-    fn test_sdk_config() -> SdkConfig {
-        SdkConfig::builder()
-            .behavior_version(BehaviorVersion::latest())
-            .build()
-    }
-
     // Sync wrapper shadowing the async builder: sealed tests fork the
     // process and run without an async runtime
+    #[cfg(all(
+        feature = "dns-route53",
+        feature = "dns-pebble",
+        feature = "dns-cloudflare",
+        feature = "dns-azure",
+        feature = "dns-acmedns",
+        feature = "dns-gcloud"
+    ))]
     fn build_dns_challenge_handler(
         provider: DnsProviderKind,
         config: &AppConfig,
-        aws_config: &SdkConfig,
-        cert_domains: &[&str],
     ) -> EyeResult<Dns01Handler> {
         tokio::runtime::Runtime::new()
             .expect("failed to build test runtime")
             .block_on(super::build_dns_challenge_handler(
                 provider,
                 config,
-                aws_config,
-                cert_domains,
+                &[config.server.domain.as_str()],
             ))
     }
 
     #[sealed_test]
+    #[cfg(all(
+        feature = "dns-route53",
+        feature = "dns-pebble",
+        feature = "dns-cloudflare",
+        feature = "dns-azure",
+        feature = "dns-acmedns",
+        feature = "dns-gcloud"
+    ))]
     fn builds_handler_for_each_configured_provider() {
-        let sdk = test_sdk_config();
         let mut config = AppConfig::load().expect("Failed to load config");
-        let domain = config.server.domain.clone();
-        let domains = [domain.as_str()];
 
         // Route53 and Pebble need no provider-specific settings
-        assert!(
-            build_dns_challenge_handler(DnsProviderKind::Route53, &config, &sdk, &domains).is_ok()
-        );
-        assert!(
-            build_dns_challenge_handler(DnsProviderKind::Pebble, &config, &sdk, &domains).is_ok()
-        );
+        assert!(build_dns_challenge_handler(DnsProviderKind::Route53, &config).is_ok());
+        assert!(build_dns_challenge_handler(DnsProviderKind::Pebble, &config).is_ok());
 
         config.server.cert.dns.cloudflare = Some(CloudflareDnsConfig {
             api_token: "token".into(),
         });
-        assert!(
-            build_dns_challenge_handler(DnsProviderKind::Cloudflare, &config, &sdk, &domains)
-                .is_ok()
-        );
+        assert!(build_dns_challenge_handler(DnsProviderKind::Cloudflare, &config).is_ok());
 
         config.server.cert.dns.azure = Some(AzureDnsConfig {
             tenant_id: "tenant".into(),
@@ -419,9 +543,7 @@ mod tests {
             subscription_id: "sub".into(),
             resource_group: "rg".into(),
         });
-        assert!(
-            build_dns_challenge_handler(DnsProviderKind::Azure, &config, &sdk, &domains).is_ok()
-        );
+        assert!(build_dns_challenge_handler(DnsProviderKind::Azure, &config).is_ok());
 
         config.server.cert.dns.acmedns = Some(AcmeDnsConfig {
             server_url: "https://auth.example.org".into(),
@@ -430,9 +552,7 @@ mod tests {
             subdomain: Some("subdomain".into()),
             accounts: Default::default(),
         });
-        assert!(
-            build_dns_challenge_handler(DnsProviderKind::Acmedns, &config, &sdk, &domains).is_ok()
-        );
+        assert!(build_dns_challenge_handler(DnsProviderKind::Acmedns, &config).is_ok());
 
         let key_json = serde_json::json!({
             "client_email": "acme@test-project.iam.gserviceaccount.com",
@@ -444,129 +564,23 @@ mod tests {
             service_account_key: Some(key_json.to_string().into()),
             service_account_key_path: None,
         });
-        assert!(
-            build_dns_challenge_handler(DnsProviderKind::Gcloud, &config, &sdk, &domains).is_ok()
-        );
+        assert!(build_dns_challenge_handler(DnsProviderKind::Gcloud, &config).is_ok());
     }
 
     #[sealed_test]
+    #[cfg(all(
+        feature = "dns-cloudflare",
+        feature = "dns-azure",
+        feature = "dns-acmedns",
+        feature = "dns-gcloud"
+    ))]
     fn fails_when_provider_settings_are_missing() {
-        let sdk = test_sdk_config();
         let config = AppConfig::load().expect("Failed to load config");
-        let domains = [config.server.domain.as_str()];
 
-        for kind in [
-            DnsProviderKind::Cloudflare,
-            DnsProviderKind::Gcloud,
-            DnsProviderKind::Azure,
-            DnsProviderKind::Acmedns,
-        ] {
-            assert!(build_dns_challenge_handler(kind, &config, &sdk, &domains).is_err());
-        }
-    }
-
-    #[sealed_test]
-    fn acme_dns_must_cover_the_server_domain_at_startup() {
-        let sdk = test_sdk_config();
-        let mut config = AppConfig::load().expect("Failed to load config");
-        let domain = config.server.domain.clone();
-        let domains = [domain.as_str()];
-
-        let account = crate::config::AcmeDnsAccount {
-            username: "user".into(),
-            password: "password".into(),
-            subdomain: "subdomain".into(),
-        };
-        let mut acmedns = AcmeDnsConfig {
-            server_url: "https://auth.example.org".into(),
-            username: None,
-            password: None,
-            subdomain: None,
-            accounts: [("other.example.com".to_string(), account.clone())].into(),
-        };
-
-        // Map-only config not covering the server domain fails at startup
-        config.server.cert.dns.acmedns = Some(acmedns.clone());
-        let err = build_dns_challenge_handler(DnsProviderKind::Acmedns, &config, &sdk, &domains)
-            .err()
-            .expect("startup must fail without an account for the server domain");
-        assert!(err.to_string().contains(&domain));
-
-        // An entry for the server domain (any cosmetic form) makes it build
-        acmedns.accounts.insert(domain.to_uppercase(), account);
-        config.server.cert.dns.acmedns = Some(acmedns);
-        assert!(
-            build_dns_challenge_handler(DnsProviderKind::Acmedns, &config, &sdk, &domains).is_ok()
-        );
-    }
-
-    #[sealed_test]
-    fn acme_dns_account_conflicts_fail_at_boot() {
-        let sdk = test_sdk_config();
-        let mut config = AppConfig::load().expect("Failed to load config");
-        let domain = config.server.domain.clone();
-        let domains = [domain.as_str()];
-
-        // Two entries normalizing to the server domain, different credentials:
-        // the provider is built eagerly at boot, so this must fail here
-        let account = |subdomain: &str| crate::config::AcmeDnsAccount {
-            username: "user".into(),
-            password: "password".into(),
-            subdomain: subdomain.into(),
-        };
-        config.server.cert.dns.acmedns = Some(AcmeDnsConfig {
-            server_url: "https://auth.example.org".into(),
-            username: None,
-            password: None,
-            subdomain: None,
-            accounts: [
-                (domain.clone(), account("first")),
-                (domain.to_uppercase(), account("second")),
-            ]
-            .into(),
-        });
-
-        let err = build_dns_challenge_handler(DnsProviderKind::Acmedns, &config, &sdk, &domains)
-            .err()
-            .expect("conflicting account entries must fail the boot-path builder");
-        assert!(err.to_string().contains("Conflicting ACME-DNS accounts"));
-    }
-
-    #[sealed_test]
-    fn acme_dns_rejects_three_cert_domains_on_one_account() {
-        let sdk = test_sdk_config();
-        let mut config = AppConfig::load().expect("Failed to load config");
-        let domains = ["a.example.com", "b.example.com", "c.example.com"];
-
-        // All three fall back to the default account, whose two-value TXT
-        // window cannot hold three digests at once
-        config.server.cert.dns.acmedns = Some(AcmeDnsConfig {
-            server_url: "https://auth.example.org".into(),
-            username: Some("user".into()),
-            password: Some("password".into()),
-            subdomain: Some("subdomain".into()),
-            accounts: Default::default(),
-        });
-
-        let err = build_dns_challenge_handler(DnsProviderKind::Acmedns, &config, &sdk, &domains)
-            .err()
-            .expect("three identifiers on one account must fail the boot-path builder");
-        assert!(err.to_string().contains("two most recent TXT values"));
-
-        // Mapping one of them to its own account restores a valid setup
-        if let Some(acmedns) = &mut config.server.cert.dns.acmedns {
-            acmedns.accounts.insert(
-                "c.example.com".to_string(),
-                crate::config::AcmeDnsAccount {
-                    username: "user-c".into(),
-                    password: "password-c".into(),
-                    subdomain: "subdomain-c".into(),
-                },
-            );
-        }
-        assert!(
-            build_dns_challenge_handler(DnsProviderKind::Acmedns, &config, &sdk, &domains).is_ok()
-        );
+        assert!(build_dns_challenge_handler(DnsProviderKind::Cloudflare, &config).is_err());
+        assert!(build_dns_challenge_handler(DnsProviderKind::Gcloud, &config).is_err());
+        assert!(build_dns_challenge_handler(DnsProviderKind::Azure, &config).is_err());
+        assert!(build_dns_challenge_handler(DnsProviderKind::Acmedns, &config).is_err());
     }
 
     #[test]

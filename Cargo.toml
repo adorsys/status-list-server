@@ -36,10 +36,38 @@ inherits = "dev"
 opt-level = 1
 
 [features]
-default = ["postgres"]
+default = ["postgres", "aws-s3", "aws-secrets-manager", "redis-cache", "dns-route53"]
+
+# Database backends (mutually exclusive - exactly one required)
 postgres = ["sea-orm/sqlx-postgres", "sea-orm-migration/sqlx-postgres"]
 mysql = ["sea-orm/sqlx-mysql", "sea-orm-migration/sqlx-mysql"]
 sqlite = ["sea-orm/sqlx-sqlite", "sea-orm-migration/sqlx-sqlite"]
+
+# Storage backends (certificates)
+aws-s3 = ["dep:aws-config", "dep:aws-sdk-s3"]
+memory-storage = []
+
+# Secrets storage backends
+aws-secrets-manager = ["dep:aws-config", "dep:aws-sdk-secretsmanager"]
+memory-secrets = []
+
+# Cache backends
+redis-cache = ["dep:redis"]
+memory-cache = []
+
+# DNS provider backends (at least one required for cert provisioning)
+dns-route53 = ["dep:aws-config", "dep:aws-sdk-route53"]
+dns-cloudflare = []
+dns-gcloud = []
+dns-azure = []
+dns-acmedns = []
+dns-pebble = []
+
+# Convenience feature for local development (in-memory everything)
+memory = ["sqlite", "memory-storage", "memory-secrets", "memory-cache", "dns-pebble"]
+
+# Full AWS feature set
+aws = ["aws-s3", "aws-secrets-manager", "dns-route53"]
 
 [dependencies]
 # Async runtime and utilities
@@ -91,7 +119,7 @@ thiserror = "2.0"
 color-eyre = "0.6"
 
 # Utility Libraries
-uuid = "1.23"
+uuid = { version = "1.23", features = ["v4"] }
 base64 = "0.22"
 time = { version = "0.3", features = ["formatting", "macros"] }
 base64url = "0.1"
@@ -104,34 +132,16 @@ metrics-exporter-prometheus = "0.18"
 metrics-process = "2.4"
 sea-orm-migration = { version = "1.1.20", default-features = false, features = ["runtime-tokio-rustls"] }
 
-# AWS related libraries
-[dependencies.aws-config]
-version = "1"
-default-features = false
-features = ["default-https-client", "rt-tokio"]
+# AWS related libraries - optional, enabled by features
+aws-config = { version = "1", default-features = false, features = ["default-https-client", "rt-tokio"], optional = true }
+aws-sdk-s3 = { version = "1", default-features = false, features = ["default-https-client", "rt-tokio", "sigv4a"], optional = true }
+aws-sdk-route53 = { version = "1", default-features = false, features = ["default-https-client", "rt-tokio"], optional = true }
+aws-sdk-secretsmanager = { version = "1", default-features = false, features = ["default-https-client", "rt-tokio"], optional = true }
 
-[dependencies.aws-sdk-s3]
-version = "1"
-default-features = false
-features = ["default-https-client", "rt-tokio", "sigv4a"]
+# Redis - optional, enabled by feature
+redis = { version = "1.3", features = ["connection-manager", "tokio-rustls-comp"], optional = true }
 
-[dependencies.aws-sdk-route53]
-version = "1"
-default-features = false
-features = ["default-https-client", "rt-tokio"]
-
-[dependencies.aws-sdk-secretsmanager]
-version = "1"
-default-features = false
-features = ["default-https-client", "rt-tokio"]
-
-[dependencies.redis]
-version = "1.3"
-features = ["connection-manager", "tokio-rustls-comp"]
-
-[dependencies.p256]
-version = "0.14"
-features = ["alloc", "ecdsa", "pem", "pkcs8"]
+p256 = { version = "0.14", features = ["alloc", "ecdsa", "pem", "pkcs8"] }
 
 [dev-dependencies]
 sealed_test = "1.1.0"
@@ -139,6 +149,11 @@ wiremock = "0.6"
 sea-orm = { version = "1.1", features = ["mock"] }
 testcontainers-modules = { version = "0.15", features = ["localstack", "mysql", "redis"] }
 metrics-util = "0.20"
+
+[[test]]
+name = "cert_provisioning"
+path = "tests/cert_provisioning.rs"
+required-features = ["dns-pebble", "aws-s3", "aws-secrets-manager", "redis-cache"]
 
 [target.'cfg(not(target_env = "msvc"))'.dependencies]
 tikv-jemallocator = "0.7"

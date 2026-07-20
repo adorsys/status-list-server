@@ -31,6 +31,42 @@ For a detailed explanation of the architecture, see the [Architecture Documentat
 | Status List Aggregation         | ✅ Implemented | `GET /api/v1/aggregation` + optional `aggregation_uri` token member |
 | X.509 Certificate EKU           | ⚠️ Partial     | Placeholder OID (`...3.30`); rename pending spec finalization       |
 
+## Backend Feature Flags
+
+This server uses Cargo feature flags to select backends at compile time. This enables flexible deployment configurations from lightweight in-memory development setups to production-grade AWS infrastructure.
+
+### Feature Naming Convention
+
+| Backend Type              | Available Features                                                                      | Notes                                                               |
+| ------------------------- | --------------------------------------------------------------------------------------- | ------------------------------------------------------------------- |
+| **Database**              | `postgres`, `mysql`, `sqlite`                                                           | Exactly one required                                                |
+| **Certificate Storage**   | `aws-s3`, `memory-storage`                                                              | `aws-s3` for production, `memory-storage` for dev                   |
+| **Secrets Storage**       | `aws-secrets-manager`, `memory-secrets`                                                   | `aws-secrets-manager` for production, `memory-secrets` for dev      |
+| **Certificate Chain Cache** | `redis-cache`, `memory-cache`                                                           | `redis-cache` for multi-replica, `memory-cache` for single instance |
+| **DNS Provider**          | `dns-route53`, `dns-cloudflare`, `dns-gcloud`, `dns-azure`, `dns-acmedns`, `dns-pebble` | At least one required for ACME DNS-01 challenges                    |
+
+### Convenience Features
+
+- **`memory`**: Enables all in-memory backends: `sqlite`, `memory-storage`, `memory-secrets`, `memory-cache`, `dns-pebble`
+- **`aws`**: Enables all AWS backends: `aws-s3`, `aws-secrets-manager`, `dns-route53`
+- **`default`**: Includes `postgres`, `aws-s3`, `aws-secrets-manager`, `redis-cache`, `dns-route53`
+
+### Build Configurations
+
+```bash
+# Production build (default)
+cargo build --release
+
+# Local development with in-memory storage
+cargo build --no-default-features --features memory
+
+# PostgreSQL database with in-memory secrets (for CI)
+cargo build --no-default-features --features "postgres,memory-secrets,memory-storage,dns-pebble"
+
+# SQLite with AWS S3
+cargo build --no-default-features --features "sqlite,aws-s3,aws-secrets-manager,dns-route53"
+```
+
 ## Quick Start
 
 ### Prerequisites
@@ -38,8 +74,7 @@ For a detailed explanation of the architecture, see the [Architecture Documentat
 Before running the server, ensure you have the following tools installed:
 
 - [Rust & Cargo](https://www.rust-lang.org/tools/install) (Latest stable).
-- A supported database backend: PostgreSQL, MySQL, or SQLite.
-- [Redis](https://redis.io/download): The in-memory data structure store used for caching.
+- Database backend (if using `postgres` or `mysql` features).
 - [Docker](https://www.docker.com/get-started/) (optional, for local testing).
 
 ### Run locally
@@ -49,6 +84,16 @@ Before running the server, ensure you have the following tools installed:
 ```bash
 git clone https://github.com/adorsys/status-list-server.git
 cd status-list-server
+```
+
+**Build with desired features:**
+
+```bash
+# For local development with SQLite and in-memory storage
+cargo build --no-default-features --features memory
+
+# Run with default features (requires PostgreSQL, Redis, AWS credentials)
+cargo run
 ```
 
 **Environment Variables:**
