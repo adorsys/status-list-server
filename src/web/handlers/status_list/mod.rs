@@ -53,6 +53,35 @@ fn ensure_serialized_list_size(
     Ok(())
 }
 
+/// Fixture builders for handler tests, replacing the retired `utils::lst_gen`.
+///
+/// `encode_compressed` constructs the wire form (zlib level 9 + base64url,
+/// no padding) independently of the domain encoder, so handler fixtures don't
+/// silently inherit an encoder bug they're meant to exercise.
+#[cfg(test)]
+pub(crate) mod test_support {
+    use std::io::Write;
+
+    pub(crate) fn encode_compressed(bytes: &[u8]) -> String {
+        let mut encoder =
+            flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::best());
+        encoder.write_all(bytes).expect("compressing test fixture");
+        base64url::encode(encoder.finish().expect("finishing test fixture"))
+    }
+
+    pub(crate) fn create_status_list(
+        entries: Vec<crate::models::StatusEntry>,
+    ) -> Result<crate::models::StatusList, crate::domain::DomainError> {
+        let domain_list = crate::domain::StatusList::create(
+            entries.into_iter().map(super::to_domain_entry).collect(),
+        )?;
+        Ok(crate::models::StatusList {
+            bits: domain_list.bits,
+            lst: domain_list.lst,
+        })
+    }
+}
+
 fn map_domain_error(error: crate::domain::DomainError) -> error::StatusListError {
     match error {
         crate::domain::DomainError::InvalidIndex => error::StatusListError::InvalidIndex,

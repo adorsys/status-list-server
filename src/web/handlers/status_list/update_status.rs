@@ -103,10 +103,8 @@ mod test {
             Status, StatusEntry, StatusList, StatusListRecord, StatusesRequest, status_lists,
         },
         test_utils::test_app_state,
-        utils::lst_gen::{AbuseLimits, create_status_list},
+        web::handlers::status_list::test_support::create_status_list,
     };
-
-    const LIMITS: AbuseLimits = AbuseLimits::unlimited();
 
     #[tokio::test]
     async fn test_update_token_status_invalid_list_id() {
@@ -149,9 +147,7 @@ mod test {
                         index: 1,
                         status: Status::VALID,
                     },
-                ],
-                &LIMITS,
-            )
+                ],            )
             .unwrap()
             .lst,
         };
@@ -251,9 +247,7 @@ mod test {
                 vec![StatusEntry {
                     index: 0,
                     status: Status::VALID,
-                }],
-                &LIMITS,
-            )
+                }],            )
             .unwrap()
             .lst,
         };
@@ -308,9 +302,7 @@ mod test {
                 vec![StatusEntry {
                     index: 0,
                     status: Status::VALID,
-                }],
-                &LIMITS,
-            )
+                }],            )
             .unwrap()
             .lst,
         };
@@ -380,9 +372,7 @@ mod test {
                     vec![StatusEntry {
                         index: 0,
                         status: Status::VALID,
-                    }],
-                    &LIMITS,
-                )
+                    }],                )
                 .unwrap()
                 .lst,
             },

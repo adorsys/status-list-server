@@ -468,4 +468,214 @@ mod tests {
         assert_eq!(statuses[0], Status::Valid);
         assert_eq!(statuses[1], Status::ApplicationSpecific(256));
     }
+
+    // The tests below are ported from the retired `utils::lst_gen` suite so the
+    // live encoder carries the exact same byte-level guarantees, including the
+    // §4.1/§4.2 worked vectors. Decompress-direction is the backend-independent
+    // guarantee; encode-direction pins are coupled to flate2's exact output.
+
+    fn entry(index: i32, status: Status) -> StatusEntry {
+        StatusEntry { index, status }
+    }
+
+    #[test]
+    fn create_one_bit_exact_bytes() {
+        let result = StatusList::create(vec![
+            entry(0, Status::Valid),
+            entry(1, Status::Invalid),
+        ])
+        .unwrap();
+        assert_eq!(result.bits, 1);
+        assert_eq!(decompress(&result.lst), vec![0b0000_0010]);
+    }
+
+    #[test]
+    fn create_two_bit_exact_bytes() {
+        let result = StatusList::create(vec![
+            entry(0, Status::Valid),
+            entry(1, Status::Invalid),
+            entry(2, Status::Suspended),
+            entry(3, Status::Invalid),
+        ])
+        .unwrap();
+        assert_eq!(result.bits, 2);
+        assert_eq!(decompress(&result.lst), vec![0b0110_0100]);
+    }
+
+    fn from_raw(bytes: &[u8], bits: u8) -> StatusList {
+        StatusList {
+            bits,
+            lst: encode_compressed(bytes).unwrap(),
+        }
+    }
+
+    #[test]
+    fn update_one_bit_exact_bytes() {
+        let updated = from_raw(&[0b0101_0101], 1)
+            .update(vec![entry(0, Status::Valid), entry(1, Status::Invalid)])
+            .unwrap();
+        assert_eq!(updated.bits, 1);
+        assert_eq!(decompress(&updated.lst), vec![0b0101_0110]);
+    }
+
+    #[test]
+    fn update_leaves_other_slots_untouched() {
+        let updated = from_raw(&[0b1110_0100], 1)
+            .update(vec![entry(1, Status::Valid)])
+            .unwrap();
+        assert_eq!(decompress(&updated.lst), vec![0b1110_0100]);
+    }
+
+    #[test]
+    fn update_widens_one_bit_list_for_suspended() {
+        let updated = from_raw(&[0b0000_0110], 1)
+            .update(vec![entry(1, Status::Suspended)])
+            .unwrap();
+        assert_eq!(updated.bits, 2);
+        assert_eq!(decompress(&updated.lst), vec![0b0001_1000, 0b0000_0000]);
+    }
+
+    #[test]
+    fn update_reencodes_existing_entries_at_wider_bits() {
+        let updated = from_raw(&[0b0101_0101], 1)
+            .update(vec![entry(2, Status::Suspended), entry(5, Status::Invalid)])
+            .unwrap();
+        assert_eq!(updated.bits, 2);
+        assert_eq!(
+            decompress(&updated.lst),
+            vec![0b0010_0001, 0b0001_0101],
+            "existing statuses must survive the bit-width re-encode"
+        );
+    }
+
+    #[test]
+    fn nine_bit_app_specific_exact_layout() {
+        let result = StatusList::create(vec![
+            entry(0, Status::Valid),
+            entry(1, Status::Invalid),
+            entry(2, Status::Suspended),
+            entry(3, Status::ApplicationSpecific(256)),
+        ])
+        .unwrap();
+        assert_eq!(result.bits, 9, "value 256 requires 9 bits");
+        let raw = decompress(&result.lst);
+        assert_eq!(raw.len(), 5, "4 entries * 9 bits = 36 bits = 5 bytes");
+        let statuses = decode_status_array(&raw, 9).unwrap();
+        assert_eq!(statuses[0], Status::Valid);
+        assert_eq!(statuses[1], Status::Invalid);
+        assert_eq!(statuses[2], Status::Suspended);
+        assert_eq!(statuses[3], Status::ApplicationSpecific(256));
+    }
+
+    #[test]
+    fn app_specific_multibyte_roundtrip() {
+        let result = StatusList::create(vec![
+            entry(0, Status::ApplicationSpecific(512)),
+            entry(3, Status::ApplicationSpecific(256)),
+        ])
+        .unwrap();
+        let statuses =
+            decode_status_array(&decompress(&result.lst), result.bits as usize).unwrap();
+        assert_eq!(statuses[0], Status::ApplicationSpecific(512));
+        assert_eq!(statuses[3], Status::ApplicationSpecific(256));
+    }
+
+    #[test]
+    fn thirteen_bit_app_specific_at_offset_roundtrip() {
+        let result = StatusList::create(vec![
+            entry(0, Status::Invalid),
+            entry(3, Status::ApplicationSpecific(4096)),
+        ])
+        .unwrap();
+        assert_eq!(result.bits, 13, "value 4096 requires 13 bits (2^13 = 8192)");
+        let statuses =
+            decode_status_array(&decompress(&result.lst), result.bits as usize).unwrap();
+        assert_eq!(statuses[0], Status::Invalid);
+        assert_eq!(statuses[3], Status::ApplicationSpecific(4096));
+    }
+
+    #[test]
+    fn create_rejects_app_specific_below_256() {
+        for value in [3u32, 100, 255] {
+            let result = StatusList::create(vec![entry(0, Status::ApplicationSpecific(value))]);
+            assert!(
+                matches!(result, Err(DomainError::InvalidStatusList(ref msg)) if msg.contains(">= 256")),
+                "value {value} must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn update_rejects_app_specific_below_256() {
+        let original = StatusList::create(vec![entry(0, Status::Valid)]).unwrap();
+        let result = original.update(vec![entry(0, Status::ApplicationSpecific(3))]);
+        assert!(matches!(result, Err(DomainError::InvalidStatusList(_))));
+    }
+
+    #[test]
+    fn decode_rejects_reserved_values() {
+        // Values 3..=255 are reserved by the encoding table; a stored list
+        // containing one is corrupt, whatever the bit width.
+        for (raw, bits) in [(vec![0b1110_0100u8], 2), (vec![3u8], 2), (vec![100u8], 8)] {
+            let result = decode_status_array(&raw, bits);
+            assert!(
+                matches!(result, Err(DomainError::InvalidStatusList(_))),
+                "value in {raw:?} at {bits} bits must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn create_empty_yields_empty_list() {
+        let result = StatusList::create(Vec::new()).unwrap();
+        assert_eq!(result.bits, 1);
+        assert_eq!(result.lst, "");
+    }
+
+    #[test]
+    fn update_on_empty_created_list_works_end_to_end() {
+        // `create(vec![])` stores `lst: ""`; an empty input stream decodes as a
+        // clean EOF, so a later real update must succeed rather than 400.
+        let updated = StatusList::create(Vec::new())
+            .unwrap()
+            .update(vec![entry(1, Status::Invalid)])
+            .unwrap();
+        assert_eq!(updated.bits, 1);
+        assert_eq!(decompress(&updated.lst), vec![0b0000_0010]);
+    }
+
+    #[test]
+    fn update_with_no_entries_is_a_noop() {
+        let original = from_raw(&[0b1110_0100], 1);
+        let updated = original.update(Vec::new()).unwrap();
+        assert_eq!(updated, original);
+    }
+
+    #[test]
+    fn create_rejects_negative_index() {
+        let result = StatusList::create(vec![entry(-1, Status::Valid)]);
+        assert!(matches!(result, Err(DomainError::InvalidIndex)));
+    }
+
+    #[test]
+    fn update_rejects_negative_index() {
+        let result = from_raw(&[0b1110_0100], 1).update(vec![entry(-1, Status::Invalid)]);
+        assert!(matches!(result, Err(DomainError::InvalidIndex)));
+    }
+
+    #[test]
+    fn spec_vector_one_bit_raw_pin() {
+        let expected_bytes = vec![0xB9, 0xA3];
+        let spec_lst = "eNrbuRgAAhcBXQ";
+        assert_eq!(decompress(spec_lst), expected_bytes);
+        assert_eq!(encode_compressed(&expected_bytes).unwrap(), spec_lst);
+    }
+
+    #[test]
+    fn spec_vector_two_bit_raw_pin() {
+        let expected_bytes = vec![0xC9, 0x44, 0xF9];
+        let spec_lst = "eNo76fITAAPfAgc";
+        assert_eq!(decompress(spec_lst), expected_bytes);
+        assert_eq!(encode_compressed(&expected_bytes).unwrap(), spec_lst);
+    }
 }

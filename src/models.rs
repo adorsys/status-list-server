@@ -187,3 +187,35 @@ pub struct StatusEntry {
     pub index: i32,
     pub status: Status,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::Status;
+
+    /// Wire format: statuses serialize as bare integers, and deserialization
+    /// rejects the reserved range 3..=255 (ported from the retired
+    /// `utils::lst_gen` suite).
+    #[test]
+    fn status_serde_integer_roundtrip() {
+        assert_eq!(serde_json::from_str::<Status>("0").unwrap(), Status::VALID);
+        assert_eq!(serde_json::from_str::<Status>("1").unwrap(), Status::INVALID);
+        assert_eq!(
+            serde_json::from_str::<Status>("2").unwrap(),
+            Status::SUSPENDED
+        );
+        assert_eq!(
+            serde_json::from_str::<Status>("256").unwrap(),
+            Status::ApplicationSpecific(256)
+        );
+        assert_eq!(serde_json::to_string(&Status::VALID).unwrap(), "0");
+        assert_eq!(serde_json::to_string(&Status::INVALID).unwrap(), "1");
+        assert_eq!(serde_json::to_string(&Status::SUSPENDED).unwrap(), "2");
+        assert_eq!(
+            serde_json::to_string(&Status::ApplicationSpecific(256)).unwrap(),
+            "256"
+        );
+        assert!(serde_json::from_str::<Status>("3").is_err());
+        assert!(serde_json::from_str::<Status>("100").is_err());
+        assert!(serde_json::from_str::<Status>("255").is_err());
+    }
+}

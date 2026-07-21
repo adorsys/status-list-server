@@ -77,14 +77,12 @@ mod tests {
     use crate::{
         models::{Status, StatusEntry, StatusList, StatusListRecord, status_lists},
         test_utils::test_app_state,
-        utils::lst_gen::{AbuseLimits, create_status_list},
+        web::handlers::status_list::test_support::create_status_list,
     };
     use axum::extract::State;
     use hyper::StatusCode;
     use sea_orm::{DatabaseBackend, MockDatabase, MockExecResult};
     use std::sync::Arc;
-
-    const LIMITS: AbuseLimits = AbuseLimits::unlimited();
 
     #[tokio::test]
     async fn test_publish_token_status_invalid_list_id() {
@@ -125,7 +123,7 @@ mod tests {
 
         let status_list = StatusList {
             bits: 2,
-            lst: create_status_list(status_entries.clone(), &LIMITS)
+            lst: create_status_list(status_entries.clone())
                 .unwrap()
                 .lst,
         };
@@ -188,7 +186,7 @@ mod tests {
 
         let status_list = StatusList {
             bits: 2,
-            lst: create_status_list(status_entries.clone(), &LIMITS)
+            lst: create_status_list(status_entries.clone())
                 .unwrap()
                 .lst,
         };
@@ -259,7 +257,7 @@ mod tests {
             issuer: "issuer".to_string(),
             status_list: StatusList {
                 bits: 1,
-                lst: create_status_list(status_entries.clone(), &LIMITS)
+                lst: create_status_list(status_entries.clone())
                     .unwrap()
                     .lst,
             },
@@ -358,7 +356,7 @@ mod tests {
 
         let status_list = StatusList {
             bits: 1,
-            lst: create_status_list(status_entries.clone(), &LIMITS)
+            lst: create_status_list(status_entries.clone())
                 .unwrap()
                 .lst,
         };
