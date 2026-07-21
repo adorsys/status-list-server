@@ -294,4 +294,131 @@ mod tests {
             Err(UseCaseError::Domain(DomainError::InvalidStatusList(_)))
         ));
     }
+
+    /// Serves a stale `updated_at` from `find` while delegating everything
+    /// else, modeling a racing writer that advanced the stamp between this
+    /// writer's read and its guarded write.
+    struct StaleReadStatusLists {
+        inner: MemoryStatusLists,
+        stale_updated_at: i64,
+    }
+
+    #[async_trait]
+    impl StatusListRepository for StaleReadStatusLists {
+        async fn find(&self, id: &str) -> Result<Option<Arc<StatusListRecord>>, PortError> {
+            Ok(self.inner.find(id).await?.map(|record| {
+                let mut stale = record.as_ref().clone();
+                stale.updated_at = self.stale_updated_at;
+                Arc::new(stale)
+            }))
+        }
+        async fn insert(&self, record: StatusListRecord) -> Result<(), PortError> {
+            self.inner.insert(record).await
+        }
+        async fn update(
+            &self,
+            record: StatusListRecord,
+            expected_updated_at: i64,
+        ) -> Result<bool, PortError> {
+            self.inner.update(record, expected_updated_at).await
+        }
+        async fn list_uris(&self) -> Result<Vec<String>, PortError> {
+            self.inner.list_uris().await
+        }
+    }
+
+    /// The memory adapter's CAS must reproduce the SQL guard semantics: a
+    /// write guarded on a stale stamp is rejected as `Conflict`, and the
+    /// rejected write leaves no trace — the cache entry survives untouched.
+    #[tokio::test]
+    async fn update_statuses_returns_conflict_when_write_races() {
+        let inner = MemoryStatusLists::default();
+        inner.insert(record()).await.unwrap();
+        let repo = Arc::new(StaleReadStatusLists {
+            inner,
+            stale_updated_at: 100,
+        });
+        let cache = Arc::new(MemoryStatusListCache::default());
+        cache.put(record()).await.unwrap();
+
+        let result = UpdateStatuses::new(repo, cache.clone())
+            .execute(&Issuer("issuer".into()), "id", Vec::new())
+            .await;
+
+        assert!(matches!(result, Err(UseCaseError::Conflict)));
+        assert!(
+            cache.get("id").await.unwrap().is_some(),
+            "a rejected write must not invalidate the cache"
+        );
+    }
+
+    /// Same race through the history-aware use case: nothing may be persisted
+    /// for a write that never landed — no snapshot, no cache invalidation.
+    #[cfg(any(
+        feature = "server",
+        feature = "postgres",
+        feature = "sqlite",
+        feature = "mysql"
+    ))]
+    #[tokio::test]
+    async fn update_statuses_with_history_writes_nothing_on_conflict() {
+        use crate::application::UpdateStatusesWithHistory;
+        let inner = MemoryStatusLists::default();
+        inner.insert(record()).await.unwrap();
+        let repo = Arc::new(StaleReadStatusLists {
+            inner,
+            stale_updated_at: 100,
+        });
+        let cache = Arc::new(MemoryStatusListCache::default());
+        cache.put(record()).await.unwrap();
+        let history = Arc::new(MemoryStatusListHistory::default());
+        let token_exp_secs = 900u64;
+
+        let result = UpdateStatusesWithHistory::new(repo, cache.clone(), history.clone())
+            .execute(&Issuer("issuer".into()), "id", Vec::new(), token_exp_secs)
+            .await;
+
+        assert!(matches!(result, Err(UseCaseError::Conflict)));
+        assert!(cache.get("id").await.unwrap().is_some());
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        assert!(
+            history.find_valid_at("id", now).await.unwrap().is_none(),
+            "a rejected write must not record a historical snapshot"
+        );
+    }
+
+    /// End-to-end pin of the stamp monotonicity through the use case and the
+    /// memory adapter: two updates inside the same wall-clock second must both
+    /// advance `updated_at`, or the second writer's guard could not move.
+    #[tokio::test]
+    async fn update_statuses_advances_updated_at_within_same_second() {
+        let repo = Arc::new(MemoryStatusLists::default());
+        let cache = Arc::new(MemoryStatusListCache::default());
+        PublishStatusList::new(repo.clone())
+            .execute(record())
+            .await
+            .unwrap();
+        let initial = repo.find("id").await.unwrap().unwrap().updated_at;
+
+        let update = UpdateStatuses::new(repo.clone(), cache);
+        update
+            .execute(&Issuer("issuer".into()), "id", Vec::new())
+            .await
+            .unwrap();
+        let first = repo.find("id").await.unwrap().unwrap().updated_at;
+        update
+            .execute(&Issuer("issuer".into()), "id", Vec::new())
+            .await
+            .unwrap();
+        let second = repo.find("id").await.unwrap().unwrap().updated_at;
+
+        assert!(first > initial, "update must advance the stamp");
+        assert!(
+            second > first,
+            "a same-second update must still advance the stamp"
+        );
+    }
 }
