@@ -260,6 +260,8 @@ mod test {
     use crate::models::StatusList;
     use jsonwebtoken::jwk::Jwk;
     use sea_orm::{DatabaseBackend, MockDatabase, MockExecResult};
+    // `Migrator::up` is only called from the real-backend helpers below.
+    #[cfg(any(feature = "sqlite", feature = "mysql"))]
     use sea_orm_migration::MigratorTrait;
 
     #[cfg(feature = "sqlite")]

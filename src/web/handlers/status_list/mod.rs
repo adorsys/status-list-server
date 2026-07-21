@@ -53,6 +53,18 @@ fn ensure_serialized_list_size(
     Ok(())
 }
 
+fn map_domain_error(error: crate::domain::DomainError) -> error::StatusListError {
+    match error {
+        crate::domain::DomainError::InvalidIndex => error::StatusListError::InvalidIndex,
+        crate::domain::DomainError::InvalidStatusList(message) => {
+            error::StatusListError::Generic(message)
+        }
+        crate::domain::DomainError::InvalidPublicJwk(message) => {
+            error::StatusListError::Generic(message)
+        }
+    }
+}
+
 /// Fixture builders for handler tests, replacing the retired `utils::lst_gen`.
 ///
 /// `encode_compressed` constructs the wire form (zlib level 9 + base64url,
@@ -79,17 +91,5 @@ pub(crate) mod test_support {
             bits: domain_list.bits,
             lst: domain_list.lst,
         })
-    }
-}
-
-fn map_domain_error(error: crate::domain::DomainError) -> error::StatusListError {
-    match error {
-        crate::domain::DomainError::InvalidIndex => error::StatusListError::InvalidIndex,
-        crate::domain::DomainError::InvalidStatusList(message) => {
-            error::StatusListError::Generic(message)
-        }
-        crate::domain::DomainError::InvalidPublicJwk(message) => {
-            error::StatusListError::Generic(message)
-        }
     }
 }
