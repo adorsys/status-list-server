@@ -440,7 +440,12 @@ mod tests {
         let result = StatusList::create(updates).unwrap();
 
         assert_eq!(result.bits, 9);
-        assert_eq!(decode_status_array(&decompress(&result.lst), 9).unwrap().len(), 12);
+        assert_eq!(
+            decode_status_array(&decompress(&result.lst), 9)
+                .unwrap()
+                .len(),
+            12
+        );
     }
 
     #[test]

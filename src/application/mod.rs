@@ -4,13 +4,6 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
-use crate::{
-    domain::{
-        Credential, DomainError, Issuer, StatusEntry, StatusList, StatusListRecord,
-        StatusListSnapshot,
-    },
-    ports::{CredentialRepository, PortError, StatusListCache, StatusListRepository},
-};
 #[cfg(any(
     feature = "server",
     feature = "postgres",
@@ -18,6 +11,13 @@ use crate::{
     feature = "mysql"
 ))]
 use crate::ports::StatusListHistoryRepository;
+use crate::{
+    domain::{
+        Credential, DomainError, Issuer, StatusEntry, StatusList, StatusListRecord,
+        StatusListSnapshot,
+    },
+    ports::{CredentialRepository, PortError, StatusListCache, StatusListRepository},
+};
 
 fn current_unix_timestamp() -> i64 {
     std::time::SystemTime::now()
@@ -195,10 +195,7 @@ async fn persist_snapshot<H: StatusListHistoryRepository + ?Sized>(
         iat,
         exp: iat + token_exp_secs as i64,
     };
-    history
-        .insert(snapshot)
-        .await
-        .map_err(UseCaseError::Port)
+    history.insert(snapshot).await.map_err(UseCaseError::Port)
 }
 
 #[cfg(any(
@@ -484,9 +481,9 @@ impl<
             ),
         };
         updater
-        .with_max_serialized_list_size(max_serialized_list_size)
-        .execute(issuer, list_id, statuses, self.token_exp_secs)
-        .await
+            .with_max_serialized_list_size(max_serialized_list_size)
+            .execute(issuer, list_id, statuses, self.token_exp_secs)
+            .await
     }
 
     async fn get_status_list(&self, list_id: &str) -> Result<StatusListRecord, UseCaseError> {

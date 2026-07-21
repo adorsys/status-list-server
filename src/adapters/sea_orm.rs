@@ -112,7 +112,9 @@ fn to_persistence(record: domain::StatusListRecord) -> models::StatusListRecord 
     }
 }
 
-fn snapshot_from_persistence(record: models::StatusListHistoryRecord) -> domain::StatusListSnapshot {
+fn snapshot_from_persistence(
+    record: models::StatusListHistoryRecord,
+) -> domain::StatusListSnapshot {
     domain::StatusListSnapshot {
         snapshot_id: record.snapshot_id,
         list_id: record.list_id,

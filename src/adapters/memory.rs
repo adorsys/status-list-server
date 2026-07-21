@@ -1,11 +1,4 @@
 //! In-memory adapters for application-service unit tests and memory-only use.
-use crate::{
-    domain::{Credential, StatusListRecord, StatusListSnapshot},
-    ports::{
-        CredentialRepository, DnsProvider, MetricsCollector, PortError, SecretStore,
-        StatusListCache, StatusListRepository,
-    },
-};
 #[cfg(any(
     feature = "server",
     feature = "postgres",
@@ -13,6 +6,13 @@ use crate::{
     feature = "mysql"
 ))]
 use crate::ports::StatusListHistoryRepository;
+use crate::{
+    domain::{Credential, StatusListRecord, StatusListSnapshot},
+    ports::{
+        CredentialRepository, DnsProvider, MetricsCollector, PortError, SecretStore,
+        StatusListCache, StatusListRepository,
+    },
+};
 use async_trait::async_trait;
 use std::{collections::HashMap, sync::Arc};
 use tokio::sync::RwLock;
