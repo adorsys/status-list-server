@@ -43,7 +43,7 @@ impl AwsSecretsManager {
                 .build()
         });
         if secrets_cache_ttl.is_zero() {
-            tracing::info!("AWS Secrets cache disabled (TTL=0)");
+            info!("AWS Secrets cache disabled (TTL=0)");
         }
 
         Ok(Self { client, cache })

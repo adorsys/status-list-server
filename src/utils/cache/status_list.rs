@@ -13,9 +13,9 @@ impl StatusListCache {
     ///
     /// # TTL Semantics
     /// A value of `ttl_secs = 0` **disables caching**: entries expire immediately and all reads
-    /// fall through to the underlying storage. This is consistent with other cache implementations
-    /// in the application ([`CertChainCache`](super::CertChainCache) and
-    /// [`Redis`](crate::cert_manager::storage::Redis) for certificates).
+    /// fall through to the underlying storage.
+    /// This intentionally differs from [`CertChainCache`](super::CertChainCache), where `ttl = 0`
+    /// means entries **never expire**.
     ///
     /// # Parameters
     /// * `ttl_secs` - Time-to-live in seconds (0 = disabled, >0 = cache enabled with that TTL)

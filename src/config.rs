@@ -101,10 +101,10 @@ pub struct CertConfig {
     pub eku: Vec<u64>,
     pub acme_directory_url: String,
     /// Time-to-live in seconds for the certificate chain cache.
-    /// A value of `0` **disables caching**: the cache treats ttl=0 as "entries never expire"
+    /// A value of `0` means **entries never expire** (infinite TTL); the cache remains active
     /// and relies on explicit invalidation via the provisioning hook.
-    /// This differs from [`CacheConfig::ttl`](CacheConfig::ttl) where `ttl=0` disables caching.
-    /// For consistent behavior across all caches, consider using a large value instead (e.g., 86400 for 1 day).
+    /// This intentionally differs from [`CacheConfig::ttl`](CacheConfig::ttl), where `ttl=0`
+    /// disables caching entirely.
     pub chain_cache_ttl: u64,
     pub renewal_cron_schedule: String,
     #[serde(default)]
