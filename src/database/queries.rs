@@ -25,6 +25,17 @@ impl<T> SeaOrmStore<T> {
     }
 }
 
+/// Maps an insert failure, distinguishing a unique-constraint violation — a
+/// concurrent writer won the check-then-insert race — from real storage
+/// failures. `sql_err()` is SeaORM's backend-normalized view of driver errors,
+/// so the same mapping serves Postgres, MySQL, and SQLite alike.
+fn map_insert_err(e: sea_orm::DbErr) -> RepositoryError {
+    match e.sql_err() {
+        Some(sea_orm::SqlErr::UniqueConstraintViolation(_)) => RepositoryError::DuplicateEntry,
+        _ => RepositoryError::InsertError(e.to_string()),
+    }
+}
+
 impl SeaOrmStore<StatusListRecord> {
     pub async fn insert_one(&self, entity: StatusListRecord) -> Result<(), RepositoryError> {
         let active = status_lists::ActiveModel {
@@ -37,7 +48,7 @@ impl SeaOrmStore<StatusListRecord> {
         status_lists::Entity::insert(active)
             .exec_without_returning(&*self.db)
             .await
-            .map_err(|e| RepositoryError::InsertError(e.to_string()))?;
+            .map_err(map_insert_err)?;
         Ok(())
     }
 
@@ -202,7 +213,7 @@ impl SeaOrmStore<Credentials> {
         credentials::Entity::insert(active)
             .exec_without_returning(&*self.db)
             .await
-            .map_err(|e| RepositoryError::InsertError(e.to_string()))?;
+            .map_err(map_insert_err)?;
         Ok(())
     }
 
@@ -672,6 +683,114 @@ mod test {
         assert!(!missing, "update on missing row should report no rows");
 
         cred_store.delete_by("issuer-neg-sqlite").await.unwrap();
+    }
+
+    /// A second insert with the same primary key must surface as
+    /// `DuplicateEntry`, not a generic insert error. This is the one property a
+    /// mock cannot verify: whether the real backend's duplicate-key error
+    /// actually parses into `SqlErr::UniqueConstraintViolation`. The adapter
+    /// layer maps `DuplicateEntry` to a conflict so a racing publish returns
+    /// 409 instead of 500.
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn test_sqlite_duplicate_insert_maps_to_duplicate_entry() {
+        let db = sqlite_connection().await;
+        let cred_store = SeaOrmStore::<Credentials>::new(db.clone());
+        let store = SeaOrmStore::<StatusListRecord>::new(db);
+
+        let key: Jwk = serde_json::from_str(
+            r#"{
+                "kty": "EC",
+                "crv": "P-256",
+                "x": "NeyFv_2L67OEplNbJpR02IFis4_lFW9HYmhfF5Or6m8",
+                "y": "eAH2qe8Pg3GQ28uxA8-qNAqdwQ_zfV2uKAvJ2sLpY9M"
+            }"#,
+        )
+        .unwrap();
+        let issuer = "issuer-dup-sqlite";
+        cred_store
+            .insert_one(Credentials::new(issuer.to_string(), key.clone()))
+            .await
+            .unwrap();
+
+        // Duplicate credential (same issuer primary key).
+        let dup_cred = cred_store
+            .insert_one(Credentials::new(issuer.to_string(), key))
+            .await;
+        assert!(
+            matches!(dup_cred, Err(RepositoryError::DuplicateEntry)),
+            "duplicate credential insert must map to DuplicateEntry, got {dup_cred:?}"
+        );
+
+        // Duplicate status list (same list_id primary key).
+        let record = StatusListRecord {
+            list_id: "list-dup-sqlite".to_string(),
+            issuer: issuer.to_string(),
+            status_list: StatusList {
+                bits: 1,
+                lst: "initial".to_string(),
+            },
+            sub: "sub-dup-sqlite".to_string(),
+            updated_at: 0,
+        };
+        store.insert_one(record.clone()).await.unwrap();
+        let dup_list = store.insert_one(record).await;
+        assert!(
+            matches!(dup_list, Err(RepositoryError::DuplicateEntry)),
+            "duplicate status list insert must map to DuplicateEntry, got {dup_list:?}"
+        );
+    }
+
+    /// Cross-backend proof (#143) for the duplicate-key mapping: MySQL's
+    /// duplicate-key error must also parse into
+    /// `SqlErr::UniqueConstraintViolation` — the exact spot where a driver's
+    /// error format could diverge from sqlite without any mock test noticing.
+    #[cfg(feature = "mysql")]
+    #[tokio::test]
+    async fn test_mysql_duplicate_insert_maps_to_duplicate_entry() {
+        let test_db = mysql_helpers::mysql_connection().await;
+        let cred_store = SeaOrmStore::<Credentials>::new(test_db.db.clone());
+        let store = SeaOrmStore::<StatusListRecord>::new(test_db.db.clone());
+
+        let key: Jwk = serde_json::from_str(
+            r#"{
+                "kty": "EC",
+                "crv": "P-256",
+                "x": "NeyFv_2L67OEplNbJpR02IFis4_lFW9HYmhfF5Or6m8",
+                "y": "eAH2qe8Pg3GQ28uxA8-qNAqdwQ_zfV2uKAvJ2sLpY9M"
+            }"#,
+        )
+        .unwrap();
+        let issuer = "issuer-dup-mysql";
+        cred_store
+            .insert_one(Credentials::new(issuer.to_string(), key.clone()))
+            .await
+            .unwrap();
+
+        let dup_cred = cred_store
+            .insert_one(Credentials::new(issuer.to_string(), key))
+            .await;
+        assert!(
+            matches!(dup_cred, Err(RepositoryError::DuplicateEntry)),
+            "duplicate credential insert must map to DuplicateEntry on MySQL, got {dup_cred:?}"
+        );
+
+        let record = StatusListRecord {
+            list_id: "list-dup-mysql".to_string(),
+            issuer: issuer.to_string(),
+            status_list: StatusList {
+                bits: 1,
+                lst: "initial".to_string(),
+            },
+            sub: "sub-dup-mysql".to_string(),
+            updated_at: 0,
+        };
+        store.insert_one(record.clone()).await.unwrap();
+        let dup_list = store.insert_one(record).await;
+        assert!(
+            matches!(dup_list, Err(RepositoryError::DuplicateEntry)),
+            "duplicate status list insert must map to DuplicateEntry on MySQL, got {dup_list:?}"
+        );
     }
 
     /// The real proof for the lost-update fix: two writers that both read the

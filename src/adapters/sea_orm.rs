@@ -1,6 +1,6 @@
 //! SeaORM implementations of the repository ports.
 use crate::{
-    database::queries::SeaOrmStore,
+    database::{error::RepositoryError, queries::SeaOrmStore},
     domain, models,
     ports::{
         CredentialRepository, InvalidDataKind, PortError, PortOperation,
@@ -9,6 +9,25 @@ use crate::{
 };
 use async_trait::async_trait;
 use std::sync::Arc;
+
+/// Maps an insert failure to its port-level meaning: a duplicate key is a
+/// [`PortError::Conflict`] (a concurrent writer won the check-then-insert
+/// race), everything else is the storage being unavailable.
+fn map_insert_err(
+    resource: &'static str,
+    operation: PortOperation,
+) -> impl Fn(RepositoryError) -> PortError {
+    move |e| match e {
+        RepositoryError::DuplicateEntry => PortError::Conflict {
+            resource,
+            reason: "already exists".to_string(),
+        },
+        e => PortError::StorageUnavailable {
+            operation,
+            detail: e.to_string(),
+        },
+    }
+}
 
 #[derive(Clone)]
 pub struct SeaOrmStatusListRepository {
@@ -81,10 +100,10 @@ impl CredentialRepository for SeaOrmCredentialRepository {
         self.store
             .insert_one(models::Credentials::new(credential.issuer.0, public_key))
             .await
-            .map_err(|e| PortError::StorageUnavailable {
-                operation: PortOperation::InsertCredential,
-                detail: e.to_string(),
-            })
+            .map_err(map_insert_err(
+                "credential",
+                PortOperation::InsertCredential,
+            ))
     }
 }
 
@@ -164,10 +183,10 @@ impl StatusListRepository for SeaOrmStatusListRepository {
         self.store
             .insert_one(to_persistence(record))
             .await
-            .map_err(|e| PortError::StorageUnavailable {
-                operation: PortOperation::InsertStatusList,
-                detail: e.to_string(),
-            })
+            .map_err(map_insert_err(
+                "status list",
+                PortOperation::InsertStatusList,
+            ))
     }
     async fn update(
         &self,

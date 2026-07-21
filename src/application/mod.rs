@@ -30,6 +30,18 @@ fn current_unix_timestamp() -> i64 {
         .as_secs() as i64
 }
 
+/// Maps an insert-path port error: a duplicate-key conflict means another
+/// writer created the resource between our existence check and the insert —
+/// semantically the same "already exists" outcome as the pre-check, so a
+/// racing publish surfaces as 409, not 500. (`UseCaseError::Conflict` is
+/// reserved for the optimistic-concurrency update race.)
+fn map_insert_conflict(error: PortError) -> UseCaseError {
+    match error {
+        PortError::Conflict { .. } => UseCaseError::AlreadyExists,
+        other => UseCaseError::Port(other),
+    }
+}
+
 /// Computes the next `updated_at` for an optimistic-concurrency write.
 ///
 /// Two distinct concerns, both required — do not drop either:
@@ -135,7 +147,10 @@ impl<R: CredentialRepository + ?Sized> PublishCredential<R> {
         if self.repository.find(&credential.issuer.0).await?.is_some() {
             return Err(UseCaseError::AlreadyExists);
         }
-        self.repository.insert(credential).await?;
+        self.repository
+            .insert(credential)
+            .await
+            .map_err(map_insert_conflict)?;
         Ok(())
     }
 }
@@ -176,7 +191,10 @@ impl<R: StatusListRepository + ?Sized> PublishStatusList<R> {
         if self.repository.find(&record.list_id).await?.is_some() {
             return Err(UseCaseError::AlreadyExists);
         }
-        self.repository.insert(record).await?;
+        self.repository
+            .insert(record)
+            .await
+            .map_err(map_insert_conflict)?;
         Ok(())
     }
 
@@ -255,7 +273,10 @@ impl<R: StatusListRepository + ?Sized, H: StatusListHistoryRepository + ?Sized>
         if self.repository.find(&record.list_id).await?.is_some() {
             return Err(UseCaseError::AlreadyExists);
         }
-        self.repository.insert(record.clone()).await?;
+        self.repository
+            .insert(record.clone())
+            .await
+            .map_err(map_insert_conflict)?;
 
         persist_snapshot(self.history.as_ref(), &record, self.token_exp_secs).await?;
 
@@ -362,7 +383,10 @@ impl<
         if self.repository.find(&record.list_id).await?.is_some() {
             return Err(UseCaseError::AlreadyExists);
         }
-        self.repository.insert(record.clone()).await?;
+        self.repository
+            .insert(record.clone())
+            .await
+            .map_err(map_insert_conflict)?;
         if let Some(history) = &self.history {
             persist_snapshot(history.as_ref(), &record, self.token_exp_secs).await?;
         }
