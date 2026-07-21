@@ -169,10 +169,14 @@ impl StatusListRepository for SeaOrmStatusListRepository {
                 detail: e.to_string(),
             })
     }
-    async fn update(&self, record: domain::StatusListRecord) -> Result<bool, PortError> {
+    async fn update(
+        &self,
+        record: domain::StatusListRecord,
+        expected_updated_at: i64,
+    ) -> Result<bool, PortError> {
         let id = record.list_id.clone();
         self.store
-            .update_one(&id, to_persistence(record))
+            .update_one(&id, to_persistence(record), expected_updated_at)
             .await
             .map_err(|e| PortError::StorageUnavailable {
                 operation: PortOperation::UpdateStatusList,

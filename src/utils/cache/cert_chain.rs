@@ -18,9 +18,12 @@ const REPLACEMENT_METRIC: &str = "certificate_chain_cache_replacements_total";
 /// # TTL semantics
 ///
 /// A **zero** TTL (`Duration::ZERO`) keeps the cache active with **no expiry**;
-/// entries persist until explicitly replaced by the provisioning hook. This
-/// differs from [`StatusListCache`](crate::ports::StatusListCache), where `ttl = 0`
-/// **disables** the cache entirely (inserts expire immediately).
+/// entries persist until explicitly replaced by the provisioning hook.
+///
+/// This intentionally differs from [`StatusListCache`](crate::ports::StatusListCache),
+/// where `ttl = 0` **disables** the cache entirely (inserts expire immediately).
+/// The rationale is that certificate chains only change when explicitly provisioned,
+/// making the "never expire" behavior safe for single-replica deployments.
 #[derive(Clone)]
 pub(crate) struct CertChainCache {
     inner: Cache<String, CertificateChain>,
@@ -61,6 +64,10 @@ impl CertChainCache {
 
         let builder = Cache::builder().max_capacity(CACHE_CAPACITY);
         let inner = if ttl.is_zero() {
+            tracing::warn!(
+                "chain_cache_ttl=0: chain cached for process lifetime; \
+                renewals on other replicas will not be observed"
+            );
             builder.build()
         } else {
             builder.time_to_live(ttl).build()

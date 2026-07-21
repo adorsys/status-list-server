@@ -37,11 +37,19 @@ impl StatusListRepository for MemoryStatusLists {
             .insert(record.list_id.clone(), record);
         Ok(())
     }
-    async fn update(&self, record: StatusListRecord) -> Result<bool, PortError> {
+    /// Mirrors the SQL adapter's optimistic guard so use-case concurrency
+    /// behavior is testable without a database: the write lands only if the
+    /// stored stamp is still `expected_updated_at`.
+    async fn update(
+        &self,
+        record: StatusListRecord,
+        expected_updated_at: i64,
+    ) -> Result<bool, PortError> {
         let mut values = self.values.write().await;
-        if !values.contains_key(&record.list_id) {
-            return Ok(false);
-        };
+        match values.get(&record.list_id) {
+            Some(current) if current.updated_at == expected_updated_at => {}
+            _ => return Ok(false),
+        }
         values.insert(record.list_id.clone(), record);
         Ok(true)
     }

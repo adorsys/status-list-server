@@ -58,6 +58,19 @@ pub async fn update_status(
         }
         Err(UseCaseError::Domain(error)) => return Err(map_domain_error(error).into()),
         Err(UseCaseError::StatusListTooLarge) => return Err(StatusListError::StatusTooLarge.into()),
+        Err(UseCaseError::Conflict) => {
+            // The optimistic guard in the use case did not match: a concurrent
+            // writer won the race (or the row was deleted). The use case returns
+            // before recording a snapshot or invalidating the cache, so nothing
+            // is persisted for a write that never landed.
+            //
+            // Logged at info, not warn: under contention an optimistic conflict
+            // is the expected, correct outcome, not an anomaly — warn would
+            // pollute dashboards and trip alerting during exactly the high-load
+            // bursts where conflicts are normal.
+            tracing::info!(list_id = ?list_id, "Concurrent update conflict; write rejected");
+            return Err(StatusListError::UpdateConflict.into());
+        }
         Err(error) => {
             tracing::error!(?error, "Failed to update status list");
             return Err(StatusListError::InternalServerError.into());
@@ -72,6 +85,10 @@ pub async fn update_status(
 mod test {
     use super::*;
     use std::sync::Arc;
+
+    // `next_updated_at` moved to the application layer with the optimistic
+    // guard it serves; the test below stays here, where the merge left it.
+    use crate::application::next_updated_at;
 
     use axum::{
         Extension,
@@ -159,12 +176,17 @@ mod test {
             mock_db
                 .append_query_results::<status_lists::Model, Vec<_>, _>(vec![
                     vec![existing_token.clone()], // for find_one_by
-                    vec![],
                 ])
-                .append_exec_results(vec![MockExecResult {
-                    rows_affected: 1,
-                    last_insert_id: 0,
-                }])
+                .append_exec_results(vec![
+                    MockExecResult {
+                        rows_affected: 1,
+                        last_insert_id: 0,
+                    }, // guarded update_many
+                    MockExecResult {
+                        rows_affected: 1,
+                        last_insert_id: 0,
+                    }, // status_list_history insert
+                ])
                 .into_connection(),
         );
 
@@ -328,5 +350,80 @@ mod test {
             Err(err) => err.into_response(),
         };
         assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    /// Pins the load-bearing monotonicity of the optimistic stamp. If someone
+    /// "simplifies" `next_updated_at` down to `now` (dropping the `+ 1`), the
+    /// same-second case below fails here instead of silently reintroducing the
+    /// lost-update bug in production.
+    #[test]
+    fn test_next_updated_at_strictly_advances_within_same_second() {
+        // Same wall-clock second as the previous write: must still advance.
+        assert_eq!(next_updated_at(1000, 1000), 1001);
+        // Clock went backwards / equal: never emit a stale-or-equal stamp.
+        assert_eq!(next_updated_at(1000, 999), 1001);
+        // Clock advanced normally: use the real time.
+        assert_eq!(next_updated_at(1000, 2000), 2000);
+    }
+
+    #[tokio::test]
+    async fn test_update_status_conflict_returns_409() {
+        let mock_db = MockDatabase::new(DatabaseBackend::Postgres);
+        let token_id = uuid::Uuid::new_v4().to_string();
+
+        let existing_token = StatusListRecord {
+            list_id: token_id.clone(),
+            issuer: "issuer".to_string(),
+            status_list: StatusList {
+                bits: 2,
+                lst: create_status_list(
+                    vec![StatusEntry {
+                        index: 0,
+                        status: Status::VALID,
+                    }],
+                    &LIMITS,
+                )
+                .unwrap()
+                .lst,
+            },
+            sub: "issuer".to_string(),
+            updated_at: 0,
+        };
+
+        let update_payload = StatusesRequest {
+            statuses: vec![StatusEntry {
+                index: 0,
+                status: Status::INVALID,
+            }],
+        };
+
+        // find_one_by sees the row, but the guarded UPDATE affects 0 rows: a
+        // concurrent writer already moved `updated_at`.
+        let db_conn = Arc::new(
+            mock_db
+                .append_query_results::<status_lists::Model, Vec<_>, _>(vec![vec![
+                    existing_token.clone(),
+                ]])
+                .append_exec_results(vec![MockExecResult {
+                    rows_affected: 0,
+                    last_insert_id: 0,
+                }])
+                .into_connection(),
+        );
+
+        let app_state = test_app_state(Some(db_conn.clone())).await;
+        let response = match update_status(
+            State(app_state),
+            Extension("issuer".to_string()),
+            Path(token_id),
+            Json(update_payload),
+        )
+        .await
+        {
+            Ok(_) => panic!("conflicting write must not report success"),
+            Err(err) => err.into_response(),
+        };
+
+        assert_eq!(response.status(), StatusCode::CONFLICT);
     }
 }

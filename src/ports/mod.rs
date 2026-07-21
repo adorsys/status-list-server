@@ -81,7 +81,18 @@ pub enum PortError {
 pub trait StatusListRepository: Send + Sync {
     async fn find(&self, list_id: &str) -> Result<Option<Arc<StatusListRecord>>, PortError>;
     async fn insert(&self, status_list: StatusListRecord) -> Result<(), PortError>;
-    async fn update(&self, status_list: StatusListRecord) -> Result<bool, PortError>;
+    /// Persist `status_list` only if the stored row still carries
+    /// `expected_updated_at` (optimistic concurrency).
+    ///
+    /// Returns `false` when the guard did not match — a racing writer already
+    /// advanced the stamp, or the row is gone. `status_list.updated_at` must be
+    /// strictly greater than `expected_updated_at`; see
+    /// [`next_updated_at`](crate::application::next_updated_at) for why.
+    async fn update(
+        &self,
+        status_list: StatusListRecord,
+        expected_updated_at: i64,
+    ) -> Result<bool, PortError>;
     async fn list_uris(&self) -> Result<Vec<String>, PortError>;
 }
 

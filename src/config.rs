@@ -120,6 +120,11 @@ pub struct CertConfig {
     #[serde(default)]
     pub eku: Vec<u64>,
     pub acme_directory_url: String,
+    /// Time-to-live in seconds for the certificate chain cache.
+    /// A value of `0` means **entries never expire** (infinite TTL); the cache remains active
+    /// and relies on explicit invalidation via the provisioning hook.
+    /// This intentionally differs from [`CacheConfig::ttl`](CacheConfig::ttl), where `ttl=0`
+    /// disables caching entirely.
     pub chain_cache_ttl: u64,
     pub renewal_cron_schedule: String,
     #[serde(default)]
@@ -478,6 +483,10 @@ impl DnsConfig {
 pub struct RedisConfig {
     pub uri: SecretString,
     pub require_client_auth: bool,
+    /// Time-to-live (in seconds) for cached certificate data in Redis.
+    /// A value of `0` **disables caching** (no storage or retrieval of certificates).
+    /// For persistent caching, use a large value (e.g., 3600 for 1 hour).
+    /// See also: [`CacheConfig::ttl`] and [`AwsConfig::secrets_cache_ttl`].
     pub cert_cache_ttl: u64,
 }
 
@@ -492,6 +501,9 @@ pub struct DatabaseConfig {
 #[derive(Debug, Clone, Deserialize)]
 pub struct AwsConfig {
     pub region: String,
+    /// Time-to-live (in seconds) for cached secrets from AWS Secrets Manager.
+    /// A value of `0` **disables caching** (no in-memory cache is created; all secrets are fetched from AWS).
+    /// See also: [`RedisConfig::cert_cache_ttl`] and [`CacheConfig::ttl`].
     pub secrets_cache_ttl: u64,
     pub s3_bucket: String,
     pub s3_key_prefix: String,
@@ -499,6 +511,9 @@ pub struct AwsConfig {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct CacheConfig {
+    /// Time-to-live (in seconds) for status-list entries in the in-memory cache.
+    /// A value of `0` **disables caching** (entries expire immediately, all reads fall through to storage).
+    /// See also: [`RedisConfig::cert_cache_ttl`] and [`AwsConfig::secrets_cache_ttl`].
     pub ttl: u64,
     pub max_capacity: u64,
 }

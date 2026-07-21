@@ -30,6 +30,24 @@ fn current_unix_timestamp() -> i64 {
         .as_secs() as i64
 }
 
+/// Computes the next `updated_at` for an optimistic-concurrency write.
+///
+/// Two distinct concerns, both required — do not drop either:
+///   * the `WHERE updated_at = previous` guard in
+///     [`StatusListRepository::update`] handles *concurrency* (a racing writer
+///     loses the race);
+///   * the `.max(previous + 1)` here handles *clock granularity*.
+///
+/// `updated_at` is unix seconds, so two writers in the same second both read the
+/// same `previous` and both see `now == previous`. If the stamp did not advance,
+/// the first write would leave `updated_at` unchanged and the second writer's
+/// guard would still match — both would succeed, silently losing a flip. Forcing
+/// the value to strictly increase guarantees the guard moves, so the loser's
+/// `WHERE` misses. Dropping the `+ 1` reintroduces the same-second lost update.
+pub fn next_updated_at(previous: i64, now: i64) -> i64 {
+    now.max(previous + 1)
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum UseCaseError {
     #[error("status list already exists")]
@@ -40,6 +58,8 @@ pub enum UseCaseError {
     IssuerMismatch,
     #[error("serialized status list exceeds configured maximum")]
     StatusListTooLarge,
+    #[error("the status list was modified concurrently")]
+    Conflict,
     #[error(transparent)]
     Domain(#[from] DomainError),
     #[error(transparent)]
@@ -463,9 +483,18 @@ impl<R: StatusListRepository + ?Sized, C: StatusListCache + ?Sized> UpdateStatus
         if existing.status_list.lst.len() > self.max_serialized_list_size {
             return Err(UseCaseError::StatusListTooLarge);
         }
-        existing.updated_at = current_unix_timestamp();
-        if !self.repository.update(existing.clone()).await? {
-            return Err(UseCaseError::NotFound);
+        // The stamp read here is the optimistic-concurrency guard: the write
+        // below only lands if `updated_at` is still this value, so a racing
+        // writer that already moved it is rejected instead of silently
+        // overwritten.
+        let previous_updated_at = existing.updated_at;
+        existing.updated_at = next_updated_at(previous_updated_at, current_unix_timestamp());
+        if !self
+            .repository
+            .update(existing.clone(), previous_updated_at)
+            .await?
+        {
+            return Err(UseCaseError::Conflict);
         }
         self.cache.invalidate(&existing.list_id).await?;
         Ok(())
@@ -541,9 +570,17 @@ impl<
         if existing.status_list.lst.len() > self.max_serialized_list_size {
             return Err(UseCaseError::StatusListTooLarge);
         }
-        existing.updated_at = current_unix_timestamp();
-        if !self.repository.update(existing.clone()).await? {
-            return Err(UseCaseError::NotFound);
+        // See the non-history path: `previous_updated_at` is the optimistic
+        // guard. Returning before the snapshot and the cache invalidation keeps
+        // a rejected write from leaving any trace behind.
+        let previous_updated_at = existing.updated_at;
+        existing.updated_at = next_updated_at(previous_updated_at, current_unix_timestamp());
+        if !self
+            .repository
+            .update(existing.clone(), previous_updated_at)
+            .await?
+        {
+            return Err(UseCaseError::Conflict);
         }
         self.cache.invalidate(&existing.list_id).await?;
 

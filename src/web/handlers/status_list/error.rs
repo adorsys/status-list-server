@@ -17,6 +17,8 @@ pub enum StatusListError {
     Generic(String),
     #[error("failed to update status")]
     UpdateFailed,
+    #[error("the status list was modified concurrently; re-read the current state and retry")]
+    UpdateConflict,
     #[error("Malformed body: {0}")]
     MalformedBody(String),
     #[error("Status list not found")]
@@ -61,6 +63,7 @@ impl StatusListError {
             InvalidIndex => StatusCode::BAD_REQUEST,
             Generic(_) => StatusCode::BAD_REQUEST,
             UpdateFailed => StatusCode::INTERNAL_SERVER_ERROR,
+            UpdateConflict => StatusCode::CONFLICT,
             MalformedBody(_) => StatusCode::BAD_REQUEST,
             StatusListNotFound => StatusCode::NOT_FOUND,
             HistoricalStatusListNotFound => StatusCode::NOT_FOUND,
@@ -89,6 +92,7 @@ impl StatusListError {
             InvalidIndex => Cow::Borrowed("invalid_index"),
             Generic(_) => Cow::Borrowed("invalid_input"),
             UpdateFailed => Cow::Borrowed("update_failed"),
+            UpdateConflict => Cow::Borrowed("update_conflict"),
             MalformedBody(_) => Cow::Borrowed("malformed_body"),
             StatusListNotFound => Cow::Borrowed("status_list_not_found"),
             HistoricalStatusListNotFound => Cow::Borrowed("historical_status_list_not_found"),

@@ -271,6 +271,8 @@ paths:
           $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/UpdateConflict"
         "413":
           $ref: "#/components/responses/PayloadTooLarge"
         "422":
@@ -747,6 +749,23 @@ components:
           schema:
             type: string
           example: "Too Many Requests! Wait for 42s"
+
+    UpdateConflict:
+      description: |
+        The status list was modified concurrently between the client's read and
+        this write (optimistic-concurrency conflict): another writer's update
+        landed first, so this request was rejected rather than silently
+        overwriting it. The client should re-read the current state and retry.
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/ProblemDetails"
+          example:
+            type: "about:blank"
+            title: "Conflict"
+            status: 409
+            detail: "the status list was modified concurrently; re-read the current state and retry"
+            instance: "/api/v1/status-lists/477121aa-b598-419e-916f-1e74654ff38b/statuses"
 
     ServiceUnavailable:
       description: Service temporarily unavailable
