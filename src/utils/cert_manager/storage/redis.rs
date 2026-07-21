@@ -17,7 +17,13 @@ impl Redis {
         Self { conn, ttl: None }
     }
 
-    /// Set the time-to-live (TTL) for the stored data
+    /// Set the time-to-live (TTL) for cached certificate data stored in Redis.
+    ///
+    /// # TTL Semantics
+    /// A value of `ttl = 0` **disables caching**: no data is stored or retrieved.
+    /// This is consistent with other cache implementations in the application
+    /// (status-list cache for status-lists and AWS Secrets Manager for secrets).
+    /// All certificate requests will fall through to the underlying storage.
     pub fn with_ttl(self, ttl: u64) -> Self {
         Self {
             ttl: Some(ttl),
