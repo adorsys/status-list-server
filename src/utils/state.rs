@@ -98,27 +98,13 @@ pub async fn build_state(config: &AppConfig) -> EyeResult<AppState> {
         .await
         .wrap_err("Failed to connect to Redis")?;
 
-    // Initialize the challenge handler with the configured DNS provider.
-    // When no provider is configured, the environment decides: Route53 in
-    // production, Pebble (fake DNS server) in development.
-    let app_env = std::env::var("APP_ENV").unwrap_or(ENV_DEVELOPMENT.to_string());
-    let dns_provider = config
-        .server
-        .cert
-        .dns
-        .resolve(&app_env)
-        .wrap_err("Invalid DNS provider configuration")?;
-    if dns_provider.kind() == DnsProviderKind::Pebble && app_env == ENV_PRODUCTION {
-        warn!(
-            "The 'pebble' DNS provider is a development-only fake DNS server \
-             but APP_ENV=production; ACME challenges will not succeed against a real CA"
-        );
-    }
     // Domains certificates are ordered for; the single source for both the
-    // ACME order and the challenge handler's startup coverage checks
+    // ACME order and the challenge handler's startup coverage checks.
     let cert_domains = [config.server.domain.as_str()];
-    let challenge_handler =
-        build_dns_challenge_handler(dns_provider, config, &aws_config, &cert_domains).await?;
+
+    // Read APP_ENV once — needed for DNS provider defaulting (ACME path) and
+    // for the development HTTP-client override below.
+    let app_env = std::env::var("APP_ENV").unwrap_or(ENV_DEVELOPMENT.to_string());
 
     // Initialize the storage backends for the certificate manager
     let cache = Redis::new(redis_conn.clone()).with_ttl(config.redis.cert_cache_ttl);
@@ -153,6 +139,24 @@ pub async fn build_state(config: &AppConfig) -> EyeResult<AppState> {
         .eku(&config.server.cert.eku);
 
     cert_manager_builder = if uses_acme_strategy {
+        // DNS resolution is only required for the ACME strategy, which needs a
+        // DNS-01 challenge handler to complete certificate orders. Store-strategy
+        // deployments read a certificate from disk or Secrets Manager and never
+        // talk to ACME, so they must never pay for — or fail on — DNS resolution.
+        let dns_provider = config
+            .server
+            .cert
+            .dns
+            .resolve(&app_env)
+            .wrap_err("Invalid DNS provider configuration")?;
+        if dns_provider.kind() == DnsProviderKind::Pebble && app_env == ENV_PRODUCTION {
+            warn!(
+                "The 'pebble' DNS provider is a development-only fake DNS server \
+                 but APP_ENV=production; ACME challenges will not succeed against a real CA"
+            );
+        }
+        let challenge_handler =
+            build_dns_challenge_handler(dns_provider, config, &aws_config, &cert_domains).await?;
         cert_manager_builder
             .challenge_handler(challenge_handler)
             .acme_strategy()
@@ -690,6 +694,30 @@ mod tests {
                 max_serialized_list_size: 1_048_576,
             },
         }
+    }
+
+    /// A store-strategy deployment must boot successfully even when the DNS
+    /// section is absent or malformed — DNS resolution is not consulted on
+    /// that path (acceptance criteria for issue #231).
+    #[test]
+    fn store_strategy_ignores_dns_config() {
+        // Case 1: no DNS section at all (default DnsConfig)
+        let config = base_config(); // provisioning_strategy = "store"
+        let result = store_certificate_strategy(&config);
+        assert!(
+            result.is_ok(),
+            "store strategy must not touch DNS config: {result:?}"
+        );
+
+        // Case 2: a broken DNS section (provider selected but credentials absent)
+        let mut config = base_config();
+        config.server.cert.dns.provider = Some(DnsProviderKind::Cloudflare);
+        // cloudflare credentials intentionally absent
+        let result = store_certificate_strategy(&config);
+        assert!(
+            result.is_ok(),
+            "store strategy must not call resolve() even with a bad DNS section: {result:?}"
+        );
     }
 
     #[test]
