@@ -123,9 +123,7 @@ mod tests {
 
         let status_list = StatusList {
             bits: 2,
-            lst: create_status_list(status_entries.clone())
-                .unwrap()
-                .lst,
+            lst: create_status_list(status_entries.clone()).unwrap().lst,
         };
         let new_token = StatusListRecord {
             list_id: token_id.clone(),
@@ -186,9 +184,7 @@ mod tests {
 
         let status_list = StatusList {
             bits: 2,
-            lst: create_status_list(status_entries.clone())
-                .unwrap()
-                .lst,
+            lst: create_status_list(status_entries.clone()).unwrap().lst,
         };
         let new_token = StatusListRecord {
             list_id: token_id.clone(),
@@ -257,9 +253,7 @@ mod tests {
             issuer: "issuer".to_string(),
             status_list: StatusList {
                 bits: 1,
-                lst: create_status_list(status_entries.clone())
-                    .unwrap()
-                    .lst,
+                lst: create_status_list(status_entries.clone()).unwrap().lst,
             },
             sub: "issuer".to_string(),
             updated_at: 0,
@@ -356,9 +350,7 @@ mod tests {
 
         let status_list = StatusList {
             bits: 1,
-            lst: create_status_list(status_entries.clone())
-                .unwrap()
-                .lst,
+            lst: create_status_list(status_entries.clone()).unwrap().lst,
         };
         let new_token = StatusListRecord {
             list_id: token_id.clone(),

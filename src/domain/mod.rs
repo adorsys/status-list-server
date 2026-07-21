@@ -480,11 +480,8 @@ mod tests {
 
     #[test]
     fn create_one_bit_exact_bytes() {
-        let result = StatusList::create(vec![
-            entry(0, Status::Valid),
-            entry(1, Status::Invalid),
-        ])
-        .unwrap();
+        let result =
+            StatusList::create(vec![entry(0, Status::Valid), entry(1, Status::Invalid)]).unwrap();
         assert_eq!(result.bits, 1);
         assert_eq!(decompress(&result.lst), vec![0b0000_0010]);
     }
@@ -574,8 +571,7 @@ mod tests {
             entry(3, Status::ApplicationSpecific(256)),
         ])
         .unwrap();
-        let statuses =
-            decode_status_array(&decompress(&result.lst), result.bits as usize).unwrap();
+        let statuses = decode_status_array(&decompress(&result.lst), result.bits as usize).unwrap();
         assert_eq!(statuses[0], Status::ApplicationSpecific(512));
         assert_eq!(statuses[3], Status::ApplicationSpecific(256));
     }
@@ -588,8 +584,7 @@ mod tests {
         ])
         .unwrap();
         assert_eq!(result.bits, 13, "value 4096 requires 13 bits (2^13 = 8192)");
-        let statuses =
-            decode_status_array(&decompress(&result.lst), result.bits as usize).unwrap();
+        let statuses = decode_status_array(&decompress(&result.lst), result.bits as usize).unwrap();
         assert_eq!(statuses[0], Status::Invalid);
         assert_eq!(statuses[3], Status::ApplicationSpecific(4096));
     }

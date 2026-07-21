@@ -75,8 +75,7 @@ pub(crate) mod test_support {
     use std::io::Write;
 
     pub(crate) fn encode_compressed(bytes: &[u8]) -> String {
-        let mut encoder =
-            flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::best());
+        let mut encoder = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::best());
         encoder.write_all(bytes).expect("compressing test fixture");
         base64url::encode(encoder.finish().expect("finishing test fixture"))
     }

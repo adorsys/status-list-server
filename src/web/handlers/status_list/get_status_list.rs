@@ -929,8 +929,7 @@ mod tests {
             .unwrap()
             .1
             .clone();
-        let expected_lst_bytes =
-            base64url::decode(&encode_compressed(&[0, 0, 0])).unwrap();
+        let expected_lst_bytes = base64url::decode(&encode_compressed(&[0, 0, 0])).unwrap();
         assert_eq!(lst, CborValue::Bytes(expected_lst_bytes));
 
         let ttl = claims

@@ -137,17 +137,16 @@ mod test {
         // Initial token setup
         let original_status_list = StatusList {
             bits: initial_bits,
-            lst: create_status_list(
-                vec![
-                    StatusEntry {
-                        index: 0,
-                        status: Status::VALID,
-                    },
-                    StatusEntry {
-                        index: 1,
-                        status: Status::VALID,
-                    },
-                ],            )
+            lst: create_status_list(vec![
+                StatusEntry {
+                    index: 0,
+                    status: Status::VALID,
+                },
+                StatusEntry {
+                    index: 1,
+                    status: Status::VALID,
+                },
+            ])
             .unwrap()
             .lst,
         };
@@ -243,11 +242,10 @@ mod test {
 
         let original_status_list = StatusList {
             bits: initial_bits,
-            lst: create_status_list(
-                vec![StatusEntry {
-                    index: 0,
-                    status: Status::VALID,
-                }],            )
+            lst: create_status_list(vec![StatusEntry {
+                index: 0,
+                status: Status::VALID,
+            }])
             .unwrap()
             .lst,
         };
@@ -298,11 +296,10 @@ mod test {
 
         let original_status_list = StatusList {
             bits: initial_bits,
-            lst: create_status_list(
-                vec![StatusEntry {
-                    index: 0,
-                    status: Status::VALID,
-                }],            )
+            lst: create_status_list(vec![StatusEntry {
+                index: 0,
+                status: Status::VALID,
+            }])
             .unwrap()
             .lst,
         };
@@ -368,11 +365,10 @@ mod test {
             issuer: "issuer".to_string(),
             status_list: StatusList {
                 bits: 2,
-                lst: create_status_list(
-                    vec![StatusEntry {
-                        index: 0,
-                        status: Status::VALID,
-                    }],                )
+                lst: create_status_list(vec![StatusEntry {
+                    index: 0,
+                    status: Status::VALID,
+                }])
                 .unwrap()
                 .lst,
             },

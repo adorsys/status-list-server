@@ -198,7 +198,10 @@ mod tests {
     #[test]
     fn status_serde_integer_roundtrip() {
         assert_eq!(serde_json::from_str::<Status>("0").unwrap(), Status::VALID);
-        assert_eq!(serde_json::from_str::<Status>("1").unwrap(), Status::INVALID);
+        assert_eq!(
+            serde_json::from_str::<Status>("1").unwrap(),
+            Status::INVALID
+        );
         assert_eq!(
             serde_json::from_str::<Status>("2").unwrap(),
             Status::SUSPENDED
