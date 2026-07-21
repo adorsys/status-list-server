@@ -6,6 +6,30 @@ use crate::models::{Status, StatusEntry, StatusList};
 
 use super::errors::Error;
 
+/// Bounds enforced by [`create_status_list`] and [`update_status_list`].
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct AbuseLimits {
+    pub(crate) max_index: i32,
+    pub(crate) max_serialized_list_size: usize,
+}
+
+impl AbuseLimits {
+    pub(crate) const fn new(max_index: i32, max_serialized_list_size: usize) -> Self {
+        Self {
+            max_index,
+            max_serialized_list_size,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn unlimited() -> Self {
+        Self {
+            max_index: i32::MAX,
+            max_serialized_list_size: usize::MAX,
+        }
+    }
+}
+
 // Helper function to determine the appropriate bits
 fn determine_bits(
     status_updates: &[StatusEntry],
@@ -55,7 +79,11 @@ fn determine_bits(
 }
 
 // Helper function to calculate the required status array size
-fn calculate_array_size(status_updates: &[StatusEntry], bits: usize) -> Result<usize, Error> {
+fn calculate_array_size(
+    status_updates: &[StatusEntry],
+    bits: usize,
+    limits: &AbuseLimits,
+) -> Result<usize, Error> {
     if status_updates.is_empty() {
         return Ok(0);
     }
@@ -70,6 +98,10 @@ fn calculate_array_size(status_updates: &[StatusEntry], bits: usize) -> Result<u
         return Err(Error::InvalidIndex);
     }
 
+    if max_index > limits.max_index {
+        return Err(Error::IndexTooLarge(max_index));
+    }
+
     let end_bit = (max_index as usize) * bits + bits - 1;
     Ok(end_bit / 8 + 1)
 }
@@ -79,10 +111,15 @@ fn apply_updates(
     status_array: &mut [u8],
     status_updates: &[StatusEntry],
     bits: usize,
+    limits: &AbuseLimits,
 ) -> Result<(), Error> {
     for update in status_updates {
         if update.index < 0 {
             return Err(Error::InvalidIndex);
+        }
+
+        if update.index > limits.max_index {
+            return Err(Error::IndexTooLarge(update.index));
         }
 
         let idx = update.index as usize;
@@ -154,12 +191,16 @@ fn apply_and_encode(
     status_array: &mut [u8],
     status_updates: &[StatusEntry],
     bits: usize,
+    limits: &AbuseLimits,
 ) -> Result<String, Error> {
-    apply_updates(status_array, status_updates, bits)?;
-    encode_compressed(status_array)
+    apply_updates(status_array, status_updates, bits, limits)?;
+    encode_compressed(status_array, limits)
 }
 
-pub(crate) fn create_status_list(status_updates: Vec<StatusEntry>) -> Result<StatusList, Error> {
+pub(crate) fn create_status_list(
+    status_updates: Vec<StatusEntry>,
+    limits: &AbuseLimits,
+) -> Result<StatusList, Error> {
     if status_updates.is_empty() {
         let stl = StatusList {
             bits: 1,
@@ -169,10 +210,10 @@ pub(crate) fn create_status_list(status_updates: Vec<StatusEntry>) -> Result<Sta
     }
 
     let bits = determine_bits(&status_updates, None)?;
-    let len = calculate_array_size(&status_updates, bits)?;
+    let len = calculate_array_size(&status_updates, bits, limits)?;
 
     let mut status_array = vec![0u8; len];
-    let lst = apply_and_encode(&mut status_array, &status_updates, bits)?;
+    let lst = apply_and_encode(&mut status_array, &status_updates, bits, limits)?;
     Ok(StatusList {
         bits: bits as u8,
         lst,
@@ -233,6 +274,7 @@ fn reencode_status_array(
     old_array: &[u8],
     old_bits: usize,
     status_updates: &[StatusEntry],
+    limits: &AbuseLimits,
 ) -> Result<StatusList, Error> {
     let decoded_statuses = decode_status_array(old_array, old_bits)?;
     let mut full_statuses: Vec<StatusEntry> = decoded_statuses
@@ -245,6 +287,12 @@ fn reencode_status_array(
         .collect();
 
     for update in status_updates {
+        if update.index < 0 {
+            return Err(Error::InvalidIndex);
+        }
+        if update.index > limits.max_index {
+            return Err(Error::IndexTooLarge(update.index));
+        }
         if let Some(entry) = full_statuses.iter_mut().find(|e| e.index == update.index) {
             entry.status = update.status.clone();
         } else {
@@ -252,13 +300,14 @@ fn reencode_status_array(
         }
     }
 
-    create_status_list(full_statuses)
+    create_status_list(full_statuses, limits)
 }
 
 pub(crate) fn update_status_list(
     existing_lst: String,
     status_updates: Vec<StatusEntry>,
     current_bits: u8,
+    limits: &AbuseLimits,
 ) -> Result<StatusList, Error> {
     if status_updates.is_empty() {
         return Ok(StatusList {
@@ -277,16 +326,16 @@ pub(crate) fn update_status_list(
         .map_err(|e| Error::Generic(e.to_string()))?;
 
     if new_bits > original_bits {
-        let result = reencode_status_array(&status_array, original_bits, &status_updates)?;
+        let result = reencode_status_array(&status_array, original_bits, &status_updates, limits)?;
         return Ok(result);
     }
 
-    let required_len = calculate_array_size(&status_updates, original_bits)?;
+    let required_len = calculate_array_size(&status_updates, original_bits, limits)?;
     if status_array.len() < required_len {
         status_array.resize(required_len, 0);
     }
 
-    let lst = apply_and_encode(&mut status_array, &status_updates, original_bits)?;
+    let lst = apply_and_encode(&mut status_array, &status_updates, original_bits, limits)?;
     let stl = StatusList {
         bits: original_bits as u8,
         lst,
@@ -294,7 +343,10 @@ pub(crate) fn update_status_list(
     Ok(stl)
 }
 
-pub(crate) fn encode_compressed(status_array: &[u8]) -> Result<String, Error> {
+pub(crate) fn encode_compressed(
+    status_array: &[u8],
+    limits: &AbuseLimits,
+) -> Result<String, Error> {
     let mut encoder = ZlibEncoder::new(Vec::new(), Compression::best());
     encoder
         .write_all(status_array)
@@ -302,7 +354,15 @@ pub(crate) fn encode_compressed(status_array: &[u8]) -> Result<String, Error> {
     let compressed = encoder
         .finish()
         .map_err(|e| Error::Generic(e.to_string()))?;
-    Ok(encode(&compressed))
+    let encoded = encode(&compressed);
+    let actual = encoded.len();
+    if actual > limits.max_serialized_list_size {
+        return Err(Error::SerializedListTooLarge {
+            actual,
+            max: limits.max_serialized_list_size,
+        });
+    }
+    Ok(encoded)
 }
 
 #[cfg(test)]
@@ -313,6 +373,7 @@ mod tests {
     use std::io::Read;
 
     use super::*;
+    const LIMITS: AbuseLimits = AbuseLimits::unlimited();
 
     #[test]
     fn test_create_lst_with_1_bit_statuses() {
@@ -327,7 +388,7 @@ mod tests {
             },
         ];
 
-        let result = create_status_list(updates).unwrap();
+        let result = create_status_list(updates, &LIMITS).unwrap();
         let decoded = base64url::decode(&result.lst).unwrap();
         let mut decoder = flate2::read::ZlibDecoder::new(&*decoded);
         let mut decompressed = Vec::new();
@@ -355,7 +416,7 @@ mod tests {
         let compressed_status = encoder.finish().expect("Failed to finish compression");
         let existing_lst = base64url::encode(compressed_status);
 
-        let result = update_status_list(existing_lst, updates, 1).unwrap();
+        let result = update_status_list(existing_lst, updates, 1, &LIMITS).unwrap();
         let decoded = base64url::decode(&result.lst).unwrap();
         let mut decoder = flate2::read::ZlibDecoder::new(&*decoded);
         let mut decompressed = Vec::new();
@@ -385,7 +446,7 @@ mod tests {
             },
         ];
 
-        let result = create_status_list(updates).unwrap();
+        let result = create_status_list(updates, &LIMITS).unwrap();
         let decoded = base64url::decode(&result.lst).unwrap();
         let mut decoder = flate2::read::ZlibDecoder::new(&*decoded);
         let mut decompressed = Vec::new();
@@ -418,7 +479,7 @@ mod tests {
         let compressed_status = encoder.finish().expect("Failed to finish compression");
         let existing_lst = base64url::encode(compressed_status);
 
-        let updated_lst = update_status_list(existing_lst, updates, 1).unwrap();
+        let updated_lst = update_status_list(existing_lst, updates, 1, &LIMITS).unwrap();
         let decoded = decode(&updated_lst.lst).expect("Failed to decode base64");
         let mut decoder = ZlibDecoder::new(&decoded[..]);
         let mut updated_status_array = Vec::new();
@@ -442,7 +503,7 @@ mod tests {
         let compressed_status = encoder.finish().expect("Failed to finish compression");
         let existing_lst = base64url::encode(compressed_status);
 
-        let updated_lst = update_status_list(existing_lst, updates, 1).unwrap();
+        let updated_lst = update_status_list(existing_lst, updates, 1, &LIMITS).unwrap();
         let decoded = decode(&updated_lst.lst).expect("Failed to decode base64");
         let mut decoder = ZlibDecoder::new(&decoded[..]);
         let mut updated_status_array = Vec::new();
@@ -457,7 +518,7 @@ mod tests {
     fn test_create_lst_empty_updates() {
         let updates = vec![];
 
-        let result = create_status_list(updates).unwrap();
+        let result = create_status_list(updates, &LIMITS).unwrap();
         let decoded = base64url::decode(&result.lst).unwrap();
         let mut decoder = flate2::read::ZlibDecoder::new(&*decoded);
         let mut decompressed = Vec::new();
@@ -477,7 +538,7 @@ mod tests {
 
         let status_updates = vec![];
 
-        let updated_lst = update_status_list(existing_lst.clone(), status_updates, 1)
+        let updated_lst = update_status_list(existing_lst.clone(), status_updates, 1, &LIMITS)
             .unwrap()
             .lst;
         assert_eq!(updated_lst, existing_lst);
@@ -490,7 +551,7 @@ mod tests {
             status: Status::VALID,
         }];
 
-        let result = create_status_list(updates);
+        let result = create_status_list(updates, &LIMITS);
         assert!(matches!(result, Err(Error::InvalidIndex)));
     }
 
@@ -508,7 +569,7 @@ mod tests {
             status: Status::INVALID,
         }];
 
-        let result = update_status_list(existing_lst, status_updates, 1);
+        let result = update_status_list(existing_lst, status_updates, 1, &LIMITS);
         assert!(matches!(result, Err(Error::InvalidIndex)));
     }
 
@@ -532,7 +593,7 @@ mod tests {
             },
         ];
 
-        let updated_lst = update_status_list(existing_lst, status_updates, 1).unwrap();
+        let updated_lst = update_status_list(existing_lst, status_updates, 1, &LIMITS).unwrap();
 
         let decoded = decode(&updated_lst.lst).expect("Failed to decode base64");
         let mut decoder = ZlibDecoder::new(&decoded[..]);
@@ -569,7 +630,7 @@ mod tests {
             },
         ];
 
-        let result = create_status_list(updates).unwrap();
+        let result = create_status_list(updates, &LIMITS).unwrap();
         let decoded = base64url::decode(&result.lst).unwrap();
         let mut decoder = flate2::read::ZlibDecoder::new(&decoded[..]);
         let mut decompressed = Vec::new();
@@ -585,7 +646,7 @@ mod tests {
                 index: 0,
                 status: Status::ApplicationSpecific(val),
             }];
-            let result = create_status_list(updates);
+            let result = create_status_list(updates, &LIMITS);
             assert!(
                 matches!(result, Err(Error::Generic(ref s)) if s.contains(">= 256")),
                 "value {} should be rejected",
@@ -607,7 +668,7 @@ mod tests {
             index: 0,
             status: Status::ApplicationSpecific(256),
         }];
-        let result = create_status_list(updates).unwrap();
+        let result = create_status_list(updates, &LIMITS).unwrap();
         let decoded = base64url::decode(&result.lst).unwrap();
         let mut decoder = flate2::read::ZlibDecoder::new(&decoded[..]);
         let mut raw = Vec::new();
@@ -636,7 +697,7 @@ mod tests {
                 status: Status::ApplicationSpecific(256),
             },
         ];
-        let result = create_status_list(updates).unwrap();
+        let result = create_status_list(updates, &LIMITS).unwrap();
         let decoded_bytes = base64url::decode(&result.lst).unwrap();
         let mut decoder = flate2::read::ZlibDecoder::new(&decoded_bytes[..]);
         let mut raw = Vec::new();
@@ -659,7 +720,7 @@ mod tests {
                 status: Status::ApplicationSpecific(4096),
             },
         ];
-        let result = create_status_list(updates).unwrap();
+        let result = create_status_list(updates, &LIMITS).unwrap();
         let decoded = base64url::decode(&result.lst).unwrap();
         let mut decoder = flate2::read::ZlibDecoder::new(&decoded[..]);
         let mut raw = Vec::new();
@@ -743,7 +804,10 @@ mod tests {
         decoder.read_to_end(&mut decompressed).unwrap();
         assert_eq!(decompressed, expected_bytes);
 
-        assert_eq!(encode_compressed(&expected_bytes).unwrap(), spec_lst);
+        assert_eq!(
+            encode_compressed(&expected_bytes, &LIMITS).unwrap(),
+            spec_lst
+        );
     }
 
     #[test]
@@ -757,7 +821,10 @@ mod tests {
         decoder.read_to_end(&mut decompressed).unwrap();
         assert_eq!(decompressed, expected_bytes);
 
-        assert_eq!(encode_compressed(&expected_bytes).unwrap(), spec_lst);
+        assert_eq!(
+            encode_compressed(&expected_bytes, &LIMITS).unwrap(),
+            spec_lst
+        );
     }
 
     #[test]
@@ -778,7 +845,7 @@ mod tests {
             })
             .collect();
 
-        let result = create_status_list(updates).unwrap();
+        let result = create_status_list(updates, &LIMITS).unwrap();
         assert_eq!(result.bits, 1);
 
         // Decompress direction: backend-independent guarantee (see comment above test_spec_vector_1_bit).
@@ -790,5 +857,48 @@ mod tests {
 
         // Encode direction: canonical-output pin, coupled to flate2's exact backend.
         assert_eq!(result.lst, "eNrbuRgAAhcBXQ");
+    }
+
+    /// Exceeding `max_index` returns `IndexTooLarge` (#171).
+    #[test]
+    fn test_create_status_list_rejects_index_too_large() {
+        let limits = AbuseLimits::new(5, usize::MAX);
+        let updates = vec![StatusEntry {
+            index: 10,
+            status: Status::VALID,
+        }];
+
+        let err = create_status_list(updates, &limits).unwrap_err();
+        assert!(matches!(err, Error::IndexTooLarge(10)));
+    }
+
+    /// Exceeding `max_index` in updates returns `IndexTooLarge` (#171).
+    #[test]
+    fn test_update_status_list_rejects_index_too_large() {
+        let limits = AbuseLimits::new(5, usize::MAX);
+        let mut encoder = ZlibEncoder::new(Vec::new(), Compression::best());
+        encoder.write_all(&[0u8]).unwrap();
+        let compressed = encoder.finish().unwrap();
+        let existing_lst = encode(&compressed);
+        let updates = vec![StatusEntry {
+            index: 100,
+            status: Status::INVALID,
+        }];
+
+        let err = update_status_list(existing_lst, updates, 1, &limits).unwrap_err();
+        assert!(matches!(err, Error::IndexTooLarge(100)));
+    }
+
+    /// Oversized serialized output returns `SerializedListTooLarge` (#171).
+    #[test]
+    fn test_encode_compressed_rejects_oversized_output() {
+        // 1-byte ceiling: any non-empty compressed output should exceed it.
+        let limits = AbuseLimits::new(i32::MAX, 1);
+        let data = vec![0u8; 1024];
+        let err = encode_compressed(&data, &limits).unwrap_err();
+        assert!(matches!(
+            err,
+            Error::SerializedListTooLarge { actual: _, max: 1 }
+        ));
     }
 }

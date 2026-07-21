@@ -6,7 +6,7 @@ mod pebble;
 mod route53;
 mod token;
 
-pub use acme_dns::AcmeDnsProvider;
+pub use acme_dns::{AcmeDnsCredentials, AcmeDnsProvider};
 pub use azure::{AzureDnsProvider, ServicePrincipal};
 pub use cloudflare::CloudflareDnsProvider;
 pub use gcloud::GoogleCloudDnsProvider;

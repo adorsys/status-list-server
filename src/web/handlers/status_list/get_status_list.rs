@@ -1,9 +1,10 @@
 use std::{fmt::Debug, io::Write as _, sync::Arc};
 
 use axum::{
-    extract::{Path, State},
-    http::{HeaderMap, StatusCode, header},
-    response::IntoResponse,
+    extract::rejection::QueryRejection,
+    extract::{Path, Query, State},
+    http::{HeaderMap, HeaderValue, StatusCode, header},
+    response::{IntoResponse, Response},
 };
 use coset::{
     self, CborSerializable, CoseSign1Builder, HeaderBuilder, TaggedCborSerializable,
@@ -19,45 +20,272 @@ use time::OffsetDateTime;
 use crate::{
     models::{StatusListClaims, StatusListRecord},
     utils::{cache::CertificateChain, keygen::Keypair, state::AppState},
+    web::errors::ApiError,
 };
 
 use super::{
+    conditional::{ConditionalResponse, evaluate_conditional_request, format_http_date},
     constants::{
         ACCEPT_STATUS_LISTS_HEADER_CWT, ACCEPT_STATUS_LISTS_HEADER_JWT, CWT_TYPE, EXP, GZIP_HEADER,
         ISSUED_AT, STATUS_LIST, STATUS_LISTS_CWT_TYPE_VALUE, STATUS_LISTS_HEADER_JWT, SUBJECT, TTL,
     },
     error::StatusListError,
+    etag::{generate_etag, generate_historical_etag},
 };
 
 pub async fn get_status_list(
     State(state): State<AppState>,
     Path(list_id): Path<String>,
+    query_result: Result<Query<StatusListQuery>, QueryRejection>,
     headers: HeaderMap,
-) -> Result<impl IntoResponse + Debug + use<>, StatusListError> {
+) -> Result<impl IntoResponse + Debug + use<>, ApiError> {
+    let query = match query_result {
+        Ok(Query(q)) => q,
+        Err(e) => {
+            tracing::warn!("Failed to parse query parameters: {e}");
+            return Err(StatusListError::InvalidHistoricalTime.into());
+        }
+    };
     let accept = headers.get(header::ACCEPT).and_then(|h| h.to_str().ok());
     let client_accepts_gzip = client_accepts_gzip(&headers);
 
-    // build the token depending on the accept header
-    match accept {
-        None =>
-        // assume jwt by default if no accept header is provided
-        {
-            build_status_list_token(
-                ACCEPT_STATUS_LISTS_HEADER_JWT,
-                &list_id,
-                &state,
-                client_accepts_gzip,
-            )
-            .await
-        }
+    // Validate accept header
+    let accept_type = match accept {
+        None => ACCEPT_STATUS_LISTS_HEADER_JWT.to_string(), // Default to JWT
         Some(accept)
             if accept == ACCEPT_STATUS_LISTS_HEADER_JWT
                 || accept == ACCEPT_STATUS_LISTS_HEADER_CWT =>
         {
-            build_status_list_token(accept, &list_id, &state, client_accepts_gzip).await
+            accept.to_string()
         }
-        Some(_) => Err(StatusListError::InvalidAcceptHeader),
+        Some(_) => return Err(StatusListError::InvalidAcceptHeader.into()),
+    };
+
+    // Handle historical query (draft-21 §8.4) separately from conditional requests
+    if let Some(time) = query.time {
+        return handle_historical_request(
+            &list_id,
+            time,
+            &accept_type,
+            &state,
+            client_accepts_gzip,
+        )
+        .await;
     }
+
+    // Extract conditional request headers
+    let if_none_match = headers
+        .get(header::IF_NONE_MATCH)
+        .and_then(|h| h.to_str().ok());
+    let if_modified_since = headers
+        .get(header::IF_MODIFIED_SINCE)
+        .and_then(|h| h.to_str().ok());
+
+    // Fetch status list record (from cache or database)
+    let status_record = fetch_status_record(&list_id, &state).await?;
+
+    let current_etag = generate_etag(&status_record);
+
+    // Last-Modified reflects the persisted content's last modification time.
+    // The served token is re-signed every validity bucket, but ETag is
+    // content-based and `max-age` (= token_ttl_secs < token_exp_secs) bounds
+    // staleness so clients/CDNs cannot replay an expired token indefinitely.
+    let last_modified_ts = status_record.updated_at;
+    let last_modified = format_http_date(last_modified_ts);
+
+    let cache_control = build_cache_control(state.token_ttl_secs);
+
+    // Evaluate conditional request
+    match evaluate_conditional_request(
+        if_none_match,
+        if_modified_since,
+        &current_etag,
+        last_modified_ts,
+    ) {
+        ConditionalResponse::NotModified => {
+            // Return 304 with caching headers but no body
+            Ok((
+                StatusCode::NOT_MODIFIED,
+                [
+                    (header::ETAG, current_etag.as_str()),
+                    (header::LAST_MODIFIED, last_modified.as_str()),
+                    (header::CACHE_CONTROL, cache_control.as_str()),
+                    (header::VARY, "Accept, Accept-Encoding"),
+                ],
+            )
+                .into_response())
+        }
+        ConditionalResponse::Modified => {
+            // Build full token response
+            let (token_bytes, encoding) = build_token(
+                &accept_type,
+                &status_record,
+                None, // Use default validity window (now + token_exp_secs)
+                &state,
+                client_accepts_gzip,
+            )
+            .await?;
+
+            let mut response = Response::new(token_bytes.into());
+            *response.status_mut() = StatusCode::OK;
+            let h = response.headers_mut();
+            h.insert(
+                header::CONTENT_TYPE,
+                HeaderValue::from_str(&accept_type).unwrap(),
+            );
+            h.insert(header::ETAG, HeaderValue::from_str(&current_etag).unwrap());
+            h.insert(
+                header::LAST_MODIFIED,
+                HeaderValue::from_str(&last_modified).unwrap(),
+            );
+            h.insert(
+                header::CACHE_CONTROL,
+                HeaderValue::from_str(&cache_control).unwrap(),
+            );
+            h.insert(
+                header::VARY,
+                HeaderValue::from_static("Accept, Accept-Encoding"),
+            );
+            if let Some(enc) = encoding {
+                h.insert(header::CONTENT_ENCODING, HeaderValue::from_static(enc));
+            }
+
+            Ok(response)
+        }
+    }
+}
+
+/// Handles historical resolution requests (draft-21 §8.4).
+///
+/// Historical queries are deliberately never served from the current
+/// list cache: that cache contains mutable, present-day state.
+/// They also don't participate in conditional request handling since
+/// we're fetching a specific snapshot in time.
+async fn handle_historical_request(
+    list_id: &str,
+    time: i64,
+    accept_type: &str,
+    state: &AppState,
+    client_accepts_gzip: bool,
+) -> Result<Response, ApiError> {
+    // Validate time parameter: must be positive and not in the future
+    let now = OffsetDateTime::now_utc().unix_timestamp();
+    if time <= 0 {
+        tracing::warn!("Historical query rejected: time must be positive, got {time}");
+        return Err(StatusListError::InvalidHistoricalTime.into());
+    }
+    if time > now {
+        tracing::warn!("Historical query rejected: time is in the future ({time} > {now})");
+        return Err(StatusListError::InvalidHistoricalTime.into());
+    }
+
+    // §12.7 privacy warning: historical queries leak timing information
+    tracing::info!(
+        "Historical query for list {list_id} at time {time} (age: {} seconds)",
+        now - time
+    );
+
+    // Fetch the snapshot whose half-open validity interval contains `time`
+    let snapshot = state
+        .status_list_history_repo
+        .find_valid_at(list_id, time)
+        .await
+        .map_err(|err| {
+            tracing::error!("Failed to resolve historical status list {list_id}: {err:?}");
+            StatusListError::InternalServerError
+        })?
+        .ok_or(StatusListError::HistoricalStatusListNotFound)?;
+
+    // Generate ETag and extract values before consuming snapshot
+    let etag = generate_historical_etag(&snapshot);
+    let last_modified = format_http_date(snapshot.iat);
+    let validity_duration = (snapshot.exp - snapshot.iat) as u64;
+    let cache_control = format!("max-age={}, immutable", validity_duration.max(86400)); // At least 1 day
+
+    // Build the status record from the snapshot
+    let status_record = StatusListRecord {
+        list_id: snapshot.list_id,
+        issuer: snapshot.issuer,
+        status_list: snapshot.status_list,
+        sub: snapshot.sub,
+        updated_at: snapshot.iat, // Use snapshot iat as the modification time
+    };
+
+    // Build token with the snapshot's validity window
+    let (token_bytes, encoding) = build_token(
+        accept_type,
+        &status_record,
+        Some((snapshot.iat, snapshot.exp)),
+        state,
+        client_accepts_gzip,
+    )
+    .await?;
+
+    let mut response = Response::new(token_bytes.into());
+    *response.status_mut() = StatusCode::OK;
+    let h = response.headers_mut();
+    h.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_str(accept_type).unwrap(),
+    );
+    h.insert(header::ETAG, HeaderValue::from_str(&etag).unwrap());
+    h.insert(
+        header::LAST_MODIFIED,
+        HeaderValue::from_str(&last_modified).unwrap(),
+    );
+    h.insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_str(&cache_control).unwrap(),
+    );
+    h.insert(
+        header::VARY,
+        HeaderValue::from_static("Accept, Accept-Encoding"),
+    );
+    if let Some(enc) = encoding {
+        h.insert(header::CONTENT_ENCODING, HeaderValue::from_static(enc));
+    }
+
+    Ok(response)
+}
+
+#[derive(Debug, Deserialize)]
+pub struct StatusListQuery {
+    /// draft-21 §8.4 Unix timestamp for a historical Status List Token.
+    pub time: Option<i64>,
+}
+
+/// Fetches status record from cache or database
+async fn fetch_status_record(
+    list_id: &str,
+    state: &AppState,
+) -> Result<Arc<StatusListRecord>, ApiError> {
+    // Check cache for status list record
+    if let Some(cached_record) = state.cache.get(list_id).await {
+        tracing::info!("Cache hit for status list record: {list_id}");
+        return Ok(cached_record);
+    }
+
+    tracing::info!("Cache miss for status list token: {list_id}");
+    // Get status list claims from database
+    let status_record = state
+        .status_list_repo
+        .find_one_by(list_id)
+        .await?
+        .ok_or_else(|| {
+            ApiError::new(
+                axum::http::StatusCode::NOT_FOUND,
+                "status_list_not_found",
+                "Status list not found",
+            )
+        })?;
+
+    // Store the token in the cache for future requests
+    state
+        .cache
+        .insert(list_id.to_string(), status_record.clone())
+        .await;
+
+    Ok(Arc::new(status_record))
 }
 
 /// Parses the request's `Accept-Encoding` header(s) (RFC 9110 content
@@ -111,48 +339,21 @@ fn client_accepts_gzip(headers: &HeaderMap) -> bool {
     }
 }
 
-async fn build_status_list_token(
-    accept: &str,
-    list_id: &str,
-    state: &AppState,
-    client_accepts_gzip: bool,
-) -> Result<impl IntoResponse + Debug + use<>, StatusListError> {
-    // Check cache for status list record
-    if let Some(cached_record) = state.cache.get(list_id).await {
-        tracing::info!("Cache hit for status list record: {list_id}");
-        // Record is in cache, proceed with building the response
-        return build_response_from_record(accept, &cached_record, state, client_accepts_gzip)
-            .await;
-    }
-
-    tracing::info!("Cache miss for status list token: {list_id}");
-    // Get status list claims from database
-    let status_record = state
-        .status_list_repo
-        .find_one_by(list_id)
-        .await
-        .map_err(|err| {
-            tracing::error!("Failed to get status list {list_id} from database: {err:?}");
-            StatusListError::InternalServerError
-        })?
-        .ok_or(StatusListError::StatusListNotFound)?;
-
-    // Store the token in the cache for future requests
-    let status_record = Arc::new(status_record);
-    state
-        .cache
-        .insert(list_id.to_string(), status_record.clone())
-        .await;
-
-    build_response_from_record(accept, &status_record, state, client_accepts_gzip).await
-}
-
-async fn build_response_from_record(
+/// Builds and conditionally compresses the token (JWT or CWT).
+///
+/// Gzip compression is only applied when the client signals support via the
+/// `Accept-Encoding` header, per HTTP semantics (RFC 9110 §8.4), and only
+/// for JWT-format tokens (draft-21 §8.2 recommends Content-Encoding only for
+/// JWT-format tokens; CWT responses are never compressed). When gzip is
+/// negotiated the returned encoding hint is `Some("gzip")`; otherwise the raw
+/// token bytes are returned with `None`.
+async fn build_token(
     accept: &str,
     status_record: &StatusListRecord,
+    validity_window: Option<(i64, i64)>,
     state: &AppState,
     client_accepts_gzip: bool,
-) -> Result<impl IntoResponse + Debug + use<>, StatusListError> {
+) -> Result<(Vec<u8>, Option<&'static str>), StatusListError> {
     // Get the certificate chain
     let certs_parts = state
         .cert_manager
@@ -176,12 +377,17 @@ async fn build_response_from_record(
     let accept_header = accept.to_string();
     let status_record = status_record.clone();
     let aggregation_uri = state.aggregation_uri.clone();
-    let token_exp_secs = state.token_exp_secs;
+    let validity_window = validity_window.unwrap_or_else(|| {
+        let iat = OffsetDateTime::now_utc().unix_timestamp();
+        (iat, iat + state.token_exp_secs as i64)
+    });
     let token_ttl_secs = state.token_ttl_secs;
 
+    // CWT responses must never be gzipped (draft-21 §8.2 recommends
+    // Content-Encoding only for JWT-format tokens).
     let should_gzip = client_accepts_gzip && accept_header == ACCEPT_STATUS_LISTS_HEADER_JWT;
 
-    let (body, gzipped) = tokio::task::spawn_blocking(move || {
+    tokio::task::spawn_blocking(move || {
         let keypair = Keypair::from_pkcs8_pem(&signing_key_pem).map_err(|e| {
             tracing::error!("Failed to parse server key: {e:?}");
             StatusListError::InternalServerError
@@ -193,7 +399,8 @@ async fn build_response_from_record(
                 &keypair,
                 &certs_parts,
                 &aggregation_uri,
-                token_exp_secs,
+                validity_window.0,
+                validity_window.1,
                 token_ttl_secs,
             )?,
             _ => issue_jwt(
@@ -201,7 +408,8 @@ async fn build_response_from_record(
                 &keypair,
                 &certs_parts,
                 &aggregation_uri,
-                token_exp_secs,
+                validity_window.0,
+                validity_window.1,
                 token_ttl_secs,
             )?
             .into_bytes(),
@@ -217,41 +425,16 @@ async fn build_response_from_record(
                 tracing::error!("Failed to finish compression: {err:?}");
                 StatusListError::InternalServerError
             })?;
-            Ok::<(Vec<u8>, bool), StatusListError>((compressed, true))
+            Ok((compressed, Some(GZIP_HEADER)))
         } else {
-            Ok((token_bytes, false))
+            Ok((token_bytes, None))
         }
     })
     .await
     .map_err(|err| {
         tracing::error!("Panicked while building token: {err:?}");
         StatusListError::InternalServerError
-    })??;
-
-    let response = if gzipped {
-        (
-            StatusCode::OK,
-            [
-                (header::CONTENT_TYPE, accept),
-                (header::CONTENT_ENCODING, GZIP_HEADER),
-                (header::VARY, "Accept-Encoding"),
-            ],
-            body,
-        )
-            .into_response()
-    } else {
-        (
-            StatusCode::OK,
-            [
-                (header::CONTENT_TYPE, accept),
-                (header::VARY, "Accept-Encoding"),
-            ],
-            body,
-        )
-            .into_response()
-    };
-
-    Ok(response)
+    })?
 }
 
 // Function to create a CWT per the specification
@@ -260,32 +443,30 @@ fn issue_cwt(
     keypair: &Keypair,
     cert_chain: &CertificateChain,
     aggregation_uri: &Option<String>,
-    token_exp_secs: u64,
+    iat: i64,
+    exp: i64,
     token_ttl_secs: u64,
 ) -> Result<Vec<u8>, StatusListError> {
-    let mut claims = vec![];
-
-    // Building the claims
-    claims.push((
-        CborValue::Integer(SUBJECT.into()),
-        CborValue::Text(status_record.sub.clone()),
-    ));
-    let iat = OffsetDateTime::now_utc().unix_timestamp();
-    claims.push((
-        CborValue::Integer(ISSUED_AT.into()),
-        CborValue::Integer(iat.into()),
-    ));
     // According to the spec, the lifetime of the token depends on the lifetime of the referenced token
     // https://datatracker.ietf.org/doc/html/draft-ietf-oauth-status-list-21#section-13.7
-    let exp = iat + token_exp_secs as i64;
-    claims.push((
-        CborValue::Integer(EXP.into()),
-        CborValue::Integer(exp.into()),
-    ));
-    claims.push((
-        CborValue::Integer(TTL.into()),
-        CborValue::Integer(token_ttl_secs.into()),
-    ));
+    let mut claims = vec![
+        (
+            CborValue::Integer(SUBJECT.into()),
+            CborValue::Text(status_record.sub.clone()),
+        ),
+        (
+            CborValue::Integer(ISSUED_AT.into()),
+            CborValue::Integer(iat.into()),
+        ),
+        (
+            CborValue::Integer(EXP.into()),
+            CborValue::Integer(exp.into()),
+        ),
+        (
+            CborValue::Integer(TTL.into()),
+            CborValue::Integer(token_ttl_secs.into()),
+        ),
+    ];
     // §4.3 requires lst as a CBOR byte string, not the base64url text used for JSON (§4.2).
     let lst_bytes = base64url::decode(&status_record.status_list.lst).map_err(|err| {
         tracing::error!("Failed to decode lst for CWT status_list claim: {err:?}");
@@ -384,12 +565,11 @@ fn issue_jwt(
     keypair: &Keypair,
     cert_chain: &CertificateChain,
     aggregation_uri: &Option<String>,
-    token_exp_secs: u64,
+    iat: i64,
+    exp: i64,
     token_ttl_secs: u64,
 ) -> Result<String, StatusListError> {
-    let iat = OffsetDateTime::now_utc().unix_timestamp();
     let ttl = token_ttl_secs as i64;
-    let exp = iat + token_exp_secs as i64;
     let status_list = StatusListClaims {
         bits: status_record.status_list.bits,
         lst: status_record.status_list.lst.clone(),
@@ -423,14 +603,33 @@ fn issue_jwt(
     Ok(token)
 }
 
+/// Builds Cache-Control header value for successful responses
+///
+/// Returns a Cache-Control directive with max-age set to the token TTL and the
+/// immutable flag, indicating content won't change during cache lifetime.
+///
+/// # Arguments
+/// * `token_ttl_secs` - The token time-to-live in seconds
+///
+/// # Returns
+/// A string formatted as "max-age={token_ttl_secs}, immutable"
+fn build_cache_control(token_ttl_secs: u64) -> String {
+    format!("max-age={}, immutable", token_ttl_secs)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::{
-        models::{StatusList, StatusListRecord, status_lists},
+        models::{
+            StatusList, StatusListHistoryRecord, StatusListRecord, status_list_history,
+            status_lists,
+        },
         test_utils::{test_app_state, test_app_state_with},
-        utils::lst_gen::encode_compressed,
+        utils::lst_gen::{AbuseLimits, encode_compressed},
     };
+
+    const LIMITS: AbuseLimits = AbuseLimits::unlimited();
     use axum::{
         body::to_bytes,
         extract::{Path, State},
@@ -448,13 +647,14 @@ mod tests {
         let mock_db = MockDatabase::new(DatabaseBackend::Postgres);
         let status_list = StatusList {
             bits: 8,
-            lst: encode_compressed(&[0, 0, 0]).unwrap(),
+            lst: encode_compressed(&[0, 0, 0], &LIMITS).unwrap(),
         };
         let status_list_token = StatusListRecord {
             list_id: "test_list".to_string(),
             issuer: "issuer1".to_string(),
             status_list,
             sub: "test_subject".to_string(),
+            updated_at: 0,
         };
         let db_conn = Arc::new(
             mock_db
@@ -476,6 +676,7 @@ mod tests {
         let response = get_status_list(
             State(app_state.clone()),
             Path("test_list".to_string()),
+            Ok(Query(StatusListQuery { time: None })),
             headers,
         )
         .await
@@ -485,7 +686,10 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
         let headers = response.headers();
         assert_eq!(headers.get(http::header::CONTENT_ENCODING).unwrap(), "gzip");
-        assert_eq!(headers.get(http::header::VARY).unwrap(), "Accept-Encoding");
+        assert_eq!(
+            headers.get(http::header::VARY).unwrap(),
+            "Accept, Accept-Encoding"
+        );
 
         let compressed_body_bytes = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
         let mut decoder = flate2::read::GzDecoder::new(&compressed_body_bytes[..]);
@@ -514,7 +718,7 @@ mod tests {
         assert_eq!(token_data.claims.status_list.bits, 8);
         assert_eq!(
             token_data.claims.status_list.lst,
-            encode_compressed(&[0, 0, 0]).unwrap()
+            encode_compressed(&[0, 0, 0], &LIMITS).unwrap()
         );
     }
 
@@ -523,13 +727,14 @@ mod tests {
         let mock_db = MockDatabase::new(DatabaseBackend::Postgres);
         let status_list = StatusList {
             bits: 8,
-            lst: encode_compressed(&[0, 0, 0]).unwrap(),
+            lst: encode_compressed(&[0, 0, 0], &LIMITS).unwrap(),
         };
         let status_list_token = StatusListRecord {
             list_id: "test_list".to_string(),
             issuer: "issuer1".to_string(),
             status_list,
             sub: "test_subject".to_string(),
+            updated_at: 0,
         };
         let db_conn = Arc::new(
             mock_db
@@ -551,6 +756,7 @@ mod tests {
         let response = get_status_list(
             State(app_state.clone()),
             Path("test_list".to_string()),
+            Ok(Query(StatusListQuery { time: None })),
             headers,
         )
         .await
@@ -564,7 +770,10 @@ mod tests {
             "Content-Encoding must not be present when gzip was not applied"
         );
         // Vary must be present even without gzip so caches key on Accept-Encoding.
-        assert_eq!(headers.get(http::header::VARY).unwrap(), "Accept-Encoding");
+        assert_eq!(
+            headers.get(http::header::VARY).unwrap(),
+            "Accept, Accept-Encoding"
+        );
 
         let body_bytes = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
         let body_str = std::str::from_utf8(&body_bytes).unwrap();
@@ -586,7 +795,7 @@ mod tests {
         assert_eq!(token_data.claims.status_list.bits, 8);
         assert_eq!(
             token_data.claims.status_list.lst,
-            encode_compressed(&[0, 0, 0]).unwrap()
+            encode_compressed(&[0, 0, 0], &LIMITS).unwrap()
         );
     }
 
@@ -595,13 +804,14 @@ mod tests {
         let mock_db = MockDatabase::new(DatabaseBackend::Postgres);
         let status_list = StatusList {
             bits: 8,
-            lst: encode_compressed(&[0, 0, 0]).unwrap(),
+            lst: encode_compressed(&[0, 0, 0], &LIMITS).unwrap(),
         };
         let status_list_token = StatusListRecord {
             list_id: "test_list".to_string(),
             issuer: "issuer1".to_string(),
             status_list: status_list.clone(),
             sub: "test_subject".to_string(),
+            updated_at: 0,
         };
         let db_conn = Arc::new(
             mock_db
@@ -626,6 +836,7 @@ mod tests {
         let response = get_status_list(
             State(app_state.clone()),
             Path("test_list".to_string()),
+            Ok(Query(StatusListQuery { time: None })),
             headers,
         )
         .await
@@ -638,7 +849,10 @@ mod tests {
             headers.get(http::header::CONTENT_ENCODING).is_none(),
             "CWT responses must never be gzipped"
         );
-        assert_eq!(headers.get(http::header::VARY).unwrap(), "Accept-Encoding");
+        assert_eq!(
+            headers.get(http::header::VARY).unwrap(),
+            "Accept, Accept-Encoding"
+        );
 
         let body_bytes = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
 
@@ -701,7 +915,7 @@ mod tests {
             .1
             .clone();
         let expected_lst_bytes =
-            base64url::decode(&encode_compressed(&[0, 0, 0]).unwrap()).unwrap();
+            base64url::decode(&encode_compressed(&[0, 0, 0], &LIMITS).unwrap()).unwrap();
         assert_eq!(lst, CborValue::Bytes(expected_lst_bytes));
 
         let ttl = claims
@@ -733,6 +947,7 @@ mod tests {
             issuer: "issuer1".to_string(),
             status_list,
             sub: "test_subject".to_string(),
+            updated_at: 0,
         }
     }
 
@@ -741,7 +956,7 @@ mod tests {
         let mock_db = MockDatabase::new(DatabaseBackend::Postgres);
         let status_list = StatusList {
             bits: 8,
-            lst: encode_compressed(&[0, 0, 0]).unwrap(),
+            lst: encode_compressed(&[0, 0, 0], &LIMITS).unwrap(),
         };
         let status_list_token = record_with_bits_8("test_list", status_list);
         let db_conn = Arc::new(
@@ -768,6 +983,7 @@ mod tests {
         let response = get_status_list(
             State(app_state.clone()),
             Path("test_list".to_string()),
+            Ok(Query(StatusListQuery { time: None })),
             headers,
         )
         .await
@@ -777,7 +993,10 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
         let headers = response.headers();
         assert_eq!(headers.get(http::header::CONTENT_ENCODING).unwrap(), "gzip");
-        assert_eq!(headers.get(http::header::VARY).unwrap(), "Accept-Encoding");
+        assert_eq!(
+            headers.get(http::header::VARY).unwrap(),
+            "Accept, Accept-Encoding"
+        );
         let compressed = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
         let mut decoder = flate2::read::GzDecoder::new(&compressed[..]);
         let mut body = Vec::new();
@@ -808,7 +1027,7 @@ mod tests {
         let mock_db = MockDatabase::new(DatabaseBackend::Postgres);
         let status_list = StatusList {
             bits: 8,
-            lst: encode_compressed(&[0, 0, 0]).unwrap(),
+            lst: encode_compressed(&[0, 0, 0], &LIMITS).unwrap(),
         };
         let status_list_token = record_with_bits_8("test_list", status_list);
         let db_conn = Arc::new(
@@ -826,10 +1045,12 @@ mod tests {
             http::header::ACCEPT,
             ACCEPT_STATUS_LISTS_HEADER_JWT.parse().unwrap(),
         );
+        headers.insert(http::header::ACCEPT_ENCODING, "gzip".parse().unwrap());
 
         let response = get_status_list(
             State(app_state.clone()),
             Path("test_list".to_string()),
+            Ok(Query(StatusListQuery { time: None })),
             headers,
         )
         .await
@@ -838,13 +1059,16 @@ mod tests {
 
         assert_eq!(response.status(), StatusCode::OK);
         let headers = response.headers();
-        assert!(
-            headers.get(http::header::CONTENT_ENCODING).is_none(),
-            "no gzip without Accept-Encoding"
+        assert_eq!(headers.get(http::header::CONTENT_ENCODING).unwrap(), "gzip");
+        assert_eq!(
+            headers.get(http::header::VARY).unwrap(),
+            "Accept, Accept-Encoding"
         );
-        assert_eq!(headers.get(http::header::VARY).unwrap(), "Accept-Encoding");
-        let raw = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
-        let body_str = std::str::from_utf8(&raw).unwrap();
+        let compressed = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+        let mut decoder = flate2::read::GzDecoder::new(&compressed[..]);
+        let mut body = Vec::new();
+        decoder.read_to_end(&mut body).unwrap();
+        let body_str = std::str::from_utf8(&body).unwrap();
 
         let signing_key_pem = app_state.cert_manager.signing_key_pem().await.unwrap();
         let keypair = Keypair::from_pkcs8_pem(&signing_key_pem).unwrap();
@@ -866,7 +1090,7 @@ mod tests {
         let mock_db = MockDatabase::new(DatabaseBackend::Postgres);
         let status_list = StatusList {
             bits: 8,
-            lst: encode_compressed(&[0, 0, 0]).unwrap(),
+            lst: encode_compressed(&[0, 0, 0], &LIMITS).unwrap(),
         };
         let status_list_token = record_with_bits_8("test_list", status_list);
         let db_conn = Arc::new(
@@ -888,10 +1112,12 @@ mod tests {
             http::header::ACCEPT,
             ACCEPT_STATUS_LISTS_HEADER_CWT.parse().unwrap(),
         );
+        headers.insert(http::header::ACCEPT_ENCODING, "gzip".parse().unwrap());
 
         let response = get_status_list(
             State(app_state.clone()),
             Path("test_list".to_string()),
+            Ok(Query(StatusListQuery { time: None })),
             headers,
         )
         .await
@@ -904,7 +1130,10 @@ mod tests {
             headers.get(http::header::CONTENT_ENCODING).is_none(),
             "CWT responses must never be gzipped"
         );
-        assert_eq!(headers.get(http::header::VARY).unwrap(), "Accept-Encoding");
+        assert_eq!(
+            headers.get(http::header::VARY).unwrap(),
+            "Accept, Accept-Encoding"
+        );
         let body = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
 
         let cwt = CoseSign1::from_tagged_slice(&body).unwrap();
@@ -952,7 +1181,7 @@ mod tests {
         let mock_db = MockDatabase::new(DatabaseBackend::Postgres);
         let status_list = StatusList {
             bits: 8,
-            lst: encode_compressed(&[0, 0, 0]).unwrap(),
+            lst: encode_compressed(&[0, 0, 0], &LIMITS).unwrap(),
         };
         let status_list_token = record_with_bits_8("test_list", status_list);
         let db_conn = Arc::new(
@@ -970,10 +1199,12 @@ mod tests {
             http::header::ACCEPT,
             ACCEPT_STATUS_LISTS_HEADER_CWT.parse().unwrap(),
         );
+        headers.insert(http::header::ACCEPT_ENCODING, "gzip".parse().unwrap());
 
         let response = get_status_list(
             State(app_state.clone()),
             Path("test_list".to_string()),
+            Ok(Query(StatusListQuery { time: None })),
             headers,
         )
         .await
@@ -986,7 +1217,10 @@ mod tests {
             headers.get(http::header::CONTENT_ENCODING).is_none(),
             "CWT responses must never be gzipped"
         );
-        assert_eq!(headers.get(http::header::VARY).unwrap(), "Accept-Encoding");
+        assert_eq!(
+            headers.get(http::header::VARY).unwrap(),
+            "Accept, Accept-Encoding"
+        );
         let body = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
 
         let cwt = CoseSign1::from_tagged_slice(&body).unwrap();
@@ -1044,13 +1278,18 @@ mod tests {
             ACCEPT_STATUS_LISTS_HEADER_JWT.parse().unwrap(),
         );
 
-        let result =
-            get_status_list(State(app_state), Path("test_list".to_string()), headers).await;
+        let result = get_status_list(
+            State(app_state),
+            Path("test_list".to_string()),
+            Ok(Query(StatusListQuery { time: None })),
+            headers,
+        )
+        .await;
 
         assert!(result.is_err());
         let err = result.unwrap_err();
-        assert_eq!(err.clone().into_response().status(), StatusCode::NOT_FOUND);
-        assert_eq!(err, StatusListError::StatusListNotFound);
+        assert_eq!(err.error.as_ref(), "status_list_not_found");
+        assert_eq!(err.into_response().status(), StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]
@@ -1060,16 +1299,532 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.insert(http::header::ACCEPT, "application/xml".parse().unwrap()); // unsupported
 
-        let result =
-            get_status_list(State(app_state), Path("test_list".to_string()), headers).await;
+        let result = get_status_list(
+            State(app_state),
+            Path("test_list".to_string()),
+            Ok(Query(StatusListQuery { time: None })),
+            headers,
+        )
+        .await;
 
         assert!(result.is_err());
-        let err = result.unwrap_err();
-        assert_eq!(
-            err.clone().into_response().status(),
-            StatusCode::NOT_ACCEPTABLE
+        let _err = result.unwrap_err();
+    }
+
+    #[tokio::test]
+    async fn test_error_responses_omit_etag_and_last_modified() {
+        // Test 404 Not Found error
+        let mock_db = MockDatabase::new(DatabaseBackend::Postgres);
+        let db_conn = Arc::new(
+            mock_db
+                .append_query_results::<status_lists::Model, Vec<_>, _>(vec![vec![]])
+                .into_connection(),
         );
-        assert_eq!(err, StatusListError::InvalidAcceptHeader);
+
+        let app_state = test_app_state(Some(db_conn.clone())).await;
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            http::header::ACCEPT,
+            ACCEPT_STATUS_LISTS_HEADER_JWT.parse().unwrap(),
+        );
+
+        let result = get_status_list(
+            State(app_state),
+            Path("test_list".to_string()),
+            Ok(Query(StatusListQuery { time: None })),
+            headers,
+        )
+        .await;
+
+        assert!(result.is_err());
+        let response = result.unwrap_err().into_response();
+        let response_headers = response.headers();
+
+        // Verify error responses do NOT include ETag or Last-Modified headers
+        assert!(
+            response_headers.get(http::header::ETAG).is_none(),
+            "Error response should not include ETag header"
+        );
+        assert!(
+            response_headers.get(http::header::LAST_MODIFIED).is_none(),
+            "Error response should not include Last-Modified header"
+        );
+
+        // But should include Cache-Control
+        assert!(
+            response_headers.get(http::header::CACHE_CONTROL).is_some(),
+            "Error response should include Cache-Control header"
+        );
+    }
+
+    #[test]
+    fn test_build_cache_control() {
+        // Test with specific TTL value
+        let cache_control = build_cache_control(300);
+        assert_eq!(cache_control, "max-age=300, immutable");
+
+        // Test with zero TTL
+        let cache_control_zero = build_cache_control(0);
+        assert_eq!(cache_control_zero, "max-age=0, immutable");
+
+        // Test with large TTL value
+        let cache_control_large = build_cache_control(86400);
+        assert_eq!(cache_control_large, "max-age=86400, immutable");
+    }
+
+    #[tokio::test]
+    async fn test_get_status_list_includes_caching_headers() {
+        let mock_db = MockDatabase::new(DatabaseBackend::Postgres);
+        let status_list = StatusList {
+            bits: 8,
+            lst: encode_compressed(&[0, 0, 0], &LIMITS).unwrap(),
+        };
+        let status_list_token = StatusListRecord {
+            list_id: "test_list".to_string(),
+            issuer: "issuer1".to_string(),
+            status_list,
+            sub: "test_subject".to_string(),
+            updated_at: 1234567890,
+        };
+        let db_conn = Arc::new(
+            mock_db
+                .append_query_results::<status_lists::Model, Vec<_>, _>(vec![vec![
+                    status_list_token,
+                ]])
+                .into_connection(),
+        );
+
+        let app_state = test_app_state(Some(db_conn.clone())).await;
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            http::header::ACCEPT,
+            ACCEPT_STATUS_LISTS_HEADER_JWT.parse().unwrap(),
+        );
+
+        let response = get_status_list(
+            State(app_state.clone()),
+            Path("test_list".to_string()),
+            Ok(Query(StatusListQuery { time: None })),
+            headers,
+        )
+        .await
+        .unwrap()
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let response_headers = response.headers();
+
+        // Verify ETag header is present and has correct format
+        let etag = response_headers
+            .get(http::header::ETAG)
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert!(etag.starts_with("W/\""), "ETag should be a weak validator");
+        assert!(etag.ends_with('"'), "ETag should be quoted");
+
+        // Verify Last-Modified header is present
+        let last_modified = response_headers
+            .get(http::header::LAST_MODIFIED)
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert!(!last_modified.is_empty(), "Last-Modified should be present");
+
+        // Verify Cache-Control header is present and correct
+        let cache_control = response_headers
+            .get(http::header::CACHE_CONTROL)
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert_eq!(cache_control, "max-age=300, immutable");
+
+        let vary = response_headers
+            .get(http::header::VARY)
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert_eq!(vary, "Accept, Accept-Encoding");
+    }
+
+    #[tokio::test]
+    async fn test_conditional_request_with_matching_etag() {
+        let mock_db = MockDatabase::new(DatabaseBackend::Postgres);
+        let status_list = StatusList {
+            bits: 8,
+            lst: encode_compressed(&[0, 0, 0], &LIMITS).unwrap(),
+        };
+        let status_list_token = StatusListRecord {
+            list_id: "test_list".to_string(),
+            issuer: "issuer1".to_string(),
+            status_list,
+            sub: "test_subject".to_string(),
+            updated_at: 1234567890,
+        };
+
+        // Single query result - will be cached after first request
+        let db_conn = Arc::new(
+            mock_db
+                .append_query_results::<status_lists::Model, Vec<_>, _>(vec![vec![
+                    status_list_token,
+                ]])
+                .into_connection(),
+        );
+
+        let app_state = test_app_state(Some(db_conn.clone())).await;
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            http::header::ACCEPT,
+            ACCEPT_STATUS_LISTS_HEADER_JWT.parse().unwrap(),
+        );
+
+        // First request - get the ETag
+        let first_response = get_status_list(
+            State(app_state.clone()),
+            Path("test_list".to_string()),
+            Ok(Query(StatusListQuery { time: None })),
+            headers.clone(),
+        )
+        .await
+        .unwrap()
+        .into_response();
+
+        let etag = first_response
+            .headers()
+            .get(http::header::ETAG)
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_string();
+
+        // Second request - conditional request with the ETag (will use cache)
+        let mut conditional_headers = HeaderMap::new();
+        conditional_headers.insert(
+            http::header::ACCEPT,
+            ACCEPT_STATUS_LISTS_HEADER_JWT.parse().unwrap(),
+        );
+        conditional_headers.insert(http::header::IF_NONE_MATCH, etag.parse().unwrap());
+
+        let conditional_response = get_status_list(
+            State(app_state),
+            Path("test_list".to_string()),
+            Ok(Query(StatusListQuery { time: None })),
+            conditional_headers,
+        )
+        .await
+        .unwrap()
+        .into_response();
+
+        // Should return 304 Not Modified
+        assert_eq!(conditional_response.status(), StatusCode::NOT_MODIFIED);
+
+        // Should still have caching headers
+        let response_headers = conditional_response.headers();
+        assert!(response_headers.contains_key(http::header::ETAG));
+        assert!(response_headers.contains_key(http::header::LAST_MODIFIED));
+        assert!(response_headers.contains_key(http::header::CACHE_CONTROL));
+        assert!(
+            response_headers.contains_key(http::header::VARY),
+            "304 response should include Vary: Accept, Accept-Encoding"
+        );
+        assert_eq!(
+            response_headers
+                .get(http::header::VARY)
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            "Accept, Accept-Encoding"
+        );
+
+        // Body should be empty
+        let body_bytes = to_bytes(conditional_response.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        assert_eq!(body_bytes.len(), 0, "304 response should have no body");
+    }
+
+    #[tokio::test]
+    async fn test_conditional_request_if_modified_since_returns_304() {
+        let mock_db = MockDatabase::new(DatabaseBackend::Postgres);
+        let status_list = StatusList {
+            bits: 8,
+            lst: encode_compressed(&[0, 0, 0], &LIMITS).unwrap(),
+        };
+        let status_list_token = StatusListRecord {
+            list_id: "test_list".to_string(),
+            issuer: "issuer1".to_string(),
+            status_list,
+            sub: "test_subject".to_string(),
+            updated_at: 1672531200, // 2023-01-01 00:00:00 UTC
+        };
+        let db_conn = Arc::new(
+            mock_db
+                .append_query_results::<status_lists::Model, Vec<_>, _>(vec![vec![
+                    status_list_token,
+                ]])
+                .into_connection(),
+        );
+
+        let app_state = test_app_state(Some(db_conn.clone())).await;
+
+        // First request: capture Last-Modified.
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            http::header::ACCEPT,
+            ACCEPT_STATUS_LISTS_HEADER_JWT.parse().unwrap(),
+        );
+        let first_response = get_status_list(
+            State(app_state.clone()),
+            Path("test_list".to_string()),
+            Ok(Query(StatusListQuery { time: None })),
+            headers,
+        )
+        .await
+        .unwrap()
+        .into_response();
+        assert_eq!(first_response.status(), StatusCode::OK);
+        let last_modified = first_response
+            .headers()
+            .get(http::header::LAST_MODIFIED)
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_string();
+
+        // Second request with If-Modified-Since: Last-Modified (updated_at) is
+        // <= the captured timestamp, so the handler must return 304 — no ETag sent.
+        let mut conditional_headers = HeaderMap::new();
+        conditional_headers.insert(
+            http::header::ACCEPT,
+            ACCEPT_STATUS_LISTS_HEADER_JWT.parse().unwrap(),
+        );
+        conditional_headers.insert(
+            http::header::IF_MODIFIED_SINCE,
+            last_modified.parse().unwrap(),
+        );
+        let conditional_response = get_status_list(
+            State(app_state),
+            Path("test_list".to_string()),
+            Ok(Query(StatusListQuery { time: None })),
+            conditional_headers,
+        )
+        .await
+        .unwrap()
+        .into_response();
+
+        assert_eq!(conditional_response.status(), StatusCode::NOT_MODIFIED);
+        assert!(
+            conditional_response
+                .headers()
+                .contains_key(http::header::LAST_MODIFIED),
+            "304 response should include Last-Modified"
+        );
+        assert!(
+            conditional_response
+                .headers()
+                .contains_key(http::header::CACHE_CONTROL),
+            "304 response should include Cache-Control"
+        );
+        let body_bytes = to_bytes(conditional_response.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        assert_eq!(body_bytes.len(), 0, "304 response should have no body");
+    }
+
+    #[tokio::test]
+    async fn test_conditional_request_if_modified_since_returns_200() {
+        let mock_db = MockDatabase::new(DatabaseBackend::Postgres);
+        let status_list = StatusList {
+            bits: 8,
+            lst: encode_compressed(&[0, 0, 0], &LIMITS).unwrap(),
+        };
+        let status_list_token = StatusListRecord {
+            list_id: "test_list".to_string(),
+            issuer: "issuer1".to_string(),
+            status_list,
+            sub: "test_subject".to_string(),
+            updated_at: 1672531200, // 2023-01-01 00:00:00 UTC
+        };
+        let db_conn = Arc::new(
+            mock_db
+                .append_query_results::<status_lists::Model, Vec<_>, _>(vec![vec![
+                    status_list_token,
+                ]])
+                .into_connection(),
+        );
+
+        let app_state = test_app_state(Some(db_conn.clone())).await;
+
+        // An If-Modified-Since older than updated_at means the served
+        // representation is newer than the client's cached value, so the
+        // handler must return 200 with a fresh body.
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            http::header::ACCEPT,
+            ACCEPT_STATUS_LISTS_HEADER_JWT.parse().unwrap(),
+        );
+        headers.insert(
+            http::header::IF_MODIFIED_SINCE,
+            "Thu, 01 Jan 1970 00:00:00 GMT".parse().unwrap(),
+        );
+        let response = get_status_list(
+            State(app_state),
+            Path("test_list".to_string()),
+            Ok(Query(StatusListQuery { time: None })),
+            headers,
+        )
+        .await
+        .unwrap()
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(
+            response.headers().contains_key(http::header::ETAG),
+            "200 response should include ETag"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_get_status_list_returns_snapshot_valid_at_requested_time() {
+        let snapshot = StatusListHistoryRecord {
+            snapshot_id: "snapshot-1".to_string(),
+            list_id: "test_list".to_string(),
+            issuer: "test_issuer".to_string(),
+            status_list: StatusList {
+                bits: 8,
+                lst: encode_compressed(&[42], &LIMITS).unwrap(),
+            },
+            sub: "test_subject".to_string(),
+            iat: 1_700_000_000,
+            exp: 1_700_000_900,
+        };
+        let db_conn = Arc::new(
+            MockDatabase::new(DatabaseBackend::Postgres)
+                .append_query_results::<status_list_history::Model, Vec<_>, _>(vec![vec![
+                    snapshot.clone(),
+                ]])
+                .into_connection(),
+        );
+        let app_state = test_app_state(Some(db_conn)).await;
+
+        let response = get_status_list(
+            State(app_state.clone()),
+            Path("test_list".to_string()),
+            Ok(Query(StatusListQuery {
+                time: Some(1_700_000_450),
+            })),
+            HeaderMap::new(),
+        )
+        .await
+        .unwrap()
+        .into_response();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        // Historical queries don't use gzip (no Accept-Encoding header provided)
+        let body_bytes = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+        let body_str = std::str::from_utf8(&body_bytes).unwrap();
+
+        let signing_key_pem = app_state.cert_manager.signing_key_pem().await.unwrap();
+        let keypair = Keypair::from_pkcs8_pem(&signing_key_pem).unwrap();
+        let decoding_key_pem = keypair
+            .verifying_key()
+            .to_public_key_pem(LineEnding::default())
+            .unwrap()
+            .into_bytes();
+        let mut validation = Validation::new(jsonwebtoken::Algorithm::ES256);
+        validation.validate_exp = false;
+        let token = jsonwebtoken::decode::<StatusListToken>(
+            &body_str,
+            &DecodingKey::from_ec_pem(&decoding_key_pem).unwrap(),
+            &validation,
+        )
+        .unwrap()
+        .claims;
+
+        assert_eq!(token.iat, snapshot.iat);
+        assert_eq!(token.exp, Some(snapshot.exp));
+        assert!(token.iat <= 1_700_000_450);
+        assert!(token.exp.unwrap() > 1_700_000_450);
+        assert_eq!(token.status_list.lst, snapshot.status_list.lst);
+    }
+
+    #[tokio::test]
+    async fn test_get_status_list_returns_not_found_when_time_is_unavailable() {
+        let db_conn = Arc::new(
+            MockDatabase::new(DatabaseBackend::Postgres)
+                .append_query_results::<status_list_history::Model, Vec<_>, _>(vec![vec![]])
+                .into_connection(),
+        );
+        let result = get_status_list(
+            State(test_app_state(Some(db_conn)).await),
+            Path("test_list".to_string()),
+            Ok(Query(StatusListQuery { time: Some(1) })),
+            HeaderMap::new(),
+        )
+        .await;
+
+        assert_eq!(
+            result.unwrap_err().into_response().status(),
+            StatusCode::NOT_FOUND
+        );
+    }
+
+    #[tokio::test]
+    async fn test_get_status_list_rejects_negative_time() {
+        let app_state = test_app_state(None).await;
+        let result = get_status_list(
+            State(app_state),
+            Path("test_list".to_string()),
+            Ok(Query(StatusListQuery { time: Some(-1) })),
+            HeaderMap::new(),
+        )
+        .await;
+
+        assert_eq!(
+            result.unwrap_err().into_response().status(),
+            StatusCode::BAD_REQUEST
+        );
+    }
+
+    #[tokio::test]
+    async fn test_get_status_list_rejects_zero_time() {
+        let app_state = test_app_state(None).await;
+        let result = get_status_list(
+            State(app_state),
+            Path("test_list".to_string()),
+            Ok(Query(StatusListQuery { time: Some(0) })),
+            HeaderMap::new(),
+        )
+        .await;
+
+        assert_eq!(
+            result.unwrap_err().into_response().status(),
+            StatusCode::BAD_REQUEST
+        );
+    }
+
+    #[tokio::test]
+    async fn test_get_status_list_rejects_future_time() {
+        let app_state = test_app_state(None).await;
+        // Use a time far in the future
+        let result = get_status_list(
+            State(app_state),
+            Path("test_list".to_string()),
+            Ok(Query(StatusListQuery {
+                time: Some(i64::MAX),
+            })),
+            HeaderMap::new(),
+        )
+        .await;
+
+        assert_eq!(
+            result.unwrap_err().into_response().status(),
+            StatusCode::BAD_REQUEST
+        );
     }
 
     // --- client_accepts_gzip: RFC 9110 §12.5.3 wildcard precedence ---

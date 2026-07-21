@@ -51,6 +51,7 @@ mod tests {
                 bits: 1,
                 lst: "test".to_string(),
             },
+            updated_at: 0,
         }
     }
 
