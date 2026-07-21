@@ -3,14 +3,11 @@ use crate::{
         aws::{AwsS3, AwsSecretsManager},
         cache::MokaStatusListCache,
         certificate::AcmeCertificateProvider,
-        dns::{AwsRoute53DnsUpdater, DnsUpdaterProvider, PebbleDnsUpdater},
-        metrics::NoopMetricsCollector,
         redis::Redis,
         sea_orm::{
             SeaOrmCredentialRepository, SeaOrmStatusListHistoryRepository,
             SeaOrmStatusListRepository,
         },
-        secret::StorageSecretStore,
     },
     application::{
         CredentialApplicationService, CredentialService, StatusListApplicationServiceWithHistory,
@@ -20,8 +17,8 @@ use crate::{
         CertManager, StoreProvisioningStrategy,
         challenge::{
             AcmeDnsCredentials, AcmeDnsProvider, AwsRoute53DnsProvider, AzureDnsProvider,
-            CloudflareDnsProvider, Dns01Handler, DnsProvider as DnsChallengeProvider,
-            GoogleCloudDnsProvider, PebbleDnsProvider, ServicePrincipal,
+            CloudflareDnsProvider, Dns01Handler, GoogleCloudDnsProvider, PebbleDnsProvider,
+            ServicePrincipal,
         },
     },
     config::{
@@ -30,8 +27,8 @@ use crate::{
     },
     database::{Migrator, queries::SeaOrmStore},
     ports::{
-        CertificateProvider, CredentialRepository, DnsProvider, MetricsCollector, SecretStore,
-        StatusListCache, StatusListHistoryRepository, StatusListRepository,
+        CertificateProvider, CredentialRepository, StatusListCache, StatusListHistoryRepository,
+        StatusListRepository,
     },
 };
 use aws_config::{BehaviorVersion, Region, SdkConfig};
@@ -62,9 +59,6 @@ pub struct AppState {
     pub status_lists: Arc<dyn StatusListService>,
     pub credentials: Arc<dyn CredentialService>,
     pub certificate_provider: Arc<dyn CertificateProvider>,
-    pub secret_store: Arc<dyn SecretStore>,
-    pub dns_provider: Arc<dyn DnsProvider>,
-    pub metrics_collector: Arc<dyn MetricsCollector>,
     pub server_domain: String,
     pub aggregation_uri: Option<String>,
     pub token_exp_secs: u64,
@@ -162,14 +156,6 @@ pub async fn build_state_with_cert_manager(
         Duration::from_secs(config.aws.secrets_cache_ttl),
     )
     .await?;
-    let secret_store = Arc::new(StorageSecretStore::new(Arc::new(
-        AwsSecretsManager::new(
-            &aws_config,
-            Duration::from_secs(config.aws.secrets_cache_ttl),
-        )
-        .await?,
-    )));
-
     let cert_strategy = store_certificate_strategy(config)?;
     let uses_acme_strategy = config
         .server
@@ -228,11 +214,11 @@ pub async fn build_state_with_cert_manager(
     let status_list_service: Arc<dyn StatusListService> =
         if config.status_list.history_retention_secs == 0 {
             Arc::new(
-                StatusListApplicationServiceWithHistory::without_history(
-                    status_lists,
-                    status_list_cache,
-                    token_exp_secs,
-                )
+                StatusListApplicationServiceWithHistory::<
+                    dyn StatusListRepository,
+                    dyn StatusListCache,
+                    dyn StatusListHistoryRepository,
+                >::without_history(status_lists, status_list_cache, token_exp_secs)
                 .with_max_serialized_list_size(config.limits.max_serialized_list_size),
             )
         } else {
@@ -251,11 +237,6 @@ pub async fn build_state_with_cert_manager(
             status_lists: status_list_service,
             credentials: Arc::new(CredentialApplicationService::new(credentials)),
             certificate_provider: Arc::new(AcmeCertificateProvider::new(cert_manager.clone())),
-            secret_store,
-            dns_provider: Arc::new(DnsUpdaterProvider::new(
-                build_dns_updater(dns_provider, config, &aws_config).await?,
-            )),
-            metrics_collector: Arc::new(NoopMetricsCollector),
             server_domain: config.server.domain.clone(),
             aggregation_uri: empty_to_none(config.server.aggregation_uri.clone()),
             token_exp_secs: config.status_list.token_exp_secs,
@@ -267,59 +248,6 @@ pub async fn build_state_with_cert_manager(
         },
         cert_manager,
     ))
-}
-
-async fn build_dns_updater(
-    provider: ResolvedDnsProvider<'_>,
-    config: &AppConfig,
-    aws_config: &SdkConfig,
-) -> EyeResult<Arc<dyn DnsChallengeProvider>> {
-    let updater: Arc<dyn DnsChallengeProvider> = match provider {
-        ResolvedDnsProvider::Route53 => Arc::new(AwsRoute53DnsUpdater::new(aws_config)),
-        ResolvedDnsProvider::Cloudflare(cfg) => {
-            Arc::new(CloudflareDnsProvider::new(cfg.api_token.clone()))
-        }
-        ResolvedDnsProvider::Gcloud(key) => {
-            let key_json = match key {
-                GcloudKeySource::Inline(key) => key.expose_secret().to_string(),
-                GcloudKeySource::Path(path) => tokio::fs::read_to_string(path)
-                    .await
-                    .wrap_err_with(|| format!("Failed to read service account key at {path}"))?,
-            };
-            Arc::new(GoogleCloudDnsProvider::new(&key_json)?)
-        }
-        ResolvedDnsProvider::Azure(cfg) => Arc::new(AzureDnsProvider::new(
-            ServicePrincipal {
-                tenant_id: cfg.tenant_id.clone(),
-                client_id: cfg.client_id.clone(),
-                client_secret: cfg.client_secret.clone(),
-            },
-            &cfg.subscription_id,
-            &cfg.resource_group,
-        )),
-        ResolvedDnsProvider::Acmedns(cfg) => {
-            let accounts = cfg
-                .accounts
-                .iter()
-                .map(|(domain, account)| (domain.clone(), acme_dns_credentials(account)))
-                .collect();
-            Arc::new(AcmeDnsProvider::new(
-                &cfg.server_url,
-                cfg.default_account().as_ref().map(acme_dns_credentials),
-                accounts,
-            )?)
-        }
-        ResolvedDnsProvider::Pebble => {
-            let dns_url = config
-                .server
-                .cert
-                .dns_challenge_server_url
-                .as_deref()
-                .unwrap_or("http://challtestsrv:8055");
-            Arc::new(PebbleDnsUpdater::new(dns_url))
-        }
-    };
-    Ok(updater)
 }
 
 /// Setup the scheduled task to clean up old status list history snapshots.

@@ -10,12 +10,16 @@ use async_trait::async_trait;
     feature = "sqlite",
     feature = "mysql"
 ))]
+use crate::domain::StatusListSnapshot;
+#[cfg(any(
+    feature = "server",
+    feature = "postgres",
+    feature = "sqlite",
+    feature = "mysql"
+))]
 use crate::ports::StatusListHistoryRepository;
 use crate::{
-    domain::{
-        Credential, DomainError, Issuer, StatusEntry, StatusList, StatusListRecord,
-        StatusListSnapshot,
-    },
+    domain::{Credential, DomainError, Issuer, StatusEntry, StatusList, StatusListRecord},
     ports::{CredentialRepository, PortError, StatusListCache, StatusListRepository},
 };
 
@@ -256,29 +260,6 @@ impl<R: StatusListRepository + ?Sized, H: StatusListHistoryRepository + ?Sized>
     }
 }
 
-pub struct StatusListApplicationService<R: ?Sized, C: ?Sized> {
-    repository: Arc<R>,
-    cache: Arc<C>,
-    max_serialized_list_size: usize,
-}
-
-impl<R: StatusListRepository + ?Sized, C: StatusListCache + ?Sized>
-    StatusListApplicationService<R, C>
-{
-    pub fn new(repository: Arc<R>, cache: Arc<C>) -> Self {
-        Self {
-            repository,
-            cache,
-            max_serialized_list_size: usize::MAX,
-        }
-    }
-
-    pub fn with_max_serialized_list_size(mut self, max_serialized_list_size: usize) -> Self {
-        self.max_serialized_list_size = max_serialized_list_size;
-        self
-    }
-}
-
 #[cfg(any(
     feature = "server",
     feature = "postgres",
@@ -328,85 +309,6 @@ impl<
     pub fn with_max_serialized_list_size(mut self, max_serialized_list_size: usize) -> Self {
         self.max_serialized_list_size = max_serialized_list_size;
         self
-    }
-}
-
-#[async_trait]
-impl<R: StatusListRepository + ?Sized, C: StatusListCache + ?Sized> StatusListService
-    for StatusListApplicationService<R, C>
-{
-    async fn publish_status_list(
-        &self,
-        list_id: String,
-        issuer: Issuer,
-        sub: String,
-        statuses: Vec<StatusEntry>,
-    ) -> Result<(), UseCaseError> {
-        PublishStatusList::new(self.repository.clone())
-            .execute_new(list_id, issuer, sub, statuses)
-            .await
-    }
-
-    async fn update_statuses(
-        &self,
-        issuer: &Issuer,
-        list_id: &str,
-        statuses: Vec<StatusEntry>,
-    ) -> Result<(), UseCaseError> {
-        self.update_statuses_with_max_serialized_list_size(
-            issuer,
-            list_id,
-            statuses,
-            self.max_serialized_list_size,
-        )
-        .await
-    }
-
-    async fn update_statuses_with_max_serialized_list_size(
-        &self,
-        issuer: &Issuer,
-        list_id: &str,
-        statuses: Vec<StatusEntry>,
-        max_serialized_list_size: usize,
-    ) -> Result<(), UseCaseError> {
-        UpdateStatuses::new(self.repository.clone(), self.cache.clone())
-            .with_max_serialized_list_size(max_serialized_list_size)
-            .execute(issuer, list_id, statuses)
-            .await
-    }
-
-    async fn get_status_list(&self, list_id: &str) -> Result<StatusListRecord, UseCaseError> {
-        GetStatusListToken::new(self.repository.clone(), self.cache.clone())
-            .execute(list_id)
-            .await
-    }
-
-    async fn list_status_list_uris(&self) -> Result<Vec<String>, UseCaseError> {
-        Ok(self.repository.list_uris().await?)
-    }
-
-    #[cfg(any(
-        feature = "server",
-        feature = "postgres",
-        feature = "sqlite",
-        feature = "mysql"
-    ))]
-    async fn get_historical_status_list(
-        &self,
-        _list_id: &str,
-        _time: i64,
-    ) -> Result<StatusListSnapshot, UseCaseError> {
-        Err(UseCaseError::NotFound)
-    }
-
-    #[cfg(any(
-        feature = "server",
-        feature = "postgres",
-        feature = "sqlite",
-        feature = "mysql"
-    ))]
-    async fn cleanup_history(&self, _cutoff: i64) -> Result<u64, UseCaseError> {
-        Ok(0)
     }
 }
 
@@ -551,7 +453,9 @@ impl<R: StatusListRepository + ?Sized, C: StatusListCache + ?Sized> UpdateStatus
             .repository
             .find(list_id)
             .await?
-            .ok_or(UseCaseError::NotFound)?;
+            .ok_or(UseCaseError::NotFound)?
+            .as_ref()
+            .clone();
         if &existing.issuer != issuer {
             return Err(UseCaseError::IssuerMismatch);
         }
@@ -627,7 +531,9 @@ impl<
             .repository
             .find(list_id)
             .await?
-            .ok_or(UseCaseError::NotFound)?;
+            .ok_or(UseCaseError::NotFound)?
+            .as_ref()
+            .clone();
         if &existing.issuer != issuer {
             return Err(UseCaseError::IssuerMismatch);
         }
@@ -659,14 +565,14 @@ impl<R: StatusListRepository + ?Sized, C: StatusListCache + ?Sized> GetStatusLis
     }
     pub async fn execute(&self, list_id: &str) -> Result<StatusListRecord, UseCaseError> {
         if let Some(record) = self.cache.get(list_id).await? {
-            return Ok(record);
+            return Ok(record.as_ref().clone());
         }
         let record = self
             .repository
             .find(list_id)
             .await?
             .ok_or(UseCaseError::NotFound)?;
-        self.cache.put(record.clone()).await?;
-        Ok(record)
+        self.cache.put(record.as_ref().clone()).await?;
+        Ok(record.as_ref().clone())
     }
 }

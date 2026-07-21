@@ -8,6 +8,7 @@ use crate::{
     },
 };
 use async_trait::async_trait;
+use std::sync::Arc;
 
 #[derive(Clone)]
 pub struct SeaOrmStatusListRepository {
@@ -146,11 +147,14 @@ fn snapshot_to_persistence(record: domain::StatusListSnapshot) -> models::Status
 
 #[async_trait]
 impl StatusListRepository for SeaOrmStatusListRepository {
-    async fn find(&self, list_id: &str) -> Result<Option<domain::StatusListRecord>, PortError> {
+    async fn find(
+        &self,
+        list_id: &str,
+    ) -> Result<Option<Arc<domain::StatusListRecord>>, PortError> {
         self.store
             .find_one_by(list_id)
             .await
-            .map(|value| value.map(from_persistence))
+            .map(|value| value.map(from_persistence).map(Arc::new))
             .map_err(|e| PortError::StorageUnavailable {
                 operation: PortOperation::FindStatusList,
                 detail: e.to_string(),

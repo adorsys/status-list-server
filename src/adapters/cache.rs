@@ -1,7 +1,7 @@
 //! In-process status-list cache adapter.
 use async_trait::async_trait;
 use moka::future::Cache as MokaCache;
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 
 use crate::{
     domain::{self, StatusListRecord},
@@ -10,7 +10,7 @@ use crate::{
 
 #[derive(Clone)]
 pub struct MokaStatusListCache {
-    inner: MokaCache<String, StatusListRecord>,
+    inner: MokaCache<String, Arc<StatusListRecord>>,
 }
 
 impl MokaStatusListCache {
@@ -27,6 +27,25 @@ impl MokaStatusListCache {
             .max_capacity(max_capacity)
             .build();
         Self { inner }
+    }
+}
+
+#[async_trait]
+impl StatusListCache for MokaStatusListCache {
+    async fn get(&self, key: &str) -> Result<Option<Arc<domain::StatusListRecord>>, PortError> {
+        Ok(self.inner.get(key).await)
+    }
+
+    async fn put(&self, record: domain::StatusListRecord) -> Result<(), PortError> {
+        self.inner
+            .insert(record.list_id.clone(), Arc::new(record))
+            .await;
+        Ok(())
+    }
+
+    async fn invalidate(&self, key: &str) -> Result<(), PortError> {
+        self.inner.invalidate(key).await;
+        Ok(())
     }
 }
 
@@ -53,22 +72,5 @@ mod tests {
             .unwrap();
 
         assert!(cache.get("id").await.unwrap().is_none());
-    }
-}
-
-#[async_trait]
-impl StatusListCache for MokaStatusListCache {
-    async fn get(&self, key: &str) -> Result<Option<domain::StatusListRecord>, PortError> {
-        Ok(self.inner.get(key).await)
-    }
-
-    async fn put(&self, record: domain::StatusListRecord) -> Result<(), PortError> {
-        self.inner.insert(record.list_id.clone(), record).await;
-        Ok(())
-    }
-
-    async fn invalidate(&self, key: &str) -> Result<(), PortError> {
-        self.inner.invalidate(key).await;
-        Ok(())
     }
 }

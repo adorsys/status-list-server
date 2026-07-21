@@ -5,13 +5,17 @@
     feature = "sqlite",
     feature = "mysql"
 ))]
+use crate::domain::StatusListSnapshot;
+#[cfg(any(
+    feature = "server",
+    feature = "postgres",
+    feature = "sqlite",
+    feature = "mysql"
+))]
 use crate::ports::StatusListHistoryRepository;
 use crate::{
-    domain::{Credential, StatusListRecord, StatusListSnapshot},
-    ports::{
-        CredentialRepository, DnsProvider, MetricsCollector, PortError, SecretStore,
-        StatusListCache, StatusListRepository,
-    },
+    domain::{Credential, StatusListRecord},
+    ports::{CredentialRepository, PortError, StatusListCache, StatusListRepository},
 };
 use async_trait::async_trait;
 use std::{collections::HashMap, sync::Arc};
@@ -23,8 +27,8 @@ pub struct MemoryStatusLists {
 }
 #[async_trait]
 impl StatusListRepository for MemoryStatusLists {
-    async fn find(&self, id: &str) -> Result<Option<StatusListRecord>, PortError> {
-        Ok(self.values.read().await.get(id).cloned())
+    async fn find(&self, id: &str) -> Result<Option<Arc<StatusListRecord>>, PortError> {
+        Ok(self.values.read().await.get(id).cloned().map(Arc::new))
     }
     async fn insert(&self, record: StatusListRecord) -> Result<(), PortError> {
         self.values
@@ -57,8 +61,8 @@ pub struct MemoryStatusListCache {
 }
 #[async_trait]
 impl StatusListCache for MemoryStatusListCache {
-    async fn get(&self, id: &str) -> Result<Option<StatusListRecord>, PortError> {
-        Ok(self.values.read().await.get(id).cloned())
+    async fn get(&self, id: &str) -> Result<Option<Arc<StatusListRecord>>, PortError> {
+        Ok(self.values.read().await.get(id).cloned().map(Arc::new))
     }
     async fn put(&self, record: StatusListRecord) -> Result<(), PortError> {
         self.values
@@ -91,47 +95,6 @@ impl CredentialRepository for MemoryCredentials {
             .insert(credential.issuer.0.clone(), credential);
         Ok(())
     }
-}
-
-#[derive(Clone, Default)]
-pub struct MemorySecretStore {
-    values: Arc<RwLock<HashMap<String, String>>>,
-}
-
-#[async_trait]
-impl SecretStore for MemorySecretStore {
-    async fn get(&self, name: &str) -> Result<Option<String>, PortError> {
-        Ok(self.values.read().await.get(name).cloned())
-    }
-
-    async fn put(&self, name: &str, value: &str) -> Result<(), PortError> {
-        self.values
-            .write()
-            .await
-            .insert(name.to_string(), value.to_string());
-        Ok(())
-    }
-}
-
-#[derive(Clone, Default)]
-pub struct MemoryDnsProvider;
-
-#[async_trait]
-impl DnsProvider for MemoryDnsProvider {
-    async fn present_txt(&self, _name: &str, _value: &str) -> Result<(), PortError> {
-        Ok(())
-    }
-
-    async fn remove_txt(&self, _name: &str, _value: &str) -> Result<(), PortError> {
-        Ok(())
-    }
-}
-
-#[derive(Clone, Default)]
-pub struct MemoryMetricsCollector;
-
-impl MetricsCollector for MemoryMetricsCollector {
-    fn increment(&self, _name: &'static str) {}
 }
 
 #[cfg(any(

@@ -1,8 +1,16 @@
 //! Outbound ports. Application services depend on these traits, never on an
 //! infrastructure client or framework.
 use async_trait::async_trait;
+use std::sync::Arc;
 
-use crate::domain::{Credential, StatusListRecord, StatusListSnapshot};
+#[cfg(any(
+    feature = "server",
+    feature = "postgres",
+    feature = "sqlite",
+    feature = "mysql"
+))]
+use crate::domain::StatusListSnapshot;
+use crate::domain::{Credential, StatusListRecord};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PortOperation {
@@ -15,11 +23,7 @@ pub enum PortOperation {
     InsertStatusList,
     InsertStatusListHistory,
     ListStatusListUris,
-    ReadSecret,
-    RemoveDnsTxt,
     SigningKey,
-    StoreSecret,
-    PresentDnsTxt,
     UpdateStatusList,
 }
 
@@ -35,11 +39,7 @@ impl std::fmt::Display for PortOperation {
             Self::InsertStatusList => "insert status list",
             Self::InsertStatusListHistory => "insert status list history",
             Self::ListStatusListUris => "list status list URIs",
-            Self::ReadSecret => "read secret",
-            Self::RemoveDnsTxt => "remove DNS TXT record",
             Self::SigningKey => "signing key",
-            Self::StoreSecret => "store secret",
-            Self::PresentDnsTxt => "present DNS TXT record",
             Self::UpdateStatusList => "update status list",
         };
         f.write_str(label)
@@ -47,15 +47,8 @@ impl std::fmt::Display for PortOperation {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum AuthFailureKind {
-    Permanent,
-    Transient,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum InvalidDataKind {
     Parse,
-    Semantic,
     Serialization,
 }
 
@@ -69,17 +62,6 @@ pub enum PortError {
     #[error("external service unavailable during {operation}: {detail}")]
     ExternalServiceUnavailable {
         operation: PortOperation,
-        detail: String,
-    },
-    #[error("operation timed out during {operation}: {detail}")]
-    Timeout {
-        operation: PortOperation,
-        detail: String,
-    },
-    #[error("unauthorized outbound operation during {operation} ({kind:?}): {detail}")]
-    Unauthorized {
-        operation: PortOperation,
-        kind: AuthFailureKind,
         detail: String,
     },
     #[error("resource conflict for {resource}: {reason}")]
@@ -97,7 +79,7 @@ pub enum PortError {
 
 #[async_trait]
 pub trait StatusListRepository: Send + Sync {
-    async fn find(&self, list_id: &str) -> Result<Option<StatusListRecord>, PortError>;
+    async fn find(&self, list_id: &str) -> Result<Option<Arc<StatusListRecord>>, PortError>;
     async fn insert(&self, status_list: StatusListRecord) -> Result<(), PortError>;
     async fn update(&self, status_list: StatusListRecord) -> Result<bool, PortError>;
     async fn list_uris(&self) -> Result<Vec<String>, PortError>;
@@ -111,7 +93,7 @@ pub trait CredentialRepository: Send + Sync {
 
 #[async_trait]
 pub trait StatusListCache: Send + Sync {
-    async fn get(&self, list_id: &str) -> Result<Option<StatusListRecord>, PortError>;
+    async fn get(&self, list_id: &str) -> Result<Option<Arc<StatusListRecord>>, PortError>;
     async fn put(&self, status_list: StatusListRecord) -> Result<(), PortError>;
     async fn invalidate(&self, list_id: &str) -> Result<(), PortError>;
 }
@@ -143,20 +125,4 @@ pub trait StatusListHistoryRepository: Send + Sync {
 pub trait CertificateProvider: Send + Sync {
     async fn certificate_chain(&self) -> Result<Option<Vec<String>>, PortError>;
     async fn signing_key_pem(&self) -> Result<String, PortError>;
-}
-
-#[async_trait]
-pub trait SecretStore: Send + Sync {
-    async fn get(&self, name: &str) -> Result<Option<String>, PortError>;
-    async fn put(&self, name: &str, value: &str) -> Result<(), PortError>;
-}
-
-#[async_trait]
-pub trait DnsProvider: Send + Sync {
-    async fn present_txt(&self, name: &str, value: &str) -> Result<(), PortError>;
-    async fn remove_txt(&self, name: &str, value: &str) -> Result<(), PortError>;
-}
-
-pub trait MetricsCollector: Send + Sync {
-    fn increment(&self, name: &'static str);
 }

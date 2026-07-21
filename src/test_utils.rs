@@ -1,7 +1,6 @@
 use crate::{
     adapters::{
         certificate::AcmeCertificateProvider,
-        memory::{MemoryDnsProvider, MemoryMetricsCollector, MemorySecretStore},
         sea_orm::{
             SeaOrmCredentialRepository, SeaOrmStatusListHistoryRepository,
             SeaOrmStatusListRepository,
@@ -108,9 +107,6 @@ pub(crate) async fn test_app_state_with(
         ),
         credentials: Arc::new(CredentialApplicationService::new(credentials)),
         certificate_provider: Arc::new(AcmeCertificateProvider::new(cert_manager.clone())),
-        secret_store: Arc::new(MemorySecretStore::default()),
-        dns_provider: Arc::new(MemoryDnsProvider),
-        metrics_collector: Arc::new(MemoryMetricsCollector),
         server_domain: "example.com".to_string(),
         aggregation_uri,
         token_exp_secs: 900,
