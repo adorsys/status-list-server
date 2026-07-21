@@ -19,7 +19,7 @@ const REPLACEMENT_METRIC: &str = "certificate_chain_cache_replacements_total";
 ///
 /// A **zero** TTL (`Duration::ZERO`) keeps the cache active with **no expiry**;
 /// entries persist until explicitly replaced by the provisioning hook. This
-/// differs from [`StatusListCache`](super::StatusListCache), where `ttl = 0`
+/// differs from [`StatusListCache`](crate::ports::StatusListCache), where `ttl = 0`
 /// **disables** the cache entirely (inserts expire immediately).
 #[derive(Clone)]
 pub(crate) struct CertChainCache {
