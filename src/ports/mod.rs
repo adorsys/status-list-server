@@ -2,7 +2,7 @@
 //! infrastructure client or framework.
 use async_trait::async_trait;
 
-use crate::domain::{Credential, StatusListRecord};
+use crate::domain::{Credential, StatusListRecord, StatusListSnapshot};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PortOperation {
@@ -126,14 +126,13 @@ pub trait StatusListCache: Send + Sync {
 #[async_trait]
 pub trait StatusListHistoryRepository: Send + Sync {
     /// Insert a new historical snapshot.
-    async fn insert(&self, record: crate::models::StatusListHistoryRecord)
-    -> Result<(), PortError>;
+    async fn insert(&self, record: StatusListSnapshot) -> Result<(), PortError>;
     /// Find the snapshot valid at the given timestamp (iat <= time < exp).
     async fn find_valid_at(
         &self,
         list_id: &str,
         time: i64,
-    ) -> Result<Option<crate::models::StatusListHistoryRecord>, PortError>;
+    ) -> Result<Option<StatusListSnapshot>, PortError>;
     /// Delete snapshots older than the cutoff (exp < cutoff).
     async fn delete_older_than(&self, cutoff: i64) -> Result<u64, PortError>;
 }

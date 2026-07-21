@@ -5,7 +5,10 @@ use std::sync::Arc;
 use async_trait::async_trait;
 
 use crate::{
-    domain::{Credential, DomainError, Issuer, StatusEntry, StatusList, StatusListRecord},
+    domain::{
+        Credential, DomainError, Issuer, StatusEntry, StatusList, StatusListRecord,
+        StatusListSnapshot,
+    },
     ports::{CredentialRepository, PortError, StatusListCache, StatusListRepository},
 };
 #[cfg(any(
@@ -14,7 +17,14 @@ use crate::{
     feature = "sqlite",
     feature = "mysql"
 ))]
-use crate::{models::StatusListHistoryRecord, ports::StatusListHistoryRepository};
+use crate::ports::StatusListHistoryRepository;
+
+fn current_unix_timestamp() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum UseCaseError {
@@ -78,7 +88,7 @@ pub trait StatusListService: Send + Sync {
         &self,
         list_id: &str,
         time: i64,
-    ) -> Result<StatusListHistoryRecord, UseCaseError>;
+    ) -> Result<StatusListSnapshot, UseCaseError>;
 
     /// Delete historical snapshots older than the cutoff.
     #[cfg(any(
@@ -158,13 +168,37 @@ impl<R: StatusListRepository + ?Sized> PublishStatusList<R> {
             issuer,
             status_list: StatusList::create(statuses)?,
             sub,
-            updated_at: std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs() as i64,
+            updated_at: current_unix_timestamp(),
         };
         self.execute(record).await
     }
+}
+
+#[cfg(any(
+    feature = "server",
+    feature = "postgres",
+    feature = "sqlite",
+    feature = "mysql"
+))]
+async fn persist_snapshot<H: StatusListHistoryRepository + ?Sized>(
+    history: &H,
+    record: &StatusListRecord,
+    token_exp_secs: u64,
+) -> Result<(), UseCaseError> {
+    let iat = time::OffsetDateTime::now_utc().unix_timestamp();
+    let snapshot = StatusListSnapshot {
+        snapshot_id: uuid::Uuid::new_v4().to_string(),
+        list_id: record.list_id.clone(),
+        issuer: record.issuer.clone(),
+        status_list: record.status_list.clone(),
+        sub: record.sub.clone(),
+        iat,
+        exp: iat + token_exp_secs as i64,
+    };
+    history
+        .insert(snapshot)
+        .await
+        .map_err(UseCaseError::Port)
 }
 
 #[cfg(any(
@@ -202,24 +236,7 @@ impl<R: StatusListRepository + ?Sized, H: StatusListHistoryRepository + ?Sized>
         }
         self.repository.insert(record.clone()).await?;
 
-        // Persist historical snapshot
-        let iat = time::OffsetDateTime::now_utc().unix_timestamp();
-        let snapshot = StatusListHistoryRecord {
-            snapshot_id: uuid::Uuid::new_v4().to_string(),
-            list_id: record.list_id.clone(),
-            issuer: record.issuer.0.clone(),
-            status_list: crate::models::StatusList {
-                bits: record.status_list.bits,
-                lst: record.status_list.lst.clone(),
-            },
-            sub: record.sub.clone(),
-            iat,
-            exp: iat + self.token_exp_secs as i64,
-        };
-        self.history
-            .insert(snapshot)
-            .await
-            .map_err(UseCaseError::Port)?;
+        persist_snapshot(self.history.as_ref(), &record, self.token_exp_secs).await?;
 
         Ok(())
     }
@@ -236,10 +253,7 @@ impl<R: StatusListRepository + ?Sized, H: StatusListHistoryRepository + ?Sized>
             issuer,
             status_list: StatusList::create(statuses)?,
             sub,
-            updated_at: std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs() as i64,
+            updated_at: current_unix_timestamp(),
         };
         self.execute(record).await
     }
@@ -277,7 +291,7 @@ impl<R: StatusListRepository + ?Sized, C: StatusListCache + ?Sized>
 pub struct StatusListApplicationServiceWithHistory<R: ?Sized, C: ?Sized, H: ?Sized> {
     repository: Arc<R>,
     cache: Arc<C>,
-    history: Arc<H>,
+    history: Option<Arc<H>>,
     token_exp_secs: u64,
     max_serialized_list_size: usize,
 }
@@ -298,7 +312,17 @@ impl<
         Self {
             repository,
             cache,
-            history,
+            history: Some(history),
+            token_exp_secs,
+            max_serialized_list_size: usize::MAX,
+        }
+    }
+
+    pub fn without_history(repository: Arc<R>, cache: Arc<C>, token_exp_secs: u64) -> Self {
+        Self {
+            repository,
+            cache,
+            history: None,
             token_exp_secs,
             max_serialized_list_size: usize::MAX,
         }
@@ -374,7 +398,7 @@ impl<R: StatusListRepository + ?Sized, C: StatusListCache + ?Sized> StatusListSe
         &self,
         _list_id: &str,
         _time: i64,
-    ) -> Result<StatusListHistoryRecord, UseCaseError> {
+    ) -> Result<StatusListSnapshot, UseCaseError> {
         Err(UseCaseError::NotFound)
     }
 
@@ -409,13 +433,21 @@ impl<
         sub: String,
         statuses: Vec<StatusEntry>,
     ) -> Result<(), UseCaseError> {
-        PublishStatusListWithHistory::new(
-            self.repository.clone(),
-            self.history.clone(),
-            self.token_exp_secs,
-        )
-        .execute_new(list_id, issuer, sub, statuses)
-        .await
+        let record = StatusListRecord {
+            list_id,
+            issuer,
+            status_list: StatusList::create(statuses)?,
+            sub,
+            updated_at: current_unix_timestamp(),
+        };
+        if self.repository.find(&record.list_id).await?.is_some() {
+            return Err(UseCaseError::AlreadyExists);
+        }
+        self.repository.insert(record.clone()).await?;
+        if let Some(history) = &self.history {
+            persist_snapshot(history.as_ref(), &record, self.token_exp_secs).await?;
+        }
+        Ok(())
     }
 
     async fn update_statuses(
@@ -440,11 +472,18 @@ impl<
         statuses: Vec<StatusEntry>,
         max_serialized_list_size: usize,
     ) -> Result<(), UseCaseError> {
-        UpdateStatusesWithHistory::new(
-            self.repository.clone(),
-            self.cache.clone(),
-            self.history.clone(),
-        )
+        let updater = match &self.history {
+            Some(history) => UpdateStatusesWithHistory::new(
+                self.repository.clone(),
+                self.cache.clone(),
+                history.clone(),
+            ),
+            None => UpdateStatusesWithHistory::without_history(
+                self.repository.clone(),
+                self.cache.clone(),
+            ),
+        };
+        updater
         .with_max_serialized_list_size(max_serialized_list_size)
         .execute(issuer, list_id, statuses, self.token_exp_secs)
         .await
@@ -464,8 +503,10 @@ impl<
         &self,
         list_id: &str,
         time: i64,
-    ) -> Result<StatusListHistoryRecord, UseCaseError> {
+    ) -> Result<StatusListSnapshot, UseCaseError> {
         self.history
+            .as_ref()
+            .ok_or(UseCaseError::NotFound)?
             .find_valid_at(list_id, time)
             .await
             .map_err(UseCaseError::Port)?
@@ -473,7 +514,10 @@ impl<
     }
 
     async fn cleanup_history(&self, cutoff: i64) -> Result<u64, UseCaseError> {
-        self.history
+        let Some(history) = &self.history else {
+            return Ok(0);
+        };
+        history
             .delete_older_than(cutoff)
             .await
             .map_err(UseCaseError::Port)
@@ -518,7 +562,10 @@ impl<R: StatusListRepository + ?Sized, C: StatusListCache + ?Sized> UpdateStatus
         if existing.status_list.lst.len() > self.max_serialized_list_size {
             return Err(UseCaseError::StatusListTooLarge);
         }
-        self.repository.update(existing.clone()).await?;
+        existing.updated_at = current_unix_timestamp();
+        if !self.repository.update(existing.clone()).await? {
+            return Err(UseCaseError::NotFound);
+        }
         self.cache.invalidate(&existing.list_id).await?;
         Ok(())
     }
@@ -533,7 +580,7 @@ impl<R: StatusListRepository + ?Sized, C: StatusListCache + ?Sized> UpdateStatus
 pub struct UpdateStatusesWithHistory<R: ?Sized, C: ?Sized, H: ?Sized> {
     repository: Arc<R>,
     cache: Arc<C>,
-    history: Arc<H>,
+    history: Option<Arc<H>>,
     max_serialized_list_size: usize,
 }
 
@@ -553,7 +600,16 @@ impl<
         Self {
             repository,
             cache,
-            history,
+            history: Some(history),
+            max_serialized_list_size: usize::MAX,
+        }
+    }
+
+    pub fn without_history(repository: Arc<R>, cache: Arc<C>) -> Self {
+        Self {
+            repository,
+            cache,
+            history: None,
             max_serialized_list_size: usize::MAX,
         }
     }
@@ -582,27 +638,15 @@ impl<
         if existing.status_list.lst.len() > self.max_serialized_list_size {
             return Err(UseCaseError::StatusListTooLarge);
         }
-        self.repository.update(existing.clone()).await?;
+        existing.updated_at = current_unix_timestamp();
+        if !self.repository.update(existing.clone()).await? {
+            return Err(UseCaseError::NotFound);
+        }
         self.cache.invalidate(&existing.list_id).await?;
 
-        // Persist historical snapshot
-        let iat = time::OffsetDateTime::now_utc().unix_timestamp();
-        let snapshot = StatusListHistoryRecord {
-            snapshot_id: uuid::Uuid::new_v4().to_string(),
-            list_id: existing.list_id.clone(),
-            issuer: existing.issuer.0.clone(),
-            status_list: crate::models::StatusList {
-                bits: existing.status_list.bits,
-                lst: existing.status_list.lst.clone(),
-            },
-            sub: existing.sub.clone(),
-            iat,
-            exp: iat + token_exp_secs as i64,
-        };
-        self.history
-            .insert(snapshot)
-            .await
-            .map_err(UseCaseError::Port)?;
+        if let Some(history) = &self.history {
+            persist_snapshot(history.as_ref(), &existing, token_exp_secs).await?;
+        }
 
         Ok(())
     }

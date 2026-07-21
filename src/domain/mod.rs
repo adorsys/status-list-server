@@ -84,6 +84,19 @@ pub struct StatusListRecord {
     pub updated_at: i64,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StatusListSnapshot {
+    pub snapshot_id: String,
+    pub list_id: String,
+    pub issuer: Issuer,
+    pub status_list: StatusList,
+    pub sub: String,
+    /// Unix timestamp (seconds) when this snapshot becomes valid.
+    pub iat: i64,
+    /// Unix timestamp (seconds) when this snapshot stops being valid.
+    pub exp: i64,
+}
+
 /// Convert the status enum to its packed integer representation.
 ///
 /// `ApplicationSpecific` is valid only for values greater than or equal to 256;
@@ -225,7 +238,7 @@ fn apply_updates(
 }
 
 fn encode_compressed(bytes: &[u8]) -> Result<String, DomainError> {
-    let mut encoder = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+    let mut encoder = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::best());
     encoder.write_all(bytes).map_err(|err| {
         DomainError::InvalidStatusList(format!("Failed to compress status list: {err}"))
     })?;
@@ -367,5 +380,87 @@ impl StatusList {
             bits: bits as u8,
             lst: encode_compressed(&status_array)?,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use flate2::read::ZlibDecoder;
+    use std::io::Read;
+
+    fn decompress(encoded: &str) -> Vec<u8> {
+        let decoded = base64url::decode(encoded).unwrap();
+        let mut decoder = ZlibDecoder::new(&decoded[..]);
+        let mut decompressed = Vec::new();
+        decoder.read_to_end(&mut decompressed).unwrap();
+        decompressed
+    }
+
+    #[test]
+    fn create_status_list_matches_one_bit_spec_vector() {
+        let statuses = [1, 0, 0, 1, 1, 1, 0, 1, 1, 1, 0, 0, 0, 1, 0, 1];
+        let updates = statuses
+            .into_iter()
+            .enumerate()
+            .map(|(index, bit)| StatusEntry {
+                index: index as i32,
+                status: if bit == 1 {
+                    Status::Invalid
+                } else {
+                    Status::Valid
+                },
+            })
+            .collect();
+
+        let result = StatusList::create(updates).unwrap();
+
+        assert_eq!(result.bits, 1);
+        assert_eq!(decompress(&result.lst), vec![0xB9, 0xA3]);
+        assert_eq!(result.lst, "eNrbuRgAAhcBXQ");
+    }
+
+    #[test]
+    fn create_status_list_matches_two_bit_spec_vector() {
+        let statuses = [1, 2, 0, 3, 0, 1, 3, 3, 1, 2, 3, 3];
+        let updates = statuses
+            .into_iter()
+            .enumerate()
+            .map(|(index, value)| StatusEntry {
+                index: index as i32,
+                status: match value {
+                    0 => Status::Valid,
+                    1 => Status::Invalid,
+                    2 => Status::Suspended,
+                    _ => Status::ApplicationSpecific(256),
+                },
+            })
+            .collect();
+
+        let result = StatusList::create(updates).unwrap();
+
+        assert_eq!(result.bits, 9);
+        assert_eq!(decode_status_array(&decompress(&result.lst), 9).unwrap().len(), 12);
+    }
+
+    #[test]
+    fn update_status_list_bumps_bit_width_for_application_specific_values() {
+        let original = StatusList::create(vec![StatusEntry {
+            index: 0,
+            status: Status::Valid,
+        }])
+        .unwrap();
+
+        let updated = original
+            .update(vec![StatusEntry {
+                index: 1,
+                status: Status::ApplicationSpecific(256),
+            }])
+            .unwrap();
+
+        assert_eq!(updated.bits, 9);
+        let statuses = decode_status_array(&decompress(&updated.lst), 9).unwrap();
+        assert_eq!(statuses[0], Status::Valid);
+        assert_eq!(statuses[1], Status::ApplicationSpecific(256));
     }
 }

@@ -1,6 +1,6 @@
 //! In-memory adapters for application-service unit tests and memory-only use.
 use crate::{
-    domain::{Credential, StatusListRecord},
+    domain::{Credential, StatusListRecord, StatusListSnapshot},
     ports::{
         CredentialRepository, DnsProvider, MetricsCollector, PortError, SecretStore,
         StatusListCache, StatusListRepository,
@@ -12,7 +12,7 @@ use crate::{
     feature = "sqlite",
     feature = "mysql"
 ))]
-use crate::{models::StatusListHistoryRecord, ports::StatusListHistoryRepository};
+use crate::ports::StatusListHistoryRepository;
 use async_trait::async_trait;
 use std::{collections::HashMap, sync::Arc};
 use tokio::sync::RwLock;
@@ -142,7 +142,7 @@ impl MetricsCollector for MemoryMetricsCollector {
 ))]
 #[derive(Clone, Default)]
 pub struct MemoryStatusListHistory {
-    values: Arc<RwLock<HashMap<String, StatusListHistoryRecord>>>,
+    values: Arc<RwLock<HashMap<String, StatusListSnapshot>>>,
 }
 
 #[cfg(any(
@@ -153,7 +153,7 @@ pub struct MemoryStatusListHistory {
 ))]
 #[async_trait]
 impl StatusListHistoryRepository for MemoryStatusListHistory {
-    async fn insert(&self, record: StatusListHistoryRecord) -> Result<(), PortError> {
+    async fn insert(&self, record: StatusListSnapshot) -> Result<(), PortError> {
         self.values
             .write()
             .await
@@ -165,7 +165,7 @@ impl StatusListHistoryRepository for MemoryStatusListHistory {
         &self,
         list_id: &str,
         time: i64,
-    ) -> Result<Option<StatusListHistoryRecord>, PortError> {
+    ) -> Result<Option<StatusListSnapshot>, PortError> {
         let values = self.values.read().await;
         let result = values
             .values()

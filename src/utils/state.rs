@@ -225,9 +225,18 @@ pub async fn build_state_with_cert_manager(
     let status_list_cache: Arc<dyn StatusListCache> = Arc::new(cache);
     let cert_manager = Arc::new(certificate_manager);
     let token_exp_secs = config.status_list.token_exp_secs;
-    Ok((
-        AppState {
-            status_lists: Arc::new(
+    let status_list_service: Arc<dyn StatusListService> =
+        if config.status_list.history_retention_secs == 0 {
+            Arc::new(
+                StatusListApplicationServiceWithHistory::without_history(
+                    status_lists,
+                    status_list_cache,
+                    token_exp_secs,
+                )
+                .with_max_serialized_list_size(config.limits.max_serialized_list_size),
+            )
+        } else {
+            Arc::new(
                 StatusListApplicationServiceWithHistory::new(
                     status_lists,
                     status_list_cache,
@@ -235,7 +244,11 @@ pub async fn build_state_with_cert_manager(
                     token_exp_secs,
                 )
                 .with_max_serialized_list_size(config.limits.max_serialized_list_size),
-            ),
+            )
+        };
+    Ok((
+        AppState {
+            status_lists: status_list_service,
             credentials: Arc::new(CredentialApplicationService::new(credentials)),
             certificate_provider: Arc::new(AcmeCertificateProvider::new(cert_manager.clone())),
             secret_store,

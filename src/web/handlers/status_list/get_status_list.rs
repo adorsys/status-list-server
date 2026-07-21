@@ -210,8 +210,11 @@ async fn handle_historical_request(
     // Build the status record from the snapshot
     let status_record = StatusListRecord {
         list_id: snapshot.list_id,
-        issuer: snapshot.issuer,
-        status_list: snapshot.status_list,
+        issuer: snapshot.issuer.0,
+        status_list: crate::models::StatusList {
+            bits: snapshot.status_list.bits,
+            lst: snapshot.status_list.lst,
+        },
         sub: snapshot.sub,
         updated_at: snapshot.iat, // Use snapshot iat as the modification time
     };

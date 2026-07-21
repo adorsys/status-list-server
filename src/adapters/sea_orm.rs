@@ -112,6 +112,36 @@ fn to_persistence(record: domain::StatusListRecord) -> models::StatusListRecord 
     }
 }
 
+fn snapshot_from_persistence(record: models::StatusListHistoryRecord) -> domain::StatusListSnapshot {
+    domain::StatusListSnapshot {
+        snapshot_id: record.snapshot_id,
+        list_id: record.list_id,
+        issuer: domain::Issuer(record.issuer),
+        status_list: domain::StatusList {
+            bits: record.status_list.bits,
+            lst: record.status_list.lst,
+        },
+        sub: record.sub,
+        iat: record.iat,
+        exp: record.exp,
+    }
+}
+
+fn snapshot_to_persistence(record: domain::StatusListSnapshot) -> models::StatusListHistoryRecord {
+    models::StatusListHistoryRecord {
+        snapshot_id: record.snapshot_id,
+        list_id: record.list_id,
+        issuer: record.issuer.0,
+        status_list: models::StatusList {
+            bits: record.status_list.bits,
+            lst: record.status_list.lst,
+        },
+        sub: record.sub,
+        iat: record.iat,
+        exp: record.exp,
+    }
+}
+
 #[async_trait]
 impl StatusListRepository for SeaOrmStatusListRepository {
     async fn find(&self, list_id: &str) -> Result<Option<domain::StatusListRecord>, PortError> {
@@ -156,9 +186,9 @@ impl StatusListRepository for SeaOrmStatusListRepository {
 
 #[async_trait]
 impl StatusListHistoryRepository for SeaOrmStatusListHistoryRepository {
-    async fn insert(&self, record: models::StatusListHistoryRecord) -> Result<(), PortError> {
+    async fn insert(&self, record: domain::StatusListSnapshot) -> Result<(), PortError> {
         self.store
-            .insert_one(record)
+            .insert_one(snapshot_to_persistence(record))
             .await
             .map_err(|e| PortError::StorageUnavailable {
                 operation: PortOperation::InsertStatusListHistory,
@@ -170,10 +200,11 @@ impl StatusListHistoryRepository for SeaOrmStatusListHistoryRepository {
         &self,
         list_id: &str,
         time: i64,
-    ) -> Result<Option<models::StatusListHistoryRecord>, PortError> {
+    ) -> Result<Option<domain::StatusListSnapshot>, PortError> {
         self.store
             .find_valid_at(list_id, time)
             .await
+            .map(|value| value.map(snapshot_from_persistence))
             .map_err(|e| PortError::StorageUnavailable {
                 operation: PortOperation::FindStatusListHistory,
                 detail: e.to_string(),

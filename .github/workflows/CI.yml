@@ -59,8 +59,8 @@ jobs:
       - name: Install Rust
         uses: actions-rust-lang/setup-rust-toolchain@v1
 
-      - name: Check infrastructure-free composition
-        run: cargo check --no-default-features --features memory-only
+      - name: Test infrastructure-free composition
+        run: cargo test --lib --no-default-features --features memory-only
 
   cargo-clippy:
     name: Cargo Clippy Check

@@ -14,6 +14,10 @@ pub struct MokaStatusListCache {
 }
 
 impl MokaStatusListCache {
+    /// Build an in-process cache.
+    ///
+    /// A `ttl_secs` value of `0` preserves the existing "cache disabled"
+    /// behavior: inserted entries expire immediately and reads miss.
     pub fn new(ttl_secs: u64, max_capacity: u64) -> Self {
         if ttl_secs == 0 {
             tracing::info!("Cache disabled (TTL=0)");
@@ -23,6 +27,32 @@ impl MokaStatusListCache {
             .max_capacity(max_capacity)
             .build();
         Self { inner }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::domain::{Issuer, StatusList};
+
+    #[tokio::test]
+    async fn ttl_zero_expires_entries_immediately() {
+        let cache = MokaStatusListCache::new(0, 10);
+        cache
+            .put(StatusListRecord {
+                list_id: "id".into(),
+                issuer: Issuer("issuer".into()),
+                status_list: StatusList {
+                    bits: 1,
+                    lst: "lst".into(),
+                },
+                sub: "sub".into(),
+                updated_at: 0,
+            })
+            .await
+            .unwrap();
+
+        assert!(cache.get("id").await.unwrap().is_none());
     }
 }
 
