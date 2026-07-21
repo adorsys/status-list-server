@@ -14,6 +14,3 @@ pub(super) const TTL: i32 = 65534;
 pub(super) const STATUS_LIST: i32 = 65533;
 
 pub(super) const GZIP_HEADER: &str = "gzip";
-
-/// Cache-Control directive for error responses — prevents caching of error states.
-pub(super) const ERROR_CACHE_CONTROL: &str = "no-store, max-age=0";

@@ -6,7 +6,12 @@ use crate::{
         StatusListCache, StatusListRepository,
     },
 };
-#[cfg(any(feature = "server", feature = "postgres"))]
+#[cfg(any(
+    feature = "server",
+    feature = "postgres",
+    feature = "sqlite",
+    feature = "mysql"
+))]
 use crate::{models::StatusListHistoryRecord, ports::StatusListHistoryRepository};
 use async_trait::async_trait;
 use std::{collections::HashMap, sync::Arc};
@@ -129,13 +134,23 @@ impl MetricsCollector for MemoryMetricsCollector {
     fn increment(&self, _name: &'static str) {}
 }
 
-#[cfg(any(feature = "server", feature = "postgres"))]
+#[cfg(any(
+    feature = "server",
+    feature = "postgres",
+    feature = "sqlite",
+    feature = "mysql"
+))]
 #[derive(Clone, Default)]
 pub struct MemoryStatusListHistory {
     values: Arc<RwLock<HashMap<String, StatusListHistoryRecord>>>,
 }
 
-#[cfg(any(feature = "server", feature = "postgres"))]
+#[cfg(any(
+    feature = "server",
+    feature = "postgres",
+    feature = "sqlite",
+    feature = "mysql"
+))]
 #[async_trait]
 impl StatusListHistoryRepository for MemoryStatusListHistory {
     async fn insert(&self, record: StatusListHistoryRecord) -> Result<(), PortError> {
@@ -220,7 +235,12 @@ mod tests {
         assert!(cache.get("id").await.unwrap().is_none());
     }
 
-    #[cfg(any(feature = "server", feature = "postgres"))]
+    #[cfg(any(
+        feature = "server",
+        feature = "postgres",
+        feature = "sqlite",
+        feature = "mysql"
+    ))]
     #[tokio::test]
     async fn application_services_work_with_history() {
         use crate::application::{PublishStatusListWithHistory, UpdateStatusesWithHistory};

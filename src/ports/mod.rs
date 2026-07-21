@@ -117,7 +117,12 @@ pub trait StatusListCache: Send + Sync {
 }
 
 /// Repository for historical status list snapshots (draft-21 §8.4).
-#[cfg(any(feature = "server", feature = "postgres"))]
+#[cfg(any(
+    feature = "server",
+    feature = "postgres",
+    feature = "sqlite",
+    feature = "mysql"
+))]
 #[async_trait]
 pub trait StatusListHistoryRepository: Send + Sync {
     /// Insert a new historical snapshot.

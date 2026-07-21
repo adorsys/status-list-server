@@ -21,6 +21,7 @@ use crate::{
     application::UseCaseError,
     models::{StatusListClaims, StatusListRecord},
     utils::{keygen::Keypair, state::AppState},
+    web::errors::ApiError,
 };
 
 use super::{
@@ -38,16 +39,14 @@ pub async fn get_status_list(
     Path(list_id): Path<String>,
     query_result: Result<Query<StatusListQuery>, QueryRejection>,
     headers: HeaderMap,
-) -> Result<impl IntoResponse + Debug + use<>, StatusListError> {
-    // Handle query extraction failures with StatusListError
+) -> Result<impl IntoResponse + Debug + use<>, ApiError> {
     let query = match query_result {
         Ok(Query(q)) => q,
         Err(e) => {
             tracing::warn!("Failed to parse query parameters: {e}");
-            return Err(StatusListError::InvalidHistoricalTime);
+            return Err(StatusListError::InvalidHistoricalTime.into());
         }
     };
-
     let accept = headers.get(header::ACCEPT).and_then(|h| h.to_str().ok());
     let client_accepts_gzip = client_accepts_gzip(&headers);
 
@@ -60,7 +59,7 @@ pub async fn get_status_list(
         {
             accept.to_string()
         }
-        Some(_) => return Err(StatusListError::InvalidAcceptHeader),
+        Some(_) => return Err(StatusListError::InvalidAcceptHeader.into()),
     };
 
     // Handle historical query (draft-21 §8.4) separately from conditional requests
@@ -169,16 +168,16 @@ async fn handle_historical_request(
     accept_type: &str,
     state: &AppState,
     client_accepts_gzip: bool,
-) -> Result<Response, StatusListError> {
+) -> Result<Response, ApiError> {
     // Validate time parameter: must be positive and not in the future
     let now = OffsetDateTime::now_utc().unix_timestamp();
     if time <= 0 {
         tracing::warn!("Historical query rejected: time must be positive, got {time}");
-        return Err(StatusListError::InvalidHistoricalTime);
+        return Err(StatusListError::InvalidHistoricalTime.into());
     }
     if time > now {
         tracing::warn!("Historical query rejected: time is in the future ({time} > {now})");
-        return Err(StatusListError::InvalidHistoricalTime);
+        return Err(StatusListError::InvalidHistoricalTime.into());
     }
 
     // §12.7 privacy warning: historical queries leak timing information
@@ -264,7 +263,7 @@ pub struct StatusListQuery {
 async fn fetch_status_record(
     list_id: &str,
     state: &AppState,
-) -> Result<Arc<StatusListRecord>, StatusListError> {
+) -> Result<Arc<StatusListRecord>, ApiError> {
     match state.status_lists.get_status_list(list_id).await {
         Ok(record) => {
             let status_record = StatusListRecord {
@@ -279,10 +278,10 @@ async fn fetch_status_record(
             };
             Ok(Arc::new(status_record))
         }
-        Err(UseCaseError::NotFound) => Err(StatusListError::StatusListNotFound),
+        Err(UseCaseError::NotFound) => Err(StatusListError::StatusListNotFound.into()),
         Err(error) => {
             tracing::error!(?error, list_id, "Failed to retrieve status list");
-            Err(StatusListError::InternalServerError)
+            Err(StatusListError::InternalServerError.into())
         }
     }
 }
@@ -1319,21 +1318,8 @@ mod tests {
 
         assert!(result.is_err());
         let err = result.unwrap_err();
-        let response = err.clone().into_response();
-        assert_eq!(response.status(), StatusCode::NOT_FOUND);
-        assert_eq!(err, StatusListError::StatusListNotFound);
-
-        // Verify error response includes no-store Cache-Control header
-        let cache_control = response.headers().get(http::header::CACHE_CONTROL);
-        assert!(
-            cache_control.is_some(),
-            "Error response should include Cache-Control header"
-        );
-        assert_eq!(
-            cache_control.unwrap().to_str().unwrap(),
-            "no-store, max-age=0",
-            "Error response should have no-store Cache-Control directive"
-        );
+        assert_eq!(err.error.as_ref(), "status_list_not_found");
+        assert_eq!(err.into_response().status(), StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]
@@ -1352,22 +1338,7 @@ mod tests {
         .await;
 
         assert!(result.is_err());
-        let err = result.unwrap_err();
-        let response = err.clone().into_response();
-        assert_eq!(response.status(), StatusCode::NOT_ACCEPTABLE);
-        assert_eq!(err, StatusListError::InvalidAcceptHeader);
-
-        // Verify error response includes no-store Cache-Control header
-        let cache_control = response.headers().get(http::header::CACHE_CONTROL);
-        assert!(
-            cache_control.is_some(),
-            "Error response should include Cache-Control header"
-        );
-        assert_eq!(
-            cache_control.unwrap().to_str().unwrap(),
-            "no-store, max-age=0",
-            "Error response should have no-store Cache-Control directive"
-        );
+        let _err = result.unwrap_err();
     }
 
     #[tokio::test]

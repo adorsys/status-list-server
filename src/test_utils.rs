@@ -2,9 +2,9 @@ use crate::{
     adapters::{
         certificate::AcmeCertificateProvider,
         memory::{MemoryDnsProvider, MemoryMetricsCollector, MemorySecretStore},
-        postgres::{
-            PostgresCredentialRepository, PostgresStatusListHistoryRepository,
-            PostgresStatusListRepository,
+        sea_orm::{
+            SeaOrmCredentialRepository, SeaOrmStatusListHistoryRepository,
+            SeaOrmStatusListRepository,
         },
     },
     application::{CredentialApplicationService, StatusListApplicationServiceWithHistory},
@@ -82,14 +82,14 @@ pub(crate) async fn test_app_state_with(
     .with_secrets_storage(secrets_storage);
 
     let cert_manager = Arc::new(certificate_manager);
-    let status_lists: Arc<dyn StatusListRepository> = Arc::new(PostgresStatusListRepository::new(
+    let status_lists: Arc<dyn StatusListRepository> = Arc::new(SeaOrmStatusListRepository::new(
         SeaOrmStore::new(db.clone()),
     ));
-    let credentials: Arc<dyn CredentialRepository> = Arc::new(PostgresCredentialRepository::new(
+    let credentials: Arc<dyn CredentialRepository> = Arc::new(SeaOrmCredentialRepository::new(
         SeaOrmStore::new(db.clone()),
     ));
     let status_list_history: Arc<dyn StatusListHistoryRepository> = Arc::new(
-        PostgresStatusListHistoryRepository::new(SeaOrmStore::new(db.clone())),
+        SeaOrmStatusListHistoryRepository::new(SeaOrmStore::new(db.clone())),
     );
     let status_list_cache: Arc<dyn StatusListCache> = Arc::new(
         crate::adapters::cache::MokaStatusListCache::new(5 * 60, 100),
@@ -97,12 +97,15 @@ pub(crate) async fn test_app_state_with(
     let token_exp_secs = 900u64;
 
     AppState {
-        status_lists: Arc::new(StatusListApplicationServiceWithHistory::new(
-            status_lists,
-            status_list_cache,
-            status_list_history,
-            token_exp_secs,
-        )),
+        status_lists: Arc::new(
+            StatusListApplicationServiceWithHistory::new(
+                status_lists,
+                status_list_cache,
+                status_list_history,
+                token_exp_secs,
+            )
+            .with_max_serialized_list_size(1_048_576),
+        ),
         credentials: Arc::new(CredentialApplicationService::new(credentials)),
         certificate_provider: Arc::new(AcmeCertificateProvider::new(cert_manager.clone())),
         secret_store: Arc::new(MemorySecretStore::default()),

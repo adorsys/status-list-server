@@ -1,15 +1,16 @@
 use axum::{
-    Extension, Json,
-    extract::{Path, State},
+    Extension,
+    extract::{Json, Path, State},
     response::IntoResponse,
 };
 use hyper::StatusCode;
 
 use crate::{application::UseCaseError, domain, models::StatusesRequest, utils::state::AppState};
 
+use crate::web::errors::ApiError;
+
 use super::{
-    ensure_serialized_list_size, error::StatusListError, map_domain_error, to_domain_entry,
-    validate_status_request_limits,
+    error::StatusListError, map_domain_error, to_domain_entry, validate_status_request_limits,
 };
 
 /// Update status entries in an existing status list.
@@ -18,10 +19,10 @@ pub async fn update_status(
     Extension(issuer): Extension<String>,
     Path(list_id): Path<String>,
     Json(payload): Json<StatusesRequest>,
-) -> Result<impl IntoResponse, StatusListError> {
+) -> Result<impl IntoResponse, ApiError> {
     // Validate list_id as UUID
     if let Err(e) = uuid::Uuid::try_parse(&list_id) {
-        return Err(StatusListError::InvalidListId(e.to_string()));
+        return Err(StatusListError::InvalidListId(e.to_string()).into());
     }
 
     validate_status_request_limits(
@@ -36,42 +37,30 @@ pub async fn update_status(
         .map(to_domain_entry)
         .collect::<Vec<_>>();
 
-    let existing = appstate.status_lists.get_status_list(&list_id).await;
-    match existing {
-        Ok(existing) if existing.issuer != domain::Issuer(issuer.clone()) => {
-            return Err(StatusListError::IssuerMismatch);
-        }
-        Ok(existing) => {
-            let preview = existing
-                .status_list
-                .update(statuses.clone())
-                .map_err(map_domain_error)?;
-            ensure_serialized_list_size(&preview, appstate.max_serialized_list_size)?;
-        }
-        Err(UseCaseError::NotFound) => return Err(StatusListError::StatusListNotFound),
-        Err(error) => {
-            tracing::error!(?error, "Failed to preview status list update");
-            return Err(StatusListError::InternalServerError);
-        }
-    }
-
     match appstate
         .status_lists
-        .update_statuses(&domain::Issuer(issuer), &list_id, statuses)
+        .update_statuses_with_max_serialized_list_size(
+            &domain::Issuer(issuer),
+            &list_id,
+            statuses,
+            appstate.max_serialized_list_size,
+        )
         .await
     {
         Ok(()) => {}
-        Err(UseCaseError::NotFound) => return Err(StatusListError::StatusListNotFound),
-        Err(UseCaseError::IssuerMismatch) => return Err(StatusListError::IssuerMismatch),
+        Err(UseCaseError::NotFound) => return Err(StatusListError::StatusListNotFound.into()),
+        Err(UseCaseError::IssuerMismatch) => return Err(StatusListError::IssuerMismatch.into()),
         Err(UseCaseError::Domain(domain::DomainError::InvalidIndex)) => {
-            return Err(StatusListError::InvalidIndex);
+            return Err(StatusListError::InvalidIndex.into());
         }
         Err(UseCaseError::Domain(domain::DomainError::InvalidStatusList(msg))) => {
-            return Err(StatusListError::Generic(msg));
+            return Err(StatusListError::Generic(msg).into());
         }
+        Err(UseCaseError::Domain(error)) => return Err(map_domain_error(error).into()),
+        Err(UseCaseError::StatusListTooLarge) => return Err(StatusListError::StatusTooLarge.into()),
         Err(error) => {
             tracing::error!(?error, "Failed to update status list");
-            return Err(StatusListError::InternalServerError);
+            return Err(StatusListError::InternalServerError.into());
         }
     }
     tracing::info!("Invalidated cache for status list: {}", list_id);
@@ -82,11 +71,10 @@ pub async fn update_status(
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::web::handlers::status_list::error::StatusListError;
     use std::sync::Arc;
 
     use axum::{
-        Extension, Json,
+        Extension,
         extract::{Path, State},
         response::IntoResponse,
     };
@@ -117,7 +105,12 @@ mod test {
         )
         .await;
 
-        assert!(matches!(result, Err(StatusListError::InvalidListId(_))));
+        match result {
+            Err(err) => {
+                assert_eq!(err.into_response().status(), StatusCode::BAD_REQUEST);
+            }
+            Ok(_) => panic!("Expected error but got Ok"),
+        }
     }
 
     #[tokio::test]

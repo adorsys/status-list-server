@@ -10,37 +10,37 @@ use crate::{
 use async_trait::async_trait;
 
 #[derive(Clone)]
-pub struct PostgresStatusListRepository {
+pub struct SeaOrmStatusListRepository {
     store: SeaOrmStore<models::StatusListRecord>,
 }
-impl PostgresStatusListRepository {
+impl SeaOrmStatusListRepository {
     pub fn new(store: SeaOrmStore<models::StatusListRecord>) -> Self {
         Self { store }
     }
 }
 
 #[derive(Clone)]
-pub struct PostgresCredentialRepository {
+pub struct SeaOrmCredentialRepository {
     store: SeaOrmStore<models::Credentials>,
 }
-impl PostgresCredentialRepository {
+impl SeaOrmCredentialRepository {
     pub fn new(store: SeaOrmStore<models::Credentials>) -> Self {
         Self { store }
     }
 }
 
 #[derive(Clone)]
-pub struct PostgresStatusListHistoryRepository {
+pub struct SeaOrmStatusListHistoryRepository {
     store: SeaOrmStore<models::StatusListHistoryRecord>,
 }
-impl PostgresStatusListHistoryRepository {
+impl SeaOrmStatusListHistoryRepository {
     pub fn new(store: SeaOrmStore<models::StatusListHistoryRecord>) -> Self {
         Self { store }
     }
 }
 
 #[async_trait]
-impl CredentialRepository for PostgresCredentialRepository {
+impl CredentialRepository for SeaOrmCredentialRepository {
     async fn find(&self, issuer: &str) -> Result<Option<domain::Credential>, PortError> {
         self.store
             .find_one_by(issuer)
@@ -113,7 +113,7 @@ fn to_persistence(record: domain::StatusListRecord) -> models::StatusListRecord 
 }
 
 #[async_trait]
-impl StatusListRepository for PostgresStatusListRepository {
+impl StatusListRepository for SeaOrmStatusListRepository {
     async fn find(&self, list_id: &str) -> Result<Option<domain::StatusListRecord>, PortError> {
         self.store
             .find_one_by(list_id)
@@ -155,7 +155,7 @@ impl StatusListRepository for PostgresStatusListRepository {
 }
 
 #[async_trait]
-impl StatusListHistoryRepository for PostgresStatusListHistoryRepository {
+impl StatusListHistoryRepository for SeaOrmStatusListHistoryRepository {
     async fn insert(&self, record: models::StatusListHistoryRecord) -> Result<(), PortError> {
         self.store
             .insert_one(record)

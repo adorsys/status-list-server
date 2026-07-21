@@ -1,4 +1,9 @@
-#[cfg(any(feature = "server", feature = "postgres"))]
+#[cfg(any(
+    feature = "server",
+    feature = "postgres",
+    feature = "sqlite",
+    feature = "mysql"
+))]
 mod database;
 #[cfg(all(test, feature = "server"))]
 mod test_utils;
@@ -16,7 +21,12 @@ pub mod application;
 #[cfg(feature = "server")]
 pub mod config;
 pub mod domain;
-#[cfg(any(feature = "server", feature = "postgres"))]
+#[cfg(any(
+    feature = "server",
+    feature = "postgres",
+    feature = "sqlite",
+    feature = "mysql"
+))]
 pub mod models;
 pub mod ports;
 #[cfg(feature = "server")]

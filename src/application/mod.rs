@@ -8,7 +8,12 @@ use crate::{
     domain::{Credential, DomainError, Issuer, StatusEntry, StatusList, StatusListRecord},
     ports::{CredentialRepository, PortError, StatusListCache, StatusListRepository},
 };
-#[cfg(any(feature = "server", feature = "postgres"))]
+#[cfg(any(
+    feature = "server",
+    feature = "postgres",
+    feature = "sqlite",
+    feature = "mysql"
+))]
 use crate::{models::StatusListHistoryRecord, ports::StatusListHistoryRepository};
 
 #[derive(Debug, thiserror::Error)]
@@ -19,6 +24,8 @@ pub enum UseCaseError {
     NotFound,
     #[error("issuer does not own the status list")]
     IssuerMismatch,
+    #[error("serialized status list exceeds configured maximum")]
+    StatusListTooLarge,
     #[error(transparent)]
     Domain(#[from] DomainError),
     #[error(transparent)]
@@ -48,12 +55,25 @@ pub trait StatusListService: Send + Sync {
         statuses: Vec<StatusEntry>,
     ) -> Result<(), UseCaseError>;
 
+    async fn update_statuses_with_max_serialized_list_size(
+        &self,
+        issuer: &Issuer,
+        list_id: &str,
+        statuses: Vec<StatusEntry>,
+        max_serialized_list_size: usize,
+    ) -> Result<(), UseCaseError>;
+
     async fn get_status_list(&self, list_id: &str) -> Result<StatusListRecord, UseCaseError>;
 
     async fn list_status_list_uris(&self) -> Result<Vec<String>, UseCaseError>;
 
     /// Get a historical snapshot valid at the given time (draft-21 §8.4).
-    #[cfg(any(feature = "server", feature = "postgres"))]
+    #[cfg(any(
+        feature = "server",
+        feature = "postgres",
+        feature = "sqlite",
+        feature = "mysql"
+    ))]
     async fn get_historical_status_list(
         &self,
         list_id: &str,
@@ -61,7 +81,12 @@ pub trait StatusListService: Send + Sync {
     ) -> Result<StatusListHistoryRecord, UseCaseError>;
 
     /// Delete historical snapshots older than the cutoff.
-    #[cfg(any(feature = "server", feature = "postgres"))]
+    #[cfg(any(
+        feature = "server",
+        feature = "postgres",
+        feature = "sqlite",
+        feature = "mysql"
+    ))]
     async fn cleanup_history(&self, cutoff: i64) -> Result<u64, UseCaseError>;
 }
 
@@ -142,14 +167,24 @@ impl<R: StatusListRepository + ?Sized> PublishStatusList<R> {
     }
 }
 
-#[cfg(any(feature = "server", feature = "postgres"))]
+#[cfg(any(
+    feature = "server",
+    feature = "postgres",
+    feature = "sqlite",
+    feature = "mysql"
+))]
 pub struct PublishStatusListWithHistory<R: ?Sized, H: ?Sized> {
     repository: Arc<R>,
     history: Arc<H>,
     token_exp_secs: u64,
 }
 
-#[cfg(any(feature = "server", feature = "postgres"))]
+#[cfg(any(
+    feature = "server",
+    feature = "postgres",
+    feature = "sqlite",
+    feature = "mysql"
+))]
 impl<R: StatusListRepository + ?Sized, H: StatusListHistoryRepository + ?Sized>
     PublishStatusListWithHistory<R, H>
 {
@@ -213,25 +248,46 @@ impl<R: StatusListRepository + ?Sized, H: StatusListHistoryRepository + ?Sized>
 pub struct StatusListApplicationService<R: ?Sized, C: ?Sized> {
     repository: Arc<R>,
     cache: Arc<C>,
+    max_serialized_list_size: usize,
 }
 
 impl<R: StatusListRepository + ?Sized, C: StatusListCache + ?Sized>
     StatusListApplicationService<R, C>
 {
     pub fn new(repository: Arc<R>, cache: Arc<C>) -> Self {
-        Self { repository, cache }
+        Self {
+            repository,
+            cache,
+            max_serialized_list_size: usize::MAX,
+        }
+    }
+
+    pub fn with_max_serialized_list_size(mut self, max_serialized_list_size: usize) -> Self {
+        self.max_serialized_list_size = max_serialized_list_size;
+        self
     }
 }
 
-#[cfg(any(feature = "server", feature = "postgres"))]
+#[cfg(any(
+    feature = "server",
+    feature = "postgres",
+    feature = "sqlite",
+    feature = "mysql"
+))]
 pub struct StatusListApplicationServiceWithHistory<R: ?Sized, C: ?Sized, H: ?Sized> {
     repository: Arc<R>,
     cache: Arc<C>,
     history: Arc<H>,
     token_exp_secs: u64,
+    max_serialized_list_size: usize,
 }
 
-#[cfg(any(feature = "server", feature = "postgres"))]
+#[cfg(any(
+    feature = "server",
+    feature = "postgres",
+    feature = "sqlite",
+    feature = "mysql"
+))]
 impl<
     R: StatusListRepository + ?Sized,
     C: StatusListCache + ?Sized,
@@ -244,7 +300,13 @@ impl<
             cache,
             history,
             token_exp_secs,
+            max_serialized_list_size: usize::MAX,
         }
+    }
+
+    pub fn with_max_serialized_list_size(mut self, max_serialized_list_size: usize) -> Self {
+        self.max_serialized_list_size = max_serialized_list_size;
+        self
     }
 }
 
@@ -270,7 +332,24 @@ impl<R: StatusListRepository + ?Sized, C: StatusListCache + ?Sized> StatusListSe
         list_id: &str,
         statuses: Vec<StatusEntry>,
     ) -> Result<(), UseCaseError> {
+        self.update_statuses_with_max_serialized_list_size(
+            issuer,
+            list_id,
+            statuses,
+            self.max_serialized_list_size,
+        )
+        .await
+    }
+
+    async fn update_statuses_with_max_serialized_list_size(
+        &self,
+        issuer: &Issuer,
+        list_id: &str,
+        statuses: Vec<StatusEntry>,
+        max_serialized_list_size: usize,
+    ) -> Result<(), UseCaseError> {
         UpdateStatuses::new(self.repository.clone(), self.cache.clone())
+            .with_max_serialized_list_size(max_serialized_list_size)
             .execute(issuer, list_id, statuses)
             .await
     }
@@ -285,7 +364,12 @@ impl<R: StatusListRepository + ?Sized, C: StatusListCache + ?Sized> StatusListSe
         Ok(self.repository.list_uris().await?)
     }
 
-    #[cfg(any(feature = "server", feature = "postgres"))]
+    #[cfg(any(
+        feature = "server",
+        feature = "postgres",
+        feature = "sqlite",
+        feature = "mysql"
+    ))]
     async fn get_historical_status_list(
         &self,
         _list_id: &str,
@@ -294,13 +378,23 @@ impl<R: StatusListRepository + ?Sized, C: StatusListCache + ?Sized> StatusListSe
         Err(UseCaseError::NotFound)
     }
 
-    #[cfg(any(feature = "server", feature = "postgres"))]
+    #[cfg(any(
+        feature = "server",
+        feature = "postgres",
+        feature = "sqlite",
+        feature = "mysql"
+    ))]
     async fn cleanup_history(&self, _cutoff: i64) -> Result<u64, UseCaseError> {
         Ok(0)
     }
 }
 
-#[cfg(any(feature = "server", feature = "postgres"))]
+#[cfg(any(
+    feature = "server",
+    feature = "postgres",
+    feature = "sqlite",
+    feature = "mysql"
+))]
 #[async_trait]
 impl<
     R: StatusListRepository + ?Sized,
@@ -330,11 +424,28 @@ impl<
         list_id: &str,
         statuses: Vec<StatusEntry>,
     ) -> Result<(), UseCaseError> {
+        self.update_statuses_with_max_serialized_list_size(
+            issuer,
+            list_id,
+            statuses,
+            self.max_serialized_list_size,
+        )
+        .await
+    }
+
+    async fn update_statuses_with_max_serialized_list_size(
+        &self,
+        issuer: &Issuer,
+        list_id: &str,
+        statuses: Vec<StatusEntry>,
+        max_serialized_list_size: usize,
+    ) -> Result<(), UseCaseError> {
         UpdateStatusesWithHistory::new(
             self.repository.clone(),
             self.cache.clone(),
             self.history.clone(),
         )
+        .with_max_serialized_list_size(max_serialized_list_size)
         .execute(issuer, list_id, statuses, self.token_exp_secs)
         .await
     }
@@ -372,11 +483,21 @@ impl<
 pub struct UpdateStatuses<R: ?Sized, C: ?Sized> {
     repository: Arc<R>,
     cache: Arc<C>,
+    max_serialized_list_size: usize,
 }
 
 impl<R: StatusListRepository + ?Sized, C: StatusListCache + ?Sized> UpdateStatuses<R, C> {
     pub fn new(repository: Arc<R>, cache: Arc<C>) -> Self {
-        Self { repository, cache }
+        Self {
+            repository,
+            cache,
+            max_serialized_list_size: usize::MAX,
+        }
+    }
+
+    pub fn with_max_serialized_list_size(mut self, max_serialized_list_size: usize) -> Self {
+        self.max_serialized_list_size = max_serialized_list_size;
+        self
     }
 
     pub async fn execute(
@@ -394,20 +515,34 @@ impl<R: StatusListRepository + ?Sized, C: StatusListCache + ?Sized> UpdateStatus
             return Err(UseCaseError::IssuerMismatch);
         }
         existing.status_list = existing.status_list.update(statuses)?;
+        if existing.status_list.lst.len() > self.max_serialized_list_size {
+            return Err(UseCaseError::StatusListTooLarge);
+        }
         self.repository.update(existing.clone()).await?;
         self.cache.invalidate(&existing.list_id).await?;
         Ok(())
     }
 }
 
-#[cfg(any(feature = "server", feature = "postgres"))]
+#[cfg(any(
+    feature = "server",
+    feature = "postgres",
+    feature = "sqlite",
+    feature = "mysql"
+))]
 pub struct UpdateStatusesWithHistory<R: ?Sized, C: ?Sized, H: ?Sized> {
     repository: Arc<R>,
     cache: Arc<C>,
     history: Arc<H>,
+    max_serialized_list_size: usize,
 }
 
-#[cfg(any(feature = "server", feature = "postgres"))]
+#[cfg(any(
+    feature = "server",
+    feature = "postgres",
+    feature = "sqlite",
+    feature = "mysql"
+))]
 impl<
     R: StatusListRepository + ?Sized,
     C: StatusListCache + ?Sized,
@@ -419,7 +554,13 @@ impl<
             repository,
             cache,
             history,
+            max_serialized_list_size: usize::MAX,
         }
+    }
+
+    pub fn with_max_serialized_list_size(mut self, max_serialized_list_size: usize) -> Self {
+        self.max_serialized_list_size = max_serialized_list_size;
+        self
     }
 
     pub async fn execute(
@@ -438,6 +579,9 @@ impl<
             return Err(UseCaseError::IssuerMismatch);
         }
         existing.status_list = existing.status_list.update(statuses)?;
+        if existing.status_list.lst.len() > self.max_serialized_list_size {
+            return Err(UseCaseError::StatusListTooLarge);
+        }
         self.repository.update(existing.clone()).await?;
         self.cache.invalidate(&existing.list_id).await?;
 

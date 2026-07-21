@@ -1,17 +1,18 @@
 use crate::{
     application::UseCaseError, domain, models::StatusesRequest, utils::state::AppState,
-    web::handlers::status_list::error::StatusListError,
+    web::errors::ApiError,
 };
 use axum::{
-    Extension, Json,
-    extract::{Path, State},
+    Extension,
+    extract::{Json, Path, State},
     http::StatusCode,
     response::IntoResponse,
 };
 use tracing;
 
 use super::{
-    ensure_serialized_list_size, map_domain_error, to_domain_entry, validate_status_request_limits,
+    ensure_serialized_list_size, error::StatusListError, map_domain_error, to_domain_entry,
+    validate_status_request_limits,
 };
 
 /// Create a new status list.
@@ -20,10 +21,10 @@ pub async fn publish_status(
     Extension(issuer): Extension<String>,
     Path(list_id): Path<String>,
     Json(payload): Json<StatusesRequest>,
-) -> Result<impl IntoResponse, StatusListError> {
+) -> Result<impl IntoResponse, ApiError> {
     // Validate list_id as UUID
     if let Err(e) = uuid::Uuid::try_parse(&list_id) {
-        return Err(StatusListError::InvalidListId(e.to_string()));
+        return Err(StatusListError::InvalidListId(e.to_string()).into());
     }
 
     validate_status_request_limits(
@@ -55,16 +56,17 @@ pub async fn publish_status(
         .await
     {
         Ok(()) => Ok(StatusCode::CREATED.into_response()),
-        Err(UseCaseError::AlreadyExists) => Err(StatusListError::StatusListAlreadyExists),
+        Err(UseCaseError::AlreadyExists) => Err(StatusListError::StatusListAlreadyExists.into()),
         Err(UseCaseError::Domain(domain::DomainError::InvalidIndex)) => {
-            Err(StatusListError::InvalidIndex)
+            Err(StatusListError::InvalidIndex.into())
         }
         Err(UseCaseError::Domain(domain::DomainError::InvalidStatusList(msg))) => {
-            Err(StatusListError::Generic(msg))
+            Err(StatusListError::Generic(msg).into())
         }
+        Err(UseCaseError::Domain(error)) => Err(map_domain_error(error).into()),
         Err(error) => {
             tracing::error!(?error, list_id, "Failed to publish status list");
-            Err(StatusListError::InternalServerError)
+            Err(StatusListError::InternalServerError.into())
         }
     }
 }
@@ -72,13 +74,13 @@ pub async fn publish_status(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::web::handlers::status_list::error::StatusListError;
     use crate::{
         models::{Status, StatusEntry, StatusList, StatusListRecord, status_lists},
         test_utils::test_app_state,
         utils::lst_gen::{AbuseLimits, create_status_list},
     };
-    use axum::{Json, extract::State};
+    use axum::extract::State;
+    use hyper::StatusCode;
     use sea_orm::{DatabaseBackend, MockDatabase, MockExecResult};
     use std::sync::Arc;
 
@@ -98,7 +100,12 @@ mod tests {
         )
         .await;
 
-        assert!(matches!(result, Err(StatusListError::InvalidListId(_))));
+        match result {
+            Err(err) => {
+                assert_eq!(err.into_response().status(), StatusCode::BAD_REQUEST);
+            }
+            Ok(_) => panic!("Expected error but got Ok"),
+        }
     }
 
     #[tokio::test]
@@ -129,11 +136,11 @@ mod tests {
             sub: format!("https://example.com/api/v1/status-lists/{token_id}"),
             updated_at: 0,
         };
-        let _ = &new_token;
         let db_conn = Arc::new(
             mock_db
                 .append_query_results::<status_lists::Model, Vec<_>, _>(vec![
-                    vec![], // find_one_by in handler returns None
+                    vec![],                  // find_one_by in handler returns None
+                    vec![new_token.clone()], // insert_one return
                 ])
                 .append_exec_results(vec![
                     MockExecResult {
@@ -196,6 +203,7 @@ mod tests {
             mock_db
                 .append_query_results::<status_lists::Model, Vec<_>, _>(vec![
                     vec![],                  // find_one_by in handler returns None
+                    vec![new_token.clone()], // insert_one return
                     vec![new_token.clone()], // find_one_by in test verification
                 ])
                 .append_exec_results(vec![
@@ -301,6 +309,7 @@ mod tests {
             mock_db
                 .append_query_results::<status_lists::Model, Vec<_>, _>(vec![
                     vec![],                  // find_one_by in handler returns None
+                    vec![new_token.clone()], // insert_one return
                     vec![new_token.clone()], // find_one_by in test verification
                 ])
                 .append_exec_results(vec![
@@ -364,6 +373,7 @@ mod tests {
             mock_db
                 .append_query_results::<status_lists::Model, Vec<_>, _>(vec![
                     vec![],                  // find_one_by in handler returns None
+                    vec![new_token.clone()], // insert_one return
                     vec![new_token.clone()], // find_one_by in test verification
                 ])
                 .append_exec_results(vec![
@@ -378,7 +388,6 @@ mod tests {
                 ])
                 .into_connection(),
         );
-
         let app_state = test_app_state(Some(db_conn.clone())).await;
 
         let response = publish_status(

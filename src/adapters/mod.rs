@@ -9,9 +9,14 @@ pub mod dns;
 pub mod memory;
 #[cfg(feature = "metrics-prometheus")]
 pub mod metrics;
-#[cfg(feature = "postgres")]
-pub mod postgres;
 #[cfg(feature = "redis")]
 pub mod redis;
+#[cfg(any(
+    feature = "server",
+    feature = "postgres",
+    feature = "sqlite",
+    feature = "mysql"
+))]
+pub mod sea_orm;
 #[cfg(feature = "certificate-acme")]
 pub mod secret;
