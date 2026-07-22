@@ -2,20 +2,15 @@ use axum::{Json, extract::State, http::StatusCode, response::IntoResponse};
 use serde_json::json;
 
 use crate::{
-    database::error::RepositoryError, models::Credentials, utils::state::AppState,
+    application::UseCaseError, domain, models::Credentials, utils::state::AppState,
     web::auth::errors::AuthenticationError, web::errors::ApiError,
 };
 
 #[derive(Debug)]
 pub enum CredentialError {
-    RepoError(RepositoryError),
+    AlreadyExists,
+    Port,
     AuthError(AuthenticationError),
-}
-
-impl From<RepositoryError> for CredentialError {
-    fn from(value: RepositoryError) -> Self {
-        CredentialError::RepoError(value)
-    }
 }
 
 impl From<AuthenticationError> for CredentialError {
@@ -40,14 +35,17 @@ pub(super) async fn publish_credentials(
     credentials: Credentials,
     state: AppState,
 ) -> Result<(), CredentialError> {
-    let store = &state.credential_repo;
-    if store.find_one_by(&credentials.issuer).await?.is_some() {
-        return Err(CredentialError::RepoError(RepositoryError::DuplicateEntry));
+    let public_key =
+        serde_json::to_vec(&credentials.public_key).map_err(|_| CredentialError::Port)?;
+    let credential = domain::Credential {
+        issuer: domain::Issuer(credentials.issuer),
+        public_key: domain::PublicJwk::try_new(public_key).map_err(|_| CredentialError::Port)?,
+    };
+    match state.credentials.publish_credential(credential).await {
+        Ok(()) => Ok(()),
+        Err(UseCaseError::AlreadyExists) => Err(CredentialError::AlreadyExists),
+        Err(_) => Err(CredentialError::Port),
     }
-
-    let credential = Credentials::new(credentials.issuer, credentials.public_key);
-    store.insert_one(credential).await?;
-    Ok(())
 }
 
 #[cfg(test)]

@@ -1,4 +1,18 @@
 use crate::{
+    adapters::{
+        aws::{AwsS3, AwsSecretsManager},
+        cache::MokaStatusListCache,
+        certificate::AcmeCertificateProvider,
+        redis::Redis,
+        sea_orm::{
+            SeaOrmCredentialRepository, SeaOrmStatusListHistoryRepository,
+            SeaOrmStatusListRepository,
+        },
+    },
+    application::{
+        CredentialApplicationService, CredentialService, StatusListApplicationServiceWithHistory,
+        StatusListService,
+    },
     cert_manager::{
         CertManager, StoreProvisioningStrategy,
         challenge::{
@@ -6,14 +20,16 @@ use crate::{
             CloudflareDnsProvider, Dns01Handler, GoogleCloudDnsProvider, PebbleDnsProvider,
             ServicePrincipal,
         },
-        storage::{AwsS3, AwsSecretsManager, Redis},
     },
     config::{
         Config as AppConfig, DnsProviderKind, ENV_DEVELOPMENT, ENV_PRODUCTION, GcloudKeySource,
         ResolvedDnsProvider,
     },
     database::{Migrator, queries::SeaOrmStore},
-    models::{Credentials, StatusListHistoryRecord, StatusListRecord},
+    ports::{
+        CertificateProvider, CredentialRepository, StatusListCache, StatusListHistoryRepository,
+        StatusListRepository,
+    },
 };
 use aws_config::{BehaviorVersion, Region, SdkConfig};
 use color_eyre::eyre::{Context, Result as EyeResult, eyre};
@@ -23,7 +39,7 @@ use secrecy::ExposeSecret;
 use std::{sync::Arc, time::Duration};
 use tracing::warn;
 
-use super::{cache::StatusListCache, cert_manager::http_client::DefaultHttpClient};
+use super::cert_manager::http_client::DefaultHttpClient;
 
 fn empty_to_none(value: Option<String>) -> Option<String> {
     value.filter(|v| !v.trim().is_empty())
@@ -40,12 +56,10 @@ fn acme_dns_credentials(account: &crate::config::AcmeDnsAccount) -> AcmeDnsCrede
 
 #[derive(Clone)]
 pub struct AppState {
-    pub credential_repo: SeaOrmStore<Credentials>,
-    pub status_list_repo: SeaOrmStore<StatusListRecord>,
-    pub status_list_history_repo: SeaOrmStore<StatusListHistoryRecord>,
+    pub status_lists: Arc<dyn StatusListService>,
+    pub credentials: Arc<dyn CredentialService>,
+    pub certificate_provider: Arc<dyn CertificateProvider>,
     pub server_domain: String,
-    pub cert_manager: Arc<CertManager>,
-    pub cache: StatusListCache,
     pub aggregation_uri: Option<String>,
     pub token_exp_secs: u64,
     pub token_ttl_secs: u64,
@@ -58,6 +72,14 @@ pub struct AppState {
 }
 
 pub async fn build_state(config: &AppConfig) -> EyeResult<AppState> {
+    build_state_with_cert_manager(config)
+        .await
+        .map(|(state, _cert_manager)| state)
+}
+
+pub async fn build_state_with_cert_manager(
+    config: &AppConfig,
+) -> EyeResult<(AppState, Arc<CertManager>)> {
     let db_url = config.database.url.expose_secret();
     let db_backend = config.database.backend;
 
@@ -120,7 +142,6 @@ pub async fn build_state(config: &AppConfig) -> EyeResult<AppState> {
         Duration::from_secs(config.aws.secrets_cache_ttl),
     )
     .await?;
-
     let cert_strategy = store_certificate_strategy(config)?;
     let uses_acme_strategy = config
         .server
@@ -176,21 +197,57 @@ pub async fn build_state(config: &AppConfig) -> EyeResult<AppState> {
     let certificate_manager = cert_manager_builder.build()?;
 
     let db_clone = Arc::new(db);
-    Ok(AppState {
-        credential_repo: SeaOrmStore::new(db_clone.clone()),
-        status_list_repo: SeaOrmStore::new(db_clone.clone()),
-        status_list_history_repo: SeaOrmStore::new(db_clone.clone()),
-        server_domain: config.server.domain.clone(),
-        cert_manager: Arc::new(certificate_manager),
-        cache: StatusListCache::new(config.cache.ttl, config.cache.max_capacity),
-        aggregation_uri: empty_to_none(config.server.aggregation_uri.clone()),
-        token_exp_secs: config.status_list.token_exp_secs,
-        token_ttl_secs: config.status_list.token_ttl_secs,
-        max_status_index: config.limits.max_status_index,
-        max_statuses_per_request: config.limits.max_statuses_per_request,
-        max_serialized_list_size: config.limits.max_serialized_list_size,
-        history_retention_secs: config.status_list.history_retention_secs,
-    })
+    let status_list_repo = SeaOrmStore::new(db_clone.clone());
+    let credential_repo = SeaOrmStore::new(db_clone.clone());
+    let status_list_history_repo = SeaOrmStore::new(db_clone.clone());
+    let cache = MokaStatusListCache::new(config.cache.ttl, config.cache.max_capacity);
+    let status_lists: Arc<dyn StatusListRepository> =
+        Arc::new(SeaOrmStatusListRepository::new(status_list_repo));
+    let credentials: Arc<dyn CredentialRepository> =
+        Arc::new(SeaOrmCredentialRepository::new(credential_repo));
+    let status_list_history: Arc<dyn StatusListHistoryRepository> = Arc::new(
+        SeaOrmStatusListHistoryRepository::new(status_list_history_repo),
+    );
+    let status_list_cache: Arc<dyn StatusListCache> = Arc::new(cache);
+    let cert_manager = Arc::new(certificate_manager);
+    let token_exp_secs = config.status_list.token_exp_secs;
+    let status_list_service: Arc<dyn StatusListService> =
+        if config.status_list.history_retention_secs == 0 {
+            Arc::new(
+                StatusListApplicationServiceWithHistory::<
+                    dyn StatusListRepository,
+                    dyn StatusListCache,
+                    dyn StatusListHistoryRepository,
+                >::without_history(status_lists, status_list_cache, token_exp_secs)
+                .with_max_serialized_list_size(config.limits.max_serialized_list_size),
+            )
+        } else {
+            Arc::new(
+                StatusListApplicationServiceWithHistory::new(
+                    status_lists,
+                    status_list_cache,
+                    status_list_history,
+                    token_exp_secs,
+                )
+                .with_max_serialized_list_size(config.limits.max_serialized_list_size),
+            )
+        };
+    Ok((
+        AppState {
+            status_lists: status_list_service,
+            credentials: Arc::new(CredentialApplicationService::new(credentials)),
+            certificate_provider: Arc::new(AcmeCertificateProvider::new(cert_manager.clone())),
+            server_domain: config.server.domain.clone(),
+            aggregation_uri: empty_to_none(config.server.aggregation_uri.clone()),
+            token_exp_secs: config.status_list.token_exp_secs,
+            token_ttl_secs: config.status_list.token_ttl_secs,
+            max_status_index: config.limits.max_status_index,
+            max_statuses_per_request: config.limits.max_statuses_per_request,
+            max_serialized_list_size: config.limits.max_serialized_list_size,
+            history_retention_secs: config.status_list.history_retention_secs,
+        },
+        cert_manager,
+    ))
 }
 
 /// Setup the scheduled task to clean up old status list history snapshots.
@@ -220,7 +277,7 @@ pub async fn setup_history_cleanup_scheduler(
                 let now = time::OffsetDateTime::now_utc().unix_timestamp();
                 let cutoff = now - app_state.history_retention_secs as i64;
 
-                match app_state.status_list_history_repo.delete_older_than(cutoff).await {
+                match app_state.status_lists.cleanup_history(cutoff).await {
                     Ok(deleted) => {
                         info!("Cleaned up {deleted} historical status list snapshots older than {cutoff}");
                     }

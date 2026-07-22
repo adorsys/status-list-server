@@ -36,6 +36,9 @@ pub enum ChallengeError {
     #[error("I/O error: {0}")]
     Io(#[from] io::Error),
 
+    #[error("AWS SDK error: {0}")]
+    AwsSdk(#[source] Report),
+
     #[error("Another error occurred: {0}")]
     Other(#[source] Report),
 }

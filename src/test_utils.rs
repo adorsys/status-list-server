@@ -1,7 +1,17 @@
 use crate::{
+    adapters::{
+        certificate::AcmeCertificateProvider,
+        sea_orm::{
+            SeaOrmCredentialRepository, SeaOrmStatusListHistoryRepository,
+            SeaOrmStatusListRepository,
+        },
+    },
+    application::{CredentialApplicationService, StatusListApplicationServiceWithHistory},
     cert_manager::storage::StorageError,
+    ports::{
+        CredentialRepository, StatusListCache, StatusListHistoryRepository, StatusListRepository,
+    },
     utils::{
-        cache::StatusListCache,
         cert_manager::{CertManager, storage::Storage},
         state::AppState,
     },
@@ -70,13 +80,34 @@ pub(crate) async fn test_app_state_with(
     .with_cert_storage(cert_storage)
     .with_secrets_storage(secrets_storage);
 
+    let cert_manager = Arc::new(certificate_manager);
+    let status_lists: Arc<dyn StatusListRepository> = Arc::new(SeaOrmStatusListRepository::new(
+        SeaOrmStore::new(db.clone()),
+    ));
+    let credentials: Arc<dyn CredentialRepository> = Arc::new(SeaOrmCredentialRepository::new(
+        SeaOrmStore::new(db.clone()),
+    ));
+    let status_list_history: Arc<dyn StatusListHistoryRepository> = Arc::new(
+        SeaOrmStatusListHistoryRepository::new(SeaOrmStore::new(db.clone())),
+    );
+    let status_list_cache: Arc<dyn StatusListCache> = Arc::new(
+        crate::adapters::cache::MokaStatusListCache::new(5 * 60, 100),
+    );
+    let token_exp_secs = 900u64;
+
     AppState {
-        credential_repo: SeaOrmStore::new(db.clone()),
-        status_list_repo: SeaOrmStore::new(db.clone()),
-        status_list_history_repo: SeaOrmStore::new(db),
+        status_lists: Arc::new(
+            StatusListApplicationServiceWithHistory::new(
+                status_lists,
+                status_list_cache,
+                status_list_history,
+                token_exp_secs,
+            )
+            .with_max_serialized_list_size(1_048_576),
+        ),
+        credentials: Arc::new(CredentialApplicationService::new(credentials)),
+        certificate_provider: Arc::new(AcmeCertificateProvider::new(cert_manager.clone())),
         server_domain: "example.com".to_string(),
-        cert_manager: Arc::new(certificate_manager),
-        cache: StatusListCache::new(5 * 60, 100),
         aggregation_uri,
         token_exp_secs: 900,
         token_ttl_secs: 300,

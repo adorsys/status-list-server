@@ -12,8 +12,8 @@ pub(super) struct AggregationResponse {
 
 pub async fn get_aggregation(State(state): State<AppState>) -> Result<impl IntoResponse, ApiError> {
     let status_lists = state
-        .status_list_repo
-        .find_all_status_list_uris()
+        .status_lists
+        .list_status_list_uris()
         .await
         .map_err(|e| {
             tracing::error!("Failed to fetch status lists for aggregation: {e:?}");

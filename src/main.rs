@@ -2,7 +2,7 @@ use color_eyre::{Result, eyre::eyre};
 use dotenvy::dotenv;
 use rustls::crypto::aws_lc_rs;
 use status_list_server::cert_manager::setup_cert_renewal_scheduler;
-use status_list_server::state::{build_state, setup_history_cleanup_scheduler};
+use status_list_server::state::{build_state_with_cert_manager, setup_history_cleanup_scheduler};
 use status_list_server::{config::Config as AppConfig, startup::HttpServer};
 #[cfg(not(target_env = "msvc"))]
 use tikv_jemallocator::Jemalloc;
@@ -26,10 +26,9 @@ async fn main() -> Result<()> {
 
     // Load configuration and build the app state
     let config = AppConfig::load()?;
-    let app_state = build_state(&config).await?;
+    let (app_state, cert_manager) = build_state_with_cert_manager(&config).await?;
 
     // Setup certificate renewal scheduler
-    let cert_manager = app_state.cert_manager.clone();
     setup_cert_renewal_scheduler(
         cert_manager.clone(),
         &config.server.cert.renewal_cron_schedule,

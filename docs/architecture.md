@@ -144,12 +144,12 @@ operator-configurable through environment variables prefixed with `APP_`.
 A token-bucket governor (`tower-governor`) is applied per route group, with
 each tier keyed and tuned independently:
 
-| Tier               | Routes                                                          | Key                                                               | Tunables (defaults)                                           |
-| ----               | ------                                                          | ---                                                               | -------------------                                           |
-| **strict**         | `POST /api/v1/credentials`                                      | peer IP (`PeerIpKeyExtractor`)                                    | `strict_burst_size` (10), `strict_period_secs` (60s)          |
-| **writes**         | `PUT`/`PATCH /api/v1/status-lists/{list_id}/statuses`           | smart IP (`SmartIpKeyExtractor`) — reads `X-Forwarded-For`,       | `strict_burst_size` (10), `strict_period_secs` (60s)          |
-|                    |                                                                 | `X-Real-Ip`, `Forwarded` headers, fallback to peer IP             |                                                               |
-| **permissive**     | `GET /api/v1/aggregation`, `GET /api/v1/status-lists/{list_id}` | peer IP (`PeerIpKeyExtractor`)                                    | `permissive_burst_size` (100), `permissive_period_secs` (60s) |
+| Tier           | Routes                                                          | Key                                                         | Tunables (defaults)                                           |
+| -------------- | --------------------------------------------------------------- | ----------------------------------------------------------- | ------------------------------------------------------------- |
+| **strict**     | `POST /api/v1/credentials`                                      | peer IP (`PeerIpKeyExtractor`)                              | `strict_burst_size` (10), `strict_period_secs` (60s)          |
+| **writes**     | `PUT`/`PATCH /api/v1/status-lists/{list_id}/statuses`           | smart IP (`SmartIpKeyExtractor`) — reads `X-Forwarded-For`, | `strict_burst_size` (10), `strict_period_secs` (60s)          |
+|                |                                                                 | `X-Real-Ip`, `Forwarded` headers, fallback to peer IP       |                                                               |
+| **permissive** | `GET /api/v1/aggregation`, `GET /api/v1/status-lists/{list_id}` | peer IP (`PeerIpKeyExtractor`)                              | `permissive_burst_size` (100), `permissive_period_secs` (60s) |
 
 The writes tier is applied **before** the `auth` middleware (rate limiting by IP
 happens first, then authentication rejects unauthenticated requests with `401`).
@@ -170,11 +170,11 @@ Beyond rate limiting, hard bounds cap incoming request size and the size of
 persisted status lists:
 
 | Bound                      | Default | Exceeded response                     | Where enforced                       |
-| -----                      | ------- | ------------------                    | --------------                       |
+| -------------------------- | ------- | ------------------------------------- | ------------------------------------ |
 | `max_body_size_bytes`      | 2 MiB   | `413 Payload Too Large`               | `RequestBodyLimitLayer` (all routes) |
 | `max_status_index`         | 100000  | `400 Bad Request` — `index` too large | publish / update handlers            |
 | `max_statuses_per_request` | 5000    | `400 Bad Request` — too many entries  | publish / update handlers            |
-| `max_serialized_list_size` | 1 MiB   | `422 Unprocessable Entity`            | list creation/update (`lst_gen`)     |
+| `max_serialized_list_size` | 1 MiB   | `422 Unprocessable Entity`            | application services                 |
 
 These bounds protect the server from oversized payloads and unbounded list
 growth. The default schema maximums (`StatusEntry.index.maximum`,
@@ -185,13 +185,13 @@ defaults, not guarantees.
 ### Error response summary
 
 | Status | Meaning                                                               |
-| ------ | -------                                                               |
+| ------ | --------------------------------------------------------------------- |
 | `400`  | Malformed/invalid request, or an enforced count/index bound exceeded  |
 | `401`  | Missing or invalid Bearer token                                       |
 | `403`  | Authenticated issuer does not own the list                            |
 | `404`  | Status list not found                                                 |
 | `406`  | Unsupported `Accept` value                                            |
-| `409`  | List/credentials already exist                                        |
+| `409`  | List/credentials already exist, or a concurrent update won the race   |
 | `413`  | Request body exceeds `max_body_size_bytes`                            |
 | `422`  | Serialized list exceeds `max_serialized_list_size`, or unparsable JWK |
 | `429`  | Rate-limit quota exhausted                                            |
