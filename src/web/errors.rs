@@ -79,7 +79,16 @@ impl From<CredentialError> for ApiError {
     fn from(err: CredentialError) -> Self {
         match err {
             CredentialError::AuthError(err) => ApiError::from(err),
-            CredentialError::RepoError(err) => ApiError::from(err),
+            CredentialError::AlreadyExists => ApiError::new(
+                StatusCode::CONFLICT,
+                "credentials_already_exist",
+                "Credentials already exist for this issuer",
+            ),
+            CredentialError::Port => ApiError::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal_error",
+                "The server encountered an unexpected error.",
+            ),
         }
     }
 }

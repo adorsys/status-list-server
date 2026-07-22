@@ -1,4 +1,4 @@
-use crate::models::{StatusListHistoryRecord, StatusListRecord};
+use crate::{domain::StatusListSnapshot, models::StatusListRecord};
 use sha2::{Digest, Sha256};
 
 /// Computes a weak ETag from the status list's content identity.
@@ -63,13 +63,13 @@ pub fn generate_etag(record: &StatusListRecord) -> String {
 /// # Examples
 ///
 /// ```
-/// use status_list_server::models::{StatusList, StatusListHistoryRecord};
+/// use status_list_server::domain::{Issuer, StatusList, StatusListSnapshot};
 /// use status_list_server::web::handlers::status_list::etag::generate_historical_etag;
 ///
-/// let snapshot = StatusListHistoryRecord {
+/// let snapshot = StatusListSnapshot {
 ///     snapshot_id: "550e8400-e29b-41d4-a716-446655440000".to_string(),
 ///     list_id: "test-list".to_string(),
-///     issuer: "https://issuer.example".to_string(),
+///     issuer: Issuer("https://issuer.example".to_string()),
 ///     status_list: StatusList {
 ///         bits: 1,
 ///         lst: "eNrbuRgAAhcBXQ".to_string(),
@@ -83,7 +83,7 @@ pub fn generate_etag(record: &StatusListRecord) -> String {
 /// assert!(!etag.starts_with("W/"));
 /// assert_eq!(etag.len(), 64); // SHA-256 hex string
 /// ```
-pub fn generate_historical_etag(snapshot: &StatusListHistoryRecord) -> String {
+pub fn generate_historical_etag(snapshot: &StatusListSnapshot) -> String {
     let mut hasher = Sha256::new();
 
     // Hash components that uniquely identify this historical snapshot
@@ -91,7 +91,7 @@ pub fn generate_historical_etag(snapshot: &StatusListHistoryRecord) -> String {
     hasher.update(snapshot.iat.to_string().as_bytes());
     hasher.update(snapshot.exp.to_string().as_bytes());
     hasher.update(snapshot.status_list.lst.as_bytes());
-    hasher.update(snapshot.issuer.as_bytes());
+    hasher.update(snapshot.issuer.0.as_bytes());
 
     let hash = hasher.finalize();
     hex::encode(hash)

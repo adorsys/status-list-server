@@ -4,38 +4,14 @@ use axum::{
     response::IntoResponse,
 };
 use hyper::StatusCode;
-use time::OffsetDateTime;
 
-use crate::{
-    models::StatusesRequest,
-    utils::{
-        bits_validation::BitFlag,
-        errors::Error,
-        lst_gen::{AbuseLimits, update_status_list},
-        state::AppState,
-    },
-    web::errors::ApiError,
+use crate::{application::UseCaseError, domain, models::StatusesRequest, utils::state::AppState};
+
+use crate::web::errors::ApiError;
+
+use super::{
+    error::StatusListError, map_domain_error, to_domain_entry, validate_status_request_limits,
 };
-
-use super::error::StatusListError;
-use super::publish_status::persist_historical_snapshot;
-
-/// Computes the next `updated_at` for an optimistic-concurrency write.
-///
-/// Two distinct concerns, both required — do not drop either:
-///   * the `WHERE updated_at = previous` guard in `update_one` handles
-///     *concurrency* (a racing writer loses the race);
-///   * the `.max(previous + 1)` here handles *clock granularity*.
-///
-/// `updated_at` is unix seconds, so two writers in the same second both read the
-/// same `previous` and both see `now == previous`. If the stamp did not advance,
-/// the first write would leave `updated_at` unchanged and the second writer's
-/// guard would still match — both would succeed, silently losing a flip. Forcing
-/// the value to strictly increase guarantees the guard moves, so the loser's
-/// `WHERE` misses. Dropping the `+ 1` reintroduces the same-second lost update.
-fn next_updated_at(previous: i64, now: i64) -> i64 {
-    now.max(previous + 1)
-}
 
 /// Update status entries in an existing status list.
 pub async fn update_status(
@@ -49,112 +25,58 @@ pub async fn update_status(
         return Err(StatusListError::InvalidListId(e.to_string()).into());
     }
 
-    let count = payload.statuses.len();
-    if count > appstate.max_statuses_per_request {
-        tracing::warn!(
-            "Rejecting update: {count} statuses exceeds maximum {}",
-            appstate.max_statuses_per_request
-        );
-        return Err(StatusListError::TooManyStatuses {
-            count,
-            max: appstate.max_statuses_per_request,
-        }
-        .into());
-    }
+    validate_status_request_limits(
+        &payload.statuses,
+        appstate.max_statuses_per_request,
+        appstate.max_status_index,
+    )?;
 
-    let store = &appstate.status_list_repo;
+    let statuses = payload
+        .statuses
+        .into_iter()
+        .map(to_domain_entry)
+        .collect::<Vec<_>>();
 
-    // Fetch the existing token
-    let record = store
-        .find_one_by(&list_id)
-        .await?
-        .ok_or(StatusListError::StatusListNotFound)?;
-
-    // Check if the request issuer matches the token issuer
-    if record.issuer != issuer {
-        tracing::error!(
-            "Issuer mismatch: expected {}, got {}",
-            record.issuer,
-            issuer
-        );
-        return Err(StatusListError::IssuerMismatch.into());
-    }
-
-    let bits = if let Some(bits) = BitFlag::new(record.status_list.bits) {
-        Ok(bits)
-    } else {
-        Err(StatusListError::Generic(format!(
-            "Invalid 'bits' value: {}. Allowed values are 1, 2, 4, 8.",
-            record.status_list.bits
-        )))
-    }?;
-
-    let limits = AbuseLimits::new(appstate.max_status_index, appstate.max_serialized_list_size);
-
-    // Update the status list
-    let updated_lst = update_status_list(
-        record.status_list.lst.clone(),
-        payload.statuses,
-        bits.value(),
-        &limits,
-    )
-    .map_err(|e| {
-        tracing::error!("update_status_list failed: {e:?}");
-        match e {
-            Error::Generic(msg) => StatusListError::Generic(msg),
-            Error::InvalidIndex => StatusListError::InvalidIndex,
-            Error::IndexTooLarge(idx) => StatusListError::IndexTooLarge(idx),
-            Error::SerializedListTooLarge { .. } => StatusListError::StatusTooLarge,
-            _ => StatusListError::Generic(e.to_string()),
-        }
-    })?;
-
-    // The timestamp read here is the optimistic-concurrency guard: the write
-    // below only lands if `updated_at` is still this value, so a racing writer
-    // that already moved it is rejected instead of silently overwritten.
-    let previous_updated_at = record.updated_at;
-
-    let mut exact_status_list = record;
-    exact_status_list.status_list.lst = updated_lst.lst;
-    exact_status_list.status_list.bits = updated_lst.bits;
-    // Strictly-advancing stamp so the optimistic guard always moves; see
-    // `next_updated_at` for why the `+ 1` is load-bearing.
-    let now = OffsetDateTime::now_utc().unix_timestamp();
-    exact_status_list.updated_at = next_updated_at(previous_updated_at, now);
-
-    // Save the updated token under the optimistic guard.
-    let updated = store
-        .update_one(
-            &exact_status_list.list_id,
-            exact_status_list.clone(),
-            previous_updated_at,
+    match appstate
+        .status_lists
+        .update_statuses_with_max_serialized_list_size(
+            &domain::Issuer(issuer),
+            &list_id,
+            statuses,
+            appstate.max_serialized_list_size,
         )
-        .await?;
-
-    if !updated {
-        // Guard did not match: a concurrent writer won the race (or the row was
-        // deleted). Return 409 *before* recording a snapshot or invalidating the
-        // cache, so nothing is persisted for a write that never landed.
-        //
-        // Logged at info, not warn: under contention an optimistic conflict is
-        // the expected, correct outcome, not an anomaly — warn would pollute
-        // dashboards and trip alerting during exactly the high-load bursts where
-        // conflicts are normal.
-        tracing::info!(
-            list_id = ?exact_status_list.list_id,
-            "Concurrent update conflict; write rejected"
-        );
-        return Err(StatusListError::UpdateConflict.into());
+        .await
+    {
+        Ok(()) => {}
+        Err(UseCaseError::NotFound) => return Err(StatusListError::StatusListNotFound.into()),
+        Err(UseCaseError::IssuerMismatch) => return Err(StatusListError::IssuerMismatch.into()),
+        Err(UseCaseError::Domain(domain::DomainError::InvalidIndex)) => {
+            return Err(StatusListError::InvalidIndex.into());
+        }
+        Err(UseCaseError::Domain(domain::DomainError::InvalidStatusList(msg))) => {
+            return Err(StatusListError::Generic(msg).into());
+        }
+        Err(UseCaseError::Domain(error)) => return Err(map_domain_error(error).into()),
+        Err(UseCaseError::StatusListTooLarge) => return Err(StatusListError::StatusTooLarge.into()),
+        Err(UseCaseError::Conflict) => {
+            // The optimistic guard in the use case did not match: a concurrent
+            // writer won the race (or the row was deleted). The use case returns
+            // before recording a snapshot or invalidating the cache, so nothing
+            // is persisted for a write that never landed.
+            //
+            // Logged at info, not warn: under contention an optimistic conflict
+            // is the expected, correct outcome, not an anomaly — warn would
+            // pollute dashboards and trip alerting during exactly the high-load
+            // bursts where conflicts are normal.
+            tracing::info!(list_id = ?list_id, "Concurrent update conflict; write rejected");
+            return Err(StatusListError::UpdateConflict.into());
+        }
+        Err(error) => {
+            tracing::error!(?error, "Failed to update status list");
+            return Err(StatusListError::InternalServerError.into());
+        }
     }
-
-    persist_historical_snapshot(&appstate, &exact_status_list).await?;
-
-    // Invalidate cache entry to ensure next read fetches the updated record
-    appstate.cache.invalidate(&exact_status_list.list_id).await;
-    tracing::info!(
-        "Invalidated cache for status list: {}",
-        exact_status_list.list_id
-    );
+    tracing::info!("Invalidated cache for status list: {}", list_id);
 
     Ok(StatusCode::OK.into_response())
 }
@@ -163,6 +85,10 @@ pub async fn update_status(
 mod test {
     use super::*;
     use std::sync::Arc;
+
+    // `next_updated_at` moved to the application layer with the optimistic
+    // guard it serves; the test below stays here, where the merge left it.
+    use crate::application::next_updated_at;
 
     use axum::{
         Extension,
@@ -177,10 +103,8 @@ mod test {
             Status, StatusEntry, StatusList, StatusListRecord, StatusesRequest, status_lists,
         },
         test_utils::test_app_state,
-        utils::lst_gen::{AbuseLimits, create_status_list},
+        web::handlers::status_list::test_support::create_status_list,
     };
-
-    const LIMITS: AbuseLimits = AbuseLimits::unlimited();
 
     #[tokio::test]
     async fn test_update_token_status_invalid_list_id() {
@@ -213,19 +137,16 @@ mod test {
         // Initial token setup
         let original_status_list = StatusList {
             bits: initial_bits,
-            lst: create_status_list(
-                vec![
-                    StatusEntry {
-                        index: 0,
-                        status: Status::VALID,
-                    },
-                    StatusEntry {
-                        index: 1,
-                        status: Status::VALID,
-                    },
-                ],
-                &LIMITS,
-            )
+            lst: create_status_list(vec![
+                StatusEntry {
+                    index: 0,
+                    status: Status::VALID,
+                },
+                StatusEntry {
+                    index: 1,
+                    status: Status::VALID,
+                },
+            ])
             .unwrap()
             .lst,
         };
@@ -321,13 +242,10 @@ mod test {
 
         let original_status_list = StatusList {
             bits: initial_bits,
-            lst: create_status_list(
-                vec![StatusEntry {
-                    index: 0,
-                    status: Status::VALID,
-                }],
-                &LIMITS,
-            )
+            lst: create_status_list(vec![StatusEntry {
+                index: 0,
+                status: Status::VALID,
+            }])
             .unwrap()
             .lst,
         };
@@ -378,13 +296,10 @@ mod test {
 
         let original_status_list = StatusList {
             bits: initial_bits,
-            lst: create_status_list(
-                vec![StatusEntry {
-                    index: 0,
-                    status: Status::VALID,
-                }],
-                &LIMITS,
-            )
+            lst: create_status_list(vec![StatusEntry {
+                index: 0,
+                status: Status::VALID,
+            }])
             .unwrap()
             .lst,
         };
@@ -450,13 +365,10 @@ mod test {
             issuer: "issuer".to_string(),
             status_list: StatusList {
                 bits: 2,
-                lst: create_status_list(
-                    vec![StatusEntry {
-                        index: 0,
-                        status: Status::VALID,
-                    }],
-                    &LIMITS,
-                )
+                lst: create_status_list(vec![StatusEntry {
+                    index: 0,
+                    status: Status::VALID,
+                }])
                 .unwrap()
                 .lst,
             },

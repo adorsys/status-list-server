@@ -18,8 +18,9 @@ use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 
 use crate::{
+    application::UseCaseError,
     models::{StatusListClaims, StatusListRecord},
-    utils::{cache::CertificateChain, keygen::Keypair, state::AppState},
+    utils::{keygen::Keypair, state::AppState},
     web::errors::ApiError,
 };
 
@@ -81,7 +82,7 @@ pub async fn get_status_list(
         .get(header::IF_MODIFIED_SINCE)
         .and_then(|h| h.to_str().ok());
 
-    // Fetch status list record (from cache or database)
+    // Fetch status list record (from cache or database via application service)
     let status_record = fetch_status_record(&list_id, &state).await?;
 
     let current_etag = generate_etag(&status_record);
@@ -185,28 +186,39 @@ async fn handle_historical_request(
         now - time
     );
 
-    // Fetch the snapshot whose half-open validity interval contains `time`
+    // Fetch the snapshot via application service
     let snapshot = state
-        .status_list_history_repo
-        .find_valid_at(list_id, time)
+        .status_lists
+        .get_historical_status_list(list_id, time)
         .await
         .map_err(|err| {
             tracing::error!("Failed to resolve historical status list {list_id}: {err:?}");
-            StatusListError::InternalServerError
-        })?
-        .ok_or(StatusListError::HistoricalStatusListNotFound)?;
+            match err {
+                crate::application::UseCaseError::NotFound => {
+                    StatusListError::HistoricalStatusListNotFound
+                }
+                _ => StatusListError::InternalServerError,
+            }
+        })?;
 
     // Generate ETag and extract values before consuming snapshot
     let etag = generate_historical_etag(&snapshot);
     let last_modified = format_http_date(snapshot.iat);
     let validity_duration = (snapshot.exp - snapshot.iat) as u64;
-    let cache_control = format!("max-age={}, immutable", validity_duration.max(86400)); // At least 1 day
+    // A historical snapshot is immutable, but its cache lifetime must not
+    // outlive the token's own validity window: an 86400 floor would let a
+    // client cache a sub-day token past its `exp`, so max-age tracks the
+    // window exactly.
+    let cache_control = format!("max-age={validity_duration}, immutable");
 
     // Build the status record from the snapshot
     let status_record = StatusListRecord {
         list_id: snapshot.list_id,
-        issuer: snapshot.issuer,
-        status_list: snapshot.status_list,
+        issuer: snapshot.issuer.0,
+        status_list: crate::models::StatusList {
+            bits: snapshot.status_list.bits,
+            lst: snapshot.status_list.lst,
+        },
         sub: snapshot.sub,
         updated_at: snapshot.iat, // Use snapshot iat as the modification time
     };
@@ -254,38 +266,31 @@ pub struct StatusListQuery {
     pub time: Option<i64>,
 }
 
-/// Fetches status record from cache or database
+/// Fetches status record from application service (which handles caching internally)
 async fn fetch_status_record(
     list_id: &str,
     state: &AppState,
 ) -> Result<Arc<StatusListRecord>, ApiError> {
-    // Check cache for status list record
-    if let Some(cached_record) = state.cache.get(list_id).await {
-        tracing::info!("Cache hit for status list record: {list_id}");
-        return Ok(cached_record);
+    match state.status_lists.get_status_list(list_id).await {
+        Ok(record) => {
+            let status_record = StatusListRecord {
+                list_id: record.list_id,
+                issuer: record.issuer.0,
+                status_list: crate::models::StatusList {
+                    bits: record.status_list.bits,
+                    lst: record.status_list.lst,
+                },
+                sub: record.sub,
+                updated_at: record.updated_at,
+            };
+            Ok(Arc::new(status_record))
+        }
+        Err(UseCaseError::NotFound) => Err(StatusListError::StatusListNotFound.into()),
+        Err(error) => {
+            tracing::error!(?error, list_id, "Failed to retrieve status list");
+            Err(StatusListError::InternalServerError.into())
+        }
     }
-
-    tracing::info!("Cache miss for status list token: {list_id}");
-    // Get status list claims from database
-    let status_record = state
-        .status_list_repo
-        .find_one_by(list_id)
-        .await?
-        .ok_or_else(|| {
-            ApiError::new(
-                axum::http::StatusCode::NOT_FOUND,
-                "status_list_not_found",
-                "Status list not found",
-            )
-        })?;
-
-    // Store the token in the cache for future requests
-    state
-        .cache
-        .insert(list_id.to_string(), status_record.clone())
-        .await;
-
-    Ok(Arc::new(status_record))
 }
 
 /// Parses the request's `Accept-Encoding` header(s) (RFC 9110 content
@@ -356,8 +361,8 @@ async fn build_token(
 ) -> Result<(Vec<u8>, Option<&'static str>), StatusListError> {
     // Get the certificate chain
     let certs_parts = state
-        .cert_manager
-        .cert_chain_parts()
+        .certificate_provider
+        .certificate_chain()
         .await
         .map_err(|e| {
             tracing::error!("Failed to get certificate chain: {e:?}");
@@ -369,10 +374,14 @@ async fn build_token(
         })?;
 
     // Load the signing key
-    let signing_key_pem = state.cert_manager.signing_key_pem().await.map_err(|e| {
-        tracing::error!("Failed to load signing key: {e:?}");
-        StatusListError::InternalServerError
-    })?;
+    let signing_key_pem = state
+        .certificate_provider
+        .signing_key_pem()
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to load signing key: {e:?}");
+            StatusListError::InternalServerError
+        })?;
 
     let accept_header = accept.to_string();
     let status_record = status_record.clone();
@@ -441,7 +450,7 @@ async fn build_token(
 fn issue_cwt(
     status_record: &StatusListRecord,
     keypair: &Keypair,
-    cert_chain: &CertificateChain,
+    cert_chain: &[String],
     aggregation_uri: &Option<String>,
     iat: i64,
     exp: i64,
@@ -563,7 +572,7 @@ pub(crate) struct StatusListToken {
 fn issue_jwt(
     status_record: &StatusListRecord,
     keypair: &Keypair,
-    cert_chain: &CertificateChain,
+    cert_chain: &[String],
     aggregation_uri: &Option<String>,
     iat: i64,
     exp: i64,
@@ -626,10 +635,8 @@ mod tests {
             status_lists,
         },
         test_utils::{test_app_state, test_app_state_with},
-        utils::lst_gen::{AbuseLimits, encode_compressed},
+        web::handlers::status_list::test_support::encode_compressed,
     };
-
-    const LIMITS: AbuseLimits = AbuseLimits::unlimited();
     use axum::{
         body::to_bytes,
         extract::{Path, State},
@@ -647,7 +654,7 @@ mod tests {
         let mock_db = MockDatabase::new(DatabaseBackend::Postgres);
         let status_list = StatusList {
             bits: 8,
-            lst: encode_compressed(&[0, 0, 0], &LIMITS).unwrap(),
+            lst: encode_compressed(&[0, 0, 0]),
         };
         let status_list_token = StatusListRecord {
             list_id: "test_list".to_string(),
@@ -698,7 +705,11 @@ mod tests {
         let body_str = std::str::from_utf8(&body_bytes).unwrap();
 
         // Load the decoding key
-        let signing_key_pem = app_state.cert_manager.signing_key_pem().await.unwrap();
+        let signing_key_pem = app_state
+            .certificate_provider
+            .signing_key_pem()
+            .await
+            .unwrap();
         let keypair = Keypair::from_pkcs8_pem(&signing_key_pem).unwrap();
         let decoding_key_pem = keypair
             .verifying_key()
@@ -718,7 +729,7 @@ mod tests {
         assert_eq!(token_data.claims.status_list.bits, 8);
         assert_eq!(
             token_data.claims.status_list.lst,
-            encode_compressed(&[0, 0, 0], &LIMITS).unwrap()
+            encode_compressed(&[0, 0, 0])
         );
     }
 
@@ -727,7 +738,7 @@ mod tests {
         let mock_db = MockDatabase::new(DatabaseBackend::Postgres);
         let status_list = StatusList {
             bits: 8,
-            lst: encode_compressed(&[0, 0, 0], &LIMITS).unwrap(),
+            lst: encode_compressed(&[0, 0, 0]),
         };
         let status_list_token = StatusListRecord {
             list_id: "test_list".to_string(),
@@ -778,7 +789,11 @@ mod tests {
         let body_bytes = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
         let body_str = std::str::from_utf8(&body_bytes).unwrap();
 
-        let signing_key_pem = app_state.cert_manager.signing_key_pem().await.unwrap();
+        let signing_key_pem = app_state
+            .certificate_provider
+            .signing_key_pem()
+            .await
+            .unwrap();
         let keypair = Keypair::from_pkcs8_pem(&signing_key_pem).unwrap();
         let decoding_key_pem = keypair
             .verifying_key()
@@ -795,7 +810,7 @@ mod tests {
         assert_eq!(token_data.claims.status_list.bits, 8);
         assert_eq!(
             token_data.claims.status_list.lst,
-            encode_compressed(&[0, 0, 0], &LIMITS).unwrap()
+            encode_compressed(&[0, 0, 0])
         );
     }
 
@@ -804,7 +819,7 @@ mod tests {
         let mock_db = MockDatabase::new(DatabaseBackend::Postgres);
         let status_list = StatusList {
             bits: 8,
-            lst: encode_compressed(&[0, 0, 0], &LIMITS).unwrap(),
+            lst: encode_compressed(&[0, 0, 0]),
         };
         let status_list_token = StatusListRecord {
             list_id: "test_list".to_string(),
@@ -860,7 +875,11 @@ mod tests {
         let cwt = CoseSign1::from_tagged_slice(&body_bytes).unwrap();
 
         // Load the key from the cache
-        let signing_key_pem = app_state.cert_manager.signing_key_pem().await.unwrap();
+        let signing_key_pem = app_state
+            .certificate_provider
+            .signing_key_pem()
+            .await
+            .unwrap();
         let keypair = Keypair::from_pkcs8_pem(&signing_key_pem).unwrap();
         let signing_key = keypair.signing_key();
         let verifying_key = VerifyingKey::from(signing_key);
@@ -914,8 +933,7 @@ mod tests {
             .unwrap()
             .1
             .clone();
-        let expected_lst_bytes =
-            base64url::decode(&encode_compressed(&[0, 0, 0], &LIMITS).unwrap()).unwrap();
+        let expected_lst_bytes = base64url::decode(&encode_compressed(&[0, 0, 0])).unwrap();
         assert_eq!(lst, CborValue::Bytes(expected_lst_bytes));
 
         let ttl = claims
@@ -956,7 +974,7 @@ mod tests {
         let mock_db = MockDatabase::new(DatabaseBackend::Postgres);
         let status_list = StatusList {
             bits: 8,
-            lst: encode_compressed(&[0, 0, 0], &LIMITS).unwrap(),
+            lst: encode_compressed(&[0, 0, 0]),
         };
         let status_list_token = record_with_bits_8("test_list", status_list);
         let db_conn = Arc::new(
@@ -1003,7 +1021,11 @@ mod tests {
         decoder.read_to_end(&mut body).unwrap();
         let body_str = std::str::from_utf8(&body).unwrap();
 
-        let signing_key_pem = app_state.cert_manager.signing_key_pem().await.unwrap();
+        let signing_key_pem = app_state
+            .certificate_provider
+            .signing_key_pem()
+            .await
+            .unwrap();
         let keypair = Keypair::from_pkcs8_pem(&signing_key_pem).unwrap();
         let decoding_key_pem = keypair
             .verifying_key()
@@ -1027,7 +1049,7 @@ mod tests {
         let mock_db = MockDatabase::new(DatabaseBackend::Postgres);
         let status_list = StatusList {
             bits: 8,
-            lst: encode_compressed(&[0, 0, 0], &LIMITS).unwrap(),
+            lst: encode_compressed(&[0, 0, 0]),
         };
         let status_list_token = record_with_bits_8("test_list", status_list);
         let db_conn = Arc::new(
@@ -1070,7 +1092,11 @@ mod tests {
         decoder.read_to_end(&mut body).unwrap();
         let body_str = std::str::from_utf8(&body).unwrap();
 
-        let signing_key_pem = app_state.cert_manager.signing_key_pem().await.unwrap();
+        let signing_key_pem = app_state
+            .certificate_provider
+            .signing_key_pem()
+            .await
+            .unwrap();
         let keypair = Keypair::from_pkcs8_pem(&signing_key_pem).unwrap();
         let decoding_key_pem = keypair
             .verifying_key()
@@ -1090,7 +1116,7 @@ mod tests {
         let mock_db = MockDatabase::new(DatabaseBackend::Postgres);
         let status_list = StatusList {
             bits: 8,
-            lst: encode_compressed(&[0, 0, 0], &LIMITS).unwrap(),
+            lst: encode_compressed(&[0, 0, 0]),
         };
         let status_list_token = record_with_bits_8("test_list", status_list);
         let db_conn = Arc::new(
@@ -1138,7 +1164,11 @@ mod tests {
 
         let cwt = CoseSign1::from_tagged_slice(&body).unwrap();
 
-        let signing_key_pem = app_state.cert_manager.signing_key_pem().await.unwrap();
+        let signing_key_pem = app_state
+            .certificate_provider
+            .signing_key_pem()
+            .await
+            .unwrap();
         let keypair = Keypair::from_pkcs8_pem(&signing_key_pem).unwrap();
         let signing_key = keypair.signing_key();
         let verifying_key = VerifyingKey::from(signing_key);
@@ -1181,7 +1211,7 @@ mod tests {
         let mock_db = MockDatabase::new(DatabaseBackend::Postgres);
         let status_list = StatusList {
             bits: 8,
-            lst: encode_compressed(&[0, 0, 0], &LIMITS).unwrap(),
+            lst: encode_compressed(&[0, 0, 0]),
         };
         let status_list_token = record_with_bits_8("test_list", status_list);
         let db_conn = Arc::new(
@@ -1225,7 +1255,11 @@ mod tests {
 
         let cwt = CoseSign1::from_tagged_slice(&body).unwrap();
 
-        let signing_key_pem = app_state.cert_manager.signing_key_pem().await.unwrap();
+        let signing_key_pem = app_state
+            .certificate_provider
+            .signing_key_pem()
+            .await
+            .unwrap();
         let keypair = Keypair::from_pkcs8_pem(&signing_key_pem).unwrap();
         let signing_key = keypair.signing_key();
         let verifying_key = VerifyingKey::from(signing_key);
@@ -1378,7 +1412,7 @@ mod tests {
         let mock_db = MockDatabase::new(DatabaseBackend::Postgres);
         let status_list = StatusList {
             bits: 8,
-            lst: encode_compressed(&[0, 0, 0], &LIMITS).unwrap(),
+            lst: encode_compressed(&[0, 0, 0]),
         };
         let status_list_token = StatusListRecord {
             list_id: "test_list".to_string(),
@@ -1455,7 +1489,7 @@ mod tests {
         let mock_db = MockDatabase::new(DatabaseBackend::Postgres);
         let status_list = StatusList {
             bits: 8,
-            lst: encode_compressed(&[0, 0, 0], &LIMITS).unwrap(),
+            lst: encode_compressed(&[0, 0, 0]),
         };
         let status_list_token = StatusListRecord {
             list_id: "test_list".to_string(),
@@ -1552,7 +1586,7 @@ mod tests {
         let mock_db = MockDatabase::new(DatabaseBackend::Postgres);
         let status_list = StatusList {
             bits: 8,
-            lst: encode_compressed(&[0, 0, 0], &LIMITS).unwrap(),
+            lst: encode_compressed(&[0, 0, 0]),
         };
         let status_list_token = StatusListRecord {
             list_id: "test_list".to_string(),
@@ -1640,7 +1674,7 @@ mod tests {
         let mock_db = MockDatabase::new(DatabaseBackend::Postgres);
         let status_list = StatusList {
             bits: 8,
-            lst: encode_compressed(&[0, 0, 0], &LIMITS).unwrap(),
+            lst: encode_compressed(&[0, 0, 0]),
         };
         let status_list_token = StatusListRecord {
             list_id: "test_list".to_string(),
@@ -1696,7 +1730,7 @@ mod tests {
             issuer: "test_issuer".to_string(),
             status_list: StatusList {
                 bits: 8,
-                lst: encode_compressed(&[42], &LIMITS).unwrap(),
+                lst: encode_compressed(&[42]),
             },
             sub: "test_subject".to_string(),
             iat: 1_700_000_000,
@@ -1728,7 +1762,11 @@ mod tests {
         let body_bytes = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
         let body_str = std::str::from_utf8(&body_bytes).unwrap();
 
-        let signing_key_pem = app_state.cert_manager.signing_key_pem().await.unwrap();
+        let signing_key_pem = app_state
+            .certificate_provider
+            .signing_key_pem()
+            .await
+            .unwrap();
         let keypair = Keypair::from_pkcs8_pem(&signing_key_pem).unwrap();
         let decoding_key_pem = keypair
             .verifying_key()
