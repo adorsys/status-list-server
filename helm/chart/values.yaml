@@ -116,7 +116,9 @@ statuslist:
     failureThreshold: 3
   networkPolicy:
     enabled: true
+    # Restrict ingress to specific namespaces or CIDR blocks
     ingress: []
+    # Restrict egress to specific destinations (e.g., PostgreSQL, Redis, AWS API)
     egress: []
   resources:
     requests:

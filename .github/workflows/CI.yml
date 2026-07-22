@@ -221,11 +221,19 @@ jobs:
       - name: Fetch Repository
         uses: actions/checkout@v7
 
-      - name: Run Trivy config scan on Helm chart
+      - name: Setup Helm
+        uses: azure/setup-helm@v3
+
+      - name: Render Helm template
+        run: |
+          mkdir -p /tmp/rendered
+          helm template status-list-server helm/chart -f helm/chart/values.yaml --output-dir /tmp/rendered
+
+      - name: Run Trivy config scan
         uses: aquasecurity/trivy-action@v0.36.0
         with:
           scan-type: config
-          scan-ref: helm/chart
+          scan-ref: /tmp/rendered
           severity: HIGH,CRITICAL
           exit-code: 1
 
