@@ -18,7 +18,18 @@ spec:
     spec:
       {{- with .Values.statuslist.initContainers }}
       initContainers:
-        {{- tpl (toYaml .) $ | nindent 8 }}
+        {{- range $ic := . }}
+        - {{- tpl (toYaml $ic) $ | nindent 10 }}
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+        {{- end }}
       {{- end }}
       securityContext:
         runAsNonRoot: true
@@ -95,8 +106,10 @@ spec:
               mountPath: /home/nobody/.aws
               readOnly: true
           {{- end }}
-      {{- if .Values.secretStore.enabled }}
       volumes:
+        - name: tmp
+          emptyDir: {}
+      {{- if .Values.secretStore.enabled }}
         - name: aws-credentials-volume
           secret:
             secretName: aws-credentials-secret

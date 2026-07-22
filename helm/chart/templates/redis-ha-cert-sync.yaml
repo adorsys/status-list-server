@@ -88,10 +88,23 @@ spec:
         spec:
           serviceAccountName: redis-cert-sync-sa
           restartPolicy: OnFailure
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65534
+            runAsGroup: 65534
+            fsGroup: 65534
+            seccompProfile:
+              type: RuntimeDefault
           containers:
             - name: redis-cert-sync
               image: bitnami/kubectl:latest
               imagePullPolicy: IfNotPresent
+              securityContext:
+                readOnlyRootFilesystem: true
+                allowPrivilegeEscalation: false
+                capabilities:
+                  drop:
+                    - ALL
               env:
                 - name: NAMESPACE
                   valueFrom:

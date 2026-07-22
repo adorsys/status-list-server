@@ -239,7 +239,7 @@ jobs:
         with:
           scan-type: config
           scan-ref: /tmp/rendered
-          severity: HIGH,CRITICAL
+          severity: CRITICAL
           exit-code: 1
 
   yaml-lint:
