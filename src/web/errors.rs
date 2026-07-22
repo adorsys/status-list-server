@@ -7,7 +7,7 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 
-use crate::database::error::RepositoryError;
+use crate::adapters::sea_orm::error::RepositoryError;
 use crate::web::auth::errors::AuthenticationError;
 use crate::web::handlers::issue_credential::CredentialError;
 use crate::web::handlers::status_list::error::StatusListError;
@@ -89,7 +89,6 @@ impl From<CredentialError> for ApiError {
                 "internal_error",
                 "The server encountered an unexpected error.",
             ),
-            CredentialError::RepoError(err) => ApiError::from(err),
         }
     }
 }
