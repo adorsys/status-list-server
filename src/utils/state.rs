@@ -65,7 +65,6 @@ pub struct AppState {
     pub token_ttl_secs: u64,
     pub max_status_index: i32,
     pub max_statuses_per_request: usize,
-    pub max_serialized_list_size: usize,
     /// Retention period for historical status list snapshots in seconds.
     /// Set to 0 to disable historical snapshots entirely.
     pub history_retention_secs: u64,
@@ -243,7 +242,6 @@ pub async fn build_state_with_cert_manager(
             token_ttl_secs: config.status_list.token_ttl_secs,
             max_status_index: config.limits.max_status_index,
             max_statuses_per_request: config.limits.max_statuses_per_request,
-            max_serialized_list_size: config.limits.max_serialized_list_size,
             history_retention_secs: config.status_list.history_retention_secs,
         },
         cert_manager,

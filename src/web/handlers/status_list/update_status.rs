@@ -39,12 +39,7 @@ pub async fn update_status(
 
     match appstate
         .status_lists
-        .update_statuses_with_max_serialized_list_size(
-            &domain::Issuer(issuer),
-            &list_id,
-            statuses,
-            appstate.max_serialized_list_size,
-        )
+        .update_statuses(&domain::Issuer(issuer), &list_id, statuses)
         .await
     {
         Ok(()) => {}
@@ -55,6 +50,13 @@ pub async fn update_status(
         }
         Err(UseCaseError::Domain(domain::DomainError::InvalidStatusList(msg))) => {
             return Err(StatusListError::Generic(msg).into());
+        }
+        Err(UseCaseError::Domain(domain::DomainError::CorruptStoredList(detail))) => {
+            // The stored `lst` failed to decode: corrupt persisted state, not a
+            // caller error. Log the detail at error level (this is the alert)
+            // and return 500 — never blame the client for our data corruption.
+            tracing::error!(list_id = ?list_id, %detail, "Corrupt stored status list");
+            return Err(StatusListError::InternalServerError.into());
         }
         Err(UseCaseError::Domain(error)) => return Err(map_domain_error(error).into()),
         Err(UseCaseError::StatusListTooLarge) => return Err(StatusListError::StatusTooLarge.into()),
@@ -102,7 +104,7 @@ mod test {
         models::{
             Status, StatusEntry, StatusList, StatusListRecord, StatusesRequest, status_lists,
         },
-        test_utils::test_app_state,
+        test_utils::{test_app_state, test_app_state_with_max_serialized_list_size},
         web::handlers::status_list::test_support::create_status_list,
     };
 
@@ -318,8 +320,7 @@ mod test {
                 ])
                 .into_connection(),
         );
-        let mut appstate = test_app_state(Some(db_conn.clone())).await;
-        appstate.max_serialized_list_size = 1;
+        let appstate = test_app_state_with_max_serialized_list_size(Some(db_conn.clone()), 1).await;
         let payload = StatusesRequest {
             statuses: vec![StatusEntry {
                 index: 9999,
@@ -411,5 +412,53 @@ mod test {
         };
 
         assert_eq!(response.status(), StatusCode::CONFLICT);
+    }
+
+    /// A well-formed update against a list whose stored `lst` is corrupt must
+    /// return 500 (state error), not 400 (client error) — so data corruption is
+    /// alerted, not blamed on the caller.
+    #[tokio::test]
+    async fn test_update_status_corrupt_stored_list_returns_500() {
+        let mock_db = MockDatabase::new(DatabaseBackend::Postgres);
+        let token_id = uuid::Uuid::new_v4().to_string();
+
+        let corrupt_token = StatusListRecord {
+            list_id: token_id.clone(),
+            issuer: "issuer".to_string(),
+            status_list: StatusList {
+                bits: 1,
+                lst: "not valid base64!!".to_string(),
+            },
+            sub: "issuer".to_string(),
+            updated_at: 0,
+        };
+
+        let db_conn = Arc::new(
+            mock_db
+                .append_query_results::<status_lists::Model, Vec<_>, _>(vec![vec![
+                    corrupt_token.clone(),
+                ]])
+                .into_connection(),
+        );
+
+        let app_state = test_app_state(Some(db_conn.clone())).await;
+        let response = match update_status(
+            State(app_state),
+            Extension("issuer".to_string()),
+            Path(token_id),
+            Json(StatusesRequest {
+                statuses: vec![StatusEntry {
+                    index: 0,
+                    status: Status::INVALID,
+                }],
+            }),
+        )
+        .await
+        {
+            Ok(_) => panic!("update over corrupt stored list must not succeed"),
+            Err(err) => err.into_response(),
+        };
+
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
     }
 }

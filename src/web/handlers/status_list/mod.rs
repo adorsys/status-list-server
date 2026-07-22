@@ -43,21 +43,21 @@ fn validate_status_request_limits(
     Ok(())
 }
 
-fn ensure_serialized_list_size(
-    status_list: &crate::domain::StatusList,
-    max_serialized_list_size: usize,
-) -> Result<(), error::StatusListError> {
-    if status_list.lst.len() > max_serialized_list_size {
-        return Err(error::StatusListError::StatusTooLarge);
-    }
-    Ok(())
-}
-
 fn map_domain_error(error: crate::domain::DomainError) -> error::StatusListError {
     match error {
         crate::domain::DomainError::InvalidIndex => error::StatusListError::InvalidIndex,
         crate::domain::DomainError::InvalidStatusList(message) => {
             error::StatusListError::Generic(message)
+        }
+        // Corrupt persisted state, not a caller error: 500, never 400. Log the
+        // decode detail at error level *here* so the alert survives even a
+        // handler that routes corruption through this central mapping without
+        // its own arm — the 500 variant carries no message, so this is the last
+        // place the detail exists. Handlers with richer context (e.g. `list_id`)
+        // may still intercept `CorruptStoredList` before this mapping.
+        crate::domain::DomainError::CorruptStoredList(detail) => {
+            tracing::error!(%detail, "Corrupt stored status list");
+            error::StatusListError::InternalServerError
         }
         crate::domain::DomainError::InvalidPublicJwk(message) => {
             error::StatusListError::Generic(message)

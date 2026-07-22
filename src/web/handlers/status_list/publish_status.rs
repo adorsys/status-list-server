@@ -11,8 +11,7 @@ use axum::{
 use tracing;
 
 use super::{
-    ensure_serialized_list_size, error::StatusListError, map_domain_error, to_domain_entry,
-    validate_status_request_limits,
+    error::StatusListError, map_domain_error, to_domain_entry, validate_status_request_limits,
 };
 
 /// Create a new status list.
@@ -38,9 +37,6 @@ pub async fn publish_status(
         .into_iter()
         .map(to_domain_entry)
         .collect::<Vec<_>>();
-    let status_list_preview =
-        domain::StatusList::create(statuses.clone()).map_err(map_domain_error)?;
-    ensure_serialized_list_size(&status_list_preview, appstate.max_serialized_list_size)?;
 
     match appstate
         .status_lists
@@ -57,6 +53,7 @@ pub async fn publish_status(
     {
         Ok(()) => Ok(StatusCode::CREATED.into_response()),
         Err(UseCaseError::AlreadyExists) => Err(StatusListError::StatusListAlreadyExists.into()),
+        Err(UseCaseError::StatusListTooLarge) => Err(StatusListError::StatusTooLarge.into()),
         Err(UseCaseError::Domain(domain::DomainError::InvalidIndex)) => {
             Err(StatusListError::InvalidIndex.into())
         }
@@ -76,7 +73,7 @@ mod tests {
     use super::*;
     use crate::{
         models::{Status, StatusEntry, StatusList, StatusListRecord, status_lists},
-        test_utils::test_app_state,
+        test_utils::{test_app_state, test_app_state_with_max_serialized_list_size},
         web::handlers::status_list::test_support::create_status_list,
     };
     use axum::extract::State;
@@ -493,8 +490,7 @@ mod tests {
                 status: Status::INVALID,
             });
         }
-        let mut app_state = test_app_state(None).await;
-        app_state.max_serialized_list_size = 8;
+        let app_state = test_app_state_with_max_serialized_list_size(None, 8).await;
 
         let response = match publish_status(
             State(app_state),

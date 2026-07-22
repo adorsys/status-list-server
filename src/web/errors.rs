@@ -7,7 +7,6 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 
-use crate::database::error::RepositoryError;
 use crate::web::auth::errors::AuthenticationError;
 use crate::web::handlers::issue_credential::CredentialError;
 use crate::web::handlers::status_list::error::StatusListError;
@@ -89,27 +88,6 @@ impl From<CredentialError> for ApiError {
                 "internal_error",
                 "The server encountered an unexpected error.",
             ),
-        }
-    }
-}
-
-impl From<RepositoryError> for ApiError {
-    fn from(err: RepositoryError) -> Self {
-        tracing::error!(error = %err, "repository error");
-        let description = err.to_string();
-        let (status, error_code) = match &err {
-            RepositoryError::DuplicateEntry => {
-                (StatusCode::CONFLICT, Cow::Borrowed("duplicate_entry"))
-            }
-            _ => (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Cow::Borrowed("internal_error"),
-            ),
-        };
-        Self {
-            status,
-            error: error_code,
-            error_description: Some(description),
         }
     }
 }

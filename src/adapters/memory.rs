@@ -246,6 +246,23 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn publish_use_case_enforces_serialized_list_size_limit() {
+        // The size limit must live in the use case, not the handler: an inbound
+        // adapter reaching straight for `PublishStatusList` (bypassing the web
+        // layer) must still be unable to persist an over-limit list.
+        let repo = Arc::new(MemoryStatusLists::default());
+        let mut oversized = record();
+        oversized.status_list.lst = "serialized-list-well-over-the-limit".to_string();
+        let result = PublishStatusList::new(repo.clone())
+            .with_max_serialized_list_size(1)
+            .execute(oversized)
+            .await;
+        assert!(matches!(result, Err(UseCaseError::StatusListTooLarge)));
+        // Nothing was persisted: the guard rejects before insert.
+        assert!(repo.find("id").await.unwrap().is_none());
+    }
+
+    #[tokio::test]
     async fn update_statuses_rejects_wrong_issuer() {
         let repo = Arc::new(MemoryStatusLists::default());
         let cache = Arc::new(MemoryStatusListCache::default());

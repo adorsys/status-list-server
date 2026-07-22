@@ -101,14 +101,6 @@ pub trait StatusListService: Send + Sync {
         statuses: Vec<StatusEntry>,
     ) -> Result<(), UseCaseError>;
 
-    async fn update_statuses_with_max_serialized_list_size(
-        &self,
-        issuer: &Issuer,
-        list_id: &str,
-        statuses: Vec<StatusEntry>,
-        max_serialized_list_size: usize,
-    ) -> Result<(), UseCaseError>;
-
     async fn get_status_list(&self, list_id: &str) -> Result<StatusListRecord, UseCaseError>;
 
     async fn list_status_list_uris(&self) -> Result<Vec<String>, UseCaseError>;
@@ -180,14 +172,26 @@ impl<R: CredentialRepository + ?Sized> CredentialService for CredentialApplicati
 
 pub struct PublishStatusList<R: ?Sized> {
     repository: Arc<R>,
+    max_serialized_list_size: usize,
 }
 
 impl<R: StatusListRepository + ?Sized> PublishStatusList<R> {
     pub fn new(repository: Arc<R>) -> Self {
-        Self { repository }
+        Self {
+            repository,
+            max_serialized_list_size: usize::MAX,
+        }
+    }
+
+    pub fn with_max_serialized_list_size(mut self, max_serialized_list_size: usize) -> Self {
+        self.max_serialized_list_size = max_serialized_list_size;
+        self
     }
 
     pub async fn execute(&self, record: StatusListRecord) -> Result<(), UseCaseError> {
+        if record.status_list.lst.len() > self.max_serialized_list_size {
+            return Err(UseCaseError::StatusListTooLarge);
+        }
         if self.repository.find(&record.list_id).await?.is_some() {
             return Err(UseCaseError::AlreadyExists);
         }
@@ -254,6 +258,7 @@ pub struct PublishStatusListWithHistory<R: ?Sized, H: ?Sized> {
     repository: Arc<R>,
     history: Option<Arc<H>>,
     token_exp_secs: u64,
+    max_serialized_list_size: usize,
 }
 
 #[cfg(any(
@@ -270,6 +275,7 @@ impl<R: StatusListRepository + ?Sized, H: StatusListHistoryRepository + ?Sized>
             repository,
             history: Some(history),
             token_exp_secs,
+            max_serialized_list_size: usize::MAX,
         }
     }
 
@@ -278,15 +284,23 @@ impl<R: StatusListRepository + ?Sized, H: StatusListHistoryRepository + ?Sized>
             repository,
             history: None,
             token_exp_secs,
+            max_serialized_list_size: usize::MAX,
         }
     }
 
+    pub fn with_max_serialized_list_size(mut self, max_serialized_list_size: usize) -> Self {
+        self.max_serialized_list_size = max_serialized_list_size;
+        self
+    }
+
     pub async fn execute(&self, record: StatusListRecord) -> Result<(), UseCaseError> {
-        // Delegate the existence check and guarded insert to the single
-        // authoritative publish core, then record the snapshot on top. This is
-        // the only find→insert implementation; the service composes it rather
-        // than re-implementing it inline.
+        // Delegate the size-limit guard, existence check, and guarded insert to
+        // the single authoritative publish core, then record the snapshot on
+        // top. This is the only find→insert implementation; the service composes
+        // it rather than re-implementing it inline. The size limit is threaded
+        // into the core so it is enforced in exactly one place.
         PublishStatusList::new(self.repository.clone())
+            .with_max_serialized_list_size(self.max_serialized_list_size)
             .execute(record.clone())
             .await?;
 
@@ -387,6 +401,11 @@ impl<
         sub: String,
         statuses: Vec<StatusEntry>,
     ) -> Result<(), UseCaseError> {
+        // Delegate to the publish use case so the size limit lives in the
+        // use-case layer, not this facade: any inbound adapter reaching for the
+        // use case gets the invariant for free instead of having to remember it.
+        // The configured limit is the service's own — there is no per-call
+        // override, so a caller cannot publish past it.
         let publisher = match &self.history {
             Some(history) => PublishStatusListWithHistory::new(
                 self.repository.clone(),
@@ -398,7 +417,10 @@ impl<
                 self.token_exp_secs,
             ),
         };
-        publisher.execute_new(list_id, issuer, sub, statuses).await
+        publisher
+            .with_max_serialized_list_size(self.max_serialized_list_size)
+            .execute_new(list_id, issuer, sub, statuses)
+            .await
     }
 
     async fn update_statuses(
@@ -406,22 +428,6 @@ impl<
         issuer: &Issuer,
         list_id: &str,
         statuses: Vec<StatusEntry>,
-    ) -> Result<(), UseCaseError> {
-        self.update_statuses_with_max_serialized_list_size(
-            issuer,
-            list_id,
-            statuses,
-            self.max_serialized_list_size,
-        )
-        .await
-    }
-
-    async fn update_statuses_with_max_serialized_list_size(
-        &self,
-        issuer: &Issuer,
-        list_id: &str,
-        statuses: Vec<StatusEntry>,
-        max_serialized_list_size: usize,
     ) -> Result<(), UseCaseError> {
         let updater = match &self.history {
             Some(history) => UpdateStatusesWithHistory::new(
@@ -435,7 +441,7 @@ impl<
             ),
         };
         updater
-            .with_max_serialized_list_size(max_serialized_list_size)
+            .with_max_serialized_list_size(self.max_serialized_list_size)
             .execute(issuer, list_id, statuses, self.token_exp_secs)
             .await
     }
