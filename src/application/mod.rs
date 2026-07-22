@@ -651,3 +651,42 @@ impl<R: StatusListRepository + ?Sized, C: StatusListCache + ?Sized> GetStatusLis
         Ok(record.as_ref().clone())
     }
 }
+
+#[cfg(all(test, feature = "server"))]
+mod tests {
+    use super::*;
+    use crate::{
+        adapters::memory::{MemoryStatusListHistory, MemoryStatusLists},
+        test_utils::test_status_list_record,
+    };
+    use std::sync::Arc;
+
+    /// A snapshot's `iat` must mirror the row's `updated_at`, not the wall
+    /// clock — that is what keeps `Last-Modified` (served from `updated_at`)
+    /// and the §8.4 lookup key (`iat`) consistent, and what makes snapshot
+    /// ordering per list strict given `next_updated_at`.
+    #[tokio::test]
+    async fn test_snapshot_iat_mirrors_record_updated_at() {
+        let history = Arc::new(MemoryStatusListHistory::default());
+        let token_exp_secs = 900u64;
+        let publish = PublishStatusListWithHistory::new(
+            Arc::new(MemoryStatusLists::default()),
+            history.clone(),
+            token_exp_secs,
+        );
+
+        let mut record = test_status_list_record("issuer", "list-iat");
+        // A stamp the clock would never produce right now, in either direction.
+        record.updated_at = 4_102_444_800; // 2100-01-01
+
+        publish.execute(record.clone()).await.unwrap();
+
+        let snapshot = history
+            .find_valid_at("list-iat", record.updated_at)
+            .await
+            .unwrap()
+            .expect("snapshot was persisted");
+        assert_eq!(snapshot.iat, record.updated_at);
+        assert_eq!(snapshot.exp, record.updated_at + token_exp_secs as i64);
+    }
+}
