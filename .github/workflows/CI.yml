@@ -224,6 +224,9 @@ jobs:
       - name: Setup Helm
         uses: azure/setup-helm@v3
 
+      - name: Build Helm dependencies
+        run: helm dependency build helm/chart
+
       - name: Render Helm template
         run: |
           mkdir -p /tmp/rendered
