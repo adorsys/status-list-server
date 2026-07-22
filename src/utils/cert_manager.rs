@@ -263,7 +263,7 @@ impl CertManager {
         self
     }
 
-    /// Zero-initialise the certificate chain cache counters so they appear
+    /// Zero-initialize the certificate chain cache counters so they appear
     /// in Prometheus scrapes before first use.
     ///
     /// **Must** be called after the global metrics recorder has been installed.
@@ -272,7 +272,7 @@ impl CertManager {
         self.cert_chain_cache.init_counters();
     }
 
-    /// Zero-initialise renewal counters so they appear in Prometheus scrapes
+    /// Zero-initialize renewal counters so they appear in Prometheus scrapes
     /// before first use.
     ///
     /// **Must** be called after the global metrics recorder has been installed.
@@ -520,8 +520,9 @@ impl CertManager {
                 .should_provision_existing(self, &cert_data)
             {
                 match self.request_certificate().await {
-                    Ok(_) => {
+                    Ok(cert_data) => {
                         self.record_successful_renewal();
+                        self.update_time_to_expiry(&cert_data);
                         info!(
                             "Certificate provisioned successfully with {} strategy",
                             self.provisioning_strategy.name()
