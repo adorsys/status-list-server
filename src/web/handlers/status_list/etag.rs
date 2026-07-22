@@ -1,4 +1,4 @@
-use crate::{domain::StatusListSnapshot, models::StatusListRecord};
+use crate::domain::{StatusListRecord, StatusListSnapshot};
 use sha2::{Digest, Sha256};
 
 /// Computes a weak ETag from the status list's content identity.
@@ -20,12 +20,12 @@ use sha2::{Digest, Sha256};
 /// # Examples
 ///
 /// ```
-/// use status_list_server::models::{StatusList, StatusListRecord};
+/// use status_list_server::domain::{Issuer, StatusList, StatusListRecord};
 /// use status_list_server::web::handlers::status_list::etag::generate_etag;
 ///
 /// let record = StatusListRecord {
 ///     list_id: "test-list".to_string(),
-///     issuer: "https://issuer.example".to_string(),
+///     issuer: Issuer("https://issuer.example".to_string()),
 ///     status_list: StatusList {
 ///         bits: 1,
 ///         lst: "eNrbuRgAAhcBXQ".to_string(),
@@ -44,7 +44,7 @@ pub fn generate_etag(record: &StatusListRecord) -> String {
     // Hash each component that defines the content identity
     hasher.update(record.status_list.bits.to_string().as_bytes());
     hasher.update(record.status_list.lst.as_bytes());
-    hasher.update(record.issuer.as_bytes());
+    hasher.update(record.issuer.0.as_bytes());
     hasher.update(record.sub.as_bytes());
 
     let hash = hasher.finalize();
@@ -100,12 +100,12 @@ pub fn generate_historical_etag(snapshot: &StatusListSnapshot) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::StatusList;
+    use crate::domain::{Issuer, StatusList};
 
     fn create_test_record() -> StatusListRecord {
         StatusListRecord {
             list_id: "test-list".to_string(),
-            issuer: "https://issuer.example".to_string(),
+            issuer: Issuer("https://issuer.example".to_string()),
             status_list: StatusList {
                 bits: 1,
                 lst: "eNrbuRgAAhcBXQ".to_string(),
@@ -182,7 +182,7 @@ mod tests {
         let original_etag = generate_etag(&record);
 
         // Change issuer field
-        record.issuer = "https://different-issuer.example".to_string();
+        record.issuer = Issuer("https://different-issuer.example".to_string());
         let new_etag = generate_etag(&record);
 
         assert_ne!(
@@ -238,7 +238,7 @@ mod tests {
     fn test_generate_etag_empty_strings() {
         let record = StatusListRecord {
             list_id: "test".to_string(),
-            issuer: "".to_string(),
+            issuer: Issuer("".to_string()),
             status_list: StatusList {
                 bits: 1,
                 lst: "".to_string(),
@@ -258,7 +258,9 @@ mod tests {
     fn test_generate_etag_special_characters() {
         let record = StatusListRecord {
             list_id: "test".to_string(),
-            issuer: "https://issuer.example/with/special?chars=value&more=stuff".to_string(),
+            issuer: Issuer(
+                "https://issuer.example/with/special?chars=value&more=stuff".to_string(),
+            ),
             status_list: StatusList {
                 bits: 8,
                 lst: "eNrbuRgAAhcBXQ==".to_string(),

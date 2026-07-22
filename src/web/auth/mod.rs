@@ -11,7 +11,7 @@ use hyper::header;
 use jsonwebtoken::{DecodingKey, Validation};
 use serde::{Deserialize, Serialize};
 
-use crate::utils::state::AppState;
+use crate::state::AppState;
 
 #[derive(Debug, Serialize, Deserialize)]
 struct Claims {
@@ -71,7 +71,9 @@ pub async fn auth(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{models::credentials, test_utils::test_app_state, utils::state::AppState};
+    use crate::{
+        adapters::sea_orm::models::credentials, state::AppState, test_utils::test_app_state,
+    };
     use axum::{
         Extension, Router,
         body::{Body, to_bytes},

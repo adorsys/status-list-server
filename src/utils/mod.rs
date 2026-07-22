@@ -8,5 +8,3 @@ pub mod cert_manager;
 pub(crate) mod keygen;
 #[cfg(feature = "metrics-prometheus")]
 pub(crate) mod metrics;
-#[cfg(feature = "server")]
-pub mod state;

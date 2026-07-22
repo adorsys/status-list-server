@@ -5,12 +5,13 @@ use axum::{
 };
 use hyper::StatusCode;
 
-use crate::{application::UseCaseError, domain, models::StatusesRequest, utils::state::AppState};
+use crate::{application::UseCaseError, domain, state::AppState};
 
 use crate::web::errors::ApiError;
 
 use super::{
-    error::StatusListError, map_domain_error, to_domain_entry, validate_status_request_limits,
+    StatusesRequest, error::StatusListError, map_domain_error, to_domain_entry,
+    validate_status_request_limits,
 };
 
 /// Update status entries in an existing status list.
@@ -100,12 +101,12 @@ mod test {
     use hyper::StatusCode;
     use sea_orm::{DatabaseBackend, MockDatabase, MockExecResult};
 
+    // models types below seed the MockDatabase (persistence side); the request
+    // wire types come from this handler module.
     use crate::{
-        models::{
-            Status, StatusEntry, StatusList, StatusListRecord, StatusesRequest, status_lists,
-        },
+        adapters::sea_orm::models::{StatusList, StatusListRecord, status_lists},
         test_utils::{test_app_state, test_app_state_with_max_serialized_list_size},
-        web::handlers::status_list::test_support::create_status_list,
+        web::handlers::status_list::{Status, StatusEntry, test_support::create_status_list},
     };
 
     #[tokio::test]

@@ -1,14 +1,33 @@
-//! SeaORM implementations of the repository ports.
+//! SeaORM implementations of the repository ports, together with the
+//! driver-facing internals they wrap: the generic store, the repository
+//! error type, and the schema migrations.
+pub(crate) mod error;
+#[cfg(feature = "server")]
+pub(crate) mod migrations;
+// Persistence models are private to the adapters so the compiler rejects any
+// handler or use case that tries to import them. Unit tests are the one
+// exception: they seed MockDatabase rows with entity models, so test builds
+// widen the visibility to the crate.
+#[cfg(not(test))]
+pub(super) mod models;
+#[cfg(test)]
+pub(crate) mod models;
+pub(crate) mod store;
+
+#[cfg(feature = "server")]
+pub(crate) use migrations::Migrator;
+
 use crate::{
-    database::{error::RepositoryError, queries::SeaOrmStore},
-    domain, models,
+    domain,
     ports::{
         CredentialRepository, InvalidDataKind, PortError, PortOperation,
         StatusListHistoryRepository, StatusListRepository,
     },
 };
 use async_trait::async_trait;
+use error::RepositoryError;
 use std::sync::Arc;
+use store::SeaOrmStore;
 
 /// Maps an insert failure to its port-level meaning: a duplicate key is a
 /// [`PortError::Conflict`] (a concurrent writer won the check-then-insert
