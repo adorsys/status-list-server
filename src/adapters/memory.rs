@@ -53,14 +53,18 @@ impl StatusListRepository for MemoryStatusLists {
         values.insert(record.list_id.clone(), record);
         Ok(true)
     }
+    /// Mirrors the SQL adapter's `GROUP BY sub ORDER BY sub`: a `BTreeSet`
+    /// dedups and sorts, so this test double does not silently diverge from
+    /// production semantics the way a raw `values()` collect would.
     async fn list_uris(&self) -> Result<Vec<String>, PortError> {
-        Ok(self
+        let uris: std::collections::BTreeSet<String> = self
             .values
             .read()
             .await
             .values()
             .map(|r| r.sub.clone())
-            .collect())
+            .collect();
+        Ok(uris.into_iter().collect())
     }
 }
 #[derive(Clone, Default)]
@@ -419,6 +423,49 @@ mod tests {
         assert!(
             second > first,
             "a same-second update must still advance the stamp"
+        );
+    }
+
+    /// Pins the read-through cache's consistency model (C2). `GetStatusListToken`
+    /// serves whatever the cache holds without revalidating against the
+    /// repository, so a value cached before a repository change stays visible
+    /// until it is invalidated (or its TTL lapses). This is the deliberately
+    /// bounded staleness window — documented and pinned here so nobody later
+    /// assumes the getter provides strong read-after-write consistency. The fix
+    /// (if one is ever wanted) is version-tagged puts; that is out of scope for a
+    /// bounded, inherited window.
+    #[tokio::test]
+    async fn get_status_list_serves_stale_cache_until_invalidated() {
+        let repo = Arc::new(MemoryStatusLists::default());
+        let cache = Arc::new(MemoryStatusListCache::default());
+        repo.insert(record()).await.unwrap();
+
+        // A reader populates the cache with v1.
+        let getter = GetStatusListToken::new(repo.clone(), cache.clone());
+        assert_eq!(
+            getter.execute("id").await.unwrap().sub,
+            "https://example/id"
+        );
+
+        // The repository advances to v2 out of band, without touching the cache
+        // (models a writer whose invalidation has not landed, or another process).
+        let mut v2 = record();
+        v2.updated_at += 1;
+        v2.sub = "https://example/v2".into();
+        repo.insert(v2).await.unwrap();
+
+        // The getter still serves the cached v1: read-through does not revalidate.
+        assert_eq!(
+            getter.execute("id").await.unwrap().sub,
+            "https://example/id"
+        );
+
+        // Only invalidation (what UpdateStatuses does after a write) closes the
+        // window; the next read then repopulates from the repository.
+        cache.invalidate("id").await.unwrap();
+        assert_eq!(
+            getter.execute("id").await.unwrap().sub,
+            "https://example/v2"
         );
     }
 }

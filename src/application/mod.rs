@@ -227,7 +227,11 @@ async fn persist_snapshot<H: StatusListHistoryRepository + ?Sized>(
     record: &StatusListRecord,
     token_exp_secs: u64,
 ) -> Result<(), UseCaseError> {
-    let iat = time::OffsetDateTime::now_utc().unix_timestamp();
+    // The snapshot becomes valid at the record's modification time. Reusing
+    // `record.updated_at` — rather than reading the clock a second time here —
+    // threads a single `now` through the write and its snapshot, so their
+    // timestamps cannot drift apart (C4).
+    let iat = record.updated_at;
     let snapshot = StatusListSnapshot {
         snapshot_id: uuid::Uuid::new_v4().to_string(),
         list_id: record.list_id.clone(),
@@ -248,7 +252,7 @@ async fn persist_snapshot<H: StatusListHistoryRepository + ?Sized>(
 ))]
 pub struct PublishStatusListWithHistory<R: ?Sized, H: ?Sized> {
     repository: Arc<R>,
-    history: Arc<H>,
+    history: Option<Arc<H>>,
     token_exp_secs: u64,
 }
 
@@ -264,21 +268,31 @@ impl<R: StatusListRepository + ?Sized, H: StatusListHistoryRepository + ?Sized>
     pub fn new(repository: Arc<R>, history: Arc<H>, token_exp_secs: u64) -> Self {
         Self {
             repository,
-            history,
+            history: Some(history),
+            token_exp_secs,
+        }
+    }
+
+    pub fn without_history(repository: Arc<R>, token_exp_secs: u64) -> Self {
+        Self {
+            repository,
+            history: None,
             token_exp_secs,
         }
     }
 
     pub async fn execute(&self, record: StatusListRecord) -> Result<(), UseCaseError> {
-        if self.repository.find(&record.list_id).await?.is_some() {
-            return Err(UseCaseError::AlreadyExists);
-        }
-        self.repository
-            .insert(record.clone())
-            .await
-            .map_err(map_insert_conflict)?;
+        // Delegate the existence check and guarded insert to the single
+        // authoritative publish core, then record the snapshot on top. This is
+        // the only find→insert implementation; the service composes it rather
+        // than re-implementing it inline.
+        PublishStatusList::new(self.repository.clone())
+            .execute(record.clone())
+            .await?;
 
-        persist_snapshot(self.history.as_ref(), &record, self.token_exp_secs).await?;
+        if let Some(history) = &self.history {
+            persist_snapshot(history.as_ref(), &record, self.token_exp_secs).await?;
+        }
 
         Ok(())
     }
@@ -373,24 +387,18 @@ impl<
         sub: String,
         statuses: Vec<StatusEntry>,
     ) -> Result<(), UseCaseError> {
-        let record = StatusListRecord {
-            list_id,
-            issuer,
-            status_list: StatusList::create(statuses)?,
-            sub,
-            updated_at: current_unix_timestamp(),
+        let publisher = match &self.history {
+            Some(history) => PublishStatusListWithHistory::new(
+                self.repository.clone(),
+                history.clone(),
+                self.token_exp_secs,
+            ),
+            None => PublishStatusListWithHistory::without_history(
+                self.repository.clone(),
+                self.token_exp_secs,
+            ),
         };
-        if self.repository.find(&record.list_id).await?.is_some() {
-            return Err(UseCaseError::AlreadyExists);
-        }
-        self.repository
-            .insert(record.clone())
-            .await
-            .map_err(map_insert_conflict)?;
-        if let Some(history) = &self.history {
-            persist_snapshot(history.as_ref(), &record, self.token_exp_secs).await?;
-        }
-        Ok(())
+        publisher.execute_new(list_id, issuer, sub, statuses).await
     }
 
     async fn update_statuses(

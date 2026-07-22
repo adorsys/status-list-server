@@ -205,7 +205,11 @@ async fn handle_historical_request(
     let etag = generate_historical_etag(&snapshot);
     let last_modified = format_http_date(snapshot.iat);
     let validity_duration = (snapshot.exp - snapshot.iat) as u64;
-    let cache_control = format!("max-age={}, immutable", validity_duration.max(86400)); // At least 1 day
+    // A historical snapshot is immutable, but its cache lifetime must not
+    // outlive the token's own validity window: an 86400 floor would let a
+    // client cache a sub-day token past its `exp`, so max-age tracks the
+    // window exactly.
+    let cache_control = format!("max-age={validity_duration}, immutable");
 
     // Build the status record from the snapshot
     let status_record = StatusListRecord {

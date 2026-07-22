@@ -56,9 +56,12 @@ pub enum Status {
     Valid,
     Invalid,
     Suspended,
-    /// Specification-defined custom values start at 256. Values 3..=255 are
-    /// intentionally rejected because the status-list bit-width table reserves
-    /// them for future standard statuses and compact encodings.
+    /// Application-specific values start at 256. Values 3..=255 are rejected by
+    /// deliberate *server policy* (not a spec requirement): it keeps the
+    /// standard 1-/2-bit lists limited to the three standard statuses and
+    /// sidesteps ambiguity with the compact bit-width table. This threshold is
+    /// pinned by test and treated as spec-evolution surface, not a knob to
+    /// loosen as part of unrelated cleanup.
     ApplicationSpecific(u32),
 }
 
@@ -99,9 +102,10 @@ pub struct StatusListSnapshot {
 
 /// Convert the status enum to its packed integer representation.
 ///
-/// `ApplicationSpecific` is valid only for values greater than or equal to 256;
-/// lower non-standard values are reserved by the status-list encoding table and
-/// must not enter newly created or updated lists.
+/// `ApplicationSpecific` is accepted only for values `>= 256`; lower
+/// non-standard values are rejected by server policy (see [`Status`]), not by
+/// any spec-level reservation, and must not enter newly created or updated
+/// lists.
 fn status_value(status: &Status) -> Result<u32, DomainError> {
     match status {
         Status::Valid => Ok(0),
@@ -258,6 +262,19 @@ fn decode_compressed(encoded: &str) -> Result<Vec<u8>, DomainError> {
     Ok(decoded)
 }
 
+/// Decode every `bits`-wide slot the byte buffer can hold.
+///
+/// The count is `array.len() * 8 / bits` — *every* slot in the buffer, not just
+/// the slots that were explicitly written. A non-byte-aligned list therefore
+/// decodes trailing padding as extra `Valid` (0) entries. This is the same
+/// floor-division consequence as the bit-packing in [`apply_updates`], seen
+/// from the read side, and it has one visible effect: when [`StatusList::update`]
+/// widens a list it re-materializes those padding slots as explicit entries, so
+/// a widened list's logical length rounds up to the old byte boundary. Those
+/// slots decode as `Valid` either way, so it is behavior-preserving from the
+/// retired `lst_gen` encoder, not a correctness change — but it does grow a
+/// sparse list on widening. Kept intentionally; see the widening branch and the
+/// `update_widening_pads_to_byte_boundary` test.
 fn decode_status_array(array: &[u8], bits: usize) -> Result<Vec<Status>, DomainError> {
     let mut statuses = Vec::new();
     for i in 0..(array.len() * 8 / bits) {
@@ -543,6 +560,47 @@ mod tests {
             vec![0b0010_0001, 0b0001_0101],
             "existing statuses must survive the bit-width re-encode"
         );
+    }
+
+    /// Pins the inherited widening behavior documented on `decode_status_array`:
+    /// widening a non-byte-aligned list re-materializes the byte's unwritten
+    /// slots as explicit `Valid` entries, so the logical length rounds up to the
+    /// old byte boundary. Three real 1-bit entries occupy one byte (eight slots),
+    /// so widening to 2 bits yields eight entries, not four. Behavior-preserving
+    /// from the retired `lst_gen`; pinned so any future change to the decode loop
+    /// is a conscious one.
+    #[test]
+    fn update_widening_pads_to_byte_boundary() {
+        let original = StatusList::create(vec![
+            entry(0, Status::Invalid),
+            entry(1, Status::Valid),
+            entry(2, Status::Invalid),
+        ])
+        .unwrap();
+        assert_eq!(original.bits, 1);
+        assert_eq!(
+            decompress(&original.lst).len(),
+            1,
+            "three 1-bit entries -> one byte"
+        );
+
+        // Introduce a Suspended (value 2) at index 3, forcing a widen to 2 bits.
+        let widened = original.update(vec![entry(3, Status::Suspended)]).unwrap();
+        assert_eq!(widened.bits, 2);
+
+        let statuses = decode_status_array(&decompress(&widened.lst), 2).unwrap();
+        assert_eq!(
+            statuses.len(),
+            8,
+            "logical length rounds up to the old byte boundary on widening"
+        );
+        assert_eq!(statuses[0], Status::Invalid);
+        assert_eq!(statuses[1], Status::Valid);
+        assert_eq!(statuses[2], Status::Invalid);
+        assert_eq!(statuses[3], Status::Suspended);
+        // The five originally-unwritten slots are re-materialized as Valid.
+        assert_eq!(statuses[4], Status::Valid);
+        assert_eq!(statuses[7], Status::Valid);
     }
 
     #[test]

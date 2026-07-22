@@ -180,6 +180,14 @@ impl SeaOrmStore<StatusListHistoryRecord> {
     /// Finds the snapshot whose half-open validity interval contains `time`.
     /// Using `iat <= time < exp` ensures the token returned to a client passes
     /// the draft-21 §8.4 `iat`/`exp` validation rule.
+    ///
+    /// Intervals intentionally overlap: each update writes a fresh snapshot with
+    /// `exp = iat + token_exp_secs` while the superseded snapshot keeps its
+    /// original (later) `exp`, so both can match a `time` in the overlap. That is
+    /// not an inconsistency — `ORDER BY iat DESC LIMIT 1` deterministically
+    /// returns the newest snapshot in effect at `time`, which is the correct
+    /// answer for "what was the status then". The memory adapter mirrors this via
+    /// `max_by_key(iat)`.
     pub async fn find_valid_at(
         &self,
         list_id: &str,
