@@ -14,7 +14,7 @@ concurrency:
 permissions:
   actions: read
   contents: read
-  security-events: write  # Required for uploading SARIF and querying API
+  security-events: write # Required for uploading SARIF and querying API
 
 jobs:
   analyze:
