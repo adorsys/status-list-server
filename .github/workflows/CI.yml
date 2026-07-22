@@ -213,6 +213,22 @@ jobs:
         with:
           globs: "**/*.md"
 
+  trivy-config:
+    name: Trivy Config Scan (Helm Chart)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Fetch Repository
+        uses: actions/checkout@v7
+
+      - name: Run Trivy config scan on Helm chart
+        uses: aquasecurity/trivy-action@0.30.0
+        with:
+          scan-type: config
+          scan-ref: helm/chart
+          severity: HIGH,CRITICAL
+          exit-code: 1
+
   yaml-lint:
     name: YAML Lint and Format Check
     runs-on: ubuntu-latest

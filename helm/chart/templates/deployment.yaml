@@ -20,14 +20,39 @@ spec:
       initContainers:
         {{- tpl (toYaml .) $ | nindent 8 }}
       {{- end }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        runAsGroup: 65534
+        fsGroup: 65534
+        seccompProfile:
+          type: RuntimeDefault
       containers:
         - name: {{ include "status-list-server-chart.name" . }}
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
           image: {{ .Values.statuslist.image.repository }}:{{ .Values.statuslist.image.tag }}
           imagePullPolicy: {{ .Values.statuslist.image.pullPolicy }}
           ports:
             - name: http
               containerPort: {{ .Values.statuslist.service.targetPort | int }}
               protocol: TCP
+          {{- with .Values.statuslist.livenessProbe }}
+          livenessProbe:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.statuslist.readinessProbe }}
+          readinessProbe:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.statuslist.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
           env:
             {{- $env := dict }}
             {{- range $name, $value := .Values.statuslist.env }}
@@ -67,7 +92,7 @@ spec:
           {{- if .Values.secretStore.enabled }}
           volumeMounts:
             - name: aws-credentials-volume
-              mountPath: /root/.aws
+              mountPath: /home/nobody/.aws
               readOnly: true
           {{- end }}
       {{- if .Values.secretStore.enabled }}
