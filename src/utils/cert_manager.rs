@@ -38,6 +38,51 @@ use crate::{
     utils::{cache::CertChainCache, keygen::Keypair},
 };
 
+// Renewal metrics constants
+const RENEWAL_ATTEMPTS_METRIC: &str = "cert_renewal_attempts_total";
+const RENEWAL_SUCCESSES_METRIC: &str = "cert_renewal_successes_total";
+const RENEWAL_FAILURES_METRIC: &str = "cert_renewal_failures_total";
+const TIME_TO_EXPIRY_METRIC: &str = "cert_time_to_expiry_seconds";
+const LAST_SUCCESSFUL_RENEWAL_METRIC: &str = "cert_last_successful_renewal_timestamp";
+
+/// Describes renewal metrics so they appear in Prometheus immediately.
+/// This is safe to call before the global metrics recorder is installed.
+pub fn describe_renewal_metrics() {
+    metrics::describe_counter!(
+        RENEWAL_ATTEMPTS_METRIC,
+        metrics::Unit::Count,
+        "Total number of certificate renewal attempts"
+    );
+    metrics::describe_counter!(
+        RENEWAL_SUCCESSES_METRIC,
+        metrics::Unit::Count,
+        "Total number of successful certificate renewals"
+    );
+    metrics::describe_counter!(
+        RENEWAL_FAILURES_METRIC,
+        metrics::Unit::Count,
+        "Total number of failed certificate renewals"
+    );
+    metrics::describe_gauge!(
+        TIME_TO_EXPIRY_METRIC,
+        metrics::Unit::Seconds,
+        "Time remaining until the current certificate expires"
+    );
+    metrics::describe_gauge!(
+        LAST_SUCCESSFUL_RENEWAL_METRIC,
+        metrics::Unit::Seconds,
+        "Unix timestamp of the last successful certificate renewal"
+    );
+}
+
+/// Zero-initialize renewal counters so they appear in Prometheus scrapes
+/// before first use. Must be called after the global metrics recorder is installed.
+pub fn init_renewal_counters() {
+    metrics::counter!(RENEWAL_ATTEMPTS_METRIC).increment(0);
+    metrics::counter!(RENEWAL_SUCCESSES_METRIC).increment(0);
+    metrics::counter!(RENEWAL_FAILURES_METRIC).increment(0);
+}
+
 /// Default cache TTL when no override is supplied.
 ///
 /// Exported as a single source of truth: `Config::load` references this
@@ -225,6 +270,33 @@ impl CertManager {
     /// If metrics are disabled this is a harmless no-op.
     pub fn init_cert_chain_cache_counters(&self) {
         self.cert_chain_cache.init_counters();
+    }
+
+    /// Zero-initialise renewal counters so they appear in Prometheus scrapes
+    /// before first use.
+    ///
+    /// **Must** be called after the global metrics recorder has been installed.
+    /// If metrics are disabled this is a harmless no-op.
+    pub fn init_renewal_counters(&self) {
+        init_renewal_counters();
+    }
+
+    /// Update the time-to-expiry gauge with the current certificate's expiry time.
+    fn update_time_to_expiry(&self, cert_data: &CertificateData) {
+        let now = now_unix_timestamp();
+        let time_to_expiry = cert_data.expires_at.saturating_sub(now);
+        metrics::gauge!(TIME_TO_EXPIRY_METRIC).set(time_to_expiry as f64);
+    }
+
+    /// Record a successful renewal by updating counters and gauges.
+    fn record_successful_renewal(&self) {
+        metrics::counter!(RENEWAL_SUCCESSES_METRIC).increment(1);
+        metrics::gauge!(LAST_SUCCESSFUL_RENEWAL_METRIC).set(now_unix_timestamp() as f64);
+    }
+
+    /// Record a failed renewal attempt.
+    fn record_failed_renewal(&self) {
+        metrics::counter!(RENEWAL_FAILURES_METRIC).increment(1);
     }
 
     /// Provision a certificate with the configured strategy.
@@ -436,26 +508,49 @@ impl CertManager {
         fields(domains = ?self.domains)
     )]
     pub async fn renew_cert_if_needed(&self) -> Result<(), CertError> {
+        // Record renewal attempt
+        metrics::counter!(RENEWAL_ATTEMPTS_METRIC).increment(1);
+
         if let Some(cert_data) = self.certificate().await? {
+            // Update time-to-expiry gauge regardless of whether we renew
+            self.update_time_to_expiry(&cert_data);
+
             if self
                 .provisioning_strategy
                 .should_provision_existing(self, &cert_data)
             {
-                self.request_certificate().await?;
-                info!(
-                    "Certificate provisioned successfully with {} strategy",
-                    self.provisioning_strategy.name()
-                );
-                return Ok(());
+                match self.request_certificate().await {
+                    Ok(_) => {
+                        self.record_successful_renewal();
+                        info!(
+                            "Certificate provisioned successfully with {} strategy",
+                            self.provisioning_strategy.name()
+                        );
+                        return Ok(());
+                    }
+                    Err(e) => {
+                        self.record_failed_renewal();
+                        return Err(e);
+                    }
+                }
             }
         } else {
             warn!(
                 "No certificate found for this domain, provisioning with {} strategy...",
                 self.provisioning_strategy.name()
             );
-            self.request_certificate().await?;
-            info!("New certificate provisioned successfully");
-            return Ok(());
+            match self.request_certificate().await {
+                Ok(cert_data) => {
+                    self.record_successful_renewal();
+                    self.update_time_to_expiry(&cert_data);
+                    info!("New certificate provisioned successfully");
+                    return Ok(());
+                }
+                Err(e) => {
+                    self.record_failed_renewal();
+                    return Err(e);
+                }
+            }
         }
         info!("Certificate is still valid. No need to provision");
         Ok(())
