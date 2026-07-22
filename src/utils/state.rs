@@ -689,6 +689,12 @@ mod tests {
                 max_statuses_per_request: 5_000,
                 max_serialized_list_size: 1_048_576,
             },
+            telemetry: crate::config::TelemetryConfig {
+                environment: "development".to_string(),
+                otlp_endpoint: "http://localhost:4317".to_string(),
+                sampler_ratio: 1.0,
+                enabled: false,
+            },
         }
     }
 

@@ -6,3 +6,4 @@ pub(crate) mod keygen;
 pub(crate) mod lst_gen;
 pub(crate) mod metrics;
 pub mod state;
+pub mod telemetry;

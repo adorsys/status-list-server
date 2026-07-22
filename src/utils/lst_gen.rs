@@ -1,6 +1,7 @@
 use base64url::{decode, encode};
 use flate2::{Compression, read::ZlibDecoder, write::ZlibEncoder};
 use std::io::{Read, Write};
+use tracing::instrument;
 
 use crate::models::{Status, StatusEntry, StatusList};
 
@@ -197,6 +198,7 @@ fn apply_and_encode(
     encode_compressed(status_array, limits)
 }
 
+#[instrument(skip(status_updates, limits), fields(status_count = status_updates.len()))]
 pub(crate) fn create_status_list(
     status_updates: Vec<StatusEntry>,
     limits: &AbuseLimits,
@@ -303,6 +305,7 @@ fn reencode_status_array(
     create_status_list(full_statuses, limits)
 }
 
+#[instrument(skip(existing_lst, status_updates, limits), fields(status_count = status_updates.len()))]
 pub(crate) fn update_status_list(
     existing_lst: String,
     status_updates: Vec<StatusEntry>,

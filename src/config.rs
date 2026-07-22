@@ -80,6 +80,7 @@ pub struct Config {
     pub status_list: StatusListConfig,
     pub rate_limit: RateLimitConfig,
     pub limits: LimitsConfig,
+    pub telemetry: TelemetryConfig,
 }
 
 /// Rate-limit configuration with strict (writes) and permissive (reads) tiers.
@@ -98,6 +99,19 @@ pub struct LimitsConfig {
     pub max_status_index: i32,
     pub max_statuses_per_request: usize,
     pub max_serialized_list_size: usize,
+}
+
+/// Telemetry configuration controlling tracing and metrics export.
+#[derive(Debug, Clone, Deserialize)]
+pub struct TelemetryConfig {
+    /// Environment mode: `"development"` (stdout) or `"production"` (OTLP export).
+    pub environment: String,
+    /// OTLP gRPC endpoint for trace export (prod mode only).
+    pub otlp_endpoint: String,
+    /// Trace sampling ratio from 0.0 (none) to 1.0 (all).
+    pub sampler_ratio: f64,
+    /// Whether the OpenTelemetry tracing pipeline is enabled.
+    pub enabled: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -632,6 +646,10 @@ impl Config {
             .set_default("limits.max_statuses_per_request", 5_000)?
             .set_default("limits.max_serialized_list_size", 1_048_576)? // 1 MiB
             .set_default("status_list.history_retention_secs", 7776000)? // 90 days
+            .set_default("telemetry.environment", "development")?
+            .set_default("telemetry.otlp_endpoint", "http://localhost:4317")?
+            .set_default("telemetry.sampler_ratio", 1.0)?
+            .set_default("telemetry.enabled", false)?
             // Override config values via environment variables
             // The environment variables should be prefixed with 'APP_' and use '__' as a separator
             // Example: APP_REDIS__REQUIRE_CLIENT_AUTH=false

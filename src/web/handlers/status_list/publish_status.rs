@@ -19,6 +19,7 @@ use tracing;
 use super::error::StatusListError;
 
 /// Create a new status list.
+#[tracing::instrument(skip(appstate, payload), fields(list_id = %list_id, issuer = %issuer))]
 pub async fn publish_status(
     State(appstate): State<AppState>,
     Extension(issuer): Extension<String>,
