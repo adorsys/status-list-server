@@ -225,7 +225,9 @@ jobs:
         uses: azure/setup-helm@v3
 
       - name: Build Helm dependencies
-        run: helm dependency build helm/chart
+        run: |
+          helm repo add dandydeveloper https://dandydeveloper.github.io/charts
+          helm dependency build helm/chart
 
       - name: Render Helm template
         run: |
