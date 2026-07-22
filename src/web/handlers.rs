@@ -1,8 +1,8 @@
-mod issue_credential;
+pub mod issue_credential;
 pub mod status_list;
 
-pub use issue_credential::credential_handler;
+pub use issue_credential::{CredentialError, credential_handler};
 pub use status_list::{
-    aggregation::get_aggregation, get_status_list::get_status_list, publish_status::publish_status,
-    update_status::update_status,
+    aggregation::get_aggregation, error::StatusListError, get_status_list::get_status_list,
+    publish_status::publish_status, update_status::update_status,
 };

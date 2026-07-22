@@ -26,8 +26,19 @@ RUN --mount=type=bind,source=src,target=src \
     cargo build --locked --release --target=${RUST_TARGET}; \
     mv target/${RUST_TARGET}/release/${APP_NAME} .
 
-FROM gcr.io/distroless/static-debian12 AS runtime
+# Minimal scratch-based runtime image
+FROM scratch AS runtime
 ARG APP_NAME
-COPY --from=builder --chown=nonroot:nonroot /app/${APP_NAME} /app/${APP_NAME}
+
+# CA certificates for TLS connections
+COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
+
+# Non-root user identity (UID 65534 = nobody)
+COPY --from=builder /etc/passwd /etc/passwd
+COPY --from=builder /etc/group /etc/group
+
+COPY --from=builder --chown=65534:65534 /app/${APP_NAME} /app/${APP_NAME}
+
+USER 65534
 EXPOSE 8000
 ENTRYPOINT ["/app/status-list-server"]

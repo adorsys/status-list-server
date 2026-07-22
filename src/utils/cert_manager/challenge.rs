@@ -2,8 +2,9 @@ mod dns01;
 mod http01;
 
 pub use dns01::{
-    AcmeDnsProvider, AwsRoute53DnsProvider, AzureDnsProvider, CloudflareDnsProvider, Dns01Handler,
-    DnsProvider, GoogleCloudDnsProvider, PebbleDnsProvider, ServicePrincipal,
+    AcmeDnsCredentials, AcmeDnsProvider, AwsRoute53DnsProvider, AzureDnsProvider,
+    CloudflareDnsProvider, Dns01Handler, DnsProvider, GoogleCloudDnsProvider, PebbleDnsProvider,
+    ServicePrincipal,
 };
 pub use http01::Http01Handler;
 

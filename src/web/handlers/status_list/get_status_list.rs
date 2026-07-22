@@ -1,7 +1,8 @@
 use std::{fmt::Debug, io::Write as _, sync::Arc};
 
 use axum::{
-    extract::{Path, State},
+    extract::rejection::QueryRejection,
+    extract::{Path, Query, State},
     http::{HeaderMap, HeaderValue, StatusCode, header},
     response::{IntoResponse, Response},
 };
@@ -19,6 +20,7 @@ use time::OffsetDateTime;
 use crate::{
     models::{StatusListClaims, StatusListRecord},
     utils::{cache::CertificateChain, keygen::Keypair, state::AppState},
+    web::errors::ApiError,
 };
 
 use super::{
@@ -28,14 +30,22 @@ use super::{
         ISSUED_AT, STATUS_LIST, STATUS_LISTS_CWT_TYPE_VALUE, STATUS_LISTS_HEADER_JWT, SUBJECT, TTL,
     },
     error::StatusListError,
-    etag::generate_etag,
+    etag::{generate_etag, generate_historical_etag},
 };
 
 pub async fn get_status_list(
     State(state): State<AppState>,
     Path(list_id): Path<String>,
+    query_result: Result<Query<StatusListQuery>, QueryRejection>,
     headers: HeaderMap,
-) -> Result<impl IntoResponse + Debug + use<>, StatusListError> {
+) -> Result<impl IntoResponse + Debug + use<>, ApiError> {
+    let query = match query_result {
+        Ok(Query(q)) => q,
+        Err(e) => {
+            tracing::warn!("Failed to parse query parameters: {e}");
+            return Err(StatusListError::InvalidHistoricalTime.into());
+        }
+    };
     let accept = headers.get(header::ACCEPT).and_then(|h| h.to_str().ok());
     let client_accepts_gzip = client_accepts_gzip(&headers);
 
@@ -48,8 +58,20 @@ pub async fn get_status_list(
         {
             accept.to_string()
         }
-        Some(_) => return Err(StatusListError::InvalidAcceptHeader),
+        Some(_) => return Err(StatusListError::InvalidAcceptHeader.into()),
     };
+
+    // Handle historical query (draft-21 §8.4) separately from conditional requests
+    if let Some(time) = query.time {
+        return handle_historical_request(
+            &list_id,
+            time,
+            &accept_type,
+            &state,
+            client_accepts_gzip,
+        )
+        .await;
+    }
 
     // Extract conditional request headers
     let if_none_match = headers
@@ -95,8 +117,14 @@ pub async fn get_status_list(
         }
         ConditionalResponse::Modified => {
             // Build full token response
-            let (token_bytes, encoding) =
-                build_token(&accept_type, &status_record, &state, client_accepts_gzip).await?;
+            let (token_bytes, encoding) = build_token(
+                &accept_type,
+                &status_record,
+                None, // Use default validity window (now + token_exp_secs)
+                &state,
+                client_accepts_gzip,
+            )
+            .await?;
 
             let mut response = Response::new(token_bytes.into());
             *response.status_mut() = StatusCode::OK;
@@ -127,11 +155,110 @@ pub async fn get_status_list(
     }
 }
 
+/// Handles historical resolution requests (draft-21 §8.4).
+///
+/// Historical queries are deliberately never served from the current
+/// list cache: that cache contains mutable, present-day state.
+/// They also don't participate in conditional request handling since
+/// we're fetching a specific snapshot in time.
+async fn handle_historical_request(
+    list_id: &str,
+    time: i64,
+    accept_type: &str,
+    state: &AppState,
+    client_accepts_gzip: bool,
+) -> Result<Response, ApiError> {
+    // Validate time parameter: must be positive and not in the future
+    let now = OffsetDateTime::now_utc().unix_timestamp();
+    if time <= 0 {
+        tracing::warn!("Historical query rejected: time must be positive, got {time}");
+        return Err(StatusListError::InvalidHistoricalTime.into());
+    }
+    if time > now {
+        tracing::warn!("Historical query rejected: time is in the future ({time} > {now})");
+        return Err(StatusListError::InvalidHistoricalTime.into());
+    }
+
+    // §12.7 privacy warning: historical queries leak timing information
+    tracing::info!(
+        "Historical query for list {list_id} at time {time} (age: {} seconds)",
+        now - time
+    );
+
+    // Fetch the snapshot whose half-open validity interval contains `time`
+    let snapshot = state
+        .status_list_history_repo
+        .find_valid_at(list_id, time)
+        .await
+        .map_err(|err| {
+            tracing::error!("Failed to resolve historical status list {list_id}: {err:?}");
+            StatusListError::InternalServerError
+        })?
+        .ok_or(StatusListError::HistoricalStatusListNotFound)?;
+
+    // Generate ETag and extract values before consuming snapshot
+    let etag = generate_historical_etag(&snapshot);
+    let last_modified = format_http_date(snapshot.iat);
+    let validity_duration = (snapshot.exp - snapshot.iat) as u64;
+    let cache_control = format!("max-age={}, immutable", validity_duration.max(86400)); // At least 1 day
+
+    // Build the status record from the snapshot
+    let status_record = StatusListRecord {
+        list_id: snapshot.list_id,
+        issuer: snapshot.issuer,
+        status_list: snapshot.status_list,
+        sub: snapshot.sub,
+        updated_at: snapshot.iat, // Use snapshot iat as the modification time
+    };
+
+    // Build token with the snapshot's validity window
+    let (token_bytes, encoding) = build_token(
+        accept_type,
+        &status_record,
+        Some((snapshot.iat, snapshot.exp)),
+        state,
+        client_accepts_gzip,
+    )
+    .await?;
+
+    let mut response = Response::new(token_bytes.into());
+    *response.status_mut() = StatusCode::OK;
+    let h = response.headers_mut();
+    h.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_str(accept_type).unwrap(),
+    );
+    h.insert(header::ETAG, HeaderValue::from_str(&etag).unwrap());
+    h.insert(
+        header::LAST_MODIFIED,
+        HeaderValue::from_str(&last_modified).unwrap(),
+    );
+    h.insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_str(&cache_control).unwrap(),
+    );
+    h.insert(
+        header::VARY,
+        HeaderValue::from_static("Accept, Accept-Encoding"),
+    );
+    if let Some(enc) = encoding {
+        h.insert(header::CONTENT_ENCODING, HeaderValue::from_static(enc));
+    }
+
+    Ok(response)
+}
+
+#[derive(Debug, Deserialize)]
+pub struct StatusListQuery {
+    /// draft-21 §8.4 Unix timestamp for a historical Status List Token.
+    pub time: Option<i64>,
+}
+
 /// Fetches status record from cache or database
 async fn fetch_status_record(
     list_id: &str,
     state: &AppState,
-) -> Result<Arc<StatusListRecord>, StatusListError> {
+) -> Result<Arc<StatusListRecord>, ApiError> {
     // Check cache for status list record
     if let Some(cached_record) = state.cache.get(list_id).await {
         tracing::info!("Cache hit for status list record: {list_id}");
@@ -143,12 +270,14 @@ async fn fetch_status_record(
     let status_record = state
         .status_list_repo
         .find_one_by(list_id)
-        .await
-        .map_err(|err| {
-            tracing::error!("Failed to get status list {list_id} from database: {err:?}");
-            StatusListError::InternalServerError
-        })?
-        .ok_or(StatusListError::StatusListNotFound)?;
+        .await?
+        .ok_or_else(|| {
+            ApiError::new(
+                axum::http::StatusCode::NOT_FOUND,
+                "status_list_not_found",
+                "Status list not found",
+            )
+        })?;
 
     // Store the token in the cache for future requests
     state
@@ -221,6 +350,7 @@ fn client_accepts_gzip(headers: &HeaderMap) -> bool {
 async fn build_token(
     accept: &str,
     status_record: &StatusListRecord,
+    validity_window: Option<(i64, i64)>,
     state: &AppState,
     client_accepts_gzip: bool,
 ) -> Result<(Vec<u8>, Option<&'static str>), StatusListError> {
@@ -247,7 +377,10 @@ async fn build_token(
     let accept_header = accept.to_string();
     let status_record = status_record.clone();
     let aggregation_uri = state.aggregation_uri.clone();
-    let token_exp_secs = state.token_exp_secs;
+    let validity_window = validity_window.unwrap_or_else(|| {
+        let iat = OffsetDateTime::now_utc().unix_timestamp();
+        (iat, iat + state.token_exp_secs as i64)
+    });
     let token_ttl_secs = state.token_ttl_secs;
 
     // CWT responses must never be gzipped (draft-21 §8.2 recommends
@@ -266,7 +399,8 @@ async fn build_token(
                 &keypair,
                 &certs_parts,
                 &aggregation_uri,
-                token_exp_secs,
+                validity_window.0,
+                validity_window.1,
                 token_ttl_secs,
             )?,
             _ => issue_jwt(
@@ -274,7 +408,8 @@ async fn build_token(
                 &keypair,
                 &certs_parts,
                 &aggregation_uri,
-                token_exp_secs,
+                validity_window.0,
+                validity_window.1,
                 token_ttl_secs,
             )?
             .into_bytes(),
@@ -308,32 +443,30 @@ fn issue_cwt(
     keypair: &Keypair,
     cert_chain: &CertificateChain,
     aggregation_uri: &Option<String>,
-    token_exp_secs: u64,
+    iat: i64,
+    exp: i64,
     token_ttl_secs: u64,
 ) -> Result<Vec<u8>, StatusListError> {
-    let mut claims = vec![];
-
-    // Building the claims
-    claims.push((
-        CborValue::Integer(SUBJECT.into()),
-        CborValue::Text(status_record.sub.clone()),
-    ));
-    let iat = OffsetDateTime::now_utc().unix_timestamp();
-    claims.push((
-        CborValue::Integer(ISSUED_AT.into()),
-        CborValue::Integer(iat.into()),
-    ));
     // According to the spec, the lifetime of the token depends on the lifetime of the referenced token
     // https://datatracker.ietf.org/doc/html/draft-ietf-oauth-status-list-21#section-13.7
-    let exp = iat + token_exp_secs as i64;
-    claims.push((
-        CborValue::Integer(EXP.into()),
-        CborValue::Integer(exp.into()),
-    ));
-    claims.push((
-        CborValue::Integer(TTL.into()),
-        CborValue::Integer(token_ttl_secs.into()),
-    ));
+    let mut claims = vec![
+        (
+            CborValue::Integer(SUBJECT.into()),
+            CborValue::Text(status_record.sub.clone()),
+        ),
+        (
+            CborValue::Integer(ISSUED_AT.into()),
+            CborValue::Integer(iat.into()),
+        ),
+        (
+            CborValue::Integer(EXP.into()),
+            CborValue::Integer(exp.into()),
+        ),
+        (
+            CborValue::Integer(TTL.into()),
+            CborValue::Integer(token_ttl_secs.into()),
+        ),
+    ];
     // §4.3 requires lst as a CBOR byte string, not the base64url text used for JSON (§4.2).
     let lst_bytes = base64url::decode(&status_record.status_list.lst).map_err(|err| {
         tracing::error!("Failed to decode lst for CWT status_list claim: {err:?}");
@@ -432,12 +565,11 @@ fn issue_jwt(
     keypair: &Keypair,
     cert_chain: &CertificateChain,
     aggregation_uri: &Option<String>,
-    token_exp_secs: u64,
+    iat: i64,
+    exp: i64,
     token_ttl_secs: u64,
 ) -> Result<String, StatusListError> {
-    let iat = OffsetDateTime::now_utc().unix_timestamp();
     let ttl = token_ttl_secs as i64;
-    let exp = iat + token_exp_secs as i64;
     let status_list = StatusListClaims {
         bits: status_record.status_list.bits,
         lst: status_record.status_list.lst.clone(),
@@ -489,10 +621,15 @@ fn build_cache_control(token_ttl_secs: u64) -> String {
 mod tests {
     use super::*;
     use crate::{
-        models::{StatusList, StatusListRecord, status_lists},
+        models::{
+            StatusList, StatusListHistoryRecord, StatusListRecord, status_list_history,
+            status_lists,
+        },
         test_utils::{test_app_state, test_app_state_with},
-        utils::lst_gen::encode_compressed,
+        utils::lst_gen::{AbuseLimits, encode_compressed},
     };
+
+    const LIMITS: AbuseLimits = AbuseLimits::unlimited();
     use axum::{
         body::to_bytes,
         extract::{Path, State},
@@ -510,7 +647,7 @@ mod tests {
         let mock_db = MockDatabase::new(DatabaseBackend::Postgres);
         let status_list = StatusList {
             bits: 8,
-            lst: encode_compressed(&[0, 0, 0]).unwrap(),
+            lst: encode_compressed(&[0, 0, 0], &LIMITS).unwrap(),
         };
         let status_list_token = StatusListRecord {
             list_id: "test_list".to_string(),
@@ -539,6 +676,7 @@ mod tests {
         let response = get_status_list(
             State(app_state.clone()),
             Path("test_list".to_string()),
+            Ok(Query(StatusListQuery { time: None })),
             headers,
         )
         .await
@@ -580,7 +718,7 @@ mod tests {
         assert_eq!(token_data.claims.status_list.bits, 8);
         assert_eq!(
             token_data.claims.status_list.lst,
-            encode_compressed(&[0, 0, 0]).unwrap()
+            encode_compressed(&[0, 0, 0], &LIMITS).unwrap()
         );
     }
 
@@ -589,7 +727,7 @@ mod tests {
         let mock_db = MockDatabase::new(DatabaseBackend::Postgres);
         let status_list = StatusList {
             bits: 8,
-            lst: encode_compressed(&[0, 0, 0]).unwrap(),
+            lst: encode_compressed(&[0, 0, 0], &LIMITS).unwrap(),
         };
         let status_list_token = StatusListRecord {
             list_id: "test_list".to_string(),
@@ -618,6 +756,7 @@ mod tests {
         let response = get_status_list(
             State(app_state.clone()),
             Path("test_list".to_string()),
+            Ok(Query(StatusListQuery { time: None })),
             headers,
         )
         .await
@@ -656,7 +795,7 @@ mod tests {
         assert_eq!(token_data.claims.status_list.bits, 8);
         assert_eq!(
             token_data.claims.status_list.lst,
-            encode_compressed(&[0, 0, 0]).unwrap()
+            encode_compressed(&[0, 0, 0], &LIMITS).unwrap()
         );
     }
 
@@ -665,7 +804,7 @@ mod tests {
         let mock_db = MockDatabase::new(DatabaseBackend::Postgres);
         let status_list = StatusList {
             bits: 8,
-            lst: encode_compressed(&[0, 0, 0]).unwrap(),
+            lst: encode_compressed(&[0, 0, 0], &LIMITS).unwrap(),
         };
         let status_list_token = StatusListRecord {
             list_id: "test_list".to_string(),
@@ -697,6 +836,7 @@ mod tests {
         let response = get_status_list(
             State(app_state.clone()),
             Path("test_list".to_string()),
+            Ok(Query(StatusListQuery { time: None })),
             headers,
         )
         .await
@@ -775,7 +915,7 @@ mod tests {
             .1
             .clone();
         let expected_lst_bytes =
-            base64url::decode(&encode_compressed(&[0, 0, 0]).unwrap()).unwrap();
+            base64url::decode(&encode_compressed(&[0, 0, 0], &LIMITS).unwrap()).unwrap();
         assert_eq!(lst, CborValue::Bytes(expected_lst_bytes));
 
         let ttl = claims
@@ -816,7 +956,7 @@ mod tests {
         let mock_db = MockDatabase::new(DatabaseBackend::Postgres);
         let status_list = StatusList {
             bits: 8,
-            lst: encode_compressed(&[0, 0, 0]).unwrap(),
+            lst: encode_compressed(&[0, 0, 0], &LIMITS).unwrap(),
         };
         let status_list_token = record_with_bits_8("test_list", status_list);
         let db_conn = Arc::new(
@@ -843,6 +983,7 @@ mod tests {
         let response = get_status_list(
             State(app_state.clone()),
             Path("test_list".to_string()),
+            Ok(Query(StatusListQuery { time: None })),
             headers,
         )
         .await
@@ -886,7 +1027,7 @@ mod tests {
         let mock_db = MockDatabase::new(DatabaseBackend::Postgres);
         let status_list = StatusList {
             bits: 8,
-            lst: encode_compressed(&[0, 0, 0]).unwrap(),
+            lst: encode_compressed(&[0, 0, 0], &LIMITS).unwrap(),
         };
         let status_list_token = record_with_bits_8("test_list", status_list);
         let db_conn = Arc::new(
@@ -909,6 +1050,7 @@ mod tests {
         let response = get_status_list(
             State(app_state.clone()),
             Path("test_list".to_string()),
+            Ok(Query(StatusListQuery { time: None })),
             headers,
         )
         .await
@@ -948,7 +1090,7 @@ mod tests {
         let mock_db = MockDatabase::new(DatabaseBackend::Postgres);
         let status_list = StatusList {
             bits: 8,
-            lst: encode_compressed(&[0, 0, 0]).unwrap(),
+            lst: encode_compressed(&[0, 0, 0], &LIMITS).unwrap(),
         };
         let status_list_token = record_with_bits_8("test_list", status_list);
         let db_conn = Arc::new(
@@ -975,6 +1117,7 @@ mod tests {
         let response = get_status_list(
             State(app_state.clone()),
             Path("test_list".to_string()),
+            Ok(Query(StatusListQuery { time: None })),
             headers,
         )
         .await
@@ -1038,7 +1181,7 @@ mod tests {
         let mock_db = MockDatabase::new(DatabaseBackend::Postgres);
         let status_list = StatusList {
             bits: 8,
-            lst: encode_compressed(&[0, 0, 0]).unwrap(),
+            lst: encode_compressed(&[0, 0, 0], &LIMITS).unwrap(),
         };
         let status_list_token = record_with_bits_8("test_list", status_list);
         let db_conn = Arc::new(
@@ -1061,6 +1204,7 @@ mod tests {
         let response = get_status_list(
             State(app_state.clone()),
             Path("test_list".to_string()),
+            Ok(Query(StatusListQuery { time: None })),
             headers,
         )
         .await
@@ -1134,26 +1278,18 @@ mod tests {
             ACCEPT_STATUS_LISTS_HEADER_JWT.parse().unwrap(),
         );
 
-        let result =
-            get_status_list(State(app_state), Path("test_list".to_string()), headers).await;
+        let result = get_status_list(
+            State(app_state),
+            Path("test_list".to_string()),
+            Ok(Query(StatusListQuery { time: None })),
+            headers,
+        )
+        .await;
 
         assert!(result.is_err());
         let err = result.unwrap_err();
-        let response = err.clone().into_response();
-        assert_eq!(response.status(), StatusCode::NOT_FOUND);
-        assert_eq!(err, StatusListError::StatusListNotFound);
-
-        // Verify error response includes no-store Cache-Control header
-        let cache_control = response.headers().get(http::header::CACHE_CONTROL);
-        assert!(
-            cache_control.is_some(),
-            "Error response should include Cache-Control header"
-        );
-        assert_eq!(
-            cache_control.unwrap().to_str().unwrap(),
-            "no-store, max-age=0",
-            "Error response should have no-store Cache-Control directive"
-        );
+        assert_eq!(err.error.as_ref(), "status_list_not_found");
+        assert_eq!(err.into_response().status(), StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]
@@ -1163,26 +1299,16 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.insert(http::header::ACCEPT, "application/xml".parse().unwrap()); // unsupported
 
-        let result =
-            get_status_list(State(app_state), Path("test_list".to_string()), headers).await;
+        let result = get_status_list(
+            State(app_state),
+            Path("test_list".to_string()),
+            Ok(Query(StatusListQuery { time: None })),
+            headers,
+        )
+        .await;
 
         assert!(result.is_err());
-        let err = result.unwrap_err();
-        let response = err.clone().into_response();
-        assert_eq!(response.status(), StatusCode::NOT_ACCEPTABLE);
-        assert_eq!(err, StatusListError::InvalidAcceptHeader);
-
-        // Verify error response includes no-store Cache-Control header
-        let cache_control = response.headers().get(http::header::CACHE_CONTROL);
-        assert!(
-            cache_control.is_some(),
-            "Error response should include Cache-Control header"
-        );
-        assert_eq!(
-            cache_control.unwrap().to_str().unwrap(),
-            "no-store, max-age=0",
-            "Error response should have no-store Cache-Control directive"
-        );
+        let _err = result.unwrap_err();
     }
 
     #[tokio::test]
@@ -1203,8 +1329,13 @@ mod tests {
             ACCEPT_STATUS_LISTS_HEADER_JWT.parse().unwrap(),
         );
 
-        let result =
-            get_status_list(State(app_state), Path("test_list".to_string()), headers).await;
+        let result = get_status_list(
+            State(app_state),
+            Path("test_list".to_string()),
+            Ok(Query(StatusListQuery { time: None })),
+            headers,
+        )
+        .await;
 
         assert!(result.is_err());
         let response = result.unwrap_err().into_response();
@@ -1247,7 +1378,7 @@ mod tests {
         let mock_db = MockDatabase::new(DatabaseBackend::Postgres);
         let status_list = StatusList {
             bits: 8,
-            lst: encode_compressed(&[0, 0, 0]).unwrap(),
+            lst: encode_compressed(&[0, 0, 0], &LIMITS).unwrap(),
         };
         let status_list_token = StatusListRecord {
             list_id: "test_list".to_string(),
@@ -1275,6 +1406,7 @@ mod tests {
         let response = get_status_list(
             State(app_state.clone()),
             Path("test_list".to_string()),
+            Ok(Query(StatusListQuery { time: None })),
             headers,
         )
         .await
@@ -1323,7 +1455,7 @@ mod tests {
         let mock_db = MockDatabase::new(DatabaseBackend::Postgres);
         let status_list = StatusList {
             bits: 8,
-            lst: encode_compressed(&[0, 0, 0]).unwrap(),
+            lst: encode_compressed(&[0, 0, 0], &LIMITS).unwrap(),
         };
         let status_list_token = StatusListRecord {
             list_id: "test_list".to_string(),
@@ -1354,6 +1486,7 @@ mod tests {
         let first_response = get_status_list(
             State(app_state.clone()),
             Path("test_list".to_string()),
+            Ok(Query(StatusListQuery { time: None })),
             headers.clone(),
         )
         .await
@@ -1379,6 +1512,7 @@ mod tests {
         let conditional_response = get_status_list(
             State(app_state),
             Path("test_list".to_string()),
+            Ok(Query(StatusListQuery { time: None })),
             conditional_headers,
         )
         .await
@@ -1418,7 +1552,7 @@ mod tests {
         let mock_db = MockDatabase::new(DatabaseBackend::Postgres);
         let status_list = StatusList {
             bits: 8,
-            lst: encode_compressed(&[0, 0, 0]).unwrap(),
+            lst: encode_compressed(&[0, 0, 0], &LIMITS).unwrap(),
         };
         let status_list_token = StatusListRecord {
             list_id: "test_list".to_string(),
@@ -1446,6 +1580,7 @@ mod tests {
         let first_response = get_status_list(
             State(app_state.clone()),
             Path("test_list".to_string()),
+            Ok(Query(StatusListQuery { time: None })),
             headers,
         )
         .await
@@ -1474,6 +1609,7 @@ mod tests {
         let conditional_response = get_status_list(
             State(app_state),
             Path("test_list".to_string()),
+            Ok(Query(StatusListQuery { time: None })),
             conditional_headers,
         )
         .await
@@ -1504,7 +1640,7 @@ mod tests {
         let mock_db = MockDatabase::new(DatabaseBackend::Postgres);
         let status_list = StatusList {
             bits: 8,
-            lst: encode_compressed(&[0, 0, 0]).unwrap(),
+            lst: encode_compressed(&[0, 0, 0], &LIMITS).unwrap(),
         };
         let status_list_token = StatusListRecord {
             list_id: "test_list".to_string(),
@@ -1535,15 +1671,159 @@ mod tests {
             http::header::IF_MODIFIED_SINCE,
             "Thu, 01 Jan 1970 00:00:00 GMT".parse().unwrap(),
         );
-        let response = get_status_list(State(app_state), Path("test_list".to_string()), headers)
-            .await
-            .unwrap()
-            .into_response();
+        let response = get_status_list(
+            State(app_state),
+            Path("test_list".to_string()),
+            Ok(Query(StatusListQuery { time: None })),
+            headers,
+        )
+        .await
+        .unwrap()
+        .into_response();
 
         assert_eq!(response.status(), StatusCode::OK);
         assert!(
             response.headers().contains_key(http::header::ETAG),
             "200 response should include ETag"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_get_status_list_returns_snapshot_valid_at_requested_time() {
+        let snapshot = StatusListHistoryRecord {
+            snapshot_id: "snapshot-1".to_string(),
+            list_id: "test_list".to_string(),
+            issuer: "test_issuer".to_string(),
+            status_list: StatusList {
+                bits: 8,
+                lst: encode_compressed(&[42], &LIMITS).unwrap(),
+            },
+            sub: "test_subject".to_string(),
+            iat: 1_700_000_000,
+            exp: 1_700_000_900,
+        };
+        let db_conn = Arc::new(
+            MockDatabase::new(DatabaseBackend::Postgres)
+                .append_query_results::<status_list_history::Model, Vec<_>, _>(vec![vec![
+                    snapshot.clone(),
+                ]])
+                .into_connection(),
+        );
+        let app_state = test_app_state(Some(db_conn)).await;
+
+        let response = get_status_list(
+            State(app_state.clone()),
+            Path("test_list".to_string()),
+            Ok(Query(StatusListQuery {
+                time: Some(1_700_000_450),
+            })),
+            HeaderMap::new(),
+        )
+        .await
+        .unwrap()
+        .into_response();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        // Historical queries don't use gzip (no Accept-Encoding header provided)
+        let body_bytes = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+        let body_str = std::str::from_utf8(&body_bytes).unwrap();
+
+        let signing_key_pem = app_state.cert_manager.signing_key_pem().await.unwrap();
+        let keypair = Keypair::from_pkcs8_pem(&signing_key_pem).unwrap();
+        let decoding_key_pem = keypair
+            .verifying_key()
+            .to_public_key_pem(LineEnding::default())
+            .unwrap()
+            .into_bytes();
+        let mut validation = Validation::new(jsonwebtoken::Algorithm::ES256);
+        validation.validate_exp = false;
+        let token = jsonwebtoken::decode::<StatusListToken>(
+            &body_str,
+            &DecodingKey::from_ec_pem(&decoding_key_pem).unwrap(),
+            &validation,
+        )
+        .unwrap()
+        .claims;
+
+        assert_eq!(token.iat, snapshot.iat);
+        assert_eq!(token.exp, Some(snapshot.exp));
+        assert!(token.iat <= 1_700_000_450);
+        assert!(token.exp.unwrap() > 1_700_000_450);
+        assert_eq!(token.status_list.lst, snapshot.status_list.lst);
+    }
+
+    #[tokio::test]
+    async fn test_get_status_list_returns_not_found_when_time_is_unavailable() {
+        let db_conn = Arc::new(
+            MockDatabase::new(DatabaseBackend::Postgres)
+                .append_query_results::<status_list_history::Model, Vec<_>, _>(vec![vec![]])
+                .into_connection(),
+        );
+        let result = get_status_list(
+            State(test_app_state(Some(db_conn)).await),
+            Path("test_list".to_string()),
+            Ok(Query(StatusListQuery { time: Some(1) })),
+            HeaderMap::new(),
+        )
+        .await;
+
+        assert_eq!(
+            result.unwrap_err().into_response().status(),
+            StatusCode::NOT_FOUND
+        );
+    }
+
+    #[tokio::test]
+    async fn test_get_status_list_rejects_negative_time() {
+        let app_state = test_app_state(None).await;
+        let result = get_status_list(
+            State(app_state),
+            Path("test_list".to_string()),
+            Ok(Query(StatusListQuery { time: Some(-1) })),
+            HeaderMap::new(),
+        )
+        .await;
+
+        assert_eq!(
+            result.unwrap_err().into_response().status(),
+            StatusCode::BAD_REQUEST
+        );
+    }
+
+    #[tokio::test]
+    async fn test_get_status_list_rejects_zero_time() {
+        let app_state = test_app_state(None).await;
+        let result = get_status_list(
+            State(app_state),
+            Path("test_list".to_string()),
+            Ok(Query(StatusListQuery { time: Some(0) })),
+            HeaderMap::new(),
+        )
+        .await;
+
+        assert_eq!(
+            result.unwrap_err().into_response().status(),
+            StatusCode::BAD_REQUEST
+        );
+    }
+
+    #[tokio::test]
+    async fn test_get_status_list_rejects_future_time() {
+        let app_state = test_app_state(None).await;
+        // Use a time far in the future
+        let result = get_status_list(
+            State(app_state),
+            Path("test_list".to_string()),
+            Ok(Query(StatusListQuery {
+                time: Some(i64::MAX),
+            })),
+            HeaderMap::new(),
+        )
+        .await;
+
+        assert_eq!(
+            result.unwrap_err().into_response().status(),
+            StatusCode::BAD_REQUEST
         );
     }
 

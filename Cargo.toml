@@ -53,7 +53,9 @@ reqwest = { version = "0.13", features = ["form", "json", "query"] }
 tower = "0.5"
 hyper-rustls = { version = "0.27", features = ["http2"] }
 axum = { version = "0.8", features = ["macros"] }
-tower-http = { version = "0.7", features = ["catch-panic", "cors", "trace"] }
+tower-http = { version = "0.7", features = ["catch-panic", "cors", "limit", "trace"] }
+tower_governor = "0.8"
+governor = "0.10"
 
 # Database and ORM
 sea-orm = { version = "1.1", default-features = false, features = ["macros", "runtime-tokio-rustls", "with-json"] }

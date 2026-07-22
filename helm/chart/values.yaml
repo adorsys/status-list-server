@@ -77,8 +77,9 @@ statuslist:
     # DNS provider for ACME DNS-01 challenges: route53 | cloudflare | gcloud | azure | acmedns
     # (pebble also exists but is a development-only fake, not for deployments)
     # See docs/dns-providers.md for the settings each provider needs.
-    # Provider credentials (e.g. APP_SERVER__CERT__DNS__CLOUDFLARE__API_TOKEN) must come
-    # from a secret (see externalSecret below), not from plain env values.
+    # Provider credentials (e.g. APP_SERVER__CERT__DNS__CLOUDFLARE__API_TOKEN, or the
+    # APP_SERVER__CERT__DNS__ACMEDNS__ACCOUNTS JSON, which holds every account password)
+    # must come from a secret (see externalSecret below), not from plain env values.
     APP_SERVER__CERT__DNS__PROVIDER: "route53"
     APP_REDIS__REQUIRE_CLIENT_AUTH: "false"
     APP_AWS__SECRETS_CACHE_TTL: "300"
@@ -89,6 +90,14 @@ statuslist:
     APP_CACHE__MAX_CAPACITY: "1000"
     APP_STATUS_LIST__TOKEN_EXP_SECS: "900"
     APP_STATUS_LIST__TOKEN_TTL_SECS: "300"
+    APP_RATE_LIMIT__STRICT_BURST_SIZE: "10"
+    APP_RATE_LIMIT__STRICT_PERIOD_SECS: "60"
+    APP_RATE_LIMIT__PERMISSIVE_BURST_SIZE: "100"
+    APP_RATE_LIMIT__PERMISSIVE_PERIOD_SECS: "60"
+    APP_LIMITS__MAX_BODY_SIZE_BYTES: "2097152"
+    APP_LIMITS__MAX_STATUS_INDEX: "100000"
+    APP_LIMITS__MAX_STATUSES_PER_REQUEST: "5000"
+    APP_LIMITS__MAX_SERIALIZED_LIST_SIZE: "1048576"
   resources:
     requests:
       memory: "256Mi"
