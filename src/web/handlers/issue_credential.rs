@@ -1,10 +1,20 @@
 use axum::{Json, extract::State, http::StatusCode, response::IntoResponse};
+use jsonwebtoken::jwk::Jwk;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use crate::{
-    application::UseCaseError, domain, models::Credentials, utils::state::AppState,
-    web::auth::errors::AuthenticationError, web::errors::ApiError,
+    application::UseCaseError, domain, state::AppState, web::auth::errors::AuthenticationError,
+    web::errors::ApiError,
 };
+
+/// Request payload carrying an issuer and its public JWK. Wire-only: the
+/// handler converts it into a `domain::Credential` at the boundary.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct CredentialsRequest {
+    pub issuer: String,
+    pub public_key: Jwk,
+}
 
 #[derive(Debug)]
 pub enum CredentialError {
@@ -21,7 +31,7 @@ impl From<AuthenticationError> for CredentialError {
 
 pub async fn credential_handler(
     State(appstate): State<AppState>,
-    Json(credential): Json<Credentials>,
+    Json(credential): Json<CredentialsRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
     publish_credentials(credential.to_owned(), appstate).await?;
     Ok((
@@ -32,7 +42,7 @@ pub async fn credential_handler(
 }
 
 pub(super) async fn publish_credentials(
-    credentials: Credentials,
+    credentials: CredentialsRequest,
     state: AppState,
 ) -> Result<(), CredentialError> {
     let public_key =
@@ -51,7 +61,7 @@ pub(super) async fn publish_credentials(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{models::credentials, test_utils::test_app_state};
+    use crate::{adapters::sea_orm::models::credentials, test_utils::test_app_state};
     use axum::{
         Router,
         body::Body,
@@ -87,7 +97,10 @@ mod tests {
         use std::sync::Arc;
 
         let jwk = test_jwk();
-        let credentials = Credentials::new("test_issuer".into(), jwk.clone());
+        let credentials = CredentialsRequest {
+            issuer: "test_issuer".into(),
+            public_key: jwk.clone(),
+        };
         let model = credentials::Model {
             issuer: credentials.issuer.clone(),
             public_key: credentials.public_key.clone().into(),

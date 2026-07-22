@@ -30,8 +30,8 @@ const AGGREGATION_ROUTE_PATH: &str = "/api/v1/aggregation";
 
 use crate::{
     config::Config,
+    state::AppState,
     utils::metrics::{metrics_handler, setup_metrics, start_metrics_collector},
-    utils::state::AppState,
     web::{
         auth::auth,
         handlers::{

@@ -5,8 +5,8 @@ use crate::{
         certificate::AcmeCertificateProvider,
         redis::Redis,
         sea_orm::{
-            SeaOrmCredentialRepository, SeaOrmStatusListHistoryRepository,
-            SeaOrmStatusListRepository,
+            Migrator, SeaOrmCredentialRepository, SeaOrmStatusListHistoryRepository,
+            SeaOrmStatusListRepository, store::SeaOrmStore,
         },
     },
     application::{
@@ -25,7 +25,6 @@ use crate::{
         Config as AppConfig, DnsProviderKind, ENV_DEVELOPMENT, ENV_PRODUCTION, GcloudKeySource,
         ResolvedDnsProvider,
     },
-    database::{Migrator, queries::SeaOrmStore},
     ports::{
         CertificateProvider, CredentialRepository, StatusListCache, StatusListHistoryRepository,
         StatusListRepository,
@@ -39,7 +38,7 @@ use secrecy::ExposeSecret;
 use std::{sync::Arc, time::Duration};
 use tracing::warn;
 
-use super::cert_manager::http_client::DefaultHttpClient;
+use crate::cert_manager::http_client::DefaultHttpClient;
 
 fn empty_to_none(value: Option<String>) -> Option<String> {
     value.filter(|v| !v.trim().is_empty())
@@ -65,7 +64,6 @@ pub struct AppState {
     pub token_ttl_secs: u64,
     pub max_status_index: i32,
     pub max_statuses_per_request: usize,
-    pub max_serialized_list_size: usize,
     /// Retention period for historical status list snapshots in seconds.
     /// Set to 0 to disable historical snapshots entirely.
     pub history_retention_secs: u64,
@@ -189,7 +187,7 @@ pub async fn build_state_with_cert_manager(
         // Override the default HTTP client to use the pebble root certificate
         // It is necessary to avoid https errors since pebble uses localhost over https
         // with a self-signed root certificate
-        let root_cert = include_bytes!("../../test_data/pebble.pem");
+        let root_cert = include_bytes!("../test_data/pebble.pem");
         let http_client = DefaultHttpClient::new(Some(root_cert))?;
         cert_manager_builder = cert_manager_builder.acme_http_client(http_client);
     }
@@ -243,7 +241,6 @@ pub async fn build_state_with_cert_manager(
             token_ttl_secs: config.status_list.token_ttl_secs,
             max_status_index: config.limits.max_status_index,
             max_statuses_per_request: config.limits.max_statuses_per_request,
-            max_serialized_list_size: config.limits.max_serialized_list_size,
             history_retention_secs: config.status_list.history_retention_secs,
         },
         cert_manager,
@@ -530,7 +527,7 @@ mod tests {
 
         let key_json = serde_json::json!({
             "client_email": "acme@test-project.iam.gserviceaccount.com",
-            "private_key": include_str!("../../test_data/gcloud_test_key.dummy.pem"),
+            "private_key": include_str!("../test_data/gcloud_test_key.dummy.pem"),
             "token_uri": "https://oauth2.googleapis.com/token",
             "project_id": "test-project",
         });
