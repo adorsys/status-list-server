@@ -11,6 +11,11 @@ pub enum DomainError {
     InvalidIndex,
     #[error("{0}")]
     InvalidStatusList(String),
+    /// The stored `lst` could not be decoded — corrupt persisted state, not a
+    /// caller error. Surfaces as 500 so data corruption is alerted, not blamed
+    /// on the client. Only produced while decoding an existing list (update).
+    #[error("corrupt stored status list: {0}")]
+    CorruptStoredList(String),
     #[error("invalid public JWK: {0}")]
     InvalidPublicJwk(String),
 }
@@ -253,22 +258,23 @@ fn encode_compressed(bytes: &[u8]) -> Result<String, DomainError> {
 
 fn decode_compressed(encoded: &str) -> Result<Vec<u8>, DomainError> {
     let bytes = base64url::decode(encoded)
-        .map_err(|err| DomainError::InvalidStatusList(format!("Invalid lst encoding: {err}")))?;
+        .map_err(|err| DomainError::CorruptStoredList(format!("Invalid lst encoding: {err}")))?;
     let mut decoder = flate2::read::ZlibDecoder::new(&bytes[..]);
     let mut decoded = Vec::new();
     decoder.read_to_end(&mut decoded).map_err(|err| {
-        DomainError::InvalidStatusList(format!("Failed to decompress status list: {err}"))
+        DomainError::CorruptStoredList(format!("Failed to decompress status list: {err}"))
     })?;
     Ok(decoded)
 }
 
-/// Decode every `bits`-wide slot the byte buffer can hold.
+/// Decode the `bits`-wide status slots packed into `array`.
 ///
-/// The count is `array.len() * 8 / bits` — *every* slot in the buffer, not just
-/// the slots that were explicitly written. A non-byte-aligned list therefore
-/// decodes trailing padding as extra `Valid` (0) entries. This is the same
-/// floor-division consequence as the bit-packing in [`apply_updates`], seen
-/// from the read side, and it has one visible effect: when [`StatusList::update`]
+/// After the well-formedness guard below, a valid buffer holds a whole number
+/// of entries plus at most 7 bits of ceil-to-byte padding. Decoding walks every
+/// whole slot the buffer can hold (`array.len() * 8 / bits`), so a
+/// non-byte-aligned list decodes its trailing sub-byte padding as extra `Valid`
+/// (0) entries — the read-side mirror of the floor-division bit-packing in
+/// [`apply_updates`]. This has one visible effect: when [`StatusList::update`]
 /// widens a list it re-materializes those padding slots as explicit entries, so
 /// a widened list's logical length rounds up to the old byte boundary. Those
 /// slots decode as `Valid` either way, so it is behavior-preserving from the
@@ -276,7 +282,35 @@ fn decode_compressed(encoded: &str) -> Result<Vec<u8>, DomainError> {
 /// sparse list on widening. Kept intentionally; see the widening branch and the
 /// `update_widening_pads_to_byte_boundary` test.
 fn decode_status_array(array: &[u8], bits: usize) -> Result<Vec<Status>, DomainError> {
+    // Well-formedness guard against corrupt/truncated persisted state.
+    //
+    // A correct encoder packs entries tightly and ceil-pads only *within* the
+    // final byte, so a well-formed array leaves strictly fewer than 8 unused
+    // bits for its width: `array.len() * 8 % bits < 8` always holds. If a whole
+    // trailing byte or more is unused, the row was truncated mid-list (or is
+    // otherwise corrupt) and must not be decoded silently. Floor division below
+    // would simply drop the missing entries; on the width-expansion
+    // reconstruction path in `update`, those dropped statuses would reappear as
+    // `Valid` — silently un-revoking credentials and returning 200. Refuse it
+    // as corrupt persisted state (-> 500), never a caller error.
+    //
+    // This catches every truncation detectable from `(array, bits)` alone: for
+    // `bits >= 9` the unused-byte signature is unambiguous. Sub-byte widths
+    // (where `bits` divides 8) leave no detectable gap — a shorter array is
+    // indistinguishable from a legitimately shorter list — so that residue is a
+    // format limitation (the format does not persist the entry count), not
+    // something this guard can close.
+    if array.len() * 8 % bits >= 8 {
+        return Err(DomainError::CorruptStoredList(format!(
+            "stored status array of {} bytes leaves an unused trailing byte at {bits}-bit width",
+            array.len()
+        )));
+    }
+
     let mut statuses = Vec::new();
+    // Floor division yields only whole entries; combined with the guard above,
+    // for every `i` in range `(i + 1) * bits <= array.len() * 8`, so the inner
+    // `break` below is unreachable and each entry is fully in-bounds.
     for i in 0..(array.len() * 8 / bits) {
         let total_bit_pos = i * bits;
         let mut cur_byte = total_bit_pos / 8;
@@ -309,7 +343,7 @@ fn decode_status_array(array: &[u8], bits: usize) -> Result<Vec<Status>, DomainE
             2 => Status::Suspended,
             value if value >= 256 => Status::ApplicationSpecific(value),
             _ => {
-                return Err(DomainError::InvalidStatusList(
+                return Err(DomainError::CorruptStoredList(
                     "Invalid status value in existing list".to_string(),
                 ));
             }
@@ -668,14 +702,90 @@ mod tests {
     #[test]
     fn decode_rejects_reserved_values() {
         // Values 3..=255 are reserved by the encoding table; a stored list
-        // containing one is corrupt, whatever the bit width.
+        // containing one is corrupt (state-caused, not caller-caused), whatever
+        // the bit width — so it must surface as CorruptStoredList (-> 500).
         for (raw, bits) in [(vec![0b1110_0100u8], 2), (vec![3u8], 2), (vec![100u8], 8)] {
             let result = decode_status_array(&raw, bits);
             assert!(
-                matches!(result, Err(DomainError::InvalidStatusList(_))),
-                "value in {raw:?} at {bits} bits must be rejected"
+                matches!(result, Err(DomainError::CorruptStoredList(_))),
+                "value in {raw:?} at {bits} bits must be rejected as corrupt state"
             );
         }
+    }
+
+    #[test]
+    fn update_over_corrupt_lst_is_state_error_not_request_error() {
+        // Corrupt persisted `lst` must classify as CorruptStoredList (state,
+        // -> 500), never InvalidStatusList (request, -> 400): the client's
+        // update is well-formed; the stored data is not.
+        let bad_base64 = StatusList {
+            bits: 1,
+            lst: "not valid base64!!".to_string(),
+        };
+        assert!(matches!(
+            bad_base64.update(vec![entry(0, Status::Invalid)]),
+            Err(DomainError::CorruptStoredList(_))
+        ));
+
+        // Valid base64url that is not valid zlib.
+        let bad_zlib = StatusList {
+            bits: 1,
+            lst: base64url::encode([0xFF, 0xFF, 0xFF, 0xFF]),
+        };
+        assert!(matches!(
+            bad_zlib.update(vec![entry(0, Status::Invalid)]),
+            Err(DomainError::CorruptStoredList(_))
+        ));
+    }
+
+    #[test]
+    fn update_with_bad_request_value_stays_request_error() {
+        // Complement to the above: a bad *request* value (reserved <256) over a
+        // sound stored list stays InvalidStatusList (request, -> 400).
+        let sound = StatusList::create(vec![entry(0, Status::Valid)]).unwrap();
+        assert!(matches!(
+            sound.update(vec![entry(0, Status::ApplicationSpecific(3))]),
+            Err(DomainError::InvalidStatusList(_))
+        ));
+    }
+
+    #[test]
+    fn decode_accepts_legitimate_sub_byte_padding() {
+        // A 2-byte array at 9 bits holds exactly one whole entry; the 7 trailing
+        // bits are legitimate ceil-to-byte padding (< 1 byte) and are ignored,
+        // not decoded or errored. Pins that the well-formedness guard in
+        // decode_status_array does not false-positive on valid 9-/13-bit lists
+        // whose byte length is not a multiple of `bits`.
+        let one_entry_256 = vec![0x00, 0x01]; // value 256 packed LSB-first over bits 0..9
+        let statuses = decode_status_array(&one_entry_256, 9).unwrap();
+        assert_eq!(statuses, vec![Status::ApplicationSpecific(256)]);
+    }
+
+    #[test]
+    fn decode_rejects_truncated_array_as_corrupt() {
+        // A single byte at 9-bit width cannot hold even one whole entry (a
+        // 9-bit entry needs two bytes), so the stored row is truncated. Decode
+        // must refuse it as corrupt state (-> 500), never silently return zero
+        // entries: on the width-expansion reconstruction path that would drop
+        // every prior status and re-encode revoked credentials as Valid.
+        let truncated = vec![0x00]; // 8 bits available, 9 required
+        assert!(matches!(
+            decode_status_array(&truncated, 9),
+            Err(DomainError::CorruptStoredList(_))
+        ));
+
+        // A width-bumping update over a truncated stored `lst` must surface the
+        // corruption, not silently reconstruct a short list. `ApplicationSpecific(512)`
+        // needs 10 bits, so it forces the decode-and-reconstruct branch where the
+        // stored array is read back at its old 9-bit width.
+        let truncated_list = StatusList {
+            bits: 9,
+            lst: encode_compressed(&[0x00]).unwrap(),
+        };
+        assert!(matches!(
+            truncated_list.update(vec![entry(1, Status::ApplicationSpecific(512))]),
+            Err(DomainError::CorruptStoredList(_))
+        ));
     }
 
     #[test]

@@ -44,12 +44,31 @@ impl Storage for MockStorage {
 }
 
 pub(crate) async fn test_app_state(db_conn: Option<Arc<sea_orm::DatabaseConnection>>) -> AppState {
-    test_app_state_with(db_conn, None).await
+    build_test_app_state(db_conn, None, 1_048_576).await
 }
 
 pub(crate) async fn test_app_state_with(
     db_conn: Option<Arc<sea_orm::DatabaseConnection>>,
     aggregation_uri: Option<String>,
+) -> AppState {
+    build_test_app_state(db_conn, aggregation_uri, 1_048_576).await
+}
+
+/// Build a test `AppState` whose status-list service enforces a specific
+/// serialized-list size limit. Used by the 422 handler tests, which previously
+/// mutated a now-removed `AppState` field; the limit lives in the service, so
+/// tests must configure it there.
+pub(crate) async fn test_app_state_with_max_serialized_list_size(
+    db_conn: Option<Arc<sea_orm::DatabaseConnection>>,
+    max_serialized_list_size: usize,
+) -> AppState {
+    build_test_app_state(db_conn, None, max_serialized_list_size).await
+}
+
+async fn build_test_app_state(
+    db_conn: Option<Arc<sea_orm::DatabaseConnection>>,
+    aggregation_uri: Option<String>,
+    max_serialized_list_size: usize,
 ) -> AppState {
     use crate::database::queries::SeaOrmStore;
 
@@ -103,7 +122,7 @@ pub(crate) async fn test_app_state_with(
                 status_list_history,
                 token_exp_secs,
             )
-            .with_max_serialized_list_size(1_048_576),
+            .with_max_serialized_list_size(max_serialized_list_size),
         ),
         credentials: Arc::new(CredentialApplicationService::new(credentials)),
         certificate_provider: Arc::new(AcmeCertificateProvider::new(cert_manager.clone())),
@@ -113,7 +132,6 @@ pub(crate) async fn test_app_state_with(
         token_ttl_secs: 300,
         max_status_index: 100_000,
         max_statuses_per_request: 5_000,
-        max_serialized_list_size: 1_048_576,
         history_retention_secs: 7776000, // 90 days default for tests
     }
 }
