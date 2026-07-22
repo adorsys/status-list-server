@@ -231,13 +231,53 @@ The server can be deployed using a containerization platform such as Docker.
 
 A Helm chart is provided for easy deployment on Kubernetes. For detailed instructions, see the [Helm Deployment Guide](helm/README.md).
 
-## Testing
+## Development
 
-You can run the tests using the following command:
+The project uses the [`cargo xtask`](https://github.com/matklad/cargo-xtask) pattern for development workflow tasks.
+
+### Run Tests
 
 ```bash
-cargo test
+cargo xtask test
 ```
+
+This starts the required services (PostgreSQL, Redis, LocalStack, ACME test tools) via Docker Compose and runs the full test suite with `cargo nextest`.
+
+### Lint
+
+```bash
+cargo xtask lint
+```
+
+Runs `cargo fmt --check`, `cargo clippy`, `cargo audit`, and `cargo machete`.
+
+### Build
+
+```bash
+cargo xtask build
+```
+
+Builds the workspace with all targets and features enabled.
+
+### Documentation
+
+```bash
+cargo xtask doc
+```
+
+Builds the crate documentation with private items included.
+
+### Local CI
+
+To run the full CI-quality pipeline locally before pushing:
+
+```bash
+cargo xtask ci
+```
+
+This runs lint, build, doc, and test tasks in sequence, mirroring the GitHub CI workflow.
+
+> **Note:** The legacy `local-ci.sh` script is deprecated. Use `cargo xtask ci` instead.
 
 ## License
 
