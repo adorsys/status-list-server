@@ -1,0 +1,97 @@
+name: "CodeQL"
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: '0 0 * * 0'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  actions: read
+  contents: read
+  security-events: write  # Required for uploading SARIF and querying API
+
+jobs:
+  analyze:
+    name: CodeQL Analyze
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Fetch Repository
+        uses: actions/checkout@v7
+
+      - name: Install Rust
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake golang-go
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          languages: rust
+          queries: security-extended,security-and-quality
+
+      - name: Build
+        run: cargo build --workspace --all-targets --all-features
+
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@v3
+        with:
+          category: "/language:rust"
+
+      - name: Verify analysis completed
+        uses: actions/github-script@v7
+        with:
+          script: |
+            // Poll for analysis with retries (SARIF processing can take time)
+            const maxRetries = 10;
+            const retryDelayMs = 3000;
+            let analyses = [];
+
+            for (let i = 0; i < maxRetries; i++) {
+              await new Promise(resolve => setTimeout(resolve, retryDelayMs));
+
+              try {
+                const { data } = await github.rest.codeScanning.listRecentAnalyses({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  ref: context.sha,
+                  per_page: 1
+                });
+                analyses = data;
+                if (analyses.length > 0) break;
+              } catch (e) {
+                // API may not be ready yet, continue polling
+              }
+            }
+
+            if (analyses.length === 0) {
+              core.setFailed('No CodeQL analysis found. Analysis may have failed or uploaded no results (zero LOC analyzed).');
+              return;
+            }
+
+            const analysis = analyses[0];
+            const alertCount = analysis.results_count ?? 0;
+
+            console.log(`Analysis ID: ${analysis.id}`);
+            console.log(`Alerts found: ${alertCount}`);
+            console.log(`Analysis created at: ${analysis.created_at}`);
+
+            // Note: GitHub API does not expose LOC directly.
+            // We verify analysis succeeded by checking the analysis object exists.
+            // Zero alerts with a valid analysis ID = code was analyzed and is clean.
+            // Zero alerts with no analysis = build/analysis failed (caught above).
+
+            if (!analysis.id || analysis.id === 0) {
+              core.setFailed('CodeQL analysis failed or produced no results. Zero LOC analyzed.');
+            } else {
+              console.log('✓ CodeQL analysis completed successfully');
+            }
