@@ -5,7 +5,7 @@ use sea_orm::{
 use std::sync::Arc;
 
 use super::error::RepositoryError;
-use crate::models::{
+use super::models::{
     Credentials, StatusListHistoryRecord, StatusListRecord, credentials, status_list_history,
     status_lists,
 };
@@ -265,7 +265,7 @@ impl SeaOrmStore<Credentials> {
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::models::StatusList;
+    use crate::adapters::sea_orm::models::StatusList;
     use jsonwebtoken::jwk::Jwk;
     use sea_orm::{DatabaseBackend, MockDatabase, MockExecResult};
     // `Migrator::up` is only called from the real-backend helpers below.
@@ -280,7 +280,7 @@ mod test {
         let db = sea_orm::Database::connect(opt)
             .await
             .expect("Failed to connect to SQLite");
-        crate::database::Migrator::up(&db, None)
+        crate::adapters::sea_orm::Migrator::up(&db, None)
             .await
             .expect("Failed to run migrations on SQLite");
         Arc::new(db)
@@ -335,7 +335,7 @@ mod test {
             let db = sea_orm::Database::connect(opt)
                 .await
                 .expect("Failed to connect to MySQL");
-            crate::database::Migrator::up(&db, None)
+            crate::adapters::sea_orm::Migrator::up(&db, None)
                 .await
                 .expect("Failed to run migrations on MySQL");
             MysqlTestDb {
@@ -431,7 +431,7 @@ mod test {
         let record = StatusListRecord {
             list_id: "list-sqlite-test".to_string(),
             issuer: issuer.to_string(),
-            status_list: crate::models::StatusList {
+            status_list: crate::adapters::sea_orm::models::StatusList {
                 bits: 1,
                 lst: "compressed".to_string(),
             },
@@ -663,7 +663,7 @@ mod test {
         let rec = StatusListRecord {
             list_id: "list-neg-sqlite".to_string(),
             issuer: "nonexistent-issuer".to_string(),
-            status_list: crate::models::StatusList {
+            status_list: crate::adapters::sea_orm::models::StatusList {
                 bits: 1,
                 lst: "compressed".to_string(),
             },
@@ -679,7 +679,7 @@ mod test {
                 StatusListRecord {
                     list_id: "missing-list-sqlite".to_string(),
                     issuer: "issuer-neg-sqlite".to_string(),
-                    status_list: crate::models::StatusList {
+                    status_list: crate::adapters::sea_orm::models::StatusList {
                         bits: 1,
                         lst: "compressed".to_string(),
                     },

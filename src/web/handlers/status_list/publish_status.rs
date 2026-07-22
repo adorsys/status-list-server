@@ -1,7 +1,4 @@
-use crate::{
-    application::UseCaseError, domain, models::StatusesRequest, utils::state::AppState,
-    web::errors::ApiError,
-};
+use crate::{application::UseCaseError, domain, state::AppState, web::errors::ApiError};
 use axum::{
     Extension,
     extract::{Json, Path, State},
@@ -11,7 +8,8 @@ use axum::{
 use tracing;
 
 use super::{
-    error::StatusListError, map_domain_error, to_domain_entry, validate_status_request_limits,
+    StatusesRequest, error::StatusListError, map_domain_error, to_domain_entry,
+    validate_status_request_limits,
 };
 
 /// Create a new status list.
@@ -71,10 +69,12 @@ pub async fn publish_status(
 #[cfg(test)]
 mod tests {
     use super::*;
+    // models types below seed the MockDatabase (persistence side); the request
+    // wire types come from this handler module.
     use crate::{
-        models::{Status, StatusEntry, StatusList, StatusListRecord, status_lists},
+        adapters::sea_orm::models::{StatusList, StatusListRecord, status_lists},
         test_utils::{test_app_state, test_app_state_with_max_serialized_list_size},
-        web::handlers::status_list::test_support::create_status_list,
+        web::handlers::status_list::{Status, StatusEntry, test_support::create_status_list},
     };
     use axum::extract::State;
     use hyper::StatusCode;

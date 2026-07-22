@@ -18,9 +18,7 @@ use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 
 use crate::{
-    application::UseCaseError,
-    models::{StatusListClaims, StatusListRecord},
-    utils::{keygen::Keypair, state::AppState},
+    application::UseCaseError, domain::StatusListRecord, state::AppState, utils::keygen::Keypair,
     web::errors::ApiError,
 };
 
@@ -214,11 +212,8 @@ async fn handle_historical_request(
     // Build the status record from the snapshot
     let status_record = StatusListRecord {
         list_id: snapshot.list_id,
-        issuer: snapshot.issuer.0,
-        status_list: crate::models::StatusList {
-            bits: snapshot.status_list.bits,
-            lst: snapshot.status_list.lst,
-        },
+        issuer: snapshot.issuer,
+        status_list: snapshot.status_list,
         sub: snapshot.sub,
         updated_at: snapshot.iat, // Use snapshot iat as the modification time
     };
@@ -272,19 +267,7 @@ async fn fetch_status_record(
     state: &AppState,
 ) -> Result<Arc<StatusListRecord>, ApiError> {
     match state.status_lists.get_status_list(list_id).await {
-        Ok(record) => {
-            let status_record = StatusListRecord {
-                list_id: record.list_id,
-                issuer: record.issuer.0,
-                status_list: crate::models::StatusList {
-                    bits: record.status_list.bits,
-                    lst: record.status_list.lst,
-                },
-                sub: record.sub,
-                updated_at: record.updated_at,
-            };
-            Ok(Arc::new(status_record))
-        }
+        Ok(record) => Ok(Arc::new(record)),
         Err(UseCaseError::NotFound) => Err(StatusListError::StatusListNotFound.into()),
         Err(error) => {
             tracing::error!(?error, list_id, "Failed to retrieve status list");
@@ -560,6 +543,19 @@ fn build_x5chain(cert_chain: &[String]) -> Result<CborValue, StatusListError> {
     Ok(x5chain_value)
 }
 
+/// Status list claims serialized inside Status List Tokens (JWT/CWT).
+///
+/// `aggregation_uri` is injected from server configuration at token-issuance
+/// time (draft-21 §4.2/§4.3) and is not part of the persisted `StatusList`
+/// storage model.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub(crate) struct StatusListClaims {
+    pub bits: u8,
+    pub lst: String,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub aggregation_uri: Option<String>,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub(crate) struct StatusListToken {
     pub exp: Option<i64>,
@@ -629,8 +625,11 @@ fn build_cache_control(token_ttl_secs: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // The models imports below are MockDatabase seed rows (persistence side),
+    // deliberately distinct from the domain record the handler code uses; the
+    // explicit `StatusListRecord` import shadows the domain one from `super::*`.
     use crate::{
-        models::{
+        adapters::sea_orm::models::{
             StatusList, StatusListHistoryRecord, StatusListRecord, status_list_history,
             status_lists,
         },

@@ -11,10 +11,8 @@ use crate::{
     ports::{
         CredentialRepository, StatusListCache, StatusListHistoryRepository, StatusListRepository,
     },
-    utils::{
-        cert_manager::{CertManager, storage::Storage},
-        state::AppState,
-    },
+    state::AppState,
+    utils::cert_manager::{CertManager, storage::Storage},
 };
 use async_trait::async_trait;
 use sea_orm::{DbBackend, MockDatabase};
@@ -70,7 +68,7 @@ async fn build_test_app_state(
     aggregation_uri: Option<String>,
     max_serialized_list_size: usize,
 ) -> AppState {
-    use crate::database::queries::SeaOrmStore;
+    use crate::adapters::sea_orm::store::SeaOrmStore;
 
     // Install the crypto provider for the tests
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
