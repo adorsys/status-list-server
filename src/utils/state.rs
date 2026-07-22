@@ -139,10 +139,6 @@ pub async fn build_state(config: &AppConfig) -> EyeResult<AppState> {
         .eku(&config.server.cert.eku);
 
     cert_manager_builder = if uses_acme_strategy {
-        // DNS resolution is only required for the ACME strategy, which needs a
-        // DNS-01 challenge handler to complete certificate orders. Store-strategy
-        // deployments read a certificate from disk or Secrets Manager and never
-        // talk to ACME, so they must never pay for — or fail on — DNS resolution.
         let dns_provider = config
             .server
             .cert
@@ -696,9 +692,6 @@ mod tests {
         }
     }
 
-    /// A store-strategy deployment must boot successfully even when the DNS
-    /// section is absent or malformed — DNS resolution is not consulted on
-    /// that path (acceptance criteria for issue #231).
     #[test]
     fn store_strategy_ignores_dns_config() {
         // Case 1: no DNS section at all (default DnsConfig)
