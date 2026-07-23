@@ -11,18 +11,35 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  cargo-fmt:
-    name: Cargo Format Check
+  zizmor-security:
+    name: Zizmor Security Check
     runs-on: ubuntu-latest
 
     steps:
       - name: Fetch Repository
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
-      - name: Install stable toolchain
-        uses: actions-rust-lang/setup-rust-toolchain@v1
+      - name: Install Zizmor
+        uses: taiki-e/install-action@c44f6b046f1c29ae5918b1e0bfdbb2f1813836fd # v2
         with:
-          components: rustfmt
+          tool: zizmor
+
+      - name: Run Zizmor
+        run: zizmor --format sarif .github/workflows/
+
+  cargo-fmt:
+    name: Cargo Format Check
+    runs-on: ubuntu-latest
+    needs: zizmor-security
+
+    steps:
+       - name: Fetch Repository
+         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+       - name: Install stable toolchain
+         uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1
+         with:
+           components: rustfmt
 
       - name: Rustfmt Check
         run: cargo fmt --all --check
@@ -33,13 +50,13 @@ jobs:
     needs: cargo-fmt
 
     steps:
-      - name: Fetch Repository
-        uses: actions/checkout@v7
+       - name: Fetch Repository
+         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
-      - name: Install Rust
-        uses: actions-rust-lang/setup-rust-toolchain@v1
+       - name: Install Rust
+         uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1
 
-      - name: Install build dependencies
+       - name: Install build dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y cmake golang-go
@@ -53,13 +70,13 @@ jobs:
     needs: cargo-fmt
 
     steps:
-      - name: Fetch Repository
-        uses: actions/checkout@v7
+       - name: Fetch Repository
+         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
-      - name: Install Rust
-        uses: actions-rust-lang/setup-rust-toolchain@v1
+       - name: Install Rust
+         uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1
 
-      - name: Test infrastructure-free composition
+       - name: Test infrastructure-free composition
         run: cargo test --lib --no-default-features --features memory-only
 
   cargo-clippy:
@@ -68,13 +85,13 @@ jobs:
     needs: cargo-build
 
     steps:
-      - name: Fetch Repository
-        uses: actions/checkout@v7
+       - name: Fetch Repository
+         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
-      - name: Install Rust
-        uses: actions-rust-lang/setup-rust-toolchain@v1
-        with:
-          components: clippy
+       - name: Install Rust
+         uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1
+         with:
+           components: clippy
 
       - name: Clippy Check
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings
@@ -85,16 +102,16 @@ jobs:
     needs: cargo-build
 
     steps:
-      - name: Fetch Repository
-        uses: actions/checkout@v7
+       - name: Fetch Repository
+         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
-      - name: Install Rust
-        uses: actions-rust-lang/setup-rust-toolchain@v1
+       - name: Install Rust
+         uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1
 
-      - name: Install cargo-nextest
-        uses: taiki-e/install-action@v2
-        with:
-          tool: nextest
+       - name: Install cargo-nextest
+         uses: taiki-e/install-action@c44f6b046f1c29ae5918b1e0bfdbb2f1813836fd # v2
+         with:
+           tool: nextest
 
       - name: Run Cargo Tests
         run: cargo nextest run --workspace --all-targets --all-features
@@ -105,13 +122,13 @@ jobs:
     needs: cargo-build
 
     steps:
-      - name: Fetch Repository
-        uses: actions/checkout@v7
+       - name: Fetch Repository
+         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
-      - name: Install Rust
-        uses: actions-rust-lang/setup-rust-toolchain@v1
+       - name: Install Rust
+         uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1
 
-      - name: Generate Documentation
+       - name: Generate Documentation
         run: cargo doc --workspace --all-features --no-deps --document-private-items
         env:
           RUSTDOCFLAGS: -D warnings
@@ -126,18 +143,18 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Fetch Repository
-        uses: actions/checkout@v7
+       - name: Fetch Repository
+         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
-      - name: Install stable toolchain
-        uses: actions-rust-lang/setup-rust-toolchain@v1
+       - name: Install stable toolchain
+         uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1
 
-      - name: Install build dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y cmake golang-go
+       - name: Install build dependencies
+         run: |
+           sudo apt-get update
+           sudo apt-get install -y cmake golang-go
 
-      - name: Cargo test doc
+       - name: Cargo test doc
         run: cargo test --doc --workspace --all-features
 
   cargo-machete:
@@ -146,16 +163,16 @@ jobs:
     needs: cargo-build
 
     steps:
-      - name: Fetch Repository
-        uses: actions/checkout@v7
+       - name: Fetch Repository
+         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
-      - name: Install Rust
-        uses: actions-rust-lang/setup-rust-toolchain@v1
+       - name: Install Rust
+         uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1
 
-      - name: Install cargo-machete
-        uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-machete
+       - name: Install cargo-machete
+         uses: taiki-e/install-action@c44f6b046f1c29ae5918b1e0bfdbb2f1813836fd # v2
+         with:
+           tool: cargo-machete
 
       - name: Check for unused dependencies
         run: cargo machete --with-metadata
@@ -166,16 +183,16 @@ jobs:
     needs: cargo-build
 
     steps:
-      - name: Fetch Repository
-        uses: actions/checkout@v7
+       - name: Fetch Repository
+         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
-      - name: Install Rust
-        uses: actions-rust-lang/setup-rust-toolchain@v1
+       - name: Install Rust
+         uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1
 
-      - name: Install cargo-vet
-        uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-vet
+       - name: Install cargo-vet
+         uses: taiki-e/install-action@c44f6b046f1c29ae5918b1e0bfdbb2f1813836fd # v2
+         with:
+           tool: cargo-vet
 
       - name: Run cargo-vet
         run: cargo vet --locked
@@ -188,13 +205,13 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Fetch Repository
-        uses: actions/checkout@v7
+       - name: Fetch Repository
+         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
-      - name: Install Typos
-        uses: taiki-e/install-action@v2
-        with:
-          tool: typos-cli
+       - name: Install Typos
+         uses: taiki-e/install-action@c44f6b046f1c29ae5918b1e0bfdbb2f1813836fd # v2
+         with:
+           tool: typos-cli
 
       - name: run typos
         run: typos
@@ -204,43 +221,56 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Fetch Repository
-        uses: actions/checkout@v7
+       - name: Fetch Repository
+         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
-      - name: Install Taplo
-        uses: tombi-toml/setup-tombi@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+       - name: Install Taplo
+         uses: tombi-toml/setup-tombi@f2ae7247d62521245eb2793d653b9df472b9e090 # v1
+         env:
+           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Validate TOML files
         run: tombi lint
 
+  zizmor:
+     name: Zizmor - GitHub Actions Security Audit
+     runs-on: ubuntu-latest
+
+     steps:
+       - name: Fetch Repository
+         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+       - name: Run zizmor
+         run: |
+           curl -sSLf https://raw.githubusercontent.com/google/zizmor/main/install.sh | sh
+           ~/.cargo/bin/zizmor .
+
   markdown-lint:
-    name: Markdown Lint
-    runs-on: ubuntu-latest
+     name: Markdown Lint
+     runs-on: ubuntu-latest
 
-    steps:
-      - name: Fetch Repository
-        uses: actions/checkout@v7
+     steps:
+       - name: Fetch Repository
+         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
-      - name: Markdown Lint
-        uses: DavidAnson/markdownlint-cli2-action@v24
-        with:
-          globs: "**/*.md"
+       - name: Markdown Lint
+         uses: DavidAnson/markdownlint-cli2-action@6bf21b07787794f89a243495939cd651942aeabe # v24
+         with:
+           globs: "**/*.md"
 
   yaml-lint:
     name: YAML Lint and Format Check
     runs-on: ubuntu-latest
 
     steps:
-      - name: Fetch Repository
-        uses: actions/checkout@v7
+       - name: Fetch Repository
+         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
-      - name: YAML Lint
-        uses: actions/setup-go@v6
-        with:
-          go-version: stable
-          cache: false
+       - name: YAML Lint
+         uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+         with:
+           go-version: stable
+           cache: false
 
       - name: Install yamlfmt
         run: go install github.com/google/yamlfmt/cmd/yamlfmt@latest
@@ -253,31 +283,31 @@ jobs:
     runs-on: ubuntu-latest
     needs: cargo-build
     steps:
-      - name: Fetch Repository
-        uses: actions/checkout@v7
+       - name: Fetch Repository
+         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
-      - name: Install stable toolchain
-        uses: actions-rust-lang/setup-rust-toolchain@v1
-        with:
-          components: llvm-tools-preview
+       - name: Install stable toolchain
+         uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1
+         with:
+           components: llvm-tools-preview
 
-      - name: Install cargo-llvm-cov and cargo-nextest
-        uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-llvm-cov,nextest
-      - name: Generate code coverage
-        run: cargo llvm-cov nextest --workspace --all-features --lcov --output-path lcov.info
+       - name: Install cargo-llvm-cov and cargo-nextest
+         uses: taiki-e/install-action@c44f6b046f1c29ae5918b1e0bfdbb2f1813836fd # v2
+         with:
+           tool: cargo-llvm-cov,nextest
+       - name: Generate code coverage
+         run: cargo llvm-cov nextest --workspace --all-features --lcov --output-path lcov.info
 
-      - name: Upload coverage to Codecov
-        uses: codecov/codecov-action@v7
-        with:
-          files: ./lcov.info
-          token: ${{ secrets.CODECOV_TOKEN }}
-          fail_ci_if_error: false
+       - name: Upload coverage to Codecov
+         uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f # v7
+         with:
+           files: ./lcov.info
+           token: ${{ secrets.CODECOV_TOKEN }}
+           fail_ci_if_error: false
 
-      - name: Upload coverage artifact
-        uses: actions/upload-artifact@v7
-        with:
-          name: coverage-report
-          path: ./coverage/
-          if-no-files-found: warn
+       - name: Upload coverage artifact
+         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+         with:
+           name: coverage-report
+           path: ./coverage/
+           if-no-files-found: warn
