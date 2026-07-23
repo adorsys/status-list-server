@@ -11,6 +11,11 @@ env:
   CLUSTER_NAME: datev-wallet-cluster
   AWS_REGION: eu-central-1
   REGISTRY: ghcr.io
+  # ARN of the IAM role provisioned by wallet-eks-env's github-actions-oidc
+  # Terraform module. Not a secret (the trust policy is what protects it),
+  # but kept as a repository variable so it can be rotated without a code
+  # change if the role is ever recreated.
+  AWS_DEPLOY_ROLE_ARN: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
 jobs:
   build-and-push:
     name: Build and Push Docker Image to GHCR
@@ -51,10 +56,19 @@ jobs:
           push: true
           platforms: linux/amd64,linux/arm64
           tags: ${{ steps.meta.outputs.tags }}
+  verify-ci:
+    name: Verify CI is green on main
+    needs: build-and-push
+    if: github.ref == 'refs/heads/main'
+    uses: ./.github/workflows/CI.yml
+    secrets: inherit
+
   deploy-to-eks:
     name: Deploy to EKS
     runs-on: ubuntu-latest
-    needs: build-and-push
+    needs: [build-and-push, verify-ci]
+    if: github.ref == 'refs/heads/main' && needs.build-and-push.result == 'success' && needs.verify-ci.result == 'success'
+    environment: production
     permissions:
       contents: read
       id-token: write
@@ -64,8 +78,8 @@ jobs:
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v6
         with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          role-to-assume: ${{ env.AWS_DEPLOY_ROLE_ARN }}
+          role-session-name: status-list-server-deploy
           aws-region: ${{ env.AWS_REGION }}
       - name: Update kubeconfig for EKS
         run: aws eks update-kubeconfig --name ${{ env.CLUSTER_NAME }} --region ${{ env.AWS_REGION }}
