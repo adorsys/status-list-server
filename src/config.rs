@@ -120,11 +120,6 @@ pub struct CertConfig {
     #[serde(default)]
     pub eku: Vec<u64>,
     pub acme_directory_url: String,
-    /// Time-to-live in seconds for the certificate chain cache.
-    /// A value of `0` means **entries never expire** (infinite TTL); the cache remains active
-    /// and relies on explicit invalidation via the provisioning hook.
-    /// This intentionally differs from [`CacheConfig::ttl`](CacheConfig::ttl), where `ttl=0`
-    /// disables caching entirely.
     pub chain_cache_ttl: u64,
     pub renewal_cron_schedule: String,
     #[serde(default)]
@@ -483,10 +478,6 @@ impl DnsConfig {
 pub struct RedisConfig {
     pub uri: SecretString,
     pub require_client_auth: bool,
-    /// Time-to-live (in seconds) for cached certificate data in Redis.
-    /// A value of `0` **disables caching** (no storage or retrieval of certificates).
-    /// For persistent caching, use a large value (e.g., 3600 for 1 hour).
-    /// See also: [`CacheConfig::ttl`] and [`AwsConfig::secrets_cache_ttl`].
     pub cert_cache_ttl: u64,
 }
 
@@ -501,9 +492,6 @@ pub struct DatabaseConfig {
 #[derive(Debug, Clone, Deserialize)]
 pub struct AwsConfig {
     pub region: String,
-    /// Time-to-live (in seconds) for cached secrets from AWS Secrets Manager.
-    /// A value of `0` **disables caching** (no in-memory cache is created; all secrets are fetched from AWS).
-    /// See also: [`RedisConfig::cert_cache_ttl`] and [`CacheConfig::ttl`].
     pub secrets_cache_ttl: u64,
     pub s3_bucket: String,
     pub s3_key_prefix: String,
@@ -511,9 +499,6 @@ pub struct AwsConfig {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct CacheConfig {
-    /// Time-to-live (in seconds) for status-list entries in the in-memory cache.
-    /// A value of `0` **disables caching** (entries expire immediately, all reads fall through to storage).
-    /// See also: [`RedisConfig::cert_cache_ttl`] and [`AwsConfig::secrets_cache_ttl`].
     pub ttl: u64,
     pub max_capacity: u64,
 }
@@ -748,6 +733,18 @@ fn base_builder() -> ConfigBuilder<DefaultState> {
         .expect("hardcoded default")
         .set_default("server.cert.renewal_cron_schedule", "0 0 0 * * *")
         .expect("hardcoded default")
+        .set_default("server.cert.provisioning_strategy", "acme")
+        .expect("hardcoded default")
+        .set_default("server.cert.store.source", "filesystem")
+        .expect("hardcoded default")
+        .set_default("server.cert.store.certificate_path", Option::<String>::None)
+        .expect("hardcoded default")
+        .set_default("server.cert.store.signing_key_path", Option::<String>::None)
+        .expect("hardcoded default")
+        .set_default("server.cert.store.certificate_key", Option::<String>::None)
+        .expect("hardcoded default")
+        .set_default("server.cert.store.signing_key_key", Option::<String>::None)
+        .expect("hardcoded default")
         .set_default("aws.region", "us-east-1")
         .expect("hardcoded default")
         .set_default("cache.ttl", 5 * 60)
@@ -758,13 +755,31 @@ fn base_builder() -> ConfigBuilder<DefaultState> {
         .expect("hardcoded default")
         .set_default("status_list.token_ttl_secs", 300)
         .expect("hardcoded default")
+        .set_default("status_list.history_retention_secs", 7776000)
+        .expect("hardcoded default")
+        .set_default("rate_limit.strict_burst_size", 10)
+        .expect("hardcoded default")
+        .set_default("rate_limit.strict_period_secs", 60)
+        .expect("hardcoded default")
+        .set_default("rate_limit.permissive_burst_size", 100)
+        .expect("hardcoded default")
+        .set_default("rate_limit.permissive_period_secs", 60)
+        .expect("hardcoded default")
+        .set_default("limits.max_body_size_bytes", 2_097_152)
+        .expect("hardcoded default")
+        .set_default("limits.max_status_index", 100_000)
+        .expect("hardcoded default")
+        .set_default("limits.max_statuses_per_request", 5_000)
+        .expect("hardcoded default")
+        .set_default("limits.max_serialized_list_size", 1_048_576)
+        .expect("hardcoded default")
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use secrecy::ExposeSecret;
     use sealed_test::prelude::*;
+    use secrecy::ExposeSecret;
 
     #[test]
     fn test_default_config() {
@@ -1167,9 +1182,6 @@ mod tests {
         );
     }
 
-<<<<<<< HEAD
-#[test]
-=======
     #[sealed_test(env = [
         ("APP_SERVER__HOST", "0.0.0.0"),
         ("APP_SERVER__PORT", "5002"),
@@ -1274,12 +1286,16 @@ mod tests {
     ])]
     fn test_new_config_fields_env_override() {
         let config = Config::load_from_overrides(&[
+            ("server.cert.provisioning_strategy", "store"),
             ("aws.s3_bucket", "my-bucket"),
             ("aws.s3_key_prefix", "prefix"),
             ("status_list.token_exp_secs", "1800"),
             ("status_list.token_ttl_secs", "600"),
             ("server.cert.renewal_cron_schedule", "0 0 12 * * *"),
             ("server.cert.dns_challenge_server_url", "http://pebble:8055"),
+            ("server.cert.provisioning_strategy", "store"),
+            ("server.cert.store.certificate_path", "/certs/tls.crt"),
+            ("server.cert.store.signing_key_path", "/certs/tls.key"),
         ])
         .expect("Failed to load config");
 

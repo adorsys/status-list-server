@@ -227,6 +227,7 @@ fn validate_aggregation_uri(config: &Config) -> color_eyre::Result<()> {
 mod tests {
     use super::*;
     use crate::config::Config;
+    use sealed_test::prelude::*;
 
     use axum::{
         body::Body,

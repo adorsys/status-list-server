@@ -239,35 +239,6 @@ You can run the tests using the following command:
 cargo test
 ```
 
-### Providing test-specific configuration
-
-The server's configuration is normally loaded from the process environment
-(see [`.env.template`](.env.template) and [`Config::load`](src/config.rs)).
-In tests we must never mutate the process-wide environment, because
-`std::env::set_var` / `std::env::remove_var` became `unsafe` on recent Rust
-toolchains and our project does not introduce `unsafe` code.
-
-Instead, tests override configuration through an in-memory source that is
-fully isolated from the host environment and from any other test, regardless
-of execution order or threading. Use [`Config::load_from_overrides`](src/config.rs),
-which layers the supplied `(path, value)` pairs on top of the same built-in
-defaults used in production `Config::load`:
-
-```rust
-let config = Config::load_from_overrides(&[
-    ("server.host", "0.0.0.0"),
-    ("server.port", "5002"),
-    ("server.aggregation_uri", "https://example.com/api/v1/aggregation"),
-])
-.expect("Failed to load config");
-```
-
-Each `path` uses `.` as the nested-key separator and mirrors the production
-`APP_*` environment variable (minus the `APP_` prefix and with `__` replaced
-by `.`). The textual `value` is interpreted exactly as the corresponding
-environment variable would be, so any valid `APP_*` value is also valid here.
-Pass `&[]` (no overrides) to obtain the production defaults.
-
 ## License
 
 Licensed under either of [Apache License, Version 2.0](LICENSE-APACHE) or [MIT license](LICENSE-MIT) at your option.
