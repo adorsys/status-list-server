@@ -178,8 +178,8 @@ mod tests {
         assert!(json.get("status").is_none());
     }
 
-    #[test]
-    fn test_repository_error_does_not_leak_db_details() {
+    #[tokio::test]
+    async fn test_repository_error_does_not_leak_db_details() {
         let db_error_message = "DbErr: error connecting: server error? details: host=secret-db password=supersecret user=admin";
         let repo_error = RepositoryError::Generic(db_error_message.to_string());
         let error = ApiError::from(repo_error);
@@ -187,11 +187,9 @@ mod tests {
 
         assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
 
-        let body = tokio::runtime::Runtime::new()
-            .unwrap()
-            .block_on(async { to_bytes(response.into_body(), usize::MAX).await.unwrap() });
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         let body_str = String::from_utf8(body.to_vec()).unwrap();
-        let json: serde_json::Value = serde_json::from_str(&body_str).unwrap();
 
         assert_eq!(json["error"], "internal_error");
         assert!(!body_str.contains("secret-db"));
