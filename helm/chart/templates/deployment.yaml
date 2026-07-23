@@ -24,6 +24,9 @@ spec:
                 "readOnlyRootFilesystem" true
                 "allowPrivilegeEscalation" false
                 "capabilities" (dict "drop" (list "ALL")))
+              "resources" (dict
+                "requests" (dict "cpu" "50m" "memory" "64Mi")
+                "limits" (dict "cpu" "100m" "memory" "128Mi"))
               "volumeMounts" (list (dict "name" "tmp" "mountPath" "/tmp")) }}
         - {{- tpl (toYaml (mustMergeOverwrite $ic $hardened)) $ | nindent 10 }}
         {{- end }}
