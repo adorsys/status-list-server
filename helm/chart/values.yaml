@@ -116,10 +116,12 @@ statuslist:
     failureThreshold: 3
   networkPolicy:
     enabled: true
-    # Restrict ingress to specific namespaces or CIDR blocks
+    # When ingress is empty [], ANY source can reach the service port (port-only restriction).
+    # Add podSelector/namespaceSelector/ipBlock entries to restrict sources.
     ingress: []
-    # Restrict egress to specific destinations (e.g., PostgreSQL, Redis, AWS API)
-    egress: []
+    # Restrict egress for internal ports (5432, 6379, 6380) to specific destinations.
+    # External ports (443, 53) are always allowed without destination restriction.
+    egressInternal: []
   resources:
     requests:
       memory: "256Mi"

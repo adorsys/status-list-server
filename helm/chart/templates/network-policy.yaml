@@ -29,14 +29,15 @@ spec:
           protocol: TCP
         - port: 6380
           protocol: TCP
+      {{- with .Values.statuslist.networkPolicy.egressInternal }}
+      to:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    - ports:
         - port: 443
           protocol: TCP
         - port: 53
           protocol: TCP
         - port: 53
           protocol: UDP
-      {{- with .Values.statuslist.networkPolicy.egress }}
-      to:
-        {{- toYaml . | nindent 8 }}
-      {{- end }}
 {{- end }}

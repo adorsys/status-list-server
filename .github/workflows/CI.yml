@@ -243,6 +243,34 @@ jobs:
           exit-code: 1
           trivyignores: .trivyignore.yaml
 
+  kube-linter:
+    name: KubeLinter Scan (Helm Chart)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Fetch Repository
+        uses: actions/checkout@v7
+
+      - name: Setup Helm
+        uses: azure/setup-helm@v3
+
+      - name: Build Helm dependencies
+        run: |
+          helm repo add dandydeveloper https://dandydeveloper.github.io/charts
+          helm dependency build helm/chart
+
+      - name: Render Helm template
+        run: |
+          mkdir -p /tmp/rendered
+          helm template status-list-server helm/chart -f helm/chart/values.yaml --output-dir /tmp/rendered
+
+      - name: Run KubeLinter
+        uses: stackrox/kube-linter-action@v1
+        with:
+          directory: /tmp/rendered
+          format: sarif
+          output: kube-linter-results.sarif
+
   yaml-lint:
     name: YAML Lint and Format Check
     runs-on: ubuntu-latest

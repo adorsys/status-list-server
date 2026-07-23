@@ -19,16 +19,13 @@ spec:
       {{- with .Values.statuslist.initContainers }}
       initContainers:
         {{- range $ic := . }}
-        - {{- tpl (toYaml $ic) $ | nindent 10 }}
-          securityContext:
-            readOnlyRootFilesystem: true
-            allowPrivilegeEscalation: false
-            capabilities:
-              drop:
-                - ALL
-          volumeMounts:
-            - name: tmp
-              mountPath: /tmp
+        {{- $hardened := dict
+              "securityContext" (dict
+                "readOnlyRootFilesystem" true
+                "allowPrivilegeEscalation" false
+                "capabilities" (dict "drop" (list "ALL")))
+              "volumeMounts" (list (dict "name" "tmp" "mountPath" "/tmp")) }}
+        - {{- tpl (toYaml (mustMergeOverwrite $ic $hardened)) $ | nindent 10 }}
         {{- end }}
       {{- end }}
       securityContext:
@@ -46,6 +43,8 @@ spec:
             capabilities:
               drop:
                 - ALL
+            seccompProfile:
+              type: RuntimeDefault
           image: {{ .Values.statuslist.image.repository }}:{{ .Values.statuslist.image.tag }}
           imagePullPolicy: {{ .Values.statuslist.image.pullPolicy }}
           ports:
@@ -88,6 +87,10 @@ spec:
             {{- if .Values.secretStore.enabled }}
             - name: APP_AWS__REGION
               value: {{ .Values.secretStore.aws.region | quote }}
+            - name: AWS_SHARED_CREDENTIALS_FILE
+              value: /home/nobody/.aws/credentials
+            - name: AWS_CONFIG_FILE
+              value: /home/nobody/.aws/config
             {{- end }}
             - name: POSTGRES_DB
               value: {{ .Values.postgres.auth.database | quote }}
