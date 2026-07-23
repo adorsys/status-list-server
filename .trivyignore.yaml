@@ -1,0 +1,8 @@
+misconfigurations:
+  - id: KSV-0014
+    paths:
+      - "*/charts/postgres*/**"
+      - "*/charts/redis-ha*/**"
+  - id: KSV-0118
+    paths:
+      - "*/charts/redis-ha*/**"

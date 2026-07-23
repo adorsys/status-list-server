@@ -241,6 +241,7 @@ jobs:
           scan-ref: /tmp/rendered
           severity: HIGH,CRITICAL
           exit-code: 1
+          trivyignores: .trivyignore.yaml
 
   yaml-lint:
     name: YAML Lint and Format Check
