@@ -100,8 +100,10 @@ spec:
                   key: redis-password
             - name: APP_REDIS__URI
               value: {{ include "status-list-server-chart.redisUri" . | quote }}
-          {{- if .Values.secretStore.enabled }}
           volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+          {{- if .Values.secretStore.enabled }}
             - name: aws-credentials-volume
               mountPath: /home/nobody/.aws
               readOnly: true
