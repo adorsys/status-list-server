@@ -684,8 +684,12 @@ impl Config {
 /// `Config::load_from_overrides`, gated on `#[cfg(test)]`) start from this
 /// shared set of defaults so that there is exactly one source of truth for the
 /// default configuration.
-#[expect(dead_code)]
-fn base_builder() -> ConfigBuilder<DefaultState> {
+#[cfg(test)]
+type TestConfigBuilder = ConfigBuilder<DefaultState>;
+
+#[cfg(test)]
+#[allow(dead_code)]
+fn base_builder() -> TestConfigBuilder {
     ConfigLib::builder()
         .set_default("server.host", "localhost")
         .expect("hardcoded default")
