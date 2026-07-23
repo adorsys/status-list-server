@@ -269,7 +269,7 @@ jobs:
         with:
           directory: /tmp/rendered
           format: sarif
-          output: kube-linter-results.sarif
+          output-file: kube-linter-results.sarif
 
   yaml-lint:
     name: YAML Lint and Format Check
