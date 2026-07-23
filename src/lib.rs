@@ -1,12 +1,5 @@
 #[cfg(all(test, feature = "server"))]
 mod test_utils;
-#[cfg(any(
-    feature = "server",
-    feature = "aws",
-    feature = "redis",
-    feature = "certificate-acme",
-    feature = "metrics-prometheus"
-))]
 mod utils;
 
 pub mod adapters;
@@ -27,4 +20,5 @@ pub mod web;
 pub use utils::bits_validation;
 #[cfg(any(feature = "server", feature = "certificate-acme"))]
 pub use utils::cert_manager;
+#[cfg(feature = "server")]
 pub use utils::telemetry;

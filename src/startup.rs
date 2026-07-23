@@ -30,8 +30,8 @@ use tower_http::{
 const AGGREGATION_ROUTE_PATH: &str = "/api/v1/aggregation";
 
 use crate::config::Config;
+use crate::state::AppState;
 use crate::utils::metrics::{metrics_handler, setup_metrics};
-use crate::utils::state::AppState;
 use crate::web::auth::auth;
 use crate::web::handlers::{
     credential_handler, get_aggregation, get_status_list, publish_status, update_status,

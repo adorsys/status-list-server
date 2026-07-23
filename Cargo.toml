@@ -13,7 +13,6 @@ server = [
   "config-file",
   "dep:tikv-jemallocator",
   "http",
-  "metrics-prometheus",
   "postgres",
   "redis",
 ]
@@ -45,7 +44,6 @@ aws = [
   "dep:tracing",
 ]
 redis = ["certificate-acme", "dep:redis"]
-metrics-prometheus = ["dep:color-eyre", "dep:metrics-exporter-prometheus", "dep:metrics-process"]
 certificate-acme = [
   "dep:axum",
   "dep:base64",
@@ -182,9 +180,6 @@ flate2 = "1.1"
 x509-parser = { version = "0.18", optional = true }
 public-suffix = { version = "0.1", optional = true }
 tokio-cron-scheduler = { version = "0.15", optional = true }
-metrics = "0.24"
-metrics-exporter-prometheus = { version = "0.18", optional = true }
-metrics-process = { version = "2.4", optional = true }
 sea-orm-migration = {
   version = "1.1.20",
   default-features = false,

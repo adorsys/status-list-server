@@ -4,7 +4,7 @@ use instant_acme::{Account, HttpClient};
 use tokio::sync::Mutex;
 
 use super::{
-    AcmeProvisioningStrategy, CertError, CertManager, CertProvisioningStrategy,
+    AcmeProvisioningStrategy, CertError, CertManager, CertManagerMetrics, CertProvisioningStrategy,
     DEFAULT_CHAIN_CACHE_TTL, RenewalStrategy, StoreProvisioningStrategy,
     challenge::ChallengeHandler, http_client::DefaultHttpClient, storage::Storage,
 };
@@ -251,6 +251,7 @@ impl CertificateManagerBuilder {
             organization: self.organization,
             eku: self.eku,
             acme_directory_url: self.acme_directory_url.unwrap_or_default(),
+            metrics: CertManagerMetrics::default(),
         })
     }
 }

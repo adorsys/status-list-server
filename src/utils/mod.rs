@@ -6,6 +6,7 @@ pub(crate) mod cache;
 pub mod cert_manager;
 #[cfg(any(feature = "server", feature = "certificate-acme"))]
 pub(crate) mod keygen;
-#[cfg(feature = "metrics-prometheus")]
+#[cfg(feature = "server")]
 pub(crate) mod metrics;
+#[cfg(feature = "server")]
 pub mod telemetry;
