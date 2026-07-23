@@ -99,6 +99,13 @@ spec:
             - name: redis-cert-sync
               image: bitnami/kubectl:1.31
               imagePullPolicy: IfNotPresent
+              resources:
+                requests:
+                  cpu: 50m
+                  memory: 64Mi
+                limits:
+                  cpu: 100m
+                  memory: 128Mi
               securityContext:
                 readOnlyRootFilesystem: true
                 allowPrivilegeEscalation: false
