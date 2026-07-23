@@ -40,4 +40,9 @@ spec:
           protocol: TCP
         - port: 53
           protocol: UDP
+    - ports:
+        - port: 4317
+          protocol: TCP
+        - port: 4318
+          protocol: TCP
 {{- end }}

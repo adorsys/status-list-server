@@ -98,6 +98,11 @@ statuslist:
     APP_LIMITS__MAX_STATUS_INDEX: "100000"
     APP_LIMITS__MAX_STATUSES_PER_REQUEST: "5000"
     APP_LIMITS__MAX_SERIALIZED_LIST_SIZE: "1048576"
+    # Telemetry / OpenTelemetry
+    APP_TELEMETRY__ENVIRONMENT: "production"
+    APP_TELEMETRY__OTLP_ENDPOINT: "http://localhost:4317"
+    APP_TELEMETRY__ENABLED: "true"
+    APP_TELEMETRY__SAMPLER_RATIO: "1.0"
   livenessProbe:
     httpGet:
       path: /health
@@ -242,3 +247,38 @@ redis-ha:
 
 redis:
   enabled: true
+
+otelCollector:
+  enabled: false
+  sidecar:
+    enabled: false
+    image:
+      repository: otel/opentelemetry-collector-contrib
+      tag: "0.156.0"
+    resources:
+      requests:
+        memory: "64Mi"
+        cpu: "50m"
+      limits:
+        memory: "128Mi"
+        cpu: "100m"
+  standalone:
+    enabled: false
+    replicaCount: 1
+    image:
+      repository: otel/opentelemetry-collector-contrib
+      tag: "0.156.0"
+    service:
+      type: ClusterIP
+      grpcPort: 4317
+      httpPort: 4318
+    resources:
+      requests:
+        memory: "128Mi"
+        cpu: "100m"
+      limits:
+        memory: "256Mi"
+        cpu: "200m"
+  config:
+    exporters:
+      otlpEndpoint: "jaeger-collector:4317"
