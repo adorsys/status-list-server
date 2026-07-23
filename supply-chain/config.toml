@@ -53,7 +53,7 @@ criteria = "safe-to-deploy"
 
 [[exemptions.anyhow]]
 version = "1.0.103"
-criteria = "safe-to-run"
+criteria = "safe-to-deploy"
 
 [[exemptions.arc-swap]]
 version = "1.9.2"
@@ -945,7 +945,7 @@ criteria = "safe-to-deploy"
 
 [[exemptions.itertools]]
 version = "0.14.0"
-criteria = "safe-to-run"
+criteria = "safe-to-deploy"
 
 [[exemptions.itoa]]
 version = "1.0.18"
@@ -1191,6 +1191,30 @@ criteria = "safe-to-deploy"
 version = "0.2.1"
 criteria = "safe-to-deploy"
 
+[[exemptions.opentelemetry]]
+version = "0.32.0"
+criteria = "safe-to-deploy"
+
+[[exemptions.opentelemetry-http]]
+version = "0.32.0"
+criteria = "safe-to-deploy"
+
+[[exemptions.opentelemetry-otlp]]
+version = "0.32.0"
+criteria = "safe-to-deploy"
+
+[[exemptions.opentelemetry-prometheus]]
+version = "0.32.0"
+criteria = "safe-to-deploy"
+
+[[exemptions.opentelemetry-proto]]
+version = "0.32.0"
+criteria = "safe-to-deploy"
+
+[[exemptions.opentelemetry_sdk]]
+version = "0.32.1"
+criteria = "safe-to-deploy"
+
 [[exemptions.ordered-float]]
 version = "2.10.1"
 criteria = "safe-to-deploy"
@@ -1391,17 +1415,29 @@ criteria = "safe-to-deploy"
 version = "0.18.0"
 criteria = "safe-to-deploy"
 
+[[exemptions.prometheus]]
+version = "0.14.0"
+criteria = "safe-to-deploy"
+
 [[exemptions.prost]]
 version = "0.14.4"
-criteria = "safe-to-run"
+criteria = "safe-to-deploy"
 
 [[exemptions.prost-derive]]
 version = "0.14.4"
-criteria = "safe-to-run"
+criteria = "safe-to-deploy"
 
 [[exemptions.prost-types]]
 version = "0.14.4"
-criteria = "safe-to-run"
+criteria = "safe-to-deploy"
+
+[[exemptions.protobuf]]
+version = "3.7.2"
+criteria = "safe-to-deploy"
+
+[[exemptions.protobuf-support]]
+version = "3.7.2"
+criteria = "safe-to-deploy"
 
 [[exemptions.ptr_meta]]
 version = "0.1.4"
@@ -2101,7 +2137,11 @@ criteria = "safe-to-deploy"
 
 [[exemptions.tonic-prost]]
 version = "0.14.6"
-criteria = "safe-to-run"
+criteria = "safe-to-deploy"
+
+[[exemptions.tonic-types]]
+version = "0.14.6"
+criteria = "safe-to-deploy"
 
 [[exemptions.tower]]
 version = "0.5.3"
@@ -2144,6 +2184,14 @@ version = "0.2.1"
 criteria = "safe-to-deploy"
 
 [[exemptions.tracing-log]]
+version = "0.2.0"
+criteria = "safe-to-deploy"
+
+[[exemptions.tracing-opentelemetry]]
+version = "0.33.0"
+criteria = "safe-to-deploy"
+
+[[exemptions.tracing-serde]]
 version = "0.2.0"
 criteria = "safe-to-deploy"
 
