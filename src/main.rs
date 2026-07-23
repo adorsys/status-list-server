@@ -1,8 +1,8 @@
 use color_eyre::{Result, eyre::eyre};
 use dotenvy::dotenv;
 use rustls::crypto::aws_lc_rs;
-use status_list_server::cert_manager::setup_cert_renewal_scheduler;
-use status_list_server::state::{build_state, setup_history_cleanup_scheduler};
+use status_list_server::cert_manager::{describe_renewal_metrics, setup_cert_renewal_scheduler};
+use status_list_server::state::{build_state_with_cert_manager, setup_history_cleanup_scheduler};
 use status_list_server::telemetry::init_telemetry;
 use status_list_server::{config::Config as AppConfig, startup::HttpServer};
 #[cfg(not(target_env = "msvc"))]
@@ -31,11 +31,13 @@ async fn main() -> Result<()> {
         .install_default()
         .map_err(|e| eyre!("Failed to set crypto provider: {e:?}"))?;
 
-    // Build the app state
-    let app_state = build_state(&config).await?;
+    // Describe renewal metrics early so they appear in Prometheus immediately
+    describe_renewal_metrics();
+
+    // Build the app state and extract the cert manager
+    let (app_state, cert_manager) = build_state_with_cert_manager(&config).await?;
 
     // Setup certificate renewal scheduler
-    let cert_manager = app_state.cert_manager.clone();
     setup_cert_renewal_scheduler(
         cert_manager.clone(),
         &config.server.cert.renewal_cron_schedule,
@@ -52,6 +54,9 @@ async fn main() -> Result<()> {
     // Zero-init cert-chain cache counters now that the metrics recorder is
     // installed (HttpServer::new → attach_metrics → setup_metrics).
     cert_manager.init_cert_chain_cache_counters();
+
+    // Zero-init renewal counters so they appear in Prometheus scrapes
+    cert_manager.init_renewal_counters();
 
     // Initial certificate request
     tokio::spawn(async move {

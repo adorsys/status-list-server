@@ -1,11 +1,11 @@
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, QueryOrder,
-    QuerySelect, Set,
+    QuerySelect, Set, sea_query::Expr,
 };
 use std::sync::Arc;
 
 use super::error::RepositoryError;
-use crate::models::{
+use super::models::{
     Credentials, StatusListHistoryRecord, StatusListRecord, credentials, status_list_history,
     status_lists,
 };
@@ -25,6 +25,17 @@ impl<T> SeaOrmStore<T> {
     }
 }
 
+/// Maps an insert failure, distinguishing a unique-constraint violation — a
+/// concurrent writer won the check-then-insert race — from real storage
+/// failures. `sql_err()` is SeaORM's backend-normalized view of driver errors,
+/// so the same mapping serves Postgres, MySQL, and SQLite alike.
+fn map_insert_err(e: sea_orm::DbErr) -> RepositoryError {
+    match e.sql_err() {
+        Some(sea_orm::SqlErr::UniqueConstraintViolation(_)) => RepositoryError::DuplicateEntry,
+        _ => RepositoryError::InsertError(e.to_string()),
+    }
+}
+
 impl SeaOrmStore<StatusListRecord> {
     #[tracing::instrument(skip(self, entity), fields(db.system = "sea-orm"))]
     pub async fn insert_one(&self, entity: StatusListRecord) -> Result<(), RepositoryError> {
@@ -38,7 +49,7 @@ impl SeaOrmStore<StatusListRecord> {
         status_lists::Entity::insert(active)
             .exec_without_returning(&*self.db)
             .await
-            .map_err(|e| RepositoryError::InsertError(e.to_string()))?;
+            .map_err(map_insert_err)?;
         Ok(())
     }
 
@@ -66,31 +77,59 @@ impl SeaOrmStore<StatusListRecord> {
             .map_err(|e| RepositoryError::FindError(e.to_string()))
     }
 
+    /// Optimistic-concurrency update guarded on `updated_at`.
+    ///
+    /// Executes a single atomic `UPDATE ... WHERE list_id = ? AND updated_at = ?`.
+    /// `list_id` is the primary key, so this touches at most one row and
+    /// `rows_affected` is exactly 0 or 1. A return of `Ok(false)` means the guard
+    /// did not match — another writer changed the row (or it was deleted) since
+    /// the caller read `expected_updated_at`, i.e. a lost-update was prevented.
+    ///
+    /// `rows_affected` is used deliberately: its semantics are identical across
+    /// the Postgres/MySQL/SQLite sea-orm backends, unlike `SELECT ... FOR UPDATE`
+    /// row locking (see #143).
+    ///
+    /// # Caller contract
+    ///
+    /// `entity.updated_at` MUST be strictly greater than `expected_updated_at`.
+    /// The guard only prevents a lost update if the write *advances* the stamp:
+    /// with a non-advancing value (`new == expected`) two same-second writers
+    /// would both match `WHERE updated_at = expected` and both succeed, silently
+    /// losing a flip. This invariant is enforced below rather than trusted, so a
+    /// future caller that forgets to advance the stamp fails loudly instead of
+    /// reintroducing the race.
     #[tracing::instrument(skip(self, entity), fields(db.system = "sea-orm"))]
     pub async fn update_one(
         &self,
         list_id: &str,
         entity: StatusListRecord,
+        expected_updated_at: i64,
     ) -> Result<bool, RepositoryError> {
-        let existing = status_lists::Entity::find_by_id(list_id)
-            .one(&*self.db)
-            .await
-            .map_err(|e| RepositoryError::FindError(e.to_string()))?;
-        if existing.is_none() {
-            return Ok(false);
+        if entity.updated_at <= expected_updated_at {
+            return Err(RepositoryError::UpdateError(format!(
+                "guarded update requires a strictly newer updated_at \
+                 (new={}, expected-guard={}); a non-advancing stamp would \
+                 silently reintroduce the same-second lost update",
+                entity.updated_at, expected_updated_at
+            )));
         }
-        let active = status_lists::ActiveModel {
-            list_id: Set(entity.list_id),
-            issuer: Set(entity.issuer),
-            status_list: Set(entity.status_list),
-            sub: Set(entity.sub),
-            updated_at: Set(entity.updated_at),
-        };
-        active
-            .update(&*self.db)
+        let result = status_lists::Entity::update_many()
+            .col_expr(status_lists::Column::Issuer, Expr::value(entity.issuer))
+            .col_expr(
+                status_lists::Column::StatusList,
+                Expr::value(entity.status_list),
+            )
+            .col_expr(status_lists::Column::Sub, Expr::value(entity.sub))
+            .col_expr(
+                status_lists::Column::UpdatedAt,
+                Expr::value(entity.updated_at),
+            )
+            .filter(status_lists::Column::ListId.eq(list_id))
+            .filter(status_lists::Column::UpdatedAt.eq(expected_updated_at))
+            .exec(&*self.db)
             .await
             .map_err(|e| RepositoryError::UpdateError(e.to_string()))?;
-        Ok(true)
+        Ok(result.rows_affected > 0)
     }
 
     #[tracing::instrument(skip(self), fields(db.system = "sea-orm"))]
@@ -150,6 +189,14 @@ impl SeaOrmStore<StatusListHistoryRecord> {
     /// Finds the snapshot whose half-open validity interval contains `time`.
     /// Using `iat <= time < exp` ensures the token returned to a client passes
     /// the draft-21 §8.4 `iat`/`exp` validation rule.
+    ///
+    /// Intervals intentionally overlap: each update writes a fresh snapshot with
+    /// `exp = iat + token_exp_secs` while the superseded snapshot keeps its
+    /// original (later) `exp`, so both can match a `time` in the overlap. That is
+    /// not an inconsistency — `ORDER BY iat DESC LIMIT 1` deterministically
+    /// returns the newest snapshot in effect at `time`, which is the correct
+    /// answer for "what was the status then". The memory adapter mirrors this via
+    /// `max_by_key(iat)`.
     #[tracing::instrument(skip(self), fields(db.system = "sea-orm"))]
     pub async fn find_valid_at(
         &self,
@@ -185,7 +232,7 @@ impl SeaOrmStore<Credentials> {
         credentials::Entity::insert(active)
             .exec_without_returning(&*self.db)
             .await
-            .map_err(|e| RepositoryError::InsertError(e.to_string()))?;
+            .map_err(map_insert_err)?;
         Ok(())
     }
 
@@ -229,9 +276,11 @@ impl SeaOrmStore<Credentials> {
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::models::StatusList;
+    use crate::adapters::sea_orm::models::StatusList;
     use jsonwebtoken::jwk::Jwk;
     use sea_orm::{DatabaseBackend, MockDatabase, MockExecResult};
+    // `Migrator::up` is only called from the real-backend helpers below.
+    #[cfg(any(feature = "sqlite", feature = "mysql"))]
     use sea_orm_migration::MigratorTrait;
 
     #[cfg(feature = "sqlite")]
@@ -242,7 +291,7 @@ mod test {
         let db = sea_orm::Database::connect(opt)
             .await
             .expect("Failed to connect to SQLite");
-        crate::database::Migrator::up(&db, None)
+        crate::adapters::sea_orm::Migrator::up(&db, None)
             .await
             .expect("Failed to run migrations on SQLite");
         Arc::new(db)
@@ -297,7 +346,7 @@ mod test {
             let db = sea_orm::Database::connect(opt)
                 .await
                 .expect("Failed to connect to MySQL");
-            crate::database::Migrator::up(&db, None)
+            crate::adapters::sea_orm::Migrator::up(&db, None)
                 .await
                 .expect("Failed to run migrations on MySQL");
             MysqlTestDb {
@@ -393,7 +442,7 @@ mod test {
         let record = StatusListRecord {
             list_id: "list-sqlite-test".to_string(),
             issuer: issuer.to_string(),
-            status_list: crate::models::StatusList {
+            status_list: crate::adapters::sea_orm::models::StatusList {
                 bits: 1,
                 lst: "compressed".to_string(),
             },
@@ -417,8 +466,10 @@ mod test {
                 "list-sqlite-test",
                 StatusListRecord {
                     sub: "sub-2-sqlite-test".to_string(),
-                    ..record
+                    updated_at: record.updated_at + 1, // guarded write must advance the stamp
+                    ..record.clone()
                 },
+                record.updated_at,
             )
             .await
             .unwrap();
@@ -430,6 +481,7 @@ mod test {
             .unwrap()
             .unwrap();
         assert_eq!(updated_found.sub, "sub-2-sqlite-test");
+        assert_eq!(updated_found.updated_at, record.updated_at + 1);
 
         let by_issuer = store.find_by_issuer("sub-2-sqlite-test").await.unwrap();
         assert!(!by_issuer.is_empty());
@@ -622,7 +674,7 @@ mod test {
         let rec = StatusListRecord {
             list_id: "list-neg-sqlite".to_string(),
             issuer: "nonexistent-issuer".to_string(),
-            status_list: crate::models::StatusList {
+            status_list: crate::adapters::sea_orm::models::StatusList {
                 bits: 1,
                 lst: "compressed".to_string(),
             },
@@ -638,19 +690,303 @@ mod test {
                 StatusListRecord {
                     list_id: "missing-list-sqlite".to_string(),
                     issuer: "issuer-neg-sqlite".to_string(),
-                    status_list: crate::models::StatusList {
+                    status_list: crate::adapters::sea_orm::models::StatusList {
                         bits: 1,
                         lst: "compressed".to_string(),
                     },
                     sub: "sub-neg-sqlite".to_string(),
-                    updated_at: 0,
+                    updated_at: 1, // must advance past the guard value below
                 },
+                0,
             )
             .await
             .unwrap();
         assert!(!missing, "update on missing row should report no rows");
 
         cred_store.delete_by("issuer-neg-sqlite").await.unwrap();
+    }
+
+    /// A second insert with the same primary key must surface as
+    /// `DuplicateEntry`, not a generic insert error. This is the one property a
+    /// mock cannot verify: whether the real backend's duplicate-key error
+    /// actually parses into `SqlErr::UniqueConstraintViolation`. The adapter
+    /// layer maps `DuplicateEntry` to a conflict so a racing publish returns
+    /// 409 instead of 500.
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn test_sqlite_duplicate_insert_maps_to_duplicate_entry() {
+        let db = sqlite_connection().await;
+        let cred_store = SeaOrmStore::<Credentials>::new(db.clone());
+        let store = SeaOrmStore::<StatusListRecord>::new(db);
+
+        let key: Jwk = serde_json::from_str(
+            r#"{
+                "kty": "EC",
+                "crv": "P-256",
+                "x": "NeyFv_2L67OEplNbJpR02IFis4_lFW9HYmhfF5Or6m8",
+                "y": "eAH2qe8Pg3GQ28uxA8-qNAqdwQ_zfV2uKAvJ2sLpY9M"
+            }"#,
+        )
+        .unwrap();
+        let issuer = "issuer-dup-sqlite";
+        cred_store
+            .insert_one(Credentials::new(issuer.to_string(), key.clone()))
+            .await
+            .unwrap();
+
+        // Duplicate credential (same issuer primary key).
+        let dup_cred = cred_store
+            .insert_one(Credentials::new(issuer.to_string(), key))
+            .await;
+        assert!(
+            matches!(dup_cred, Err(RepositoryError::DuplicateEntry)),
+            "duplicate credential insert must map to DuplicateEntry, got {dup_cred:?}"
+        );
+
+        // Duplicate status list (same list_id primary key).
+        let record = StatusListRecord {
+            list_id: "list-dup-sqlite".to_string(),
+            issuer: issuer.to_string(),
+            status_list: StatusList {
+                bits: 1,
+                lst: "initial".to_string(),
+            },
+            sub: "sub-dup-sqlite".to_string(),
+            updated_at: 0,
+        };
+        store.insert_one(record.clone()).await.unwrap();
+        let dup_list = store.insert_one(record).await;
+        assert!(
+            matches!(dup_list, Err(RepositoryError::DuplicateEntry)),
+            "duplicate status list insert must map to DuplicateEntry, got {dup_list:?}"
+        );
+    }
+
+    /// Cross-backend proof (#143) for the duplicate-key mapping: MySQL's
+    /// duplicate-key error must also parse into
+    /// `SqlErr::UniqueConstraintViolation` — the exact spot where a driver's
+    /// error format could diverge from sqlite without any mock test noticing.
+    #[cfg(feature = "mysql")]
+    #[tokio::test]
+    async fn test_mysql_duplicate_insert_maps_to_duplicate_entry() {
+        let test_db = mysql_helpers::mysql_connection().await;
+        let cred_store = SeaOrmStore::<Credentials>::new(test_db.db.clone());
+        let store = SeaOrmStore::<StatusListRecord>::new(test_db.db.clone());
+
+        let key: Jwk = serde_json::from_str(
+            r#"{
+                "kty": "EC",
+                "crv": "P-256",
+                "x": "NeyFv_2L67OEplNbJpR02IFis4_lFW9HYmhfF5Or6m8",
+                "y": "eAH2qe8Pg3GQ28uxA8-qNAqdwQ_zfV2uKAvJ2sLpY9M"
+            }"#,
+        )
+        .unwrap();
+        let issuer = "issuer-dup-mysql";
+        cred_store
+            .insert_one(Credentials::new(issuer.to_string(), key.clone()))
+            .await
+            .unwrap();
+
+        let dup_cred = cred_store
+            .insert_one(Credentials::new(issuer.to_string(), key))
+            .await;
+        assert!(
+            matches!(dup_cred, Err(RepositoryError::DuplicateEntry)),
+            "duplicate credential insert must map to DuplicateEntry on MySQL, got {dup_cred:?}"
+        );
+
+        let record = StatusListRecord {
+            list_id: "list-dup-mysql".to_string(),
+            issuer: issuer.to_string(),
+            status_list: StatusList {
+                bits: 1,
+                lst: "initial".to_string(),
+            },
+            sub: "sub-dup-mysql".to_string(),
+            updated_at: 0,
+        };
+        store.insert_one(record.clone()).await.unwrap();
+        let dup_list = store.insert_one(record).await;
+        assert!(
+            matches!(dup_list, Err(RepositoryError::DuplicateEntry)),
+            "duplicate status list insert must map to DuplicateEntry on MySQL, got {dup_list:?}"
+        );
+    }
+
+    /// The real proof for the lost-update fix: two writers that both read the
+    /// same `updated_at` cannot both win. This deterministically models the race
+    /// (no threads) — both capture the same guard value, the first guarded write
+    /// lands, the second's guard misses and is rejected — and asserts the
+    /// loser's flip did not overwrite the winner's.
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn test_update_one_optimistic_guard_rejects_stale_write() {
+        let db = sqlite_connection().await;
+        let cred_store = SeaOrmStore::<Credentials>::new(db.clone());
+        let store = SeaOrmStore::<StatusListRecord>::new(db);
+
+        let key: Jwk = serde_json::from_str(
+            r#"{
+                "kty": "EC",
+                "crv": "P-256",
+                "x": "NeyFv_2L67OEplNbJpR02IFis4_lFW9HYmhfF5Or6m8",
+                "y": "eAH2qe8Pg3GQ28uxA8-qNAqdwQ_zfV2uKAvJ2sLpY9M"
+            }"#,
+        )
+        .unwrap();
+        let issuer = "issuer-guard-sqlite";
+        cred_store
+            .insert_one(Credentials::new(issuer.to_string(), key))
+            .await
+            .unwrap();
+
+        // Seed a row at a known guard value V.
+        let v = 1000;
+        let base = StatusListRecord {
+            list_id: "list-guard-sqlite".to_string(),
+            issuer: issuer.to_string(),
+            status_list: StatusList {
+                bits: 1,
+                lst: "initial".to_string(),
+            },
+            sub: "sub-guard-sqlite".to_string(),
+            updated_at: v,
+        };
+        store.insert_one(base.clone()).await.unwrap();
+
+        // Both writers read the same state, so both guard on V.
+        let writer_a = StatusListRecord {
+            status_list: StatusList {
+                bits: 1,
+                lst: "flip-A".to_string(),
+            },
+            updated_at: v + 1,
+            ..base.clone()
+        };
+        let writer_b = StatusListRecord {
+            status_list: StatusList {
+                bits: 1,
+                lst: "flip-B".to_string(),
+            },
+            updated_at: v + 1,
+            ..base.clone()
+        };
+
+        // First writer wins.
+        let a_won = store.update_one(&base.list_id, writer_a, v).await.unwrap();
+        assert!(a_won, "first guarded write should land");
+
+        // Second writer guarded on the now-stale V: rejected, not silently applied.
+        let b_won = store.update_one(&base.list_id, writer_b, v).await.unwrap();
+        assert!(!b_won, "stale guarded write must be rejected");
+
+        // A's flip survived; B's did not overwrite it.
+        let stored = store.find_one_by(&base.list_id).await.unwrap().unwrap();
+        assert_eq!(stored.status_list.lst, "flip-A");
+        assert_eq!(stored.updated_at, v + 1);
+    }
+
+    /// Cross-backend proof (#143): the optimistic guard must behave identically
+    /// on a real non-sqlite backend. This exercises the JSON `col_expr` write and
+    /// `rows_affected` semantics against MySQL — the two things most likely to
+    /// diverge from sqlite — and asserts the same win/reject outcome as the
+    /// sqlite guard test.
+    #[cfg(feature = "mysql")]
+    #[tokio::test]
+    async fn test_mysql_update_one_optimistic_guard_rejects_stale_write() {
+        let test_db = mysql_helpers::mysql_connection().await;
+        let cred_store = SeaOrmStore::<Credentials>::new(test_db.db.clone());
+        let store = SeaOrmStore::<StatusListRecord>::new(test_db.db.clone());
+
+        let key: Jwk = serde_json::from_str(
+            r#"{
+                "kty": "EC",
+                "crv": "P-256",
+                "x": "NeyFv_2L67OEplNbJpR02IFis4_lFW9HYmhfF5Or6m8",
+                "y": "eAH2qe8Pg3GQ28uxA8-qNAqdwQ_zfV2uKAvJ2sLpY9M"
+            }"#,
+        )
+        .unwrap();
+        let issuer = "issuer-guard-mysql";
+        cred_store
+            .insert_one(Credentials::new(issuer.to_string(), key))
+            .await
+            .unwrap();
+
+        let v = 1000;
+        let base = StatusListRecord {
+            list_id: "list-guard-mysql".to_string(),
+            issuer: issuer.to_string(),
+            status_list: StatusList {
+                bits: 1,
+                lst: "initial".to_string(),
+            },
+            sub: "sub-guard-mysql".to_string(),
+            updated_at: v,
+        };
+        store.insert_one(base.clone()).await.unwrap();
+
+        let writer_a = StatusListRecord {
+            status_list: StatusList {
+                bits: 1,
+                lst: "flip-A".to_string(),
+            },
+            updated_at: v + 1,
+            ..base.clone()
+        };
+        let writer_b = StatusListRecord {
+            status_list: StatusList {
+                bits: 1,
+                lst: "flip-B".to_string(),
+            },
+            updated_at: v + 1,
+            ..base.clone()
+        };
+
+        // First writer wins.
+        let a_won = store.update_one(&base.list_id, writer_a, v).await.unwrap();
+        assert!(a_won, "first guarded write should land on MySQL");
+
+        // Second writer guarded on the now-stale V: rejected.
+        let b_won = store.update_one(&base.list_id, writer_b, v).await.unwrap();
+        assert!(!b_won, "stale guarded write must be rejected on MySQL");
+
+        // A's flip survived and round-tripped through the JSON column.
+        let stored = store.find_one_by(&base.list_id).await.unwrap().unwrap();
+        assert_eq!(stored.status_list.lst, "flip-A");
+        assert_eq!(stored.updated_at, v + 1);
+    }
+
+    /// Pins the store-level caller contract: a guarded write whose new
+    /// `updated_at` does not strictly advance past the guard value is rejected
+    /// outright (before touching the DB), so a future caller that forgets to
+    /// advance the stamp fails loudly instead of silently reintroducing the
+    /// same-second lost update. No DB round-trip is needed — the check precedes
+    /// the query — so this runs on the mock backend.
+    #[tokio::test]
+    async fn test_update_one_rejects_non_advancing_stamp() {
+        let db_conn = Arc::new(MockDatabase::new(DatabaseBackend::Postgres).into_connection());
+        let store = SeaOrmStore::<StatusListRecord>::new(db_conn);
+
+        let entity = StatusListRecord {
+            list_id: "list-x".to_string(),
+            issuer: "issuer".to_string(),
+            status_list: StatusList {
+                bits: 1,
+                lst: "x".to_string(),
+            },
+            sub: "sub".to_string(),
+            updated_at: 1000,
+        };
+
+        // new == expected: not advancing.
+        let equal = store.update_one("list-x", entity.clone(), 1000).await;
+        assert!(matches!(equal, Err(RepositoryError::UpdateError(_))));
+
+        // new < expected: going backwards.
+        let backwards = store.update_one("list-x", entity, 1001).await;
+        assert!(matches!(backwards, Err(RepositoryError::UpdateError(_))));
     }
 
     #[cfg(feature = "sqlite")]

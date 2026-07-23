@@ -11,7 +11,7 @@ use hyper::header;
 use jsonwebtoken::{DecodingKey, Validation};
 use serde::{Deserialize, Serialize};
 
-use crate::utils::state::AppState;
+use crate::state::AppState;
 
 #[derive(Debug, Serialize, Deserialize)]
 struct Claims {
@@ -42,9 +42,9 @@ pub async fn auth(
     let issuer = insecure_decode::<Claims>(token)?.claims.iss;
 
     // Check if issuer is in database and get its credentials
-    let credential = &state
-        .credential_repo
-        .find_one_by(&issuer)
+    let credential = state
+        .credentials
+        .find_credential(&issuer)
         .await
         .map_err(|e| {
             tracing::error!("Failed to find credential for {issuer}: {e:?}");
@@ -53,10 +53,12 @@ pub async fn auth(
         .ok_or(AuthenticationError::IssuerNotFound)?;
 
     // Get the decoding key
-    let decoding_key = DecodingKey::from_jwk(&credential.public_key)?;
+    let public_key = serde_json::from_slice(credential.public_key.as_bytes())
+        .map_err(|_| AuthenticationError::InternalServer)?;
+    let decoding_key = DecodingKey::from_jwk(&public_key)?;
 
     let mut validation = Validation::new(alg);
-    validation.set_issuer(&[&credential.issuer]);
+    validation.set_issuer(&[&credential.issuer.0]);
 
     // Verify the token to ensure that the issuer is the same as the one in the database
     let token_data = jsonwebtoken::decode::<Claims>(token, &decoding_key, &validation)?;
@@ -69,7 +71,9 @@ pub async fn auth(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{models::credentials, test_utils::test_app_state, utils::state::AppState};
+    use crate::{
+        adapters::sea_orm::models::credentials, state::AppState, test_utils::test_app_state,
+    };
     use axum::{
         Extension, Router,
         body::{Body, to_bytes},

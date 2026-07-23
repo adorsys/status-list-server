@@ -1,7 +1,7 @@
 use axum::{Json, extract::State, http::StatusCode, response::IntoResponse};
 use serde::{Deserialize, Serialize};
 
-use crate::utils::state::AppState;
+use crate::state::AppState;
 
 use crate::web::errors::ApiError;
 
@@ -13,8 +13,8 @@ pub(super) struct AggregationResponse {
 #[tracing::instrument(skip(state))]
 pub async fn get_aggregation(State(state): State<AppState>) -> Result<impl IntoResponse, ApiError> {
     let status_lists = state
-        .status_list_repo
-        .find_all_status_list_uris()
+        .status_lists
+        .list_status_list_uris()
         .await
         .map_err(|e| {
             tracing::error!("Failed to fetch status lists for aggregation: {e:?}");

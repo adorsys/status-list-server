@@ -1,22 +1,16 @@
-use crate::{
-    models::{StatusList, StatusListHistoryRecord, StatusListRecord, StatusesRequest},
-    utils::{
-        errors::Error,
-        lst_gen::{AbuseLimits, create_status_list},
-        state::AppState,
-    },
-    web::errors::ApiError,
-};
+use crate::{application::UseCaseError, domain, state::AppState, web::errors::ApiError};
 use axum::{
     Extension,
     extract::{Json, Path, State},
     http::StatusCode,
     response::IntoResponse,
 };
-use time::OffsetDateTime;
 use tracing;
 
-use super::error::StatusListError;
+use super::{
+    StatusesRequest, error::StatusListError, map_domain_error, to_domain_entry,
+    validate_status_request_limits,
+};
 
 /// Create a new status list.
 #[tracing::instrument(skip(appstate, payload), fields(list_id = %list_id, issuer = %issuer))]
@@ -31,123 +25,62 @@ pub async fn publish_status(
         return Err(StatusListError::InvalidListId(e.to_string()).into());
     }
 
-    let count = payload.statuses.len();
-    if count > appstate.max_statuses_per_request {
-        tracing::warn!(
-            "Rejecting publish: {count} statuses exceeds maximum {}",
-            appstate.max_statuses_per_request
-        );
-        return Err(StatusListError::TooManyStatuses {
-            count,
-            max: appstate.max_statuses_per_request,
-        }
-        .into());
-    }
+    validate_status_request_limits(
+        &payload.statuses,
+        appstate.max_statuses_per_request,
+        appstate.max_status_index,
+    )?;
 
-    let store = &appstate.status_list_repo;
+    let statuses = payload
+        .statuses
+        .into_iter()
+        .map(to_domain_entry)
+        .collect::<Vec<_>>();
 
-    let limits = AbuseLimits::new(appstate.max_status_index, appstate.max_serialized_list_size);
-    let stl = create_status_list(payload.statuses, &limits).map_err(|e| {
-        tracing::error!("lst_from failed: {e:?}");
-        match e {
-            Error::Generic(msg) => StatusListError::Generic(msg),
-            Error::InvalidIndex => StatusListError::InvalidIndex,
-            Error::IndexTooLarge(idx) => StatusListError::IndexTooLarge(idx),
-            Error::SerializedListTooLarge { .. } => StatusListError::StatusTooLarge,
-            _ => StatusListError::Generic(e.to_string()),
-        }
-    })?;
-
-    // Check for existing token to prevent duplicates
-    match store.find_one_by(&list_id).await {
-        Ok(Some(_)) => {
-            tracing::info!("Status list {} already exists", list_id);
-            Err(StatusListError::StatusListAlreadyExists.into())
-        }
-        Ok(None) => {
-            // Serialize the status list before constructing the token
-            let status_list = StatusList {
-                bits: stl.bits,
-                lst: stl.lst,
-            };
-
-            let sub = format!(
-                "https://{}/api/v1/status-lists/{}",
-                appstate.server_domain, list_id
-            );
-
-            let updated_at = OffsetDateTime::now_utc().unix_timestamp();
-
-            let status_list_record = StatusListRecord {
-                list_id: list_id.clone(),
-                issuer,
-                status_list,
-                sub,
-                updated_at,
-            };
-
-            // Insert the token into the repository
-            store.insert_one(status_list_record.clone()).await?;
-
-            persist_historical_snapshot(&appstate, &status_list_record).await?;
-            Ok(StatusCode::CREATED.into_response())
-        }
-        Err(e) => Err(ApiError::from(e)),
-    }
-}
-
-/// Records the exact payload and validity window issued at each state change.
-/// This retention is privacy-sensitive: §12.7 recommends enabling it only
-/// where historical resolution is justified and its privacy impact is known.
-///
-/// If `history_retention_secs` is 0, this function returns immediately without
-/// creating a snapshot, effectively disabling historical resolution.
-pub(super) async fn persist_historical_snapshot(
-    appstate: &AppState,
-    status_list_record: &StatusListRecord,
-) -> Result<(), StatusListError> {
-    // Skip snapshot creation if historical resolution is disabled
-    if appstate.history_retention_secs == 0 {
-        tracing::debug!(
-            "Historical snapshots are disabled, skipping snapshot for list {}",
-            status_list_record.list_id
-        );
-        return Ok(());
-    }
-
-    let iat = OffsetDateTime::now_utc().unix_timestamp();
-    let snapshot = StatusListHistoryRecord {
-        snapshot_id: uuid::Uuid::new_v4().to_string(),
-        list_id: status_list_record.list_id.clone(),
-        issuer: status_list_record.issuer.clone(),
-        status_list: status_list_record.status_list.clone(),
-        sub: status_list_record.sub.clone(),
-        iat,
-        exp: iat + appstate.token_exp_secs as i64,
-    };
-    appstate
-        .status_list_history_repo
-        .insert_one(snapshot)
+    match appstate
+        .status_lists
+        .publish_status_list(
+            list_id.clone(),
+            domain::Issuer(issuer),
+            format!(
+                "https://{}/api/v1/status-lists/{list_id}",
+                appstate.server_domain
+            ),
+            statuses,
+        )
         .await
-        .map_err(|e| {
-            tracing::error!("Failed to persist status list history: {e:?}");
-            StatusListError::InternalServerError
-        })
+    {
+        Ok(()) => Ok(StatusCode::CREATED.into_response()),
+        Err(UseCaseError::AlreadyExists) => Err(StatusListError::StatusListAlreadyExists.into()),
+        Err(UseCaseError::StatusListTooLarge) => Err(StatusListError::StatusTooLarge.into()),
+        Err(UseCaseError::Domain(domain::DomainError::InvalidIndex)) => {
+            Err(StatusListError::InvalidIndex.into())
+        }
+        Err(UseCaseError::Domain(domain::DomainError::InvalidStatusList(msg))) => {
+            Err(StatusListError::Generic(msg).into())
+        }
+        Err(UseCaseError::Domain(error)) => Err(map_domain_error(error).into()),
+        Err(error) => {
+            tracing::error!(?error, list_id, "Failed to publish status list");
+            Err(StatusListError::InternalServerError.into())
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    // models types below seed the MockDatabase (persistence side); the request
+    // wire types come from this handler module.
     use crate::{
-        models::{Status, StatusEntry, StatusListRecord, status_lists},
-        test_utils::test_app_state,
+        adapters::sea_orm::models::{StatusList, StatusListRecord, status_lists},
+        test_utils::{test_app_state, test_app_state_with_max_serialized_list_size},
+        web::handlers::status_list::{Status, StatusEntry, test_support::create_status_list},
     };
     use axum::extract::State;
     use hyper::StatusCode;
     use sea_orm::{DatabaseBackend, MockDatabase, MockExecResult};
     use std::sync::Arc;
-
-    const LIMITS: AbuseLimits = AbuseLimits::unlimited();
 
     #[tokio::test]
     async fn test_publish_token_status_invalid_list_id() {
@@ -188,9 +121,7 @@ mod tests {
 
         let status_list = StatusList {
             bits: 2,
-            lst: create_status_list(status_entries.clone(), &LIMITS)
-                .unwrap()
-                .lst,
+            lst: create_status_list(status_entries.clone()).unwrap().lst,
         };
         let new_token = StatusListRecord {
             list_id: token_id.clone(),
@@ -251,9 +182,7 @@ mod tests {
 
         let status_list = StatusList {
             bits: 2,
-            lst: create_status_list(status_entries.clone(), &LIMITS)
-                .unwrap()
-                .lst,
+            lst: create_status_list(status_entries.clone()).unwrap().lst,
         };
         let new_token = StatusListRecord {
             list_id: token_id.clone(),
@@ -295,13 +224,11 @@ mod tests {
         .await
         .unwrap();
 
-        let result = app_state
-            .status_list_repo
-            .find_one_by(&token_id)
+        let token = app_state
+            .status_lists
+            .get_status_list(&token_id)
             .await
             .unwrap();
-        assert!(result.is_some());
-        let token = result.unwrap();
         assert_eq!(token.list_id, token_id);
         assert_eq!(token.status_list.bits, 2);
         assert_eq!(
@@ -324,9 +251,7 @@ mod tests {
             issuer: "issuer".to_string(),
             status_list: StatusList {
                 bits: 1,
-                lst: create_status_list(status_entries.clone(), &LIMITS)
-                    .unwrap()
-                    .lst,
+                lst: create_status_list(status_entries.clone()).unwrap().lst,
             },
             sub: "issuer".to_string(),
             updated_at: 0,
@@ -403,13 +328,11 @@ mod tests {
         .into_response();
         assert_eq!(response.status(), StatusCode::CREATED);
 
-        let result = app_state
-            .status_list_repo
-            .find_one_by(&token_id)
+        let token = app_state
+            .status_lists
+            .get_status_list(&token_id)
             .await
             .unwrap();
-        assert!(result.is_some());
-        let token = result.unwrap();
         assert_eq!(token.list_id, token_id);
         assert_eq!(token.status_list.lst, base64url::encode([]));
     }
@@ -425,9 +348,7 @@ mod tests {
 
         let status_list = StatusList {
             bits: 1,
-            lst: create_status_list(status_entries.clone(), &LIMITS)
-                .unwrap()
-                .lst,
+            lst: create_status_list(status_entries.clone()).unwrap().lst,
         };
         let new_token = StatusListRecord {
             list_id: token_id.clone(),
@@ -570,8 +491,7 @@ mod tests {
                 status: Status::INVALID,
             });
         }
-        let mut app_state = test_app_state(None).await;
-        app_state.max_serialized_list_size = 8;
+        let app_state = test_app_state_with_max_serialized_list_size(None, 8).await;
 
         let response = match publish_status(
             State(app_state),

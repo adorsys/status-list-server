@@ -10,11 +10,14 @@ use std::{sync::Arc, time::Duration};
 
 use aws_config::BehaviorVersion;
 use aws_sdk_s3::Client as S3Client;
-use status_list_server::cert_manager::{
-    CertManager,
-    challenge::{Dns01Handler, PebbleDnsProvider},
-    http_client::DefaultHttpClient,
-    storage::{AwsS3, AwsSecretsManager, Redis as RedisStorage},
+use status_list_server::{
+    adapters::aws::{AwsS3, AwsSecretsManager},
+    adapters::redis::Redis as RedisStorage,
+    cert_manager::{
+        CertManager,
+        challenge::{Dns01Handler, PebbleDnsProvider},
+        http_client::DefaultHttpClient,
+    },
 };
 use testcontainers_modules::{
     localstack::LocalStack,

@@ -4,21 +4,15 @@ use axum::{
     response::IntoResponse,
 };
 use hyper::StatusCode;
-use time::OffsetDateTime;
 
-use crate::{
-    models::StatusesRequest,
-    utils::{
-        bits_validation::BitFlag,
-        errors::Error,
-        lst_gen::{AbuseLimits, update_status_list},
-        state::AppState,
-    },
-    web::errors::ApiError,
+use crate::{application::UseCaseError, domain, state::AppState};
+
+use crate::web::errors::ApiError;
+
+use super::{
+    StatusesRequest, error::StatusListError, map_domain_error, to_domain_entry,
+    validate_status_request_limits,
 };
-
-use super::error::StatusListError;
-use super::publish_status::persist_historical_snapshot;
 
 /// Update status entries in an existing status list.
 #[tracing::instrument(skip(appstate, payload), fields(list_id = %list_id, issuer = %issuer))]
@@ -33,84 +27,60 @@ pub async fn update_status(
         return Err(StatusListError::InvalidListId(e.to_string()).into());
     }
 
-    let count = payload.statuses.len();
-    if count > appstate.max_statuses_per_request {
-        tracing::warn!(
-            "Rejecting update: {count} statuses exceeds maximum {}",
-            appstate.max_statuses_per_request
-        );
-        return Err(StatusListError::TooManyStatuses {
-            count,
-            max: appstate.max_statuses_per_request,
+    validate_status_request_limits(
+        &payload.statuses,
+        appstate.max_statuses_per_request,
+        appstate.max_status_index,
+    )?;
+
+    let statuses = payload
+        .statuses
+        .into_iter()
+        .map(to_domain_entry)
+        .collect::<Vec<_>>();
+
+    match appstate
+        .status_lists
+        .update_statuses(&domain::Issuer(issuer), &list_id, statuses)
+        .await
+    {
+        Ok(()) => {}
+        Err(UseCaseError::NotFound) => return Err(StatusListError::StatusListNotFound.into()),
+        Err(UseCaseError::IssuerMismatch) => return Err(StatusListError::IssuerMismatch.into()),
+        Err(UseCaseError::Domain(domain::DomainError::InvalidIndex)) => {
+            return Err(StatusListError::InvalidIndex.into());
         }
-        .into());
-    }
-
-    let store = &appstate.status_list_repo;
-
-    // Fetch the existing token
-    let record = store
-        .find_one_by(&list_id)
-        .await?
-        .ok_or(StatusListError::StatusListNotFound)?;
-
-    // Check if the request issuer matches the token issuer
-    if record.issuer != issuer {
-        tracing::error!(
-            "Issuer mismatch: expected {}, got {}",
-            record.issuer,
-            issuer
-        );
-        return Err(StatusListError::IssuerMismatch.into());
-    }
-
-    let bits = if let Some(bits) = BitFlag::new(record.status_list.bits) {
-        Ok(bits)
-    } else {
-        Err(StatusListError::Generic(format!(
-            "Invalid 'bits' value: {}. Allowed values are 1, 2, 4, 8.",
-            record.status_list.bits
-        )))
-    }?;
-
-    let limits = AbuseLimits::new(appstate.max_status_index, appstate.max_serialized_list_size);
-
-    // Update the status list
-    let updated_lst = update_status_list(
-        record.status_list.lst.clone(),
-        payload.statuses,
-        bits.value(),
-        &limits,
-    )
-    .map_err(|e| {
-        tracing::error!("update_status_list failed: {e:?}");
-        match e {
-            Error::Generic(msg) => StatusListError::Generic(msg),
-            Error::InvalidIndex => StatusListError::InvalidIndex,
-            Error::IndexTooLarge(idx) => StatusListError::IndexTooLarge(idx),
-            Error::SerializedListTooLarge { .. } => StatusListError::StatusTooLarge,
-            _ => StatusListError::Generic(e.to_string()),
+        Err(UseCaseError::Domain(domain::DomainError::InvalidStatusList(msg))) => {
+            return Err(StatusListError::Generic(msg).into());
         }
-    })?;
-
-    let mut exact_status_list = record;
-    exact_status_list.status_list.lst = updated_lst.lst;
-    exact_status_list.status_list.bits = updated_lst.bits;
-    exact_status_list.updated_at = OffsetDateTime::now_utc().unix_timestamp();
-
-    // Save the updated token
-    store
-        .update_one(&exact_status_list.list_id, exact_status_list.clone())
-        .await?;
-
-    persist_historical_snapshot(&appstate, &exact_status_list).await?;
-
-    // Invalidate cache entry to ensure next read fetches the updated record
-    appstate.cache.invalidate(&exact_status_list.list_id).await;
-    tracing::info!(
-        "Invalidated cache for status list: {}",
-        exact_status_list.list_id
-    );
+        Err(UseCaseError::Domain(domain::DomainError::CorruptStoredList(detail))) => {
+            // The stored `lst` failed to decode: corrupt persisted state, not a
+            // caller error. Log the detail at error level (this is the alert)
+            // and return 500 — never blame the client for our data corruption.
+            tracing::error!(list_id = ?list_id, %detail, "Corrupt stored status list");
+            return Err(StatusListError::InternalServerError.into());
+        }
+        Err(UseCaseError::Domain(error)) => return Err(map_domain_error(error).into()),
+        Err(UseCaseError::StatusListTooLarge) => return Err(StatusListError::StatusTooLarge.into()),
+        Err(UseCaseError::Conflict) => {
+            // The optimistic guard in the use case did not match: a concurrent
+            // writer won the race (or the row was deleted). The use case returns
+            // before recording a snapshot or invalidating the cache, so nothing
+            // is persisted for a write that never landed.
+            //
+            // Logged at info, not warn: under contention an optimistic conflict
+            // is the expected, correct outcome, not an anomaly — warn would
+            // pollute dashboards and trip alerting during exactly the high-load
+            // bursts where conflicts are normal.
+            tracing::info!(list_id = ?list_id, "Concurrent update conflict; write rejected");
+            return Err(StatusListError::UpdateConflict.into());
+        }
+        Err(error) => {
+            tracing::error!(?error, "Failed to update status list");
+            return Err(StatusListError::InternalServerError.into());
+        }
+    }
+    tracing::info!("Invalidated cache for status list: {}", list_id);
 
     Ok(StatusCode::OK.into_response())
 }
@@ -120,6 +90,10 @@ mod test {
     use super::*;
     use std::sync::Arc;
 
+    // `next_updated_at` moved to the application layer with the optimistic
+    // guard it serves; the test below stays here, where the merge left it.
+    use crate::application::next_updated_at;
+
     use axum::{
         Extension,
         extract::{Path, State},
@@ -128,15 +102,13 @@ mod test {
     use hyper::StatusCode;
     use sea_orm::{DatabaseBackend, MockDatabase, MockExecResult};
 
+    // models types below seed the MockDatabase (persistence side); the request
+    // wire types come from this handler module.
     use crate::{
-        models::{
-            Status, StatusEntry, StatusList, StatusListRecord, StatusesRequest, status_lists,
-        },
-        test_utils::test_app_state,
-        utils::lst_gen::{AbuseLimits, create_status_list},
+        adapters::sea_orm::models::{StatusList, StatusListRecord, status_lists},
+        test_utils::{test_app_state, test_app_state_with_max_serialized_list_size},
+        web::handlers::status_list::{Status, StatusEntry, test_support::create_status_list},
     };
-
-    const LIMITS: AbuseLimits = AbuseLimits::unlimited();
 
     #[tokio::test]
     async fn test_update_token_status_invalid_list_id() {
@@ -169,19 +141,16 @@ mod test {
         // Initial token setup
         let original_status_list = StatusList {
             bits: initial_bits,
-            lst: create_status_list(
-                vec![
-                    StatusEntry {
-                        index: 0,
-                        status: Status::VALID,
-                    },
-                    StatusEntry {
-                        index: 1,
-                        status: Status::VALID,
-                    },
-                ],
-                &LIMITS,
-            )
+            lst: create_status_list(vec![
+                StatusEntry {
+                    index: 0,
+                    status: Status::VALID,
+                },
+                StatusEntry {
+                    index: 1,
+                    status: Status::VALID,
+                },
+            ])
             .unwrap()
             .lst,
         };
@@ -206,12 +175,17 @@ mod test {
             mock_db
                 .append_query_results::<status_lists::Model, Vec<_>, _>(vec![
                     vec![existing_token.clone()], // for find_one_by
-                    vec![],
                 ])
-                .append_exec_results(vec![MockExecResult {
-                    rows_affected: 1,
-                    last_insert_id: 0,
-                }])
+                .append_exec_results(vec![
+                    MockExecResult {
+                        rows_affected: 1,
+                        last_insert_id: 0,
+                    }, // guarded update_many
+                    MockExecResult {
+                        rows_affected: 1,
+                        last_insert_id: 0,
+                    }, // status_list_history insert
+                ])
                 .into_connection(),
         );
 
@@ -272,13 +246,10 @@ mod test {
 
         let original_status_list = StatusList {
             bits: initial_bits,
-            lst: create_status_list(
-                vec![StatusEntry {
-                    index: 0,
-                    status: Status::VALID,
-                }],
-                &LIMITS,
-            )
+            lst: create_status_list(vec![StatusEntry {
+                index: 0,
+                status: Status::VALID,
+            }])
             .unwrap()
             .lst,
         };
@@ -329,13 +300,10 @@ mod test {
 
         let original_status_list = StatusList {
             bits: initial_bits,
-            lst: create_status_list(
-                vec![StatusEntry {
-                    index: 0,
-                    status: Status::VALID,
-                }],
-                &LIMITS,
-            )
+            lst: create_status_list(vec![StatusEntry {
+                index: 0,
+                status: Status::VALID,
+            }])
             .unwrap()
             .lst,
         };
@@ -354,8 +322,7 @@ mod test {
                 ])
                 .into_connection(),
         );
-        let mut appstate = test_app_state(Some(db_conn.clone())).await;
-        appstate.max_serialized_list_size = 1;
+        let appstate = test_app_state_with_max_serialized_list_size(Some(db_conn.clone()), 1).await;
         let payload = StatusesRequest {
             statuses: vec![StatusEntry {
                 index: 9999,
@@ -375,5 +342,125 @@ mod test {
             Err(err) => err.into_response(),
         };
         assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    /// Pins the load-bearing monotonicity of the optimistic stamp. If someone
+    /// "simplifies" `next_updated_at` down to `now` (dropping the `+ 1`), the
+    /// same-second case below fails here instead of silently reintroducing the
+    /// lost-update bug in production.
+    #[test]
+    fn test_next_updated_at_strictly_advances_within_same_second() {
+        // Same wall-clock second as the previous write: must still advance.
+        assert_eq!(next_updated_at(1000, 1000), 1001);
+        // Clock went backwards / equal: never emit a stale-or-equal stamp.
+        assert_eq!(next_updated_at(1000, 999), 1001);
+        // Clock advanced normally: use the real time.
+        assert_eq!(next_updated_at(1000, 2000), 2000);
+    }
+
+    #[tokio::test]
+    async fn test_update_status_conflict_returns_409() {
+        let mock_db = MockDatabase::new(DatabaseBackend::Postgres);
+        let token_id = uuid::Uuid::new_v4().to_string();
+
+        let existing_token = StatusListRecord {
+            list_id: token_id.clone(),
+            issuer: "issuer".to_string(),
+            status_list: StatusList {
+                bits: 2,
+                lst: create_status_list(vec![StatusEntry {
+                    index: 0,
+                    status: Status::VALID,
+                }])
+                .unwrap()
+                .lst,
+            },
+            sub: "issuer".to_string(),
+            updated_at: 0,
+        };
+
+        let update_payload = StatusesRequest {
+            statuses: vec![StatusEntry {
+                index: 0,
+                status: Status::INVALID,
+            }],
+        };
+
+        // find_one_by sees the row, but the guarded UPDATE affects 0 rows: a
+        // concurrent writer already moved `updated_at`.
+        let db_conn = Arc::new(
+            mock_db
+                .append_query_results::<status_lists::Model, Vec<_>, _>(vec![vec![
+                    existing_token.clone(),
+                ]])
+                .append_exec_results(vec![MockExecResult {
+                    rows_affected: 0,
+                    last_insert_id: 0,
+                }])
+                .into_connection(),
+        );
+
+        let app_state = test_app_state(Some(db_conn.clone())).await;
+        let response = match update_status(
+            State(app_state),
+            Extension("issuer".to_string()),
+            Path(token_id),
+            Json(update_payload),
+        )
+        .await
+        {
+            Ok(_) => panic!("conflicting write must not report success"),
+            Err(err) => err.into_response(),
+        };
+
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+    }
+
+    /// A well-formed update against a list whose stored `lst` is corrupt must
+    /// return 500 (state error), not 400 (client error) — so data corruption is
+    /// alerted, not blamed on the caller.
+    #[tokio::test]
+    async fn test_update_status_corrupt_stored_list_returns_500() {
+        let mock_db = MockDatabase::new(DatabaseBackend::Postgres);
+        let token_id = uuid::Uuid::new_v4().to_string();
+
+        let corrupt_token = StatusListRecord {
+            list_id: token_id.clone(),
+            issuer: "issuer".to_string(),
+            status_list: StatusList {
+                bits: 1,
+                lst: "not valid base64!!".to_string(),
+            },
+            sub: "issuer".to_string(),
+            updated_at: 0,
+        };
+
+        let db_conn = Arc::new(
+            mock_db
+                .append_query_results::<status_lists::Model, Vec<_>, _>(vec![vec![
+                    corrupt_token.clone(),
+                ]])
+                .into_connection(),
+        );
+
+        let app_state = test_app_state(Some(db_conn.clone())).await;
+        let response = match update_status(
+            State(app_state),
+            Extension("issuer".to_string()),
+            Path(token_id),
+            Json(StatusesRequest {
+                statuses: vec![StatusEntry {
+                    index: 0,
+                    status: Status::INVALID,
+                }],
+            }),
+        )
+        .await
+        {
+            Ok(_) => panic!("update over corrupt stored list must not succeed"),
+            Err(err) => err.into_response(),
+        };
+
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
     }
 }

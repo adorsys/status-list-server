@@ -1,10 +1,18 @@
 use crate::{
-    cert_manager::storage::StorageError,
-    utils::{
-        cache::StatusListCache,
-        cert_manager::{CertManager, storage::Storage},
-        state::AppState,
+    adapters::{
+        certificate::AcmeCertificateProvider,
+        sea_orm::{
+            SeaOrmCredentialRepository, SeaOrmStatusListHistoryRepository,
+            SeaOrmStatusListRepository,
+        },
     },
+    application::{CredentialApplicationService, StatusListApplicationServiceWithHistory},
+    cert_manager::storage::StorageError,
+    ports::{
+        CredentialRepository, StatusListCache, StatusListHistoryRepository, StatusListRepository,
+    },
+    state::AppState,
+    utils::cert_manager::{CertManager, storage::Storage},
 };
 use async_trait::async_trait;
 use sea_orm::{DbBackend, MockDatabase};
@@ -34,14 +42,33 @@ impl Storage for MockStorage {
 }
 
 pub(crate) async fn test_app_state(db_conn: Option<Arc<sea_orm::DatabaseConnection>>) -> AppState {
-    test_app_state_with(db_conn, None).await
+    build_test_app_state(db_conn, None, 1_048_576).await
 }
 
 pub(crate) async fn test_app_state_with(
     db_conn: Option<Arc<sea_orm::DatabaseConnection>>,
     aggregation_uri: Option<String>,
 ) -> AppState {
-    use crate::database::queries::SeaOrmStore;
+    build_test_app_state(db_conn, aggregation_uri, 1_048_576).await
+}
+
+/// Build a test `AppState` whose status-list service enforces a specific
+/// serialized-list size limit. Used by the 422 handler tests, which previously
+/// mutated a now-removed `AppState` field; the limit lives in the service, so
+/// tests must configure it there.
+pub(crate) async fn test_app_state_with_max_serialized_list_size(
+    db_conn: Option<Arc<sea_orm::DatabaseConnection>>,
+    max_serialized_list_size: usize,
+) -> AppState {
+    build_test_app_state(db_conn, None, max_serialized_list_size).await
+}
+
+async fn build_test_app_state(
+    db_conn: Option<Arc<sea_orm::DatabaseConnection>>,
+    aggregation_uri: Option<String>,
+    max_serialized_list_size: usize,
+) -> AppState {
+    use crate::adapters::sea_orm::store::SeaOrmStore;
 
     // Install the crypto provider for the tests
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
@@ -70,19 +97,39 @@ pub(crate) async fn test_app_state_with(
     .with_cert_storage(cert_storage)
     .with_secrets_storage(secrets_storage);
 
+    let cert_manager = Arc::new(certificate_manager);
+    let status_lists: Arc<dyn StatusListRepository> = Arc::new(SeaOrmStatusListRepository::new(
+        SeaOrmStore::new(db.clone()),
+    ));
+    let credentials: Arc<dyn CredentialRepository> = Arc::new(SeaOrmCredentialRepository::new(
+        SeaOrmStore::new(db.clone()),
+    ));
+    let status_list_history: Arc<dyn StatusListHistoryRepository> = Arc::new(
+        SeaOrmStatusListHistoryRepository::new(SeaOrmStore::new(db.clone())),
+    );
+    let status_list_cache: Arc<dyn StatusListCache> = Arc::new(
+        crate::adapters::cache::MokaStatusListCache::new(5 * 60, 100),
+    );
+    let token_exp_secs = 900u64;
+
     AppState {
-        credential_repo: SeaOrmStore::new(db.clone()),
-        status_list_repo: SeaOrmStore::new(db.clone()),
-        status_list_history_repo: SeaOrmStore::new(db),
+        status_lists: Arc::new(
+            StatusListApplicationServiceWithHistory::new(
+                status_lists,
+                status_list_cache,
+                status_list_history,
+                token_exp_secs,
+            )
+            .with_max_serialized_list_size(max_serialized_list_size),
+        ),
+        credentials: Arc::new(CredentialApplicationService::new(credentials)),
+        certificate_provider: Arc::new(AcmeCertificateProvider::new(cert_manager.clone())),
         server_domain: "example.com".to_string(),
-        cert_manager: Arc::new(certificate_manager),
-        cache: StatusListCache::new(5 * 60, 100),
         aggregation_uri,
         token_exp_secs: 900,
         token_ttl_secs: 300,
         max_status_index: 100_000,
         max_statuses_per_request: 5_000,
-        max_serialized_list_size: 1_048_576,
         history_retention_secs: 7776000, // 90 days default for tests
     }
 }

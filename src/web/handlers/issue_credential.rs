@@ -1,21 +1,26 @@
 use axum::{Json, extract::State, http::StatusCode, response::IntoResponse};
+use jsonwebtoken::jwk::Jwk;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use crate::{
-    database::error::RepositoryError, models::Credentials, utils::state::AppState,
-    web::auth::errors::AuthenticationError, web::errors::ApiError,
+    application::UseCaseError, domain, state::AppState, web::auth::errors::AuthenticationError,
+    web::errors::ApiError,
 };
+
+/// Request payload carrying an issuer and its public JWK. Wire-only: the
+/// handler converts it into a `domain::Credential` at the boundary.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct CredentialsRequest {
+    pub issuer: String,
+    pub public_key: Jwk,
+}
 
 #[derive(Debug)]
 pub enum CredentialError {
-    RepoError(RepositoryError),
+    AlreadyExists,
+    Port,
     AuthError(AuthenticationError),
-}
-
-impl From<RepositoryError> for CredentialError {
-    fn from(value: RepositoryError) -> Self {
-        CredentialError::RepoError(value)
-    }
 }
 
 impl From<AuthenticationError> for CredentialError {
@@ -27,7 +32,7 @@ impl From<AuthenticationError> for CredentialError {
 #[tracing::instrument(skip(appstate, credential), fields(issuer = credential.issuer))]
 pub async fn credential_handler(
     State(appstate): State<AppState>,
-    Json(credential): Json<Credentials>,
+    Json(credential): Json<CredentialsRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
     publish_credentials(credential.to_owned(), appstate).await?;
     Ok((
@@ -38,23 +43,26 @@ pub async fn credential_handler(
 }
 
 pub(super) async fn publish_credentials(
-    credentials: Credentials,
+    credentials: CredentialsRequest,
     state: AppState,
 ) -> Result<(), CredentialError> {
-    let store = &state.credential_repo;
-    if store.find_one_by(&credentials.issuer).await?.is_some() {
-        return Err(CredentialError::RepoError(RepositoryError::DuplicateEntry));
+    let public_key =
+        serde_json::to_vec(&credentials.public_key).map_err(|_| CredentialError::Port)?;
+    let credential = domain::Credential {
+        issuer: domain::Issuer(credentials.issuer),
+        public_key: domain::PublicJwk::try_new(public_key).map_err(|_| CredentialError::Port)?,
+    };
+    match state.credentials.publish_credential(credential).await {
+        Ok(()) => Ok(()),
+        Err(UseCaseError::AlreadyExists) => Err(CredentialError::AlreadyExists),
+        Err(_) => Err(CredentialError::Port),
     }
-
-    let credential = Credentials::new(credentials.issuer, credentials.public_key);
-    store.insert_one(credential).await?;
-    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{models::credentials, test_utils::test_app_state};
+    use crate::{adapters::sea_orm::models::credentials, test_utils::test_app_state};
     use axum::{
         Router,
         body::Body,
@@ -90,7 +98,10 @@ mod tests {
         use std::sync::Arc;
 
         let jwk = test_jwk();
-        let credentials = Credentials::new("test_issuer".into(), jwk.clone());
+        let credentials = CredentialsRequest {
+            issuer: "test_issuer".into(),
+            public_key: jwk.clone(),
+        };
         let model = credentials::Model {
             issuer: credentials.issuer.clone(),
             public_key: credentials.public_key.clone().into(),
