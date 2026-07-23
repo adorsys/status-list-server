@@ -1,6 +1,11 @@
 use std::{collections::HashMap, fmt, marker::PhantomData, time::Duration};
 
-use config::{Config as ConfigLib, ConfigBuilder, ConfigError, Environment, builder::DefaultState};
+use config::{Config as ConfigLib, ConfigError, Environment};
+
+#[cfg(test)]
+use config::ConfigBuilder;
+#[cfg(test)]
+use config::builder::DefaultState;
 use redis::{
     Client as RedisClient, ClientTlsConfig, RedisResult, TlsCertificates,
     aio::{ConnectionManager, ConnectionManagerConfig},
