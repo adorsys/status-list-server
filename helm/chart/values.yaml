@@ -204,7 +204,7 @@ redis:
   enabled: true
 
 otelCollector:
-  enabled: false
+  enabled: true
   sidecar:
     enabled: false
     image:
@@ -218,7 +218,7 @@ otelCollector:
         memory: "128Mi"
         cpu: "100m"
   standalone:
-    enabled: false
+    enabled: true
     replicaCount: 1
     image:
       repository: otel/opentelemetry-collector-contrib

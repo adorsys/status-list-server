@@ -664,7 +664,7 @@ impl Config {
             .set_default("telemetry.environment", "development")?
             .set_default("telemetry.otlp_endpoint", "http://localhost:4317")?
             .set_default("telemetry.sampler_ratio", 1.0)?
-            .set_default("telemetry.enabled", false)?
+            .set_default("telemetry.enabled", true)?
             // Override config values via environment variables
             // The environment variables should be prefixed with 'APP_' and use '__' as a separator
             // Example: APP_REDIS__REQUIRE_CLIENT_AUTH=false
