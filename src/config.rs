@@ -1321,9 +1321,7 @@ mod tests {
 
     #[sealed_test]
     fn test_default_rate_limits_and_bounds() {
-        unsafe { std::env::remove_var("APP_RATE_LIMIT__STRICT_BURST_SIZE") };
-        unsafe { std::env::remove_var("APP_LIMITS__MAX_BODY_SIZE_BYTES") };
-        let config = Config::load().expect("Failed to load config");
+        let config = Config::load_from_overrides(&[]).expect("Failed to load config");
 
         assert_eq!(config.rate_limit.strict_burst_size, 10);
         assert_eq!(config.rate_limit.strict_period_secs, 60);

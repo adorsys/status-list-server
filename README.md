@@ -233,6 +233,10 @@ A Helm chart is provided for easy deployment on Kubernetes. For detailed instruc
 
 ## Testing
 
+Tests use in-memory configuration overrides via [`Config::load_from_overrides`](src/config.rs) to avoid mutating the process-wide environment, which is `unsafe` in recent Rust toolchains. This means tests can safely run in parallel and don't share environment state between test executions.
+
+All environment variables in tests are self-isolated and cleaned up automatically after each test completes.
+
 You can run the tests using the following command:
 
 ```bash
