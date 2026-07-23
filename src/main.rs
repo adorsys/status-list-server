@@ -1,7 +1,7 @@
 use color_eyre::{Result, eyre::eyre};
 use dotenvy::dotenv;
 use rustls::crypto::aws_lc_rs;
-use status_list_server::cert_manager::{describe_renewal_metrics, setup_cert_renewal_scheduler};
+use status_list_server::cert_manager::setup_cert_renewal_scheduler;
 use status_list_server::state::{build_state_with_cert_manager, setup_history_cleanup_scheduler};
 use status_list_server::telemetry::init_telemetry;
 use status_list_server::{config::Config as AppConfig, startup::HttpServer};
@@ -30,9 +30,6 @@ async fn main() -> Result<()> {
     aws_lc_rs::default_provider()
         .install_default()
         .map_err(|e| eyre!("Failed to set crypto provider: {e:?}"))?;
-
-    // Describe renewal metrics early so they appear in Prometheus immediately
-    describe_renewal_metrics();
 
     // Build the app state and extract the cert manager
     let (app_state, cert_manager) = build_state_with_cert_manager(&config).await?;

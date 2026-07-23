@@ -21,10 +21,10 @@ pub struct TelemetryGuard {
 
 impl Drop for TelemetryGuard {
     fn drop(&mut self) {
-        if let Some(provider) = self.tracer_provider.take() {
-            if let Err(e) = provider.shutdown() {
-                tracing::error!("OpenTelemetry tracer shutdown error: {e}");
-            }
+        if let Some(provider) = self.tracer_provider.take()
+            && let Err(e) = provider.shutdown()
+        {
+            tracing::error!("OpenTelemetry tracer shutdown error: {e}");
         }
     }
 }

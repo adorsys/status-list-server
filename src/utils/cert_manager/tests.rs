@@ -652,12 +652,6 @@ async fn test_cert_chain_cache_invalidation_reloads_chain() {
 // Tests for renewal metrics
 
 #[test]
-fn test_describe_renewal_metrics_is_safe_before_recorder_installed() {
-    // This should not panic
-    describe_renewal_metrics();
-}
-
-#[test]
 fn test_init_renewal_counters_registers_zero_values() {
     init_renewal_counters();
 }

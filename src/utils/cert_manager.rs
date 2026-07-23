@@ -87,10 +87,6 @@ impl Default for CertManagerMetrics {
     }
 }
 
-/// Describes renewal metrics so they appear in Prometheus immediately.
-/// OpenTelemetry automatically registers descriptions upon instrument creation.
-pub fn describe_renewal_metrics() {}
-
 /// Zero-initialize renewal counters so they appear in Prometheus scrapes before first use.
 pub fn init_renewal_counters() {
     let meter = global::meter("status-list-server");
