@@ -6,14 +6,15 @@ metadata:
   labels:
     {{- include "status-list-server-chart.labels" . | nindent 4 }}
   namespace: {{ .Release.Namespace }}
-  {{- if .Values.statuslist.ingress.externalDnsHostname }}
   annotations:
+    {{- if .Values.statuslist.ingress.externalDnsHostname }}
     external-dns.alpha.kubernetes.io/hostname: {{ .Values.statuslist.ingress.externalDnsHostname }}
+    {{- end }}
+    {{- if .Values.statuslist.ingress.annotations }}
     {{- toYaml .Values.statuslist.ingress.annotations | nindent 4 }}
-  {{- else if .Values.statuslist.ingress.annotations }}
-  annotations:
-    {{- toYaml .Values.statuslist.ingress.annotations | nindent 4 }}
-  {{- end }}
+    {{- end }}
+    nginx.ingress.kubernetes.io/configuration-snippet: |
+      proxy_set_header X-Forwarded-For $remote_addr;
 spec:
   ingressClassName: nginx
   rules:

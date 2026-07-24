@@ -6,10 +6,12 @@ use tower_governor::{errors::GovernorError, key_extractor::KeyExtractor};
 /// Key extractor that reads the `iss` claim from a Bearer JWT without
 /// verification.
 ///
-/// **Deprecated**: No longer used in production. Rate limiting on the write
-/// endpoints now uses `SmartIpKeyExtractor` (IP-based via proxy headers or
-/// peer IP) which cannot be bypassed by forging JWT claims.  The type and
-/// its tests are retained for unit-test coverage of the extraction logic.
+/// **Deprecated**: No longer used in production. Rate limiting on write
+/// endpoints now uses `SmartIpKeyExtractor` (IP-based via trusted proxy
+/// headers or peer IP), so JWT claim forgery no longer changes the write
+/// rate-limit key. Deployments behind ingress must ensure client-supplied
+/// proxy headers are overwritten before they reach the application. The type
+/// and its tests are retained for unit-test coverage of the extraction logic.
 ///
 /// Falls back to the peer IP when the token is absent or malformed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
