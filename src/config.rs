@@ -1,7 +1,7 @@
 use std::{collections::HashMap, fmt, marker::PhantomData, time::Duration};
 
-use config::{Config as ConfigLib, ConfigError, Environment};
 use config::builder::DefaultState;
+use config::{Config as ConfigLib, ConfigError, Environment};
 
 #[cfg(test)]
 use config::ConfigBuilder;
