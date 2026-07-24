@@ -219,13 +219,13 @@ The server uses structured logging with configurable output formats for differen
 
 Set via the `RUST_LOG` environment variable:
 
-| Level   | Description              |
-|---------|--------------------------|
-| `error` | Critical errors only     |
-| `warn`  | Warnings and errors      |
-| `info`  | Normal operation (default) |
-| `debug` | Detailed debugging       |
-| `trace` | Very verbose tracing     |
+| Level   | Description                  |
+|---------|------------------------------|
+| `error` | Critical errors only         |
+| `warn`  | Warnings and errors          |
+| `info`  | Normal operation (default)   |
+| `debug` | Detailed debugging           |
+| `trace` | Very verbose tracing         |
 
 ### Examples
 
