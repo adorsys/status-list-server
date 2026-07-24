@@ -31,6 +31,7 @@ jobs:
     name: Cargo Build
     runs-on: ubuntu-latest
     needs: cargo-fmt
+    timeout-minutes: 45
 
     steps:
       - name: Fetch Repository
@@ -109,6 +110,7 @@ jobs:
     if: ${{ needs.check-crate-type.outputs.is_lib == 'true' }}
     name: Cargo test doc
     runs-on: ubuntu-latest
+    timeout-minutes: 45
 
     steps:
       - name: Fetch Repository
