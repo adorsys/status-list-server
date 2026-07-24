@@ -93,6 +93,33 @@ pub trait StatusListRepository: Send + Sync {
         status_list: StatusListRecord,
         expected_updated_at: i64,
     ) -> Result<bool, PortError>;
+    /// Atomically persist the guarded row update **and** its point-in-time
+    /// history snapshot: both writes commit, or neither does.
+    ///
+    /// This is the durability guarantee the plain [`update`](Self::update) plus
+    /// a separate history insert cannot give: there, a committed row update
+    /// followed by a failed snapshot insert leaves the row changed with no
+    /// snapshot recording the change. Implementations MUST perform both writes
+    /// inside a single backend transaction (portable across Postgres/MySQL/
+    /// SQLite) so that any snapshot-write failure rolls the row update back.
+    ///
+    /// Returns `false` when the optimistic guard did not match — identical
+    /// semantics to [`update`](Self::update), and the transaction is rolled back
+    /// so nothing is persisted. `status_list.updated_at` must be strictly
+    /// greater than `expected_updated_at`. Callers that keep no history use
+    /// [`update`](Self::update).
+    #[cfg(any(
+        feature = "server",
+        feature = "postgres",
+        feature = "sqlite",
+        feature = "mysql"
+    ))]
+    async fn update_with_snapshot(
+        &self,
+        status_list: StatusListRecord,
+        expected_updated_at: i64,
+        snapshot: StatusListSnapshot,
+    ) -> Result<bool, PortError>;
     async fn list_uris(&self) -> Result<Vec<String>, PortError>;
 }
 

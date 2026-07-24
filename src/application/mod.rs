@@ -226,17 +226,15 @@ impl<R: StatusListRepository + ?Sized> PublishStatusList<R> {
     feature = "sqlite",
     feature = "mysql"
 ))]
-async fn persist_snapshot<H: StatusListHistoryRepository + ?Sized>(
-    history: &H,
-    record: &StatusListRecord,
-    token_exp_secs: u64,
-) -> Result<(), UseCaseError> {
-    // The snapshot becomes valid at the record's modification time. Reusing
-    // `record.updated_at` — rather than reading the clock a second time here —
-    // threads a single `now` through the write and its snapshot, so their
-    // timestamps cannot drift apart (C4).
+/// Build the point-in-time snapshot for `record`.
+///
+/// The snapshot becomes valid at the record's modification time. Reusing
+/// `record.updated_at` — rather than reading the clock a second time here —
+/// threads a single `now` through the write and its snapshot, so their
+/// timestamps cannot drift apart (C4).
+fn build_snapshot(record: &StatusListRecord, token_exp_secs: u64) -> StatusListSnapshot {
     let iat = record.updated_at;
-    let snapshot = StatusListSnapshot {
+    StatusListSnapshot {
         snapshot_id: uuid::Uuid::new_v4().to_string(),
         list_id: record.list_id.clone(),
         issuer: record.issuer.clone(),
@@ -244,8 +242,24 @@ async fn persist_snapshot<H: StatusListHistoryRepository + ?Sized>(
         sub: record.sub.clone(),
         iat,
         exp: iat + token_exp_secs as i64,
-    };
-    history.insert(snapshot).await.map_err(UseCaseError::Port)
+    }
+}
+
+#[cfg(any(
+    feature = "server",
+    feature = "postgres",
+    feature = "sqlite",
+    feature = "mysql"
+))]
+async fn persist_snapshot<H: StatusListHistoryRepository + ?Sized>(
+    history: &H,
+    record: &StatusListRecord,
+    token_exp_secs: u64,
+) -> Result<(), UseCaseError> {
+    history
+        .insert(build_snapshot(record, token_exp_secs))
+        .await
+        .map_err(UseCaseError::Port)
 }
 
 #[cfg(any(
@@ -534,7 +548,7 @@ impl<R: StatusListRepository + ?Sized, C: StatusListCache + ?Sized> UpdateStatus
         {
             return Err(UseCaseError::Conflict);
         }
-        self.cache.invalidate(&existing.list_id).await?;
+        invalidate_after_commit(self.cache.as_ref(), &existing.list_id).await;
         Ok(())
     }
 }
@@ -609,24 +623,54 @@ impl<
             return Err(UseCaseError::StatusListTooLarge);
         }
         // See the non-history path: `previous_updated_at` is the optimistic
-        // guard. Returning before the snapshot and the cache invalidation keeps
-        // a rejected write from leaving any trace behind.
+        // guard. A rejected write must leave no trace behind.
         let previous_updated_at = existing.updated_at;
         existing.updated_at = next_updated_at(previous_updated_at, current_unix_timestamp());
-        if !self
-            .repository
-            .update(existing.clone(), previous_updated_at)
-            .await?
-        {
+
+        // The guarded row update and its history snapshot must commit or fail as
+        // a unit: a committed row change with no snapshot recording it is the
+        // bug this path exists to prevent. `update_with_snapshot` performs both
+        // writes in one transaction, so a snapshot-write failure rolls the row
+        // update back. When history is disabled there is no snapshot, so the
+        // plain guarded update suffices.
+        let landed = match &self.history {
+            Some(_) => {
+                let snapshot = build_snapshot(&existing, token_exp_secs);
+                self.repository
+                    .update_with_snapshot(existing.clone(), previous_updated_at, snapshot)
+                    .await?
+            }
+            None => {
+                self.repository
+                    .update(existing.clone(), previous_updated_at)
+                    .await?
+            }
+        };
+        if !landed {
             return Err(UseCaseError::Conflict);
         }
-        self.cache.invalidate(&existing.list_id).await?;
 
-        if let Some(history) = &self.history {
-            persist_snapshot(history.as_ref(), &existing, token_exp_secs).await?;
-        }
-
+        invalidate_after_commit(self.cache.as_ref(), &existing.list_id).await;
         Ok(())
+    }
+}
+
+/// Invalidate the cache after a durable write has committed.
+///
+/// This runs only once the row (and, on the history path, its snapshot) is
+/// committed, and it deliberately does not fail the operation: the write is
+/// already durable, and a stale cache entry self-heals at the cache TTL.
+/// Returning an error here would misreport a committed write as a 500 and make
+/// the client retry into a 409 against the now-advanced stamp.
+async fn invalidate_after_commit<C: StatusListCache + ?Sized>(cache: &C, list_id: &str) {
+    if let Err(_error) = cache.invalidate(list_id).await {
+        #[cfg(feature = "tracing")]
+        tracing::warn!(
+            list_id = %list_id,
+            error = ?_error,
+            "status list write committed, but cache invalidation failed; \
+             reads may be stale until the cache entry expires"
+        );
     }
 }
 

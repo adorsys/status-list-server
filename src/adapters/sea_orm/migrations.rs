@@ -33,12 +33,18 @@ pub(crate) mod tables {
     impl MigrationTrait for Migration {
         /// Creates the necessary database tables if they don't exist
         async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
-            // Create Credentials table for storing issuer credentials
+            // Create Credentials table for storing issuer credentials.
+            // `ENGINE=InnoDB` is emitted only on MySQL (ignored by the Postgres
+            // and SQLite builders); it makes the transactional-rollback
+            // guarantee that `update_with_snapshot` relies on explicit rather
+            // than dependent on the server's default engine, and is required for
+            // the foreign key below to be enforced on MySQL.
             manager
                 .create_table(
                     Table::create()
                         .table(Credentials::Table)
                         .if_not_exists()
+                        .engine("InnoDB")
                         .col(
                             ColumnDef::new(Credentials::Issuer)
                                 .string()
@@ -50,12 +56,15 @@ pub(crate) mod tables {
                 )
                 .await?;
 
-            // Create StatusLists table for storing status list entries
+            // Create StatusLists table for storing status list entries.
+            // InnoDB (MySQL-only clause) so the guarded UPDATE + snapshot INSERT
+            // in `update_with_snapshot` roll back atomically.
             manager
                 .create_table(
                     Table::create()
                         .table(StatusLists::Table)
                         .if_not_exists()
+                        .engine("InnoDB")
                         .col(
                             ColumnDef::new(StatusLists::ListId)
                                 .string()
@@ -278,11 +287,14 @@ pub(crate) mod status_list_history {
     #[allow(elided_lifetimes_in_paths)]
     impl MigrationTrait for Migration {
         async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+            // InnoDB (MySQL-only clause) so a snapshot INSERT that fails inside
+            // `update_with_snapshot` rolls the paired row UPDATE back.
             manager
                 .create_table(
                     Table::create()
                         .table(StatusListHistory::Table)
                         .if_not_exists()
+                        .engine("InnoDB")
                         .col(
                             ColumnDef::new(StatusListHistory::SnapshotId)
                                 .string()

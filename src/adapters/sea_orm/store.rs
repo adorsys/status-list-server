@@ -1,6 +1,6 @@
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, QueryOrder,
-    QuerySelect, Set, sea_query::Expr,
+    QuerySelect, Set, TransactionTrait, sea_query::Expr,
 };
 use std::sync::Arc;
 
@@ -126,6 +126,95 @@ impl SeaOrmStore<StatusListRecord> {
             .await
             .map_err(|e| RepositoryError::UpdateError(e.to_string()))?;
         Ok(result.rows_affected > 0)
+    }
+
+    /// Optimistic update that records a history snapshot in the **same
+    /// transaction** as the guarded row update.
+    ///
+    /// Either the guarded `UPDATE status_lists` and the `status_list_history`
+    /// `INSERT` both commit, or neither does. This closes the split the plain
+    /// [`update_one`](Self::update_one) leaves open, where the row changes but a
+    /// subsequent snapshot insert fails, so nothing records the change.
+    ///
+    /// A `false` return means the optimistic guard did not match (a racing
+    /// writer advanced the stamp, or the row is gone): the transaction is rolled
+    /// back and nothing is written — identical outward behavior to
+    /// [`update_one`](Self::update_one). Transaction semantics are portable
+    /// across the Postgres/MySQL/SQLite sea-orm backends (#143), so the
+    /// all-or-nothing guarantee holds identically on all three.
+    ///
+    /// The same strictly-advancing `updated_at` caller contract as
+    /// [`update_one`](Self::update_one) applies and is enforced here too.
+    pub async fn update_one_with_snapshot(
+        &self,
+        list_id: &str,
+        entity: StatusListRecord,
+        expected_updated_at: i64,
+        snapshot: StatusListHistoryRecord,
+    ) -> Result<bool, RepositoryError> {
+        if entity.updated_at <= expected_updated_at {
+            return Err(RepositoryError::UpdateError(format!(
+                "guarded update requires a strictly newer updated_at \
+                 (new={}, expected-guard={}); a non-advancing stamp would \
+                 silently reintroduce the same-second lost update",
+                entity.updated_at, expected_updated_at
+            )));
+        }
+
+        let txn = self
+            .db
+            .begin()
+            .await
+            .map_err(|e| RepositoryError::UpdateError(e.to_string()))?;
+
+        let result = status_lists::Entity::update_many()
+            .col_expr(status_lists::Column::Issuer, Expr::value(entity.issuer))
+            .col_expr(
+                status_lists::Column::StatusList,
+                Expr::value(entity.status_list),
+            )
+            .col_expr(status_lists::Column::Sub, Expr::value(entity.sub))
+            .col_expr(
+                status_lists::Column::UpdatedAt,
+                Expr::value(entity.updated_at),
+            )
+            .filter(status_lists::Column::ListId.eq(list_id))
+            .filter(status_lists::Column::UpdatedAt.eq(expected_updated_at))
+            .exec(&txn)
+            .await
+            .map_err(|e| RepositoryError::UpdateError(e.to_string()))?;
+
+        if result.rows_affected == 0 {
+            // Optimistic-guard miss: roll back so the conflict path records
+            // nothing (no snapshot, no row change).
+            txn.rollback()
+                .await
+                .map_err(|e| RepositoryError::UpdateError(e.to_string()))?;
+            return Ok(false);
+        }
+
+        let history_active: status_list_history::ActiveModel = snapshot.into();
+        if let Err(insert_err) = status_list_history::Entity::insert(history_active)
+            .exec(&txn)
+            .await
+        {
+            // The row UPDATE already landed inside the transaction, but the
+            // snapshot INSERT failed. Roll back so the row reverts to its
+            // pre-update state — the whole point of this method: never leave a
+            // changed row without the snapshot that records the change.
+            txn.rollback().await.map_err(|rollback_err| {
+                RepositoryError::InsertError(format!(
+                    "history snapshot insert failed ({insert_err}); \
+                     rolling back the row update also failed: {rollback_err}"
+                ))
+            })?;
+            return Err(RepositoryError::InsertError(insert_err.to_string()));
+        }
+
+        txn.commit()
+            .await
+            .map_err(|e| RepositoryError::UpdateError(e.to_string()))?;
+        Ok(true)
     }
 
     pub async fn delete_by(&self, value: &str) -> Result<bool, RepositoryError> {
@@ -976,6 +1065,302 @@ mod test {
         // new < expected: going backwards.
         let backwards = store.update_one("list-x", entity, 1001).await;
         assert!(matches!(backwards, Err(RepositoryError::UpdateError(_))));
+    }
+
+    #[cfg(feature = "sqlite")]
+    const TEST_EC_JWK: &str = r#"{
+        "kty": "EC",
+        "crv": "P-256",
+        "x": "NeyFv_2L67OEplNbJpR02IFis4_lFW9HYmhfF5Or6m8",
+        "y": "eAH2qe8Pg3GQ28uxA8-qNAqdwQ_zfV2uKAvJ2sLpY9M"
+    }"#;
+
+    /// The core acceptance test for the transactional fix: the guarded row
+    /// UPDATE and the history INSERT succeed or fail as a unit. Exercises the
+    /// happy path (both commit), the forced-INSERT-failure path (row update
+    /// rolls back, no partial snapshot), and the conflict path (guard miss rolls
+    /// back cleanly) — all against a real SQLite backend, since a `MockDatabase`
+    /// cannot model transaction rollback.
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn test_sqlite_update_with_snapshot_is_atomic() {
+        let db = sqlite_connection().await;
+        let cred_store = SeaOrmStore::<Credentials>::new(db.clone());
+        let store = SeaOrmStore::<StatusListRecord>::new(db.clone());
+        let history = SeaOrmStore::<StatusListHistoryRecord>::new(db);
+
+        let key: Jwk = serde_json::from_str(TEST_EC_JWK).unwrap();
+        let issuer = "issuer-atomic-sqlite";
+        cred_store
+            .insert_one(Credentials::new(issuer.to_string(), key))
+            .await
+            .unwrap();
+
+        let v = 1000;
+        let base = StatusListRecord {
+            list_id: "list-atomic-sqlite".to_string(),
+            issuer: issuer.to_string(),
+            status_list: StatusList {
+                bits: 1,
+                lst: "initial".to_string(),
+            },
+            sub: "sub-atomic-sqlite".to_string(),
+            updated_at: v,
+        };
+        store.insert_one(base.clone()).await.unwrap();
+
+        // --- Happy path: row update and snapshot both commit. ---
+        let good_snapshot = StatusListHistoryRecord {
+            snapshot_id: "snap-good".to_string(),
+            list_id: base.list_id.clone(),
+            issuer: issuer.to_string(),
+            status_list: StatusList {
+                bits: 1,
+                lst: "flip-1".to_string(),
+            },
+            sub: base.sub.clone(),
+            iat: v + 1,
+            exp: v + 1 + 900,
+        };
+        let committed = store
+            .update_one_with_snapshot(
+                &base.list_id,
+                StatusListRecord {
+                    status_list: StatusList {
+                        bits: 1,
+                        lst: "flip-1".to_string(),
+                    },
+                    updated_at: v + 1,
+                    ..base.clone()
+                },
+                v,
+                good_snapshot,
+            )
+            .await
+            .unwrap();
+        assert!(
+            committed,
+            "advancing guarded update with snapshot must commit"
+        );
+        let row = store.find_one_by(&base.list_id).await.unwrap().unwrap();
+        assert_eq!(row.updated_at, v + 1);
+        assert_eq!(row.status_list.lst, "flip-1");
+        assert!(
+            history
+                .find_valid_at(&base.list_id, v + 1)
+                .await
+                .unwrap()
+                .is_some(),
+            "the committed snapshot must be resolvable"
+        );
+
+        // --- Rollback path: force the snapshot INSERT to fail (duplicate PK)
+        // and assert the paired row update did NOT land. ---
+        let colliding_snapshot = StatusListHistoryRecord {
+            snapshot_id: "snap-good".to_string(), // collides with the committed row
+            list_id: base.list_id.clone(),
+            issuer: issuer.to_string(),
+            status_list: StatusList {
+                bits: 1,
+                lst: "flip-2".to_string(),
+            },
+            sub: base.sub.clone(),
+            iat: v + 2,
+            exp: v + 2 + 900,
+        };
+        let result = store
+            .update_one_with_snapshot(
+                &base.list_id,
+                StatusListRecord {
+                    status_list: StatusList {
+                        bits: 1,
+                        lst: "flip-2".to_string(),
+                    },
+                    updated_at: v + 2,
+                    ..base.clone()
+                },
+                v + 1,
+                colliding_snapshot,
+            )
+            .await;
+        assert!(
+            result.is_err(),
+            "a failed snapshot insert must fail the whole unit"
+        );
+        let row = store.find_one_by(&base.list_id).await.unwrap().unwrap();
+        assert_eq!(
+            row.updated_at,
+            v + 1,
+            "row stamp must roll back when the snapshot insert fails"
+        );
+        assert_eq!(
+            row.status_list.lst, "flip-1",
+            "row content must roll back when the snapshot insert fails"
+        );
+        // No partial snapshot for the rolled-back update: what resolves at v+2 is
+        // still the previously committed snapshot, not the flip-2 attempt.
+        let resolved = history
+            .find_valid_at(&base.list_id, v + 2)
+            .await
+            .unwrap()
+            .expect("the earlier committed snapshot still covers v+2");
+        assert_eq!(
+            resolved.status_list.lst, "flip-1",
+            "no partial snapshot from the rolled-back update may exist"
+        );
+
+        // --- Conflict path: a stale guard rolls back cleanly and records
+        // nothing. ---
+        let conflict = store
+            .update_one_with_snapshot(
+                &base.list_id,
+                StatusListRecord {
+                    status_list: StatusList {
+                        bits: 1,
+                        lst: "flip-3".to_string(),
+                    },
+                    updated_at: v + 5,
+                    ..base.clone()
+                },
+                v, // stale: the row is at v+1 now
+                StatusListHistoryRecord {
+                    snapshot_id: "snap-conflict".to_string(),
+                    list_id: base.list_id.clone(),
+                    issuer: issuer.to_string(),
+                    status_list: StatusList {
+                        bits: 1,
+                        lst: "flip-3".to_string(),
+                    },
+                    sub: base.sub.clone(),
+                    iat: v + 5,
+                    exp: v + 5 + 900,
+                },
+            )
+            .await
+            .unwrap();
+        assert!(!conflict, "stale guard must report no rows and roll back");
+        let row = store.find_one_by(&base.list_id).await.unwrap().unwrap();
+        assert_eq!(row.updated_at, v + 1, "conflict must not change the row");
+        let resolved = history
+            .find_valid_at(&base.list_id, v + 5)
+            .await
+            .unwrap()
+            .expect("only the committed snapshot exists");
+        assert_eq!(
+            resolved.status_list.lst, "flip-1",
+            "conflict path must not record a snapshot"
+        );
+    }
+
+    /// Cross-backend proof (#143) that the transactional rollback holds on a
+    /// real non-sqlite backend: on MySQL, a failed snapshot INSERT must roll the
+    /// paired row UPDATE back (requires InnoDB — pinned by the migration). This
+    /// is the exact spot where a non-transactional table engine would silently
+    /// keep the row change, so it is verified against a live MySQL container.
+    #[cfg(feature = "mysql")]
+    #[tokio::test]
+    async fn test_mysql_update_with_snapshot_rolls_back_on_history_failure() {
+        let test_db = mysql_helpers::mysql_connection().await;
+        let cred_store = SeaOrmStore::<Credentials>::new(test_db.db.clone());
+        let store = SeaOrmStore::<StatusListRecord>::new(test_db.db.clone());
+
+        let key: Jwk = serde_json::from_str(
+            r#"{
+                "kty": "EC",
+                "crv": "P-256",
+                "x": "NeyFv_2L67OEplNbJpR02IFis4_lFW9HYmhfF5Or6m8",
+                "y": "eAH2qe8Pg3GQ28uxA8-qNAqdwQ_zfV2uKAvJ2sLpY9M"
+            }"#,
+        )
+        .unwrap();
+        let issuer = "issuer-atomic-mysql";
+        cred_store
+            .insert_one(Credentials::new(issuer.to_string(), key))
+            .await
+            .unwrap();
+
+        let v = 1000;
+        let base = StatusListRecord {
+            list_id: "list-atomic-mysql".to_string(),
+            issuer: issuer.to_string(),
+            status_list: StatusList {
+                bits: 1,
+                lst: "initial".to_string(),
+            },
+            sub: "sub-atomic-mysql".to_string(),
+            updated_at: v,
+        };
+        store.insert_one(base.clone()).await.unwrap();
+
+        // Commit one snapshot so its primary key exists to collide against.
+        store
+            .update_one_with_snapshot(
+                &base.list_id,
+                StatusListRecord {
+                    status_list: StatusList {
+                        bits: 1,
+                        lst: "flip-1".to_string(),
+                    },
+                    updated_at: v + 1,
+                    ..base.clone()
+                },
+                v,
+                StatusListHistoryRecord {
+                    snapshot_id: "snap-mysql".to_string(),
+                    list_id: base.list_id.clone(),
+                    issuer: issuer.to_string(),
+                    status_list: StatusList {
+                        bits: 1,
+                        lst: "flip-1".to_string(),
+                    },
+                    sub: base.sub.clone(),
+                    iat: v + 1,
+                    exp: v + 1 + 900,
+                },
+            )
+            .await
+            .unwrap();
+
+        // Second update whose snapshot collides on the primary key: the INSERT
+        // fails, so the whole transaction must roll back.
+        let result = store
+            .update_one_with_snapshot(
+                &base.list_id,
+                StatusListRecord {
+                    status_list: StatusList {
+                        bits: 1,
+                        lst: "flip-2".to_string(),
+                    },
+                    updated_at: v + 2,
+                    ..base.clone()
+                },
+                v + 1,
+                StatusListHistoryRecord {
+                    snapshot_id: "snap-mysql".to_string(), // duplicate PK
+                    list_id: base.list_id.clone(),
+                    issuer: issuer.to_string(),
+                    status_list: StatusList {
+                        bits: 1,
+                        lst: "flip-2".to_string(),
+                    },
+                    sub: base.sub.clone(),
+                    iat: v + 2,
+                    exp: v + 2 + 900,
+                },
+            )
+            .await;
+        assert!(result.is_err(), "duplicate snapshot PK must fail the unit");
+
+        let row = store.find_one_by(&base.list_id).await.unwrap().unwrap();
+        assert_eq!(
+            row.updated_at,
+            v + 1,
+            "InnoDB must roll the row update back when the snapshot insert fails"
+        );
+        assert_eq!(
+            row.status_list.lst, "flip-1",
+            "the rolled-back row must retain its previously committed content"
+        );
     }
 
     #[cfg(feature = "sqlite")]
