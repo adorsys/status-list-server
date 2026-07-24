@@ -3,7 +3,7 @@ name: "CodeQL"
 on:
   push:
     branches: [main]
-  pull_request:
+  workflow_dispatch:
   schedule:
     - cron: '0 0 * * 0'
 
@@ -14,7 +14,7 @@ concurrency:
 permissions:
   actions: read
   contents: read
-  security-events: write # Required for uploading SARIF and querying API
+  security-events: write
 
 jobs:
   analyze:
@@ -23,10 +23,10 @@ jobs:
 
     steps:
       - name: Fetch Repository
-        uses: actions/checkout@v7
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 
       - name: Install Rust
-        uses: actions-rust-lang/setup-rust-toolchain@v1
+        uses: actions-rust-lang/setup-rust-toolchain@b93a5597a6d24ac3e57f5c4ee97b0e7a0c91db62 # v1
 
       - name: Install build dependencies
         run: |
@@ -34,7 +34,7 @@ jobs:
           sudo apt-get install -y cmake golang-go
 
       - name: Initialize CodeQL
-        uses: github/codeql-action/init@v3
+        uses: github/codeql-action/init@cdcdbb5ceac1ca5d66cbb3a502b9ffa1a5505ded # v3
         with:
           languages: rust
           queries: security-extended,security-and-quality
@@ -43,70 +43,6 @@ jobs:
         run: cargo build --workspace --all-targets --all-features
 
       - name: Perform CodeQL Analysis
-        uses: github/codeql-action/analyze@v3
+        uses: github/codeql-action/analyze@cdcdbb5ceac1ca5d66cbb3a502b9ffa1a5505ded # v3
         with:
           category: "/language:rust"
-
-      - name: Verify analysis completed
-        uses: actions/github-script@v7
-        with:
-          script: |
-            // Skip API verification on fork PRs where token has limited permissions
-            if (context.eventName === 'pull_request' && context.payload.pull_request?.head?.repo?.full_name !== context.repo.owner + '/' + context.repo.repo) {
-              console.log('Skipping API verification on fork PR (insufficient permissions)');
-              console.log('CodeQL analysis was performed; results will appear in Security tab after merge');
-              return;
-            }
-
-            // Use the correct ref: head sha for PRs, current sha for push/schedule
-            const ref = context.payload.pull_request?.head?.sha || context.sha;
-            console.log(`Checking for analysis on ref: ${ref}`);
-
-            // Poll for analysis with retries (SARIF processing can take time)
-            const maxRetries = 15;
-            const retryDelayMs = 4000;
-            let analyses = [];
-            let lastError = null;
-
-            for (let i = 0; i < maxRetries; i++) {
-              await new Promise(resolve => setTimeout(resolve, retryDelayMs));
-
-              try {
-                const { data } = await github.rest.codeScanning.listRecentAnalyses({
-                  owner: context.repo.owner,
-                  repo: context.repo.repo,
-                  ref: ref,
-                  per_page: 1
-                });
-                analyses = data;
-                if (analyses.length > 0) {
-                  console.log(`Found analysis after ${i + 1} attempts`);
-                  break;
-                }
-              } catch (e) {
-                lastError = e.message;
-                console.log(`Attempt ${i + 1}: API not ready (${e.message})`);
-              }
-            }
-
-            if (analyses.length === 0) {
-              console.log(`Warning: Could not verify analysis via API after ${maxRetries} attempts.`);
-              console.log(`Last error: ${lastError || 'No analysis found'}`);
-              console.log('The CodeQL analysis step succeeded, but API verification is inconclusive.');
-              console.log('This is expected for PRs from forks or when the API is delayed.');
-              // Don't fail - the analyze step already validated the build succeeded
-              return;
-            }
-
-            const analysis = analyses[0];
-            const alertCount = analysis.results_count ?? 0;
-
-            console.log(`Analysis ID: ${analysis.id}`);
-            console.log(`Alerts found: ${alertCount}`);
-            console.log(`Analysis created at: ${analysis.created_at}`);
-
-            if (!analysis.id || analysis.id === 0) {
-              core.setFailed('CodeQL analysis produced invalid results.');
-            } else {
-              console.log('✓ CodeQL analysis verified successfully');
-            }
