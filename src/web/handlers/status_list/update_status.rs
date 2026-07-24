@@ -15,6 +15,7 @@ use super::{
 };
 
 /// Update status entries in an existing status list.
+#[tracing::instrument(skip(appstate, payload), fields(list_id = %list_id, issuer = %issuer))]
 pub async fn update_status(
     State(appstate): State<AppState>,
     Extension(issuer): Extension<String>,

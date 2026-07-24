@@ -37,6 +37,7 @@ fn map_insert_err(e: sea_orm::DbErr) -> RepositoryError {
 }
 
 impl SeaOrmStore<StatusListRecord> {
+    #[tracing::instrument(skip(self, entity), fields(db.system = "sea-orm"))]
     pub async fn insert_one(&self, entity: StatusListRecord) -> Result<(), RepositoryError> {
         let active = status_lists::ActiveModel {
             list_id: Set(entity.list_id),
@@ -52,6 +53,7 @@ impl SeaOrmStore<StatusListRecord> {
         Ok(())
     }
 
+    #[tracing::instrument(skip(self), fields(db.system = "sea-orm"))]
     pub async fn find_one_by(
         &self,
         value: &str,
@@ -62,6 +64,7 @@ impl SeaOrmStore<StatusListRecord> {
             .map_err(|e| RepositoryError::FindError(e.to_string()))
     }
 
+    #[tracing::instrument(skip(self), fields(db.system = "sea-orm"))]
     pub async fn find_all_by(
         &self,
         issuer: &str,
@@ -95,6 +98,7 @@ impl SeaOrmStore<StatusListRecord> {
     /// losing a flip. This invariant is enforced below rather than trusted, so a
     /// future caller that forgets to advance the stamp fails loudly instead of
     /// reintroducing the race.
+    #[tracing::instrument(skip(self, entity), fields(db.system = "sea-orm"))]
     pub async fn update_one(
         &self,
         list_id: &str,
@@ -128,6 +132,7 @@ impl SeaOrmStore<StatusListRecord> {
         Ok(result.rows_affected > 0)
     }
 
+    #[tracing::instrument(skip(self), fields(db.system = "sea-orm"))]
     pub async fn delete_by(&self, value: &str) -> Result<bool, RepositoryError> {
         let result = status_lists::Entity::delete_by_id(value)
             .exec(&*self.db)
@@ -136,6 +141,7 @@ impl SeaOrmStore<StatusListRecord> {
         Ok(result.rows_affected > 0)
     }
 
+    #[tracing::instrument(skip(self), fields(db.system = "sea-orm"))]
     pub async fn find_by_issuer(
         &self,
         issuer: &str,
@@ -147,6 +153,7 @@ impl SeaOrmStore<StatusListRecord> {
             .map_err(|e| RepositoryError::FindError(e.to_string()))
     }
 
+    #[tracing::instrument(skip(self), fields(db.system = "sea-orm"))]
     pub async fn find_all(&self) -> Result<Vec<StatusListRecord>, RepositoryError> {
         status_lists::Entity::find()
             .all(&*self.db)
@@ -154,6 +161,7 @@ impl SeaOrmStore<StatusListRecord> {
             .map_err(|e| RepositoryError::FindError(e.to_string()))
     }
 
+    #[tracing::instrument(skip(self), fields(db.system = "sea-orm"))]
     pub async fn find_all_status_list_uris(&self) -> Result<Vec<String>, RepositoryError> {
         status_lists::Entity::find()
             .select_only()
@@ -168,6 +176,7 @@ impl SeaOrmStore<StatusListRecord> {
 }
 
 impl SeaOrmStore<StatusListHistoryRecord> {
+    #[tracing::instrument(skip(self, entity), fields(db.system = "sea-orm"))]
     pub async fn insert_one(&self, entity: StatusListHistoryRecord) -> Result<(), RepositoryError> {
         let active: status_list_history::ActiveModel = entity.into();
         status_list_history::Entity::insert(active)
@@ -188,6 +197,7 @@ impl SeaOrmStore<StatusListHistoryRecord> {
     /// returns the newest snapshot in effect at `time`, which is the correct
     /// answer for "what was the status then". The memory adapter mirrors this via
     /// `max_by_key(iat)`.
+    #[tracing::instrument(skip(self), fields(db.system = "sea-orm"))]
     pub async fn find_valid_at(
         &self,
         list_id: &str,
@@ -205,6 +215,7 @@ impl SeaOrmStore<StatusListHistoryRecord> {
 
     /// Deletes snapshots older than the given cutoff timestamp.
     /// Returns the number of rows deleted.
+    #[tracing::instrument(skip(self), fields(db.system = "sea-orm"))]
     pub async fn delete_older_than(&self, cutoff: i64) -> Result<u64, RepositoryError> {
         let result = status_list_history::Entity::delete_many()
             .filter(status_list_history::Column::Exp.lt(cutoff))

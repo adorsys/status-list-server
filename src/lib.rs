@@ -27,3 +27,4 @@ pub mod web;
 pub use utils::bits_validation;
 #[cfg(any(feature = "server", feature = "certificate-acme"))]
 pub use utils::cert_manager;
+pub use utils::telemetry;

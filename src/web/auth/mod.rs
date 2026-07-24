@@ -2,7 +2,7 @@ pub mod errors;
 
 use axum::{
     body::Body,
-    extract::{Request, State},
+    extract::{ConnectInfo, Request, State},
     middleware::Next,
     response::IntoResponse,
 };
@@ -10,8 +10,10 @@ use errors::AuthenticationError;
 use hyper::header;
 use jsonwebtoken::{DecodingKey, Validation};
 use serde::{Deserialize, Serialize};
+use std::net::SocketAddr;
 
 use crate::state::AppState;
+use crate::utils::security_events;
 
 #[derive(Debug, Serialize, Deserialize)]
 struct Claims {
@@ -22,10 +24,21 @@ struct Claims {
 /// Authentication middleware acting as a safeguard for unauthorized issuers
 pub async fn auth(
     State(state): State<AppState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
     mut request: Request<Body>,
     next: Next,
 ) -> Result<impl IntoResponse, AuthenticationError> {
     use jsonwebtoken::dangerous::insecure_decode;
+    use tower_http::request_id::RequestId;
+
+    // Extract request ID for correlation
+    let request_id = request
+        .extensions()
+        .get::<RequestId>()
+        .and_then(|id| id.header_value().to_str().ok())
+        .map(|s| s.to_string());
+    let request_id_ref = request_id.as_deref();
+    let source_ip = addr.ip().to_string();
 
     // Try to extract token from Authorization header
     let token = request
@@ -33,35 +46,111 @@ pub async fn auth(
         .get(header::AUTHORIZATION)
         .and_then(|header| header.to_str().ok())
         .and_then(|auth| auth.strip_prefix("Bearer "))
-        .ok_or(AuthenticationError::InvalidAuthorizationHeader)?;
+        .ok_or_else(|| {
+            security_events::log_suspicious_activity(
+                "missing_auth_header",
+                "Authorization header missing or malformed",
+                Some(&source_ip),
+                request_id_ref,
+            );
+            AuthenticationError::InvalidAuthorizationHeader
+        })?;
 
     // Get the algorithm from the token
-    let alg = jsonwebtoken::decode_header(token)?.alg;
+    let alg = match jsonwebtoken::decode_header(token) {
+        Ok(header) => header.alg,
+        Err(e) => {
+            security_events::log_token_validation_failure(
+                "decode_header_failed",
+                None,
+                &e.to_string(),
+                request_id_ref,
+            );
+            return Err(AuthenticationError::JwtError(e));
+        }
+    };
 
     // We decode without verification to get the issuer
-    let issuer = insecure_decode::<Claims>(token)?.claims.iss;
+    let issuer = match insecure_decode::<Claims>(token) {
+        Ok(token_data) => token_data.claims.iss,
+        Err(e) => {
+            security_events::log_token_validation_failure(
+                "insecure_decode_failed",
+                None,
+                &e.to_string(),
+                request_id_ref,
+            );
+            return Err(AuthenticationError::JwtError(e));
+        }
+    };
 
     // Check if issuer is in database and get its credentials
-    let credential = state
-        .credentials
-        .find_credential(&issuer)
-        .await
-        .map_err(|e| {
-            tracing::error!("Failed to find credential for {issuer}: {e:?}");
-            AuthenticationError::InternalServer
-        })?
-        .ok_or(AuthenticationError::IssuerNotFound)?;
+    let credential = match state.credentials.find_credential(&issuer).await {
+        Ok(Some(cred)) => cred,
+        Ok(None) => {
+            security_events::log_auth_failure(&issuer, "Issuer not registered", request_id_ref);
+            return Err(AuthenticationError::IssuerNotFound);
+        }
+        Err(e) => {
+            security_events::log_suspicious_activity(
+                "credential_lookup_error",
+                &format!("Database error during credential lookup: {e}"),
+                Some(&source_ip),
+                request_id_ref,
+            );
+            return Err(AuthenticationError::InternalServer);
+        }
+    };
 
     // Get the decoding key
-    let public_key = serde_json::from_slice(credential.public_key.as_bytes())
-        .map_err(|_| AuthenticationError::InternalServer)?;
-    let decoding_key = DecodingKey::from_jwk(&public_key)?;
+    let public_key = match serde_json::from_slice(credential.public_key.as_bytes()) {
+        Ok(key) => key,
+        Err(_) => {
+            security_events::log_suspicious_activity(
+                "invalid_public_key",
+                &format!("Failed to parse public key for issuer: {issuer}"),
+                Some(&source_ip),
+                request_id_ref,
+            );
+            return Err(AuthenticationError::InternalServer);
+        }
+    };
+    let decoding_key = match DecodingKey::from_jwk(&public_key) {
+        Ok(key) => key,
+        Err(e) => {
+            security_events::log_suspicious_activity(
+                "decoding_key_failed",
+                &format!("Failed to create decoding key: {e}"),
+                Some(&source_ip),
+                request_id_ref,
+            );
+            return Err(AuthenticationError::JwtError(e));
+        }
+    };
 
     let mut validation = Validation::new(alg);
     validation.set_issuer(&[&credential.issuer.0]);
 
     // Verify the token to ensure that the issuer is the same as the one in the database
-    let token_data = jsonwebtoken::decode::<Claims>(token, &decoding_key, &validation)?;
+    let token_data = match jsonwebtoken::decode::<Claims>(token, &decoding_key, &validation) {
+        Ok(data) => data,
+        Err(e) => {
+            security_events::log_auth_failure(
+                &issuer,
+                &format!("Token verification failed: {e}"),
+                request_id_ref,
+            );
+            return Err(AuthenticationError::JwtError(e));
+        }
+    };
+
+    // Log successful authentication
+    security_events::log_security_event(
+        "auth_success",
+        &issuer,
+        request.uri().path(),
+        request_id_ref,
+    );
 
     // Insert issuer into request extensions
     request.extensions_mut().insert(token_data.claims.iss);

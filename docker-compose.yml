@@ -98,6 +98,10 @@ services:
       APP_AWS__S3_BUCKET: ${APP_AWS__S3_BUCKET:-status-list-adorsys}
       APP_STATUS_LIST__TOKEN_EXP_SECS: ${APP_STATUS_LIST__TOKEN_EXP_SECS:-900}
       APP_STATUS_LIST__TOKEN_TTL_SECS: ${APP_STATUS_LIST__TOKEN_TTL_SECS:-300}
+      APP_TELEMETRY__ENVIRONMENT: ${APP_TELEMETRY__ENVIRONMENT:-development}
+      APP_TELEMETRY__OTLP_ENDPOINT: "http://otel-collector:4317"
+      APP_TELEMETRY__ENABLED: ${APP_TELEMETRY__ENABLED:-true}
+      APP_TELEMETRY__SAMPLER_RATIO: ${APP_TELEMETRY__SAMPLER_RATIO:-1.0}
     ports:
       - 8000:8000
     depends_on:
@@ -111,6 +115,34 @@ services:
         condition: service_healthy
       pushgateway:
         condition: service_started
+      otel-collector:
+        condition: service_started
+    networks:
+      - status-list-network
+
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.156.0
+    container_name: otel-collector
+    command: ["--config", "/etc/otelcol/config.yaml"]
+    volumes:
+      - ./otel-collector.yaml:/etc/otelcol/config.yaml
+    ports:
+      - 4317:4317
+      - 4318:4318
+    depends_on:
+      jaeger:
+        condition: service_started
+    networks:
+      - status-list-network
+
+  jaeger:
+    image: jaegertracing/jaeger:2.20
+    container_name: jaeger
+    ports:
+      - 16686:16686
+      - "4317"
+    environment:
+      COLLECTOR_OTLP_ENABLED: "true"
     networks:
       - status-list-network
 

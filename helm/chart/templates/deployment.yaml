@@ -70,10 +70,35 @@ spec:
               mountPath: /root/.aws
               readOnly: true
           {{- end }}
-      {{- if .Values.secretStore.enabled }}
+        {{- if and .Values.otelCollector.enabled .Values.otelCollector.sidecar.enabled }}
+        - name: otel-collector
+          image: {{ .Values.otelCollector.sidecar.image.repository }}:{{ .Values.otelCollector.sidecar.image.tag }}
+          args: ["--config", "/etc/otelcol/config.yaml"]
+          ports:
+            - name: otlp-grpc
+              containerPort: 4317
+              protocol: TCP
+            - name: otlp-http
+              containerPort: 4318
+              protocol: TCP
+          volumeMounts:
+            - name: otel-collector-config
+              mountPath: /etc/otelcol
+              readOnly: true
+          {{- with .Values.otelCollector.sidecar.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+        {{- end }}
       volumes:
+      {{- if .Values.secretStore.enabled }}
         - name: aws-credentials-volume
           secret:
             secretName: aws-credentials-secret
+      {{- end }}
+      {{- if and .Values.otelCollector.enabled .Values.otelCollector.sidecar.enabled }}
+        - name: otel-collector-config
+          configMap:
+            name: {{ include "status-list-server-chart.fullname" . }}-otel-collector-config
       {{- end }}
 {{- end }}

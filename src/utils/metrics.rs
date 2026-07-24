@@ -1,29 +1,34 @@
-use color_eyre::eyre::Result;
-use metrics_exporter_prometheus::PrometheusHandle;
-use metrics_process::Collector;
-use std::time::Duration;
+use color_eyre::eyre::{Context, Result};
+use opentelemetry_prometheus::exporter;
+use opentelemetry_sdk::metrics::SdkMeterProvider;
+use prometheus::{Encoder, Registry, TextEncoder};
 
-/// Initialize Prometheus metrics recorder
-pub(crate) fn setup_metrics() -> Result<PrometheusHandle> {
-    let builder = metrics_exporter_prometheus::PrometheusBuilder::new();
-    let handle = builder.install_recorder()?;
+/// Initialize the OpenTelemetry metrics pipeline backed by a Prometheus
+/// registry. Returns the [`SdkMeterProvider`] that instruments use to create
+/// counters, histograms, etc.
+pub(crate) fn setup_metrics(registry: &Registry) -> Result<SdkMeterProvider> {
+    let prometheus_exporter = exporter()
+        .with_registry(registry.clone())
+        .build()
+        .wrap_err("Failed to build Prometheus exporter")?;
 
-    Ok(handle)
+    let provider = SdkMeterProvider::builder()
+        .with_reader(prometheus_exporter)
+        .build();
+
+    // Install as global so `opentelemetry::global::meter()` works everywhere
+    opentelemetry::global::set_meter_provider(provider.clone());
+    Ok(provider)
 }
 
-/// Start the background metrics collector task
-pub(crate) fn start_metrics_collector() {
-    let collector = Collector::default();
-    collector.describe();
-
-    tokio::spawn(async move {
-        loop {
-            collector.collect();
-            tokio::time::sleep(Duration::from_secs(1)).await;
-        }
-    });
-}
-
-pub(crate) async fn metrics_handler(handle: PrometheusHandle) -> String {
-    handle.render()
+/// Render all collected metrics in the Prometheus text exposition format.
+pub(crate) async fn metrics_handler(registry: Registry) -> String {
+    let encoder = TextEncoder::new();
+    let metric_families = registry.gather();
+    let mut buffer = vec![];
+    if let Err(e) = encoder.encode(&metric_families, &mut buffer) {
+        tracing::error!("Failed to encode metrics: {e}");
+        return String::new();
+    }
+    String::from_utf8(buffer).unwrap_or_default()
 }

@@ -12,6 +12,7 @@ use axum::{
 use color_eyre::eyre::{Context, eyre};
 use governor::middleware::NoOpMiddleware;
 use hyper::Method;
+use prometheus::Registry;
 use tokio::net::TcpListener;
 use tower_governor::{
     GovernorLayer,
@@ -22,22 +23,20 @@ use tower_http::{
     catch_panic::CatchPanicLayer,
     cors::{Any, CorsLayer},
     limit::RequestBodyLimitLayer,
+    request_id::{MakeRequestUuid, PropagateRequestIdLayer, RequestId, SetRequestIdLayer},
     trace::TraceLayer,
 };
+use tracing::Span;
 
 /// Path of the aggregation route, as registered under `/api/v1`.
 const AGGREGATION_ROUTE_PATH: &str = "/api/v1/aggregation";
 
-use crate::{
-    config::Config,
-    state::AppState,
-    utils::metrics::{metrics_handler, setup_metrics, start_metrics_collector},
-    web::{
-        auth::auth,
-        handlers::{
-            credential_handler, get_aggregation, get_status_list, publish_status, update_status,
-        },
-    },
+use crate::config::Config;
+use crate::state::AppState;
+use crate::utils::metrics::{metrics_handler, setup_metrics};
+use crate::web::auth::auth;
+use crate::web::handlers::{
+    credential_handler, get_aggregation, get_status_list, publish_status, update_status,
 };
 
 async fn welcome() -> impl IntoResponse {
@@ -54,7 +53,11 @@ pub struct HttpServer {
 }
 
 impl HttpServer {
-    pub async fn new(config: &Config, state: AppState) -> color_eyre::Result<Self> {
+    pub async fn new(
+        config: &Config,
+        state: AppState,
+        prometheus_registry: Registry,
+    ) -> color_eyre::Result<Self> {
         let cors = CorsLayer::new()
             .allow_methods([
                 Method::GET,
@@ -83,14 +86,41 @@ impl HttpServer {
                     permissive_governor.clone(),
                 ),
             )
-            .layer(TraceLayer::new_for_http())
+            // Request ID propagation (returns header in response)
+            .layer(PropagateRequestIdLayer::new(
+                axum::http::header::HeaderName::from_static("x-request-id"),
+            ))
+            // Trace layer with request ID in span
+            .layer(
+                TraceLayer::new_for_http().make_span_with(|request: &axum::extract::Request| {
+                    let request_id = request
+                        .extensions()
+                        .get::<RequestId>()
+                        .map(|id| id.header_value().to_str().unwrap_or("unknown"))
+                        .unwrap_or("unknown");
+
+                    Span::current().record("request_id", request_id);
+
+                    tracing::info_span!(
+                        "http_request",
+                        method = %request.method(),
+                        uri = %request.uri(),
+                        request_id = %request_id,
+                    )
+                }),
+            )
+            // Request ID generation (must be before TraceLayer so it's available in spans)
+            .layer(SetRequestIdLayer::new(
+                axum::http::header::HeaderName::from_static("x-request-id"),
+                MakeRequestUuid,
+            ))
             .layer(CatchPanicLayer::new())
             .layer(cors)
             .layer(RequestBodyLimitLayer::new(max_body_size))
             .layer(DefaultBodyLimit::disable())
             .with_state(state);
 
-        router = attach_metrics(router, config);
+        router = attach_metrics(router, config, prometheus_registry);
 
         validate_aggregation_uri(config)?;
 
@@ -181,13 +211,12 @@ fn api_v1_routes(
         .merge(public_reads)
 }
 
-fn attach_metrics(router: Router, config: &Config) -> Router {
+fn attach_metrics(router: Router, config: &Config, registry: Registry) -> Router {
     if config.server.enable_metrics {
-        match setup_metrics() {
-            Ok(handle) => {
-                start_metrics_collector();
+        match setup_metrics(&registry) {
+            Ok(_meter) => {
                 tracing::info!("StatusList Monitor: ENABLED (Metrics at /metrics)");
-                return router.route("/metrics", get(move || metrics_handler(handle)));
+                return router.route("/metrics", get(move || metrics_handler(registry)));
             }
             Err(e) => tracing::warn!("Failed to setup metrics: {e}"),
         }

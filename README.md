@@ -211,6 +211,112 @@ let manager = CertManager::builder()
 
 ACME DNS-01 challenges are solved through a configurable DNS provider. AWS Route53, Cloudflare, Google Cloud DNS, Azure DNS and self-hosted ACME-DNS are supported, selected via `APP_SERVER__CERT__DNS__PROVIDER`. See the [DNS Provider Documentation](docs/dns-providers.md) for setup instructions.
 
+## Logging Configuration
+
+The server uses structured logging with configurable output formats for different environments. All logging is controlled via the `RUST_LOG` environment variable.
+
+### Log Levels
+
+Set via the `RUST_LOG` environment variable:
+
+| Level   | Description                  |
+|---------|------------------------------|
+| `error` | Critical errors only         |
+| `warn`  | Warnings and errors          |
+| `info`  | Normal operation (default)   |
+| `debug` | Detailed debugging           |
+| `trace` | Very verbose tracing         |
+
+### Examples
+
+```bash
+# Default (info level)
+RUST_LOG=info cargo run
+
+# Debug mode for troubleshooting
+RUST_LOG=debug cargo run
+
+# Production - warnings and above only
+RUST_LOG=warn cargo run
+
+# Specific module levels
+RUST_LOG=status_list_server=debug,hyper=info cargo run
+```
+
+### Output Formats
+
+- **Development** (`APP_TELEMETRY__ENVIRONMENT=development` or unset):
+  - Pretty-printed, human-readable logs
+  - `RUST_LOG` defaults to `debug`
+  - Request IDs included in logs
+
+- **Production** (`APP_TELEMETRY__ENVIRONMENT=production`):
+  - JSON-formatted logs for machine parsing
+  - `RUST_LOG` defaults to `info`
+  - Structured fields for log aggregation
+
+### JSON Logging (Production)
+
+In production mode, logs are output as structured JSON:
+
+```json
+{
+  "timestamp": "2024-01-15T10:30:00Z",
+  "level": "INFO",
+  "target": "status_list_server",
+  "fields": {
+    "message": "Request completed",
+    "request_id": "550e8400-e29b-41d4-a716-446655440000",
+    "method": "GET",
+    "uri": "/api/v1/status-lists/123",
+    "status": 200
+  }
+}
+```
+
+Query JSON logs with `jq`:
+
+```bash
+# Find all errors
+jq 'select(.level == "ERROR")' logs.json
+
+# Find requests by ID
+jq 'select(.fields.request_id == "550e8400...")' logs.json
+
+# Find security events
+jq 'select(.target == "security")' logs.json
+```
+
+### Request Correlation IDs
+
+Every request is assigned a unique `x-request-id` header:
+
+- Returned in the HTTP response
+- Included in all log entries for that request
+- Propagated to downstream services
+
+Pass your own request ID:
+
+```bash
+curl -H "x-request-id: my-custom-id" http://localhost:8000/health
+```
+
+### Security Events
+
+Security events (authentication failures, permission denials, suspicious activity) are logged with target `security`. Configure your log aggregator to route these separately for audit compliance:
+
+```bash
+# Filter security events only
+RUST_LOG=security=warn cargo run
+```
+
+Security events include:
+- `auth_failure` - Failed authentication attempts
+- `permission_denied` - Authorization failures
+- `token_validation_failure` - JWT validation errors
+- `suspicious_activity` - Potential attack indicators (rate limiting, malformed tokens)
+- `security_event` - Successful security-sensitive operations
+
 ## Error Handling
 
 The server implements proper error handling and returns appropriate HTTP status codes:
