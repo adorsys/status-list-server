@@ -11,25 +11,25 @@ on:
 jobs:
   check-crate-type:
     runs-on: ubuntu-latest
-  steps:
-    - name: Fetch Repository
-      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+    steps:
+      - name: Fetch Repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
-    - name: Install stable toolchain
-      uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1
+      - name: Install stable toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1
 
-    - name: Install jql
-      uses: taiki-e/install-action@c44f6b046f1c29ae5918b1e0bfdbb2f1813836fd # v2
-      with:
-        tool: jql
+      - name: Install jql
+        uses: taiki-e/install-action@c44f6b046f1c29ae5918b1e0bfdbb2f1813836fd # v2
+        with:
+          tool: jql
 
-    - name: Searching for lib
-      id: searching
-      run: |
-        result=$(cargo metadata --format-version=1 --no-deps | jql '"packages"|>"targets"<|[0]|>"kind"' | jql '..' -i);
-        echo "targets=$result" >> "$GITHUB_OUTPUT";
-        echo kind of targets $result;
+      - name: Searching for lib
+        id: searching
+        run: |
+          result=$(cargo metadata --format-version=1 --no-deps | jql '"packages"|>"targets"<|[0]|>"kind"' | jql '..' -i);
+          echo "targets=$result" >> "$GITHUB_OUTPUT";
+          echo kind of targets $result;
 
-  outputs:
-    is_lib: ${{ contains(steps.searching.outputs.targets, 'lib') }}
-    is_bin: ${{ contains(steps.searching.outputs.targets, 'bin') }}
+    outputs:
+      is_lib: ${{ contains(steps.searching.outputs.targets, 'lib') }}
+      is_bin: ${{ contains(steps.searching.outputs.targets, 'bin') }}
