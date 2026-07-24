@@ -25,10 +25,9 @@ impl<T> SeaOrmStore<T> {
     }
 }
 
-/// Maps an insert failure, distinguishing a unique-constraint violation — a
-/// concurrent writer won the check-then-insert race — from real storage
-/// failures. `sql_err()` is SeaORM's backend-normalized view of driver errors,
-/// so the same mapping serves Postgres, MySQL, and SQLite alike.
+/// Maps an insert failure, distinguishing a unique-constraint violation (a
+/// concurrent writer won the check-then-insert race) from real storage
+/// failures. `sql_err()` normalizes driver errors across all three backends.
 fn map_insert_err(e: sea_orm::DbErr) -> RepositoryError {
     match e.sql_err() {
         Some(sea_orm::SqlErr::UniqueConstraintViolation(_)) => RepositoryError::DuplicateEntry,
@@ -74,27 +73,17 @@ impl SeaOrmStore<StatusListRecord> {
             .map_err(|e| RepositoryError::FindError(e.to_string()))
     }
 
-    /// Optimistic-concurrency update guarded on `updated_at`.
+    /// Optimistic-concurrency update guarded on `updated_at`:
+    /// `UPDATE ... WHERE list_id = ? AND updated_at = ?`. `Ok(false)` means the
+    /// guard did not match — a racing writer advanced the stamp, or the row is
+    /// gone — so a lost update was prevented.
     ///
-    /// Executes a single atomic `UPDATE ... WHERE list_id = ? AND updated_at = ?`.
-    /// `list_id` is the primary key, so this touches at most one row and
-    /// `rows_affected` is exactly 0 or 1. A return of `Ok(false)` means the guard
-    /// did not match — another writer changed the row (or it was deleted) since
-    /// the caller read `expected_updated_at`, i.e. a lost-update was prevented.
+    /// Uses `rows_affected` rather than `SELECT ... FOR UPDATE` because its
+    /// semantics are identical across all three sea-orm backends (#143).
     ///
-    /// `rows_affected` is used deliberately: its semantics are identical across
-    /// the Postgres/MySQL/SQLite sea-orm backends, unlike `SELECT ... FOR UPDATE`
-    /// row locking (see #143).
-    ///
-    /// # Caller contract
-    ///
-    /// `entity.updated_at` MUST be strictly greater than `expected_updated_at`.
-    /// The guard only prevents a lost update if the write *advances* the stamp:
-    /// with a non-advancing value (`new == expected`) two same-second writers
-    /// would both match `WHERE updated_at = expected` and both succeed, silently
-    /// losing a flip. This invariant is enforced below rather than trusted, so a
-    /// future caller that forgets to advance the stamp fails loudly instead of
-    /// reintroducing the race.
+    /// `entity.updated_at` MUST be strictly greater than `expected_updated_at`,
+    /// enforced below: a non-advancing stamp lets two same-second writers both
+    /// match the guard, silently losing a flip.
     pub async fn update_one(
         &self,
         list_id: &str,
@@ -128,23 +117,13 @@ impl SeaOrmStore<StatusListRecord> {
         Ok(result.rows_affected > 0)
     }
 
-    /// Optimistic update that records a history snapshot in the **same
-    /// transaction** as the guarded row update.
-    ///
-    /// Either the guarded `UPDATE status_lists` and the `status_list_history`
-    /// `INSERT` both commit, or neither does. This closes the split the plain
-    /// [`update_one`](Self::update_one) leaves open, where the row changes but a
-    /// subsequent snapshot insert fails, so nothing records the change.
-    ///
-    /// A `false` return means the optimistic guard did not match (a racing
-    /// writer advanced the stamp, or the row is gone): the transaction is rolled
-    /// back and nothing is written — identical outward behavior to
-    /// [`update_one`](Self::update_one). Transaction semantics are portable
-    /// across the Postgres/MySQL/SQLite sea-orm backends (#143), so the
-    /// all-or-nothing guarantee holds identically on all three.
-    ///
-    /// The same strictly-advancing `updated_at` caller contract as
-    /// [`update_one`](Self::update_one) applies and is enforced here too.
+    /// Like [`update_one`](Self::update_one), but the guarded `UPDATE` and the
+    /// `status_list_history` `INSERT` run in one transaction: both commit or
+    /// neither does. This closes the split the plain `update_one` leaves open,
+    /// where the row changes but a failing snapshot insert leaves nothing
+    /// recording it. Transaction semantics are portable across all three
+    /// sea-orm backends (#143). Same `false`-on-guard-miss and
+    /// strictly-advancing-stamp contract as `update_one`.
     pub async fn update_one_with_snapshot(
         &self,
         list_id: &str,
@@ -185,8 +164,7 @@ impl SeaOrmStore<StatusListRecord> {
             .map_err(|e| RepositoryError::UpdateError(e.to_string()))?;
 
         if result.rows_affected == 0 {
-            // Optimistic-guard miss: roll back so the conflict path records
-            // nothing (no snapshot, no row change).
+            // Guard miss: roll back so nothing is recorded.
             txn.rollback()
                 .await
                 .map_err(|e| RepositoryError::UpdateError(e.to_string()))?;
@@ -198,10 +176,8 @@ impl SeaOrmStore<StatusListRecord> {
             .exec(&txn)
             .await
         {
-            // The row UPDATE already landed inside the transaction, but the
-            // snapshot INSERT failed. Roll back so the row reverts to its
-            // pre-update state — the whole point of this method: never leave a
-            // changed row without the snapshot that records the change.
+            // Snapshot INSERT failed after the row UPDATE landed: roll the row
+            // back so a changed row never outlives the snapshot recording it.
             txn.rollback().await.map_err(|rollback_err| {
                 RepositoryError::InsertError(format!(
                     "history snapshot insert failed ({insert_err}); \
@@ -266,17 +242,11 @@ impl SeaOrmStore<StatusListHistoryRecord> {
         Ok(())
     }
 
-    /// Finds the snapshot whose half-open validity interval contains `time`.
-    /// Using `iat <= time < exp` ensures the token returned to a client passes
-    /// the draft-21 §8.4 `iat`/`exp` validation rule.
-    ///
-    /// Intervals intentionally overlap: each update writes a fresh snapshot with
-    /// `exp = iat + token_exp_secs` while the superseded snapshot keeps its
-    /// original (later) `exp`, so both can match a `time` in the overlap. That is
-    /// not an inconsistency — `ORDER BY iat DESC LIMIT 1` deterministically
-    /// returns the newest snapshot in effect at `time`, which is the correct
-    /// answer for "what was the status then". The memory adapter mirrors this via
-    /// `max_by_key(iat)`.
+    /// Finds the snapshot whose half-open interval `iat <= time < exp` contains
+    /// `time` (draft-21 §8.4). Intervals intentionally overlap — a superseded
+    /// snapshot keeps its original later `exp` — so `ORDER BY iat DESC LIMIT 1`
+    /// picks the newest one in effect at `time`. The memory adapter mirrors this
+    /// via `max_by_key(iat)`.
     pub async fn find_valid_at(
         &self,
         list_id: &str,
@@ -358,7 +328,7 @@ mod test {
     use jsonwebtoken::jwk::Jwk;
     use sea_orm::{DatabaseBackend, MockDatabase, MockExecResult};
     // `Migrator::up` is only called from the real-backend helpers below.
-    #[cfg(any(feature = "sqlite", feature = "mysql"))]
+    #[cfg(any(feature = "sqlite", feature = "mysql", feature = "postgres-tests"))]
     use sea_orm_migration::MigratorTrait;
 
     #[cfg(feature = "sqlite")]
@@ -428,6 +398,51 @@ mod test {
                 .await
                 .expect("Failed to run migrations on MySQL");
             MysqlTestDb {
+                _container: node,
+                db: Arc::new(db),
+            }
+        }
+    }
+
+    #[cfg(feature = "postgres-tests")]
+    mod postgres_helpers {
+        use super::*;
+        use testcontainers_modules::{
+            postgres::Postgres as PostgresImage,
+            testcontainers::{ContainerAsync, runners::AsyncRunner},
+        };
+
+        pub(super) struct PostgresTestDb {
+            #[allow(dead_code)]
+            pub(super) _container: ContainerAsync<PostgresImage>,
+            pub(super) db: Arc<DatabaseConnection>,
+        }
+
+        pub(super) async fn postgres_connection() -> PostgresTestDb {
+            let node = PostgresImage::default()
+                .start()
+                .await
+                .expect("Failed to start Postgres container");
+            let host = node
+                .get_host()
+                .await
+                .expect("Failed to resolve Postgres host");
+            let port = node
+                .get_host_port_ipv4(5432)
+                .await
+                .expect("Failed to resolve Postgres port");
+
+            // testcontainers' Postgres image defaults to postgres/postgres/postgres.
+            let url = format!("postgres://postgres:postgres@{host}:{port}/postgres");
+            let mut opt = sea_orm::ConnectOptions::new(url);
+            opt.max_connections(5);
+            let db = sea_orm::Database::connect(opt)
+                .await
+                .expect("Failed to connect to Postgres");
+            crate::adapters::sea_orm::Migrator::up(&db, None)
+                .await
+                .expect("Failed to run migrations on Postgres");
+            PostgresTestDb {
                 _container: node,
                 db: Arc::new(db),
             }
@@ -784,12 +799,9 @@ mod test {
         cred_store.delete_by("issuer-neg-sqlite").await.unwrap();
     }
 
-    /// A second insert with the same primary key must surface as
-    /// `DuplicateEntry`, not a generic insert error. This is the one property a
-    /// mock cannot verify: whether the real backend's duplicate-key error
-    /// actually parses into `SqlErr::UniqueConstraintViolation`. The adapter
-    /// layer maps `DuplicateEntry` to a conflict so a racing publish returns
-    /// 409 instead of 500.
+    /// A duplicate primary key must surface as `DuplicateEntry`, not a generic
+    /// insert error — the one property a mock cannot verify, since it depends on
+    /// the real driver's error parsing into `SqlErr::UniqueConstraintViolation`.
     #[cfg(feature = "sqlite")]
     #[tokio::test]
     async fn test_sqlite_duplicate_insert_maps_to_duplicate_entry() {
@@ -840,10 +852,9 @@ mod test {
         );
     }
 
-    /// Cross-backend proof (#143) for the duplicate-key mapping: MySQL's
-    /// duplicate-key error must also parse into
-    /// `SqlErr::UniqueConstraintViolation` — the exact spot where a driver's
-    /// error format could diverge from sqlite without any mock test noticing.
+    /// Cross-backend proof (#143): MySQL's duplicate-key error must also parse
+    /// into `SqlErr::UniqueConstraintViolation`, where the driver format could
+    /// diverge from sqlite.
     #[cfg(feature = "mysql")]
     #[tokio::test]
     async fn test_mysql_duplicate_insert_maps_to_duplicate_entry() {
@@ -892,11 +903,9 @@ mod test {
         );
     }
 
-    /// The real proof for the lost-update fix: two writers that both read the
-    /// same `updated_at` cannot both win. This deterministically models the race
-    /// (no threads) — both capture the same guard value, the first guarded write
-    /// lands, the second's guard misses and is rejected — and asserts the
-    /// loser's flip did not overwrite the winner's.
+    /// The lost-update proof: two writers reading the same `updated_at` cannot
+    /// both win. Deterministic (no threads) — first write lands, second's guard
+    /// misses — and the loser's flip must not overwrite the winner's.
     #[cfg(feature = "sqlite")]
     #[tokio::test]
     async fn test_update_one_optimistic_guard_rejects_stale_write() {
@@ -965,11 +974,9 @@ mod test {
         assert_eq!(stored.updated_at, v + 1);
     }
 
-    /// Cross-backend proof (#143): the optimistic guard must behave identically
-    /// on a real non-sqlite backend. This exercises the JSON `col_expr` write and
-    /// `rows_affected` semantics against MySQL — the two things most likely to
-    /// diverge from sqlite — and asserts the same win/reject outcome as the
-    /// sqlite guard test.
+    /// Cross-backend proof (#143): the optimistic guard behaves identically on
+    /// MySQL, exercising the JSON `col_expr` write and `rows_affected` semantics
+    /// most likely to diverge from sqlite.
     #[cfg(feature = "mysql")]
     #[tokio::test]
     async fn test_mysql_update_one_optimistic_guard_rejects_stale_write() {
@@ -1036,12 +1043,10 @@ mod test {
         assert_eq!(stored.updated_at, v + 1);
     }
 
-    /// Pins the store-level caller contract: a guarded write whose new
-    /// `updated_at` does not strictly advance past the guard value is rejected
-    /// outright (before touching the DB), so a future caller that forgets to
-    /// advance the stamp fails loudly instead of silently reintroducing the
-    /// same-second lost update. No DB round-trip is needed — the check precedes
-    /// the query — so this runs on the mock backend.
+    /// A guarded write whose `updated_at` does not strictly advance past the
+    /// guard is rejected before touching the DB, so a caller that forgets to
+    /// advance the stamp fails loudly. The check precedes the query, so this
+    /// runs on the mock backend.
     #[tokio::test]
     async fn test_update_one_rejects_non_advancing_stamp() {
         let db_conn = Arc::new(MockDatabase::new(DatabaseBackend::Postgres).into_connection());
@@ -1075,12 +1080,10 @@ mod test {
         "y": "eAH2qe8Pg3GQ28uxA8-qNAqdwQ_zfV2uKAvJ2sLpY9M"
     }"#;
 
-    /// The core acceptance test for the transactional fix: the guarded row
-    /// UPDATE and the history INSERT succeed or fail as a unit. Exercises the
-    /// happy path (both commit), the forced-INSERT-failure path (row update
-    /// rolls back, no partial snapshot), and the conflict path (guard miss rolls
-    /// back cleanly) — all against a real SQLite backend, since a `MockDatabase`
-    /// cannot model transaction rollback.
+    /// The core acceptance test: the guarded row UPDATE and the history INSERT
+    /// succeed or fail as a unit. Covers the happy path, the forced-INSERT-
+    /// failure rollback (no partial snapshot), and the conflict path — against
+    /// real SQLite, since `MockDatabase` cannot model rollback.
     #[cfg(feature = "sqlite")]
     #[tokio::test]
     async fn test_sqlite_update_with_snapshot_is_atomic() {
@@ -1252,11 +1255,9 @@ mod test {
         );
     }
 
-    /// Cross-backend proof (#143) that the transactional rollback holds on a
-    /// real non-sqlite backend: on MySQL, a failed snapshot INSERT must roll the
-    /// paired row UPDATE back (requires InnoDB — pinned by the migration). This
-    /// is the exact spot where a non-transactional table engine would silently
-    /// keep the row change, so it is verified against a live MySQL container.
+    /// Cross-backend proof (#143): on MySQL a failed snapshot INSERT must roll
+    /// the paired row UPDATE back. Requires InnoDB (pinned by the migration) —
+    /// a non-transactional engine would silently keep the row change.
     #[cfg(feature = "mysql")]
     #[tokio::test]
     async fn test_mysql_update_with_snapshot_rolls_back_on_history_failure() {
@@ -1356,6 +1357,115 @@ mod test {
             row.updated_at,
             v + 1,
             "InnoDB must roll the row update back when the snapshot insert fails"
+        );
+        assert_eq!(
+            row.status_list.lst, "flip-1",
+            "the rolled-back row must retain its previously committed content"
+        );
+    }
+
+    /// Postgres is the production backend, so the transactional rollback is
+    /// proven directly on it, not just inferred from the SQLite and MySQL
+    /// proofs: a colliding snapshot INSERT must roll the paired row UPDATE back.
+    #[cfg(feature = "postgres-tests")]
+    #[tokio::test]
+    async fn test_postgres_update_with_snapshot_rolls_back_on_history_failure() {
+        let test_db = postgres_helpers::postgres_connection().await;
+        let cred_store = SeaOrmStore::<Credentials>::new(test_db.db.clone());
+        let store = SeaOrmStore::<StatusListRecord>::new(test_db.db.clone());
+
+        let key: Jwk = serde_json::from_str(
+            r#"{
+                "kty": "EC",
+                "crv": "P-256",
+                "x": "NeyFv_2L67OEplNbJpR02IFis4_lFW9HYmhfF5Or6m8",
+                "y": "eAH2qe8Pg3GQ28uxA8-qNAqdwQ_zfV2uKAvJ2sLpY9M"
+            }"#,
+        )
+        .unwrap();
+        let issuer = "issuer-atomic-postgres";
+        cred_store
+            .insert_one(Credentials::new(issuer.to_string(), key))
+            .await
+            .unwrap();
+
+        let v = 1000;
+        let base = StatusListRecord {
+            list_id: "list-atomic-postgres".to_string(),
+            issuer: issuer.to_string(),
+            status_list: StatusList {
+                bits: 1,
+                lst: "initial".to_string(),
+            },
+            sub: "sub-atomic-postgres".to_string(),
+            updated_at: v,
+        };
+        store.insert_one(base.clone()).await.unwrap();
+
+        // Commit one snapshot so its primary key exists to collide against.
+        store
+            .update_one_with_snapshot(
+                &base.list_id,
+                StatusListRecord {
+                    status_list: StatusList {
+                        bits: 1,
+                        lst: "flip-1".to_string(),
+                    },
+                    updated_at: v + 1,
+                    ..base.clone()
+                },
+                v,
+                StatusListHistoryRecord {
+                    snapshot_id: "snap-postgres".to_string(),
+                    list_id: base.list_id.clone(),
+                    issuer: issuer.to_string(),
+                    status_list: StatusList {
+                        bits: 1,
+                        lst: "flip-1".to_string(),
+                    },
+                    sub: base.sub.clone(),
+                    iat: v + 1,
+                    exp: v + 1 + 900,
+                },
+            )
+            .await
+            .unwrap();
+
+        // Second update whose snapshot collides on the primary key: the INSERT
+        // fails, so the whole transaction must roll back.
+        let result = store
+            .update_one_with_snapshot(
+                &base.list_id,
+                StatusListRecord {
+                    status_list: StatusList {
+                        bits: 1,
+                        lst: "flip-2".to_string(),
+                    },
+                    updated_at: v + 2,
+                    ..base.clone()
+                },
+                v + 1,
+                StatusListHistoryRecord {
+                    snapshot_id: "snap-postgres".to_string(), // duplicate PK
+                    list_id: base.list_id.clone(),
+                    issuer: issuer.to_string(),
+                    status_list: StatusList {
+                        bits: 1,
+                        lst: "flip-2".to_string(),
+                    },
+                    sub: base.sub.clone(),
+                    iat: v + 2,
+                    exp: v + 2 + 900,
+                },
+            )
+            .await;
+        assert!(result.is_err(), "duplicate snapshot PK must fail the unit");
+
+        let row = store.find_one_by(&base.list_id).await.unwrap().unwrap();
+        assert_eq!(
+            row.updated_at,
+            v + 1,
+            "Postgres must roll the row update back when the snapshot insert fails"
         );
         assert_eq!(
             row.status_list.lst, "flip-1",

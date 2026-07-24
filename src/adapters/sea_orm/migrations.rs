@@ -33,12 +33,9 @@ pub(crate) mod tables {
     impl MigrationTrait for Migration {
         /// Creates the necessary database tables if they don't exist
         async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
-            // Create Credentials table for storing issuer credentials.
-            // `ENGINE=InnoDB` is emitted only on MySQL (ignored by the Postgres
-            // and SQLite builders); it makes the transactional-rollback
-            // guarantee that `update_with_snapshot` relies on explicit rather
-            // than dependent on the server's default engine, and is required for
-            // the foreign key below to be enforced on MySQL.
+            // Credentials table. `.engine("InnoDB")` is emitted only on MySQL
+            // (ignored elsewhere); it pins the transactional-rollback engine
+            // `update_with_snapshot` relies on, and lets MySQL enforce the FK.
             manager
                 .create_table(
                     Table::create()
@@ -56,9 +53,8 @@ pub(crate) mod tables {
                 )
                 .await?;
 
-            // Create StatusLists table for storing status list entries.
-            // InnoDB (MySQL-only clause) so the guarded UPDATE + snapshot INSERT
-            // in `update_with_snapshot` roll back atomically.
+            // StatusLists table; InnoDB (see above) so the guarded UPDATE and
+            // snapshot INSERT roll back atomically on MySQL.
             manager
                 .create_table(
                     Table::create()
@@ -75,8 +71,7 @@ pub(crate) mod tables {
                         .col(ColumnDef::new(StatusLists::StatusList).json().not_null())
                         .col(ColumnDef::new(StatusLists::Sub).string().not_null())
                         .foreign_key(
-                            // Foreign key use to ensures that the Issuer in the StatusLists table references
-                            // a valid Issuer in the Credentials table
+                            // FK: StatusLists.Issuer must reference a valid Credentials.Issuer.
                             ForeignKey::create()
                                 .name("fk_status_lists_issuer")
                                 .from(StatusLists::Table, StatusLists::Issuer)

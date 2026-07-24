@@ -30,11 +30,9 @@ fn current_unix_timestamp() -> i64 {
         .as_secs() as i64
 }
 
-/// Maps an insert-path port error: a duplicate-key conflict means another
-/// writer created the resource between our existence check and the insert —
-/// semantically the same "already exists" outcome as the pre-check, so a
-/// racing publish surfaces as 409, not 500. (`UseCaseError::Conflict` is
-/// reserved for the optimistic-concurrency update race.)
+/// Maps a duplicate-key insert conflict to `AlreadyExists` (racing publish →
+/// 409, same outcome as the pre-check), leaving `Conflict` for the
+/// optimistic-concurrency update race.
 fn map_insert_conflict(error: PortError) -> UseCaseError {
     match error {
         PortError::Conflict { .. } => UseCaseError::AlreadyExists,
@@ -44,18 +42,10 @@ fn map_insert_conflict(error: PortError) -> UseCaseError {
 
 /// Computes the next `updated_at` for an optimistic-concurrency write.
 ///
-/// Two distinct concerns, both required — do not drop either:
-///   * the `WHERE updated_at = previous` guard in
-///     [`StatusListRepository::update`] handles *concurrency* (a racing writer
-///     loses the race);
-///   * the `.max(previous + 1)` here handles *clock granularity*.
-///
-/// `updated_at` is unix seconds, so two writers in the same second both read the
-/// same `previous` and both see `now == previous`. If the stamp did not advance,
-/// the first write would leave `updated_at` unchanged and the second writer's
-/// guard would still match — both would succeed, silently losing a flip. Forcing
-/// the value to strictly increase guarantees the guard moves, so the loser's
-/// `WHERE` misses. Dropping the `+ 1` reintroduces the same-second lost update.
+/// `updated_at` is unix seconds, so two writers in the same second read the
+/// same `previous` and both see `now == previous`. `.max(previous + 1)` forces
+/// the stamp to strictly increase so the loser's `WHERE updated_at = previous`
+/// guard misses; dropping the `+ 1` reintroduces the same-second lost update.
 pub fn next_updated_at(previous: i64, now: i64) -> i64 {
     now.max(previous + 1)
 }
@@ -226,12 +216,9 @@ impl<R: StatusListRepository + ?Sized> PublishStatusList<R> {
     feature = "sqlite",
     feature = "mysql"
 ))]
-/// Build the point-in-time snapshot for `record`.
-///
-/// The snapshot becomes valid at the record's modification time. Reusing
-/// `record.updated_at` — rather than reading the clock a second time here —
-/// threads a single `now` through the write and its snapshot, so their
-/// timestamps cannot drift apart (C4).
+/// Builds the point-in-time snapshot for `record`. `iat` reuses
+/// `record.updated_at` rather than re-reading the clock, so the write and its
+/// snapshot share one `now` and cannot drift apart (C4).
 fn build_snapshot(record: &StatusListRecord, token_exp_secs: u64) -> StatusListSnapshot {
     let iat = record.updated_at;
     StatusListSnapshot {
@@ -308,11 +295,8 @@ impl<R: StatusListRepository + ?Sized, H: StatusListHistoryRepository + ?Sized>
     }
 
     pub async fn execute(&self, record: StatusListRecord) -> Result<(), UseCaseError> {
-        // Delegate the size-limit guard, existence check, and guarded insert to
-        // the single authoritative publish core, then record the snapshot on
-        // top. This is the only find→insert implementation; the service composes
-        // it rather than re-implementing it inline. The size limit is threaded
-        // into the core so it is enforced in exactly one place.
+        // Reuse the single publish core (size guard, existence check, guarded
+        // insert), then record the snapshot on top.
         PublishStatusList::new(self.repository.clone())
             .with_max_serialized_list_size(self.max_serialized_list_size)
             .execute(record.clone())
@@ -415,11 +399,8 @@ impl<
         sub: String,
         statuses: Vec<StatusEntry>,
     ) -> Result<(), UseCaseError> {
-        // Delegate to the publish use case so the size limit lives in the
-        // use-case layer, not this facade: any inbound adapter reaching for the
-        // use case gets the invariant for free instead of having to remember it.
-        // The configured limit is the service's own — there is no per-call
-        // override, so a caller cannot publish past it.
+        // Delegate to the publish use case so the size limit lives there, not in
+        // this facade, and applies to every inbound adapter.
         let publisher = match &self.history {
             Some(history) => PublishStatusListWithHistory::new(
                 self.repository.clone(),
@@ -535,10 +516,8 @@ impl<R: StatusListRepository + ?Sized, C: StatusListCache + ?Sized> UpdateStatus
         if existing.status_list.lst.len() > self.max_serialized_list_size {
             return Err(UseCaseError::StatusListTooLarge);
         }
-        // The stamp read here is the optimistic-concurrency guard: the write
-        // below only lands if `updated_at` is still this value, so a racing
-        // writer that already moved it is rejected instead of silently
-        // overwritten.
+        // Optimistic guard: the write below lands only if `updated_at` is still
+        // this value, so a racing writer that moved it is rejected.
         let previous_updated_at = existing.updated_at;
         existing.updated_at = next_updated_at(previous_updated_at, current_unix_timestamp());
         if !self
@@ -622,17 +601,14 @@ impl<
         if existing.status_list.lst.len() > self.max_serialized_list_size {
             return Err(UseCaseError::StatusListTooLarge);
         }
-        // See the non-history path: `previous_updated_at` is the optimistic
-        // guard. A rejected write must leave no trace behind.
+        // Optimistic guard; see the non-history path.
         let previous_updated_at = existing.updated_at;
         existing.updated_at = next_updated_at(previous_updated_at, current_unix_timestamp());
 
-        // The guarded row update and its history snapshot must commit or fail as
-        // a unit: a committed row change with no snapshot recording it is the
-        // bug this path exists to prevent. `update_with_snapshot` performs both
-        // writes in one transaction, so a snapshot-write failure rolls the row
-        // update back. When history is disabled there is no snapshot, so the
-        // plain guarded update suffices.
+        // With history, the row update and its snapshot must commit or fail as a
+        // unit (`update_with_snapshot` wraps both in one transaction) so a
+        // committed row can never lack the snapshot recording it. Without
+        // history there is no snapshot, so the plain guarded update suffices.
         let landed = match &self.history {
             Some(_) => {
                 let snapshot = build_snapshot(&existing, token_exp_secs);
@@ -655,13 +631,10 @@ impl<
     }
 }
 
-/// Invalidate the cache after a durable write has committed.
-///
-/// This runs only once the row (and, on the history path, its snapshot) is
-/// committed, and it deliberately does not fail the operation: the write is
-/// already durable, and a stale cache entry self-heals at the cache TTL.
-/// Returning an error here would misreport a committed write as a 500 and make
-/// the client retry into a 409 against the now-advanced stamp.
+/// Invalidates the cache after a durable write has committed. Deliberately does
+/// not fail the operation: the write is already durable and a stale entry
+/// self-heals at the TTL, whereas erroring here would misreport a committed
+/// write as 500 and make the client retry into a 409 against the new stamp.
 async fn invalidate_after_commit<C: StatusListCache + ?Sized>(cache: &C, list_id: &str) {
     if let Err(_error) = cache.invalidate(list_id).await {
         #[cfg(feature = "tracing")]
@@ -706,9 +679,8 @@ mod tests {
     use std::sync::Arc;
 
     /// A snapshot's `iat` must mirror the row's `updated_at`, not the wall
-    /// clock — that is what keeps `Last-Modified` (served from `updated_at`)
-    /// and the §8.4 lookup key (`iat`) consistent, and what makes snapshot
-    /// ordering per list strict given `next_updated_at`.
+    /// clock — that keeps `Last-Modified` and the §8.4 lookup key (`iat`)
+    /// consistent and per-list snapshot ordering strict.
     #[tokio::test]
     async fn test_snapshot_iat_mirrors_record_updated_at() {
         let history = Arc::new(MemoryStatusListHistory::default());

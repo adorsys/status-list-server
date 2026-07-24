@@ -44,10 +44,8 @@ pub struct MemoryStatusLists {
     feature = "mysql"
 ))]
 impl MemoryStatusLists {
-    /// Share `history`'s underlying storage so the atomic
-    /// [`update_with_snapshot`](StatusListRepository::update_with_snapshot)
-    /// writes the row and its snapshot together. Without this, the memory repo
-    /// has nowhere to record snapshots and would silently drop them.
+    /// Shares `history`'s storage so `update_with_snapshot` can write the row
+    /// and its snapshot together; without it the repo would drop snapshots.
     pub fn with_history(mut self, history: &MemoryStatusListHistory) -> Self {
         self.history = Some(history.values.clone());
         self
@@ -66,9 +64,9 @@ impl StatusListRepository for MemoryStatusLists {
             .insert(record.list_id.clone(), record);
         Ok(())
     }
-    /// Mirrors the SQL adapter's optimistic guard so use-case concurrency
-    /// behavior is testable without a database: the write lands only if the
-    /// stored stamp is still `expected_updated_at`.
+    /// Mirrors the SQL adapter's optimistic guard so concurrency behavior is
+    /// testable without a database: the write lands only if the stored stamp is
+    /// still `expected_updated_at`.
     async fn update(
         &self,
         record: StatusListRecord,
@@ -83,11 +81,9 @@ impl StatusListRepository for MemoryStatusLists {
         Ok(true)
     }
     /// Atomic mirror of the SQL adapter's transactional update: the row CAS and
-    /// the snapshot insert happen while the row-map write lock is held, so a
-    /// reader can never observe the row advanced without its snapshot. A guard
-    /// miss returns `false` before either write, so nothing is recorded. Lock
-    /// order is always row-map then history-map, and no other path takes them in
-    /// the opposite order, so this cannot deadlock.
+    /// snapshot insert both happen under the row-map write lock, so no reader
+    /// sees the row advanced without its snapshot. Lock order is always row-map
+    /// then history-map (never the reverse), so this cannot deadlock.
     #[cfg(any(
         feature = "server",
         feature = "postgres",
@@ -114,9 +110,8 @@ impl StatusListRepository for MemoryStatusLists {
         values.insert(record.list_id.clone(), record);
         Ok(true)
     }
-    /// Mirrors the SQL adapter's `GROUP BY sub ORDER BY sub`: a `BTreeSet`
-    /// dedups and sorts, so this test double does not silently diverge from
-    /// production semantics the way a raw `values()` collect would.
+    /// Mirrors the SQL adapter's `GROUP BY sub ORDER BY sub` via a `BTreeSet`
+    /// (dedup + sort), so this double doesn't diverge from production semantics.
     async fn list_uris(&self) -> Result<Vec<String>, PortError> {
         let uris: std::collections::BTreeSet<String> = self
             .values

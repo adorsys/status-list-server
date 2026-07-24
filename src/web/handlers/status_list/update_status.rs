@@ -53,24 +53,18 @@ pub async fn update_status(
             return Err(StatusListError::Generic(msg).into());
         }
         Err(UseCaseError::Domain(domain::DomainError::CorruptStoredList(detail))) => {
-            // The stored `lst` failed to decode: corrupt persisted state, not a
-            // caller error. Log the detail at error level (this is the alert)
-            // and return 500 — never blame the client for our data corruption.
+            // Corrupt persisted state, not a caller error: log as the alert and
+            // return 500 rather than blaming the client.
             tracing::error!(list_id = ?list_id, %detail, "Corrupt stored status list");
             return Err(StatusListError::InternalServerError.into());
         }
         Err(UseCaseError::Domain(error)) => return Err(map_domain_error(error).into()),
         Err(UseCaseError::StatusListTooLarge) => return Err(StatusListError::StatusTooLarge.into()),
         Err(UseCaseError::Conflict) => {
-            // The optimistic guard in the use case did not match: a concurrent
-            // writer won the race (or the row was deleted). The use case returns
-            // before recording a snapshot or invalidating the cache, so nothing
-            // is persisted for a write that never landed.
-            //
-            // Logged at info, not warn: under contention an optimistic conflict
-            // is the expected, correct outcome, not an anomaly — warn would
-            // pollute dashboards and trip alerting during exactly the high-load
-            // bursts where conflicts are normal.
+            // Optimistic guard miss: a concurrent writer won the race and nothing
+            // was persisted. Logged at info, not warn — under contention a
+            // conflict is the expected outcome, and warn would trip alerting
+            // during exactly the high-load bursts where conflicts are normal.
             tracing::info!(list_id = ?list_id, "Concurrent update conflict; write rejected");
             return Err(StatusListError::UpdateConflict.into());
         }
