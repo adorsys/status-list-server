@@ -23,15 +23,17 @@ use tower_http::{
     catch_panic::CatchPanicLayer,
     cors::{Any, CorsLayer},
     limit::RequestBodyLimitLayer,
+    request_id::{MakeRequestUuid, PropagateRequestIdLayer, RequestId, SetRequestIdLayer},
     trace::TraceLayer,
 };
+use tracing::Span;
 
 /// Path of the aggregation route, as registered under `/api/v1`.
 const AGGREGATION_ROUTE_PATH: &str = "/api/v1/aggregation";
 
 use crate::config::Config;
+use crate::state::AppState;
 use crate::utils::metrics::{metrics_handler, setup_metrics};
-use crate::utils::state::AppState;
 use crate::web::auth::auth;
 use crate::web::handlers::{
     credential_handler, get_aggregation, get_status_list, publish_status, update_status,
@@ -84,7 +86,34 @@ impl HttpServer {
                     permissive_governor.clone(),
                 ),
             )
-            .layer(TraceLayer::new_for_http())
+            // Request ID propagation (returns header in response)
+            .layer(PropagateRequestIdLayer::new(
+                axum::http::header::HeaderName::from_static("x-request-id"),
+            ))
+            // Trace layer with request ID in span
+            .layer(
+                TraceLayer::new_for_http().make_span_with(|request: &axum::extract::Request| {
+                    let request_id = request
+                        .extensions()
+                        .get::<RequestId>()
+                        .map(|id| id.header_value().to_str().unwrap_or("unknown"))
+                        .unwrap_or("unknown");
+
+                    Span::current().record("request_id", request_id);
+
+                    tracing::info_span!(
+                        "http_request",
+                        method = %request.method(),
+                        uri = %request.uri(),
+                        request_id = %request_id,
+                    )
+                }),
+            )
+            // Request ID generation (must be before TraceLayer so it's available in spans)
+            .layer(SetRequestIdLayer::new(
+                axum::http::header::HeaderName::from_static("x-request-id"),
+                MakeRequestUuid,
+            ))
             .layer(CatchPanicLayer::new())
             .layer(cors)
             .layer(RequestBodyLimitLayer::new(max_body_size))

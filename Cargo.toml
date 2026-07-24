@@ -119,7 +119,7 @@ hyper-rustls = { version = "0.27", features = ["http2"], optional = true }
 axum = { version = "0.8", features = ["macros"], optional = true }
 tower-http = {
   version = "0.7",
-  features = ["catch-panic", "cors", "limit", "trace"],
+  features = ["catch-panic", "cors", "limit", "trace", "request-id"],
   optional = true
 }
 tower_governor = { version = "0.8", optional = true }

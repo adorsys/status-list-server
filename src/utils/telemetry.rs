@@ -21,10 +21,9 @@ pub struct TelemetryGuard {
 
 impl Drop for TelemetryGuard {
     fn drop(&mut self) {
-        if let Some(provider) = self.tracer_provider.take() {
-            if let Err(e) = provider.shutdown() {
+        if let Some(provider) = self.tracer_provider.take()
+            && let Err(e) = provider.shutdown() {
                 tracing::error!("OpenTelemetry tracer shutdown error: {e}");
-            }
         }
     }
 }
@@ -130,9 +129,16 @@ fn build_otlp_tracer_provider(
 
 /// Constructs the [`EnvFilter`] from the `RUST_LOG` env var with sensible
 /// defaults for noisy dependencies.
+///
+/// Security events are always logged at `warn` level or higher unless explicitly
+/// configured otherwise. This ensures audit events are captured even when the
+/// general log level is lowered.
 fn build_env_filter() -> EnvFilter {
     EnvFilter::try_from_default_env().unwrap_or_else(|_| {
         EnvFilter::new("info")
+            // Security events: always capture warn+ for audit compliance
+            .add_directive("security=warn".parse().expect("valid directive"))
+            // Noisy dependency suppression
             .add_directive("hyper::proto=info".parse().expect("valid directive"))
             .add_directive("tower_http::trace=debug".parse().expect("valid directive"))
             .add_directive("h2=info".parse().expect("valid directive"))
