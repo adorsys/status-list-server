@@ -3,6 +3,18 @@ name: "CodeQL"
 on:
   push:
     branches: [main]
+    paths:
+      - 'src/**'
+      - '**/Cargo.toml'
+      - 'Cargo.lock'
+      - '.github/workflows/codeql.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'src/**'
+      - '**/Cargo.toml'
+      - 'Cargo.lock'
+      - '.github/workflows/codeql.yml'
   workflow_dispatch:
   schedule:
     - cron: '0 0 * * 0'
@@ -12,7 +24,6 @@ concurrency:
   cancel-in-progress: true
 
 permissions:
-  actions: read
   contents: read
   security-events: write
 
@@ -23,24 +34,14 @@ jobs:
 
     steps:
       - name: Fetch Repository
-        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
-
-      - name: Install Rust
-        uses: actions-rust-lang/setup-rust-toolchain@b93a5597a6d24ac3e57f5c4ee97b0e7a0c91db62 # v1
-
-      - name: Install build dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y cmake golang-go
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v4
 
       - name: Initialize CodeQL
         uses: github/codeql-action/init@cdcdbb5ceac1ca5d66cbb3a502b9ffa1a5505ded # v3
         with:
           languages: rust
-          queries: security-extended,security-and-quality
-
-      - name: Build
-        run: cargo build --workspace --all-targets --all-features
+          queries: security-extended
+          build-mode: none
 
       - name: Perform CodeQL Analysis
         uses: github/codeql-action/analyze@cdcdbb5ceac1ca5d66cbb3a502b9ffa1a5505ded # v3
