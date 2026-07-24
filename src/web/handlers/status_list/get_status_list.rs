@@ -32,6 +32,7 @@ use super::{
     etag::{generate_etag, generate_historical_etag},
 };
 
+#[tracing::instrument(skip(state, headers, query_result), fields(list_id = %list_id))]
 pub async fn get_status_list(
     State(state): State<AppState>,
     Path(list_id): Path<String>,

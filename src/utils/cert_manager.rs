@@ -38,6 +38,11 @@ use crate::{
     utils::{cache::CertChainCache, keygen::Keypair},
 };
 
+use opentelemetry::{
+    global,
+    metrics::{Counter, Gauge},
+};
+
 // Renewal metrics constants
 const RENEWAL_ATTEMPTS_METRIC: &str = "cert_renewal_attempts_total";
 const RENEWAL_SUCCESSES_METRIC: &str = "cert_renewal_successes_total";
@@ -45,42 +50,58 @@ const RENEWAL_FAILURES_METRIC: &str = "cert_renewal_failures_total";
 const TIME_TO_EXPIRY_METRIC: &str = "cert_time_to_expiry_seconds";
 const LAST_SUCCESSFUL_RENEWAL_METRIC: &str = "cert_last_successful_renewal_timestamp";
 
-/// Describes renewal metrics so they appear in Prometheus immediately.
-/// This is safe to call before the global metrics recorder is installed.
-pub fn describe_renewal_metrics() {
-    metrics::describe_counter!(
-        RENEWAL_ATTEMPTS_METRIC,
-        metrics::Unit::Count,
-        "Total number of certificate renewal attempts"
-    );
-    metrics::describe_counter!(
-        RENEWAL_SUCCESSES_METRIC,
-        metrics::Unit::Count,
-        "Total number of successful certificate renewals"
-    );
-    metrics::describe_counter!(
-        RENEWAL_FAILURES_METRIC,
-        metrics::Unit::Count,
-        "Total number of failed certificate renewals"
-    );
-    metrics::describe_gauge!(
-        TIME_TO_EXPIRY_METRIC,
-        metrics::Unit::Seconds,
-        "Time remaining until the current certificate expires"
-    );
-    metrics::describe_gauge!(
-        LAST_SUCCESSFUL_RENEWAL_METRIC,
-        metrics::Unit::Seconds,
-        "Unix timestamp of the last successful certificate renewal"
-    );
+#[derive(Clone, Debug)]
+pub(crate) struct CertManagerMetrics {
+    attempts: Counter<u64>,
+    successes: Counter<u64>,
+    failures: Counter<u64>,
+    time_to_expiry: Gauge<i64>,
+    last_successful_renewal: Gauge<i64>,
 }
 
-/// Zero-initialize renewal counters so they appear in Prometheus scrapes
-/// before first use. Must be called after the global metrics recorder is installed.
+impl Default for CertManagerMetrics {
+    fn default() -> Self {
+        let meter = global::meter("status-list-server");
+        Self {
+            attempts: meter
+                .u64_counter(RENEWAL_ATTEMPTS_METRIC)
+                .with_description("Total number of certificate renewal attempts")
+                .build(),
+            successes: meter
+                .u64_counter(RENEWAL_SUCCESSES_METRIC)
+                .with_description("Total number of successful certificate renewals")
+                .build(),
+            failures: meter
+                .u64_counter(RENEWAL_FAILURES_METRIC)
+                .with_description("Total number of failed certificate renewals")
+                .build(),
+            time_to_expiry: meter
+                .i64_gauge(TIME_TO_EXPIRY_METRIC)
+                .with_description("Time remaining until the current certificate expires")
+                .build(),
+            last_successful_renewal: meter
+                .i64_gauge(LAST_SUCCESSFUL_RENEWAL_METRIC)
+                .with_description("Unix timestamp of the last successful certificate renewal")
+                .build(),
+        }
+    }
+}
+
+/// Zero-initialize renewal counters so they appear in Prometheus scrapes before first use.
 pub fn init_renewal_counters() {
-    metrics::counter!(RENEWAL_ATTEMPTS_METRIC).increment(0);
-    metrics::counter!(RENEWAL_SUCCESSES_METRIC).increment(0);
-    metrics::counter!(RENEWAL_FAILURES_METRIC).increment(0);
+    let meter = global::meter("status-list-server");
+    meter
+        .u64_counter(RENEWAL_ATTEMPTS_METRIC)
+        .build()
+        .add(0, &[]);
+    meter
+        .u64_counter(RENEWAL_SUCCESSES_METRIC)
+        .build()
+        .add(0, &[]);
+    meter
+        .u64_counter(RENEWAL_FAILURES_METRIC)
+        .build()
+        .add(0, &[]);
 }
 
 /// Default cache TTL when no override is supplied.
@@ -142,6 +163,7 @@ pub struct CertManager {
     eku: Option<Vec<u64>>,
     // The ACME directory URL
     acme_directory_url: String,
+    metrics: CertManagerMetrics,
 }
 
 impl CertManager {
@@ -180,6 +202,7 @@ impl CertManager {
             organization: organization.map(|o| o.into()),
             eku: None,
             acme_directory_url: acme_directory_url.into(),
+            metrics: CertManagerMetrics::default(),
         })
     }
 
@@ -278,25 +301,29 @@ impl CertManager {
     /// **Must** be called after the global metrics recorder has been installed.
     /// If metrics are disabled this is a harmless no-op.
     pub fn init_renewal_counters(&self) {
-        init_renewal_counters();
+        self.metrics.attempts.add(0, &[]);
+        self.metrics.successes.add(0, &[]);
+        self.metrics.failures.add(0, &[]);
     }
 
     /// Update the time-to-expiry gauge with the current certificate's expiry time.
     fn update_time_to_expiry(&self, cert_data: &CertificateData) {
         let now = now_unix_timestamp();
         let time_to_expiry = cert_data.expires_at.saturating_sub(now);
-        metrics::gauge!(TIME_TO_EXPIRY_METRIC).set(time_to_expiry as f64);
+        self.metrics.time_to_expiry.record(time_to_expiry, &[]);
     }
 
     /// Record a successful renewal by updating counters and gauges.
     fn record_successful_renewal(&self) {
-        metrics::counter!(RENEWAL_SUCCESSES_METRIC).increment(1);
-        metrics::gauge!(LAST_SUCCESSFUL_RENEWAL_METRIC).set(now_unix_timestamp() as f64);
+        self.metrics.successes.add(1, &[]);
+        self.metrics
+            .last_successful_renewal
+            .record(now_unix_timestamp(), &[]);
     }
 
     /// Record a failed renewal attempt.
     fn record_failed_renewal(&self) {
-        metrics::counter!(RENEWAL_FAILURES_METRIC).increment(1);
+        self.metrics.failures.add(1, &[]);
     }
 
     /// Provision a certificate with the configured strategy.
@@ -509,7 +536,7 @@ impl CertManager {
     )]
     pub async fn renew_cert_if_needed(&self) -> Result<(), CertError> {
         // Record renewal attempt
-        metrics::counter!(RENEWAL_ATTEMPTS_METRIC).increment(1);
+        self.metrics.attempts.add(1, &[]);
 
         if let Some(cert_data) = self.certificate().await? {
             // Update time-to-expiry gauge regardless of whether we renew
