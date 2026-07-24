@@ -6,6 +6,7 @@ edition = "2024"
 [features]
 default = ["server"]
 memory-only = []
+tracing = ["dep:tracing"]
 server = [
     "aws",
     "cache-moka",
@@ -19,7 +20,7 @@ server = [
 ]
 http = [
     "dep:axum", "dep:hyper", "dep:hyper-util", "dep:reqwest", "dep:tower",
-    "dep:tower-http", "dep:tower_governor", "dep:governor", "dep:tracing", "dep:tracing-subscriber",
+    "dep:tower-http", "dep:tower_governor", "dep:governor", "tracing", "dep:tracing-subscriber",
 ]
 postgres = ["dep:jsonwebtoken", "dep:sea-orm", "dep:sea-orm-migration", "sea-orm?/sqlx-postgres"]
 sqlite = ["dep:jsonwebtoken", "dep:sea-orm", "dep:sea-orm-migration", "sea-orm?/sqlx-sqlite"]
@@ -28,12 +29,12 @@ mysql = ["dep:jsonwebtoken", "dep:sea-orm", "dep:sea-orm-migration", "sea-orm?/s
 # real-backend test needs a separate non-default feature to stay out of plain
 # `cargo test`; `--all-features` enables it in CI.
 postgres-tests = ["postgres"]
-cache-moka = ["dep:moka", "dep:tracing"]
+cache-moka = ["dep:moka", "tracing"]
 aws = [
     "certificate-acme",
     "dep:aws-config", "dep:aws-sdk-route53", "dep:aws-sdk-s3",
     "dep:aws-sdk-secretsmanager", "dep:color-eyre", "dep:moka", "dep:reqwest",
-    "dep:tracing",
+    "tracing",
 ]
 redis = ["certificate-acme", "dep:redis"]
 metrics-prometheus = ["dep:color-eyre", "dep:metrics-exporter-prometheus", "dep:metrics-process"]
@@ -42,7 +43,7 @@ certificate-acme = [
     "dep:hyper-util", "dep:instant-acme", "dep:jsonwebtoken", "dep:p256",
     "dep:pem", "dep:public-suffix", "dep:rand", "dep:rcgen", "dep:reqwest",
     "dep:rustls", "dep:rustls-pki-types", "dep:time", "dep:tokio-cron-scheduler",
-    "dep:tracing", "dep:uuid", "dep:webpki-roots", "dep:x509-parser",
+    "tracing", "dep:uuid", "dep:webpki-roots", "dep:x509-parser",
 ]
 config-file = ["dep:config", "dep:dotenvy", "dep:secrecy", "dep:serde-aux"]
 
