@@ -1,0 +1,15 @@
+checks:
+  exclude:
+    # Subchart containers (postgres, redis-ha) use template-level defaults
+    # that don't set cpu/memory resources or read-only root fs.
+    # These are third-party packaged charts we cannot modify.
+    - "unset-cpu-requirements"
+    - "unset-memory-requirements"
+    - "no-read-only-root-fs"
+    # Redis HA announce services use pod-name-specific selectors intentionally.
+    - "dangling-service"
+    # APP_AWS__SECRETS_CACHE_TTL is a cache TTL, not a plaintext secret value.
+    - "env-var-secret"
+    # The status-list-server:latest and init container busybox images are
+    # template defaults overridden by CI tag injection at deploy time.
+    - "latest-tag"

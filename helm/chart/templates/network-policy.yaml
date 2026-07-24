@@ -1,0 +1,48 @@
+{{- if .Values.statuslist.networkPolicy.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "status-list-server-chart.fullname" . }}-network-policy
+  labels:
+    {{- include "status-list-server-chart.labels" . | nindent 4 }}
+  namespace: {{ .Release.Namespace }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "status-list-server-chart.selectorLabels" . | nindent 6 }}
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - ports:
+        - port: {{ .Values.statuslist.service.targetPort | int }}
+          protocol: TCP
+      {{- with .Values.statuslist.networkPolicy.ingress }}
+      from:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+  egress:
+    - ports:
+        - port: 5432
+          protocol: TCP
+        - port: 6379
+          protocol: TCP
+        - port: 6380
+          protocol: TCP
+      {{- with .Values.statuslist.networkPolicy.egressInternal }}
+      to:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    - ports:
+        - port: 443
+          protocol: TCP
+        - port: 53
+          protocol: TCP
+        - port: 53
+          protocol: UDP
+    - ports:
+        - port: 4317
+          protocol: TCP
+        - port: 4318
+          protocol: TCP
+{{- end }}
