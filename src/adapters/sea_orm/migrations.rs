@@ -33,12 +33,15 @@ pub(crate) mod tables {
     impl MigrationTrait for Migration {
         /// Creates the necessary database tables if they don't exist
         async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
-            // Create Credentials table for storing issuer credentials
+            // Credentials table. `.engine("InnoDB")` is emitted only on MySQL
+            // (ignored elsewhere); it pins the transactional-rollback engine
+            // `update_with_snapshot` relies on, and lets MySQL enforce the FK.
             manager
                 .create_table(
                     Table::create()
                         .table(Credentials::Table)
                         .if_not_exists()
+                        .engine("InnoDB")
                         .col(
                             ColumnDef::new(Credentials::Issuer)
                                 .string()
@@ -50,12 +53,14 @@ pub(crate) mod tables {
                 )
                 .await?;
 
-            // Create StatusLists table for storing status list entries
+            // StatusLists table; InnoDB (see above) so the guarded UPDATE and
+            // snapshot INSERT roll back atomically on MySQL.
             manager
                 .create_table(
                     Table::create()
                         .table(StatusLists::Table)
                         .if_not_exists()
+                        .engine("InnoDB")
                         .col(
                             ColumnDef::new(StatusLists::ListId)
                                 .string()
@@ -66,8 +71,7 @@ pub(crate) mod tables {
                         .col(ColumnDef::new(StatusLists::StatusList).json().not_null())
                         .col(ColumnDef::new(StatusLists::Sub).string().not_null())
                         .foreign_key(
-                            // Foreign key use to ensures that the Issuer in the StatusLists table references
-                            // a valid Issuer in the Credentials table
+                            // FK: StatusLists.Issuer must reference a valid Credentials.Issuer.
                             ForeignKey::create()
                                 .name("fk_status_lists_issuer")
                                 .from(StatusLists::Table, StatusLists::Issuer)
@@ -278,11 +282,14 @@ pub(crate) mod status_list_history {
     #[allow(elided_lifetimes_in_paths)]
     impl MigrationTrait for Migration {
         async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+            // InnoDB (MySQL-only clause) so a snapshot INSERT that fails inside
+            // `update_with_snapshot` rolls the paired row UPDATE back.
             manager
                 .create_table(
                     Table::create()
                         .table(StatusListHistory::Table)
                         .if_not_exists()
+                        .engine("InnoDB")
                         .col(
                             ColumnDef::new(StatusListHistory::SnapshotId)
                                 .string()

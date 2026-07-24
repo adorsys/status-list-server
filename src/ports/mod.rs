@@ -81,17 +81,35 @@ pub enum PortError {
 pub trait StatusListRepository: Send + Sync {
     async fn find(&self, list_id: &str) -> Result<Option<Arc<StatusListRecord>>, PortError>;
     async fn insert(&self, status_list: StatusListRecord) -> Result<(), PortError>;
-    /// Persist `status_list` only if the stored row still carries
-    /// `expected_updated_at` (optimistic concurrency).
-    ///
-    /// Returns `false` when the guard did not match — a racing writer already
-    /// advanced the stamp, or the row is gone. `status_list.updated_at` must be
-    /// strictly greater than `expected_updated_at`; see
+    /// Persists `status_list` only if the stored row still carries
+    /// `expected_updated_at` (optimistic concurrency). Returns `false` on a
+    /// guard miss (a racing writer advanced the stamp, or the row is gone).
+    /// `status_list.updated_at` must be strictly greater than
+    /// `expected_updated_at`; see
     /// [`next_updated_at`](crate::application::next_updated_at) for why.
     async fn update(
         &self,
         status_list: StatusListRecord,
         expected_updated_at: i64,
+    ) -> Result<bool, PortError>;
+    /// Like [`update`](Self::update), but atomically persists the guarded row
+    /// update **and** its history snapshot: both commit or neither does.
+    /// Implementations MUST perform both writes in a single backend transaction
+    /// (portable across Postgres/MySQL/SQLite) so a failed snapshot insert rolls
+    /// the row update back — a guarantee `update` plus a separate insert cannot
+    /// give. Same `false`-on-guard-miss and strictly-advancing-stamp contract as
+    /// `update`; callers that keep no history use it instead.
+    #[cfg(any(
+        feature = "server",
+        feature = "postgres",
+        feature = "sqlite",
+        feature = "mysql"
+    ))]
+    async fn update_with_snapshot(
+        &self,
+        status_list: StatusListRecord,
+        expected_updated_at: i64,
+        snapshot: StatusListSnapshot,
     ) -> Result<bool, PortError>;
     async fn list_uris(&self) -> Result<Vec<String>, PortError>;
 }

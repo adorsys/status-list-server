@@ -41,6 +41,49 @@ impl Storage for MockStorage {
     }
 }
 
+/// A minimal valid status list record, for tests that need a record rather
+/// than a database.
+pub(crate) fn test_status_list_record(
+    issuer: &str,
+    list_id: &str,
+) -> crate::domain::StatusListRecord {
+    crate::domain::StatusListRecord {
+        list_id: list_id.to_string(),
+        issuer: crate::domain::Issuer(issuer.to_string()),
+        status_list: crate::domain::StatusList {
+            bits: 1,
+            lst: "initial".to_string(),
+        },
+        sub: format!("https://example.com/statuslists/{list_id}"),
+        updated_at: 1000,
+    }
+}
+
+/// A migrated in-memory SQLite connection, for tests that need real database
+/// behavior (transactions, constraints, rollback) rather than `MockDatabase`.
+///
+/// `max_connections(1)` mirrors the production SQLite setup in
+/// [`crate::state::build_state`]: an open transaction holds the only
+/// connection, so any query routed to the pool instead of the transaction
+/// handle deadlocks. Tests using this should bound themselves with a timeout so
+/// that failure mode surfaces as a named assertion rather than a hang.
+#[cfg(feature = "sqlite")]
+#[allow(dead_code)] // scaffolding for upcoming transactional snapshot tests
+pub(crate) async fn sqlite_connection() -> Arc<sea_orm::DatabaseConnection> {
+    use sea_orm_migration::MigratorTrait;
+
+    let mut opt = sea_orm::ConnectOptions::new("sqlite::memory:");
+    opt.max_connections(1);
+    opt.map_sqlx_sqlite_opts(|o| o.foreign_keys(true));
+    let db = sea_orm::Database::connect(opt)
+        .await
+        .expect("Failed to connect to SQLite");
+    crate::adapters::sea_orm::Migrator::up(&db, None)
+        .await
+        .expect("Failed to run migrations on SQLite");
+    Arc::new(db)
+}
+
 pub(crate) async fn test_app_state(db_conn: Option<Arc<sea_orm::DatabaseConnection>>) -> AppState {
     build_test_app_state(db_conn, None, 1_048_576).await
 }

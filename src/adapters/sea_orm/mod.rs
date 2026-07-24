@@ -221,6 +221,28 @@ impl StatusListRepository for SeaOrmStatusListRepository {
                 detail: e.to_string(),
             })
     }
+    async fn update_with_snapshot(
+        &self,
+        record: domain::StatusListRecord,
+        expected_updated_at: i64,
+        snapshot: domain::StatusListSnapshot,
+    ) -> Result<bool, PortError> {
+        // The guarded row update and the snapshot insert run in one transaction
+        // inside the store; either both commit or neither does.
+        let id = record.list_id.clone();
+        self.store
+            .update_one_with_snapshot(
+                &id,
+                to_persistence(record),
+                expected_updated_at,
+                snapshot_to_persistence(snapshot),
+            )
+            .await
+            .map_err(|e| PortError::StorageUnavailable {
+                operation: PortOperation::UpdateStatusList,
+                detail: e.to_string(),
+            })
+    }
     async fn list_uris(&self) -> Result<Vec<String>, PortError> {
         self.store
             .find_all_status_list_uris()

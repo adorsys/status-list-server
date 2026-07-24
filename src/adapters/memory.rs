@@ -24,7 +24,34 @@ use tokio::sync::RwLock;
 #[derive(Clone, Default)]
 pub struct MemoryStatusLists {
     values: Arc<RwLock<HashMap<String, StatusListRecord>>>,
+    // Shared snapshot storage so `update_with_snapshot` can write the row and
+    // its snapshot under one held lock — the memory mirror of the SQL adapter's
+    // single transaction. `None` when history is disabled (memory-only builds do
+    // not compile the history port at all).
+    #[cfg(any(
+        feature = "server",
+        feature = "postgres",
+        feature = "sqlite",
+        feature = "mysql"
+    ))]
+    history: Option<Arc<RwLock<HashMap<String, StatusListSnapshot>>>>,
 }
+
+#[cfg(any(
+    feature = "server",
+    feature = "postgres",
+    feature = "sqlite",
+    feature = "mysql"
+))]
+impl MemoryStatusLists {
+    /// Shares `history`'s storage so `update_with_snapshot` can write the row
+    /// and its snapshot together; without it the repo would drop snapshots.
+    pub fn with_history(mut self, history: &MemoryStatusListHistory) -> Self {
+        self.history = Some(history.values.clone());
+        self
+    }
+}
+
 #[async_trait]
 impl StatusListRepository for MemoryStatusLists {
     async fn find(&self, id: &str) -> Result<Option<Arc<StatusListRecord>>, PortError> {
@@ -37,9 +64,9 @@ impl StatusListRepository for MemoryStatusLists {
             .insert(record.list_id.clone(), record);
         Ok(())
     }
-    /// Mirrors the SQL adapter's optimistic guard so use-case concurrency
-    /// behavior is testable without a database: the write lands only if the
-    /// stored stamp is still `expected_updated_at`.
+    /// Mirrors the SQL adapter's optimistic guard so concurrency behavior is
+    /// testable without a database: the write lands only if the stored stamp is
+    /// still `expected_updated_at`.
     async fn update(
         &self,
         record: StatusListRecord,
@@ -53,9 +80,38 @@ impl StatusListRepository for MemoryStatusLists {
         values.insert(record.list_id.clone(), record);
         Ok(true)
     }
-    /// Mirrors the SQL adapter's `GROUP BY sub ORDER BY sub`: a `BTreeSet`
-    /// dedups and sorts, so this test double does not silently diverge from
-    /// production semantics the way a raw `values()` collect would.
+    /// Atomic mirror of the SQL adapter's transactional update: the row CAS and
+    /// snapshot insert both happen under the row-map write lock, so no reader
+    /// sees the row advanced without its snapshot. Lock order is always row-map
+    /// then history-map (never the reverse), so this cannot deadlock.
+    #[cfg(any(
+        feature = "server",
+        feature = "postgres",
+        feature = "sqlite",
+        feature = "mysql"
+    ))]
+    async fn update_with_snapshot(
+        &self,
+        record: StatusListRecord,
+        expected_updated_at: i64,
+        snapshot: StatusListSnapshot,
+    ) -> Result<bool, PortError> {
+        let mut values = self.values.write().await;
+        match values.get(&record.list_id) {
+            Some(current) if current.updated_at == expected_updated_at => {}
+            _ => return Ok(false),
+        }
+        if let Some(history) = &self.history {
+            history
+                .write()
+                .await
+                .insert(snapshot.snapshot_id.clone(), snapshot);
+        }
+        values.insert(record.list_id.clone(), record);
+        Ok(true)
+    }
+    /// Mirrors the SQL adapter's `GROUP BY sub ORDER BY sub` via a `BTreeSet`
+    /// (dedup + sort), so this double doesn't diverge from production semantics.
     async fn list_uris(&self) -> Result<Vec<String>, PortError> {
         let uris: std::collections::BTreeSet<String> = self
             .values
@@ -219,9 +275,11 @@ mod tests {
     #[tokio::test]
     async fn application_services_work_with_history() {
         use crate::application::{PublishStatusListWithHistory, UpdateStatusesWithHistory};
-        let repo = Arc::new(MemoryStatusLists::default());
         let cache = Arc::new(MemoryStatusListCache::default());
         let history = Arc::new(MemoryStatusListHistory::default());
+        // Share the history storage so the atomic update path can record its
+        // snapshot (mirrors the SQL adapter, where both writes hit one db).
+        let repo = Arc::new(MemoryStatusLists::default().with_history(history.as_ref()));
         let token_exp_secs = 900u64;
         PublishStatusListWithHistory::new(repo.clone(), history.clone(), token_exp_secs)
             .execute(record())
@@ -238,11 +296,22 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(fetched.list_id, "id");
-        UpdateStatusesWithHistory::new(repo, cache.clone(), history)
+        UpdateStatusesWithHistory::new(repo.clone(), cache.clone(), history.clone())
             .execute(&Issuer("issuer".into()), "id", Vec::new(), token_exp_secs)
             .await
             .unwrap();
         assert!(cache.get("id").await.unwrap().is_none());
+        // The atomic update committed its snapshot: the row's new stamp resolves
+        // to a stored historical snapshot.
+        let updated_at = repo.find("id").await.unwrap().unwrap().updated_at;
+        assert!(
+            history
+                .find_valid_at("id", updated_at)
+                .await
+                .unwrap()
+                .is_some(),
+            "the atomic update must persist a history snapshot for the new stamp"
+        );
     }
 
     #[tokio::test]
@@ -343,6 +412,22 @@ mod tests {
         ) -> Result<bool, PortError> {
             self.inner.update(record, expected_updated_at).await
         }
+        #[cfg(any(
+            feature = "server",
+            feature = "postgres",
+            feature = "sqlite",
+            feature = "mysql"
+        ))]
+        async fn update_with_snapshot(
+            &self,
+            record: StatusListRecord,
+            expected_updated_at: i64,
+            snapshot: StatusListSnapshot,
+        ) -> Result<bool, PortError> {
+            self.inner
+                .update_with_snapshot(record, expected_updated_at, snapshot)
+                .await
+        }
         async fn list_uris(&self) -> Result<Vec<String>, PortError> {
             self.inner.list_uris().await
         }
@@ -384,7 +469,10 @@ mod tests {
     #[tokio::test]
     async fn update_statuses_with_history_writes_nothing_on_conflict() {
         use crate::application::UpdateStatusesWithHistory;
-        let inner = MemoryStatusLists::default();
+        let history = Arc::new(MemoryStatusListHistory::default());
+        // Wire the shared history so the repo *could* record a snapshot: the
+        // assertion that it records nothing on conflict is then meaningful.
+        let inner = MemoryStatusLists::default().with_history(history.as_ref());
         inner.insert(record()).await.unwrap();
         let repo = Arc::new(StaleReadStatusLists {
             inner,
@@ -392,7 +480,6 @@ mod tests {
         });
         let cache = Arc::new(MemoryStatusListCache::default());
         cache.put(record()).await.unwrap();
-        let history = Arc::new(MemoryStatusListHistory::default());
         let token_exp_secs = 900u64;
 
         let result = UpdateStatusesWithHistory::new(repo, cache.clone(), history.clone())
