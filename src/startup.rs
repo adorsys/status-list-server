@@ -244,15 +244,21 @@ mod tests {
         ("APP_SERVER__AGGREGATION_URI", "https://statuslist.example.com/api/v1/aggregation"),
     ])]
     fn test_validate_aggregation_uri_accepts_matching_path() {
-        let config = Config::load().unwrap();
+        let config = Config::load_from_overrides(&[(
+            "server.aggregation_uri",
+            "https://statuslist.example.com/api/v1/aggregation",
+        )])
+        .unwrap();
         assert!(validate_aggregation_uri(&config).is_ok());
     }
 
-    #[sealed_test(env = [
-        ("APP_SERVER__AGGREGATION_URI", "https://statuslist.example.com/statuslists/aggregation"),
-    ])]
+    #[test]
     fn test_validate_aggregation_uri_rejects_mismatched_path() {
-        let config = Config::load().unwrap();
+        let config = Config::load_from_overrides(&[(
+            "server.aggregation_uri",
+            "https://statuslist.example.com/statuslists/aggregation",
+        )])
+        .unwrap();
         let result = validate_aggregation_uri(&config);
         assert!(
             result.is_err(),
@@ -260,19 +266,16 @@ mod tests {
         );
     }
 
-    #[sealed_test]
+    #[test]
     fn test_validate_aggregation_uri_passes_when_unset() {
-        // Ensure no leftover aggregation_uri from the environment.
-        unsafe { std::env::remove_var("APP_SERVER__AGGREGATION_URI") };
-        let config = Config::load().unwrap();
+        let config = Config::load_from_overrides(&[]).unwrap();
         assert!(validate_aggregation_uri(&config).is_ok());
     }
 
-    #[sealed_test(env = [
-        ("APP_SERVER__AGGREGATION_URI", "not a url"),
-    ])]
+    #[test]
     fn test_validate_aggregation_uri_rejects_invalid_url() {
-        let config = Config::load().unwrap();
+        let config =
+            Config::load_from_overrides(&[("server.aggregation_uri", "not a url")]).unwrap();
         let result = validate_aggregation_uri(&config);
         assert!(result.is_err(), "Should reject invalid URL");
     }
