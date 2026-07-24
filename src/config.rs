@@ -1,11 +1,11 @@
 use std::{collections::HashMap, fmt, marker::PhantomData, time::Duration};
 
 use config::{Config as ConfigLib, ConfigError, Environment};
-
-#[allow(dead_code)]
-use config::ConfigBuilder;
-#[allow(dead_code)]
 use config::builder::DefaultState;
+
+#[cfg(test)]
+use config::ConfigBuilder;
+
 use redis::{
     Client as RedisClient, ClientTlsConfig, RedisResult, TlsCertificates,
     aio::{ConnectionManager, ConnectionManagerConfig},
@@ -693,6 +693,7 @@ impl Config {
 type TestConfigBuilder = ConfigBuilder<DefaultState>;
 
 #[cfg(test)]
+#[allow(dead_code)]
 fn base_builder() -> TestConfigBuilder {
     ConfigLib::builder()
         .set_default("server.host", "localhost")
