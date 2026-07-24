@@ -1,6 +1,11 @@
 use std::{collections::HashMap, fmt, marker::PhantomData, time::Duration};
 
 use config::{Config as ConfigLib, ConfigError, Environment};
+
+#[allow(dead_code)]
+use config::ConfigBuilder;
+#[allow(dead_code)]
+use config::builder::DefaultState;
 use redis::{
     Client as RedisClient, ClientTlsConfig, RedisResult, TlsCertificates,
     aio::{ConnectionManager, ConnectionManagerConfig},
@@ -782,7 +787,9 @@ fn base_builder() -> TestConfigBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[allow(dead_code)]
     use config::ConfigBuilder;
+    #[allow(dead_code)]
     use config::builder::DefaultState;
     use sealed_test::prelude::*;
     use secrecy::ExposeSecret;
