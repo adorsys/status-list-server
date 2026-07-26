@@ -15,6 +15,16 @@ impl MigratorTrait for Migrator {
     }
 }
 
+/// Pins InnoDB on MySQL so `update_with_snapshot`'s UPDATE+INSERT roll back as a
+/// unit rather than depending on the server's default engine. MySQL-only:
+/// sea-query renders the engine option as a literal `ENGINE=InnoDB` clause on
+/// every backend, which SQLite and Postgres reject with a syntax error.
+fn pin_innodb_on_mysql(manager: &SchemaManager<'_>, stmt: &mut TableCreateStatement) {
+    if manager.get_database_backend() == sea_orm::DatabaseBackend::MySql {
+        stmt.engine("InnoDB");
+    }
+}
+
 /// Database tables module containing table creation migrations
 pub(crate) mod tables {
     use super::*;
@@ -33,55 +43,47 @@ pub(crate) mod tables {
     impl MigrationTrait for Migration {
         /// Creates the necessary database tables if they don't exist
         async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
-            // Credentials table. `.engine("InnoDB")` is emitted only on MySQL
-            // (ignored elsewhere); it pins the transactional-rollback engine
-            // `update_with_snapshot` relies on, and lets MySQL enforce the FK.
-            manager
-                .create_table(
-                    Table::create()
-                        .table(Credentials::Table)
-                        .if_not_exists()
-                        .engine("InnoDB")
-                        .col(
-                            ColumnDef::new(Credentials::Issuer)
-                                .string()
-                                .not_null()
-                                .primary_key(),
-                        )
-                        .col(ColumnDef::new(Credentials::PublicKey).json().not_null())
-                        .to_owned(),
+            // Credentials table. InnoDB is pinned on MySQL (see
+            // `pin_innodb_on_mysql`) so the FK below is enforced there.
+            let mut credentials = Table::create();
+            credentials
+                .table(Credentials::Table)
+                .if_not_exists()
+                .col(
+                    ColumnDef::new(Credentials::Issuer)
+                        .string()
+                        .not_null()
+                        .primary_key(),
                 )
-                .await?;
+                .col(ColumnDef::new(Credentials::PublicKey).json().not_null());
+            pin_innodb_on_mysql(manager, &mut credentials);
+            manager.create_table(credentials).await?;
 
-            // StatusLists table; InnoDB (see above) so the guarded UPDATE and
-            // snapshot INSERT roll back atomically on MySQL.
-            manager
-                .create_table(
-                    Table::create()
-                        .table(StatusLists::Table)
-                        .if_not_exists()
-                        .engine("InnoDB")
-                        .col(
-                            ColumnDef::new(StatusLists::ListId)
-                                .string()
-                                .not_null()
-                                .primary_key(),
-                        )
-                        .col(ColumnDef::new(StatusLists::Issuer).string().not_null())
-                        .col(ColumnDef::new(StatusLists::StatusList).json().not_null())
-                        .col(ColumnDef::new(StatusLists::Sub).string().not_null())
-                        .foreign_key(
-                            // FK: StatusLists.Issuer must reference a valid Credentials.Issuer.
-                            ForeignKey::create()
-                                .name("fk_status_lists_issuer")
-                                .from(StatusLists::Table, StatusLists::Issuer)
-                                .to(Credentials::Table, Credentials::Issuer)
-                                .on_delete(ForeignKeyAction::Cascade)
-                                .on_update(ForeignKeyAction::Cascade),
-                        )
-                        .to_owned(),
+            // StatusLists table; InnoDB pinned on MySQL (see above).
+            let mut status_lists = Table::create();
+            status_lists
+                .table(StatusLists::Table)
+                .if_not_exists()
+                .col(
+                    ColumnDef::new(StatusLists::ListId)
+                        .string()
+                        .not_null()
+                        .primary_key(),
                 )
-                .await?;
+                .col(ColumnDef::new(StatusLists::Issuer).string().not_null())
+                .col(ColumnDef::new(StatusLists::StatusList).json().not_null())
+                .col(ColumnDef::new(StatusLists::Sub).string().not_null())
+                .foreign_key(
+                    // FK: StatusLists.Issuer must reference a valid Credentials.Issuer.
+                    ForeignKey::create()
+                        .name("fk_status_lists_issuer")
+                        .from(StatusLists::Table, StatusLists::Issuer)
+                        .to(Credentials::Table, Credentials::Issuer)
+                        .on_delete(ForeignKeyAction::Cascade)
+                        .on_update(ForeignKeyAction::Cascade),
+                );
+            pin_innodb_on_mysql(manager, &mut status_lists);
+            manager.create_table(status_lists).await?;
 
             // Create an index on list_id for faster lookups
             manager
@@ -282,49 +284,46 @@ pub(crate) mod status_list_history {
     #[allow(elided_lifetimes_in_paths)]
     impl MigrationTrait for Migration {
         async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
-            // InnoDB (MySQL-only clause) so a snapshot INSERT that fails inside
-            // `update_with_snapshot` rolls the paired row UPDATE back.
-            manager
-                .create_table(
-                    Table::create()
-                        .table(StatusListHistory::Table)
-                        .if_not_exists()
-                        .engine("InnoDB")
-                        .col(
-                            ColumnDef::new(StatusListHistory::SnapshotId)
-                                .string()
-                                .not_null()
-                                .primary_key(),
-                        )
-                        .col(
-                            ColumnDef::new(StatusListHistory::ListId)
-                                .string()
-                                .not_null(),
-                        )
-                        .col(
-                            ColumnDef::new(StatusListHistory::Issuer)
-                                .string()
-                                .not_null(),
-                        )
-                        .col(
-                            ColumnDef::new(StatusListHistory::StatusList)
-                                .json()
-                                .not_null(),
-                        )
-                        .col(ColumnDef::new(StatusListHistory::Sub).string().not_null())
-                        .col(
-                            ColumnDef::new(StatusListHistory::Iat)
-                                .big_integer()
-                                .not_null(),
-                        )
-                        .col(
-                            ColumnDef::new(StatusListHistory::Exp)
-                                .big_integer()
-                                .not_null(),
-                        )
-                        .to_owned(),
+            // InnoDB pinned on MySQL (see `pin_innodb_on_mysql`) so a failing
+            // snapshot INSERT rolls the paired row UPDATE back.
+            let mut history = Table::create();
+            history
+                .table(StatusListHistory::Table)
+                .if_not_exists()
+                .col(
+                    ColumnDef::new(StatusListHistory::SnapshotId)
+                        .string()
+                        .not_null()
+                        .primary_key(),
                 )
-                .await?;
+                .col(
+                    ColumnDef::new(StatusListHistory::ListId)
+                        .string()
+                        .not_null(),
+                )
+                .col(
+                    ColumnDef::new(StatusListHistory::Issuer)
+                        .string()
+                        .not_null(),
+                )
+                .col(
+                    ColumnDef::new(StatusListHistory::StatusList)
+                        .json()
+                        .not_null(),
+                )
+                .col(ColumnDef::new(StatusListHistory::Sub).string().not_null())
+                .col(
+                    ColumnDef::new(StatusListHistory::Iat)
+                        .big_integer()
+                        .not_null(),
+                )
+                .col(
+                    ColumnDef::new(StatusListHistory::Exp)
+                        .big_integer()
+                        .not_null(),
+                );
+            pin_innodb_on_mysql(manager, &mut history);
+            manager.create_table(history).await?;
             manager
                 .create_index(
                     Index::create()
