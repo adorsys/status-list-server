@@ -25,7 +25,7 @@ jobs:
           tool: zizmor
 
       - name: Run Zizmor
-        run: zizmor --format sarif .github/workflows/
+        run: zizmor .github/workflows/
 
   cargo-fmt:
     name: Cargo Format Check
@@ -260,7 +260,7 @@ jobs:
           cache: false
 
       - name: Install yamlfmt
-        run: go install github.com/google/yamlfmt/cmd/yamlfmt@latest
+        run: go install github.com/google/yamlfmt/cmd/yamlfmt@v0.21.0
 
       - name: Run yamlfmt
         run: yamlfmt --lint .
