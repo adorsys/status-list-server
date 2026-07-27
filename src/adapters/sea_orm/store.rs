@@ -2,8 +2,8 @@ use sea_orm::{
     ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, QueryOrder,
     QuerySelect, Set, sea_query::Expr,
 };
-use tracing::warn;
 use std::sync::Arc;
+use tracing::warn;
 
 use super::error::RepositoryError;
 use super::models::{
