@@ -7,6 +7,7 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 
+use crate::adapters::sea_orm::error::RepositoryError;
 use crate::web::auth::errors::AuthenticationError;
 use crate::web::handlers::issue_credential::CredentialError;
 use crate::web::handlers::status_list::error::StatusListError;
@@ -92,6 +93,29 @@ impl From<CredentialError> for ApiError {
     }
 }
 
+impl From<RepositoryError> for ApiError {
+    fn from(err: RepositoryError) -> Self {
+        tracing::error!(error = %err, "repository error");
+        let (status, error_code, description) = match &err {
+            RepositoryError::DuplicateEntry => (
+                StatusCode::CONFLICT,
+                Cow::Borrowed("duplicate_entry"),
+                "A duplicate entry was detected.",
+            ),
+            _ => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Cow::Borrowed("internal_error"),
+                "An internal error occurred.",
+            ),
+        };
+        Self {
+            status,
+            error: error_code,
+            error_description: Some(description.to_string()),
+        }
+    }
+}
+
 impl From<AuthenticationError> for ApiError {
     fn from(err: AuthenticationError) -> Self {
         Self {
@@ -152,5 +176,25 @@ mod tests {
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(json["error"], "test_error");
         assert!(json.get("status").is_none());
+    }
+
+    #[tokio::test]
+    async fn test_repository_error_does_not_leak_db_details() {
+        let db_error_message = "DbErr: error connecting: server error? details: host=secret-db password=supersecret user=admin";
+        let repo_error = RepositoryError::Generic(db_error_message.to_string());
+        let error = ApiError::from(repo_error);
+        let response = error.into_response();
+
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let body_str = String::from_utf8(body.to_vec()).unwrap();
+
+        assert_eq!(json["error"], "internal_error");
+        assert!(!body_str.contains("secret-db"));
+        assert!(!body_str.contains("supersecret"));
+        assert!(!body_str.contains("DbErr"));
+        assert!(!body_str.contains("host="));
     }
 }

@@ -31,6 +31,7 @@ jobs:
     name: Cargo Build
     runs-on: ubuntu-latest
     needs: cargo-fmt
+    timeout-minutes: 45
 
     steps:
       - name: Fetch Repository
@@ -124,6 +125,7 @@ jobs:
     if: ${{ needs.check-crate-type.outputs.is_lib == 'true' }}
     name: Cargo test doc
     runs-on: ubuntu-latest
+    timeout-minutes: 45
 
     steps:
       - name: Fetch Repository
@@ -227,6 +229,65 @@ jobs:
         uses: DavidAnson/markdownlint-cli2-action@v24
         with:
           globs: "**/*.md"
+
+  trivy-config:
+    name: Trivy Config Scan (Helm Chart)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Fetch Repository
+        uses: actions/checkout@v7
+
+      - name: Setup Helm
+        uses: azure/setup-helm@v3
+
+      - name: Build Helm dependencies
+        run: |
+          helm repo add dandydeveloper https://dandydeveloper.github.io/charts
+          helm dependency build helm/chart
+
+      - name: Render Helm template
+        run: |
+          mkdir -p /tmp/rendered
+          helm template status-list-server helm/chart -f helm/chart/values.yaml --output-dir /tmp/rendered
+
+      - name: Run Trivy config scan
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          scan-type: config
+          scan-ref: /tmp/rendered
+          severity: HIGH,CRITICAL
+          exit-code: 1
+          trivyignores: .trivyignore.yaml
+
+  kube-linter:
+    name: KubeLinter Scan (Helm Chart)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Fetch Repository
+        uses: actions/checkout@v7
+
+      - name: Setup Helm
+        uses: azure/setup-helm@v3
+
+      - name: Build Helm dependencies
+        run: |
+          helm repo add dandydeveloper https://dandydeveloper.github.io/charts
+          helm dependency build helm/chart
+
+      - name: Render Helm template
+        run: |
+          mkdir -p /tmp/rendered
+          helm template status-list-server helm/chart -f helm/chart/values.yaml --output-dir /tmp/rendered
+
+      - name: Run KubeLinter
+        uses: stackrox/kube-linter-action@v1
+        with:
+          directory: /tmp/rendered
+          format: sarif
+          config: .kube-linter.yaml
+          output-file: kube-linter-results.sarif
 
   yaml-lint:
     name: YAML Lint and Format Check
