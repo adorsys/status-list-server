@@ -408,7 +408,7 @@ mod test {
     use super::*;
     use crate::adapters::sea_orm::models::StatusList;
     use jsonwebtoken::jwk::Jwk;
-    use sea_orm::{DatabaseBackend, MockDatabase, MockExecResult, TransactionTrait};
+    use sea_orm::{DatabaseBackend, MockDatabase, MockExecResult};
     // `Migrator::up` is only called from the real-backend helpers below.
     #[cfg(any(feature = "sqlite", feature = "mysql", feature = "postgres-tests"))]
     use sea_orm_migration::MigratorTrait;
@@ -1799,19 +1799,19 @@ mod test {
         assert!(result.is_none(), "All snapshots should be deleted");
     }
 
-    /// Multi-connection contention test: proves the block-then-409 behavior.
+    /// Multi-connection contention test: proves the block-then-lose behavior.
     ///
     /// This test opens two real connections to the same MySQL database and
     /// verifies that:
     /// 1. Connection A starts a transaction and performs a guarded UPDATE
     /// 2. Connection B attempts a concurrent UPDATE on the same row and blocks
-    /// 3. After A commits, B's UPDATE returns 0 rows (409), not false success
+    /// 3. After A commits, B's UPDATE returns false (lost the guard), not false success
     ///
     /// This verifies the lock-hold behavior described in the optimistic
     /// concurrency guard documentation.
     #[cfg(feature = "mysql")]
-    #[tokio::test]
-    async fn test_mysql_concurrent_update_contention_blocks_then_returns_409() {
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_mysql_concurrent_update_loses_guarded_update() {
         use sea_orm::ConnectionTrait;
         use std::time::{Duration, Instant};
         use testcontainers_modules::{
@@ -1846,25 +1846,38 @@ mod test {
             .expect("Failed to create test database");
         drop(admin_conn);
 
-        // Create two independent connections to the same database
+        // Create two independent single-connection pools to the same database
         let db_url_base = format!("mysql://{}:{}/{}", host, port, db_name);
-        let conn_a_url = format!("{}?lock_wait_timeout=5", db_url_base);
-        let conn_b_url = format!("{}?lock_wait_timeout=5", db_url_base);
 
-        let conn_a = sea_orm::Database::connect(&conn_a_url)
+        // Connection A: single-connection pool (holds lock during transaction)
+        let mut opt_a = sea_orm::ConnectOptions::new(db_url_base.clone());
+        opt_a.max_connections(1).min_connections(1);
+        let pool_a = sea_orm::Database::connect(opt_a)
             .await
             .expect("Failed to connect A");
-        let conn_b = sea_orm::Database::connect(&conn_b_url)
+
+        // Connection B: single-connection pool (blocks waiting for lock)
+        let mut opt_b = sea_orm::ConnectOptions::new(db_url_base.clone());
+        opt_b.max_connections(1).min_connections(1);
+        let pool_b = sea_orm::Database::connect(opt_b)
             .await
             .expect("Failed to connect B");
 
-        // Run migrations on both connections
-        crate::adapters::sea_orm::Migrator::up(&conn_a, None)
+        // Verification pool: separate pool for reads (avoids deadlock against A's pinned connection)
+        let mut opt_v = sea_orm::ConnectOptions::new(db_url_base);
+        opt_v.max_connections(2);
+        let pool_verify = sea_orm::Database::connect(opt_v)
+            .await
+            .expect("Failed to connect verification pool");
+
+        // Run migrations on connection A
+        crate::adapters::sea_orm::Migrator::up(&pool_a, None)
             .await
             .expect("Failed to run migrations on A");
 
-        let store_a = SeaOrmStore::<StatusListRecord>::new(Arc::new(conn_a));
-        let store_b = SeaOrmStore::<StatusListRecord>::new(Arc::new(conn_b));
+        let store_a = SeaOrmStore::<StatusListRecord>::new(Arc::new(pool_a));
+        let store_b = SeaOrmStore::<StatusListRecord>::new(Arc::new(pool_b));
+        let store_verify = SeaOrmStore::<StatusListRecord>::new(Arc::new(pool_verify));
 
         // Seed a credential first (required for FK)
         let cred_key: Jwk = serde_json::from_str(
@@ -1898,14 +1911,16 @@ mod test {
         };
         store_a.insert_one(base_record.clone()).await.unwrap();
 
-        // Channels for coordination
+        // Channels for coordination (using Instants for happens-before assertions)
         let (tx_a_ready, rx_a_ready) = oneshot::channel();
         let (tx_b_started, rx_b_started) = oneshot::channel();
-        let (tx_b_complete, rx_b_complete) = oneshot::channel();
+        let (tx_a_commit, rx_a_commit) = oneshot::channel::<Instant>();
+        let (tx_b_complete, rx_b_complete) = oneshot::channel::<(bool, Instant)>();
+        let (tx_commit_done, rx_commit_done) = oneshot::channel(); // Synchronizes A's timestamp send before B's
 
         // Connection A: Start transaction, update, hold, then commit
         let store_a_clone = store_a.clone();
-        tokio::spawn(async move {
+        let handle_a = tokio::spawn(async move {
             let conn = &*store_a_clone.db;
 
             // Start transaction
@@ -1949,19 +1964,30 @@ mod test {
 
             // Commit the transaction - releases the lock, allowing B to proceed
             txn.commit().await.expect("Failed to commit transaction A");
+
+            // Capture timestamp and send BEFORE signaling completion
+            // This ensures the timestamp is sent before B can proceed to send its own
+            let a_commit = Instant::now();
+            tx_a_commit
+                .send(a_commit)
+                .expect("Failed to send A commit time");
+
+            // Signal that A has finished sending its timestamp
+            // B waits for this before capturing its timestamp, ensuring happens-before
+            tx_commit_done
+                .send(())
+                .expect("Failed to signal commit done");
         });
 
         // Connection B: Try to update concurrently
         let store_b_clone = store_b.clone();
         let base_record_b = base_record.clone();
-        tokio::spawn(async move {
+        let handle_b = tokio::spawn(async move {
             // Wait for A to be ready (ensuring A holds the lock)
             rx_a_ready.await.expect("Failed to receive A ready");
 
             // Signal that B is starting
             tx_b_started.send(()).expect("Failed to signal B started");
-
-            let start_time = Instant::now();
 
             // Try to update - this should BLOCK until A commits
             // because InnoDB row locks are exclusive for writes
@@ -1977,32 +2003,52 @@ mod test {
 
             // This update uses the ORIGINAL base_timestamp as guard
             // After A commits, the row has updated_at = base_timestamp + 1
-            // So this guard (base_timestamp) should miss → returns false (409)
+            // So this guard (base_timestamp) should miss → returns false
             let result = store_b_clone
                 .update_one(list_id, record_b, base_timestamp)
                 .await
                 .expect("Update B should complete");
 
-            let elapsed = start_time.elapsed();
+            // Wait for A to signal it has sent its commit timestamp
+            // This ensures happens-before ordering: A sends timestamp, then B captures timestamp
+            rx_commit_done
+                .await
+                .expect("Failed to receive commit done signal");
+
+            // Capture timestamp AFTER A has sent its timestamp
+            let b_done = Instant::now();
 
             tx_b_complete
-                .send((result, elapsed))
+                .send((result, b_done))
                 .expect("Failed to send B result");
         });
 
-        // Wait for B to complete with timeout
+        // Wait for both tasks with timeout, joining both handles for proper error reporting
         let timeout = Duration::from_secs(10);
-        let (b_won, b_elapsed) = match tokio::time::timeout(timeout, rx_b_complete).await {
-            Ok(Ok(result)) => result,
-            Ok(Err(_)) => panic!("B task panicked"),
-            Err(_) => panic!("Test timed out - B never completed, possible deadlock"),
-        };
+        let (a_result, b_result) = tokio::join!(
+            tokio::time::timeout(timeout, handle_a),
+            tokio::time::timeout(timeout, handle_b)
+        );
 
-        // Verify B blocked for some time (at least 50ms, which is how long A held it)
+        // Unwrap results to get proper panic messages from either task
+        a_result
+            .expect("Test timed out waiting for task A")
+            .expect("Task A panicked");
+        b_result
+            .expect("Test timed out waiting for task B")
+            .expect("Task B panicked");
+
+        // Receive the results from the oneshot channels
+        let (b_won, b_done) = rx_b_complete.await.expect("Failed to receive B result");
+        let a_commit = rx_a_commit.await.expect("Failed to receive A commit time");
+
+        // Happens-before assertion: B's completion must be after A's commit
+        // This proves B blocked waiting for A's lock, not just an optimistic guard miss
         assert!(
-            b_elapsed >= Duration::from_millis(30),
-            "B should have blocked waiting for lock, elapsed: {:?}",
-            b_elapsed
+            b_done > a_commit,
+            "B should have completed after A committed (B: {:?}, A: {:?})",
+            b_done,
+            a_commit
         );
 
         // The CRITICAL assertion: B should NOT have won
@@ -2014,8 +2060,8 @@ mod test {
              This is the 409 Conflict case: B blocked, then got stale guard"
         );
 
-        // Verify the final state has A's changes
-        let final_record = store_a
+        // Verify the final state has A's changes (use verify pool to avoid deadlock)
+        let final_record = store_verify
             .find_one_by(list_id)
             .await
             .unwrap()
@@ -2042,7 +2088,7 @@ mod test {
     /// fail immediately with 0 rows affected if the guard doesn't match, rather than
     /// blocking. This is the desired behavior for the status list server.
     #[cfg(feature = "mysql")]
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_mysql_snapshot_insert_lock_hold_behavior() {
         use sea_orm::ConnectionTrait;
         use std::time::{Duration, Instant};
@@ -2078,25 +2124,38 @@ mod test {
             .expect("Failed to create test database");
         drop(admin_conn);
 
-        // Create connections with short lock_wait_timeout to fail fast
+        // Create two independent single-connection pools to the same database
         let db_url_base = format!("mysql://{}:{}/{}", host, port, db_name);
-        let conn_a_url = format!("{}?lock_wait_timeout=2", db_url_base);
-        let conn_b_url = format!("{}?lock_wait_timeout=2", db_url_base);
 
-        let conn_a = sea_orm::Database::connect(&conn_a_url)
+        // Connection A: single-connection pool (holds lock during transaction)
+        let mut opt_a = sea_orm::ConnectOptions::new(db_url_base.clone());
+        opt_a.max_connections(1).min_connections(1);
+        let pool_a = sea_orm::Database::connect(opt_a)
             .await
             .expect("Failed to connect A");
-        let conn_b = sea_orm::Database::connect(&conn_b_url)
+
+        // Connection B: single-connection pool (blocks waiting for lock)
+        let mut opt_b = sea_orm::ConnectOptions::new(db_url_base.clone());
+        opt_b.max_connections(1).min_connections(1);
+        let pool_b = sea_orm::Database::connect(opt_b)
             .await
             .expect("Failed to connect B");
 
+        // Verification pool: separate pool for reads (avoids deadlock against A's pinned connection)
+        let mut opt_v = sea_orm::ConnectOptions::new(db_url_base);
+        opt_v.max_connections(2);
+        let pool_verify = sea_orm::Database::connect(opt_v)
+            .await
+            .expect("Failed to connect verification pool");
+
         // Run migrations on connection A
-        crate::adapters::sea_orm::Migrator::up(&conn_a, None)
+        crate::adapters::sea_orm::Migrator::up(&pool_a, None)
             .await
             .expect("Failed to run migrations on A");
 
-        let store_a = SeaOrmStore::<StatusListRecord>::new(Arc::new(conn_a));
-        let store_b = SeaOrmStore::<StatusListRecord>::new(Arc::new(conn_b));
+        let store_a = SeaOrmStore::<StatusListRecord>::new(Arc::new(pool_a));
+        let store_b = SeaOrmStore::<StatusListRecord>::new(Arc::new(pool_b));
+        let store_verify = SeaOrmStore::<StatusListRecord>::new(Arc::new(pool_verify));
 
         // Seed credential and status list
         let cred_key: Jwk = serde_json::from_str(
@@ -2129,16 +2188,19 @@ mod test {
         };
         store_a.insert_one(base_record.clone()).await.unwrap();
 
+        // Channels for coordination (using Instants for happens-before assertions)
         let (tx_a_ready, rx_a_ready) = oneshot::channel();
         let (tx_b_started, rx_b_started) = oneshot::channel();
-        let (tx_b_complete, rx_b_complete) = oneshot::channel();
+        let (tx_a_commit, rx_a_commit) = oneshot::channel::<Instant>();
+        let (tx_b_complete, rx_b_complete) = oneshot::channel::<(bool, Instant)>();
+        let (tx_commit_done, rx_commit_done) = oneshot::channel(); // Synchronizes A's timestamp send before B's
 
         // Clone base_record for each task to avoid partial move issues
         let base_record_a = base_record.clone();
 
         // Connection A: Simulate update + snapshot INSERT in transaction
         let store_a_clone = store_a.clone();
-        tokio::spawn(async move {
+        let handle_a = tokio::spawn(async move {
             let conn = &*store_a_clone.db;
             let txn = conn.begin().await.expect("Failed to begin transaction A");
 
@@ -2191,19 +2253,28 @@ mod test {
 
             // Commit releases the lock
             txn.commit().await.expect("Failed to commit transaction A");
+
+            // Capture timestamp and send BEFORE signaling completion
+            let a_commit = Instant::now();
+            tx_a_commit
+                .send(a_commit)
+                .expect("Failed to send A commit time");
+
+            // Signal that A has finished sending its timestamp
+            tx_commit_done
+                .send(())
+                .expect("Failed to signal commit done");
         });
 
         // Connection B: Try to update concurrently
         let store_b_clone = store_b.clone();
         let base_record_b = base_record.clone();
-        tokio::spawn(async move {
+        let handle_b = tokio::spawn(async move {
             // Wait for A to be ready (holding the lock across UPDATE+INSERT)
             rx_a_ready.await.expect("Failed to receive A ready");
 
             // Signal that B is starting
             tx_b_started.send(()).expect("Failed to signal B started");
-
-            let start_time = Instant::now();
 
             // Try to update - this will BLOCK until A commits
             // because the row is locked by A's transaction
@@ -2217,33 +2288,51 @@ mod test {
                 ..base_record_b.clone()
             };
 
-            // This blocks until A commits, then returns false (409) because
+            // This blocks until A commits, then returns false because
             // updated_at was changed by A
             let result = store_b_clone
                 .update_one(list_id, record_b, base_timestamp)
                 .await
                 .expect("Update B should complete");
 
-            let elapsed = start_time.elapsed();
+            // Wait for A to signal it has sent its commit timestamp
+            rx_commit_done
+                .await
+                .expect("Failed to receive commit done signal");
 
+            // Capture timestamp AFTER A has sent its timestamp
+            let b_done = Instant::now();
             tx_b_complete
-                .send((result, elapsed))
+                .send((result, b_done))
                 .expect("Failed to send B result");
         });
 
-        // Wait for B to complete
+        // Wait for both tasks with timeout, joining both handles for proper error reporting
         let timeout = Duration::from_secs(10);
-        let (b_won, b_elapsed) = match tokio::time::timeout(timeout, rx_b_complete).await {
-            Ok(Ok(result)) => result,
-            Ok(Err(_)) => panic!("B task panicked"),
-            Err(_) => panic!("Test timed out - B never completed, possible deadlock"),
-        };
+        let (a_result, b_result) = tokio::join!(
+            tokio::time::timeout(timeout, handle_a),
+            tokio::time::timeout(timeout, handle_b)
+        );
 
-        // Verify B blocked for some time (demonstrating the extended lock hold)
+        // Unwrap results to get proper panic messages from either task
+        a_result
+            .expect("Test timed out waiting for task A")
+            .expect("Task A panicked");
+        b_result
+            .expect("Test timed out waiting for task B")
+            .expect("Task B panicked");
+
+        // Receive the results from the oneshot channels
+        let (b_won, b_done) = rx_b_complete.await.expect("Failed to receive B result");
+        let a_commit = rx_a_commit.await.expect("Failed to receive A commit time");
+
+        // Happens-before assertion: B's completion must be after A's commit
+        // This proves B blocked waiting for A's lock across the extended transaction
         assert!(
-            b_elapsed >= Duration::from_millis(100),
-            "B should have blocked waiting for A's transaction to complete (UPDATE+INSERT), elapsed: {:?}",
-            b_elapsed
+            b_done > a_commit,
+            "B should have completed after A committed (B: {:?}, A: {:?})",
+            b_done,
+            a_commit
         );
 
         // B should lose because A changed updated_at
@@ -2252,8 +2341,8 @@ mod test {
             "B should lose (0 rows) because A already advanced updated_at"
         );
 
-        // Verify final state
-        let final_record = store_a
+        // Verify final state (use verify pool to avoid deadlock)
+        let final_record = store_verify
             .find_one_by(list_id)
             .await
             .unwrap()
@@ -2262,7 +2351,7 @@ mod test {
         assert_eq!(final_record.updated_at, base_timestamp + 1);
 
         // Verify snapshot was created
-        let history_store = SeaOrmStore::<StatusListHistoryRecord>::new(store_a.db.clone());
+        let history_store = SeaOrmStore::<StatusListHistoryRecord>::new(store_verify.db.clone());
         let snapshots = history_store
             .find_valid_at(list_id, base_timestamp + 1)
             .await
