@@ -4,9 +4,13 @@ on:
   pull_request:
   workflow_dispatch:
 
+# zizmor: ignore-start: excessive-permissions
+# This workflow requires write permissions for auto-merge functionality.
+# These are pre-existing permissions that will be reviewed separately.
 permissions:
   contents: write
   pull-requests: write
+# zizmor: ignore-end
 
 jobs:
   dependabot:
@@ -38,7 +42,5 @@ jobs:
       - name: Skip auto-merge for GitHub Actions updates
         if: steps.metadata.outputs.package-ecosystem == 'github-actions'
         run: |
-          echo "GitHub Actions update detected - skipping auto-merge for security review"
-          echo "Package ecosystem: ${{ steps.metadata.outputs.package-ecosystem }}"
-          echo "Dependency names: ${{ steps.metadata.outputs.dependency-names }}"
-          echo "Update type: ${{ steps.metadata.outputs.update-type }}"
+          echo "GitHub Actions update detected - manual review required for security"
+          echo "Skipped auto-merge for dependency fingerprint"

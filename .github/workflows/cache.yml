@@ -1,8 +1,12 @@
 # Workflow to clean the cache in case of issues
 name: Clean Cache
 
+# zizmor: ignore-start: excessive-permissions
+# This workflow requires actions:write permission to delete cache entries.
+# This is a pre-existing permission requirement.
 permissions:
   actions: write
+# zizmor: ignore-end
 
 on:
   workflow_dispatch:

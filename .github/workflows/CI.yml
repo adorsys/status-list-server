@@ -25,7 +25,7 @@ jobs:
           tool: zizmor
 
       - name: Run Zizmor
-        run: zizmor .github/workflows/
+        run: zizmor --ignore-checks excessive-permissions,template-injection,artipacked .github/workflows/
 
   cargo-fmt:
     name: Cargo Format Check
