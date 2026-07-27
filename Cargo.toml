@@ -6,6 +6,7 @@ edition = "2024"
 [features]
 default = ["server"]
 memory-only = []
+tracing = ["dep:tracing"]
 server = [
   "aws",
   "cache-moka",
@@ -31,7 +32,11 @@ http = [
 postgres = ["dep:jsonwebtoken", "dep:sea-orm", "dep:sea-orm-migration", "sea-orm?/sqlx-postgres"]
 sqlite = ["dep:jsonwebtoken", "dep:sea-orm", "dep:sea-orm-migration", "sea-orm?/sqlx-sqlite"]
 mysql = ["dep:jsonwebtoken", "dep:sea-orm", "dep:sea-orm-migration", "sea-orm?/sqlx-mysql"]
-cache-moka = ["dep:moka", "dep:tracing"]
+# Opt-in gate for the Postgres container test. `postgres` is default-on, so its
+# real-backend test needs a separate non-default feature to stay out of plain
+# `cargo test`; `--all-features` enables it in CI.
+postgres-tests = ["postgres"]
+cache-moka = ["dep:moka", "tracing"]
 aws = [
   "certificate-acme",
   "dep:aws-config",
@@ -227,7 +232,7 @@ optional = true
 sealed_test = "1.1.0"
 wiremock = "0.6"
 sea-orm = { version = "1.1", features = ["mock"] }
-testcontainers-modules = { version = "0.15", features = ["localstack", "mysql", "redis"] }
+testcontainers-modules = { version = "0.15", features = ["localstack", "mysql", "postgres", "redis"] }
 
 [target.'cfg(not(target_env = "msvc"))'.dependencies]
 tikv-jemallocator = { version = "0.7", optional = true }
