@@ -4,6 +4,9 @@ use config::builder::DefaultState;
 use config::{Config as ConfigLib, ConfigError, Environment};
 
 #[cfg(test)]
+use config::{ConfigBuilder, builder::DefaultState};
+
+#[cfg(test)]
 use config::ConfigBuilder;
 
 use redis::{
