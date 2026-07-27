@@ -13,8 +13,7 @@ metadata:
     {{- if .Values.statuslist.ingress.annotations }}
     {{- toYaml .Values.statuslist.ingress.annotations | nindent 4 }}
     {{- end }}
-    nginx.ingress.kubernetes.io/configuration-snippet: |
-      proxy_set_header X-Forwarded-For $remote_addr;
+
 spec:
   ingressClassName: nginx
   rules:

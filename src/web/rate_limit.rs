@@ -9,8 +9,10 @@ use tower_governor::{errors::GovernorError, key_extractor::KeyExtractor};
 /// **Deprecated**: No longer used in production. Rate limiting on write
 /// endpoints now uses `SmartIpKeyExtractor` (IP-based via trusted proxy
 /// headers or peer IP), so JWT claim forgery no longer changes the write
-/// rate-limit key. Deployments behind ingress must ensure client-supplied
-/// proxy headers are overwritten before they reach the application. The type
+/// rate-limit key. Deployments behind ingress must configure trusted proxy
+/// headers via ingress-nginx ConfigMap settings (e.g., `use-forwarded-headers`,
+/// `set-real-ip-from`) since `configuration-snippet` annotations are disabled
+/// by default in production (allow-snippet-annotations: false). The type
 /// and its tests are retained for unit-test coverage of the extraction logic.
 ///
 /// Falls back to the peer IP when the token is absent or malformed.
