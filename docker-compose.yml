@@ -91,7 +91,11 @@ services:
       context: .
       dockerfile: Dockerfile
     container_name: status-list-server
-    env_file: .env
+    env_file:
+      - path: .env
+        required: false
+      - path: .env.template
+        required: false
     environment:
       APP_ENV: ${APP_ENV:-development}
       APP_SERVER__ENABLE_METRICS: ${APP_SERVER__ENABLE_METRICS:-true}
