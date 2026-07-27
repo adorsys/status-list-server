@@ -2,6 +2,7 @@ use sea_orm::{
     ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, QueryOrder,
     QuerySelect, Set, sea_query::Expr,
 };
+use tracing::warn;
 use std::sync::Arc;
 
 use super::error::RepositoryError;
@@ -204,14 +205,46 @@ impl SeaOrmStore<StatusListHistoryRecord> {
     }
 
     /// Deletes snapshots older than the given cutoff timestamp.
-    /// Returns the number of rows deleted.
+    /// Batches the delete in chunks to avoid holding long-lived locks.
+    /// Returns the total number of rows deleted.
     pub async fn delete_older_than(&self, cutoff: i64) -> Result<u64, RepositoryError> {
-        let result = status_list_history::Entity::delete_many()
-            .filter(status_list_history::Column::Exp.lt(cutoff))
-            .exec(&*self.db)
-            .await
-            .map_err(|e| RepositoryError::DeleteError(e.to_string()))?;
-        Ok(result.rows_affected)
+        const BATCH_SIZE: u64 = 500;
+        let mut total_deleted: u64 = 0;
+
+        loop {
+            let batch: Vec<String> = status_list_history::Entity::find()
+                .select_only()
+                .column(status_list_history::Column::SnapshotId)
+                .filter(status_list_history::Column::Exp.lt(cutoff))
+                .limit(BATCH_SIZE)
+                .into_tuple::<String>()
+                .all(&*self.db)
+                .await
+                .map_err(|e| RepositoryError::DeleteError(e.to_string()))?;
+
+            if batch.is_empty() {
+                break;
+            }
+
+            let result = status_list_history::Entity::delete_many()
+                .filter(status_list_history::Column::SnapshotId.is_in(batch.clone()))
+                .exec(&*self.db)
+                .await
+                .map_err(|e| RepositoryError::DeleteError(e.to_string()))?;
+
+            let count = result.rows_affected;
+            total_deleted += count;
+
+            if count < BATCH_SIZE {
+                break;
+            }
+        }
+
+        if total_deleted > 0 {
+            warn!(target: "status_list_server::store", deleted = total_deleted, cutoff, "Deleted expired status list history snapshots");
+        }
+
+        Ok(total_deleted)
     }
 }
 
