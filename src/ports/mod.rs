@@ -111,6 +111,26 @@ pub trait StatusListRepository: Send + Sync {
         expected_updated_at: i64,
         snapshot: StatusListSnapshot,
     ) -> Result<bool, PortError>;
+    /// Like [`insert`](Self::insert), but atomically persists the new row **and**
+    /// the snapshot covering its initial state: both commit or neither does.
+    /// Implementations MUST perform both writes in a single backend transaction,
+    /// for the same reason as
+    /// [`update_with_snapshot`](Self::update_with_snapshot) — a published list
+    /// whose initial snapshot is missing leaves a permanent hole in §8.4
+    /// resolution for the window it should have covered, and unlike a failed
+    /// update there is no later write that repairs it. A duplicate `list_id`
+    /// still surfaces as [`PortError::Conflict`], exactly as `insert` does.
+    #[cfg(any(
+        feature = "server",
+        feature = "postgres",
+        feature = "sqlite",
+        feature = "mysql"
+    ))]
+    async fn insert_with_snapshot(
+        &self,
+        status_list: StatusListRecord,
+        snapshot: StatusListSnapshot,
+    ) -> Result<(), PortError>;
     async fn list_uris(&self) -> Result<Vec<String>, PortError>;
 }
 

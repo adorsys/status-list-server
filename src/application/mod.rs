@@ -179,12 +179,12 @@ impl<R: StatusListRepository + ?Sized> PublishStatusList<R> {
     }
 
     pub async fn execute(&self, record: StatusListRecord) -> Result<(), UseCaseError> {
-        if record.status_list.lst.len() > self.max_serialized_list_size {
-            return Err(UseCaseError::StatusListTooLarge);
-        }
-        if self.repository.find(&record.list_id).await?.is_some() {
-            return Err(UseCaseError::AlreadyExists);
-        }
+        check_publishable(
+            self.repository.as_ref(),
+            &record,
+            self.max_serialized_list_size,
+        )
+        .await?;
         self.repository
             .insert(record)
             .await
@@ -232,21 +232,21 @@ fn build_snapshot(record: &StatusListRecord, token_exp_secs: u64) -> StatusListS
     }
 }
 
-#[cfg(any(
-    feature = "server",
-    feature = "postgres",
-    feature = "sqlite",
-    feature = "mysql"
-))]
-async fn persist_snapshot<H: StatusListHistoryRepository + ?Sized>(
-    history: &H,
+/// Pre-insert validation shared by both publish paths: the serialized-size
+/// limit and the existence pre-check. Kept in one place so the history-aware
+/// path cannot drift from the plain one.
+async fn check_publishable<R: StatusListRepository + ?Sized>(
+    repository: &R,
     record: &StatusListRecord,
-    token_exp_secs: u64,
+    max_serialized_list_size: usize,
 ) -> Result<(), UseCaseError> {
-    history
-        .insert(build_snapshot(record, token_exp_secs))
-        .await
-        .map_err(UseCaseError::Port)
+    if record.status_list.lst.len() > max_serialized_list_size {
+        return Err(UseCaseError::StatusListTooLarge);
+    }
+    if repository.find(&record.list_id).await?.is_some() {
+        return Err(UseCaseError::AlreadyExists);
+    }
+    Ok(())
 }
 
 #[cfg(any(
@@ -295,15 +295,35 @@ impl<R: StatusListRepository + ?Sized, H: StatusListHistoryRepository + ?Sized>
     }
 
     pub async fn execute(&self, record: StatusListRecord) -> Result<(), UseCaseError> {
-        // Reuse the single publish core (size guard, existence check, guarded
-        // insert), then record the snapshot on top.
-        PublishStatusList::new(self.repository.clone())
-            .with_max_serialized_list_size(self.max_serialized_list_size)
-            .execute(record.clone())
-            .await?;
+        // Same pre-checks as the history-free publish, shared so the two paths
+        // cannot drift apart.
+        check_publishable(
+            self.repository.as_ref(),
+            &record,
+            self.max_serialized_list_size,
+        )
+        .await?;
 
-        if let Some(history) = &self.history {
-            persist_snapshot(history.as_ref(), &record, self.token_exp_secs).await?;
+        // With history, the row insert and the snapshot covering its initial
+        // state must commit or fail as a unit (`insert_with_snapshot` wraps both
+        // in one transaction). Otherwise a published list can exist with no
+        // snapshot covering it — and unlike a failed update, no later write
+        // repairs that hole: §8.4 lookups over the opening window would 404
+        // forever. Without history there is no snapshot, so a plain insert does.
+        match &self.history {
+            Some(_) => {
+                let snapshot = build_snapshot(&record, self.token_exp_secs);
+                self.repository
+                    .insert_with_snapshot(record, snapshot)
+                    .await
+                    .map_err(map_insert_conflict)?;
+            }
+            None => {
+                self.repository
+                    .insert(record)
+                    .await
+                    .map_err(map_insert_conflict)?;
+            }
         }
 
         Ok(())
@@ -685,8 +705,11 @@ mod tests {
     async fn test_snapshot_iat_mirrors_record_updated_at() {
         let history = Arc::new(MemoryStatusListHistory::default());
         let token_exp_secs = 900u64;
+        // The publish path now writes the row and its snapshot through the
+        // repository in one unit, so the repo must share the history storage
+        // this test reads back from.
         let publish = PublishStatusListWithHistory::new(
-            Arc::new(MemoryStatusLists::default()),
+            Arc::new(MemoryStatusLists::default().with_history(history.as_ref())),
             history.clone(),
             token_exp_secs,
         );

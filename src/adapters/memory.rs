@@ -44,11 +44,40 @@ pub struct MemoryStatusLists {
     feature = "mysql"
 ))]
 impl MemoryStatusLists {
-    /// Shares `history`'s storage so `update_with_snapshot` can write the row
+    /// Shares `history`'s storage so the atomic write paths can record the row
     /// and its snapshot together; without it the repo would drop snapshots.
     pub fn with_history(mut self, history: &MemoryStatusListHistory) -> Self {
         self.history = Some(history.values.clone());
         self
+    }
+
+    /// Borrows the shared snapshot storage, refusing to proceed when it was
+    /// never wired up.
+    ///
+    /// The atomic write paths promise the row and its snapshot land together.
+    /// Silently skipping the snapshot while still reporting success would make
+    /// this double certify the exact split the port forbids — and a test
+    /// asserting "the snapshot was persisted" would pass vacuously against a
+    /// `MemoryStatusLists::default()`. Failing here surfaces the missing
+    /// `.with_history(..)` as a loud wiring error instead.
+    #[cfg(any(
+        feature = "server",
+        feature = "postgres",
+        feature = "sqlite",
+        feature = "mysql"
+    ))]
+    fn require_history(
+        &self,
+    ) -> Result<&Arc<RwLock<HashMap<String, StatusListSnapshot>>>, PortError> {
+        self.history
+            .as_ref()
+            .ok_or_else(|| PortError::StorageUnavailable {
+                operation: crate::ports::PortOperation::UpdateStatusList,
+                detail: "MemoryStatusLists was built without shared history storage; \
+                         construct it with `.with_history(..)` so snapshots are \
+                         persisted atomically with the row write"
+                    .to_string(),
+            })
     }
 }
 
@@ -96,19 +125,42 @@ impl StatusListRepository for MemoryStatusLists {
         expected_updated_at: i64,
         snapshot: StatusListSnapshot,
     ) -> Result<bool, PortError> {
+        let history = self.require_history()?;
         let mut values = self.values.write().await;
         match values.get(&record.list_id) {
             Some(current) if current.updated_at == expected_updated_at => {}
             _ => return Ok(false),
         }
-        if let Some(history) = &self.history {
-            history
-                .write()
-                .await
-                .insert(snapshot.snapshot_id.clone(), snapshot);
-        }
+        history
+            .write()
+            .await
+            .insert(snapshot.snapshot_id.clone(), snapshot);
         values.insert(record.list_id.clone(), record);
         Ok(true)
+    }
+    /// Atomic mirror of the SQL adapter's transactional insert: the row and the
+    /// snapshot covering its initial state both land under the row-map write
+    /// lock, so no reader sees a published list without its snapshot. Same lock
+    /// order as `update_with_snapshot` (row-map then history-map).
+    #[cfg(any(
+        feature = "server",
+        feature = "postgres",
+        feature = "sqlite",
+        feature = "mysql"
+    ))]
+    async fn insert_with_snapshot(
+        &self,
+        record: StatusListRecord,
+        snapshot: StatusListSnapshot,
+    ) -> Result<(), PortError> {
+        let history = self.require_history()?;
+        let mut values = self.values.write().await;
+        history
+            .write()
+            .await
+            .insert(snapshot.snapshot_id.clone(), snapshot);
+        values.insert(record.list_id.clone(), record);
+        Ok(())
     }
     /// Mirrors the SQL adapter's `GROUP BY sub ORDER BY sub` via a `BTreeSet`
     /// (dedup + sort), so this double doesn't diverge from production semantics.
@@ -428,6 +480,19 @@ mod tests {
                 .update_with_snapshot(record, expected_updated_at, snapshot)
                 .await
         }
+        #[cfg(any(
+            feature = "server",
+            feature = "postgres",
+            feature = "sqlite",
+            feature = "mysql"
+        ))]
+        async fn insert_with_snapshot(
+            &self,
+            record: StatusListRecord,
+            snapshot: StatusListSnapshot,
+        ) -> Result<(), PortError> {
+            self.inner.insert_with_snapshot(record, snapshot).await
+        }
         async fn list_uris(&self) -> Result<Vec<String>, PortError> {
             self.inner.list_uris().await
         }
@@ -496,6 +561,82 @@ mod tests {
             history.find_valid_at("id", now).await.unwrap().is_none(),
             "a rejected write must not record a historical snapshot"
         );
+    }
+
+    /// A repo built without shared history storage must refuse the atomic write
+    /// paths rather than dropping the snapshot and reporting success. Without
+    /// this, any future test asserting "the snapshot was persisted" would pass
+    /// vacuously against a `default()` repo, and the double would certify the
+    /// very row-without-snapshot split the port forbids.
+    #[cfg(any(
+        feature = "server",
+        feature = "postgres",
+        feature = "sqlite",
+        feature = "mysql"
+    ))]
+    #[tokio::test]
+    async fn atomic_writes_fail_loudly_without_shared_history() {
+        use crate::domain::{StatusList as DomainStatusList, StatusListSnapshot};
+
+        let repo = MemoryStatusLists::default(); // deliberately not `.with_history(..)`
+        repo.insert(record()).await.unwrap();
+
+        let snapshot = StatusListSnapshot {
+            snapshot_id: "snap".into(),
+            list_id: "id".into(),
+            issuer: Issuer("issuer".into()),
+            status_list: DomainStatusList {
+                bits: 1,
+                lst: "".into(),
+            },
+            sub: "https://example/id".into(),
+            iat: 1672531200,
+            exp: 1672532100,
+        };
+
+        let updated = repo
+            .update_with_snapshot(record(), 1672531200, snapshot.clone())
+            .await;
+        assert!(
+            updated.is_err(),
+            "update_with_snapshot must not report success while dropping the snapshot"
+        );
+
+        let inserted = repo.insert_with_snapshot(record(), snapshot).await;
+        assert!(
+            inserted.is_err(),
+            "insert_with_snapshot must not report success while dropping the snapshot"
+        );
+    }
+
+    /// The publish path records the snapshot covering the list's initial state
+    /// through the repository, so a §8.4 lookup at the publish instant resolves
+    /// immediately rather than falling into a permanent hole.
+    #[cfg(any(
+        feature = "server",
+        feature = "postgres",
+        feature = "sqlite",
+        feature = "mysql"
+    ))]
+    #[tokio::test]
+    async fn publish_with_history_records_the_initial_snapshot() {
+        use crate::application::PublishStatusListWithHistory;
+        let history = Arc::new(MemoryStatusListHistory::default());
+        let repo = Arc::new(MemoryStatusLists::default().with_history(history.as_ref()));
+
+        PublishStatusListWithHistory::new(repo.clone(), history.clone(), 900)
+            .execute(record())
+            .await
+            .unwrap();
+
+        let published = repo.find("id").await.unwrap().unwrap();
+        let snapshot = history
+            .find_valid_at("id", published.updated_at)
+            .await
+            .unwrap()
+            .expect("publish must record a snapshot covering the initial state");
+        assert_eq!(snapshot.iat, published.updated_at);
+        assert_eq!(snapshot.list_id, "id");
     }
 
     /// End-to-end pin of the stamp monotonicity through the use case and the

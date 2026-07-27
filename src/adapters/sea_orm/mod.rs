@@ -243,6 +243,23 @@ impl StatusListRepository for SeaOrmStatusListRepository {
                 detail: e.to_string(),
             })
     }
+    async fn insert_with_snapshot(
+        &self,
+        record: domain::StatusListRecord,
+        snapshot: domain::StatusListSnapshot,
+    ) -> Result<(), PortError> {
+        // The row insert and its initial snapshot run in one transaction inside
+        // the store; either both commit or neither does. `map_insert_err` keeps
+        // a duplicate `list_id` classified as a conflict (409), matching the
+        // non-transactional `insert`.
+        self.store
+            .insert_one_with_snapshot(to_persistence(record), snapshot_to_persistence(snapshot))
+            .await
+            .map_err(map_insert_err(
+                "status list",
+                PortOperation::InsertStatusList,
+            ))
+    }
     async fn list_uris(&self) -> Result<Vec<String>, PortError> {
         self.store
             .find_all_status_list_uris()

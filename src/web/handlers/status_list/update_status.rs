@@ -65,6 +65,13 @@ pub async fn update_status(
             // was persisted. Logged at info, not warn — under contention a
             // conflict is the expected outcome, and warn would trip alerting
             // during exactly the high-load bursts where conflicts are normal.
+            //
+            // Expected, but no longer free: now that the row update and its
+            // snapshot share one transaction, the winner holds the row lock
+            // until it commits, so the loser blocks on that lock before landing
+            // here rather than failing fast. Conflicts are still the normal
+            // outcome under contention; they just cost a lock wait, which is
+            // worth remembering when reading latency on a hot list.
             tracing::info!(list_id = ?list_id, "Concurrent update conflict; write rejected");
             return Err(StatusListError::UpdateConflict.into());
         }
