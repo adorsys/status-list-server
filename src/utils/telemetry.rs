@@ -2,8 +2,11 @@
 
 use color_eyre::eyre::Context;
 use opentelemetry::trace::TracerProvider as _;
+use opentelemetry_appender_tracing::layer::OpenTelemetryTracingBridge;
 use opentelemetry_sdk::{
     Resource,
+    logs::SdkLoggerProvider,
+    metrics::SdkMeterProvider,
     trace::{Sampler, SdkTracerProvider},
 };
 use prometheus::Registry;
@@ -11,20 +14,30 @@ use tracing_subscriber::{
     EnvFilter, Registry as TracingRegistry, layer::SubscriberExt, util::SubscriberInitExt,
 };
 
-use crate::config::{ENV_PRODUCTION, TelemetryConfig};
+use crate::{config::TelemetryConfig, utils::metrics::setup_metrics};
 
-/// Guard that shuts down the OpenTelemetry tracer provider on drop, ensuring
-/// all pending spans are flushed before the process exits.
+/// Guard that shuts down OpenTelemetry providers on drop, ensuring pending
+/// telemetry is flushed before the process exits.
 pub struct TelemetryGuard {
     tracer_provider: Option<SdkTracerProvider>,
+    meter_provider: SdkMeterProvider,
+    logger_provider: Option<SdkLoggerProvider>,
 }
 
 impl Drop for TelemetryGuard {
     fn drop(&mut self) {
+        if let Some(provider) = self.logger_provider.take()
+            && let Err(e) = provider.shutdown()
+        {
+            tracing::error!("OpenTelemetry logger shutdown error: {e}");
+        }
         if let Some(provider) = self.tracer_provider.take()
             && let Err(e) = provider.shutdown()
         {
             tracing::error!("OpenTelemetry tracer shutdown error: {e}");
+        }
+        if let Err(e) = self.meter_provider.shutdown() {
+            tracing::error!("OpenTelemetry meter shutdown error: {e}");
         }
     }
 }
@@ -36,7 +49,6 @@ impl Drop for TelemetryGuard {
 /// shutdown. Also returns a [`prometheus::Registry`] that the `/metrics`
 /// endpoint uses to render Prometheus metrics.
 pub fn init_telemetry(config: &TelemetryConfig) -> color_eyre::Result<(TelemetryGuard, Registry)> {
-    let is_prod = config.environment.eq_ignore_ascii_case(ENV_PRODUCTION);
     let service_name =
         std::env::var("OTEL_SERVICE_NAME").unwrap_or_else(|_| "status-list-server".to_string());
 
@@ -44,16 +56,19 @@ pub fn init_telemetry(config: &TelemetryConfig) -> color_eyre::Result<(Telemetry
 
     // Prometheus metrics registry (always active)
     let prometheus_registry = Registry::new();
+    let meter_provider = setup_metrics(&prometheus_registry, config, resource.clone())?;
 
     // Build the tracing subscriber
     let env_filter = build_env_filter();
 
-    if is_prod && config.enabled {
-        // Production: JSON stdout + OTLP trace export
-        let tracer_provider = build_otlp_tracer_provider(config, resource)?;
+    if config.enabled && config.environment.is_production() {
+        // Production: JSON stdout + OTLP trace and log export.
+        let tracer_provider = build_otlp_tracer_provider(config, resource.clone())?;
+        let logger_provider = build_otlp_logger_provider(config, resource)?;
 
         let tracer = tracer_provider.tracer("status-list-server");
-        let otel_layer = tracing_opentelemetry::layer().with_tracer(tracer);
+        let otel_trace_layer = tracing_opentelemetry::layer().with_tracer(tracer);
+        let otel_log_layer = OpenTelemetryTracingBridge::new(&logger_provider);
 
         let fmt_layer = tracing_subscriber::fmt::layer()
             .json()
@@ -65,7 +80,8 @@ pub fn init_telemetry(config: &TelemetryConfig) -> color_eyre::Result<(Telemetry
         TracingRegistry::default()
             .with(env_filter)
             .with(fmt_layer)
-            .with(otel_layer)
+            .with(otel_trace_layer)
+            .with(otel_log_layer)
             .try_init()?;
 
         tracing::info!(otlp_endpoint = %config.otlp_endpoint, "telemetry initialized");
@@ -73,6 +89,8 @@ pub fn init_telemetry(config: &TelemetryConfig) -> color_eyre::Result<(Telemetry
         Ok((
             TelemetryGuard {
                 tracer_provider: Some(tracer_provider),
+                meter_provider,
+                logger_provider: Some(logger_provider),
             },
             prometheus_registry,
         ))
@@ -94,6 +112,8 @@ pub fn init_telemetry(config: &TelemetryConfig) -> color_eyre::Result<(Telemetry
         Ok((
             TelemetryGuard {
                 tracer_provider: None,
+                meter_provider,
+                logger_provider: None,
             },
             prometheus_registry,
         ))
@@ -125,6 +145,24 @@ fn build_otlp_tracer_provider(
         .with_batch_exporter(exporter)
         .with_sampler(sampler)
         .with_resource(resource)
+        .build())
+}
+
+fn build_otlp_logger_provider(
+    config: &TelemetryConfig,
+    resource: Resource,
+) -> color_eyre::Result<SdkLoggerProvider> {
+    use opentelemetry_otlp::{LogExporter, WithExportConfig};
+
+    let exporter = LogExporter::builder()
+        .with_tonic()
+        .with_endpoint(&config.otlp_endpoint)
+        .build()
+        .wrap_err("failed to build OTLP log exporter")?;
+
+    Ok(SdkLoggerProvider::builder()
+        .with_resource(resource)
+        .with_batch_exporter(exporter)
         .build())
 }
 

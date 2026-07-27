@@ -744,7 +744,7 @@ mod tests {
                 max_serialized_list_size: 1_048_576,
             },
             telemetry: crate::config::TelemetryConfig {
-                environment: "development".to_string(),
+                environment: crate::config::TelemetryEnvironment::Development,
                 otlp_endpoint: "http://localhost:4317".to_string(),
                 sampler_ratio: 1.0,
                 enabled: false,

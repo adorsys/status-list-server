@@ -136,7 +136,7 @@ services:
       - status-list-network
 
   jaeger:
-    image: jaegertracing/jaeger:2.20
+    image: jaegertracing/jaeger:2.20.0
     container_name: jaeger
     ports:
       - 16686:16686

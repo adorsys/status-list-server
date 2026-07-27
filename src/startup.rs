@@ -31,7 +31,7 @@ const AGGREGATION_ROUTE_PATH: &str = "/api/v1/aggregation";
 
 use crate::config::Config;
 use crate::state::AppState;
-use crate::utils::metrics::{metrics_handler, setup_metrics};
+use crate::utils::metrics::metrics_handler;
 use crate::web::auth::auth;
 use crate::web::handlers::{
     credential_handler, get_aggregation, get_status_list, publish_status, update_status,
@@ -184,13 +184,8 @@ fn api_v1_routes(
 
 fn attach_metrics(router: Router, config: &Config, registry: Registry) -> Router {
     if config.server.enable_metrics {
-        match setup_metrics(&registry) {
-            Ok(_meter) => {
-                tracing::info!("StatusList Monitor: ENABLED (Metrics at /metrics)");
-                return router.route("/metrics", get(move || metrics_handler(registry)));
-            }
-            Err(e) => tracing::warn!("Failed to setup metrics: {e}"),
-        }
+        tracing::info!("StatusList Monitor: ENABLED (Metrics at /metrics)");
+        return router.route("/metrics", get(move || metrics_handler(registry)));
     } else {
         tracing::info!("StatusList Monitor: DISABLED");
     }

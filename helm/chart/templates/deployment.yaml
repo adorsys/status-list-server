@@ -40,6 +40,21 @@ spec:
                 {{- $_ := set $env "APP_SERVER__DOMAIN" "localhost" }}
               {{- end }}
             {{- end }}
+            {{- if .Values.otelCollector.enabled }}
+              {{- if and .Values.otelCollector.sidecar.enabled .Values.otelCollector.standalone.enabled }}
+                {{- fail "otelCollector sidecar and standalone modes are mutually exclusive" }}
+              {{- else if .Values.otelCollector.sidecar.enabled }}
+                {{- $_ := set $env "APP_TELEMETRY__ENABLED" "true" }}
+                {{- $_ := set $env "APP_TELEMETRY__OTLP_ENDPOINT" "http://localhost:4317" }}
+              {{- else if .Values.otelCollector.standalone.enabled }}
+                {{- $_ := set $env "APP_TELEMETRY__ENABLED" "true" }}
+                {{- $_ := set $env "APP_TELEMETRY__OTLP_ENDPOINT" (printf "http://%s-otel-collector.%s.svc.cluster.local:%v" (include "status-list-server-chart.fullname" .) .Release.Namespace .Values.otelCollector.standalone.service.grpcPort) }}
+              {{- else }}
+                {{- fail "otelCollector.enabled=true requires either sidecar.enabled=true or standalone.enabled=true" }}
+              {{- end }}
+            {{- else }}
+              {{- $_ := set $env "APP_TELEMETRY__ENABLED" "false" }}
+            {{- end }}
             {{- range $name, $value := $env }}
             - name: {{ $name }}
               value: {{ $value | quote }}

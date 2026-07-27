@@ -100,8 +100,6 @@ statuslist:
     APP_LIMITS__MAX_SERIALIZED_LIST_SIZE: "1048576"
     # Telemetry / OpenTelemetry
     APP_TELEMETRY__ENVIRONMENT: "production"
-    APP_TELEMETRY__OTLP_ENDPOINT: "http://localhost:4317"
-    APP_TELEMETRY__ENABLED: "true"
     APP_TELEMETRY__SAMPLER_RATIO: "1.0"
   resources:
     requests:

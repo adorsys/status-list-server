@@ -32,6 +32,10 @@ data:
           receivers: [otlp]
           processors: [batch]
           exporters: [otlp/backend, debug]
+        metrics:
+          receivers: [otlp]
+          processors: [batch]
+          exporters: [debug]
         logs:
           receivers: [otlp]
           processors: [batch]

@@ -44,9 +44,9 @@ use opentelemetry::{
 };
 
 // Renewal metrics constants
-const RENEWAL_ATTEMPTS_METRIC: &str = "cert_renewal_attempts_total";
-const RENEWAL_SUCCESSES_METRIC: &str = "cert_renewal_successes_total";
-const RENEWAL_FAILURES_METRIC: &str = "cert_renewal_failures_total";
+const RENEWAL_ATTEMPTS_METRIC: &str = "cert_renewal_attempts";
+const RENEWAL_SUCCESSES_METRIC: &str = "cert_renewal_successes";
+const RENEWAL_FAILURES_METRIC: &str = "cert_renewal_failures";
 const TIME_TO_EXPIRY_METRIC: &str = "cert_time_to_expiry_seconds";
 const LAST_SUCCESSFUL_RENEWAL_METRIC: &str = "cert_last_successful_renewal_timestamp";
 

@@ -10,9 +10,9 @@ pub(crate) type CertificateChain = Arc<[String]>;
 
 // One CertManager serves a single TLD+1, so only one chain is ever cached.
 const CACHE_CAPACITY: u64 = 1;
-const HIT_METRIC: &str = "certificate_chain_cache_hits_total";
-const MISS_METRIC: &str = "certificate_chain_cache_misses_total";
-const REPLACEMENT_METRIC: &str = "certificate_chain_cache_replacements_total";
+const HIT_METRIC: &str = "certificate_chain_cache_hits";
+const MISS_METRIC: &str = "certificate_chain_cache_misses";
+const REPLACEMENT_METRIC: &str = "certificate_chain_cache_replacements";
 
 /// An in-memory cache of type [`CertificateChain`] keyed by the cert storage
 /// key (`cert_key`). One [`CertManager`](crate::cert_manager::CertManager)
@@ -47,8 +47,9 @@ impl CertChainCache {
     /// empty string to opt out of the label entirely.
     ///
     /// Counters are created eagerly from the OpenTelemetry global meter
-    /// provider. If no provider is installed yet, the no-op meter is used
-    /// and counters become live once the real provider is set.
+    /// provider. Telemetry initialization must install the provider before
+    /// application state constructs this cache; otherwise these handles would
+    /// remain no-op for the lifetime of the process.
     pub(crate) fn new(ttl: Duration, domain: impl AsRef<str>) -> Self {
         let meter = global::meter("status-list-server");
 
@@ -85,12 +86,8 @@ impl CertChainCache {
     }
 
     /// Zero-initialise all counters so they appear in Prometheus scrapes
-    /// before first use. With OpenTelemetry counters this is a no-op since
-    /// the meter automatically registers instruments, but we keep the method
-    /// for API compatibility.
+    /// before first use.
     pub(crate) fn init_counters(&self) {
-        // OTel counters are registered on creation; adding 0 ensures they
-        // appear in the first scrape.
         self.hit_counter.add(0, &self.attributes());
         self.miss_counter.add(0, &self.attributes());
         self.replacement_counter.add(0, &self.attributes());
@@ -136,13 +133,33 @@ impl CertChainCache {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{
+        config::{TelemetryConfig, TelemetryEnvironment},
+        utils::metrics::setup_metrics,
+    };
+    use opentelemetry_sdk::Resource;
+    use prometheus::{Encoder, Registry, TextEncoder};
 
     #[tokio::test]
-    async fn test_counters_work_with_otel() {
-        // Verifies counters work when cache is constructed (mirrors production
-        // ordering where the cache is built before telemetry is fully wired).
+    async fn test_counters_are_exported_to_prometheus() {
+        let registry = Registry::new();
+        let config = TelemetryConfig {
+            environment: TelemetryEnvironment::Development,
+            otlp_endpoint: "http://localhost:4317".to_string(),
+            sampler_ratio: 1.0,
+            enabled: false,
+        };
+        let _meter_provider = setup_metrics(
+            &registry,
+            &config,
+            Resource::builder()
+                .with_service_name("status-list-server-test")
+                .build(),
+        )
+        .expect("metrics setup");
 
         let cache = CertChainCache::new(Duration::ZERO, "example.com");
+        cache.init_counters();
 
         let chain: CertificateChain = Arc::from(vec!["a".to_string()]);
         cache.insert("k".to_string(), chain.clone()).await;
@@ -155,8 +172,23 @@ mod tests {
         let new_chain: CertificateChain = Arc::from(vec!["b".to_string()]);
         cache.replace("k".to_string(), new_chain).await;
 
-        // With the no-op meter (no global provider installed in tests),
-        // counters silently discard values. The test verifies the code
-        // compiles and runs without panicking.
+        assert_counter_value(&registry, HIT_METRIC, 1.0);
+        assert_counter_value(&registry, MISS_METRIC, 1.0);
+        assert_counter_value(&registry, REPLACEMENT_METRIC, 1.0);
+    }
+
+    fn assert_counter_value(registry: &Registry, metric_name: &str, expected: f64) {
+        let mut buffer = Vec::new();
+        TextEncoder::new()
+            .encode(&registry.gather(), &mut buffer)
+            .expect("encode metrics");
+        let body = String::from_utf8(buffer).expect("metrics are valid UTF-8");
+        let sample = format!(
+            r#"{metric_name}_total{{domain="example.com",otel_scope_name="status-list-server"}} {expected}"#
+        );
+        assert!(
+            body.contains(&sample),
+            "missing sample {sample}; body:\n{body}"
+        );
     }
 }

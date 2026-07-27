@@ -6,7 +6,7 @@ use redis::{
     aio::{ConnectionManager, ConnectionManagerConfig},
 };
 use secrecy::{ExposeSecret, SecretString};
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer};
 use serde_aux::field_attributes::deserialize_vec_from_string_or_vec;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Deserialize)]
@@ -105,13 +105,57 @@ pub struct LimitsConfig {
 #[derive(Debug, Clone, Deserialize)]
 pub struct TelemetryConfig {
     /// Environment mode: `"development"` (stdout) or `"production"` (OTLP export).
-    pub environment: String,
-    /// OTLP gRPC endpoint for trace export (prod mode only).
+    pub environment: TelemetryEnvironment,
+    /// OTLP gRPC endpoint for trace, metric, and log export (prod mode only).
     pub otlp_endpoint: String,
     /// Trace sampling ratio from 0.0 (none) to 1.0 (all).
+    #[serde(deserialize_with = "deserialize_sampler_ratio")]
     pub sampler_ratio: f64,
     /// Whether the OpenTelemetry tracing pipeline is enabled.
     pub enabled: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TelemetryEnvironment {
+    Development,
+    Production,
+}
+
+impl TelemetryEnvironment {
+    pub fn is_production(self) -> bool {
+        matches!(self, Self::Production)
+    }
+}
+
+impl<'de> Deserialize<'de> for TelemetryEnvironment {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let raw = String::deserialize(deserializer)?;
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "development" | "dev" => Ok(Self::Development),
+            "production" | "prod" => Ok(Self::Production),
+            other => Err(serde::de::Error::unknown_variant(
+                other,
+                &["development", "dev", "production", "prod"],
+            )),
+        }
+    }
+}
+
+fn deserialize_sampler_ratio<'de, D>(deserializer: D) -> Result<f64, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = f64::deserialize(deserializer)?;
+    if value.is_finite() && (0.0..=1.0).contains(&value) {
+        Ok(value)
+    } else {
+        Err(serde::de::Error::custom(
+            "telemetry.sampler_ratio must be a finite value in 0.0..=1.0",
+        ))
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -611,6 +655,16 @@ impl RedisConfig {
 impl Config {
     pub fn load() -> Result<Self, ConfigError> {
         // Build the config
+        let telemetry_environment = match std::env::var("APP_ENV")
+            .unwrap_or_default()
+            .trim()
+            .to_ascii_lowercase()
+            .as_str()
+        {
+            "production" | "prod" => ENV_PRODUCTION,
+            _ => ENV_DEVELOPMENT,
+        };
+
         let config = ConfigLib::builder()
             // Set default values
             .set_default("server.host", "localhost")?
@@ -661,7 +715,7 @@ impl Config {
             .set_default("limits.max_statuses_per_request", 5_000)?
             .set_default("limits.max_serialized_list_size", 1_048_576)? // 1 MiB
             .set_default("status_list.history_retention_secs", 7776000)? // 90 days
-            .set_default("telemetry.environment", "development")?
+            .set_default("telemetry.environment", telemetry_environment)?
             .set_default("telemetry.otlp_endpoint", "http://localhost:4317")?
             .set_default("telemetry.sampler_ratio", 1.0)?
             .set_default("telemetry.enabled", true)?
@@ -725,6 +779,110 @@ mod tests {
         assert_eq!(config.limits.max_statuses_per_request, 5_000);
         assert_eq!(config.limits.max_serialized_list_size, 1_048_576);
         assert_eq!(config.server.cert.dns.provider, None);
+        assert_eq!(
+            config.telemetry.environment,
+            TelemetryEnvironment::Development
+        );
+        assert_eq!(config.telemetry.sampler_ratio, 1.0);
+    }
+
+    #[sealed_test(env = [
+        ("APP_TELEMETRY__ENVIRONMENT", "development"),
+    ])]
+    fn test_telemetry_environment_accepts_development() {
+        let config = Config::load().expect("Failed to load config");
+        assert_eq!(
+            config.telemetry.environment,
+            TelemetryEnvironment::Development
+        );
+    }
+
+    #[sealed_test(env = [
+        ("APP_TELEMETRY__ENVIRONMENT", "dev"),
+    ])]
+    fn test_telemetry_environment_accepts_dev_alias() {
+        let config = Config::load().expect("Failed to load config");
+        assert_eq!(
+            config.telemetry.environment,
+            TelemetryEnvironment::Development
+        );
+    }
+
+    #[sealed_test(env = [
+        ("APP_ENV", "production"),
+    ])]
+    fn test_telemetry_environment_defaults_from_app_env() {
+        let config = Config::load().expect("Failed to load config");
+        assert_eq!(
+            config.telemetry.environment,
+            TelemetryEnvironment::Production
+        );
+    }
+
+    #[sealed_test(env = [
+        ("APP_ENV", "production"),
+        ("APP_TELEMETRY__ENVIRONMENT", "development"),
+    ])]
+    fn test_telemetry_environment_override_wins_over_app_env() {
+        let config = Config::load().expect("Failed to load config");
+        assert_eq!(
+            config.telemetry.environment,
+            TelemetryEnvironment::Development
+        );
+    }
+
+    #[sealed_test(env = [
+        ("APP_TELEMETRY__ENVIRONMENT", "production"),
+    ])]
+    fn test_telemetry_environment_accepts_production() {
+        let config = Config::load().expect("Failed to load config");
+        assert_eq!(
+            config.telemetry.environment,
+            TelemetryEnvironment::Production
+        );
+    }
+
+    #[sealed_test(env = [
+        ("APP_TELEMETRY__ENVIRONMENT", "prod"),
+    ])]
+    fn test_telemetry_environment_accepts_prod_alias() {
+        let config = Config::load().expect("Failed to load config");
+        assert_eq!(
+            config.telemetry.environment,
+            TelemetryEnvironment::Production
+        );
+    }
+
+    #[sealed_test(env = [
+        ("APP_TELEMETRY__ENVIRONMENT", "prodution"),
+    ])]
+    fn test_telemetry_environment_rejects_unknown_value() {
+        let err = Config::load().expect_err("invalid telemetry environment should fail");
+        assert!(err.to_string().contains("prodution"));
+    }
+
+    #[sealed_test(env = [
+        ("APP_TELEMETRY__SAMPLER_RATIO", "0"),
+    ])]
+    fn test_telemetry_sampler_ratio_accepts_lower_bound() {
+        let config = Config::load().expect("Failed to load config");
+        assert_eq!(config.telemetry.sampler_ratio, 0.0);
+    }
+
+    #[sealed_test(env = [
+        ("APP_TELEMETRY__SAMPLER_RATIO", "1"),
+    ])]
+    fn test_telemetry_sampler_ratio_accepts_upper_bound() {
+        let config = Config::load().expect("Failed to load config");
+        assert_eq!(config.telemetry.sampler_ratio, 1.0);
+    }
+
+    #[sealed_test(env = [
+        ("APP_TELEMETRY__SAMPLER_RATIO", "1.5"),
+    ])]
+    fn test_telemetry_sampler_ratio_rejects_out_of_range_value() {
+        let err = Config::load().expect_err("invalid sampler ratio should fail");
+        assert!(err.to_string().contains("sampler_ratio"));
     }
 
     #[sealed_test(env = [
