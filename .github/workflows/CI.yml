@@ -177,7 +177,7 @@ jobs:
       - name: Install cargo-vet
         uses: taiki-e/install-action@v2
         with:
-          tool: cargo-vet
+          tool: cargo-vet@0.10.2
 
       - name: Run cargo-vet
         run: cargo vet --locked
