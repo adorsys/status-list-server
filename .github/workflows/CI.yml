@@ -239,7 +239,7 @@ jobs:
         uses: actions/checkout@v7
 
       - name: Setup Helm
-        uses: azure/setup-helm@v3
+        uses: azure/setup-helm@v5
 
       - name: Build Helm dependencies
         run: |
@@ -269,7 +269,7 @@ jobs:
         uses: actions/checkout@v7
 
       - name: Setup Helm
-        uses: azure/setup-helm@v3
+        uses: azure/setup-helm@v5
 
       - name: Build Helm dependencies
         run: |
@@ -298,7 +298,7 @@ jobs:
         uses: actions/checkout@v7
 
       - name: YAML Lint
-        uses: actions/setup-go@v6
+        uses: actions/setup-go@v7
         with:
           go-version: stable
           cache: false
