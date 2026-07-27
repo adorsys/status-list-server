@@ -19,8 +19,23 @@ spec:
         app.kubernetes.io/component: otel-collector
         {{- include "status-list-server-chart.labels" . | nindent 8 }}
     spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
       containers:
         - name: otel-collector
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+            seccompProfile:
+              type: RuntimeDefault
           image: {{ .Values.otelCollector.standalone.image.repository }}:{{ .Values.otelCollector.standalone.image.tag }}
           args: ["--config", "/etc/otelcol/config.yaml"]
           ports:

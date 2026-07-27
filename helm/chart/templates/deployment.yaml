@@ -131,6 +131,14 @@ spec:
           {{- end }}
         {{- if and .Values.otelCollector.enabled .Values.otelCollector.sidecar.enabled }}
         - name: otel-collector
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+            seccompProfile:
+              type: RuntimeDefault
           image: {{ .Values.otelCollector.sidecar.image.repository }}:{{ .Values.otelCollector.sidecar.image.tag }}
           args: ["--config", "/etc/otelcol/config.yaml"]
           ports:

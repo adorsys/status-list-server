@@ -854,11 +854,11 @@ mod tests {
     }
 
     #[sealed_test(env = [
-        ("APP_TELEMETRY__ENVIRONMENT", "prodution"),
+        ("APP_TELEMETRY__ENVIRONMENT", "invalid_env"),
     ])]
     fn test_telemetry_environment_rejects_unknown_value() {
         let err = Config::load().expect_err("invalid telemetry environment should fail");
-        assert!(err.to_string().contains("prodution"));
+        assert!(err.to_string().contains("invalid_env"));
     }
 
     #[sealed_test(env = [
