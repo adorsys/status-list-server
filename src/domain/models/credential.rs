@@ -48,24 +48,3 @@ pub struct Credential {
     pub issuer: Issuer,
     pub public_key: PublicJwk,
 }
-
-impl Credential {
-    /// Publish new credentials for an issuer after verifying uniqueness invariant.
-    pub async fn publish(
-        repo: &dyn crate::domain::ports::CredentialRepo,
-        credential: Credential,
-    ) -> Result<(), CredentialError> {
-        if repo.find(&credential.issuer.0).await?.is_some() {
-            return Err(CredentialError::AlreadyExists);
-        }
-        repo.insert(credential).await
-    }
-
-    /// Retrieve credentials by issuer identifier.
-    pub async fn find(
-        repo: &dyn crate::domain::ports::CredentialRepo,
-        issuer: &str,
-    ) -> Result<Option<Self>, CredentialError> {
-        repo.find(issuer).await
-    }
-}
