@@ -9,19 +9,17 @@ mod test_utils;
 ))]
 mod utils;
 
-pub mod adapters;
-pub mod application;
 #[cfg(feature = "server")]
 pub mod config;
 pub mod domain;
-pub mod ports;
+pub mod outbound;
 #[cfg(feature = "server")]
-pub mod startup;
+pub mod server;
 /// Composition root: the only place adapters are constructed and injected.
 #[cfg(feature = "server")]
-pub mod state;
+pub mod setup;
 #[cfg(feature = "server")]
-pub mod web;
+pub mod startup;
 
 #[cfg(feature = "server")]
 pub use utils::bits_validation;

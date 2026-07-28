@@ -5,9 +5,7 @@ pub(crate) use cert_chain::{CertChainCache, CertificateChain};
 /// Pins the deliberately-opposite `ttl = 0` semantics of the two caches.
 ///
 /// `CertChainCache` treats zero as "never expire"; the status-list cache treats
-/// zero as "disabled". The status-list half of this matrix now lives with its
-/// implementation in [`crate::adapters::cache`], since that cache sits behind
-/// the [`StatusListCache`](crate::ports::StatusListCache) port.
+/// zero as "disabled".
 #[cfg(test)]
 mod ttl_zero_semantics_matrix {
     use std::sync::Arc;
