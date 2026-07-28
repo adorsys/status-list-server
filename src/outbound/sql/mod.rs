@@ -11,7 +11,6 @@ pub use models::*;
 pub use store::SeaOrmStore;
 
 use async_trait::async_trait;
-use std::sync::Arc;
 
 use crate::domain::models::credential::{Credential, CredentialError, Issuer, PublicJwk};
 use crate::domain::models::status_list::{StatusListError, StatusListRecord, StatusListSnapshot};
@@ -81,11 +80,11 @@ impl CredentialRepo for SqlCredentialRepo {
 
 #[async_trait]
 impl StatusListRepo for SqlStatusListRepo {
-    async fn find(&self, list_id: &str) -> Result<Option<Arc<StatusListRecord>>, StatusListError> {
+    async fn find(&self, list_id: &str) -> Result<Option<StatusListRecord>, StatusListError> {
         self.store
             .find_one_by(list_id)
             .await
-            .map(|value| value.map(From::from).map(Arc::new))
+            .map(|value| value.map(From::from))
             .map_err(Into::into)
     }
 

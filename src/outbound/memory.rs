@@ -35,8 +35,8 @@ impl MemoryStatusLists {
 
 #[async_trait]
 impl StatusListRepo for MemoryStatusLists {
-    async fn find(&self, id: &str) -> Result<Option<Arc<StatusListRecord>>, StatusListError> {
-        Ok(self.values.read().await.get(id).cloned().map(Arc::new))
+    async fn find(&self, id: &str) -> Result<Option<StatusListRecord>, StatusListError> {
+        Ok(self.values.read().await.get(id).cloned())
     }
 
     async fn insert(&self, record: StatusListRecord) -> Result<(), StatusListError> {
@@ -255,23 +255,8 @@ mod tests {
         let cache = MemoryStatusListCache::default();
         let service = create_test_service(repo, cache, None);
 
-        StatusListRecord::publish(
-            service.status_list_repo(),
-            service.history_repo(),
-            "id".into(),
-            Issuer("issuer".into()),
-            "https://example/id".into(),
-            Vec::new(),
-            900,
-            usize::MAX,
-        )
-        .await
-        .unwrap();
-
-        assert!(matches!(
-            StatusListRecord::publish(
-                service.status_list_repo(),
-                service.history_repo(),
+        service
+            .publish_status_list(
                 "id".into(),
                 Issuer("issuer".into()),
                 "https://example/id".into(),
@@ -279,17 +264,24 @@ mod tests {
                 900,
                 usize::MAX,
             )
-            .await,
+            .await
+            .unwrap();
+
+        assert!(matches!(
+            service
+                .publish_status_list(
+                    "id".into(),
+                    Issuer("issuer".into()),
+                    "https://example/id".into(),
+                    Vec::new(),
+                    900,
+                    usize::MAX,
+                )
+                .await,
             Err(StatusListError::AlreadyExists)
         ));
 
-        let fetched = StatusListRecord::get(
-            service.status_list_repo(),
-            service.status_list_cache(),
-            "id",
-        )
-        .await
-        .unwrap();
+        let fetched = service.get_status_list("id").await.unwrap();
         assert_eq!(fetched.list_id, "id");
     }
 
@@ -299,32 +291,29 @@ mod tests {
         let cache = MemoryStatusListCache::default();
         let service = create_test_service(repo, cache, None);
 
-        StatusListRecord::publish(
-            service.status_list_repo(),
-            service.history_repo(),
-            "id".into(),
-            Issuer("issuer".into()),
-            "https://example/id".into(),
-            Vec::new(),
-            900,
-            usize::MAX,
-        )
-        .await
-        .unwrap();
+        service
+            .publish_status_list(
+                "id".into(),
+                Issuer("issuer".into()),
+                "https://example/id".into(),
+                Vec::new(),
+                900,
+                usize::MAX,
+            )
+            .await
+            .unwrap();
 
-        let result = StatusListRecord::update_statuses(
-            service.status_list_repo(),
-            service.status_list_cache(),
-            service.history_repo(),
-            &Issuer("other-issuer".into()),
-            "id",
-            Vec::new(),
-            900,
-            10000,
-            1000,
-            usize::MAX,
-        )
-        .await;
+        let result = service
+            .update_statuses(
+                &Issuer("other-issuer".into()),
+                "id",
+                Vec::new(),
+                900,
+                10000,
+                1000,
+                usize::MAX,
+            )
+            .await;
 
         assert!(matches!(result, Err(StatusListError::IssuerMismatch)));
     }

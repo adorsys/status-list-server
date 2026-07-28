@@ -9,7 +9,7 @@ use std::sync::Arc;
 #[async_trait]
 pub trait StatusListRepo: Send + Sync + 'static {
     /// Retrieve a status list record by list identifier.
-    async fn find(&self, list_id: &str) -> Result<Option<Arc<StatusListRecord>>, StatusListError>;
+    async fn find(&self, list_id: &str) -> Result<Option<StatusListRecord>, StatusListError>;
 
     /// Insert a new status list record into persistent storage.
     async fn insert(&self, status_list: StatusListRecord) -> Result<(), StatusListError>;

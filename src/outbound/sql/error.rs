@@ -23,3 +23,15 @@ impl From<sea_orm::DbErr> for RepositoryError {
         RepositoryError::Generic(err.to_string())
     }
 }
+
+impl From<sea_orm::DbErr> for crate::domain::models::status_list::StatusListError {
+    fn from(err: sea_orm::DbErr) -> Self {
+        crate::domain::models::status_list::StatusListError::Backend(Box::new(err))
+    }
+}
+
+impl From<sea_orm::DbErr> for crate::domain::models::credential::CredentialError {
+    fn from(err: sea_orm::DbErr) -> Self {
+        crate::domain::models::credential::CredentialError::Backend(Box::new(err))
+    }
+}
