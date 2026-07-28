@@ -434,53 +434,74 @@ mod test {
             mysql::Mysql as MysqlImage,
             testcontainers::{ContainerAsync, runners::AsyncRunner},
         };
+        use tokio::sync::OnceCell;
+
+        static MYSQL_CONTAINER: OnceCell<ContainerAsync<MysqlImage>> = OnceCell::const_new();
 
         pub(super) struct MysqlTestDb {
             #[allow(dead_code)]
-            pub(super) _container: ContainerAsync<MysqlImage>,
-            pub(super) db: Arc<DatabaseConnection>,
+            pub(super) _container: &'static ContainerAsync<MysqlImage>,
+            pub(super) base_url: String,
         }
 
-        pub(super) async fn mysql_connection() -> MysqlTestDb {
-            let node = MysqlImage::default()
-                .start()
-                .await
-                .expect("Failed to start MySQL container");
-            let host = node.get_host().await.expect("Failed to resolve MySQL host");
-            let port = node
-                .get_host_port_ipv4(3306)
-                .await
-                .expect("Failed to resolve MySQL port");
+        impl MysqlTestDb {
+            pub(super) async fn start() -> Self {
+                let node = MYSQL_CONTAINER
+                    .get_or_init(|| async {
+                        MysqlImage::default()
+                            .start()
+                            .await
+                            .expect("Failed to start MySQL container")
+                    })
+                    .await;
 
-            // Connect without database first to create a unique database
-            let admin_url = format!("mysql://{}:{}", host, port);
-            let db_name = format!("test_{}", uuid::Uuid::new_v4().simple());
+                let host = node.get_host().await.expect("Failed to resolve MySQL host");
+                let port = node
+                    .get_host_port_ipv4(3306)
+                    .await
+                    .expect("Failed to resolve MySQL port");
 
-            // Create the database
-            let admin_conn = sea_orm::Database::connect(&admin_url)
-                .await
-                .expect("Failed to connect to MySQL admin");
-            admin_conn
-                .execute_unprepared(&format!(
-                    "CREATE DATABASE {} CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci",
-                    db_name
-                ))
-                .await
-                .expect("Failed to create test database");
+                // Connect without database first to create a unique database.
+                let admin_url = format!("mysql://{}:{}", host, port);
+                let db_name = format!("test_{}", uuid::Uuid::new_v4().simple());
 
-            // Connect to the new database and run migrations
-            let mysql_url = format!("mysql://{}:{}/{}", host, port, db_name);
-            let mut opt = sea_orm::ConnectOptions::new(mysql_url);
-            opt.max_connections(5);
-            let db = sea_orm::Database::connect(opt)
-                .await
-                .expect("Failed to connect to MySQL");
-            crate::adapters::sea_orm::Migrator::up(&db, None)
-                .await
-                .expect("Failed to run migrations on MySQL");
-            MysqlTestDb {
-                _container: node,
-                db: Arc::new(db),
+                let mut admin_opt = sea_orm::ConnectOptions::new(admin_url);
+                admin_opt.max_connections(1).min_connections(1);
+                let admin_conn = sea_orm::Database::connect(admin_opt)
+                    .await
+                    .expect("Failed to connect to MySQL admin");
+                admin_conn
+                    .execute_unprepared(&format!(
+                        "CREATE DATABASE {} CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci",
+                        db_name
+                    ))
+                    .await
+                    .expect("Failed to create test database");
+
+                let base_url = format!("mysql://{}:{}/{}", host, port, db_name);
+                let db = Self::connect_pinned(&base_url).await;
+                crate::adapters::sea_orm::Migrator::up(db.as_ref(), None)
+                    .await
+                    .expect("Failed to run migrations on MySQL");
+
+                Self {
+                    _container: node,
+                    base_url,
+                }
+            }
+
+            pub(super) async fn connection(&self) -> Arc<DatabaseConnection> {
+                Self::connect_pinned(&self.base_url).await
+            }
+
+            async fn connect_pinned(url: &str) -> Arc<DatabaseConnection> {
+                let mut opt = sea_orm::ConnectOptions::new(url.to_owned());
+                opt.max_connections(1).min_connections(1);
+                Arc::new(
+                    sea_orm::Database::connect(opt)
+                        .await
+                        .expect("Failed to connect to MySQL"),
+                )
             }
         }
     }
@@ -488,22 +509,30 @@ mod test {
     #[cfg(feature = "postgres-tests")]
     mod postgres_helpers {
         use super::*;
+        use sea_orm::ConnectionTrait;
         use testcontainers_modules::{
             postgres::Postgres as PostgresImage,
             testcontainers::{ContainerAsync, runners::AsyncRunner},
         };
+        use tokio::sync::OnceCell;
+
+        static POSTGRES_CONTAINER: OnceCell<ContainerAsync<PostgresImage>> = OnceCell::const_new();
 
         pub(super) struct PostgresTestDb {
             #[allow(dead_code)]
-            pub(super) _container: ContainerAsync<PostgresImage>,
+            pub(super) _container: &'static ContainerAsync<PostgresImage>,
             pub(super) db: Arc<DatabaseConnection>,
         }
 
         pub(super) async fn postgres_connection() -> PostgresTestDb {
-            let node = PostgresImage::default()
-                .start()
-                .await
-                .expect("Failed to start Postgres container");
+            let node = POSTGRES_CONTAINER
+                .get_or_init(|| async {
+                    PostgresImage::default()
+                        .start()
+                        .await
+                        .expect("Failed to start Postgres container")
+                })
+                .await;
             let host = node
                 .get_host()
                 .await
@@ -514,15 +543,29 @@ mod test {
                 .expect("Failed to resolve Postgres port");
 
             // testcontainers' Postgres image defaults to postgres/postgres/postgres.
-            let url = format!("postgres://postgres:postgres@{host}:{port}/postgres");
+            let admin_url = format!("postgres://postgres:postgres@{host}:{port}/postgres");
+            let db_name = format!("test_{}", uuid::Uuid::new_v4().simple());
+
+            let mut admin_opt = sea_orm::ConnectOptions::new(admin_url);
+            admin_opt.max_connections(1).min_connections(1);
+            let admin_conn = sea_orm::Database::connect(admin_opt)
+                .await
+                .expect("Failed to connect to Postgres admin");
+            admin_conn
+                .execute_unprepared(&format!("CREATE DATABASE {}", db_name))
+                .await
+                .expect("Failed to create Postgres test database");
+
+            let url = format!("postgres://postgres:postgres@{host}:{port}/{db_name}");
             let mut opt = sea_orm::ConnectOptions::new(url);
-            opt.max_connections(5);
+            opt.max_connections(1).min_connections(1);
             let db = sea_orm::Database::connect(opt)
                 .await
                 .expect("Failed to connect to Postgres");
             crate::adapters::sea_orm::Migrator::up(&db, None)
                 .await
                 .expect("Failed to run migrations on Postgres");
+
             PostgresTestDb {
                 _container: node,
                 db: Arc::new(db),
@@ -565,8 +608,9 @@ mod test {
     #[cfg(feature = "mysql")]
     #[tokio::test]
     async fn test_mysql_credentials_round_trip() {
-        let test_db = mysql_helpers::mysql_connection().await;
-        let store = SeaOrmStore::<Credentials>::new(test_db.db.clone());
+        let test_db = mysql_helpers::MysqlTestDb::start().await;
+        let db = test_db.connection().await;
+        let store = SeaOrmStore::<Credentials>::new(db);
 
         let public_key: Jwk = serde_json::from_str(
             r#"{
@@ -939,9 +983,10 @@ mod test {
     #[cfg(feature = "mysql")]
     #[tokio::test]
     async fn test_mysql_duplicate_insert_maps_to_duplicate_entry() {
-        let test_db = mysql_helpers::mysql_connection().await;
-        let cred_store = SeaOrmStore::<Credentials>::new(test_db.db.clone());
-        let store = SeaOrmStore::<StatusListRecord>::new(test_db.db.clone());
+        let test_db = mysql_helpers::MysqlTestDb::start().await;
+        let db = test_db.connection().await;
+        let cred_store = SeaOrmStore::<Credentials>::new(db.clone());
+        let store = SeaOrmStore::<StatusListRecord>::new(db);
 
         let key: Jwk = serde_json::from_str(
             r#"{
@@ -1061,9 +1106,10 @@ mod test {
     #[cfg(feature = "mysql")]
     #[tokio::test]
     async fn test_mysql_update_one_optimistic_guard_rejects_stale_write() {
-        let test_db = mysql_helpers::mysql_connection().await;
-        let cred_store = SeaOrmStore::<Credentials>::new(test_db.db.clone());
-        let store = SeaOrmStore::<StatusListRecord>::new(test_db.db.clone());
+        let test_db = mysql_helpers::MysqlTestDb::start().await;
+        let db = test_db.connection().await;
+        let cred_store = SeaOrmStore::<Credentials>::new(db.clone());
+        let store = SeaOrmStore::<StatusListRecord>::new(db);
 
         let key: Jwk = serde_json::from_str(
             r#"{
@@ -1476,9 +1522,10 @@ mod test {
     #[cfg(feature = "mysql")]
     #[tokio::test]
     async fn test_mysql_update_with_snapshot_rolls_back_on_history_failure() {
-        let test_db = mysql_helpers::mysql_connection().await;
-        let cred_store = SeaOrmStore::<Credentials>::new(test_db.db.clone());
-        let store = SeaOrmStore::<StatusListRecord>::new(test_db.db.clone());
+        let test_db = mysql_helpers::MysqlTestDb::start().await;
+        let db = test_db.connection().await;
+        let cred_store = SeaOrmStore::<Credentials>::new(db.clone());
+        let store = SeaOrmStore::<StatusListRecord>::new(db);
 
         let key: Jwk = serde_json::from_str(
             r#"{
