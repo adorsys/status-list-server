@@ -830,9 +830,31 @@ mod tests {
     async fn test_pool_acquire_timeout_fires() {
         use sea_orm::{ConnectOptions, Database};
         use std::time::Instant;
+        use testcontainers_modules::{
+            postgres::Postgres as PostgresImage,
+            testcontainers::runners::AsyncRunner,
+        };
 
-        let db_url = std::env::var("APP_DATABASE__URL")
-            .unwrap_or_else(|_| "postgres://postgres:postgres@localhost/status-list".to_string());
+        let (_container, db_url) = if let Ok(url) = std::env::var("APP_DATABASE__URL") {
+            (None, url)
+        } else {
+            let node = PostgresImage::default()
+                .start()
+                .await
+                .expect("Failed to start Postgres container for pool test");
+            let host = node
+                .get_host()
+                .await
+                .expect("Failed to resolve Postgres host for pool test");
+            let port = node
+                .get_host_port_ipv4(5432)
+                .await
+                .expect("Failed to resolve Postgres port for pool test");
+            (
+                Some(node),
+                format!("postgres://postgres:postgres@{host}:{port}/postgres"),
+            )
+        };
 
         let mut opt = ConnectOptions::new(db_url);
         opt.max_connections(1)
