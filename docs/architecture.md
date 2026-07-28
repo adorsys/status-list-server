@@ -102,9 +102,20 @@ The Status List Server is built using modern, performant, and scalable technolog
 - **jsonwebtoken**: Used for encoding and decoding Status List Tokens in JWT (JSON Web Token) format.
 - **coset**: Used for encoding and decoding Status List Tokens in CWT (CBOR Web Token) format.
 
-#### Storage
+- **Database**: Relational database storage for status lists (keyed by `list_id`) and issuer credentials (keyed by `issuer`) using SeaORM.
 
-- **Database**: to map and store status lists (keyed by `list_id`) and issuer credentials (keyed by `issuer`). See [Database Overview](../src/adapters/sea_orm/README.md) for the schema.
+### Architecture & Project Structure
+
+The project strictly follows **Hexagonal Architecture (Ports and Adapters)**:
+
+| Layer                 | Directory               | Responsibility                                                                                                                                         |
+| --------------------- | ----------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| **Domain Models**     | `src/domain/models/`    | Pure types (`StatusListRecord`, `Credential`, etc.) and co-located domain errors (`StatusListError`, `CredentialError`).                               |
+| **Domain Ports**      | `src/domain/ports.rs`   | Secondary port traits (`StatusListRepo`, `CredentialRepo`, `StatusListCache`, `StatusListHistoryRepo`, `CertificateProvider`) returning domain errors. |
+| **Service Container** | `src/domain/service.rs` | Lightweight `Service` container holding `Arc<dyn Port>` references injected into handlers.                                                             |
+| **Outbound Adapters** | `src/outbound/`         | Infrastructure implementations (`SqlStatusListRepo`, `MokaStatusListCache`, `AcmeCertificateProvider`, etc.) of domain ports.                          |
+| **Inbound Server**    | `src/server/`           | Web server module (`AppState`, HTTP handlers, `auth` middleware, and `ApiError` mapping via `IntoApiError`).                                           |
+| **Composition Root**  | `src/setup.rs`          | Factory functions building outbound adapters and initializing `AppState` and `Service`.                                                                |
 
 ### Data Flow
 
