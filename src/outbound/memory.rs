@@ -2,6 +2,7 @@ use async_trait::async_trait;
 use std::{collections::HashMap, sync::Arc};
 use tokio::sync::RwLock;
 
+use crate::cert_manager::storage::StorageError;
 use crate::domain::models::credential::{Credential, CredentialError};
 use crate::domain::models::status_list::{StatusListError, StatusListRecord, StatusListSnapshot};
 use crate::domain::ports::{
@@ -193,6 +194,31 @@ impl StatusListHistoryRepo for MemoryStatusListHistory {
             values.remove(&id);
         }
         Ok(count)
+    }
+}
+
+#[derive(Clone, Default)]
+pub struct MemoryStorage {
+    values: Arc<RwLock<HashMap<String, String>>>,
+}
+
+#[async_trait]
+impl crate::utils::cert_manager::storage::Storage for MemoryStorage {
+    async fn store(&self, key: &str, value: &str) -> Result<(), StorageError> {
+        self.values
+            .write()
+            .await
+            .insert(key.to_string(), value.to_string());
+        Ok(())
+    }
+
+    async fn load(&self, key: &str) -> Result<Option<String>, StorageError> {
+        Ok(self.values.read().await.get(key).cloned())
+    }
+
+    async fn delete(&self, key: &str) -> Result<(), StorageError> {
+        self.values.write().await.remove(key);
+        Ok(())
     }
 }
 

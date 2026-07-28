@@ -1,6 +1,7 @@
-use std::{collections::HashMap, fmt, marker::PhantomData, time::Duration};
+use std::{collections::HashMap, fmt, marker::PhantomData};
 
 use config::{Config as ConfigLib, ConfigError, Environment};
+#[cfg(feature = "redis")]
 use redis::{
     Client as RedisClient, ClientTlsConfig, RedisResult, TlsCertificates,
     aio::{ConnectionManager, ConnectionManagerConfig},
@@ -8,11 +9,14 @@ use redis::{
 use secrecy::{ExposeSecret, SecretString};
 use serde::Deserialize;
 use serde_aux::field_attributes::deserialize_vec_from_string_or_vec;
+#[cfg(feature = "redis")]
+use std::time::Duration;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum DatabaseBackend {
     #[default]
+    Memory,
     Postgres,
     MySql,
     Sqlite,
@@ -27,6 +31,10 @@ struct DatabaseBackendScheme {
 impl DatabaseBackend {
     fn scheme(&self) -> DatabaseBackendScheme {
         match self {
+            DatabaseBackend::Memory => DatabaseBackendScheme {
+                prefixes: &["memory:", "memory"],
+                description: "'memory:' or 'memory'",
+            },
             DatabaseBackend::Postgres => DatabaseBackendScheme {
                 prefixes: &["postgres://", "postgresql://"],
                 description: "'postgres://' or 'postgresql://'",
@@ -47,10 +55,11 @@ impl DatabaseBackend {
         self.scheme().description
     }
 
-    /// Returns the lowercase name matching the config value (`"postgres"`,
+    /// Returns the lowercase name matching the config value (`"memory"`, `"postgres"`,
     /// `"mysql"`, `"sqlite"`), useful for user-facing messages.
     pub fn as_str(&self) -> &'static str {
         match self {
+            DatabaseBackend::Memory => "memory",
             DatabaseBackend::Postgres => "postgres",
             DatabaseBackend::MySql => "mysql",
             DatabaseBackend::Sqlite => "sqlite",
@@ -533,6 +542,7 @@ pub struct StatusListConfig {
     pub history_retention_secs: u64,
 }
 
+#[cfg(feature = "redis")]
 impl RedisConfig {
     /// Establishes a new Redis connection based on the configuration.
     ///
@@ -1261,11 +1271,12 @@ mod tests {
     #[test]
     fn test_database_backend_default() {
         let backend = DatabaseBackend::default();
-        assert_eq!(backend, DatabaseBackend::Postgres);
+        assert_eq!(backend, DatabaseBackend::Memory);
     }
 
     #[test]
     fn test_database_backend_as_str() {
+        assert_eq!(DatabaseBackend::Memory.as_str(), "memory");
         assert_eq!(DatabaseBackend::Postgres.as_str(), "postgres");
         assert_eq!(DatabaseBackend::MySql.as_str(), "mysql");
         assert_eq!(DatabaseBackend::Sqlite.as_str(), "sqlite");

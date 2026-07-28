@@ -102,7 +102,6 @@ fn build_snapshot(record: &StatusListRecord, token_exp_secs: u64) -> StatusListS
 
 async fn invalidate_after_commit<C: StatusListCache + ?Sized>(cache: &C, list_id: &str) {
     if let Err(_error) = cache.invalidate(list_id).await {
-        #[cfg(feature = "tracing")]
         tracing::warn!(
             list_id = %list_id,
             error = ?_error,

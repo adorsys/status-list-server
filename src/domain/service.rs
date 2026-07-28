@@ -16,6 +16,22 @@ pub struct Service {
 }
 
 impl Service {
+    pub fn from_arcs(
+        status_list_repo: Arc<dyn StatusListRepo>,
+        credential_repo: Arc<dyn CredentialRepo>,
+        status_list_cache: Arc<dyn StatusListCache>,
+        history_repo: Option<Arc<dyn StatusListHistoryRepo>>,
+        cert_provider: Arc<dyn CertificateProvider>,
+    ) -> Self {
+        Self {
+            status_list_repo,
+            credential_repo,
+            status_list_cache,
+            history_repo,
+            cert_provider,
+        }
+    }
+
     pub fn new<S, C, SC, CP>(
         status_list_repo: S,
         credential_repo: C,

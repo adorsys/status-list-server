@@ -1,13 +1,11 @@
 //! Relational database outbound adapters implementing domain ports via SeaORM.
 
 mod error;
-#[cfg(feature = "server")]
 mod migrations;
 mod models;
 mod store;
 
 pub use error::RepositoryError;
-#[cfg(feature = "server")]
 pub use migrations::Migrator;
 pub use models::*;
 pub use store::SeaOrmStore;

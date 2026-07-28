@@ -3,6 +3,7 @@ mod azure;
 mod cloudflare;
 mod gcloud;
 mod pebble;
+#[cfg(feature = "aws")]
 mod route53;
 mod token;
 
@@ -11,6 +12,7 @@ pub use azure::{AzureDnsProvider, ServicePrincipal};
 pub use cloudflare::CloudflareDnsProvider;
 pub use gcloud::GoogleCloudDnsProvider;
 pub use pebble::PebbleDnsProvider;
+#[cfg(feature = "aws")]
 pub use route53::AwsRoute53DnsProvider;
 
 use std::{sync::Arc, time::Duration};

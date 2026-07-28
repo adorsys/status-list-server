@@ -69,28 +69,12 @@ mod tests {
 
     #[tokio::test]
     async fn test_publish_credentials_success() {
-        use sea_orm::{DatabaseBackend, MockDatabase, MockExecResult};
-        use std::sync::Arc;
-
         let jwk = test_jwk();
         let credentials = CredentialsRequest {
             issuer: "test_issuer".into(),
             public_key: jwk.clone(),
         };
-        let model = crate::outbound::sql::credentials::Model {
-            issuer: credentials.issuer.clone(),
-            public_key: credentials.public_key.clone().into(),
-        };
-        let db_conn = Arc::new(
-            MockDatabase::new(DatabaseBackend::Postgres)
-                .append_query_results(vec![vec![], vec![model]])
-                .append_exec_results(vec![MockExecResult {
-                    rows_affected: 1,
-                    last_insert_id: 0,
-                }])
-                .into_connection(),
-        );
-        let app_state = test_app_state(Some(db_conn)).await;
+        let app_state = test_app_state(None).await;
         let app = create_test_router(app_state);
 
         let response = app

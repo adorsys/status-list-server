@@ -1,3 +1,5 @@
+#![cfg(all(feature = "aws", feature = "redis"))]
+
 //! Integration tests for the ACME certificate provisioning flow.
 //!
 //! These tests require Docker to be running. They spin up:

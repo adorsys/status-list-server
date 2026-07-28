@@ -1,31 +1,52 @@
 //! Composition root assembling outbound infrastructure adapters and creating the AppState container.
 
+#[cfg(feature = "aws")]
 use aws_config::{BehaviorVersion, Region};
-use color_eyre::eyre::{Context, Result as EyeResult, eyre};
+#[cfg(any(
+    feature = "acme",
+    feature = "sqlite",
+    feature = "postgres",
+    feature = "mysql"
+))]
+use color_eyre::eyre::Context;
+use color_eyre::eyre::{Result as EyeResult, eyre};
+#[cfg(any(feature = "sqlite", feature = "postgres", feature = "mysql"))]
 use sea_orm::ConnectOptions;
+#[cfg(any(feature = "sqlite", feature = "postgres", feature = "mysql"))]
 use sea_orm_migration::MigratorTrait;
+#[cfg(any(feature = "sqlite", feature = "postgres", feature = "mysql"))]
 use secrecy::ExposeSecret;
 use std::{sync::Arc, time::Duration};
+#[cfg(feature = "acme")]
 use tracing::warn;
 
+#[cfg(feature = "aws")]
+use crate::cert_manager::challenge::AwsRoute53DnsProvider;
+#[cfg(feature = "acme")]
+use crate::cert_manager::challenge::{
+    AcmeDnsCredentials, AcmeDnsProvider, AzureDnsProvider, CloudflareDnsProvider, Dns01Handler,
+    GoogleCloudDnsProvider, PebbleDnsProvider, ServicePrincipal,
+};
 use crate::cert_manager::{
-    CertManager, StoreProvisioningStrategy,
-    challenge::{
-        AcmeDnsCredentials, AcmeDnsProvider, AwsRoute53DnsProvider, AzureDnsProvider,
-        CloudflareDnsProvider, Dns01Handler, GoogleCloudDnsProvider, PebbleDnsProvider,
-        ServicePrincipal,
-    },
-    http_client::DefaultHttpClient,
+    CertManager, StoreProvisioningStrategy, http_client::DefaultHttpClient, storage::Storage,
 };
-use crate::config::{
-    Config as AppConfig, DnsProviderKind, ENV_DEVELOPMENT, ENV_PRODUCTION, GcloudKeySource,
-    ResolvedDnsProvider,
+use crate::config::{Config as AppConfig, DatabaseBackend, ENV_DEVELOPMENT};
+#[cfg(feature = "acme")]
+use crate::config::{DnsProviderKind, ENV_PRODUCTION, GcloudKeySource, ResolvedDnsProvider};
+use crate::domain::{
+    ports::{CredentialRepo, StatusListHistoryRepo, StatusListRepo},
+    service::Service,
 };
-use crate::domain::{ports::StatusListHistoryRepo, service::Service};
+#[cfg(feature = "aws")]
 use crate::outbound::aws::{AwsS3, AwsSecretsManager};
 use crate::outbound::cache::MokaStatusListCache;
 use crate::outbound::cert::AcmeCertificateProvider;
+use crate::outbound::memory::{
+    MemoryCredentials, MemoryStatusListHistory, MemoryStatusLists, MemoryStorage,
+};
+#[cfg(feature = "redis")]
 use crate::outbound::redis::Redis;
+#[cfg(any(feature = "sqlite", feature = "postgres", feature = "mysql"))]
 use crate::outbound::sql::{
     Migrator, SeaOrmStore, SqlCredentialRepo, SqlStatusListHistoryRepo, SqlStatusListRepo,
 };
@@ -41,61 +62,133 @@ pub async fn build_state(config: &AppConfig) -> EyeResult<AppState> {
 pub async fn build_state_with_cert_manager(
     config: &AppConfig,
 ) -> EyeResult<(AppState, Arc<CertManager>)> {
-    let db_url = config.database.url.expose_secret();
-    let db_backend = config.database.backend;
+    let (status_list_repo, credential_repo, status_list_history): (
+        Arc<dyn StatusListRepo>,
+        Arc<dyn CredentialRepo>,
+        Arc<dyn StatusListHistoryRepo>,
+    ) = match config.database.backend {
+        DatabaseBackend::Memory => {
+            let memory_history = MemoryStatusListHistory::default();
+            let memory_lists = MemoryStatusLists::default().with_history(&memory_history);
+            (
+                Arc::new(memory_lists),
+                Arc::new(MemoryCredentials::default()),
+                Arc::new(memory_history),
+            )
+        }
+        #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mysql"))]
+        db_backend => {
+            let db_url = config.database.url.expose_secret();
+            if !db_backend.validate_url_scheme(db_url) {
+                return Err(color_eyre::eyre::eyre!(
+                    "URL scheme does not match configured backend '{}'. Expected URL starting with {}",
+                    db_backend.as_str(),
+                    db_backend.expected_scheme_description()
+                ));
+            }
 
-    if !db_backend.validate_url_scheme(db_url) {
-        return Err(color_eyre::eyre::eyre!(
-            "URL scheme does not match configured backend '{}'. Expected URL starting with {}",
-            db_backend.as_str(),
-            db_backend.expected_scheme_description()
-        ));
-    }
+            #[cfg(feature = "sqlite")]
+            let mut opt = ConnectOptions::new(db_url.to_string());
+            #[cfg(not(feature = "sqlite"))]
+            let opt = ConnectOptions::new(db_url.to_string());
+            #[cfg(feature = "sqlite")]
+            if db_backend == crate::config::DatabaseBackend::Sqlite {
+                opt.max_connections(1);
+                opt.map_sqlx_sqlite_opts(|o| o.foreign_keys(true));
+            }
+            let db = sea_orm::Database::connect(opt)
+                .await
+                .wrap_err("Failed to connect to database")?;
 
-    #[cfg(feature = "sqlite")]
-    let mut opt = ConnectOptions::new(db_url.to_string());
-    #[cfg(not(feature = "sqlite"))]
-    let opt = ConnectOptions::new(db_url.to_string());
-    #[cfg(feature = "sqlite")]
-    if db_backend == crate::config::DatabaseBackend::Sqlite {
-        opt.max_connections(1);
-        opt.map_sqlx_sqlite_opts(|o| o.foreign_keys(true));
-    }
-    let db = sea_orm::Database::connect(opt)
-        .await
-        .wrap_err("Failed to connect to database")?;
+            Migrator::up(&db, None)
+                .await
+                .wrap_err("Failed to run database migrations")?;
 
-    Migrator::up(&db, None)
-        .await
-        .wrap_err("Failed to run database migrations")?;
-
-    let aws_config = aws_config::defaults(BehaviorVersion::latest())
-        .region(Region::new(config.aws.region.clone()))
-        .load()
-        .await;
-
-    let redis_conn = config
-        .redis
-        .start(None, None, None)
-        .await
-        .wrap_err("Failed to connect to Redis")?;
+            let db_clone = Arc::new(db);
+            (
+                Arc::new(SqlStatusListRepo::new(SeaOrmStore::new(db_clone.clone()))),
+                Arc::new(SqlCredentialRepo::new(SeaOrmStore::new(db_clone.clone()))),
+                Arc::new(SqlStatusListHistoryRepo::new(SeaOrmStore::new(
+                    db_clone.clone(),
+                ))),
+            )
+        }
+        #[cfg(not(any(feature = "sqlite", feature = "postgres", feature = "mysql")))]
+        other => {
+            return Err(color_eyre::eyre::eyre!(
+                "Database backend '{}' configured, but feature flag for it was not compiled in.",
+                other.as_str()
+            ));
+        }
+    };
 
     let cert_domains = [config.server.domain.as_str()];
     let app_env = std::env::var("APP_ENV").unwrap_or(ENV_DEVELOPMENT.to_string());
 
-    let cache = Redis::new(redis_conn.clone()).with_ttl(config.redis.cert_cache_ttl);
-    let cert_storage = AwsS3::new(
-        &aws_config,
-        &config.aws.s3_bucket,
-        &config.aws.region,
-        &config.aws.s3_key_prefix,
-    )
-    .with_cache(cache);
-    let secrets_storage = AwsSecretsManager::new(
-        &aws_config,
-        Duration::from_secs(config.aws.secrets_cache_ttl),
-    )
-    .await?;
+    let (cert_storage, secrets_storage): (Box<dyn Storage>, Box<dyn Storage>) = {
+        #[cfg(feature = "aws")]
+        {
+            if config
+                .server
+                .cert
+                .store
+                .source
+                .eq_ignore_ascii_case("aws_secrets_manager")
+                || !config.aws.s3_bucket.is_empty()
+            {
+                let aws_config = aws_config::defaults(BehaviorVersion::latest())
+                    .region(Region::new(config.aws.region.clone()))
+                    .load()
+                    .await;
+
+                #[cfg(feature = "redis")]
+                let cache_opt = if !config.redis.uri.expose_secret().is_empty() {
+                    if let Ok(redis_conn) = config.redis.start(None, None, None).await {
+                        Some(Redis::new(redis_conn).with_ttl(config.redis.cert_cache_ttl))
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+                #[cfg(not(feature = "redis"))]
+                let cache_opt = None;
+
+                let s3 = AwsS3::new(
+                    &aws_config,
+                    &config.aws.s3_bucket,
+                    &config.aws.region,
+                    &config.aws.s3_key_prefix,
+                );
+                let cert_st: Box<dyn Storage> = match cache_opt {
+                    Some(c) => Box::new(s3.with_cache(c)),
+                    None => Box::new(s3),
+                };
+
+                let secrets_st: Box<dyn Storage> = Box::new(
+                    AwsSecretsManager::new(
+                        &aws_config,
+                        Duration::from_secs(config.aws.secrets_cache_ttl),
+                    )
+                    .await?,
+                );
+                (cert_st, secrets_st)
+            } else {
+                (
+                    Box::new(MemoryStorage::default()),
+                    Box::new(MemoryStorage::default()),
+                )
+            }
+        }
+        #[cfg(not(feature = "aws"))]
+        {
+            (
+                Box::new(MemoryStorage::default()),
+                Box::new(MemoryStorage::default()),
+            )
+        }
+    };
+
     let cert_strategy = store_certificate_strategy(config)?;
     let uses_acme_strategy = config
         .server
@@ -114,23 +207,32 @@ pub async fn build_state_with_cert_manager(
         .eku(&config.server.cert.eku);
 
     cert_manager_builder = if uses_acme_strategy {
-        let dns_provider = config
-            .server
-            .cert
-            .dns
-            .resolve(&app_env)
-            .wrap_err("Invalid DNS provider configuration")?;
-        if dns_provider.kind() == DnsProviderKind::Pebble && app_env == ENV_PRODUCTION {
-            warn!(
-                "The 'pebble' DNS provider is a development-only fake DNS server \
-                 but APP_ENV=production; ACME challenges will not succeed against a real CA"
-            );
+        #[cfg(feature = "acme")]
+        {
+            let dns_provider = config
+                .server
+                .cert
+                .dns
+                .resolve(&app_env)
+                .wrap_err("Invalid DNS provider configuration")?;
+            if dns_provider.kind() == DnsProviderKind::Pebble && app_env == ENV_PRODUCTION {
+                warn!(
+                    "The 'pebble' DNS provider is a development-only fake DNS server \
+                     but APP_ENV=production; ACME challenges will not succeed against a real CA"
+                );
+            }
+            let challenge_handler =
+                build_dns_challenge_handler(dns_provider, config, &cert_domains).await?;
+            cert_manager_builder
+                .challenge_handler(challenge_handler)
+                .acme_strategy()
         }
-        let challenge_handler =
-            build_dns_challenge_handler(dns_provider, config, &aws_config, &cert_domains).await?;
-        cert_manager_builder
-            .challenge_handler(challenge_handler)
-            .acme_strategy()
+        #[cfg(not(feature = "acme"))]
+        {
+            return Err(eyre!(
+                "ACME provisioning strategy requested, but 'acme' feature flag was not compiled in."
+            ));
+        }
     } else if let Some(cert_strategy) = cert_strategy {
         cert_manager_builder.store_strategy(cert_strategy)
     } else {
@@ -146,19 +248,10 @@ pub async fn build_state_with_cert_manager(
     }
 
     let certificate_manager = cert_manager_builder.build()?;
-
-    let db_clone = Arc::new(db);
-    let status_list_repo = SeaOrmStore::new(db_clone.clone());
-    let credential_repo = SeaOrmStore::new(db_clone.clone());
-    let status_list_history_repo = SeaOrmStore::new(db_clone.clone());
     let status_list_cache = MokaStatusListCache::new(config.cache.ttl, config.cache.max_capacity);
 
-    let status_lists = SqlStatusListRepo::new(status_list_repo);
-    let credentials = SqlCredentialRepo::new(credential_repo);
-    let status_list_history: Arc<dyn StatusListHistoryRepo> =
-        Arc::new(SqlStatusListHistoryRepo::new(status_list_history_repo));
     let cert_manager = Arc::new(certificate_manager);
-    let cert_provider = AcmeCertificateProvider::new(cert_manager.clone());
+    let cert_provider = Arc::new(AcmeCertificateProvider::new(cert_manager.clone()));
 
     let history_option = if config.status_list.history_retention_secs == 0 {
         None
@@ -166,10 +259,10 @@ pub async fn build_state_with_cert_manager(
         Some(status_list_history)
     };
 
-    let service = Arc::new(Service::new(
-        status_lists,
-        credentials,
-        status_list_cache,
+    let service = Arc::new(Service::from_arcs(
+        status_list_repo,
+        credential_repo,
+        Arc::new(status_list_cache),
         history_option,
         cert_provider,
     ));
@@ -235,6 +328,7 @@ fn empty_to_none(value: Option<String>) -> Option<String> {
     value.filter(|v| !v.trim().is_empty())
 }
 
+#[cfg(feature = "acme")]
 fn acme_dns_credentials(account: &crate::config::AcmeDnsAccount) -> AcmeDnsCredentials {
     AcmeDnsCredentials {
         username: account.username.clone(),
@@ -317,14 +411,27 @@ fn store_certificate_strategy(config: &AppConfig) -> EyeResult<Option<StoreProvi
     }
 }
 
+#[cfg(feature = "acme")]
 async fn build_dns_challenge_handler(
     provider: ResolvedDnsProvider<'_>,
     config: &AppConfig,
-    aws_config: &aws_config::SdkConfig,
     cert_domains: &[&str],
 ) -> EyeResult<Dns01Handler> {
     let handler = match provider {
-        ResolvedDnsProvider::Route53 => Dns01Handler::new(AwsRoute53DnsProvider::new(aws_config)),
+        #[cfg(feature = "aws")]
+        ResolvedDnsProvider::Route53 => {
+            let aws_config = aws_config::defaults(BehaviorVersion::latest())
+                .region(Region::new(config.aws.region.clone()))
+                .load()
+                .await;
+            Dns01Handler::new(AwsRoute53DnsProvider::new(&aws_config))
+        }
+        #[cfg(not(feature = "aws"))]
+        ResolvedDnsProvider::Route53 => {
+            return Err(eyre!(
+                "Route53 DNS provider requested, but 'aws' feature is disabled at compile time."
+            ));
+        }
         ResolvedDnsProvider::Cloudflare(cfg) => {
             Dns01Handler::new(CloudflareDnsProvider::new(cfg.api_token.clone()))
         }
@@ -373,22 +480,19 @@ async fn build_dns_challenge_handler(
     Ok(handler)
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "acme"))]
 mod tests {
     use super::*;
-    use crate::config::{AcmeDnsConfig, AzureDnsConfig, CloudflareDnsConfig, GcloudDnsConfig};
+    use crate::cert_manager::challenge::Dns01Handler;
+    use crate::config::{
+        AcmeDnsConfig, AzureDnsConfig, CloudflareDnsConfig, DnsProviderKind, ENV_PRODUCTION,
+        GcloudDnsConfig,
+    };
     use sealed_test::prelude::*;
-
-    fn test_sdk_config() -> aws_config::SdkConfig {
-        aws_config::SdkConfig::builder()
-            .behavior_version(BehaviorVersion::latest())
-            .build()
-    }
 
     fn build_dns_challenge_handler(
         provider: DnsProviderKind,
         config: &mut AppConfig,
-        aws_config: &aws_config::SdkConfig,
         cert_domains: &[&str],
     ) -> EyeResult<Dns01Handler> {
         config.server.cert.dns.provider = Some(provider);
@@ -398,33 +502,29 @@ mod tests {
             .block_on(super::build_dns_challenge_handler(
                 resolved,
                 config,
-                aws_config,
                 cert_domains,
             ))
     }
 
     #[sealed_test]
     fn builds_handler_for_each_configured_provider() {
-        let sdk = test_sdk_config();
         let mut config = AppConfig::load().expect("Failed to load config");
         let domain = config.server.domain.clone();
         let domains = [domain.as_str()];
 
+        #[cfg(feature = "aws")]
         assert!(
-            build_dns_challenge_handler(DnsProviderKind::Route53, &mut config, &sdk, &domains)
-                .is_ok()
+            build_dns_challenge_handler(DnsProviderKind::Route53, &mut config, &domains).is_ok()
         );
         assert!(
-            build_dns_challenge_handler(DnsProviderKind::Pebble, &mut config, &sdk, &domains)
-                .is_ok()
+            build_dns_challenge_handler(DnsProviderKind::Pebble, &mut config, &domains).is_ok()
         );
 
         config.server.cert.dns.cloudflare = Some(CloudflareDnsConfig {
             api_token: "token".into(),
         });
         assert!(
-            build_dns_challenge_handler(DnsProviderKind::Cloudflare, &mut config, &sdk, &domains)
-                .is_ok()
+            build_dns_challenge_handler(DnsProviderKind::Cloudflare, &mut config, &domains).is_ok()
         );
 
         config.server.cert.dns.azure = Some(AzureDnsConfig {
@@ -434,10 +534,7 @@ mod tests {
             subscription_id: "sub".into(),
             resource_group: "rg".into(),
         });
-        assert!(
-            build_dns_challenge_handler(DnsProviderKind::Azure, &mut config, &sdk, &domains)
-                .is_ok()
-        );
+        assert!(build_dns_challenge_handler(DnsProviderKind::Azure, &mut config, &domains).is_ok());
 
         config.server.cert.dns.acmedns = Some(AcmeDnsConfig {
             server_url: "https://auth.example.org".into(),
@@ -447,8 +544,7 @@ mod tests {
             accounts: Default::default(),
         });
         assert!(
-            build_dns_challenge_handler(DnsProviderKind::Acmedns, &mut config, &sdk, &domains)
-                .is_ok()
+            build_dns_challenge_handler(DnsProviderKind::Acmedns, &mut config, &domains).is_ok()
         );
 
         let key_json = serde_json::json!({
@@ -462,8 +558,7 @@ mod tests {
             service_account_key_path: None,
         });
         assert!(
-            build_dns_challenge_handler(DnsProviderKind::Gcloud, &mut config, &sdk, &domains)
-                .is_ok()
+            build_dns_challenge_handler(DnsProviderKind::Gcloud, &mut config, &domains).is_ok()
         );
     }
 }
