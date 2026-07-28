@@ -3,7 +3,7 @@ use redis::{AsyncCommands, aio::ConnectionManager};
 
 use crate::cert_manager::storage::{Storage, StorageError};
 
-/// Struct representing Redis storage
+/// Represents Redis storage
 #[derive(Clone)]
 pub struct Redis {
     conn: ConnectionManager,

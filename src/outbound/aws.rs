@@ -14,21 +14,13 @@ use tracing::{info, warn};
 
 use crate::cert_manager::storage::{Storage, StorageError};
 
-/// Type used for AWS Secrets Manager operations
+/// AWS Secrets Manager.
 pub struct AwsSecretsManager {
     client: SecretsClient,
     cache: Option<Cache<String, String>>,
 }
 
 impl AwsSecretsManager {
-    /// Create a new instance of [AwsSecretsManager] with the given AWS SDK config.
-    ///
-    /// # Caching Behavior
-    /// - If `secrets_cache_ttl` is zero, **caching is disabled**: all secret requests go directly to AWS.
-    /// - If `secrets_cache_ttl` is non-zero, an in-memory cache is created with that TTL.
-    ///
-    /// This TTL semantics is consistent with other caches in the application
-    /// (status-list cache for status-lists and Redis for certificate data).
     pub async fn new(
         config: &SdkConfig,
         secrets_cache_ttl: Duration,
@@ -55,14 +47,12 @@ impl Storage for AwsSecretsManager {
     async fn store(&self, name: &str, data: &str) -> Result<(), StorageError> {
         use aws_sdk_secretsmanager::error::SdkError;
 
-        // Store a secret only if it does not already exist
         match self.client.describe_secret().secret_id(name).send().await {
             Ok(_) => {
                 warn!("Secret {name} already exists. Skipping...");
                 Ok(())
             }
             Err(SdkError::ServiceError(err)) if err.err().is_resource_not_found_exception() => {
-                // Secret does not exist, try to create it
                 self.client
                     .create_secret()
                     .name(name)
@@ -135,7 +125,6 @@ impl Storage for AwsSecretsManager {
     }
 }
 
-/// Struct representing AWS S3 storage with optional caching mechanism
 pub struct AwsS3 {
     client: S3Client,
     bucket: String,
@@ -149,7 +138,6 @@ impl AwsS3 {
     const BUCKET_MAX_RETRIES: u32 = 3;
     const BUCKET_RETRY_DELAY: Duration = Duration::from_millis(500);
 
-    /// Create a new instance of [`AwsS3`] with the given AWS SDK config and bucket name
     pub fn new(
         config: &SdkConfig,
         bucket_name: impl Into<String>,
@@ -176,14 +164,11 @@ impl AwsS3 {
         }
     }
 
-    /// Set the cache layer if needed
     pub fn with_cache(mut self, cache: impl Storage + 'static) -> Self {
         self.cache = Some(Box::new(cache));
         self
     }
 
-    /// Qualify a key by prepending the configured S3 key prefix.
-    /// If the prefix is empty, the key is returned as-is.
     fn qualify_key(&self, key: &str) -> String {
         if self.key_prefix.is_empty() {
             key.to_string()
@@ -194,11 +179,9 @@ impl AwsS3 {
         }
     }
 
-    // Helper function to ensure the S3 bucket exists before any operation
     async fn ensure_bucket_exists(&self) -> Result<(), StorageError> {
         use aws_sdk_s3::error::SdkError;
 
-        // return if bucket is already verified
         if self.bucket_exists.load(Ordering::Relaxed) {
             return Ok(());
         }
@@ -206,7 +189,6 @@ impl AwsS3 {
         let max_retries = Self::BUCKET_MAX_RETRIES;
 
         for attempt in 0..max_retries {
-            // Check if the bucket exists
             match self.client.head_bucket().bucket(&self.bucket).send().await {
                 Ok(_) => {
                     info!("Bucket {} already exists. Skipping...", self.bucket);
@@ -214,7 +196,6 @@ impl AwsS3 {
                     return Ok(());
                 }
                 Err(SdkError::ServiceError(err)) if err.err().is_not_found() => {
-                    // Bucket not found, attempt to create it
                     let mut req = self.client.create_bucket().bucket(&self.bucket);
                     if self.region != "us-east-1" {
                         let location_constraint = self.region.parse().map_err(|_| {
@@ -254,7 +235,6 @@ impl AwsS3 {
                 }
             }
 
-            // Wait a bit before retrying
             if attempt < max_retries - 1 {
                 sleep(Self::BUCKET_RETRY_DELAY).await;
             }
@@ -266,17 +246,14 @@ impl AwsS3 {
 #[async_trait]
 impl Storage for AwsS3 {
     async fn store(&self, key: &str, data: &str) -> Result<(), StorageError> {
-        // Ensure the bucket exists
         self.ensure_bucket_exists().await?;
 
-        // Invalidate cache
         if let Some(cache) = &self.cache
             && let Err(e) = cache.delete(key).await
         {
             warn!("Failed to invalidate cache for {key}: {e}");
         }
 
-        // Store the object in the bucket
         let s3_key = self.qualify_key(key);
         let body = data.as_bytes().to_vec();
         match self
@@ -293,7 +270,6 @@ impl Storage for AwsS3 {
                 Ok(())
             }
             Err(e) => {
-                // We make sure cache stays invalid
                 if let Some(cache) = &self.cache {
                     let _ = cache.delete(key).await;
                 }
@@ -305,7 +281,6 @@ impl Storage for AwsS3 {
     async fn load(&self, key: &str) -> Result<Option<String>, StorageError> {
         use aws_sdk_s3::error::SdkError;
 
-        // Check the cache first if it exists
         if let Some(cache) = &self.cache {
             match cache.load(key).await {
                 Ok(Some(data)) => {
@@ -316,7 +291,6 @@ impl Storage for AwsS3 {
             }
         }
 
-        // If not found in cache, try to get directly from S3
         self.ensure_bucket_exists().await?;
         let s3_key = self.qualify_key(key);
         match self
@@ -335,7 +309,6 @@ impl Storage for AwsS3 {
                     .map_err(|e| StorageError::AwsSdk(e.into()))?;
                 let data = String::from_utf8(bytes.into_bytes().into())
                     .map_err(|e| StorageError::InvalidData(e.to_string()))?;
-                // Update cache if it exists
                 if let Some(cache) = &self.cache
                     && let Err(e) = cache.store(key, &data).await
                 {
@@ -359,7 +332,6 @@ impl Storage for AwsS3 {
             .await
         {
             Ok(_) => {
-                // Invalidate cache
                 if let Some(cache) = &self.cache
                     && let Err(e) = cache.delete(key).await
                 {

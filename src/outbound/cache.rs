@@ -3,9 +3,9 @@ use async_trait::async_trait;
 use moka::future::Cache as MokaCache;
 use std::{sync::Arc, time::Duration};
 
-use crate::{
-    domain::{self, StatusListRecord},
-    ports::{PortError, StatusListCache},
+use crate::domain::{
+    models::status_list::{StatusListError, StatusListRecord},
+    ports::StatusListCache,
 };
 
 #[derive(Clone)]
@@ -32,18 +32,18 @@ impl MokaStatusListCache {
 
 #[async_trait]
 impl StatusListCache for MokaStatusListCache {
-    async fn get(&self, key: &str) -> Result<Option<Arc<domain::StatusListRecord>>, PortError> {
+    async fn get(&self, key: &str) -> Result<Option<Arc<StatusListRecord>>, StatusListError> {
         Ok(self.inner.get(key).await)
     }
 
-    async fn put(&self, record: domain::StatusListRecord) -> Result<(), PortError> {
+    async fn put(&self, record: StatusListRecord) -> Result<(), StatusListError> {
         self.inner
             .insert(record.list_id.clone(), Arc::new(record))
             .await;
         Ok(())
     }
 
-    async fn invalidate(&self, key: &str) -> Result<(), PortError> {
+    async fn invalidate(&self, key: &str) -> Result<(), StatusListError> {
         self.inner.invalidate(key).await;
         Ok(())
     }
@@ -52,7 +52,8 @@ impl StatusListCache for MokaStatusListCache {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::{Issuer, StatusList};
+    use crate::domain::models::credential::Issuer;
+    use crate::domain::models::status_list::StatusList;
 
     #[tokio::test]
     async fn ttl_zero_expires_entries_immediately() {
