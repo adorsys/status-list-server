@@ -842,7 +842,7 @@ mod tests {
         let db = std::sync::Arc::new(
             Database::connect(opt)
                 .await
-                .expect("Failed to connect for pool test")
+                .expect("Failed to connect for pool test"),
         );
 
         // Hold the single connection with a long-running query
