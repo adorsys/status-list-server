@@ -306,8 +306,11 @@ pub async fn setup_history_cleanup_scheduler(
                 let now = time::OffsetDateTime::now_utc().unix_timestamp();
                 let cutoff = now - app_state.history_retention_secs as i64;
 
-                use crate::domain::models::status_list::StatusListSnapshot;
-                match StatusListSnapshot::cleanup(app_state.service.history_repo(), cutoff).await {
+                match app_state
+                    .service
+                    .cleanup_historical_snapshots(cutoff)
+                    .await
+                {
                     Ok(deleted) => {
                         info!("Cleaned up {deleted} historical status list snapshots older than {cutoff}");
                     }

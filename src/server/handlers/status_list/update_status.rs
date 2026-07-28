@@ -31,20 +31,18 @@ pub async fn update_status(
         .map(to_domain_entry)
         .collect::<Vec<_>>();
 
-    use crate::domain::models::status_list::StatusListRecord;
-    StatusListRecord::update_statuses(
-        appstate.service.status_list_repo(),
-        appstate.service.status_list_cache(),
-        appstate.service.history_repo(),
-        &Issuer(issuer),
-        &list_id,
-        statuses,
-        appstate.token_exp_secs,
-        appstate.max_status_index,
-        appstate.max_statuses_per_request,
-        appstate.max_serialized_list_size,
-    )
-    .await?;
+    appstate
+        .service
+        .update_statuses(
+            &Issuer(issuer),
+            &list_id,
+            statuses,
+            appstate.token_exp_secs,
+            appstate.max_status_index,
+            appstate.max_statuses_per_request,
+            appstate.max_serialized_list_size,
+        )
+        .await?;
 
     Ok(StatusCode::NO_CONTENT.into_response())
 }

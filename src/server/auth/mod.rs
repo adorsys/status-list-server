@@ -39,8 +39,9 @@ pub async fn auth(
     let alg = jsonwebtoken::decode_header(token)?.alg;
     let issuer = insecure_decode::<Claims>(token)?.claims.iss;
 
-    use crate::domain::models::credential::Credential;
-    let credential = Credential::find(state.service.credential_repo(), &issuer)
+    let credential = state
+        .service
+        .find_credential(&issuer)
         .await
         .map_err(|e| {
             tracing::error!("Failed to find credential for {issuer}: {e:?}");

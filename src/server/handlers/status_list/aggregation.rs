@@ -9,9 +9,7 @@ pub(super) struct AggregationResponse {
 }
 
 pub async fn get_aggregation(State(state): State<AppState>) -> Result<impl IntoResponse, ApiError> {
-    use crate::domain::models::status_list::StatusListRecord;
-
-    let status_lists = StatusListRecord::list_uris(state.service.status_list_repo()).await?;
+    let status_lists = state.service.list_uris().await?;
 
     tracing::info!(
         "Serving status list aggregation with {} list(s)",

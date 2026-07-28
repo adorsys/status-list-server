@@ -26,7 +26,7 @@ pub async fn credential_handler(
         issuer: Issuer(payload.issuer),
         public_key: PublicJwk::try_new(public_key_bytes)?,
     };
-    Credential::publish(state.service.credential_repo(), credential).await?;
+    state.service.publish_credential(credential).await?;
     Ok((
         StatusCode::ACCEPTED,
         Json(json!({"status": "Credentials stored successfully"})),

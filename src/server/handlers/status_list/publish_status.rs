@@ -36,18 +36,17 @@ pub async fn publish_status(
         appstate.server_domain
     );
 
-    use crate::domain::models::status_list::StatusListRecord;
-    StatusListRecord::publish(
-        appstate.service.status_list_repo(),
-        appstate.service.history_repo(),
-        list_id,
-        Issuer(issuer),
-        sub,
-        statuses,
-        appstate.token_exp_secs,
-        appstate.max_serialized_list_size,
-    )
-    .await?;
+    appstate
+        .service
+        .publish_status_list(
+            list_id,
+            Issuer(issuer),
+            sub,
+            statuses,
+            appstate.token_exp_secs,
+            appstate.max_serialized_list_size,
+        )
+        .await?;
 
     Ok(StatusCode::CREATED.into_response())
 }

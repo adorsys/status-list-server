@@ -161,9 +161,7 @@ async fn handle_historical_request(
         now - time
     );
 
-    use crate::domain::models::status_list::StatusListSnapshot;
-    let snapshot =
-        StatusListSnapshot::get_valid_at(state.service.history_repo(), list_id, time).await?;
+    let snapshot = state.service.get_historical_snapshot(list_id, time).await?;
 
     let etag = generate_historical_etag(&snapshot);
     let last_modified = format_http_date(snapshot.iat);
@@ -223,14 +221,11 @@ async fn fetch_status_record(
     list_id: &str,
     state: &AppState,
 ) -> Result<StatusListRecord, ApiError> {
-    use crate::domain::models::status_list::StatusListRecord;
-    StatusListRecord::get(
-        state.service.status_list_repo(),
-        state.service.status_list_cache(),
-        list_id,
-    )
-    .await
-    .map_err(Into::into)
+    state
+        .service
+        .get_status_list(list_id)
+        .await
+        .map_err(Into::into)
 }
 
 fn client_accepts_gzip(headers: &HeaderMap) -> bool {
