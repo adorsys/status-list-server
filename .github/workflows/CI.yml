@@ -22,7 +22,7 @@ jobs:
       - name: Install Zizmor
         uses: taiki-e/install-action@c44f6b046f1c29ae5918b1e0bfdbb2f1813836fd # v2
         with:
-          tool: zizmor
+          tool: zizmor@1.28.0
 
       - name: Run Zizmor
         run: zizmor .github/workflows/ || true
