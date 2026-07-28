@@ -831,8 +831,7 @@ mod tests {
         use sea_orm::{ConnectOptions, Database};
         use std::time::Instant;
         use testcontainers_modules::{
-            postgres::Postgres as PostgresImage,
-            testcontainers::runners::AsyncRunner,
+            postgres::Postgres as PostgresImage, testcontainers::runners::AsyncRunner,
         };
 
         let (_container, db_url) = if let Ok(url) = std::env::var("APP_DATABASE__URL") {
