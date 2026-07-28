@@ -490,12 +490,38 @@ pub struct RedisConfig {
     pub cert_cache_ttl: u64,
 }
 
+/// Connection-pool tuning for the production (Postgres/MySQL) backends.
+///
+/// Defaults are chosen so a single-replica deployment with a fresh Postgres
+/// instance works out of the box, while still being safe to run in
+/// production. Adjust `max` according to your server's `max_connections`
+/// divided by the number of application replicas.
+///
+/// PostgreSQL default `max_connections` = 100.
+/// Rule of thumb: pool.max = floor(pg_max_connections / replicas) - 5 (headroom)
+#[derive(Debug, Clone, Deserialize)]
+pub struct DatabasePoolConfig {
+    /// Maximum number of connections in the pool. Default: 5
+    pub max_connections: u32,
+    /// Minimum number of idle connections kept alive. Default: 1
+    pub min_connections: u32,
+    /// Seconds to wait for an available connection before returning an error. Default: 5
+    pub acquire_timeout_secs: u64,
+    /// Seconds for the TCP connect+auth handshake to the server. Default: 10
+    pub connect_timeout_secs: u64,
+    /// Seconds a connection may sit idle before being closed. Default: 600 (10 min)
+    pub idle_timeout_secs: u64,
+    /// Maximum age in seconds of any connection, regardless of activity. Default: 1800 (30 min)
+    pub max_lifetime_secs: u64,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct DatabaseConfig {
     pub url: SecretString,
-    /// Backend selection is used to validate the URL scheme at startup.
+    /// Validated against the URL scheme at startup.
     #[serde(default)]
     pub backend: DatabaseBackend,
+    pub pool: DatabasePoolConfig,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -609,6 +635,12 @@ impl Config {
                 "postgres://postgres:postgres@localhost:5432/status-list",
             )?
             .set_default("database.backend", "postgres")?
+            .set_default("database.pool.max_connections", 5u32)?
+            .set_default("database.pool.min_connections", 1u32)?
+            .set_default("database.pool.acquire_timeout_secs", 5u64)?
+            .set_default("database.pool.connect_timeout_secs", 10u64)?
+            .set_default("database.pool.idle_timeout_secs", 600u64)?
+            .set_default("database.pool.max_lifetime_secs", 1800u64)?
             .set_default("redis.uri", "redis://localhost:6379")?
             .set_default("redis.require_client_auth", false)?
             .set_default("redis.cert_cache_ttl", 3600)? // Default 1 hour
@@ -707,6 +739,12 @@ mod tests {
         assert_eq!(config.limits.max_statuses_per_request, 5_000);
         assert_eq!(config.limits.max_serialized_list_size, 1_048_576);
         assert_eq!(config.server.cert.dns.provider, None);
+        assert_eq!(config.database.pool.max_connections, 5);
+        assert_eq!(config.database.pool.min_connections, 1);
+        assert_eq!(config.database.pool.acquire_timeout_secs, 5);
+        assert_eq!(config.database.pool.connect_timeout_secs, 10);
+        assert_eq!(config.database.pool.idle_timeout_secs, 600);
+        assert_eq!(config.database.pool.max_lifetime_secs, 1800);
     }
 
     #[sealed_test(env = [
@@ -1281,5 +1319,23 @@ mod tests {
             result.is_err(),
             "an unknown backend value should fail to load config"
         );
+    }
+
+    #[sealed_test(env = [
+        ("APP_DATABASE__POOL__MAX_CONNECTIONS", "20"),
+        ("APP_DATABASE__POOL__MIN_CONNECTIONS", "2"),
+        ("APP_DATABASE__POOL__ACQUIRE_TIMEOUT_SECS", "3"),
+        ("APP_DATABASE__POOL__CONNECT_TIMEOUT_SECS", "15"),
+        ("APP_DATABASE__POOL__IDLE_TIMEOUT_SECS", "300"),
+        ("APP_DATABASE__POOL__MAX_LIFETIME_SECS", "900"),
+    ])]
+    fn test_pool_config_env_override() {
+        let config = Config::load().expect("Failed to load config");
+        assert_eq!(config.database.pool.max_connections, 20);
+        assert_eq!(config.database.pool.min_connections, 2);
+        assert_eq!(config.database.pool.acquire_timeout_secs, 3);
+        assert_eq!(config.database.pool.connect_timeout_secs, 15);
+        assert_eq!(config.database.pool.idle_timeout_secs, 300);
+        assert_eq!(config.database.pool.max_lifetime_secs, 900);
     }
 }

@@ -90,15 +90,35 @@ pub async fn build_state_with_cert_manager(
         ));
     }
 
-    #[cfg(feature = "sqlite")]
     let mut opt = ConnectOptions::new(db_url.to_string());
-    #[cfg(not(feature = "sqlite"))]
-    let opt = ConnectOptions::new(db_url.to_string());
+
     #[cfg(feature = "sqlite")]
     if db_backend == crate::config::DatabaseBackend::Sqlite {
         opt.max_connections(1);
         opt.map_sqlx_sqlite_opts(|o| o.foreign_keys(true));
+    } else {
+        let pool = &config.database.pool;
+        opt.max_connections(pool.max_connections)
+            .min_connections(pool.min_connections)
+            .acquire_timeout(Duration::from_secs(pool.acquire_timeout_secs))
+            .connect_timeout(Duration::from_secs(pool.connect_timeout_secs))
+            .idle_timeout(Duration::from_secs(pool.idle_timeout_secs))
+            .max_lifetime(Duration::from_secs(pool.max_lifetime_secs))
+            .sqlx_logging(false);
     }
+
+    #[cfg(not(feature = "sqlite"))]
+    {
+        let pool = &config.database.pool;
+        opt.max_connections(pool.max_connections)
+            .min_connections(pool.min_connections)
+            .acquire_timeout(Duration::from_secs(pool.acquire_timeout_secs))
+            .connect_timeout(Duration::from_secs(pool.connect_timeout_secs))
+            .idle_timeout(Duration::from_secs(pool.idle_timeout_secs))
+            .max_lifetime(Duration::from_secs(pool.max_lifetime_secs))
+            .sqlx_logging(false);
+    }
+
     let db = Database::connect(opt)
         .await
         .wrap_err("Failed to connect to database")?;
@@ -710,6 +730,14 @@ mod tests {
             database: DatabaseConfig {
                 url: SecretString::from("postgres://postgres:postgres@localhost/status-list"),
                 backend: crate::config::DatabaseBackend::Postgres,
+                pool: crate::config::DatabasePoolConfig {
+                    max_connections: 5,
+                    min_connections: 1,
+                    acquire_timeout_secs: 5,
+                    connect_timeout_secs: 10,
+                    idle_timeout_secs: 600,
+                    max_lifetime_secs: 1800,
+                },
             },
             redis: RedisConfig {
                 uri: SecretString::from("redis://localhost:6379"),
@@ -792,6 +820,52 @@ mod tests {
         assert!(
             err.to_string()
                 .contains("server.cert.store.signing_key_key")
+        );
+    }
+
+    /// Verifies that a saturated pool returns an error within `acquire_timeout`
+    /// rather than queuing indefinitely.
+    #[cfg(feature = "postgres-tests")]
+    #[tokio::test]
+    async fn test_pool_acquire_timeout_fires() {
+        use sea_orm::{ConnectOptions, Database};
+        use std::time::Instant;
+
+        let db_url = std::env::var("APP_DATABASE__URL")
+            .unwrap_or_else(|_| "postgres://postgres:postgres@localhost/status-list".to_string());
+
+        let mut opt = ConnectOptions::new(db_url);
+        opt.max_connections(1)
+            .acquire_timeout(Duration::from_secs(1))
+            .sqlx_logging(false);
+
+        let db = std::sync::Arc::new(
+            Database::connect(opt)
+                .await
+                .expect("Failed to connect for pool test")
+        );
+
+        // Hold the single connection with a long-running query
+        let db_clone = db.clone();
+        let _holder = tokio::spawn(async move {
+            let _ = sea_orm::ConnectionTrait::execute_unprepared(
+                db_clone.as_ref(),
+                "SELECT pg_sleep(10)",
+            )
+            .await;
+        });
+
+        // Give the holder time to acquire the connection
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        let start = Instant::now();
+        let result = sea_orm::ConnectionTrait::execute_unprepared(db.as_ref(), "SELECT 1").await;
+        let elapsed = start.elapsed();
+
+        assert!(result.is_err(), "Expected pool-exhaustion error, got Ok");
+        assert!(
+            elapsed < Duration::from_secs(3),
+            "acquire_timeout did not fire quickly enough: {elapsed:?}"
         );
     }
 }
