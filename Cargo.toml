@@ -172,6 +172,7 @@ opentelemetry-appender-tracing = "0.32"
 tracing-opentelemetry = "0.33"
 opentelemetry-prometheus = "0.32"
 prometheus = "0.14"
+metrics-process = { version = "2.4", default-features = false }
 
 # Error handling
 thiserror = "2.0"
