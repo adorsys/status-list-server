@@ -1,8 +1,4 @@
 //! Wire types for the status-list HTTP API.
-//!
-//! These carry the draft-21 JSON representation (statuses as bare integers)
-//! and are translated into domain values at the handler boundary — they are
-//! not persisted and must never leak into inner layers.
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -48,7 +44,6 @@ pub struct StatusEntry {
     pub status: Status,
 }
 
-/// Request payload for creating or updating status entries in a status list.
 #[derive(Deserialize)]
 pub struct StatusesRequest {
     pub statuses: Vec<StatusEntry>,
@@ -58,9 +53,6 @@ pub struct StatusesRequest {
 mod tests {
     use super::Status;
 
-    /// Wire format: statuses serialize as bare integers, and deserialization
-    /// rejects the reserved range 3..=255 (ported from the retired
-    /// `utils::lst_gen` suite).
     #[test]
     fn status_serde_integer_roundtrip() {
         assert_eq!(serde_json::from_str::<Status>("0").unwrap(), Status::VALID);

@@ -4,36 +4,29 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use crate::{
-    application::UseCaseError, domain, state::AppState, web::auth::errors::AuthenticationError,
-    web::errors::ApiError,
+    domain::models::credential::{Credential, Issuer, PublicJwk},
+    server::{AppState, error::ApiError},
 };
 
-/// Request payload carrying an issuer and its public JWK. Wire-only: the
-/// handler converts it into a `domain::Credential` at the boundary.
+/// Request body for registering issuer public key credentials.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct CredentialsRequest {
     pub issuer: String,
     pub public_key: Jwk,
 }
 
-#[derive(Debug)]
-pub enum CredentialError {
-    AlreadyExists,
-    Port,
-    AuthError(AuthenticationError),
-}
-
-impl From<AuthenticationError> for CredentialError {
-    fn from(value: AuthenticationError) -> Self {
-        CredentialError::AuthError(value)
-    }
-}
-
+/// HTTP handler for registering issuer public keys.
 pub async fn credential_handler(
-    State(appstate): State<AppState>,
-    Json(credential): Json<CredentialsRequest>,
+    State(state): State<AppState>,
+    Json(payload): Json<CredentialsRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
-    publish_credentials(credential.to_owned(), appstate).await?;
+    let public_key_bytes = serde_json::to_vec(&payload.public_key)
+        .map_err(|e| ApiError::bad_request("invalid_public_jwk", e.to_string()))?;
+    let credential = Credential {
+        issuer: Issuer(payload.issuer),
+        public_key: PublicJwk::try_new(public_key_bytes)?,
+    };
+    Credential::publish(state.service.credential_repo(), credential).await?;
     Ok((
         StatusCode::ACCEPTED,
         Json(json!({"status": "Credentials stored successfully"})),
@@ -41,27 +34,10 @@ pub async fn credential_handler(
         .into_response())
 }
 
-pub(super) async fn publish_credentials(
-    credentials: CredentialsRequest,
-    state: AppState,
-) -> Result<(), CredentialError> {
-    let public_key =
-        serde_json::to_vec(&credentials.public_key).map_err(|_| CredentialError::Port)?;
-    let credential = domain::Credential {
-        issuer: domain::Issuer(credentials.issuer),
-        public_key: domain::PublicJwk::try_new(public_key).map_err(|_| CredentialError::Port)?,
-    };
-    match state.credentials.publish_credential(credential).await {
-        Ok(()) => Ok(()),
-        Err(UseCaseError::AlreadyExists) => Err(CredentialError::AlreadyExists),
-        Err(_) => Err(CredentialError::Port),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{adapters::sea_orm::models::credentials, test_utils::test_app_state};
+    use crate::test_utils::test_app_state;
     use axum::{
         Router,
         body::Body,
@@ -101,7 +77,7 @@ mod tests {
             issuer: "test_issuer".into(),
             public_key: jwk.clone(),
         };
-        let model = credentials::Model {
+        let model = crate::outbound::sql::credentials::Model {
             issuer: credentials.issuer.clone(),
             public_key: credentials.public_key.clone().into(),
         };

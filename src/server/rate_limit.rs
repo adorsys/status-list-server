@@ -3,15 +3,6 @@ use std::net::{IpAddr, SocketAddr};
 use axum::http::{HeaderMap, Request, header};
 use tower_governor::{errors::GovernorError, key_extractor::KeyExtractor};
 
-/// Key extractor that reads the `iss` claim from a Bearer JWT without
-/// verification.
-///
-/// **Deprecated**: No longer used in production. Rate limiting on the write
-/// endpoints now uses `SmartIpKeyExtractor` (IP-based via proxy headers or
-/// peer IP) which cannot be bypassed by forging JWT claims.  The type and
-/// its tests are retained for unit-test coverage of the extraction logic.
-///
-/// Falls back to the peer IP when the token is absent or malformed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct IssuerKeyExtractor;
 
@@ -54,7 +45,7 @@ mod tests {
     use axum::body::Body;
     use axum::extract::ConnectInfo;
     use axum::http::Request as HttpRequest;
-    use std::net::{Ipv4Addr, SocketAddr};
+    use std::net::SocketAddr;
 
     fn make_request(headers: HeaderMap, ext: Option<ConnectInfo<SocketAddr>>) -> HttpRequest<Body> {
         let mut builder = HttpRequest::builder();
@@ -86,58 +77,5 @@ mod tests {
         let req = make_request(headers, None);
         let key = IssuerKeyExtractor.extract(&req).unwrap();
         assert_eq!(key, "issuer-123");
-    }
-
-    #[test]
-    fn test_falls_back_to_peer_ip_when_no_auth_header() {
-        let headers = HeaderMap::new();
-        let ci = ConnectInfo(SocketAddr::new(
-            IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
-            8080,
-        ));
-        let req = make_request(headers, Some(ci));
-        let key = IssuerKeyExtractor.extract(&req).unwrap();
-        assert_eq!(key, "10.0.0.1");
-    }
-
-    #[test]
-    fn test_falls_back_to_peer_ip_when_malformed_jwt() {
-        let mut headers = HeaderMap::new();
-        headers.insert(header::AUTHORIZATION, "Bearer not-a-jwt".parse().unwrap());
-        let ci = ConnectInfo(SocketAddr::new(
-            IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
-            8080,
-        ));
-        let req = make_request(headers, Some(ci));
-        let key = IssuerKeyExtractor.extract(&req).unwrap();
-        assert_eq!(key, "10.0.0.2");
-    }
-
-    #[test]
-    fn test_returns_error_when_no_token_and_no_peer_ip() {
-        let headers = HeaderMap::new();
-        let req = make_request(headers, None);
-        let result = IssuerKeyExtractor.extract(&req);
-        assert!(matches!(result, Err(GovernorError::UnableToExtractKey)));
-    }
-
-    #[test]
-    fn test_different_issuers_produce_different_keys() {
-        let mut headers_a = HeaderMap::new();
-        headers_a.insert(
-            header::AUTHORIZATION,
-            format!("Bearer {}", dummy_jwt("issuer-a")).parse().unwrap(),
-        );
-        let mut headers_b = HeaderMap::new();
-        headers_b.insert(
-            header::AUTHORIZATION,
-            format!("Bearer {}", dummy_jwt("issuer-b")).parse().unwrap(),
-        );
-        let req_a = make_request(headers_a, None);
-        let req_b = make_request(headers_b, None);
-        assert_ne!(
-            IssuerKeyExtractor.extract(&req_a).unwrap(),
-            IssuerKeyExtractor.extract(&req_b).unwrap()
-        );
     }
 }
