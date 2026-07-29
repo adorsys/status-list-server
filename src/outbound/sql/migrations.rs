@@ -2,6 +2,7 @@
 
 use sea_orm_migration::prelude::*;
 
+/// Main migrator struct for database migrations
 pub struct Migrator;
 
 #[async_trait::async_trait]
@@ -18,6 +19,7 @@ impl MigratorTrait for Migrator {
 pub(crate) mod tables {
     use super::*;
 
+    /// Migration type for creating database tables
     pub(crate) struct Migration;
 
     impl MigrationName for Migration {
@@ -29,7 +31,10 @@ pub(crate) mod tables {
     #[async_trait::async_trait]
     #[allow(elided_lifetimes_in_paths)]
     impl MigrationTrait for Migration {
+        /// Creates the necessary database tables if they don't exist
         async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+            // Credentials table. InnoDB is pinned on MySQL (see
+            // `pin_innodb_on_mysql`) so the FK below is enforced there.
             let mut credentials = Table::create();
             credentials
                 .table(Credentials::Table)
@@ -44,6 +49,7 @@ pub(crate) mod tables {
             pin_innodb_on_mysql(manager, &mut credentials);
             manager.create_table(credentials).await?;
 
+            // StatusLists table; InnoDB pinned on MySQL (see above).
             let mut status_lists = Table::create();
             status_lists
                 .table(StatusLists::Table)
@@ -58,6 +64,7 @@ pub(crate) mod tables {
                 .col(ColumnDef::new(StatusLists::StatusList).json().not_null())
                 .col(ColumnDef::new(StatusLists::Sub).string().not_null())
                 .foreign_key(
+                    // FK: StatusLists.Issuer must reference a valid Credentials.Issuer.
                     ForeignKey::create()
                         .name("fk_status_lists_issuer")
                         .from(StatusLists::Table, StatusLists::Issuer)
@@ -68,6 +75,7 @@ pub(crate) mod tables {
             pin_innodb_on_mysql(manager, &mut status_lists);
             manager.create_table(status_lists).await?;
 
+            // Create an index on list_id for faster lookups
             manager
                 .create_index(
                     Index::create()
@@ -79,6 +87,7 @@ pub(crate) mod tables {
                 )
                 .await?;
 
+            // Create index on issuer for faster lookups
             manager
                 .create_index(
                     Index::create()
@@ -90,6 +99,7 @@ pub(crate) mod tables {
                 )
                 .await?;
 
+            // Create index on sub for faster lookups in find_by_issuer
             manager
                 .create_index(
                     Index::create()
@@ -106,6 +116,7 @@ pub(crate) mod tables {
 
         #[allow(elided_lifetimes_in_paths)]
         async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+            // Drop indexes first
             manager
                 .drop_index(
                     Index::drop()
@@ -136,6 +147,7 @@ pub(crate) mod tables {
                 )
                 .await?;
 
+            // Drop tables in reverse order to handle foreign key constraints
             manager
                 .drop_table(
                     Table::drop()
@@ -174,9 +186,11 @@ pub(crate) mod tables {
     }
 }
 
+/// Migration to add updated_at column to status_lists table
 pub(crate) mod add_updated_at {
     use super::*;
 
+    /// Migration type for adding updated_at column
     pub(crate) struct Migration;
 
     impl MigrationName for Migration {
@@ -187,6 +201,7 @@ pub(crate) mod add_updated_at {
 
     #[async_trait::async_trait]
     impl MigrationTrait for Migration {
+        /// Adds updated_at column to status_lists table
         #[allow(elided_lifetimes_in_paths)]
         async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
             manager
@@ -203,6 +218,12 @@ pub(crate) mod add_updated_at {
                 )
                 .await?;
 
+            // Backfill pre-existing rows. With default(0) every legacy row
+            // would report Last-Modified = 1970-01-01, so any
+            // If-Modified-Since date >= 1970 would yield 304 and fresh
+            // tokens would never be served via the IMS path until the first
+            // update touches the row. Setting them to the migration run
+            // time makes the validator meaningful immediately.
             let now_secs = time::OffsetDateTime::now_utc().unix_timestamp();
             let update_stmt = sea_query::Query::update()
                 .table(StatusLists::Table)
@@ -215,6 +236,7 @@ pub(crate) mod add_updated_at {
                 .map(|_| ())
         }
 
+        /// Removes updated_at column from status_lists table
         #[allow(elided_lifetimes_in_paths)]
         async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
             manager
@@ -235,6 +257,7 @@ pub(crate) mod add_updated_at {
     }
 }
 
+/// Historical Status List Token payloads used for draft-21 §8.4 queries.
 pub(crate) mod status_list_history {
     use super::*;
 
@@ -250,6 +273,8 @@ pub(crate) mod status_list_history {
     #[allow(elided_lifetimes_in_paths)]
     impl MigrationTrait for Migration {
         async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+            // InnoDB pinned on MySQL (see `pin_innodb_on_mysql`) so a failing
+            // snapshot INSERT rolls the paired row UPDATE back.
             let mut history = Table::create();
             history
                 .table(StatusListHistory::Table)
@@ -337,6 +362,10 @@ pub(crate) mod status_list_history {
     }
 }
 
+/// Pins InnoDB on MySQL so `update_with_snapshot`'s UPDATE+INSERT roll back as a
+/// unit rather than depending on the server's default engine. MySQL-only:
+/// sea-query renders the engine option as a literal `ENGINE=InnoDB` clause on
+/// every backend, which SQLite and Postgres reject with a syntax error.
 fn pin_innodb_on_mysql(manager: &SchemaManager<'_>, stmt: &mut TableCreateStatement) {
     if manager.get_database_backend() == sea_orm::DatabaseBackend::MySql {
         stmt.engine("InnoDB");

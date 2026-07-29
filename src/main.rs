@@ -16,30 +16,42 @@ static GLOBAL: Jemalloc = Jemalloc;
 async fn main() -> Result<()> {
     config_tracing();
     dotenv().ok();
+    // Install the default panic and error report hooks
     color_eyre::install()?;
 
+    // Install the crypto provider
     aws_lc_rs::default_provider()
         .install_default()
         .map_err(|e| eyre!("Failed to set crypto provider: {e:?}"))?;
 
+    // Describe renewal metrics early so they appear in Prometheus immediately
     describe_renewal_metrics();
 
+    // Load configuration and build the app state
     let config = AppConfig::load()?;
     let (app_state, cert_manager) = build_state_with_cert_manager(&config).await?;
 
+    // Setup certificate renewal scheduler
     setup_cert_renewal_scheduler(
         cert_manager.clone(),
         &config.server.cert.renewal_cron_schedule,
     )
     .await?;
 
+    // Setup historical snapshot cleanup scheduler (runs daily at midnight UTC)
+    // This deletes snapshots older than history_retention_secs to prevent
+    // unbounded database growth and mitigate privacy risks (draft-21 §12.7)
     setup_history_cleanup_scheduler(app_state.clone(), "0 0 0 * * *").await?;
 
     let http_server = HttpServer::new(&config, app_state).await?;
 
+    // Zero-init cert-chain cache counters now that the metrics recorder is installed.
     cert_manager.init_cert_chain_cache_counters();
+
+    // Zero-init renewal counters so they appear in Prometheus scrapes
     cert_manager.init_renewal_counters();
 
+    // Initial certificate request
     tokio::spawn(async move {
         if let Err(e) = cert_manager.renew_cert_if_needed().await {
             warn!("Certificate initialization failed: {e}");

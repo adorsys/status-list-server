@@ -19,6 +19,7 @@ impl From<Jwk> for PublicKey {
     }
 }
 
+// Credentials entity
 pub(crate) mod credentials {
     use super::*;
 
@@ -67,6 +68,7 @@ impl From<Credentials> for credentials::ActiveModel {
     }
 }
 
+// Statuses entries
 pub(crate) mod status_lists {
     use super::*;
 
@@ -79,6 +81,7 @@ pub(crate) mod status_lists {
         #[sea_orm(column_type = "Json")]
         pub status_list: StatusList,
         pub sub: String,
+        /// Unix timestamp (seconds) of last modification
         pub updated_at: i64,
     }
 
@@ -90,6 +93,8 @@ pub(crate) mod status_lists {
 
 pub(crate) type StatusListRecord = status_lists::Model;
 
+// An immutable Status List Token payload and the interval during which it was
+// issued as valid. These rows are retained for draft-21 §8.4 resolution.
 pub(crate) mod status_list_history {
     use super::*;
 
@@ -114,6 +119,7 @@ pub(crate) mod status_list_history {
 
 pub(crate) type StatusListHistoryRecord = status_list_history::Model;
 
+// Persisted JSON shape of a status list column.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, FromJsonQueryResult)]
 pub struct StatusList {
     pub bits: u8,

@@ -10,5 +10,4 @@ pub mod server;
 pub mod setup;
 pub mod startup;
 
-pub use utils::bits_validation;
-pub use utils::cert_manager;
+pub use utils::{bits_validation, cert_manager};

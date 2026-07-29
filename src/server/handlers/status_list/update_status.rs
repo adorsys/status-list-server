@@ -12,6 +12,9 @@ use crate::{
 
 use super::{request::StatusesRequest, to_domain_entry};
 
+/// Update statuses in a status list.
+///
+/// Handle PATCH /status-lists/{list_id}/statuses request.
 pub async fn update_status(
     State(appstate): State<AppState>,
     Extension(issuer): Extension<String>,

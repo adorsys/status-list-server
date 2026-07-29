@@ -32,6 +32,12 @@ use super::{
     etag::{generate_etag, generate_historical_etag},
 };
 
+/// Handle GET /status-lists/{list_id} request.
+///
+/// This function handles the following cases:
+///
+/// - Retrieve a status list identified by its list id.
+/// - Retrieve a historical status list identified by its list id and time.
 pub async fn get_status_list(
     State(state): State<AppState>,
     Path(list_id): Path<String>,

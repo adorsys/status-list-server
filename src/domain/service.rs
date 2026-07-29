@@ -1,5 +1,7 @@
 //! Service container holding injected outbound adapter ports and domain business operations.
 
+use std::sync::Arc;
+
 use crate::domain::models::credential::{Credential, CredentialError, Issuer};
 use crate::domain::models::status_list::{
     StatusEntry, StatusList, StatusListError, StatusListRecord, StatusListSnapshot,
@@ -7,42 +9,6 @@ use crate::domain::models::status_list::{
 use crate::domain::ports::{
     CertificateProvider, CredentialRepo, StatusListCache, StatusListHistoryRepo, StatusListRepo,
 };
-use std::sync::Arc;
-
-pub fn current_unix_timestamp() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs() as i64
-}
-
-pub fn next_updated_at(previous: i64, now: i64) -> i64 {
-    now.max(previous + 1)
-}
-
-fn build_snapshot(record: &StatusListRecord, token_exp_secs: u64) -> StatusListSnapshot {
-    let iat = record.updated_at;
-    StatusListSnapshot {
-        snapshot_id: uuid::Uuid::new_v4().to_string(),
-        list_id: record.list_id.clone(),
-        issuer: record.issuer.clone(),
-        status_list: record.status_list.clone(),
-        sub: record.sub.clone(),
-        iat,
-        exp: iat + token_exp_secs as i64,
-    }
-}
-
-async fn invalidate_after_commit(cache: &dyn StatusListCache, list_id: &str) {
-    if let Err(_error) = cache.invalidate(list_id).await {
-        tracing::warn!(
-            list_id = %list_id,
-            error = ?_error,
-            "status list write committed, but cache invalidation failed; \
-             reads may be stale until the cache entry expires"
-        );
-    }
-}
 
 /// Container struct for building and exposing external service ports injected into handlers.
 #[derive(Clone)]
@@ -113,8 +79,6 @@ impl Service {
         self.cert_provider.as_ref()
     }
 
-    // --- Domain Business Operations ---
-
     /// Create and publish a new status list record, enforcing uniqueness and size invariants.
     #[allow(clippy::too_many_arguments)]
     pub async fn publish_status_list(
@@ -152,7 +116,6 @@ impl Service {
                 self.status_list_repo.insert(record.clone()).await?;
             }
         }
-
         Ok(record)
     }
 
@@ -286,5 +249,64 @@ impl Service {
         issuer: &str,
     ) -> Result<Option<Credential>, CredentialError> {
         self.credential_repo.find(issuer).await
+    }
+}
+
+impl std::fmt::Debug for Service {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Service")
+            .field(
+                "status_list_repo",
+                &std::any::type_name::<dyn StatusListRepo>(),
+            )
+            .field(
+                "credential_repo",
+                &std::any::type_name::<dyn CredentialRepo>(),
+            )
+            .field(
+                "status_list_cache",
+                &std::any::type_name::<dyn StatusListCache>(),
+            )
+            .field(
+                "history_repo",
+                &std::any::type_name::<dyn StatusListHistoryRepo>(),
+            )
+            .field(
+                "cert_provider",
+                &std::any::type_name::<dyn CertificateProvider>(),
+            )
+            .finish()
+    }
+}
+
+pub fn current_unix_timestamp() -> i64 {
+    time::UtcDateTime::now().unix_timestamp()
+}
+
+pub fn next_updated_at(previous: i64, now: i64) -> i64 {
+    now.max(previous + 1)
+}
+
+fn build_snapshot(record: &StatusListRecord, token_exp_secs: u64) -> StatusListSnapshot {
+    let iat = record.updated_at;
+    StatusListSnapshot {
+        snapshot_id: uuid::Uuid::new_v4().to_string(),
+        list_id: record.list_id.clone(),
+        issuer: record.issuer.clone(),
+        status_list: record.status_list.clone(),
+        sub: record.sub.clone(),
+        iat,
+        exp: iat + token_exp_secs as i64,
+    }
+}
+
+async fn invalidate_after_commit(cache: &dyn StatusListCache, list_id: &str) {
+    if let Err(error) = cache.invalidate(list_id).await {
+        tracing::warn!(
+            list_id = %list_id,
+            error = ?error,
+            "status list write committed, but cache invalidation failed; \
+             reads may be stale until the cache entry expires"
+        );
     }
 }

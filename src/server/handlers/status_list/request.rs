@@ -44,6 +44,7 @@ pub struct StatusEntry {
     pub status: Status,
 }
 
+/// Request payload for creating or updating status entries in a status list.
 #[derive(Deserialize)]
 pub struct StatusesRequest {
     pub statuses: Vec<StatusEntry>,

@@ -192,6 +192,11 @@ fn attach_metrics(router: Router, config: &Config) -> Router {
     router
 }
 
+/// Validates that the configured `aggregation_uri` (when set) has a path
+/// matching the actual aggregation route registered on the router.
+///
+/// This prevents operators from shipping tokens with a dead `aggregation_uri`
+/// member that points to a non-existent endpoint.
 fn validate_aggregation_uri(config: &Config) -> color_eyre::Result<()> {
     let Some(uri) = config.server.aggregation_uri.as_deref() else {
         return Ok(());

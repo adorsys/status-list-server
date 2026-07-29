@@ -9,7 +9,7 @@ use crate::domain::service::Service;
 use std::sync::Arc;
 
 /// Shared application state injected into web handlers.
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct AppState {
     /// Domain service container holding secondary ports.
     pub service: Arc<Service>,
