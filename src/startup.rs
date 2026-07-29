@@ -217,3 +217,200 @@ fn validate_aggregation_uri(config: &Config) -> color_eyre::Result<()> {
     tracing::info!("aggregation_uri validated: {uri}");
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+    use tower::ServiceExt;
+
+    #[tokio::test]
+    async fn test_strict_governor_returns_429_when_burst_exceeded() {
+        async fn handler() -> impl IntoResponse {
+            "ok"
+        }
+
+        let strict = Arc::new(
+            GovernorConfigBuilder::default()
+                .burst_size(2)
+                .period(Duration::from_secs(600))
+                .finish()
+                .expect("non-zero burst/period"),
+        );
+        let permissive = Arc::new(
+            GovernorConfigBuilder::default()
+                .burst_size(100)
+                .period(Duration::from_secs(60))
+                .finish()
+                .expect("non-zero burst/period"),
+        );
+
+        let router = Router::new()
+            .route("/write", post(handler))
+            .layer(GovernorLayer::new(strict.clone()))
+            .route("/read", axum::routing::get(handler))
+            .layer(GovernorLayer::new(permissive.clone()))
+            .with_state(());
+
+        let make_request = |path: &'static str, method: Method| {
+            Request::builder()
+                .method(method)
+                .uri(path)
+                .extension(axum::extract::ConnectInfo(SocketAddr::new(
+                    IpAddr::V4(Ipv4Addr::LOCALHOST),
+                    12345,
+                )))
+                .body(Body::empty())
+                .unwrap()
+        };
+
+        let resp = router
+            .clone()
+            .oneshot(make_request("/write", Method::POST))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let resp = router
+            .clone()
+            .oneshot(make_request("/write", Method::POST))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let resp = router
+            .clone()
+            .oneshot(make_request("/write", Method::POST))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
+    }
+
+    #[tokio::test]
+    async fn test_request_body_limit_returns_413_when_exceeded() {
+        async fn handler() -> impl IntoResponse {
+            "ok"
+        }
+
+        let router = Router::new()
+            .route("/write", post(handler))
+            .layer(RequestBodyLimitLayer::new(16))
+            .with_state(());
+
+        let oversized_body = "X".repeat(1024);
+        let request = Request::builder()
+            .method(Method::POST)
+            .uri("/write")
+            .header("content-type", "text/plain")
+            .header("content-length", oversized_body.len().to_string())
+            .body(Body::from(oversized_body))
+            .unwrap();
+
+        let response = router.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    }
+
+    #[tokio::test]
+    async fn test_request_body_limit_allows_normal_body() {
+        async fn handler() -> impl IntoResponse {
+            "ok"
+        }
+
+        let router = Router::new()
+            .route("/write", post(handler))
+            .layer(RequestBodyLimitLayer::new(64))
+            .with_state(());
+
+        let request = Request::builder()
+            .method(Method::POST)
+            .uri("/write")
+            .header("content-type", "text/plain")
+            .header("content-length", "12")
+            .body(Body::from("hello world!".to_string()))
+            .unwrap();
+
+        let response = router.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_smart_ip_governor_independent_buckets_per_ip() {
+        async fn handler() -> impl IntoResponse {
+            "ok"
+        }
+
+        let governor = Arc::new(
+            GovernorConfigBuilder::default()
+                .burst_size(1)
+                .period(Duration::from_secs(600))
+                .key_extractor(SmartIpKeyExtractor)
+                .finish()
+                .expect("non-zero burst/period"),
+        );
+
+        let router = Router::new()
+            .route("/write", axum::routing::put(handler))
+            .layer(GovernorLayer::new(governor))
+            .with_state(());
+
+        fn make_request(ip: IpAddr) -> Request<Body> {
+            Request::builder()
+                .method(Method::PUT)
+                .uri("/write")
+                .extension(axum::extract::ConnectInfo(SocketAddr::new(ip, 12345)))
+                .body(Body::empty())
+                .unwrap()
+        }
+
+        let ip_a = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let ip_b = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+
+        let resp = router.clone().oneshot(make_request(ip_a)).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let resp = router.clone().oneshot(make_request(ip_b)).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let resp = router.clone().oneshot(make_request(ip_a)).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
+    }
+
+    #[tokio::test]
+    async fn test_connect_info_populated_for_real_http_requests() {
+        use axum::extract::ConnectInfo;
+        use reqwest::Client;
+
+        async fn handler(ConnectInfo(addr): ConnectInfo<SocketAddr>) -> impl IntoResponse {
+            addr.ip().to_string()
+        }
+
+        let router = Router::new().route("/info", get(handler));
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let local_addr = listener.local_addr().unwrap();
+
+        let serve = axum::serve(
+            listener,
+            router.into_make_service_with_connect_info::<SocketAddr>(),
+        );
+
+        tokio::spawn(async move {
+            serve.await.unwrap();
+        });
+
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        let client = Client::new();
+        let resp = client
+            .get(format!("http://{}/info", local_addr))
+            .send()
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = resp.text().await.unwrap();
+        let parsed: IpAddr = body.parse().unwrap();
+        assert!(parsed.is_loopback());
+    }
+}

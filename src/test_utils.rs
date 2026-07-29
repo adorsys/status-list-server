@@ -1,16 +1,13 @@
 use crate::domain::ports::{CredentialRepo, StatusListHistoryRepo, StatusListRepo};
 use crate::domain::service::Service;
 use crate::outbound::cache::MokaStatusListCache;
-use crate::outbound::cert::AcmeCertificateProvider;
 use crate::outbound::memory::{MemoryCredentials, MemoryStatusListHistory, MemoryStatusLists};
 #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mysql"))]
 use crate::outbound::sql::{
     SeaOrmStore, SqlCredentialRepo, SqlStatusListHistoryRepo, SqlStatusListRepo,
 };
 use crate::{
-    cert_manager::storage::StorageError,
-    server::AppState,
-    utils::cert_manager::{CertManager, storage::Storage},
+    cert_manager::storage::StorageError, server::AppState, utils::cert_manager::storage::Storage,
 };
 use async_trait::async_trait;
 use std::{collections::HashMap, sync::Arc};

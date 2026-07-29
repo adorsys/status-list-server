@@ -386,4 +386,45 @@ mod test {
         assert_eq!(records[0].list_id, "list1");
         assert_eq!(records[0].sub, "https://example.com/statuslists/list1");
     }
+
+    #[tokio::test]
+    async fn test_status_list_find_all_status_list_uris() {
+        let models = vec![status_lists::Model {
+            list_id: "list1".to_string(),
+            issuer: "https://example.com/list1".to_string(),
+            status_list: StatusList {
+                bits: 1,
+                lst: "abc".to_string(),
+            },
+            sub: "https://example.com/list1".to_string(),
+            updated_at: 0,
+        }];
+
+        let db_conn = Arc::new(
+            MockDatabase::new(DatabaseBackend::Postgres)
+                .append_query_results::<status_lists::Model, Vec<_>, _>(vec![models])
+                .into_connection(),
+        );
+
+        let store = SeaOrmStore::<StatusListRecord>::new(db_conn);
+        let uris = store.find_all_status_list_uris().await.unwrap();
+        assert_eq!(uris.len(), 1);
+        assert_eq!(uris[0], "https://example.com/list1");
+    }
+
+    #[tokio::test]
+    async fn test_delete_older_than_deletes_expired_snapshots() {
+        let db_conn = Arc::new(
+            MockDatabase::new(DatabaseBackend::Postgres)
+                .append_exec_results(vec![sea_orm::MockExecResult {
+                    rows_affected: 3,
+                    last_insert_id: 0,
+                }])
+                .into_connection(),
+        );
+
+        let store = SeaOrmStore::<StatusListHistoryRecord>::new(db_conn);
+        let deleted = store.delete_older_than(1000).await.unwrap();
+        assert_eq!(deleted, 3);
+    }
 }

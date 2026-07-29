@@ -564,4 +564,16 @@ mod tests {
             build_dns_challenge_handler(DnsProviderKind::Gcloud, &mut config, &domains).is_ok()
         );
     }
+
+    #[tokio::test]
+    async fn build_state_succeeds_under_default_config() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let mut config = AppConfig::load().expect("Failed to load config");
+        config.database.backend = crate::config::DatabaseBackend::Memory;
+        config.server.cert.provisioning_strategy = "store".to_string();
+        config.server.cert.store.source = "filesystem".to_string();
+        config.server.cert.store.certificate_path = Some("test_data/test_cert.pem".into());
+        config.server.cert.store.signing_key_path = Some("test_data/ec-private.pem".into());
+        assert!(build_state(&config).await.is_ok());
+    }
 }

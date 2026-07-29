@@ -53,7 +53,6 @@ pub async fn update_status(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::models::status_list::Status as DomainStatus;
     use crate::server::handlers::status_list::publish_status::publish_status;
     use crate::server::handlers::status_list::request::{
         Status as RequestStatus, StatusEntry as RequestStatusEntry,

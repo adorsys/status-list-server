@@ -57,4 +57,73 @@ mod tests {
         assert_eq!(hex_part.len(), 64);
         assert!(hex_part.chars().all(|c| c.is_ascii_hexdigit()));
     }
+
+    #[test]
+    fn test_generate_etag_determinism() {
+        let record1 = create_test_record();
+        let record2 = create_test_record();
+
+        let etag1 = generate_etag(&record1);
+        let etag2 = generate_etag(&record2);
+
+        assert_eq!(etag1, etag2);
+    }
+
+    #[test]
+    fn test_generate_etag_content_only_stability() {
+        let record1 = create_test_record();
+        let record2 = create_test_record();
+
+        assert_eq!(generate_etag(&record1), generate_etag(&record2));
+    }
+
+    #[test]
+    fn test_generate_etag_updated_at_independence() {
+        let mut record1 = create_test_record();
+        let mut record2 = create_test_record();
+        record1.updated_at = 1000;
+        record2.updated_at = 2000;
+
+        assert_eq!(generate_etag(&record1), generate_etag(&record2));
+    }
+
+    #[test]
+    fn test_generate_etag_bits_sensitivity() {
+        let mut record1 = create_test_record();
+        let mut record2 = create_test_record();
+        record1.status_list.bits = 1;
+        record2.status_list.bits = 2;
+
+        assert_ne!(generate_etag(&record1), generate_etag(&record2));
+    }
+
+    #[test]
+    fn test_generate_etag_lst_sensitivity() {
+        let mut record1 = create_test_record();
+        let mut record2 = create_test_record();
+        record1.status_list.lst = "lst1".to_string();
+        record2.status_list.lst = "lst2".to_string();
+
+        assert_ne!(generate_etag(&record1), generate_etag(&record2));
+    }
+
+    #[test]
+    fn test_generate_etag_issuer_sensitivity() {
+        let mut record1 = create_test_record();
+        let mut record2 = create_test_record();
+        record1.issuer = Issuer("https://issuer1.com".to_string());
+        record2.issuer = Issuer("https://issuer2.com".to_string());
+
+        assert_ne!(generate_etag(&record1), generate_etag(&record2));
+    }
+
+    #[test]
+    fn test_generate_etag_sub_sensitivity() {
+        let mut record1 = create_test_record();
+        let mut record2 = create_test_record();
+        record1.sub = "https://example.com/1".to_string();
+        record2.sub = "https://example.com/2".to_string();
+
+        assert_ne!(generate_etag(&record1), generate_etag(&record2));
+    }
 }

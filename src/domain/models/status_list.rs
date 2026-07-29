@@ -674,4 +674,37 @@ mod tests {
         assert_eq!(result.bits, 1);
         assert_eq!(result.lst, "");
     }
+
+    #[test]
+    fn create_rejects_negative_index() {
+        let updates = vec![entry(-1, Status::Valid)];
+        assert!(matches!(
+            StatusList::create(updates),
+            Err(StatusListError::InvalidIndex)
+        ));
+    }
+
+    #[test]
+    fn update_rejects_negative_index() {
+        let list = StatusList::create(vec![entry(0, Status::Valid)]).unwrap();
+        assert!(matches!(
+            list.update(vec![entry(-5, Status::Invalid)]),
+            Err(StatusListError::InvalidIndex)
+        ));
+    }
+
+    #[test]
+    fn update_with_no_entries_is_a_noop() {
+        let list = StatusList::create(vec![entry(0, Status::Valid)]).unwrap();
+        let updated = list.update(vec![]).unwrap();
+        assert_eq!(list, updated);
+    }
+
+    #[test]
+    fn update_on_empty_created_list_works_end_to_end() {
+        let list = StatusList::create(vec![]).unwrap();
+        let updated = list.update(vec![entry(0, Status::Invalid)]).unwrap();
+        assert_eq!(updated.bits, 1);
+        assert!(!updated.lst.is_empty());
+    }
 }

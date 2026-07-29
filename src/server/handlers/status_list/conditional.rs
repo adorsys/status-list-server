@@ -120,4 +120,206 @@ mod tests {
         let result = evaluate_if_none_match(Some(if_none_match), current_etag);
         assert_eq!(result, ConditionalResponse::NotModified);
     }
+
+    #[test]
+    fn test_evaluate_if_none_match_single_etag_no_match() {
+        let current_etag = r#"W/"abc123""#;
+        let if_none_match = r#"W/"different""#;
+
+        let result = evaluate_if_none_match(Some(if_none_match), current_etag);
+        assert_eq!(result, ConditionalResponse::Modified);
+    }
+
+    #[test]
+    fn test_evaluate_if_none_match_weak_strong_match() {
+        let current_etag = r#"W/"abc123""#;
+        let if_none_match = r#""abc123""#;
+
+        let result = evaluate_if_none_match(Some(if_none_match), current_etag);
+        assert_eq!(result, ConditionalResponse::NotModified);
+    }
+
+    #[test]
+    fn test_evaluate_if_none_match_strong_weak_match() {
+        let current_etag = r#""abc123""#;
+        let if_none_match = r#"W/"abc123""#;
+
+        let result = evaluate_if_none_match(Some(if_none_match), current_etag);
+        assert_eq!(result, ConditionalResponse::NotModified);
+    }
+
+    #[test]
+    fn test_evaluate_if_none_match_multiple_etags_with_match() {
+        let current_etag = r#"W/"abc123""#;
+        let if_none_match = r#"W/"xyz789", W/"abc123", W/"def456""#;
+
+        let result = evaluate_if_none_match(Some(if_none_match), current_etag);
+        assert_eq!(result, ConditionalResponse::NotModified);
+    }
+
+    #[test]
+    fn test_evaluate_if_none_match_multiple_etags_no_match() {
+        let current_etag = r#"W/"abc123""#;
+        let if_none_match = r#"W/"xyz789", W/"def456""#;
+
+        let result = evaluate_if_none_match(Some(if_none_match), current_etag);
+        assert_eq!(result, ConditionalResponse::Modified);
+    }
+
+    #[test]
+    fn test_evaluate_if_none_match_wildcard() {
+        let current_etag = r#"W/"abc123""#;
+        let if_none_match = "*";
+
+        let result = evaluate_if_none_match(Some(if_none_match), current_etag);
+        assert_eq!(result, ConditionalResponse::NotModified);
+    }
+
+    #[test]
+    fn test_evaluate_if_none_match_none_header() {
+        let current_etag = r#"W/"abc123""#;
+
+        let result = evaluate_if_none_match(None, current_etag);
+        assert_eq!(result, ConditionalResponse::Modified);
+    }
+
+    #[test]
+    fn test_evaluate_if_none_match_malformed_no_quotes() {
+        let current_etag = r#"W/"abc123""#;
+        let if_none_match = "abc123";
+
+        let result = evaluate_if_none_match(Some(if_none_match), current_etag);
+        assert_eq!(result, ConditionalResponse::NotModified);
+    }
+
+    #[test]
+    fn test_evaluate_if_modified_since_not_modified() {
+        let updated_at = 1000000;
+        let client_time = 1000000;
+        let if_modified_since = format_http_date(client_time);
+
+        let result = evaluate_if_modified_since(Some(&if_modified_since), updated_at);
+        assert_eq!(result, ConditionalResponse::NotModified);
+    }
+
+    #[test]
+    fn test_evaluate_if_modified_since_modified() {
+        let updated_at = 1000000;
+        let client_time = 999999;
+        let if_modified_since = format_http_date(client_time);
+
+        let result = evaluate_if_modified_since(Some(&if_modified_since), updated_at);
+        assert_eq!(result, ConditionalResponse::Modified);
+    }
+
+    #[test]
+    fn test_evaluate_if_modified_since_client_newer() {
+        let updated_at = 999999;
+        let client_time = 1000000;
+        let if_modified_since = format_http_date(client_time);
+
+        let result = evaluate_if_modified_since(Some(&if_modified_since), updated_at);
+        assert_eq!(result, ConditionalResponse::NotModified);
+    }
+
+    #[test]
+    fn test_evaluate_if_modified_since_none_header() {
+        let updated_at = 1000000;
+
+        let result = evaluate_if_modified_since(None, updated_at);
+        assert_eq!(result, ConditionalResponse::Modified);
+    }
+
+    #[test]
+    fn test_evaluate_if_modified_since_malformed() {
+        let updated_at = 1000000;
+        let if_modified_since = "not a valid date";
+
+        let result = evaluate_if_modified_since(Some(if_modified_since), updated_at);
+        assert_eq!(result, ConditionalResponse::Modified);
+    }
+
+    #[test]
+    fn test_evaluate_conditional_request_if_none_match_precedence() {
+        let current_etag = r#"W/"abc123""#;
+        let if_none_match = r#"W/"abc123""#;
+        let updated_at = 1000000;
+        let if_modified_since = format_http_date(999999);
+
+        let result = evaluate_conditional_request(
+            Some(if_none_match),
+            Some(&if_modified_since),
+            current_etag,
+            updated_at,
+        );
+        assert_eq!(result, ConditionalResponse::NotModified);
+    }
+
+    #[test]
+    fn test_evaluate_conditional_request_if_modified_since_fallback() {
+        let current_etag = r#"W/"abc123""#;
+        let updated_at = 999999;
+        let if_modified_since = format_http_date(1000000);
+
+        let result =
+            evaluate_conditional_request(None, Some(&if_modified_since), current_etag, updated_at);
+        assert_eq!(result, ConditionalResponse::NotModified);
+    }
+
+    #[test]
+    fn test_evaluate_conditional_request_no_headers() {
+        let current_etag = r#"W/"abc123""#;
+        let updated_at = 1000000;
+
+        let result = evaluate_conditional_request(None, None, current_etag, updated_at);
+        assert_eq!(result, ConditionalResponse::Modified);
+    }
+
+    #[test]
+    fn test_format_http_date() {
+        let timestamp = 1672531200;
+        let formatted = format_http_date(timestamp);
+
+        assert!(formatted.contains("2023"));
+        assert!(formatted.contains("GMT"));
+        assert!(!formatted.contains("+0000"));
+    }
+
+    #[test]
+    fn test_format_http_date_rejects_rfc2822_zone() {
+        let timestamp = 1672531200;
+        let formatted = format_http_date(timestamp);
+
+        assert!(formatted.contains("GMT"));
+        assert!(!formatted.contains("+0000"));
+    }
+
+    #[test]
+    fn test_parse_http_date_roundtrip() {
+        let timestamp = 1672531200;
+        let formatted = format_http_date(timestamp);
+        let parsed = parse_http_date(&formatted);
+
+        assert_eq!(parsed, Some(timestamp));
+    }
+
+    #[test]
+    fn test_parse_http_date_invalid() {
+        let result = parse_http_date("not a date");
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_parse_http_date_valid_rfc2822() {
+        let date_str = "Sun, 01 Jan 2023 00:00:00 +0000";
+        let result = parse_http_date(date_str);
+        assert!(result.is_some());
+    }
+
+    #[test]
+    fn test_parse_http_date_valid_imf_fixdate() {
+        let date_str = "Sun, 06 Nov 1994 08:49:37 GMT";
+        let result = parse_http_date(date_str);
+        assert!(result.is_some());
+    }
 }

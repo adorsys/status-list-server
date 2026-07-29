@@ -156,3 +156,78 @@ impl IntoApiError for CredentialError {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_status_list_error_converted_to_api_error() {
+        let err = StatusListError::NotFound;
+        let api_err: ApiError = err.into();
+        assert_eq!(api_err.status, StatusCode::NOT_FOUND);
+        assert_eq!(api_err.error, "status_list_not_found");
+    }
+
+    #[test]
+    fn test_status_list_error_all_variants_convert() {
+        let cases = vec![
+            (
+                StatusListError::InvalidIndex,
+                StatusCode::BAD_REQUEST,
+                "invalid_index",
+            ),
+            (
+                StatusListError::AlreadyExists,
+                StatusCode::CONFLICT,
+                "status_list_already_exists",
+            ),
+            (
+                StatusListError::NotFound,
+                StatusCode::NOT_FOUND,
+                "status_list_not_found",
+            ),
+            (
+                StatusListError::HistoricalNotFound,
+                StatusCode::NOT_FOUND,
+                "historical_status_list_not_found",
+            ),
+            (
+                StatusListError::InvalidHistoricalTime,
+                StatusCode::BAD_REQUEST,
+                "invalid_time",
+            ),
+            (
+                StatusListError::IssuerMismatch,
+                StatusCode::FORBIDDEN,
+                "issuer_mismatch",
+            ),
+            (
+                StatusListError::TooLarge,
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "status_list_too_large",
+            ),
+        ];
+
+        for (err, expected_status, expected_code) in cases {
+            let api_err: ApiError = err.into();
+            assert_eq!(api_err.status, expected_status, "Status mismatch");
+            assert_eq!(api_err.error.as_ref(), expected_code, "Code mismatch");
+        }
+    }
+
+    #[test]
+    fn test_status_list_error_into_response_contains_snake_case_code() {
+        let err = StatusListError::NotFound;
+        let api_err: ApiError = err.into();
+        let response = api_err.into_response();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[test]
+    fn test_api_error_internal_logs_and_returns_500() {
+        let api_err = ApiError::internal("something broke");
+        assert_eq!(api_err.status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(api_err.error, "internal_error");
+    }
+}
