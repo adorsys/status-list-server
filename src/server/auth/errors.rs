@@ -45,6 +45,22 @@ impl AuthenticationError {
 impl IntoResponse for AuthenticationError {
     fn into_response(self) -> axum::response::Response {
         let status = self.get_status();
+        if status.is_server_error() {
+            tracing::error!(
+                status = %status,
+                error = %self.get_error_code(),
+                message = %self.get_error_message(),
+                "Authentication server error"
+            );
+        } else {
+            tracing::warn!(
+                status = %status,
+                error = %self.get_error_code(),
+                message = %self.get_error_message(),
+                "Authentication failure"
+            );
+        }
+
         let body = json!({
             "error": self.get_error_code(),
             "message": self.get_error_message(),

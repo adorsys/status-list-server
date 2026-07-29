@@ -78,6 +78,34 @@ impl ApiError {
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
+        match self.status {
+            // 409 Conflict is logged at INFO level to avoid tripping alert systems during high write contention.
+            StatusCode::CONFLICT => {
+                tracing::info!(
+                    status = %self.status,
+                    error = %self.error,
+                    error_description = ?self.error_description,
+                    "API request conflict"
+                );
+            }
+            status if status.is_server_error() => {
+                tracing::error!(
+                    status = %status,
+                    error = %self.error,
+                    error_description = ?self.error_description,
+                    "API server error"
+                );
+            }
+            status => {
+                tracing::warn!(
+                    status = %status,
+                    error = %self.error,
+                    error_description = ?self.error_description,
+                    "API client error"
+                );
+            }
+        }
+
         let body = ErrorResponse {
             error: self.error,
             error_description: self.error_description,
