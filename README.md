@@ -25,7 +25,7 @@ For a detailed explanation of the architecture, see the [hexagonal architecture 
 | Status List Updates             | ✅ Implemented | Partial updates via `PATCH /api/v1/status-lists/{id}/statuses`      |
 | JWT Status List Format          | ✅ Implemented | JWS Compact Serialization with `exp`/`ttl`                          |
 | CWT Status List Format          | ✅ Implemented | COSE_Sign1_Tagged (tag 18) with `exp`/`ttl`                         |
-| Gzip Compression                | ✅ Implemented | Applied to both JWT and CWT responses                               |
+| Gzip Compression                | ✅ Implemented | Applied to JWT responses only (draft-21 section 8.2)                |
 | HTTP Content Negotiation        | ⚠️ Partial     | Exact match only; RFC 9110 patterns (`*/*`, `q=`) not yet supported |
 | Historical Resolution (`time=`) | ✅ Implemented | Optional feature for time-based status queries                      |
 | Status List Aggregation         | ✅ Implemented | `GET /api/v1/aggregation` + optional `aggregation_uri` token member |

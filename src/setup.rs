@@ -643,18 +643,20 @@ mod tests {
 #[cfg(test)]
 mod general_tests {
     use super::*;
+    use sealed_test::prelude::*;
 
-    #[tokio::test]
-    async fn build_state_succeeds_under_default_config() {
+    #[sealed_test(env = [
+        ("APP_ENV", "development"),
+        ("APP_DATABASE__BACKEND", "memory"),
+        ("APP_DATABASE__URL", "memory:")
+    ])]
+    fn build_state_succeeds_under_default_config() {
         let _ = rustls::crypto::ring::default_provider().install_default();
-        let mut config = AppConfig::load().expect("Failed to load config");
-        #[cfg(feature = "memory")]
-        {
-            config.database.backend = DatabaseBackend::Memory;
-        }
-        config.server.cert.provisioning_strategy = "store".to_string();
-        config.server.cert.store.certificate_path = Some("test_data/test_cert.pem".to_string());
-        config.server.cert.store.signing_key_path = Some("test_data/ec-private.pem".to_string());
-        assert!(build_state(&config).await.is_ok());
+        let config = AppConfig::load().expect("Failed to load config");
+        tokio::runtime::Runtime::new().unwrap().block_on(async {
+            if let Err(ref e) = build_state(&config).await {
+                panic!("build_state failed: {e:?}");
+            }
+        });
     }
 }

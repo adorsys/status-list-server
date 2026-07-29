@@ -627,11 +627,8 @@ impl Config {
         let (default_provisioning_strategy, default_cert_path, default_key_path) =
             ("acme", Option::<String>::None, Option::<String>::None);
         #[cfg(not(feature = "acme"))]
-        let (default_provisioning_strategy, default_cert_path, default_key_path) = (
-            "store",
-            Some("test_data/test_cert.pem".to_string()),
-            Some("test_data/ec-private.pem".to_string()),
-        );
+        let (default_provisioning_strategy, default_cert_path, default_key_path) =
+            ("store", Option::<String>::None, Option::<String>::None);
 
         #[cfg(feature = "acme")]
         let default_chain_cache_ttl = crate::utils::cert_manager::DEFAULT_CHAIN_CACHE_TTL.as_secs();
@@ -752,11 +749,8 @@ mod tests {
         let (expected_strategy, expected_cert_path, expected_key_path) =
             ("acme", Option::<String>::None, Option::<String>::None);
         #[cfg(not(feature = "acme"))]
-        let (expected_strategy, expected_cert_path, expected_key_path) = (
-            "store",
-            Some("test_data/test_cert.pem".to_string()),
-            Some("test_data/ec-private.pem".to_string()),
-        );
+        let (expected_strategy, expected_cert_path, expected_key_path) =
+            ("store", Option::<String>::None, Option::<String>::None);
         assert_eq!(config.server.cert.provisioning_strategy, expected_strategy);
         assert_eq!(config.server.cert.store.source, "filesystem");
         assert_eq!(
@@ -1168,6 +1162,7 @@ mod tests {
     }
 
     #[sealed_test(env = [
+        ("APP_DATABASE__URL", "postgres://postgres:postgres@localhost:5432/status-list"),
         ("APP_REDIS__URI", "rediss://user:password@localhost:6379/redis"),
         ("APP_REDIS__REQUIRE_CLIENT_AUTH", "true"),
         ("APP_SERVER__CERT__EMAIL", "test@gmail.com"),

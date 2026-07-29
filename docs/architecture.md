@@ -102,7 +102,9 @@ The Status List Server is built using modern, performant, and scalable technolog
 - **jsonwebtoken**: Used for encoding and decoding Status List Tokens in JWT (JSON Web Token) format.
 - **coset**: Used for encoding and decoding Status List Tokens in CWT (CBOR Web Token) format.
 
-- **Database**: Relational database storage for status lists (keyed by `list_id`) and issuer credentials (keyed by `issuer`) using SeaORM.
+#### Storage
+
+- **Database**: Relational database storage for status lists (keyed by `list_id`) and issuer credentials (keyed by `issuer`) using SeaORM. See the [Database Overview](../src/outbound/sql/README.md) for full schema details.
 
 ### Architecture & Project Structure
 

@@ -66,9 +66,10 @@ pub async fn get_status_list(
             accept.to_string()
         }
         Some(_) => {
-            return Err(ApiError::bad_request(
+            return Err(ApiError::new(
+                StatusCode::NOT_ACCEPTABLE,
                 "invalid_accept_header",
-                "Unsupported Accept header",
+                Some("Unsupported Accept header".into()),
             ));
         }
     };

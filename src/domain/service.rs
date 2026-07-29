@@ -208,15 +208,19 @@ impl Service {
         &self,
         list_id: &str,
     ) -> Result<StatusListRecord, StatusListError> {
-        if let Some(record) = self.status_list_cache.get(list_id).await? {
-            return Ok(record.as_ref().clone());
+        match self.status_list_cache.get(list_id).await {
+            Ok(Some(record)) => return Ok(record.as_ref().clone()),
+            Ok(None) => {}
+            Err(e) => tracing::warn!("Cache get failed for list {list_id}: {e}"),
         }
         let record = self
             .status_list_repo
             .find(list_id)
             .await?
             .ok_or(StatusListError::NotFound)?;
-        self.status_list_cache.put(record.clone()).await?;
+        if let Err(e) = self.status_list_cache.put(record.clone()).await {
+            tracing::warn!("Cache put failed for list {list_id}: {e}");
+        }
         Ok(record)
     }
 

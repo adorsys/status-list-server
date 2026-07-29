@@ -135,9 +135,7 @@ impl IntoApiError for StatusListError {
             StatusListError::InvalidIndex => {
                 ApiError::bad_request("invalid_index", "Invalid status list index")
             }
-            StatusListError::InvalidStatusList(msg) => {
-                ApiError::bad_request("invalid_status_list", msg)
-            }
+            StatusListError::InvalidStatusList(msg) => ApiError::bad_request("invalid_input", msg),
             StatusListError::CorruptStoredList(msg) => ApiError::internal(msg),
             StatusListError::AlreadyExists => {
                 ApiError::conflict("status_list_already_exists", "Status list already exists")
@@ -150,26 +148,27 @@ impl IntoApiError for StatusListError {
                 "Historical status list token not found",
             ),
             StatusListError::InvalidHistoricalTime => {
-                ApiError::bad_request("invalid_time", "Invalid historical query time")
+                ApiError::bad_request("invalid_historical_time", "Invalid historical query time")
             }
             StatusListError::IssuerMismatch => {
                 ApiError::forbidden("issuer_mismatch", "Issuer does not own the status list")
             }
             StatusListError::TooLarge => ApiError::unprocessable(
-                "status_list_too_large",
+                "status_too_large",
                 "Serialized status list size exceeds configured maximum",
             ),
-            StatusListError::TooManyStatuses { count, max } => ApiError::unprocessable(
+            StatusListError::TooManyStatuses { count, max } => ApiError::bad_request(
                 "too_many_statuses",
                 format!("too many statuses in request: {count} > {max}"),
             ),
-            StatusListError::IndexTooLarge { index, max } => ApiError::unprocessable(
+            StatusListError::IndexTooLarge { index, max } => ApiError::bad_request(
                 "index_too_large",
                 format!("status index {index} exceeds configured maximum {max}"),
             ),
-            StatusListError::Conflict => {
-                ApiError::conflict("conflict", "The status list was modified concurrently")
-            }
+            StatusListError::Conflict => ApiError::conflict(
+                "update_conflict",
+                "The status list was modified concurrently",
+            ),
             StatusListError::Unavailable => ApiError::new(
                 StatusCode::SERVICE_UNAVAILABLE,
                 "service_unavailable",
@@ -233,7 +232,7 @@ mod tests {
             (
                 StatusListError::InvalidHistoricalTime,
                 StatusCode::BAD_REQUEST,
-                "invalid_time",
+                "invalid_historical_time",
             ),
             (
                 StatusListError::IssuerMismatch,
@@ -243,7 +242,7 @@ mod tests {
             (
                 StatusListError::TooLarge,
                 StatusCode::UNPROCESSABLE_ENTITY,
-                "status_list_too_large",
+                "status_too_large",
             ),
         ];
 

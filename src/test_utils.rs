@@ -11,7 +11,9 @@ use crate::server::AppState;
 #[cfg(feature = "acme")]
 use crate::{cert_manager::storage::StorageError, utils::cert_manager::storage::Storage};
 use async_trait::async_trait;
-use std::{collections::HashMap, sync::Arc};
+#[cfg(feature = "acme")]
+use std::collections::HashMap;
+use std::sync::Arc;
 
 #[cfg(feature = "acme")]
 #[allow(dead_code)]

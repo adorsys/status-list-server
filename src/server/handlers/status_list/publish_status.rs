@@ -156,7 +156,11 @@ mod tests {
         )
         .await;
 
-        assert!(result.is_err());
+        let err = match result {
+            Ok(_) => panic!("expected error"),
+            Err(e) => e,
+        };
+        assert_eq!(err.status, StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]
@@ -180,7 +184,11 @@ mod tests {
         )
         .await;
 
-        assert!(result.is_err());
+        let err = match result {
+            Ok(_) => panic!("expected error"),
+            Err(e) => e,
+        };
+        assert_eq!(err.status, StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]
@@ -207,6 +215,10 @@ mod tests {
         )
         .await;
 
-        assert!(result.is_err());
+        let err = match result {
+            Ok(_) => panic!("expected error"),
+            Err(e) => e,
+        };
+        assert_eq!(err.status, StatusCode::UNPROCESSABLE_ENTITY);
     }
 }
