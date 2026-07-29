@@ -1,6 +1,6 @@
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, QueryOrder,
-    QuerySelect, Set, TransactionTrait, sea_query::Expr,
+    ActiveModelTrait, ColumnTrait, ConnectionTrait, DatabaseConnection, EntityTrait, QueryFilter,
+    QueryOrder, QuerySelect, Set, TransactionTrait, sea_query::Expr,
 };
 use std::sync::Arc;
 
@@ -33,6 +33,52 @@ fn map_insert_err(e: sea_orm::DbErr) -> RepositoryError {
         Some(sea_orm::SqlErr::UniqueConstraintViolation(_)) => RepositoryError::DuplicateEntry,
         _ => RepositoryError::InsertError(e.to_string()),
     }
+}
+
+fn require_advancing_stamp(new: i64, expected: i64) -> Result<(), RepositoryError> {
+    if new <= expected {
+        return Err(RepositoryError::UpdateError(format!(
+            "guarded update requires a strictly newer updated_at \
+             (new={new}, expected-guard={expected}); a non-advancing stamp \
+             would silently reintroduce the same-second lost update"
+        )));
+    }
+    Ok(())
+}
+
+async fn execute_guarded_update<C: ConnectionTrait>(
+    conn: &C,
+    list_id: &str,
+    entity: StatusListRecord,
+    expected_updated_at: i64,
+) -> Result<bool, RepositoryError> {
+    status_lists::Entity::update_many()
+        .col_expr(status_lists::Column::Issuer, Expr::value(entity.issuer))
+        .col_expr(
+            status_lists::Column::StatusList,
+            Expr::value(entity.status_list),
+        )
+        .col_expr(status_lists::Column::Sub, Expr::value(entity.sub))
+        .col_expr(
+            status_lists::Column::UpdatedAt,
+            Expr::value(entity.updated_at),
+        )
+        .filter(status_lists::Column::ListId.eq(list_id))
+        .filter(status_lists::Column::UpdatedAt.eq(expected_updated_at))
+        .exec(conn)
+        .await
+        .map(|r| r.rows_affected > 0)
+        .map_err(|e| RepositoryError::UpdateError(e.to_string()))
+}
+
+async fn guarded_update<C: ConnectionTrait>(
+    conn: &C,
+    list_id: &str,
+    entity: StatusListRecord,
+    expected_updated_at: i64,
+) -> Result<bool, RepositoryError> {
+    require_advancing_stamp(entity.updated_at, expected_updated_at)?;
+    execute_guarded_update(conn, list_id, entity, expected_updated_at).await
 }
 
 impl SeaOrmStore<StatusListRecord> {
@@ -170,45 +216,7 @@ impl SeaOrmStore<StatusListRecord> {
         entity: StatusListRecord,
         expected_updated_at: i64,
     ) -> Result<bool, RepositoryError> {
-        let update_stmt =
-            self.build_guarded_update_statement(list_id, &entity, expected_updated_at)?;
-        let result = update_stmt
-            .exec(&*self.db)
-            .await
-            .map_err(|e| RepositoryError::UpdateError(e.to_string()))?;
-        Ok(result.rows_affected > 0)
-    }
-
-    fn build_guarded_update_statement(
-        &self,
-        list_id: &str,
-        entity: &StatusListRecord,
-        expected_updated_at: i64,
-    ) -> Result<sea_orm::UpdateMany<status_lists::Entity>, RepositoryError> {
-        if entity.updated_at <= expected_updated_at {
-            return Err(RepositoryError::UpdateError(format!(
-                "guarded update requires a strictly newer updated_at \
-                 (new={}, expected-guard={}); a non-advancing stamp would \
-                 silently reintroduce the same-second lost update",
-                entity.updated_at, expected_updated_at
-            )));
-        }
-        Ok(status_lists::Entity::update_many()
-            .col_expr(
-                status_lists::Column::Issuer,
-                Expr::value(entity.issuer.clone()),
-            )
-            .col_expr(
-                status_lists::Column::StatusList,
-                Expr::value(entity.status_list.clone()),
-            )
-            .col_expr(status_lists::Column::Sub, Expr::value(entity.sub.clone()))
-            .col_expr(
-                status_lists::Column::UpdatedAt,
-                Expr::value(entity.updated_at),
-            )
-            .filter(status_lists::Column::ListId.eq(list_id))
-            .filter(status_lists::Column::UpdatedAt.eq(expected_updated_at)))
+        guarded_update(&*self.db, list_id, entity, expected_updated_at).await
     }
 
     /// Like [`update_one`](Self::update_one), but the guarded `UPDATE` and the
@@ -234,20 +242,16 @@ impl SeaOrmStore<StatusListRecord> {
         expected_updated_at: i64,
         snapshot: StatusListHistoryRecord,
     ) -> Result<bool, RepositoryError> {
+        require_advancing_stamp(entity.updated_at, expected_updated_at)?;
+
         let txn = self
             .db
             .begin()
             .await
             .map_err(|e| RepositoryError::UpdateError(e.to_string()))?;
 
-        let update_stmt =
-            self.build_guarded_update_statement(list_id, &entity, expected_updated_at)?;
-        let result = update_stmt
-            .exec(&txn)
-            .await
-            .map_err(|e| RepositoryError::UpdateError(e.to_string()))?;
-
-        if result.rows_affected == 0 {
+        let updated = execute_guarded_update(&txn, list_id, entity, expected_updated_at).await?;
+        if !updated {
             // Guard miss: roll back so nothing is recorded.
             txn.rollback()
                 .await
@@ -1173,6 +1177,42 @@ mod test {
 
         // new < expected: going backwards.
         let backwards = store.update_one("list-x", entity, 1001).await;
+        assert!(matches!(backwards, Err(RepositoryError::UpdateError(_))));
+    }
+
+    #[tokio::test]
+    async fn test_update_one_with_snapshot_rejects_non_advancing_stamp() {
+        let db_conn = Arc::new(MockDatabase::new(DatabaseBackend::Postgres).into_connection());
+        let store = SeaOrmStore::<StatusListRecord>::new(db_conn);
+
+        let entity = StatusListRecord {
+            list_id: "list-x".to_string(),
+            issuer: "issuer".to_string(),
+            status_list: StatusList {
+                bits: 1,
+                lst: "x".to_string(),
+            },
+            sub: "sub".to_string(),
+            updated_at: 1000,
+        };
+        let snapshot = StatusListHistoryRecord {
+            snapshot_id: "snapshot-x".to_string(),
+            list_id: entity.list_id.clone(),
+            issuer: entity.issuer.clone(),
+            status_list: entity.status_list.clone(),
+            sub: entity.sub.clone(),
+            iat: entity.updated_at,
+            exp: entity.updated_at + 900,
+        };
+
+        let equal = store
+            .update_one_with_snapshot("list-x", entity.clone(), 1000, snapshot.clone())
+            .await;
+        assert!(matches!(equal, Err(RepositoryError::UpdateError(_))));
+
+        let backwards = store
+            .update_one_with_snapshot("list-x", entity, 1001, snapshot)
+            .await;
         assert!(matches!(backwards, Err(RepositoryError::UpdateError(_))));
     }
 
