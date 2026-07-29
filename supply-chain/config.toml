@@ -155,6 +155,10 @@ criteria = "safe-to-deploy"
 version = "0.4.10"
 criteria = "safe-to-deploy"
 
+[[exemptions.bindgen]]
+version = "0.72.1"
+criteria = "safe-to-deploy"
+
 [[exemptions.bit-vec]]
 version = "0.9.1"
 criteria = "safe-to-deploy"
@@ -223,6 +227,10 @@ criteria = "safe-to-deploy"
 version = "1.2.66"
 criteria = "safe-to-deploy"
 
+[[exemptions.cexpr]]
+version = "0.6.0"
+criteria = "safe-to-deploy"
+
 [[exemptions.cfg-if]]
 version = "1.0.4"
 criteria = "safe-to-deploy"
@@ -253,6 +261,10 @@ criteria = "safe-to-deploy"
 
 [[exemptions.ciborium-ll]]
 version = "0.2.2"
+criteria = "safe-to-deploy"
+
+[[exemptions.clang-sys]]
+version = "1.8.1"
 criteria = "safe-to-deploy"
 
 [[exemptions.cmake]]
@@ -864,6 +876,10 @@ version = "2.12.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.itertools]]
+version = "0.13.0"
+criteria = "safe-to-deploy"
+
+[[exemptions.itertools]]
 version = "0.14.0"
 criteria = "safe-to-deploy"
 
@@ -907,8 +923,16 @@ criteria = "safe-to-deploy"
 version = "0.2.186"
 criteria = "safe-to-deploy"
 
+[[exemptions.libloading]]
+version = "0.8.9"
+criteria = "safe-to-deploy"
+
 [[exemptions.libm]]
 version = "0.2.16"
+criteria = "safe-to-deploy"
+
+[[exemptions.libproc]]
+version = "0.14.11"
 criteria = "safe-to-deploy"
 
 [[exemptions.libredox]]
@@ -925,7 +949,7 @@ criteria = "safe-to-run"
 
 [[exemptions.linux-raw-sys]]
 version = "0.12.1"
-criteria = "safe-to-run"
+criteria = "safe-to-deploy"
 
 [[exemptions.litemap]]
 version = "0.8.2"
@@ -951,6 +975,10 @@ criteria = "safe-to-deploy"
 version = "1.1.8"
 criteria = "safe-to-deploy"
 
+[[exemptions.mach2]]
+version = "0.6.0"
+criteria = "safe-to-deploy"
+
 [[exemptions.matchers]]
 version = "0.2.0"
 criteria = "safe-to-deploy"
@@ -973,6 +1001,10 @@ criteria = "safe-to-deploy"
 
 [[exemptions.memoffset]]
 version = "0.9.1"
+criteria = "safe-to-deploy"
+
+[[exemptions.metrics-process]]
+version = "2.4.3"
 criteria = "safe-to-deploy"
 
 [[exemptions.mime]]
@@ -1275,6 +1307,14 @@ criteria = "safe-to-deploy"
 version = "0.10.1"
 criteria = "safe-to-deploy"
 
+[[exemptions.procfs]]
+version = "0.18.0"
+criteria = "safe-to-deploy"
+
+[[exemptions.procfs-core]]
+version = "0.18.0"
+criteria = "safe-to-deploy"
+
 [[exemptions.prometheus]]
 version = "0.14.0"
 criteria = "safe-to-deploy"
@@ -1439,6 +1479,10 @@ criteria = "safe-to-deploy"
 version = "0.7.46"
 criteria = "safe-to-deploy"
 
+[[exemptions.rlimit]]
+version = "0.11.0"
+criteria = "safe-to-deploy"
+
 [[exemptions.ron]]
 version = "0.12.2"
 criteria = "safe-to-deploy"
@@ -1477,7 +1521,7 @@ criteria = "safe-to-run"
 
 [[exemptions.rustix]]
 version = "1.1.4"
-criteria = "safe-to-run"
+criteria = "safe-to-deploy"
 
 [[exemptions.rustls]]
 version = "0.23.41"
@@ -1689,6 +1733,10 @@ criteria = "safe-to-deploy"
 
 [[exemptions.sharded-slab]]
 version = "0.1.7"
+criteria = "safe-to-deploy"
+
+[[exemptions.shlex]]
+version = "1.3.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.shlex]]
@@ -2199,8 +2247,20 @@ criteria = "safe-to-deploy"
 version = "0.4.0"
 criteria = "safe-to-deploy"
 
+[[exemptions.windows]]
+version = "0.62.2"
+criteria = "safe-to-deploy"
+
+[[exemptions.windows-collections]]
+version = "0.3.2"
+criteria = "safe-to-deploy"
+
 [[exemptions.windows-core]]
 version = "0.62.2"
+criteria = "safe-to-deploy"
+
+[[exemptions.windows-future]]
+version = "0.3.2"
 criteria = "safe-to-deploy"
 
 [[exemptions.windows-implement]]
@@ -2213,6 +2273,10 @@ criteria = "safe-to-deploy"
 
 [[exemptions.windows-link]]
 version = "0.2.1"
+criteria = "safe-to-deploy"
+
+[[exemptions.windows-numerics]]
+version = "0.3.1"
 criteria = "safe-to-deploy"
 
 [[exemptions.windows-registry]]
@@ -2249,6 +2313,10 @@ criteria = "safe-to-deploy"
 
 [[exemptions.windows-targets]]
 version = "0.52.6"
+criteria = "safe-to-deploy"
+
+[[exemptions.windows-threading]]
+version = "0.2.1"
 criteria = "safe-to-deploy"
 
 [[exemptions.windows_aarch64_gnullvm]]
