@@ -11,8 +11,10 @@ sqlite = ["dep:sea-orm", "dep:sea-orm-migration", "sea-orm?/sqlx-sqlite"]
 mysql = ["dep:sea-orm", "dep:sea-orm-migration", "sea-orm?/sqlx-mysql"]
 redis = ["dep:redis"]
 aws = [
-    "dep:aws-config", "dep:aws-sdk-route53", "dep:aws-sdk-s3",
-    "dep:aws-sdk-secretsmanager",
+  "dep:aws-config",
+  "dep:aws-sdk-route53",
+  "dep:aws-sdk-s3",
+  "dep:aws-sdk-secretsmanager",
 ]
 acme = []
 # Opt-in gate for the Postgres container test. `--all-features` enables it in CI.
@@ -58,7 +60,7 @@ async-trait = "0.1"
 # Web frameworks
 hyper = "1.10"
 hyper-util = "0.1"
-reqwest = { version = "0.13", features = ["json", "form", "query"] }
+reqwest = { version = "0.13", features = ["form", "json", "query"] }
 tower = "0.5"
 hyper-rustls = { version = "0.27", features = ["http2"] }
 axum = { version = "0.8", features = ["macros"] }
@@ -67,7 +69,12 @@ tower_governor = "0.8"
 governor = "0.10"
 
 # Database and ORM
-sea-orm = { version = "1.1", default-features = false, features = ["macros", "runtime-tokio-rustls", "with-json"], optional = true }
+sea-orm = {
+  version = "1.1",
+  default-features = false,
+  features = ["macros", "runtime-tokio-rustls", "with-json"],
+  optional = true
+}
 moka = { version = "0.12", features = ["future"] }
 
 # Cryptography and Security
@@ -113,7 +120,12 @@ tokio-cron-scheduler = "0.15"
 metrics = "0.24"
 metrics-exporter-prometheus = "0.18"
 metrics-process = "2.4"
-sea-orm-migration = { version = "1.1.20", default-features = false, features = ["runtime-tokio-rustls"], optional = true }
+sea-orm-migration = {
+  version = "1.1.20",
+  default-features = false,
+  features = ["runtime-tokio-rustls"],
+  optional = true
+}
 
 # AWS related libraries
 [dependencies.aws-config]
@@ -153,7 +165,10 @@ features = ["alloc", "ecdsa", "pem", "pkcs8"]
 sealed_test = "1.1.0"
 wiremock = "0.6"
 sea-orm = { version = "1.1", features = ["mock"] }
-testcontainers-modules = { version = "0.15", features = ["localstack", "mysql", "postgres", "redis"] }
+testcontainers-modules = {
+  version = "0.15",
+  features = ["localstack", "mysql", "postgres", "redis"]
+}
 metrics-util = "0.20"
 
 [target.'cfg(not(target_env = "msvc"))'.dependencies]
