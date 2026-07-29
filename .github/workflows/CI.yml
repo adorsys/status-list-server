@@ -315,7 +315,7 @@ jobs:
 
     steps:
       - name: Fetch Repository
-        uses: actions/checkout@v7
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
       - name: Validate Docker Compose model
         run: docker compose config
@@ -331,7 +331,7 @@ jobs:
             validate --config /etc/otelcol/config.yaml
 
       - name: Install Helm
-        uses: azure/setup-helm@v4
+        uses: azure/setup-helm@fe7b79cd5ee1e45176fc867860ab94b8c962a349 # v4.3.0
 
       - name: Install YAML parser
         run: |

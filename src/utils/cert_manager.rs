@@ -87,23 +87,6 @@ impl Default for CertManagerMetrics {
     }
 }
 
-/// Zero-initialize renewal counters so they appear in Prometheus scrapes before first use.
-pub fn init_renewal_counters() {
-    let meter = global::meter("status-list-server");
-    meter
-        .u64_counter(RENEWAL_ATTEMPTS_METRIC)
-        .build()
-        .add(0, &[]);
-    meter
-        .u64_counter(RENEWAL_SUCCESSES_METRIC)
-        .build()
-        .add(0, &[]);
-    meter
-        .u64_counter(RENEWAL_FAILURES_METRIC)
-        .build()
-        .add(0, &[]);
-}
-
 /// Default cache TTL when no override is supplied.
 ///
 /// Exported as a single source of truth: `Config::load` references this

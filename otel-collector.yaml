@@ -29,6 +29,7 @@ service:
       receivers: [otlp]
       processors: [batch]
       exporters: [debug]
+    # Note: Logs pipeline currently uses debug exporter (stdout); dedicated backend (e.g. Loki) can be added as needed.
     logs:
       receivers: [otlp]
       processors: [batch]

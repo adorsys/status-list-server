@@ -7,6 +7,8 @@ use opentelemetry_sdk::{
     metrics::{PeriodicReader, SdkMeterProvider},
 };
 use prometheus::{Encoder, Registry, TextEncoder};
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 use crate::config::TelemetryConfig;
 
@@ -44,6 +46,51 @@ pub(crate) fn setup_metrics(
     Ok(provider)
 }
 
+#[derive(Clone, Copy)]
+struct ProcessMetrics {
+    cpu_seconds_total: Option<f64>,
+    open_fds: Option<u64>,
+    max_fds: Option<u64>,
+    virtual_memory_bytes: Option<u64>,
+    virtual_memory_max_bytes: Option<u64>,
+    resident_memory_bytes: Option<u64>,
+    start_time_seconds: Option<u64>,
+    threads: Option<u64>,
+}
+
+struct ProcessSnapshotCache {
+    last_updated: Instant,
+    snapshot: ProcessMetrics,
+}
+
+static PROCESS_CACHE: Mutex<Option<ProcessSnapshotCache>> = Mutex::new(None);
+
+fn get_process_snapshot() -> ProcessMetrics {
+    let now = Instant::now();
+    let mut cache = PROCESS_CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(ref c) = *cache
+        && now.duration_since(c.last_updated) < Duration::from_millis(500)
+    {
+        return c.snapshot;
+    }
+    let m = metrics_process::collector::collect();
+    let snapshot = ProcessMetrics {
+        cpu_seconds_total: m.cpu_seconds_total,
+        open_fds: m.open_fds,
+        max_fds: m.max_fds,
+        virtual_memory_bytes: m.virtual_memory_bytes,
+        virtual_memory_max_bytes: m.virtual_memory_max_bytes,
+        resident_memory_bytes: m.resident_memory_bytes,
+        start_time_seconds: m.start_time_seconds,
+        threads: m.threads,
+    };
+    *cache = Some(ProcessSnapshotCache {
+        last_updated: now,
+        snapshot,
+    });
+    snapshot
+}
+
 fn register_process_observers(provider: &SdkMeterProvider) {
     let meter = provider.meter("status-list-server");
 
@@ -52,7 +99,7 @@ fn register_process_observers(provider: &SdkMeterProvider) {
         .with_description("Total user and system CPU time spent in seconds.")
         .with_unit("s")
         .with_callback(|observer| {
-            if let Some(value) = metrics_process::collector::collect().cpu_seconds_total {
+            if let Some(value) = get_process_snapshot().cpu_seconds_total {
                 observer.observe(value, &[]);
             }
         })
@@ -63,7 +110,7 @@ fn register_process_observers(provider: &SdkMeterProvider) {
         .with_description("Number of open file descriptors.")
         .with_unit("{fd}")
         .with_callback(|observer| {
-            if let Some(value) = metrics_process::collector::collect().open_fds {
+            if let Some(value) = get_process_snapshot().open_fds {
                 observer.observe(value, &[]);
             }
         })
@@ -74,7 +121,7 @@ fn register_process_observers(provider: &SdkMeterProvider) {
         .with_description("Maximum number of open file descriptors.")
         .with_unit("{fd}")
         .with_callback(|observer| {
-            if let Some(value) = metrics_process::collector::collect().max_fds {
+            if let Some(value) = get_process_snapshot().max_fds {
                 observer.observe(value, &[]);
             }
         })
@@ -85,7 +132,7 @@ fn register_process_observers(provider: &SdkMeterProvider) {
         .with_description("Virtual memory size in bytes.")
         .with_unit("By")
         .with_callback(|observer| {
-            if let Some(value) = metrics_process::collector::collect().virtual_memory_bytes {
+            if let Some(value) = get_process_snapshot().virtual_memory_bytes {
                 observer.observe(value, &[]);
             }
         })
@@ -96,7 +143,7 @@ fn register_process_observers(provider: &SdkMeterProvider) {
         .with_description("Maximum amount of virtual memory available in bytes.")
         .with_unit("By")
         .with_callback(|observer| {
-            if let Some(value) = metrics_process::collector::collect().virtual_memory_max_bytes {
+            if let Some(value) = get_process_snapshot().virtual_memory_max_bytes {
                 observer.observe(value, &[]);
             }
         })
@@ -107,7 +154,7 @@ fn register_process_observers(provider: &SdkMeterProvider) {
         .with_description("Resident memory size in bytes.")
         .with_unit("By")
         .with_callback(|observer| {
-            if let Some(value) = metrics_process::collector::collect().resident_memory_bytes {
+            if let Some(value) = get_process_snapshot().resident_memory_bytes {
                 observer.observe(value, &[]);
             }
         })
@@ -118,7 +165,7 @@ fn register_process_observers(provider: &SdkMeterProvider) {
         .with_description("Start time of the process since Unix epoch in seconds.")
         .with_unit("s")
         .with_callback(|observer| {
-            if let Some(value) = metrics_process::collector::collect().start_time_seconds {
+            if let Some(value) = get_process_snapshot().start_time_seconds {
                 observer.observe(value, &[]);
             }
         })
@@ -129,7 +176,7 @@ fn register_process_observers(provider: &SdkMeterProvider) {
         .with_description("Number of OS threads in the process.")
         .with_unit("{thread}")
         .with_callback(|observer| {
-            if let Some(value) = metrics_process::collector::collect().threads {
+            if let Some(value) = get_process_snapshot().threads {
                 observer.observe(value, &[]);
             }
         })

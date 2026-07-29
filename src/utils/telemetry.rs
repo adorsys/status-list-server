@@ -177,3 +177,52 @@ fn build_env_filter() -> EnvFilter {
             .add_directive("tonic=info".parse().expect("valid directive"))
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::{TelemetryConfig, TelemetryEnvironment};
+
+    #[test]
+    fn test_init_telemetry_dev_mode() {
+        let config = TelemetryConfig {
+            environment: TelemetryEnvironment::Development,
+            otlp_endpoint: "http://localhost:4317".to_string(),
+            sampler_ratio: 1.0,
+            enabled: false,
+        };
+
+        let result = init_telemetry(&config);
+        // init_telemetry succeeds or returns try_init error if subscriber already set by another test
+        if let Ok((guard, _registry)) = result {
+            assert!(guard.tracer_provider.is_none());
+            assert!(guard.logger_provider.is_none());
+        }
+    }
+
+    #[test]
+    fn test_init_telemetry_prod_mode_providers() {
+        // The OTLP/tonic exporter builder touches the Tokio reactor; wrap in a
+        // single-threaded runtime so the test is self-contained.
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("tokio runtime");
+
+        rt.block_on(async {
+            let config = TelemetryConfig {
+                environment: TelemetryEnvironment::Production,
+                otlp_endpoint: "http://localhost:4317".to_string(),
+                sampler_ratio: 1.0,
+                enabled: true,
+            };
+
+            let resource = Resource::builder().with_service_name("test").build();
+            let tracer_provider = build_otlp_tracer_provider(&config, resource.clone());
+            assert!(tracer_provider.is_ok());
+
+            let logger_provider = build_otlp_logger_provider(&config, resource);
+            assert!(logger_provider.is_ok());
+        });
+    }
+}

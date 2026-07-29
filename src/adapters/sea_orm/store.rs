@@ -170,6 +170,21 @@ impl SeaOrmStore<StatusListRecord> {
         entity: StatusListRecord,
         expected_updated_at: i64,
     ) -> Result<bool, RepositoryError> {
+        let update_stmt =
+            self.build_guarded_update_statement(list_id, &entity, expected_updated_at)?;
+        let result = update_stmt
+            .exec(&*self.db)
+            .await
+            .map_err(|e| RepositoryError::UpdateError(e.to_string()))?;
+        Ok(result.rows_affected > 0)
+    }
+
+    fn build_guarded_update_statement(
+        &self,
+        list_id: &str,
+        entity: &StatusListRecord,
+        expected_updated_at: i64,
+    ) -> Result<sea_orm::UpdateMany<status_lists::Entity>, RepositoryError> {
         if entity.updated_at <= expected_updated_at {
             return Err(RepositoryError::UpdateError(format!(
                 "guarded update requires a strictly newer updated_at \
@@ -178,23 +193,22 @@ impl SeaOrmStore<StatusListRecord> {
                 entity.updated_at, expected_updated_at
             )));
         }
-        let result = status_lists::Entity::update_many()
-            .col_expr(status_lists::Column::Issuer, Expr::value(entity.issuer))
+        Ok(status_lists::Entity::update_many()
+            .col_expr(
+                status_lists::Column::Issuer,
+                Expr::value(entity.issuer.clone()),
+            )
             .col_expr(
                 status_lists::Column::StatusList,
-                Expr::value(entity.status_list),
+                Expr::value(entity.status_list.clone()),
             )
-            .col_expr(status_lists::Column::Sub, Expr::value(entity.sub))
+            .col_expr(status_lists::Column::Sub, Expr::value(entity.sub.clone()))
             .col_expr(
                 status_lists::Column::UpdatedAt,
                 Expr::value(entity.updated_at),
             )
             .filter(status_lists::Column::ListId.eq(list_id))
-            .filter(status_lists::Column::UpdatedAt.eq(expected_updated_at))
-            .exec(&*self.db)
-            .await
-            .map_err(|e| RepositoryError::UpdateError(e.to_string()))?;
-        Ok(result.rows_affected > 0)
+            .filter(status_lists::Column::UpdatedAt.eq(expected_updated_at)))
     }
 
     /// Like [`update_one`](Self::update_one), but the guarded `UPDATE` and the
@@ -220,34 +234,15 @@ impl SeaOrmStore<StatusListRecord> {
         expected_updated_at: i64,
         snapshot: StatusListHistoryRecord,
     ) -> Result<bool, RepositoryError> {
-        if entity.updated_at <= expected_updated_at {
-            return Err(RepositoryError::UpdateError(format!(
-                "guarded update requires a strictly newer updated_at \
-                 (new={}, expected-guard={}); a non-advancing stamp would \
-                 silently reintroduce the same-second lost update",
-                entity.updated_at, expected_updated_at
-            )));
-        }
-
         let txn = self
             .db
             .begin()
             .await
             .map_err(|e| RepositoryError::UpdateError(e.to_string()))?;
 
-        let result = status_lists::Entity::update_many()
-            .col_expr(status_lists::Column::Issuer, Expr::value(entity.issuer))
-            .col_expr(
-                status_lists::Column::StatusList,
-                Expr::value(entity.status_list),
-            )
-            .col_expr(status_lists::Column::Sub, Expr::value(entity.sub))
-            .col_expr(
-                status_lists::Column::UpdatedAt,
-                Expr::value(entity.updated_at),
-            )
-            .filter(status_lists::Column::ListId.eq(list_id))
-            .filter(status_lists::Column::UpdatedAt.eq(expected_updated_at))
+        let update_stmt =
+            self.build_guarded_update_statement(list_id, &entity, expected_updated_at)?;
+        let result = update_stmt
             .exec(&txn)
             .await
             .map_err(|e| RepositoryError::UpdateError(e.to_string()))?;

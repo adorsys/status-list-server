@@ -651,14 +651,67 @@ async fn test_cert_chain_cache_invalidation_reloads_chain() {
 
 // Tests for renewal metrics
 
+fn setup_test_metrics_registry() -> prometheus::Registry {
+    use crate::config::{TelemetryConfig, TelemetryEnvironment};
+    use crate::utils::metrics::setup_metrics;
+    use opentelemetry_sdk::Resource;
+
+    let registry = prometheus::Registry::new();
+    let config = TelemetryConfig {
+        environment: TelemetryEnvironment::Development,
+        otlp_endpoint: "http://localhost:4317".to_string(),
+        sampler_ratio: 1.0,
+        enabled: false,
+    };
+    let _ = setup_metrics(
+        &registry,
+        &config,
+        Resource::builder()
+            .with_service_name("cert-manager-test")
+            .build(),
+    );
+    registry
+}
+
 #[test]
 fn test_init_renewal_counters_registers_zero_values() {
-    init_renewal_counters();
+    init_crypto();
+    let registry = setup_test_metrics_registry();
+
+    let cert_manager = CertManager::new(
+        vec!["example.com"],
+        "test@example.com",
+        None::<String>,
+        "https://acme-staging-v02.api.letsencrypt.org/directory",
+    )
+    .unwrap();
+
+    cert_manager.init_renewal_counters();
+
+    let gathered = registry.gather();
+    let names: Vec<String> = gathered
+        .into_iter()
+        .map(|g| g.name().to_string())
+        .collect();
+    // OpenTelemetry-Prometheus appends _total to counters
+    assert!(
+        names.iter().any(|n| n.contains("cert_renewal_attempts")),
+        "missing cert_renewal_attempts metric; got: {names:?}"
+    );
+    assert!(
+        names.iter().any(|n| n.contains("cert_renewal_successes")),
+        "missing cert_renewal_successes metric; got: {names:?}"
+    );
+    assert!(
+        names.iter().any(|n| n.contains("cert_renewal_failures")),
+        "missing cert_renewal_failures metric; got: {names:?}"
+    );
 }
 
 #[test]
 fn test_update_time_to_expiry_sets_gauge() {
     init_crypto();
+    let _registry = setup_test_metrics_registry();
 
     let cert_manager = CertManager::new(
         vec!["example.com"],
@@ -682,6 +735,7 @@ fn test_update_time_to_expiry_sets_gauge() {
 #[test]
 fn test_record_successful_renewal_updates_counters_and_gauge() {
     init_crypto();
+    let _registry = setup_test_metrics_registry();
 
     let cert_manager = CertManager::new(
         vec!["example.com"],
@@ -698,6 +752,7 @@ fn test_record_successful_renewal_updates_counters_and_gauge() {
 #[test]
 fn test_record_failed_renewal_increments_failure_counter() {
     init_crypto();
+    let _registry = setup_test_metrics_registry();
 
     let cert_manager = CertManager::new(
         vec!["example.com"],
@@ -715,6 +770,7 @@ fn test_record_failed_renewal_increments_failure_counter() {
 #[test]
 fn test_renewal_attempts_metric_via_manager() {
     init_crypto();
+    let _registry = setup_test_metrics_registry();
 
     let cert_storage = MockStorage::new();
     let secrets_storage = MockStorage::new();
