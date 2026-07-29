@@ -390,7 +390,10 @@ impl SeaOrmStore<StatusListHistoryRecord> {
         }
 
         if total_deleted > 0 {
-            warn!(deleted = total_deleted, cutoff, "Deleted expired status list history snapshots");
+            warn!(
+                deleted = total_deleted,
+                cutoff, "Deleted expired status list history snapshots"
+            );
         }
 
         Ok(total_deleted)
