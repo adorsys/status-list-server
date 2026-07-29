@@ -48,6 +48,26 @@ pub(crate) async fn test_app_state(_db_conn: Option<Arc<()>>) -> AppState {
     build_test_app_state(None, 1_048_576).await
 }
 
+pub(crate) struct TestCertProvider {
+    pub key_pem: String,
+    pub cert_chain: Vec<String>,
+}
+
+#[async_trait]
+impl crate::domain::ports::CertificateProvider for TestCertProvider {
+    async fn certificate_chain(
+        &self,
+    ) -> Result<Option<Vec<String>>, crate::domain::models::status_list::StatusListError> {
+        Ok(Some(self.cert_chain.clone()))
+    }
+
+    async fn signing_key_pem(
+        &self,
+    ) -> Result<String, crate::domain::models::status_list::StatusListError> {
+        Ok(self.key_pem.clone())
+    }
+}
+
 async fn build_test_app_state(
     #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mysql"))] db_conn: Option<
         Arc<sea_orm::DatabaseConnection>,
@@ -58,26 +78,9 @@ async fn build_test_app_state(
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 
     let key_pem = include_str!("../test_data/ec-private.pem").to_string();
-    let secrets_storage = MockStorage {
-        key_value: HashMap::from([("keys-test.com".to_string(), key_pem)]),
-    };
 
-    let cert_data = include_str!("../test_data/cert_data.json").to_string();
-    let cert_storage = MockStorage {
-        key_value: HashMap::from([("certs-test.com-cert_data.json".to_string(), cert_data)]),
-    };
-
-    let certificate_manager = CertManager::new(
-        ["test.com"],
-        "test@example.com",
-        None::<String>,
-        "http://example.com/dir",
-    )
-    .unwrap()
-    .with_cert_storage(cert_storage)
-    .with_secrets_storage(secrets_storage);
-
-    let cert_manager = Arc::new(certificate_manager);
+    let memory_history = MemoryStatusListHistory::default();
+    let memory_lists = MemoryStatusLists::default().with_history(&memory_history);
 
     #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mysql"))]
     let (status_lists, credentials, status_list_history): (
@@ -92,9 +95,9 @@ async fn build_test_app_state(
         )
     } else {
         (
-            Arc::new(MemoryStatusLists::default()),
+            Arc::new(memory_lists),
             Arc::new(MemoryCredentials::default()),
-            Arc::new(MemoryStatusListHistory::default()),
+            Arc::new(memory_history),
         )
     };
 
@@ -104,13 +107,16 @@ async fn build_test_app_state(
         Arc<dyn CredentialRepo>,
         Arc<dyn StatusListHistoryRepo>,
     ) = (
-        Arc::new(MemoryStatusLists::default()),
+        Arc::new(memory_lists),
         Arc::new(MemoryCredentials::default()),
-        Arc::new(MemoryStatusListHistory::default()),
+        Arc::new(memory_history),
     );
 
     let status_list_cache = Arc::new(MokaStatusListCache::new(5 * 60, 100));
-    let cert_provider = Arc::new(AcmeCertificateProvider::new(cert_manager));
+    let cert_provider = Arc::new(TestCertProvider {
+        key_pem,
+        cert_chain: vec!["ZHVtbXlfY2VydA==".into()],
+    });
 
     let service = Arc::new(Service::from_arcs(
         status_lists,

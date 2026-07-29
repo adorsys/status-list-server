@@ -49,3 +49,168 @@ pub async fn update_status(
 
     Ok(StatusCode::NO_CONTENT.into_response())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::domain::models::status_list::Status as DomainStatus;
+    use crate::server::handlers::status_list::publish_status::publish_status;
+    use crate::server::handlers::status_list::request::{
+        Status as RequestStatus, StatusEntry as RequestStatusEntry,
+    };
+    use crate::test_utils::test_app_state;
+
+    #[tokio::test]
+    async fn test_update_token_status_invalid_list_id() {
+        let appstate = test_app_state(None).await;
+        let issuer = "test-issuer".to_string();
+        let payload = StatusesRequest { statuses: vec![] };
+
+        let result = update_status(
+            State(appstate),
+            Extension(issuer),
+            Path("not-a-uuid".to_string()),
+            Json(payload),
+        )
+        .await;
+
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_update_status_modifies_existing_token() {
+        let token_id = uuid::Uuid::new_v4().to_string();
+        let app_state = test_app_state(None).await;
+
+        // First publish
+        publish_status(
+            State(app_state.clone()),
+            Extension("issuer1".to_string()),
+            Path(token_id.clone()),
+            Json(StatusesRequest { statuses: vec![] }),
+        )
+        .await
+        .unwrap();
+
+        // Then update
+        let update_res = update_status(
+            State(app_state.clone()),
+            Extension("issuer1".to_string()),
+            Path(token_id.clone()),
+            Json(StatusesRequest {
+                statuses: vec![RequestStatusEntry {
+                    index: 0,
+                    status: RequestStatus::INVALID,
+                }],
+            }),
+        )
+        .await
+        .unwrap()
+        .into_response();
+
+        assert_eq!(update_res.status(), StatusCode::NO_CONTENT);
+
+        let token = app_state.service.get_status_list(&token_id).await.unwrap();
+        assert!(!token.status_list.lst.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_update_status_rejects_wrong_issuer() {
+        let token_id = uuid::Uuid::new_v4().to_string();
+        let app_state = test_app_state(None).await;
+
+        publish_status(
+            State(app_state.clone()),
+            Extension("issuer1".to_string()),
+            Path(token_id.clone()),
+            Json(StatusesRequest { statuses: vec![] }),
+        )
+        .await
+        .unwrap();
+
+        let update_res = update_status(
+            State(app_state.clone()),
+            Extension("issuer2".to_string()),
+            Path(token_id.clone()),
+            Json(StatusesRequest {
+                statuses: vec![RequestStatusEntry {
+                    index: 0,
+                    status: RequestStatus::INVALID,
+                }],
+            }),
+        )
+        .await;
+
+        assert!(update_res.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_update_status_rejects_too_many_statuses() {
+        let token_id = uuid::Uuid::new_v4().to_string();
+        let mut app_state = test_app_state(None).await;
+
+        publish_status(
+            State(app_state.clone()),
+            Extension("issuer1".to_string()),
+            Path(token_id.clone()),
+            Json(StatusesRequest { statuses: vec![] }),
+        )
+        .await
+        .unwrap();
+
+        app_state.max_statuses_per_request = 1;
+
+        let update_res = update_status(
+            State(app_state.clone()),
+            Extension("issuer1".to_string()),
+            Path(token_id.clone()),
+            Json(StatusesRequest {
+                statuses: vec![
+                    RequestStatusEntry {
+                        index: 0,
+                        status: RequestStatus::INVALID,
+                    },
+                    RequestStatusEntry {
+                        index: 1,
+                        status: RequestStatus::INVALID,
+                    },
+                ],
+            }),
+        )
+        .await;
+
+        assert!(update_res.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_update_status_rejects_index_too_large() {
+        let token_id = uuid::Uuid::new_v4().to_string();
+        let mut app_state = test_app_state(None).await;
+
+        publish_status(
+            State(app_state.clone()),
+            Extension("issuer1".to_string()),
+            Path(token_id.clone()),
+            Json(StatusesRequest { statuses: vec![] }),
+        )
+        .await
+        .unwrap();
+
+        app_state.max_status_index = 10;
+
+        let update_res = update_status(
+            State(app_state.clone()),
+            Extension("issuer1".to_string()),
+            Path(token_id.clone()),
+            Json(StatusesRequest {
+                statuses: vec![RequestStatusEntry {
+                    index: 999_999,
+                    status: RequestStatus::INVALID,
+                }],
+            }),
+        )
+        .await;
+
+        assert!(update_res.is_err());
+    }
+}

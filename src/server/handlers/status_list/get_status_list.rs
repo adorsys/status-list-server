@@ -508,3 +508,403 @@ fn issue_jwt(
 fn build_cache_control(token_ttl_secs: u64) -> String {
     format!("max-age={}, immutable", token_ttl_secs)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::server::handlers::status_list::publish_status::publish_status;
+    use crate::server::handlers::status_list::request::StatusesRequest;
+    use crate::test_utils::test_app_state;
+    use axum::Extension;
+    use axum::extract::Json;
+    use axum::http::HeaderMap;
+
+    #[test]
+    fn test_accepts_gzip_simple() {
+        let mut h = HeaderMap::new();
+        h.insert(header::ACCEPT_ENCODING, "gzip".parse().unwrap());
+        assert!(client_accepts_gzip(&h));
+    }
+
+    #[test]
+    fn test_accepts_gzip_with_qvalue() {
+        let mut h = HeaderMap::new();
+        h.insert(header::ACCEPT_ENCODING, "gzip;q=0.8".parse().unwrap());
+        assert!(client_accepts_gzip(&h));
+    }
+
+    #[test]
+    fn test_rejects_gzip_q0() {
+        let mut h = HeaderMap::new();
+        h.insert(header::ACCEPT_ENCODING, "gzip;q=0".parse().unwrap());
+        assert!(!client_accepts_gzip(&h));
+    }
+
+    #[test]
+    fn test_rejects_gzip_q0_with_wildcard_accept() {
+        let mut h = HeaderMap::new();
+        h.insert(header::ACCEPT_ENCODING, "gzip;q=0, *".parse().unwrap());
+        assert!(!client_accepts_gzip(&h));
+    }
+
+    #[test]
+    fn test_accepts_via_wildcard_only() {
+        let mut h = HeaderMap::new();
+        h.insert(header::ACCEPT_ENCODING, "*".parse().unwrap());
+        assert!(client_accepts_gzip(&h));
+    }
+
+    #[test]
+    fn test_accepts_via_wildcard_q1() {
+        let mut h = HeaderMap::new();
+        h.insert(header::ACCEPT_ENCODING, "*;q=1".parse().unwrap());
+        assert!(client_accepts_gzip(&h));
+    }
+
+    #[test]
+    fn test_rejects_wildcard_q0() {
+        let mut h = HeaderMap::new();
+        h.insert(header::ACCEPT_ENCODING, "*;q=0".parse().unwrap());
+        assert!(!client_accepts_gzip(&h));
+    }
+
+    #[test]
+    fn test_rejects_when_header_absent() {
+        let h = HeaderMap::new();
+        assert!(!client_accepts_gzip(&h));
+    }
+
+    #[test]
+    fn test_multiple_accept_encoding_lines() {
+        let mut h = HeaderMap::new();
+        h.append(header::ACCEPT_ENCODING, "deflate".parse().unwrap());
+        h.append(header::ACCEPT_ENCODING, "gzip".parse().unwrap());
+        assert!(client_accepts_gzip(&h));
+    }
+
+    #[test]
+    fn test_case_insensitive_gzip() {
+        let mut h = HeaderMap::new();
+        h.insert(header::ACCEPT_ENCODING, "GZIP".parse().unwrap());
+        assert!(client_accepts_gzip(&h));
+    }
+
+    #[tokio::test]
+    async fn test_get_status_list_not_found() {
+        let app_state = test_app_state(None).await;
+        let headers = HeaderMap::new();
+
+        let result = get_status_list(
+            State(app_state),
+            Path(uuid::Uuid::new_v4().to_string()),
+            Ok(Query(StatusListQuery { time: None })),
+            headers,
+        )
+        .await;
+
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_get_status_list_unsupported_accept_header() {
+        let app_state = test_app_state(None).await;
+        let mut headers = HeaderMap::new();
+        headers.insert(header::ACCEPT, "text/html".parse().unwrap());
+
+        let result = get_status_list(
+            State(app_state),
+            Path(uuid::Uuid::new_v4().to_string()),
+            Ok(Query(StatusListQuery { time: None })),
+            headers,
+        )
+        .await;
+
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_get_status_list_jwt_success() {
+        let token_id = uuid::Uuid::new_v4().to_string();
+        let app_state = test_app_state(None).await;
+
+        // Publish first
+        publish_status(
+            State(app_state.clone()),
+            Extension("issuer1".to_string()),
+            Path(token_id.clone()),
+            Json(StatusesRequest { statuses: vec![] }),
+        )
+        .await
+        .unwrap();
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::ACCEPT,
+            ACCEPT_STATUS_LISTS_HEADER_JWT.parse().unwrap(),
+        );
+        headers.insert(header::ACCEPT_ENCODING, "gzip".parse().unwrap());
+
+        let response = get_status_list(
+            State(app_state),
+            Path(token_id),
+            Ok(Query(StatusListQuery { time: None })),
+            headers,
+        )
+        .await
+        .unwrap()
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers().get(header::CONTENT_ENCODING).unwrap(),
+            "gzip"
+        );
+        assert!(response.headers().contains_key(header::ETAG));
+        assert!(response.headers().contains_key(header::CACHE_CONTROL));
+    }
+
+    #[tokio::test]
+    async fn test_get_status_list_success_cwt() {
+        let token_id = uuid::Uuid::new_v4().to_string();
+        let app_state = test_app_state(None).await;
+
+        publish_status(
+            State(app_state.clone()),
+            Extension("issuer1".to_string()),
+            Path(token_id.clone()),
+            Json(StatusesRequest { statuses: vec![] }),
+        )
+        .await
+        .unwrap();
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::ACCEPT,
+            ACCEPT_STATUS_LISTS_HEADER_CWT.parse().unwrap(),
+        );
+
+        let response = get_status_list(
+            State(app_state),
+            Path(token_id),
+            Ok(Query(StatusListQuery { time: None })),
+            headers,
+        )
+        .await
+        .unwrap()
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers().get(header::CONTENT_TYPE).unwrap(),
+            ACCEPT_STATUS_LISTS_HEADER_CWT
+        );
+    }
+
+    #[tokio::test]
+    async fn test_get_status_list_jwt_no_gzip_when_client_does_not_accept() {
+        let token_id = uuid::Uuid::new_v4().to_string();
+        let app_state = test_app_state(None).await;
+
+        publish_status(
+            State(app_state.clone()),
+            Extension("issuer1".to_string()),
+            Path(token_id.clone()),
+            Json(StatusesRequest { statuses: vec![] }),
+        )
+        .await
+        .unwrap();
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::ACCEPT,
+            ACCEPT_STATUS_LISTS_HEADER_JWT.parse().unwrap(),
+        );
+
+        let response = get_status_list(
+            State(app_state),
+            Path(token_id),
+            Ok(Query(StatusListQuery { time: None })),
+            headers,
+        )
+        .await
+        .unwrap()
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(response.headers().get(header::CONTENT_ENCODING).is_none());
+        assert_eq!(
+            response.headers().get(header::VARY).unwrap(),
+            "Accept, Accept-Encoding"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_jwt_emits_aggregation_uri_when_configured() {
+        let token_id = uuid::Uuid::new_v4().to_string();
+        let mut app_state = test_app_state(None).await;
+        app_state.aggregation_uri =
+            Some("https://aggregation.example.com/statuslists/aggregation".to_string());
+
+        publish_status(
+            State(app_state.clone()),
+            Extension("issuer1".to_string()),
+            Path(token_id.clone()),
+            Json(StatusesRequest { statuses: vec![] }),
+        )
+        .await
+        .unwrap();
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::ACCEPT,
+            ACCEPT_STATUS_LISTS_HEADER_JWT.parse().unwrap(),
+        );
+
+        let response = get_status_list(
+            State(app_state),
+            Path(token_id),
+            Ok(Query(StatusListQuery { time: None })),
+            headers,
+        )
+        .await
+        .unwrap()
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_jwt_omits_aggregation_uri_when_not_configured() {
+        let token_id = uuid::Uuid::new_v4().to_string();
+        let mut app_state = test_app_state(None).await;
+        app_state.aggregation_uri = None;
+
+        publish_status(
+            State(app_state.clone()),
+            Extension("issuer1".to_string()),
+            Path(token_id.clone()),
+            Json(StatusesRequest { statuses: vec![] }),
+        )
+        .await
+        .unwrap();
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::ACCEPT,
+            ACCEPT_STATUS_LISTS_HEADER_JWT.parse().unwrap(),
+        );
+
+        let response = get_status_list(
+            State(app_state),
+            Path(token_id),
+            Ok(Query(StatusListQuery { time: None })),
+            headers,
+        )
+        .await
+        .unwrap()
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_conditional_request_if_modified_since_returns_304() {
+        let token_id = uuid::Uuid::new_v4().to_string();
+        let app_state = test_app_state(None).await;
+
+        publish_status(
+            State(app_state.clone()),
+            Extension("issuer1".to_string()),
+            Path(token_id.clone()),
+            Json(StatusesRequest { statuses: vec![] }),
+        )
+        .await
+        .unwrap();
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::ACCEPT,
+            ACCEPT_STATUS_LISTS_HEADER_JWT.parse().unwrap(),
+        );
+
+        let res1 = get_status_list(
+            State(app_state.clone()),
+            Path(token_id.clone()),
+            Ok(Query(StatusListQuery { time: None })),
+            headers.clone(),
+        )
+        .await
+        .unwrap()
+        .into_response();
+
+        let last_modified = res1.headers().get(header::LAST_MODIFIED).unwrap().clone();
+
+        headers.insert(header::IF_MODIFIED_SINCE, last_modified);
+        let res2 = get_status_list(
+            State(app_state),
+            Path(token_id),
+            Ok(Query(StatusListQuery { time: None })),
+            headers,
+        )
+        .await
+        .unwrap()
+        .into_response();
+
+        assert_eq!(res2.status(), StatusCode::NOT_MODIFIED);
+    }
+
+    #[tokio::test]
+    async fn test_get_status_list_rejects_future_time() {
+        let token_id = uuid::Uuid::new_v4().to_string();
+        let app_state = test_app_state(None).await;
+
+        let future_time = time::OffsetDateTime::now_utc().unix_timestamp() + 3600;
+
+        let result = get_status_list(
+            State(app_state),
+            Path(token_id),
+            Ok(Query(StatusListQuery {
+                time: Some(future_time),
+            })),
+            HeaderMap::new(),
+        )
+        .await;
+
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_get_status_list_returns_snapshot_valid_at_requested_time() {
+        let token_id = uuid::Uuid::new_v4().to_string();
+        let app_state = test_app_state(None).await;
+
+        publish_status(
+            State(app_state.clone()),
+            Extension("issuer1".to_string()),
+            Path(token_id.clone()),
+            Json(StatusesRequest { statuses: vec![] }),
+        )
+        .await
+        .unwrap();
+
+        let now = time::OffsetDateTime::now_utc().unix_timestamp();
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::ACCEPT,
+            ACCEPT_STATUS_LISTS_HEADER_JWT.parse().unwrap(),
+        );
+
+        let response = get_status_list(
+            State(app_state),
+            Path(token_id),
+            Ok(Query(StatusListQuery { time: Some(now) })),
+            headers,
+        )
+        .await
+        .unwrap()
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+}
