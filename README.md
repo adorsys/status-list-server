@@ -59,13 +59,19 @@ Create a `.env` file in the root directory. Take a look at the [.env.template](.
 
 The simplest way to run the project is with [docker compose](https://docs.docker.com/compose/):
 
-- Execute the command below at the root of the project
+- Execute the command below at the root of the project:
 
 ```sh
 docker compose up --build
 ```
 
-This command will pull all required images and start the server.
+This command will pull all required images and start the server compiled with default compose features (`postgres,redis,aws,acme`).
+
+To pass custom Cargo feature flags during build, specify the `FEATURES` environment variable:
+
+```sh
+FEATURES="mysql,redis,aws,acme" docker compose up --build
+```
 
 #### Running Manually
 
