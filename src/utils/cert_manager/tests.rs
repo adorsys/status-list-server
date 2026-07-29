@@ -689,10 +689,7 @@ fn test_init_renewal_counters_registers_zero_values() {
     cert_manager.init_renewal_counters();
 
     let gathered = registry.gather();
-    let names: Vec<String> = gathered
-        .into_iter()
-        .map(|g| g.name().to_string())
-        .collect();
+    let names: Vec<String> = gathered.into_iter().map(|g| g.name().to_string()).collect();
     // OpenTelemetry-Prometheus appends _total to counters
     assert!(
         names.iter().any(|n| n.contains("cert_renewal_attempts")),
