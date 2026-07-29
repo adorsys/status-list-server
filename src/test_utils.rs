@@ -1,22 +1,27 @@
 use crate::domain::ports::{CredentialRepo, StatusListHistoryRepo, StatusListRepo};
 use crate::domain::service::Service;
 use crate::outbound::cache::MokaStatusListCache;
+#[cfg(feature = "memory")]
 use crate::outbound::memory::{MemoryCredentials, MemoryStatusListHistory, MemoryStatusLists};
 #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mysql"))]
 use crate::outbound::sql::{
     SeaOrmStore, SqlCredentialRepo, SqlStatusListHistoryRepo, SqlStatusListRepo,
 };
+#[cfg(feature = "acme")]
 use crate::{
-    cert_manager::storage::StorageError, server::AppState, utils::cert_manager::storage::Storage,
+    cert_manager::storage::StorageError, utils::cert_manager::storage::Storage,
 };
+use crate::server::AppState;
 use async_trait::async_trait;
 use std::{collections::HashMap, sync::Arc};
 
+#[cfg(feature = "acme")]
 #[allow(dead_code)]
 pub(crate) struct MockStorage {
     pub key_value: HashMap<String, String>,
 }
 
+#[cfg(feature = "acme")]
 #[async_trait]
 impl Storage for MockStorage {
     async fn store(&self, _key: &str, _value: &str) -> Result<(), StorageError> {

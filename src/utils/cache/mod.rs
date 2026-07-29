@@ -1,12 +1,14 @@
+#[cfg(feature = "acme")]
 mod cert_chain;
 
+#[cfg(feature = "acme")]
 pub(crate) use cert_chain::{CertChainCache, CertificateChain};
 
 /// Pins the deliberately-opposite `ttl = 0` semantics of the two caches.
 ///
 /// `CertChainCache` treats zero as "never expire"; the status-list cache treats
 /// zero as "disabled".
-#[cfg(test)]
+#[cfg(all(test, feature = "acme"))]
 mod ttl_zero_semantics_matrix {
     use std::sync::Arc;
     use std::time::Duration;

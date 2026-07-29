@@ -8,7 +8,8 @@ pub mod challenge;
 pub mod http_client;
 pub mod storage;
 
-use crate::utils::cache::CertificateChain;
+use crate::utils::cache::{CertChainCache, CertificateChain};
+use crate::utils::keygen::Keypair;
 pub use builder::CertificateManagerBuilder;
 use challenge::CleanupFuture;
 pub use errors::CertError;
@@ -28,15 +29,13 @@ use rcgen::{
 use serde::{Deserialize, Serialize};
 use std::{sync::Arc, time::Duration};
 use time::{OffsetDateTime, macros::format_description};
-use tokio::{sync::Mutex, time::sleep};
+use tokio::sync::Mutex;
+use tokio::time::sleep;
 use tokio_cron_scheduler::{Job, JobScheduler};
 use tracing::{error, info, instrument, warn};
 use x509_parser::pem::Pem as X509Pem;
 
-use crate::{
-    cert_manager::{challenge::ChallengeHandler, http_client::DefaultHttpClient, storage::Storage},
-    utils::{cache::CertChainCache, keygen::Keypair},
-};
+use crate::cert_manager::{challenge::ChallengeHandler, http_client::DefaultHttpClient, storage::Storage};
 
 // Renewal metrics constants
 const RENEWAL_ATTEMPTS_METRIC: &str = "cert_renewal_attempts_total";

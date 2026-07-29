@@ -50,3 +50,32 @@ impl<T: Storage + ?Sized> Storage for Box<T> {
         (**self).delete(key).await
     }
 }
+
+use std::collections::HashMap;
+use std::sync::Arc;
+use tokio::sync::RwLock;
+
+#[derive(Clone, Default)]
+pub struct MemoryStorage {
+    values: Arc<RwLock<HashMap<String, String>>>,
+}
+
+#[async_trait]
+impl Storage for MemoryStorage {
+    async fn store(&self, key: &str, value: &str) -> Result<(), StorageError> {
+        self.values
+            .write()
+            .await
+            .insert(key.to_string(), value.to_string());
+        Ok(())
+    }
+
+    async fn load(&self, key: &str) -> Result<Option<String>, StorageError> {
+        Ok(self.values.read().await.get(key).cloned())
+    }
+
+    async fn delete(&self, key: &str) -> Result<(), StorageError> {
+        self.values.write().await.remove(key);
+        Ok(())
+    }
+}

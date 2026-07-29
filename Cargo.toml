@@ -16,7 +16,7 @@ aws = [
   "dep:aws-sdk-s3",
   "dep:aws-sdk-secretsmanager",
 ]
-acme = []
+acme = ["dep:instant-acme", "dep:rcgen"]
 # Opt-in gate for the Postgres container test. `--all-features` enables it in CI.
 postgres-tests = ["postgres"]
 
@@ -81,12 +81,12 @@ moka = { version = "0.12", features = ["future"] }
 rand = "0.10"
 pem = "3"
 coset = "0.4"
-instant-acme = "0.8"
+instant-acme = { version = "0.8", optional = true }
 rustls = "0.23"
 webpki-roots = "1"
 rustls-pki-types = "1.15"
 secrecy = { version = "0.10", features = ["serde"] }
-rcgen = { version = "0.14", features = ["pem"] }
+rcgen = { version = "0.14", features = ["pem"], optional = true }
 jsonwebtoken = { version = "10.4", features = ["aws_lc_rs"] }
 sha2 = "0.10"
 hex = "0.4"
@@ -177,6 +177,7 @@ tikv-jemallocator = "0.7"
 [[bin]]
 name = "status-list-server"
 path = "src/main.rs"
+required-features = ["memory"]
 
 [profile.dev.package.backtrace]
 opt-level = 3

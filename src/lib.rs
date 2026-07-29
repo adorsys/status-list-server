@@ -10,4 +10,6 @@ pub mod server;
 pub mod setup;
 pub mod startup;
 
-pub use utils::{bits_validation, cert_manager};
+pub use utils::bits_validation;
+#[cfg(feature = "acme")]
+pub use utils::cert_manager;

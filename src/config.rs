@@ -633,6 +633,11 @@ impl Config {
             Some("test_data/ec-private.pem".to_string()),
         );
 
+        #[cfg(feature = "acme")]
+        let default_chain_cache_ttl = crate::utils::cert_manager::DEFAULT_CHAIN_CACHE_TTL.as_secs();
+        #[cfg(not(feature = "acme"))]
+        let default_chain_cache_ttl = 86400;
+
         // Build the config
         let config = ConfigLib::builder()
             // Set default values
@@ -660,10 +665,7 @@ impl Config {
                 "server.cert.acme_directory_url",
                 "https://acme-v02.api.letsencrypt.org/directory",
             )?
-            .set_default(
-                "server.cert.chain_cache_ttl",
-                crate::utils::cert_manager::DEFAULT_CHAIN_CACHE_TTL.as_secs(),
-            )?
+            .set_default("server.cert.chain_cache_ttl", default_chain_cache_ttl)?
             .set_default("server.cert.renewal_cron_schedule", "0 0 0 * * *")?
             .set_default("server.cert.store.source", "filesystem")?
             .set_default("server.cert.store.certificate_path", default_cert_path)?

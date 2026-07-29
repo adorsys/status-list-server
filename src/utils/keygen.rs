@@ -32,6 +32,7 @@ struct KeyRepr {
 
 impl Keypair {
     /// Generate a new random keypair
+    #[allow(dead_code)]
     pub(crate) fn generate() -> Result<Self, Error> {
         let mut seed = [0u8; SECRET_KEY_LENGTH];
         const MAX_ATTEMPTS: u8 = 3;
@@ -75,6 +76,7 @@ impl Keypair {
     }
 
     /// Create a keypair from PKCS#8 DER bytes.
+    #[allow(dead_code)]
     pub(crate) fn from_pkcs8_der(der: &[u8]) -> Result<Self, Error> {
         let key = SigningKey::from_pkcs8_der(der).map_err(|e| Error::Parsing(e.into()))?;
         Ok(Keypair {

@@ -14,7 +14,7 @@ use color_eyre::eyre::{Result as EyeResult, eyre};
 use sea_orm::ConnectOptions;
 #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mysql"))]
 use sea_orm_migration::MigratorTrait;
-#[cfg(any(feature = "sqlite", feature = "postgres", feature = "mysql"))]
+#[cfg(any(feature = "acme", feature = "sqlite", feature = "postgres", feature = "mysql"))]
 use secrecy::ExposeSecret;
 use std::{sync::Arc, time::Duration};
 #[cfg(feature = "acme")]
@@ -27,22 +27,27 @@ use crate::cert_manager::challenge::{
     AcmeDnsCredentials, AcmeDnsProvider, AzureDnsProvider, CloudflareDnsProvider, Dns01Handler,
     GoogleCloudDnsProvider, PebbleDnsProvider, ServicePrincipal,
 };
+#[cfg(feature = "acme")]
 use crate::cert_manager::{
-    CertManager, StoreProvisioningStrategy, http_client::DefaultHttpClient, storage::Storage,
+    CertManager, StoreProvisioningStrategy, storage::MemoryStorage, storage::Storage,
 };
+#[cfg(feature = "acme")]
+use crate::cert_manager::http_client::DefaultHttpClient;
 use crate::config::{Config as AppConfig, DatabaseBackend, ENV_DEVELOPMENT};
 #[cfg(feature = "acme")]
 use crate::config::{DnsProviderKind, ENV_PRODUCTION, GcloudKeySource, ResolvedDnsProvider};
 use crate::domain::{
-    ports::{CredentialRepo, StatusListHistoryRepo, StatusListRepo},
+    ports::{CertificateProvider, CredentialRepo, StatusListHistoryRepo, StatusListRepo},
     service::Service,
 };
 #[cfg(feature = "aws")]
 use crate::outbound::aws::{AwsS3, AwsSecretsManager};
 use crate::outbound::cache::MokaStatusListCache;
+#[cfg(feature = "acme")]
 use crate::outbound::cert::AcmeCertificateProvider;
+#[cfg(feature = "memory")]
 use crate::outbound::memory::{
-    MemoryCredentials, MemoryStatusListHistory, MemoryStatusLists, MemoryStorage,
+    MemoryCredentials, MemoryStatusListHistory, MemoryStatusLists,
 };
 #[cfg(feature = "redis")]
 use crate::outbound::redis::Redis;
@@ -53,20 +58,49 @@ use crate::outbound::sql::{
 use crate::server::AppState;
 
 /// Assembles application configuration, connects outbound repositories, and builds `AppState`.
+#[cfg(feature = "acme")]
 pub async fn build_state(config: &AppConfig) -> EyeResult<AppState> {
     build_state_with_cert_manager(config)
         .await
         .map(|(state, _cert_manager)| state)
 }
 
+#[cfg(not(feature = "acme"))]
+pub async fn build_state(config: &AppConfig) -> EyeResult<AppState> {
+    build_state_internal(config).await
+}
+
+#[cfg(feature = "acme")]
 pub async fn build_state_with_cert_manager(
     config: &AppConfig,
 ) -> EyeResult<(AppState, Arc<CertManager>)> {
+    build_state_internal(config).await
+}
+
+#[cfg(feature = "acme")]
+async fn build_state_internal(config: &AppConfig) -> EyeResult<(AppState, Arc<CertManager>)> {
+    build_state_impl(config).await
+}
+
+#[cfg(not(feature = "acme"))]
+async fn build_state_internal(config: &AppConfig) -> EyeResult<AppState> {
+    let (state,) = build_state_impl(config).await?;
+    Ok(state)
+}
+
+#[cfg(feature = "acme")]
+type BuildStateResult = (AppState, Arc<CertManager>);
+
+#[cfg(not(feature = "acme"))]
+type BuildStateResult = (AppState,);
+
+async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
     let (status_list_repo, credential_repo, status_list_history): (
         Arc<dyn StatusListRepo>,
         Arc<dyn CredentialRepo>,
         Arc<dyn StatusListHistoryRepo>,
     ) = match config.database.backend {
+        #[cfg(feature = "memory")]
         DatabaseBackend::Memory => {
             let memory_history = MemoryStatusListHistory::default();
             let memory_lists = MemoryStatusLists::default().with_history(&memory_history);
@@ -75,6 +109,12 @@ pub async fn build_state_with_cert_manager(
                 Arc::new(MemoryCredentials::default()),
                 Arc::new(memory_history),
             )
+        }
+        #[cfg(not(feature = "memory"))]
+        DatabaseBackend::Memory => {
+            return Err(color_eyre::eyre::eyre!(
+                "Database backend 'memory' configured, but 'memory' feature flag was not compiled in."
+            ));
         }
         #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mysql"))]
         db_backend => {
@@ -122,93 +162,92 @@ pub async fn build_state_with_cert_manager(
         }
     };
 
-    let cert_domains = [config.server.domain.as_str()];
-    let app_env = std::env::var("APP_ENV").unwrap_or(ENV_DEVELOPMENT.to_string());
-
-    let (cert_storage, secrets_storage): (Box<dyn Storage>, Box<dyn Storage>) = {
-        #[cfg(feature = "aws")]
-        {
-            if config
-                .server
-                .cert
-                .store
-                .source
-                .eq_ignore_ascii_case("aws_secrets_manager")
-                || !config.aws.s3_bucket.is_empty()
+    #[cfg(feature = "acme")]
+    let (cert_provider, cert_manager_opt): (Arc<dyn CertificateProvider>, Option<Arc<CertManager>>) = {
+        let app_env = std::env::var("APP_ENV").unwrap_or(ENV_DEVELOPMENT.to_string());
+        let cert_domains = [config.server.domain.as_str()];
+        let (cert_storage, secrets_storage): (Box<dyn Storage>, Box<dyn Storage>) = {
+            #[cfg(feature = "aws")]
             {
-                let aws_config = aws_config::defaults(BehaviorVersion::latest())
-                    .region(Region::new(config.aws.region.clone()))
-                    .load()
-                    .await;
+                if config
+                    .server
+                    .cert
+                    .store
+                    .source
+                    .eq_ignore_ascii_case("aws_secrets_manager")
+                    || !config.aws.s3_bucket.is_empty()
+                {
+                    let aws_config = aws_config::defaults(BehaviorVersion::latest())
+                        .region(Region::new(config.aws.region.clone()))
+                        .load()
+                        .await;
 
-                #[cfg(feature = "redis")]
-                let cache_opt = if !config.redis.uri.expose_secret().is_empty() {
-                    if let Ok(redis_conn) = config.redis.start(None, None, None).await {
-                        Some(Redis::new(redis_conn).with_ttl(config.redis.cert_cache_ttl))
+                    #[cfg(feature = "redis")]
+                    let cache_opt = if !config.redis.uri.expose_secret().is_empty() {
+                        if let Ok(redis_conn) = config.redis.start(None, None, None).await {
+                            Some(Redis::new(redis_conn).with_ttl(config.redis.cert_cache_ttl))
+                        } else {
+                            None
+                        }
                     } else {
                         None
-                    }
-                } else {
-                    None
-                };
-                #[cfg(not(feature = "redis"))]
-                let cache_opt = None;
+                    };
+                    #[cfg(not(feature = "redis"))]
+                    let cache_opt = None;
 
-                let s3 = AwsS3::new(
-                    &aws_config,
-                    &config.aws.s3_bucket,
-                    &config.aws.region,
-                    &config.aws.s3_key_prefix,
-                );
-                let cert_st: Box<dyn Storage> = match cache_opt {
-                    Some(c) => Box::new(s3.with_cache(c)),
-                    None => Box::new(s3),
-                };
-
-                let secrets_st: Box<dyn Storage> = Box::new(
-                    AwsSecretsManager::new(
+                    let s3 = AwsS3::new(
                         &aws_config,
-                        Duration::from_secs(config.aws.secrets_cache_ttl),
+                        &config.aws.s3_bucket,
+                        &config.aws.region,
+                        &config.aws.s3_key_prefix,
+                    );
+                    let cert_st: Box<dyn Storage> = match cache_opt {
+                        Some(c) => Box::new(s3.with_cache(c)),
+                        None => Box::new(s3),
+                    };
+
+                    let secrets_st: Box<dyn Storage> = Box::new(
+                        AwsSecretsManager::new(
+                            &aws_config,
+                            Duration::from_secs(config.aws.secrets_cache_ttl),
+                        )
+                        .await?,
+                    );
+                    (cert_st, secrets_st)
+                } else {
+                    (
+                        Box::new(MemoryStorage::default()),
+                        Box::new(MemoryStorage::default()),
                     )
-                    .await?,
-                );
-                (cert_st, secrets_st)
-            } else {
+                }
+            }
+            #[cfg(not(feature = "aws"))]
+            {
                 (
                     Box::new(MemoryStorage::default()),
                     Box::new(MemoryStorage::default()),
                 )
             }
-        }
-        #[cfg(not(feature = "aws"))]
-        {
-            (
-                Box::new(MemoryStorage::default()),
-                Box::new(MemoryStorage::default()),
-            )
-        }
-    };
+        };
 
-    let cert_strategy = store_certificate_strategy(config)?;
-    let uses_acme_strategy = config
-        .server
-        .cert
-        .provisioning_strategy
-        .eq_ignore_ascii_case("acme");
+        let cert_strategy = store_certificate_strategy(config)?;
+        let uses_acme_strategy = config
+            .server
+            .cert
+            .provisioning_strategy
+            .eq_ignore_ascii_case("acme");
 
-    let mut cert_manager_builder = CertManager::builder()
-        .domains(cert_domains)
-        .email(&config.server.cert.email)
-        .organization(config.server.cert.organization.as_deref())
-        .acme_directory_url(&config.server.cert.acme_directory_url)
-        .cert_storage(cert_storage)
-        .secrets_storage(secrets_storage)
-        .chain_cache_ttl(Duration::from_secs(config.server.cert.chain_cache_ttl))
-        .eku(&config.server.cert.eku);
+        let mut cert_manager_builder = CertManager::builder()
+            .domains(cert_domains)
+            .email(&config.server.cert.email)
+            .organization(config.server.cert.organization.as_deref())
+            .acme_directory_url(&config.server.cert.acme_directory_url)
+            .cert_storage(cert_storage)
+            .secrets_storage(secrets_storage)
+            .chain_cache_ttl(Duration::from_secs(config.server.cert.chain_cache_ttl))
+            .eku(&config.server.cert.eku);
 
-    cert_manager_builder = if uses_acme_strategy {
-        #[cfg(feature = "acme")]
-        {
+        cert_manager_builder = if uses_acme_strategy {
             let dns_provider = config
                 .server
                 .cert
@@ -226,32 +265,40 @@ pub async fn build_state_with_cert_manager(
             cert_manager_builder
                 .challenge_handler(challenge_handler)
                 .acme_strategy()
-        }
-        #[cfg(not(feature = "acme"))]
-        {
+        } else if let Some(cert_strategy) = cert_strategy {
+            cert_manager_builder.store_strategy(cert_strategy)
+        } else {
             return Err(eyre!(
-                "ACME provisioning strategy requested, but 'acme' feature flag was not compiled in."
+                "store certificate provisioning strategy is missing after validation"
             ));
+        };
+
+        if app_env == ENV_DEVELOPMENT {
+            let root_cert = include_bytes!("../test_data/pebble.pem");
+            let http_client = DefaultHttpClient::new(Some(root_cert))?;
+            cert_manager_builder = cert_manager_builder.acme_http_client(http_client);
         }
-    } else if let Some(cert_strategy) = cert_strategy {
-        cert_manager_builder.store_strategy(cert_strategy)
-    } else {
-        return Err(eyre!(
-            "store certificate provisioning strategy is missing after validation"
-        ));
+
+        let certificate_manager = cert_manager_builder.build()?;
+        let cert_manager = Arc::new(certificate_manager);
+        (
+            Arc::new(AcmeCertificateProvider::new(cert_manager.clone())),
+            Some(cert_manager),
+        )
     };
 
-    if app_env == ENV_DEVELOPMENT {
-        let root_cert = include_bytes!("../test_data/pebble.pem");
-        let http_client = DefaultHttpClient::new(Some(root_cert))?;
-        cert_manager_builder = cert_manager_builder.acme_http_client(http_client);
-    }
+    #[cfg(not(feature = "acme"))]
+    let (cert_provider, _cert_manager_opt): (Arc<dyn CertificateProvider>, Option<()>) = (
+        Arc::new(
+            crate::outbound::cert::StoreCertificateProvider::new(
+                config.server.cert.store.certificate_path.clone(),
+                config.server.cert.store.signing_key_path.clone(),
+            ),
+        ),
+        None,
+    );
 
-    let certificate_manager = cert_manager_builder.build()?;
     let status_list_cache = MokaStatusListCache::new(config.cache.ttl, config.cache.max_capacity);
-
-    let cert_manager = Arc::new(certificate_manager);
-    let cert_provider = Arc::new(AcmeCertificateProvider::new(cert_manager.clone()));
 
     let history_option = if config.status_list.history_retention_secs == 0 {
         None
@@ -267,20 +314,26 @@ pub async fn build_state_with_cert_manager(
         cert_provider,
     ));
 
-    Ok((
-        AppState {
-            service,
-            server_domain: config.server.domain.clone(),
-            aggregation_uri: empty_to_none(config.server.aggregation_uri.clone()),
-            token_exp_secs: config.status_list.token_exp_secs,
-            token_ttl_secs: config.status_list.token_ttl_secs,
-            max_status_index: config.limits.max_status_index,
-            max_statuses_per_request: config.limits.max_statuses_per_request,
-            max_serialized_list_size: config.limits.max_serialized_list_size,
-            history_retention_secs: config.status_list.history_retention_secs,
-        },
-        cert_manager,
-    ))
+    let state = AppState {
+        service,
+        server_domain: config.server.domain.clone(),
+        aggregation_uri: empty_to_none(config.server.aggregation_uri.clone()),
+        token_exp_secs: config.status_list.token_exp_secs,
+        token_ttl_secs: config.status_list.token_ttl_secs,
+        max_status_index: config.limits.max_status_index,
+        max_statuses_per_request: config.limits.max_statuses_per_request,
+        max_serialized_list_size: config.limits.max_serialized_list_size,
+        history_retention_secs: config.status_list.history_retention_secs,
+    };
+
+    #[cfg(feature = "acme")]
+    {
+        Ok((state, cert_manager_opt.unwrap()))
+    }
+    #[cfg(not(feature = "acme"))]
+    {
+        Ok((state,))
+    }
 }
 
 pub async fn setup_history_cleanup_scheduler(
@@ -340,6 +393,7 @@ fn acme_dns_credentials(account: &crate::config::AcmeDnsAccount) -> AcmeDnsCrede
     }
 }
 
+#[cfg(feature = "acme")]
 fn store_certificate_strategy(config: &AppConfig) -> EyeResult<Option<StoreProvisioningStrategy>> {
     let cert_config = &config.server.cert;
     if cert_config
@@ -564,16 +618,23 @@ mod tests {
             build_dns_challenge_handler(DnsProviderKind::Gcloud, &mut config, &domains).is_ok()
         );
     }
+}
+
+#[cfg(test)]
+mod general_tests {
+    use super::*;
 
     #[tokio::test]
     async fn build_state_succeeds_under_default_config() {
         let _ = rustls::crypto::ring::default_provider().install_default();
         let mut config = AppConfig::load().expect("Failed to load config");
-        config.database.backend = crate::config::DatabaseBackend::Memory;
+        #[cfg(feature = "memory")]
+        {
+            config.database.backend = DatabaseBackend::Memory;
+        }
         config.server.cert.provisioning_strategy = "store".to_string();
-        config.server.cert.store.source = "filesystem".to_string();
-        config.server.cert.store.certificate_path = Some("test_data/test_cert.pem".into());
-        config.server.cert.store.signing_key_path = Some("test_data/ec-private.pem".into());
+        config.server.cert.store.certificate_path = Some("test_data/test_cert.pem".to_string());
+        config.server.cert.store.signing_key_path = Some("test_data/ec-private.pem".to_string());
         assert!(build_state(&config).await.is_ok());
     }
 }

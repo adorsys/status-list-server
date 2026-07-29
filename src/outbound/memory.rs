@@ -2,6 +2,7 @@ use async_trait::async_trait;
 use std::{collections::HashMap, sync::Arc};
 use tokio::sync::RwLock;
 
+#[cfg(feature = "acme")]
 use crate::cert_manager::storage::StorageError;
 use crate::domain::models::credential::{Credential, CredentialError};
 use crate::domain::models::status_list::{StatusListError, StatusListRecord, StatusListSnapshot};
@@ -211,11 +212,13 @@ impl StatusListHistoryRepo for MemoryStatusListHistory {
     }
 }
 
+#[cfg(feature = "acme")]
 #[derive(Clone, Default)]
 pub struct MemoryStorage {
     values: Arc<RwLock<HashMap<String, String>>>,
 }
 
+#[cfg(feature = "acme")]
 #[async_trait]
 impl crate::utils::cert_manager::storage::Storage for MemoryStorage {
     async fn store(&self, key: &str, value: &str) -> Result<(), StorageError> {
