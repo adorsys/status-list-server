@@ -372,7 +372,7 @@ impl SeaOrmStore<StatusListHistoryRecord> {
                 }
             };
 
-            let count = (&*self.db)
+            let count = (*self.db)
                 .execute(Statement::from_sql_and_values(
                     backend,
                     sql,
