@@ -35,7 +35,9 @@ use tokio_cron_scheduler::{Job, JobScheduler};
 use tracing::{error, info, instrument, warn};
 use x509_parser::pem::Pem as X509Pem;
 
-use crate::cert_manager::{challenge::ChallengeHandler, http_client::DefaultHttpClient, storage::Storage};
+use crate::cert_manager::{
+    challenge::ChallengeHandler, http_client::DefaultHttpClient, storage::Storage,
+};
 
 // Renewal metrics constants
 const RENEWAL_ATTEMPTS_METRIC: &str = "cert_renewal_attempts_total";

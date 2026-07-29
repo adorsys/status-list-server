@@ -9,14 +9,33 @@ use aws_config::{BehaviorVersion, Region};
     feature = "mysql"
 ))]
 use color_eyre::eyre::Context;
-use color_eyre::eyre::{Result as EyeResult, eyre};
+use color_eyre::eyre::Result as EyeResult;
+#[cfg(any(
+    feature = "acme",
+    feature = "sqlite",
+    feature = "postgres",
+    feature = "mysql"
+))]
+use color_eyre::eyre::eyre;
 #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mysql"))]
 use sea_orm::ConnectOptions;
 #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mysql"))]
 use sea_orm_migration::MigratorTrait;
-#[cfg(any(feature = "acme", feature = "sqlite", feature = "postgres", feature = "mysql"))]
+#[cfg(any(
+    feature = "acme",
+    feature = "sqlite",
+    feature = "postgres",
+    feature = "mysql"
+))]
 use secrecy::ExposeSecret;
-use std::{sync::Arc, time::Duration};
+use std::sync::Arc;
+#[cfg(any(
+    feature = "acme",
+    feature = "sqlite",
+    feature = "postgres",
+    feature = "mysql"
+))]
+use std::time::Duration;
 #[cfg(feature = "acme")]
 use tracing::warn;
 
@@ -28,14 +47,16 @@ use crate::cert_manager::challenge::{
     GoogleCloudDnsProvider, PebbleDnsProvider, ServicePrincipal,
 };
 #[cfg(feature = "acme")]
+use crate::cert_manager::http_client::DefaultHttpClient;
+#[cfg(feature = "acme")]
 use crate::cert_manager::{
     CertManager, StoreProvisioningStrategy, storage::MemoryStorage, storage::Storage,
 };
+use crate::config::{Config as AppConfig, DatabaseBackend};
 #[cfg(feature = "acme")]
-use crate::cert_manager::http_client::DefaultHttpClient;
-use crate::config::{Config as AppConfig, DatabaseBackend, ENV_DEVELOPMENT};
-#[cfg(feature = "acme")]
-use crate::config::{DnsProviderKind, ENV_PRODUCTION, GcloudKeySource, ResolvedDnsProvider};
+use crate::config::{
+    DnsProviderKind, ENV_DEVELOPMENT, ENV_PRODUCTION, GcloudKeySource, ResolvedDnsProvider,
+};
 use crate::domain::{
     ports::{CertificateProvider, CredentialRepo, StatusListHistoryRepo, StatusListRepo},
     service::Service,
@@ -46,9 +67,7 @@ use crate::outbound::cache::MokaStatusListCache;
 #[cfg(feature = "acme")]
 use crate::outbound::cert::AcmeCertificateProvider;
 #[cfg(feature = "memory")]
-use crate::outbound::memory::{
-    MemoryCredentials, MemoryStatusListHistory, MemoryStatusLists,
-};
+use crate::outbound::memory::{MemoryCredentials, MemoryStatusListHistory, MemoryStatusLists};
 #[cfg(feature = "redis")]
 use crate::outbound::redis::Redis;
 #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mysql"))]
@@ -163,7 +182,10 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
     };
 
     #[cfg(feature = "acme")]
-    let (cert_provider, cert_manager_opt): (Arc<dyn CertificateProvider>, Option<Arc<CertManager>>) = {
+    let (cert_provider, cert_manager_opt): (
+        Arc<dyn CertificateProvider>,
+        Option<Arc<CertManager>>,
+    ) = {
         let app_env = std::env::var("APP_ENV").unwrap_or(ENV_DEVELOPMENT.to_string());
         let cert_domains = [config.server.domain.as_str()];
         let (cert_storage, secrets_storage): (Box<dyn Storage>, Box<dyn Storage>) = {
@@ -289,12 +311,10 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
 
     #[cfg(not(feature = "acme"))]
     let (cert_provider, _cert_manager_opt): (Arc<dyn CertificateProvider>, Option<()>) = (
-        Arc::new(
-            crate::outbound::cert::StoreCertificateProvider::new(
-                config.server.cert.store.certificate_path.clone(),
-                config.server.cert.store.signing_key_path.clone(),
-            ),
-        ),
+        Arc::new(crate::outbound::cert::StoreCertificateProvider::new(
+            config.server.cert.store.certificate_path.clone(),
+            config.server.cert.store.signing_key_path.clone(),
+        )),
         None,
     );
 

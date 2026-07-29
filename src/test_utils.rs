@@ -7,11 +7,9 @@ use crate::outbound::memory::{MemoryCredentials, MemoryStatusListHistory, Memory
 use crate::outbound::sql::{
     SeaOrmStore, SqlCredentialRepo, SqlStatusListHistoryRepo, SqlStatusListRepo,
 };
-#[cfg(feature = "acme")]
-use crate::{
-    cert_manager::storage::StorageError, utils::cert_manager::storage::Storage,
-};
 use crate::server::AppState;
+#[cfg(feature = "acme")]
+use crate::{cert_manager::storage::StorageError, utils::cert_manager::storage::Storage};
 use async_trait::async_trait;
 use std::{collections::HashMap, sync::Arc};
 

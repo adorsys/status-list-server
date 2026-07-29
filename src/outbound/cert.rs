@@ -48,7 +48,10 @@ pub struct StoreCertificateProvider {
 #[cfg(not(feature = "acme"))]
 impl StoreCertificateProvider {
     pub fn new(cert_path: Option<String>, key_path: Option<String>) -> Self {
-        Self { cert_path, key_path }
+        Self {
+            cert_path,
+            key_path,
+        }
     }
 }
 

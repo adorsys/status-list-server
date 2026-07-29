@@ -1,6 +1,5 @@
 use crate::{
-    cert_manager::storage::StorageError,
-    cert_manager::challenge::ChallengeError,
+    cert_manager::challenge::ChallengeError, cert_manager::storage::StorageError,
     utils::keygen::Error as KeyOpError,
 };
 use color_eyre::eyre::Error as EyreError;

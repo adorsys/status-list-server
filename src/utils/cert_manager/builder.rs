@@ -5,10 +5,9 @@ use instant_acme::{Account, HttpClient};
 use tokio::sync::Mutex;
 
 use super::{
-    CertError, CertManager, CertProvisioningStrategy,
+    AcmeProvisioningStrategy, CertError, CertManager, CertProvisioningStrategy,
     DEFAULT_CHAIN_CACHE_TTL, RenewalStrategy, StoreProvisioningStrategy,
-    storage::Storage,
-    AcmeProvisioningStrategy, challenge::ChallengeHandler, http_client::DefaultHttpClient,
+    challenge::ChallengeHandler, http_client::DefaultHttpClient, storage::Storage,
 };
 use crate::utils::cache::CertChainCache;
 
@@ -200,7 +199,8 @@ impl CertificateManagerBuilder {
             CertError::Validation("secrets storage backend must be configured".to_string())
         })?;
 
-        let default_strategy: Box<dyn CertProvisioningStrategy> = Box::new(AcmeProvisioningStrategy);
+        let default_strategy: Box<dyn CertProvisioningStrategy> =
+            Box::new(AcmeProvisioningStrategy);
         let strategy = self.provisioning_strategy.unwrap_or(default_strategy);
 
         let strategy_uses_acme = strategy.name() == "acme";

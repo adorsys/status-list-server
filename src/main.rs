@@ -3,11 +3,11 @@ use dotenvy::dotenv;
 use rustls::crypto::aws_lc_rs;
 #[cfg(feature = "acme")]
 use status_list_server::cert_manager::{describe_renewal_metrics, setup_cert_renewal_scheduler};
-use status_list_server::setup::setup_history_cleanup_scheduler;
 #[cfg(not(feature = "acme"))]
 use status_list_server::setup::build_state;
 #[cfg(feature = "acme")]
 use status_list_server::setup::build_state_with_cert_manager;
+use status_list_server::setup::setup_history_cleanup_scheduler;
 use status_list_server::{config::Config as AppConfig, startup::HttpServer};
 #[cfg(not(target_env = "msvc"))]
 use tikv_jemallocator::Jemalloc;
