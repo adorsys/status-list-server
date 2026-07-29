@@ -284,12 +284,7 @@ async fn build_token(
         .certificate_chain()
         .await
         .map_err(|e| StatusListError::Backend(Box::new(e)))?
-        .ok_or_else(|| {
-            StatusListError::Backend(Box::new(std::io::Error::new(
-                std::io::ErrorKind::NotFound,
-                "Certificate not provisioned",
-            )))
-        })?;
+        .ok_or(StatusListError::Unavailable)?;
 
     let signing_key_pem = state
         .service

@@ -31,6 +31,8 @@ pub enum StatusListError {
     IndexTooLarge { index: i32, max: i32 },
     #[error("the status list was modified concurrently")]
     Conflict,
+    #[error("the service is currently unavailable. Please try again later")]
+    Unavailable,
     #[error("storage error: {0}")]
     Backend(#[source] Box<dyn std::error::Error + Send + Sync>),
 }

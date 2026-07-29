@@ -623,6 +623,16 @@ impl Config {
         ))]
         let (default_db_url, default_db_backend) = ("memory:", "memory");
 
+        #[cfg(feature = "acme")]
+        let (default_provisioning_strategy, default_cert_path, default_key_path) =
+            ("acme", Option::<String>::None, Option::<String>::None);
+        #[cfg(not(feature = "acme"))]
+        let (default_provisioning_strategy, default_cert_path, default_key_path) = (
+            "store",
+            Some("test_data/test_cert.pem".to_string()),
+            Some("test_data/ec-private.pem".to_string()),
+        );
+
         // Build the config
         let config = ConfigLib::builder()
             // Set default values
@@ -639,7 +649,10 @@ impl Config {
             .set_default("aws.secrets_cache_ttl", 300)? // Default 5 minutes
             .set_default("aws.s3_bucket", "status-list-adorsys")?
             .set_default("aws.s3_key_prefix", "")?
-            .set_default("server.cert.provisioning_strategy", "acme")?
+            .set_default(
+                "server.cert.provisioning_strategy",
+                default_provisioning_strategy,
+            )?
             .set_default("server.cert.email", "admin@example.com")?
             .set_default("server.cert.eku", vec![1, 3, 6, 1, 5, 5, 7, 3, 30])?
             .set_default("server.cert.organization", "adorsys GmbH & CO KG")?
@@ -653,8 +666,8 @@ impl Config {
             )?
             .set_default("server.cert.renewal_cron_schedule", "0 0 0 * * *")?
             .set_default("server.cert.store.source", "filesystem")?
-            .set_default("server.cert.store.certificate_path", Option::<String>::None)?
-            .set_default("server.cert.store.signing_key_path", Option::<String>::None)?
+            .set_default("server.cert.store.certificate_path", default_cert_path)?
+            .set_default("server.cert.store.signing_key_path", default_key_path)?
             .set_default("server.cert.store.certificate_key", Option::<String>::None)?
             .set_default("server.cert.store.signing_key_key", Option::<String>::None)?
             .set_default("aws.region", "us-east-1")?
@@ -698,11 +711,27 @@ mod tests {
 
         assert_eq!(config.server.host, "localhost");
         assert_eq!(config.server.port, 8000);
-        assert_eq!(
-            config.database.url.expose_secret(),
-            "postgres://postgres:postgres@localhost:5432/status-list"
+        #[cfg(feature = "postgres")]
+        let (expected_db_url, expected_db_backend) = (
+            "postgres://postgres:postgres@localhost:5432/status-list",
+            DatabaseBackend::Postgres,
         );
-        assert_eq!(config.database.backend, DatabaseBackend::Postgres);
+        #[cfg(all(not(feature = "postgres"), feature = "sqlite"))]
+        let (expected_db_url, expected_db_backend) = ("sqlite::memory:", DatabaseBackend::Sqlite);
+        #[cfg(all(not(feature = "postgres"), not(feature = "sqlite"), feature = "mysql"))]
+        let (expected_db_url, expected_db_backend) = (
+            "mysql://mysql:mysql@localhost:3306/status-list",
+            DatabaseBackend::MySql,
+        );
+        #[cfg(all(
+            not(feature = "postgres"),
+            not(feature = "sqlite"),
+            not(feature = "mysql")
+        ))]
+        let (expected_db_url, expected_db_backend) = ("memory:", DatabaseBackend::Memory);
+
+        assert_eq!(config.database.url.expose_secret(), expected_db_url);
+        assert_eq!(config.database.backend, expected_db_backend);
         assert_eq!(config.redis.uri.expose_secret(), "redis://localhost:6379");
         assert!(!config.redis.require_client_auth);
         assert_eq!(config.server.cert.email, "admin@example.com");
@@ -717,10 +746,22 @@ mod tests {
         assert_eq!(config.status_list.token_ttl_secs, 300);
         assert_eq!(config.server.cert.renewal_cron_schedule, "0 0 0 * * *");
         assert_eq!(config.server.cert.dns_challenge_server_url, None);
-        assert_eq!(config.server.cert.provisioning_strategy, "acme");
+        #[cfg(feature = "acme")]
+        let (expected_strategy, expected_cert_path, expected_key_path) =
+            ("acme", Option::<String>::None, Option::<String>::None);
+        #[cfg(not(feature = "acme"))]
+        let (expected_strategy, expected_cert_path, expected_key_path) = (
+            "store",
+            Some("test_data/test_cert.pem".to_string()),
+            Some("test_data/ec-private.pem".to_string()),
+        );
+        assert_eq!(config.server.cert.provisioning_strategy, expected_strategy);
         assert_eq!(config.server.cert.store.source, "filesystem");
-        assert_eq!(config.server.cert.store.certificate_path, None);
-        assert_eq!(config.server.cert.store.signing_key_path, None);
+        assert_eq!(
+            config.server.cert.store.certificate_path,
+            expected_cert_path
+        );
+        assert_eq!(config.server.cert.store.signing_key_path, expected_key_path);
         assert_eq!(config.server.aggregation_uri, None);
         assert_eq!(config.rate_limit.strict_burst_size, 10);
         assert_eq!(config.rate_limit.strict_period_secs, 60);

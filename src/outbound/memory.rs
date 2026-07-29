@@ -40,11 +40,15 @@ impl StatusListRepo for MemoryStatusLists {
     }
 
     async fn insert(&self, record: StatusListRecord) -> Result<(), StatusListError> {
-        self.values
-            .write()
-            .await
-            .insert(record.list_id.clone(), record);
-        Ok(())
+        let mut values = self.values.write().await;
+        use std::collections::hash_map::Entry;
+        match values.entry(record.list_id.clone()) {
+            Entry::Occupied(_) => Err(StatusListError::AlreadyExists),
+            Entry::Vacant(e) => {
+                e.insert(record);
+                Ok(())
+            }
+        }
     }
 
     async fn update(
@@ -88,12 +92,18 @@ impl StatusListRepo for MemoryStatusLists {
     ) -> Result<(), StatusListError> {
         let history = self.require_history()?;
         let mut values = self.values.write().await;
-        history
-            .write()
-            .await
-            .insert(snapshot.snapshot_id.clone(), snapshot);
-        values.insert(record.list_id.clone(), record);
-        Ok(())
+        use std::collections::hash_map::Entry;
+        match values.entry(record.list_id.clone()) {
+            Entry::Occupied(_) => Err(StatusListError::AlreadyExists),
+            Entry::Vacant(e) => {
+                history
+                    .write()
+                    .await
+                    .insert(snapshot.snapshot_id.clone(), snapshot);
+                e.insert(record);
+                Ok(())
+            }
+        }
     }
 
     async fn list_uris(&self) -> Result<Vec<String>, StatusListError> {
@@ -145,11 +155,15 @@ impl CredentialRepo for MemoryCredentials {
     }
 
     async fn insert(&self, credential: Credential) -> Result<(), CredentialError> {
-        self.values
-            .write()
-            .await
-            .insert(credential.issuer.0.clone(), credential);
-        Ok(())
+        let mut values = self.values.write().await;
+        use std::collections::hash_map::Entry;
+        match values.entry(credential.issuer.0.clone()) {
+            Entry::Occupied(_) => Err(CredentialError::AlreadyExists),
+            Entry::Vacant(e) => {
+                e.insert(credential);
+                Ok(())
+            }
+        }
     }
 }
 

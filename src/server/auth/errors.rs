@@ -1,7 +1,7 @@
-use axum::{Json, response::IntoResponse};
+use crate::server::error::{ApiError, IntoApiError};
+use axum::response::IntoResponse;
 use hyper::StatusCode;
 use jsonwebtoken::errors::Error as JwtError;
-use serde_json::json;
 use std::borrow::Cow;
 use thiserror::Error;
 
@@ -42,30 +42,19 @@ impl AuthenticationError {
     }
 }
 
+impl IntoApiError for AuthenticationError {
+    fn into_api_error(self) -> ApiError {
+        ApiError::new(
+            self.get_status(),
+            self.get_error_code(),
+            Some(self.get_error_message()),
+        )
+    }
+}
+
 impl IntoResponse for AuthenticationError {
     fn into_response(self) -> axum::response::Response {
-        let status = self.get_status();
-        if status.is_server_error() {
-            tracing::error!(
-                status = %status,
-                error = %self.get_error_code(),
-                message = %self.get_error_message(),
-                "Authentication server error"
-            );
-        } else {
-            tracing::warn!(
-                status = %status,
-                error = %self.get_error_code(),
-                message = %self.get_error_message(),
-                "Authentication failure"
-            );
-        }
-
-        let body = json!({
-            "error": self.get_error_code(),
-            "message": self.get_error_message(),
-        });
-        (status, Json(body)).into_response()
+        self.into_api_error().into_response()
     }
 }
 
@@ -83,6 +72,9 @@ mod tests {
         let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(json["error"], "invalid_auth_header");
-        assert!(json.get("message").is_some());
+        assert_eq!(
+            json["error_description"],
+            "Missing or invalid Authorization header"
+        );
     }
 }

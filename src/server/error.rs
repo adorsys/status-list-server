@@ -110,7 +110,12 @@ impl IntoResponse for ApiError {
             error: self.error,
             error_description: self.error_description,
         };
-        (self.status, Json(body)).into_response()
+        (
+            self.status,
+            [(axum::http::header::CACHE_CONTROL, "no-store, max-age=0")],
+            Json(body),
+        )
+            .into_response()
     }
 }
 
@@ -165,6 +170,11 @@ impl IntoApiError for StatusListError {
             StatusListError::Conflict => {
                 ApiError::conflict("conflict", "The status list was modified concurrently")
             }
+            StatusListError::Unavailable => ApiError::new(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "service_unavailable",
+                Some("the service is currently unavailable. Please try again later".into()),
+            ),
             StatusListError::Backend(err) => ApiError::internal(err),
         }
     }
