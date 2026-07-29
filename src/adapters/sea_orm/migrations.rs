@@ -36,9 +36,7 @@ const INNODB_REQUIRED_TABLES: &[&str] = &["status_lists", "status_list_history"]
 ///
 /// No-op on Postgres and SQLite. On failure the error log includes the table
 /// name, its actual engine, and the `ALTER TABLE … ENGINE=InnoDB` fix command.
-pub(crate) async fn verify_innodb_engines(
-    db: &sea_orm::DatabaseConnection,
-) -> Result<(), DbErr> {
+pub(crate) async fn verify_innodb_engines(db: &sea_orm::DatabaseConnection) -> Result<(), DbErr> {
     use sea_orm::{ConnectionTrait, FromQueryResult, Statement, Value};
     use tracing::error;
 
@@ -65,10 +63,7 @@ pub(crate) async fn verify_innodb_engines(
          WHERE table_schema = DATABASE() \
            AND table_name IN ({placeholders})"
     );
-    let values: Vec<Value> = INNODB_REQUIRED_TABLES
-        .iter()
-        .map(|t| (*t).into())
-        .collect();
+    let values: Vec<Value> = INNODB_REQUIRED_TABLES.iter().map(|t| (*t).into()).collect();
 
     let rows = TableEngine::find_by_statement(Statement::from_sql_and_values(
         sea_orm::DatabaseBackend::MySql,
@@ -476,7 +471,10 @@ mod tests {
 
     #[test]
     fn non_innodb_table_is_flagged() {
-        let rows = [("status_lists", "MyISAM"), ("status_list_history", "InnoDB")];
+        let rows = [
+            ("status_lists", "MyISAM"),
+            ("status_list_history", "InnoDB"),
+        ];
         let non_innodb = flagged(&rows);
 
         assert!(!non_innodb.is_empty());
@@ -488,14 +486,23 @@ mod tests {
             non_innodb.join(", ")
         );
 
-        assert!(err_msg.contains("status_lists"), "must name the affected table");
+        assert!(
+            err_msg.contains("status_lists"),
+            "must name the affected table"
+        );
         assert!(err_msg.contains("MyISAM"), "must include the actual engine");
-        assert!(!err_msg.contains("status_list_history"), "InnoDB table must not appear");
+        assert!(
+            !err_msg.contains("status_list_history"),
+            "InnoDB table must not appear"
+        );
     }
 
     #[test]
     fn all_innodb_produces_no_error() {
-        let rows = [("status_lists", "InnoDB"), ("status_list_history", "InnoDB")];
+        let rows = [
+            ("status_lists", "InnoDB"),
+            ("status_list_history", "InnoDB"),
+        ];
         assert!(flagged(&rows).is_empty());
     }
 
