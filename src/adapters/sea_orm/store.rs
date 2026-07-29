@@ -1,6 +1,6 @@
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, QueryOrder,
-    QuerySelect, Set, sea_query::Expr,
+    ActiveModelTrait, ColumnTrait, ConnectionTrait, DatabaseBackend, DatabaseConnection,
+    EntityTrait, QueryFilter, QueryOrder, QuerySelect, Set, Statement, Value, sea_query::Expr,
 };
 use std::sync::Arc;
 use tracing::warn;
@@ -207,32 +207,40 @@ impl SeaOrmStore<StatusListHistoryRecord> {
     /// Deletes snapshots older than the given cutoff timestamp.
     /// Batches the delete in chunks to avoid holding long-lived locks.
     /// Returns the total number of rows deleted.
+    ///
+    /// Note: This operation is not atomic across batches. If interrupted,
+    /// some expired snapshots may be deleted while others remain. This is
+    /// acceptable for a cleanup operation; subsequent runs will clean up
+    /// any remaining rows.
     pub async fn delete_older_than(&self, cutoff: i64) -> Result<u64, RepositoryError> {
         const BATCH_SIZE: u64 = 500;
         let mut total_deleted: u64 = 0;
 
         loop {
-            let batch: Vec<String> = status_list_history::Entity::find()
-                .select_only()
-                .column(status_list_history::Column::SnapshotId)
-                .filter(status_list_history::Column::Exp.lt(cutoff))
-                .limit(BATCH_SIZE)
-                .into_tuple::<String>()
-                .all(&*self.db)
+            let backend = self.db.get_database_backend();
+            let sql = match backend {
+                DatabaseBackend::Postgres => {
+                    "DELETE FROM status_list_history \
+                     WHERE snapshot_id IN \
+                     (SELECT snapshot_id FROM status_list_history WHERE exp < $1 LIMIT $2)"
+                }
+                _ => {
+                    "DELETE FROM status_list_history \
+                     WHERE snapshot_id IN \
+                     (SELECT snapshot_id FROM status_list_history WHERE exp < ? LIMIT ?)"
+                }
+            };
+
+            let count = (&*self.db)
+                .execute(Statement::from_sql_and_values(
+                    backend,
+                    sql,
+                    vec![Value::from(cutoff), Value::from(BATCH_SIZE)],
+                ))
                 .await
-                .map_err(|e| RepositoryError::DeleteError(e.to_string()))?;
+                .map_err(|e| RepositoryError::DeleteError(e.to_string()))?
+                .rows_affected();
 
-            if batch.is_empty() {
-                break;
-            }
-
-            let result = status_list_history::Entity::delete_many()
-                .filter(status_list_history::Column::SnapshotId.is_in(batch.clone()))
-                .exec(&*self.db)
-                .await
-                .map_err(|e| RepositoryError::DeleteError(e.to_string()))?;
-
-            let count = result.rows_affected;
             total_deleted += count;
 
             if count < BATCH_SIZE {
@@ -241,7 +249,7 @@ impl SeaOrmStore<StatusListHistoryRecord> {
         }
 
         if total_deleted > 0 {
-            warn!(target: "status_list_server::store", deleted = total_deleted, cutoff, "Deleted expired status list history snapshots");
+            warn!(deleted = total_deleted, cutoff, "Deleted expired status list history snapshots");
         }
 
         Ok(total_deleted)

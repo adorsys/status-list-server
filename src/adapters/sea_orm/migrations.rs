@@ -410,6 +410,8 @@ pub(crate) mod status_list_history_exp_index {
         }
     }
 
+    // Intentionally redefined in this migration module to be self-contained.
+    // See `status_list_history::Migration` for the full table definition.
     #[derive(Iden)]
     enum StatusListHistory {
         Table,
