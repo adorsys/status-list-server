@@ -25,6 +25,95 @@ fn pin_innodb_on_mysql(manager: &SchemaManager<'_>, stmt: &mut TableCreateStatem
     }
 }
 
+/// Tables that must use InnoDB for transactional guarantees.
+/// Extend this list if new transactional tables are added.
+const INNODB_REQUIRED_TABLES: &[&str] = &["status_lists", "status_list_history"];
+
+/// Queries `information_schema.TABLES` after migrations and refuses to boot if
+/// any of the critical tables (`status_lists`, `status_list_history`) are not
+/// InnoDB. MyISAM silently ignores transactions, so a non-InnoDB install breaks
+/// the guarantees from issue #244 without any visible error.
+///
+/// No-op on Postgres and SQLite. On failure the error log includes the table
+/// name, its actual engine, and the `ALTER TABLE … ENGINE=InnoDB` fix command.
+pub(crate) async fn verify_innodb_engines(
+    db: &sea_orm::DatabaseConnection,
+) -> Result<(), DbErr> {
+    use sea_orm::{ConnectionTrait, FromQueryResult, Statement, Value};
+    use tracing::error;
+
+    if db.get_database_backend() != sea_orm::DatabaseBackend::MySql {
+        return Ok(());
+    }
+
+    #[derive(Debug, FromQueryResult)]
+    struct TableEngine {
+        table_name: String,
+        engine: String,
+    }
+
+    // Build `IN (?, ?, …)` from the const table list so the query stays in
+    // sync with INNODB_REQUIRED_TABLES without manual string editing.
+    let placeholders = INNODB_REQUIRED_TABLES
+        .iter()
+        .map(|_| "?")
+        .collect::<Vec<_>>()
+        .join(", ");
+    let sql = format!(
+        "SELECT table_name, engine \
+         FROM information_schema.TABLES \
+         WHERE table_schema = DATABASE() \
+           AND table_name IN ({placeholders})"
+    );
+    let values: Vec<Value> = INNODB_REQUIRED_TABLES
+        .iter()
+        .map(|t| (*t).into())
+        .collect();
+
+    let rows = TableEngine::find_by_statement(Statement::from_sql_and_values(
+        sea_orm::DatabaseBackend::MySql,
+        sql,
+        values,
+    ))
+    .all(db)
+    .await?;
+
+    let mut non_innodb: Vec<String> = Vec::new();
+    for row in rows {
+        if !row.engine.eq_ignore_ascii_case("InnoDB") {
+            error!(
+                table = %row.table_name,
+                engine = %row.engine,
+                "Table '{}' has storage engine '{}' instead of InnoDB. \
+                 InnoDB is required for transactional guarantees (see issue #244). \
+                 To fix, run during a maintenance window: \
+                 ALTER TABLE `{}` ENGINE=InnoDB;",
+                row.table_name, row.engine, row.table_name,
+            );
+            non_innodb.push(format!("{}({})", row.table_name, row.engine));
+        }
+    }
+
+    if non_innodb.is_empty() {
+        Ok(())
+    } else {
+        let alter_commands = non_innodb
+            .iter()
+            .map(|entry| {
+                let table = entry.split('(').next().unwrap_or(entry);
+                format!("ALTER TABLE `{table}` ENGINE=InnoDB;")
+            })
+            .collect::<Vec<_>>()
+            .join(" ");
+        Err(DbErr::Custom(format!(
+            "Non-InnoDB tables detected: {}. \
+             The server requires InnoDB for transactional guarantees. \
+             To fix, run in a maintenance window: {alter_commands}",
+            non_innodb.join(", "),
+        )))
+    }
+}
+
 /// Database tables module containing table creation migrations
 pub(crate) mod tables {
     use super::*;
@@ -370,5 +459,50 @@ pub(crate) mod status_list_history {
         Sub,
         Iat,
         Exp,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    // Tests for verify_innodb_engines: exercise the error-building logic
+    // without a live DB connection.
+
+    fn flagged(rows: &[(&str, &str)]) -> Vec<String> {
+        rows.iter()
+            .filter(|(_, engine)| !engine.eq_ignore_ascii_case("InnoDB"))
+            .map(|(table, engine)| format!("{}({})", table, engine))
+            .collect()
+    }
+
+    #[test]
+    fn non_innodb_table_is_flagged() {
+        let rows = [("status_lists", "MyISAM"), ("status_list_history", "InnoDB")];
+        let non_innodb = flagged(&rows);
+
+        assert!(!non_innodb.is_empty());
+
+        let err_msg = format!(
+            "Non-InnoDB tables detected: {}. \
+             The server requires InnoDB for transactional guarantees. \
+             Run `ALTER TABLE <table> ENGINE=InnoDB;` in a maintenance window and restart.",
+            non_innodb.join(", ")
+        );
+
+        assert!(err_msg.contains("status_lists"), "must name the affected table");
+        assert!(err_msg.contains("MyISAM"), "must include the actual engine");
+        assert!(!err_msg.contains("status_list_history"), "InnoDB table must not appear");
+    }
+
+    #[test]
+    fn all_innodb_produces_no_error() {
+        let rows = [("status_lists", "InnoDB"), ("status_list_history", "InnoDB")];
+        assert!(flagged(&rows).is_empty());
+    }
+
+    #[test]
+    fn engine_comparison_is_case_insensitive() {
+        for variant in ["innodb", "INNODB", "InnoDB", "Innodb"] {
+            assert!(variant.eq_ignore_ascii_case("InnoDB"));
+        }
     }
 }

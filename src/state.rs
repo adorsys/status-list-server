@@ -6,7 +6,7 @@ use crate::{
         redis::Redis,
         sea_orm::{
             Migrator, SeaOrmCredentialRepository, SeaOrmStatusListHistoryRepository,
-            SeaOrmStatusListRepository, store::SeaOrmStore,
+            SeaOrmStatusListRepository, migrations::verify_innodb_engines, store::SeaOrmStore,
         },
     },
     application::{
@@ -106,6 +106,14 @@ pub async fn build_state_with_cert_manager(
     Migrator::up(&db, None)
         .await
         .wrap_err("Failed to run database migrations")?;
+
+    verify_innodb_engines(&db)
+        .await
+        .wrap_err(
+            "Startup aborted: one or more tables are not using the InnoDB storage engine. \
+             See the logged error(s) above for the table name(s) and the ALTER TABLE \
+             runbook command to fix the issue.",
+        )?;
 
     let aws_config = aws_config::defaults(BehaviorVersion::latest())
         .region(Region::new(config.aws.region.clone()))
