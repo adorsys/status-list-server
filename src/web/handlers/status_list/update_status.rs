@@ -53,24 +53,25 @@ pub async fn update_status(
             return Err(StatusListError::Generic(msg).into());
         }
         Err(UseCaseError::Domain(domain::DomainError::CorruptStoredList(detail))) => {
-            // The stored `lst` failed to decode: corrupt persisted state, not a
-            // caller error. Log the detail at error level (this is the alert)
-            // and return 500 — never blame the client for our data corruption.
+            // Corrupt persisted state, not a caller error: log as the alert and
+            // return 500 rather than blaming the client.
             tracing::error!(list_id = ?list_id, %detail, "Corrupt stored status list");
             return Err(StatusListError::InternalServerError.into());
         }
         Err(UseCaseError::Domain(error)) => return Err(map_domain_error(error).into()),
         Err(UseCaseError::StatusListTooLarge) => return Err(StatusListError::StatusTooLarge.into()),
         Err(UseCaseError::Conflict) => {
-            // The optimistic guard in the use case did not match: a concurrent
-            // writer won the race (or the row was deleted). The use case returns
-            // before recording a snapshot or invalidating the cache, so nothing
-            // is persisted for a write that never landed.
+            // Optimistic guard miss: a concurrent writer won the race and nothing
+            // was persisted. Logged at info, not warn — under contention a
+            // conflict is the expected outcome, and warn would trip alerting
+            // during exactly the high-load bursts where conflicts are normal.
             //
-            // Logged at info, not warn: under contention an optimistic conflict
-            // is the expected, correct outcome, not an anomaly — warn would
-            // pollute dashboards and trip alerting during exactly the high-load
-            // bursts where conflicts are normal.
+            // Expected, but no longer free: now that the row update and its
+            // snapshot share one transaction, the winner holds the row lock
+            // until it commits, so the loser blocks on that lock before landing
+            // here rather than failing fast. Conflicts are still the normal
+            // outcome under contention; they just cost a lock wait, which is
+            // worth remembering when reading latency on a hot list.
             tracing::info!(list_id = ?list_id, "Concurrent update conflict; write rejected");
             return Err(StatusListError::UpdateConflict.into());
         }
