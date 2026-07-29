@@ -606,6 +606,23 @@ impl RedisConfig {
 
 impl Config {
     pub fn load() -> Result<Self, ConfigError> {
+        #[cfg(feature = "postgres")]
+        let (default_db_url, default_db_backend) = (
+            "postgres://postgres:postgres@localhost:5432/status-list",
+            "postgres",
+        );
+        #[cfg(all(not(feature = "postgres"), feature = "sqlite"))]
+        let (default_db_url, default_db_backend) = ("sqlite::memory:", "sqlite");
+        #[cfg(all(not(feature = "postgres"), not(feature = "sqlite"), feature = "mysql"))]
+        let (default_db_url, default_db_backend) =
+            ("mysql://mysql:mysql@localhost:3306/status-list", "mysql");
+        #[cfg(all(
+            not(feature = "postgres"),
+            not(feature = "sqlite"),
+            not(feature = "mysql")
+        ))]
+        let (default_db_url, default_db_backend) = ("memory:", "memory");
+
         // Build the config
         let config = ConfigLib::builder()
             // Set default values
@@ -614,11 +631,8 @@ impl Config {
             .set_default("server.port", 8000)?
             .set_default("server.enable_metrics", false)?
             .set_default("server.aggregation_uri", Option::<String>::None)?
-            .set_default(
-                "database.url",
-                "postgres://postgres:postgres@localhost:5432/status-list",
-            )?
-            .set_default("database.backend", "postgres")?
+            .set_default("database.url", default_db_url)?
+            .set_default("database.backend", default_db_backend)?
             .set_default("redis.uri", "redis://localhost:6379")?
             .set_default("redis.require_client_auth", false)?
             .set_default("redis.cert_cache_ttl", 3600)? // Default 1 hour

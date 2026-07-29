@@ -13,11 +13,11 @@ use crate::domain::ports::{
 /// Container struct for building and exposing external service ports injected into handlers.
 #[derive(Clone)]
 pub struct Service {
-    pub status_list_repo: Arc<dyn StatusListRepo>,
-    pub credential_repo: Arc<dyn CredentialRepo>,
-    pub status_list_cache: Arc<dyn StatusListCache>,
-    pub history_repo: Option<Arc<dyn StatusListHistoryRepo>>,
-    pub cert_provider: Arc<dyn CertificateProvider>,
+    pub(crate) status_list_repo: Arc<dyn StatusListRepo>,
+    pub(crate) credential_repo: Arc<dyn CredentialRepo>,
+    pub(crate) status_list_cache: Arc<dyn StatusListCache>,
+    pub(crate) history_repo: Option<Arc<dyn StatusListHistoryRepo>>,
+    pub(crate) cert_provider: Arc<dyn CertificateProvider>,
 }
 
 impl Service {
@@ -88,8 +88,25 @@ impl Service {
         sub: String,
         statuses: Vec<StatusEntry>,
         token_exp_secs: u64,
+        max_status_index: i32,
+        max_statuses_per_request: usize,
         max_serialized_list_size: usize,
     ) -> Result<StatusListRecord, StatusListError> {
+        if statuses.len() > max_statuses_per_request {
+            return Err(StatusListError::TooManyStatuses {
+                count: statuses.len(),
+                max: max_statuses_per_request,
+            });
+        }
+        for entry in &statuses {
+            if entry.index > max_status_index {
+                return Err(StatusListError::IndexTooLarge {
+                    index: entry.index,
+                    max: max_status_index,
+                });
+            }
+        }
+
         let record = StatusListRecord {
             list_id,
             issuer,

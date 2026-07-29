@@ -47,6 +47,8 @@ pub async fn publish_status(
             sub,
             statuses,
             appstate.token_exp_secs,
+            appstate.max_status_index,
+            appstate.max_statuses_per_request,
             appstate.max_serialized_list_size,
         )
         .await?;

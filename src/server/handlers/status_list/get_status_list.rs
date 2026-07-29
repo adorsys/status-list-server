@@ -48,7 +48,10 @@ pub async fn get_status_list(
         Ok(Query(q)) => q,
         Err(e) => {
             tracing::warn!("Failed to parse query parameters: {e}");
-            return Err(StatusListError::InvalidHistoricalTime.into());
+            return Err(ApiError::bad_request(
+                "invalid_query",
+                format!("Failed to parse query parameters: {e}"),
+            ));
         }
     };
     let accept = headers.get(header::ACCEPT).and_then(|h| h.to_str().ok());

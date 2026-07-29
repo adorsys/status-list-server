@@ -65,6 +65,9 @@ jobs:
       - name: Cargo Build
         run: cargo build --workspace --all-targets --all-features
 
+      - name: Memory-only Build
+        run: cargo check --no-default-features --features memory
+
   cargo-clippy:
     name: Cargo Clippy Check
     runs-on: ubuntu-latest

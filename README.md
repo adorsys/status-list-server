@@ -273,7 +273,7 @@ To verify the infrastructure-free application composition (domain models, domain
 service container, and in-memory outbound adapters only), run:
 
 ```bash
-cargo check --no-default-features --features memory-only
+cargo check --no-default-features --features memory
 ```
 
 ## License

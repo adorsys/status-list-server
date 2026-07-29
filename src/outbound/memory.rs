@@ -226,14 +226,18 @@ impl crate::utils::cert_manager::storage::Storage for MemoryStorage {
 mod tests {
     use super::*;
     use crate::domain::models::credential::Issuer;
+    use crate::domain::models::status_list::{Status, StatusEntry, StatusListError};
+    use crate::domain::ports::CertificateProvider;
     use crate::domain::service::Service;
 
     struct DummyCertProvider;
+
     #[async_trait]
-    impl crate::domain::ports::CertificateProvider for DummyCertProvider {
+    impl CertificateProvider for DummyCertProvider {
         async fn certificate_chain(&self) -> Result<Option<Vec<String>>, StatusListError> {
             Ok(None)
         }
+
         async fn signing_key_pem(&self) -> Result<String, StatusListError> {
             Ok("".into())
         }
@@ -242,11 +246,17 @@ mod tests {
     fn create_test_service(
         repo: MemoryStatusLists,
         cache: MemoryStatusListCache,
-        history: Option<Arc<dyn StatusListHistoryRepo>>,
+        history_repo: Option<MemoryStatusListHistory>,
     ) -> Service {
-        let creds = MemoryCredentials::default();
-        let cert_provider = DummyCertProvider;
-        Service::new(repo, creds, cache, history, cert_provider)
+        let history_arc: Option<Arc<dyn crate::domain::ports::StatusListHistoryRepo>> =
+            history_repo.map(|h| Arc::new(h) as _);
+        Service::from_arcs(
+            Arc::new(repo),
+            Arc::new(MemoryCredentials::default()),
+            Arc::new(cache),
+            history_arc,
+            Arc::new(DummyCertProvider),
+        )
     }
 
     #[tokio::test]
@@ -262,6 +272,8 @@ mod tests {
                 "https://example/id".into(),
                 Vec::new(),
                 900,
+                100_000,
+                5_000,
                 usize::MAX,
             )
             .await
@@ -275,6 +287,8 @@ mod tests {
                     "https://example/id".into(),
                     Vec::new(),
                     900,
+                    100_000,
+                    5_000,
                     usize::MAX,
                 )
                 .await,
@@ -283,6 +297,64 @@ mod tests {
 
         let fetched = service.get_status_list("id").await.unwrap();
         assert_eq!(fetched.list_id, "id");
+    }
+
+    #[tokio::test]
+    async fn publish_status_list_enforces_bounds() {
+        let repo = MemoryStatusLists::default();
+        let cache = MemoryStatusListCache::default();
+        let service = create_test_service(repo, cache, None);
+
+        // Test out of bounds index
+        let result = service
+            .publish_status_list(
+                "id1".into(),
+                Issuer("issuer".into()),
+                "https://example/id1".into(),
+                vec![StatusEntry {
+                    index: 500,
+                    status: Status::Valid,
+                }],
+                900,
+                100, // max_status_index = 100
+                5_000,
+                usize::MAX,
+            )
+            .await;
+        assert!(matches!(
+            result,
+            Err(StatusListError::IndexTooLarge {
+                index: 500,
+                max: 100
+            })
+        ));
+
+        // Test too many statuses per request
+        let result = service
+            .publish_status_list(
+                "id2".into(),
+                Issuer("issuer".into()),
+                "https://example/id2".into(),
+                vec![
+                    StatusEntry {
+                        index: 0,
+                        status: Status::Valid,
+                    },
+                    StatusEntry {
+                        index: 1,
+                        status: Status::Valid,
+                    },
+                ],
+                900,
+                100_000,
+                1, // max_statuses_per_request = 1
+                usize::MAX,
+            )
+            .await;
+        assert!(matches!(
+            result,
+            Err(StatusListError::TooManyStatuses { count: 2, max: 1 })
+        ));
     }
 
     #[tokio::test]
@@ -298,6 +370,8 @@ mod tests {
                 "https://example/id".into(),
                 Vec::new(),
                 900,
+                100_000,
+                5_000,
                 usize::MAX,
             )
             .await
@@ -309,8 +383,8 @@ mod tests {
                 "id",
                 Vec::new(),
                 900,
-                10000,
-                1000,
+                100_000,
+                5000,
                 usize::MAX,
             )
             .await;
