@@ -647,7 +647,12 @@ mod general_tests {
 
     /// Verifies that build_state succeeds with AppConfig::load() defaults under
     /// the default feature set, catching missing test_data/ or config mismatch issues.
-    #[sealed_test(env = [("APP_ENV", "development")])]
+    /// When SQL features are enabled, uses memory backend to avoid requiring a real database.
+    #[sealed_test(env = [
+        ("APP_ENV", "development"),
+        ("APP_DATABASE__BACKEND", "memory"),
+        ("APP_DATABASE__URL", "")
+    ])]
     fn build_state_succeeds_under_default_config() {
         let _ = rustls::crypto::ring::default_provider().install_default();
         let config = AppConfig::load().expect("Failed to load config");
