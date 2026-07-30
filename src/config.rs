@@ -604,8 +604,8 @@ impl RedisConfig {
     }
 }
 
-impl Config {
-    pub fn load() -> Result<Self, ConfigError> {
+macro_rules! set_config_defaults {
+    ($builder:expr) => {{
         #[cfg(feature = "postgres")]
         let (default_db_url, default_db_backend) = (
             "postgres://postgres:postgres@localhost:5432/status-list",
@@ -631,13 +631,12 @@ impl Config {
             ("store", Option::<String>::None, Option::<String>::None);
 
         #[cfg(feature = "acme")]
-        let default_chain_cache_ttl = crate::utils::cert_manager::DEFAULT_CHAIN_CACHE_TTL.as_secs();
+        let default_chain_cache_ttl =
+            crate::utils::cert_manager::DEFAULT_CHAIN_CACHE_TTL.as_secs();
         #[cfg(not(feature = "acme"))]
         let default_chain_cache_ttl = 86400;
 
-        // Build the config
-        let config = ConfigLib::builder()
-            // Set default values
+        $builder
             .set_default("server.host", "localhost")?
             .set_default("server.domain", "localhost")?
             .set_default("server.port", 8000)?
@@ -683,6 +682,21 @@ impl Config {
             .set_default("limits.max_statuses_per_request", 5_000)?
             .set_default("limits.max_serialized_list_size", 1_048_576)? // 1 MiB
             .set_default("status_list.history_retention_secs", 7776000)? // 90 days
+    }};
+}
+
+impl Config {
+    /// Creates a [`config::ConfigBuilder`] pre-populated with default configuration values.
+    pub fn base_builder(
+    ) -> Result<config::ConfigBuilder<config::builder::DefaultState>, ConfigError> {
+        let builder = ConfigLib::builder();
+        let builder = set_config_defaults!(builder);
+        Ok(builder)
+    }
+
+    pub fn load() -> Result<Self, ConfigError> {
+        // Build the config
+        let config = Self::base_builder()?
             // Override config values via environment variables
             // The environment variables should be prefixed with 'APP_' and use '__' as a separator
             // Example: APP_REDIS__REQUIRE_CLIENT_AUTH=false
