@@ -326,17 +326,17 @@ mod tests {
         let err = StatusListError::NotFound;
         let api_err: ApiError = err.into();
         let response = api_err.into_response();
-        
+
         // Verify status code
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
-        
+
         // Verify Cache-Control header is present
         let cache_control = response
             .headers()
             .get(axum::http::header::CACHE_CONTROL)
             .expect("Cache-Control header should be present");
         assert_eq!(cache_control, "no-store, max-age=0");
-        
+
         // Verify JSON body contains both error and error_description
         let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
             .await
@@ -372,7 +372,7 @@ mod additional_tests {
     async fn test_error_response_sets_no_store() {
         let api_err = ApiError::not_found("test_error", "test description");
         let response = api_err.into_response();
-        
+
         let cache_control = response
             .headers()
             .get(axum::http::header::CACHE_CONTROL)

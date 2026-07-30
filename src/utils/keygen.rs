@@ -99,6 +99,7 @@ impl Keypair {
     }
 
     /// Convert the private key to PKCS#8 DER bytes.
+    #[allow(dead_code)]
     #[cfg(test)]
     pub(crate) fn to_pkcs8_der_bytes(&self) -> Result<Vec<u8>, Error> {
         self.repr
