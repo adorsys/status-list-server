@@ -1,6 +1,7 @@
-use std::{collections::HashMap, fmt, marker::PhantomData, time::Duration};
+use std::{collections::HashMap, fmt, marker::PhantomData};
 
 use config::{Config as ConfigLib, ConfigError, Environment};
+#[cfg(feature = "redis")]
 use redis::{
     Client as RedisClient, ClientTlsConfig, RedisResult, TlsCertificates,
     aio::{ConnectionManager, ConnectionManagerConfig},
@@ -8,11 +9,14 @@ use redis::{
 use secrecy::{ExposeSecret, SecretString};
 use serde::Deserialize;
 use serde_aux::field_attributes::deserialize_vec_from_string_or_vec;
+#[cfg(feature = "redis")]
+use std::time::Duration;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum DatabaseBackend {
     #[default]
+    Memory,
     Postgres,
     MySql,
     Sqlite,
@@ -27,6 +31,10 @@ struct DatabaseBackendScheme {
 impl DatabaseBackend {
     fn scheme(&self) -> DatabaseBackendScheme {
         match self {
+            DatabaseBackend::Memory => DatabaseBackendScheme {
+                prefixes: &["memory:", "memory"],
+                description: "'memory:' or 'memory'",
+            },
             DatabaseBackend::Postgres => DatabaseBackendScheme {
                 prefixes: &["postgres://", "postgresql://"],
                 description: "'postgres://' or 'postgresql://'",
@@ -47,10 +55,11 @@ impl DatabaseBackend {
         self.scheme().description
     }
 
-    /// Returns the lowercase name matching the config value (`"postgres"`,
+    /// Returns the lowercase name matching the config value (`"memory"`, `"postgres"`,
     /// `"mysql"`, `"sqlite"`), useful for user-facing messages.
     pub fn as_str(&self) -> &'static str {
         match self {
+            DatabaseBackend::Memory => "memory",
             DatabaseBackend::Postgres => "postgres",
             DatabaseBackend::MySql => "mysql",
             DatabaseBackend::Sqlite => "sqlite",
@@ -559,6 +568,7 @@ pub struct StatusListConfig {
     pub history_retention_secs: u64,
 }
 
+#[cfg(feature = "redis")]
 impl RedisConfig {
     /// Establishes a new Redis connection based on the configuration.
     ///
@@ -622,6 +632,35 @@ impl RedisConfig {
 
 impl Config {
     pub fn load() -> Result<Self, ConfigError> {
+        #[cfg(feature = "postgres")]
+        let (default_db_url, default_db_backend) = (
+            "postgres://postgres:postgres@localhost:5432/status-list",
+            "postgres",
+        );
+        #[cfg(all(not(feature = "postgres"), feature = "sqlite"))]
+        let (default_db_url, default_db_backend) = ("sqlite::memory:", "sqlite");
+        #[cfg(all(not(feature = "postgres"), not(feature = "sqlite"), feature = "mysql"))]
+        let (default_db_url, default_db_backend) =
+            ("mysql://mysql:mysql@localhost:3306/status-list", "mysql");
+        #[cfg(all(
+            not(feature = "postgres"),
+            not(feature = "sqlite"),
+            not(feature = "mysql")
+        ))]
+        let (default_db_url, default_db_backend) = ("memory:", "memory");
+
+        #[cfg(feature = "acme")]
+        let (default_provisioning_strategy, default_cert_path, default_key_path) =
+            ("acme", Option::<String>::None, Option::<String>::None);
+        #[cfg(not(feature = "acme"))]
+        let (default_provisioning_strategy, default_cert_path, default_key_path) =
+            ("store", Option::<String>::None, Option::<String>::None);
+
+        #[cfg(feature = "acme")]
+        let default_chain_cache_ttl = crate::utils::cert_manager::DEFAULT_CHAIN_CACHE_TTL.as_secs();
+        #[cfg(not(feature = "acme"))]
+        let default_chain_cache_ttl = 86400;
+
         // Build the config
         let config = ConfigLib::builder()
             // Set default values
@@ -630,11 +669,8 @@ impl Config {
             .set_default("server.port", 8000)?
             .set_default("server.enable_metrics", false)?
             .set_default("server.aggregation_uri", Option::<String>::None)?
-            .set_default(
-                "database.url",
-                "postgres://postgres:postgres@localhost:5432/status-list",
-            )?
-            .set_default("database.backend", "postgres")?
+            .set_default("database.url", default_db_url)?
+            .set_default("database.backend", default_db_backend)?
             .set_default("database.pool.max_connections", 5u32)?
             .set_default("database.pool.min_connections", 1u32)?
             .set_default("database.pool.acquire_timeout_secs", 5u64)?
@@ -647,7 +683,10 @@ impl Config {
             .set_default("aws.secrets_cache_ttl", 300)? // Default 5 minutes
             .set_default("aws.s3_bucket", "status-list-adorsys")?
             .set_default("aws.s3_key_prefix", "")?
-            .set_default("server.cert.provisioning_strategy", "acme")?
+            .set_default(
+                "server.cert.provisioning_strategy",
+                default_provisioning_strategy,
+            )?
             .set_default("server.cert.email", "admin@example.com")?
             .set_default("server.cert.eku", vec![1, 3, 6, 1, 5, 5, 7, 3, 30])?
             .set_default("server.cert.organization", "adorsys GmbH & CO KG")?
@@ -655,14 +694,11 @@ impl Config {
                 "server.cert.acme_directory_url",
                 "https://acme-v02.api.letsencrypt.org/directory",
             )?
-            .set_default(
-                "server.cert.chain_cache_ttl",
-                crate::utils::cert_manager::DEFAULT_CHAIN_CACHE_TTL.as_secs(),
-            )?
+            .set_default("server.cert.chain_cache_ttl", default_chain_cache_ttl)?
             .set_default("server.cert.renewal_cron_schedule", "0 0 0 * * *")?
             .set_default("server.cert.store.source", "filesystem")?
-            .set_default("server.cert.store.certificate_path", Option::<String>::None)?
-            .set_default("server.cert.store.signing_key_path", Option::<String>::None)?
+            .set_default("server.cert.store.certificate_path", default_cert_path)?
+            .set_default("server.cert.store.signing_key_path", default_key_path)?
             .set_default("server.cert.store.certificate_key", Option::<String>::None)?
             .set_default("server.cert.store.signing_key_key", Option::<String>::None)?
             .set_default("aws.region", "us-east-1")?
@@ -706,11 +742,27 @@ mod tests {
 
         assert_eq!(config.server.host, "localhost");
         assert_eq!(config.server.port, 8000);
-        assert_eq!(
-            config.database.url.expose_secret(),
-            "postgres://postgres:postgres@localhost:5432/status-list"
+        #[cfg(feature = "postgres")]
+        let (expected_db_url, expected_db_backend) = (
+            "postgres://postgres:postgres@localhost:5432/status-list",
+            DatabaseBackend::Postgres,
         );
-        assert_eq!(config.database.backend, DatabaseBackend::Postgres);
+        #[cfg(all(not(feature = "postgres"), feature = "sqlite"))]
+        let (expected_db_url, expected_db_backend) = ("sqlite::memory:", DatabaseBackend::Sqlite);
+        #[cfg(all(not(feature = "postgres"), not(feature = "sqlite"), feature = "mysql"))]
+        let (expected_db_url, expected_db_backend) = (
+            "mysql://mysql:mysql@localhost:3306/status-list",
+            DatabaseBackend::MySql,
+        );
+        #[cfg(all(
+            not(feature = "postgres"),
+            not(feature = "sqlite"),
+            not(feature = "mysql")
+        ))]
+        let (expected_db_url, expected_db_backend) = ("memory:", DatabaseBackend::Memory);
+
+        assert_eq!(config.database.url.expose_secret(), expected_db_url);
+        assert_eq!(config.database.backend, expected_db_backend);
         assert_eq!(config.redis.uri.expose_secret(), "redis://localhost:6379");
         assert!(!config.redis.require_client_auth);
         assert_eq!(config.server.cert.email, "admin@example.com");
@@ -725,10 +777,19 @@ mod tests {
         assert_eq!(config.status_list.token_ttl_secs, 300);
         assert_eq!(config.server.cert.renewal_cron_schedule, "0 0 0 * * *");
         assert_eq!(config.server.cert.dns_challenge_server_url, None);
-        assert_eq!(config.server.cert.provisioning_strategy, "acme");
+        #[cfg(feature = "acme")]
+        let (expected_strategy, expected_cert_path, expected_key_path) =
+            ("acme", Option::<String>::None, Option::<String>::None);
+        #[cfg(not(feature = "acme"))]
+        let (expected_strategy, expected_cert_path, expected_key_path) =
+            ("store", Option::<String>::None, Option::<String>::None);
+        assert_eq!(config.server.cert.provisioning_strategy, expected_strategy);
         assert_eq!(config.server.cert.store.source, "filesystem");
-        assert_eq!(config.server.cert.store.certificate_path, None);
-        assert_eq!(config.server.cert.store.signing_key_path, None);
+        assert_eq!(
+            config.server.cert.store.certificate_path,
+            expected_cert_path
+        );
+        assert_eq!(config.server.cert.store.signing_key_path, expected_key_path);
         assert_eq!(config.server.aggregation_uri, None);
         assert_eq!(config.rate_limit.strict_burst_size, 10);
         assert_eq!(config.rate_limit.strict_period_secs, 60);
@@ -1153,14 +1214,32 @@ mod tests {
         ("APP_CACHE__MAX_CAPACITY", "2000"),
     ])]
     fn test_env_config_with_tls() {
+        // Feature-conditional database configuration matching test_default_config pattern
+        #[cfg(feature = "postgres")]
+        let (expected_db_url, expected_db_backend) = (
+            "postgres://postgres:postgres@localhost:5432/status-list",
+            DatabaseBackend::Postgres,
+        );
+        #[cfg(all(not(feature = "postgres"), feature = "sqlite"))]
+        let (expected_db_url, expected_db_backend) = ("sqlite::memory:", DatabaseBackend::Sqlite);
+        #[cfg(all(not(feature = "postgres"), not(feature = "sqlite"), feature = "mysql"))]
+        let (expected_db_url, expected_db_backend) = (
+            "mysql://mysql:mysql@localhost:3306/status-list",
+            DatabaseBackend::MySql,
+        );
+        #[cfg(all(
+            not(feature = "postgres"),
+            not(feature = "sqlite"),
+            not(feature = "mysql")
+        ))]
+        let (expected_db_url, expected_db_backend) = ("memory:", DatabaseBackend::Memory);
+
         let config = Config::load().expect("Failed to load config");
 
         assert_eq!(config.server.host, "localhost");
         assert_eq!(config.server.port, 8000);
-        assert_eq!(
-            config.database.url.expose_secret(),
-            "postgres://postgres:postgres@localhost:5432/status-list"
-        );
+        assert_eq!(config.database.url.expose_secret(), expected_db_url);
+        assert_eq!(config.database.backend, expected_db_backend);
         assert_eq!(
             config.redis.uri.expose_secret(),
             "rediss://user:password@localhost:6379/redis"
@@ -1299,14 +1378,62 @@ mod tests {
     #[test]
     fn test_database_backend_default() {
         let backend = DatabaseBackend::default();
-        assert_eq!(backend, DatabaseBackend::Postgres);
+        assert_eq!(backend, DatabaseBackend::Memory);
     }
 
     #[test]
     fn test_database_backend_as_str() {
+        assert_eq!(DatabaseBackend::Memory.as_str(), "memory");
         assert_eq!(DatabaseBackend::Postgres.as_str(), "postgres");
         assert_eq!(DatabaseBackend::MySql.as_str(), "mysql");
         assert_eq!(DatabaseBackend::Sqlite.as_str(), "sqlite");
+    }
+
+    #[sealed_test]
+    fn test_default_config_ships_no_repo_key_material() {
+        // The default config must not reference any test_data/ paths or
+        // other repository-local key material, ensuring it can be used
+        // in production without requiring those test files
+        let config = Config::load().expect("Failed to load config");
+
+        // Cert store paths should be None when using ACME strategy (default on feature=acme)
+        // or None/empty when using store strategy (default without feature=acme)
+        let cert_path = config.server.cert.store.certificate_path;
+        let key_path = config.server.cert.store.signing_key_path;
+
+        if let Some(path) = cert_path.as_deref() {
+            assert!(
+                !path.contains("test_data"),
+                "Default config certificate_path references test_data: {path}"
+            );
+        }
+        if let Some(path) = key_path.as_deref() {
+            assert!(
+                !path.contains("test_data"),
+                "Default config signing_key_path references test_data: {path}"
+            );
+        }
+
+        // Database URL should not reference test_data either
+        let db_url = config.database.url.expose_secret();
+        assert!(
+            !db_url.contains("test_data"),
+            "Default config database URL references test_data: {db_url}"
+        );
+
+        // AWS secret keys should be None or not reference test_data
+        if let Some(key) = config.server.cert.store.certificate_key.as_deref() {
+            assert!(
+                !key.contains("test_data"),
+                "Default config certificate_key references test_data: {key}"
+            );
+        }
+        if let Some(key) = config.server.cert.store.signing_key_key.as_deref() {
+            assert!(
+                !key.contains("test_data"),
+                "Default config signing_key_key references test_data: {key}"
+            );
+        }
     }
 
     #[sealed_test(env = [
