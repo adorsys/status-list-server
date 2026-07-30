@@ -37,7 +37,7 @@ const INNODB_REQUIRED_TABLES: &[&str] = &["status_lists", "status_list_history"]
 ///
 /// No-op on Postgres and SQLite. On failure the error log includes the table
 /// name, its actual engine, and the `ALTER TABLE … ENGINE=InnoDB` fix command.
-pub(crate) async fn verify_innodb_engines(db: &sea_orm::DatabaseConnection) -> Result<(), DbErr> {
+pub async fn verify_innodb_engines(db: &sea_orm::DatabaseConnection) -> Result<(), DbErr> {
     use sea_orm::{ConnectionTrait, FromQueryResult, Statement, Value};
     use tracing::error;
 
