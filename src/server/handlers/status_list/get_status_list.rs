@@ -58,7 +58,7 @@ pub async fn get_status_list(
             return Err(ApiError::new(
                 StatusCode::NOT_ACCEPTABLE,
                 "invalid_accept_header",
-                Some("Unsupported Accept header".into()),
+                Some("Invalid accept header".into()),
             ));
         }
     };
