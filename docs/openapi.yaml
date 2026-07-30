@@ -280,7 +280,7 @@ paths:
         "429":
           $ref: "#/components/responses/TooManyRequests"
         "500":
-          $ref: "#/components/responses/InternalServerError"
+          $ref: "#/components/responses/UpdateInternalServerError"
 
   /api/v1/status-lists/{list_id}:
     get:
@@ -765,6 +765,28 @@ components:
             title: "Conflict"
             status: 409
             detail: "the status list was modified concurrently; re-read the current state and retry"
+            instance: "/api/v1/status-lists/477121aa-b598-419e-916f-1e74654ff38b/statuses"
+
+    UpdateInternalServerError:
+      description: |
+        Internal server error. The status list row and the historical snapshot
+        recording the change are written in a single database transaction, so a
+        500 from this endpoint means **no partial write occurred**: the list is
+        unchanged, no snapshot was recorded, and the previous state remains
+        authoritative. The request is therefore safe to retry as-is.
+
+        This differs from a `409`, which means the write was rejected because
+        another writer got there first. A `409` requires re-reading the current
+        state before retrying; a `500` does not.
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/ProblemDetails"
+          example:
+            type: "about:blank"
+            title: "Internal Server Error"
+            status: 500
+            detail: "Internal server error"
             instance: "/api/v1/status-lists/477121aa-b598-419e-916f-1e74654ff38b/statuses"
 
     ServiceUnavailable:

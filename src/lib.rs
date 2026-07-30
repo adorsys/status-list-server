@@ -1,11 +1,16 @@
-mod database;
 #[cfg(test)]
 mod test_utils;
 mod utils;
 
 pub mod config;
-pub mod models;
+pub mod domain;
+pub mod outbound;
+pub mod server;
+/// Composition root: the only place adapters are constructed and injected.
+pub mod setup;
 pub mod startup;
-pub mod web;
 
-pub use utils::{bits_validation, cert_manager, state};
+pub use utils::bits_validation;
+#[cfg(feature = "acme")]
+pub use utils::cert_manager;
+pub use utils::keygen;

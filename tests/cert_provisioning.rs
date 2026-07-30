@@ -1,3 +1,5 @@
+#![cfg(all(feature = "aws", feature = "redis"))]
+
 //! Integration tests for the ACME certificate provisioning flow.
 //!
 //! These tests require Docker to be running. They spin up:
@@ -10,11 +12,14 @@ use std::{sync::Arc, time::Duration};
 
 use aws_config::BehaviorVersion;
 use aws_sdk_s3::Client as S3Client;
-use status_list_server::cert_manager::{
-    CertManager,
-    challenge::{Dns01Handler, PebbleDnsProvider},
-    http_client::DefaultHttpClient,
-    storage::{AwsS3, AwsSecretsManager, Redis as RedisStorage},
+use status_list_server::{
+    cert_manager::{
+        CertManager,
+        challenge::{Dns01Handler, PebbleDnsProvider},
+        http_client::DefaultHttpClient,
+    },
+    outbound::aws::{AwsS3, AwsSecretsManager},
+    outbound::redis::Redis as RedisStorage,
 };
 use testcontainers_modules::{
     localstack::LocalStack,

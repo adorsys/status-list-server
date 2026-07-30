@@ -3,6 +3,23 @@ name = "status-list-server"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+default = ["memory"]
+memory = []
+postgres = ["dep:sea-orm", "dep:sea-orm-migration", "sea-orm?/sqlx-postgres"]
+sqlite = ["dep:sea-orm", "dep:sea-orm-migration", "sea-orm?/sqlx-sqlite"]
+mysql = ["dep:sea-orm", "dep:sea-orm-migration", "sea-orm?/sqlx-mysql"]
+redis = ["dep:redis"]
+aws = [
+  "dep:aws-config",
+  "dep:aws-sdk-route53",
+  "dep:aws-sdk-s3",
+  "dep:aws-sdk-secretsmanager",
+]
+acme = ["dep:instant-acme", "dep:rcgen"]
+# Opt-in gate for the Postgres container test. `--all-features` enables it in CI.
+postgres-tests = ["postgres"]
+
 [lints.rust]
 elided_lifetimes_in_paths = "warn"
 explicit_outlives_requirements = "warn"
@@ -35,12 +52,6 @@ strip = true
 inherits = "dev"
 opt-level = 1
 
-[features]
-default = ["postgres"]
-postgres = ["sea-orm/sqlx-postgres", "sea-orm-migration/sqlx-postgres"]
-mysql = ["sea-orm/sqlx-mysql", "sea-orm-migration/sqlx-mysql"]
-sqlite = ["sea-orm/sqlx-sqlite", "sea-orm-migration/sqlx-sqlite"]
-
 [dependencies]
 # Async runtime and utilities
 tokio = { version = "1.5", features = ["full"] }
@@ -58,19 +69,24 @@ tower_governor = "0.8"
 governor = "0.10"
 
 # Database and ORM
-sea-orm = { version = "1.1", default-features = false, features = ["macros", "runtime-tokio-rustls", "with-json"] }
+sea-orm = {
+  version = "1.1",
+  default-features = false,
+  features = ["macros", "runtime-tokio-rustls", "with-json"],
+  optional = true
+}
 moka = { version = "0.12", features = ["future"] }
 
 # Cryptography and Security
 rand = "0.10"
 pem = "3"
 coset = "0.4"
-instant-acme = "0.8"
+instant-acme = { version = "0.8", optional = true }
 rustls = "0.23"
 webpki-roots = "1"
 rustls-pki-types = "1.15"
 secrecy = { version = "0.10", features = ["serde"] }
-rcgen = { version = "0.14", features = ["pem"] }
+rcgen = { version = "0.14", features = ["pem"], optional = true }
 jsonwebtoken = { version = "10.4", features = ["aws_lc_rs"] }
 sha2 = "0.10"
 hex = "0.4"
@@ -93,7 +109,7 @@ thiserror = "2.0"
 color-eyre = "0.6"
 
 # Utility Libraries
-uuid = "1.23"
+uuid = { version = "1.23", features = ["v4"] }
 base64 = "0.22"
 time = { version = "0.3", features = ["formatting", "macros"] }
 base64url = "0.1"
@@ -104,32 +120,42 @@ tokio-cron-scheduler = "0.15"
 metrics = "0.24"
 metrics-exporter-prometheus = "0.18"
 metrics-process = "2.4"
-sea-orm-migration = { version = "1.1.20", default-features = false, features = ["runtime-tokio-rustls"] }
+sea-orm-migration = {
+  version = "1.1.20",
+  default-features = false,
+  features = ["runtime-tokio-rustls"],
+  optional = true
+}
 
 # AWS related libraries
 [dependencies.aws-config]
 version = "1"
 default-features = false
 features = ["default-https-client", "rt-tokio"]
+optional = true
 
 [dependencies.aws-sdk-s3]
 version = "1"
 default-features = false
 features = ["default-https-client", "rt-tokio", "sigv4a"]
+optional = true
 
 [dependencies.aws-sdk-route53]
 version = "1"
 default-features = false
 features = ["default-https-client", "rt-tokio"]
+optional = true
 
 [dependencies.aws-sdk-secretsmanager]
 version = "1"
 default-features = false
 features = ["default-https-client", "rt-tokio"]
+optional = true
 
 [dependencies.redis]
 version = "1.3"
 features = ["connection-manager", "tokio-rustls-comp"]
+optional = true
 
 [dependencies.p256]
 version = "0.14"
@@ -139,11 +165,19 @@ features = ["alloc", "ecdsa", "pem", "pkcs8"]
 sealed_test = "1.1.0"
 wiremock = "0.6"
 sea-orm = { version = "1.1", features = ["mock"] }
-testcontainers-modules = { version = "0.15", features = ["localstack", "mysql", "redis"] }
+testcontainers-modules = {
+  version = "0.15",
+  features = ["localstack", "mysql", "postgres", "redis"]
+}
 metrics-util = "0.20"
 
 [target.'cfg(not(target_env = "msvc"))'.dependencies]
 tikv-jemallocator = "0.7"
+
+[[bin]]
+name = "status-list-server"
+path = "src/main.rs"
+required-features = ["memory"]
 
 [profile.dev.package.backtrace]
 opt-level = 3

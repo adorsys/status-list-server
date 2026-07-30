@@ -18,16 +18,54 @@ spec:
     spec:
       {{- with .Values.statuslist.initContainers }}
       initContainers:
-        {{- tpl (toYaml .) $ | nindent 8 }}
+        {{- range $ic := . }}
+        {{- $hardened := dict
+              "securityContext" (dict
+                "readOnlyRootFilesystem" true
+                "allowPrivilegeEscalation" false
+                "capabilities" (dict "drop" (list "ALL")))
+              "resources" (dict
+                "requests" (dict "cpu" "50m" "memory" "64Mi")
+                "limits" (dict "cpu" "100m" "memory" "128Mi"))
+              "volumeMounts" (list (dict "name" "tmp" "mountPath" "/tmp")) }}
+        - {{- tpl (toYaml (mustMergeOverwrite $ic $hardened)) $ | nindent 10 }}
+        {{- end }}
       {{- end }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        runAsGroup: 65534
+        fsGroup: 65534
+        seccompProfile:
+          type: RuntimeDefault
       containers:
         - name: {{ include "status-list-server-chart.name" . }}
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+            seccompProfile:
+              type: RuntimeDefault
           image: {{ .Values.statuslist.image.repository }}:{{ .Values.statuslist.image.tag }}
           imagePullPolicy: {{ .Values.statuslist.image.pullPolicy }}
           ports:
             - name: http
               containerPort: {{ .Values.statuslist.service.targetPort | int }}
               protocol: TCP
+          {{- with .Values.statuslist.livenessProbe }}
+          livenessProbe:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.statuslist.readinessProbe }}
+          readinessProbe:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.statuslist.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
           env:
             {{- $env := dict }}
             {{- range $name, $value := .Values.statuslist.env }}
@@ -52,6 +90,10 @@ spec:
             {{- if .Values.secretStore.enabled }}
             - name: APP_AWS__REGION
               value: {{ .Values.secretStore.aws.region | quote }}
+            - name: AWS_SHARED_CREDENTIALS_FILE
+              value: /home/nobody/.aws/credentials
+            - name: AWS_CONFIG_FILE
+              value: /home/nobody/.aws/config
             {{- end }}
             - name: POSTGRES_DB
               value: {{ .Values.postgres.auth.database | quote }}
@@ -64,16 +106,45 @@ spec:
                   key: redis-password
             - name: APP_REDIS__URI
               value: {{ include "status-list-server-chart.redisUri" . | quote }}
-          {{- if .Values.secretStore.enabled }}
           volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+          {{- if .Values.secretStore.enabled }}
             - name: aws-credentials-volume
-              mountPath: /root/.aws
+              mountPath: /home/nobody/.aws
               readOnly: true
           {{- end }}
-      {{- if .Values.secretStore.enabled }}
+        {{- if and .Values.otelCollector.enabled .Values.otelCollector.sidecar.enabled }}
+        - name: otel-collector
+          image: {{ .Values.otelCollector.sidecar.image.repository }}:{{ .Values.otelCollector.sidecar.image.tag }}
+          args: ["--config", "/etc/otelcol/config.yaml"]
+          ports:
+            - name: otlp-grpc
+              containerPort: 4317
+              protocol: TCP
+            - name: otlp-http
+              containerPort: 4318
+              protocol: TCP
+          volumeMounts:
+            - name: otel-collector-config
+              mountPath: /etc/otelcol
+              readOnly: true
+          {{- with .Values.otelCollector.sidecar.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+        {{- end }}
       volumes:
+        - name: tmp
+          emptyDir: {}
+      {{- if .Values.secretStore.enabled }}
         - name: aws-credentials-volume
           secret:
             secretName: aws-credentials-secret
+      {{- end }}
+      {{- if and .Values.otelCollector.enabled .Values.otelCollector.sidecar.enabled }}
+        - name: otel-collector-config
+          configMap:
+            name: {{ include "status-list-server-chart.fullname" . }}-otel-collector-config
       {{- end }}
 {{- end }}

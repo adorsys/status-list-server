@@ -14,7 +14,7 @@ It allows issuers to register, publish, and update status lists, and verifiers t
 This service implements the [Token Status List specification](https://datatracker.ietf.org/doc/draft-ietf-oauth-status-list/).  
 It supports both **JWT** and **CWT** formats, with cryptographic signing using multiple algorithms (ECDSA, EdDSA, RSA with SHA-256, SHA-384, SHA-512 digest algorithms).
 
-For a detailed explanation of the architecture, see the [Architecture Documentation](docs/architecture.md).
+For a detailed explanation of the architecture, see the [hexagonal architecture documentation](docs/hexagonal-architecture.md).
 
 ## Feature Implementation Status
 
@@ -25,9 +25,9 @@ For a detailed explanation of the architecture, see the [Architecture Documentat
 | Status List Updates             | ✅ Implemented | Partial updates via `PATCH /api/v1/status-lists/{id}/statuses`      |
 | JWT Status List Format          | ✅ Implemented | JWS Compact Serialization with `exp`/`ttl`                          |
 | CWT Status List Format          | ✅ Implemented | COSE_Sign1_Tagged (tag 18) with `exp`/`ttl`                         |
-| Gzip Compression                | ✅ Implemented | Applied to both JWT and CWT responses                               |
+| Gzip Compression                | ✅ Implemented | Applied to JWT responses only (draft-21 section 8.2)                |
 | HTTP Content Negotiation        | ⚠️ Partial     | Exact match only; RFC 9110 patterns (`*/*`, `q=`) not yet supported |
-| Historical Resolution (`time=`) | ❌ Not Started | Optional feature for time-based status queries                      |
+| Historical Resolution (`time=`) | ✅ Implemented | Optional feature for time-based status queries                      |
 | Status List Aggregation         | ✅ Implemented | `GET /api/v1/aggregation` + optional `aggregation_uri` token member |
 | X.509 Certificate EKU           | ⚠️ Partial     | Placeholder OID (`...3.30`); rename pending spec finalization       |
 
@@ -59,23 +59,53 @@ Create a `.env` file in the root directory. Take a look at the [.env.template](.
 
 The simplest way to run the project is with [docker compose](https://docs.docker.com/compose/):
 
-- Execute the command below at the root of the project
+- Execute the command below at the root of the project:
 
 ```sh
 docker compose up --build
 ```
 
-This command will pull all required images and start the server.
+This command will pull all required images and start the server compiled with default compose features (`postgres,redis,aws,acme`).
+
+To pass custom Cargo feature flags during build, specify the `FEATURES` environment variable:
+
+```sh
+FEATURES="mysql,redis,aws,acme" docker compose up --build
+```
 
 #### Running Manually
 
-To start the server, execute:
+To start the server in zero-infrastructure default in-memory mode, execute:
 
 ```bash
 cargo run
 ```
 
-By default, the server will listen on `http://localhost:8000`. You can modify the host and port in the configuration settings.
+By default, the server will listen on `http://localhost:8000` using in-memory repositories, Moka cache, and store-based certificate management. No external databases, Redis, or cloud services are required for development.
+
+## Cargo Feature Matrix
+
+The crate uses modular Cargo feature flags to gate optional production backend drivers:
+
+| Feature    | Description                                                                                                                                        | Default    |
+| ---------- | -------------------------------------------------------------------------------------------------------------------------------------------------- | ---------- |
+| `memory`   | In-memory repositories (`MemoryStatusLists`, `MemoryCredentials`, `MemoryStatusListHistory`), Moka TTL cache, and store-based certificate storage. | ✅ Default |
+| `postgres` | SeaORM PostgreSQL database driver.                                                                                                                 | ❌ Opt-in  |
+| `sqlite`   | SeaORM SQLite database driver.                                                                                                                     | ❌ Opt-in  |
+| `mysql`    | SeaORM MySQL database driver.                                                                                                                      | ❌ Opt-in  |
+| `redis`    | Redis storage and certificate cache driver.                                                                                                        | ❌ Opt-in  |
+| `aws`      | AWS S3 object storage and AWS Secrets Manager drivers.                                                                                             | ❌ Opt-in  |
+| `acme`     | ACME DNS-01 certificate manager driver.                                                                                                            | ❌ Opt-in  |
+
+To build with specific backend drivers, pass the matching feature flag(s):
+
+```bash
+# Run with PostgreSQL and Redis support
+cargo run --features postgres,redis
+
+# Run with all AWS and ACME production integrations
+cargo run --features postgres,redis,aws,acme
+```
 
 For deployment guidance and backend tradeoffs, see [`docs/database-backends.md`](docs/database-backends.md).
 
@@ -237,6 +267,13 @@ You can run the tests using the following command:
 
 ```bash
 cargo test
+```
+
+To verify the infrastructure-free application composition (domain models, domain ports,
+service container, and in-memory outbound adapters only), run:
+
+```bash
+cargo check --no-default-features --features memory
 ```
 
 ## License

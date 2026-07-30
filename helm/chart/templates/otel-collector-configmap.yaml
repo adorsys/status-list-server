@@ -1,0 +1,39 @@
+{{- if .Values.otelCollector.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "status-list-server-chart.fullname" . }}-otel-collector-config
+  labels:
+    {{- include "status-list-server-chart.labels" . | nindent 4 }}
+  namespace: {{ .Release.Namespace }}
+data:
+  config.yaml: |
+    receivers:
+      otlp:
+        protocols:
+          grpc:
+            endpoint: 0.0.0.0:4317
+          http:
+            endpoint: 0.0.0.0:4318
+    processors:
+      batch:
+        timeout: 5s
+        send_batch_size: 1024
+    exporters:
+      otlp/backend:
+        endpoint: {{ .Values.otelCollector.config.exporters.otlpEndpoint | quote }}
+        tls:
+          insecure: true
+      debug:
+        verbosity: basic
+    service:
+      pipelines:
+        traces:
+          receivers: [otlp]
+          processors: [batch]
+          exporters: [otlp/backend, debug]
+        logs:
+          receivers: [otlp]
+          processors: [batch]
+          exporters: [debug]
+{{- end }}
