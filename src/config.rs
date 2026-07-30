@@ -1,13 +1,7 @@
 use std::{collections::HashMap, fmt, marker::PhantomData, time::Duration};
 
 use config::builder::DefaultState;
-use config::{Config as ConfigLib, ConfigError, Environment};
-
-#[cfg(test)]
-use config::{ConfigBuilder, builder::DefaultState};
-
-#[cfg(test)]
-use config::ConfigBuilder;
+use config::{Config as ConfigLib, ConfigBuilder, ConfigError, Environment};
 
 use redis::{
     Client as RedisClient, ClientTlsConfig, RedisResult, TlsCertificates,
@@ -595,56 +589,7 @@ impl Config {
     /// separator between nested keys. For example `APP_SERVER__PORT=5002`
     /// maps to the `server.port` configuration value.
     pub fn load() -> Result<Self, ConfigError> {
-        let config = ConfigLib::builder()
-            // Set default values
-            .set_default("server.host", "localhost")?
-            .set_default("server.domain", "localhost")?
-            .set_default("server.port", 8000)?
-            .set_default("server.enable_metrics", false)?
-            .set_default("server.aggregation_uri", Option::<String>::None)?
-            .set_default(
-                "database.url",
-                "postgres://postgres:postgres@localhost:5432/status-list",
-            )?
-            .set_default("database.backend", "postgres")?
-            .set_default("redis.uri", "redis://localhost:6379")?
-            .set_default("redis.require_client_auth", false)?
-            .set_default("redis.cert_cache_ttl", 3600)? // Default 1 hour
-            .set_default("aws.secrets_cache_ttl", 300)? // Default 5 minutes
-            .set_default("aws.s3_bucket", "status-list-adorsys")?
-            .set_default("aws.s3_key_prefix", "")?
-            .set_default("server.cert.provisioning_strategy", "acme")?
-            .set_default("server.cert.email", "admin@example.com")?
-            .set_default("server.cert.eku", vec![1, 3, 6, 1, 5, 5, 7, 3, 30])?
-            .set_default("server.cert.organization", "adorsys GmbH & CO KG")?
-            .set_default(
-                "server.cert.acme_directory_url",
-                "https://acme-v02.api.letsencrypt.org/directory",
-            )?
-            .set_default(
-                "server.cert.chain_cache_ttl",
-                crate::utils::cert_manager::DEFAULT_CHAIN_CACHE_TTL.as_secs(),
-            )?
-            .set_default("server.cert.renewal_cron_schedule", "0 0 0 * * *")?
-            .set_default("server.cert.store.source", "filesystem")?
-            .set_default("server.cert.store.certificate_path", Option::<String>::None)?
-            .set_default("server.cert.store.signing_key_path", Option::<String>::None)?
-            .set_default("server.cert.store.certificate_key", Option::<String>::None)?
-            .set_default("server.cert.store.signing_key_key", Option::<String>::None)?
-            .set_default("aws.region", "us-east-1")?
-            .set_default("cache.ttl", 5 * 60)?
-            .set_default("cache.max_capacity", 100)?
-            .set_default("status_list.token_exp_secs", 900)? // 15 minutes
-            .set_default("status_list.token_ttl_secs", 300)? // 5 minutes
-            .set_default("rate_limit.strict_burst_size", 10)?
-            .set_default("rate_limit.strict_period_secs", 60)?
-            .set_default("rate_limit.permissive_burst_size", 100)?
-            .set_default("rate_limit.permissive_period_secs", 60)?
-            .set_default("limits.max_body_size_bytes", 2_097_152)? // 2 MiB
-            .set_default("limits.max_status_index", 100_000)?
-            .set_default("limits.max_statuses_per_request", 5_000)?
-            .set_default("limits.max_serialized_list_size", 1_048_576)? // 1 MiB
-            .set_default("status_list.history_retention_secs", 7776000)? // 90 days
+        let config = base_builder()?
             // Override config values via environment variables
             // The environment variables should be prefixed with 'APP_' and use '__' as a separator
             // Example: APP_REDIS__REQUIRE_CLIENT_AUTH=false
@@ -677,7 +622,7 @@ impl Config {
     pub(crate) fn load_from_overrides(
         overrides: &[(&'static str, &'static str)],
     ) -> Result<Self, ConfigError> {
-        let mut builder = base_builder();
+        let mut builder = base_builder()?;
         for &(key, value) in overrides {
             builder = builder.set_override(key, value)?;
         }
@@ -689,112 +634,64 @@ impl Config {
 /// Returns a `config::ConfigBuilder` seeded with the built-in default values.
 ///
 /// Both production loading (via [`Config::load`]) and test loading (via
-/// `Config::load_from_overrides`, gated on `#[cfg(test)]`) start from this
-/// shared set of defaults so that there is exactly one source of truth for the
-/// default configuration.
-#[cfg(test)]
-type TestConfigBuilder = ConfigBuilder<DefaultState>;
-
-#[cfg(test)]
-#[allow(dead_code)]
-fn base_builder() -> TestConfigBuilder {
-    ConfigLib::builder()
-        .set_default("server.host", "localhost")
-        .expect("hardcoded default")
-        .set_default("server.domain", "localhost")
-        .expect("hardcoded default")
-        .set_default("server.port", 8000)
-        .expect("hardcoded default")
-        .set_default("server.enable_metrics", false)
-        .expect("hardcoded default")
-        .set_default("server.aggregation_uri", Option::<String>::None)
-        .expect("hardcoded default")
+/// `Config::load_from_overrides`) start from this shared set of defaults so
+/// that there is exactly one source of truth for the default configuration.
+fn base_builder() -> Result<ConfigBuilder<DefaultState>, ConfigError> {
+    let builder = ConfigLib::builder()
+        .set_default("server.host", "localhost")?
+        .set_default("server.domain", "localhost")?
+        .set_default("server.port", 8000)?
+        .set_default("server.enable_metrics", false)?
+        .set_default("server.aggregation_uri", Option::<String>::None)?
         .set_default(
             "database.url",
             "postgres://postgres:postgres@localhost:5432/status-list",
-        )
-        .expect("hardcoded default")
-        .set_default("database.backend", "postgres")
-        .expect("hardcoded default")
-        .set_default("redis.uri", "redis://localhost:6379")
-        .expect("hardcoded default")
-        .set_default("redis.require_client_auth", false)
-        .expect("hardcoded default")
-        .set_default("redis.cert_cache_ttl", 3600)
-        .expect("hardcoded default")
-        .set_default("aws.secrets_cache_ttl", 300)
-        .expect("hardcoded default")
-        .set_default("aws.s3_bucket", "status-list-adorsys")
-        .expect("hardcoded default")
-        .set_default("aws.s3_key_prefix", "")
-        .expect("hardcoded default")
-        .set_default("server.cert.email", "admin@example.com")
-        .expect("hardcoded default")
-        .set_default("server.cert.eku", vec![1, 3, 6, 1, 5, 5, 7, 3, 30])
-        .expect("hardcoded default")
-        .set_default("server.cert.organization", "adorsys GmbH & CO KG")
-        .expect("hardcoded default")
+        )?
+        .set_default("database.backend", "postgres")?
+        .set_default("redis.uri", "redis://localhost:6379")?
+        .set_default("redis.require_client_auth", false)?
+        .set_default("redis.cert_cache_ttl", 3600)?
+        .set_default("aws.secrets_cache_ttl", 300)?
+        .set_default("aws.s3_bucket", "status-list-adorsys")?
+        .set_default("aws.s3_key_prefix", "")?
+        .set_default("server.cert.provisioning_strategy", "acme")?
+        .set_default("server.cert.email", "admin@example.com")?
+        .set_default("server.cert.eku", vec![1, 3, 6, 1, 5, 5, 7, 3, 30])?
+        .set_default("server.cert.organization", "adorsys GmbH & CO KG")?
         .set_default(
             "server.cert.acme_directory_url",
             "https://acme-v02.api.letsencrypt.org/directory",
-        )
-        .expect("hardcoded default")
+        )?
         .set_default(
             "server.cert.chain_cache_ttl",
             crate::utils::cert_manager::DEFAULT_CHAIN_CACHE_TTL.as_secs(),
-        )
-        .expect("hardcoded default")
-        .set_default("server.cert.renewal_cron_schedule", "0 0 0 * * *")
-        .expect("hardcoded default")
-        .set_default("server.cert.provisioning_strategy", "acme")
-        .expect("hardcoded default")
-        .set_default("server.cert.store.source", "filesystem")
-        .expect("hardcoded default")
-        .set_default("server.cert.store.certificate_path", Option::<String>::None)
-        .expect("hardcoded default")
-        .set_default("server.cert.store.signing_key_path", Option::<String>::None)
-        .expect("hardcoded default")
-        .set_default("server.cert.store.certificate_key", Option::<String>::None)
-        .expect("hardcoded default")
-        .set_default("server.cert.store.signing_key_key", Option::<String>::None)
-        .expect("hardcoded default")
-        .set_default("aws.region", "us-east-1")
-        .expect("hardcoded default")
-        .set_default("cache.ttl", 5 * 60)
-        .expect("hardcoded default")
-        .set_default("cache.max_capacity", 100)
-        .expect("hardcoded default")
-        .set_default("status_list.token_exp_secs", 900)
-        .expect("hardcoded default")
-        .set_default("status_list.token_ttl_secs", 300)
-        .expect("hardcoded default")
-        .set_default("status_list.history_retention_secs", 7776000)
-        .expect("hardcoded default")
-        .set_default("rate_limit.strict_burst_size", 10)
-        .expect("hardcoded default")
-        .set_default("rate_limit.strict_period_secs", 60)
-        .expect("hardcoded default")
-        .set_default("rate_limit.permissive_burst_size", 100)
-        .expect("hardcoded default")
-        .set_default("rate_limit.permissive_period_secs", 60)
-        .expect("hardcoded default")
-        .set_default("limits.max_body_size_bytes", 2_097_152)
-        .expect("hardcoded default")
-        .set_default("limits.max_status_index", 100_000)
-        .expect("hardcoded default")
-        .set_default("limits.max_statuses_per_request", 5_000)
-        .expect("hardcoded default")
-        .set_default("limits.max_serialized_list_size", 1_048_576)
-        .expect("hardcoded default")
+        )?
+        .set_default("server.cert.renewal_cron_schedule", "0 0 0 * * *")?
+        .set_default("server.cert.store.source", "filesystem")?
+        .set_default("server.cert.store.certificate_path", Option::<String>::None)?
+        .set_default("server.cert.store.signing_key_path", Option::<String>::None)?
+        .set_default("server.cert.store.certificate_key", Option::<String>::None)?
+        .set_default("server.cert.store.signing_key_key", Option::<String>::None)?
+        .set_default("aws.region", "us-east-1")?
+        .set_default("cache.ttl", 5 * 60)?
+        .set_default("cache.max_capacity", 100)?
+        .set_default("status_list.token_exp_secs", 900)?
+        .set_default("status_list.token_ttl_secs", 300)?
+        .set_default("status_list.history_retention_secs", 7776000)?
+        .set_default("rate_limit.strict_burst_size", 10)?
+        .set_default("rate_limit.strict_period_secs", 60)?
+        .set_default("rate_limit.permissive_burst_size", 100)?
+        .set_default("rate_limit.permissive_period_secs", 60)?
+        .set_default("limits.max_body_size_bytes", 2_097_152)?
+        .set_default("limits.max_status_index", 100_000)?
+        .set_default("limits.max_statuses_per_request", 5_000)?
+        .set_default("limits.max_serialized_list_size", 1_048_576)?;
+    Ok(builder)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[allow(dead_code)]
-    use config::ConfigBuilder;
-    #[allow(dead_code)]
-    use config::builder::DefaultState;
     use sealed_test::prelude::*;
     use secrecy::ExposeSecret;
 
