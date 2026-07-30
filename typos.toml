@@ -4,13 +4,12 @@ extend-ignore-identifiers-re = []
 [default.extend-words]
 Cose = "Cose"
 flate = "flate"
+Ue = "Ue"
 
 [files]
 extend-exclude = [
-    "demo",
-    "supply-chain",
-    "test_data/",
-    "src/test_resources",
-    "src/web/auth/mod.rs",
-    "src/web/handlers/issue_credential.rs",
+  "demo",
+  "supply-chain",
+  "test_data/",
+  "src/test_resources",
 ]
