@@ -94,9 +94,7 @@ async fn build_test_app_state(
         (
             Arc::new(SqlStatusListRepo::new(SeaOrmStore::new(db.clone()))),
             Arc::new(SqlCredentialRepo::new(SeaOrmStore::new(db.clone()))),
-            Arc::new(SqlStatusListSnapshotRepo::new(SeaOrmStore::new(
-                db.clone(),
-            ))),
+            Arc::new(SqlStatusListSnapshotRepo::new(SeaOrmStore::new(db.clone()))),
         )
     } else {
         (
