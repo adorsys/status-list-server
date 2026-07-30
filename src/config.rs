@@ -559,7 +559,8 @@ pub struct StatusListConfig {
     /// This prevents unbounded database growth and mitigates timing leak
     /// risks described in draft-21 §12.7. When disabled, historical resolution
     /// via `?time=` query parameter will not be available.
-    pub history_retention_secs: u64,
+    #[serde(alias = "history_retention_secs")]
+    pub snapshot_retention_secs: u64,
 }
 
 #[cfg(feature = "redis")]
@@ -740,7 +741,7 @@ fn base_builder() -> Result<ConfigBuilder<DefaultState>, ConfigError> {
         .set_default("cache.max_capacity", 100)?
         .set_default("status_list.token_exp_secs", 900)?
         .set_default("status_list.token_ttl_secs", 300)?
-        .set_default("status_list.history_retention_secs", 7776000)?
+        .set_default("status_list.snapshot_retention_secs", 7776000)?
         .set_default("rate_limit.strict_burst_size", 10)?
         .set_default("rate_limit.strict_period_secs", 60)?
         .set_default("rate_limit.permissive_burst_size", 100)?
