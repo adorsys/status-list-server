@@ -337,7 +337,7 @@ jobs:
       - name: Install cargo-llvm-cov and cargo-nextest
         uses: taiki-e/install-action@c44f6b046f1c29ae5918b1e0bfdbb2f1813836fd # v2
         with:
-          tool: cargo-llvm-cov,nextest
+          tool: cargo-llvm-cov@0.6.16,nextest@0.9.101 # or an version that is working now because of our sha pin 
 
       - name: Generate code coverage
         run: cargo llvm-cov nextest --workspace --all-features --html --output-dir target/llvm-cov/html
