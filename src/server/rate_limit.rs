@@ -1,0 +1,129 @@
+use std::net::{IpAddr, SocketAddr};
+
+use axum::http::{HeaderMap, Request, header};
+use tower_governor::{errors::GovernorError, key_extractor::KeyExtractor};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct IssuerKeyExtractor;
+
+impl KeyExtractor for IssuerKeyExtractor {
+    type Key = String;
+
+    fn extract<T>(&self, req: &Request<T>) -> Result<Self::Key, GovernorError> {
+        if let Some(issuer) = extract_issuer_from_jwt(req.headers()) {
+            return Ok(issuer);
+        }
+        peer_ip(req)
+            .map(|ip| ip.to_string())
+            .ok_or(GovernorError::UnableToExtractKey)
+    }
+}
+
+fn extract_issuer_from_jwt(headers: &HeaderMap) -> Option<String> {
+    let token = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|h| h.to_str().ok())
+        .and_then(|s| s.strip_prefix("Bearer "))?;
+
+    let mut parts = token.split('.');
+    parts.next()?;
+    let payload = parts.next()?;
+    let decoded = base64url::decode(payload).ok()?;
+    let value: serde_json::Value = serde_json::from_slice(&decoded).ok()?;
+    value.get("iss")?.as_str().map(|s| s.to_string())
+}
+
+fn peer_ip<T>(req: &Request<T>) -> Option<IpAddr> {
+    req.extensions()
+        .get::<axum::extract::ConnectInfo<SocketAddr>>()
+        .map(|addr| addr.ip())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::body::Body;
+    use axum::extract::ConnectInfo;
+    use axum::http::Request as HttpRequest;
+    use std::net::SocketAddr;
+
+    fn make_request(headers: HeaderMap, ext: Option<ConnectInfo<SocketAddr>>) -> HttpRequest<Body> {
+        let mut builder = HttpRequest::builder();
+        for (name, value) in headers.iter() {
+            builder = builder.header(name, value);
+        }
+        if let Some(ci) = ext {
+            builder = builder.extension(ci);
+        }
+        builder.body(Body::empty()).unwrap()
+    }
+
+    fn dummy_jwt(iss: &str) -> String {
+        let header = base64url::encode(br#"{"alg":"ES256"}"#);
+        let payload_json = format!(r#"{{"iss":"{iss}","exp":9999999999}}"#);
+        let payload = base64url::encode(payload_json.as_bytes());
+        format!("{header}.{payload}.signature")
+    }
+
+    #[test]
+    fn test_extract_issuer_from_valid_jwt() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::AUTHORIZATION,
+            format!("Bearer {}", dummy_jwt("issuer-123"))
+                .parse()
+                .unwrap(),
+        );
+        let req = make_request(headers, None);
+        let key = IssuerKeyExtractor.extract(&req).unwrap();
+        assert_eq!(key, "issuer-123");
+    }
+
+    #[test]
+    fn test_falls_back_to_peer_ip_when_no_auth_header() {
+        let headers = HeaderMap::new();
+        let addr: SocketAddr = "1.2.3.4:5678".parse().unwrap();
+        let req = make_request(headers, Some(ConnectInfo(addr)));
+        let key = IssuerKeyExtractor.extract(&req).unwrap();
+        assert_eq!(key, "1.2.3.4");
+    }
+
+    #[test]
+    fn test_falls_back_to_peer_ip_when_malformed_jwt() {
+        let mut headers = HeaderMap::new();
+        headers.insert(header::AUTHORIZATION, "Bearer invalid-jwt".parse().unwrap());
+        let addr: SocketAddr = "10.0.0.1:1234".parse().unwrap();
+        let req = make_request(headers, Some(ConnectInfo(addr)));
+        let key = IssuerKeyExtractor.extract(&req).unwrap();
+        assert_eq!(key, "10.0.0.1");
+    }
+
+    #[test]
+    fn test_returns_error_when_no_token_and_no_peer_ip() {
+        let headers = HeaderMap::new();
+        let req = make_request(headers, None);
+        let result = IssuerKeyExtractor.extract(&req);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_different_issuers_produce_different_keys() {
+        let mut headers1 = HeaderMap::new();
+        headers1.insert(
+            header::AUTHORIZATION,
+            format!("Bearer {}", dummy_jwt("issuer-a")).parse().unwrap(),
+        );
+        let req1 = make_request(headers1, None);
+
+        let mut headers2 = HeaderMap::new();
+        headers2.insert(
+            header::AUTHORIZATION,
+            format!("Bearer {}", dummy_jwt("issuer-b")).parse().unwrap(),
+        );
+        let req2 = make_request(headers2, None);
+
+        let key1 = IssuerKeyExtractor.extract(&req1).unwrap();
+        let key2 = IssuerKeyExtractor.extract(&req2).unwrap();
+        assert_ne!(key1, key2);
+    }
+}

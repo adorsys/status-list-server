@@ -1,8 +1,12 @@
 # Workflow to clean the cache in case of issues
 name: Clean Cache
 
+# zizmor: ignore-start: excessive-permissions
+# This workflow requires actions:write permission to delete cache entries.
+# This is a pre-existing permission requirement.
 permissions:
   actions: write
+# zizmor: ignore-end
 
 on:
   workflow_dispatch:
@@ -11,7 +15,7 @@ jobs:
   clean-cache:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - run: gh cache delete --all
         env:
           GH_TOKEN: ${{ github.token }}
