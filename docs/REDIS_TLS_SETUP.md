@@ -13,7 +13,6 @@ This document explains the Redis TLS configuration for the status-list-server de
    ```
 
    This will:
-
    - Ensure the wildcard certificate `statuslist-tls` is managed by cert-manager
    - Install a `CronJob` that automatically syncs `statuslist-tls` into `statuslist-haproxy-tls`
    - Only update `statuslist-haproxy-tls` when the certificate actually changes
