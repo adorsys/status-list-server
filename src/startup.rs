@@ -29,13 +29,12 @@ use tower_http::{
 const AGGREGATION_ROUTE_PATH: &str = "/api/v1/aggregation";
 
 use crate::config::Config;
-use crate::state::AppState;
-use crate::utils::metrics::metrics_handler;
-use crate::utils::metrics::{metrics_handler, setup_metrics, start_metrics_collector};
-use crate::web::auth::auth;
-use crate::web::handlers::{
+use crate::server::AppState;
+use crate::server::auth::auth;
+use crate::server::handlers::{
     credential_handler, get_aggregation, get_status_list, publish_status, update_status,
 };
+use crate::utils::metrics::metrics_handler;
 
 async fn welcome() -> impl IntoResponse {
     "Status list Server"

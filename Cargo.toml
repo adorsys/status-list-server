@@ -58,27 +58,16 @@ tokio = { version = "1.5", features = ["full"] }
 async-trait = "0.1"
 
 # Web frameworks
-hyper = { version = "1.10", optional = true }
-hyper-util = { version = "0.1", optional = true }
-reqwest = { version = "0.13", features = ["form", "json", "query"], optional = true }
-tower = { version = "0.5", optional = true }
-hyper-rustls = { version = "0.27", features = ["http2"], optional = true }
-axum = { version = "0.8", features = ["macros"], optional = true }
-tower-http = {
-  version = "0.7",
-  features = ["catch-panic", "cors", "limit", "trace"],
-  optional = true
-}
-tower_governor = { version = "0.8", optional = true }
-governor = { version = "0.10", optional = true }
+hyper = "1.10"
+hyper-util = "0.1"
+reqwest = { version = "0.13", features = ["form", "json", "query"] }
+tower = "0.5"
+hyper-rustls = { version = "0.27", features = ["http2"] }
+axum = { version = "0.8", features = ["macros"] }
+tower-http = { version = "0.7", features = ["catch-panic", "cors", "limit", "trace"] }
+tower_governor = "0.8"
+governor = "0.10"
 
-# Database and ORM
-sea-orm = {
-  version = "1.1",
-  default-features = false,
-  features = ["macros", "runtime-tokio-rustls", "with-json"],
-  optional = true
-}
 moka = { version = "0.12", features = ["future"] }
 
 # Cryptography and Security
@@ -131,14 +120,19 @@ flate2 = "1.1"
 x509-parser = "0.18"
 public-suffix = "0.1"
 tokio-cron-scheduler = "0.15"
-metrics = "0.24"
-metrics-exporter-prometheus = "0.18"
-sea-orm-migration = {
-  version = "1.1.20",
-  default-features = false,
-  features = ["runtime-tokio-rustls"],
-  optional = true
-}
+
+# Database and ORM
+[dependencies.sea-orm]
+version = "1.1"
+default-features = false
+features = ["macros", "runtime-tokio-rustls", "with-json"]
+optional = true
+
+[dependencies.sea-orm-migration]
+version = "1.1.20"
+default-features = false
+features = ["runtime-tokio-rustls"]
+optional = true
 
 # AWS related libraries
 [dependencies.aws-config]
