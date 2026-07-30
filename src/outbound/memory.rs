@@ -126,8 +126,8 @@ pub struct MemoryStatusListCache {
 
 #[async_trait]
 impl StatusListCache for MemoryStatusListCache {
-    async fn get(&self, id: &str) -> Result<Option<Arc<StatusListRecord>>, StatusListError> {
-        Ok(self.values.read().await.get(id).cloned().map(Arc::new))
+    async fn get(&self, id: &str) -> Result<Option<StatusListRecord>, StatusListError> {
+        Ok(self.values.read().await.get(id).cloned())
     }
 
     async fn put(&self, record: StatusListRecord) -> Result<(), StatusListError> {

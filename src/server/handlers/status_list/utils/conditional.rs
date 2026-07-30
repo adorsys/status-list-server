@@ -6,12 +6,12 @@ const IMF_FIXDATE: &[time::format_description::BorrowedFormatItem<'static>] = fo
 );
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ConditionalResponse {
+pub(crate) enum ConditionalResponse {
     NotModified,
     Modified,
 }
 
-pub fn evaluate_if_none_match(
+pub(crate) fn evaluate_if_none_match(
     if_none_match: Option<&str>,
     current_etag: &str,
 ) -> ConditionalResponse {
@@ -37,7 +37,7 @@ pub fn evaluate_if_none_match(
     ConditionalResponse::Modified
 }
 
-pub fn evaluate_if_modified_since(
+pub(crate) fn evaluate_if_modified_since(
     if_modified_since: Option<&str>,
     updated_at: i64,
 ) -> ConditionalResponse {
@@ -63,7 +63,7 @@ pub fn evaluate_if_modified_since(
     }
 }
 
-pub fn evaluate_conditional_request(
+pub(crate) fn evaluate_conditional_request(
     if_none_match: Option<&str>,
     if_modified_since: Option<&str>,
     current_etag: &str,
@@ -75,7 +75,7 @@ pub fn evaluate_conditional_request(
     evaluate_if_modified_since(if_modified_since, updated_at)
 }
 
-pub fn format_http_date(unix_timestamp: i64) -> String {
+pub(crate) fn format_http_date(unix_timestamp: i64) -> String {
     use time::OffsetDateTime;
 
     let datetime =
@@ -86,7 +86,7 @@ pub fn format_http_date(unix_timestamp: i64) -> String {
         .unwrap_or_else(|_| "Thu, 01 Jan 1970 00:00:00 GMT".to_string())
 }
 
-pub fn parse_http_date(date_str: &str) -> Option<i64> {
+pub(crate) fn parse_http_date(date_str: &str) -> Option<i64> {
     use time::OffsetDateTime;
 
     OffsetDateTime::parse(date_str, IMF_FIXDATE)

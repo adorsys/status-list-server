@@ -209,7 +209,7 @@ impl Service {
         list_id: &str,
     ) -> Result<StatusListRecord, StatusListError> {
         match self.status_list_cache.get(list_id).await {
-            Ok(Some(record)) => return Ok(record.as_ref().clone()),
+            Ok(Some(record)) => return Ok(record),
             Ok(None) => {}
             Err(e) => tracing::warn!("Cache get failed for list {list_id}: {e}"),
         }

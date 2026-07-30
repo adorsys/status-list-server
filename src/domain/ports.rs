@@ -3,7 +3,6 @@
 use crate::domain::models::credential::{Credential, CredentialError};
 use crate::domain::models::status_list::{StatusListError, StatusListRecord, StatusListSnapshot};
 use async_trait::async_trait;
-use std::sync::Arc;
 
 /// Interface for managing active status list records.
 #[async_trait]
@@ -54,7 +53,7 @@ pub trait CredentialRepo: Send + Sync + 'static {
 #[async_trait]
 pub trait StatusListCache: Send + Sync + 'static {
     /// Retrieve a cached status list record by list identifier.
-    async fn get(&self, list_id: &str) -> Result<Option<Arc<StatusListRecord>>, StatusListError>;
+    async fn get(&self, list_id: &str) -> Result<Option<StatusListRecord>, StatusListError>;
 
     /// Store a status list record in the cache.
     async fn put(&self, status_list: StatusListRecord) -> Result<(), StatusListError>;

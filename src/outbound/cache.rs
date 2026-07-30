@@ -32,8 +32,8 @@ impl MokaStatusListCache {
 
 #[async_trait]
 impl StatusListCache for MokaStatusListCache {
-    async fn get(&self, key: &str) -> Result<Option<Arc<StatusListRecord>>, StatusListError> {
-        Ok(self.inner.get(key).await)
+    async fn get(&self, key: &str) -> Result<Option<StatusListRecord>, StatusListError> {
+        Ok(self.inner.get(key).await.map(|arc| (*arc).clone()))
     }
 
     async fn put(&self, record: StatusListRecord) -> Result<(), StatusListError> {

@@ -1163,6 +1163,7 @@ mod tests {
 
     #[sealed_test(env = [
         ("APP_DATABASE__URL", "postgres://postgres:postgres@localhost:5432/status-list"),
+        ("APP_DATABASE__BACKEND", "postgres"),
         ("APP_REDIS__URI", "rediss://user:password@localhost:6379/redis"),
         ("APP_REDIS__REQUIRE_CLIENT_AUTH", "true"),
         ("APP_SERVER__CERT__EMAIL", "test@gmail.com"),
@@ -1185,6 +1186,7 @@ mod tests {
             config.database.url.expose_secret(),
             "postgres://postgres:postgres@localhost:5432/status-list"
         );
+        assert_eq!(config.database.backend, DatabaseBackend::Postgres);
         assert_eq!(
             config.redis.uri.expose_secret(),
             "rediss://user:password@localhost:6379/redis"

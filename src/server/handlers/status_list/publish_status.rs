@@ -10,7 +10,7 @@ use crate::{
     server::{AppState, error::ApiError},
 };
 
-use super::{request::StatusesRequest, to_domain_entry};
+use super::utils::request::StatusesRequest;
 
 /// Publish a new status list.
 ///
@@ -31,7 +31,7 @@ pub async fn publish_status(
     let statuses = payload
         .statuses
         .into_iter()
-        .map(to_domain_entry)
+        .map(Into::into)
         .collect::<Vec<_>>();
 
     let sub = format!(
@@ -59,7 +59,7 @@ pub async fn publish_status(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::server::handlers::status_list::request::{
+    use crate::server::handlers::status_list::utils::request::{
         Status as RequestStatus, StatusEntry as RequestStatusEntry,
     };
     use crate::test_utils::test_app_state;

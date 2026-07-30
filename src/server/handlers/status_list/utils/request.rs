@@ -1,6 +1,6 @@
-//! Wire types for the status-list HTTP API.
 use serde::{Deserialize, Serialize};
 
+#[allow(clippy::upper_case_acronyms)]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Status {
     VALID,
@@ -48,6 +48,22 @@ pub struct StatusEntry {
 #[derive(Deserialize)]
 pub struct StatusesRequest {
     pub statuses: Vec<StatusEntry>,
+}
+
+impl From<StatusEntry> for crate::domain::models::status_list::StatusEntry {
+    fn from(entry: StatusEntry) -> Self {
+        Self {
+            index: entry.index,
+            status: match entry.status {
+                Status::VALID => crate::domain::models::status_list::Status::Valid,
+                Status::INVALID => crate::domain::models::status_list::Status::Invalid,
+                Status::SUSPENDED => crate::domain::models::status_list::Status::Suspended,
+                Status::ApplicationSpecific(value) => {
+                    crate::domain::models::status_list::Status::ApplicationSpecific(value)
+                }
+            },
+        }
+    }
 }
 
 #[cfg(test)]
