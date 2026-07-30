@@ -631,8 +631,7 @@ macro_rules! set_config_defaults {
             ("store", Option::<String>::None, Option::<String>::None);
 
         #[cfg(feature = "acme")]
-        let default_chain_cache_ttl =
-            crate::utils::cert_manager::DEFAULT_CHAIN_CACHE_TTL.as_secs();
+        let default_chain_cache_ttl = crate::utils::cert_manager::DEFAULT_CHAIN_CACHE_TTL.as_secs();
         #[cfg(not(feature = "acme"))]
         let default_chain_cache_ttl = 86400;
 
@@ -687,8 +686,8 @@ macro_rules! set_config_defaults {
 
 impl Config {
     /// Creates a [`config::ConfigBuilder`] pre-populated with default configuration values.
-    pub fn base_builder(
-    ) -> Result<config::ConfigBuilder<config::builder::DefaultState>, ConfigError> {
+    pub fn base_builder()
+    -> Result<config::ConfigBuilder<config::builder::DefaultState>, ConfigError> {
         let builder = ConfigLib::builder();
         let builder = set_config_defaults!(builder);
         Ok(builder)
