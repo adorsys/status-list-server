@@ -31,10 +31,10 @@ SQLite is not a distributed database, so it is not a good match for horizontally
 
 ## Compose Profiles
 
-`docker compose up` starts PostgreSQL by default. To run the MySQL service instead:
+`docker compose up` starts PostgreSQL by default and builds the container with `postgres,redis,aws,acme` features enabled. To run the MySQL service instead:
 
 ```bash
-docker compose --profile mysql up
+FEATURES="mysql,redis,aws,acme" docker compose --profile mysql up --build
 ```
 
 There is no separate MariaDB service because MariaDB uses the same MySQL-driver path (`mysql://` URL). Connect to a MariaDB host by pointing `APP_DATABASE__URL` at your MariaDB instance on port 3306 (the default) and setting `APP_DATABASE__BACKEND=mysql`.
