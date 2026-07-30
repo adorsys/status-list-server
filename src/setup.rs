@@ -146,28 +146,13 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
                 ));
             }
 
-            #[cfg(feature = "sqlite")]
-            let mut opt = ConnectOptions::new(db_url.to_string());
-            #[cfg(not(feature = "sqlite"))]
             let mut opt = ConnectOptions::new(db_url.to_string());
 
-            #[cfg(feature = "sqlite")]
-            if db_backend == crate::config::DatabaseBackend::Sqlite {
+            if db_backend == DatabaseBackend::Sqlite || db_backend == DatabaseBackend::Memory {
                 opt.max_connections(1);
+                #[cfg(feature = "sqlite")]
                 opt.map_sqlx_sqlite_opts(|o| o.foreign_keys(true));
             } else {
-                let pool = &config.database.pool;
-                opt.max_connections(pool.max_connections)
-                    .min_connections(pool.min_connections)
-                    .acquire_timeout(Duration::from_secs(pool.acquire_timeout_secs))
-                    .connect_timeout(Duration::from_secs(pool.connect_timeout_secs))
-                    .idle_timeout(Duration::from_secs(pool.idle_timeout_secs))
-                    .max_lifetime(Duration::from_secs(pool.max_lifetime_secs))
-                    .sqlx_logging(false);
-            }
-
-            #[cfg(not(feature = "sqlite"))]
-            {
                 let pool = &config.database.pool;
                 opt.max_connections(pool.max_connections)
                     .min_connections(pool.min_connections)

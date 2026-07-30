@@ -632,6 +632,12 @@ impl RedisConfig {
 
 impl Config {
     pub fn load() -> Result<Self, ConfigError> {
+        Self::load_from_overrides::<&str, &str>(&[])
+    }
+
+    pub fn load_from_overrides<K: AsRef<str>, V: AsRef<str>>(
+        overrides: &[(K, V)],
+    ) -> Result<Self, ConfigError> {
         #[cfg(feature = "postgres")]
         let (default_db_url, default_db_backend) = (
             "postgres://postgres:postgres@localhost:5432/status-list",
@@ -662,7 +668,7 @@ impl Config {
         let default_chain_cache_ttl = 86400;
 
         // Build the config
-        let config = ConfigLib::builder()
+        let mut builder = ConfigLib::builder()
             // Set default values
             .set_default("server.host", "localhost")?
             .set_default("server.domain", "localhost")?
@@ -722,9 +728,21 @@ impl Config {
                 Environment::with_prefix("APP")
                     .prefix_separator("_")
                     .separator("__"),
-            )
-            .build()?;
+            );
 
+        for (k, v) in overrides {
+            let key = k.as_ref();
+            let val = v.as_ref();
+            let normalized_key = key
+                .strip_prefix("APP_")
+                .or_else(|| key.strip_prefix("app_"))
+                .unwrap_or(key)
+                .replace("__", ".")
+                .to_lowercase();
+            builder = builder.set_override(normalized_key, val)?;
+        }
+
+        let config = builder.build()?;
         let config: Config = config.try_deserialize()?;
         Ok(config)
     }
@@ -1448,16 +1466,17 @@ mod tests {
         );
     }
 
-    #[sealed_test(env = [
-        ("APP_DATABASE__POOL__MAX_CONNECTIONS", "20"),
-        ("APP_DATABASE__POOL__MIN_CONNECTIONS", "2"),
-        ("APP_DATABASE__POOL__ACQUIRE_TIMEOUT_SECS", "3"),
-        ("APP_DATABASE__POOL__CONNECT_TIMEOUT_SECS", "15"),
-        ("APP_DATABASE__POOL__IDLE_TIMEOUT_SECS", "300"),
-        ("APP_DATABASE__POOL__MAX_LIFETIME_SECS", "900"),
-    ])]
+    #[test]
     fn test_pool_config_env_override() {
-        let config = Config::load().expect("Failed to load config");
+        let config = Config::load_from_overrides(&[
+            ("APP_DATABASE__POOL__MAX_CONNECTIONS", "20"),
+            ("APP_DATABASE__POOL__MIN_CONNECTIONS", "2"),
+            ("APP_DATABASE__POOL__ACQUIRE_TIMEOUT_SECS", "3"),
+            ("APP_DATABASE__POOL__CONNECT_TIMEOUT_SECS", "15"),
+            ("APP_DATABASE__POOL__IDLE_TIMEOUT_SECS", "300"),
+            ("APP_DATABASE__POOL__MAX_LIFETIME_SECS", "900"),
+        ])
+        .expect("Failed to load config");
         assert_eq!(config.database.pool.max_connections, 20);
         assert_eq!(config.database.pool.min_connections, 2);
         assert_eq!(config.database.pool.acquire_timeout_secs, 3);
