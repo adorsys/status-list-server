@@ -90,6 +90,8 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      args:
+        FEATURES: ${FEATURES:-postgres,redis,aws,acme}
     container_name: status-list-server
     env_file:
       - path: .env

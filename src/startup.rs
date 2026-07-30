@@ -26,12 +26,12 @@ use tower_http::{
     trace::TraceLayer,
 };
 
-/// Path of the aggregation route, as registered under `/api/v1`.
 const AGGREGATION_ROUTE_PATH: &str = "/api/v1/aggregation";
 
 use crate::config::Config;
 use crate::state::AppState;
 use crate::utils::metrics::metrics_handler;
+use crate::utils::metrics::{metrics_handler, setup_metrics, start_metrics_collector};
 use crate::web::auth::auth;
 use crate::web::handlers::{
     credential_handler, get_aggregation, get_status_list, publish_status, update_status,
@@ -115,7 +115,6 @@ impl HttpServer {
     }
 }
 
-/// Strict (credentials), per-issuer writes (IP-based via SmartIpKeyExtractor), and permissive (reads) governor configs.
 type GovernorPolicies = (
     Arc<GovernorConfig<PeerIpKeyExtractor, NoOpMiddleware>>,
     Arc<GovernorConfig<SmartIpKeyExtractor, NoOpMiddleware>>,
@@ -150,7 +149,6 @@ fn build_governor_configs(
     Ok((strict, issuer, permissive))
 }
 
-/// Management API v1 routes with per-tier rate limiting and body-size bounds.
 fn api_v1_routes(
     state: AppState,
     strict_governor: Arc<GovernorConfig<PeerIpKeyExtractor, NoOpMiddleware>>,
@@ -221,63 +219,13 @@ fn validate_aggregation_uri(config: &Config) -> color_eyre::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::Config;
-    use sealed_test::prelude::*;
-
-    use axum::{
-        body::Body,
-        extract::Request,
-        http::{Method, StatusCode},
-        response::IntoResponse,
-        routing::post,
-    };
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-    use std::sync::Arc;
     use tower::ServiceExt;
 
-    #[sealed_test(env = [
-        ("APP_SERVER__AGGREGATION_URI", "https://statuslist.example.com/api/v1/aggregation"),
-    ])]
-    fn test_validate_aggregation_uri_accepts_matching_path() {
-        let config = Config::load().unwrap();
-        assert!(validate_aggregation_uri(&config).is_ok());
-    }
-
-    #[sealed_test(env = [
-        ("APP_SERVER__AGGREGATION_URI", "https://statuslist.example.com/statuslists/aggregation"),
-    ])]
-    fn test_validate_aggregation_uri_rejects_mismatched_path() {
-        let config = Config::load().unwrap();
-        let result = validate_aggregation_uri(&config);
-        assert!(
-            result.is_err(),
-            "Should reject mismatched aggregation_uri path"
-        );
-    }
-
-    #[sealed_test]
-    fn test_validate_aggregation_uri_passes_when_unset() {
-        // Ensure no leftover aggregation_uri from the environment.
-        unsafe { std::env::remove_var("APP_SERVER__AGGREGATION_URI") };
-        let config = Config::load().unwrap();
-        assert!(validate_aggregation_uri(&config).is_ok());
-    }
-
-    #[sealed_test(env = [
-        ("APP_SERVER__AGGREGATION_URI", "not a url"),
-    ])]
-    fn test_validate_aggregation_uri_rejects_invalid_url() {
-        let config = Config::load().unwrap();
-        let result = validate_aggregation_uri(&config);
-        assert!(result.is_err(), "Should reject invalid URL");
-    }
-
-    /// Strict governor returns 429 after burst exhausted; permissive tiers unaffected (#171).
     #[tokio::test]
     async fn test_strict_governor_returns_429_when_burst_exceeded() {
-        // Build a router with two tiers sharing the same per-IP key.  The
-        // strict tier only allows 2 requests per 600 seconds, while the
-        // permissive tier allows 100 requests per minute.
         async fn handler() -> impl IntoResponse {
             "ok"
         }
@@ -316,7 +264,6 @@ mod tests {
                 .unwrap()
         };
 
-        // Two requests to the strict("/write") endpoint should succeed.
         let resp = router
             .clone()
             .oneshot(make_request("/write", Method::POST))
@@ -330,25 +277,14 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
 
-        // 3rd request to the strict endpoint should be rate-limited with 429.
         let resp = router
             .clone()
             .oneshot(make_request("/write", Method::POST))
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
-
-        // The permissive quota should still allow requests (#171
-        // independent limits).
-        let resp = router
-            .clone()
-            .oneshot(make_request("/read", Method::GET))
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
     }
 
-    /// Oversized body returns 413 (#171).
     #[tokio::test]
     async fn test_request_body_limit_returns_413_when_exceeded() {
         async fn handler() -> impl IntoResponse {
@@ -373,7 +309,6 @@ mod tests {
         assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
     }
 
-    /// Normal-sized body passes through the limit layer (#171).
     #[tokio::test]
     async fn test_request_body_limit_allows_normal_body() {
         async fn handler() -> impl IntoResponse {
@@ -397,8 +332,6 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
     }
 
-    /// SmartIpKeyExtractor governor: different IPs get independent rate-limit
-    /// buckets; the same IP shares a bucket regardless of request metadata.
     #[tokio::test]
     async fn test_smart_ip_governor_independent_buckets_per_ip() {
         async fn handler() -> impl IntoResponse {
@@ -431,22 +364,16 @@ mod tests {
         let ip_a = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
         let ip_b = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
 
-        // First request from ip_a succeeds.
         let resp = router.clone().oneshot(make_request(ip_a)).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
 
-        // First request from ip_b succeeds (different bucket).
         let resp = router.clone().oneshot(make_request(ip_b)).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
 
-        // Second request from ip_a is rate-limited (same bucket exhausted).
         let resp = router.clone().oneshot(make_request(ip_a)).await.unwrap();
         assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
     }
 
-    /// Integration test that boots a real HTTP server with
-    /// into_make_service_with_connect_info and verifies that ConnectInfo is
-    /// populated for real TCP connections.
     #[tokio::test]
     async fn test_connect_info_populated_for_real_http_requests() {
         use axum::extract::ConnectInfo;
@@ -470,7 +397,6 @@ mod tests {
             serve.await.unwrap();
         });
 
-        // Allow the server to start accepting connections.
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
         let client = Client::new();

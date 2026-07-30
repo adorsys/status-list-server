@@ -20,9 +20,7 @@ static INIT_CRYPTO: Once = Once::new();
 
 fn init_crypto() {
     INIT_CRYPTO.call_once(|| {
-        rustls::crypto::aws_lc_rs::default_provider()
-            .install_default()
-            .expect("Failed to install crypto provider");
+        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
     });
 }
 

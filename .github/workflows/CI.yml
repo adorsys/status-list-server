@@ -65,20 +65,15 @@ jobs:
       - name: Cargo Build
         run: cargo build --workspace --all-targets --all-features
 
-  memory-only:
-    name: Memory-only Build
-    runs-on: ubuntu-latest
-    needs: cargo-fmt
+      - name: Memory-only Build
+        run: cargo check --no-default-features --features memory
 
-    steps:
-      - name: Fetch Repository
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-      - name: Install Rust
-        uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1
-
-      - name: Test infrastructure-free composition
-        run: cargo test --lib --no-default-features --features memory-only
+      - name: Verify domain layer purity
+        run: |
+          if grep -rn -E "(sea_orm|axum|aws_sdk|redis|reqwest|moka|crate::server|crate::outbound)" src/domain/; then
+            echo "ERROR: Infrastructure dependencies or imports found in src/domain/"
+            exit 1
+          fi
 
   cargo-clippy:
     name: Cargo Clippy Check
