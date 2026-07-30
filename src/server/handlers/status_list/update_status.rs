@@ -47,7 +47,7 @@ pub async fn update_status(
         )
         .await?;
 
-    Ok(StatusCode::OK.into_response())
+    Ok(StatusCode::NO_CONTENT.into_response())
 }
 
 #[cfg(test)]
@@ -107,7 +107,7 @@ mod tests {
         .unwrap()
         .into_response();
 
-        assert_eq!(update_res.status(), StatusCode::OK);
+        assert_eq!(update_res.status(), StatusCode::NO_CONTENT);
 
         let token = app_state.service.get_status_list(&token_id).await.unwrap();
         assert!(!token.status_list.lst.is_empty());

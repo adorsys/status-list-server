@@ -215,6 +215,16 @@ mod tests {
                 "invalid_index",
             ),
             (
+                StatusListError::InvalidStatusList("test".into()),
+                StatusCode::BAD_REQUEST,
+                "invalid_input",
+            ),
+            (
+                StatusListError::CorruptStoredList("test".into()),
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal_error",
+            ),
+            (
                 StatusListError::AlreadyExists,
                 StatusCode::CONFLICT,
                 "status_list_already_exists",
@@ -244,6 +254,34 @@ mod tests {
                 StatusCode::UNPROCESSABLE_ENTITY,
                 "status_too_large",
             ),
+            (
+                StatusListError::TooManyStatuses { count: 2, max: 1 },
+                StatusCode::BAD_REQUEST,
+                "too_many_statuses",
+            ),
+            (
+                StatusListError::IndexTooLarge { index: 2, max: 1 },
+                StatusCode::BAD_REQUEST,
+                "index_too_large",
+            ),
+            (
+                StatusListError::Conflict,
+                StatusCode::CONFLICT,
+                "update_conflict",
+            ),
+            (
+                StatusListError::Unavailable,
+                StatusCode::SERVICE_UNAVAILABLE,
+                "service_unavailable",
+            ),
+            (
+                StatusListError::Backend(Box::new(std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    "test",
+                ))),
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal_error",
+            ),
         ];
 
         for (err, expected_status, expected_code) in cases {
@@ -254,11 +292,46 @@ mod tests {
     }
 
     #[test]
-    fn test_status_list_error_into_response_contains_snake_case_code() {
+    fn test_credential_error_all_variants_convert() {
+        let cases = vec![
+            (
+                CredentialError::InvalidPublicJwk("test".into()),
+                StatusCode::BAD_REQUEST,
+                "invalid_public_jwk",
+            ),
+            (
+                CredentialError::AlreadyExists,
+                StatusCode::CONFLICT,
+                "credentials_already_exist",
+            ),
+            (
+                CredentialError::Backend(Box::new(std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    "test",
+                ))),
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal_error",
+            ),
+        ];
+
+        for (err, expected_status, expected_code) in cases {
+            let api_err: ApiError = err.into();
+            assert_eq!(api_err.status, expected_status, "Status mismatch");
+            assert_eq!(api_err.error.as_ref(), expected_code, "Code mismatch");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_status_list_error_into_response_contains_snake_case_code() {
         let err = StatusListError::NotFound;
         let api_err: ApiError = err.into();
         let response = api_err.into_response();
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body_str = String::from_utf8(body_bytes.to_vec()).unwrap();
+        assert!(body_str.contains("\"error\":\"status_list_not_found\""));
     }
 
     #[test]

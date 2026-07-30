@@ -1162,8 +1162,6 @@ mod tests {
     }
 
     #[sealed_test(env = [
-        ("APP_DATABASE__URL", "postgres://postgres:postgres@localhost:5432/status-list"),
-        ("APP_DATABASE__BACKEND", "postgres"),
         ("APP_REDIS__URI", "rediss://user:password@localhost:6379/redis"),
         ("APP_REDIS__REQUIRE_CLIENT_AUTH", "true"),
         ("APP_SERVER__CERT__EMAIL", "test@gmail.com"),
@@ -1178,15 +1176,44 @@ mod tests {
         ("APP_CACHE__MAX_CAPACITY", "2000"),
     ])]
     fn test_env_config_with_tls() {
+        #[cfg(feature = "postgres")]
+        let (env_db_url, env_db_backend, expected_backend) = (
+            "postgres://postgres:postgres@localhost:5432/status-list-env",
+            "postgres",
+            DatabaseBackend::Postgres,
+        );
+        #[cfg(all(not(feature = "postgres"), feature = "sqlite"))]
+        let (env_db_url, env_db_backend, expected_backend) = (
+            "sqlite::memory:",
+            "sqlite",
+            DatabaseBackend::Sqlite,
+        );
+        #[cfg(all(not(feature = "postgres"), not(feature = "sqlite"), feature = "mysql"))]
+        let (env_db_url, env_db_backend, expected_backend) = (
+            "mysql://mysql:mysql@localhost:3306/status-list-env",
+            "mysql",
+            DatabaseBackend::MySql,
+        );
+        #[cfg(all(
+            not(feature = "postgres"),
+            not(feature = "sqlite"),
+            not(feature = "mysql")
+        ))]
+        let (env_db_url, env_db_backend, expected_backend) = (
+            "memory:",
+            "memory",
+            DatabaseBackend::Memory,
+        );
+
+        unsafe { std::env::set_var("APP_DATABASE__URL", env_db_url) };
+        unsafe { std::env::set_var("APP_DATABASE__BACKEND", env_db_backend) };
+
         let config = Config::load().expect("Failed to load config");
 
         assert_eq!(config.server.host, "localhost");
         assert_eq!(config.server.port, 8000);
-        assert_eq!(
-            config.database.url.expose_secret(),
-            "postgres://postgres:postgres@localhost:5432/status-list"
-        );
-        assert_eq!(config.database.backend, DatabaseBackend::Postgres);
+        assert_eq!(config.database.url.expose_secret(), env_db_url);
+        assert_eq!(config.database.backend, expected_backend);
         assert_eq!(
             config.redis.uri.expose_secret(),
             "rediss://user:password@localhost:6379/redis"
