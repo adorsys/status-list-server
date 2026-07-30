@@ -1,10 +1,11 @@
 mod dns01;
 mod http01;
 
+#[cfg(feature = "aws")]
+pub use dns01::AwsRoute53DnsProvider;
 pub use dns01::{
-    AcmeDnsCredentials, AcmeDnsProvider, AwsRoute53DnsProvider, AzureDnsProvider,
-    CloudflareDnsProvider, Dns01Handler, DnsProvider, GoogleCloudDnsProvider, PebbleDnsProvider,
-    ServicePrincipal,
+    AcmeDnsCredentials, AcmeDnsProvider, AzureDnsProvider, CloudflareDnsProvider, Dns01Handler,
+    DnsProvider, GoogleCloudDnsProvider, PebbleDnsProvider, ServicePrincipal,
 };
 pub use http01::Http01Handler;
 
