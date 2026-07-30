@@ -784,6 +784,19 @@ mod tests {
         assert_eq!(config.server.cert.dns.provider, None);
     }
 
+    #[sealed_test]
+    fn test_base_builder_defaults() {
+        let builder = Config::base_builder().expect("Failed to create base_builder");
+        let config: Config = builder
+            .build()
+            .expect("Failed to build config")
+            .try_deserialize()
+            .expect("Failed to deserialize config");
+
+        assert_eq!(config.server.host, "localhost");
+        assert_eq!(config.server.port, 8000);
+    }
+
     #[sealed_test(env = [
         ("APP_SERVER__AGGREGATION_URI", "https://example.com/aggregation"),
     ])]
