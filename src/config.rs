@@ -122,6 +122,8 @@ pub struct CertConfig {
     #[serde(default)]
     pub eku: Vec<u64>,
     pub acme_directory_url: String,
+    /// Cache TTL for parsed certificate chains in seconds.
+    /// A value of 0 keeps entries in memory indefinitely without expiration.
     pub chain_cache_ttl: u64,
     pub renewal_cron_schedule: String,
     #[serde(default)]
@@ -480,6 +482,8 @@ impl DnsConfig {
 pub struct RedisConfig {
     pub uri: SecretString,
     pub require_client_auth: bool,
+    /// Cache TTL for Redis TLS certificates in seconds.
+    /// Setting this to 0 disables caching entirely.
     pub cert_cache_ttl: u64,
 }
 
@@ -494,6 +498,8 @@ pub struct DatabaseConfig {
 #[derive(Debug, Clone, Deserialize)]
 pub struct AwsConfig {
     pub region: String,
+    /// Cache TTL for AWS Secrets Manager entries in seconds.
+    /// Setting this to 0 disables caching entirely.
     pub secrets_cache_ttl: u64,
     pub s3_bucket: String,
     pub s3_key_prefix: String,
@@ -501,6 +507,8 @@ pub struct AwsConfig {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct CacheConfig {
+    /// Time-to-live for cached status list items in seconds.
+    /// Setting this to 0 disables caching entirely.
     pub ttl: u64,
     pub max_capacity: u64,
 }
@@ -619,9 +627,7 @@ impl Config {
     /// the process-wide environment, tests are fully isolated from each other
     /// and from the host environment regardless of execution order or threading.
     #[cfg(test)]
-    pub(crate) fn load_from_overrides(
-        overrides: &[(&'static str, &'static str)],
-    ) -> Result<Self, ConfigError> {
+    pub(crate) fn load_from_overrides(overrides: &[(&str, &str)]) -> Result<Self, ConfigError> {
         let mut builder = base_builder()?;
         for &(key, value) in overrides {
             builder = builder.set_override(key, value)?;
