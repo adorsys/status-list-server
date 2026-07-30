@@ -21,6 +21,13 @@ spec:
       from:
         {{- toYaml . | nindent 8 }}
       {{- end }}
+    {{- if .Values.otelCollector.enabled }}
+    - ports:
+        - port: 4317
+          protocol: TCP
+        - port: 4318
+          protocol: TCP
+    {{- end }}
   egress:
     - ports:
         - port: 5432

@@ -688,7 +688,6 @@ fn test_init_renewal_counters_registers_zero_values() {
 
     let gathered = registry.gather();
     let names: Vec<String> = gathered.into_iter().map(|g| g.name().to_string()).collect();
-    // OpenTelemetry-Prometheus appends _total to counters
     assert!(
         names.iter().any(|n| n.contains("cert_renewal_attempts")),
         "missing cert_renewal_attempts metric; got: {names:?}"
@@ -706,7 +705,7 @@ fn test_init_renewal_counters_registers_zero_values() {
 #[test]
 fn test_update_time_to_expiry_sets_gauge() {
     init_crypto();
-    let _registry = setup_test_metrics_registry();
+    let registry = setup_test_metrics_registry();
 
     let cert_manager = CertManager::new(
         vec!["example.com"],
@@ -725,12 +724,21 @@ fn test_update_time_to_expiry_sets_gauge() {
     };
 
     cert_manager.update_time_to_expiry(&cert_data);
+
+    let gathered = registry.gather();
+    let names: Vec<String> = gathered.into_iter().map(|g| g.name().to_string()).collect();
+    assert!(
+        names
+            .iter()
+            .any(|n| n.contains("cert_time_to_expiry_seconds")),
+        "missing cert_time_to_expiry_seconds metric; got: {names:?}"
+    );
 }
 
 #[test]
 fn test_record_successful_renewal_updates_counters_and_gauge() {
     init_crypto();
-    let _registry = setup_test_metrics_registry();
+    let registry = setup_test_metrics_registry();
 
     let cert_manager = CertManager::new(
         vec!["example.com"],
@@ -742,12 +750,25 @@ fn test_record_successful_renewal_updates_counters_and_gauge() {
 
     cert_manager.init_renewal_counters();
     cert_manager.record_successful_renewal();
+
+    let gathered = registry.gather();
+    let names: Vec<String> = gathered.into_iter().map(|g| g.name().to_string()).collect();
+    assert!(
+        names.iter().any(|n| n.contains("cert_renewal_successes")),
+        "missing cert_renewal_successes metric; got: {names:?}"
+    );
+    assert!(
+        names
+            .iter()
+            .any(|n| n.contains("cert_last_successful_renewal_timestamp")),
+        "missing cert_last_successful_renewal_timestamp metric; got: {names:?}"
+    );
 }
 
 #[test]
 fn test_record_failed_renewal_increments_failure_counter() {
     init_crypto();
-    let _registry = setup_test_metrics_registry();
+    let registry = setup_test_metrics_registry();
 
     let cert_manager = CertManager::new(
         vec!["example.com"],
@@ -760,12 +781,19 @@ fn test_record_failed_renewal_increments_failure_counter() {
     cert_manager.init_renewal_counters();
     cert_manager.record_failed_renewal();
     cert_manager.record_failed_renewal();
+
+    let gathered = registry.gather();
+    let names: Vec<String> = gathered.into_iter().map(|g| g.name().to_string()).collect();
+    assert!(
+        names.iter().any(|n| n.contains("cert_renewal_failures")),
+        "missing cert_renewal_failures metric; got: {names:?}"
+    );
 }
 
 #[test]
 fn test_renewal_attempts_metric_via_manager() {
     init_crypto();
-    let _registry = setup_test_metrics_registry();
+    let registry = setup_test_metrics_registry();
 
     let cert_storage = MockStorage::new();
     let secrets_storage = MockStorage::new();
@@ -789,4 +817,11 @@ fn test_renewal_attempts_metric_via_manager() {
         cert_manager.init_renewal_counters();
         let _ = cert_manager.renew_cert_if_needed().await;
     });
+
+    let gathered = registry.gather();
+    let names: Vec<String> = gathered.into_iter().map(|g| g.name().to_string()).collect();
+    assert!(
+        names.iter().any(|n| n.contains("cert_renewal_attempts")),
+        "missing cert_renewal_attempts metric; got: {names:?}"
+    );
 }
