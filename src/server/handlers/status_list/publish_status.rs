@@ -78,7 +78,11 @@ mod tests {
         )
         .await;
 
-        assert!(result.is_err());
+        let err = match result {
+            Ok(_) => panic!("expected error for invalid list_id"),
+            Err(e) => e,
+        };
+        assert_eq!(err.status, StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]
@@ -126,7 +130,11 @@ mod tests {
         )
         .await;
 
-        assert!(res2.is_err());
+        let err = match res2 {
+            Ok(_) => panic!("expected conflict error for duplicate list_id"),
+            Err(e) => e,
+        };
+        assert_eq!(err.status, StatusCode::CONFLICT);
     }
 
     #[tokio::test]

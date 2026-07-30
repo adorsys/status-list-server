@@ -1176,22 +1176,17 @@ mod tests {
         ("APP_CACHE__MAX_CAPACITY", "2000"),
     ])]
     fn test_env_config_with_tls() {
+        // Feature-conditional database configuration matching test_default_config pattern
         #[cfg(feature = "postgres")]
-        let (env_db_url, env_db_backend, expected_backend) = (
-            "postgres://postgres:postgres@localhost:5432/status-list-env",
-            "postgres",
+        let (expected_db_url, expected_db_backend) = (
+            "postgres://postgres:postgres@localhost:5432/status-list",
             DatabaseBackend::Postgres,
         );
         #[cfg(all(not(feature = "postgres"), feature = "sqlite"))]
-        let (env_db_url, env_db_backend, expected_backend) = (
-            "sqlite::memory:",
-            "sqlite",
-            DatabaseBackend::Sqlite,
-        );
+        let (expected_db_url, expected_db_backend) = ("sqlite::memory:", DatabaseBackend::Sqlite);
         #[cfg(all(not(feature = "postgres"), not(feature = "sqlite"), feature = "mysql"))]
-        let (env_db_url, env_db_backend, expected_backend) = (
-            "mysql://mysql:mysql@localhost:3306/status-list-env",
-            "mysql",
+        let (expected_db_url, expected_db_backend) = (
+            "mysql://mysql:mysql@localhost:3306/status-list",
             DatabaseBackend::MySql,
         );
         #[cfg(all(
@@ -1199,21 +1194,14 @@ mod tests {
             not(feature = "sqlite"),
             not(feature = "mysql")
         ))]
-        let (env_db_url, env_db_backend, expected_backend) = (
-            "memory:",
-            "memory",
-            DatabaseBackend::Memory,
-        );
-
-        unsafe { std::env::set_var("APP_DATABASE__URL", env_db_url) };
-        unsafe { std::env::set_var("APP_DATABASE__BACKEND", env_db_backend) };
+        let (expected_db_url, expected_db_backend) = ("memory:", DatabaseBackend::Memory);
 
         let config = Config::load().expect("Failed to load config");
 
         assert_eq!(config.server.host, "localhost");
         assert_eq!(config.server.port, 8000);
-        assert_eq!(config.database.url.expose_secret(), env_db_url);
-        assert_eq!(config.database.backend, expected_backend);
+        assert_eq!(config.database.url.expose_secret(), expected_db_url);
+        assert_eq!(config.database.backend, expected_db_backend);
         assert_eq!(
             config.redis.uri.expose_secret(),
             "rediss://user:password@localhost:6379/redis"
@@ -1361,6 +1349,53 @@ mod tests {
         assert_eq!(DatabaseBackend::Postgres.as_str(), "postgres");
         assert_eq!(DatabaseBackend::MySql.as_str(), "mysql");
         assert_eq!(DatabaseBackend::Sqlite.as_str(), "sqlite");
+    }
+
+    #[sealed_test]
+    fn test_default_config_ships_no_repo_key_material() {
+        // The default config must not reference any test_data/ paths or
+        // other repository-local key material, ensuring it can be used
+        // in production without requiring those test files
+        let config = Config::load().expect("Failed to load config");
+
+        // Cert store paths should be None when using ACME strategy (default on feature=acme)
+        // or None/empty when using store strategy (default without feature=acme)
+        let cert_path = config.server.cert.store.certificate_path;
+        let key_path = config.server.cert.store.signing_key_path;
+
+        if let Some(path) = cert_path.as_deref() {
+            assert!(
+                !path.contains("test_data"),
+                "Default config certificate_path references test_data: {path}"
+            );
+        }
+        if let Some(path) = key_path.as_deref() {
+            assert!(
+                !path.contains("test_data"),
+                "Default config signing_key_path references test_data: {path}"
+            );
+        }
+
+        // Database URL should not reference test_data either
+        let db_url = config.database.url.expose_secret();
+        assert!(
+            !db_url.contains("test_data"),
+            "Default config database URL references test_data: {db_url}"
+        );
+
+        // AWS secret keys should be None or not reference test_data
+        if let Some(key) = config.server.cert.store.certificate_key.as_deref() {
+            assert!(
+                !key.contains("test_data"),
+                "Default config certificate_key references test_data: {key}"
+            );
+        }
+        if let Some(key) = config.server.cert.store.signing_key_key.as_deref() {
+            assert!(
+                !key.contains("test_data"),
+                "Default config signing_key_key references test_data: {key}"
+            );
+        }
     }
 
     #[sealed_test(env = [

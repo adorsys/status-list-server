@@ -645,17 +645,15 @@ mod general_tests {
     use super::*;
     use sealed_test::prelude::*;
 
-    #[sealed_test(env = [
-        ("APP_ENV", "development"),
-        ("APP_DATABASE__BACKEND", "memory"),
-        ("APP_DATABASE__URL", "memory:")
-    ])]
+    /// Verifies that build_state succeeds with AppConfig::load() defaults under
+    /// the default feature set, catching missing test_data/ or config mismatch issues.
+    #[sealed_test(env = [("APP_ENV", "development")])]
     fn build_state_succeeds_under_default_config() {
         let _ = rustls::crypto::ring::default_provider().install_default();
         let config = AppConfig::load().expect("Failed to load config");
         tokio::runtime::Runtime::new().unwrap().block_on(async {
             if let Err(ref e) = build_state(&config).await {
-                panic!("build_state failed: {e:?}");
+                panic!("build_state failed under default configuration: {e:?}");
             }
         });
     }

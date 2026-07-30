@@ -326,12 +326,34 @@ mod tests {
         let err = StatusListError::NotFound;
         let api_err: ApiError = err.into();
         let response = api_err.into_response();
+        
+        // Verify status code
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        
+        // Verify Cache-Control header is present
+        let cache_control = response
+            .headers()
+            .get(axum::http::header::CACHE_CONTROL)
+            .expect("Cache-Control header should be present");
+        assert_eq!(cache_control, "no-store, max-age=0");
+        
+        // Verify JSON body contains both error and error_description
         let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
             .await
             .unwrap();
         let body_str = String::from_utf8(body_bytes.to_vec()).unwrap();
-        assert!(body_str.contains("\"error\":\"status_list_not_found\""));
+        assert!(
+            body_str.contains("\"error\":\"status_list_not_found\""),
+            "Response body should contain error code"
+        );
+        assert!(
+            body_str.contains("\"error_description\""),
+            "Response body should contain error_description field"
+        );
+        assert!(
+            body_str.contains("Status list was not found"),
+            "Response body should contain error description text"
+        );
     }
 
     #[test]
@@ -339,5 +361,25 @@ mod tests {
         let api_err = ApiError::internal("something broke");
         assert_eq!(api_err.status, StatusCode::INTERNAL_SERVER_ERROR);
         assert_eq!(api_err.error, "internal_error");
+    }
+}
+
+#[cfg(test)]
+mod additional_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_error_response_sets_no_store() {
+        let api_err = ApiError::not_found("test_error", "test description");
+        let response = api_err.into_response();
+        
+        let cache_control = response
+            .headers()
+            .get(axum::http::header::CACHE_CONTROL)
+            .expect("Cache-Control header must be present on error responses");
+        assert_eq!(
+            cache_control, "no-store, max-age=0",
+            "Error responses must include Cache-Control: no-store to prevent caching of errors"
+        );
     }
 }
