@@ -275,10 +275,7 @@ mod tests {
                 "service_unavailable",
             ),
             (
-                StatusListError::Backend(Box::new(std::io::Error::new(
-                    std::io::ErrorKind::Other,
-                    "test",
-                ))),
+                StatusListError::Backend(Box::new(std::io::Error::other("test"))),
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "internal_error",
             ),
@@ -305,10 +302,7 @@ mod tests {
                 "credentials_already_exist",
             ),
             (
-                CredentialError::Backend(Box::new(std::io::Error::new(
-                    std::io::ErrorKind::Other,
-                    "test",
-                ))),
+                CredentialError::Backend(Box::new(std::io::Error::other("test"))),
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "internal_error",
             ),
