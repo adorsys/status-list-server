@@ -5,6 +5,7 @@ use crate::{
 
 use super::*;
 use async_trait::async_trait;
+use sealed_test::sealed;
 use std::collections::HashMap;
 use std::sync::{
     Arc, Once,
@@ -646,9 +647,6 @@ async fn test_cert_chain_cache_invalidation_reloads_chain() {
     assert!(!Arc::ptr_eq(&first, &reloaded));
     assert_eq!(cert_storage.load_count(), 2);
 }
-
-// Tests for renewal metrics
-use sealed_test::sealed;
 
 fn setup_test_metrics_registry() -> prometheus::Registry {
     use crate::config::{TelemetryConfig, TelemetryEnvironment};
