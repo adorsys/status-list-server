@@ -3,6 +3,19 @@ use std::net::{IpAddr, SocketAddr};
 use axum::http::{HeaderMap, Request, header};
 use tower_governor::{errors::GovernorError, key_extractor::KeyExtractor};
 
+/// Key extractor that reads the `iss` claim from a Bearer JWT without
+/// verification.
+///
+/// **Deprecated**: No longer used in production. Rate limiting on write
+/// endpoints now uses `SmartIpKeyExtractor` (IP-based via trusted proxy
+/// headers or peer IP), so JWT claim forgery no longer changes the write
+/// rate-limit key. Deployments behind ingress must configure trusted proxy
+/// headers via ingress-nginx ConfigMap settings (e.g., `use-forwarded-headers`,
+/// `set-real-ip-from`) since `configuration-snippet` annotations are disabled
+/// by default in production (allow-snippet-annotations: false). The type
+/// and its tests are retained for unit-test coverage of the extraction logic.
+///
+/// Falls back to the peer IP when the token is absent or malformed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct IssuerKeyExtractor;
 
