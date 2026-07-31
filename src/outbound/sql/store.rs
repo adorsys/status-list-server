@@ -306,9 +306,7 @@ impl SeaOrmStore<StatusListHistoryRecord> {
                      WHERE snapshot_id IN \
                      (SELECT snapshot_id FROM status_list_history WHERE exp < $1 LIMIT $2)"
                 }
-                DatabaseBackend::MySql => {
-                    "DELETE FROM status_list_history WHERE exp < ? LIMIT ?"
-                }
+                DatabaseBackend::MySql => "DELETE FROM status_list_history WHERE exp < ? LIMIT ?",
                 _ => {
                     "DELETE FROM status_list_history \
                      WHERE snapshot_id IN \
