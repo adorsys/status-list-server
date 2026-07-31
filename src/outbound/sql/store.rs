@@ -283,6 +283,13 @@ impl SeaOrmStore<StatusListHistoryRecord> {
     /// Batches the delete in chunks to avoid holding long-lived locks.
     /// Returns the total number of rows deleted.
     ///
+    /// Single-statement batched deletes are used per database backend:
+    /// - **PostgreSQL**: Does not support direct `LIMIT` on `DELETE`. Requires
+    ///   `WHERE snapshot_id IN (SELECT snapshot_id FROM ... LIMIT ...)`.
+    /// - **MySQL**: Fails with Error 1093 if target table is subqueried in an `IN` clause.
+    ///   Uses direct `DELETE FROM status_list_history WHERE exp < ? LIMIT ?`.
+    /// - **SQLite / Fallback**: Uses subquery `WHERE snapshot_id IN (...)` with `?` parameters.
+    ///
     /// Note: This operation is not atomic across batches. If interrupted,
     /// some expired snapshots may be deleted while others remain. This is
     /// acceptable for a cleanup operation; subsequent runs will clean up
@@ -298,6 +305,9 @@ impl SeaOrmStore<StatusListHistoryRecord> {
                     "DELETE FROM status_list_history \
                      WHERE snapshot_id IN \
                      (SELECT snapshot_id FROM status_list_history WHERE exp < $1 LIMIT $2)"
+                }
+                DatabaseBackend::MySql => {
+                    "DELETE FROM status_list_history WHERE exp < ? LIMIT ?"
                 }
                 _ => {
                     "DELETE FROM status_list_history \
