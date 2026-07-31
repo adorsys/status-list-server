@@ -248,6 +248,43 @@ mod tests {
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
     use tower::ServiceExt;
 
+    #[test]
+    fn test_validate_aggregation_uri_accepts_matching_path() {
+        let config = Config::load_from_overrides(&[(
+            "server.aggregation_uri",
+            "https://statuslist.example.com/api/v1/aggregation",
+        )])
+        .unwrap();
+        assert!(validate_aggregation_uri(&config).is_ok());
+    }
+
+    #[test]
+    fn test_validate_aggregation_uri_rejects_mismatched_path() {
+        let config = Config::load_from_overrides(&[(
+            "server.aggregation_uri",
+            "https://statuslist.example.com/statuslists/aggregation",
+        )])
+        .unwrap();
+        let result = validate_aggregation_uri(&config);
+        assert!(
+            result.is_err(),
+            "Should reject mismatched aggregation_uri path"
+        );
+    }
+
+    #[test]
+    fn test_validate_aggregation_uri_passes_when_unset() {
+        let config = Config::load_from_overrides(&[]).unwrap();
+        assert!(validate_aggregation_uri(&config).is_ok());
+    }
+
+    #[test]
+    fn test_validate_aggregation_uri_rejects_invalid_url() {
+        let config =
+            Config::load_from_overrides(&[("server.aggregation_uri", "not a url")]).unwrap();
+        let result = validate_aggregation_uri(&config);
+        assert!(result.is_err(), "Should reject invalid URL");
+    }
     #[tokio::test]
     async fn test_strict_governor_returns_429_when_burst_exceeded() {
         async fn handler() -> impl IntoResponse {
