@@ -518,9 +518,17 @@ mod test {
     use crate::outbound::sql::models::StatusList;
     use jsonwebtoken::jwk::Jwk;
     use sea_orm::{DatabaseBackend, MockDatabase, MockExecResult};
-    // `Migrator::up` is only called from the real-backend helpers below.
-    #[cfg(any(feature = "sqlite", feature = "mysql", feature = "postgres-tests"))]
+    // `Migrator::up` is only called from `sqlite_connection` below; the MySQL and
+    // Postgres fixtures run their own migrations inside `test_containers`.
+    #[cfg(feature = "sqlite")]
     use sea_orm_migration::MigratorTrait;
+
+    // Container fixtures live in `test_containers` because the HTTP-layer
+    // publish test needs them too; the call sites below are unchanged.
+    #[cfg(feature = "mysql")]
+    use crate::outbound::sql::test_containers::mysql_helpers;
+    #[cfg(feature = "postgres-tests")]
+    use crate::outbound::sql::test_containers::postgres_helpers;
 
     #[cfg(feature = "sqlite")]
     async fn sqlite_connection() -> Arc<DatabaseConnection> {
@@ -534,171 +542,6 @@ mod test {
             .await
             .expect("Failed to run migrations on SQLite");
         Arc::new(db)
-    }
-
-    #[cfg(feature = "mysql")]
-    mod mysql_helpers {
-        use super::*;
-        use sea_orm::ConnectionTrait;
-        use testcontainers_modules::{
-            mysql::Mysql as MysqlImage,
-            testcontainers::{ContainerAsync, runners::AsyncRunner},
-        };
-        use tokio::sync::OnceCell;
-
-        static MYSQL_CONTAINER: OnceCell<ContainerAsync<MysqlImage>> = OnceCell::const_new();
-
-        pub(super) struct MysqlTestDb {
-            #[allow(dead_code)]
-            pub(super) _container: &'static ContainerAsync<MysqlImage>,
-            pub(super) url: String,
-        }
-
-        impl MysqlTestDb {
-            pub(super) async fn start() -> Self {
-                let node = MYSQL_CONTAINER
-                    .get_or_init(|| async {
-                        MysqlImage::default()
-                            .start()
-                            .await
-                            .expect("Failed to start MySQL container")
-                    })
-                    .await;
-
-                let host = node.get_host().await.expect("Failed to resolve MySQL host");
-                let port = node
-                    .get_host_port_ipv4(3306)
-                    .await
-                    .expect("Failed to resolve MySQL port");
-
-                // Connect without database first to create a unique database.
-                let admin_url = format!("mysql://{}:{}", host, port);
-                let db_name = format!("test_{}", uuid::Uuid::new_v4().simple());
-
-                let mut admin_opt = sea_orm::ConnectOptions::new(admin_url);
-                admin_opt.max_connections(1).min_connections(1);
-                let admin_conn = sea_orm::Database::connect(admin_opt)
-                    .await
-                    .expect("Failed to connect to MySQL admin");
-                admin_conn
-                    .execute_unprepared(&format!(
-                        "CREATE DATABASE {} CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci",
-                        db_name
-                    ))
-                    .await
-                    .expect("Failed to create test database");
-
-                let url = format!("mysql://{}:{}/{}", host, port, db_name);
-                let db = Self::connect_pinned(&url).await;
-                crate::outbound::sql::Migrator::up(db.as_ref(), None)
-                    .await
-                    .expect("Failed to run migrations on MySQL");
-
-                Self {
-                    _container: node,
-                    url,
-                }
-            }
-
-            pub(super) async fn connection(&self) -> Arc<DatabaseConnection> {
-                Self::connect_pinned(&self.url).await
-            }
-
-            async fn connect_pinned(url: &str) -> Arc<DatabaseConnection> {
-                let mut opt = sea_orm::ConnectOptions::new(url.to_owned());
-                opt.max_connections(1).min_connections(1);
-                Arc::new(
-                    sea_orm::Database::connect(opt)
-                        .await
-                        .expect("Failed to connect to MySQL"),
-                )
-            }
-        }
-
-        pub(super) async fn connect_to_test_db(
-            mysql_url: &str,
-            max_connections: u32,
-        ) -> DatabaseConnection {
-            let mut opt = sea_orm::ConnectOptions::new(mysql_url.to_string());
-            opt.max_connections(max_connections)
-                .min_connections(max_connections);
-            sea_orm::Database::connect(opt)
-                .await
-                .expect("Failed to connect to MySQL test database")
-        }
-
-        /// Backward-compatible helper that creates a new test database.
-        /// Prefer `MysqlTestDb::start()` for new tests.
-        pub(super) async fn mysql_connection() -> MysqlTestDb {
-            MysqlTestDb::start().await
-        }
-    }
-
-    #[cfg(feature = "postgres-tests")]
-    mod postgres_helpers {
-        use super::*;
-        use sea_orm::ConnectionTrait;
-        use testcontainers_modules::{
-            postgres::Postgres as PostgresImage,
-            testcontainers::{ContainerAsync, runners::AsyncRunner},
-        };
-        use tokio::sync::OnceCell;
-
-        static POSTGRES_CONTAINER: OnceCell<ContainerAsync<PostgresImage>> = OnceCell::const_new();
-
-        pub(super) struct PostgresTestDb {
-            #[allow(dead_code)]
-            pub(super) _container: &'static ContainerAsync<PostgresImage>,
-            pub(super) db: Arc<DatabaseConnection>,
-        }
-
-        pub(super) async fn postgres_connection() -> PostgresTestDb {
-            let node = POSTGRES_CONTAINER
-                .get_or_init(|| async {
-                    PostgresImage::default()
-                        .start()
-                        .await
-                        .expect("Failed to start Postgres container")
-                })
-                .await;
-            let host = node
-                .get_host()
-                .await
-                .expect("Failed to resolve Postgres host");
-            let port = node
-                .get_host_port_ipv4(5432)
-                .await
-                .expect("Failed to resolve Postgres port");
-
-            // testcontainers' Postgres image defaults to postgres/postgres/postgres.
-            let admin_url = format!("postgres://postgres:postgres@{host}:{port}/postgres");
-            let db_name = format!("test_{}", uuid::Uuid::new_v4().simple());
-
-            let mut admin_opt = sea_orm::ConnectOptions::new(admin_url);
-            admin_opt.max_connections(1).min_connections(1);
-            let admin_conn = sea_orm::Database::connect(admin_opt)
-                .await
-                .expect("Failed to connect to Postgres admin");
-            admin_conn
-                .execute_unprepared(&format!("CREATE DATABASE {}", db_name))
-                .await
-                .expect("Failed to create Postgres test database");
-
-            let url = format!("postgres://postgres:postgres@{host}:{port}/{db_name}");
-            let mut opt = sea_orm::ConnectOptions::new(url);
-            opt.max_connections(1).min_connections(1);
-            let db = sea_orm::Database::connect(opt)
-                .await
-                .expect("Failed to connect to Postgres");
-            crate::outbound::sql::Migrator::up(&db, None)
-                .await
-                .expect("Failed to run migrations on Postgres");
-
-            PostgresTestDb {
-                _container: node,
-                db: Arc::new(db),
-            }
-        }
     }
 
     #[cfg(feature = "sqlite")]
@@ -1363,14 +1206,6 @@ mod test {
         assert!(matches!(backwards, Err(RepositoryError::UpdateError(_))));
     }
 
-    #[cfg(feature = "sqlite")]
-    const TEST_EC_JWK: &str = r#"{
-        "kty": "EC",
-        "crv": "P-256",
-        "x": "NeyFv_2L67OEplNbJpR02IFis4_lFW9HYmhfF5Or6m8",
-        "y": "eAH2qe8Pg3GQ28uxA8-qNAqdwQ_zfV2uKAvJ2sLpY9M"
-    }"#;
-
     /// failure rollback (no partial snapshot), and the conflict path — against
     /// real SQLite, since `MockDatabase` cannot model rollback.
     #[cfg(feature = "sqlite")]
@@ -1381,7 +1216,7 @@ mod test {
         let store = SeaOrmStore::<StatusListRecord>::new(db.clone());
         let history = SeaOrmStore::<StatusListHistoryRecord>::new(db);
 
-        let key: Jwk = serde_json::from_str(TEST_EC_JWK).unwrap();
+        let key: Jwk = serde_json::from_str(crate::test_fixtures::TEST_EC_PUBLIC_JWK).unwrap();
         let issuer = "issuer-atomic-sqlite";
         cred_store
             .insert_one(Credentials::new(issuer.to_string(), key))
@@ -1476,8 +1311,9 @@ mod test {
             )
             .await;
         assert!(
-            result.is_err(),
-            "a failed snapshot insert must fail the whole unit"
+            matches!(result, Err(RepositoryError::InsertError(_))),
+            "a failed snapshot insert must fail the whole unit as a plain \
+             insert error, got {result:?}"
         );
         let row = store.find_one_by(&base.list_id).await.unwrap().unwrap();
         assert_eq!(
@@ -1558,7 +1394,7 @@ mod test {
         let store = SeaOrmStore::<StatusListRecord>::new(db.clone());
         let history = SeaOrmStore::<StatusListHistoryRecord>::new(db);
 
-        let key: Jwk = serde_json::from_str(TEST_EC_JWK).unwrap();
+        let key: Jwk = serde_json::from_str(crate::test_fixtures::TEST_EC_PUBLIC_JWK).unwrap();
         let issuer = "issuer-insert-atomic";
         cred_store
             .insert_one(Credentials::new(issuer.to_string(), key))
@@ -1612,9 +1448,16 @@ mod test {
                 new_snapshot("snap-ok", "list-rolled-back"),
             )
             .await;
+        // Specifically an `InsertError`, not a `DuplicateEntry`: only the *row*
+        // insert classifies duplicates (`map_insert_err`), because only a
+        // duplicate `list_id` is a client-visible conflict. `snapshot_id` is a
+        // fresh v4 UUID per publish, so a collision here is a server fault and
+        // must stay a 500. `assert_insert_with_snapshot_duplicate_is_conflict`
+        // reasons from this asymmetry, so it is pinned rather than assumed.
         assert!(
-            result.is_err(),
-            "a failed snapshot insert must fail the whole unit"
+            matches!(result, Err(RepositoryError::InsertError(_))),
+            "a failed snapshot insert must fail the whole unit as a plain \
+             insert error, got {result:?}"
         );
         assert!(
             store
@@ -1634,13 +1477,204 @@ mod test {
             matches!(dup, Err(RepositoryError::DuplicateEntry)),
             "duplicate list_id must map to DuplicateEntry, got {dup:?}"
         );
-        // The rejected publish recorded no snapshot either.
+        // The rolled-back publish recorded no snapshot either. This must name
+        // `list-rolled-back` — the list that actually failed. Asserting against
+        // a list_id that was never inserted proves nothing about rollback.
         assert!(
             history
-                .find_valid_at("list-nonexistent", 1000)
+                .find_valid_at("list-rolled-back", 1000)
                 .await
                 .unwrap()
-                .is_none()
+                .is_none(),
+            "the rolled-back publish must not leave a snapshot behind"
+        );
+        // ...and the duplicate attempt left the committed snapshot alone.
+        let surviving = history
+            .find_valid_at("list-ok", 1000)
+            .await
+            .unwrap()
+            .expect("the first publish's snapshot must survive");
+        assert_eq!(surviving.snapshot_id, "snap-ok");
+    }
+
+    /// Cross-backend proof: a duplicate `list_id` raised *inside* the open
+    /// transaction must still classify as `DuplicateEntry` on MySQL. The
+    /// non-transactional `insert_one` is already covered by
+    /// `test_mysql_duplicate_insert_maps_to_duplicate_entry`; what is untested
+    /// there is that `insert_one_with_snapshot` — which rolls back first and
+    /// classifies afterwards (`map_insert_err` on the error captured *before*
+    /// the rollback) — does not lose the classification along the way. Losing it
+    /// turns every racing publish into a 500 instead of a 409.
+    #[cfg(feature = "mysql")]
+    #[tokio::test]
+    async fn test_mysql_insert_with_snapshot_duplicate_maps_to_duplicate_entry() {
+        let test_db = mysql_helpers::MysqlTestDb::start().await;
+        assert_insert_with_snapshot_duplicate_is_conflict(
+            test_db.connection().await,
+            "issuer-dup-txn-mysql",
+            "list-dup-txn-mysql",
+            "MySQL",
+        )
+        .await;
+    }
+
+    /// The same proof on Postgres, the production backend. Postgres is the
+    /// backend where this could plausibly diverge: a failed statement poisons
+    /// the transaction (`25P02`), so if the classification were ever read from
+    /// the rollback rather than from the original `23505`, it would degrade to a
+    /// generic insert error here and nowhere else.
+    #[cfg(feature = "postgres-tests")]
+    #[tokio::test]
+    async fn test_postgres_insert_with_snapshot_duplicate_maps_to_duplicate_entry() {
+        let test_db = postgres_helpers::postgres_connection().await;
+        assert_insert_with_snapshot_duplicate_is_conflict(
+            test_db.db.clone(),
+            "issuer-dup-txn-postgres",
+            "list-dup-txn-postgres",
+            "Postgres",
+        )
+        .await;
+    }
+
+    /// The same proof on SQLite. Redundant with the two container tests above on
+    /// the classification question itself — but it is the only one of the three
+    /// that runs under a plain `cargo test`, with no Docker and no
+    /// `--all-features`. A regression in `insert_one_with_snapshot`'s error
+    /// mapping therefore fails in milliseconds locally instead of waiting for
+    /// the container job.
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn test_sqlite_insert_with_snapshot_duplicate_maps_to_duplicate_entry() {
+        let db = sqlite_connection().await;
+        assert_insert_with_snapshot_duplicate_is_conflict(
+            db,
+            "issuer-dup-txn-sqlite",
+            "list-dup-txn-sqlite",
+            "SQLite",
+        )
+        .await;
+    }
+
+    /// Publishes `list_id` once, then republishes it with a *different*
+    /// `snapshot_id`, and asserts the failure is the duplicate `list_id`
+    /// classified as `DuplicateEntry` — on both publish paths, transactional
+    /// (`insert_one_with_snapshot`) and not (`insert_one`).
+    ///
+    /// The distinct `snapshot_id` keeps the assertion aimed at one constraint.
+    /// A duplicate `snapshot_id` deliberately stays a plain `InsertError` rather
+    /// than a `DuplicateEntry` (pinned by
+    /// `test_sqlite_insert_with_snapshot_is_atomic`), so reusing the committed
+    /// one would couple this test to statement *ordering*: today the row INSERT
+    /// fails first and short-circuits, but if that order ever flipped, the
+    /// snapshot would collide first and this test would fail for a reason that
+    /// has nothing to do with the property under test. A fresh `snapshot_id`
+    /// leaves the duplicate `list_id` as the only thing that can fail.
+    ///
+    /// Seeds its own issuer because `status_lists.issuer` is a foreign key onto
+    /// `credentials.issuer`; callers pass a per-backend `issuer`/`list_id` pair
+    /// so a shared database would still keep them apart.
+    #[cfg(any(feature = "sqlite", feature = "mysql", feature = "postgres-tests"))]
+    async fn assert_insert_with_snapshot_duplicate_is_conflict(
+        db: Arc<DatabaseConnection>,
+        issuer: &str,
+        list_id: &str,
+        backend: &str,
+    ) {
+        let cred_store = SeaOrmStore::<Credentials>::new(db.clone());
+        let store = SeaOrmStore::<StatusListRecord>::new(db.clone());
+        let history = SeaOrmStore::<StatusListHistoryRecord>::new(db);
+
+        let key: Jwk = serde_json::from_str(crate::test_fixtures::TEST_EC_PUBLIC_JWK).unwrap();
+        cred_store
+            .insert_one(Credentials::new(issuer.to_string(), key))
+            .await
+            .unwrap();
+
+        let record = |updated_at: i64| StatusListRecord {
+            list_id: list_id.to_string(),
+            issuer: issuer.to_string(),
+            status_list: StatusList {
+                bits: 1,
+                lst: "initial".to_string(),
+            },
+            sub: format!("sub-{list_id}"),
+            updated_at,
+        };
+        let snapshot = |snapshot_id: &str, iat: i64| StatusListHistoryRecord {
+            snapshot_id: snapshot_id.to_string(),
+            list_id: list_id.to_string(),
+            issuer: issuer.to_string(),
+            status_list: StatusList {
+                bits: 1,
+                lst: "initial".to_string(),
+            },
+            sub: format!("sub-{list_id}"),
+            iat,
+            exp: iat + 900,
+        };
+
+        store
+            .insert_one_with_snapshot(record(1000), snapshot("snap-first", 1000))
+            .await
+            .unwrap();
+
+        // Racing publish: same list_id, freshly minted snapshot_id.
+        let dup = store
+            .insert_one_with_snapshot(record(2000), snapshot("snap-second", 2000))
+            .await;
+        assert!(
+            matches!(dup, Err(RepositoryError::DuplicateEntry)),
+            "duplicate list_id inside a transaction must map to DuplicateEntry \
+             on {backend}, got {dup:?}"
+        );
+
+        // The rejected publish rolled back cleanly. Its snapshot would have
+        // covered `[2000, 2900)`, and the first publish's covers `[1000, 1900)`,
+        // so *anything* resolvable at 2000 could only be the leak this asserts
+        // against — the windows do not overlap.
+        assert!(
+            history
+                .find_valid_at(list_id, 2000)
+                .await
+                .unwrap()
+                .is_none(),
+            "the rejected publish must not leave a snapshot behind on {backend}"
+        );
+
+        // ...and the failed attempt did not disturb the committed one.
+        let first = history
+            .find_valid_at(list_id, 1000)
+            .await
+            .unwrap()
+            .unwrap_or_else(|| panic!("the first publish's snapshot must survive on {backend}"));
+        assert_eq!(first.snapshot_id, "snap-first");
+
+        // The row itself is untouched. The two records differ only in
+        // `updated_at`, so this is what catches a silent upsert: an
+        // `ON CONFLICT DO UPDATE` "optimization" would leave 2000 here while
+        // every assertion above still passed.
+        let row = store
+            .find_one_by(list_id)
+            .await
+            .unwrap()
+            .unwrap_or_else(|| panic!("the committed row must survive on {backend}"));
+        assert_eq!(
+            row.updated_at, 1000,
+            "the rejected publish must not overwrite the committed row on {backend}"
+        );
+
+        // The same conflict on the *non-transactional* path. Operators can set
+        // `snapshot_retention_secs = 0`, which builds a `Service` with no
+        // snapshot repo, and `publish_status_list` then calls plain `insert_one`
+        // — a different `map_insert_err` call site with no transaction or
+        // rollback around it. Reuses this test's backend rather than paying for
+        // another container, since the row it collides with is already
+        // committed.
+        let plain = store.insert_one(record(3000)).await;
+        assert!(
+            matches!(plain, Err(RepositoryError::DuplicateEntry)),
+            "duplicate list_id on the history-disabled publish path must also \
+             map to DuplicateEntry on {backend}, got {plain:?}"
         );
     }
 

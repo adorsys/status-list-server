@@ -118,10 +118,14 @@ impl Service {
         if record.status_list.lst.len() > max_serialized_list_size {
             return Err(StatusListError::TooLarge);
         }
-        if self.status_list_repo.find(&record.list_id).await?.is_some() {
-            return Err(StatusListError::AlreadyExists);
-        }
 
+        // No `find` pre-check: the primary key on `list_id` is the only check
+        // that is not a TOCTOU race, and every repository classifies the
+        // resulting violation as `AlreadyExists` — proven against SQLite, MySQL
+        // and Postgres by `assert_insert_with_snapshot_duplicate_is_conflict`,
+        // and by construction for the in-memory adapter. A pre-check would add a
+        // round trip to every publish and still have to defer to this path when
+        // a competing writer commits between the read and the insert.
         match &self.snapshot_repo {
             Some(_) => {
                 let snapshot = build_snapshot(&record, token_exp_secs);
