@@ -15,7 +15,7 @@ impl MigratorTrait for Migrator {
             Box::new(status_list_history_exp_index::Migration),
         ]
     }
-}
+} 
 
 pub(crate) mod tables {
     use super::*;
