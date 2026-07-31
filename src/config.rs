@@ -495,12 +495,38 @@ pub struct RedisConfig {
     pub cert_cache_ttl: u64,
 }
 
+/// Connection-pool tuning for the production (Postgres/MySQL) backends.
+///
+/// Defaults are chosen so a single-replica deployment with a fresh Postgres
+/// instance works out of the box, while still being safe to run in
+/// production. Adjust `max` according to your server's `max_connections`
+/// divided by the number of application replicas.
+///
+/// PostgreSQL default `max_connections` = 100.
+/// Rule of thumb: pool.max = floor(pg_max_connections / replicas) - 5 (headroom)
+#[derive(Debug, Clone, Deserialize)]
+pub struct DatabasePoolConfig {
+    /// Maximum number of connections in the pool. Default: 5
+    pub max_connections: u32,
+    /// Minimum number of idle connections kept alive. Default: 1
+    pub min_connections: u32,
+    /// Seconds to wait for an available connection before returning an error. Default: 5
+    pub acquire_timeout_secs: u64,
+    /// Seconds for the TCP connect+auth handshake to the server. Default: 10
+    pub connect_timeout_secs: u64,
+    /// Seconds a connection may sit idle before being closed. Default: 600 (10 min)
+    pub idle_timeout_secs: u64,
+    /// Maximum age in seconds of any connection, regardless of activity. Default: 1800 (30 min)
+    pub max_lifetime_secs: u64,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct DatabaseConfig {
     pub url: SecretString,
-    /// Backend selection is used to validate the URL scheme at startup.
+    /// Validated against the URL scheme at startup.
     #[serde(default)]
     pub backend: DatabaseBackend,
+    pub pool: DatabasePoolConfig,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -606,7 +632,11 @@ impl Config {
     /// separator between nested keys. For example `APP_SERVER__PORT=5002`
     /// maps to the `server.port` configuration value.
     pub fn load() -> Result<Self, ConfigError> {
-        let config = base_builder()?
+        Self::load_from_overrides(&[])
+    }
+
+    pub fn load_from_overrides(overrides: &[(&str, &str)]) -> Result<Self, ConfigError> {
+        let mut builder = base_builder()?
             // Override config values via environment variables
             // The environment variables should be prefixed with 'APP_' and use '__' as a separator
             // Example: APP_REDIS__REQUIRE_CLIENT_AUTH=false
@@ -614,35 +644,21 @@ impl Config {
                 Environment::with_prefix("APP")
                     .prefix_separator("_")
                     .separator("__"),
-            )
-            .build()?;
+            );
 
+        for &(key, val) in overrides {
+            let normalized_key = key
+                .strip_prefix("APP_")
+                .or_else(|| key.strip_prefix("app_"))
+                .unwrap_or(key)
+                .replace("__", ".")
+                .to_lowercase();
+            builder = builder.set_override(normalized_key, val)?;
+        }
+
+        let config = builder.build()?;
         let config: Config = config.try_deserialize()?;
         Ok(config)
-    }
-
-    /// Builds a `Config` from the built-in defaults layered with the supplied
-    /// `overrides`, without ever touching the process environment.
-    ///
-    /// Each override is a `(path, value)` pair where `path` is a configuration
-    /// key using `.` as the nested-key separator (e.g. `server.aggregation_uri`)
-    /// and `value` is the textual representation of the desired setting. This
-    /// mirrors how environment variables are interpreted, so any value that is
-    /// valid as an `APP_*` environment variable is also valid here.
-    ///
-    /// This helper exists so that tests can exercise configuration loading and
-    /// overrides without relying on `std::env::set_var` / `std::env::remove_var`,
-    /// which became `unsafe` on recent Rust toolchains. Because nothing mutates
-    /// the process-wide environment, tests are fully isolated from each other
-    /// and from the host environment regardless of execution order or threading.
-    #[cfg(test)]
-    pub(crate) fn load_from_overrides(overrides: &[(&str, &str)]) -> Result<Self, ConfigError> {
-        let mut builder = base_builder()?;
-        for &(key, value) in overrides {
-            builder = builder.set_override(key, value)?;
-        }
-        let config = builder.build()?;
-        config.try_deserialize()
     }
 }
 
@@ -689,6 +705,12 @@ fn base_builder() -> Result<ConfigBuilder<DefaultState>, ConfigError> {
         .set_default("server.aggregation_uri", Option::<String>::None)?
         .set_default("database.url", default_db_url)?
         .set_default("database.backend", default_db_backend)?
+        .set_default("database.pool.max_connections", 5u32)?
+        .set_default("database.pool.min_connections", 1u32)?
+        .set_default("database.pool.acquire_timeout_secs", 5u64)?
+        .set_default("database.pool.connect_timeout_secs", 10u64)?
+        .set_default("database.pool.idle_timeout_secs", 600u64)?
+        .set_default("database.pool.max_lifetime_secs", 1800u64)?
         .set_default("redis.uri", "redis://localhost:6379")?
         .set_default("redis.require_client_auth", false)?
         .set_default("redis.cert_cache_ttl", 3600)?
@@ -799,6 +821,12 @@ mod tests {
         assert_eq!(config.limits.max_statuses_per_request, 5_000);
         assert_eq!(config.limits.max_serialized_list_size, 1_048_576);
         assert_eq!(config.server.cert.dns.provider, None);
+        assert_eq!(config.database.pool.max_connections, 5);
+        assert_eq!(config.database.pool.min_connections, 1);
+        assert_eq!(config.database.pool.acquire_timeout_secs, 5);
+        assert_eq!(config.database.pool.connect_timeout_secs, 10);
+        assert_eq!(config.database.pool.idle_timeout_secs, 600);
+        assert_eq!(config.database.pool.max_lifetime_secs, 1800);
     }
 
     #[test]
@@ -1468,5 +1496,24 @@ mod tests {
             result.is_err(),
             "an unknown backend value should fail to load config"
         );
+    }
+
+    #[test]
+    fn test_pool_config_env_override() {
+        let config = Config::load_from_overrides(&[
+            ("APP_DATABASE__POOL__MAX_CONNECTIONS", "20"),
+            ("APP_DATABASE__POOL__MIN_CONNECTIONS", "2"),
+            ("APP_DATABASE__POOL__ACQUIRE_TIMEOUT_SECS", "3"),
+            ("APP_DATABASE__POOL__CONNECT_TIMEOUT_SECS", "15"),
+            ("APP_DATABASE__POOL__IDLE_TIMEOUT_SECS", "300"),
+            ("APP_DATABASE__POOL__MAX_LIFETIME_SECS", "900"),
+        ])
+        .expect("Failed to load config");
+        assert_eq!(config.database.pool.max_connections, 20);
+        assert_eq!(config.database.pool.min_connections, 2);
+        assert_eq!(config.database.pool.acquire_timeout_secs, 3);
+        assert_eq!(config.database.pool.connect_timeout_secs, 15);
+        assert_eq!(config.database.pool.idle_timeout_secs, 300);
+        assert_eq!(config.database.pool.max_lifetime_secs, 900);
     }
 }
