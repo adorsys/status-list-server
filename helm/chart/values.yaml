@@ -281,4 +281,5 @@ otelCollector:
         cpu: "200m"
   config:
     exporters:
-      otlpEndpoint: "jaeger-collector:4317"
+      otlpEndpoint: ""
+      otlpTlsInsecure: true

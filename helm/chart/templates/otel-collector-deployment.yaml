@@ -4,20 +4,17 @@ kind: Deployment
 metadata:
   name: {{ include "status-list-server-chart.fullname" . }}-otel-collector
   labels:
-    {{- include "status-list-server-chart.labels" . | nindent 4 }}
-    app.kubernetes.io/component: otel-collector
+    {{- include "status-list-server-chart.otelCollectorLabels" . | nindent 4 }}
   namespace: {{ .Release.Namespace }}
 spec:
   replicas: {{ .Values.otelCollector.standalone.replicaCount }}
   selector:
     matchLabels:
-      app.kubernetes.io/component: otel-collector
-      {{- include "status-list-server-chart.selectorLabels" . | nindent 6 }}
+      {{- include "status-list-server-chart.otelCollectorSelectorLabels" . | nindent 6 }}
   template:
     metadata:
       labels:
-        app.kubernetes.io/component: otel-collector
-        {{- include "status-list-server-chart.labels" . | nindent 8 }}
+        {{- include "status-list-server-chart.otelCollectorLabels" . | nindent 8 }}
     spec:
       securityContext:
         runAsNonRoot: true
@@ -63,8 +60,7 @@ kind: Service
 metadata:
   name: {{ include "status-list-server-chart.fullname" . }}-otel-collector
   labels:
-    {{- include "status-list-server-chart.labels" . | nindent 4 }}
-    app.kubernetes.io/component: otel-collector
+    {{- include "status-list-server-chart.otelCollectorLabels" . | nindent 4 }}
   namespace: {{ .Release.Namespace }}
 spec:
   type: {{ .Values.otelCollector.standalone.service.type }}
@@ -78,6 +74,5 @@ spec:
       targetPort: 4318
       protocol: TCP
   selector:
-    app.kubernetes.io/component: otel-collector
-    {{- include "status-list-server-chart.selectorLabels" . | nindent 4 }}
+    {{- include "status-list-server-chart.otelCollectorSelectorLabels" . | nindent 4 }}
 {{- end }}

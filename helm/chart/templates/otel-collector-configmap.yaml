@@ -4,7 +4,7 @@ kind: ConfigMap
 metadata:
   name: {{ include "status-list-server-chart.fullname" . }}-otel-collector-config
   labels:
-    {{- include "status-list-server-chart.labels" . | nindent 4 }}
+    {{- include "status-list-server-chart.otelCollectorLabels" . | nindent 4 }}
   namespace: {{ .Release.Namespace }}
 data:
   config.yaml: |
@@ -16,28 +16,34 @@ data:
           http:
             endpoint: 0.0.0.0:4318
     processors:
+      memory_limiter:
+        check_interval: 1s
+        limit_percentage: 75
+        spike_limit_percentage: 15
       batch:
         timeout: 5s
         send_batch_size: 1024
     exporters:
+      {{- if .Values.otelCollector.config.exporters.otlpEndpoint }}
       otlp/backend:
         endpoint: {{ .Values.otelCollector.config.exporters.otlpEndpoint | quote }}
         tls:
-          insecure: true
+          insecure: {{ .Values.otelCollector.config.exporters.otlpTlsInsecure | default true }}
+      {{- end }}
       debug:
         verbosity: basic
     service:
       pipelines:
         traces:
           receivers: [otlp]
-          processors: [batch]
-          exporters: [otlp/backend, debug]
+          processors: [memory_limiter, batch]
+          exporters: [{{ if .Values.otelCollector.config.exporters.otlpEndpoint }}otlp/backend, {{ end }}debug]
         metrics:
           receivers: [otlp]
-          processors: [batch]
+          processors: [memory_limiter, batch]
           exporters: [debug]
         logs:
           receivers: [otlp]
-          processors: [batch]
+          processors: [memory_limiter, batch]
           exporters: [debug]
 {{- end }}

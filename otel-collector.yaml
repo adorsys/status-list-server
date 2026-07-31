@@ -7,6 +7,10 @@ receivers:
         endpoint: 0.0.0.0:4318
 
 processors:
+  memory_limiter:
+    check_interval: 1s
+    limit_percentage: 75
+    spike_limit_percentage: 15
   batch:
     timeout: 5s
     send_batch_size: 1024
@@ -16,6 +20,8 @@ exporters:
     endpoint: jaeger:4317
     tls:
       insecure: true
+  prometheus:
+    endpoint: 0.0.0.0:8889
   debug:
     verbosity: basic
 
@@ -23,14 +29,14 @@ service:
   pipelines:
     traces:
       receivers: [otlp]
-      processors: [batch]
+      processors: [memory_limiter, batch]
       exporters: [otlp/jaeger, debug]
     metrics:
       receivers: [otlp]
-      processors: [batch]
-      exporters: [debug]
+      processors: [memory_limiter, batch]
+      exporters: [prometheus, debug]
     # Note: Logs pipeline currently uses debug exporter (stdout); dedicated backend (e.g. Loki) can be added as needed.
     logs:
       receivers: [otlp]
-      processors: [batch]
+      processors: [memory_limiter, batch]
       exporters: [debug]
