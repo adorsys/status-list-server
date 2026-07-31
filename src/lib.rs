@@ -1,29 +1,16 @@
-#[cfg(all(test, feature = "server"))]
+#[cfg(test)]
 mod test_utils;
-#[cfg(any(
-    feature = "server",
-    feature = "aws",
-    feature = "redis",
-    feature = "certificate-acme",
-    feature = "metrics-prometheus"
-))]
 mod utils;
 
-pub mod adapters;
-pub mod application;
-#[cfg(feature = "server")]
 pub mod config;
 pub mod domain;
-pub mod ports;
-#[cfg(feature = "server")]
-pub mod startup;
+pub mod outbound;
+pub mod server;
 /// Composition root: the only place adapters are constructed and injected.
-#[cfg(feature = "server")]
-pub mod state;
-#[cfg(feature = "server")]
-pub mod web;
+pub mod setup;
+pub mod startup;
 
-#[cfg(feature = "server")]
 pub use utils::bits_validation;
-#[cfg(any(feature = "server", feature = "certificate-acme"))]
+#[cfg(feature = "acme")]
 pub use utils::cert_manager;
+pub use utils::keygen;
