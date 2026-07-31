@@ -7,11 +7,15 @@ use opentelemetry_sdk::{
     Resource,
     logs::SdkLoggerProvider,
     metrics::SdkMeterProvider,
+    propagation::TraceContextPropagator,
     trace::{Sampler, SdkTracerProvider},
 };
 use prometheus::Registry;
 use tracing_subscriber::{
-    EnvFilter, Registry as TracingRegistry, layer::SubscriberExt, util::SubscriberInitExt,
+    EnvFilter, Layer as _, Registry as TracingRegistry,
+    filter::{LevelFilter, Targets},
+    layer::SubscriberExt,
+    util::SubscriberInitExt,
 };
 
 use crate::{config::TelemetryConfig, utils::metrics::setup_metrics};
@@ -49,6 +53,8 @@ impl Drop for TelemetryGuard {
 /// shutdown. Also returns a [`prometheus::Registry`] that the `/metrics`
 /// endpoint uses to render Prometheus metrics.
 pub fn init_telemetry(config: &TelemetryConfig) -> color_eyre::Result<(TelemetryGuard, Registry)> {
+    opentelemetry::global::set_text_map_propagator(TraceContextPropagator::new());
+
     let service_name =
         std::env::var("OTEL_SERVICE_NAME").unwrap_or_else(|_| "status-list-server".to_string());
 
@@ -68,7 +74,15 @@ pub fn init_telemetry(config: &TelemetryConfig) -> color_eyre::Result<(Telemetry
 
         let tracer = tracer_provider.tracer("status-list-server");
         let otel_trace_layer = tracing_opentelemetry::layer().with_tracer(tracer);
-        let otel_log_layer = OpenTelemetryTracingBridge::new(&logger_provider);
+
+        let otel_log_filter = Targets::new()
+            .with_default(LevelFilter::INFO)
+            .with_target("opentelemetry", LevelFilter::OFF)
+            .with_target("tonic", LevelFilter::OFF)
+            .with_target("h2", LevelFilter::OFF)
+            .with_target("hyper", LevelFilter::OFF);
+        let otel_log_layer =
+            OpenTelemetryTracingBridge::new(&logger_provider).with_filter(otel_log_filter);
 
         let fmt_layer = tracing_subscriber::fmt::layer()
             .json()
@@ -127,13 +141,7 @@ fn build_otlp_tracer_provider(
 ) -> color_eyre::Result<SdkTracerProvider> {
     use opentelemetry_otlp::{SpanExporter, WithExportConfig};
 
-    let sampler = if (config.sampler_ratio - 1.0_f64).abs() < f64::EPSILON {
-        Sampler::AlwaysOn
-    } else if config.sampler_ratio <= 0.0 {
-        Sampler::AlwaysOff
-    } else {
-        Sampler::TraceIdRatioBased(config.sampler_ratio)
-    };
+    let sampler = Sampler::ParentBased(Box::new(Sampler::TraceIdRatioBased(config.sampler_ratio)));
 
     let exporter = SpanExporter::builder()
         .with_tonic()
@@ -172,7 +180,6 @@ fn build_env_filter() -> EnvFilter {
     EnvFilter::try_from_default_env().unwrap_or_else(|_| {
         EnvFilter::new("info")
             .add_directive("hyper::proto=info".parse().expect("valid directive"))
-            .add_directive("tower_http::trace=debug".parse().expect("valid directive"))
             .add_directive("h2=info".parse().expect("valid directive"))
             .add_directive("tonic=info".parse().expect("valid directive"))
     })
