@@ -92,6 +92,28 @@ pub struct Config {
     pub limits: LimitsConfig,
 }
 
+/// Source of the trusted client IP address.
+///
+/// This is used to configure how the server extracts the client IP for
+/// rate-limiting purposes. The source must be explicitly configured to fail
+/// closed; the server refuses to start when no source is configured.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ClientIpSource {
+    /// Direct connection without a proxy. Uses the connection's remote address.
+    #[default]
+    ConnectInfo,
+    /// Trust the rightmost value of `X-Forwarded-For` after skipping
+    /// `trusted_hops` entries (the number of trusted proxies before the client).
+    RightmostXForwardedFor {
+        #[serde(default)]
+        trusted_hops: usize,
+    },
+    /// Use `X-Real-IP` header, which is typically set by nginx.
+    /// Only suitable when the proxy always overwrites this header.
+    XRealIp,
+}
+
 /// Rate-limit configuration with strict (writes) and permissive (reads) tiers.
 #[derive(Debug, Clone, Deserialize)]
 pub struct RateLimitConfig {
@@ -99,6 +121,32 @@ pub struct RateLimitConfig {
     pub strict_period_secs: u64,
     pub permissive_burst_size: u32,
     pub permissive_period_secs: u64,
+    /// Source of the client IP address for rate limiting.
+    /// When `None`, the server refuses to start (fail-closed).
+    #[serde(default)]
+    pub client_ip_source: Option<ClientIpSource>,
+    /// Maximum number of active rate-limit buckets.
+    /// When `None`, the bucket count is unbounded (not recommended).
+    #[serde(default)]
+    pub max_buckets: Option<usize>,
+}
+
+impl RateLimitConfig {
+    /// Validate the rate-limit configuration.
+    /// Returns an error if `client_ip_source` is not configured (fail-closed).
+    pub fn validate(&self) -> Result<(), ConfigError> {
+        if self.client_ip_source.is_none() {
+            return Err(ConfigError::Message(
+                "rate_limit.client_ip_source must be configured. \
+                 Set rate_limit.client_ip_source to one of: connect_info, \
+                 rightmost_x_forwarded_for, or x_real_ip. \
+                 The server refuses to start without an explicit IP source to prevent \
+                 rate-limit bypass via spoofed headers."
+                    .to_string(),
+            ));
+        }
+        Ok(())
+    }
 }
 
 /// Hard bounds on incoming requests and persisted status lists.
@@ -658,6 +706,7 @@ impl Config {
 
         let config = builder.build()?;
         let config: Config = config.try_deserialize()?;
+        config.rate_limit.validate()?;
         Ok(config)
     }
 }
@@ -745,6 +794,7 @@ fn base_builder() -> Result<ConfigBuilder<DefaultState>, ConfigError> {
         .set_default("rate_limit.strict_period_secs", 60)?
         .set_default("rate_limit.permissive_burst_size", 100)?
         .set_default("rate_limit.permissive_period_secs", 60)?
+        .set_default("rate_limit.client_ip_source", "connect_info")?
         .set_default("limits.max_body_size_bytes", 2_097_152)?
         .set_default("limits.max_status_index", 100_000)?
         .set_default("limits.max_statuses_per_request", 5_000)?

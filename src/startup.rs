@@ -16,7 +16,7 @@ use tokio::net::TcpListener;
 use tower_governor::{
     GovernorLayer,
     governor::{GovernorConfig, GovernorConfigBuilder},
-    key_extractor::{PeerIpKeyExtractor, SmartIpKeyExtractor},
+    key_extractor::PeerIpKeyExtractor,
 };
 use tower_http::{
     catch_panic::CatchPanicLayer,
@@ -34,6 +34,7 @@ use crate::server::{
     handlers::{
         credential_handler, get_aggregation, get_status_list, publish_status, update_status,
     },
+    rate_limit::AuthenticatedKeyExtractor,
 };
 use crate::utils::metrics::{metrics_handler, setup_metrics, start_metrics_collector};
 
@@ -113,7 +114,7 @@ impl HttpServer {
 
 type GovernorPolicies = (
     Arc<GovernorConfig<PeerIpKeyExtractor, NoOpMiddleware>>,
-    Arc<GovernorConfig<SmartIpKeyExtractor, NoOpMiddleware>>,
+    Arc<GovernorConfig<AuthenticatedKeyExtractor, NoOpMiddleware>>,
     Arc<GovernorConfig<PeerIpKeyExtractor, NoOpMiddleware>>,
 );
 
@@ -131,7 +132,7 @@ fn build_governor_configs(
         GovernorConfigBuilder::default()
             .burst_size(config.strict_burst_size)
             .period(Duration::from_secs(config.strict_period_secs))
-            .key_extractor(SmartIpKeyExtractor)
+            .key_extractor(AuthenticatedKeyExtractor)
             .finish()
             .ok_or_else(|| eyre!("issuer governor requires non-zero burst_size and period"))?,
     );
@@ -148,7 +149,7 @@ fn build_governor_configs(
 fn api_v1_routes(
     state: AppState,
     strict_governor: Arc<GovernorConfig<PeerIpKeyExtractor, NoOpMiddleware>>,
-    issuer_governor: Arc<GovernorConfig<SmartIpKeyExtractor, NoOpMiddleware>>,
+    issuer_governor: Arc<GovernorConfig<AuthenticatedKeyExtractor, NoOpMiddleware>>,
     permissive_governor: Arc<GovernorConfig<PeerIpKeyExtractor, NoOpMiddleware>>,
 ) -> Router<AppState> {
     let protected = Router::new()
@@ -372,7 +373,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_smart_ip_governor_independent_buckets_per_ip() {
+    async fn test_authenticated_governor_independent_buckets_per_issuer() {
         async fn handler() -> impl IntoResponse {
             "ok"
         }
@@ -381,7 +382,7 @@ mod tests {
             GovernorConfigBuilder::default()
                 .burst_size(1)
                 .period(Duration::from_secs(600))
-                .key_extractor(SmartIpKeyExtractor)
+                .key_extractor(AuthenticatedKeyExtractor)
                 .finish()
                 .expect("non-zero burst/period"),
         );
