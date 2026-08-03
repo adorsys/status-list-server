@@ -12,7 +12,118 @@ impl MigratorTrait for Migrator {
             Box::new(tables::Migration),
             Box::new(add_updated_at::Migration),
             Box::new(status_list_history::Migration),
+            Box::new(status_list_history_exp_index::Migration),
         ]
+    }
+}
+
+/// Pins InnoDB on MySQL so `update_with_snapshot`'s UPDATE+INSERT roll back as a
+/// unit rather than depending on the server's default engine. MySQL-only:
+/// sea-query renders the engine option as a literal `ENGINE=InnoDB` clause on
+/// every backend, which SQLite and Postgres reject with a syntax error.
+fn pin_innodb_on_mysql(manager: &SchemaManager<'_>, stmt: &mut TableCreateStatement) {
+    if manager.get_database_backend() == sea_orm::DatabaseBackend::MySql {
+        stmt.engine("InnoDB");
+    }
+}
+
+/// Tables that must use InnoDB for transactional guarantees and foreign key enforcement.
+/// Extend this list if new transactional tables are added.
+const INNODB_REQUIRED_TABLES: &[&str] = &["credentials", "status_lists", "status_list_history"];
+
+/// Queries `information_schema.TABLES` after migrations and refuses to boot if
+/// any of the critical tables (`credentials`, `status_lists`, `status_list_history`) are not
+/// InnoDB. MyISAM silently ignores transactions, so a non-InnoDB install breaks
+/// the guarantees from issue #244 without any visible error.
+///
+/// No-op on Postgres and SQLite. On failure the error log includes the table
+/// name, its actual engine, and the `ALTER TABLE … ENGINE=InnoDB` fix command.
+pub(crate) async fn verify_innodb_engines(db: &sea_orm::DatabaseConnection) -> Result<(), DbErr> {
+    use sea_orm::{ConnectionTrait, FromQueryResult, Statement, Value};
+
+    if db.get_database_backend() != sea_orm::DatabaseBackend::MySql {
+        return Ok(());
+    }
+
+    #[derive(Debug, FromQueryResult)]
+    struct TableEngine {
+        #[sea_orm(from_alias = "TABLE_NAME")]
+        table_name: String,
+        #[sea_orm(from_alias = "ENGINE")]
+        engine: String,
+    }
+
+    // Build `IN (?, ?, …)` from the const table list so the query stays in
+    // sync with INNODB_REQUIRED_TABLES without manual string editing.
+    let placeholders = INNODB_REQUIRED_TABLES
+        .iter()
+        .map(|_| "?")
+        .collect::<Vec<_>>()
+        .join(", ");
+    let sql = format!(
+        "SELECT TABLE_NAME AS table_name, ENGINE AS engine \
+         FROM information_schema.TABLES \
+         WHERE table_schema = DATABASE() \
+           AND table_name IN ({placeholders})"
+    );
+    let values: Vec<Value> = INNODB_REQUIRED_TABLES.iter().map(|t| (*t).into()).collect();
+
+    let rows = TableEngine::find_by_statement(Statement::from_sql_and_values(
+        sea_orm::DatabaseBackend::MySql,
+        sql,
+        values,
+    ))
+    .all(db)
+    .await?;
+
+    let table_pairs: Vec<(&str, &str)> = rows
+        .iter()
+        .map(|r| (r.table_name.as_str(), r.engine.as_str()))
+        .collect();
+
+    evaluate_table_engines(table_pairs)
+}
+
+/// Evaluates storage engines for required tables and returns an error if any non-InnoDB engine is found.
+pub(crate) fn evaluate_table_engines<'a, I>(rows: I) -> Result<(), DbErr>
+where
+    I: IntoIterator<Item = (&'a str, &'a str)>,
+{
+    use tracing::error;
+
+    let mut non_innodb: Vec<(&str, &str)> = Vec::new();
+    for (table_name, engine) in rows {
+        if !engine.eq_ignore_ascii_case("InnoDB") {
+            error!(
+                table = %table_name,
+                engine = %engine,
+                "Table '{table_name}' has storage engine '{engine}' instead of InnoDB. \
+                 InnoDB is required for transactional guarantees (see issue #244). \
+                 To fix, run during a maintenance window: \
+                 ALTER TABLE `{table_name}` ENGINE=InnoDB;"
+            );
+            non_innodb.push((table_name, engine));
+        }
+    }
+
+    if non_innodb.is_empty() {
+        Ok(())
+    } else {
+        let details = non_innodb
+            .iter()
+            .map(|(t, e)| format!("{t}({e})"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let alter_commands = non_innodb
+            .iter()
+            .map(|(t, _)| format!("ALTER TABLE `{t}` ENGINE=InnoDB;"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        Err(DbErr::Custom(format!(
+            "Non-InnoDB tables detected: {details}. \
+             The server requires InnoDB for transactional guarantees. \
+             To fix, run in a maintenance window: {alter_commands}",
+        )))
     }
 }
 
@@ -362,12 +473,116 @@ pub(crate) mod status_list_history {
     }
 }
 
-/// Pins InnoDB on MySQL so `update_with_snapshot`'s UPDATE+INSERT roll back as a
-/// unit rather than depending on the server's default engine. MySQL-only:
-/// sea-query renders the engine option as a literal `ENGINE=InnoDB` clause on
-/// every backend, which SQLite and Postgres reject with a syntax error.
-fn pin_innodb_on_mysql(manager: &SchemaManager<'_>, stmt: &mut TableCreateStatement) {
-    if manager.get_database_backend() == sea_orm::DatabaseBackend::MySql {
-        stmt.engine("InnoDB");
+/// Migration to add an index on `exp` for the retention sweep query.
+pub(crate) mod status_list_history_exp_index {
+    use super::*;
+
+    pub(crate) struct Migration;
+
+    impl MigrationName for Migration {
+        fn name(&self) -> &str {
+            "m20260727_000001_status_list_history_exp_index"
+        }
+    }
+
+    #[async_trait::async_trait]
+    #[allow(elided_lifetimes_in_paths)]
+    impl MigrationTrait for Migration {
+        async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+            manager
+                .create_index(
+                    Index::create()
+                        .if_not_exists()
+                        .name("idx_status_list_history_exp")
+                        .table(StatusListHistory::Table)
+                        .col(StatusListHistory::Exp)
+                        .to_owned(),
+                )
+                .await
+        }
+
+        #[allow(elided_lifetimes_in_paths)]
+        async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+            manager
+                .drop_index(
+                    Index::drop()
+                        .if_exists()
+                        .name("idx_status_list_history_exp")
+                        .table(StatusListHistory::Table)
+                        .to_owned(),
+                )
+                .await
+        }
+    }
+
+    // Intentionally redefined in this migration module to be self-contained.
+    // See `status_list_history::Migration` for the full table definition.
+    #[derive(Iden)]
+    enum StatusListHistory {
+        Table,
+        Exp,
+    }
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn non_innodb_table_is_flagged() {
+        let rows = [
+            ("credentials", "InnoDB"),
+            ("status_lists", "MyISAM"),
+            ("status_list_history", "InnoDB"),
+        ];
+        let result = evaluate_table_engines(rows);
+
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+
+        assert!(
+            err_msg.contains("status_lists(MyISAM)"),
+            "must name affected table and engine"
+        );
+        assert!(
+            err_msg.contains("ALTER TABLE `status_lists` ENGINE=InnoDB;"),
+            "must include ALTER TABLE fix command"
+        );
+        assert!(
+            !err_msg.contains("credentials"),
+            "InnoDB table must not appear in error"
+        );
+        assert!(
+            !err_msg.contains("status_list_history"),
+            "InnoDB table must not appear in error"
+        );
+    }
+
+    #[test]
+    fn all_innodb_produces_no_error() {
+        let rows = [
+            ("credentials", "InnoDB"),
+            ("status_lists", "InnoDB"),
+            ("status_list_history", "InnoDB"),
+        ];
+        assert!(evaluate_table_engines(rows).is_ok());
+    }
+
+    #[test]
+    fn engine_comparison_is_case_insensitive() {
+        for variant in ["innodb", "INNODB", "InnoDB", "Innodb"] {
+            let rows = [("status_lists", variant)];
+            assert!(evaluate_table_engines(rows).is_ok());
+        }
+    }
+
+    #[tokio::test]
+    async fn verify_innodb_engines_skips_non_mysql_backends() {
+        use sea_orm::{DatabaseBackend, MockDatabase};
+
+        for backend in [DatabaseBackend::Sqlite, DatabaseBackend::Postgres] {
+            let db = MockDatabase::new(backend).into_connection();
+            let result = verify_innodb_engines(&db).await;
+            assert!(result.is_ok(), "must skip non-MySQL backend {backend:?}");
+        }
     }
 }

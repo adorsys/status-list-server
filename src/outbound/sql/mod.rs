@@ -7,6 +7,7 @@ mod store;
 
 pub use error::RepositoryError;
 pub use migrations::Migrator;
+pub(crate) use migrations::verify_innodb_engines;
 pub use models::*;
 pub use store::SeaOrmStore;
 
