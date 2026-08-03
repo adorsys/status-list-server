@@ -2,19 +2,34 @@
 
 #[cfg(feature = "aws")]
 use aws_config::{BehaviorVersion, Region};
-#[cfg(any(feature = "acme", feature = "history"))]
+#[cfg(any(
+    feature = "acme",
+    feature = "sqlite",
+    feature = "postgres",
+    feature = "mysql"
+))]
 use color_eyre::eyre::Context;
 use color_eyre::eyre::Result as EyeResult;
-#[cfg(any(feature = "acme", feature = "history"))]
+#[cfg(feature = "acme")]
 use color_eyre::eyre::eyre;
 #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mysql"))]
 use sea_orm::ConnectOptions;
 #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mysql"))]
 use sea_orm_migration::MigratorTrait;
-#[cfg(any(feature = "acme", feature = "history"))]
+#[cfg(any(
+    feature = "acme",
+    feature = "sqlite",
+    feature = "postgres",
+    feature = "mysql"
+))]
 use secrecy::ExposeSecret;
 use std::sync::Arc;
-#[cfg(any(feature = "acme", feature = "history"))]
+#[cfg(any(
+    feature = "acme",
+    feature = "sqlite",
+    feature = "postgres",
+    feature = "mysql"
+))]
 use std::time::Duration;
 #[cfg(feature = "acme")]
 use tracing::warn;
