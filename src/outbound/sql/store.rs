@@ -1,8 +1,10 @@
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, QueryOrder,
-    QuerySelect, Set, TransactionTrait, sea_query::Expr,
+    ActiveModelTrait, ColumnTrait, ConnectionTrait, DatabaseBackend, DatabaseConnection,
+    EntityTrait, QueryFilter, QueryOrder, QuerySelect, Set, Statement, TransactionTrait, Value,
+    sea_query::Expr,
 };
 use std::sync::Arc;
+use tracing::warn;
 
 use super::error::RepositoryError;
 use super::models::{
@@ -280,13 +282,66 @@ impl SeaOrmStore<StatusListHistoryRecord> {
             .map_err(|e| RepositoryError::FindError(e.to_string()))
     }
 
+    /// Deletes snapshots older than the given cutoff timestamp.
+    /// Batches the delete in chunks to avoid holding long-lived locks.
+    /// Returns the total number of rows deleted.
+    ///
+    /// Single-statement batched deletes are used per database backend:
+    /// - **PostgreSQL**: Does not support direct `LIMIT` on `DELETE`. Requires
+    ///   `WHERE snapshot_id IN (SELECT snapshot_id FROM ... LIMIT ...)`.
+    /// - **MySQL**: Fails with Error 1093 if target table is subqueried in an `IN` clause.
+    ///   Uses direct `DELETE FROM status_list_history WHERE exp < ? LIMIT ?`.
+    /// - **SQLite / Fallback**: Uses subquery `WHERE snapshot_id IN (...)` with `?` parameters.
+    ///
+    /// Note: This operation is not atomic across batches. If interrupted,
+    /// some expired snapshots may be deleted while others remain. This is
+    /// acceptable for a cleanup operation; subsequent runs will clean up
+    /// any remaining rows.
     pub async fn delete_older_than(&self, cutoff: i64) -> Result<u64, RepositoryError> {
-        let result = status_list_history::Entity::delete_many()
-            .filter(status_list_history::Column::Exp.lt(cutoff))
-            .exec(&*self.db)
-            .await
-            .map_err(|e| RepositoryError::DeleteError(e.to_string()))?;
-        Ok(result.rows_affected)
+        const BATCH_SIZE: u64 = 500;
+        let mut total_deleted: u64 = 0;
+
+        loop {
+            let backend = self.db.get_database_backend();
+            let sql = match backend {
+                DatabaseBackend::Postgres => {
+                    "DELETE FROM status_list_history \
+                     WHERE snapshot_id IN \
+                     (SELECT snapshot_id FROM status_list_history WHERE exp < $1 LIMIT $2)"
+                }
+                DatabaseBackend::MySql => "DELETE FROM status_list_history WHERE exp < ? LIMIT ?",
+                _ => {
+                    "DELETE FROM status_list_history \
+                     WHERE snapshot_id IN \
+                     (SELECT snapshot_id FROM status_list_history WHERE exp < ? LIMIT ?)"
+                }
+            };
+
+            let count = (*self.db)
+                .execute(Statement::from_sql_and_values(
+                    backend,
+                    sql,
+                    vec![Value::from(cutoff), Value::from(BATCH_SIZE)],
+                ))
+                .await
+                .map_err(|e| RepositoryError::DeleteError(e.to_string()))?
+                .rows_affected();
+
+            total_deleted += count;
+
+            if count < BATCH_SIZE {
+                break;
+            }
+        }
+
+        if total_deleted > 0 {
+            warn!(
+                deleted = total_deleted,
+                cutoff, "Deleted expired status list history snapshots"
+            );
+        }
+
+        Ok(total_deleted)
     }
 }
 
