@@ -27,7 +27,7 @@ jobs:
       - run: git pull
 
       - name: Install cargo-bump
-        uses: taiki-e/install-action@c44f6b046f1c29ae5918b1e0bfdbb2f1813836fd # v2
+        uses: taiki-e/install-action@6a1bd70eaac3c8bdf093356838d7ee09fda951cf # v2
         with:
           tool: cargo-bump
 
