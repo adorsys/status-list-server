@@ -10,8 +10,12 @@
 ///
 /// `server::auth` keeps its own copy on purpose: there it is the public half of
 /// a matched keypair, and splitting the halves across modules would hide that
-/// the PEM and the JWK correspond.
-#[allow(dead_code)]
+/// the PEM and the JWK correspond. Do not "deduplicate" the two.
+///
+/// Gated rather than `#[allow(dead_code)]` so that it stays genuinely dead-code
+/// checked: every consumer is behind one of these features, and if the last one
+/// goes away the constant should start warning instead of sitting here forever.
+#[cfg(any(feature = "sqlite", feature = "mysql", feature = "postgres-tests"))]
 pub(crate) const TEST_EC_PUBLIC_JWK: &str = r#"{
     "kty": "EC",
     "crv": "P-256",

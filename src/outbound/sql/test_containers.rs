@@ -169,6 +169,26 @@ pub(crate) mod postgres_helpers {
         #[allow(dead_code)]
         pub(crate) _container: &'static ContainerAsync<PostgresImage>,
         pub(crate) db: Arc<DatabaseConnection>,
+        /// Connection URL for this test's database, for opening further pools —
+        /// see [`connect_to_test_db`].
+        pub(crate) url: String,
+    }
+
+    /// Opens an additional pool of a caller-chosen size against an
+    /// already-migrated database. The counterpart of
+    /// [`super::mysql_helpers::connect_to_test_db`]; contention tests need it
+    /// because two halves sharing one multi-slot pool can be handed the same
+    /// connection, and the row lock they mean to fight over is never contended.
+    pub(crate) async fn connect_to_test_db(
+        postgres_url: &str,
+        max_connections: u32,
+    ) -> DatabaseConnection {
+        let mut opt = sea_orm::ConnectOptions::new(postgres_url.to_string());
+        opt.max_connections(max_connections)
+            .min_connections(max_connections);
+        sea_orm::Database::connect(opt)
+            .await
+            .expect("Failed to connect to Postgres test database")
     }
 
     pub(crate) async fn postgres_connection() -> PostgresTestDb {
@@ -204,7 +224,7 @@ pub(crate) mod postgres_helpers {
             .expect("Failed to create Postgres test database");
 
         let url = format!("postgres://postgres:postgres@{host}:{port}/{db_name}");
-        let mut opt = sea_orm::ConnectOptions::new(url);
+        let mut opt = sea_orm::ConnectOptions::new(url.clone());
         opt.max_connections(1).min_connections(1);
         let db = sea_orm::Database::connect(opt)
             .await
@@ -216,6 +236,7 @@ pub(crate) mod postgres_helpers {
         PostgresTestDb {
             _container: node,
             db: Arc::new(db),
+            url,
         }
     }
 }

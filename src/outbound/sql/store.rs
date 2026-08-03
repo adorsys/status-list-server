@@ -59,6 +59,11 @@ impl SeaOrmStore<StatusListRecord> {
         entity: StatusListRecord,
         snapshot: StatusListHistoryRecord,
     ) -> Result<(), RepositoryError> {
+        // Captured before `entity` is consumed below; only the contention test
+        // reads it.
+        #[cfg(test)]
+        let probed_list_id = entity.list_id.clone();
+
         let txn = self
             .db
             .begin()
@@ -76,6 +81,17 @@ impl SeaOrmStore<StatusListRecord> {
             .exec_without_returning(&txn)
             .await
         {
+            // `insert_err` is captured *before* the rollback and classified
+            // after it, which is what keeps a duplicate a 409 rather than a 500:
+            // on Postgres the failed statement poisons the transaction (`25P02`),
+            // so a classification read from the rollback's own error would
+            // degrade to a generic backend failure. Verified on MySQL and
+            // Postgres by `assert_duplicate_list_id_is_conflict`.
+            //
+            // If the rollback itself fails the classification is deliberately
+            // dropped and the caller gets a 500. A transaction that will not
+            // roll back is a server fault, not a client conflict, and telling
+            // the client "retry with a different id" would be wrong.
             txn.rollback().await.map_err(|rollback_err| {
                 RepositoryError::InsertError(format!(
                     "status list insert failed ({insert_err}); \
@@ -98,6 +114,11 @@ impl SeaOrmStore<StatusListRecord> {
             })?;
             return Err(RepositoryError::InsertError(insert_err.to_string()));
         }
+
+        #[cfg(test)]
+        snapshot_txn_test_hook::INSERT_BEFORE_COMMIT
+            .pause(&probed_list_id)
+            .await;
 
         txn.commit()
             .await
@@ -260,7 +281,9 @@ impl SeaOrmStore<StatusListRecord> {
         }
 
         #[cfg(test)]
-        update_snapshot_test_hook::pause_after_snapshot_insert(list_id).await;
+        snapshot_txn_test_hook::UPDATE_BEFORE_COMMIT
+            .pause(list_id)
+            .await;
 
         txn.commit()
             .await
@@ -459,6 +482,21 @@ impl SeaOrmStore<Credentials> {
     }
 }
 
+/// Classifies an insert failure, distinguishing the one case that is a client
+/// conflict rather than a server fault.
+///
+/// Only unique-constraint violations are singled out, because only they are
+/// caused by something the client can see and act on — a `list_id` or `issuer`
+/// that is already taken — and they must reach the client as 409, not 500
+/// (#143, #244).
+///
+/// Foreign-key violations deliberately fall through to `InsertError`/500.
+/// The only FK on the write paths is `status_lists.issuer -> credentials.issuer`,
+/// and authentication resolves the issuer's credential before any handler runs,
+/// so reaching this function with a missing issuer means the credential was
+/// deleted mid-request — a server-side consistency failure, correctly a 500.
+/// If that ever stops holding, add a `ForeignKeyConstraintViolation` arm rather
+/// than widening the unique-violation one.
 fn map_insert_err(e: sea_orm::DbErr) -> RepositoryError {
     match e.sql_err() {
         Some(sea_orm::SqlErr::UniqueConstraintViolation(_)) => RepositoryError::DuplicateEntry,
@@ -466,50 +504,86 @@ fn map_insert_err(e: sea_orm::DbErr) -> RepositoryError {
     }
 }
 
+/// Lets a contention test hold a transaction open at a chosen point so a second
+/// writer provably collides with it, rather than with an already-committed row.
+///
+/// Without this a "race" test is really a sequential test: the first writer has
+/// already committed by the time the second starts, so the second never blocks
+/// on a lock and the interesting window — one writer holding an uncommitted row
+/// or index entry while another arrives — is never entered.
 #[cfg(test)]
-mod update_snapshot_test_hook {
+mod snapshot_txn_test_hook {
     use std::sync::OnceLock;
     use tokio::sync::{Mutex, oneshot};
 
     pub(super) struct Probe {
         pub(super) list_id: String,
+        /// Fires once the paused writer is inside the transaction, holding its
+        /// locks. The test waits on this before starting the second writer.
         pub(super) ready: oneshot::Sender<()>,
+        /// The test fires this to let the paused writer commit.
         pub(super) release: oneshot::Receiver<()>,
     }
 
-    static PROBE: OnceLock<Mutex<Option<Probe>>> = OnceLock::new();
-
-    fn probe() -> &'static Mutex<Option<Probe>> {
-        PROBE.get_or_init(|| Mutex::new(None))
+    /// One installable pause point. Each site owns its own slot so the insert
+    /// and update contention tests cannot capture each other's probe.
+    pub(super) struct PauseSite {
+        slot: OnceLock<Mutex<Option<Probe>>>,
+        site: &'static str,
     }
 
-    pub(super) async fn install(probe_to_install: Probe) {
-        let mut guard = probe().lock().await;
-        assert!(
-            guard.is_none(),
-            "only one update_one_with_snapshot contention probe can be installed at a time"
-        );
-        *guard = Some(probe_to_install);
-    }
-
-    pub(super) async fn pause_after_snapshot_insert(list_id: &str) {
-        let installed_probe = {
-            let mut guard = probe().lock().await;
-            if guard
-                .as_ref()
-                .is_some_and(|installed| installed.list_id == list_id)
-            {
-                guard.take()
-            } else {
-                None
+    impl PauseSite {
+        const fn new(site: &'static str) -> Self {
+            Self {
+                slot: OnceLock::new(),
+                site,
             }
-        };
+        }
 
-        if let Some(installed_probe) = installed_probe {
-            let _ = installed_probe.ready.send(());
-            let _ = installed_probe.release.await;
+        fn slot(&self) -> &Mutex<Option<Probe>> {
+            self.slot.get_or_init(|| Mutex::new(None))
+        }
+
+        pub(super) async fn install(&self, probe_to_install: Probe) {
+            let mut guard = self.slot().lock().await;
+            assert!(
+                guard.is_none(),
+                "only one {} contention probe can be installed at a time",
+                self.site
+            );
+            *guard = Some(probe_to_install);
+        }
+
+        /// Pauses only the writer working on the probed `list_id`, and only
+        /// once — the probe is taken, so every other call is a no-op and the
+        /// production path is untouched for all other rows.
+        pub(super) async fn pause(&self, list_id: &str) {
+            let installed_probe = {
+                let mut guard = self.slot().lock().await;
+                if guard
+                    .as_ref()
+                    .is_some_and(|installed| installed.list_id == list_id)
+                {
+                    guard.take()
+                } else {
+                    None
+                }
+            };
+
+            if let Some(installed_probe) = installed_probe {
+                let _ = installed_probe.ready.send(());
+                let _ = installed_probe.release.await;
+            }
         }
     }
+
+    /// Inside `update_one_with_snapshot`, after the snapshot INSERT, while the
+    /// guarded UPDATE still holds its exclusive row lock.
+    pub(super) static UPDATE_BEFORE_COMMIT: PauseSite = PauseSite::new("update_one_with_snapshot");
+
+    /// Inside `insert_one_with_snapshot`, after the snapshot INSERT, while the
+    /// row INSERT still holds its uncommitted primary-key entry.
+    pub(super) static INSERT_BEFORE_COMMIT: PauseSite = PauseSite::new("insert_one_with_snapshot");
 }
 
 #[cfg(test)]
@@ -1452,7 +1526,7 @@ mod test {
         // insert classifies duplicates (`map_insert_err`), because only a
         // duplicate `list_id` is a client-visible conflict. `snapshot_id` is a
         // fresh v4 UUID per publish, so a collision here is a server fault and
-        // must stay a 500. `assert_insert_with_snapshot_duplicate_is_conflict`
+        // must stay a 500. `assert_duplicate_list_id_is_conflict`
         // reasons from this asymmetry, so it is pinned rather than assumed.
         assert!(
             matches!(result, Err(RepositoryError::InsertError(_))),
@@ -1509,7 +1583,7 @@ mod test {
     #[tokio::test]
     async fn test_mysql_insert_with_snapshot_duplicate_maps_to_duplicate_entry() {
         let test_db = mysql_helpers::MysqlTestDb::start().await;
-        assert_insert_with_snapshot_duplicate_is_conflict(
+        assert_duplicate_list_id_is_conflict(
             test_db.connection().await,
             "issuer-dup-txn-mysql",
             "list-dup-txn-mysql",
@@ -1527,7 +1601,7 @@ mod test {
     #[tokio::test]
     async fn test_postgres_insert_with_snapshot_duplicate_maps_to_duplicate_entry() {
         let test_db = postgres_helpers::postgres_connection().await;
-        assert_insert_with_snapshot_duplicate_is_conflict(
+        assert_duplicate_list_id_is_conflict(
             test_db.db.clone(),
             "issuer-dup-txn-postgres",
             "list-dup-txn-postgres",
@@ -1546,7 +1620,7 @@ mod test {
     #[tokio::test]
     async fn test_sqlite_insert_with_snapshot_duplicate_maps_to_duplicate_entry() {
         let db = sqlite_connection().await;
-        assert_insert_with_snapshot_duplicate_is_conflict(
+        assert_duplicate_list_id_is_conflict(
             db,
             "issuer-dup-txn-sqlite",
             "list-dup-txn-sqlite",
@@ -1574,7 +1648,7 @@ mod test {
     /// `credentials.issuer`; callers pass a per-backend `issuer`/`list_id` pair
     /// so a shared database would still keep them apart.
     #[cfg(any(feature = "sqlite", feature = "mysql", feature = "postgres-tests"))]
-    async fn assert_insert_with_snapshot_duplicate_is_conflict(
+    async fn assert_duplicate_list_id_is_conflict(
         db: Arc<DatabaseConnection>,
         issuer: &str,
         list_id: &str,
@@ -1673,7 +1747,7 @@ mod test {
         let plain = store.insert_one(record(3000)).await;
         assert!(
             matches!(plain, Err(RepositoryError::DuplicateEntry)),
-            "duplicate list_id on the history-disabled publish path must also \
+            "duplicate list_id on the snapshot-disabled publish path must also \
              map to DuplicateEntry on {backend}, got {plain:?}"
         );
     }
@@ -2111,12 +2185,13 @@ mod test {
         let (tx_a_release, rx_a_release) = oneshot::channel();
         let (tx_b_complete, rx_b_complete) = oneshot::channel::<(bool, Instant)>();
 
-        update_snapshot_test_hook::install(update_snapshot_test_hook::Probe {
-            list_id: list_id.to_string(),
-            ready: tx_a_ready,
-            release: rx_a_release,
-        })
-        .await;
+        snapshot_txn_test_hook::UPDATE_BEFORE_COMMIT
+            .install(snapshot_txn_test_hook::Probe {
+                list_id: list_id.to_string(),
+                ready: tx_a_ready,
+                release: rx_a_release,
+            })
+            .await;
 
         // Connection A: run the real update + snapshot method, pausing after
         // the snapshot insert and before commit while the row lock is held.
@@ -2283,5 +2358,208 @@ mod test {
             loser_snapshot.is_none(),
             "B's guard-miss path must not record a snapshot"
         );
+    }
+
+    /// The publish race itself, on two real connections.
+    ///
+    /// `assert_duplicate_list_id_is_conflict` collides with a row that is
+    /// already **committed**, which is the common case but not the one the
+    /// issue describes. This collides with a row that is still **uncommitted**:
+    /// writer A holds the primary-key entry inside an open transaction while
+    /// writer B arrives, so B blocks in the engine and only learns the outcome
+    /// when A commits. That is a different code path — the driver surfaces the
+    /// violation at a different point — and it is the one a real racing publish
+    /// takes.
+    ///
+    /// Asserts three things:
+    ///
+    /// 1. B genuinely blocked (it cannot finish before A starts committing),
+    ///    which is what makes this a race test rather than a sequential one.
+    /// 2. B's failure still classifies as `DuplicateEntry` → 409, not a generic
+    ///    backend error → 500. This is the property the issue is about.
+    /// 3. The loser left nothing behind: no snapshot, and A's row intact.
+    #[cfg(any(feature = "mysql", feature = "postgres-tests"))]
+    async fn assert_concurrent_publish_loser_gets_conflict(
+        pool_a: DatabaseConnection,
+        pool_b: DatabaseConnection,
+        pool_verify: DatabaseConnection,
+        issuer: &'static str,
+        list_id: &'static str,
+        backend: &'static str,
+    ) {
+        use std::time::{Duration, Instant};
+        use tokio::sync::oneshot;
+
+        let store_a = SeaOrmStore::<StatusListRecord>::new(Arc::new(pool_a));
+        let store_b = SeaOrmStore::<StatusListRecord>::new(Arc::new(pool_b));
+        let store_verify = SeaOrmStore::<StatusListRecord>::new(Arc::new(pool_verify));
+
+        // status_lists.issuer is a foreign key onto credentials.issuer, so the
+        // credential has to be committed before either writer starts.
+        let key: Jwk = serde_json::from_str(crate::test_fixtures::TEST_EC_PUBLIC_JWK).unwrap();
+        SeaOrmStore::<Credentials>::new(store_verify.db.clone())
+            .insert_one(Credentials::new(issuer.to_string(), key))
+            .await
+            .unwrap();
+
+        // `move` so both closures capture the `&'static str`s by copy and stay
+        // `Copy` themselves — each spawned writer below needs its own.
+        let record = move |lst: &str, updated_at: i64| StatusListRecord {
+            list_id: list_id.to_string(),
+            issuer: issuer.to_string(),
+            status_list: StatusList {
+                bits: 1,
+                lst: lst.to_string(),
+            },
+            sub: format!("sub-{list_id}"),
+            updated_at,
+        };
+        let snapshot = move |snapshot_id: &str, iat: i64| StatusListHistoryRecord {
+            snapshot_id: snapshot_id.to_string(),
+            list_id: list_id.to_string(),
+            issuer: issuer.to_string(),
+            status_list: StatusList {
+                bits: 1,
+                lst: "initial".to_string(),
+            },
+            sub: format!("sub-{list_id}"),
+            iat,
+            exp: iat + 900,
+        };
+
+        let (tx_a_ready, rx_a_ready) = oneshot::channel();
+        let (tx_b_started, rx_b_started) = oneshot::channel();
+        let (tx_a_release, rx_a_release) = oneshot::channel();
+        let (tx_b_done, rx_b_done) = oneshot::channel::<(Result<(), RepositoryError>, Instant)>();
+
+        snapshot_txn_test_hook::INSERT_BEFORE_COMMIT
+            .install(snapshot_txn_test_hook::Probe {
+                list_id: list_id.to_string(),
+                ready: tx_a_ready,
+                release: rx_a_release,
+            })
+            .await;
+
+        // Writer A: the winning publish, paused just before COMMIT while its
+        // primary-key entry is still uncommitted.
+        let handle_a = tokio::spawn(async move {
+            store_a
+                .insert_one_with_snapshot(record("writer-a", 1000), snapshot("snap-race-a", 1000))
+                .await
+        });
+
+        // Writer B: the losing publish. Starts only once A is known to be
+        // holding the uncommitted key.
+        let handle_b = tokio::spawn(async move {
+            rx_a_ready.await.expect("A never reached its pause point");
+            tx_b_started.send(()).expect("failed to signal B started");
+
+            let result = store_b
+                .insert_one_with_snapshot(record("writer-b", 2000), snapshot("snap-race-b", 2000))
+                .await;
+            // Timestamped the instant the call returns, before any channel work,
+            // so nothing downstream can manufacture the ordering.
+            let b_done = Instant::now();
+            tx_b_done
+                .send((result, b_done))
+                .expect("failed to send B result");
+        });
+
+        rx_b_started.await.expect("B never started");
+        // Give B time to reach the database and block on A's key.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        let a_releasing = Instant::now();
+        tx_a_release.send(()).expect("failed to release A");
+
+        let timeout = Duration::from_secs(30);
+        let (a_join, b_join) = tokio::join!(
+            tokio::time::timeout(timeout, handle_a),
+            tokio::time::timeout(timeout, handle_b)
+        );
+        a_join
+            .unwrap_or_else(|_| panic!("timed out waiting for writer A on {backend}"))
+            .expect("writer A panicked")
+            .unwrap_or_else(|e| panic!("writer A should win the publish on {backend}: {e:?}"));
+        b_join
+            .unwrap_or_else(|_| panic!("timed out waiting for writer B on {backend}"))
+            .expect("writer B panicked");
+
+        let (b_result, b_done) = rx_b_done.await.expect("failed to receive B result");
+
+        // Falsifiable: if B had not blocked on A's uncommitted key it would have
+        // finished during the sleep above, before A began committing.
+        assert!(
+            b_done > a_releasing,
+            "B must block until A commits on {backend} — otherwise this is not a \
+             race (B: {b_done:?}, A releasing: {a_releasing:?})"
+        );
+
+        // The property under test: a genuinely concurrent duplicate is still a
+        // client conflict, not a server error.
+        assert!(
+            matches!(b_result, Err(RepositoryError::DuplicateEntry)),
+            "the losing publisher of a real race must get DuplicateEntry (409) \
+             on {backend}, not a generic error (500), got {b_result:?}"
+        );
+
+        // A's row won and B disturbed nothing.
+        let row = store_verify
+            .find_one_by(list_id)
+            .await
+            .unwrap()
+            .unwrap_or_else(|| panic!("A's row must be committed on {backend}"));
+        assert_eq!(
+            row.status_list.lst, "writer-a",
+            "A's publish must be the one that persisted on {backend}"
+        );
+        assert_eq!(
+            row.updated_at, 1000,
+            "B must not have overwritten A's row on {backend}"
+        );
+
+        let loser_snapshot = status_list_history::Entity::find_by_id("snap-race-b")
+            .one(&*store_verify.db)
+            .await
+            .expect("loser snapshot lookup should succeed");
+        assert!(
+            loser_snapshot.is_none(),
+            "the losing publisher must not leave a snapshot behind on {backend}"
+        );
+    }
+
+    /// The publish race on MySQL, whose driver reports duplicate keys as `1062`.
+    #[cfg(feature = "mysql")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+    async fn test_mysql_concurrent_publish_loser_gets_conflict() {
+        let test_db = mysql_helpers::MysqlTestDb::start().await;
+        assert_concurrent_publish_loser_gets_conflict(
+            mysql_helpers::connect_to_test_db(&test_db.url, 1).await,
+            mysql_helpers::connect_to_test_db(&test_db.url, 1).await,
+            mysql_helpers::connect_to_test_db(&test_db.url, 2).await,
+            "issuer-race-txn-mysql",
+            "list-race-txn-mysql",
+            "MySQL",
+        )
+        .await;
+    }
+
+    /// The same race on Postgres, the production backend and the one the issue
+    /// singles out: a failed statement poisons the transaction (`25P02`), so a
+    /// classification taken from anywhere but the original `23505` degrades to a
+    /// 500 here and nowhere else.
+    #[cfg(feature = "postgres-tests")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+    async fn test_postgres_concurrent_publish_loser_gets_conflict() {
+        let test_db = postgres_helpers::postgres_connection().await;
+        assert_concurrent_publish_loser_gets_conflict(
+            postgres_helpers::connect_to_test_db(&test_db.url, 1).await,
+            postgres_helpers::connect_to_test_db(&test_db.url, 1).await,
+            postgres_helpers::connect_to_test_db(&test_db.url, 2).await,
+            "issuer-race-txn-postgres",
+            "list-race-txn-postgres",
+            "Postgres",
+        )
+        .await;
     }
 }
