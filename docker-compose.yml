@@ -94,9 +94,9 @@ services:
         FEATURES: ${FEATURES:-postgres,redis,aws,acme}
     container_name: status-list-server
     env_file:
-      - path: .env
-        required: false
       - path: .env.template
+        required: false
+      - path: .env
         required: false
     environment:
       APP_ENV: ${APP_ENV:-development}

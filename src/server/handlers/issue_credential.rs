@@ -28,7 +28,7 @@ impl From<AuthenticationError> for CredentialError {
     }
 }
 
-#[tracing::instrument(skip_all, fields(issuer = payload.issuer))]
+#[tracing::instrument(skip_all, fields(issuer = payload.issuer), err(Debug))]
 pub async fn credential_handler(
     State(state): State<AppState>,
     Json(payload): Json<CredentialsRequest>,

@@ -180,6 +180,7 @@ fn build_env_filter() -> EnvFilter {
     EnvFilter::try_from_default_env().unwrap_or_else(|_| {
         EnvFilter::new("info")
             .add_directive("hyper::proto=info".parse().expect("valid directive"))
+            .add_directive("tower_http::trace=debug".parse().expect("valid directive"))
             .add_directive("h2=info".parse().expect("valid directive"))
             .add_directive("tonic=info".parse().expect("valid directive"))
     })
