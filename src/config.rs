@@ -835,7 +835,7 @@ mod tests {
         assert_eq!(config.database.pool.max_lifetime_secs, 1800);
     }
 
-    #[sealed_test]
+    #[test]
     fn test_base_builder_defaults() {
         let builder = Config::base_builder().expect("Failed to create base_builder");
         let config: Config = builder
