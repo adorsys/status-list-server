@@ -473,6 +473,57 @@ pub(crate) mod status_list_history {
     }
 }
 
+
+/// Migration to add an index on `exp` for the retention sweep query.
+pub(crate) mod status_list_history_exp_index {
+    use super::*;
+
+    pub(crate) struct Migration;
+
+    impl MigrationName for Migration {
+        fn name(&self) -> &str {
+            "m20260727_000001_status_list_history_exp_index"
+        }
+    }
+
+    #[async_trait::async_trait]
+    #[allow(elided_lifetimes_in_paths)]
+    impl MigrationTrait for Migration {
+        async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+            manager
+                .create_index(
+                    Index::create()
+                        .if_not_exists()
+                        .name("idx_status_list_history_exp")
+                        .table(StatusListHistory::Table)
+                        .col(StatusListHistory::Exp)
+                        .to_owned(),
+                )
+                .await
+        }
+
+        #[allow(elided_lifetimes_in_paths)]
+        async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+            manager
+                .drop_index(
+                    Index::drop()
+                        .if_exists()
+                        .name("idx_status_list_history_exp")
+                        .table(StatusListHistory::Table)
+                        .to_owned(),
+                )
+                .await
+        }
+    }
+
+    // Intentionally redefined in this migration module to be self-contained.
+    // See `status_list_history::Migration` for the full table definition.
+    #[derive(Iden)]
+    enum StatusListHistory {
+        Table,
+        Exp,
+    }
+}
 #[cfg(test)]
 mod tests {
     use super::*;
