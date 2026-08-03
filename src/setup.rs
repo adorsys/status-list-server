@@ -147,15 +147,23 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
                 ));
             }
 
-            #[cfg(feature = "sqlite")]
             let mut opt = ConnectOptions::new(db_url.to_string());
-            #[cfg(not(feature = "sqlite"))]
-            let opt = ConnectOptions::new(db_url.to_string());
-            #[cfg(feature = "sqlite")]
-            if db_backend == crate::config::DatabaseBackend::Sqlite {
+
+            if db_backend == DatabaseBackend::Sqlite || db_backend == DatabaseBackend::Memory {
                 opt.max_connections(1);
+                #[cfg(feature = "sqlite")]
                 opt.map_sqlx_sqlite_opts(|o| o.foreign_keys(true));
+            } else {
+                let pool = &config.database.pool;
+                opt.max_connections(pool.max_connections)
+                    .min_connections(pool.min_connections)
+                    .acquire_timeout(Duration::from_secs(pool.acquire_timeout_secs))
+                    .connect_timeout(Duration::from_secs(pool.connect_timeout_secs))
+                    .idle_timeout(Duration::from_secs(pool.idle_timeout_secs))
+                    .max_lifetime(Duration::from_secs(pool.max_lifetime_secs))
+                    .sqlx_logging(false);
             }
+
             let db = sea_orm::Database::connect(opt)
                 .await
                 .wrap_err("Failed to connect to database")?;
@@ -668,5 +676,72 @@ mod general_tests {
                 panic!("build_state failed under default configuration: {e:?}");
             }
         });
+    }
+
+    /// Verifies that a saturated pool returns an error within `acquire_timeout`
+    /// rather than queuing indefinitely.
+    #[cfg(feature = "postgres-tests")]
+    #[tokio::test]
+    async fn test_pool_acquire_timeout_fires() {
+        use sea_orm::{ConnectOptions, Database};
+        use std::time::Instant;
+        use testcontainers_modules::{
+            postgres::Postgres as PostgresImage, testcontainers::runners::AsyncRunner,
+        };
+
+        let (_container, db_url) = if let Ok(url) = std::env::var("APP_DATABASE__URL") {
+            (None, url)
+        } else {
+            let node = PostgresImage::default()
+                .start()
+                .await
+                .expect("Failed to start Postgres container for pool test");
+            let host = node
+                .get_host()
+                .await
+                .expect("Failed to resolve Postgres host for pool test");
+            let port = node
+                .get_host_port_ipv4(5432)
+                .await
+                .expect("Failed to resolve Postgres port for pool test");
+            (
+                Some(node),
+                format!("postgres://postgres:postgres@{host}:{port}/postgres"),
+            )
+        };
+
+        let mut opt = ConnectOptions::new(db_url);
+        opt.max_connections(1)
+            .acquire_timeout(Duration::from_secs(1))
+            .sqlx_logging(false);
+
+        let db = std::sync::Arc::new(
+            Database::connect(opt)
+                .await
+                .expect("Failed to connect for pool test"),
+        );
+
+        // Hold the single connection with a long-running query
+        let db_clone = db.clone();
+        let _holder = tokio::spawn(async move {
+            let _ = sea_orm::ConnectionTrait::execute_unprepared(
+                db_clone.as_ref(),
+                "SELECT pg_sleep(10)",
+            )
+            .await;
+        });
+
+        // Give the holder time to acquire the connection
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        let start = Instant::now();
+        let result = sea_orm::ConnectionTrait::execute_unprepared(db.as_ref(), "SELECT 1").await;
+        let elapsed = start.elapsed();
+
+        assert!(result.is_err(), "Expected pool-exhaustion error, got Ok");
+        assert!(
+            elapsed < Duration::from_secs(3),
+            "acquire_timeout did not fire quickly enough: {elapsed:?}"
+        );
     }
 }

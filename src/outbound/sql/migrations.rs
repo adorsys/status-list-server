@@ -12,6 +12,7 @@ impl MigratorTrait for Migrator {
             Box::new(tables::Migration),
             Box::new(add_updated_at::Migration),
             Box::new(status_list_history::Migration),
+            Box::new(status_list_history_exp_index::Migration),
         ]
     }
 }
