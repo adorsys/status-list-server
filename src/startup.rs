@@ -83,7 +83,10 @@ impl HttpServer {
                     permissive_governor.clone(),
                 ),
             )
-            .layer(TraceLayer::new_for_http())
+            .layer(
+                TraceLayer::new_for_http()
+                    .make_span_with(crate::utils::telemetry::make_http_request_span),
+            )
             .layer(CatchPanicLayer::new())
             .layer(cors)
             .layer(RequestBodyLimitLayer::new(max_body_size))

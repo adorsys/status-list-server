@@ -6,16 +6,16 @@ This document describes the telemetry, tracing, and metrics architecture in `sta
 
 Telemetry behavior is determined primarily by the deployment environment (`APP_ENV`), with explicit overrides available via environment variables:
 
-| Environment Variable           | Allowed Values                     | Default                       | Description                                                                                                                                                  |
-| ------------------------------ | ---------------------------------- | ----------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ | --- |
-| `APP_ENV`                      | `development`, `production`        | `development`                 | Core environment selector. `development` outputs human-readable logs to stdout. `production` emits JSON logs, OTLP traces, and metrics to an OTLP collector. |
-| `APP_TELEMETRY__ENABLED`       | `true`, `false`                    | `false` (dev) / `true` (prod) | Explicit toggle to enable or disable OpenTelemetry OTLP exporting.                                                                                           |
-| `APP_TELEMETRY__ENVIRONMENT`   | `development`, `production`        | (inherits `APP_ENV`)          | Explicit override for telemetry environment selection.                                                                                                       |
-| `APP_TELEMETRY__OTLP_ENDPOINT` | URL (e.g. `http://localhost:4317`) | `http://localhost:4317`       | Target OTLP gRPC collector endpoint.                                                                                                                         |
-| `APP_TELEMETRY__SAMPLER_RATIO` | Float `0.0` – `1.0`                | `1.0`                         | Trace sampling ratio (`1.0` = 100% sampling).                                                                                                                | ◊   |
+| Environment Variable           | Allowed Values                     | Default                 | Description                                                                                                                        |
+| ------------------------------ | ---------------------------------- | ----------------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
+| `APP_ENV`                      | `development`, `production`        | `development`           | Core environment selector. `development` outputs human-readable logs to stdout. `production` emits structured JSON logs to stdout. |
+| `APP_TELEMETRY__ENABLED`       | `true`, `false`                    | `true`                  | Explicit toggle to enable or disable OpenTelemetry OTLP trace, metric, and log exporting.                                          |
+| `APP_TELEMETRY__ENVIRONMENT`   | `development`, `production`        | (inherits `APP_ENV`)    | Explicit override for telemetry environment log formatting selection.                                                              |
+| `APP_TELEMETRY__OTLP_ENDPOINT` | URL (e.g. `http://localhost:4317`) | `http://localhost:4317` | Target OTLP gRPC collector endpoint.                                                                                               |
+| `APP_TELEMETRY__SAMPLER_RATIO` | Float `0.0` – `1.0`                | `1.0`                   | Trace sampling ratio (`1.0` = 100% sampling).                                                                                      |
 
 > [!NOTE]
-> Reusing `APP_ENV` guarantees that applications inheriting standard environment settings automatically use stdout logging in development while exporting structured OTLP data in production.
+> Reusing `APP_ENV` guarantees that applications inheriting standard environment settings automatically use pretty stdout logging in development while exporting structured JSON OTLP data in production.
 
 ## 2. Helm Deployment Architecture & Wiring
 
@@ -45,7 +45,7 @@ When `statuslist.networkPolicy.enabled=true` is set:
 
 ### Running the Observability Stack
 
-In local development, Docker Compose provisions an OpenTelemetry Collector and Jaeger instance alongside the server:
+In local development, Docker Compose provisions an OpenTelemetry Collector, Prometheus, and Jaeger instance alongside the server. The application runs in `development` mode (human-readable stdout logs) with `APP_TELEMETRY__ENABLED=true` exporting OTLP traces to Jaeger:
 
 ```bash
 docker compose up -d
@@ -55,8 +55,9 @@ Services provisioned for observability:
 
 - **Status List Server**: `http://localhost:8000`
 - **Prometheus Metrics**: `http://localhost:8000/metrics`
+- **Prometheus UI**: `http://localhost:9090`
 - **Jaeger UI**: `http://localhost:16686`
-- **OTLP Collector**: `localhost:4317` (gRPC) / `localhost:4318` (HTTP)
+- **OTLP Collector**: `localhost:4317` (gRPC) / `localhost:4318` (HTTP) / `localhost:8889` (Prometheus metrics exporter)
 
 ### Inspecting Traces in Jaeger
 
@@ -85,10 +86,10 @@ If you have existing Grafana dashboards or Prometheus alerting rules:
 
   ```promql
   # Before
-  sum(rate(http_requests_total[5m])) by (status)
+  sum(rate(axum_http_requests_duration_seconds_count[5m])) by (status)
 
   # After
-  sum(rate(http_requests_total{otel_scope_name="status-list-server"}[5m])) by (status)
+  sum(rate(axum_http_requests_duration_seconds_count{otel_scope_name="status-list-server"}[5m])) by (status)
   ```
 
 ## 5. Trace Retention & Privacy Posture

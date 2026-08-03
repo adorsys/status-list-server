@@ -13,6 +13,13 @@ spec:
       {{- include "status-list-server-chart.selectorLabels" . | nindent 6 }}
   template:
     metadata:
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: {{ .Values.statuslist.service.targetPort | quote }}
+        prometheus.io/path: "/metrics"
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
       labels:
         {{- include "status-list-server-chart.labels" . | nindent 8 }}
     spec:

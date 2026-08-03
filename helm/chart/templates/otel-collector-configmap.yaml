@@ -30,6 +30,8 @@ data:
         tls:
           insecure: {{ .Values.otelCollector.config.exporters.otlpTlsInsecure | default true }}
       {{- end }}
+      prometheus:
+        endpoint: 0.0.0.0:8889
       debug:
         verbosity: basic
     service:
@@ -41,7 +43,7 @@ data:
         metrics:
           receivers: [otlp]
           processors: [memory_limiter, batch]
-          exporters: [debug]
+          exporters: [prometheus, debug]
         logs:
           receivers: [otlp]
           processors: [memory_limiter, batch]

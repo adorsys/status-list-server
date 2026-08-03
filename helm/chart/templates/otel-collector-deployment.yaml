@@ -13,6 +13,10 @@ spec:
       {{- include "status-list-server-chart.otelCollectorSelectorLabels" . | nindent 6 }}
   template:
     metadata:
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8889"
+        prometheus.io/path: "/metrics"
       labels:
         {{- include "status-list-server-chart.otelCollectorLabels" . | nindent 8 }}
     spec:
@@ -41,6 +45,9 @@ spec:
               protocol: TCP
             - name: otlp-http
               containerPort: 4318
+              protocol: TCP
+            - name: metrics
+              containerPort: 8889
               protocol: TCP
           volumeMounts:
             - name: config
@@ -72,6 +79,10 @@ spec:
     - name: otlp-http
       port: {{ .Values.otelCollector.standalone.service.httpPort }}
       targetPort: 4318
+      protocol: TCP
+    - name: metrics
+      port: 8889
+      targetPort: 8889
       protocol: TCP
   selector:
     {{- include "status-list-server-chart.otelCollectorSelectorLabels" . | nindent 4 }}

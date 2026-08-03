@@ -11,6 +11,7 @@ use opentelemetry_sdk::{
     trace::{Sampler, SdkTracerProvider},
 };
 use prometheus::Registry;
+use tracing_opentelemetry::OpenTelemetrySpanExt as _;
 use tracing_subscriber::{
     EnvFilter, Layer as _, Registry as TracingRegistry,
     filter::{LevelFilter, Targets},
@@ -46,6 +47,35 @@ impl Drop for TelemetryGuard {
     }
 }
 
+/// Extractor for reading W3C trace context headers from HTTP requests.
+pub struct HeaderExtractor<'a>(pub &'a axum::http::HeaderMap);
+
+impl<'a> opentelemetry::propagation::Extractor for HeaderExtractor<'a> {
+    fn get(&self, key: &str) -> Option<&str> {
+        self.0.get(key).and_then(|v| v.to_str().ok())
+    }
+
+    fn keys(&self) -> Vec<&str> {
+        self.0.keys().map(|k| k.as_str()).collect()
+    }
+}
+
+/// Creates a tracing span for an incoming HTTP request and populates parent context
+/// from W3C traceparent headers if present.
+pub fn make_http_request_span(request: &axum::http::Request<axum::body::Body>) -> tracing::Span {
+    let parent_context = opentelemetry::global::get_text_map_propagator(|propagator| {
+        propagator.extract(&HeaderExtractor(request.headers()))
+    });
+    let span = tracing::info_span!(
+        "HTTP request",
+        http.method = %request.method(),
+        http.uri = %request.uri(),
+        otel.kind = "server",
+    );
+    let _ = span.set_parent(parent_context);
+    span
+}
+
 /// Initializes the global telemetry stack (tracing + metrics) based on the
 /// provided configuration.
 ///
@@ -64,74 +94,106 @@ pub fn init_telemetry(config: &TelemetryConfig) -> color_eyre::Result<(Telemetry
     let prometheus_registry = Registry::new();
     let meter_provider = setup_metrics(&prometheus_registry, config, resource.clone())?;
 
-    // Build the tracing subscriber
+    // Build the global env filter
     let env_filter = build_env_filter();
 
-    if config.enabled && config.environment.is_production() {
-        // Production: JSON stdout + OTLP trace and log export.
+    let (tracer_provider, logger_provider) = if config.enabled {
         let tracer_provider = build_otlp_tracer_provider(config, resource.clone())?;
         let logger_provider = build_otlp_logger_provider(config, resource)?;
 
-        let tracer = tracer_provider.tracer("status-list-server");
-        let otel_trace_layer = tracing_opentelemetry::layer().with_tracer(tracer);
+        if config.environment.is_production() {
+            let tracer = tracer_provider.tracer("status-list-server");
+            let otel_trace_layer = tracing_opentelemetry::layer().with_tracer(tracer);
+            let otel_log_filter = Targets::new()
+                .with_default(LevelFilter::INFO)
+                .with_target("opentelemetry", LevelFilter::OFF)
+                .with_target("tonic", LevelFilter::OFF)
+                .with_target("h2", LevelFilter::OFF)
+                .with_target("hyper", LevelFilter::OFF);
+            let otel_log_layer =
+                OpenTelemetryTracingBridge::new(&logger_provider).with_filter(otel_log_filter);
 
-        let otel_log_filter = Targets::new()
-            .with_default(LevelFilter::INFO)
-            .with_target("opentelemetry", LevelFilter::OFF)
-            .with_target("tonic", LevelFilter::OFF)
-            .with_target("h2", LevelFilter::OFF)
-            .with_target("hyper", LevelFilter::OFF);
-        let otel_log_layer =
-            OpenTelemetryTracingBridge::new(&logger_provider).with_filter(otel_log_filter);
+            let fmt_layer = tracing_subscriber::fmt::layer()
+                .json()
+                .with_target(true)
+                .with_thread_ids(true)
+                .with_file(true)
+                .with_line_number(true);
 
-        let fmt_layer = tracing_subscriber::fmt::layer()
-            .json()
-            .with_target(true)
-            .with_thread_ids(true)
-            .with_file(true)
-            .with_line_number(true);
+            TracingRegistry::default()
+                .with(env_filter)
+                .with(fmt_layer)
+                .with(otel_trace_layer)
+                .with(otel_log_layer)
+                .try_init()?;
+        } else {
+            let tracer = tracer_provider.tracer("status-list-server");
+            let otel_trace_layer = tracing_opentelemetry::layer().with_tracer(tracer);
+            let otel_log_filter = Targets::new()
+                .with_default(LevelFilter::INFO)
+                .with_target("opentelemetry", LevelFilter::OFF)
+                .with_target("tonic", LevelFilter::OFF)
+                .with_target("h2", LevelFilter::OFF)
+                .with_target("hyper", LevelFilter::OFF);
+            let otel_log_layer =
+                OpenTelemetryTracingBridge::new(&logger_provider).with_filter(otel_log_filter);
 
-        TracingRegistry::default()
-            .with(env_filter)
-            .with(fmt_layer)
-            .with(otel_trace_layer)
-            .with(otel_log_layer)
-            .try_init()?;
+            let fmt_layer = tracing_subscriber::fmt::layer()
+                .with_target(true)
+                .with_thread_ids(false)
+                .with_file(true)
+                .with_line_number(true);
 
-        tracing::info!(otlp_endpoint = %config.otlp_endpoint, "telemetry initialized");
+            TracingRegistry::default()
+                .with(env_filter)
+                .with(fmt_layer)
+                .with(otel_trace_layer)
+                .with(otel_log_layer)
+                .try_init()?;
+        }
 
-        Ok((
-            TelemetryGuard {
-                tracer_provider: Some(tracer_provider),
-                meter_provider,
-                logger_provider: Some(logger_provider),
-            },
-            prometheus_registry,
-        ))
+        tracing::info!(otlp_endpoint = %config.otlp_endpoint, "telemetry initialized with OTLP export");
+
+        (Some(tracer_provider), Some(logger_provider))
     } else {
-        // Development: pretty-printed stdout
-        let fmt_layer = tracing_subscriber::fmt::layer()
-            .with_target(true)
-            .with_thread_ids(false)
-            .with_file(true)
-            .with_line_number(true);
+        if config.environment.is_production() {
+            let fmt_layer = tracing_subscriber::fmt::layer()
+                .json()
+                .with_target(true)
+                .with_thread_ids(true)
+                .with_file(true)
+                .with_line_number(true);
 
-        TracingRegistry::default()
-            .with(env_filter)
-            .with(fmt_layer)
-            .try_init()?;
+            TracingRegistry::default()
+                .with(env_filter)
+                .with(fmt_layer)
+                .try_init()?;
+        } else {
+            let fmt_layer = tracing_subscriber::fmt::layer()
+                .with_target(true)
+                .with_thread_ids(false)
+                .with_file(true)
+                .with_line_number(true);
+
+            TracingRegistry::default()
+                .with(env_filter)
+                .with(fmt_layer)
+                .try_init()?;
+        }
 
         tracing::info!("telemetry initialized: stdout logging only");
 
-        Ok((
-            TelemetryGuard {
-                tracer_provider: None,
-                meter_provider,
-                logger_provider: None,
-            },
-            prometheus_registry,
-        ))
-    }
+        (None, None)
+    };
+
+    Ok((
+        TelemetryGuard {
+            tracer_provider,
+            meter_provider,
+            logger_provider,
+        },
+        prometheus_registry,
+    ))
 }
 
 /// Builds an OTLP-backed tracer provider with batch export.
