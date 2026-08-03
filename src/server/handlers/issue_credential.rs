@@ -5,7 +5,7 @@ use serde_json::json;
 
 use crate::{
     domain::models::credential::{Credential, Issuer, PublicJwk},
-    server::{AppState, error::ApiError},
+    server::{AppState, auth::errors::AuthenticationError, error::ApiError},
 };
 
 /// Request body for registering issuer public key credentials.
@@ -15,7 +15,20 @@ pub struct CredentialsRequest {
     pub public_key: Jwk,
 }
 
-/// HTTP handler for registering issuer public keys.
+#[derive(Debug)]
+pub enum CredentialError {
+    AlreadyExists,
+    Port,
+    AuthError(AuthenticationError),
+}
+
+impl From<AuthenticationError> for CredentialError {
+    fn from(value: AuthenticationError) -> Self {
+        CredentialError::AuthError(value)
+    }
+}
+
+#[tracing::instrument(skip_all, fields(issuer = payload.issuer), err(Debug))]
 pub async fn credential_handler(
     State(state): State<AppState>,
     Json(payload): Json<CredentialsRequest>,

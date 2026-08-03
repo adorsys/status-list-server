@@ -8,7 +8,7 @@ use redis::{
     aio::{ConnectionManager, ConnectionManagerConfig},
 };
 use secrecy::{ExposeSecret, SecretString};
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer};
 use serde_aux::field_attributes::deserialize_vec_from_string_or_vec;
 #[cfg(feature = "redis")]
 use std::time::Duration;
@@ -90,6 +90,7 @@ pub struct Config {
     pub status_list: StatusListConfig,
     pub rate_limit: RateLimitConfig,
     pub limits: LimitsConfig,
+    pub telemetry: TelemetryConfig,
 }
 
 /// Rate-limit configuration with strict (writes) and permissive (reads) tiers.
@@ -108,6 +109,63 @@ pub struct LimitsConfig {
     pub max_status_index: i32,
     pub max_statuses_per_request: usize,
     pub max_serialized_list_size: usize,
+}
+
+/// Telemetry configuration controlling tracing and metrics export.
+#[derive(Debug, Clone, Deserialize)]
+pub struct TelemetryConfig {
+    /// Environment mode: `"development"` (stdout) or `"production"` (OTLP export).
+    pub environment: TelemetryEnvironment,
+    /// OTLP gRPC endpoint for trace, metric, and log export (prod mode only).
+    pub otlp_endpoint: String,
+    /// Trace sampling ratio from 0.0 (none) to 1.0 (all).
+    #[serde(deserialize_with = "deserialize_sampler_ratio")]
+    pub sampler_ratio: f64,
+    /// Whether the OpenTelemetry tracing pipeline is enabled.
+    pub enabled: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TelemetryEnvironment {
+    Development,
+    Production,
+}
+
+impl TelemetryEnvironment {
+    pub fn is_production(self) -> bool {
+        matches!(self, Self::Production)
+    }
+}
+
+impl<'de> Deserialize<'de> for TelemetryEnvironment {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let raw = String::deserialize(deserializer)?;
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "development" | "dev" => Ok(Self::Development),
+            "production" | "prod" => Ok(Self::Production),
+            other => Err(serde::de::Error::unknown_variant(
+                other,
+                &["development", "dev", "production", "prod"],
+            )),
+        }
+    }
+}
+
+fn deserialize_sampler_ratio<'de, D>(deserializer: D) -> Result<f64, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = f64::deserialize(deserializer)?;
+    if value.is_finite() && (0.0..=1.0).contains(&value) {
+        Ok(value)
+    } else {
+        Err(serde::de::Error::custom(
+            "telemetry.sampler_ratio must be a finite value in 0.0..=1.0",
+        ))
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -697,6 +755,16 @@ fn base_builder() -> Result<ConfigBuilder<DefaultState>, ConfigError> {
     #[cfg(not(feature = "acme"))]
     let default_chain_cache_ttl = 86400;
 
+    let telemetry_environment = match std::env::var("APP_ENV")
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "production" | "prod" => ENV_PRODUCTION,
+        _ => ENV_DEVELOPMENT,
+    };
+
     let builder = ConfigLib::builder()
         .set_default("server.host", "localhost")?
         .set_default("server.domain", "localhost")?
@@ -748,7 +816,11 @@ fn base_builder() -> Result<ConfigBuilder<DefaultState>, ConfigError> {
         .set_default("limits.max_body_size_bytes", 2_097_152)?
         .set_default("limits.max_status_index", 100_000)?
         .set_default("limits.max_statuses_per_request", 5_000)?
-        .set_default("limits.max_serialized_list_size", 1_048_576)?;
+        .set_default("limits.max_serialized_list_size", 1_048_576)?
+        .set_default("telemetry.environment", telemetry_environment)?
+        .set_default("telemetry.otlp_endpoint", "http://localhost:4317")?
+        .set_default("telemetry.sampler_ratio", 1.0)?
+        .set_default("telemetry.enabled", true)?;
     Ok(builder)
 }
 
@@ -827,6 +899,11 @@ mod tests {
         assert_eq!(config.database.pool.connect_timeout_secs, 10);
         assert_eq!(config.database.pool.idle_timeout_secs, 600);
         assert_eq!(config.database.pool.max_lifetime_secs, 1800);
+        assert_eq!(
+            config.telemetry.environment,
+            TelemetryEnvironment::Development
+        );
+        assert_eq!(config.telemetry.sampler_ratio, 1.0);
     }
 
     #[test]

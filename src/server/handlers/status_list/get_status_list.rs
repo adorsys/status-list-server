@@ -27,6 +27,7 @@ use super::utils::{
 ///
 /// - Retrieve a status list identified by its list id.
 /// - Retrieve a historical status list identified by its list id and time.
+#[tracing::instrument(skip_all, fields(list_id = %list_id), err(Debug))]
 pub async fn get_status_list(
     State(state): State<AppState>,
     Path(list_id): Path<String>,

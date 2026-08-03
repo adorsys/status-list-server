@@ -28,6 +28,7 @@ impl<T> SeaOrmStore<T> {
 }
 
 impl SeaOrmStore<StatusListRecord> {
+    #[tracing::instrument(skip(self, entity), fields(db.system = "sea-orm"))]
     pub async fn insert_one(&self, entity: StatusListRecord) -> Result<(), RepositoryError> {
         let active = status_lists::ActiveModel {
             list_id: Set(entity.list_id),
@@ -43,6 +44,16 @@ impl SeaOrmStore<StatusListRecord> {
         Ok(())
     }
 
+    /// Like [`insert_one`](Self::insert_one), but the row `INSERT` and the
+    /// `status_list_history` `INSERT` covering its initial state run in one
+    /// transaction: both commit or neither does. Without this a publish whose
+    /// snapshot insert fails leaves a list with no snapshot covering it, and —
+    /// unlike an update — no later write repairs that hole.
+    ///
+    /// A duplicate `list_id` is still reported as
+    /// [`RepositoryError::DuplicateEntry`] so the publish conflict keeps mapping
+    /// to 409 rather than 500.
+    #[tracing::instrument(skip(self, entity, snapshot))]
     pub async fn insert_one_with_snapshot(
         &self,
         entity: StatusListRecord,
@@ -104,6 +115,7 @@ impl SeaOrmStore<StatusListRecord> {
             .map_err(|e| RepositoryError::FindError(e.to_string()))
     }
 
+    #[tracing::instrument(skip(self), fields(issuer))]
     pub async fn find_all_by(
         &self,
         issuer: &str,
@@ -116,6 +128,28 @@ impl SeaOrmStore<StatusListRecord> {
             .map_err(|e| RepositoryError::FindError(e.to_string()))
     }
 
+    /// Optimistic-concurrency update guarded on `updated_at`:
+    /// `UPDATE ... WHERE list_id = ? AND updated_at = ?`. `Ok(false)` means the
+    /// guard did not match — a racing writer advanced the stamp, or the row is
+    /// gone — so a lost update was prevented.
+    ///
+    /// Uses `rows_affected` rather than `SELECT ... FOR UPDATE` because its
+    /// semantics are identical across all three sea-orm backends (#143).
+    ///
+    /// `rows_affected` is used deliberately: its semantics are identical across
+    /// the Postgres/MySQL/SQLite sea-orm backends, unlike `SELECT ... FOR UPDATE`
+    /// row locking (see #143).
+    ///
+    /// # Caller contract
+    ///
+    /// `entity.updated_at` MUST be strictly greater than `expected_updated_at`.
+    /// The guard only prevents a lost update if the write *advances* the stamp:
+    /// with a non-advancing value (`new == expected`) two same-second writers
+    /// would both match `WHERE updated_at = expected` and both succeed, silently
+    /// losing a flip. This invariant is enforced below rather than trusted, so a
+    /// future caller that forgets to advance the stamp fails loudly instead of
+    /// reintroducing the race.
+    #[tracing::instrument(skip(self, entity), fields(db.system = "sea-orm"))]
     pub async fn update_one(
         &self,
         list_id: &str,
@@ -149,6 +183,22 @@ impl SeaOrmStore<StatusListRecord> {
         Ok(result.rows_affected > 0)
     }
 
+    /// Like [`update_one`](Self::update_one), but the guarded `UPDATE` and the
+    /// `status_list_history` `INSERT` run in one transaction: both commit or
+    /// neither does. This closes the split the plain `update_one` leaves open,
+    /// where the row changes but a failing snapshot insert leaves nothing
+    /// recording it. Transaction semantics are portable across all three
+    /// sea-orm backends (#143). Same `false`-on-guard-miss and
+    /// strictly-advancing-stamp contract as `update_one`.
+    ///
+    /// Concurrency cost: unlike `update_one`, the exclusive row lock taken by
+    /// the `UPDATE` is held until `COMMIT`, spanning the snapshot `INSERT`'s
+    /// round trip. A racing writer guarded on the same stamp therefore *blocks*
+    /// on that lock rather than immediately reading `rows_affected == 0`; it
+    /// still resolves to `false` once the winner commits, so the outcome is
+    /// unchanged, but a conflict now costs a lock wait instead of failing fast.
+    /// Callers that treat conflicts as cheap should account for that.
+    #[tracing::instrument(skip(self, entity, snapshot), fields(db.system = "sea-orm"))]
     pub async fn update_one_with_snapshot(
         &self,
         list_id: &str,
@@ -226,6 +276,7 @@ impl SeaOrmStore<StatusListRecord> {
         Ok(result.rows_affected > 0)
     }
 
+    #[tracing::instrument(skip(self), fields(db.system = "sea-orm"))]
     pub async fn find_by_issuer(
         &self,
         issuer: &str,
@@ -237,6 +288,7 @@ impl SeaOrmStore<StatusListRecord> {
             .map_err(|e| RepositoryError::FindError(e.to_string()))
     }
 
+    #[tracing::instrument(skip(self), fields(db.system = "sea-orm"))]
     pub async fn find_all(&self) -> Result<Vec<StatusListRecord>, RepositoryError> {
         status_lists::Entity::find()
             .all(&*self.db)
@@ -244,6 +296,7 @@ impl SeaOrmStore<StatusListRecord> {
             .map_err(|e| RepositoryError::FindError(e.to_string()))
     }
 
+    #[tracing::instrument(skip(self), fields(db.system = "sea-orm"))]
     pub async fn find_all_status_list_uris(&self) -> Result<Vec<String>, RepositoryError> {
         status_lists::Entity::find()
             .select_only()
@@ -258,6 +311,7 @@ impl SeaOrmStore<StatusListRecord> {
 }
 
 impl SeaOrmStore<StatusListHistoryRecord> {
+    #[tracing::instrument(skip(self, entity), fields(db.system = "sea-orm"))]
     pub async fn insert_one(&self, entity: StatusListHistoryRecord) -> Result<(), RepositoryError> {
         let active: status_list_history::ActiveModel = entity.into();
         status_list_history::Entity::insert(active)
@@ -267,6 +321,18 @@ impl SeaOrmStore<StatusListHistoryRecord> {
         Ok(())
     }
 
+    /// Finds the snapshot whose half-open validity interval contains `time`.
+    /// Using `iat <= time < exp` ensures the token returned to a client passes
+    /// the draft-21 §8.4 `iat`/`exp` validation rule.
+    ///
+    /// Intervals intentionally overlap: each update writes a fresh snapshot with
+    /// `exp = iat + token_exp_secs` while the superseded snapshot keeps its
+    /// original (later) `exp`, so both can match a `time` in the overlap. That is
+    /// not an inconsistency — `ORDER BY iat DESC LIMIT 1` deterministically
+    /// returns the newest snapshot in effect at `time`, which is the correct
+    /// answer for "what was the status then". The memory adapter mirrors this via
+    /// `max_by_key(iat)`.
+    #[tracing::instrument(skip(self), fields(db.system = "sea-orm"))]
     pub async fn find_valid_at(
         &self,
         list_id: &str,
@@ -297,6 +363,7 @@ impl SeaOrmStore<StatusListHistoryRecord> {
     /// some expired snapshots may be deleted while others remain. This is
     /// acceptable for a cleanup operation; subsequent runs will clean up
     /// any remaining rows.
+    #[tracing::instrument(skip(self), fields(db.system = "sea-orm"))]
     pub async fn delete_older_than(&self, cutoff: i64) -> Result<u64, RepositoryError> {
         const BATCH_SIZE: u64 = 500;
         let mut total_deleted: u64 = 0;
