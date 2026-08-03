@@ -473,7 +473,6 @@ pub(crate) mod status_list_history {
     }
 }
 
-
 /// Migration to add an index on `exp` for the retention sweep query.
 pub(crate) mod status_list_history_exp_index {
     use super::*;
