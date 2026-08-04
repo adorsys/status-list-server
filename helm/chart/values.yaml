@@ -98,8 +98,15 @@ statuslist:
     APP_LIMITS__MAX_STATUS_INDEX: "100000"
     APP_LIMITS__MAX_STATUSES_PER_REQUEST: "5000"
     APP_LIMITS__MAX_SERIALIZED_LIST_SIZE: "1048576"
-    # Telemetry / OpenTelemetry
-    APP_TELEMETRY__ENVIRONMENT: "production"
+# Telemetry / OpenTelemetry
+     APP_TELEMETRY__ENVIRONMENT: "production"
+     # NOTE: The deployed image was built from an older source version that included
+     # OpenTelemetry (opentelemetry_sdk). Since the telemetry endpoint (localhost:4317)
+     # is not actually running in this deployment (no OTEL collector is deployed), these
+     # errors would flood the logs whenever telemetry is enabled.
+     # Set to false until the image is rebuilt from the current source (no telemetry).
+     APP_TELEMETRY__ENABLED: "false"
+     APP_TELEMETRY__OTLP_ENDPOINT: "http://localhost:4317"
     APP_TELEMETRY__SAMPLER_RATIO: "1.0"
   livenessProbe:
     httpGet:
@@ -184,6 +191,19 @@ secretStore:
   enabled: true
   aws:
     region: eu-central-1
+
+# ServiceAccount used by the status-list-server pods. On EKS, annotate this
+# ServiceAccount with an IRSA role ARN (eks.amazonaws.com/role-arn) so the AWS
+# SDK inside the app can authenticate via the default credential chain
+# (WebIdentityToken) without any mounted static credentials. The IAM role
+# must grant access to Secrets Manager (for the ACME DNS/cert secrets it
+# manages at runtime) and S3 (APP_AWS__S3_BUCKET), scoped to this workload
+# only.
+serviceAccount:
+  create: true
+  name: ""
+  annotations:
+    eks.amazonaws.com/role-arn: "arn:aws:iam::982081049921:role/statuslist-app-role"
 
 redis-ha:
   enabled: true
