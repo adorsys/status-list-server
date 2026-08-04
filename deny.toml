@@ -20,7 +20,9 @@ unmaintained = "workspace"
 ignore = [
   # Present in rsa crate. As there is currently no available fix for this vulnerability,
   # this change temporarily ignores the advisory to allow CI/CD pipelines to pass
-  "RUSTSEC-2023-0071"
+  "RUSTSEC-2023-0071",
+  # Transitive dependency rkyv 0.7.46 via rust_decimal/sea-orm has no 0.7 fix (fix is 0.8+ breaking change)
+  "RUSTSEC-2026-0235"
 ]
 
 [bans]

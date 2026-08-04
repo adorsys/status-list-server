@@ -251,6 +251,21 @@ opentelemetry-collector:
   mode: deployment
   image:
     repository: otel/opentelemetry-collector-contrib
+  podSecurityContext:
+    runAsNonRoot: true
+    runAsUser: 10001
+    runAsGroup: 10001
+    fsGroup: 10001
+    seccompProfile:
+      type: RuntimeDefault
+  securityContext:
+    readOnlyRootFilesystem: true
+    allowPrivilegeEscalation: false
+    capabilities:
+      drop:
+        - ALL
+    seccompProfile:
+      type: RuntimeDefault
   resources:
     requests:
       memory: "128Mi"
@@ -263,6 +278,11 @@ opentelemetry-collector:
       enabled: true
     otlp-http:
       enabled: true
+    healthcheck:
+      enabled: true
+      containerPort: 13133
+      servicePort: 13133
+      protocol: TCP
     jaeger-compact:
       enabled: false
     jaeger-thrift:
