@@ -7,7 +7,7 @@ use status_list_server::cert_manager::setup_cert_renewal_scheduler;
 use status_list_server::setup::build_state;
 #[cfg(feature = "acme")]
 use status_list_server::setup::build_state_with_cert_manager;
-use status_list_server::setup::setup_history_cleanup_scheduler;
+use status_list_server::setup::setup_snapshot_cleanup_scheduler;
 use status_list_server::telemetry::init_telemetry;
 use status_list_server::{config::Config as AppConfig, startup::HttpServer};
 #[cfg(not(target_env = "msvc"))]
@@ -55,9 +55,9 @@ async fn main() -> Result<()> {
     .await?;
 
     // Setup historical snapshot cleanup scheduler (runs daily at midnight UTC)
-    // This deletes snapshots older than history_retention_secs to prevent
+    // This deletes snapshots older than snapshot_retention_secs to prevent
     // unbounded database growth and mitigate privacy risks (draft-21 §12.7)
-    setup_history_cleanup_scheduler(app_state.clone(), "0 0 0 * * *").await?;
+    setup_snapshot_cleanup_scheduler(app_state.clone(), "0 0 0 * * *").await?;
 
     let http_server = HttpServer::new(&config, app_state, prometheus_registry).await?;
 

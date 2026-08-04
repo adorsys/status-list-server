@@ -15,7 +15,7 @@ use async_trait::async_trait;
 
 use crate::domain::models::credential::{Credential, CredentialError, Issuer, PublicJwk};
 use crate::domain::models::status_list::{StatusListError, StatusListRecord, StatusListSnapshot};
-use crate::domain::ports::{CredentialRepo, StatusListHistoryRepo, StatusListRepo};
+use crate::domain::ports::{CredentialRepo, StatusListRepo, StatusListSnapshotRepo};
 
 /// SQL relational adapter implementing `StatusListRepo`.
 #[derive(Clone)]
@@ -41,13 +41,13 @@ impl SqlCredentialRepo {
     }
 }
 
-/// SQL relational adapter implementing `StatusListHistoryRepo`.
+/// SQL relational adapter implementing `StatusListSnapshotRepo`.
 #[derive(Clone)]
-pub struct SqlStatusListHistoryRepo {
+pub struct SqlStatusListSnapshotRepo {
     store: SeaOrmStore<models::StatusListHistoryRecord>,
 }
 
-impl SqlStatusListHistoryRepo {
+impl SqlStatusListSnapshotRepo {
     pub fn new(store: SeaOrmStore<models::StatusListHistoryRecord>) -> Self {
         Self { store }
     }
@@ -141,7 +141,7 @@ impl StatusListRepo for SqlStatusListRepo {
 }
 
 #[async_trait]
-impl StatusListHistoryRepo for SqlStatusListHistoryRepo {
+impl StatusListSnapshotRepo for SqlStatusListSnapshotRepo {
     async fn insert(&self, record: StatusListSnapshot) -> Result<(), StatusListError> {
         self.store
             .insert_one(record.into())

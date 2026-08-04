@@ -161,7 +161,7 @@ async fn handle_historical_request(
         now - time
     );
 
-    let snapshot = state.service.get_historical_snapshot(list_id, time).await?;
+    let snapshot = state.service.get_snapshot_at(list_id, time).await?;
 
     let etag = generate_historical_etag(&snapshot);
     let last_modified = format_http_date(snapshot.iat);
