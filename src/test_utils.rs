@@ -2,7 +2,7 @@ use crate::domain::ports::{CredentialRepo, StatusListRepo, StatusListSnapshotRep
 use crate::domain::service::Service;
 use crate::outbound::cache::MokaStatusListCache;
 #[cfg(feature = "memory")]
-use crate::outbound::memory::{MemoryCredentials, MemoryStatusListHistory, MemoryStatusLists};
+use crate::outbound::memory::{MemoryCredentials, MemoryStatusListSnapshotRepo, MemoryStatusLists};
 #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mysql"))]
 use crate::outbound::sql::{
     SeaOrmStore, SqlCredentialRepo, SqlStatusListRepo, SqlStatusListSnapshotRepo,
@@ -123,7 +123,7 @@ async fn build_test_app_state(
         status_lists,
         credentials,
         status_list_cache,
-        Some(status_list_snapshot),
+        Some(status_list_history),
         cert_provider,
     ));
 
