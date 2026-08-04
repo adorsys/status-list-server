@@ -229,8 +229,9 @@ impl Service {
         self.status_list_repo.list_uris().await
     }
 
-    /// Retrieve a historical status list snapshot active at a specific Unix timestamp.
-    pub async fn get_historical_snapshot(
+    /// Retrieve the snapshot that was active at the given Unix timestamp
+    /// (historical resolution per draft-21 §8.4).
+    pub async fn get_snapshot_at(
         &self,
         list_id: &str,
         time: i64,
@@ -243,8 +244,8 @@ impl Service {
             .ok_or(StatusListError::HistoricalNotFound)
     }
 
-    /// Purge historical snapshots older than `cutoff` timestamp.
-    pub async fn cleanup_historical_snapshots(&self, cutoff: i64) -> Result<u64, StatusListError> {
+    /// Purge snapshots older than `cutoff` timestamp.
+    pub async fn cleanup_snapshots(&self, cutoff: i64) -> Result<u64, StatusListError> {
         let Some(snapshot_repo) = &self.snapshot_repo else {
             return Ok(0);
         };

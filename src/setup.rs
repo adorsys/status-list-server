@@ -389,7 +389,7 @@ pub async fn setup_snapshot_cleanup_scheduler(
 
                 match app_state
                     .service
-                    .cleanup_historical_snapshots(cutoff)
+                    .cleanup_snapshots(cutoff)
                     .await
                 {
                     Ok(deleted) => {

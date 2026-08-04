@@ -551,14 +551,19 @@ pub struct CacheConfig {
 pub struct StatusListConfig {
     pub token_exp_secs: u64,
     pub token_ttl_secs: u64,
-    /// Retention period for historical status list snapshots in seconds.
+    /// Retention period for status list snapshots in seconds.
     /// Snapshots older than this will be deleted by a scheduled cleanup task.
     /// Default is 90 days (7776000 seconds).
     ///
-    /// **Privacy note:** Set to 0 to disable historical snapshots entirely.
+    /// **Privacy note:** Set to 0 to disable snapshots entirely.
     /// This prevents unbounded database growth and mitigates timing leak
     /// risks described in draft-21 §12.7. When disabled, historical resolution
     /// via `?time=` query parameter will not be available.
+    ///
+    /// **Deprecation:** The old name `history_retention_secs`
+    /// (`APP_STATUS_LIST__HISTORY_RETENTION_SECS`) is accepted for backward
+    /// compatibility but will be removed in a future release. Use
+    /// `snapshot_retention_secs` (`APP_STATUS_LIST__SNAPSHOT_RETENTION_SECS`).
     #[serde(alias = "history_retention_secs")]
     pub snapshot_retention_secs: u64,
 }
