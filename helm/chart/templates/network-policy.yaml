@@ -21,7 +21,8 @@ spec:
       from:
         {{- toYaml . | nindent 8 }}
       {{- end }}
-    {{- if .Values.otelCollector.enabled }}
+    {{- $otel := index .Values "opentelemetry-collector" | default dict }}
+    {{- if $otel.enabled }}
     - ports:
         - port: 4317
           protocol: TCP
@@ -47,9 +48,11 @@ spec:
           protocol: TCP
         - port: 53
           protocol: UDP
+    {{- if $otel.enabled }}
     - ports:
         - port: 4317
           protocol: TCP
         - port: 4318
           protocol: TCP
+    {{- end }}
 {{- end }}
