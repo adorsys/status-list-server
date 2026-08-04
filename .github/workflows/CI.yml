@@ -256,6 +256,7 @@ jobs:
       - name: Build Helm dependencies
         run: |
           helm repo add dandydeveloper https://dandydeveloper.github.io/charts
+          helm repo add open-telemetry https://open-telemetry.github.io/opentelemetry-helm-charts
           helm dependency build helm/chart
 
       - name: Render Helm template
@@ -286,6 +287,7 @@ jobs:
       - name: Build Helm dependencies
         run: |
           helm repo add dandydeveloper https://dandydeveloper.github.io/charts
+          helm repo add open-telemetry https://open-telemetry.github.io/opentelemetry-helm-charts
           helm dependency build helm/chart
 
       - name: Render Helm template
