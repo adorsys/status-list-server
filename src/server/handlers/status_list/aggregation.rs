@@ -8,6 +8,7 @@ pub(super) struct AggregationResponse {
     pub(super) status_lists: Vec<String>,
 }
 
+#[tracing::instrument(skip_all, err(Debug))]
 pub async fn get_aggregation(State(state): State<AppState>) -> Result<impl IntoResponse, ApiError> {
     let status_lists = state.service.list_uris().await?;
 

@@ -13,4 +13,4 @@ pub mod startup;
 pub use utils::bits_validation;
 #[cfg(feature = "acme")]
 pub use utils::cert_manager;
-pub use utils::keygen;
+pub use utils::{keygen, telemetry};

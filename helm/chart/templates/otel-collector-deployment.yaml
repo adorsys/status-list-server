@@ -4,23 +4,39 @@ kind: Deployment
 metadata:
   name: {{ include "status-list-server-chart.fullname" . }}-otel-collector
   labels:
-    {{- include "status-list-server-chart.labels" . | nindent 4 }}
-    app.kubernetes.io/component: otel-collector
+    {{- include "status-list-server-chart.otelCollectorLabels" . | nindent 4 }}
   namespace: {{ .Release.Namespace }}
 spec:
   replicas: {{ .Values.otelCollector.standalone.replicaCount }}
   selector:
     matchLabels:
-      app.kubernetes.io/component: otel-collector
-      {{- include "status-list-server-chart.selectorLabels" . | nindent 6 }}
+      {{- include "status-list-server-chart.otelCollectorSelectorLabels" . | nindent 6 }}
   template:
     metadata:
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8889"
+        prometheus.io/path: "/metrics"
       labels:
-        app.kubernetes.io/component: otel-collector
-        {{- include "status-list-server-chart.labels" . | nindent 8 }}
+        {{- include "status-list-server-chart.otelCollectorLabels" . | nindent 8 }}
     spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
       containers:
         - name: otel-collector
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+            seccompProfile:
+              type: RuntimeDefault
           image: {{ .Values.otelCollector.standalone.image.repository }}:{{ .Values.otelCollector.standalone.image.tag }}
           args: ["--config", "/etc/otelcol/config.yaml"]
           ports:
@@ -29,6 +45,9 @@ spec:
               protocol: TCP
             - name: otlp-http
               containerPort: 4318
+              protocol: TCP
+            - name: metrics
+              containerPort: 8889
               protocol: TCP
           volumeMounts:
             - name: config
@@ -48,8 +67,7 @@ kind: Service
 metadata:
   name: {{ include "status-list-server-chart.fullname" . }}-otel-collector
   labels:
-    {{- include "status-list-server-chart.labels" . | nindent 4 }}
-    app.kubernetes.io/component: otel-collector
+    {{- include "status-list-server-chart.otelCollectorLabels" . | nindent 4 }}
   namespace: {{ .Release.Namespace }}
 spec:
   type: {{ .Values.otelCollector.standalone.service.type }}
@@ -62,7 +80,10 @@ spec:
       port: {{ .Values.otelCollector.standalone.service.httpPort }}
       targetPort: 4318
       protocol: TCP
+    - name: metrics
+      port: 8889
+      targetPort: 8889
+      protocol: TCP
   selector:
-    app.kubernetes.io/component: otel-collector
-    {{- include "status-list-server-chart.selectorLabels" . | nindent 4 }}
+    {{- include "status-list-server-chart.otelCollectorSelectorLabels" . | nindent 4 }}
 {{- end }}

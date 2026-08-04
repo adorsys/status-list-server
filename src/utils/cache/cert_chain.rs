@@ -1,14 +1,18 @@
 use std::{sync::Arc, time::Duration};
 
 use moka::future::Cache;
+use opentelemetry::{
+    metrics::Counter,
+    {KeyValue, global},
+};
 
 pub(crate) type CertificateChain = Arc<[String]>;
 
 // One CertManager serves a single TLD+1, so only one chain is ever cached.
 const CACHE_CAPACITY: u64 = 1;
-const HIT_METRIC: &str = "certificate_chain_cache_hits_total";
-const MISS_METRIC: &str = "certificate_chain_cache_misses_total";
-const REPLACEMENT_METRIC: &str = "certificate_chain_cache_replacements_total";
+const HIT_METRIC: &str = "certificate_chain_cache_hits";
+const MISS_METRIC: &str = "certificate_chain_cache_misses";
+const REPLACEMENT_METRIC: &str = "certificate_chain_cache_replacements";
 
 /// An in-memory cache of type [`CertificateChain`] keyed by the cert storage
 /// key (`cert_key`). One [`CertManager`](crate::cert_manager::CertManager)
@@ -27,9 +31,12 @@ const REPLACEMENT_METRIC: &str = "certificate_chain_cache_replacements_total";
 #[derive(Clone)]
 pub(crate) struct CertChainCache {
     inner: Cache<String, CertificateChain>,
-    /// Domain label attached to every emitted counter.  Empty string means
+    /// Domain label attached to every emitted counter. Empty string means
     /// "no label".
     domain_label: String,
+    hit_counter: Counter<u64>,
+    miss_counter: Counter<u64>,
+    replacement_counter: Counter<u64>,
 }
 
 impl CertChainCache {
@@ -39,28 +46,25 @@ impl CertChainCache {
     /// counter so multi-domain deployments don't aggregate blindly. Pass an
     /// empty string to opt out of the label entirely.
     ///
-    /// Counter descriptions are registered eagerly so they appear in
-    /// Prometheus immediately, but the counter handles themselves are resolved
-    /// lazily on each `get`/`replace` call. This makes the cache safe to
-    /// construct before the global metrics recorder is installed.
+    /// Counters are created eagerly from the OpenTelemetry global meter
+    /// provider. Telemetry initialization must install the provider before
+    /// application state constructs this cache; otherwise these handles would
+    /// remain no-op for the lifetime of the process.
     pub(crate) fn new(ttl: Duration, domain: impl AsRef<str>) -> Self {
-        // Describe counters — these are idempotent and safe to call before
-        // a recorder is installed (descriptions are buffered).
-        metrics::describe_counter!(
-            HIT_METRIC,
-            metrics::Unit::Count,
-            "Certificate chain cache hits"
-        );
-        metrics::describe_counter!(
-            MISS_METRIC,
-            metrics::Unit::Count,
-            "Certificate chain cache misses"
-        );
-        metrics::describe_counter!(
-            REPLACEMENT_METRIC,
-            metrics::Unit::Count,
-            "Certificate chain cache replacements (post-provisioning)"
-        );
+        let meter = global::meter("status-list-server");
+
+        let hit_counter = meter
+            .u64_counter(HIT_METRIC)
+            .with_description("Certificate chain cache hits")
+            .build();
+        let miss_counter = meter
+            .u64_counter(MISS_METRIC)
+            .with_description("Certificate chain cache misses")
+            .build();
+        let replacement_counter = meter
+            .u64_counter(REPLACEMENT_METRIC)
+            .with_description("Certificate chain cache replacements (post-provisioning)")
+            .build();
 
         let builder = Cache::builder().max_capacity(CACHE_CAPACITY);
         let inner = if ttl.is_zero() {
@@ -75,24 +79,26 @@ impl CertChainCache {
         Self {
             inner,
             domain_label: domain.as_ref().to_string(),
+            hit_counter,
+            miss_counter,
+            replacement_counter,
         }
     }
 
     /// Zero-initialise all counters so they appear in Prometheus scrapes
-    /// before first use. **Must** be called after the global metrics recorder
-    /// has been installed.
+    /// before first use.
     pub(crate) fn init_counters(&self) {
-        self.hit_counter().increment(0);
-        self.miss_counter().increment(0);
-        self.replacement_counter().increment(0);
+        self.hit_counter.add(0, &self.attributes());
+        self.miss_counter.add(0, &self.attributes());
+        self.replacement_counter.add(0, &self.attributes());
     }
 
     pub(crate) async fn get(&self, key: &str) -> Option<CertificateChain> {
         let cached = self.inner.get(key).await;
         if cached.is_some() {
-            self.hit_counter().increment(1);
+            self.hit_counter.add(1, &self.attributes());
         } else {
-            self.miss_counter().increment(1);
+            self.miss_counter.add(1, &self.attributes());
         }
         cached
     }
@@ -106,7 +112,7 @@ impl CertChainCache {
     /// Used after a new certificate is provisioned so the next read returns
     /// the fresh chain without an extra storage load and parse.
     pub(crate) async fn replace(&self, key: String, value: CertificateChain) {
-        self.replacement_counter().increment(1);
+        self.replacement_counter.add(1, &self.attributes());
         self.inner.insert(key, value).await;
     }
 
@@ -115,29 +121,11 @@ impl CertChainCache {
         self.inner.invalidate(key).await;
     }
 
-    // -- private helpers for lazy counter resolution --------------------------
-
-    fn hit_counter(&self) -> metrics::Counter {
+    fn attributes(&self) -> Vec<KeyValue> {
         if self.domain_label.is_empty() {
-            metrics::counter!(HIT_METRIC)
+            vec![]
         } else {
-            metrics::counter!(HIT_METRIC, "domain" => self.domain_label.clone())
-        }
-    }
-
-    fn miss_counter(&self) -> metrics::Counter {
-        if self.domain_label.is_empty() {
-            metrics::counter!(MISS_METRIC)
-        } else {
-            metrics::counter!(MISS_METRIC, "domain" => self.domain_label.clone())
-        }
-    }
-
-    fn replacement_counter(&self) -> metrics::Counter {
-        if self.domain_label.is_empty() {
-            metrics::counter!(REPLACEMENT_METRIC)
-        } else {
-            metrics::counter!(REPLACEMENT_METRIC, "domain" => self.domain_label.clone())
+            vec![KeyValue::new("domain", self.domain_label.clone())]
         }
     }
 }
@@ -145,56 +133,62 @@ impl CertChainCache {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{
+        config::{TelemetryConfig, TelemetryEnvironment},
+        utils::metrics::setup_metrics,
+    };
+    use opentelemetry_sdk::Resource;
+    use prometheus::{Encoder, Registry, TextEncoder};
 
-    /// Mimics production ordering: the cache is constructed **before** the
-    /// metrics recorder is installed. Counters must still land because they
-    /// are resolved lazily on each `get`/`replace` call.
-    #[test]
-    fn test_counters_work_when_cache_constructed_before_recorder() {
-        use metrics_util::debugging::{DebugValue, DebuggingRecorder};
+    #[tokio::test]
+    async fn test_counters_are_exported_to_prometheus() {
+        let registry = Registry::new();
+        let config = TelemetryConfig {
+            environment: TelemetryEnvironment::Development,
+            otlp_endpoint: "http://localhost:4317".to_string(),
+            sampler_ratio: 1.0,
+            enabled: false,
+        };
+        let _meter_provider = setup_metrics(
+            &registry,
+            &config,
+            Resource::builder()
+                .with_service_name("status-list-server-test")
+                .build(),
+        )
+        .expect("metrics setup");
 
-        // 1. Build the cache WITHOUT a recorder — mirrors build_state().
         let cache = CertChainCache::new(Duration::ZERO, "example.com");
+        cache.init_counters();
 
-        // 2. Install a recorder — mirrors attach_metrics() in HttpServer::new().
-        let recorder = DebuggingRecorder::new();
-        let snapshotter = recorder.snapshotter();
+        let chain: CertificateChain = Arc::from(vec!["a".to_string()]);
+        cache.insert("k".to_string(), chain.clone()).await;
 
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("tokio runtime");
+        // hit
+        assert!(cache.get("k").await.is_some());
+        // miss
+        assert!(cache.get("missing").await.is_none());
+        // replacement
+        let new_chain: CertificateChain = Arc::from(vec!["b".to_string()]);
+        cache.replace("k".to_string(), new_chain).await;
 
-        metrics::with_local_recorder(&recorder, || {
-            rt.block_on(async {
-                let chain: CertificateChain = Arc::from(vec!["a".to_string()]);
-                cache.insert("k".to_string(), chain.clone()).await;
+        assert_counter_value(&registry, HIT_METRIC, 1.0);
+        assert_counter_value(&registry, MISS_METRIC, 1.0);
+        assert_counter_value(&registry, REPLACEMENT_METRIC, 1.0);
+    }
 
-                // hit
-                assert!(cache.get("k").await.is_some());
-                // miss
-                assert!(cache.get("missing").await.is_none());
-                // replacement
-                let new_chain: CertificateChain = Arc::from(vec!["b".to_string()]);
-                cache.replace("k".to_string(), new_chain).await;
-            });
-        });
-
-        let snapshot = snapshotter.snapshot().into_hashmap();
-        let mut hits = 0u64;
-        let mut misses = 0u64;
-        let mut replacements = 0u64;
-        for (composite_key, (_, _, debug_value)) in &snapshot {
-            let name = composite_key.key().name();
-            match (name, debug_value) {
-                (HIT_METRIC, DebugValue::Counter(c)) => hits = *c,
-                (MISS_METRIC, DebugValue::Counter(c)) => misses = *c,
-                (REPLACEMENT_METRIC, DebugValue::Counter(c)) => replacements = *c,
-                _ => {}
-            }
-        }
-        assert_eq!(hits, 1, "exactly one hit expected");
-        assert_eq!(misses, 1, "exactly one miss expected");
-        assert_eq!(replacements, 1, "exactly one replacement expected");
+    fn assert_counter_value(registry: &Registry, metric_name: &str, expected: f64) {
+        let mut buffer = Vec::new();
+        TextEncoder::new()
+            .encode(&registry.gather(), &mut buffer)
+            .expect("encode metrics");
+        let body = String::from_utf8(buffer).expect("metrics are valid UTF-8");
+        let sample = format!(
+            r#"{metric_name}_total{{domain="example.com",otel_scope_name="status-list-server"}} {expected}"#
+        );
+        assert!(
+            body.contains(&sample),
+            "missing sample {sample}; body:\n{body}"
+        );
     }
 }

@@ -15,6 +15,7 @@ use super::utils::request::StatusesRequest;
 /// Update statuses in a status list.
 ///
 /// Handle PATCH /status-lists/{list_id}/statuses request.
+#[tracing::instrument(skip_all, fields(list_id = %list_id, issuer = %issuer), err(Debug))]
 pub async fn update_status(
     State(appstate): State<AppState>,
     Extension(issuer): Extension<String>,

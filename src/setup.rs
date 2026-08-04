@@ -73,6 +73,7 @@ use crate::outbound::redis::Redis;
 #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mysql"))]
 use crate::outbound::sql::{
     Migrator, SeaOrmStore, SqlCredentialRepo, SqlStatusListRepo, SqlStatusListSnapshotRepo,
+    verify_innodb_engines,
 };
 use crate::server::AppState;
 
@@ -170,6 +171,12 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
             Migrator::up(&db, None)
                 .await
                 .wrap_err("Failed to run database migrations")?;
+
+            verify_innodb_engines(&db).await.wrap_err(
+                "Startup aborted: one or more tables are not using the InnoDB storage engine. \
+                     See the logged error(s) above for the table name(s) and the ALTER TABLE \
+                     runbook command to fix the issue.",
+            )?;
 
             let db_clone = Arc::new(db);
             (
