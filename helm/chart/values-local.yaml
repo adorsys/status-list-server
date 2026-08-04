@@ -100,3 +100,7 @@ redis-ha:
       type: NodePort
       annotations: {}
       nodePort: 30679
+
+opentelemetry-collector:
+  enabled: false
+

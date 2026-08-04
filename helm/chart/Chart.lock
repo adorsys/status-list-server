@@ -5,5 +5,8 @@ dependencies:
 - name: redis-ha
   repository: https://dandydeveloper.github.io/charts
   version: 4.35.0
-digest: sha256:f1f581f7aee3669dcc25c5b46c7b4d1204621a53635973d48eb59b5266d00549
-generated: "2026-02-17T13:47:10.337741571+01:00"
+- name: opentelemetry-collector
+  repository: https://open-telemetry.github.io/opentelemetry-helm-charts
+  version: 0.166.0
+digest: sha256:b64caba85813cfcab2bbf41b73839332979805815f0a8a78b38240e4790c546f
+generated: "2026-08-04T09:59:49.45571+01:00"

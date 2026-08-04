@@ -246,38 +246,66 @@ redis-ha:
 redis:
   enabled: true
 
-otelCollector:
+opentelemetry-collector:
   enabled: true
-  sidecar:
-    enabled: false
-    image:
-      repository: otel/opentelemetry-collector-contrib
-      tag: "0.156.0"
-    resources:
-      requests:
-        memory: "64Mi"
-        cpu: "50m"
-      limits:
-        memory: "128Mi"
-        cpu: "100m"
-  standalone:
-    enabled: true
-    replicaCount: 1
-    image:
-      repository: otel/opentelemetry-collector-contrib
-      tag: "0.156.0"
-    service:
-      type: ClusterIP
-      grpcPort: 4317
-      httpPort: 4318
-    resources:
-      requests:
-        memory: "128Mi"
-        cpu: "100m"
-      limits:
-        memory: "256Mi"
-        cpu: "200m"
+  mode: deployment
+  image:
+    repository: otel/opentelemetry-collector-contrib
+  resources:
+    requests:
+      memory: "128Mi"
+      cpu: "100m"
+    limits:
+      memory: "256Mi"
+      cpu: "200m"
+  ports:
+    otlp:
+      enabled: true
+    otlp-http:
+      enabled: true
+    jaeger-compact:
+      enabled: false
+    jaeger-thrift:
+      enabled: false
+    jaeger-grpc:
+      enabled: false
+    zipkin:
+      enabled: false
+    metrics:
+      enabled: true
   config:
+    receivers:
+      jaeger: null
+      zipkin: null
+      prometheus: null
+      otlp:
+        protocols:
+          grpc:
+            endpoint: ${env:MY_POD_IP}:4317
+          http:
+            endpoint: ${env:MY_POD_IP}:4318
+    processors:
+      memory_limiter:
+        check_interval: 1s
+        limit_percentage: 75
+        spike_limit_percentage: 15
+      batch:
+        timeout: 5s
+        send_batch_size: 1024
     exporters:
-      otlpEndpoint: ""
-      otlpTlsInsecure: true
+      debug:
+        verbosity: basic
+    service:
+      pipelines:
+        traces:
+          receivers: [otlp]
+          processors: [memory_limiter, batch]
+          exporters: [debug]
+        metrics:
+          receivers: [otlp]
+          processors: [memory_limiter, batch]
+          exporters: [debug]
+        logs:
+          receivers: [otlp]
+          processors: [memory_limiter, batch]
+          exporters: [debug]
