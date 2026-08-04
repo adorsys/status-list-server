@@ -10,12 +10,7 @@ use aws_config::{BehaviorVersion, Region};
 ))]
 use color_eyre::eyre::Context;
 use color_eyre::eyre::Result as EyeResult;
-#[cfg(any(
-    feature = "acme",
-    feature = "sqlite",
-    feature = "postgres",
-    feature = "mysql"
-))]
+#[cfg(feature = "acme")]
 use color_eyre::eyre::eyre;
 #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mysql"))]
 use sea_orm::ConnectOptions;

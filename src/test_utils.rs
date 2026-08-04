@@ -41,12 +41,12 @@ impl Storage for MockStorage {
     }
 }
 
-#[cfg(any(feature = "sqlite", feature = "postgres", feature = "mysql"))]
+#[cfg(feature = "history")]
 pub(crate) async fn test_app_state(db_conn: Option<Arc<sea_orm::DatabaseConnection>>) -> AppState {
     build_test_app_state(db_conn, None, 1_048_576).await
 }
 
-#[cfg(not(any(feature = "sqlite", feature = "postgres", feature = "mysql")))]
+#[cfg(not(feature = "history"))]
 pub(crate) async fn test_app_state(_db_conn: Option<Arc<()>>) -> AppState {
     build_test_app_state(None, 1_048_576).await
 }
@@ -72,9 +72,7 @@ impl crate::domain::ports::CertificateProvider for TestCertProvider {
 }
 
 async fn build_test_app_state(
-    #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mysql"))] db_conn: Option<
-        Arc<sea_orm::DatabaseConnection>,
-    >,
+    #[cfg(feature = "history")] db_conn: Option<Arc<sea_orm::DatabaseConnection>>,
     aggregation_uri: Option<String>,
     max_serialized_list_size: usize,
 ) -> AppState {
@@ -86,7 +84,7 @@ async fn build_test_app_state(
     let memory_lists = MemoryStatusLists::default().with_snapshot(&memory_snapshot);
 
     #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mysql"))]
-    let (status_lists, credentials, status_list_snapshot): (
+    let (status_lists, credentials, status_list_history): (
         Arc<dyn StatusListRepo>,
         Arc<dyn CredentialRepo>,
         Arc<dyn StatusListSnapshotRepo>,
@@ -105,7 +103,7 @@ async fn build_test_app_state(
     };
 
     #[cfg(not(any(feature = "sqlite", feature = "postgres", feature = "mysql")))]
-    let (status_lists, credentials, status_list_snapshot): (
+    let (status_lists, credentials, status_list_history): (
         Arc<dyn StatusListRepo>,
         Arc<dyn CredentialRepo>,
         Arc<dyn StatusListSnapshotRepo>,
@@ -125,7 +123,7 @@ async fn build_test_app_state(
         status_lists,
         credentials,
         status_list_cache,
-        Some(status_list_snapshot),
+        Some(status_list_history),
         cert_provider,
     ));
 
