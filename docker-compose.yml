@@ -127,7 +127,7 @@ services:
       - status-list-network
 
   otel-collector:
-    image: otel/opentelemetry-collector-contrib:0.156.0
+    image: otel/opentelemetry-collector-contrib:0.157.0
     container_name: otel-collector
     command: ["--config", "/etc/otelcol/config.yaml"]
     volumes:
