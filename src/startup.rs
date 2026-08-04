@@ -12,6 +12,7 @@ use axum::{
 use color_eyre::eyre::{Context, eyre};
 use governor::middleware::NoOpMiddleware;
 use hyper::Method;
+use prometheus::Registry;
 use tokio::net::TcpListener;
 use tower_governor::{
     GovernorLayer,
@@ -36,7 +37,7 @@ use crate::server::{
     },
     rate_limit::AuthenticatedKeyExtractor,
 };
-use crate::utils::metrics::{metrics_handler, setup_metrics, start_metrics_collector};
+use crate::utils::metrics::metrics_handler;
 
 async fn welcome() -> impl IntoResponse {
     "Status list Server"
@@ -52,7 +53,11 @@ pub struct HttpServer {
 }
 
 impl HttpServer {
-    pub async fn new(config: &Config, state: AppState) -> color_eyre::Result<Self> {
+    pub async fn new(
+        config: &Config,
+        state: AppState,
+        prometheus_registry: Registry,
+    ) -> color_eyre::Result<Self> {
         let cors = CorsLayer::new()
             .allow_methods([
                 Method::GET,
@@ -81,14 +86,17 @@ impl HttpServer {
                     permissive_governor.clone(),
                 ),
             )
-            .layer(TraceLayer::new_for_http())
+            .layer(
+                TraceLayer::new_for_http()
+                    .make_span_with(crate::utils::telemetry::make_http_request_span),
+            )
             .layer(CatchPanicLayer::new())
             .layer(cors)
             .layer(RequestBodyLimitLayer::new(max_body_size))
             .layer(DefaultBodyLimit::disable())
             .with_state(state);
 
-        router = attach_metrics(router, config);
+        router = attach_metrics(router, config, prometheus_registry);
 
         validate_aggregation_uri(config)?;
 
@@ -106,9 +114,34 @@ impl HttpServer {
             self.router
                 .into_make_service_with_connect_info::<SocketAddr>(),
         )
+        .with_graceful_shutdown(shutdown_signal())
         .await
         .wrap_err("Failed to start HTTP server")?;
         Ok(())
+    }
+}
+
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        tokio::signal::ctrl_c()
+            .await
+            .expect("failed to install Ctrl+C handler");
+    };
+
+    #[cfg(unix)]
+    let terminate = async {
+        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .expect("failed to install SIGTERM signal handler")
+            .recv()
+            .await;
+    };
+
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+
+    tokio::select! {
+        _ = ctrl_c => {},
+        _ = terminate => {},
     }
 }
 
@@ -177,16 +210,10 @@ fn api_v1_routes(
         .merge(public_reads)
 }
 
-fn attach_metrics(router: Router, config: &Config) -> Router {
+fn attach_metrics(router: Router, config: &Config, registry: Registry) -> Router {
     if config.server.enable_metrics {
-        match setup_metrics() {
-            Ok(handle) => {
-                start_metrics_collector();
-                tracing::info!("StatusList Monitor: ENABLED (Metrics at /metrics)");
-                return router.route("/metrics", get(move || metrics_handler(handle)));
-            }
-            Err(e) => tracing::warn!("Failed to setup metrics: {e}"),
-        }
+        tracing::info!("StatusList Monitor: ENABLED (Metrics at /metrics)");
+        return router.route("/metrics", get(move || metrics_handler(registry)));
     } else {
         tracing::info!("StatusList Monitor: DISABLED");
     }

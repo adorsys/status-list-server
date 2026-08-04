@@ -6,5 +6,5 @@ pub mod cert;
 pub mod memory;
 #[cfg(feature = "redis")]
 pub mod redis;
-#[cfg(any(feature = "sqlite", feature = "postgres", feature = "mysql"))]
+#[cfg(feature = "history")]
 pub mod sql;

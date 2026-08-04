@@ -100,8 +100,6 @@ statuslist:
     APP_LIMITS__MAX_SERIALIZED_LIST_SIZE: "1048576"
     # Telemetry / OpenTelemetry
     APP_TELEMETRY__ENVIRONMENT: "production"
-    APP_TELEMETRY__OTLP_ENDPOINT: "http://localhost:4317"
-    APP_TELEMETRY__ENABLED: "true"
     APP_TELEMETRY__SAMPLER_RATIO: "1.0"
   livenessProbe:
     httpGet:
@@ -249,7 +247,7 @@ redis:
   enabled: true
 
 otelCollector:
-  enabled: false
+  enabled: true
   sidecar:
     enabled: false
     image:
@@ -263,7 +261,7 @@ otelCollector:
         memory: "128Mi"
         cpu: "100m"
   standalone:
-    enabled: false
+    enabled: true
     replicaCount: 1
     image:
       repository: otel/opentelemetry-collector-contrib
@@ -281,4 +279,5 @@ otelCollector:
         cpu: "200m"
   config:
     exporters:
-      otlpEndpoint: "jaeger-collector:4317"
+      otlpEndpoint: ""
+      otlpTlsInsecure: true
