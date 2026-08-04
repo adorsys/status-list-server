@@ -16,6 +16,7 @@ spec:
       labels:
         {{- include "status-list-server-chart.labels" . | nindent 8 }}
     spec:
+      serviceAccountName: {{ include "status-list-server-chart.serviceAccountName" . }}
       {{- with .Values.statuslist.initContainers }}
       initContainers:
         {{- range $ic := . }}
@@ -90,10 +91,6 @@ spec:
             {{- if .Values.secretStore.enabled }}
             - name: APP_AWS__REGION
               value: {{ .Values.secretStore.aws.region | quote }}
-            - name: AWS_SHARED_CREDENTIALS_FILE
-              value: /home/nobody/.aws/credentials
-            - name: AWS_CONFIG_FILE
-              value: /home/nobody/.aws/config
             {{- end }}
             - name: POSTGRES_DB
               value: {{ .Values.postgres.auth.database | quote }}
@@ -109,11 +106,6 @@ spec:
           volumeMounts:
             - name: tmp
               mountPath: /tmp
-          {{- if .Values.secretStore.enabled }}
-            - name: aws-credentials-volume
-              mountPath: /home/nobody/.aws
-              readOnly: true
-          {{- end }}
         {{- if and .Values.otelCollector.enabled .Values.otelCollector.sidecar.enabled }}
         - name: otel-collector
           image: {{ .Values.otelCollector.sidecar.image.repository }}:{{ .Values.otelCollector.sidecar.image.tag }}
@@ -137,11 +129,6 @@ spec:
       volumes:
         - name: tmp
           emptyDir: {}
-      {{- if .Values.secretStore.enabled }}
-        - name: aws-credentials-volume
-          secret:
-            secretName: aws-credentials-secret
-      {{- end }}
       {{- if and .Values.otelCollector.enabled .Values.otelCollector.sidecar.enabled }}
         - name: otel-collector-config
           configMap:

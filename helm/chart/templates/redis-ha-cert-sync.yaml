@@ -11,8 +11,16 @@ We:
   - Compare against the existing redis.pem in statuslist-haproxy-tls (if any)
   - Only apply a new secret if redis.pem has actually changed
 
-The CronJob is scheduled infrequently, because certificates change rarely and
-DNS / LB propagation is not instantaneous.
+Two workloads share the sync script (see the
+"status-list-server-chart.redisCertSyncScript" helper):
+
+  1. A post-install/post-upgrade Helm hook Job that runs the sync immediately,
+     so statuslist-haproxy-tls exists before the redis-ha-haproxy Deployment's
+     first rollout instead of waiting for the CronJob's first scheduled run
+     (which can be up to a week away on a fresh install).
+  2. A CronJob, scheduled infrequently because certificates change rarely and
+     DNS / LB propagation is not instantaneous, that keeps the secret in sync
+     whenever cert-manager rotates the wildcard certificate later on.
 */ -}}
 
 {{- $redisHA := index .Values "redis-ha" | default dict -}}
@@ -41,7 +49,10 @@ rules:
     resourceNames:
       - statuslist-tls
       - statuslist-haproxy-tls
-    verbs: ["get", "create", "update", "patch"]
+    verbs: ["get", "update", "patch"]
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["create"]
   - apiGroups: ["apps"]
     resources: ["deployments"]
     resourceNames:
@@ -64,6 +75,78 @@ subjects:
     name: redis-cert-sync-sa
     namespace: {{ .Release.Namespace }}
 ---
+# Bootstrap Job: runs on every install/upgrade so statuslist-haproxy-tls
+# exists immediately, instead of waiting for the CronJob's first scheduled
+# trigger. Helm hook weight/deletion policy ensures it runs before the rest
+# of the release (in particular before the haproxy Deployment tries to mount
+# the secret) and is cleaned up automatically after it succeeds.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: redis-cert-sync-bootstrap-{{ .Release.Revision }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "status-list-server-chart.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook-weight": "-5"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  # statuslist-tls is issued asynchronously by cert-manager via the Ingress
+  # (DNS-01 challenge), so on a brand new domain/cluster it may not exist
+  # yet when this hook runs. Retry with backoff for a while; if the
+  # certificate still isn't ready by the time retries are exhausted, the
+  # weekly redis-cert-sync CronJob (or `helm upgrade` to re-run this hook)
+  # will pick it up once cert-manager finishes issuing it.
+  backoffLimit: 10
+  template:
+    metadata:
+      labels:
+        {{- include "status-list-server-chart.labels" . | nindent 8 }}
+    spec:
+      serviceAccountName: redis-cert-sync-sa
+      restartPolicy: OnFailure
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        runAsGroup: 65534
+        fsGroup: 65534
+        seccompProfile:
+          type: RuntimeDefault
+      volumes:
+        - name: tmp
+          emptyDir: {}
+      containers:
+        - name: redis-cert-sync-bootstrap
+          image: bitnami/kubectl:latest
+          imagePullPolicy: IfNotPresent
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 100m
+              memory: 128Mi
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+          env:
+            - name: NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+          command:
+            - /bin/bash
+            - -c
+            - |
+              {{- include "status-list-server-chart.redisCertSyncScript" . | nindent 14 }}
+---
 apiVersion: batch/v1
 kind: CronJob
 metadata:
@@ -74,7 +157,9 @@ metadata:
 spec:
   # Run once per week at Sunday 00:00 UTC.
   # Certificates are long-lived and cert-manager renews well before expiry,
-  # so a weekly sync is sufficient while keeping cluster noise low.
+  # so a weekly sync is sufficient while keeping cluster noise low. The
+  # bootstrap Job above (pre-install/pre-upgrade hook) handles the initial
+  # sync so this schedule only needs to catch later certificate rotations.
   schedule: "0 0 * * 0"
   concurrencyPolicy: Forbid
   successfulJobsHistoryLimit: 2
@@ -95,9 +180,12 @@ spec:
             fsGroup: 65534
             seccompProfile:
               type: RuntimeDefault
+          volumes:
+            - name: tmp
+              emptyDir: {}
           containers:
             - name: redis-cert-sync
-              image: bitnami/kubectl:1.31
+              image: bitnami/kubectl:latest
               imagePullPolicy: IfNotPresent
               resources:
                 requests:
@@ -117,43 +205,12 @@ spec:
                   valueFrom:
                     fieldRef:
                       fieldPath: metadata.namespace
+              volumeMounts:
+                - name: tmp
+                  mountPath: /tmp
               command:
                 - /bin/bash
                 - -c
                 - |
-                  set -euo pipefail
-
-                  NS="${NAMESPACE:-{{ .Release.Namespace }}}"
-                  TMP_DIR="$(mktemp -d)"
-                  trap 'rm -rf "$TMP_DIR"' EXIT
-
-                  echo "Fetching base certificate from secret statuslist-tls in namespace ${NS}..."
-                  kubectl get secret statuslist-tls -n "${NS}" -o jsonpath='{.data.tls\.crt}' | base64 -d > "${TMP_DIR}/tls.crt"
-                  kubectl get secret statuslist-tls -n "${NS}" -o jsonpath='{.data.tls\.key}' | base64 -d > "${TMP_DIR}/tls.key"
-
-                  cat "${TMP_DIR}/tls.crt" "${TMP_DIR}/tls.key" > "${TMP_DIR}/redis.pem"
-
-                  # If the HAProxy secret exists, compare the current redis.pem with the new one.
-                  if kubectl get secret statuslist-haproxy-tls -n "${NS}" >/dev/null 2>&1; then
-                    echo "Existing statuslist-haproxy-tls secret found, comparing redis.pem..."
-                    kubectl get secret statuslist-haproxy-tls -n "${NS}" -o jsonpath='{.data.redis\.pem}' | base64 -d > "${TMP_DIR}/existing-redis.pem" || true
-
-                    if [ -s "${TMP_DIR}/existing-redis.pem" ] && cmp -s "${TMP_DIR}/redis.pem" "${TMP_DIR}/existing-redis.pem"; then
-                      echo "Redis HAProxy certificate is already up to date. No changes applied."
-                      exit 0
-                    fi
-                  else
-                    echo "statuslist-haproxy-tls secret does not exist yet. It will be created."
-                  fi
-
-                  echo "Applying updated statuslist-haproxy-tls secret..."
-                  kubectl create secret generic statuslist-haproxy-tls \
-                    -n "${NS}" \
-                    --from-file=redis.pem="${TMP_DIR}/redis.pem" \
-                    --dry-run=client -o yaml | kubectl apply -f -
-
-                  echo "Redis HAProxy TLS secret synced successfully. Restarting HAProxy deployment to pick up new certificate..."
-                  kubectl rollout restart deploy/{{ .Release.Name }}-redis-ha-haproxy -n "${NS}"
-
-                  echo "Redis HAProxy deployment restart triggered."
+                  {{- include "status-list-server-chart.redisCertSyncScript" . | nindent 18 }}
 {{- end }}

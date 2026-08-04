@@ -63,6 +63,50 @@ Create the name of the service account to use
 {{- end }}
 
 {{/*
+Shared shell script that syncs the HAProxy TLS secret (statuslist-haproxy-tls)
+from the main wildcard certificate secret (statuslist-tls). Used by both the
+post-install/post-upgrade bootstrap Job (immediate first sync) and the
+periodic CronJob (renewal after cert-manager rotates the certificate).
+*/}}
+{{- define "status-list-server-chart.redisCertSyncScript" -}}
+set -euo pipefail
+
+NS="${NAMESPACE:-{{ .Release.Namespace }}}"
+TMP_DIR="$(mktemp -d)"
+trap 'rm -rf "$TMP_DIR"' EXIT
+
+echo "Fetching base certificate from secret statuslist-tls in namespace ${NS}..."
+kubectl get secret statuslist-tls -n "${NS}" -o jsonpath='{.data.tls\.crt}' | base64 -d > "${TMP_DIR}/tls.crt"
+kubectl get secret statuslist-tls -n "${NS}" -o jsonpath='{.data.tls\.key}' | base64 -d > "${TMP_DIR}/tls.key"
+
+cat "${TMP_DIR}/tls.crt" "${TMP_DIR}/tls.key" > "${TMP_DIR}/redis.pem"
+
+# If the HAProxy secret exists, compare the current redis.pem with the new one.
+if kubectl get secret statuslist-haproxy-tls -n "${NS}" >/dev/null 2>&1; then
+  echo "Existing statuslist-haproxy-tls secret found, comparing redis.pem..."
+  kubectl get secret statuslist-haproxy-tls -n "${NS}" -o jsonpath='{.data.redis\.pem}' | base64 -d > "${TMP_DIR}/existing-redis.pem" || true
+
+  if [ -s "${TMP_DIR}/existing-redis.pem" ] && cmp -s "${TMP_DIR}/redis.pem" "${TMP_DIR}/existing-redis.pem"; then
+    echo "Redis HAProxy certificate is already up to date. No changes applied."
+    exit 0
+  fi
+else
+  echo "statuslist-haproxy-tls secret does not exist yet. It will be created."
+fi
+
+echo "Applying updated statuslist-haproxy-tls secret..."
+kubectl create secret generic statuslist-haproxy-tls \
+  -n "${NS}" \
+  --from-file=redis.pem="${TMP_DIR}/redis.pem" \
+  --dry-run=client -o yaml | kubectl apply -f -
+
+echo "Redis HAProxy TLS secret synced successfully. Restarting HAProxy deployment to pick up new certificate..."
+kubectl rollout restart deploy/{{ .Release.Name }}-redis-ha-haproxy -n "${NS}" 2>/dev/null || echo "HAProxy deployment not found yet, skipping restart (it will pick up the secret on its own startup)."
+
+echo "Redis HAProxy deployment restart triggered."
+{{- end }}
+
+{{/*
 Resolve the Redis connection URI based on chart values.
 */}}
 {{- define "status-list-server-chart.redisUri" -}}
