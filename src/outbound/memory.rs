@@ -7,27 +7,27 @@ use crate::cert_manager::storage::StorageError;
 use crate::domain::models::credential::{Credential, CredentialError};
 use crate::domain::models::status_list::{StatusListError, StatusListRecord, StatusListSnapshot};
 use crate::domain::ports::{
-    CredentialRepo, StatusListCache, StatusListHistoryRepo, StatusListRepo,
+    CredentialRepo, StatusListCache, StatusListRepo, StatusListSnapshotRepo,
 };
 
 #[derive(Clone, Default)]
 pub struct MemoryStatusLists {
     values: Arc<RwLock<HashMap<String, StatusListRecord>>>,
-    history: Option<Arc<RwLock<HashMap<String, StatusListSnapshot>>>>,
+    snapshot: Option<Arc<RwLock<HashMap<String, StatusListSnapshot>>>>,
 }
 
 impl MemoryStatusLists {
-    pub fn with_history(mut self, history: &MemoryStatusListHistory) -> Self {
-        self.history = Some(history.values.clone());
+    pub fn with_snapshot(mut self, snapshot_repo: &MemoryStatusListSnapshotRepo) -> Self {
+        self.snapshot = Some(snapshot_repo.values.clone());
         self
     }
 
-    fn require_history(
+    fn require_snapshot(
         &self,
     ) -> Result<&Arc<RwLock<HashMap<String, StatusListSnapshot>>>, StatusListError> {
-        self.history.as_ref().ok_or_else(|| {
+        self.snapshot.as_ref().ok_or_else(|| {
             StatusListError::Backend(
-                "MemoryStatusLists was built without shared history storage; construct it with `.with_history(..)`"
+                "MemoryStatusLists was built without shared snapshot storage; construct it with `.with_snapshot(..)`"
                     .into(),
             )
         })
@@ -72,13 +72,13 @@ impl StatusListRepo for MemoryStatusLists {
         expected_updated_at: i64,
         snapshot: StatusListSnapshot,
     ) -> Result<bool, StatusListError> {
-        let history = self.require_history()?;
+        let snapshot_store = self.require_snapshot()?;
         let mut values = self.values.write().await;
         match values.get(&record.list_id) {
             Some(current) if current.updated_at == expected_updated_at => {}
             _ => return Ok(false),
         }
-        history
+        snapshot_store
             .write()
             .await
             .insert(snapshot.snapshot_id.clone(), snapshot);
@@ -91,13 +91,13 @@ impl StatusListRepo for MemoryStatusLists {
         record: StatusListRecord,
         snapshot: StatusListSnapshot,
     ) -> Result<(), StatusListError> {
-        let history = self.require_history()?;
+        let snapshot_store = self.require_snapshot()?;
         let mut values = self.values.write().await;
         use std::collections::hash_map::Entry;
         match values.entry(record.list_id.clone()) {
             Entry::Occupied(_) => Err(StatusListError::AlreadyExists),
             Entry::Vacant(e) => {
-                history
+                snapshot_store
                     .write()
                     .await
                     .insert(snapshot.snapshot_id.clone(), snapshot);
@@ -169,12 +169,12 @@ impl CredentialRepo for MemoryCredentials {
 }
 
 #[derive(Clone, Default)]
-pub struct MemoryStatusListHistory {
+pub struct MemoryStatusListSnapshotRepo {
     values: Arc<RwLock<HashMap<String, StatusListSnapshot>>>,
 }
 
 #[async_trait]
-impl StatusListHistoryRepo for MemoryStatusListHistory {
+impl StatusListSnapshotRepo for MemoryStatusListSnapshotRepo {
     async fn insert(&self, record: StatusListSnapshot) -> Result<(), StatusListError> {
         self.values
             .write()
@@ -263,15 +263,15 @@ mod tests {
     fn create_test_service(
         repo: MemoryStatusLists,
         cache: MemoryStatusListCache,
-        history_repo: Option<MemoryStatusListHistory>,
+        snapshot_repo: Option<MemoryStatusListSnapshotRepo>,
     ) -> Service {
-        let history_arc: Option<Arc<dyn crate::domain::ports::StatusListHistoryRepo>> =
-            history_repo.map(|h| Arc::new(h) as _);
+        let snapshot_arc: Option<Arc<dyn crate::domain::ports::StatusListSnapshotRepo>> =
+            snapshot_repo.map(|h| Arc::new(h) as _);
         Service::from_arcs(
             Arc::new(repo),
             Arc::new(MemoryCredentials::default()),
             Arc::new(cache),
-            history_arc,
+            snapshot_arc,
             Arc::new(DummyCertProvider),
         )
     }

@@ -1,0 +1,7 @@
+[test-groups]
+container-backed = { max-threads = 4 }
+
+[[profile.default.overrides]]
+filter = 'test(test_mysql_) | test(test_postgres_) | test(cert_provisioning)'
+test-group = 'container-backed'
+slow-timeout = { period = "2m", terminate-after = 2, grace-period = "10s" }

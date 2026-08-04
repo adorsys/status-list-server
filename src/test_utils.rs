@@ -1,11 +1,11 @@
-use crate::domain::ports::{CredentialRepo, StatusListHistoryRepo, StatusListRepo};
+use crate::domain::ports::{CredentialRepo, StatusListRepo, StatusListSnapshotRepo};
 use crate::domain::service::Service;
 use crate::outbound::cache::MokaStatusListCache;
 #[cfg(feature = "memory")]
 use crate::outbound::memory::{MemoryCredentials, MemoryStatusListHistory, MemoryStatusLists};
-#[cfg(feature = "history")]
+#[cfg(any(feature = "sqlite", feature = "postgres", feature = "mysql"))]
 use crate::outbound::sql::{
-    SeaOrmStore, SqlCredentialRepo, SqlStatusListHistoryRepo, SqlStatusListRepo,
+    SeaOrmStore, SqlCredentialRepo, SqlStatusListRepo, SqlStatusListSnapshotRepo,
 };
 use crate::server::AppState;
 #[cfg(feature = "acme")]
@@ -80,37 +80,37 @@ async fn build_test_app_state(
 
     let key_pem = include_str!("../test_data/ec-private.pem").to_string();
 
-    let memory_history = MemoryStatusListHistory::default();
-    let memory_lists = MemoryStatusLists::default().with_history(&memory_history);
+    let memory_snapshot = MemoryStatusListSnapshotRepo::default();
+    let memory_lists = MemoryStatusLists::default().with_snapshot(&memory_snapshot);
 
-    #[cfg(feature = "history")]
+    #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mysql"))]
     let (status_lists, credentials, status_list_history): (
         Arc<dyn StatusListRepo>,
         Arc<dyn CredentialRepo>,
-        Arc<dyn StatusListHistoryRepo>,
+        Arc<dyn StatusListSnapshotRepo>,
     ) = if let Some(db) = db_conn {
         (
             Arc::new(SqlStatusListRepo::new(SeaOrmStore::new(db.clone()))),
             Arc::new(SqlCredentialRepo::new(SeaOrmStore::new(db.clone()))),
-            Arc::new(SqlStatusListHistoryRepo::new(SeaOrmStore::new(db.clone()))),
+            Arc::new(SqlStatusListSnapshotRepo::new(SeaOrmStore::new(db.clone()))),
         )
     } else {
         (
             Arc::new(memory_lists),
             Arc::new(MemoryCredentials::default()),
-            Arc::new(memory_history),
+            Arc::new(memory_snapshot),
         )
     };
 
-    #[cfg(not(feature = "history"))]
+    #[cfg(not(any(feature = "sqlite", feature = "postgres", feature = "mysql")))]
     let (status_lists, credentials, status_list_history): (
         Arc<dyn StatusListRepo>,
         Arc<dyn CredentialRepo>,
-        Arc<dyn StatusListHistoryRepo>,
+        Arc<dyn StatusListSnapshotRepo>,
     ) = (
         Arc::new(memory_lists),
         Arc::new(MemoryCredentials::default()),
-        Arc::new(memory_history),
+        Arc::new(memory_snapshot),
     );
 
     let status_list_cache = Arc::new(MokaStatusListCache::new(5 * 60, 100));
@@ -123,7 +123,7 @@ async fn build_test_app_state(
         status_lists,
         credentials,
         status_list_cache,
-        Some(status_list_history),
+        Some(status_list_snapshot),
         cert_provider,
     ));
 
@@ -136,6 +136,6 @@ async fn build_test_app_state(
         max_status_index: 100_000,
         max_statuses_per_request: 5_000,
         max_serialized_list_size,
-        history_retention_secs: 7776000,
+        snapshot_retention_secs: 7776000,
     }
 }

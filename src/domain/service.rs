@@ -7,7 +7,7 @@ use crate::domain::models::status_list::{
     StatusEntry, StatusList, StatusListError, StatusListRecord, StatusListSnapshot,
 };
 use crate::domain::ports::{
-    CertificateProvider, CredentialRepo, StatusListCache, StatusListHistoryRepo, StatusListRepo,
+    CertificateProvider, CredentialRepo, StatusListCache, StatusListRepo, StatusListSnapshotRepo,
 };
 
 /// Container struct for building and exposing external service ports injected into handlers.
@@ -16,7 +16,7 @@ pub struct Service {
     pub(crate) status_list_repo: Arc<dyn StatusListRepo>,
     pub(crate) credential_repo: Arc<dyn CredentialRepo>,
     pub(crate) status_list_cache: Arc<dyn StatusListCache>,
-    pub(crate) history_repo: Option<Arc<dyn StatusListHistoryRepo>>,
+    pub(crate) snapshot_repo: Option<Arc<dyn StatusListSnapshotRepo>>,
     pub(crate) cert_provider: Arc<dyn CertificateProvider>,
 }
 
@@ -25,14 +25,14 @@ impl Service {
         status_list_repo: Arc<dyn StatusListRepo>,
         credential_repo: Arc<dyn CredentialRepo>,
         status_list_cache: Arc<dyn StatusListCache>,
-        history_repo: Option<Arc<dyn StatusListHistoryRepo>>,
+        snapshot_repo: Option<Arc<dyn StatusListSnapshotRepo>>,
         cert_provider: Arc<dyn CertificateProvider>,
     ) -> Self {
         Self {
             status_list_repo,
             credential_repo,
             status_list_cache,
-            history_repo,
+            snapshot_repo,
             cert_provider,
         }
     }
@@ -41,7 +41,7 @@ impl Service {
         status_list_repo: S,
         credential_repo: C,
         status_list_cache: SC,
-        history_repo: Option<Arc<dyn StatusListHistoryRepo>>,
+        snapshot_repo: Option<Arc<dyn StatusListSnapshotRepo>>,
         cert_provider: CP,
     ) -> Self
     where
@@ -54,7 +54,7 @@ impl Service {
             status_list_repo: Arc::new(status_list_repo),
             credential_repo: Arc::new(credential_repo),
             status_list_cache: Arc::new(status_list_cache),
-            history_repo,
+            snapshot_repo,
             cert_provider: Arc::new(cert_provider),
         }
     }
@@ -71,8 +71,8 @@ impl Service {
         self.status_list_cache.as_ref()
     }
 
-    pub fn history_repo(&self) -> Option<&dyn StatusListHistoryRepo> {
-        self.history_repo.as_deref()
+    pub fn snapshot_repo(&self) -> Option<&dyn StatusListSnapshotRepo> {
+        self.snapshot_repo.as_deref()
     }
 
     pub fn cert_provider(&self) -> &dyn CertificateProvider {
@@ -122,7 +122,7 @@ impl Service {
             return Err(StatusListError::AlreadyExists);
         }
 
-        match &self.history_repo {
+        match &self.snapshot_repo {
             Some(_) => {
                 let snapshot = build_snapshot(&record, token_exp_secs);
                 self.status_list_repo
@@ -181,7 +181,7 @@ impl Service {
         let previous_updated_at = existing.updated_at;
         existing.updated_at = next_updated_at(previous_updated_at, current_unix_timestamp());
 
-        let landed = match &self.history_repo {
+        let landed = match &self.snapshot_repo {
             Some(_) => {
                 let snapshot = build_snapshot(&existing, token_exp_secs);
                 self.status_list_repo
@@ -229,13 +229,14 @@ impl Service {
         self.status_list_repo.list_uris().await
     }
 
-    /// Retrieve a historical status list snapshot active at a specific Unix timestamp.
-    pub async fn get_historical_snapshot(
+    /// Retrieve the snapshot that was active at the given Unix timestamp
+    /// (historical resolution per draft-21 §8.4).
+    pub async fn get_snapshot_at(
         &self,
         list_id: &str,
         time: i64,
     ) -> Result<StatusListSnapshot, StatusListError> {
-        self.history_repo
+        self.snapshot_repo
             .as_ref()
             .ok_or(StatusListError::NotFound)?
             .find_valid_at(list_id, time)
@@ -243,12 +244,12 @@ impl Service {
             .ok_or(StatusListError::HistoricalNotFound)
     }
 
-    /// Purge historical snapshots older than `cutoff` timestamp.
-    pub async fn cleanup_historical_snapshots(&self, cutoff: i64) -> Result<u64, StatusListError> {
-        let Some(history) = &self.history_repo else {
+    /// Purge snapshots older than `cutoff` timestamp.
+    pub async fn cleanup_snapshots(&self, cutoff: i64) -> Result<u64, StatusListError> {
+        let Some(snapshot_repo) = &self.snapshot_repo else {
             return Ok(0);
         };
-        history.delete_older_than(cutoff).await
+        snapshot_repo.delete_older_than(cutoff).await
     }
 
     /// Publish new credentials for an issuer after verifying uniqueness invariant.
@@ -289,8 +290,8 @@ impl std::fmt::Debug for Service {
                 &std::any::type_name::<dyn StatusListCache>(),
             )
             .field(
-                "history_repo",
-                &std::any::type_name::<dyn StatusListHistoryRepo>(),
+                "snapshot_repo",
+                &std::any::type_name::<dyn StatusListSnapshotRepo>(),
             )
             .field(
                 "cert_provider",

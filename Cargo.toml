@@ -70,13 +70,6 @@ tower-http = { version = "0.7", features = ["catch-panic", "cors", "limit", "tra
 tower_governor = "0.8"
 governor = "0.10"
 
-# Database and ORM
-sea-orm = {
-  version = "1.1",
-  default-features = false,
-  features = ["macros", "runtime-tokio-rustls", "with-json"],
-  optional = true
-}
 moka = { version = "0.12", features = ["future"] }
 
 # Cryptography and Security
@@ -104,7 +97,17 @@ dotenvy = "0.15"
 
 # Logging and Tracing
 tracing = "0.1"
-tracing-subscriber = "0.3"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+
+# OpenTelemetry
+opentelemetry = "0.32"
+opentelemetry_sdk = { version = "0.32", features = ["rt-tokio"] }
+opentelemetry-otlp = { version = "0.32", features = ["grpc-tonic"] }
+opentelemetry-appender-tracing = "0.32"
+tracing-opentelemetry = "0.33"
+opentelemetry-prometheus = "0.32"
+prometheus = "0.14"
+metrics-process = { version = "2.4", default-features = false }
 
 # Error handling
 thiserror = "2.0"
@@ -119,15 +122,19 @@ flate2 = "1.1"
 x509-parser = "0.18"
 public-suffix = "0.1"
 tokio-cron-scheduler = "0.15"
-metrics = "0.24"
-metrics-exporter-prometheus = "0.18"
-metrics-process = "2.4"
-sea-orm-migration = {
-  version = "1.1.20",
-  default-features = false,
-  features = ["runtime-tokio-rustls"],
-  optional = true
-}
+
+# Database and ORM
+[dependencies.sea-orm]
+version = "1.1"
+default-features = false
+features = ["macros", "runtime-tokio-rustls", "with-json"]
+optional = true
+
+[dependencies.sea-orm-migration]
+version = "1.1.20"
+default-features = false
+features = ["runtime-tokio-rustls"]
+optional = true
 
 # AWS related libraries
 [dependencies.aws-config]
@@ -171,7 +178,6 @@ testcontainers-modules = {
   version = "0.15",
   features = ["localstack", "mysql", "postgres", "redis"]
 }
-metrics-util = "0.20"
 
 [target.'cfg(not(target_env = "msvc"))'.dependencies]
 tikv-jemallocator = "0.7"
