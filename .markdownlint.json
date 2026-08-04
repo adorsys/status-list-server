@@ -3,5 +3,11 @@
   "MD022": false,
   "MD024": false,
   "MD032": false,
-  "MD060": { "style": "aligned" }
+  "MD036": false,
+  "MD040": false,
+  "MD047": false,
+  "MD056": false,
+  "MD060": {
+    "style": "aligned"
+  }
 }

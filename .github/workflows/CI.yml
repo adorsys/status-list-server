@@ -240,7 +240,15 @@ jobs:
       - name: Markdown Lint
         uses: DavidAnson/markdownlint-cli2-action@6bf21b07787794f89a243495939cd651942aeabe # v24
         with:
-          globs: "**/*.md"
+          config: ".markdownlint.json"
+          globs: |
+            *.md
+            .github/**/*.md
+            docs/**/*.md
+            helm/**/*.md
+            demo/**/*.md
+            artillery-tests/**/*.md
+            src/**/*.md
 
   trivy-config:
     name: Trivy Config Scan (Helm Chart)
