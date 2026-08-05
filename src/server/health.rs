@@ -72,10 +72,7 @@ impl Readiness {
             .collect();
 
         let ready = checks.iter().all(|c| c.ok);
-        ReadinessReport {
-            ready,
-            checks,
-        }
+        ReadinessReport { ready, checks }
     }
 }
 
@@ -237,7 +234,10 @@ pub struct FilesystemCertCheck {
 #[cfg(not(feature = "acme"))]
 impl FilesystemCertCheck {
     pub fn new(cert_path: Option<String>, key_path: Option<String>) -> Self {
-        Self { cert_path, key_path }
+        Self {
+            cert_path,
+            key_path,
+        }
     }
 }
 
@@ -341,10 +341,8 @@ mod tests {
 
     #[tokio::test]
     async fn live_returns_200_while_process_is_up() {
-        let state = app_state_with_checks(vec![Arc::new(FailingNamedCheck {
-            name: "database",
-        })])
-        .await;
+        let state =
+            app_state_with_checks(vec![Arc::new(FailingNamedCheck { name: "database" })]).await;
         let resp = call_handler(state, "/health/live").await;
         assert_eq!(resp.status(), StatusCode::OK);
     }

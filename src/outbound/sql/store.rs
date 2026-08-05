@@ -33,10 +33,7 @@ impl<T> SeaOrmStore<T> {
     /// round-trip so a downed database surfaces as a readiness failure.
     pub async fn ping(&self) -> Result<(), sea_orm::DbErr> {
         use sea_orm::ConnectionTrait as _;
-        (*self.db)
-            .execute_unprepared("SELECT 1")
-            .await
-            .map(|_| ())
+        (*self.db).execute_unprepared("SELECT 1").await.map(|_| ())
     }
 }
 
