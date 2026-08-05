@@ -266,7 +266,7 @@ A Helm chart is provided for easy deployment on Kubernetes. For detailed instruc
 The server uses tiered rate limiting:
 
 | Tier | Key Extractor | Use Case |
-|------|---------------|----------|
+| ---- | ------------- | -------- |
 | Write (strict) | `AuthenticatedKeyExtractor` | POST/PATCH endpoints, keyed on JWT `iss` claim |
 | Credentials | `PeerIpKeyExtractor` | Token issuance, keyed on peer IP |
 | Read | `PeerIpKeyExtractor` | Public reads, keyed on peer IP |
