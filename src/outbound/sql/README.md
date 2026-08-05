@@ -68,7 +68,7 @@ secrets storage is selected.
 | Column        | Type   | Null | Key | Description                                      |
 | ------------- | ------ | ---- | --- | ------------------------------------------------ |
 | `storage_key` | TEXT   | NO   | PK  | Storage key used by the certificate manager      |
-| `value`       | TEXT   | NO   |     | Opaque stored value; may contain secret material  |
+| `value`       | TEXT   | NO   |     | Opaque stored value; may contain secret material |
 | `metadata`    | JSON   | YES  |     | Optional provider metadata for future extensions |
 | `created_at`  | BIGINT | NO   |     | UNIX timestamp when the row was created          |
 | `updated_at`  | BIGINT | NO   |     | UNIX timestamp when the row was last updated     |
