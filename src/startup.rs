@@ -12,6 +12,7 @@ use axum::{
 use color_eyre::eyre::{Context, eyre};
 use governor::middleware::NoOpMiddleware;
 use hyper::Method;
+use prometheus::Registry;
 use tokio::net::TcpListener;
 use tower_governor::{
     GovernorLayer,
@@ -28,14 +29,12 @@ use tower_http::{
 const AGGREGATION_ROUTE_PATH: &str = "/api/v1/aggregation";
 
 use crate::config::Config;
-use crate::server::{
-    AppState,
-    auth::auth,
-    handlers::{
-        credential_handler, get_aggregation, get_status_list, publish_status, update_status,
-    },
+use crate::server::AppState;
+use crate::server::auth::auth;
+use crate::server::handlers::{
+    credential_handler, get_aggregation, get_status_list, publish_status, update_status,
 };
-use crate::utils::metrics::{metrics_handler, setup_metrics, start_metrics_collector};
+use crate::utils::metrics::metrics_handler;
 
 async fn welcome() -> impl IntoResponse {
     "Status list Server"
@@ -51,7 +50,11 @@ pub struct HttpServer {
 }
 
 impl HttpServer {
-    pub async fn new(config: &Config, state: AppState) -> color_eyre::Result<Self> {
+    pub async fn new(
+        config: &Config,
+        state: AppState,
+        prometheus_registry: Registry,
+    ) -> color_eyre::Result<Self> {
         let cors = CorsLayer::new()
             .allow_methods([
                 Method::GET,
@@ -80,14 +83,17 @@ impl HttpServer {
                     permissive_governor.clone(),
                 ),
             )
-            .layer(TraceLayer::new_for_http())
+            .layer(
+                TraceLayer::new_for_http()
+                    .make_span_with(crate::utils::telemetry::make_http_request_span),
+            )
             .layer(CatchPanicLayer::new())
             .layer(cors)
             .layer(RequestBodyLimitLayer::new(max_body_size))
             .layer(DefaultBodyLimit::disable())
             .with_state(state);
 
-        router = attach_metrics(router, config);
+        router = attach_metrics(router, config, prometheus_registry);
 
         validate_aggregation_uri(config)?;
 
@@ -105,9 +111,34 @@ impl HttpServer {
             self.router
                 .into_make_service_with_connect_info::<SocketAddr>(),
         )
+        .with_graceful_shutdown(shutdown_signal())
         .await
         .wrap_err("Failed to start HTTP server")?;
         Ok(())
+    }
+}
+
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        tokio::signal::ctrl_c()
+            .await
+            .expect("failed to install Ctrl+C handler");
+    };
+
+    #[cfg(unix)]
+    let terminate = async {
+        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .expect("failed to install SIGTERM signal handler")
+            .recv()
+            .await;
+    };
+
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+
+    tokio::select! {
+        _ = ctrl_c => {},
+        _ = terminate => {},
     }
 }
 
@@ -176,16 +207,10 @@ fn api_v1_routes(
         .merge(public_reads)
 }
 
-fn attach_metrics(router: Router, config: &Config) -> Router {
+fn attach_metrics(router: Router, config: &Config, registry: Registry) -> Router {
     if config.server.enable_metrics {
-        match setup_metrics() {
-            Ok(handle) => {
-                start_metrics_collector();
-                tracing::info!("StatusList Monitor: ENABLED (Metrics at /metrics)");
-                return router.route("/metrics", get(move || metrics_handler(handle)));
-            }
-            Err(e) => tracing::warn!("Failed to setup metrics: {e}"),
-        }
+        tracing::info!("StatusList Monitor: ENABLED (Metrics at /metrics)");
+        return router.route("/metrics", get(move || metrics_handler(registry)));
     } else {
         tracing::info!("StatusList Monitor: DISABLED");
     }
@@ -226,6 +251,43 @@ mod tests {
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
     use tower::ServiceExt;
 
+    #[test]
+    fn test_validate_aggregation_uri_accepts_matching_path() {
+        let config = Config::load_from_overrides(&[(
+            "server.aggregation_uri",
+            "https://statuslist.example.com/api/v1/aggregation",
+        )])
+        .unwrap();
+        assert!(validate_aggregation_uri(&config).is_ok());
+    }
+
+    #[test]
+    fn test_validate_aggregation_uri_rejects_mismatched_path() {
+        let config = Config::load_from_overrides(&[(
+            "server.aggregation_uri",
+            "https://statuslist.example.com/statuslists/aggregation",
+        )])
+        .unwrap();
+        let result = validate_aggregation_uri(&config);
+        assert!(
+            result.is_err(),
+            "Should reject mismatched aggregation_uri path"
+        );
+    }
+
+    #[test]
+    fn test_validate_aggregation_uri_passes_when_unset() {
+        let config = Config::load_from_overrides(&[]).unwrap();
+        assert!(validate_aggregation_uri(&config).is_ok());
+    }
+
+    #[test]
+    fn test_validate_aggregation_uri_rejects_invalid_url() {
+        let config =
+            Config::load_from_overrides(&[("server.aggregation_uri", "not a url")]).unwrap();
+        let result = validate_aggregation_uri(&config);
+        assert!(result.is_err(), "Should reject invalid URL");
+    }
     #[tokio::test]
     async fn test_strict_governor_returns_429_when_burst_exceeded() {
         async fn handler() -> impl IntoResponse {
