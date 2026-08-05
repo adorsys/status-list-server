@@ -529,15 +529,12 @@ mod snapshot_txn_test_hook {
     /// and update contention tests cannot capture each other's probe.
     pub(super) struct PauseSite {
         slot: OnceLock<Mutex<Option<Probe>>>,
-        #[allow(dead_code)]
-        site: &'static str,
     }
 
     impl PauseSite {
-        const fn new(site: &'static str) -> Self {
+        const fn new(_site: &'static str) -> Self {
             Self {
                 slot: OnceLock::new(),
-                site,
             }
         }
 
@@ -545,13 +542,12 @@ mod snapshot_txn_test_hook {
             self.slot.get_or_init(|| Mutex::new(None))
         }
 
-        #[allow(dead_code)]
+        #[cfg(any(feature = "mysql", feature = "postgres-tests"))]
         pub(super) async fn install(&self, probe_to_install: Probe) {
             let mut guard = self.slot().lock().await;
             assert!(
                 guard.is_none(),
-                "only one {} contention probe can be installed at a time",
-                self.site
+                "only one contention probe can be installed at a time"
             );
             *guard = Some(probe_to_install);
         }
