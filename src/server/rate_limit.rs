@@ -378,7 +378,10 @@ mod tests {
             X_FORWARDED_FOR.clone(),
             "1.2.3.4, 10.0.0.1".parse().unwrap(),
         );
-        let ci = ConnectInfo(SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 8080));
+        let ci = ConnectInfo(SocketAddr::new(
+            IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+            8080,
+        ));
         let req = make_request(headers, Some(ci));
 
         let extractor =
@@ -397,7 +400,10 @@ mod tests {
             X_FORWARDED_FOR.clone(),
             "1.2.3.4, 10.0.0.1".parse().unwrap(),
         );
-        let ci = ConnectInfo(SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 8080));
+        let ci = ConnectInfo(SocketAddr::new(
+            IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+            8080,
+        ));
         let req = make_request(headers, Some(ci));
 
         let extractor =
@@ -411,7 +417,10 @@ mod tests {
 
     #[test]
     fn test_rightmost_xff_trusted_hops_zero_same_key_despite_client_spoofing() {
-        let ci = ConnectInfo(SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 8080));
+        let ci = ConnectInfo(SocketAddr::new(
+            IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+            8080,
+        ));
 
         let mut headers_a = HeaderMap::new();
         headers_a.insert(
@@ -441,7 +450,10 @@ mod tests {
 
     #[test]
     fn test_rightmost_xff_trusted_hops_one_different_client_keys() {
-        let ci = ConnectInfo(SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 8080));
+        let ci = ConnectInfo(SocketAddr::new(
+            IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+            8080,
+        ));
 
         let mut headers_a = HeaderMap::new();
         headers_a.insert(
@@ -471,7 +483,10 @@ mod tests {
     #[test]
     fn test_rightmost_xff_no_xff_falls_back_to_connect_info() {
         let headers = HeaderMap::new();
-        let ci = ConnectInfo(SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 8080));
+        let ci = ConnectInfo(SocketAddr::new(
+            IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+            8080,
+        ));
         let req = make_request(headers, Some(ci));
 
         let extractor =
@@ -485,7 +500,10 @@ mod tests {
 
     #[test]
     fn test_rightmost_xff_nginx_overwrites_to_same_connect_info() {
-        let ci = ConnectInfo(SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 8080));
+        let ci = ConnectInfo(SocketAddr::new(
+            IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+            8080,
+        ));
 
         let mut headers_spoofed = HeaderMap::new();
         headers_spoofed.insert(
