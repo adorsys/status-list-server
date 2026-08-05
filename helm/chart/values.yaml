@@ -103,7 +103,7 @@ statuslist:
     APP_TELEMETRY__SAMPLER_RATIO: "1.0"
   livenessProbe:
     httpGet:
-      path: /health
+      path: /health/live
       port: http
     initialDelaySeconds: 10
     periodSeconds: 15
@@ -111,7 +111,7 @@ statuslist:
     failureThreshold: 3
   readinessProbe:
     httpGet:
-      path: /health
+      path: /health/ready
       port: http
     initialDelaySeconds: 5
     periodSeconds: 10

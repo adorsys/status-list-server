@@ -133,6 +133,18 @@ impl Storage for AwsSecretsManager {
         }
         Ok(())
     }
+
+    /// Verify the Secrets Manager API is reachable without touching any
+    /// specific secret, by issuing a paginated `MaxResults(1)` list call.
+    async fn reachable(&self) -> Result<(), StorageError> {
+        self.client
+            .list_secrets()
+            .max_results(1)
+            .send()
+            .await
+            .map_err(|e| StorageError::AwsSdk(e.into()))?;
+        Ok(())
+    }
 }
 
 /// AWS S3 bucket with optional caching layer
@@ -366,5 +378,12 @@ impl Storage for AwsS3 {
             }
             Err(e) => Err(StorageError::AwsSdk(e.into())),
         }
+    }
+
+    /// Verify the S3 bucket is reachable via a `HEAD` request, which proves
+    /// both the S3 endpoint and the configured bucket are available without
+    /// reading or writing any object.
+    async fn reachable(&self) -> Result<(), StorageError> {
+        self.ensure_bucket_exists().await
     }
 }

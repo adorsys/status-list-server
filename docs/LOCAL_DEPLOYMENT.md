@@ -49,7 +49,8 @@ Expect three components to reach `Running`:
 
 ```bash
 kubectl port-forward -n local svc/statuslist-local-status-list-server-service 8081:8081
-curl http://localhost:8081/health
+curl http://localhost:8081/health/live
+curl http://localhost:8081/health/ready
 ```
 
 ## 7. Tear Down

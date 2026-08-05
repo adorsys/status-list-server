@@ -96,15 +96,15 @@ paths:
         "500":
           $ref: "#/components/responses/InternalServerError"
 
-  /health:
+  /health/live:
     get:
-      operationId: healthCheck
-      summary: Health check
-      description: Returns a simple health indicator.
+      operationId: livenessCheck
+      summary: Liveness check
+      description: Returns a lightweight indicator that the HTTP server process is up.
       security: []
       responses:
         "200":
-          description: Server is healthy
+          description: Server process is up
           content:
             text/plain:
               schema:
@@ -112,6 +112,42 @@ paths:
               example: "OK"
         "500":
           $ref: "#/components/responses/InternalServerError"
+
+  /health/ready:
+    get:
+      operationId: readinessCheck
+      summary: Readiness check
+      description: |
+        Returns 200 only when all critical dependencies (database, cache
+        backend, and certificate/key store) are reachable; otherwise 503.
+      security: []
+      responses:
+        "200":
+          description: All critical dependencies are reachable
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ready:
+                    type: boolean
+                  checks:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        name:
+                          type: string
+                        ok:
+                          type: boolean
+                        reason:
+                          type: string
+        "503":
+          description: One or more critical dependencies are unavailable
+          content:
+            application/json:
+              schema:
+                type: object
 
   /metrics:
     get:

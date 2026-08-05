@@ -8,6 +8,7 @@ use crate::outbound::sql::{
     SeaOrmStore, SqlCredentialRepo, SqlStatusListRepo, SqlStatusListSnapshotRepo,
 };
 use crate::server::AppState;
+use crate::server::health::Readiness;
 #[cfg(feature = "acme")]
 use crate::{cert_manager::storage::StorageError, utils::cert_manager::storage::Storage};
 use async_trait::async_trait;
@@ -139,5 +140,6 @@ async fn build_test_app_state(
         max_statuses_per_request: 5_000,
         max_serialized_list_size,
         snapshot_retention_secs: 7776000,
+        readiness: Readiness::default(),
     }
 }

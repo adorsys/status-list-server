@@ -76,6 +76,7 @@ use crate::outbound::sql::{
     verify_innodb_engines,
 };
 use crate::server::AppState;
+use crate::server::health::{AlwaysReady, Readiness};
 
 /// Assembles application configuration, connects outbound repositories, and builds `AppState`.
 #[cfg(feature = "acme")]
@@ -115,6 +116,14 @@ type BuildStateResult = (AppState, Arc<CertManager>);
 type BuildStateResult = (AppState,);
 
 async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
+    // Hoisted handles captured from the backend branches below so the readiness
+    // probe can reach the real adapters (the domain ports only expose the
+    // higher-level repositories).
+    #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mysql"))]
+    let mut db_arc: Option<Arc<sea_orm::DatabaseConnection>> = None;
+    #[cfg(feature = "redis")]
+    let mut redis_manager: Option<redis::aio::ConnectionManager> = None;
+
     let (status_list_repo, credential_repo, status_list_snapshot): (
         Arc<dyn StatusListRepo>,
         Arc<dyn CredentialRepo>,
@@ -179,6 +188,7 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
             )?;
 
             let db_clone = Arc::new(db);
+            db_arc = Some(db_clone.clone());
             (
                 Arc::new(SqlStatusListRepo::new(SeaOrmStore::new(db_clone.clone()))),
                 Arc::new(SqlCredentialRepo::new(SeaOrmStore::new(db_clone.clone()))),
@@ -222,7 +232,12 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
                     #[cfg(feature = "redis")]
                     let cache_opt = if !config.redis.uri.expose_secret().is_empty() {
                         if let Ok(redis_conn) = config.redis.start(None, None, None).await {
-                            Some(Redis::new(redis_conn).with_ttl(config.redis.cert_cache_ttl))
+                            redis_manager = Some(redis_conn);
+                            let redis_conn = redis_manager.as_ref().expect("just set");
+                            Some(
+                                Redis::new(redis_conn.clone())
+                                    .with_ttl(config.redis.cert_cache_ttl),
+                            )
                         } else {
                             None
                         }
@@ -349,6 +364,46 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
         cert_provider,
     ));
 
+    // Assemble the readiness probes from the real adapters captured above.
+    let mut readiness = Readiness::default();
+
+    #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mysql"))]
+    {
+        match db_arc {
+            Some(db) => readiness = readiness.with_check(crate::server::health::DbCheck::new(db)),
+            None => readiness = readiness.with_check(AlwaysReady::new("database")),
+        }
+    }
+    #[cfg(not(any(feature = "sqlite", feature = "postgres", feature = "mysql")))]
+    {
+        readiness = readiness.with_check(AlwaysReady::new("database"));
+    }
+
+    // The status-list cache is always in-process (Moka); it is always ready.
+    readiness = readiness.with_check(AlwaysReady::new("cache"));
+
+    #[cfg(feature = "redis")]
+    {
+        if let Some(conn) = redis_manager {
+            readiness = readiness.with_check(crate::server::health::RedisCheck::new(conn));
+        }
+    }
+
+    #[cfg(feature = "acme")]
+    {
+        if let Some(manager) = &cert_manager_opt {
+            readiness =
+                readiness.with_check(crate::server::health::CertStoreCheck::new(manager.clone()));
+        }
+    }
+    #[cfg(not(feature = "acme"))]
+    {
+        readiness = readiness.with_check(crate::server::health::FilesystemCertCheck::new(
+            config.server.cert.store.certificate_path.clone(),
+            config.server.cert.store.signing_key_path.clone(),
+        ));
+    }
+
     let state = AppState {
         service,
         server_domain: config.server.domain.clone(),
@@ -359,6 +414,7 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
         max_statuses_per_request: config.limits.max_statuses_per_request,
         max_serialized_list_size: config.limits.max_serialized_list_size,
         snapshot_retention_secs: config.status_list.snapshot_retention_secs,
+        readiness,
     };
 
     #[cfg(feature = "acme")]

@@ -25,6 +25,19 @@ impl<T> SeaOrmStore<T> {
             _phantom: std::marker::PhantomData,
         }
     }
+
+    /// Verifies the database is reachable by issuing a lightweight read query.
+    ///
+    /// Used by the `/health/ready` probe. Matching the existing `SELECT 1`
+    /// pattern used in the pool-timeout test, this exercises a real connection
+    /// round-trip so a downed database surfaces as a readiness failure.
+    pub async fn ping(&self) -> Result<(), sea_orm::DbErr> {
+        use sea_orm::ConnectionTrait as _;
+        (*self.db)
+            .execute_unprepared("SELECT 1")
+            .await
+            .map(|_| ())
+    }
 }
 
 impl SeaOrmStore<StatusListRecord> {

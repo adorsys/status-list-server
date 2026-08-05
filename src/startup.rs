@@ -31,6 +31,7 @@ const AGGREGATION_ROUTE_PATH: &str = "/api/v1/aggregation";
 use crate::config::Config;
 use crate::server::AppState;
 use crate::server::auth::auth;
+use crate::server::health;
 use crate::server::handlers::{
     credential_handler, get_aggregation, get_status_list, publish_status, update_status,
 };
@@ -38,10 +39,6 @@ use crate::utils::metrics::metrics_handler;
 
 async fn welcome() -> impl IntoResponse {
     "Status list Server"
-}
-
-async fn health_check() -> impl IntoResponse {
-    "OK"
 }
 
 pub struct HttpServer {
@@ -73,7 +70,8 @@ impl HttpServer {
 
         let mut router = Router::new()
             .route("/", get(welcome))
-            .route("/health", get(health_check))
+            .route("/health/live", get(health::live))
+            .route("/health/ready", get(health::ready))
             .nest(
                 "/api/v1",
                 api_v1_routes(

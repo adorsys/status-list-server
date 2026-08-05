@@ -17,6 +17,21 @@ impl Redis {
         Self { conn, ttl: None }
     }
 
+    /// Return a clone of the underlying connection manager, for use where a
+    /// separate handle on the same backend is needed (e.g. readiness probing).
+    pub fn connection(&self) -> ConnectionManager {
+        self.conn.clone()
+    }
+
+    /// Issue a `PING` against the Redis backend.
+    ///
+    /// This exercises real connectivity without reading or writing any cert
+    /// data, so it is safe to call from the `/health/ready` probe.
+    pub async fn ping(&self) -> Result<(), redis::RedisError> {
+        let mut conn = self.conn.clone();
+        redis::AsyncCommands::ping(&mut conn).await
+    }
+
     /// Set the time-to-live (TTL) for cached certificate data stored in Redis.
     ///
     /// # TTL Semantics

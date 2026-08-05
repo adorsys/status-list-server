@@ -56,6 +56,7 @@ opt-level = 1
 # Async runtime and utilities
 tokio = { version = "1.5", features = ["full"] }
 async-trait = "0.1"
+futures = "0.3"
 
 # Web frameworks
 hyper = "1.10"

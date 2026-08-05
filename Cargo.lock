@@ -5612,6 +5612,7 @@ dependencies = [
  "coset",
  "dotenvy",
  "flate2",
+ "futures",
  "governor",
  "hex",
  "hyper",
