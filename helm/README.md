@@ -127,7 +127,7 @@ aws iam put-role-policy \
   --region eu-central-1
 ```
 
-**Step 4 — Enable IRSA in values.yaml**
+### Step 4 — Enable IRSA in values.yaml
 
 The `values.yaml` ships with `serviceAccount.annotations` commented out. Uncomment and fill in your role ARN (or supply it via `--set` during install):
 
