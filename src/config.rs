@@ -546,6 +546,8 @@ impl DnsConfig {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct RedisConfig {
+    /// Redis connection URI. Leave empty to disable the optional Redis-backed
+    /// certificate-material cache, even when the `redis` feature is compiled.
     pub uri: SecretString,
     pub require_client_auth: bool,
     /// Cache TTL for Redis TLS certificates in seconds.
@@ -785,7 +787,7 @@ fn base_builder() -> Result<ConfigBuilder<DefaultState>, ConfigError> {
         .set_default("database.pool.connect_timeout_secs", 10u64)?
         .set_default("database.pool.idle_timeout_secs", 600u64)?
         .set_default("database.pool.max_lifetime_secs", 1800u64)?
-        .set_default("redis.uri", "redis://localhost:6379")?
+        .set_default("redis.uri", "")?
         .set_default("redis.require_client_auth", false)?
         .set_default("redis.cert_cache_ttl", 3600)?
         .set_default("aws.secrets_cache_ttl", 300)?
@@ -862,7 +864,7 @@ mod tests {
 
         assert_eq!(config.database.url.expose_secret(), expected_db_url);
         assert_eq!(config.database.backend, expected_db_backend);
-        assert_eq!(config.redis.uri.expose_secret(), "redis://localhost:6379");
+        assert_eq!(config.redis.uri.expose_secret(), "");
         assert!(!config.redis.require_client_auth);
         assert_eq!(config.server.cert.email, "admin@example.com");
         assert_eq!(
