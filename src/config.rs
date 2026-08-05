@@ -1649,4 +1649,15 @@ mod tests {
         assert_eq!(config.database.pool.idle_timeout_secs, 300);
         assert_eq!(config.database.pool.max_lifetime_secs, 900);
     }
+
+    #[test]
+    fn test_rate_limit_client_ip_source_required_fail_closed() {
+        let result = Config::load_from_overrides(&[("rate_limit.client_ip_source", "")]);
+        assert!(result.is_err(), "Empty client_ip_source should fail closed");
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("client_ip_source"),
+            "Error should mention client_ip_source: {err}"
+        );
+    }
 }

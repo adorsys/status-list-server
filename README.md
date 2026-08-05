@@ -261,6 +261,31 @@ The server can be deployed using a containerization platform such as Docker.
 
 A Helm chart is provided for easy deployment on Kubernetes. For detailed instructions, see the [Helm Deployment Guide](helm/README.md).
 
+### Rate Limiting Topology
+
+The server uses tiered rate limiting:
+
+| Tier | Key Extractor | Use Case |
+|------|---------------|----------|
+| Write (strict) | `AuthenticatedKeyExtractor` | POST/PATCH endpoints, keyed on JWT `iss` claim |
+| Credentials | `PeerIpKeyExtractor` | Token issuance, keyed on peer IP |
+| Read | `PeerIpKeyExtractor` | Public reads, keyed on peer IP |
+
+**Authenticated write tier** is immune to IP spoofing — requests are keyed on the verified credential issuer.
+
+**IP-based tiers** require the client IP to be correctly extracted from the connection. Three modes configured via `rate_limit.client_ip_source`:
+
+```yaml
+rate_limit:
+  client_ip_source: connect_info                              # Direct connection, no proxy
+  client_ip_source: rightmost_x_forwarded_for: 1              # Trust rightmost XFF after 1 proxy hop
+  client_ip_source: x_real_ip                                 # Use X-Real-IP from nginx
+```
+
+**Kubernetes / nginx ingress**: Use the ingress-nginx ConfigMap setting `use-forwarded-headers=os` to overwrite `X-Forwarded-For` at the ingress. Without this, clients can spoof XFF to bypass rate limiting on IP-based tiers.
+
+**Environment variable**: `APP_RATE_LIMIT__CLIENT_IP_SOURCE=connect_info`
+
 ## Testing
 
 You can run the tests using the following command:

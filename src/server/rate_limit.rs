@@ -370,4 +370,142 @@ mod tests {
         let key = extractor.extract(&req).unwrap();
         assert_eq!(key, "3.3.3.3");
     }
+
+    #[test]
+    fn test_rightmost_xff_trusted_hops_zero_extracts_rightmost() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            X_FORWARDED_FOR.clone(),
+            "1.2.3.4, 10.0.0.1".parse().unwrap(),
+        );
+        let ci = ConnectInfo(SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 8080));
+        let req = make_request(headers, Some(ci));
+
+        let extractor =
+            SecureIpKeyExtractor::new(ClientIpSource::RightmostXForwardedFor { trusted_hops: 0 });
+        let key = extractor.extract(&req).unwrap();
+        assert_eq!(
+            key, "10.0.0.1",
+            "trusted_hops=0 extracts the rightmost XFF value"
+        );
+    }
+
+    #[test]
+    fn test_rightmost_xff_trusted_hops_one_skips_rightmost() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            X_FORWARDED_FOR.clone(),
+            "1.2.3.4, 10.0.0.1".parse().unwrap(),
+        );
+        let ci = ConnectInfo(SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 8080));
+        let req = make_request(headers, Some(ci));
+
+        let extractor =
+            SecureIpKeyExtractor::new(ClientIpSource::RightmostXForwardedFor { trusted_hops: 1 });
+        let key = extractor.extract(&req).unwrap();
+        assert_eq!(
+            key, "1.2.3.4",
+            "trusted_hops=1 skips the rightmost XFF value and extracts second-from-rightmost"
+        );
+    }
+
+    #[test]
+    fn test_rightmost_xff_trusted_hops_zero_same_key_despite_client_spoofing() {
+        let ci = ConnectInfo(SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 8080));
+
+        let mut headers_a = HeaderMap::new();
+        headers_a.insert(
+            X_FORWARDED_FOR.clone(),
+            "1.1.1.1, 10.0.0.1".parse().unwrap(),
+        );
+        let req_a = make_request(headers_a, Some(ci));
+
+        let mut headers_b = HeaderMap::new();
+        headers_b.insert(
+            X_FORWARDED_FOR.clone(),
+            "2.2.2.2, 10.0.0.1".parse().unwrap(),
+        );
+        let req_b = make_request(headers_b, Some(ci));
+
+        let extractor =
+            SecureIpKeyExtractor::new(ClientIpSource::RightmostXForwardedFor { trusted_hops: 0 });
+        let key_a = extractor.extract(&req_a).unwrap();
+        let key_b = extractor.extract(&req_b).unwrap();
+        assert_eq!(
+            key_a, key_b,
+            "With trusted_hops=0, spoofing the leftmost client IP does NOT change the extracted key \
+             because the rightmost value (trusted proxy) is always the same"
+        );
+        assert_eq!(key_a, "10.0.0.1");
+    }
+
+    #[test]
+    fn test_rightmost_xff_trusted_hops_one_different_client_keys() {
+        let ci = ConnectInfo(SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 8080));
+
+        let mut headers_a = HeaderMap::new();
+        headers_a.insert(
+            X_FORWARDED_FOR.clone(),
+            "1.1.1.1, 10.0.0.1".parse().unwrap(),
+        );
+        let req_a = make_request(headers_a, Some(ci));
+
+        let mut headers_b = HeaderMap::new();
+        headers_b.insert(
+            X_FORWARDED_FOR.clone(),
+            "2.2.2.2, 10.0.0.1".parse().unwrap(),
+        );
+        let req_b = make_request(headers_b, Some(ci));
+
+        let extractor =
+            SecureIpKeyExtractor::new(ClientIpSource::RightmostXForwardedFor { trusted_hops: 1 });
+        let key_a = extractor.extract(&req_a).unwrap();
+        let key_b = extractor.extract(&req_b).unwrap();
+        assert_ne!(
+            key_a, key_b,
+            "With trusted_hops=1, spoofing the leftmost XFF (client IP) changes the extracted key \
+             because trusted_hops skips the rightmost proxy and reads the client IP"
+        );
+    }
+
+    #[test]
+    fn test_rightmost_xff_no_xff_falls_back_to_connect_info() {
+        let headers = HeaderMap::new();
+        let ci = ConnectInfo(SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 8080));
+        let req = make_request(headers, Some(ci));
+
+        let extractor =
+            SecureIpKeyExtractor::new(ClientIpSource::RightmostXForwardedFor { trusted_hops: 0 });
+        let key = extractor.extract(&req).unwrap();
+        assert_eq!(
+            key, "10.0.0.1",
+            "No XFF header should fall back to ConnectInfo IP"
+        );
+    }
+
+    #[test]
+    fn test_rightmost_xff_nginx_overwrites_to_same_connect_info() {
+        let ci = ConnectInfo(SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 8080));
+
+        let mut headers_spoofed = HeaderMap::new();
+        headers_spoofed.insert(
+            X_FORWARDED_FOR.clone(),
+            "real_client, 10.0.0.1".parse().unwrap(),
+        );
+        let req_spoofed = make_request(headers_spoofed, Some(ci));
+
+        let req_unspoofed = make_request(HeaderMap::new(), Some(ci));
+
+        let extractor =
+            SecureIpKeyExtractor::new(ClientIpSource::RightmostXForwardedFor { trusted_hops: 0 });
+        let key_spoofed = extractor.extract(&req_spoofed).unwrap();
+        let key_unspoofed = extractor.extract(&req_unspoofed).unwrap();
+        assert_eq!(
+            key_spoofed, key_unspoofed,
+            "nginx-overwritten XFF (client on left, proxy on right) and no-XFF request produce \
+             the same key because rightmost extraction gives the same proxy IP, and fallback \
+             to peer IP (same proxy) gives the same result"
+        );
+        assert_eq!(key_spoofed, "10.0.0.1");
+    }
 }

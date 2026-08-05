@@ -74,6 +74,64 @@ impl HttpServer {
         let (strict_governor, issuer_governor, permissive_governor) =
             build_governor_configs(&config.rate_limit)?;
 
+        let eviction_interval = Duration::from_secs(60);
+        let strict_limiter = strict_governor.limiter();
+        let issuer_limiter = issuer_governor.limiter();
+        let permissive_limiter = permissive_governor.limiter();
+        if let Some(max_buckets) = config.rate_limit.max_buckets.filter(|&n| n > 0) {
+            tokio::spawn({
+                let limiter = strict_limiter.clone();
+                async move {
+                    let mut timer = tokio::time::interval(eviction_interval);
+                    timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                    loop {
+                        timer.tick().await;
+                        let len = limiter.len();
+                        if len > max_buckets {
+                            tracing::warn!(
+                                "rate limiter 'strict' has {len} buckets (max: {max_buckets}), evicting inactive entries"
+                            );
+                            limiter.retain_recent();
+                        }
+                    }
+                }
+            });
+            tokio::spawn({
+                let limiter = issuer_limiter.clone();
+                async move {
+                    let mut timer = tokio::time::interval(eviction_interval);
+                    timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                    loop {
+                        timer.tick().await;
+                        let len = limiter.len();
+                        if len > max_buckets {
+                            tracing::warn!(
+                                "rate limiter 'issuer' has {len} buckets (max: {max_buckets}), evicting inactive entries"
+                            );
+                            limiter.retain_recent();
+                        }
+                    }
+                }
+            });
+            tokio::spawn({
+                let limiter = permissive_limiter.clone();
+                async move {
+                    let mut timer = tokio::time::interval(eviction_interval);
+                    timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                    loop {
+                        timer.tick().await;
+                        let len = limiter.len();
+                        if len > max_buckets {
+                            tracing::warn!(
+                                "rate limiter 'permissive' has {len} buckets (max: {max_buckets}), evicting inactive entries"
+                            );
+                            limiter.retain_recent();
+                        }
+                    }
+                }
+            });
+        }
+
         let mut router = Router::new()
             .route("/", get(welcome))
             .route("/health", get(health_check))
