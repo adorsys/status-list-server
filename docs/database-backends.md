@@ -29,6 +29,26 @@ Best for local development, fast unit and integration tests, and simple single-n
 
 SQLite is not a distributed database, so it is not a good match for horizontally scaled production storage. For in-memory tests, use a shared-cache URI such as `sqlite::memory:?cache=shared` and a single-connection pool.
 
+## SQL-Backed Certificate Storage
+
+When the `acme` feature is enabled together with one of the SeaORM database
+features, certificate-manager storage can use the application database:
+
+```sh
+APP_SERVER__CERT__STORE__CERTIFICATE_STORAGE=sql
+APP_SERVER__CERT__STORE__SECRETS_STORAGE=sql
+```
+
+This creates and uses the `certificate_storage` table for certificate chains,
+ACME account state and signing keys. It is useful for small installations,
+development, and provider-neutral deployments that do not have object storage or
+a dedicated secrets manager available.
+
+For production signing keys, prefer a dedicated secrets manager when you need
+secret-specific IAM, audit logging, rotation, envelope encryption, or blast
+radius separation from database users and backups. If SQL storage is used for
+secrets, protect database credentials and backups as secret material.
+
 ## Compose Profiles
 
 `docker compose up` starts PostgreSQL by default and builds the container with `postgres,redis,aws,acme` features enabled. To run the MySQL service instead:

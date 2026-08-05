@@ -203,6 +203,10 @@ pub struct CertConfig {
 pub struct CertStoreConfig {
     pub source: String,
     #[serde(default)]
+    pub certificate_storage: Option<String>,
+    #[serde(default)]
+    pub secrets_storage: Option<String>,
+    #[serde(default)]
     pub certificate_path: Option<String>,
     #[serde(default)]
     pub signing_key_path: Option<String>,
@@ -805,6 +809,11 @@ fn base_builder() -> Result<ConfigBuilder<DefaultState>, ConfigError> {
         .set_default("server.cert.chain_cache_ttl", default_chain_cache_ttl)?
         .set_default("server.cert.renewal_cron_schedule", "0 0 0 * * *")?
         .set_default("server.cert.store.source", "filesystem")?
+        .set_default(
+            "server.cert.store.certificate_storage",
+            Option::<String>::None,
+        )?
+        .set_default("server.cert.store.secrets_storage", Option::<String>::None)?
         .set_default("server.cert.store.certificate_path", default_cert_path)?
         .set_default("server.cert.store.signing_key_path", default_key_path)?
         .set_default("server.cert.store.certificate_key", Option::<String>::None)?
@@ -1393,6 +1402,8 @@ mod tests {
             ("status_list.token_ttl_secs", "600"),
             ("server.cert.renewal_cron_schedule", "0 0 12 * * *"),
             ("server.cert.dns_challenge_server_url", "http://pebble:8055"),
+            ("server.cert.store.certificate_storage", "sql"),
+            ("server.cert.store.secrets_storage", "sql"),
             ("server.cert.store.certificate_path", "/certs/tls.crt"),
             ("server.cert.store.signing_key_path", "/certs/tls.key"),
         ])
@@ -1415,6 +1426,14 @@ mod tests {
         assert_eq!(
             config.server.cert.store.signing_key_path.as_deref(),
             Some("/certs/tls.key")
+        );
+        assert_eq!(
+            config.server.cert.store.certificate_storage.as_deref(),
+            Some("sql")
+        );
+        assert_eq!(
+            config.server.cert.store.secrets_storage.as_deref(),
+            Some("sql")
         );
     }
 

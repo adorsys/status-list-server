@@ -13,6 +13,7 @@ impl MigratorTrait for Migrator {
             Box::new(add_updated_at::Migration),
             Box::new(status_list_history::Migration),
             Box::new(status_list_history_exp_index::Migration),
+            Box::new(certificate_storage::Migration),
         ]
     }
 }
@@ -29,7 +30,12 @@ fn pin_innodb_on_mysql(manager: &SchemaManager<'_>, stmt: &mut TableCreateStatem
 
 /// Tables that must use InnoDB for transactional guarantees and foreign key enforcement.
 /// Extend this list if new transactional tables are added.
-const INNODB_REQUIRED_TABLES: &[&str] = &["credentials", "status_lists", "status_list_history"];
+const INNODB_REQUIRED_TABLES: &[&str] = &[
+    "credentials",
+    "status_lists",
+    "status_list_history",
+    "certificate_storage",
+];
 
 /// Queries `information_schema.TABLES` after migrations and refuses to boot if
 /// any of the critical tables (`credentials`, `status_lists`, `status_list_history`) are not
@@ -523,6 +529,73 @@ pub(crate) mod status_list_history_exp_index {
         Exp,
     }
 }
+
+/// Generic key/value table for certificate-manager storage.
+pub(crate) mod certificate_storage {
+    use super::*;
+
+    pub(crate) struct Migration;
+
+    impl MigrationName for Migration {
+        fn name(&self) -> &str {
+            "m20260805_000001_certificate_storage"
+        }
+    }
+
+    #[async_trait::async_trait]
+    #[allow(elided_lifetimes_in_paths)]
+    impl MigrationTrait for Migration {
+        async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+            let mut storage = Table::create();
+            storage
+                .table(CertificateStorage::Table)
+                .if_not_exists()
+                .col(
+                    ColumnDef::new(CertificateStorage::StorageKey)
+                        .string()
+                        .not_null()
+                        .primary_key(),
+                )
+                .col(ColumnDef::new(CertificateStorage::Value).text().not_null())
+                .col(ColumnDef::new(CertificateStorage::Metadata).json().null())
+                .col(
+                    ColumnDef::new(CertificateStorage::CreatedAt)
+                        .big_integer()
+                        .not_null(),
+                )
+                .col(
+                    ColumnDef::new(CertificateStorage::UpdatedAt)
+                        .big_integer()
+                        .not_null(),
+                );
+            pin_innodb_on_mysql(manager, &mut storage);
+            manager.create_table(storage).await
+        }
+
+        #[allow(elided_lifetimes_in_paths)]
+        async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+            manager
+                .drop_table(
+                    Table::drop()
+                        .if_exists()
+                        .table(CertificateStorage::Table)
+                        .to_owned(),
+                )
+                .await
+        }
+    }
+
+    #[derive(Iden)]
+    enum CertificateStorage {
+        Table,
+        StorageKey,
+        Value,
+        Metadata,
+        CreatedAt,
+        UpdatedAt,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

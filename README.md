@@ -201,6 +201,13 @@ The Status List Server is provisioned with a cryptographic certificate that is e
 - Filesystem store inputs may be PEM text or raw DER. Storage-backed store inputs may be PEM text or base64/base64url-encoded DER. Private keys must be PKCS#8 in PEM or DER form.
 - The renewal cron schedule is configured with `server.cert.renewal_cron_schedule`. For store provisioning, each scheduled run reloads the configured source and refreshes persisted material only when it changed.
 
+**Certificate Storage Backends:**
+
+- `server.cert.store.certificate_storage` selects where managed certificate chain data is stored. Supported values are `memory`, `sql`, and, with the `aws` feature, `aws_s3`.
+- `server.cert.store.secrets_storage` selects where signing keys and ACME account material are stored. Supported values are `memory`, `sql`, and, with the `aws` feature, `aws_secrets_manager`.
+- Set either or both values to `sql` to use the configured SeaORM database (`postgres`, `mysql`, or `sqlite`) through the `certificate_storage` table. This is a portable fallback for small deployments, local environments, and installations that cannot operate separate object-storage or secrets-manager services.
+- Prefer a dedicated secrets manager such as AWS Secrets Manager for production signing keys when you need secret-specific access controls, rotation workflows, audit logs, envelope encryption, or separation from the application database backup/restore path. SQL-backed secret storage inherits the security posture of the database, so restrict database access and protect backups accordingly.
+
 **Certificate Manager Builder Defaults:**
 
 - `CertManager::builder()` defaults to ACME provisioning.

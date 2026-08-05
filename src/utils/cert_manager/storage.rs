@@ -18,6 +18,9 @@ pub enum StorageError {
 
     #[error("Bucket {0} is unavailable")]
     BucketUnavailable(String),
+
+    #[error("SQL storage error: {0}")]
+    Sql(String),
 }
 
 /// Abstract interface for storage backends used by the certificate manager.

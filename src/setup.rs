@@ -13,7 +13,7 @@ use color_eyre::eyre::Result as EyeResult;
 #[cfg(feature = "acme")]
 use color_eyre::eyre::eyre;
 #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mysql"))]
-use sea_orm::ConnectOptions;
+use sea_orm::{ConnectOptions, DatabaseConnection};
 #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mysql"))]
 use sea_orm_migration::MigratorTrait;
 #[cfg(any(
@@ -67,8 +67,8 @@ use crate::outbound::memory::{MemoryCredentials, MemoryStatusListSnapshotRepo, M
 use crate::outbound::redis::Redis;
 #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mysql"))]
 use crate::outbound::sql::{
-    Migrator, SeaOrmStore, SqlCredentialRepo, SqlStatusListRepo, SqlStatusListSnapshotRepo,
-    verify_innodb_engines,
+    Migrator, SeaOrmStore, SqlCertificateStorage, SqlCredentialRepo, SqlStatusListRepo,
+    SqlStatusListSnapshotRepo, verify_innodb_engines,
 };
 use crate::server::AppState;
 
@@ -110,6 +110,9 @@ type BuildStateResult = (AppState, Arc<CertManager>);
 type BuildStateResult = (AppState,);
 
 async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
+    #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mysql"))]
+    let mut sql_db_for_cert_storage: Option<Arc<DatabaseConnection>> = None;
+
     let (status_list_repo, credential_repo, status_list_snapshot): (
         Arc<dyn StatusListRepo>,
         Arc<dyn CredentialRepo>,
@@ -174,6 +177,7 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
             )?;
 
             let db_clone = Arc::new(db);
+            sql_db_for_cert_storage = Some(db_clone.clone());
             (
                 Arc::new(SqlStatusListRepo::new(SeaOrmStore::new(db_clone.clone()))),
                 Arc::new(SqlCredentialRepo::new(SeaOrmStore::new(db_clone.clone()))),
@@ -199,66 +203,13 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
         let app_env = std::env::var("APP_ENV").unwrap_or(ENV_DEVELOPMENT.to_string());
         let cert_domains = [config.server.domain.as_str()];
         let (cert_storage, secrets_storage): (Box<dyn Storage>, Box<dyn Storage>) = {
-            #[cfg(feature = "aws")]
+            #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mysql"))]
             {
-                if config
-                    .server
-                    .cert
-                    .store
-                    .source
-                    .eq_ignore_ascii_case("aws_secrets_manager")
-                    || !config.aws.s3_bucket.is_empty()
-                {
-                    let aws_config = aws_config::defaults(BehaviorVersion::latest())
-                        .region(Region::new(config.aws.region.clone()))
-                        .load()
-                        .await;
-
-                    #[cfg(feature = "redis")]
-                    let cache_opt = if !config.redis.uri.expose_secret().is_empty() {
-                        if let Ok(redis_conn) = config.redis.start(None, None, None).await {
-                            Some(Redis::new(redis_conn).with_ttl(config.redis.cert_cache_ttl))
-                        } else {
-                            None
-                        }
-                    } else {
-                        None
-                    };
-                    #[cfg(not(feature = "redis"))]
-                    let cache_opt = None;
-
-                    let s3 = AwsS3::new(
-                        &aws_config,
-                        &config.aws.s3_bucket,
-                        &config.aws.region,
-                        &config.aws.s3_key_prefix,
-                    );
-                    let cert_st: Box<dyn Storage> = match cache_opt {
-                        Some(c) => Box::new(s3.with_cache(c)),
-                        None => Box::new(s3),
-                    };
-
-                    let secrets_st: Box<dyn Storage> = Box::new(
-                        AwsSecretsManager::new(
-                            &aws_config,
-                            Duration::from_secs(config.aws.secrets_cache_ttl),
-                        )
-                        .await?,
-                    );
-                    (cert_st, secrets_st)
-                } else {
-                    (
-                        Box::new(MemoryStorage::default()),
-                        Box::new(MemoryStorage::default()),
-                    )
-                }
+                build_certificate_storages(config, sql_db_for_cert_storage.clone()).await?
             }
-            #[cfg(not(feature = "aws"))]
+            #[cfg(not(any(feature = "sqlite", feature = "postgres", feature = "mysql")))]
             {
-                (
-                    Box::new(MemoryStorage::default()),
-                    Box::new(MemoryStorage::default()),
-                )
+                build_certificate_storages(config).await?
             }
         };
 
@@ -424,6 +375,283 @@ fn acme_dns_credentials(account: &crate::config::AcmeDnsAccount) -> AcmeDnsCrede
 }
 
 #[cfg(feature = "acme")]
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CertificateStorageKind {
+    Memory,
+    Sql,
+    AwsS3,
+    AwsSecretsManager,
+}
+
+#[cfg(feature = "acme")]
+fn storage_kind_from_config(
+    explicit: Option<&str>,
+    source: &str,
+    is_secret_storage: bool,
+    aws_defaults_enabled: bool,
+) -> EyeResult<CertificateStorageKind> {
+    let Some(raw) = explicit else {
+        if source.eq_ignore_ascii_case("sql") {
+            return Ok(CertificateStorageKind::Sql);
+        }
+        if aws_defaults_enabled {
+            return Ok(if is_secret_storage {
+                CertificateStorageKind::AwsSecretsManager
+            } else {
+                CertificateStorageKind::AwsS3
+            });
+        }
+        return Ok(CertificateStorageKind::Memory);
+    };
+
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "memory" => Ok(CertificateStorageKind::Memory),
+        "sql" | "database" => Ok(CertificateStorageKind::Sql),
+        "aws_s3" | "s3" | "object_storage" if !is_secret_storage => {
+            Ok(CertificateStorageKind::AwsS3)
+        }
+        "aws_secrets_manager" | "secrets_manager" if is_secret_storage => {
+            Ok(CertificateStorageKind::AwsSecretsManager)
+        }
+        other => {
+            let setting = if is_secret_storage {
+                "server.cert.store.secrets_storage"
+            } else {
+                "server.cert.store.certificate_storage"
+            };
+            Err(eyre!(
+                "unsupported {setting} value '{other}'; expected 'memory', 'sql'{}",
+                if is_secret_storage {
+                    ", or 'aws_secrets_manager'"
+                } else {
+                    ", or 'aws_s3'"
+                }
+            ))
+        }
+    }
+}
+
+#[cfg(all(
+    feature = "acme",
+    any(feature = "sqlite", feature = "postgres", feature = "mysql")
+))]
+async fn build_certificate_storages(
+    config: &AppConfig,
+    sql_db: Option<Arc<DatabaseConnection>>,
+) -> EyeResult<(Box<dyn Storage>, Box<dyn Storage>)> {
+    let source = config.server.cert.store.source.as_str();
+    #[cfg(feature = "aws")]
+    let aws_defaults_enabled =
+        source.eq_ignore_ascii_case("aws_secrets_manager") || !config.aws.s3_bucket.is_empty();
+    #[cfg(not(feature = "aws"))]
+    let aws_defaults_enabled = false;
+
+    let cert_kind = storage_kind_from_config(
+        config.server.cert.store.certificate_storage.as_deref(),
+        source,
+        false,
+        aws_defaults_enabled,
+    )?;
+    let secrets_kind = storage_kind_from_config(
+        config.server.cert.store.secrets_storage.as_deref(),
+        source,
+        true,
+        aws_defaults_enabled,
+    )?;
+
+    if [cert_kind, secrets_kind].contains(&CertificateStorageKind::Sql) && sql_db.is_none() {
+        return Err(eyre!(
+            "SQL certificate storage requires database.backend to be postgres, mysql, or sqlite"
+        ));
+    }
+
+    #[cfg(not(feature = "aws"))]
+    if [cert_kind, secrets_kind].iter().any(|kind| {
+        matches!(
+            kind,
+            CertificateStorageKind::AwsS3 | CertificateStorageKind::AwsSecretsManager
+        )
+    }) {
+        return Err(eyre!(
+            "AWS certificate storage was selected, but the 'aws' feature flag was not compiled in"
+        ));
+    }
+
+    #[cfg(feature = "aws")]
+    let aws_config = if [cert_kind, secrets_kind].iter().any(|kind| {
+        matches!(
+            kind,
+            CertificateStorageKind::AwsS3 | CertificateStorageKind::AwsSecretsManager
+        )
+    }) {
+        Some(
+            aws_config::defaults(BehaviorVersion::latest())
+                .region(Region::new(config.aws.region.clone()))
+                .load()
+                .await,
+        )
+    } else {
+        None
+    };
+
+    let build_sql_storage = || -> Box<dyn Storage> {
+        Box::new(SqlCertificateStorage::new(
+            sql_db
+                .as_ref()
+                .expect("validated SQL certificate storage connection")
+                .clone(),
+        ))
+    };
+
+    let cert_storage: Box<dyn Storage> = match cert_kind {
+        CertificateStorageKind::Memory => Box::new(MemoryStorage::default()),
+        CertificateStorageKind::Sql => build_sql_storage(),
+        CertificateStorageKind::AwsS3 => {
+            #[cfg(feature = "aws")]
+            {
+                let aws_config = aws_config
+                    .as_ref()
+                    .expect("AWS config is loaded for AWS storage");
+                #[cfg(feature = "redis")]
+                let cache_opt = if !config.redis.uri.expose_secret().is_empty() {
+                    if let Ok(redis_conn) = config.redis.start(None, None, None).await {
+                        Some(Redis::new(redis_conn).with_ttl(config.redis.cert_cache_ttl))
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+                #[cfg(not(feature = "redis"))]
+                let cache_opt = None;
+
+                let s3 = AwsS3::new(
+                    aws_config,
+                    &config.aws.s3_bucket,
+                    &config.aws.region,
+                    &config.aws.s3_key_prefix,
+                );
+                match cache_opt {
+                    Some(c) => Box::new(s3.with_cache(c)),
+                    None => Box::new(s3),
+                }
+            }
+            #[cfg(not(feature = "aws"))]
+            unreachable!("AWS storage checked above")
+        }
+        CertificateStorageKind::AwsSecretsManager => {
+            return Err(eyre!(
+                "server.cert.store.certificate_storage cannot use aws_secrets_manager; use aws_s3, sql, or memory"
+            ));
+        }
+    };
+
+    let secrets_storage: Box<dyn Storage> = match secrets_kind {
+        CertificateStorageKind::Memory => Box::new(MemoryStorage::default()),
+        CertificateStorageKind::Sql => build_sql_storage(),
+        CertificateStorageKind::AwsSecretsManager => {
+            #[cfg(feature = "aws")]
+            {
+                let aws_config = aws_config
+                    .as_ref()
+                    .expect("AWS config is loaded for AWS storage");
+                Box::new(
+                    AwsSecretsManager::new(
+                        aws_config,
+                        Duration::from_secs(config.aws.secrets_cache_ttl),
+                    )
+                    .await?,
+                )
+            }
+            #[cfg(not(feature = "aws"))]
+            unreachable!("AWS storage checked above")
+        }
+        CertificateStorageKind::AwsS3 => {
+            return Err(eyre!(
+                "server.cert.store.secrets_storage cannot use aws_s3; use aws_secrets_manager, sql, or memory"
+            ));
+        }
+    };
+
+    Ok((cert_storage, secrets_storage))
+}
+
+#[cfg(all(
+    feature = "acme",
+    not(any(feature = "sqlite", feature = "postgres", feature = "mysql"))
+))]
+async fn build_certificate_storages(
+    config: &AppConfig,
+) -> EyeResult<(Box<dyn Storage>, Box<dyn Storage>)> {
+    let source = config.server.cert.store.source.as_str();
+    #[cfg(feature = "aws")]
+    let aws_defaults_enabled =
+        source.eq_ignore_ascii_case("aws_secrets_manager") || !config.aws.s3_bucket.is_empty();
+    #[cfg(not(feature = "aws"))]
+    let aws_defaults_enabled = false;
+
+    let cert_kind = storage_kind_from_config(
+        config.server.cert.store.certificate_storage.as_deref(),
+        source,
+        false,
+        aws_defaults_enabled,
+    )?;
+    let secrets_kind = storage_kind_from_config(
+        config.server.cert.store.secrets_storage.as_deref(),
+        source,
+        true,
+        aws_defaults_enabled,
+    )?;
+
+    if [cert_kind, secrets_kind].contains(&CertificateStorageKind::Sql) {
+        return Err(eyre!(
+            "SQL certificate storage was selected, but no SeaORM database feature was compiled in"
+        ));
+    }
+
+    #[cfg(feature = "aws")]
+    {
+        if [cert_kind, secrets_kind]
+            == [
+                CertificateStorageKind::AwsS3,
+                CertificateStorageKind::AwsSecretsManager,
+            ]
+        {
+            let aws_config = aws_config::defaults(BehaviorVersion::latest())
+                .region(Region::new(config.aws.region.clone()))
+                .load()
+                .await;
+            let cert_storage: Box<dyn Storage> = Box::new(AwsS3::new(
+                &aws_config,
+                &config.aws.s3_bucket,
+                &config.aws.region,
+                &config.aws.s3_key_prefix,
+            ));
+            let secrets_storage: Box<dyn Storage> = Box::new(
+                AwsSecretsManager::new(
+                    &aws_config,
+                    Duration::from_secs(config.aws.secrets_cache_ttl),
+                )
+                .await?,
+            );
+            return Ok((cert_storage, secrets_storage));
+        }
+    }
+
+    if cert_kind == CertificateStorageKind::Memory && secrets_kind == CertificateStorageKind::Memory
+    {
+        Ok((
+            Box::new(MemoryStorage::default()),
+            Box::new(MemoryStorage::default()),
+        ))
+    } else {
+        Err(eyre!(
+            "the selected certificate storage combination requires the matching database or aws feature flag"
+        ))
+    }
+}
+
+#[cfg(feature = "acme")]
 fn store_certificate_strategy(config: &AppConfig) -> EyeResult<Option<StoreProvisioningStrategy>> {
     let cert_config = &config.server.cert;
     if cert_config
@@ -468,6 +696,30 @@ fn store_certificate_strategy(config: &AppConfig) -> EyeResult<Option<StoreProvi
                 signing_key_path,
             )))
         }
+        source if source.eq_ignore_ascii_case("storage") || source.eq_ignore_ascii_case("sql") => {
+            let certificate_key = cert_config
+                .store
+                .certificate_key
+                .as_deref()
+                .ok_or_else(|| {
+                    eyre!(
+                        "server.cert.store.certificate_key is required for storage-backed store provisioning"
+                    )
+                })?;
+            let signing_key_key = cert_config
+                .store
+                .signing_key_key
+                .as_deref()
+                .ok_or_else(|| {
+                    eyre!(
+                        "server.cert.store.signing_key_key is required for storage-backed store provisioning"
+                    )
+                })?;
+            Ok(Some(StoreProvisioningStrategy::storage(
+                certificate_key,
+                signing_key_key,
+            )))
+        }
         source if source.eq_ignore_ascii_case("aws_secrets_manager") => {
             let certificate_key = cert_config
                 .store
@@ -493,7 +745,7 @@ fn store_certificate_strategy(config: &AppConfig) -> EyeResult<Option<StoreProvi
             )))
         }
         unsupported => Err(eyre!(
-            "unsupported certificate store source '{unsupported}'; expected 'filesystem' or 'aws_secrets_manager'"
+            "unsupported certificate store source '{unsupported}'; expected 'filesystem', 'storage', 'sql', or 'aws_secrets_manager'"
         )),
     }
 }
