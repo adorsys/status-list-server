@@ -4,4 +4,3 @@ formatter:
 
 exclude:
   - helm/chart/templates/
-
