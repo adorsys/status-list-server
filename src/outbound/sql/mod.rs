@@ -4,6 +4,10 @@ mod error;
 mod migrations;
 mod models;
 mod store;
+// Real-backend container fixtures, shared by the store's own backend proofs and
+// by the HTTP-layer publish test.
+#[cfg(test)]
+pub(crate) mod test_containers;
 
 pub use error::RepositoryError;
 pub use migrations::Migrator;
