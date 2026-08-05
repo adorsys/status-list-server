@@ -32,4 +32,4 @@ jobs:
         with:
           tool: cargo-audit
 
-      - run: cargo audit --ignore RUSTSEC-2026-0235
+      - run: cargo audit

@@ -1,15 +1,7 @@
 
 # cargo-vet audits file
 
-[[audits.spin]]
-who = "Christian Yemele <yemelechristian2@gmail.com>"
-criteria = "safe-to-deploy"
-delta = "0.9.8 -> 0.9.9"
-
-[[audits.windows-sys]]
-who = "Christian Yemele <yemelechristian2@gmail.com>"
-criteria = "safe-to-deploy"
-delta = "0.52.0 -> 0.59.0"
+[audits]
 
 [[trusted.aws-config]]
 criteria = "safe-to-deploy"
