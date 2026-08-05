@@ -12,10 +12,11 @@
 /// a matched keypair, and splitting the halves across modules would hide that
 /// the PEM and the JWK correspond. Do not "deduplicate" the two.
 ///
-/// Gated rather than `#[allow(dead_code)]` so that it stays genuinely dead-code
-/// checked: every consumer is behind one of these features, and if the last one
-/// goes away the constant should start warning instead of sitting here forever.
-#[cfg(any(feature = "sqlite", feature = "mysql", feature = "postgres-tests"))]
+/// Deliberately carries neither a `cfg` nor `#[allow(dead_code)]`. Both the
+/// container-backed store proofs and the memory-backed handler tests use it, and
+/// the latter are ungated — so it is live in every test build, and dead-code
+/// analysis stays meaningful. A `cfg` narrowed to the SQL backends would break
+/// `cargo test` under default features.
 pub(crate) const TEST_EC_PUBLIC_JWK: &str = r#"{
     "kty": "EC",
     "crv": "P-256",
