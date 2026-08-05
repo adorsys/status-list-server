@@ -27,6 +27,7 @@ use super::utils::{
 ///
 /// - Retrieve a status list identified by its list id.
 /// - Retrieve a historical status list identified by its list id and time.
+#[tracing::instrument(skip_all, fields(list_id = %list_id), err(Debug))]
 pub async fn get_status_list(
     State(state): State<AppState>,
     Path(list_id): Path<String>,
@@ -160,7 +161,7 @@ async fn handle_historical_request(
         now - time
     );
 
-    let snapshot = state.service.get_historical_snapshot(list_id, time).await?;
+    let snapshot = state.service.get_snapshot_at(list_id, time).await?;
 
     let etag = generate_historical_etag(&snapshot);
     let last_modified = format_http_date(snapshot.iat);

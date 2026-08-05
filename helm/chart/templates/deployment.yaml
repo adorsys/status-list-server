@@ -13,6 +13,13 @@ spec:
       {{- include "status-list-server-chart.selectorLabels" . | nindent 6 }}
   template:
     metadata:
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: {{ .Values.statuslist.service.targetPort | quote }}
+        prometheus.io/path: "/metrics"
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
       labels:
         {{- include "status-list-server-chart.labels" . | nindent 8 }}
     spec:
@@ -78,6 +85,31 @@ spec:
                 {{- $_ := set $env "APP_SERVER__DOMAIN" "localhost" }}
               {{- end }}
             {{- end }}
+            {{- if .Values.otelCollector.enabled }}
+              {{- if and .Values.otelCollector.sidecar.enabled .Values.otelCollector.standalone.enabled }}
+                {{- fail "otelCollector sidecar and standalone modes are mutually exclusive" }}
+              {{- else if .Values.otelCollector.sidecar.enabled }}
+                {{- if not (hasKey $env "APP_TELEMETRY__ENABLED") }}
+                  {{- $_ := set $env "APP_TELEMETRY__ENABLED" "true" }}
+                {{- end }}
+                {{- if not (hasKey $env "APP_TELEMETRY__OTLP_ENDPOINT") }}
+                  {{- $_ := set $env "APP_TELEMETRY__OTLP_ENDPOINT" "http://localhost:4317" }}
+                {{- end }}
+              {{- else if .Values.otelCollector.standalone.enabled }}
+                {{- if not (hasKey $env "APP_TELEMETRY__ENABLED") }}
+                  {{- $_ := set $env "APP_TELEMETRY__ENABLED" "true" }}
+                {{- end }}
+                {{- if not (hasKey $env "APP_TELEMETRY__OTLP_ENDPOINT") }}
+                  {{- $_ := set $env "APP_TELEMETRY__OTLP_ENDPOINT" (printf "http://%s-otel-collector.%s.svc.cluster.local:%v" (include "status-list-server-chart.fullname" .) .Release.Namespace .Values.otelCollector.standalone.service.grpcPort) }}
+                {{- end }}
+              {{- else }}
+                {{- fail "otelCollector.enabled=true requires either sidecar.enabled=true or standalone.enabled=true" }}
+              {{- end }}
+            {{- else }}
+              {{- if not (hasKey $env "APP_TELEMETRY__ENABLED") }}
+                {{- $_ := set $env "APP_TELEMETRY__ENABLED" "false" }}
+              {{- end }}
+            {{- end }}
             {{- range $name, $value := $env }}
             - name: {{ $name }}
               value: {{ $value | quote }}
@@ -116,6 +148,14 @@ spec:
           {{- end }}
         {{- if and .Values.otelCollector.enabled .Values.otelCollector.sidecar.enabled }}
         - name: otel-collector
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+            seccompProfile:
+              type: RuntimeDefault
           image: {{ .Values.otelCollector.sidecar.image.repository }}:{{ .Values.otelCollector.sidecar.image.tag }}
           args: ["--config", "/etc/otelcol/config.yaml"]
           ports:

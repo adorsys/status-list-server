@@ -7,7 +7,7 @@ use crate::domain::models::status_list::{
     StatusEntry, StatusList, StatusListError, StatusListRecord, StatusListSnapshot,
 };
 use crate::domain::ports::{
-    CertificateProvider, CredentialRepo, StatusListCache, StatusListHistoryRepo, StatusListRepo,
+    CertificateProvider, CredentialRepo, StatusListCache, StatusListRepo, StatusListSnapshotRepo,
 };
 
 /// Container struct for building and exposing external service ports injected into handlers.
@@ -16,7 +16,7 @@ pub struct Service {
     pub(crate) status_list_repo: Arc<dyn StatusListRepo>,
     pub(crate) credential_repo: Arc<dyn CredentialRepo>,
     pub(crate) status_list_cache: Arc<dyn StatusListCache>,
-    pub(crate) history_repo: Option<Arc<dyn StatusListHistoryRepo>>,
+    pub(crate) snapshot_repo: Option<Arc<dyn StatusListSnapshotRepo>>,
     pub(crate) cert_provider: Arc<dyn CertificateProvider>,
 }
 
@@ -25,14 +25,14 @@ impl Service {
         status_list_repo: Arc<dyn StatusListRepo>,
         credential_repo: Arc<dyn CredentialRepo>,
         status_list_cache: Arc<dyn StatusListCache>,
-        history_repo: Option<Arc<dyn StatusListHistoryRepo>>,
+        snapshot_repo: Option<Arc<dyn StatusListSnapshotRepo>>,
         cert_provider: Arc<dyn CertificateProvider>,
     ) -> Self {
         Self {
             status_list_repo,
             credential_repo,
             status_list_cache,
-            history_repo,
+            snapshot_repo,
             cert_provider,
         }
     }
@@ -41,7 +41,7 @@ impl Service {
         status_list_repo: S,
         credential_repo: C,
         status_list_cache: SC,
-        history_repo: Option<Arc<dyn StatusListHistoryRepo>>,
+        snapshot_repo: Option<Arc<dyn StatusListSnapshotRepo>>,
         cert_provider: CP,
     ) -> Self
     where
@@ -54,7 +54,7 @@ impl Service {
             status_list_repo: Arc::new(status_list_repo),
             credential_repo: Arc::new(credential_repo),
             status_list_cache: Arc::new(status_list_cache),
-            history_repo,
+            snapshot_repo,
             cert_provider: Arc::new(cert_provider),
         }
     }
@@ -71,8 +71,8 @@ impl Service {
         self.status_list_cache.as_ref()
     }
 
-    pub fn history_repo(&self) -> Option<&dyn StatusListHistoryRepo> {
-        self.history_repo.as_deref()
+    pub fn snapshot_repo(&self) -> Option<&dyn StatusListSnapshotRepo> {
+        self.snapshot_repo.as_deref()
     }
 
     pub fn cert_provider(&self) -> &dyn CertificateProvider {
@@ -118,11 +118,28 @@ impl Service {
         if record.status_list.lst.len() > max_serialized_list_size {
             return Err(StatusListError::TooLarge);
         }
-        if self.status_list_repo.find(&record.list_id).await?.is_some() {
-            return Err(StatusListError::AlreadyExists);
-        }
 
-        match &self.history_repo {
+        // No `find` pre-check: the primary key on `list_id` is the only check
+        // that is not a TOCTOU race, and every repository classifies the
+        // resulting violation as `AlreadyExists` — proven against SQLite, MySQL
+        // and Postgres by `assert_duplicate_list_id_is_conflict` (which covers
+        // both branches below), and by construction for the in-memory adapter.
+        // A pre-check would add a round trip to every publish and still have to
+        // defer to this path when a competing writer commits between the read
+        // and the insert.
+        //
+        // The trade is not free on the duplicate path: a rejected publish now
+        // costs BEGIN + failed INSERT + ROLLBACK instead of one SELECT, which on
+        // Postgres burns a transaction ID and leaves a dead tuple for autovacuum.
+        // That is the right way round — duplicates are the rare case, and the
+        // pre-check never actually prevented one.
+        //
+        // Only unique violations are classified. A foreign-key violation on
+        // `issuer` still surfaces as a generic backend error (500); that is
+        // unreachable in practice because authentication resolves the issuer's
+        // credential before this runs, so an unregistered issuer is rejected as
+        // 401 long before the insert.
+        match &self.snapshot_repo {
             Some(_) => {
                 let snapshot = build_snapshot(&record, token_exp_secs);
                 self.status_list_repo
@@ -181,7 +198,7 @@ impl Service {
         let previous_updated_at = existing.updated_at;
         existing.updated_at = next_updated_at(previous_updated_at, current_unix_timestamp());
 
-        let landed = match &self.history_repo {
+        let landed = match &self.snapshot_repo {
             Some(_) => {
                 let snapshot = build_snapshot(&existing, token_exp_secs);
                 self.status_list_repo
@@ -229,13 +246,14 @@ impl Service {
         self.status_list_repo.list_uris().await
     }
 
-    /// Retrieve a historical status list snapshot active at a specific Unix timestamp.
-    pub async fn get_historical_snapshot(
+    /// Retrieve the snapshot that was active at the given Unix timestamp
+    /// (historical resolution per draft-21 §8.4).
+    pub async fn get_snapshot_at(
         &self,
         list_id: &str,
         time: i64,
     ) -> Result<StatusListSnapshot, StatusListError> {
-        self.history_repo
+        self.snapshot_repo
             .as_ref()
             .ok_or(StatusListError::NotFound)?
             .find_valid_at(list_id, time)
@@ -243,24 +261,26 @@ impl Service {
             .ok_or(StatusListError::HistoricalNotFound)
     }
 
-    /// Purge historical snapshots older than `cutoff` timestamp.
-    pub async fn cleanup_historical_snapshots(&self, cutoff: i64) -> Result<u64, StatusListError> {
-        let Some(history) = &self.history_repo else {
+    /// Purge snapshots older than `cutoff` timestamp.
+    pub async fn cleanup_snapshots(&self, cutoff: i64) -> Result<u64, StatusListError> {
+        let Some(snapshot_repo) = &self.snapshot_repo else {
             return Ok(0);
         };
-        history.delete_older_than(cutoff).await
+        snapshot_repo.delete_older_than(cutoff).await
     }
 
-    /// Publish new credentials for an issuer after verifying uniqueness invariant.
+    /// Publish new credentials for an issuer.
+    ///
+    /// Uniqueness is enforced by the primary key on `credentials.issuer`, not by
+    /// a `find` pre-check — same reasoning as [`Self::publish_status_list`]: the
+    /// pre-check is a TOCTOU race that still has to defer to the constraint when
+    /// two registrations for one issuer arrive together, so it buys a round trip
+    /// and no guarantee. `insert_one` classifies the violation through
+    /// `map_insert_err` (proven on SQLite and MySQL by
+    /// `test_*_duplicate_insert_maps_to_duplicate_entry`) and
+    /// `impl From<RepositoryError> for CredentialError` maps it to
+    /// `AlreadyExists`, so the 409 is unchanged.
     pub async fn publish_credential(&self, credential: Credential) -> Result<(), CredentialError> {
-        if self
-            .credential_repo
-            .find(&credential.issuer.0)
-            .await?
-            .is_some()
-        {
-            return Err(CredentialError::AlreadyExists);
-        }
         self.credential_repo.insert(credential).await
     }
 
@@ -289,8 +309,8 @@ impl std::fmt::Debug for Service {
                 &std::any::type_name::<dyn StatusListCache>(),
             )
             .field(
-                "history_repo",
-                &std::any::type_name::<dyn StatusListHistoryRepo>(),
+                "snapshot_repo",
+                &std::any::type_name::<dyn StatusListSnapshotRepo>(),
             )
             .field(
                 "cert_provider",

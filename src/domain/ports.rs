@@ -64,7 +64,7 @@ pub trait StatusListCache: Send + Sync + 'static {
 
 /// Persistence interface for historical status list snapshots.
 #[async_trait]
-pub trait StatusListHistoryRepo: Send + Sync + 'static {
+pub trait StatusListSnapshotRepo: Send + Sync + 'static {
     /// Save a historical status list snapshot.
     async fn insert(&self, record: StatusListSnapshot) -> Result<(), StatusListError>;
 

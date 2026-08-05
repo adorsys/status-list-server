@@ -14,24 +14,17 @@ pub enum RepositoryError {
     RepositoryNotSet,
     #[error("Duplicate entry")]
     DuplicateEntry,
-    #[error("Generic error: {0}")]
-    Generic(String),
 }
 
-impl From<sea_orm::DbErr> for RepositoryError {
-    fn from(err: sea_orm::DbErr) -> Self {
-        RepositoryError::Generic(err.to_string())
-    }
-}
-
-impl From<sea_orm::DbErr> for crate::domain::models::status_list::StatusListError {
-    fn from(err: sea_orm::DbErr) -> Self {
-        crate::domain::models::status_list::StatusListError::Backend(Box::new(err))
-    }
-}
-
-impl From<sea_orm::DbErr> for crate::domain::models::credential::CredentialError {
-    fn from(err: sea_orm::DbErr) -> Self {
-        crate::domain::models::credential::CredentialError::Backend(Box::new(err))
-    }
-}
+// There is deliberately no `impl From<sea_orm::DbErr>` for this type, nor for
+// `StatusListError` / `CredentialError`.
+//
+// A blanket conversion would make `?` on a `DbErr` compile anywhere, and every
+// such conversion silently discards `DbErr::sql_err()` — turning a unique-key
+// violation into a generic backend error, and a racing publish into a 500
+// instead of a 409 (#143, #244). Requiring `.map_err(map_insert_err)` at each
+// insert site keeps that classification an explicit, reviewable decision rather
+// than something a one-character edit can drop.
+//
+// The `Generic` variant went with it: it existed only as that impl's output, and
+// an unclassified catch-all is the same trapdoor wearing a different hat.
