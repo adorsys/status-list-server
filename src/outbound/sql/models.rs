@@ -25,7 +25,7 @@ pub(crate) mod credentials {
 
     #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel, Serialize, Deserialize)]
     #[sea_orm(table_name = "credentials")]
-    pub(crate) struct Model {
+    pub struct Model {
         #[sea_orm(primary_key)]
         pub issuer: String,
         #[sea_orm(column_type = "Json")]
@@ -33,7 +33,7 @@ pub(crate) mod credentials {
     }
 
     #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
-    pub(crate) enum Relation {}
+    pub enum Relation {}
 
     impl ActiveModelBehavior for ActiveModel {}
 }
@@ -120,6 +120,7 @@ pub(crate) mod status_list_history {
 pub(crate) type StatusListHistoryRecord = status_list_history::Model;
 
 // Certificate manager storage rows.
+#[allow(unreachable_pub)]
 pub(crate) mod certificate_storage {
     use super::*;
 
