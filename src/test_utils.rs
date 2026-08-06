@@ -90,6 +90,7 @@ pub(crate) async fn test_app_state_without_snapshots() -> AppState {
         max_statuses_per_request: 5_000,
         max_serialized_list_size: 1_048_576,
         snapshot_retention_secs: 0,
+        readiness: crate::server::health::Readiness::new(Vec::new()),
     }
 }
 
