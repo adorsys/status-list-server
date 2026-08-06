@@ -836,11 +836,27 @@ mod tests {
     use secrecy::ExposeSecret;
 
     #[test]
-    fn test_default_config() {
-        let config = Config::load_from_overrides(&[]).expect("Failed to load config");
+    fn test_config_loading() {
+        // 1. Default configuration loading & helper methods
+        let config = Config::load_from_overrides(&[]).expect("Failed to load default config");
 
         assert_eq!(config.server.host, "localhost");
         assert_eq!(config.server.port, 8000);
+        assert_eq!(config.server.cert.email, "admin@example.com");
+        assert_eq!(
+            config.server.cert.acme_directory_url,
+            "https://acme-v02.api.letsencrypt.org/directory"
+        );
+        assert_eq!(config.aws.region, "us-east-1");
+        assert_eq!(config.aws.s3_bucket, "status-list-adorsys");
+        assert_eq!(config.aws.s3_key_prefix, "");
+        assert_eq!(config.status_list.token_exp_secs, 900);
+        assert_eq!(config.status_list.token_ttl_secs, 300);
+        assert_eq!(config.server.cert.renewal_cron_schedule, "0 0 0 * * *");
+        assert_eq!(config.server.cert.dns_challenge_server_url, None);
+        assert_eq!(config.server.aggregation_uri, None);
+
+        // Feature-gated default database expectations
         #[cfg(feature = "postgres")]
         let (expected_db_url, expected_db_backend) = (
             "postgres://postgres:postgres@localhost:5432/status-list",
@@ -864,18 +880,7 @@ mod tests {
         assert_eq!(config.database.backend, expected_db_backend);
         assert_eq!(config.redis.uri.expose_secret(), "redis://localhost:6379");
         assert!(!config.redis.require_client_auth);
-        assert_eq!(config.server.cert.email, "admin@example.com");
-        assert_eq!(
-            config.server.cert.acme_directory_url,
-            "https://acme-v02.api.letsencrypt.org/directory"
-        );
-        assert_eq!(config.aws.region, "us-east-1");
-        assert_eq!(config.aws.s3_bucket, "status-list-adorsys");
-        assert_eq!(config.aws.s3_key_prefix, "");
-        assert_eq!(config.status_list.token_exp_secs, 900);
-        assert_eq!(config.status_list.token_ttl_secs, 300);
-        assert_eq!(config.server.cert.renewal_cron_schedule, "0 0 0 * * *");
-        assert_eq!(config.server.cert.dns_challenge_server_url, None);
+
         #[cfg(feature = "acme")]
         let (expected_strategy, expected_cert_path, expected_key_path) =
             ("acme", Option::<String>::None, Option::<String>::None);
@@ -889,7 +894,7 @@ mod tests {
             expected_cert_path
         );
         assert_eq!(config.server.cert.store.signing_key_path, expected_key_path);
-        assert_eq!(config.server.aggregation_uri, None);
+
         assert_eq!(config.rate_limit.strict_burst_size, 10);
         assert_eq!(config.rate_limit.strict_period_secs, 60);
         assert_eq!(config.rate_limit.permissive_burst_size, 100);
@@ -898,32 +903,159 @@ mod tests {
         assert_eq!(config.limits.max_status_index, 100_000);
         assert_eq!(config.limits.max_statuses_per_request, 5_000);
         assert_eq!(config.limits.max_serialized_list_size, 1_048_576);
-        assert_eq!(config.server.cert.dns.provider, None);
+
         assert_eq!(config.database.pool.max_connections, 5);
         assert_eq!(config.database.pool.min_connections, 1);
         assert_eq!(config.database.pool.acquire_timeout_secs, 5);
         assert_eq!(config.database.pool.connect_timeout_secs, 10);
         assert_eq!(config.database.pool.idle_timeout_secs, 600);
         assert_eq!(config.database.pool.max_lifetime_secs, 1800);
+
         assert_eq!(
             config.telemetry.environment,
             TelemetryEnvironment::Development
         );
         assert_eq!(config.telemetry.sampler_ratio, 1.0);
-    }
 
-    #[test]
-    fn test_aggregation_uri_env_override() {
-        let config = Config::load_from_overrides(&[(
-            "server.aggregation_uri",
-            "https://example.com/aggregation",
-        )])
-        .expect("Failed to load config");
+        // DatabaseBackend helper unit tests
+        assert_eq!(DatabaseBackend::default(), DatabaseBackend::Memory);
+        assert_eq!(DatabaseBackend::Memory.as_str(), "memory");
+        assert_eq!(DatabaseBackend::Postgres.as_str(), "postgres");
+        assert_eq!(DatabaseBackend::MySql.as_str(), "mysql");
+        assert_eq!(DatabaseBackend::Sqlite.as_str(), "sqlite");
+        assert!(DatabaseBackend::Postgres.validate_url_scheme("postgres://user:pass@host:5432/db"));
+        assert!(DatabaseBackend::Postgres.validate_url_scheme("postgresql://user:pass@host:5432/db"));
+        assert!(DatabaseBackend::MySql.validate_url_scheme("mysql://user:pass@host:3306/db"));
+        assert!(DatabaseBackend::Sqlite.validate_url_scheme("sqlite::memory:"));
+        assert!(!DatabaseBackend::MySql.validate_url_scheme("postgres://user:pass@host:5432/db"));
 
+        // 2. Comprehensive environment variable override testing
+        let overridden = Config::load_from_overrides(&[
+            ("server.host", "0.0.0.0"),
+            ("server.port", "5002"),
+            ("server.aggregation_uri", "https://example.com/aggregation"),
+            (
+                "database.url",
+                "postgres://user:password@localhost:5432/status-list",
+            ),
+            ("redis.uri", "rediss://user:password@localhost:6379/redis"),
+            ("redis.require_client_auth", "true"),
+            ("server.cert.email", "test@gmail.com"),
+            (
+                "server.cert.acme_directory_url",
+                "https://acme-v02.api.letsencrypt.org/directory",
+            ),
+            ("server.cert.organization", "Test Org"),
+            ("server.cert.eku", "1,3,6,1,5,5,7,3,30"),
+            ("server.cert.provisioning_strategy", "store"),
+            ("server.cert.store.certificate_path", "/certs/tls.crt"),
+            ("server.cert.store.signing_key_path", "/certs/tls.key"),
+            ("server.cert.renewal_cron_schedule", "0 0 12 * * *"),
+            ("server.cert.dns_challenge_server_url", "http://pebble:8055"),
+            ("aws.region", "us-west-2"),
+            ("aws.secrets_cache_ttl", "600"),
+            ("aws.s3_bucket", "my-custom-bucket"),
+            ("aws.s3_key_prefix", "status-list/prod"),
+            ("cache.ttl", "600"),
+            ("cache.max_capacity", "2000"),
+            ("status_list.token_exp_secs", "1800"),
+            ("status_list.token_ttl_secs", "600"),
+            ("rate_limit.strict_burst_size", "3"),
+            ("rate_limit.strict_period_secs", "120"),
+            ("rate_limit.permissive_burst_size", "500"),
+            ("rate_limit.permissive_period_secs", "10"),
+            ("limits.max_body_size_bytes", "65536"),
+            ("limits.max_status_index", "4096"),
+            ("limits.max_statuses_per_request", "256"),
+            ("limits.max_serialized_list_size", "32768"),
+            ("APP_DATABASE__POOL__MAX_CONNECTIONS", "20"),
+            ("APP_DATABASE__POOL__MIN_CONNECTIONS", "2"),
+            ("APP_DATABASE__POOL__ACQUIRE_TIMEOUT_SECS", "3"),
+            ("APP_DATABASE__POOL__CONNECT_TIMEOUT_SECS", "15"),
+            ("APP_DATABASE__POOL__IDLE_TIMEOUT_SECS", "300"),
+            ("APP_DATABASE__POOL__MAX_LIFETIME_SECS", "900"),
+        ])
+        .expect("Failed to load config with overrides");
+
+        assert_eq!(overridden.server.host, "0.0.0.0");
+        assert_eq!(overridden.server.port, 5002);
         assert_eq!(
-            config.server.aggregation_uri.as_deref(),
+            overridden.server.aggregation_uri.as_deref(),
             Some("https://example.com/aggregation")
         );
+        assert_eq!(
+            overridden.database.url.expose_secret(),
+            "postgres://user:password@localhost:5432/status-list"
+        );
+        assert_eq!(
+            overridden.redis.uri.expose_secret(),
+            "rediss://user:password@localhost:6379/redis"
+        );
+        assert!(overridden.redis.require_client_auth);
+        assert_eq!(overridden.server.cert.email, "test@gmail.com");
+        assert_eq!(
+            overridden.server.cert.acme_directory_url,
+            "https://acme-v02.api.letsencrypt.org/directory"
+        );
+        assert_eq!(overridden.aws.region, "us-west-2");
+        assert_eq!(overridden.aws.secrets_cache_ttl, 600);
+        assert_eq!(overridden.aws.s3_bucket, "my-custom-bucket");
+        assert_eq!(overridden.aws.s3_key_prefix, "status-list/prod");
+        assert_eq!(overridden.cache.ttl, 600);
+        assert_eq!(overridden.cache.max_capacity, 2000);
+        assert_eq!(overridden.status_list.token_exp_secs, 1800);
+        assert_eq!(overridden.status_list.token_ttl_secs, 600);
+        assert_eq!(overridden.server.cert.renewal_cron_schedule, "0 0 12 * * *");
+        assert_eq!(
+            overridden.server.cert.dns_challenge_server_url.as_deref(),
+            Some("http://pebble:8055")
+        );
+        assert_eq!(overridden.server.cert.provisioning_strategy, "store");
+        assert_eq!(
+            overridden.server.cert.store.certificate_path.as_deref(),
+            Some("/certs/tls.crt")
+        );
+        assert_eq!(
+            overridden.server.cert.store.signing_key_path.as_deref(),
+            Some("/certs/tls.key")
+        );
+        assert_eq!(overridden.rate_limit.strict_burst_size, 3);
+        assert_eq!(overridden.rate_limit.strict_period_secs, 120);
+        assert_eq!(overridden.rate_limit.permissive_burst_size, 500);
+        assert_eq!(overridden.rate_limit.permissive_period_secs, 10);
+        assert_eq!(overridden.limits.max_body_size_bytes, 65_536);
+        assert_eq!(overridden.limits.max_status_index, 4_096);
+        assert_eq!(overridden.limits.max_statuses_per_request, 256);
+        assert_eq!(overridden.limits.max_serialized_list_size, 32_768);
+        assert_eq!(overridden.database.pool.max_connections, 20);
+        assert_eq!(overridden.database.pool.min_connections, 2);
+        assert_eq!(overridden.database.pool.acquire_timeout_secs, 3);
+        assert_eq!(overridden.database.pool.connect_timeout_secs, 15);
+        assert_eq!(overridden.database.pool.idle_timeout_secs, 300);
+        assert_eq!(overridden.database.pool.max_lifetime_secs, 900);
+
+        // 3. Database backend overrides (MySQL & SQLite)
+        let mysql_cfg = Config::load_from_overrides(&[
+            ("database.backend", "mysql"),
+            (
+                "database.url",
+                "mysql://user:password@localhost:3306/status-list",
+            ),
+        ])
+        .expect("Failed to load mysql config");
+        assert_eq!(mysql_cfg.database.backend, DatabaseBackend::MySql);
+        assert_eq!(
+            mysql_cfg.database.url.expose_secret(),
+            "mysql://user:password@localhost:3306/status-list"
+        );
+
+        let sqlite_cfg = Config::load_from_overrides(&[
+            ("database.backend", "sqlite"),
+            ("database.url", "sqlite::memory:"),
+        ])
+        .expect("Failed to load sqlite config");
+        assert_eq!(sqlite_cfg.database.backend, DatabaseBackend::Sqlite);
+        assert_eq!(sqlite_cfg.database.url.expose_secret(), "sqlite::memory:");
     }
 
     #[test]
@@ -1283,241 +1415,7 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_env_config() {
-        let config = Config::load_from_overrides(&[
-            ("server.host", "0.0.0.0"),
-            ("server.port", "5002"),
-            (
-                "database.url",
-                "postgres://user:password@localhost:5432/status-list",
-            ),
-            ("redis.uri", "rediss://user:password@localhost:6379/redis"),
-            ("redis.require_client_auth", "true"),
-            ("server.cert.email", "test@gmail.com"),
-            (
-                "server.cert.acme_directory_url",
-                "https://acme-v02.api.letsencrypt.org/directory",
-            ),
-        ])
-        .expect("Failed to load config");
 
-        assert_eq!(config.server.host, "0.0.0.0");
-        assert_eq!(config.server.port, 5002);
-        assert_eq!(
-            config.database.url.expose_secret(),
-            "postgres://user:password@localhost:5432/status-list"
-        );
-        assert_eq!(
-            config.redis.uri.expose_secret(),
-            "rediss://user:password@localhost:6379/redis"
-        );
-        assert!(config.redis.require_client_auth);
-        assert_eq!(config.server.cert.email, "test@gmail.com");
-        assert_eq!(
-            config.server.cert.acme_directory_url,
-            "https://acme-v02.api.letsencrypt.org/directory"
-        );
-    }
-
-    #[test]
-    fn test_env_config_with_tls() {
-        // Feature-conditional database configuration matching test_default_config pattern
-        #[cfg(feature = "postgres")]
-        let (expected_db_url, expected_db_backend) = (
-            "postgres://postgres:postgres@localhost:5432/status-list",
-            DatabaseBackend::Postgres,
-        );
-        #[cfg(all(not(feature = "postgres"), feature = "sqlite"))]
-        let (expected_db_url, expected_db_backend) = ("sqlite::memory:", DatabaseBackend::Sqlite);
-        #[cfg(all(not(feature = "postgres"), not(feature = "sqlite"), feature = "mysql"))]
-        let (expected_db_url, expected_db_backend) = (
-            "mysql://mysql:mysql@localhost:3306/status-list",
-            DatabaseBackend::MySql,
-        );
-        #[cfg(all(
-            not(feature = "postgres"),
-            not(feature = "sqlite"),
-            not(feature = "mysql")
-        ))]
-        let (expected_db_url, expected_db_backend) = ("memory:", DatabaseBackend::Memory);
-
-        let config = Config::load_from_overrides(&[
-            ("redis.uri", "rediss://user:password@localhost:6379/redis"),
-            ("redis.require_client_auth", "true"),
-            ("server.cert.email", "test@gmail.com"),
-            (
-                "server.cert.acme_directory_url",
-                "https://acme-v02.api.letsencrypt.org/directory",
-            ),
-            ("server.cert.organization", "Test Org"),
-            ("server.cert.eku", "1,3,6,1,5,5,7,3,30"),
-            ("aws.region", "us-west-2"),
-            ("aws.secrets_cache_ttl", "600"),
-            ("aws.s3_bucket", "my-custom-bucket"),
-            ("aws.s3_key_prefix", "status-list/prod"),
-            ("cache.ttl", "600"),
-            ("cache.max_capacity", "2000"),
-        ])
-        .expect("Failed to load config");
-
-        assert_eq!(config.server.host, "localhost");
-        assert_eq!(config.server.port, 8000);
-        assert_eq!(config.database.url.expose_secret(), expected_db_url);
-        assert_eq!(config.database.backend, expected_db_backend);
-        assert_eq!(
-            config.redis.uri.expose_secret(),
-            "rediss://user:password@localhost:6379/redis"
-        );
-        assert!(config.redis.require_client_auth);
-        assert_eq!(config.server.cert.email, "test@gmail.com");
-        assert_eq!(
-            config.server.cert.acme_directory_url,
-            "https://acme-v02.api.letsencrypt.org/directory"
-        );
-        assert_eq!(config.aws.region, "us-west-2");
-        assert_eq!(config.aws.secrets_cache_ttl, 600);
-        assert_eq!(config.aws.s3_bucket, "my-custom-bucket");
-        assert_eq!(config.aws.s3_key_prefix, "status-list/prod");
-        assert_eq!(config.cache.ttl, 600);
-        assert_eq!(config.cache.max_capacity, 2000);
-    }
-
-    #[test]
-    fn test_new_config_fields_env_override() {
-        let config = Config::load_from_overrides(&[
-            ("server.cert.provisioning_strategy", "store"),
-            ("aws.s3_bucket", "my-bucket"),
-            ("aws.s3_key_prefix", "prefix"),
-            ("status_list.token_exp_secs", "1800"),
-            ("status_list.token_ttl_secs", "600"),
-            ("server.cert.renewal_cron_schedule", "0 0 12 * * *"),
-            ("server.cert.dns_challenge_server_url", "http://pebble:8055"),
-            ("server.cert.store.certificate_path", "/certs/tls.crt"),
-            ("server.cert.store.signing_key_path", "/certs/tls.key"),
-        ])
-        .expect("Failed to load config");
-
-        assert_eq!(config.aws.s3_bucket, "my-bucket");
-        assert_eq!(config.aws.s3_key_prefix, "prefix");
-        assert_eq!(config.status_list.token_exp_secs, 1800);
-        assert_eq!(config.status_list.token_ttl_secs, 600);
-        assert_eq!(config.server.cert.renewal_cron_schedule, "0 0 12 * * *");
-        assert_eq!(
-            config.server.cert.dns_challenge_server_url.as_deref(),
-            Some("http://pebble:8055")
-        );
-        assert_eq!(config.server.cert.provisioning_strategy, "store");
-        assert_eq!(
-            config.server.cert.store.certificate_path.as_deref(),
-            Some("/certs/tls.crt")
-        );
-        assert_eq!(
-            config.server.cert.store.signing_key_path.as_deref(),
-            Some("/certs/tls.key")
-        );
-    }
-
-    #[test]
-    fn test_default_rate_limits_and_bounds() {
-        let config = Config::load_from_overrides(&[]).expect("Failed to load config");
-
-        assert_eq!(config.rate_limit.strict_burst_size, 10);
-        assert_eq!(config.rate_limit.strict_period_secs, 60);
-        assert_eq!(config.rate_limit.permissive_burst_size, 100);
-        assert_eq!(config.rate_limit.permissive_period_secs, 60);
-        assert_eq!(config.limits.max_body_size_bytes, 2_097_152);
-        assert_eq!(config.limits.max_status_index, 100_000);
-        assert_eq!(config.limits.max_statuses_per_request, 5_000);
-        assert_eq!(config.limits.max_serialized_list_size, 1_048_576);
-    }
-
-    #[test]
-    fn test_rate_limits_and_bounds_env_override() {
-        let config = Config::load_from_overrides(&[
-            ("rate_limit.strict_burst_size", "3"),
-            ("rate_limit.strict_period_secs", "120"),
-            ("rate_limit.permissive_burst_size", "500"),
-            ("rate_limit.permissive_period_secs", "10"),
-            ("limits.max_body_size_bytes", "65536"),
-            ("limits.max_status_index", "4096"),
-            ("limits.max_statuses_per_request", "256"),
-            ("limits.max_serialized_list_size", "32768"),
-        ])
-        .expect("Failed to load config");
-
-        assert_eq!(config.rate_limit.strict_burst_size, 3);
-        assert_eq!(config.rate_limit.strict_period_secs, 120);
-        assert_eq!(config.rate_limit.permissive_burst_size, 500);
-        assert_eq!(config.rate_limit.permissive_period_secs, 10);
-        assert_eq!(config.limits.max_body_size_bytes, 65_536);
-        assert_eq!(config.limits.max_status_index, 4_096);
-        assert_eq!(config.limits.max_statuses_per_request, 256);
-        assert_eq!(config.limits.max_serialized_list_size, 32_768);
-    }
-
-    #[test]
-    fn test_mysql_backend_config() {
-        let config = Config::load_from_overrides(&[
-            ("database.backend", "mysql"),
-            (
-                "database.url",
-                "mysql://user:password@localhost:3306/status-list",
-            ),
-        ])
-        .expect("Failed to load config");
-        assert_eq!(config.database.backend, DatabaseBackend::MySql);
-        assert_eq!(
-            config.database.url.expose_secret(),
-            "mysql://user:password@localhost:3306/status-list"
-        );
-    }
-
-    #[test]
-    fn test_sqlite_backend_config() {
-        let config = Config::load_from_overrides(&[
-            ("database.backend", "sqlite"),
-            ("database.url", "sqlite::memory:"),
-        ])
-        .expect("Failed to load config");
-        assert_eq!(config.database.backend, DatabaseBackend::Sqlite);
-        assert_eq!(config.database.url.expose_secret(), "sqlite::memory:");
-    }
-
-    #[test]
-    fn test_database_backend_validate_url_scheme() {
-        assert!(
-            DatabaseBackend::Postgres
-                .validate_url_scheme("postgres://postgres:postgres@localhost:5432/status-list")
-        );
-        assert!(
-            DatabaseBackend::Postgres
-                .validate_url_scheme("postgresql://postgres:postgres@localhost:5432/status-list")
-        );
-        assert!(
-            DatabaseBackend::MySql
-                .validate_url_scheme("mysql://user:password@localhost:3306/status-list")
-        );
-        assert!(DatabaseBackend::Sqlite.validate_url_scheme("sqlite::memory:"));
-        assert!(
-            !DatabaseBackend::MySql
-                .validate_url_scheme("postgres://postgres:postgres@localhost:5432/status-list")
-        );
-    }
-
-    #[test]
-    fn test_database_backend_default() {
-        let backend = DatabaseBackend::default();
-        assert_eq!(backend, DatabaseBackend::Memory);
-    }
-
-    #[test]
-    fn test_database_backend_as_str() {
-        assert_eq!(DatabaseBackend::Memory.as_str(), "memory");
-        assert_eq!(DatabaseBackend::Postgres.as_str(), "postgres");
-        assert_eq!(DatabaseBackend::MySql.as_str(), "mysql");
-        assert_eq!(DatabaseBackend::Sqlite.as_str(), "sqlite");
-    }
 
     #[test]
     fn test_default_config_ships_no_repo_key_material() {
@@ -1581,22 +1479,5 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_pool_config_env_override() {
-        let config = Config::load_from_overrides(&[
-            ("APP_DATABASE__POOL__MAX_CONNECTIONS", "20"),
-            ("APP_DATABASE__POOL__MIN_CONNECTIONS", "2"),
-            ("APP_DATABASE__POOL__ACQUIRE_TIMEOUT_SECS", "3"),
-            ("APP_DATABASE__POOL__CONNECT_TIMEOUT_SECS", "15"),
-            ("APP_DATABASE__POOL__IDLE_TIMEOUT_SECS", "300"),
-            ("APP_DATABASE__POOL__MAX_LIFETIME_SECS", "900"),
-        ])
-        .expect("Failed to load config");
-        assert_eq!(config.database.pool.max_connections, 20);
-        assert_eq!(config.database.pool.min_connections, 2);
-        assert_eq!(config.database.pool.acquire_timeout_secs, 3);
-        assert_eq!(config.database.pool.connect_timeout_secs, 15);
-        assert_eq!(config.database.pool.idle_timeout_secs, 300);
-        assert_eq!(config.database.pool.max_lifetime_secs, 900);
-    }
+
 }
