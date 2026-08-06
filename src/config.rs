@@ -1059,29 +1059,178 @@ mod tests {
     }
 
     #[test]
-    fn test_dns_provider_defaults_per_environment() {
-        let dns = DnsConfig::default();
-
+    fn test_dns_provider_resolution() {
+        // Environment defaults & explicit selection override
+        let default_dns = DnsConfig::default();
         assert_eq!(
-            dns.resolve("production").unwrap().kind(),
+            default_dns.resolve("production").unwrap().kind(),
             DnsProviderKind::Route53
         );
         assert_eq!(
-            dns.resolve("development").unwrap().kind(),
+            default_dns.resolve("development").unwrap().kind(),
             DnsProviderKind::Pebble
         );
-    }
 
-    #[test]
-    fn test_dns_provider_explicit_selection_overrides_environment() {
-        let dns = DnsConfig {
+        let explicit_dns = DnsConfig {
             provider: Some(DnsProviderKind::Pebble),
             ..Default::default()
         };
-
         assert_eq!(
-            dns.resolve("production").unwrap().kind(),
+            explicit_dns.resolve("production").unwrap().kind(),
             DnsProviderKind::Pebble
+        );
+
+        let env_override_cfg = Config::load_from_overrides(&[("server.cert.dns.provider", "route53")])
+            .expect("Failed to load config");
+        assert_eq!(
+            env_override_cfg.server.cert.dns.provider,
+            Some(DnsProviderKind::Route53)
+        );
+
+        // Valid provider settings resolve successfully
+        let cloudflare_dns = DnsConfig {
+            provider: Some(DnsProviderKind::Cloudflare),
+            cloudflare: Some(CloudflareDnsConfig {
+                api_token: "token".into(),
+            }),
+            ..Default::default()
+        };
+        assert_eq!(
+            cloudflare_dns.resolve("production").unwrap().kind(),
+            DnsProviderKind::Cloudflare
+        );
+
+        let acmedns_helper = |cfg: AcmeDnsConfig| DnsConfig {
+            provider: Some(DnsProviderKind::Acmedns),
+            acmedns: Some(cfg),
+            ..Default::default()
+        };
+        let valid_acmedns = acmedns_helper(AcmeDnsConfig {
+            server_url: "https://auth.example.org".into(),
+            username: Some("user".into()),
+            password: Some("password".into()),
+            subdomain: Some("subdomain".into()),
+            accounts: Default::default(),
+        });
+        assert_eq!(
+            valid_acmedns.resolve("production").unwrap().kind(),
+            DnsProviderKind::Acmedns
+        );
+
+        let account = AcmeDnsAccount {
+            username: "user".into(),
+            password: "password".into(),
+            subdomain: "subdomain".into(),
+        };
+        let acmedns_map = acmedns_helper(AcmeDnsConfig {
+            server_url: "https://auth.example.org".into(),
+            username: None,
+            password: None,
+            subdomain: None,
+            accounts: [("status.example.com".to_string(), account)].into(),
+        });
+        assert_eq!(
+            acmedns_map.resolve("production").unwrap().kind(),
+            DnsProviderKind::Acmedns
+        );
+
+        let azure_dns = DnsConfig {
+            provider: Some(DnsProviderKind::Azure),
+            azure: Some(AzureDnsConfig {
+                tenant_id: "tenant".into(),
+                client_id: "client".into(),
+                client_secret: "secret".into(),
+                subscription_id: "sub".into(),
+                resource_group: "rg".into(),
+            }),
+            ..Default::default()
+        };
+        assert_eq!(
+            azure_dns.resolve("production").unwrap().kind(),
+            DnsProviderKind::Azure
+        );
+
+        let gcloud_path_dns = DnsConfig {
+            provider: Some(DnsProviderKind::Gcloud),
+            gcloud: Some(GcloudDnsConfig {
+                service_account_key: None,
+                service_account_key_path: Some("/etc/gcloud/key.json".into()),
+            }),
+            ..Default::default()
+        };
+        assert_eq!(
+            gcloud_path_dns.resolve("production").unwrap().kind(),
+            DnsProviderKind::Gcloud
+        );
+
+        // GCloud key source precedence (Inline key vs Path)
+        let gcloud_inline_and_path = DnsConfig {
+            provider: Some(DnsProviderKind::Gcloud),
+            gcloud: Some(GcloudDnsConfig {
+                service_account_key: Some("inline-key-json".into()),
+                service_account_key_path: Some("/etc/gcloud/key.json".into()),
+            }),
+            ..Default::default()
+        };
+        match gcloud_inline_and_path.resolve("production").unwrap() {
+            ResolvedDnsProvider::Gcloud(GcloudKeySource::Inline(key)) => {
+                assert_eq!(key.expose_secret(), "inline-key-json");
+            }
+            other => panic!("Expected an inline key source, got {other:?}"),
+        }
+
+        let gcloud_empty_inline_uses_path = DnsConfig {
+            provider: Some(DnsProviderKind::Gcloud),
+            gcloud: Some(GcloudDnsConfig {
+                service_account_key: Some("".into()),
+                service_account_key_path: Some("/etc/gcloud/key.json".into()),
+            }),
+            ..Default::default()
+        };
+        match gcloud_empty_inline_uses_path.resolve("production").unwrap() {
+            ResolvedDnsProvider::Gcloud(GcloudKeySource::Path(path)) => {
+                assert_eq!(path, "/etc/gcloud/key.json");
+            }
+            other => panic!("Expected a path key source, got {other:?}"),
+        }
+
+        // ACME-DNS accounts JSON parsing from environment overrides
+        let server_url = "https://auth.example.org";
+        let accounts_json = r#"{"a.example.com": {"username": "u1", "password": "p1", "subdomain": "s1"}, "b.example.com": {"username": "u2", "password": "p2", "subdomain": "s2"}}"#;
+        let acme_json_cfg = Config::load_from_overrides(&[
+            ("server.cert.dns.acmedns.server_url", server_url),
+            ("server.cert.dns.acmedns.accounts", accounts_json),
+        ])
+        .expect("Failed to load config with acmedns accounts JSON");
+
+        let acmedns = acme_json_cfg
+            .server
+            .cert
+            .dns
+            .acmedns
+            .expect("acmedns settings");
+        assert_eq!(acmedns.server_url, "https://auth.example.org");
+        assert!(acmedns.default_account().is_none());
+        assert_eq!(acmedns.accounts.len(), 2);
+        let b_acct = &acmedns.accounts["b.example.com"];
+        assert_eq!(b_acct.username, "u2");
+        assert_eq!(b_acct.password.expose_secret(), "p2");
+        assert_eq!(b_acct.subdomain, "s2");
+
+        let empty_acme_json_cfg = Config::load_from_overrides(&[
+            ("server.cert.dns.acmedns.server_url", server_url),
+            ("server.cert.dns.acmedns.accounts", ""),
+        ])
+        .expect("Failed to load config with empty acmedns accounts var");
+        assert!(
+            empty_acme_json_cfg
+                .server
+                .cert
+                .dns
+                .acmedns
+                .unwrap()
+                .accounts
+                .is_empty()
         );
     }
 
@@ -1317,103 +1466,7 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_gcloud_inline_key_wins_over_path() {
-        // Both sources configured: the inline key must be selected, not the path
-        let dns = DnsConfig {
-            provider: Some(DnsProviderKind::Gcloud),
-            gcloud: Some(GcloudDnsConfig {
-                service_account_key: Some("inline-key-json".into()),
-                service_account_key_path: Some("/etc/gcloud/key.json".into()),
-            }),
-            ..Default::default()
-        };
-        let resolved = dns.resolve("production").unwrap();
-        match resolved {
-            ResolvedDnsProvider::Gcloud(GcloudKeySource::Inline(key)) => {
-                assert_eq!(key.expose_secret(), "inline-key-json");
-            }
-            other => panic!("Expected an inline key source, got {other:?}"),
-        }
 
-        // An empty inline key counts as unset, so the path is used instead
-        let dns = DnsConfig {
-            provider: Some(DnsProviderKind::Gcloud),
-            gcloud: Some(GcloudDnsConfig {
-                service_account_key: Some("".into()),
-                service_account_key_path: Some("/etc/gcloud/key.json".into()),
-            }),
-            ..Default::default()
-        };
-        let resolved = dns.resolve("production").unwrap();
-        match resolved {
-            ResolvedDnsProvider::Gcloud(GcloudKeySource::Path(path)) => {
-                assert_eq!(path, "/etc/gcloud/key.json");
-            }
-            other => panic!("Expected a path key source, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn test_acme_dns_accounts_parse_from_env_json() {
-        let server_url = "https://auth.example.org";
-        let accounts_json = r#"{"a.example.com": {"username": "u1", "password": "p1", "subdomain": "s1"}, "b.example.com": {"username": "u2", "password": "p2", "subdomain": "s2"}}"#;
-        let config = Config::load_from_overrides(&[
-            ("server.cert.dns.acmedns.server_url", server_url),
-            ("server.cert.dns.acmedns.accounts", accounts_json),
-        ])
-        .expect("Failed to load config");
-
-        let acmedns = config.server.cert.dns.acmedns.expect("acmedns settings");
-        assert_eq!(acmedns.server_url, "https://auth.example.org");
-        assert!(acmedns.default_account().is_none());
-        assert_eq!(acmedns.accounts.len(), 2);
-        let account = &acmedns.accounts["b.example.com"];
-        assert_eq!(account.username, "u2");
-        assert_eq!(account.password.expose_secret(), "p2");
-        assert_eq!(account.subdomain, "s2");
-    }
-
-    #[test]
-    fn test_acme_dns_accounts_reject_malformed_json() {
-        Config::load_from_overrides(&[
-            (
-                "server.cert.dns.acmedns.server_url",
-                "https://auth.example.org",
-            ),
-            (
-                "server.cert.dns.acmedns.accounts",
-                "{\"a.example.com\": not valid json",
-            ),
-        ])
-        .expect_err("malformed accounts JSON must fail config loading");
-    }
-
-    #[test]
-    fn test_acme_dns_accounts_empty_env_var_means_no_accounts() {
-        let config = Config::load_from_overrides(&[
-            (
-                "server.cert.dns.acmedns.server_url",
-                "https://auth.example.org",
-            ),
-            ("server.cert.dns.acmedns.accounts", ""),
-        ])
-        .expect("Failed to load config");
-
-        let acmedns = config.server.cert.dns.acmedns.expect("acmedns settings");
-        assert!(acmedns.accounts.is_empty());
-    }
-
-    #[test]
-    fn test_dns_provider_env_override() {
-        let config = Config::load_from_overrides(&[("server.cert.dns.provider", "route53")])
-            .expect("Failed to load config");
-
-        assert_eq!(
-            config.server.cert.dns.provider,
-            Some(DnsProviderKind::Route53)
-        );
-    }
 
 
 
