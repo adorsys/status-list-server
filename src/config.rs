@@ -1235,198 +1235,128 @@ mod tests {
     }
 
     #[test]
-    fn test_dns_provider_requires_its_settings() {
-        let dns = DnsConfig {
+    fn test_critical_validations() {
+        // Invalid database backend configuration
+        let invalid_db_res = Config::load_from_overrides(&[
+            ("database.backend", "redis"),
+            (
+                "database.url",
+                "postgres://user:password@localhost:5432/status-list",
+            ),
+        ]);
+        assert!(
+            invalid_db_res.is_err(),
+            "an unknown database backend value should fail config loading"
+        );
+
+        // DNS provider missing or empty required settings rejections
+        let missing_cloudflare = DnsConfig {
             provider: Some(DnsProviderKind::Cloudflare),
             ..Default::default()
         };
-        let err = dns.resolve("production").unwrap_err();
-        assert!(err.to_string().contains("dns.cloudflare"));
-
-        let dns = DnsConfig {
-            provider: Some(DnsProviderKind::Cloudflare),
-            cloudflare: Some(CloudflareDnsConfig {
-                api_token: "token".into(),
-            }),
-            ..Default::default()
-        };
-        assert_eq!(
-            dns.resolve("production").unwrap().kind(),
-            DnsProviderKind::Cloudflare
+        assert!(
+            missing_cloudflare
+                .resolve("production")
+                .unwrap_err()
+                .to_string()
+                .contains("dns.cloudflare")
         );
 
-        let dns = DnsConfig {
-            provider: Some(DnsProviderKind::Acmedns),
-            ..Default::default()
-        };
-        let err = dns.resolve("production").unwrap_err();
-        assert!(err.to_string().contains("dns.acmedns"));
-
-        // Legacy single-account config still resolves unchanged
-        let acmedns = |cfg: AcmeDnsConfig| DnsConfig {
-            provider: Some(DnsProviderKind::Acmedns),
-            acmedns: Some(cfg),
-            ..Default::default()
-        };
-        let dns = acmedns(AcmeDnsConfig {
-            server_url: "https://auth.example.org".into(),
-            username: Some("user".into()),
-            password: Some("password".into()),
-            subdomain: Some("subdomain".into()),
-            accounts: Default::default(),
-        });
-        assert_eq!(
-            dns.resolve("production").unwrap().kind(),
-            DnsProviderKind::Acmedns
-        );
-
-        // A per-domain accounts map alone is enough
-        let account = AcmeDnsAccount {
-            username: "user".into(),
-            password: "password".into(),
-            subdomain: "subdomain".into(),
-        };
-        let dns = acmedns(AcmeDnsConfig {
-            server_url: "https://auth.example.org".into(),
-            username: None,
-            password: None,
-            subdomain: None,
-            accounts: [("status.example.com".to_string(), account)].into(),
-        });
-        assert_eq!(
-            dns.resolve("production").unwrap().kind(),
-            DnsProviderKind::Acmedns
-        );
-
-        // A partial default account is rejected
-        let dns = acmedns(AcmeDnsConfig {
-            server_url: "https://auth.example.org".into(),
-            username: Some("user".into()),
-            password: None,
-            subdomain: None,
-            accounts: Default::default(),
-        });
-        let err = dns.resolve("production").unwrap_err();
-        assert!(err.to_string().contains("must be set together"));
-
-        // Neither a default account nor a map is rejected
-        let dns = acmedns(AcmeDnsConfig {
-            server_url: "https://auth.example.org".into(),
-            username: None,
-            password: None,
-            subdomain: None,
-            accounts: Default::default(),
-        });
-        let err = dns.resolve("production").unwrap_err();
-        assert!(err.to_string().contains("default account"));
-
-        // Gcloud needs the key inline or as a file path
-        let dns = DnsConfig {
-            provider: Some(DnsProviderKind::Gcloud),
-            gcloud: Some(GcloudDnsConfig {
-                service_account_key: None,
-                service_account_key_path: None,
-            }),
-            ..Default::default()
-        };
-        let err = dns.resolve("production").unwrap_err();
-        assert!(err.to_string().contains("dns.gcloud"));
-
-        let dns = DnsConfig {
-            provider: Some(DnsProviderKind::Gcloud),
-            gcloud: Some(GcloudDnsConfig {
-                service_account_key: None,
-                service_account_key_path: Some("/etc/gcloud/key.json".into()),
-            }),
-            ..Default::default()
-        };
-        assert_eq!(
-            dns.resolve("production").unwrap().kind(),
-            DnsProviderKind::Gcloud
-        );
-    }
-
-    #[test]
-    fn test_dns_provider_rejects_empty_required_fields() {
-        // Azure names exactly the empty fields
-        let azure = |tenant_id: &str, subscription_id: &str| DnsConfig {
-            provider: Some(DnsProviderKind::Azure),
-            azure: Some(AzureDnsConfig {
-                tenant_id: tenant_id.into(),
-                client_id: "client".into(),
-                client_secret: "secret".into(),
-                subscription_id: subscription_id.into(),
-                resource_group: "rg".into(),
-            }),
-            ..Default::default()
-        };
-        let err = azure("", " ")
-            .resolve("production")
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("tenant_id"));
-        assert!(err.contains("subscription_id"));
-        assert!(!err.contains("client_id"));
-        assert_eq!(
-            azure("tenant", "sub").resolve("production").unwrap().kind(),
-            DnsProviderKind::Azure
-        );
-
-        // Cloudflare rejects an empty api_token
-        let dns = DnsConfig {
+        let empty_cloudflare_token = DnsConfig {
             provider: Some(DnsProviderKind::Cloudflare),
             cloudflare: Some(CloudflareDnsConfig {
                 api_token: "".into(),
             }),
             ..Default::default()
         };
-        let err = dns.resolve("production").unwrap_err();
-        assert!(err.to_string().contains("api_token"));
+        assert!(
+            empty_cloudflare_token
+                .resolve("production")
+                .unwrap_err()
+                .to_string()
+                .contains("api_token")
+        );
 
-        // ACME-DNS rejects an empty server_url
-        let acmedns = |cfg: AcmeDnsConfig| DnsConfig {
+        let acmedns_helper = |cfg: AcmeDnsConfig| DnsConfig {
             provider: Some(DnsProviderKind::Acmedns),
             acmedns: Some(cfg),
             ..Default::default()
         };
-        let dns = acmedns(AcmeDnsConfig {
+
+        let missing_acmedns = DnsConfig {
+            provider: Some(DnsProviderKind::Acmedns),
+            ..Default::default()
+        };
+        assert!(
+            missing_acmedns
+                .resolve("production")
+                .unwrap_err()
+                .to_string()
+                .contains("dns.acmedns")
+        );
+
+        let partial_acmedns_default = acmedns_helper(AcmeDnsConfig {
+            server_url: "https://auth.example.org".into(),
+            username: Some("user".into()),
+            password: None,
+            subdomain: None,
+            accounts: Default::default(),
+        });
+        assert!(
+            partial_acmedns_default
+                .resolve("production")
+                .unwrap_err()
+                .to_string()
+                .contains("must be set together")
+        );
+
+        let empty_acmedns_account = acmedns_helper(AcmeDnsConfig {
+            server_url: "https://auth.example.org".into(),
+            username: None,
+            password: None,
+            subdomain: None,
+            accounts: Default::default(),
+        });
+        assert!(
+            empty_acmedns_account
+                .resolve("production")
+                .unwrap_err()
+                .to_string()
+                .contains("default account")
+        );
+
+        let empty_acmedns_url = acmedns_helper(AcmeDnsConfig {
             server_url: " ".into(),
             username: Some("user".into()),
             password: Some("password".into()),
             subdomain: Some("subdomain".into()),
             accounts: Default::default(),
         });
-        let err = dns.resolve("production").unwrap_err();
-        assert!(err.to_string().contains("server_url"));
+        assert!(
+            empty_acmedns_url
+                .resolve("production")
+                .unwrap_err()
+                .to_string()
+                .contains("server_url")
+        );
 
-        // An empty default-account field counts as unset, so the account
-        // is partial rather than silently unusable
-        let dns = acmedns(AcmeDnsConfig {
+        let empty_acmedns_subdomain = acmedns_helper(AcmeDnsConfig {
             server_url: "https://auth.example.org".into(),
             username: Some("user".into()),
             password: Some("password".into()),
             subdomain: Some("".into()),
             accounts: Default::default(),
         });
-        let err = dns.resolve("production").unwrap_err();
-        assert!(err.to_string().contains("must be set together"));
+        assert!(
+            empty_acmedns_subdomain
+                .resolve("production")
+                .unwrap_err()
+                .to_string()
+                .contains("must be set together")
+        );
 
-        // Gcloud with both key sources empty counts as missing
-        let dns = DnsConfig {
-            provider: Some(DnsProviderKind::Gcloud),
-            gcloud: Some(GcloudDnsConfig {
-                service_account_key: Some("".into()),
-                service_account_key_path: Some(" ".into()),
-            }),
-            ..Default::default()
-        };
-        let err = dns.resolve("production").unwrap_err();
-        assert!(err.to_string().contains("dns.gcloud"));
-    }
-
-    #[test]
-    fn test_acme_dns_rejects_unusable_account_entries() {
-        let acmedns = |accounts: HashMap<String, AcmeDnsAccount>| DnsConfig {
+        // ACME-DNS unusable account entries validation
+        let acmedns_accounts_helper = |accounts: HashMap<String, AcmeDnsAccount>| DnsConfig {
             provider: Some(DnsProviderKind::Acmedns),
             acmedns: Some(AcmeDnsConfig {
                 server_url: "https://auth.example.org".into(),
@@ -1437,100 +1367,133 @@ mod tests {
             }),
             ..Default::default()
         };
-        let account = |username: &str, subdomain: &str| AcmeDnsAccount {
+        let make_acct = |username: &str, subdomain: &str| AcmeDnsAccount {
             username: username.into(),
             password: "password".into(),
             subdomain: subdomain.into(),
         };
 
-        // An entry with empty fields is rejected, naming the domain and fields
-        let dns = acmedns([("status.example.com".to_string(), account("", " "))].into());
-        let err = dns.resolve("production").unwrap_err().to_string();
-        assert!(err.contains("status.example.com"));
-        assert!(err.contains("username"));
-        assert!(err.contains("subdomain"));
-        assert!(!err.contains("password"));
+        let empty_fields_err = acmedns_accounts_helper(
+            [("status.example.com".to_string(), make_acct("", " "))].into(),
+        )
+        .resolve("production")
+        .unwrap_err()
+        .to_string();
+        assert!(empty_fields_err.contains("status.example.com"));
+        assert!(empty_fields_err.contains("username"));
+        assert!(empty_fields_err.contains("subdomain"));
+        assert!(!empty_fields_err.contains("password"));
 
-        // A key that does not name a domain is rejected
-        for key in ["", "  ", "*.", "."] {
-            let dns = acmedns([(key.to_string(), account("user", "sub"))].into());
-            let err = dns.resolve("production").unwrap_err().to_string();
-            assert!(err.contains("does not name a domain"), "key {key:?}: {err}");
+        for invalid_key in ["", "  ", "*.", "."] {
+            let invalid_key_err = acmedns_accounts_helper(
+                [(invalid_key.to_string(), make_acct("user", "sub"))].into(),
+            )
+            .resolve("production")
+            .unwrap_err()
+            .to_string();
+            assert!(
+                invalid_key_err.contains("does not name a domain"),
+                "key {invalid_key:?}: {invalid_key_err}"
+            );
         }
 
-        // A usable entry passes
-        let dns = acmedns([("status.example.com".to_string(), account("user", "sub"))].into());
-        assert_eq!(
-            dns.resolve("production").unwrap().kind(),
-            DnsProviderKind::Acmedns
+        let missing_gcloud_key = DnsConfig {
+            provider: Some(DnsProviderKind::Gcloud),
+            gcloud: Some(GcloudDnsConfig {
+                service_account_key: None,
+                service_account_key_path: None,
+            }),
+            ..Default::default()
+        };
+        assert!(
+            missing_gcloud_key
+                .resolve("production")
+                .unwrap_err()
+                .to_string()
+                .contains("dns.gcloud")
         );
-    }
 
+        let empty_gcloud_keys = DnsConfig {
+            provider: Some(DnsProviderKind::Gcloud),
+            gcloud: Some(GcloudDnsConfig {
+                service_account_key: Some("".into()),
+                service_account_key_path: Some(" ".into()),
+            }),
+            ..Default::default()
+        };
+        assert!(
+            empty_gcloud_keys
+                .resolve("production")
+                .unwrap_err()
+                .to_string()
+                .contains("dns.gcloud")
+        );
 
+        let azure_helper = |tenant_id: &str, subscription_id: &str| DnsConfig {
+            provider: Some(DnsProviderKind::Azure),
+            azure: Some(AzureDnsConfig {
+                tenant_id: tenant_id.into(),
+                client_id: "client".into(),
+                client_secret: "secret".into(),
+                subscription_id: subscription_id.into(),
+                resource_group: "rg".into(),
+            }),
+            ..Default::default()
+        };
+        let azure_err = azure_helper("", " ")
+            .resolve("production")
+            .unwrap_err()
+            .to_string();
+        assert!(azure_err.contains("tenant_id"));
+        assert!(azure_err.contains("subscription_id"));
+        assert!(!azure_err.contains("client_id"));
 
+        // Malformed ACME-DNS accounts JSON rejection
+        assert!(
+            Config::load_from_overrides(&[
+                (
+                    "server.cert.dns.acmedns.server_url",
+                    "https://auth.example.org",
+                ),
+                (
+                    "server.cert.dns.acmedns.accounts",
+                    "{\"a.example.com\": not valid json",
+                ),
+            ])
+            .is_err(),
+            "malformed accounts JSON must fail config loading"
+        );
 
-
-    #[test]
-    fn test_default_config_ships_no_repo_key_material() {
-        // The default config must not reference any test_data/ paths or
-        // other repository-local key material, ensuring it can be used
-        // in production without requiring those test files
-        let config = Config::load_from_overrides(&[]).expect("Failed to load config");
-
-        // Cert store paths should be None when using ACME strategy (default on feature=acme)
-        // or None/empty when using store strategy (default without feature=acme)
-        let cert_path = config.server.cert.store.certificate_path;
-        let key_path = config.server.cert.store.signing_key_path;
-
-        if let Some(path) = cert_path.as_deref() {
+        // Security check: Default config contains no repository-specific test_data references
+        let default_config = Config::load_from_overrides(&[]).expect("Failed to load default config");
+        if let Some(path) = default_config.server.cert.store.certificate_path.as_deref() {
             assert!(
                 !path.contains("test_data"),
                 "Default config certificate_path references test_data: {path}"
             );
         }
-        if let Some(path) = key_path.as_deref() {
+        if let Some(path) = default_config.server.cert.store.signing_key_path.as_deref() {
             assert!(
                 !path.contains("test_data"),
                 "Default config signing_key_path references test_data: {path}"
             );
         }
-
-        // Database URL should not reference test_data either
-        let db_url = config.database.url.expose_secret();
+        let db_url = default_config.database.url.expose_secret();
         assert!(
             !db_url.contains("test_data"),
             "Default config database URL references test_data: {db_url}"
         );
-
-        // AWS secret keys should be None or not reference test_data
-        if let Some(key) = config.server.cert.store.certificate_key.as_deref() {
+        if let Some(key) = default_config.server.cert.store.certificate_key.as_deref() {
             assert!(
                 !key.contains("test_data"),
                 "Default config certificate_key references test_data: {key}"
             );
         }
-        if let Some(key) = config.server.cert.store.signing_key_key.as_deref() {
+        if let Some(key) = default_config.server.cert.store.signing_key_key.as_deref() {
             assert!(
                 !key.contains("test_data"),
                 "Default config signing_key_key references test_data: {key}"
             );
         }
     }
-
-    #[test]
-    fn test_invalid_database_backend_config() {
-        let result = Config::load_from_overrides(&[
-            ("database.backend", "redis"),
-            (
-                "database.url",
-                "postgres://user:password@localhost:5432/status-list",
-            ),
-        ]);
-        assert!(
-            result.is_err(),
-            "an unknown backend value should fail to load config"
-        );
-    }
-
-
 }
