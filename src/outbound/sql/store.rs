@@ -59,10 +59,15 @@ impl SeaOrmStore<StatusListRecord> {
         entity: StatusListRecord,
         snapshot: StatusListHistoryRecord,
     ) -> Result<(), RepositoryError> {
-        // Captured before `entity` is consumed below; only the contention test
-        // reads it.
         #[cfg(test)]
         let probed_list_id = entity.list_id.clone();
+
+        if snapshot.list_id != entity.list_id {
+            return Err(RepositoryError::InsertError(format!(
+                "snapshot list_id ({}) does not match entity list_id ({})",
+                snapshot.list_id, entity.list_id
+            )));
+        }
 
         let txn = self
             .db
@@ -227,6 +232,13 @@ impl SeaOrmStore<StatusListRecord> {
         expected_updated_at: i64,
         snapshot: StatusListHistoryRecord,
     ) -> Result<bool, RepositoryError> {
+        if snapshot.list_id != list_id || entity.list_id != list_id {
+            return Err(RepositoryError::UpdateError(format!(
+                "snapshot list_id ({}) or entity list_id ({}) does not match list_id ({})",
+                snapshot.list_id, entity.list_id, list_id
+            )));
+        }
+
         if entity.updated_at <= expected_updated_at {
             return Err(RepositoryError::UpdateError(format!(
                 "guarded update requires a strictly newer updated_at \
