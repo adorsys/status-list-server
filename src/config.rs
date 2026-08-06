@@ -924,7 +924,9 @@ mod tests {
         assert_eq!(DatabaseBackend::MySql.as_str(), "mysql");
         assert_eq!(DatabaseBackend::Sqlite.as_str(), "sqlite");
         assert!(DatabaseBackend::Postgres.validate_url_scheme("postgres://user:pass@host:5432/db"));
-        assert!(DatabaseBackend::Postgres.validate_url_scheme("postgresql://user:pass@host:5432/db"));
+        assert!(
+            DatabaseBackend::Postgres.validate_url_scheme("postgresql://user:pass@host:5432/db")
+        );
         assert!(DatabaseBackend::MySql.validate_url_scheme("mysql://user:pass@host:3306/db"));
         assert!(DatabaseBackend::Sqlite.validate_url_scheme("sqlite::memory:"));
         assert!(!DatabaseBackend::MySql.validate_url_scheme("postgres://user:pass@host:5432/db"));
@@ -1080,8 +1082,9 @@ mod tests {
             DnsProviderKind::Pebble
         );
 
-        let env_override_cfg = Config::load_from_overrides(&[("server.cert.dns.provider", "route53")])
-            .expect("Failed to load config");
+        let env_override_cfg =
+            Config::load_from_overrides(&[("server.cert.dns.provider", "route53")])
+                .expect("Failed to load config");
         assert_eq!(
             env_override_cfg.server.cert.dns.provider,
             Some(DnsProviderKind::Route53)
@@ -1465,7 +1468,8 @@ mod tests {
         );
 
         // Security check: Default config contains no repository-specific test_data references
-        let default_config = Config::load_from_overrides(&[]).expect("Failed to load default config");
+        let default_config =
+            Config::load_from_overrides(&[]).expect("Failed to load default config");
         if let Some(path) = default_config.server.cert.store.certificate_path.as_deref() {
             assert!(
                 !path.contains("test_data"),
