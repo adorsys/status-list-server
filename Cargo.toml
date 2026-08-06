@@ -6,9 +6,11 @@ edition = "2024"
 [features]
 default = ["memory"]
 memory = []
-postgres = ["dep:sea-orm", "dep:sea-orm-migration", "sea-orm?/sqlx-postgres"]
-sqlite = ["dep:sea-orm", "dep:sea-orm-migration", "sea-orm?/sqlx-sqlite"]
-mysql = ["dep:sea-orm", "dep:sea-orm-migration", "sea-orm?/sqlx-mysql"]
+history = ["dep:sea-orm", "dep:sea-orm-migration"]
+server = ["history"]
+postgres = ["sea-orm?/sqlx-postgres", "history"]
+sqlite = ["sea-orm?/sqlx-sqlite", "history"]
+mysql = ["sea-orm?/sqlx-mysql", "history"]
 redis = ["dep:redis"]
 aws = [
   "dep:aws-config",
