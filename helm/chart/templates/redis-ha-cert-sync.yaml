@@ -117,9 +117,9 @@ spec:
       volumes:
         - name: tmp
           emptyDir: {}
-       containers:
-         - name: redis-cert-sync-bootstrap
-           image: bitnami/kubectl:1.31
+      containers:
+        - name: redis-cert-sync-bootstrap
+          image: bitnami/kubectl:1.31
           imagePullPolicy: IfNotPresent
           resources:
             requests:
@@ -184,9 +184,9 @@ spec:
           volumes:
             - name: tmp
               emptyDir: {}
-           containers:
-             - name: redis-cert-sync
-               image: bitnami/kubectl:1.31
+          containers:
+            - name: redis-cert-sync
+              image: bitnami/kubectl:1.31
               imagePullPolicy: IfNotPresent
               resources:
                 requests:

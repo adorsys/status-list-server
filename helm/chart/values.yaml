@@ -98,10 +98,10 @@ statuslist:
     APP_LIMITS__MAX_STATUS_INDEX: "100000"
     APP_LIMITS__MAX_STATUSES_PER_REQUEST: "5000"
     APP_LIMITS__MAX_SERIALIZED_LIST_SIZE: "1048576"
-     # Telemetry / OpenTelemetry
-     APP_TELEMETRY__ENVIRONMENT: "production"
-     # NOTE: Image was built from older source with OTEL enabled. Disabled here until image is rebuilt.
-     APP_TELEMETRY__ENABLED: "false"
+    # Telemetry / OpenTelemetry
+    APP_TELEMETRY__ENVIRONMENT: "production"
+    # NOTE: Image was built from older source with OTEL enabled. Disabled here until image is rebuilt.
+    APP_TELEMETRY__ENABLED: "false"
     APP_TELEMETRY__OTLP_ENDPOINT: "http://localhost:4317"
     APP_TELEMETRY__SAMPLER_RATIO: "1.0"
   livenessProbe:
@@ -199,8 +199,8 @@ serviceAccount:
   create: true
   name: ""
   annotations:
-    # Replace <AWS_ACCOUNT_ID> with your actual AWS account ID and uncomment to enable IRSA.
-    # eks.amazonaws.com/role-arn: "arn:aws:iam::<AWS_ACCOUNT_ID>:role/statuslist-app-role"
+  # Replace <AWS_ACCOUNT_ID> with your actual AWS account ID and uncomment to enable IRSA.
+  # eks.amazonaws.com/role-arn: "arn:aws:iam::<AWS_ACCOUNT_ID>:role/statuslist-app-role"
 
 redis-ha:
   enabled: true
