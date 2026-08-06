@@ -21,7 +21,6 @@ struct Claims {
     exp: usize,
 }
 
-
 /// Authentication middleware acting as a safeguard for unauthorized issuers
 pub async fn auth(
     State(state): State<AppState>,
