@@ -2,6 +2,8 @@ use async_trait::async_trait;
 use color_eyre::eyre::Error as Report;
 #[cfg(feature = "redis")]
 use redis::RedisError;
+#[cfg(any(feature = "sqlite", feature = "postgres", feature = "mysql"))]
+use sea_orm::DbErr;
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -12,6 +14,10 @@ pub enum StorageError {
 
     #[error("AWS SDK error: {0}")]
     AwsSdk(#[source] Report),
+
+    #[error("SQL storage error: {0}")]
+    #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mysql"))]
+    Sql(#[from] DbErr),
 
     #[error("The data is invalid: {0}")]
     InvalidData(String),

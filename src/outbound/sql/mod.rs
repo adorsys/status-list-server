@@ -1,5 +1,6 @@
 //! Relational database outbound adapters implementing domain ports via SeaORM.
 
+mod certificate_storage;
 mod error;
 mod migrations;
 mod models;
@@ -9,6 +10,7 @@ mod store;
 #[cfg(test)]
 pub(crate) mod test_containers;
 
+pub use certificate_storage::SqlCertificateStorage;
 pub use error::RepositoryError;
 pub use migrations::Migrator;
 pub(crate) use migrations::verify_innodb_engines;

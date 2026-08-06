@@ -29,6 +29,12 @@ Best for local development, fast unit and integration tests, and simple single-n
 
 SQLite is not a distributed database, so it is not a good match for horizontally scaled production storage. For in-memory tests, use a shared-cache URI such as `sqlite::memory:?cache=shared` and a single-connection pool.
 
+## SQL Certificate Storage
+
+When ACME is enabled, certificate-manager certificate values can be stored in the application database by setting `APP_SERVER__CERT__STORE__SOURCE=sql`. Migrations create the `certificate_storage` table with a certificate name, value, `created_at`, `updated_at`, and optional JSON metadata column.
+
+Use this when object storage is unavailable or unnecessary, such as local, small, or provider-neutral deployments. Prefer object storage or a dedicated secret store when certificate material needs independent retention, backup, access control, or cross-service sharing. SQLite-backed certificate storage should stay limited to tests and single-process deployments.
+
 ## Compose Profiles
 
 `docker compose up` starts PostgreSQL by default and builds the container with `postgres,redis,aws,acme` features enabled. To run the MySQL service instead:

@@ -25,7 +25,7 @@ pub(crate) mod credentials {
 
     #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel, Serialize, Deserialize)]
     #[sea_orm(table_name = "credentials")]
-    pub struct Model {
+    pub(crate) struct Model {
         #[sea_orm(primary_key)]
         pub issuer: String,
         #[sea_orm(column_type = "Json")]
@@ -33,7 +33,7 @@ pub(crate) mod credentials {
     }
 
     #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
-    pub enum Relation {}
+    pub(crate) enum Relation {}
 
     impl ActiveModelBehavior for ActiveModel {}
 }
@@ -118,6 +118,28 @@ pub(crate) mod status_list_history {
 }
 
 pub(crate) type StatusListHistoryRecord = status_list_history::Model;
+
+// Certificate manager storage rows.
+pub(crate) mod certificate_storage {
+    use super::*;
+
+    #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel, Serialize, Deserialize)]
+    #[sea_orm(table_name = "certificate_storage")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub name: String,
+        pub value: String,
+        pub created_at: i64,
+        pub updated_at: i64,
+        #[sea_orm(column_type = "Json", nullable)]
+        pub metadata: Option<Json>,
+    }
+
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub enum Relation {}
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
 
 // Persisted JSON shape of a status list column.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, FromJsonQueryResult)]

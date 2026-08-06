@@ -198,8 +198,11 @@ The Status List Server is provisioned with a cryptographic certificate that is e
 - `server.cert.provisioning_strategy = "store"` loads externally managed certificate material and persists it into the configured certificate/secrets storage.
 - Store provisioning supports `server.cert.store.source = "filesystem"` with `certificate_path` and `signing_key_path`.
 - Store provisioning also supports `server.cert.store.source = "storage"` for the configured certificate/secrets storage backends, or `"aws_secrets_manager"` when both PEM values are stored in the configured secrets backend, using `certificate_key` and `signing_key_key`.
+- SQL-backed certificate storage can be selected with `server.cert.store.source = "sql"` when the server is compiled with `postgres`, `mysql`, or `sqlite` and `database.backend` uses that SQL backend. It stores certificate-manager certificate values in the application database table `certificate_storage`.
 - Filesystem store inputs may be PEM text or raw DER. Storage-backed store inputs may be PEM text or base64/base64url-encoded DER. Private keys must be PKCS#8 in PEM or DER form.
 - The renewal cron schedule is configured with `server.cert.renewal_cron_schedule`. For store provisioning, each scheduled run reloads the configured source and refreshes persisted material only when it changed.
+
+SQL-backed certificate storage is appropriate for small deployments, local setups, and provider-neutral environments where adding object storage only for certificate chains is unnecessary. Prefer S3 or another managed object/secret store for high-scale or strongly separated production deployments, especially when certificate material needs independent backup, retention, access control, or cross-service sharing. SQLite remains best suited to single-process deployments and tests.
 
 **Certificate Manager Builder Defaults:**
 

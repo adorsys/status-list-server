@@ -13,7 +13,7 @@ use color_eyre::eyre::Result as EyeResult;
 #[cfg(feature = "acme")]
 use color_eyre::eyre::eyre;
 #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mysql"))]
-use sea_orm::ConnectOptions;
+use sea_orm::{ConnectOptions, DatabaseConnection};
 #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mysql"))]
 use sea_orm_migration::MigratorTrait;
 #[cfg(any(
@@ -67,8 +67,8 @@ use crate::outbound::memory::{MemoryCredentials, MemoryStatusListSnapshotRepo, M
 use crate::outbound::redis::Redis;
 #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mysql"))]
 use crate::outbound::sql::{
-    Migrator, SeaOrmStore, SqlCredentialRepo, SqlStatusListRepo, SqlStatusListSnapshotRepo,
-    verify_innodb_engines,
+    Migrator, SeaOrmStore, SqlCertificateStorage, SqlCredentialRepo, SqlStatusListRepo,
+    SqlStatusListSnapshotRepo, verify_innodb_engines,
 };
 use crate::server::AppState;
 
@@ -110,6 +110,9 @@ type BuildStateResult = (AppState, Arc<CertManager>);
 type BuildStateResult = (AppState,);
 
 async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
+    #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mysql"))]
+    let mut sql_db_for_cert_storage = None;
+
     let (status_list_repo, credential_repo, status_list_snapshot): (
         Arc<dyn StatusListRepo>,
         Arc<dyn CredentialRepo>,
@@ -174,6 +177,10 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
             )?;
 
             let db_clone = Arc::new(db);
+            #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mysql"))]
+            {
+                sql_db_for_cert_storage = Some(db_clone.clone());
+            }
             (
                 Arc::new(SqlStatusListRepo::new(SeaOrmStore::new(db_clone.clone()))),
                 Arc::new(SqlCredentialRepo::new(SeaOrmStore::new(db_clone.clone()))),
@@ -198,69 +205,11 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
     ) = {
         let app_env = std::env::var("APP_ENV").unwrap_or(ENV_DEVELOPMENT.to_string());
         let cert_domains = [config.server.domain.as_str()];
-        let (cert_storage, secrets_storage): (Box<dyn Storage>, Box<dyn Storage>) = {
-            #[cfg(feature = "aws")]
-            {
-                if config
-                    .server
-                    .cert
-                    .store
-                    .source
-                    .eq_ignore_ascii_case("aws_secrets_manager")
-                    || !config.aws.s3_bucket.is_empty()
-                {
-                    let aws_config = aws_config::defaults(BehaviorVersion::latest())
-                        .region(Region::new(config.aws.region.clone()))
-                        .load()
-                        .await;
-
-                    #[cfg(feature = "redis")]
-                    let cache_opt = if !config.redis.uri.expose_secret().is_empty() {
-                        if let Ok(redis_conn) = config.redis.start(None, None, None).await {
-                            Some(Redis::new(redis_conn).with_ttl(config.redis.cert_cache_ttl))
-                        } else {
-                            None
-                        }
-                    } else {
-                        None
-                    };
-                    #[cfg(not(feature = "redis"))]
-                    let cache_opt = None;
-
-                    let s3 = AwsS3::new(
-                        &aws_config,
-                        &config.aws.s3_bucket,
-                        &config.aws.region,
-                        &config.aws.s3_key_prefix,
-                    );
-                    let cert_st: Box<dyn Storage> = match cache_opt {
-                        Some(c) => Box::new(s3.with_cache(c)),
-                        None => Box::new(s3),
-                    };
-
-                    let secrets_st: Box<dyn Storage> = Box::new(
-                        AwsSecretsManager::new(
-                            &aws_config,
-                            Duration::from_secs(config.aws.secrets_cache_ttl),
-                        )
-                        .await?,
-                    );
-                    (cert_st, secrets_st)
-                } else {
-                    (
-                        Box::new(MemoryStorage::default()),
-                        Box::new(MemoryStorage::default()),
-                    )
-                }
-            }
-            #[cfg(not(feature = "aws"))]
-            {
-                (
-                    Box::new(MemoryStorage::default()),
-                    Box::new(MemoryStorage::default()),
-                )
-            }
-        };
+        #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mysql"))]
+        let (cert_storage, secrets_storage) =
+            build_certificate_storages(config, sql_db_for_cert_storage.clone()).await?;
+        #[cfg(not(any(feature = "sqlite", feature = "postgres", feature = "mysql")))]
+        let (cert_storage, secrets_storage) = build_certificate_storages(config).await?;
 
         let cert_strategy = store_certificate_strategy(config)?;
         let uses_acme_strategy = config
@@ -414,6 +363,110 @@ fn empty_to_none(value: Option<String>) -> Option<String> {
     value.filter(|v| !v.trim().is_empty())
 }
 
+#[cfg(all(
+    feature = "acme",
+    any(feature = "sqlite", feature = "postgres", feature = "mysql")
+))]
+async fn build_certificate_storages(
+    config: &AppConfig,
+    sql_db: Option<Arc<DatabaseConnection>>,
+) -> EyeResult<(Box<dyn Storage>, Box<dyn Storage>)> {
+    if config.server.cert.store.source.eq_ignore_ascii_case("sql") {
+        let db = sql_db.ok_or_else(|| {
+            eyre!(
+                "server.cert.store.source = 'sql' requires a SQL database backend; \
+                 configure database.backend as postgres, mysql, or sqlite"
+            )
+        })?;
+        return Ok((
+            Box::new(SqlCertificateStorage::new(db)),
+            Box::new(MemoryStorage::default()),
+        ));
+    }
+
+    build_non_sql_certificate_storages(config).await
+}
+
+#[cfg(all(
+    feature = "acme",
+    not(any(feature = "sqlite", feature = "postgres", feature = "mysql"))
+))]
+async fn build_certificate_storages(
+    config: &AppConfig,
+) -> EyeResult<(Box<dyn Storage>, Box<dyn Storage>)> {
+    if config.server.cert.store.source.eq_ignore_ascii_case("sql") {
+        return Err(eyre!(
+            "server.cert.store.source = 'sql' requires compiling with one of the \
+             SQL backend features: postgres, mysql, or sqlite"
+        ));
+    }
+
+    build_non_sql_certificate_storages(config).await
+}
+
+#[cfg(feature = "acme")]
+async fn build_non_sql_certificate_storages(
+    config: &AppConfig,
+) -> EyeResult<(Box<dyn Storage>, Box<dyn Storage>)> {
+    #[cfg(not(feature = "aws"))]
+    let _ = config;
+
+    #[cfg(feature = "aws")]
+    {
+        if config
+            .server
+            .cert
+            .store
+            .source
+            .eq_ignore_ascii_case("aws_secrets_manager")
+            || !config.aws.s3_bucket.is_empty()
+        {
+            let aws_config = aws_config::defaults(BehaviorVersion::latest())
+                .region(Region::new(config.aws.region.clone()))
+                .load()
+                .await;
+
+            #[cfg(feature = "redis")]
+            let cache_opt = if !config.redis.uri.expose_secret().is_empty() {
+                if let Ok(redis_conn) = config.redis.start(None, None, None).await {
+                    Some(Redis::new(redis_conn).with_ttl(config.redis.cert_cache_ttl))
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+            #[cfg(not(feature = "redis"))]
+            let cache_opt = None;
+
+            let s3 = AwsS3::new(
+                &aws_config,
+                &config.aws.s3_bucket,
+                &config.aws.region,
+                &config.aws.s3_key_prefix,
+            );
+            let cert_st: Box<dyn Storage> = match cache_opt {
+                Some(c) => Box::new(s3.with_cache(c)),
+                None => Box::new(s3),
+            };
+
+            let secrets_st: Box<dyn Storage> = Box::new(
+                AwsSecretsManager::new(
+                    &aws_config,
+                    Duration::from_secs(config.aws.secrets_cache_ttl),
+                )
+                .await?,
+            );
+            return Ok((cert_st, secrets_st));
+        }
+    }
+
+    Ok((
+        Box::new(MemoryStorage::default()),
+        Box::new(MemoryStorage::default()),
+    ))
+}
+
 #[cfg(feature = "acme")]
 fn acme_dns_credentials(account: &crate::config::AcmeDnsAccount) -> AcmeDnsCredentials {
     AcmeDnsCredentials {
@@ -468,6 +521,30 @@ fn store_certificate_strategy(config: &AppConfig) -> EyeResult<Option<StoreProvi
                 signing_key_path,
             )))
         }
+        source if source.eq_ignore_ascii_case("storage") || source.eq_ignore_ascii_case("sql") => {
+            let certificate_key = cert_config
+                .store
+                .certificate_key
+                .as_deref()
+                .ok_or_else(|| {
+                    eyre!(
+                        "server.cert.store.certificate_key is required for storage-backed store provisioning"
+                    )
+                })?;
+            let signing_key_key = cert_config
+                .store
+                .signing_key_key
+                .as_deref()
+                .ok_or_else(|| {
+                    eyre!(
+                        "server.cert.store.signing_key_key is required for storage-backed store provisioning"
+                    )
+                })?;
+            Ok(Some(StoreProvisioningStrategy::storage(
+                certificate_key,
+                signing_key_key,
+            )))
+        }
         source if source.eq_ignore_ascii_case("aws_secrets_manager") => {
             let certificate_key = cert_config
                 .store
@@ -493,7 +570,8 @@ fn store_certificate_strategy(config: &AppConfig) -> EyeResult<Option<StoreProvi
             )))
         }
         unsupported => Err(eyre!(
-            "unsupported certificate store source '{unsupported}'; expected 'filesystem' or 'aws_secrets_manager'"
+            "unsupported certificate store source '{unsupported}'; expected 'filesystem', \
+             'storage', 'sql', or 'aws_secrets_manager'"
         )),
     }
 }
@@ -653,6 +731,8 @@ mod tests {
 #[cfg(test)]
 mod general_tests {
     use super::*;
+    #[cfg(all(feature = "acme", feature = "sqlite"))]
+    use crate::cert_manager::CertificateData;
     use sealed_test::prelude::*;
 
     /// Verifies that build_state succeeds with AppConfig::load() defaults under
@@ -671,6 +751,40 @@ mod general_tests {
                 panic!("build_state failed under default configuration: {e:?}");
             }
         });
+    }
+
+    #[cfg(all(feature = "acme", feature = "sqlite"))]
+    #[tokio::test]
+    async fn build_state_selects_sql_certificate_storage() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let config = AppConfig::load_from_overrides(&[
+            ("database.backend", "sqlite"),
+            ("database.url", "sqlite::memory:"),
+            ("server.cert.store.source", "sql"),
+        ])
+        .expect("Failed to load config");
+
+        let (_state, cert_manager) = build_state_with_cert_manager(&config)
+            .await
+            .expect("build_state should select SQL certificate storage");
+
+        let cert_data = CertificateData {
+            certificate: "sql-backed-cert".to_string(),
+            valid_from: 1,
+            expires_at: 2,
+            updated_at: 3,
+        };
+        cert_manager
+            .persist_certificate_data(&cert_data)
+            .await
+            .expect("certificate data should be stored in SQL");
+
+        let loaded = cert_manager
+            .certificate()
+            .await
+            .expect("certificate should load")
+            .expect("certificate should exist");
+        assert_eq!(loaded.certificate, "sql-backed-cert");
     }
 
     /// Verifies that a saturated pool returns an error within `acquire_timeout`

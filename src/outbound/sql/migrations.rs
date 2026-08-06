@@ -13,6 +13,7 @@ impl MigratorTrait for Migrator {
             Box::new(add_updated_at::Migration),
             Box::new(status_list_history::Migration),
             Box::new(status_list_history_exp_index::Migration),
+            Box::new(certificate_storage::Migration),
         ]
     }
 }
@@ -521,6 +522,92 @@ pub(crate) mod status_list_history_exp_index {
     enum StatusListHistory {
         Table,
         Exp,
+    }
+}
+
+/// Certificate-manager storage table used by the SQL-backed certificate storage adapter.
+pub(crate) mod certificate_storage {
+    use super::*;
+
+    pub(crate) struct Migration;
+
+    impl MigrationName for Migration {
+        fn name(&self) -> &str {
+            "m20260806_000001_certificate_storage"
+        }
+    }
+
+    #[async_trait::async_trait]
+    #[allow(elided_lifetimes_in_paths)]
+    impl MigrationTrait for Migration {
+        async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+            let mut certificates = Table::create();
+            certificates
+                .table(CertificateStorage::Table)
+                .if_not_exists()
+                .col(
+                    ColumnDef::new(CertificateStorage::Name)
+                        .string()
+                        .not_null()
+                        .primary_key(),
+                )
+                .col(ColumnDef::new(CertificateStorage::Value).text().not_null())
+                .col(
+                    ColumnDef::new(CertificateStorage::CreatedAt)
+                        .big_integer()
+                        .not_null(),
+                )
+                .col(
+                    ColumnDef::new(CertificateStorage::UpdatedAt)
+                        .big_integer()
+                        .not_null(),
+                )
+                .col(ColumnDef::new(CertificateStorage::Metadata).json());
+            pin_innodb_on_mysql(manager, &mut certificates);
+            manager.create_table(certificates).await?;
+
+            manager
+                .create_index(
+                    Index::create()
+                        .if_not_exists()
+                        .name("idx_certificate_storage_updated_at")
+                        .table(CertificateStorage::Table)
+                        .col(CertificateStorage::UpdatedAt)
+                        .to_owned(),
+                )
+                .await
+        }
+
+        #[allow(elided_lifetimes_in_paths)]
+        async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+            manager
+                .drop_index(
+                    Index::drop()
+                        .if_exists()
+                        .name("idx_certificate_storage_updated_at")
+                        .table(CertificateStorage::Table)
+                        .to_owned(),
+                )
+                .await?;
+            manager
+                .drop_table(
+                    Table::drop()
+                        .if_exists()
+                        .table(CertificateStorage::Table)
+                        .to_owned(),
+                )
+                .await
+        }
+    }
+
+    #[derive(Iden)]
+    enum CertificateStorage {
+        Table,
+        Name,
+        Value,
+        CreatedAt,
+        UpdatedAt,
+        Metadata,
     }
 }
 #[cfg(test)]
