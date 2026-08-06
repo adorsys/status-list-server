@@ -147,7 +147,7 @@ mod tests {
     #[tokio::test]
     async fn test_mysql_certificate_storage_contract() {
         let test_db = mysql_helpers::MysqlTestDb::start().await;
-        assert_storage_contract(test_db.db).await;
+        assert_storage_contract(test_db.connection().await).await;
     }
 
     #[cfg(feature = "postgres-tests")]
