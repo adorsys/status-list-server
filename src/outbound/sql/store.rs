@@ -272,15 +272,15 @@ impl SeaOrmStore<StatusListRecord> {
             .map_err(|e| RepositoryError::UpdateError(e.to_string()))?;
 
         if result.rows_affected == 0 {
-            txn.rollback()
-                .await
-                .map_err(|e| RepositoryError::UpdateError(e.to_string()))?;
+            if let Err(e) = txn.rollback().await {
+                tracing::warn!(error = ?e, "rollback of empty conflict transaction failed");
+            }
             return Ok(false);
         }
 
         let history_active: status_list_history::ActiveModel = snapshot.into();
         if let Err(insert_err) = status_list_history::Entity::insert(history_active)
-            .exec(&txn)
+            .exec_without_returning(&txn)
             .await
         {
             txn.rollback().await.map_err(|rollback_err| {
@@ -350,9 +350,9 @@ impl SeaOrmStore<StatusListHistoryRecord> {
     pub async fn insert_one(&self, entity: StatusListHistoryRecord) -> Result<(), RepositoryError> {
         let active: status_list_history::ActiveModel = entity.into();
         status_list_history::Entity::insert(active)
-            .exec(&*self.db)
+            .exec_without_returning(&*self.db)
             .await
-            .map_err(|e| RepositoryError::InsertError(e.to_string()))?;
+            .map_err(map_insert_err)?;
         Ok(())
     }
 
