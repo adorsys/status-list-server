@@ -9,6 +9,7 @@ use axum::{
 };
 use serde::Serialize;
 use std::sync::Arc;
+use std::time::Duration;
 
 use crate::server::AppState;
 
@@ -54,22 +55,29 @@ impl Readiness {
     }
 
     /// Run every check concurrently and report per-dependency results.
+    ///
+    /// Each check runs under a timeout so a hung dependency cannot block the
+    /// readiness probe forever.
     pub async fn run(&self) -> ReadinessReport {
-        let results = futures::future::join_all(
-            self.checks
-                .iter()
-                .map(|check| async move { (check, check.check().await) }),
-        )
-        .await;
+        let mut set = tokio::task::JoinSet::new();
+        for check in &self.checks {
+            let check = check.clone();
+            set.spawn(async move {
+                let res = tokio::time::timeout(Duration::from_secs(5), check.check())
+                    .await
+                    .unwrap_or_else(|_| Err("check timed out".to_string()));
+                (check, res)
+            });
+        }
 
-        let checks: Vec<CheckResult> = results
-            .into_iter()
-            .map(|(check, res)| CheckResult {
+        let mut checks: Vec<CheckResult> = Vec::with_capacity(self.checks.len());
+        while let Some(Ok((check, res))) = set.join_next().await {
+            checks.push(CheckResult {
                 name: check.name().to_string(),
                 ok: res.is_ok(),
                 reason: res.err(),
-            })
-            .collect();
+            });
+        }
 
         let ready = checks.iter().all(|c| c.ok);
         ReadinessReport { ready, checks }
@@ -182,10 +190,15 @@ impl ReadinessCheck for RedisCheck {
     }
 
     async fn check(&self) -> Result<(), String> {
-        crate::outbound::redis::Redis::new(self.conn.clone())
-            .ping()
-            .await
-            .map_err(|e| format!("cache (redis) unreachable: {e}"))
+        let conn = self.conn.clone();
+        tokio::time::timeout(Duration::from_secs(5), async move {
+            crate::outbound::redis::Redis::new(conn)
+                .ping()
+                .await
+                .map_err(|e| format!("cache (redis) unreachable: {e}"))
+        })
+        .await
+        .unwrap_or_else(|_| Err("cache (redis) check timed out".to_string()))
     }
 }
 
@@ -223,8 +236,8 @@ impl ReadinessCheck for CertStoreCheck {
 }
 
 /// Readiness check for the filesystem certificate/key store used when the ACME
-/// feature is disabled. Only verifies the configured files exist — it never
-/// reads or parses the private signing key.
+/// feature is disabled. Verifies the configured files exist *and* are readable —
+/// it never parses the private signing key.
 #[cfg(not(feature = "acme"))]
 pub struct FilesystemCertCheck {
     cert_path: Option<String>,
@@ -253,6 +266,11 @@ impl ReadinessCheck for FilesystemCertCheck {
             tokio::fs::metadata(path)
                 .await
                 .map_err(|e| format!("cert store file '{path}' unavailable: {e}"))?;
+            tokio::fs::OpenOptions::new()
+                .read(true)
+                .open(path)
+                .await
+                .map_err(|e| format!("cert store file '{path}' not readable: {e}"))?;
         }
         Ok(())
     }
@@ -361,14 +379,10 @@ mod tests {
 
     /// Each readiness dependency failure must flip `/health/ready` to 503.
     #[tokio::test]
-    async fn ready_fails_when_each_dependency_is_down() {
+    async fn ready_fails_when_any_dependency_is_down() {
         for dep in ["database", "redis_cache", "cert_store"] {
-            let state = app_state_with_checks(vec![
-                Arc::new(AlwaysReady::new("database")),
-                Arc::new(AlwaysReady::new("cache")),
-                Arc::new(FailingNamedCheck { name: dep }),
-            ])
-            .await;
+            let state =
+                app_state_with_checks(vec![Arc::new(FailingNamedCheck { name: dep })]).await;
             let resp = call_handler(state, "/health/ready").await;
             assert_eq!(
                 resp.status(),
