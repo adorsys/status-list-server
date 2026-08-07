@@ -546,6 +546,8 @@ impl DnsConfig {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct RedisConfig {
+    /// Redis connection URI. Leave empty to disable the optional Redis-backed
+    /// certificate-material cache, even when the `redis` feature is compiled.
     pub uri: SecretString,
     pub require_client_auth: bool,
     /// Cache TTL for Redis TLS certificates in seconds.
@@ -609,15 +611,21 @@ pub struct CacheConfig {
 pub struct StatusListConfig {
     pub token_exp_secs: u64,
     pub token_ttl_secs: u64,
-    /// Retention period for historical status list snapshots in seconds.
+    /// Retention period for status list snapshots in seconds.
     /// Snapshots older than this will be deleted by a scheduled cleanup task.
     /// Default is 90 days (7776000 seconds).
     ///
-    /// **Privacy note:** Set to 0 to disable historical snapshots entirely.
+    /// **Privacy note:** Set to 0 to disable snapshots entirely.
     /// This prevents unbounded database growth and mitigates timing leak
     /// risks described in draft-21 §12.7. When disabled, historical resolution
     /// via `?time=` query parameter will not be available.
-    pub history_retention_secs: u64,
+    ///
+    /// **Deprecation:** The old name `history_retention_secs`
+    /// (`APP_STATUS_LIST__HISTORY_RETENTION_SECS`) is accepted for backward
+    /// compatibility but will be removed in a future release. Use
+    /// `snapshot_retention_secs` (`APP_STATUS_LIST__SNAPSHOT_RETENTION_SECS`).
+    #[serde(alias = "history_retention_secs")]
+    pub snapshot_retention_secs: u64,
 }
 
 #[cfg(feature = "redis")]
@@ -779,7 +787,7 @@ fn base_builder() -> Result<ConfigBuilder<DefaultState>, ConfigError> {
         .set_default("database.pool.connect_timeout_secs", 10u64)?
         .set_default("database.pool.idle_timeout_secs", 600u64)?
         .set_default("database.pool.max_lifetime_secs", 1800u64)?
-        .set_default("redis.uri", "redis://localhost:6379")?
+        .set_default("redis.uri", "")?
         .set_default("redis.require_client_auth", false)?
         .set_default("redis.cert_cache_ttl", 3600)?
         .set_default("aws.secrets_cache_ttl", 300)?
@@ -808,7 +816,7 @@ fn base_builder() -> Result<ConfigBuilder<DefaultState>, ConfigError> {
         .set_default("cache.max_capacity", 100)?
         .set_default("status_list.token_exp_secs", 900)?
         .set_default("status_list.token_ttl_secs", 300)?
-        .set_default("status_list.history_retention_secs", 7776000)?
+        .set_default("status_list.snapshot_retention_secs", 7776000)?
         .set_default("rate_limit.strict_burst_size", 10)?
         .set_default("rate_limit.strict_period_secs", 60)?
         .set_default("rate_limit.permissive_burst_size", 100)?
@@ -856,7 +864,7 @@ mod tests {
 
         assert_eq!(config.database.url.expose_secret(), expected_db_url);
         assert_eq!(config.database.backend, expected_db_backend);
-        assert_eq!(config.redis.uri.expose_secret(), "redis://localhost:6379");
+        assert_eq!(config.redis.uri.expose_secret(), "");
         assert!(!config.redis.require_client_auth);
         assert_eq!(config.server.cert.email, "admin@example.com");
         assert_eq!(

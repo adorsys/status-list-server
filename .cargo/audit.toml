@@ -6,8 +6,9 @@ ignore = [
   # proc-macro-error2 is unmaintained and is used in sea-orm.
   # We temporarily ignore it until a fix is available.
   "RUSTSEC-2026-0173",
-  # Transitive dependency rkyv 0.7.46 via rust_decimal/sea-orm has no 0.7 fix (fix is 0.8+ breaking change)
-  "RUSTSEC-2026-0235"
+  # rkyv 0.7.46 (via rust_decimal) has no patched 0.7.x release and is not
+  # activated in the build. We temporarily ignore it until upstream bumps rkyv.
+  "RUSTSEC-2026-0235",
 ]  # advisory IDs to ignore
 
 informational_warnings = ["unmaintained"]

@@ -1,11 +1,18 @@
-use crate::domain::ports::{CredentialRepo, StatusListHistoryRepo, StatusListRepo};
+//! Test harness: builds a wired [`AppState`] over the memory or SQL adapters.
+//!
+//! Shared test *data* does not belong here. This module pulls in the adapters,
+//! so anything defined in it is unreachable from a test module compiled without
+//! them. Put plain literals in [`crate::test_fixtures`], which is dependency-
+//! free precisely so that any test module can reach it whatever its own gate.
+
+use crate::domain::ports::{CredentialRepo, StatusListRepo, StatusListSnapshotRepo};
 use crate::domain::service::Service;
 use crate::outbound::cache::MokaStatusListCache;
 #[cfg(feature = "memory")]
-use crate::outbound::memory::{MemoryCredentials, MemoryStatusListHistory, MemoryStatusLists};
+use crate::outbound::memory::{MemoryCredentials, MemoryStatusListSnapshotRepo, MemoryStatusLists};
 #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mysql"))]
 use crate::outbound::sql::{
-    SeaOrmStore, SqlCredentialRepo, SqlStatusListHistoryRepo, SqlStatusListRepo,
+    SeaOrmStore, SqlCredentialRepo, SqlStatusListRepo, SqlStatusListSnapshotRepo,
 };
 use crate::server::AppState;
 #[cfg(feature = "acme")]
@@ -41,14 +48,48 @@ impl Storage for MockStorage {
     }
 }
 
-#[cfg(any(feature = "sqlite", feature = "postgres", feature = "mysql"))]
+#[cfg(feature = "history")]
 pub(crate) async fn test_app_state(db_conn: Option<Arc<sea_orm::DatabaseConnection>>) -> AppState {
     build_test_app_state(db_conn, None, 1_048_576).await
 }
 
-#[cfg(not(any(feature = "sqlite", feature = "postgres", feature = "mysql")))]
+#[cfg(not(feature = "history"))]
 pub(crate) async fn test_app_state(_db_conn: Option<Arc<()>>) -> AppState {
     build_test_app_state(None, 1_048_576).await
+}
+
+/// An [`AppState`] whose `Service` has **no** snapshot repo, as built when an
+/// operator sets `snapshot_retention_secs = 0`.
+///
+/// That configuration routes publishes down `Service::publish_status_list`'s
+/// `None` branch to the plain, non-transactional `insert`, which is a different
+/// duplicate-classification call site from `insert_with_snapshot`. Memory-backed
+/// because the branch being exercised is in the service, not the adapter.
+pub(crate) async fn test_app_state_without_snapshots() -> AppState {
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+
+    let service = Arc::new(Service::from_arcs(
+        Arc::new(MemoryStatusLists::default()),
+        Arc::new(MemoryCredentials::default()),
+        Arc::new(MokaStatusListCache::new(5 * 60, 100)),
+        None,
+        Arc::new(TestCertProvider {
+            key_pem: include_str!("../test_data/ec-private.pem").to_string(),
+            cert_chain: vec!["ZHVtbXlfY2VydA==".into()],
+        }),
+    ));
+
+    AppState {
+        service,
+        server_domain: "example.com".to_string(),
+        aggregation_uri: None,
+        token_exp_secs: 900,
+        token_ttl_secs: 300,
+        max_status_index: 100_000,
+        max_statuses_per_request: 5_000,
+        max_serialized_list_size: 1_048_576,
+        snapshot_retention_secs: 0,
+    }
 }
 
 pub(crate) struct TestCertProvider {
@@ -72,9 +113,7 @@ impl crate::domain::ports::CertificateProvider for TestCertProvider {
 }
 
 async fn build_test_app_state(
-    #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mysql"))] db_conn: Option<
-        Arc<sea_orm::DatabaseConnection>,
-    >,
+    #[cfg(feature = "history")] db_conn: Option<Arc<sea_orm::DatabaseConnection>>,
     aggregation_uri: Option<String>,
     max_serialized_list_size: usize,
 ) -> AppState {
@@ -82,25 +121,25 @@ async fn build_test_app_state(
 
     let key_pem = include_str!("../test_data/ec-private.pem").to_string();
 
-    let memory_history = MemoryStatusListHistory::default();
-    let memory_lists = MemoryStatusLists::default().with_history(&memory_history);
+    let memory_snapshot = MemoryStatusListSnapshotRepo::default();
+    let memory_lists = MemoryStatusLists::default().with_snapshot(&memory_snapshot);
 
     #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mysql"))]
     let (status_lists, credentials, status_list_history): (
         Arc<dyn StatusListRepo>,
         Arc<dyn CredentialRepo>,
-        Arc<dyn StatusListHistoryRepo>,
+        Arc<dyn StatusListSnapshotRepo>,
     ) = if let Some(db) = db_conn {
         (
             Arc::new(SqlStatusListRepo::new(SeaOrmStore::new(db.clone()))),
             Arc::new(SqlCredentialRepo::new(SeaOrmStore::new(db.clone()))),
-            Arc::new(SqlStatusListHistoryRepo::new(SeaOrmStore::new(db.clone()))),
+            Arc::new(SqlStatusListSnapshotRepo::new(SeaOrmStore::new(db.clone()))),
         )
     } else {
         (
             Arc::new(memory_lists),
             Arc::new(MemoryCredentials::default()),
-            Arc::new(memory_history),
+            Arc::new(memory_snapshot),
         )
     };
 
@@ -108,11 +147,11 @@ async fn build_test_app_state(
     let (status_lists, credentials, status_list_history): (
         Arc<dyn StatusListRepo>,
         Arc<dyn CredentialRepo>,
-        Arc<dyn StatusListHistoryRepo>,
+        Arc<dyn StatusListSnapshotRepo>,
     ) = (
         Arc::new(memory_lists),
         Arc::new(MemoryCredentials::default()),
-        Arc::new(memory_history),
+        Arc::new(memory_snapshot),
     );
 
     let status_list_cache = Arc::new(MokaStatusListCache::new(5 * 60, 100));
@@ -138,6 +177,6 @@ async fn build_test_app_state(
         max_status_index: 100_000,
         max_statuses_per_request: 5_000,
         max_serialized_list_size,
-        history_retention_secs: 7776000,
+        snapshot_retention_secs: 7776000,
     }
 }

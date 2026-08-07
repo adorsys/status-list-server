@@ -1,3 +1,7 @@
+// Ungated on purpose: plain `&str` data with no dependencies, so it is reachable
+// from test modules whatever feature gate they carry.
+#[cfg(test)]
+mod test_fixtures;
 #[cfg(test)]
 mod test_utils;
 mod utils;

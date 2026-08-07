@@ -20,5 +20,5 @@ pub struct AppState {
     pub max_status_index: i32,
     pub max_statuses_per_request: usize,
     pub max_serialized_list_size: usize,
-    pub history_retention_secs: u64,
+    pub snapshot_retention_secs: u64,
 }
