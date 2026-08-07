@@ -19,27 +19,61 @@ Telemetry behavior is determined primarily by the deployment environment (`APP_E
 
 ## 2. Helm Deployment Architecture & Wiring
 
-When deploying via Helm (`helm/chart`), OpenTelemetry Collector integration is governed by the `.Values.otelCollector` hierarchy.
+When deploying via Helm (`helm/chart`), OpenTelemetry Collector integration is provided by the official
+[`open-telemetry/opentelemetry-collector`](https://github.com/open-telemetry/opentelemetry-helm-charts/tree/main/charts/opentelemetry-collector)
+subchart. Configuration is under the `opentelemetry-collector` key in `values.yaml`.
 
-### `otelCollector.enabled` ↔ `APP_TELEMETRY__ENABLED` Relationship
+### `opentelemetry-collector.enabled` ↔ `APP_TELEMETRY__ENABLED` Relationship
 
-Setting `.Values.otelCollector.enabled=true` automatically sets `APP_TELEMETRY__ENABLED="true"` on the status-list-server application pod.
+Setting `.Values.opentelemetry-collector.enabled=true` automatically sets `APP_TELEMETRY__ENABLED="true"`
+and wires `APP_TELEMETRY__OTLP_ENDPOINT` on the status-list-server application pod to the in-cluster
+collector service:
 
-The chart supports two deployment topologies:
+```text
+http://<release>-opentelemetry-collector.<namespace>.svc.cluster.local:<otlp-grpc-port>
+```
 
-1. **Sidecar Mode** (`otelCollector.sidecar.enabled=true`):
-   - An OpenTelemetry Collector container runs alongside the application in the same Pod.
-   - Endpoint automatically resolves to `http://localhost:4317`.
-2. **Standalone Deployment Mode** (`otelCollector.standalone.enabled=true`):
-   - A dedicated OpenTelemetry Collector Deployment and Service are provisioned.
-   - Endpoint automatically resolves to `http://<release>-otel-collector.<namespace>.svc.cluster.local:4317`.
+The OTLP gRPC port is read from `opentelemetry-collector.ports.otlp.servicePort` (default `4317`).
+
+### Deployment Mode
+
+The collector runs as a `Deployment` (one replica, `mode: deployment` in `values.yaml`). This matches
+the previous custom standalone deployment topology. Sidecar mode is not used.
+
+### Configuring Exporters
+
+The default `values.yaml` configures a `debug` exporter only (telemetry appears in collector stdout logs).
+For production, override the `opentelemetry-collector.config` block in your environment-specific values
+to add backend exporters, for example:
+
+```yaml
+opentelemetry-collector:
+  config:
+    exporters:
+      debug:
+        verbosity: basic
+      otlp/backend:
+        endpoint: "jaeger.example.com:4317"
+        tls:
+          insecure: true
+      prometheus:
+        endpoint: "0.0.0.0:8889"
+    service:
+      pipelines:
+        traces:
+          exporters: [otlp/backend, debug]
+        metrics:
+          exporters: [prometheus, debug]
+```
+
+Default values reference: <https://github.com/open-telemetry/opentelemetry-helm-charts/blob/main/charts/opentelemetry-collector/values.yaml>
 
 ### Network Policy Considerations
 
 When `statuslist.networkPolicy.enabled=true` is set:
 
-- Inbound TCP traffic on OTLP ports `4317` (gRPC) and `4318` (HTTP) is explicitly allowed to the collector.
-- Egress rules permit communication between the status-list-server pod and the collector service.
+- **Egress** from the status-list-server pod to the collector on OTLP ports `4317` (gRPC) and `4318` (HTTP) is explicitly allowed.
+- The status-list-server pod does **not** receive inbound traffic on collector ports.
 
 ## 3. Local Development Workflow
 

@@ -232,6 +232,7 @@ opentelemetry-collector:
   mode: deployment
   image:
     repository: otel/opentelemetry-collector-contrib
+    tag: "0.158.0"
   podSecurityContext:
     runAsNonRoot: true
     runAsUser: 10001
@@ -254,9 +255,16 @@ opentelemetry-collector:
     limits:
       memory: "256Mi"
       cpu: "200m"
+  serviceAccount:
+    # The collector uses only OTLP receivers and has no Kubernetes API access needs.
+    # Disabling automounting keeps the pod least-privileged.
+    automountServiceAccountToken: false
   ports:
     otlp:
       enabled: true
+      containerPort: 4317
+      servicePort: 4317
+      protocol: TCP
     otlp-http:
       enabled: true
     healthcheck:

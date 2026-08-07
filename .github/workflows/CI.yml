@@ -256,6 +256,8 @@ jobs:
       - name: Build Helm dependencies
         run: |
           helm repo add dandydeveloper https://dandydeveloper.github.io/charts
+          # Upstream chart default values:
+          # https://github.com/open-telemetry/opentelemetry-helm-charts/blob/main/charts/opentelemetry-collector/values.yaml
           helm repo add open-telemetry https://open-telemetry.github.io/opentelemetry-helm-charts
           helm dependency build helm/chart
 
@@ -341,7 +343,7 @@ jobs:
         run: |
           docker run --rm \
             -v "$PWD/otel-collector.yaml:/etc/otelcol/config.yaml:ro" \
-            otel/opentelemetry-collector-contrib:0.157.0 \
+            otel/opentelemetry-collector-contrib:0.158.0 \
             validate --config /etc/otelcol/config.yaml
 
       - name: Install Helm
@@ -389,7 +391,7 @@ jobs:
         run: |
           docker run --rm \
             -v "/tmp/helm-otel-collector.yaml:/etc/otelcol/config.yaml:ro" \
-            otel/opentelemetry-collector-contrib:0.157.0 \
+            otel/opentelemetry-collector-contrib:0.158.0 \
             validate --config /etc/otelcol/config.yaml
 
   cargo-coverage:

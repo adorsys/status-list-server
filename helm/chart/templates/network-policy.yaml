@@ -1,6 +1,7 @@
 {{- if .Values.statuslist.networkPolicy.enabled }}
 {{- $redisHA := index .Values "redis-ha" | default dict -}}
 {{- $redisHAEnabled := eq (default false (index $redisHA "enabled")) true -}}
+{{- $otel := index .Values "opentelemetry-collector" | default dict -}}
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -23,14 +24,7 @@ spec:
       from:
         {{- toYaml . | nindent 8 }}
       {{- end }}
-    {{- $otel := index .Values "opentelemetry-collector" | default dict }}
-    {{- if $otel.enabled }}
-    - ports:
-        - port: 4317
-          protocol: TCP
-        - port: 4318
-          protocol: TCP
-    {{- end }}
+
   egress:
     - ports:
         - port: 5432

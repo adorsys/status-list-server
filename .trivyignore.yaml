@@ -3,8 +3,6 @@ misconfigurations:
     paths:
       - "*/charts/postgres*/**"
       - "*/charts/redis-ha*/**"
-      - "*/charts/opentelemetry-collector*/**"
   - id: AVD-KSV-0118
     paths:
       - "*/charts/redis-ha*/**"
-      - "*/charts/opentelemetry-collector*/**"

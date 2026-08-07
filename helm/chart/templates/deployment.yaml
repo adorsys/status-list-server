@@ -93,7 +93,8 @@ spec:
                 {{- $_ := set $env "APP_TELEMETRY__ENABLED" "true" }}
               {{- end }}
               {{- if not (hasKey $env "APP_TELEMETRY__OTLP_ENDPOINT") }}
-                {{- $_ := set $env "APP_TELEMETRY__OTLP_ENDPOINT" (printf "http://%s-opentelemetry-collector.%s.svc.cluster.local:4317" .Release.Name .Release.Namespace) }}
+                {{- $otlpPort := dig "ports" "otlp" "servicePort" 4317 $otel }}
+                {{- $_ := set $env "APP_TELEMETRY__OTLP_ENDPOINT" (printf "http://%s-opentelemetry-collector.%s.svc.cluster.local:%d" .Release.Name .Release.Namespace ($otlpPort | int)) }}
               {{- end }}
             {{- else }}
               {{- if not (hasKey $env "APP_TELEMETRY__ENABLED") }}
