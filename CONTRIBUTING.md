@@ -92,7 +92,13 @@ When the Release PR is merged, release-plz automatically:
 
 - Creates a git tag (e.g., `v1.2.0`)
 - Publishes a GitHub Release with the changelog as the release body
-- The `v*.*.*` tag push triggers the existing deploy workflow, which builds and tags a Docker image with the semver version
+- The `v*.*.*` tag push triggers `deploy.yml`, which builds and pushes a Docker image
+  tagged with the semver version (e.g., `ghcr.io/adorsys/status-list-server:1.2.0`)
+
+> **Note:** The EKS deployment step in `deploy.yml` currently deploys using the
+> short-SHA image tag (`sha-<short_sha>`), not the semver tag. Switching the
+> Kubernetes rollout to use the semver image tag is tracked in
+> [#248](https://github.com/adorsys/status-list-server/issues/248).
 
 ### Diagram
 
@@ -104,7 +110,7 @@ Merge to main (after CI passes)
     │
     ▼
 release-plz opens/updates Release PR
- ├─ Cargo.toml version: 1.0.1 → 1.1.0
+ ├─ Cargo.toml: version bump
  ├─ CHANGELOG.md: new entry with all commits since last release
  └─ CI runs on the Release PR
     │
@@ -113,9 +119,10 @@ Maintainer reviews and merges Release PR
     │
     ▼
 Automatic on merge:
- ├─ Git tag created: v1.1.0
+ ├─ Git tag created (e.g. v1.2.0)
  ├─ GitHub Release published with changelog
- └─ Docker image built and tagged: ghcr.io/adorsys/status-list-server:1.1.0
+ ├─ Docker image built and pushed: ghcr.io/adorsys/status-list-server:1.2.0  ← built ✓
+ └─ EKS deployment: still uses sha-<short_sha> tag (semver deploy: see #248)
 ```
 
 ## Development Setup

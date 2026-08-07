@@ -21,9 +21,6 @@ jobs:
       contents: write
     runs-on: ubuntu-latest
     if: ${{ github.repository_owner == 'adorsys' }}
-    concurrency:
-      group: release-plz-${{ github.ref }}
-      cancel-in-progress: false
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -39,7 +36,10 @@ jobs:
         with:
           command: release
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # A PAT/GitHub App token is required here — GITHUB_TOKEN-created tag
+          # events do not trigger other workflow runs (e.g. deploy.yml on v*.*.*)
+          # See: https://release-plz.dev/docs/github/output#workflow-not-triggered
+          GITHUB_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN }}
 
   # Create a PR with the new versions and changelog, preparing the next release.
   release-plz-pr:
@@ -50,7 +50,7 @@ jobs:
     runs-on: ubuntu-latest
     if: ${{ github.repository_owner == 'adorsys' }}
     concurrency:
-      group: release-plz-${{ github.ref }}
+      group: release-plz-pr-${{ github.ref }}
       cancel-in-progress: false
     steps:
       - name: Checkout repository
