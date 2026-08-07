@@ -226,15 +226,22 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
 
                     #[cfg(feature = "redis")]
                     let cache_opt = if !config.redis.uri.expose_secret().is_empty() {
-                        if let Ok(redis_conn) = config.redis.start(None, None, None).await {
-                            redis_manager = Some(redis_conn);
-                            let redis_conn = redis_manager.as_ref().expect("just set");
-                            Some(
-                                Redis::new(redis_conn.clone())
-                                    .with_ttl(config.redis.cert_cache_ttl),
-                            )
-                        } else {
-                            None
+                        match config.redis.start(None, None, None).await {
+                            Ok(redis_conn) => {
+                                redis_manager = Some(redis_conn);
+                                let redis_conn = redis_manager.as_ref().expect("just set");
+                                Some(
+                                    Redis::new(redis_conn.clone())
+                                        .with_ttl(config.redis.cert_cache_ttl),
+                                )
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    "Redis connection failed ({}); certificate cache disabled, falling back to direct S3",
+                                    e
+                                );
+                                None
+                            }
                         }
                     } else {
                         None

@@ -26,14 +26,12 @@ impl<T> SeaOrmStore<T> {
         }
     }
 
-    /// Verifies the database is reachable by issuing a lightweight read query.
+    /// Verifies the database is reachable by pinging the connection.
     ///
-    /// Used by the `/health/ready` probe. Matching the existing `SELECT 1`
-    /// pattern used in the pool-timeout test, this exercises a real connection
+    /// Used by the `/health/ready` probe. This exercises a real connection
     /// round-trip so a downed database surfaces as a readiness failure.
     pub async fn ping(&self) -> Result<(), sea_orm::DbErr> {
-        use sea_orm::ConnectionTrait as _;
-        (*self.db).execute_unprepared("SELECT 1").await.map(|_| ())
+        (*self.db).ping().await
     }
 }
 
@@ -69,10 +67,15 @@ impl SeaOrmStore<StatusListRecord> {
         entity: StatusListRecord,
         snapshot: StatusListHistoryRecord,
     ) -> Result<(), RepositoryError> {
-        // Captured before `entity` is consumed below; only the contention test
-        // reads it.
         #[cfg(test)]
         let probed_list_id = entity.list_id.clone();
+
+        if snapshot.list_id != entity.list_id {
+            return Err(RepositoryError::InsertError(format!(
+                "snapshot list_id ({}) does not match entity list_id ({})",
+                snapshot.list_id, entity.list_id
+            )));
+        }
 
         let txn = self
             .db
@@ -237,6 +240,13 @@ impl SeaOrmStore<StatusListRecord> {
         expected_updated_at: i64,
         snapshot: StatusListHistoryRecord,
     ) -> Result<bool, RepositoryError> {
+        if snapshot.list_id != list_id || entity.list_id != list_id {
+            return Err(RepositoryError::UpdateError(format!(
+                "snapshot list_id ({}) or entity list_id ({}) does not match list_id ({})",
+                snapshot.list_id, entity.list_id, list_id
+            )));
+        }
+
         if entity.updated_at <= expected_updated_at {
             return Err(RepositoryError::UpdateError(format!(
                 "guarded update requires a strictly newer updated_at \
@@ -270,15 +280,15 @@ impl SeaOrmStore<StatusListRecord> {
             .map_err(|e| RepositoryError::UpdateError(e.to_string()))?;
 
         if result.rows_affected == 0 {
-            txn.rollback()
-                .await
-                .map_err(|e| RepositoryError::UpdateError(e.to_string()))?;
+            if let Err(e) = txn.rollback().await {
+                tracing::warn!(error = ?e, "rollback of empty conflict transaction failed");
+            }
             return Ok(false);
         }
 
         let history_active: status_list_history::ActiveModel = snapshot.into();
         if let Err(insert_err) = status_list_history::Entity::insert(history_active)
-            .exec(&txn)
+            .exec_without_returning(&txn)
             .await
         {
             txn.rollback().await.map_err(|rollback_err| {
@@ -348,9 +358,9 @@ impl SeaOrmStore<StatusListHistoryRecord> {
     pub async fn insert_one(&self, entity: StatusListHistoryRecord) -> Result<(), RepositoryError> {
         let active: status_list_history::ActiveModel = entity.into();
         status_list_history::Entity::insert(active)
-            .exec(&*self.db)
+            .exec_without_returning(&*self.db)
             .await
-            .map_err(|e| RepositoryError::InsertError(e.to_string()))?;
+            .map_err(map_insert_err)?;
         Ok(())
     }
 

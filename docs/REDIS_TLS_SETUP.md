@@ -1,5 +1,7 @@
 # Redis TLS Setup with HAProxy Termination
 
+Redis is optional in status-list-server. Use this guide only for deployments that deliberately enable `redis-ha.enabled=true` and run an application image compiled with the `redis` feature for the distributed certificate-material cache. Status-list persistence and status-list reads do not require Redis.
+
 This document explains the Redis TLS configuration for the status-list-server deployment, including the challenges encountered and solutions implemented.
 
 ## Quick Start
