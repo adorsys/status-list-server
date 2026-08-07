@@ -8,3 +8,5 @@ pub mod memory;
 pub mod redis;
 #[cfg(feature = "history")]
 pub mod sql;
+#[cfg(feature = "vault")]
+pub mod vault;

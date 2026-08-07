@@ -8,10 +8,11 @@ default = ["memory"]
 memory = []
 history = ["dep:sea-orm", "dep:sea-orm-migration"]
 server = ["history"]
-postgres = ["sea-orm?/sqlx-postgres", "history"]
-sqlite = ["sea-orm?/sqlx-sqlite", "history"]
-mysql = ["sea-orm?/sqlx-mysql", "history"]
+postgres = ["history", "sea-orm?/sqlx-postgres"]
+sqlite = ["history", "sea-orm?/sqlx-sqlite"]
+mysql = ["history", "sea-orm?/sqlx-mysql"]
 redis = ["dep:redis"]
+vault = ["acme"]
 aws = [
   "dep:aws-config",
   "dep:aws-sdk-route53",
@@ -171,12 +172,11 @@ version = "0.14"
 features = ["alloc", "ecdsa", "pem", "pkcs8"]
 
 [dev-dependencies]
-sealed_test = "1.1.0"
 wiremock = "0.6"
 sea-orm = { version = "1.1", features = ["mock"] }
 testcontainers-modules = {
   version = "0.15",
-  features = ["localstack", "mysql", "postgres", "redis"]
+  features = ["hashicorp_vault", "localstack", "mysql", "postgres", "redis"]
 }
 
 [target.'cfg(not(target_env = "msvc"))'.dependencies]

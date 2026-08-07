@@ -86,6 +86,7 @@ pub struct Config {
     pub database: DatabaseConfig,
     pub redis: RedisConfig,
     pub aws: AwsConfig,
+    pub vault: VaultConfig,
     pub cache: CacheConfig,
     pub status_list: StatusListConfig,
     pub rate_limit: RateLimitConfig,
@@ -598,6 +599,26 @@ pub struct AwsConfig {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+pub struct VaultConfig {
+    /// Vault / OpenBao API address (e.g. `http://vault:8200`).
+    pub addr: String,
+    /// Authentication token.
+    pub token: SecretString,
+    /// KV v2 engine mount path..
+    pub mount: String,
+    /// Prefix prepended to all secret paths. Default: empty.
+    pub path_prefix: String,
+    /// Optional Vault Enterprise / OpenBao namespace.
+    #[serde(default)]
+    pub namespace: Option<String>,
+    /// Cache TTL for Vault secrets in seconds.
+    /// Setting this to 0 disables caching entirely.
+    pub secrets_cache_ttl: u64,
+    /// HTTP request timeout in seconds.
+    pub timeout_secs: u64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
 pub struct CacheConfig {
     /// Time-to-live for cached status list items in seconds.
     /// Setting this to 0 disables caching entirely.
@@ -810,6 +831,13 @@ fn base_builder() -> Result<ConfigBuilder<DefaultState>, ConfigError> {
         .set_default("server.cert.store.certificate_key", Option::<String>::None)?
         .set_default("server.cert.store.signing_key_key", Option::<String>::None)?
         .set_default("aws.region", "us-east-1")?
+        .set_default("vault.addr", "http://localhost:8200")?
+        .set_default("vault.token", "")?
+        .set_default("vault.mount", "secret")?
+        .set_default("vault.path_prefix", "")?
+        .set_default("vault.namespace", Option::<String>::None)?
+        .set_default("vault.secrets_cache_ttl", 300)?
+        .set_default("vault.timeout_secs", 30)?
         .set_default("cache.ttl", 5 * 60)?
         .set_default("cache.max_capacity", 100)?
         .set_default("status_list.token_exp_secs", 900)?
@@ -872,6 +900,13 @@ mod tests {
         assert_eq!(config.aws.region, "us-east-1");
         assert_eq!(config.aws.s3_bucket, "status-list-adorsys");
         assert_eq!(config.aws.s3_key_prefix, "");
+        assert_eq!(config.vault.addr, "http://localhost:8200");
+        assert_eq!(config.vault.token.expose_secret(), "");
+        assert_eq!(config.vault.mount, "secret");
+        assert_eq!(config.vault.path_prefix, "");
+        assert_eq!(config.vault.namespace, None);
+        assert_eq!(config.vault.secrets_cache_ttl, 300);
+        assert_eq!(config.vault.timeout_secs, 30);
         assert_eq!(config.status_list.token_exp_secs, 900);
         assert_eq!(config.status_list.token_ttl_secs, 300);
         assert_eq!(config.server.cert.renewal_cron_schedule, "0 0 0 * * *");
