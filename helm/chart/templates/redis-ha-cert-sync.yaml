@@ -18,7 +18,7 @@ DNS / LB propagation is not instantaneous.
 {{- $redisHA := index .Values "redis-ha" | default dict -}}
 {{- $haproxy := index $redisHA "haproxy" | default dict -}}
 {{- $haproxyTls := index $haproxy "tls" | default dict -}}
-{{- if and (eq (default true (index $haproxy "enabled")) true) (eq (default false (index $haproxyTls "enabled")) true) }}
+{{- if and (eq (default false (index $redisHA "enabled")) true) (eq (default true (index $haproxy "enabled")) true) (eq (default false (index $haproxyTls "enabled")) true) }}
 ---
 apiVersion: v1
 kind: ServiceAccount
