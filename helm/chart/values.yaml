@@ -228,7 +228,6 @@ redis:
   enabled: true
 
 opentelemetry-collector:
-otelCollector:
   enabled: true
   mode: deployment
   image:
