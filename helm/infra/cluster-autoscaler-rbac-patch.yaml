@@ -1,0 +1,48 @@
+# Supplementary RBAC grant for the kube-system/cluster-autoscaler Helm release.
+#
+# Why this exists:
+# The cluster-autoscaler Helm chart (cluster-autoscaler-9.35.0, app version 1.29.0)
+# ships a ClusterRole that grants watch/list/get on storage.k8s.io resources
+# (storageclasses, csinodes, csidrivers, csistoragecapacities) but omits
+# "volumeattachments". Without it, cluster-autoscaler-sa cannot watch
+# VolumeAttachment objects, which breaks the autoscaler's node scale-up/down
+# reconciliation loop (observed as repeated "forbidden" errors in its logs
+# and nodes not being replaced after termination, leaving pods stuck Pending).
+#
+# This ClusterRole/ClusterRoleBinding pair is intentionally NOT part of the
+# cluster-autoscaler Helm release, so it survives `helm upgrade`/reconcile of
+# that release without being reverted. It binds to the same service account
+# (cluster-autoscaler-sa) used by the Helm-managed deployment.
+#
+# Apply with:
+#   kubectl apply -f helm/infra/cluster-autoscaler-rbac-patch.yaml
+#
+# Remove once the cluster-autoscaler chart is upgraded to a version that
+# includes "volumeattachments" in its default ClusterRole.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: cluster-autoscaler-volumeattachments-patch
+  labels:
+    app.kubernetes.io/managed-by: manual-patch
+    app.kubernetes.io/part-of: cluster-autoscaler
+rules:
+  - apiGroups: ["storage.k8s.io"]
+    resources: ["volumeattachments"]
+    verbs: ["watch", "list", "get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: cluster-autoscaler-volumeattachments-patch
+  labels:
+    app.kubernetes.io/managed-by: manual-patch
+    app.kubernetes.io/part-of: cluster-autoscaler
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: cluster-autoscaler-volumeattachments-patch
+subjects:
+  - kind: ServiceAccount
+    name: cluster-autoscaler-sa
+    namespace: kube-system
