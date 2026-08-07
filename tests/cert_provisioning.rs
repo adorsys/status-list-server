@@ -7,11 +7,16 @@
 //! - **challtestsrv** (DNS server for Pebble)
 //! - **LocalStack** (S3 + Secrets Manager)
 //! - **Redis** (S3 cache layer)
+//! - **Vault** (if enabled) or **OpenBao** (if enabled)
 
 use std::{sync::Arc, time::Duration};
 
 use aws_config::BehaviorVersion;
 use aws_sdk_s3::Client as S3Client;
+#[cfg(feature = "vault")]
+use secrecy::SecretString;
+#[cfg(feature = "vault")]
+use status_list_server::{cert_manager::storage::Storage, outbound::vault::VaultClient};
 use status_list_server::{
     cert_manager::{
         CertManager,
@@ -21,6 +26,8 @@ use status_list_server::{
     outbound::aws::{AwsS3, AwsSecretsManager},
     outbound::redis::Redis as RedisStorage,
 };
+#[cfg(feature = "vault")]
+use testcontainers_modules::hashicorp_vault::HashicorpVault;
 use testcontainers_modules::{
     localstack::LocalStack,
     redis::Redis,
@@ -39,6 +46,11 @@ const CHALLTESTSRV_TAG: &str = "2.10";
 
 const BUCKET_NAME: &str = "status-list-adorsys";
 const AWS_REGION: &str = "us-east-1";
+
+#[cfg(feature = "vault")]
+const OPENBAO_IMAGE: &str = "openbao/openbao";
+#[cfg(feature = "vault")]
+const OPENBAO_TAG: &str = "2.6";
 
 /// Minica root CA that signs Pebble's own TLS server certificate.
 const PEBBLE_MINICA_ROOT_CA: &[u8] = include_bytes!("../test_data/pebble.pem");
@@ -149,17 +161,18 @@ impl TestInfra {
             .expect("Failed to get Redis connection manager")
     }
 
-    /// Build a `CertManager` with storage topology:
-    /// `AwsS3` + `Redis` cache for certs, `AwsSecretsManager` for secrets.
-    async fn build_cert_manager(&self, domain: &str) -> CertManager {
+    /// Build a `CertManager` with `AwsS3` + `Redis` cache for cert storage,
+    /// and the provided `secrets_storage` backend for signing keys.
+    async fn build_cert_manager(
+        &self,
+        domain: &str,
+        secrets_storage: impl Storage + 'static,
+    ) -> CertManager {
         let aws_config = self.aws_config().await;
         let redis_conn = self.redis_connection().await;
 
         let cache = RedisStorage::new(redis_conn);
         let cert_storage = AwsS3::new(&aws_config, BUCKET_NAME, AWS_REGION, "").with_cache(cache);
-        let secrets_storage = AwsSecretsManager::new(&aws_config, Duration::from_millis(0))
-            .await
-            .expect("Failed to create AwsSecretsManager");
 
         let challtestsrv_url = format!("http://127.0.0.1:{}", self.challtestsrv_port);
         let dns_provider = PebbleDnsProvider::new(&challtestsrv_url);
@@ -189,20 +202,31 @@ impl TestInfra {
         let dev_config = c.config().to_builder().force_path_style(true).build();
         S3Client::from_conf(dev_config)
     }
+}
 
-    /// Create a Secrets Manager client.
-    async fn secrets_manager_client(&self) -> aws_sdk_secretsmanager::Client {
-        let aws_config = self.aws_config().await;
-        aws_sdk_secretsmanager::Client::new(&aws_config)
-    }
+#[cfg(feature = "vault")]
+fn build_vault_storage(vault_port: u16) -> VaultClient {
+    let vault_url = format!("http://127.0.0.1:{vault_port}");
+    VaultClient::builder(vault_url, SecretString::from("root".to_string()))
+        .mount("secret")
+        .path_prefix("status-list")
+        .secrets_cache_ttl(Duration::ZERO)
+        .build()
+        .expect("Failed to build VaultClient")
 }
 
 #[tokio::test]
-async fn test_full_certificate_provisioning() {
+async fn test_cert_provisioning_with_aws_secrets_manager() {
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 
     let infra = TestInfra::start("provision").await;
-    let cert_manager = infra.build_cert_manager("test.example.com").await;
+    let aws_config = infra.aws_config().await;
+    let secrets_storage = AwsSecretsManager::new(&aws_config, Duration::from_millis(0))
+        .await
+        .expect("Failed to create AwsSecretsManager");
+    let cert_manager = infra
+        .build_cert_manager("test.example.com", secrets_storage)
+        .await;
 
     // Request a certificate
     let cert_data = cert_manager
@@ -231,8 +255,8 @@ async fn test_full_certificate_provisioning() {
     assert!(keys.iter().any(|k| k.contains("cert_data.json")));
 
     // Verify signing key is in Secrets Manager
-    let sm = infra.secrets_manager_client().await;
-    let secrets = sm
+    let aws_config = infra.aws_config().await;
+    let secrets = aws_sdk_secretsmanager::Client::new(&aws_config)
         .list_secrets()
         .send()
         .await
@@ -259,7 +283,15 @@ async fn test_certificate_renewal_with_existing_cert() {
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 
     let infra = TestInfra::start("renew").await;
-    let cert_manager = Arc::new(infra.build_cert_manager("renew.example.com").await);
+    let aws_config = infra.aws_config().await;
+    let secrets_storage = AwsSecretsManager::new(&aws_config, Duration::from_millis(0))
+        .await
+        .expect("Failed to create AwsSecretsManager");
+    let cert_manager = Arc::new(
+        infra
+            .build_cert_manager("renew.example.com", secrets_storage)
+            .await,
+    );
 
     // Initial provisioning
     let initial_cert = cert_manager
@@ -282,4 +314,140 @@ async fn test_certificate_renewal_with_existing_cert() {
     assert_eq!(initial_cert.certificate, current_cert.certificate);
     assert_eq!(initial_cert.valid_from, current_cert.valid_from);
     assert_eq!(initial_cert.expires_at, current_cert.expires_at);
+}
+
+#[cfg(feature = "vault")]
+#[tokio::test]
+async fn test_cert_provisioning_with_hashicorp_vault() {
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+
+    let infra = TestInfra::start("vault-provision").await;
+    let _vault_container = HashicorpVault::default()
+        .with_tag("2.0")
+        .with_env_var("VAULT_DEV_ROOT_TOKEN_ID", "root")
+        .start()
+        .await
+        .expect("Failed to start HashicorpVault container");
+    let vault_port = _vault_container.get_host_port_ipv4(8200).await.unwrap();
+
+    let secrets_storage = build_vault_storage(vault_port);
+    let cert_manager = infra
+        .build_cert_manager("vault.example.com", secrets_storage)
+        .await;
+
+    // Request a certificate
+    let cert_data = cert_manager
+        .request_certificate()
+        .await
+        .expect("Certificate provisioning failed with Vault secrets backend");
+
+    // Verify the certificate content
+    assert!(
+        cert_data
+            .certificate
+            .contains("-----BEGIN CERTIFICATE-----")
+    );
+    assert!(cert_data.valid_from < cert_data.expires_at);
+    assert!(cert_data.updated_at > 0);
+
+    // Verify certificate is persisted in S3 (cert storage)
+    let s3 = infra.s3_client().await;
+    let objects = s3
+        .list_objects_v2()
+        .bucket(BUCKET_NAME)
+        .send()
+        .await
+        .expect("Failed to list S3 objects");
+    let keys: Vec<_> = objects.contents().iter().filter_map(|o| o.key()).collect();
+    assert!(keys.iter().any(|k| k.contains("cert_data.json")));
+
+    // Verify signing key was stored in Vault (secrets storage)
+    let vault_reader = build_vault_storage(vault_port);
+    let signing_key = Storage::load(&vault_reader, "keys-vault.example.com")
+        .await
+        .expect("Failed to load signing_key from Vault");
+    assert!(
+        signing_key.is_some(),
+        "signing_key should be present in Vault"
+    );
+
+    // Verify cert chain extraction
+    let cert_chain = cert_manager
+        .cert_chain_parts()
+        .await
+        .expect("Failed to extract cert chain");
+    assert!(cert_chain.is_some());
+    let parts = cert_chain.unwrap();
+    assert!(!parts.is_empty());
+}
+
+#[cfg(feature = "vault")]
+#[tokio::test]
+async fn test_cert_provisioning_with_openbao() {
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+
+    let infra = TestInfra::start("openbao-provision").await;
+    let _openbao_container = GenericImage::new(OPENBAO_IMAGE, OPENBAO_TAG)
+        .with_exposed_port(8200.tcp())
+        .with_wait_for(WaitFor::message_on_stdout(
+            "Development mode should NOT be used in production",
+        ))
+        .with_env_var("VAULT_DEV_ROOT_TOKEN_ID", "root")
+        .with_env_var("VAULT_DEV_LISTEN_ADDRESS", "0.0.0.0:8200")
+        .with_env_var("BAO_DEV_ROOT_TOKEN_ID", "root")
+        .with_env_var("BAO_DEV_LISTEN_ADDRESS", "0.0.0.0:8200")
+        .start()
+        .await
+        .expect("Failed to start OpenBao container");
+    let openbao_port = _openbao_container.get_host_port_ipv4(8200).await.unwrap();
+
+    let secrets_storage = build_vault_storage(openbao_port);
+    let cert_manager = infra
+        .build_cert_manager("openbao.example.com", secrets_storage)
+        .await;
+
+    // Request a certificate
+    let cert_data = cert_manager
+        .request_certificate()
+        .await
+        .expect("Certificate provisioning failed with OpenBao secrets backend");
+
+    // Verify the certificate content
+    assert!(
+        cert_data
+            .certificate
+            .contains("-----BEGIN CERTIFICATE-----")
+    );
+    assert!(cert_data.valid_from < cert_data.expires_at);
+    assert!(cert_data.updated_at > 0);
+
+    // Verify certificate is persisted in S3 (cert storage)
+    let s3 = infra.s3_client().await;
+    let objects = s3
+        .list_objects_v2()
+        .bucket(BUCKET_NAME)
+        .send()
+        .await
+        .expect("Failed to list S3 objects");
+    let keys: Vec<_> = objects.contents().iter().filter_map(|o| o.key()).collect();
+    assert!(keys.iter().any(|k| k.contains("cert_data.json")));
+
+    // Verify signing key was stored in OpenBao (secrets storage)
+    let openbao_reader = build_vault_storage(openbao_port);
+    let signing_key = Storage::load(&openbao_reader, "keys-openbao.example.com")
+        .await
+        .expect("Failed to load signing_key from OpenBao");
+    assert!(
+        signing_key.is_some(),
+        "signing_key should be present in OpenBao"
+    );
+
+    // Verify cert chain extraction
+    let cert_chain = cert_manager
+        .cert_chain_parts()
+        .await
+        .expect("Failed to extract cert chain");
+    assert!(cert_chain.is_some());
+    let parts = cert_chain.unwrap();
+    assert!(!parts.is_empty());
 }
