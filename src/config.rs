@@ -178,6 +178,46 @@ pub struct ServerConfig {
     pub aggregation_uri: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CertStorageProvider {
+    #[default]
+    Memory,
+    #[serde(alias = "s3", alias = "aws_s3", alias = "aws-s3")]
+    AwsS3,
+}
+
+impl CertStorageProvider {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Memory => "memory",
+            Self::AwsS3 => "aws_s3",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SecretsStorageProvider {
+    #[default]
+    Memory,
+    #[serde(
+        alias = "aws_secrets_manager",
+        alias = "aws-secrets-manager",
+        alias = "secrets_manager"
+    )]
+    AwsSecretsManager,
+}
+
+impl SecretsStorageProvider {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Memory => "memory",
+            Self::AwsSecretsManager => "aws_secrets_manager",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct CertConfig {
     pub provisioning_strategy: String,
@@ -197,6 +237,10 @@ pub struct CertConfig {
     pub store: CertStoreConfig,
     #[serde(default)]
     pub dns: DnsConfig,
+    #[serde(default)]
+    pub cert_storage: CertStorageProvider,
+    #[serde(default)]
+    pub secrets_storage: SecretsStorageProvider,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -763,6 +807,11 @@ fn base_builder() -> Result<ConfigBuilder<DefaultState>, ConfigError> {
     #[cfg(not(feature = "acme"))]
     let default_chain_cache_ttl = 86400;
 
+    #[cfg(feature = "aws")]
+    let (default_cert_storage, default_secrets_storage) = ("aws_s3", "aws_secrets_manager");
+    #[cfg(not(feature = "aws"))]
+    let (default_cert_storage, default_secrets_storage) = ("memory", "memory");
+
     let telemetry_environment = match std::env::var("APP_ENV")
         .unwrap_or_default()
         .trim()
@@ -793,6 +842,8 @@ fn base_builder() -> Result<ConfigBuilder<DefaultState>, ConfigError> {
         .set_default("aws.secrets_cache_ttl", 300)?
         .set_default("aws.s3_bucket", "status-list-adorsys")?
         .set_default("aws.s3_key_prefix", "")?
+        .set_default("server.cert.cert_storage", default_cert_storage)?
+        .set_default("server.cert.secrets_storage", default_secrets_storage)?
         .set_default(
             "server.cert.provisioning_strategy",
             default_provisioning_strategy,
@@ -912,6 +963,44 @@ mod tests {
             TelemetryEnvironment::Development
         );
         assert_eq!(config.telemetry.sampler_ratio, 1.0);
+
+        #[cfg(feature = "aws")]
+        let (expected_cert_storage, expected_secrets_storage) = (
+            CertStorageProvider::AwsS3,
+            SecretsStorageProvider::AwsSecretsManager,
+        );
+        #[cfg(not(feature = "aws"))]
+        let (expected_cert_storage, expected_secrets_storage) =
+            (CertStorageProvider::Memory, SecretsStorageProvider::Memory);
+        assert_eq!(config.server.cert.cert_storage, expected_cert_storage);
+        assert_eq!(config.server.cert.secrets_storage, expected_secrets_storage);
+    }
+
+    #[test]
+    fn test_storage_provider_overrides() {
+        let config = Config::load_from_overrides(&[
+            ("server.cert.cert_storage", "memory"),
+            ("server.cert.secrets_storage", "aws_secrets_manager"),
+        ])
+        .expect("Failed to load config");
+
+        assert_eq!(config.server.cert.cert_storage, CertStorageProvider::Memory);
+        assert_eq!(
+            config.server.cert.secrets_storage,
+            SecretsStorageProvider::AwsSecretsManager
+        );
+
+        let config2 = Config::load_from_overrides(&[
+            ("server.cert.cert_storage", "s3"),
+            ("server.cert.secrets_storage", "memory"),
+        ])
+        .expect("Failed to load config");
+
+        assert_eq!(config2.server.cert.cert_storage, CertStorageProvider::AwsS3);
+        assert_eq!(
+            config2.server.cert.secrets_storage,
+            SecretsStorageProvider::Memory
+        );
     }
 
     #[test]

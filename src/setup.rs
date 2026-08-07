@@ -47,7 +47,9 @@ use crate::cert_manager::http_client::DefaultHttpClient;
 use crate::cert_manager::{
     CertManager, StoreProvisioningStrategy, storage::MemoryStorage, storage::Storage,
 };
-use crate::config::{Config as AppConfig, DatabaseBackend};
+use crate::config::{
+    CertStorageProvider, Config as AppConfig, DatabaseBackend, SecretsStorageProvider,
+};
 #[cfg(feature = "acme")]
 use crate::config::{
     DnsProviderKind, ENV_DEVELOPMENT, ENV_PRODUCTION, GcloudKeySource, ResolvedDnsProvider,
@@ -198,17 +200,17 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
     ) = {
         let app_env = std::env::var("APP_ENV").unwrap_or(ENV_DEVELOPMENT.to_string());
         let cert_domains = [config.server.domain.as_str()];
-        let (cert_storage, secrets_storage): (Box<dyn Storage>, Box<dyn Storage>) = {
-            #[cfg(feature = "aws")]
-            {
-                if config
-                    .server
-                    .cert
-                    .store
-                    .source
-                    .eq_ignore_ascii_case("aws_secrets_manager")
-                    || !config.aws.s3_bucket.is_empty()
+        let cert_storage: Box<dyn Storage> = match config.server.cert.cert_storage {
+            CertStorageProvider::Memory => Box::new(MemoryStorage::default()),
+            CertStorageProvider::AwsS3 => {
+                #[cfg(feature = "aws")]
                 {
+                    if config.aws.s3_bucket.trim().is_empty() {
+                        return Err(color_eyre::eyre::eyre!(
+                            "aws.s3_bucket is required when 'aws_s3' cert_storage provider is selected"
+                        ));
+                    }
+
                     let aws_config = aws_config::defaults(BehaviorVersion::latest())
                         .region(Region::new(config.aws.region.clone()))
                         .load()
@@ -240,32 +242,44 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
                         &config.aws.region,
                         &config.aws.s3_key_prefix,
                     );
-                    let cert_st: Box<dyn Storage> = match cache_opt {
+                    match cache_opt {
                         Some(c) => Box::new(s3.with_cache(c)),
                         None => Box::new(s3),
-                    };
+                    }
+                }
+                #[cfg(not(feature = "aws"))]
+                {
+                    return Err(color_eyre::eyre::eyre!(
+                        "s3 certificate storage provider selected, but 'aws' feature flag was not compiled in."
+                    ));
+                }
+            }
+        };
 
-                    let secrets_st: Box<dyn Storage> = Box::new(
+        let secrets_storage: Box<dyn Storage> = match config.server.cert.secrets_storage {
+            SecretsStorageProvider::Memory => Box::new(MemoryStorage::default()),
+            SecretsStorageProvider::AwsSecretsManager => {
+                #[cfg(feature = "aws")]
+                {
+                    let aws_config = aws_config::defaults(BehaviorVersion::latest())
+                        .region(Region::new(config.aws.region.clone()))
+                        .load()
+                        .await;
+
+                    Box::new(
                         AwsSecretsManager::new(
                             &aws_config,
                             Duration::from_secs(config.aws.secrets_cache_ttl),
                         )
                         .await?,
-                    );
-                    (cert_st, secrets_st)
-                } else {
-                    (
-                        Box::new(MemoryStorage::default()),
-                        Box::new(MemoryStorage::default()),
                     )
                 }
-            }
-            #[cfg(not(feature = "aws"))]
-            {
-                (
-                    Box::new(MemoryStorage::default()),
-                    Box::new(MemoryStorage::default()),
-                )
+                #[cfg(not(feature = "aws"))]
+                {
+                    return Err(color_eyre::eyre::eyre!(
+                        "aws_secrets_manager secrets storage provider selected, but 'aws' feature flag was not compiled in."
+                    ));
+                }
             }
         };
 
@@ -475,14 +489,14 @@ fn store_certificate_strategy(config: &AppConfig) -> EyeResult<Option<StoreProvi
                 signing_key_path,
             )))
         }
-        source if source.eq_ignore_ascii_case("aws_secrets_manager") => {
+        source if source.eq_ignore_ascii_case("storage") => {
             let certificate_key = cert_config
                 .store
                 .certificate_key
                 .as_deref()
                 .ok_or_else(|| {
                     eyre!(
-                        "server.cert.store.certificate_key is required for aws_secrets_manager store provisioning"
+                        "server.cert.store.certificate_key is required for storage store provisioning"
                     )
                 })?;
             let signing_key_key = cert_config
@@ -491,7 +505,34 @@ fn store_certificate_strategy(config: &AppConfig) -> EyeResult<Option<StoreProvi
                 .as_deref()
                 .ok_or_else(|| {
                     eyre!(
-                        "server.cert.store.signing_key_key is required for aws_secrets_manager store provisioning"
+                        "server.cert.store.signing_key_key is required for storage store provisioning"
+                    )
+                })?;
+            Ok(Some(StoreProvisioningStrategy::storage(
+                certificate_key,
+                signing_key_key,
+            )))
+        }
+        source
+            if source.eq_ignore_ascii_case("secrets_storage")
+                || source.eq_ignore_ascii_case("aws_secrets_manager") =>
+        {
+            let certificate_key = cert_config
+                .store
+                .certificate_key
+                .as_deref()
+                .ok_or_else(|| {
+                    eyre!(
+                        "server.cert.store.certificate_key is required for secrets_storage store provisioning"
+                    )
+                })?;
+            let signing_key_key = cert_config
+                .store
+                .signing_key_key
+                .as_deref()
+                .ok_or_else(|| {
+                    eyre!(
+                        "server.cert.store.signing_key_key is required for secrets_storage store provisioning"
                     )
                 })?;
             Ok(Some(StoreProvisioningStrategy::secrets_storage(
@@ -500,7 +541,7 @@ fn store_certificate_strategy(config: &AppConfig) -> EyeResult<Option<StoreProvi
             )))
         }
         unsupported => Err(eyre!(
-            "unsupported certificate store source '{unsupported}'; expected 'filesystem' or 'aws_secrets_manager'"
+            "unsupported certificate store source '{unsupported}'; expected 'filesystem', 'storage', 'secrets_storage', or 'aws_secrets_manager'"
         )),
     }
 }
@@ -655,8 +696,205 @@ mod tests {
             build_dns_challenge_handler(DnsProviderKind::Gcloud, &mut config, &domains).is_ok()
         );
     }
+
+    #[sealed_test]
+    fn store_strategy_filesystem_requires_paths() {
+        let mut config = AppConfig::load().expect("Failed to load config");
+        config.server.cert.provisioning_strategy = "store".to_string();
+        config.server.cert.store.source = "filesystem".to_string();
+        config.server.cert.store.certificate_path = None;
+        config.server.cert.store.signing_key_path = None;
+
+        let result = store_certificate_strategy(&config);
+        assert!(result.is_err());
+        let msg = format!("{}", result.unwrap_err());
+        assert!(
+            msg.contains("certificate_path"),
+            "error should mention certificate_path: {msg}"
+        );
+    }
+
+    #[sealed_test]
+    fn store_strategy_filesystem_succeeds_with_paths() {
+        let mut config = AppConfig::load().expect("Failed to load config");
+        config.server.cert.provisioning_strategy = "store".to_string();
+        config.server.cert.store.source = "filesystem".to_string();
+        config.server.cert.store.certificate_path = Some("/tmp/cert.pem".to_string());
+        config.server.cert.store.signing_key_path = Some("/tmp/key.pem".to_string());
+
+        let result = store_certificate_strategy(&config);
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_some());
+    }
+
+    #[sealed_test]
+    fn store_strategy_storage_requires_keys() {
+        let mut config = AppConfig::load().expect("Failed to load config");
+        config.server.cert.provisioning_strategy = "store".to_string();
+        config.server.cert.store.source = "storage".to_string();
+        config.server.cert.store.certificate_key = None;
+        config.server.cert.store.signing_key_key = None;
+
+        let result = store_certificate_strategy(&config);
+        assert!(result.is_err());
+        let msg = format!("{}", result.unwrap_err());
+        assert!(
+            msg.contains("certificate_key"),
+            "error should mention certificate_key: {msg}"
+        );
+    }
+
+    #[sealed_test]
+    fn store_strategy_storage_succeeds_with_keys() {
+        let mut config = AppConfig::load().expect("Failed to load config");
+        config.server.cert.provisioning_strategy = "store".to_string();
+        config.server.cert.store.source = "storage".to_string();
+        config.server.cert.store.certificate_key = Some("cert-key".to_string());
+        config.server.cert.store.signing_key_key = Some("sign-key".to_string());
+
+        let result = store_certificate_strategy(&config);
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_some());
+    }
+
+    #[sealed_test]
+    fn store_strategy_secrets_storage_requires_keys() {
+        let mut config = AppConfig::load().expect("Failed to load config");
+        config.server.cert.provisioning_strategy = "store".to_string();
+        config.server.cert.store.source = "secrets_storage".to_string();
+        config.server.cert.store.certificate_key = None;
+        config.server.cert.store.signing_key_key = None;
+
+        let result = store_certificate_strategy(&config);
+        assert!(result.is_err());
+        let msg = format!("{}", result.unwrap_err());
+        assert!(
+            msg.contains("certificate_key"),
+            "error should mention certificate_key: {msg}"
+        );
+    }
+
+    #[sealed_test]
+    fn store_strategy_secrets_storage_succeeds_with_keys() {
+        let mut config = AppConfig::load().expect("Failed to load config");
+        config.server.cert.provisioning_strategy = "store".to_string();
+        config.server.cert.store.source = "secrets_storage".to_string();
+        config.server.cert.store.certificate_key = Some("cert-key".to_string());
+        config.server.cert.store.signing_key_key = Some("sign-key".to_string());
+
+        let result = store_certificate_strategy(&config);
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_some());
+    }
+
+    #[sealed_test]
+    fn store_strategy_aws_secrets_manager_alias_succeeds_with_keys() {
+        let mut config = AppConfig::load().expect("Failed to load config");
+        config.server.cert.provisioning_strategy = "store".to_string();
+        config.server.cert.store.source = "aws_secrets_manager".to_string();
+        config.server.cert.store.certificate_key = Some("cert-key".to_string());
+        config.server.cert.store.signing_key_key = Some("sign-key".to_string());
+
+        let result = store_certificate_strategy(&config);
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_some());
+    }
+
+    #[sealed_test]
+    fn store_strategy_rejects_unsupported_source() {
+        let mut config = AppConfig::load().expect("Failed to load config");
+        config.server.cert.provisioning_strategy = "store".to_string();
+        config.server.cert.store.source = "hashicorp_vault".to_string();
+
+        let result = store_certificate_strategy(&config);
+        assert!(result.is_err());
+        let msg = format!("{}", result.unwrap_err());
+        assert!(
+            msg.contains("unsupported"),
+            "error should say unsupported: {msg}"
+        );
+        assert!(
+            msg.contains("hashicorp_vault"),
+            "error should include the bad source: {msg}"
+        );
+    }
+
+    #[sealed_test]
+    fn store_strategy_acme_returns_none() {
+        let mut config = AppConfig::load().expect("Failed to load config");
+        config.server.cert.provisioning_strategy = "acme".to_string();
+
+        let result = store_certificate_strategy(&config).expect("should succeed");
+        assert!(result.is_none());
+    }
+
+    #[sealed_test]
+    fn store_strategy_rejects_unsupported_provisioning_strategy() {
+        let mut config = AppConfig::load().expect("Failed to load config");
+        config.server.cert.provisioning_strategy = "manual".to_string();
+
+        let result = store_certificate_strategy(&config);
+        assert!(result.is_err());
+        let msg = format!("{}", result.unwrap_err());
+        assert!(
+            msg.contains("manual"),
+            "error should include the bad strategy: {msg}"
+        );
+    }
 }
 
+#[cfg(all(test, feature = "acme"))]
+mod storage_provider_tests {
+    use super::*;
+    use sealed_test::prelude::*;
+
+    /// Memory cert_storage + memory secrets_storage works regardless of feature flags.
+    #[sealed_test(env = [
+        ("APP_ENV", "development"),
+        ("APP_DATABASE__BACKEND", "memory"),
+        ("APP_DATABASE__URL", ""),
+        ("APP_SERVER__CERT__CERT_STORAGE", "memory"),
+        ("APP_SERVER__CERT__SECRETS_STORAGE", "memory")
+    ])]
+    fn build_state_memory_plus_memory() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let config = AppConfig::load().expect("Failed to load config");
+        assert_eq!(config.server.cert.cert_storage, CertStorageProvider::Memory);
+        assert_eq!(
+            config.server.cert.secrets_storage,
+            SecretsStorageProvider::Memory
+        );
+        tokio::runtime::Runtime::new().unwrap().block_on(async {
+            if let Err(ref e) = build_state(&config).await {
+                panic!("build_state(memory+memory) failed: {e:?}");
+            }
+        });
+    }
+
+    /// Selecting aws_s3 with an empty bucket should fail fast.
+    #[cfg(feature = "aws")]
+    #[sealed_test(env = [
+        ("APP_ENV", "development"),
+        ("APP_DATABASE__BACKEND", "memory"),
+        ("APP_DATABASE__URL", ""),
+        ("APP_SERVER__CERT__CERT_STORAGE", "aws_s3"),
+        ("APP_AWS__S3_BUCKET", "")
+    ])]
+    fn build_state_aws_s3_empty_bucket_fails() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let config = AppConfig::load().expect("Failed to load config");
+        assert_eq!(config.server.cert.cert_storage, CertStorageProvider::AwsS3);
+        tokio::runtime::Runtime::new().unwrap().block_on(async {
+            let result = build_state(&config).await;
+            assert!(result.is_err(), "Expected error for empty s3_bucket");
+            let msg = format!("{}", result.unwrap_err());
+            assert!(
+                msg.contains("s3_bucket"),
+                "error should mention s3_bucket: {msg}"
+            );
+        });
+    }
+}
 #[cfg(test)]
 mod general_tests {
     use super::*;

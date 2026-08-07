@@ -159,7 +159,9 @@ The following constraints are validated at startup and will cause the server to 
 
 - `server.port` must be between 1 and 65535 (the `u16` type enforces the upper bound)
 - `server.cert.renewal_cron_schedule` must be a valid 6-field cron expression (seconds required)
-- `aws.s3_bucket` must not be empty
+- `aws.s3_bucket` must not be empty when `server.cert.cert_storage = "aws_s3"`
+- `server.cert.cert_storage` must match a compiled feature flag (e.g. `aws_s3` requires the `aws` feature)
+- `server.cert.secrets_storage` must match a compiled feature flag (e.g. `aws_secrets_manager` requires the `aws` feature)
 
 ## Security
 
@@ -211,9 +213,19 @@ The Status List Server is provisioned with a cryptographic certificate that is e
 - `server.cert.provisioning_strategy = "acme"` requests and renews certificates through ACME.
 - `server.cert.provisioning_strategy = "store"` loads externally managed certificate material and persists it into the configured certificate/secrets storage.
 - Store provisioning supports `server.cert.store.source = "filesystem"` with `certificate_path` and `signing_key_path`.
-- Store provisioning also supports `server.cert.store.source = "storage"` for the configured certificate/secrets storage backends, or `"aws_secrets_manager"` when both PEM values are stored in the configured secrets backend, using `certificate_key` and `signing_key_key`.
+- Store provisioning also supports `server.cert.store.source = "storage"` (cert from `cert_storage`, key from `secrets_storage`), `"secrets_storage"` (both from `secrets_storage`), or `"aws_secrets_manager"` (alias for `secrets_storage`), using `certificate_key` and `signing_key_key`.
 - Filesystem store inputs may be PEM text or raw DER. Storage-backed store inputs may be PEM text or base64/base64url-encoded DER. Private keys must be PKCS#8 in PEM or DER form.
 - The renewal cron schedule is configured with `server.cert.renewal_cron_schedule`. For store provisioning, each scheduled run reloads the configured source and refreshes persisted material only when it changed.
+
+**Certificate and Secrets Storage Backends:**
+
+Certificate object storage (`server.cert.cert_storage`) and secrets storage (`server.cert.secrets_storage`) are selected independently:
+
+- `memory` — in-process ephemeral storage (default when the `aws` feature is not compiled).
+- `aws_s3` — AWS S3 for certificate storage (default when the `aws` feature is compiled). Requires `aws.s3_bucket`.
+- `aws_secrets_manager` — AWS Secrets Manager for secrets storage (default when the `aws` feature is compiled).
+
+This allows mixed deployments such as S3-compatible object storage for certificates with an in-memory or alternative secrets backend.
 
 **Certificate Manager Builder Defaults:**
 
