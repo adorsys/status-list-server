@@ -22,8 +22,7 @@ Passwords can be any non-empty string; reuse for convenience.
 ```bash
 kubectl create namespace local
 kubectl create secret generic statuslist-secret -n local \
-  --from-literal=postgres-password=postgres \
-  --from-literal=redis-password=redis
+  --from-literal=postgres-password=postgres
 ```
 
 ## 4. Deploy
@@ -39,10 +38,9 @@ helm install statuslist-local ./helm/chart -n local -f ./helm/chart/values-local
 kubectl get pods -n local
 ```
 
-Expect three components to reach `Running`:
+Expect these components to reach `Running`:
 
 - `statuslist-local-postgres-0`
-- `statuslist-local-redis-ha-*`
 - `statuslist-local-status-list-server-deployment-*`
 
 ## 6. Access the API
@@ -63,5 +61,9 @@ minikube stop
 ## Notes
 
 - `values-local.yaml` only overrides what differs from production defaults (NodePorts, disabled ingress/secret-store, lighter resources).
-- Redis TLS and AWS-specific resources remain disabled; no additional setup required.
+- Redis, Redis TLS, and AWS-specific resources remain disabled; no additional setup required.
 - If pods fail with `CreateContainerConfigError`, check that `statuslist-secret` exists in the `local` namespace.
+
+## Optional Redis Cache
+
+Redis is only useful here if you want to exercise the distributed certificate-material cache path. Add `--set redis-ha.enabled=true`, add `redis-password` to `statuslist-secret`, and run an application image built with the `redis` feature plus `APP_REDIS__URI` configured. The default local chart intentionally avoids that dependency.
