@@ -5,6 +5,7 @@ extend-ignore-identifiers-re = []
 Cose = "Cose"
 flate = "flate"
 Ue = "Ue"
+Hashi = "Hashi"
 
 [files]
 extend-exclude = [
