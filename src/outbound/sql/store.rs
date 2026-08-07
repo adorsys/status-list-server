@@ -268,7 +268,7 @@ impl SeaOrmStore<StatusListRecord> {
 
         let history_active: status_list_history::ActiveModel = snapshot.into();
         if let Err(insert_err) = status_list_history::Entity::insert(history_active)
-            .exec(&txn)
+            .exec_without_returning(&txn)
             .await
         {
             txn.rollback().await.map_err(|rollback_err| {
@@ -1425,7 +1425,7 @@ mod test {
                 ),
                 Statement::from_sql_and_values(
                     DatabaseBackend::Postgres,
-                    r#"INSERT INTO "status_list_history" ("snapshot_id", "list_id", "issuer", "status_list", "sub", "iat", "exp") VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING "snapshot_id""#,
+                    r#"INSERT INTO "status_list_history" ("snapshot_id", "list_id", "issuer", "status_list", "sub", "iat", "exp") VALUES ($1, $2, $3, $4, $5, $6, $7)"#,
                     [
                         snapshot.snapshot_id.clone().into(),
                         snapshot.list_id.clone().into(),
