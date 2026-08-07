@@ -69,10 +69,10 @@ impl Storage for AwsSecretsManager {
                     .secret_string(data)
                     .send()
                     .await
-                    .map_err(|e| StorageError::AwsSdk(e.into()))?;
+                    .map_err(|e| StorageError::Backend(e.into()))?;
                 Ok(())
             }
-            Err(sdk_err) => Err(StorageError::AwsSdk(sdk_err.into())),
+            Err(sdk_err) => Err(StorageError::Backend(sdk_err.into())),
         }
     }
 
@@ -101,7 +101,7 @@ impl Storage for AwsSecretsManager {
             {
                 Ok(None)
             }
-            Err(err) => Err(StorageError::AwsSdk(eyre!("{err}"))),
+            Err(err) => Err(StorageError::Backend(eyre!("{err}"))),
         }
     }
 
@@ -112,7 +112,7 @@ impl Storage for AwsSecretsManager {
             .secret_string(data)
             .send()
             .await
-            .map_err(|e| StorageError::AwsSdk(e.into()))?;
+            .map_err(|e| StorageError::Backend(e.into()))?;
 
         if let Some(cache) = &self.cache {
             cache.insert(name.to_string(), data.to_string()).await;
@@ -126,7 +126,7 @@ impl Storage for AwsSecretsManager {
             .secret_id(name)
             .send()
             .await
-            .map_err(|e| StorageError::AwsSdk(e.into()))?;
+            .map_err(|e| StorageError::Backend(e.into()))?;
 
         if let Some(cache) = &self.cache {
             cache.invalidate(name).await;
@@ -217,7 +217,7 @@ impl AwsS3 {
                     let mut req = self.client.create_bucket().bucket(&self.bucket);
                     if self.region != "us-east-1" {
                         let location_constraint = self.region.parse().map_err(|_| {
-                            StorageError::AwsSdk(eyre!(
+                            StorageError::Backend(eyre!(
                                 "Invalid region '{}' for LocationConstraint",
                                 self.region
                             ))
@@ -236,7 +236,7 @@ impl AwsS3 {
                         }
                         Err(create_err) => {
                             if attempt == max_retries - 1 {
-                                return Err(StorageError::AwsSdk(create_err.into()));
+                                return Err(StorageError::Backend(create_err.into()));
                             }
                             warn!(
                                 "Failed to create bucket {}: {create_err}. Retrying...",
@@ -248,7 +248,7 @@ impl AwsS3 {
                 Err(err) => {
                     // Wait a bit before retrying
                     if attempt == max_retries - 1 {
-                        return Err(StorageError::AwsSdk(err.into()));
+                        return Err(StorageError::Backend(err.into()));
                     }
                     warn!("Error checking bucket {}: {err}. Retrying...", self.bucket);
                 }
@@ -296,7 +296,7 @@ impl Storage for AwsS3 {
                 if let Some(cache) = &self.cache {
                     let _ = cache.delete(key).await;
                 }
-                Err(StorageError::AwsSdk(e.into()))
+                Err(StorageError::Backend(e.into()))
             }
         }
     }
@@ -331,7 +331,7 @@ impl Storage for AwsS3 {
                     .body
                     .collect()
                     .await
-                    .map_err(|e| StorageError::AwsSdk(e.into()))?;
+                    .map_err(|e| StorageError::Backend(e.into()))?;
                 let data = String::from_utf8(bytes.into_bytes().into())
                     .map_err(|e| StorageError::InvalidData(e.to_string()))?;
                 if let Some(cache) = &self.cache
@@ -342,7 +342,7 @@ impl Storage for AwsS3 {
                 Ok(Some(data))
             }
             Err(SdkError::ServiceError(err)) if err.err().is_no_such_key() => Ok(None),
-            Err(sdk_err) => Err(StorageError::AwsSdk(sdk_err.into())),
+            Err(sdk_err) => Err(StorageError::Backend(sdk_err.into())),
         }
     }
 
@@ -364,7 +364,7 @@ impl Storage for AwsS3 {
                 }
                 Ok(())
             }
-            Err(e) => Err(StorageError::AwsSdk(e.into())),
+            Err(e) => Err(StorageError::Backend(e.into())),
         }
     }
 }
