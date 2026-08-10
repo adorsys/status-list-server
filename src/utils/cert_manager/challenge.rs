@@ -1,4 +1,4 @@
-mod dns01;
+pub(crate) mod dns01;
 mod http01;
 
 #[cfg(feature = "aws")]

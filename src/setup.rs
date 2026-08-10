@@ -62,6 +62,8 @@ use crate::domain::{
 #[cfg(feature = "aws")]
 use crate::outbound::aws::{AwsS3, AwsSecretsManager};
 use crate::outbound::cache::MokaStatusListCache;
+#[cfg(all(feature = "acme", feature = "gcs"))]
+use crate::outbound::gcs::GoogleCloudStorage;
 #[cfg(feature = "acme")]
 use crate::outbound::cert::AcmeCertificateProvider;
 #[cfg(feature = "memory")]
@@ -371,6 +373,7 @@ async fn build_certificate_storage(
         CertificateStorageBackend::S3Compatible => {
             build_s3_compatible_certificate_storage(config).await
         }
+        CertificateStorageBackend::Gcs => build_gcs_certificate_storage(config).await,
     }
 }
 
@@ -499,6 +502,61 @@ async fn build_s3_compatible_certificate_storage(
 ) -> EyeResult<(Box<dyn Storage>, Box<dyn Storage>)> {
     Err(eyre!(
         "certificate storage backend 's3_compatible' configured, but the 's3-compatible' feature flag was not compiled in"
+    ))
+}
+
+#[cfg(all(feature = "acme", feature = "gcs"))]
+async fn build_gcs_certificate_storage(
+    config: &AppConfig,
+) -> EyeResult<(Box<dyn Storage>, Box<dyn Storage>)> {
+    let gcs_config = &config.gcs;
+    if gcs_config.bucket.trim().is_empty() {
+        return Err(eyre!(
+            "gcs.bucket is required when certificate storage backend is 'gcs'"
+        ));
+    }
+
+    // Get the service account key JSON
+    let key_json = if let Some(key) = gcs_config
+        .service_account_key
+        .as_ref()
+        .filter(|k| !k.expose_secret().trim().is_empty())
+    {
+        key.expose_secret().to_string()
+    } else if let Some(key_path) = gcs_config
+        .service_account_key_path
+        .as_deref()
+        .filter(|p| !p.trim().is_empty())
+    {
+        tokio::fs::read_to_string(key_path)
+            .await
+            .wrap_err_with(|| format!("Failed to read GCS service account key at {key_path}"))?
+    } else {
+        return Err(eyre!(
+            "gcs.service_account_key or gcs.service_account_key_path is required when certificate storage backend is 'gcs'"
+        ));
+    };
+
+    let cert_storage: Box<dyn Storage> = Box::new(GoogleCloudStorage::new(
+        &key_json,
+        &gcs_config.bucket,
+        &gcs_config.key_prefix,
+    )?);
+    let secrets_storage: Box<dyn Storage> = Box::new(GoogleCloudStorage::new(
+        &key_json,
+        &gcs_config.bucket,
+        &gcs_config.key_prefix,
+    )?);
+
+    Ok((cert_storage, secrets_storage))
+}
+
+#[cfg(all(feature = "acme", not(feature = "gcs")))]
+async fn build_gcs_certificate_storage(
+    _config: &AppConfig,
+) -> EyeResult<(Box<dyn Storage>, Box<dyn Storage>)> {
+    Err(eyre!(
+        "certificate storage backend 'gcs' configured, but the 'gcs' feature flag was not compiled in"
     ))
 }
 

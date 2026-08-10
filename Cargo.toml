@@ -24,6 +24,7 @@ s3-compatible = [
   "dep:aws-credential-types",
   "dep:aws-sdk-s3",
 ]
+gcs = []
 acme = ["dep:instant-acme", "dep:rcgen"]
 # Opt-in gate for the Postgres container test. `--all-features` enables it in CI.
 postgres-tests = ["postgres"]
@@ -128,6 +129,7 @@ flate2 = "1.1"
 x509-parser = "0.18"
 public-suffix = "0.1"
 tokio-cron-scheduler = "0.15"
+urlencoding = "2.1"
 
 # Database and ORM
 [dependencies.sea-orm]

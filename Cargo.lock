@@ -5657,6 +5657,7 @@ dependencies = [
  "tracing",
  "tracing-opentelemetry",
  "tracing-subscriber",
+ "urlencoding",
  "uuid",
  "webpki-roots 1.0.8",
  "wiremock",

@@ -16,6 +16,10 @@ pub enum StorageError {
     #[error("S3-compatible object storage error: {0}")]
     ObjectStorage(#[source] Report),
 
+    #[cfg(feature = "gcs")]
+    #[error("Google Cloud Storage error: {0}")]
+    Gcs(#[source] Report),
+
     #[error("The data is invalid: {0}")]
     InvalidData(String),
 

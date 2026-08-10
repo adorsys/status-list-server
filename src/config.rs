@@ -87,6 +87,8 @@ pub struct Config {
     pub redis: RedisConfig,
     pub aws: AwsConfig,
     pub s3_compatible: S3CompatibleConfig,
+    #[cfg(feature = "gcs")]
+    pub gcs: GcsConfig,
     pub cache: CacheConfig,
     pub status_list: StatusListConfig,
     pub rate_limit: RateLimitConfig,
@@ -210,6 +212,7 @@ pub enum CertificateStorageBackend {
     AwsS3,
     #[serde(alias = "s3")]
     S3Compatible,
+    Gcs,
 }
 
 impl CertificateStorageBackend {
@@ -218,6 +221,7 @@ impl CertificateStorageBackend {
             Self::Memory => "memory",
             Self::AwsS3 => "aws_s3",
             Self::S3Compatible => "s3_compatible",
+            Self::Gcs => "gcs",
         }
     }
 }
@@ -637,6 +641,21 @@ pub struct S3CompatibleConfig {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+pub struct GcsConfig {
+    /// GCS bucket name for certificate storage
+    pub bucket: String,
+    /// Optional prefix for object keys (e.g., "status-list/certs")
+    #[serde(default)]
+    pub key_prefix: String,
+    /// Service account key JSON, inline (alternative to key_path)
+    #[serde(default)]
+    pub service_account_key: Option<SecretString>,
+    /// Path to the service account key JSON file (alternative to inline key)
+    #[serde(default)]
+    pub service_account_key_path: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
 pub struct CacheConfig {
     /// Time-to-live for cached status list items in seconds.
     /// Setting this to 0 disables caching entirely.
@@ -842,6 +861,10 @@ fn base_builder() -> Result<ConfigBuilder<DefaultState>, ConfigError> {
         .set_default("s3_compatible.force_path_style", true)?
         .set_default("s3_compatible.auto_create_bucket", true)?
         .set_default("s3_compatible.access_key_id", Option::<String>::None)?
+        .set_default("gcs.bucket", "status-list-certs")?
+        .set_default("gcs.key_prefix", "")?
+        .set_default("gcs.service_account_key", "")?
+        .set_default("gcs.service_account_key_path", "")?
         .set_default(
             "server.cert.provisioning_strategy",
             default_provisioning_strategy,
