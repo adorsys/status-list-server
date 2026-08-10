@@ -105,6 +105,7 @@ pub(crate) mod status_list_history {
         pub snapshot_id: String,
         pub list_id: String,
         pub issuer: String,
+        #[sea_orm(column_type = "Json")]
         pub status_list: StatusList,
         pub sub: String,
         pub iat: i64,

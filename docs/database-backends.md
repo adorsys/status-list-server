@@ -37,10 +37,10 @@ Use this when object storage is unavailable or unnecessary, such as local, small
 
 ## Compose Profiles
 
-`docker compose up` starts PostgreSQL by default and builds the container with `postgres,redis,aws,acme` features enabled. To run the MySQL service instead:
+`docker compose up` starts PostgreSQL by default and builds the container with `postgres,aws,acme` features enabled. To run the MySQL service instead:
 
 ```bash
-FEATURES="mysql,redis,aws,acme" docker compose --profile mysql up --build
+FEATURES="mysql,aws,acme" docker compose --profile mysql up --build
 ```
 
 There is no separate MariaDB service because MariaDB uses the same MySQL-driver path (`mysql://` URL). Connect to a MariaDB host by pointing `APP_DATABASE__URL` at your MariaDB instance on port 3306 (the default) and setting `APP_DATABASE__BACKEND=mysql`.
@@ -50,3 +50,9 @@ There is no separate MariaDB service because MariaDB uses the same MySQL-driver 
 - For high availability, prefer PostgreSQL or MySQL backed by a managed HA service or a replicated cluster.
 - Avoid SQLite for multi-replica production deployments.
 - If you need distributed storage semantics, use a database that already provides them rather than trying to layer them on top of SQLite.
+
+## Redis Is Not A Database Backend
+
+Redis is not used for status-list persistence or for the status-list read path. Reads use the configured database/repository plus the in-process Moka cache. The optional `redis` feature provides a distributed certificate-material cache for the AWS S3 certificate storage path when `APP_REDIS__URI` is set.
+
+Use Redis when multiple application replicas should share cached certificate material and reducing backend object-storage reads is worth the added Redis credentials, TLS, HA, and monitoring work. Leave it disabled for local, single-replica, and simple deployments.

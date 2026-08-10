@@ -79,6 +79,11 @@ impl Service {
         self.cert_provider.as_ref()
     }
 
+    /// Whether historical snapshot retention is enabled.
+    pub fn snapshots_enabled(&self) -> bool {
+        self.snapshot_repo.is_some()
+    }
+
     /// Create and publish a new status list record, enforcing uniqueness and size invariants.
     #[allow(clippy::too_many_arguments)]
     pub async fn publish_status_list(
@@ -119,36 +124,13 @@ impl Service {
             return Err(StatusListError::TooLarge);
         }
 
-        // No `find` pre-check: the primary key on `list_id` is the only check
-        // that is not a TOCTOU race, and every repository classifies the
-        // resulting violation as `AlreadyExists` — proven against SQLite, MySQL
-        // and Postgres by `assert_duplicate_list_id_is_conflict` (which covers
-        // both branches below), and by construction for the in-memory adapter.
-        // A pre-check would add a round trip to every publish and still have to
-        // defer to this path when a competing writer commits between the read
-        // and the insert.
-        //
-        // The trade is not free on the duplicate path: a rejected publish now
-        // costs BEGIN + failed INSERT + ROLLBACK instead of one SELECT, which on
-        // Postgres burns a transaction ID and leaves a dead tuple for autovacuum.
-        // That is the right way round — duplicates are the rare case, and the
-        // pre-check never actually prevented one.
-        //
-        // Only unique violations are classified. A foreign-key violation on
-        // `issuer` still surfaces as a generic backend error (500); that is
-        // unreachable in practice because authentication resolves the issuer's
-        // credential before this runs, so an unregistered issuer is rejected as
-        // 401 long before the insert.
-        match &self.snapshot_repo {
-            Some(_) => {
-                let snapshot = build_snapshot(&record, token_exp_secs);
-                self.status_list_repo
-                    .insert_with_snapshot(record.clone(), snapshot)
-                    .await?;
-            }
-            None => {
-                self.status_list_repo.insert(record.clone()).await?;
-            }
+        if self.snapshots_enabled() {
+            let snapshot = build_snapshot(&record, token_exp_secs);
+            self.status_list_repo
+                .insert_with_snapshot(record.clone(), snapshot)
+                .await?;
+        } else {
+            self.status_list_repo.insert(record.clone()).await?;
         }
         Ok(record)
     }
@@ -198,18 +180,15 @@ impl Service {
         let previous_updated_at = existing.updated_at;
         existing.updated_at = next_updated_at(previous_updated_at, current_unix_timestamp());
 
-        let landed = match &self.snapshot_repo {
-            Some(_) => {
-                let snapshot = build_snapshot(&existing, token_exp_secs);
-                self.status_list_repo
-                    .update_with_snapshot(existing.clone(), previous_updated_at, snapshot)
-                    .await?
-            }
-            None => {
-                self.status_list_repo
-                    .update(existing.clone(), previous_updated_at)
-                    .await?
-            }
+        let landed = if self.snapshots_enabled() {
+            let snapshot = build_snapshot(&existing, token_exp_secs);
+            self.status_list_repo
+                .update_with_snapshot(existing.clone(), previous_updated_at, snapshot)
+                .await?
+        } else {
+            self.status_list_repo
+                .update(existing.clone(), previous_updated_at)
+                .await?
         };
 
         if !landed {
@@ -342,12 +321,17 @@ fn build_snapshot(record: &StatusListRecord, token_exp_secs: u64) -> StatusListS
 }
 
 async fn invalidate_after_commit(cache: &dyn StatusListCache, list_id: &str) {
-    if let Err(error) = cache.invalidate(list_id).await {
-        tracing::warn!(
-            list_id = %list_id,
-            error = ?error,
-            "status list write committed, but cache invalidation failed; \
-             reads may be stale until the cache entry expires"
-        );
+    match cache.invalidate(list_id).await {
+        Ok(()) => {
+            tracing::debug!(list_id = %list_id, "invalidated cache entry after commit");
+        }
+        Err(error) => {
+            tracing::warn!(
+                list_id = %list_id,
+                error = ?error,
+                "status list write committed, but cache invalidation failed; \
+                 reads may be stale until the cache entry expires"
+            );
+        }
     }
 }

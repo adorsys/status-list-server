@@ -11,6 +11,7 @@ server = ["history"]
 postgres = ["sea-orm?/sqlx-postgres", "history"]
 sqlite = ["sea-orm?/sqlx-sqlite", "history"]
 mysql = ["sea-orm?/sqlx-mysql", "history"]
+# Optional distributed certificate-material cache driver.
 redis = ["dep:redis"]
 aws = [
   "dep:aws-config",
