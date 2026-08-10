@@ -94,7 +94,14 @@ spec:
               {{- end }}
               {{- if not (hasKey $env "APP_TELEMETRY__OTLP_ENDPOINT") }}
                 {{- $otlpPort := dig "ports" "otlp" "servicePort" 4317 $otel }}
-                {{- $_ := set $env "APP_TELEMETRY__OTLP_ENDPOINT" (printf "http://%s-opentelemetry-collector.%s.svc.cluster.local:%d" .Release.Name .Release.Namespace ($otlpPort | int)) }}
+                {{- /* Derive service name following subchart fullnameOverride → nameOverride → default */}}
+                {{- $collectorSvcName := printf "%s-opentelemetry-collector" .Release.Name }}
+                {{- if $otel.fullnameOverride }}
+                  {{- $collectorSvcName = $otel.fullnameOverride | trunc 63 | trimSuffix "-" }}
+                {{- else if $otel.nameOverride }}
+                  {{- $collectorSvcName = printf "%s-%s" .Release.Name ($otel.nameOverride | trunc 63 | trimSuffix "-") }}
+                {{- end }}
+                {{- $_ := set $env "APP_TELEMETRY__OTLP_ENDPOINT" (printf "http://%s.%s.svc.cluster.local:%d" $collectorSvcName .Release.Namespace ($otlpPort | int)) }}
               {{- end }}
             {{- else }}
               {{- if not (hasKey $env "APP_TELEMETRY__ENABLED") }}

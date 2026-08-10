@@ -48,6 +48,14 @@ to add backend exporters, for example:
 
 ```yaml
 opentelemetry-collector:
+  # Expose the Prometheus exporter port on the Service so Prometheus can scrape it.
+  # Without this ports entry, port 8889 exists only on the container but not on the Service.
+  ports:
+    prometheus:
+      enabled: true
+      containerPort: 8889
+      servicePort: 8889
+      protocol: TCP
   config:
     exporters:
       debug:
@@ -65,6 +73,9 @@ opentelemetry-collector:
         metrics:
           exporters: [prometheus, debug]
 ```
+
+> [!NOTE]
+> Exposing the Prometheus port via `ports.prometheus` makes it reachable inside the cluster, but Prometheus still needs to discover it. Either add `prometheus.io/scrape: "true"` pod annotations (if using annotation-based discovery) or create a `ServiceMonitor` / `PodMonitor` (if using the Prometheus Operator).
 
 Default values reference: <https://github.com/open-telemetry/opentelemetry-helm-charts/blob/main/charts/opentelemetry-collector/values.yaml>
 
