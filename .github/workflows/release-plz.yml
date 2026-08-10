@@ -17,7 +17,6 @@ jobs:
     name: Release-plz release
     environment: release
     permissions:
-      pull-requests: write
       contents: write
     runs-on: ubuntu-latest
     if: ${{ github.repository_owner == 'adorsys' }}
@@ -32,7 +31,7 @@ jobs:
         with:
           toolchain: stable
       - name: Run release-plz
-        uses: release-plz/action@2eb1d8bcb770b4c48ccfaad919734b38b51958c9 # v0.5
+        uses: release-plz/action@2eb1d8bcb770b4c48ccfaad919734b38b51958c9 # v0.5.131
         with:
           command: release
         env:
@@ -63,7 +62,7 @@ jobs:
         with:
           toolchain: stable
       - name: Run release-plz
-        uses: release-plz/action@2eb1d8bcb770b4c48ccfaad919734b38b51958c9 # v0.5
+        uses: release-plz/action@2eb1d8bcb770b4c48ccfaad919734b38b51958c9 # v0.5.131
         with:
           command: release-pr
         env:
