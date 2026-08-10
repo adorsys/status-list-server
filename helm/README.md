@@ -31,6 +31,29 @@ The following files are used to configure the deployment:
 - **`postgres.persistence.enabled`**: Enable or disable persistent storage for PostgreSQL.
 - **`redis-ha.persistentVolume.enabled`**: Enable or disable persistent storage for Redis.
 - **`redis-ha.enabled`**: Enable the optional Redis HA dependency and application Redis environment variables.
+- **`statuslist.s3CompatibleCredentials.enabled`**: Mount S3-compatible access keys from an existing Kubernetes Secret.
+
+## S3-Compatible Certificate Storage
+
+The chart can configure the application to store certificate material in MinIO, Ceph/RadosGW, or another S3-compatible endpoint when the application image is built with the `s3-compatible` feature.
+
+Use `chart/values-minio.yaml` as a complete MinIO example. It selects `APP_SERVER__CERT__STORAGE_BACKEND=s3_compatible`, enables path-style addressing, sets a certificate object prefix, and reads credentials from a Kubernetes Secret.
+
+```bash
+kubectl create namespace statuslist
+kubectl create secret generic statuslist-minio-credentials \
+  --namespace statuslist \
+  --from-literal=access-key-id=minioadmin \
+  --from-literal=secret-access-key=minioadmin
+
+helm dependency update ./chart
+helm template statuslist ./chart \
+  --namespace statuslist \
+  -f ./chart/values.yaml \
+  -f ./chart/values-minio.yaml
+```
+
+The configured bucket is sensitive because it may contain certificate JSON, private signing keys, and ACME account data. See the [Certificate Object Storage guide](../docs/certificate-object-storage.md) for object keys and provider-specific notes.
 
 ## Redis Role
 

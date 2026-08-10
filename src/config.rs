@@ -86,6 +86,7 @@ pub struct Config {
     pub database: DatabaseConfig,
     pub redis: RedisConfig,
     pub aws: AwsConfig,
+    pub s3_compatible: S3CompatibleConfig,
     pub cache: CacheConfig,
     pub status_list: StatusListConfig,
     pub rate_limit: RateLimitConfig,
@@ -181,6 +182,8 @@ pub struct ServerConfig {
 #[derive(Debug, Clone, Deserialize)]
 pub struct CertConfig {
     pub provisioning_strategy: String,
+    #[serde(default)]
+    pub storage_backend: CertificateStorageBackend,
     pub email: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub organization: Option<String>,
@@ -197,6 +200,26 @@ pub struct CertConfig {
     pub store: CertStoreConfig,
     #[serde(default)]
     pub dns: DnsConfig,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CertificateStorageBackend {
+    #[default]
+    Memory,
+    AwsS3,
+    #[serde(alias = "s3")]
+    S3Compatible,
+}
+
+impl CertificateStorageBackend {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Memory => "memory",
+            Self::AwsS3 => "aws_s3",
+            Self::S3Compatible => "s3_compatible",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -600,6 +623,20 @@ pub struct AwsConfig {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+pub struct S3CompatibleConfig {
+    pub endpoint_url: String,
+    pub region: String,
+    pub bucket: String,
+    pub key_prefix: String,
+    pub force_path_style: bool,
+    pub auto_create_bucket: bool,
+    #[serde(default)]
+    pub access_key_id: Option<String>,
+    #[serde(default)]
+    pub secret_access_key: Option<SecretString>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
 pub struct CacheConfig {
     /// Time-to-live for cached status list items in seconds.
     /// Setting this to 0 disables caching entirely.
@@ -763,6 +800,11 @@ fn base_builder() -> Result<ConfigBuilder<DefaultState>, ConfigError> {
     #[cfg(not(feature = "acme"))]
     let default_chain_cache_ttl = 86400;
 
+    #[cfg(feature = "aws")]
+    let default_cert_storage_backend = "aws_s3";
+    #[cfg(not(feature = "aws"))]
+    let default_cert_storage_backend = "memory";
+
     let telemetry_environment = match std::env::var("APP_ENV")
         .unwrap_or_default()
         .trim()
@@ -793,10 +835,18 @@ fn base_builder() -> Result<ConfigBuilder<DefaultState>, ConfigError> {
         .set_default("aws.secrets_cache_ttl", 300)?
         .set_default("aws.s3_bucket", "status-list-adorsys")?
         .set_default("aws.s3_key_prefix", "")?
+        .set_default("s3_compatible.endpoint_url", "http://localhost:9000")?
+        .set_default("s3_compatible.region", "us-east-1")?
+        .set_default("s3_compatible.bucket", "status-list-certs")?
+        .set_default("s3_compatible.key_prefix", "certificates")?
+        .set_default("s3_compatible.force_path_style", true)?
+        .set_default("s3_compatible.auto_create_bucket", true)?
+        .set_default("s3_compatible.access_key_id", Option::<String>::None)?
         .set_default(
             "server.cert.provisioning_strategy",
             default_provisioning_strategy,
         )?
+        .set_default("server.cert.storage_backend", default_cert_storage_backend)?
         .set_default("server.cert.email", "admin@example.com")?
         .set_default("server.cert.eku", vec![1, 3, 6, 1, 5, 5, 7, 3, 30])?
         .set_default("server.cert.organization", "adorsys GmbH & CO KG")?
@@ -874,6 +924,24 @@ mod tests {
         assert_eq!(config.aws.region, "us-east-1");
         assert_eq!(config.aws.s3_bucket, "status-list-adorsys");
         assert_eq!(config.aws.s3_key_prefix, "");
+        #[cfg(feature = "aws")]
+        assert_eq!(
+            config.server.cert.storage_backend,
+            CertificateStorageBackend::AwsS3
+        );
+        #[cfg(not(feature = "aws"))]
+        assert_eq!(
+            config.server.cert.storage_backend,
+            CertificateStorageBackend::Memory
+        );
+        assert_eq!(config.s3_compatible.endpoint_url, "http://localhost:9000");
+        assert_eq!(config.s3_compatible.region, "us-east-1");
+        assert_eq!(config.s3_compatible.bucket, "status-list-certs");
+        assert_eq!(config.s3_compatible.key_prefix, "certificates");
+        assert!(config.s3_compatible.force_path_style);
+        assert!(config.s3_compatible.auto_create_bucket);
+        assert_eq!(config.s3_compatible.access_key_id, None);
+        assert!(config.s3_compatible.secret_access_key.is_none());
         assert_eq!(config.status_list.token_exp_secs, 900);
         assert_eq!(config.status_list.token_ttl_secs, 300);
         assert_eq!(config.server.cert.renewal_cron_schedule, "0 0 0 * * *");
@@ -1358,6 +1426,15 @@ mod tests {
             ("aws.secrets_cache_ttl", "600"),
             ("aws.s3_bucket", "my-custom-bucket"),
             ("aws.s3_key_prefix", "status-list/prod"),
+            ("server.cert.storage_backend", "s3_compatible"),
+            ("s3_compatible.endpoint_url", "http://minio:9000"),
+            ("s3_compatible.region", "garage"),
+            ("s3_compatible.bucket", "cert-material"),
+            ("s3_compatible.key_prefix", "tenant-a/certs"),
+            ("s3_compatible.force_path_style", "true"),
+            ("s3_compatible.auto_create_bucket", "false"),
+            ("s3_compatible.access_key_id", "minioadmin"),
+            ("s3_compatible.secret_access_key", "minioadmin"),
             ("cache.ttl", "600"),
             ("cache.max_capacity", "2000"),
         ])
@@ -1381,6 +1458,28 @@ mod tests {
         assert_eq!(config.aws.secrets_cache_ttl, 600);
         assert_eq!(config.aws.s3_bucket, "my-custom-bucket");
         assert_eq!(config.aws.s3_key_prefix, "status-list/prod");
+        assert_eq!(
+            config.server.cert.storage_backend,
+            CertificateStorageBackend::S3Compatible
+        );
+        assert_eq!(config.s3_compatible.endpoint_url, "http://minio:9000");
+        assert_eq!(config.s3_compatible.region, "garage");
+        assert_eq!(config.s3_compatible.bucket, "cert-material");
+        assert_eq!(config.s3_compatible.key_prefix, "tenant-a/certs");
+        assert!(config.s3_compatible.force_path_style);
+        assert!(!config.s3_compatible.auto_create_bucket);
+        assert_eq!(
+            config.s3_compatible.access_key_id.as_deref(),
+            Some("minioadmin")
+        );
+        assert_eq!(
+            config
+                .s3_compatible
+                .secret_access_key
+                .as_ref()
+                .map(ExposeSecret::expose_secret),
+            Some("minioadmin")
+        );
         assert_eq!(config.cache.ttl, 600);
         assert_eq!(config.cache.max_capacity, 2000);
     }

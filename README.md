@@ -40,6 +40,7 @@ Before running the server, ensure you have the following tools installed:
 - [Rust & Cargo](https://www.rust-lang.org/tools/install) (Latest stable).
 - A supported database backend: PostgreSQL, MySQL, or SQLite for persistent deployments. The default local mode uses in-memory repositories.
 - [Redis](https://redis.io/download) is optional and only needed when you enable the distributed certificate-material cache.
+- An S3-compatible object store such as MinIO or Ceph/RadosGW is optional and only needed when `APP_SERVER__CERT__STORAGE_BACKEND=s3_compatible`.
 - [Docker](https://www.docker.com/get-started/) (optional, for local testing).
 
 ### Run locally
@@ -101,6 +102,7 @@ The crate uses modular Cargo feature flags to gate optional production backend d
 | `mysql`    | SeaORM MySQL database driver.                                                                                                                      | ❌ Opt-in  |
 | `redis`    | Redis storage and certificate cache driver.                                                                                                        | ❌ Opt-in  |
 | `aws`      | AWS S3 object storage and AWS Secrets Manager drivers.                                                                                             | ❌ Opt-in  |
+| `s3-compatible` | S3-compatible object storage driver for certificate material, including MinIO and Ceph/RadosGW.                                             | ❌ Opt-in  |
 | `acme`     | ACME DNS-01 certificate manager driver.                                                                                                            | ❌ Opt-in  |
 
 To build with specific backend drivers, pass the matching feature flag(s):
@@ -111,6 +113,9 @@ cargo run --features postgres,redis
 
 # Run with all AWS and ACME production integrations, including the optional Redis cache driver
 cargo run --features postgres,redis,aws,acme
+
+# Run with ACME and S3-compatible certificate material storage
+cargo run --features postgres,acme,s3-compatible
 ```
 
 ## Redis Role
@@ -210,6 +215,7 @@ The Status List Server is provisioned with a cryptographic certificate that is e
 
 - `server.cert.provisioning_strategy = "acme"` requests and renews certificates through ACME.
 - `server.cert.provisioning_strategy = "store"` loads externally managed certificate material and persists it into the configured certificate/secrets storage.
+- `server.cert.storage_backend = "aws_s3" | "s3_compatible" | "memory"` selects where ACME/store provisioning persists certificate material.
 - Store provisioning supports `server.cert.store.source = "filesystem"` with `certificate_path` and `signing_key_path`.
 - Store provisioning also supports `server.cert.store.source = "storage"` for the configured certificate/secrets storage backends, or `"aws_secrets_manager"` when both PEM values are stored in the configured secrets backend, using `certificate_key` and `signing_key_key`.
 - Filesystem store inputs may be PEM text or raw DER. Storage-backed store inputs may be PEM text or base64/base64url-encoded DER. Private keys must be PKCS#8 in PEM or DER form.
@@ -254,6 +260,10 @@ let manager = CertManager::builder()
 **DNS Providers:**
 
 ACME DNS-01 challenges are solved through a configurable DNS provider. AWS Route53, Cloudflare, Google Cloud DNS, Azure DNS and self-hosted ACME-DNS are supported, selected via `APP_SERVER__CERT__DNS__PROVIDER`. See the [DNS Provider Documentation](docs/dns-providers.md) for setup instructions.
+
+**Certificate Object Storage:**
+
+AWS S3, MinIO, Ceph/RadosGW, and generic S3-compatible endpoints are documented in the [Certificate Object Storage guide](docs/certificate-object-storage.md). The guide includes object key behavior, credential configuration, and a complete MinIO deployment example.
 
 ## Error Handling
 

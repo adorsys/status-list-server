@@ -1,0 +1,14 @@
+statuslist:
+  env:
+    APP_SERVER__CERT__STORAGE_BACKEND: "s3_compatible"
+    APP_S3_COMPATIBLE__ENDPOINT_URL: "http://minio.minio.svc.cluster.local:9000"
+    APP_S3_COMPATIBLE__REGION: "us-east-1"
+    APP_S3_COMPATIBLE__BUCKET: "status-list-certs"
+    APP_S3_COMPATIBLE__KEY_PREFIX: "status-list/certificates"
+    APP_S3_COMPATIBLE__FORCE_PATH_STYLE: "true"
+    APP_S3_COMPATIBLE__AUTO_CREATE_BUCKET: "true"
+  s3CompatibleCredentials:
+    enabled: true
+    existingSecret: statuslist-minio-credentials
+    accessKeyIdKey: access-key-id
+    secretAccessKeyKey: secret-access-key

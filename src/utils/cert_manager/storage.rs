@@ -13,6 +13,9 @@ pub enum StorageError {
     #[error("AWS SDK error: {0}")]
     AwsSdk(#[source] Report),
 
+    #[error("S3-compatible object storage error: {0}")]
+    ObjectStorage(#[source] Report),
+
     #[error("The data is invalid: {0}")]
     InvalidData(String),
 

@@ -6,5 +6,7 @@ pub mod cert;
 pub mod memory;
 #[cfg(feature = "redis")]
 pub mod redis;
+#[cfg(feature = "s3-compatible")]
+pub mod s3_compatible;
 #[cfg(feature = "history")]
 pub mod sql;

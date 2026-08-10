@@ -5601,6 +5601,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "aws-config",
+ "aws-credential-types",
  "aws-sdk-route53",
  "aws-sdk-s3",
  "aws-sdk-secretsmanager",
@@ -5844,6 +5845,7 @@ dependencies = [
  "memchr",
  "parse-display",
  "pin-project-lite",
+ "reqwest",
  "serde",
  "serde_json",
  "serde_with",

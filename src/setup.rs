@@ -1,7 +1,9 @@
 //! Composition root assembling outbound infrastructure adapters and creating the AppState container.
 
-#[cfg(feature = "aws")]
+#[cfg(any(feature = "aws", all(feature = "acme", feature = "s3-compatible")))]
 use aws_config::{BehaviorVersion, Region};
+#[cfg(all(feature = "acme", feature = "s3-compatible"))]
+use aws_credential_types::Credentials;
 #[cfg(any(
     feature = "acme",
     feature = "sqlite",
@@ -47,11 +49,12 @@ use crate::cert_manager::http_client::DefaultHttpClient;
 use crate::cert_manager::{
     CertManager, StoreProvisioningStrategy, storage::MemoryStorage, storage::Storage,
 };
-use crate::config::{Config as AppConfig, DatabaseBackend};
 #[cfg(feature = "acme")]
 use crate::config::{
-    DnsProviderKind, ENV_DEVELOPMENT, ENV_PRODUCTION, GcloudKeySource, ResolvedDnsProvider,
+    CertificateStorageBackend, DnsProviderKind, ENV_DEVELOPMENT, ENV_PRODUCTION, GcloudKeySource,
+    ResolvedDnsProvider,
 };
+use crate::config::{Config as AppConfig, DatabaseBackend};
 use crate::domain::{
     ports::{CertificateProvider, CredentialRepo, StatusListRepo, StatusListSnapshotRepo},
     service::Service,
@@ -65,6 +68,8 @@ use crate::outbound::cert::AcmeCertificateProvider;
 use crate::outbound::memory::{MemoryCredentials, MemoryStatusListSnapshotRepo, MemoryStatusLists};
 #[cfg(feature = "redis")]
 use crate::outbound::redis::Redis;
+#[cfg(all(feature = "acme", feature = "s3-compatible"))]
+use crate::outbound::s3_compatible::S3Compatible;
 #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mysql"))]
 use crate::outbound::sql::{
     Migrator, SeaOrmStore, SqlCredentialRepo, SqlStatusListRepo, SqlStatusListSnapshotRepo,
@@ -198,76 +203,8 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
     ) = {
         let app_env = std::env::var("APP_ENV").unwrap_or(ENV_DEVELOPMENT.to_string());
         let cert_domains = [config.server.domain.as_str()];
-        let (cert_storage, secrets_storage): (Box<dyn Storage>, Box<dyn Storage>) = {
-            #[cfg(feature = "aws")]
-            {
-                if config
-                    .server
-                    .cert
-                    .store
-                    .source
-                    .eq_ignore_ascii_case("aws_secrets_manager")
-                    || !config.aws.s3_bucket.is_empty()
-                {
-                    let aws_config = aws_config::defaults(BehaviorVersion::latest())
-                        .region(Region::new(config.aws.region.clone()))
-                        .load()
-                        .await;
-
-                    #[cfg(feature = "redis")]
-                    let cache_opt = if !config.redis.uri.expose_secret().is_empty() {
-                        match config.redis.start(None, None, None).await {
-                            Ok(redis_conn) => {
-                                Some(Redis::new(redis_conn).with_ttl(config.redis.cert_cache_ttl))
-                            }
-                            Err(e) => {
-                                tracing::warn!(
-                                    "Redis connection failed ({}); certificate cache disabled, falling back to direct S3",
-                                    e
-                                );
-                                None
-                            }
-                        }
-                    } else {
-                        None
-                    };
-                    #[cfg(not(feature = "redis"))]
-                    let cache_opt = None;
-
-                    let s3 = AwsS3::new(
-                        &aws_config,
-                        &config.aws.s3_bucket,
-                        &config.aws.region,
-                        &config.aws.s3_key_prefix,
-                    );
-                    let cert_st: Box<dyn Storage> = match cache_opt {
-                        Some(c) => Box::new(s3.with_cache(c)),
-                        None => Box::new(s3),
-                    };
-
-                    let secrets_st: Box<dyn Storage> = Box::new(
-                        AwsSecretsManager::new(
-                            &aws_config,
-                            Duration::from_secs(config.aws.secrets_cache_ttl),
-                        )
-                        .await?,
-                    );
-                    (cert_st, secrets_st)
-                } else {
-                    (
-                        Box::new(MemoryStorage::default()),
-                        Box::new(MemoryStorage::default()),
-                    )
-                }
-            }
-            #[cfg(not(feature = "aws"))]
-            {
-                (
-                    Box::new(MemoryStorage::default()),
-                    Box::new(MemoryStorage::default()),
-                )
-            }
-        };
+        let (cert_storage, secrets_storage): (Box<dyn Storage>, Box<dyn Storage>) =
+            build_certificate_storage(config).await?;
 
         let cert_strategy = store_certificate_strategy(config)?;
         let uses_acme_strategy = config
@@ -422,6 +359,150 @@ fn empty_to_none(value: Option<String>) -> Option<String> {
 }
 
 #[cfg(feature = "acme")]
+async fn build_certificate_storage(
+    config: &AppConfig,
+) -> EyeResult<(Box<dyn Storage>, Box<dyn Storage>)> {
+    match config.server.cert.storage_backend {
+        CertificateStorageBackend::Memory => Ok((
+            Box::new(MemoryStorage::default()),
+            Box::new(MemoryStorage::default()),
+        )),
+        CertificateStorageBackend::AwsS3 => build_aws_certificate_storage(config).await,
+        CertificateStorageBackend::S3Compatible => {
+            build_s3_compatible_certificate_storage(config).await
+        }
+    }
+}
+
+#[cfg(all(feature = "acme", feature = "aws"))]
+async fn build_aws_certificate_storage(
+    config: &AppConfig,
+) -> EyeResult<(Box<dyn Storage>, Box<dyn Storage>)> {
+    let aws_config = aws_config::defaults(BehaviorVersion::latest())
+        .region(Region::new(config.aws.region.clone()))
+        .load()
+        .await;
+
+    #[cfg(feature = "redis")]
+    let cache_opt = if !config.redis.uri.expose_secret().is_empty() {
+        match config.redis.start(None, None, None).await {
+            Ok(redis_conn) => Some(Redis::new(redis_conn).with_ttl(config.redis.cert_cache_ttl)),
+            Err(e) => {
+                tracing::warn!(
+                    "Redis connection failed ({}); certificate cache disabled, falling back to direct S3",
+                    e
+                );
+                None
+            }
+        }
+    } else {
+        None
+    };
+    #[cfg(not(feature = "redis"))]
+    let cache_opt = None;
+
+    let s3 = AwsS3::new(
+        &aws_config,
+        &config.aws.s3_bucket,
+        &config.aws.region,
+        &config.aws.s3_key_prefix,
+    );
+    let cert_storage: Box<dyn Storage> = match cache_opt {
+        Some(cache) => Box::new(s3.with_cache(cache)),
+        None => Box::new(s3),
+    };
+
+    let secrets_storage: Box<dyn Storage> = Box::new(
+        AwsSecretsManager::new(
+            &aws_config,
+            Duration::from_secs(config.aws.secrets_cache_ttl),
+        )
+        .await?,
+    );
+    Ok((cert_storage, secrets_storage))
+}
+
+#[cfg(all(feature = "acme", not(feature = "aws")))]
+async fn build_aws_certificate_storage(
+    _config: &AppConfig,
+) -> EyeResult<(Box<dyn Storage>, Box<dyn Storage>)> {
+    Err(eyre!(
+        "certificate storage backend 'aws_s3' configured, but the 'aws' feature flag was not compiled in"
+    ))
+}
+
+#[cfg(all(feature = "acme", feature = "s3-compatible"))]
+async fn build_s3_compatible_certificate_storage(
+    config: &AppConfig,
+) -> EyeResult<(Box<dyn Storage>, Box<dyn Storage>)> {
+    let s3_config = &config.s3_compatible;
+    if s3_config.endpoint_url.trim().is_empty() {
+        return Err(eyre!(
+            "s3_compatible.endpoint_url is required when certificate storage backend is 's3_compatible'"
+        ));
+    }
+    if s3_config.bucket.trim().is_empty() {
+        return Err(eyre!(
+            "s3_compatible.bucket is required when certificate storage backend is 's3_compatible'"
+        ));
+    }
+
+    let mut config_loader = aws_config::defaults(BehaviorVersion::latest())
+        .region(Region::new(s3_config.region.clone()))
+        .endpoint_url(s3_config.endpoint_url.clone());
+
+    if let (Some(access_key_id), Some(secret_access_key)) = (
+        s3_config
+            .access_key_id
+            .as_deref()
+            .filter(|value| !value.trim().is_empty()),
+        s3_config
+            .secret_access_key
+            .as_ref()
+            .map(ExposeSecret::expose_secret)
+            .filter(|value| !value.trim().is_empty()),
+    ) {
+        config_loader = config_loader.credentials_provider(Credentials::new(
+            access_key_id,
+            secret_access_key,
+            None,
+            None,
+            "s3-compatible-config",
+        ));
+    }
+
+    let sdk_config = config_loader.load().await;
+
+    let cert_storage: Box<dyn Storage> = Box::new(S3Compatible::new(
+        &sdk_config,
+        &s3_config.bucket,
+        &s3_config.region,
+        &s3_config.key_prefix,
+        s3_config.force_path_style,
+        s3_config.auto_create_bucket,
+    ));
+    let secrets_storage: Box<dyn Storage> = Box::new(S3Compatible::new(
+        &sdk_config,
+        &s3_config.bucket,
+        &s3_config.region,
+        &s3_config.key_prefix,
+        s3_config.force_path_style,
+        s3_config.auto_create_bucket,
+    ));
+
+    Ok((cert_storage, secrets_storage))
+}
+
+#[cfg(all(feature = "acme", not(feature = "s3-compatible")))]
+async fn build_s3_compatible_certificate_storage(
+    _config: &AppConfig,
+) -> EyeResult<(Box<dyn Storage>, Box<dyn Storage>)> {
+    Err(eyre!(
+        "certificate storage backend 's3_compatible' configured, but the 's3-compatible' feature flag was not compiled in"
+    ))
+}
+
+#[cfg(feature = "acme")]
 fn acme_dns_credentials(account: &crate::config::AcmeDnsAccount) -> AcmeDnsCredentials {
     AcmeDnsCredentials {
         username: account.username.clone(),
@@ -499,8 +580,32 @@ fn store_certificate_strategy(config: &AppConfig) -> EyeResult<Option<StoreProvi
                 signing_key_key,
             )))
         }
+        source if source.eq_ignore_ascii_case("storage") => {
+            let certificate_key = cert_config
+                .store
+                .certificate_key
+                .as_deref()
+                .ok_or_else(|| {
+                    eyre!(
+                        "server.cert.store.certificate_key is required for storage store provisioning"
+                    )
+                })?;
+            let signing_key_key = cert_config
+                .store
+                .signing_key_key
+                .as_deref()
+                .ok_or_else(|| {
+                    eyre!(
+                        "server.cert.store.signing_key_key is required for storage store provisioning"
+                    )
+                })?;
+            Ok(Some(StoreProvisioningStrategy::storage(
+                certificate_key,
+                signing_key_key,
+            )))
+        }
         unsupported => Err(eyre!(
-            "unsupported certificate store source '{unsupported}'; expected 'filesystem' or 'aws_secrets_manager'"
+            "unsupported certificate store source '{unsupported}'; expected 'filesystem', 'storage', or 'aws_secrets_manager'"
         )),
     }
 }
