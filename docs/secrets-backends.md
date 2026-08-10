@@ -4,8 +4,10 @@ The server supports storing sensitive cryptographic materials (such as ACME acco
 
 The supported secrets backends include:
 
-- **HashiCorp Vault / OpenBao** (KV v2 engine)
-- **AWS Secrets Manager**
+- **HashiCorp Vault / OpenBao** (KV v2 engine, feature flag: `vault`)
+- **GCP Secret Manager** (feature flag: `gcp-secrets`)
+- **Azure Key Vault** (feature flag: `azure-kv`)
+- **AWS Secrets Manager** (feature flag: `aws`)
 - **In-Memory** (for development and testing)
 
 ## HashiCorp Vault & OpenBao (KV v2)
@@ -65,6 +67,73 @@ APP_VAULT__SECRETS_CACHE_TTL=600
 
 - Secrets are cached in-memory using TTL semantics to minimize latency and Vault API request volume.
 - To disable caching entirely (forcing every read to query Vault directly), set `APP_VAULT__SECRETS_CACHE_TTL=0`.
+
+## GCP Secret Manager
+
+When compiled with the `gcp-secrets` feature flag, secrets are stored in GCP Secret Manager.
+
+### Configuration Variables
+
+| Variable                                           | Type              | Default                          | Description                                                    |
+| -------------------------------------------------- | ----------------- | -------------------------------- | -------------------------------------------------------------- |
+| `APP_GCP_SECRET_MANAGER__PROJECT_ID`               | String            | _(Required when GCP is enabled)_ | GCP Project ID where secrets are hosted                        |
+| `APP_GCP_SECRET_MANAGER__SERVICE_ACCOUNT_KEY`      | String (JSON)     | `None`                           | Optional inline service account JSON key string                |
+| `APP_GCP_SECRET_MANAGER__SERVICE_ACCOUNT_KEY_PATH` | String            | `None`                           | Optional filepath to service account JSON key file             |
+| `APP_GCP_SECRET_MANAGER__SECRETS_CACHE_TTL`        | Integer (seconds) | `300` (5 minutes)                | In-memory cache TTL in seconds. Set to `0` to disable caching. |
+
+### Authentication & IAM Permissions
+
+By default, authentication uses **Application Default Credentials (ADC)** (discovering environment credentials, GKE workload identity, service account metadata server, etc.).
+
+Required IAM roles (least-privilege):
+
+- `roles/secretmanager.secretAccessor` (read secrets)
+- `roles/secretmanager.secretVersionManager` (create/update secret versions)
+- `roles/secretmanager.admin` or custom role with `secretmanager.secrets.create` and `secretmanager.secrets.delete` (if automated secret creation/deletion is used)
+
+### Example `.env` Configuration
+
+```env
+APP_GCP_SECRET_MANAGER__PROJECT_ID=my-gcp-project-123
+APP_GCP_SECRET_MANAGER__SECRETS_CACHE_TTL=300
+GOOGLE_APPLICATION_CREDENTIALS=/path/to/credentials.json
+```
+
+## Azure Key Vault
+
+When compiled with the `azure-kv` feature flag, secrets are stored in Azure Key Vault.
+
+### Configuration Variables
+
+| Variable                                | Type              | Default                               | Description                                                    |
+| --------------------------------------- | ----------------- | ------------------------------------- | -------------------------------------------------------------- |
+| `APP_AZURE_KEYVAULT__VAULT_URL`         | String            | \_(Required when Azure KV is enabled) | Azure Key Vault URL (e.g. `https://my-vault.vault.azure.net/`) |
+| `APP_AZURE_KEYVAULT__TENANT_ID`         | String            | `None`                                | Azure AD Tenant ID (for service principal auth)                |
+| `APP_AZURE_KEYVAULT__CLIENT_ID`         | String            | `None`                                | Azure AD Client ID (for service principal auth)                |
+| `APP_AZURE_KEYVAULT__CLIENT_SECRET`     | String            | `None`                                | Azure AD Client Secret (for service principal auth)            |
+| `APP_AZURE_KEYVAULT__SECRETS_CACHE_TTL` | Integer (seconds) | `300` (5 minutes)                     | In-memory cache TTL in seconds. Set to `0` to disable caching. |
+
+### Authentication & RBAC Permissions
+
+If `tenant_id`, `client_id`, and `client_secret` are provided, the adapter authenticates as a Service Principal. Otherwise, it falls back to Azure developer/workload identity credentials (`AZURE_TENANT_ID`, `AZURE_CLIENT_ID`, `AZURE_CLIENT_SECRET`, or Azure CLI credentials).
+
+Required RBAC roles (least-privilege):
+
+- **Key Vault Secrets Officer** (full CRUD access to secrets)
+- Or custom role with data actions:
+  - `Microsoft.KeyVault/vaults/secrets/read`
+  - `Microsoft.KeyVault/vaults/secrets/write`
+  - `Microsoft.KeyVault/vaults/secrets/delete`
+
+### Example `.env` Configuration
+
+```env
+APP_AZURE_KEYVAULT__VAULT_URL=https://prod-vault.vault.azure.net/
+APP_AZURE_KEYVAULT__TENANT_ID=00000000-0000-0000-0000-000000000000
+APP_AZURE_KEYVAULT__CLIENT_ID=11111111-1111-1111-1111-111111111111
+APP_AZURE_KEYVAULT__CLIENT_SECRET=supersecret
+APP_AZURE_KEYVAULT__SECRETS_CACHE_TTL=300
+```
 
 ## AWS Secrets Manager
 

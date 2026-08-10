@@ -62,9 +62,23 @@ use crate::domain::{
 use crate::outbound::aws::AwsS3;
 #[cfg(all(feature = "aws", not(feature = "vault")))]
 use crate::outbound::aws::AwsSecretsManager;
+#[cfg(all(
+    feature = "azure-kv",
+    feature = "acme",
+    not(feature = "vault"),
+    not(feature = "gcp-secrets")
+))]
+use crate::outbound::azure_kv::AzureKeyVaultClient;
 use crate::outbound::cache::MokaStatusListCache;
 #[cfg(feature = "acme")]
 use crate::outbound::cert::AcmeCertificateProvider;
+#[cfg(all(
+    feature = "gcp-secrets",
+    feature = "acme",
+    not(feature = "vault"),
+    not(feature = "azure-kv")
+))]
+use crate::outbound::gcp_secret::GcpSecretManagerClient;
 #[cfg(feature = "memory")]
 use crate::outbound::memory::{MemoryCredentials, MemoryStatusListSnapshotRepo, MemoryStatusLists};
 #[cfg(feature = "redis")]
@@ -218,35 +232,82 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
                         .build()?,
                 )
             }
-            #[cfg(not(feature = "vault"))]
+            #[cfg(all(feature = "gcp-secrets", not(feature = "vault")))]
             {
-                #[cfg(feature = "aws")]
-                {
-                    if config
-                        .server
-                        .cert
-                        .store
-                        .source
-                        .eq_ignore_ascii_case("aws_secrets_manager")
-                    {
-                        let aws_config = aws_config::defaults(BehaviorVersion::latest())
-                            .region(Region::new(config.aws.region.clone()))
-                            .load()
-                            .await;
-                        Box::new(
-                            AwsSecretsManager::new(
-                                &aws_config,
-                                Duration::from_secs(config.aws.secrets_cache_ttl),
-                            )
-                            .await?,
+                tracing::info!("Using GCP Secret Manager as secrets backend");
+                Box::new(
+                    GcpSecretManagerClient::builder(&config.gcp_secret_manager.project_id)
+                        .service_account_key(config.gcp_secret_manager.service_account_key.clone())
+                        .service_account_key_path(
+                            config
+                                .gcp_secret_manager
+                                .service_account_key_path
+                                .as_deref(),
                         )
-                    } else {
-                        Box::new(MemoryStorage::default())
-                    }
-                }
-                #[cfg(not(feature = "aws"))]
-                Box::new(MemoryStorage::default())
+                        .endpoint(config.gcp_secret_manager.endpoint.as_deref())
+                        .secrets_cache_ttl(Duration::from_secs(
+                            config.gcp_secret_manager.secrets_cache_ttl,
+                        ))
+                        .build()
+                        .await?,
+                )
             }
+            #[cfg(all(
+                feature = "azure-kv",
+                not(feature = "vault"),
+                not(feature = "gcp-secrets")
+            ))]
+            {
+                tracing::info!("Using Azure Key Vault as secrets backend");
+                Box::new(
+                    AzureKeyVaultClient::builder(config.azure_keyvault.vault_url.clone())
+                        .service_principal(
+                            config.azure_keyvault.tenant_id.as_deref(),
+                            config.azure_keyvault.client_id.as_deref(),
+                            config.azure_keyvault.client_secret.clone(),
+                        )
+                        .secrets_cache_ttl(Duration::from_secs(
+                            config.azure_keyvault.secrets_cache_ttl,
+                        ))
+                        .build()?,
+                )
+            }
+            #[cfg(all(
+                feature = "aws",
+                not(feature = "vault"),
+                not(feature = "gcp-secrets"),
+                not(feature = "azure-kv")
+            ))]
+            {
+                if config
+                    .server
+                    .cert
+                    .store
+                    .source
+                    .eq_ignore_ascii_case("aws_secrets_manager")
+                {
+                    let aws_config = aws_config::defaults(BehaviorVersion::latest())
+                        .region(Region::new(config.aws.region.clone()))
+                        .load()
+                        .await;
+                    Box::new(
+                        AwsSecretsManager::new(
+                            &aws_config,
+                            Duration::from_secs(config.aws.secrets_cache_ttl),
+                        )
+                        .await?,
+                    )
+                } else {
+                    Box::new(MemoryStorage::default())
+                }
+            }
+            #[cfg(not(any(
+                feature = "vault",
+                feature = "gcp-secrets",
+                feature = "azure-kv",
+                feature = "aws"
+            )))]
+            Box::new(MemoryStorage::default())
         };
 
         // Uses S3 when available and configured, otherwise memory.
@@ -503,14 +564,24 @@ fn store_certificate_strategy(config: &AppConfig) -> EyeResult<Option<StoreProvi
                 signing_key_path,
             )))
         }
-        source if source.eq_ignore_ascii_case("aws_secrets_manager") => {
+        source
+            if matches!(
+                source.to_ascii_lowercase().as_str(),
+                "aws_secrets_manager"
+                    | "vault"
+                    | "gcp_secret_manager"
+                    | "azure_keyvault"
+                    | "secrets_manager"
+                    | "secrets_storage"
+            ) =>
+        {
             let certificate_key = cert_config
                 .store
                 .certificate_key
                 .as_deref()
                 .ok_or_else(|| {
                     eyre!(
-                        "server.cert.store.certificate_key is required for aws_secrets_manager store provisioning"
+                        "server.cert.store.certificate_key is required for {source} store provisioning"
                     )
                 })?;
             let signing_key_key = cert_config
@@ -519,7 +590,7 @@ fn store_certificate_strategy(config: &AppConfig) -> EyeResult<Option<StoreProvi
                 .as_deref()
                 .ok_or_else(|| {
                     eyre!(
-                        "server.cert.store.signing_key_key is required for aws_secrets_manager store provisioning"
+                        "server.cert.store.signing_key_key is required for {source} store provisioning"
                     )
                 })?;
             Ok(Some(StoreProvisioningStrategy::secrets_storage(
@@ -528,7 +599,7 @@ fn store_certificate_strategy(config: &AppConfig) -> EyeResult<Option<StoreProvi
             )))
         }
         unsupported => Err(eyre!(
-            "unsupported certificate store source '{unsupported}'; expected 'filesystem' or 'aws_secrets_manager'"
+            "unsupported certificate store source '{unsupported}'; expected 'filesystem', 'aws_secrets_manager', 'vault', 'gcp_secret_manager', or 'azure_keyvault'"
         )),
     }
 }
