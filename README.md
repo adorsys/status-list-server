@@ -102,7 +102,7 @@ The crate uses modular Cargo feature flags to gate optional production backend d
 | `mysql`    | SeaORM MySQL database driver.                                                                                                                      | ❌ Opt-in  |
 | `redis`    | Redis storage and certificate cache driver.                                                                                                        | ❌ Opt-in  |
 | `aws`      | AWS S3 object storage and AWS Secrets Manager drivers.                                                                                             | ❌ Opt-in  |
-| `s3-compatible` | S3-compatible object storage driver for certificate material, including MinIO and Ceph/RadosGW.                                             | ❌ Opt-in  |
+| `s3-compatible` | S3-compatible object storage driver for certificate material, including MinIO and Ceph/RadosGW.                                                | ❌ Opt-in  |
 | `acme`     | ACME DNS-01 certificate manager driver.                                                                                                            | ❌ Opt-in  |
 
 To build with specific backend drivers, pass the matching feature flag(s):
