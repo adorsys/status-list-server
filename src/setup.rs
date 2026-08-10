@@ -47,9 +47,9 @@ use crate::cert_manager::http_client::DefaultHttpClient;
 use crate::cert_manager::{
     CertManager, StoreProvisioningStrategy, storage::MemoryStorage, storage::Storage,
 };
-use crate::config::{Config as AppConfig, DatabaseBackend};
 #[cfg(feature = "acme")]
 use crate::config::{CertStorageProvider, SecretsStorageProvider};
+use crate::config::{Config as AppConfig, DatabaseBackend};
 #[cfg(feature = "acme")]
 use crate::config::{
     DnsProviderKind, ENV_DEVELOPMENT, ENV_PRODUCTION, GcloudKeySource, ResolvedDnsProvider,

@@ -981,7 +981,6 @@ mod tests {
         assert_eq!(config.server.cert.cert_storage, expected_cert_storage);
         assert_eq!(config.server.cert.secrets_storage, expected_secrets_storage);
 
-
         // DatabaseBackend helper unit tests
         assert_eq!(DatabaseBackend::default(), DatabaseBackend::Memory);
         assert_eq!(DatabaseBackend::Memory.as_str(), "memory");
