@@ -807,9 +807,6 @@ fn base_builder() -> Result<ConfigBuilder<DefaultState>, ConfigError> {
     #[cfg(not(feature = "acme"))]
     let default_chain_cache_ttl = 86400;
 
-    #[cfg(feature = "aws")]
-    let (default_cert_storage, default_secrets_storage) = ("aws_s3", "aws_secrets_manager");
-    #[cfg(not(feature = "aws"))]
     let (default_cert_storage, default_secrets_storage) = ("memory", "memory");
 
     let telemetry_environment = match std::env::var("APP_ENV")
@@ -970,16 +967,11 @@ mod tests {
         );
         assert_eq!(config.telemetry.sampler_ratio, 1.0);
 
-        #[cfg(feature = "aws")]
-        let (expected_cert_storage, expected_secrets_storage) = (
-            CertStorageProvider::AwsS3,
-            SecretsStorageProvider::AwsSecretsManager,
+        assert_eq!(config.server.cert.cert_storage, CertStorageProvider::Memory);
+        assert_eq!(
+            config.server.cert.secrets_storage,
+            SecretsStorageProvider::Memory
         );
-        #[cfg(not(feature = "aws"))]
-        let (expected_cert_storage, expected_secrets_storage) =
-            (CertStorageProvider::Memory, SecretsStorageProvider::Memory);
-        assert_eq!(config.server.cert.cert_storage, expected_cert_storage);
-        assert_eq!(config.server.cert.secrets_storage, expected_secrets_storage);
 
         // DatabaseBackend helper unit tests
         assert_eq!(DatabaseBackend::default(), DatabaseBackend::Memory);

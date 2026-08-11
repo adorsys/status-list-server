@@ -221,9 +221,9 @@ The Status List Server is provisioned with a cryptographic certificate that is e
 
 Certificate object storage (`server.cert.cert_storage`) and secrets storage (`server.cert.secrets_storage`) are selected independently:
 
-- `memory` — in-process ephemeral storage (default when the `aws` feature is not compiled).
-- `aws_s3` — AWS S3 for certificate storage (default when the `aws` feature is compiled). Requires `aws.s3_bucket`.
-- `aws_secrets_manager` — AWS Secrets Manager for secrets storage (default when the `aws` feature is compiled).
+- `memory` — in-process ephemeral storage (the default for both backends regardless of compiled features). AWS storage backends require explicit opt-in.
+- `aws_s3` — AWS S3 for certificate storage. Requires `aws.s3_bucket` and the `aws` feature.
+- `aws_secrets_manager` — AWS Secrets Manager for secrets storage. Requires the `aws` feature.
 
 This allows mixed deployments such as S3-compatible object storage for certificates with an in-memory or alternative secrets backend.
 
