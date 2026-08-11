@@ -13,8 +13,10 @@ use super::models::certificate_storage;
 /// SeaORM-backed certificate-manager storage.
 ///
 /// This adapter stores opaque PEM/JSON certificate-manager values in the
-/// application database. Writes are upserts so `store` and `update` both match
-/// the trait's replace-current-value semantics.
+/// application database. [`Storage::store`] is an upsert (insert-or-replace on
+/// `name`), so the trait's default [`update`](Storage::update) — which
+/// delegates to `store` — matches the replace-current-value semantics. `update`
+/// is intentionally not overridden here.
 #[derive(Clone)]
 pub struct SqlCertificateStorage {
     db: Arc<DatabaseConnection>,
@@ -63,11 +65,6 @@ impl Storage for SqlCertificateStorage {
             .one(&*self.db)
             .await?;
         Ok(row.map(|row| row.value))
-    }
-
-    #[tracing::instrument(skip(self, value), fields(db.system = "sea-orm"))]
-    async fn update(&self, key: &str, value: &str) -> Result<(), StorageError> {
-        self.store(key, value).await
     }
 
     #[tracing::instrument(skip(self), fields(db.system = "sea-orm"))]
