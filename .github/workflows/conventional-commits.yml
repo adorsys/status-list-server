@@ -43,3 +43,36 @@ jobs:
           requireScope: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  commits:
+    name: Commits follow Conventional Commits
+    runs-on: ubuntu-latest
+    steps:
+      - name: Fetch repository history
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+          # Checkout the head commit (not the synthetic merge ref) so the
+          # comparison range in `cog check` only covers the PR's own commits.
+          ref: ${{ github.event.pull_request.head.sha }}
+
+      - name: Fetch main for comparison
+        if: github.event_name == 'pull_request'
+        run: git fetch --no-tags --depth=1 origin main
+
+      - name: Install cocogitto
+        uses: taiki-e/install-action@c44f6b046f1c29ae5918b1e0bfdbb2f1813836fd # v2
+        with:
+          tool: cocogitto
+
+      - name: Validate PR commit messages
+        if: github.event_name == 'pull_request'
+        run: |
+          # Only the commits introduced by this PR.
+          cog check origin/main..HEAD
+
+      - name: Validate commits on main
+        if: github.event_name != 'pull_request'
+        run: |
+          # Direct pushes to main: verify everything since the last release tag.
+          cog check --from-latest-tag
