@@ -56,9 +56,12 @@ jobs:
           # comparison range in `cog check` only covers the PR's own commits.
           ref: ${{ github.event.pull_request.head.sha }}
 
+      # Fetch main at full depth. A shallow fetch (--depth=1) would turn
+      # origin/main into a root commit, so `cog check origin/main..HEAD`
+      # can't traverse past it and would scan the entire repository history.
       - name: Fetch main for comparison
         if: github.event_name == 'pull_request'
-        run: git fetch --no-tags --depth=1 origin main
+        run: git fetch --no-tags origin main
 
       - name: Install cocogitto
         uses: taiki-e/install-action@c44f6b046f1c29ae5918b1e0bfdbb2f1813836fd # v2
