@@ -94,12 +94,21 @@ spec:
               {{- end }}
               {{- if not (hasKey $env "APP_TELEMETRY__OTLP_ENDPOINT") }}
                 {{- $otlpPort := dig "ports" "otlp" "servicePort" 4317 $otel }}
-                {{- /* Derive service name following subchart fullnameOverride → nameOverride → default */}}
-                {{- $collectorSvcName := printf "%s-opentelemetry-collector" .Release.Name }}
+                {{- /* Mirror the upstream opentelemetry-collector.fullname helper exactly:        */}}
+                {{- /* 1. fullnameOverride → use as-is (trunc 63)                                */}}
+                {{- /* 2. else: effectiveName = nameOverride ?? chart name                        */}}
+                {{- /*    if release.contains(effectiveName) → use release (trunc 63)            */}}
+                {{- /*    else → "$release-$effectiveName" (trunc 63)                            */}}
+                {{- $collectorSvcName := "" }}
                 {{- if $otel.fullnameOverride }}
                   {{- $collectorSvcName = $otel.fullnameOverride | trunc 63 | trimSuffix "-" }}
-                {{- else if $otel.nameOverride }}
-                  {{- $collectorSvcName = printf "%s-%s" .Release.Name ($otel.nameOverride | trunc 63 | trimSuffix "-") }}
+                {{- else }}
+                  {{- $effectiveName := $otel.nameOverride | default "opentelemetry-collector" }}
+                  {{- if contains $effectiveName .Release.Name }}
+                    {{- $collectorSvcName = .Release.Name | trunc 63 | trimSuffix "-" }}
+                  {{- else }}
+                    {{- $collectorSvcName = printf "%s-%s" .Release.Name $effectiveName | trunc 63 | trimSuffix "-" }}
+                  {{- end }}
                 {{- end }}
                 {{- $_ := set $env "APP_TELEMETRY__OTLP_ENDPOINT" (printf "http://%s.%s.svc.cluster.local:%d" $collectorSvcName .Release.Namespace ($otlpPort | int)) }}
               {{- end }}
