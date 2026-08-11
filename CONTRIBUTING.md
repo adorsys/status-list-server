@@ -2,6 +2,34 @@
 
 Thank you for your interest in contributing! This document covers how to submit changes.
 
+## Conventional Commits Are Enforced by CI
+
+Conventional Commits are not optional here. Both **PR titles** and **commit
+messages** are validated automatically by the
+[`conventional-commits` workflow](.github/workflows/conventional-commits.yml):
+
+- **PR titles** are checked with
+  [`amannn/action-semantic-pull-request`](https://github.com/amannn/action-semantic-pull-request)
+  on every `pull_request` event (including when the title is edited).
+- **Commit messages** are checked with
+  [cocogitto](https://docs.cocogitto.io/) (`cog check`):
+  - on a PR, only the commits the PR introduces are checked;
+  - on direct pushes to `main`, all commits since the last release tag are checked.
+
+The two resulting status checks
+(**PR title follows Conventional Commits** and
+**Commits follow Conventional Commits**) are **required** on `main`: pull requests
+cannot be merged until they pass, and direct pushes that violate the rules are
+rejected. If either check fails, rewrite the offending commit message(s) or PR
+title to follow the format below and push again.
+
+You can validate commits locally before pushing (install cocogitto with
+`cargo install cocogitto` or via your package manager):
+
+```bash
+cog check
+```
+
 ## Commit Messages
 
 This project uses [Conventional Commits](https://www.conventionalcommits.org/) to automate versioning and changelog generation. Every commit message merged to `main` **must** follow this format:
@@ -56,9 +84,14 @@ refactor(telemetry): simplify OTLP layer composition
 
 1. Fork the repository and create a feature branch from `main`.
 2. Make your changes, ensuring all commits follow Conventional Commits format.
-3. Open a PR against `main`. CI will run automatically.
-4. Address review feedback.
-5. A maintainer will merge using **squash merge** (the squash commit message should also follow Conventional Commits format).
+3. Make sure the **PR title** also follows Conventional Commits format — with
+   **squash merge** the PR title becomes the commit message on `main`, so it is
+   what release-plz reads for the version bump and changelog.
+4. Open a PR against `main`. CI will run automatically, including the required
+   Conventional Commits checks.
+5. Address review feedback and fix the PR title or any commit messages if the
+   Conventional Commits checks fail.
+6. A maintainer will merge using **squash merge**.
 
 ## How Releases Work
 
