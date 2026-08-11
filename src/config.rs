@@ -183,7 +183,7 @@ pub struct ServerConfig {
 pub enum CertStorageProvider {
     #[default]
     Memory,
-    #[serde(alias = "s3", alias = "aws_s3", alias = "aws-s3")]
+    #[serde(rename = "aws_s3", alias = "s3", alias = "aws-s3")]
     AwsS3,
 }
 
@@ -202,7 +202,7 @@ pub enum SecretsStorageProvider {
     #[default]
     Memory,
     #[serde(
-        alias = "aws_secrets_manager",
+        rename = "aws_secrets_manager",
         alias = "aws-secrets-manager",
         alias = "secrets_manager"
     )]
