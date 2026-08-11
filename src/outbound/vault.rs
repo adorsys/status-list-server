@@ -2,7 +2,7 @@
 //!
 //! Both HashiCorp Vault and OpenBao expose the same KV v2 HTTP API, so this
 //! single adapter covers both.  Only **token auth** is supported in this
-//! initial implementation;
+//! initial implementation.
 
 use std::time::Duration;
 
@@ -37,7 +37,10 @@ pub struct VaultClient {
 }
 
 impl VaultClient {
-    const CACHE_MAX_CAPACITY: u64 = 10;
+    /// Maximum number of distinct secrets kept in the in-process cache.
+    /// 100 entries covers multi-domain deployments (20+ domains with cert +
+    /// key per domain) with plenty of headroom, while still bounding memory.
+    const CACHE_MAX_CAPACITY: u64 = 100;
 
     /// Return a [`VaultClientBuilder`] for constructing a [`VaultClient`] adapter
     /// with the given address and token.
@@ -57,15 +60,59 @@ impl VaultClient {
         format!("{}/v1/{}/metadata/{}", self.addr, self.mount, path)
     }
 
-    /// Qualify a key by prepending the configured path prefix.
+    /// Qualify a key by prepending the configured path prefix, then
+    /// percent-encode each path segment so that characters such as `?`, `#`,
+    /// or spaces cannot corrupt the HTTP request URL.
     fn qualify_key(&self, key: &str) -> String {
-        if self.path_prefix.is_empty() {
+        let raw = if self.path_prefix.is_empty() {
             key.to_string()
         } else if self.path_prefix.ends_with('/') {
             format!("{}{}", self.path_prefix, key)
         } else {
             format!("{}/{}", self.path_prefix, key)
+        };
+        raw.split('/')
+            .map(Self::encode_path_segment)
+            .collect::<Vec<_>>()
+            .join("/")
+    }
+
+    /// Percent-encode a single URL path segment (RFC 3986).
+    ///
+    /// Unreserved characters (`A-Z a-z 0-9 - _ . ~`) and sub-delimiters
+    /// allowed in path segments (`! $ & ' ( ) * + , ; = : @`) are left as-is;
+    /// everything else (including `?`, `#`, ` `, `%`) is percent-encoded.
+    fn encode_path_segment(segment: &str) -> String {
+        let mut out = String::with_capacity(segment.len());
+        for b in segment.bytes() {
+            if b.is_ascii_alphanumeric()
+                || matches!(
+                    b,
+                    b'-' | b'_'
+                        | b'.'
+                        | b'~'
+                        | b'!'
+                        | b'$'
+                        | b'&'
+                        | b'\''
+                        | b'('
+                        | b')'
+                        | b'*'
+                        | b'+'
+                        | b','
+                        | b';'
+                        | b'='
+                        | b':'
+                        | b'@'
+                )
+            {
+                out.push(b as char);
+            } else {
+                out.push('%');
+                out.push_str(&format!("{b:02X}"));
+            }
         }
+        out
     }
 
     /// Add common headers (token + optional namespace) to a request builder.
@@ -226,6 +273,11 @@ impl Storage for VaultClient {
                 cache.insert(key.to_string(), value.to_string()).await;
             }
             Ok(())
+        } else if status == StatusCode::FORBIDDEN {
+            Err(StorageError::Backend(eyre!(
+                "vault access denied for path '{}'",
+                self.qualify_key(key)
+            )))
         } else {
             Err(StorageError::Backend(eyre!(
                 "vault store failed for path '{}': HTTP {status}",
@@ -283,6 +335,11 @@ impl Storage for VaultClient {
                 cache.invalidate(key).await;
             }
             Ok(())
+        } else if status == StatusCode::FORBIDDEN {
+            Err(StorageError::Backend(eyre!(
+                "vault access denied for path '{}'",
+                self.qualify_key(key)
+            )))
         } else {
             Err(StorageError::Backend(eyre!(
                 "vault delete failed for path '{}': HTTP {status}",
