@@ -1,0 +1,45 @@
+name: Conventional Commits
+
+# Enforce the Conventional Commits specification on PR titles and commit
+# messages. release-plz derives semantic version bumps and the changelog
+# directly from conventional commit messages on `main`, so non-conventional
+# commits (e.g. "fixed stuff") would be ignored by git-cliff and release-plz,
+# causing inaccurate version bumps and incomplete changelogs.
+
+permissions:
+  contents: read
+  pull-requests: read
+
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened]
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  pr-title:
+    name: PR title follows Conventional Commits
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    steps:
+      - name: Validate PR title
+        uses: amannn/action-semantic-pull-request@48f256284bd46cdaab1048c3721360e808335d50 # v6.1.1
+        with:
+          types: |
+            feat
+            fix
+            docs
+            refactor
+            perf
+            test
+            ci
+            chore
+            build
+            revert
+            style
+          # Optional scope is allowed: `feat(api): ...`
+          requireScope: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
