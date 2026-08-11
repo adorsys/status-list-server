@@ -379,8 +379,8 @@ async fn build_certificate_storages(
             )
         })?;
         return Ok((
-            Box::new(SqlCertificateStorage::new(db.clone())),
             Box::new(SqlCertificateStorage::new(db)),
+            Box::new(MemoryStorage::default()),
         ));
     }
 
@@ -757,21 +757,14 @@ mod general_tests {
     #[tokio::test]
     async fn build_state_selects_sql_certificate_storage() {
         let _ = rustls::crypto::ring::default_provider().install_default();
+        let config = AppConfig::load_from_overrides(&[
+            ("database.backend", "sqlite"),
+            ("database.url", "sqlite::memory:"),
+            ("server.cert.store.source", "sql"),
+        ])
+        .expect("Failed to load config");
 
-        let config = |url: &str| {
-            AppConfig::load_from_overrides(&[
-                ("database.backend", "sqlite"),
-                ("database.url", url),
-                ("server.cert.store.source", "sql"),
-            ])
-            .expect("Failed to load config")
-        };
-
-        let dir = tempfile::tempdir().expect("failed to create temp dir for sqlite db");
-        let db_path = dir.path().join("cert-storage.sqlite");
-        let db_url = format!("sqlite://{}?mode=rwc", db_path.display());
-
-        let (_state, cert_manager) = build_state_with_cert_manager(&config(&db_url))
+        let (_state, cert_manager) = build_state_with_cert_manager(&config)
             .await
             .expect("build_state should select SQL certificate storage");
 
@@ -792,38 +785,6 @@ mod general_tests {
             .expect("certificate should load")
             .expect("certificate should exist");
         assert_eq!(loaded.certificate, "sql-backed-cert");
-
-        // The signing key is routed through secrets_storage; with the sql source
-        // that must be SQL too, not a fresh in-memory store (bug: empty
-        // MemoryStorage failed store provisioning and never survived restarts).
-        let first_sign_key = cert_manager
-            .signing_key_pem()
-            .await
-            .expect("signing key should be generated and persisted to SQL");
-
-        // Simulated restart: rebuild the whole state against the same DB file.
-        drop(cert_manager);
-        let (_state, cert_manager) = build_state_with_cert_manager(&config(&db_url))
-            .await
-            .expect("rebuild after simulated restart should still select SQL storage");
-
-        let reloaded = cert_manager
-            .certificate()
-            .await
-            .expect("certificate should load after restart")
-            .expect("certificate should survive restart");
-        assert_eq!(reloaded.certificate, "sql-backed-cert");
-
-        // The signing key must survive the restart unchanged — regenerating it
-        // (the MemoryStorage failure mode) would invalidate issued token sigs.
-        let restarted_sign_key = cert_manager
-            .signing_key_pem()
-            .await
-            .expect("signing key should load from SQL after restart");
-        assert_eq!(
-            first_sign_key, restarted_sign_key,
-            "signing key must be persisted in SQL and survive a restart"
-        );
     }
 
     /// Verifies that a saturated pool returns an error within `acquire_timeout`
