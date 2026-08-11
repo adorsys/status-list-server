@@ -250,7 +250,7 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
                 #[cfg(not(feature = "aws"))]
                 {
                     return Err(color_eyre::eyre::eyre!(
-                        "s3 certificate storage provider selected, but 'aws' feature flag was not compiled in."
+                        "aws_s3 certificate storage provider selected, but 'aws' feature flag was not compiled in."
                     ));
                 }
             }
