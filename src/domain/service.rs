@@ -79,6 +79,11 @@ impl Service {
         self.cert_provider.as_ref()
     }
 
+    /// Whether historical snapshot retention is enabled.
+    pub fn snapshots_enabled(&self) -> bool {
+        self.snapshot_repo.is_some()
+    }
+
     /// Create and publish a new status list record, enforcing uniqueness and size invariants.
     #[allow(clippy::too_many_arguments)]
     pub async fn publish_status_list(
@@ -118,20 +123,14 @@ impl Service {
         if record.status_list.lst.len() > max_serialized_list_size {
             return Err(StatusListError::TooLarge);
         }
-        if self.status_list_repo.find(&record.list_id).await?.is_some() {
-            return Err(StatusListError::AlreadyExists);
-        }
 
-        match &self.snapshot_repo {
-            Some(_) => {
-                let snapshot = build_snapshot(&record, token_exp_secs);
-                self.status_list_repo
-                    .insert_with_snapshot(record.clone(), snapshot)
-                    .await?;
-            }
-            None => {
-                self.status_list_repo.insert(record.clone()).await?;
-            }
+        if self.snapshots_enabled() {
+            let snapshot = build_snapshot(&record, token_exp_secs);
+            self.status_list_repo
+                .insert_with_snapshot(record.clone(), snapshot)
+                .await?;
+        } else {
+            self.status_list_repo.insert(record.clone()).await?;
         }
         Ok(record)
     }
@@ -181,18 +180,15 @@ impl Service {
         let previous_updated_at = existing.updated_at;
         existing.updated_at = next_updated_at(previous_updated_at, current_unix_timestamp());
 
-        let landed = match &self.snapshot_repo {
-            Some(_) => {
-                let snapshot = build_snapshot(&existing, token_exp_secs);
-                self.status_list_repo
-                    .update_with_snapshot(existing.clone(), previous_updated_at, snapshot)
-                    .await?
-            }
-            None => {
-                self.status_list_repo
-                    .update(existing.clone(), previous_updated_at)
-                    .await?
-            }
+        let landed = if self.snapshots_enabled() {
+            let snapshot = build_snapshot(&existing, token_exp_secs);
+            self.status_list_repo
+                .update_with_snapshot(existing.clone(), previous_updated_at, snapshot)
+                .await?
+        } else {
+            self.status_list_repo
+                .update(existing.clone(), previous_updated_at)
+                .await?
         };
 
         if !landed {
@@ -252,16 +248,18 @@ impl Service {
         snapshot_repo.delete_older_than(cutoff).await
     }
 
-    /// Publish new credentials for an issuer after verifying uniqueness invariant.
+    /// Publish new credentials for an issuer.
+    ///
+    /// Uniqueness is enforced by the primary key on `credentials.issuer`, not by
+    /// a `find` pre-check — same reasoning as [`Self::publish_status_list`]: the
+    /// pre-check is a TOCTOU race that still has to defer to the constraint when
+    /// two registrations for one issuer arrive together, so it buys a round trip
+    /// and no guarantee. `insert_one` classifies the violation through
+    /// `map_insert_err` (proven on SQLite and MySQL by
+    /// `test_*_duplicate_insert_maps_to_duplicate_entry`) and
+    /// `impl From<RepositoryError> for CredentialError` maps it to
+    /// `AlreadyExists`, so the 409 is unchanged.
     pub async fn publish_credential(&self, credential: Credential) -> Result<(), CredentialError> {
-        if self
-            .credential_repo
-            .find(&credential.issuer.0)
-            .await?
-            .is_some()
-        {
-            return Err(CredentialError::AlreadyExists);
-        }
         self.credential_repo.insert(credential).await
     }
 
@@ -323,12 +321,17 @@ fn build_snapshot(record: &StatusListRecord, token_exp_secs: u64) -> StatusListS
 }
 
 async fn invalidate_after_commit(cache: &dyn StatusListCache, list_id: &str) {
-    if let Err(error) = cache.invalidate(list_id).await {
-        tracing::warn!(
-            list_id = %list_id,
-            error = ?error,
-            "status list write committed, but cache invalidation failed; \
-             reads may be stale until the cache entry expires"
-        );
+    match cache.invalidate(list_id).await {
+        Ok(()) => {
+            tracing::debug!(list_id = %list_id, "invalidated cache entry after commit");
+        }
+        Err(error) => {
+            tracing::warn!(
+                list_id = %list_id,
+                error = ?error,
+                "status list write committed, but cache invalidation failed; \
+                 reads may be stale until the cache entry expires"
+            );
+        }
     }
 }

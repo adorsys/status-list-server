@@ -1,7 +1,30 @@
-[test-groups]
-container-backed = { max-threads = 4 }
+# Container-backed tests must not run concurrently with each other.
+#
+# Two suites start real Docker containers: the SQL backend proofs, one database
+# per test (`src/outbound/sql/test_containers.rs`), and the ACME provisioning
+# tests, which start four apiece — pebble, challtestsrv, localstack and redis
+# (`tests/cert_provisioning.rs`). nextest runs tests in parallel by default, so
+# unconstrained these try to boot a dozen servers at once and starve each other
+# of CPU during init. The failures land *before* any test code runs and look
+# nothing like the code under test: MySQL reports
+# `WaitContainer(StartupTimeout)`, and the ACME tests time out waiting on
+# pebble. Both are pure scheduling artefacts.
+#
+# Serialising the group trades wall-clock time for determinism, which is the
+# right trade for tests whose entire purpose is proving real-backend behaviour.
+[test-groups.containers]
+max-threads = 1
 
 [[profile.default.overrides]]
-filter = 'test(test_mysql_) | test(test_postgres_) | test(cert_provisioning)'
-test-group = 'container-backed'
+# `test(...)` matches the SQL fixtures' callers by name; `binary(...)` catches
+# the whole ACME integration suite. The name match also sweeps in
+# `config::tests::test_mysql_backend_config`, a pure deserialisation check
+# costing microseconds, so the imprecision is free.
+#
+# Keep `mysql` or `postgres` in the name of any new database-backed test, and
+# confirm membership with `cargo nextest show-config test-groups`.
+filter = 'test(mysql) or test(postgres) or binary(cert_provisioning)'
+test-group = 'containers'
+# A container that never becomes ready would otherwise hang the run: fail the
+# test after two 2m periods rather than waiting on the job timeout.
 slow-timeout = { period = "2m", terminate-after = 2, grace-period = "10s" }

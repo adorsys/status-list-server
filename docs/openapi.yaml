@@ -10,9 +10,22 @@ info:
     and allows credential issuers to register, publish, and update status lists.
     Relying parties can retrieve status list tokens in JWT or CWT format.
 
-    Error responses are modelled as RFC 7807 problem details
-    (`application/problem+json`). This is the canonical error format intended
-    for the API; individual endpoints may migrate to this format over time.
+    Error responses are JSON objects of the form
+    `{"error": "<code>", "error_description": "<human-readable text>"}`, served
+    as `application/json` with `Cache-Control: no-store, max-age=0`. The
+    `error` field is a stable machine-readable identifier and is the field
+    clients should branch on — the HTTP status alone is not sufficient, since
+    (for example) `409` covers both `status_list_already_exists` and
+    `update_conflict`. `error_description` is for humans and its wording is not
+    part of the contract.
+
+    Two endpoints predate this shape and still return plain text: see the
+    `UnprocessableEntity` and `TooManyRequests` responses below.
+
+    > **Note:** RFC 7807 problem details (`application/problem+json`) are the
+    > intended long-term format for the whole API. Adoption is tracked in issue
+    > #156; until it lands, the schema documented here is what the server
+    > actually sends.
 
     Status list tokens are signed by the server and delivered as
     `application/statuslist+jwt` or `application/statuslist+cwt`. JWT-format
@@ -395,9 +408,9 @@ paths:
               schema:
                 type: string
                 format: binary
-              description: |
-                Raw COSE_Sign1_Tagged CBOR bytes (CBOR tag 18). Never
-                gzip-compressed regardless of the request's `Accept-Encoding`.
+                description: |
+                  Raw COSE_Sign1_Tagged CBOR bytes (CBOR tag 18). Never
+                  gzip-compressed regardless of the request's `Accept-Encoding`.
               example: "0gEAAQ..."
           headers:
             Content-Encoding:
@@ -623,35 +636,60 @@ components:
             - "https://statuslist.example.com/api/v1/status-lists/477121aa-b598-419e-916f-1e74654ff38b"
             - "https://statuslist.example.com/api/v1/status-lists/8e4ebb4a-dd79-498f-ac97-966f22884037"
 
-    ProblemDetails:
+    ErrorResponse:
       type: object
       description: |
-        RFC 7807 problem details object. Error responses use
-        `application/problem+json` where applicable.
+        The error body returned by every JSON error response. Serialized from
+        `server::error::ErrorResponse`.
+
+        RFC 7807 problem details are the intended long-term replacement
+        (issue #156); this schema documents the current wire format.
+      required:
+        - error
       properties:
-        type:
+        error:
           type: string
-          format: uri
-          description: A URI reference that identifies the problem type.
-          default: "about:blank"
-          example: "about:blank"
-        title:
+          description: |
+            Stable machine-readable error identifier. Branch on this rather
+            than on the HTTP status, which is not unique across error kinds.
+          enum:
+            # 400
+            - invalid_list_id
+            - invalid_query
+            - invalid_input
+            - invalid_index
+            - invalid_historical_time
+            - invalid_public_jwk
+            - too_many_statuses
+            - index_too_large
+            # 401 — emitted by the authentication middleware
+            - invalid_auth_header
+            - jwt_error
+            - unsupported_algorithm
+            - issuer_not_found
+            # 403
+            - issuer_mismatch
+            # 404
+            - status_list_not_found
+            - historical_status_list_not_found
+            # 406
+            - invalid_accept_header
+            # 409
+            - status_list_already_exists
+            - credentials_already_exist
+            - update_conflict
+            # 422
+            - status_too_large
+            # 500 / 503
+            - internal_error
+            - service_unavailable
+          example: "status_list_already_exists"
+        error_description:
           type: string
-          description: Short, human-readable summary of the problem.
-          example: "Bad Request"
-        status:
-          type: integer
-          description: HTTP status code.
-          example: 400
-        detail:
-          type: string
-          description: Human-readable explanation of the error.
-          example: "Invalid list ID string"
-        instance:
-          type: string
-          format: uri
-          description: URI reference that identifies the specific occurrence.
-          example: "/api/v1/status-lists/invalid-uuid/statuses"
+          description: |
+            Human-readable explanation. Omitted when absent; wording is not
+            part of the contract and may change without notice.
+          example: "Status list already exists"
 
     ErrorResponse:
       type: object
@@ -684,80 +722,62 @@ components:
             (default 100000) — `Status index <n> exceeds the configured
             maximum`.
       content:
-        application/problem+json:
+        application/json:
           schema:
-            $ref: "#/components/schemas/ProblemDetails"
+            $ref: "#/components/schemas/ErrorResponse"
           example:
-            type: "about:blank"
-            title: "Bad Request"
-            status: 400
-            detail: "Too many statuses in request: 6000 > 5000"
-            instance: "/api/v1/status-lists/477121aa-b598-419e-916f-1e74654ff38b/statuses"
+            error: "too_many_statuses"
+            error_description: "too many statuses in request: 6000 > 5000"
 
     Unauthorized:
       description: Missing or invalid authentication token
       content:
-        application/problem+json:
+        application/json:
           schema:
-            $ref: "#/components/schemas/ProblemDetails"
+            $ref: "#/components/schemas/ErrorResponse"
           example:
-            type: "about:blank"
-            title: "Unauthorized"
-            status: 401
-            detail: "Missing or invalid Authorization header"
-            instance: "/api/v1/status-lists/477121aa-b598-419e-916f-1e74654ff38b/statuses"
+            error: "invalid_auth_header"
+            error_description: "Missing or invalid Authorization header"
 
     Forbidden:
       description: Insufficient permissions to access the resource
       content:
-        application/problem+json:
+        application/json:
           schema:
-            $ref: "#/components/schemas/ProblemDetails"
+            $ref: "#/components/schemas/ErrorResponse"
           example:
-            type: "about:blank"
-            title: "Forbidden"
-            status: 403
-            detail: "Issuer mismatch"
-            instance: "/api/v1/status-lists/477121aa-b598-419e-916f-1e74654ff38b/statuses"
+            error: "issuer_mismatch"
+            error_description: "Issuer does not own the status list"
 
     NotFound:
       description: Resource not found
       content:
-        application/problem+json:
+        application/json:
           schema:
-            $ref: "#/components/schemas/ProblemDetails"
+            $ref: "#/components/schemas/ErrorResponse"
           example:
-            type: "about:blank"
-            title: "Not Found"
-            status: 404
-            detail: "Status list not found"
-            instance: "/api/v1/status-lists/477121aa-b598-419e-916f-1e74654ff38b/statuses"
+            error: "status_list_not_found"
+            error_description: "Status list was not found"
 
     NotAcceptable:
       description: Requested response format not supported
       content:
-        application/problem+json:
+        application/json:
           schema:
-            $ref: "#/components/schemas/ProblemDetails"
+            $ref: "#/components/schemas/ErrorResponse"
           example:
-            type: "about:blank"
-            title: "Not Acceptable"
-            status: 406
-            detail: "Invalid accept header"
-            instance: "/statuslists/477121aa-b598-419e-916f-1e74654ff38b"
+            error: "invalid_accept_header"
+            error_description: "Invalid accept header"
 
     Conflict:
       description: Resource already exists
       content:
-        application/problem+json:
+        application/json:
           schema:
-            $ref: "#/components/schemas/ProblemDetails"
+            $ref: "#/components/schemas/ErrorResponse"
           example:
-            type: "about:blank"
-            title: "Conflict"
-            status: 409
-            detail: "Status list already exists"
-            instance: "/api/v1/status-lists/477121aa-b598-419e-916f-1e74654ff38b/statuses"
+            error: "status_list_already_exists"
+            error_description: "Status list already exists"
 
     PayloadTooLarge:
       description: |
@@ -833,16 +853,16 @@ components:
         this write (optimistic-concurrency conflict): another writer's update
         landed first, so this request was rejected rather than silently
         overwriting it. The client should re-read the current state and retry.
+
+        Distinguished from the publish conflict by the `error` code: this
+        response carries `update_conflict`, not `status_list_already_exists`.
       content:
-        application/problem+json:
+        application/json:
           schema:
-            $ref: "#/components/schemas/ProblemDetails"
+            $ref: "#/components/schemas/ErrorResponse"
           example:
-            type: "about:blank"
-            title: "Conflict"
-            status: 409
-            detail: "the status list was modified concurrently; re-read the current state and retry"
-            instance: "/api/v1/status-lists/477121aa-b598-419e-916f-1e74654ff38b/statuses"
+            error: "update_conflict"
+            error_description: "The status list was modified concurrently"
 
     UpdateInternalServerError:
       description: |
@@ -856,28 +876,22 @@ components:
         another writer got there first. A `409` requires re-reading the current
         state before retrying; a `500` does not.
       content:
-        application/problem+json:
+        application/json:
           schema:
-            $ref: "#/components/schemas/ProblemDetails"
+            $ref: "#/components/schemas/ErrorResponse"
           example:
-            type: "about:blank"
-            title: "Internal Server Error"
-            status: 500
-            detail: "Internal server error"
-            instance: "/api/v1/status-lists/477121aa-b598-419e-916f-1e74654ff38b/statuses"
+            error: "internal_error"
+            error_description: "Internal server error"
 
     ServiceUnavailable:
       description: Service temporarily unavailable
       content:
-        application/problem+json:
+        application/json:
           schema:
-            $ref: "#/components/schemas/ProblemDetails"
+            $ref: "#/components/schemas/ErrorResponse"
           example:
-            type: "about:blank"
-            title: "Service Unavailable"
-            status: 503
-            detail: "The service is currently unavailable. Please try again later"
-            instance: "/statuslists/477121aa-b598-419e-916f-1e74654ff38b"
+            error: "service_unavailable"
+            error_description: "The service is currently unavailable. Please try again later"
 
     InternalServerError:
       description: |
@@ -892,12 +906,9 @@ components:
         the limiter — and never a consequence of client input, so retrying will
         not help until the deployment is fixed.
       content:
-        application/problem+json:
+        application/json:
           schema:
-            $ref: "#/components/schemas/ProblemDetails"
+            $ref: "#/components/schemas/ErrorResponse"
           example:
-            type: "about:blank"
-            title: "Internal Server Error"
-            status: 500
-            detail: "Internal server error"
-            instance: "/api/v1/status-lists/477121aa-b598-419e-916f-1e74654ff38b/statuses"
+            error: "internal_error"
+            error_description: "Internal server error"
