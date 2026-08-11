@@ -189,6 +189,9 @@ impl IntoApiError for CredentialError {
                 "credentials_already_exist",
                 "Credentials already exist for this issuer",
             ),
+            err @ (CredentialError::IssuerTooLong(_) | CredentialError::IssuerEmpty) => {
+                ApiError::bad_request("invalid_issuer", err.to_string())
+            }
             CredentialError::Backend(err) => ApiError::internal(err),
         }
     }

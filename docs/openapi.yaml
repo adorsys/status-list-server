@@ -21,27 +21,58 @@ info:
 
     ## Rate limiting
 
-    The server applies three independent token-bucket governor tiers, each
+    The server applies four independent token-bucket governor tiers, each
     operator-configurable through the `APP_RATE_LIMIT__*` environment
-    variables (see `RateLimitConfig`):
+    variables (see `RateLimitConfig`).
 
-      * **strict** (per source IP) — `POST /api/v1/credentials`.
-        Tunables: `strict_burst_size`, `strict_period_secs`
+    Each tier's `burst_size` / `period_secs` pair is a token bucket rather than
+    a per-window quota: `burst_size` is the capacity and one token is
+    replenished every `period_secs`. Defaults of 100 / 60s therefore permit a
+    burst of 100 followed by a sustained one request per minute.
+
+    The tiers are:
+
+      * **issuer** (per verified credential issuer) — `PUT`/`PATCH`
+        `/api/v1/status-lists/{list_id}/statuses`. The key is the issuer whose
+        token signature has already been verified, so it cannot be influenced
+        by request headers; presenting a different `iss` claim fails
+        authentication rather than selecting another bucket.
+        Tunables: `issuer_burst_size`, `issuer_period_secs`
         (defaults: 10 / 60s).
-      * **writes** (per smart IP via `SmartIpKeyExtractor`, reading
-        `X-Forwarded-For`, `X-Real-Ip`, and `Forwarded` headers, falling back to
-        the peer IP) — `PUT`/`PATCH`
-        `/api/v1/status-lists/{list_id}/statuses`.
-        Tunables: `strict_burst_size`, `strict_period_secs`.
-      * **permissive** (per source IP) — public read routes
+      * **write_gate** (per derived client IP) — the same write routes, applied
+        in front of authentication as a coarse gate on anonymous traffic.
+        Tunables: `write_gate_burst_size`, `write_gate_period_secs`
+        (defaults: 100 / 60s).
+      * **credentials** (per derived client IP) — `POST /api/v1/credentials`.
+        Tunables: `credentials_burst_size`, `credentials_period_secs`
+        (defaults: 10 / 60s).
+      * **reads** (per derived client IP) — public read routes
         (`GET /api/v1/aggregation`,
         `GET /api/v1/status-lists/{list_id}`).
-        Tunables: `permissive_burst_size`, `permissive_period_secs`
-        (defaults: 100 / 60s).
+        Tunables: `reads_burst_size`, `reads_period_secs`.
 
-    When a quota is exhausted the server returns `429 Too Many Requests` with
-    a plain-text body of the form `Too Many Requests! Wait for <n>s` (emitted by
-    the `tower-governor` middleware; it is not RFC 7807 problem+json).
+    How the client IP is derived for the IP-keyed tiers is an explicit
+    deployment setting, `APP_RATE_LIMIT__CLIENT_IP_SOURCE`, with no default:
+    one of `connect_info`, `rightmost_x_forwarded_for` (with
+    `APP_RATE_LIMIT__TRUSTED_HOPS`), or `x_real_ip`. The server refuses to start
+    until it is set. Which request headers — if any — affect your bucket
+    therefore depends on the deployment; see the Rate Limiting section of the
+    README. IPv6 clients are bucketed by `/64` rather than by individual
+    address.
+
+    Rejections name the tier that rejected the request in `error_description`,
+    so a client can distinguish a per-issuer limit from a per-IP one.
+
+    When a quota is exhausted the server returns `429 Too Many Requests` with a
+    JSON body, together with a `retry-after` header and the `x-ratelimit-limit`,
+    `x-ratelimit-remaining` and `x-ratelimit-after` headers. Limiter responses
+    are `Cache-Control: no-store`: a throttling decision is specific to one
+    caller at one instant and must never be served from a shared cache.
+
+    Where two tiers apply to the same route, the `x-ratelimit-*` headers report
+    the budget of the innermost one — for writes, the per-issuer budget, which
+    is the one a legitimate authenticated caller actually spends. These headers
+    are single-valued.
 
     ## Request bounds
 
@@ -622,6 +653,23 @@ components:
           description: URI reference that identifies the specific occurrence.
           example: "/api/v1/status-lists/invalid-uuid/statuses"
 
+    ErrorResponse:
+      type: object
+      description: |
+        The server's non-problem+json error shape, used by the rate limiter and
+        by handlers that have not migrated to `ProblemDetails`.
+      required:
+        - error
+      properties:
+        error:
+          type: string
+          description: Stable, machine-readable error identifier.
+          example: "rate_limited"
+        error_description:
+          type: string
+          description: Human-readable explanation. Omitted when there is nothing to add.
+          example: "Rate limit exceeded for the issuer tier. Retry in 42s."
+
   responses:
     BadRequest:
       description: |
@@ -739,16 +787,45 @@ components:
 
     TooManyRequests:
       description: |
-        The client has exceeded the configured rate-limit quota for the route
-        tier (strict, per-issuer, or permissive — see the Rate limiting section
-        in the API description). Emitted by the `tower-governor` middleware as a
-        plain-text body of the form `Too Many Requests! Wait for <n>s`; it is
-        not RFC 7807 problem+json.
-      content:
-        text/plain:
+        The client has exceeded the configured rate-limit quota for one of the
+        route's tiers (`issuer`, `write_gate`, `credentials` or `reads` — see
+        the Rate limiting section in the API description). The response names
+        the tier that rejected the request, so a client can tell a per-issuer
+        limit from a per-IP one.
+
+        The body uses the `error` / `error_description` shape rather than RFC
+        7807 problem+json.
+      headers:
+        Cache-Control:
+          description: Always `no-store`; a throttling decision is not cacheable.
           schema:
             type: string
-          example: "Too Many Requests! Wait for 42s"
+        Retry-After:
+          description: Seconds to wait before retrying.
+          schema:
+            type: integer
+            format: int64
+        X-RateLimit-Limit:
+          description: Burst size configured for the tier.
+          schema:
+            type: integer
+        X-RateLimit-Remaining:
+          description: Requests still available in the current burst.
+          schema:
+            type: integer
+        X-RateLimit-After:
+          description: Seconds until the next request is permitted.
+          schema:
+            type: integer
+            format: int64
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+          example:
+            error: "rate_limited"
+            error_description: "Rate limit exceeded for the issuer tier. Retry in 42s."
+
 
     UpdateConflict:
       description: |
@@ -803,7 +880,17 @@ components:
             instance: "/statuslists/477121aa-b598-419e-916f-1e74654ff38b"
 
     InternalServerError:
-      description: Internal server error
+      description: |
+        Internal server error.
+
+        One case is worth calling out because it is not a handler failure: if
+        the rate limiter cannot identify the caller it refuses the request
+        rather than letting it through unmetered, returning
+        `{"error": "rate_limit_unavailable"}` as `application/json`. That is
+        always a deployment fault — for example the server running without
+        connection info, or middleware ordering hiding the verified issuer from
+        the limiter — and never a consequence of client input, so retrying will
+        not help until the deployment is fixed.
       content:
         application/problem+json:
           schema:

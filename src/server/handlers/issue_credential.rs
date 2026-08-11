@@ -35,8 +35,12 @@ pub async fn credential_handler(
 ) -> Result<impl IntoResponse, ApiError> {
     let public_key_bytes = serde_json::to_vec(&payload.public_key)
         .map_err(|e| ApiError::bad_request("invalid_public_jwk", e.to_string()))?;
+    // Bounded here because this is the only place an issuer identifier enters
+    // the system, and each one becomes both a stored row and a rate-limit
+    // bucket key. Registration is unauthenticated, so neither may be unbounded.
     let credential = Credential {
-        issuer: Issuer(payload.issuer),
+        issuer: Issuer::try_new(payload.issuer)
+            .map_err(|e| ApiError::bad_request("invalid_issuer", e.to_string()))?,
         public_key: PublicJwk::try_new(public_key_bytes)?,
     };
     state.service.publish_credential(credential).await?;

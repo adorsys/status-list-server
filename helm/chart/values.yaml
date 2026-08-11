@@ -56,6 +56,19 @@ statuslist:
       nginx.ingress.kubernetes.io/ssl-redirect: "true"
       nginx.ingress.kubernetes.io/force-ssl-redirect: "true"
       nginx.ingress.kubernetes.io/proxy-body-size: "10m"
+    # X-Forwarded-For handling is a controller-wide ingress-nginx ConfigMap
+    # setting, not something this chart can express as an annotation. Keep
+    # `use-forwarded-headers: "false"` (its default) on the controller: NGINX
+    # then ignores the client's X-Forwarded-For and writes what it observed.
+    # Setting it to "true" makes NGINX trust and forward the client's header,
+    # which lets clients choose their own rate-limit bucket.
+    #
+    # If a CDN is ever put in front of ingress, that becomes the trust boundary:
+    # set use-forwarded-headers "true" plus proxy-real-ip-cidr, and raise
+    # statuslist.env.APP_RATE_LIMIT__TRUSTED_HOPS by one, in the same change.
+    #
+    # This is defence in depth. The binary's own APP_RATE_LIMIT__CLIENT_IP_SOURCE
+    # setting below is what actually determines how the client IP is derived.
     tls:
       hosts:
         - "*.eudi-adorsys.com"
@@ -67,6 +80,19 @@ statuslist:
     APP_ENV: "production"
     APP_SERVER__HOST: "0.0.0.0"
     APP_SERVER__PORT: "8000"
+    # Required — the server refuses to start without it. How the client IP is
+    # derived for the IP-keyed rate-limit tiers depends on what sits in front of
+    # the pod, which the server cannot detect. This chart puts the server behind
+    # ingress-nginx, which writes the client address into X-Forwarded-For, so
+    # the rightmost entry is the one to key on.
+    #
+    # TRUSTED_HOPS is how many entries to skip counting from the RIGHT, not how
+    # many proxies there are: with ingress alone the header holds just the
+    # client, so 0. Add 1 for each additional proxy (e.g. a CDN) placed in
+    # front of ingress, and change the controller's use-forwarded-headers
+    # setting in the same commit.
+    APP_RATE_LIMIT__CLIENT_IP_SOURCE: "rightmost_x_forwarded_for"
+    APP_RATE_LIMIT__TRUSTED_HOPS: "0"
     APP_SERVER__CERT__EMAIL: "info@adorsys.com"
     APP_SERVER__CERT__ORGANIZATION: "adorsys GmbH & CO KG"
     APP_SERVER__CERT__ACME_DIRECTORY_URL: "https://acme-v02.api.letsencrypt.org/directory"

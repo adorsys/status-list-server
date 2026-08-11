@@ -593,7 +593,7 @@ mod tests {
             ))
     }
 
-    #[sealed_test]
+    #[sealed_test(env = [("APP_RATE_LIMIT__CLIENT_IP_SOURCE", "connect_info")])]
     fn builds_handler_for_each_configured_provider() {
         let mut config = AppConfig::load().expect("Failed to load config");
         let domain = config.server.domain.clone();
@@ -661,7 +661,10 @@ mod general_tests {
     #[sealed_test(env = [
         ("APP_ENV", "development"),
         ("APP_DATABASE__BACKEND", "memory"),
-        ("APP_DATABASE__URL", "")
+        ("APP_DATABASE__URL", ""),
+        // `client_ip_source` has no default by design; a deployment must
+        // declare its topology. See `RateLimitConfig::validate`.
+        ("APP_RATE_LIMIT__CLIENT_IP_SOURCE", "connect_info")
     ])]
     fn build_state_succeeds_under_default_config() {
         let _ = rustls::crypto::ring::default_provider().install_default();

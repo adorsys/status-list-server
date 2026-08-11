@@ -7,7 +7,7 @@ use axum::{
 
 use crate::{
     domain::models::credential::Issuer,
-    server::{AppState, error::ApiError},
+    server::{AppState, auth::VerifiedIssuer, error::ApiError},
 };
 
 use super::utils::request::StatusesRequest;
@@ -18,7 +18,7 @@ use super::utils::request::StatusesRequest;
 #[tracing::instrument(skip_all, fields(list_id = %list_id, issuer = %issuer), err(Debug))]
 pub async fn publish_status(
     State(appstate): State<AppState>,
-    Extension(issuer): Extension<String>,
+    Extension(issuer): Extension<VerifiedIssuer>,
     Path(list_id): Path<String>,
     Json(payload): Json<StatusesRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
@@ -44,7 +44,7 @@ pub async fn publish_status(
         .service
         .publish_status_list(
             list_id,
-            Issuer(issuer),
+            Issuer(issuer.into_inner()),
             sub,
             statuses,
             appstate.token_exp_secs,
@@ -68,7 +68,7 @@ mod tests {
     #[tokio::test]
     async fn test_publish_token_status_invalid_list_id() {
         let appstate = test_app_state(None).await;
-        let issuer = "test-issuer".to_string();
+        let issuer = VerifiedIssuer::new("test-issuer");
         let payload = StatusesRequest { statuses: vec![] };
 
         let result = publish_status(
@@ -93,7 +93,7 @@ mod tests {
 
         let response = publish_status(
             State(app_state.clone()),
-            Extension("issuer".to_string()),
+            Extension(VerifiedIssuer::new("issuer")),
             Path(token_id.clone()),
             Json(StatusesRequest { statuses: vec![] }),
         )
@@ -114,7 +114,7 @@ mod tests {
 
         let res1 = publish_status(
             State(app_state.clone()),
-            Extension("issuer".to_string()),
+            Extension(VerifiedIssuer::new("issuer")),
             Path(token_id.clone()),
             Json(StatusesRequest { statuses: vec![] }),
         )
@@ -125,7 +125,7 @@ mod tests {
 
         let res2 = publish_status(
             State(app_state.clone()),
-            Extension("issuer".to_string()),
+            Extension(VerifiedIssuer::new("issuer")),
             Path(token_id.clone()),
             Json(StatusesRequest { statuses: vec![] }),
         )
@@ -157,7 +157,7 @@ mod tests {
 
         let result = publish_status(
             State(app_state),
-            Extension("issuer".to_string()),
+            Extension(VerifiedIssuer::new("issuer")),
             Path(token_id),
             Json(StatusesRequest {
                 statuses: status_entries,
@@ -185,7 +185,7 @@ mod tests {
 
         let result = publish_status(
             State(app_state),
-            Extension("issuer".to_string()),
+            Extension(VerifiedIssuer::new("issuer")),
             Path(token_id),
             Json(StatusesRequest {
                 statuses: status_entries,
@@ -216,7 +216,7 @@ mod tests {
 
         let result = publish_status(
             State(app_state),
-            Extension("issuer".to_string()),
+            Extension(VerifiedIssuer::new("issuer")),
             Path(token_id),
             Json(StatusesRequest {
                 statuses: status_entries,

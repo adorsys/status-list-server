@@ -261,30 +261,195 @@ The server can be deployed using a containerization platform such as Docker.
 
 A Helm chart is provided for easy deployment on Kubernetes. For detailed instructions, see the [Helm Deployment Guide](helm/README.md).
 
-### Rate Limiting Topology
+### Rate limiting and network topology
 
-The server uses tiered rate limiting:
+> **The server will not start until you set `APP_RATE_LIMIT__CLIENT_IP_SOURCE`.**
+> This setting has no default on purpose — see [Choosing a client IP source](#choosing-a-client-ip-source).
 
-| Tier | Key Extractor | Use Case |
-| ---- | ------------- | -------- |
-| Write (strict) | `AuthenticatedKeyExtractor` | POST/PATCH endpoints, keyed on JWT `iss` claim |
-| Credentials | `PeerIpKeyExtractor` | Token issuance, keyed on peer IP |
-| Read | `PeerIpKeyExtractor` | Public reads, keyed on peer IP |
+Rate limiting is tiered by how strong the identity behind a request is.
 
-**Authenticated write tier** is immune to IP spoofing — requests are keyed on the verified credential issuer.
+| Tier          | Routes                                                     | Keyed on                                                               | Budget           |
+| ------------- | ---------------------------------------------------------- | ---------------------------------------------------------------------- | ---------------- |
+| `issuer`      | `PUT`/`PATCH` `/api/v1/status-lists/{id}/statuses`         | The credential issuer, **after** its token signature has been verified | `issuer_*`       |
+| `write_gate`  | the same write routes, in front of authentication          | Derived client IP                                                      | `write_gate_*`   |
+| `credentials` | `POST /api/v1/credentials`                                 | Derived client IP                                                      | `credentials_*`  |
+| `reads`       | `GET /api/v1/aggregation`, `GET /api/v1/status-lists/{id}` | Derived client IP                                                      | `reads_*`        |
 
-**IP-based tiers** require the client IP to be correctly extracted from the connection. Three modes configured via `rate_limit.client_ip_source`:
+Each budget is a pair, `APP_RATE_LIMIT__<TIER>_BURST_SIZE` and
+`APP_RATE_LIMIT__<TIER>_PERIOD_SECS`. Every tier has its own, so retuning one
+route group never silently retunes another.
 
-```yaml
-rate_limit:
-  client_ip_source: connect_info                              # Direct connection, no proxy
-  client_ip_source: rightmost_x_forwarded_for: 1              # Trust rightmost XFF after 1 proxy hop
-  client_ip_source: x_real_ip                                 # Use X-Real-IP from nginx
+> **Read a budget as a token bucket, not a per-window quota.** `burst_size` is
+> the bucket's capacity; **one token is replenished every `period_secs`**. So
+> `burst_size = 100, period_secs = 60` allows 100 requests immediately and then
+> a sustained **one request per minute** — not 100 per minute. Pick
+> `period_secs` from the sustained rate you want
+> (`period_secs = 60 / requests_per_minute`) and `burst_size` from how much
+> bunching you will tolerate.
+
+The `issuer` tier is the only one keyed on something a client cannot choose: the
+issuer is read from the request only after the token has been verified against
+the issuer's registered public key. Changing the `iss` claim in a token does not
+select a different bucket — it fails authentication.
+
+`write_gate` exists because keying on a verified identity means authentication —
+and therefore a credential lookup — has to run before the per-issuer limiter. It
+is a coarse, generous gate so that anonymous traffic cannot drive those lookups
+without limit. Keep `write_gate_burst_size` comfortably above the issuer budget:
+every issuer behind a shared source IP passes through it.
+
+Rejections name the tier that fired in `error_description`, so a client can tell
+"you are writing too fast" from "this source IP is".
+
+> **Note on the `credentials` tier.** It is keyed on the *derived* client IP, so
+> a wrong `client_ip_source` does more than skew throttling accuracy — it makes
+> the gate on credential registration client-influenced. On `main` this tier
+> used the raw peer address, which was coarse but unforgeable. That is a
+> deliberate trade for topology-correctness, and one more reason the setting is
+> required rather than guessed.
+
+Global caps on connections, request concurrency and body size are an ingress
+concern and are not handled here.
+
+#### Choosing a client IP source
+
+The IP-keyed tiers can only be as correct as the client IP they derive, and the
+right way to derive it depends entirely on what sits in front of the server.
+There is no safe default: guessing wrong either lets clients forge the key
+(unbounded buckets, no effective limit) or collapses every client into one
+bucket (a self-inflicted denial of service). So the value is required, and an
+unset value stops the server with an explanatory error.
+
+| `APP_RATE_LIMIT__CLIENT_IP_SOURCE` | Use when                                                         | Notes                                                                          |
+| ---------------------------------- | ---------------------------------------------------------------- | ------------------------------------------------------------------------------ |
+| `connect_info`                     | Nothing sits between clients and the server                      | Unforgeable. Behind any proxy this collapses all clients into a single bucket. |
+| `rightmost_x_forwarded_for`        | One or more reverse proxies that **append** to `X-Forwarded-For` | Also set `APP_RATE_LIMIT__TRUSTED_HOPS` — see below.                           |
+| `x_real_ip`                        | A proxy that unconditionally **overwrites** `X-Real-IP`          | Only safe if the overwrite is guaranteed on every request path.                |
+
+**`trusted_hops` is how many `X-Forwarded-For` entries to skip, counting from
+the right — not how many proxies are in the chain.** The innermost proxy writes
+the *client's* address into the header, so a single reverse proxy needs `0`.
+Each additional proxy in front of that one appends its own entry and adds `1`:
+
+| Chain                       | `X-Forwarded-For` reaching the server | `trusted_hops` |
+| --------------------------- | ------------------------------------- | -------------- |
+| client → ingress            | `client`                              | `0`            |
+| client → CDN → ingress      | `client, cdn`                         | `1`            |
+| client → CDN → LB → ingress | `client, cdn, lb`                     | `2`            |
+
+```bash
+# Direct exposure
+APP_RATE_LIMIT__CLIENT_IP_SOURCE=connect_info
+
+# Behind one reverse proxy that appends to X-Forwarded-For
+APP_RATE_LIMIT__CLIENT_IP_SOURCE=rightmost_x_forwarded_for
+APP_RATE_LIMIT__TRUSTED_HOPS=0
+
+# Behind a CDN in front of that proxy: one more entry to skip
+APP_RATE_LIMIT__TRUSTED_HOPS=1
 ```
 
-**Kubernetes / nginx ingress**: Use the ingress-nginx ConfigMap setting `use-forwarded-headers=os` to overwrite `X-Forwarded-For` at the ingress. Without this, clients can spoof XFF to bypass rate limiting on IP-based tiers.
+Because entries are counted from the right, anything a client prepends is
+ignored. Setting `trusted_hops` higher than the real chain is rejected at
+startup above `16`; below that it makes every request fall back to the peer
+address, visible as `rate_limit_ip_source_fallback{reason="chain_too_short"}`.
+If instead the header is absent altogether — this source selected on a
+deployment with no proxy in front of it — the reason is `header_absent`, and
+`trusted_hops` is not the setting to change. `trusted_hops` is also rejected
+outright unless the source is `rightmost_x_forwarded_for`, rather than being
+silently ignored.
 
-**Environment variable**: `APP_RATE_LIMIT__CLIENT_IP_SOURCE=connect_info`
+If the configured header is missing or unusable, the server falls back to the
+peer address. That is coarse but never forgeable, so a misconfiguration degrades
+into over-throttling rather than into a bypass.
+
+#### Kubernetes / ingress-nginx
+
+Keep `use-forwarded-headers` at its default of `"false"` in the ingress-nginx
+controller ConfigMap. Despite the name, `"false"` is the setting you want: NGINX
+then **ignores** any `X-Forwarded-For` the client sent and writes what it
+observed itself. Setting it to `"true"` makes NGINX *trust and forward* the
+client's header, which is what allows spoofing.
+
+```yaml
+# ingress-nginx controller ConfigMap (cluster-wide, not a per-Ingress annotation)
+data:
+  use-forwarded-headers: "false"   # NGINX overwrites X-Forwarded-For
+```
+
+If a CDN or another L7 proxy sits in front of ingress, that proxy becomes the
+trust boundary instead. In that case set `use-forwarded-headers: "true"` *and*
+`proxy-real-ip-cidr` to the upstream's ranges, and raise
+`APP_RATE_LIMIT__TRUSTED_HOPS` by one for the extra hop. The two must change
+together: adding a proxy without updating both reintroduces the problem.
+
+This ingress configuration is defence in depth. It is not load-bearing on its
+own — it lives in cluster config rather than in the shipped binary, so a
+deployment behind a different ingress, a service mesh, or no proxy at all is
+covered by `client_ip_source` instead.
+
+#### Bucket bounds
+
+No key in any tier can be chosen freely by a client, which is what stops the
+limiter's own state from becoming a denial-of-service vector:
+
+- the `issuer` tier only accepts keys that verified against a **registered**
+  credential;
+- the IP tiers bucket IPv6 clients by `/64`, so one residential allocation
+  cannot mint unlimited distinct keys, and unwrap IPv4-mapped addresses so a
+  dual-stack listener keys IPv4 clients the same way an IPv4-only one does.
+
+Two honest caveats. First, `POST /api/v1/credentials` is unauthenticated, so the
+set of registered issuers is **not fixed** — an attacker can grow it, bounded by
+the `credentials` tier's rate but persistent across restarts. The issuer key
+space is therefore bounded by a rate, not by a ceiling. Second, if
+`client_ip_source` is wrong for the topology, the IP tiers inherit that error;
+that is the whole reason the setting is required rather than defaulted.
+
+On top of that, each tier sweeps buckets that have returned to their starting
+state every `APP_RATE_LIMIT__BUCKET_EVICTION_INTERVAL_SECS` seconds (default
+`60`), reclaiming map capacity only when a sweep actually freed a meaningful
+share of it. `APP_RATE_LIMIT__MAX_BUCKETS` (default `100000`) is the count above
+which the server logs at `ERROR` after a sweep. `governor` offers no admission
+control, so this is an alerting threshold — a signal that one of the bounds
+above is not holding — and not a cap that rejects new keys.
+
+#### Observability
+
+| Metric                             | Type    | Labels           |
+| ---------------------------------- | ------- | ---------------- |
+| `rate_limit_buckets`               | gauge   | `tier`           |
+| `rate_limit_rejected`              | counter | `tier`           |
+| `rate_limit_key_extraction_failed` | counter | `tier`           |
+| `rate_limit_ip_source_fallback`    | counter | `tier`, `reason` |
+
+`rate_limit_ip_source_fallback` is the signal that `client_ip_source` does not
+match the deployment: the configured header could not be used, so the tier fell
+back to the peer address and is keying more coarsely than intended. Nothing else
+is observable — the request still succeeds and the response is unchanged — so a
+steady rate here means the setting is wrong while everything looks healthy.
+
+`reason` says which remedy applies. Note that they are not interchangeable —
+`header_absent` and `chain_too_short` point at different settings:
+
+- **`header_absent`** — the configured header was not on the request at all.
+  Either no proxy is in front of this server, or the one that is does not set
+  the header. The fix is `client_ip_source`; **`trusted_hops` cannot help**,
+  because there is no chain to count into. Emitted by both header sources.
+- **`chain_too_short`** — the header was present, but had fewer entries than
+  `trusted_hops` requires. This is the one case where lowering `trusted_hops` to
+  match the real chain is the fix. Only `rightmost_x_forwarded_for` emits it.
+- **`unparseable`** — the selected entry was not an address, e.g. an RFC 7239
+  obfuscated identifier. Check what the proxy actually writes. Emitted by both
+  header sources.
+
+`connect_info` never emits this metric: the connection address is always
+available, so there is nothing to fall back from.
+
+A non-zero `rate_limit_key_extraction_failed` means the limiter could not
+identify the caller — it is always a deployment or wiring fault, never client
+input. Rejections are returned as `429` with `retry-after` and `x-ratelimit-*`
+headers.
 
 ## Testing
 

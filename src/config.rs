@@ -93,60 +93,249 @@ pub struct Config {
     pub telemetry: TelemetryConfig,
 }
 
-/// Source of the trusted client IP address.
+/// Where the server derives the client IP address from.
 ///
-/// This is used to configure how the server extracts the client IP for
-/// rate-limiting purposes. The source must be explicitly configured to fail
-/// closed; the server refuses to start when no source is configured.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+/// The correct choice depends entirely on the network topology the server is
+/// deployed into, which the server cannot detect. There is deliberately **no
+/// default**: guessing the topology is what allowed spoofed `X-Forwarded-For`
+/// values to mint unlimited rate-limit buckets. An unset value refuses to
+/// start rather than silently picking a source that may be forgeable.
+///
+/// The `trusted_hops` companion setting on [`RateLimitConfig`] only applies to
+/// [`ClientIpSource::RightmostXForwardedFor`]. The variants are kept flat
+/// (rather than carrying their own payload) so that every one of them is
+/// expressible through the `APP_*` environment variables, which are the only
+/// configuration source this server reads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ClientIpSource {
-    /// Direct connection without a proxy. Uses the connection's remote address.
-    #[default]
+    /// The server is reached directly, with no proxy in front of it. The IP is
+    /// taken from the accepted connection and cannot be forged.
     ConnectInfo,
-    /// Trust the rightmost value of `X-Forwarded-For` after skipping
-    /// `trusted_hops` entries (the number of trusted proxies before the client).
-    RightmostXForwardedFor {
-        #[serde(default)]
-        trusted_hops: usize,
-    },
-    /// Use `X-Real-IP` header, which is typically set by nginx.
-    /// Only suitable when the proxy always overwrites this header.
+    /// The server sits behind one or more reverse proxies that *append* to
+    /// `X-Forwarded-For`. The IP is taken by counting `trusted_hops` entries in
+    /// from the right, so client-supplied entries on the left are ignored.
+    RightmostXForwardedFor,
+    /// The server sits behind a proxy that unconditionally **overwrites**
+    /// `X-Real-IP` (e.g. nginx `proxy_set_header X-Real-IP $remote_addr`).
+    /// Only safe when the overwrite is guaranteed for every request path.
     XRealIp,
 }
 
-/// Rate-limit configuration with strict (writes) and permissive (reads) tiers.
-#[derive(Debug, Clone, Deserialize)]
-pub struct RateLimitConfig {
-    pub strict_burst_size: u32,
-    pub strict_period_secs: u64,
-    pub permissive_burst_size: u32,
-    pub permissive_period_secs: u64,
-    /// Source of the client IP address for rate limiting.
-    /// When `None`, the server refuses to start (fail-closed).
-    #[serde(default)]
-    pub client_ip_source: Option<ClientIpSource>,
-    /// Maximum number of active rate-limit buckets.
-    /// When `None`, the bucket count is unbounded (not recommended).
-    #[serde(default)]
-    pub max_buckets: Option<usize>,
+impl ClientIpSource {
+    /// Every variant, so that error messages and documentation cannot drift
+    /// from the enum.
+    pub const ALL: [Self; 3] = [
+        Self::ConnectInfo,
+        Self::RightmostXForwardedFor,
+        Self::XRealIp,
+    ];
+
+    /// The configuration spelling of this variant. Single source of truth for
+    /// both `Display` and the accepted-values list.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::ConnectInfo => "connect_info",
+            Self::RightmostXForwardedFor => "rightmost_x_forwarded_for",
+            Self::XRealIp => "x_real_ip",
+        }
+    }
+
+    /// Comma-separated list of accepted values, for error messages.
+    pub fn accepted_values() -> String {
+        Self::ALL
+            .iter()
+            .map(|source| source.as_str())
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+
+    /// Whether this source reads a client-supplied header, and therefore
+    /// depends on a proxy in front of the server to sanitise it.
+    pub fn trusts_headers(self) -> bool {
+        matches!(self, Self::RightmostXForwardedFor | Self::XRealIp)
+    }
 }
 
+impl std::fmt::Display for ClientIpSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// Rate-limit configuration.
+///
+/// One budget per tier, named after the tier it controls  -  see the rate-limiting
+/// section of the README for how tiers map onto routes.
+///
+/// # Reading a budget
+///
+/// `*_burst_size` and `*_period_secs` are a token bucket, **not** a
+/// requests-per-window quota. `burst_size` is the bucket's capacity, and one
+/// token is replenished every `period_secs`. So `burst_size = 100`,
+/// `period_secs = 60` means: up to 100 requests immediately, then a sustained
+/// rate of **one request per minute**  -  not 100 per minute. Size
+/// `period_secs` from the sustained rate you want (`period_secs = 60 /
+/// requests_per_minute`) and `burst_size` from how much bunching you will
+/// tolerate.
+#[derive(Debug, Clone, Deserialize)]
+pub struct RateLimitConfig {
+    /// Authenticated writes, keyed on the verified issuer.
+    pub issuer_burst_size: u32,
+    pub issuer_period_secs: u64,
+    /// Public reads.
+    pub reads_burst_size: u32,
+    pub reads_period_secs: u64,
+    /// Coarse IP-keyed gate that runs in front of authentication on the write
+    /// routes.
+    ///
+    /// Separate from the read budget so that retuning public reads cannot
+    /// silently retighten the write gate, and vice versa. Keep it comfortably
+    /// above the issuer budget: every issuer sharing a source IP passes
+    /// through it.
+    pub write_gate_burst_size: u32,
+    pub write_gate_period_secs: u64,
+    /// Credential registration.
+    ///
+    /// Its own budget rather than sharing the issuer tier's: registration is
+    /// unauthenticated and persists a row, so it warrants tuning independently
+    /// of how fast an authenticated issuer may write.
+    pub credentials_burst_size: u32,
+    pub credentials_period_secs: u64,
+    /// How the client IP is derived for the IP-keyed tiers.
+    ///
+    /// Has no default: when unset the server refuses to start (fail-closed).
+    #[serde(default)]
+    pub client_ip_source: Option<ClientIpSource>,
+    /// How many `X-Forwarded-For` entries to skip, counting from the right,
+    /// before reading the client IP.
+    ///
+    /// Only meaningful with [`ClientIpSource::RightmostXForwardedFor`].
+    ///
+    /// This is **not** the number of proxies in the chain. The innermost proxy
+    /// writes the client's address into the header, so a single reverse proxy
+    /// needs `0`. Each *additional* proxy in front of that one appends another
+    /// entry to the right and therefore adds `1`:
+    ///
+    /// | Chain | `X-Forwarded-For` | `trusted_hops` |
+    /// |---|---|---|
+    /// | client -> ingress | `client` | `0` |
+    /// | client -> CDN -> ingress | `client, cdn` | `1` |
+    /// | client -> CDN -> LB -> ingress | `client, cdn, lb` | `2` |
+    #[serde(default)]
+    pub trusted_hops: usize,
+    /// Soft ceiling on the number of live rate-limit buckets per tier.
+    ///
+    /// Exceeding it logs at `ERROR` after a sweep; nothing is rejected, because
+    /// `governor` offers no admission control. Treat it as an alerting
+    /// threshold, not a cap.
+    pub max_buckets: usize,
+    /// How often idle buckets are swept, in seconds.
+    pub bucket_eviction_interval_secs: u64,
+}
+
+/// Upper bound accepted for `rate_limit.trusted_hops`.
+///
+/// Real proxy chains are short  -  CDN, load balancer, ingress, mesh sidecar is
+/// already four. Anything beyond this is a typo, and accepting it would produce
+/// a server that silently keys every request on the peer address.
+const MAX_TRUSTED_HOPS: usize = 16;
+
 impl RateLimitConfig {
-    /// Validate the rate-limit configuration.
-    /// Returns an error if `client_ip_source` is not configured (fail-closed).
+    /// Validates the rate-limit configuration at startup.
+    ///
+    /// This is the fail-closed gate: a deployment that has not declared its
+    /// network topology does not start, because every possible guess is wrong
+    /// for some topology and a wrong guess is either a rate-limit bypass or a
+    /// site-wide shared bucket.
     pub fn validate(&self) -> Result<(), ConfigError> {
-        if self.client_ip_source.is_none() {
+        let Some(source) = self.client_ip_source else {
+            return Err(ConfigError::Message(format!(
+                "rate_limit.client_ip_source must be set explicitly (one of: {}). \
+                 The server refuses to start without it: the correct value depends on the \
+                 network topology it is deployed into, and a wrong guess either lets clients \
+                 forge the rate-limit key or collapses every client into one bucket. \
+                 Set APP_RATE_LIMIT__CLIENT_IP_SOURCE. See the Rate Limiting section of the README.",
+                ClientIpSource::accepted_values(),
+            )));
+        };
+
+        if self.trusted_hops > 0 && source != ClientIpSource::RightmostXForwardedFor {
+            return Err(ConfigError::Message(format!(
+                "rate_limit.trusted_hops is set to {} but rate_limit.client_ip_source is \
+                 `{source}`. trusted_hops only applies to `rightmost_x_forwarded_for`; leaving \
+                 it set here would misrepresent the trust boundary.",
+                self.trusted_hops,
+            )));
+        }
+
+        if self.trusted_hops > MAX_TRUSTED_HOPS {
+            return Err(ConfigError::Message(format!(
+                "rate_limit.trusted_hops is {} but the maximum accepted is {MAX_TRUSTED_HOPS}. \
+                 A hop count larger than any real proxy chain means the client IP can never be \
+                 located, so every request would silently fall back to the peer address and share \
+                 one bucket.",
+                self.trusted_hops,
+            )));
+        }
+
+        if self.max_buckets == 0 {
             return Err(ConfigError::Message(
-                "rate_limit.client_ip_source must be configured. \
-                 Set rate_limit.client_ip_source to one of: connect_info, \
-                 rightmost_x_forwarded_for, or x_real_ip. \
-                 The server refuses to start without an explicit IP source to prevent \
-                 rate-limit bypass via spoofed headers."
-                    .to_string(),
+                "rate_limit.max_buckets must be greater than zero.".to_string(),
             ));
         }
+
+        if self.bucket_eviction_interval_secs == 0 {
+            return Err(ConfigError::Message(
+                "rate_limit.bucket_eviction_interval_secs must be greater than zero.".to_string(),
+            ));
+        }
+
+        // NOTE: nothing is logged here on purpose. `Config::load` runs before
+        // the tracing subscriber is installed, so anything emitted from this
+        // function goes nowhere. The header-trust warning is raised by
+        // `HttpServer::new` instead  -  see `warn_about_header_trust`.
         Ok(())
+    }
+
+    /// Whether the derived client IP comes from a client-supplied header, and
+    /// therefore depends on a proxy in front of this server to sanitise it.
+    ///
+    /// Reported at startup by `HttpServer::new`, not from [`Self::validate`],
+    /// which runs before logging exists.
+    pub fn trusts_client_headers(&self) -> bool {
+        self.client_ip_source
+            .is_some_and(ClientIpSource::trusts_headers)
+    }
+
+    /// A rate-limit configuration for tests.
+    ///
+    /// Shared by the config, runtime and router test modules so that a change
+    /// to the shape of this struct does not have to be mirrored in three
+    /// hand-written builders. `issuer_burst` sizes the per-issuer tier and
+    /// `ip_burst` the three IP-keyed tiers; periods are long enough that no
+    /// bucket refills mid-test.
+    #[cfg(test)]
+    pub(crate) fn for_test(
+        source: ClientIpSource,
+        trusted_hops: usize,
+        issuer_burst: u32,
+        ip_burst: u32,
+    ) -> Self {
+        Self {
+            issuer_burst_size: issuer_burst,
+            issuer_period_secs: 600,
+            reads_burst_size: ip_burst,
+            reads_period_secs: 600,
+            write_gate_burst_size: ip_burst,
+            write_gate_period_secs: 600,
+            credentials_burst_size: ip_burst,
+            credentials_period_secs: 600,
+            client_ip_source: Some(source),
+            trusted_hops,
+            max_buckets: 1_000,
+            bucket_eviction_interval_secs: 60,
+        }
     }
 }
 
@@ -663,7 +852,7 @@ pub struct StatusListConfig {
     ///
     /// **Privacy note:** Set to 0 to disable snapshots entirely.
     /// This prevents unbounded database growth and mitigates timing leak
-    /// risks described in draft-21 §12.7. When disabled, historical resolution
+    /// risks described in draft-21 Section 12.7. When disabled, historical resolution
     /// via `?time=` query parameter will not be available.
     ///
     /// **Deprecation:** The old name `history_retention_secs`
@@ -736,6 +925,80 @@ impl RedisConfig {
     }
 }
 
+/// Environment variables renamed in this release, as `(deprecated, current)`.
+///
+/// The rate-limit budgets were renamed after the tiers they control, so that a
+/// value's name says which route group it affects. The old spellings keep
+/// working for one release cycle.
+///
+/// Deliberately handled here rather than with `#[serde(alias)]`: every budget
+/// has a registered default, so an aliased field would be present twice in the
+/// deserialized map and serde would reject it as a duplicate field.
+pub const DEPRECATED_ENV_KEYS: &[(&str, &str)] = &[
+    (
+        "APP_RATE_LIMIT__STRICT_BURST_SIZE",
+        "APP_RATE_LIMIT__ISSUER_BURST_SIZE",
+    ),
+    (
+        "APP_RATE_LIMIT__STRICT_PERIOD_SECS",
+        "APP_RATE_LIMIT__ISSUER_PERIOD_SECS",
+    ),
+    (
+        "APP_RATE_LIMIT__PERMISSIVE_BURST_SIZE",
+        "APP_RATE_LIMIT__READS_BURST_SIZE",
+    ),
+    (
+        "APP_RATE_LIMIT__PERMISSIVE_PERIOD_SECS",
+        "APP_RATE_LIMIT__READS_PERIOD_SECS",
+    ),
+    (
+        "APP_RATE_LIMIT__UNAUTHENTICATED_BURST_SIZE",
+        "APP_RATE_LIMIT__WRITE_GATE_BURST_SIZE",
+    ),
+    (
+        "APP_RATE_LIMIT__UNAUTHENTICATED_PERIOD_SECS",
+        "APP_RATE_LIMIT__WRITE_GATE_PERIOD_SECS",
+    ),
+];
+
+/// Deprecated `APP_*` variables that are currently set in the environment.
+///
+/// Reported at startup by `HttpServer::new`; config loading itself happens
+/// before the tracing subscriber exists, so it cannot warn.
+pub fn deprecated_env_keys_in_use() -> Vec<(&'static str, &'static str)> {
+    DEPRECATED_ENV_KEYS
+        .iter()
+        .copied()
+        .filter(|(old, _)| std::env::var_os(old).is_some())
+        .collect()
+}
+
+/// Maps `APP_SECTION__KEY` to the `section.key` path the config builder uses.
+fn env_key_to_config_path(env_key: &str) -> String {
+    env_key
+        .strip_prefix("APP_")
+        .unwrap_or(env_key)
+        .replace("__", ".")
+        .to_lowercase()
+}
+
+/// Copies any deprecated variable onto its current key, unless the current one
+/// is also set  -  an operator who has migrated should not be overridden by a
+/// stale variable left behind in the environment.
+fn apply_deprecated_env_keys(
+    mut builder: ConfigBuilder<DefaultState>,
+) -> Result<ConfigBuilder<DefaultState>, ConfigError> {
+    for (old, new) in DEPRECATED_ENV_KEYS {
+        if std::env::var_os(new).is_some() {
+            continue;
+        }
+        if let Some(value) = std::env::var_os(old).and_then(|v| v.into_string().ok()) {
+            builder = builder.set_override(env_key_to_config_path(new), value)?;
+        }
+    }
+    Ok(builder)
+}
+
 impl Config {
     /// Loads configuration from built-in defaults, then overrides them with
     /// values sourced from the process environment.
@@ -758,6 +1021,8 @@ impl Config {
                     .separator("__"),
             );
 
+        builder = apply_deprecated_env_keys(builder)?;
+
         for &(key, val) in overrides {
             let normalized_key = key
                 .strip_prefix("APP_")
@@ -772,6 +1037,20 @@ impl Config {
         let config: Config = config.try_deserialize()?;
         config.rate_limit.validate()?;
         Ok(config)
+    }
+
+    /// Test-only loader that supplies the one setting which has no default.
+    ///
+    /// `rate_limit.client_ip_source` is intentionally required in production
+    /// (see [`RateLimitConfig::validate`]). Tests that are not about the rate
+    /// limiter should not have to care, but they must not be able to paper over
+    /// the requirement for production code either  -  hence a separate,
+    /// test-only entry point rather than a default in `base_builder`.
+    #[cfg(test)]
+    pub(crate) fn load_for_test(overrides: &[(&str, &str)]) -> Result<Self, ConfigError> {
+        let mut all: Vec<(&str, &str)> = vec![("rate_limit.client_ip_source", "connect_info")];
+        all.extend_from_slice(overrides);
+        Self::load_from_overrides(&all)
     }
 }
 
@@ -864,11 +1143,22 @@ fn base_builder() -> Result<ConfigBuilder<DefaultState>, ConfigError> {
         .set_default("status_list.token_exp_secs", 900)?
         .set_default("status_list.token_ttl_secs", 300)?
         .set_default("status_list.snapshot_retention_secs", 7776000)?
-        .set_default("rate_limit.strict_burst_size", 10)?
-        .set_default("rate_limit.strict_period_secs", 60)?
-        .set_default("rate_limit.permissive_burst_size", 100)?
-        .set_default("rate_limit.permissive_period_secs", 60)?
-        .set_default("rate_limit.client_ip_source", "connect_info")?
+        // Token buckets: `burst_size` is capacity, one token returns every
+        // `period_secs`. 10/60 is "10 at once, then one per minute".
+        .set_default("rate_limit.issuer_burst_size", 10)?
+        .set_default("rate_limit.issuer_period_secs", 60)?
+        .set_default("rate_limit.reads_burst_size", 100)?
+        .set_default("rate_limit.reads_period_secs", 60)?
+        .set_default("rate_limit.write_gate_burst_size", 100)?
+        .set_default("rate_limit.write_gate_period_secs", 60)?
+        .set_default("rate_limit.credentials_burst_size", 10)?
+        .set_default("rate_limit.credentials_period_secs", 60)?
+        // NOTE: `rate_limit.client_ip_source` deliberately has no default  -
+        // see `RateLimitConfig::validate`. Adding one here re-opens the bug
+        // this setting exists to close.
+        .set_default("rate_limit.trusted_hops", 0u64)?
+        .set_default("rate_limit.max_buckets", 100_000u64)?
+        .set_default("rate_limit.bucket_eviction_interval_secs", 60u64)?
         .set_default("limits.max_body_size_bytes", 2_097_152)?
         .set_default("limits.max_status_index", 100_000)?
         .set_default("limits.max_statuses_per_request", 5_000)?
@@ -883,11 +1173,12 @@ fn base_builder() -> Result<ConfigBuilder<DefaultState>, ConfigError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sealed_test::prelude::*;
     use secrecy::ExposeSecret;
 
     #[test]
     fn test_default_config() {
-        let config = Config::load_from_overrides(&[]).expect("Failed to load config");
+        let config = Config::load_for_test(&[]).expect("Failed to load config");
 
         assert_eq!(config.server.host, "localhost");
         assert_eq!(config.server.port, 8000);
@@ -940,10 +1231,10 @@ mod tests {
         );
         assert_eq!(config.server.cert.store.signing_key_path, expected_key_path);
         assert_eq!(config.server.aggregation_uri, None);
-        assert_eq!(config.rate_limit.strict_burst_size, 10);
-        assert_eq!(config.rate_limit.strict_period_secs, 60);
-        assert_eq!(config.rate_limit.permissive_burst_size, 100);
-        assert_eq!(config.rate_limit.permissive_period_secs, 60);
+        assert_eq!(config.rate_limit.issuer_burst_size, 10);
+        assert_eq!(config.rate_limit.issuer_period_secs, 60);
+        assert_eq!(config.rate_limit.reads_burst_size, 100);
+        assert_eq!(config.rate_limit.reads_period_secs, 60);
         assert_eq!(config.limits.max_body_size_bytes, 2_097_152);
         assert_eq!(config.limits.max_status_index, 100_000);
         assert_eq!(config.limits.max_statuses_per_request, 5_000);
@@ -964,11 +1255,9 @@ mod tests {
 
     #[test]
     fn test_aggregation_uri_env_override() {
-        let config = Config::load_from_overrides(&[(
-            "server.aggregation_uri",
-            "https://example.com/aggregation",
-        )])
-        .expect("Failed to load config");
+        let config =
+            Config::load_for_test(&[("server.aggregation_uri", "https://example.com/aggregation")])
+                .expect("Failed to load config");
 
         assert_eq!(
             config.server.aggregation_uri.as_deref(),
@@ -1276,7 +1565,7 @@ mod tests {
     fn test_acme_dns_accounts_parse_from_env_json() {
         let server_url = "https://auth.example.org";
         let accounts_json = r#"{"a.example.com": {"username": "u1", "password": "p1", "subdomain": "s1"}, "b.example.com": {"username": "u2", "password": "p2", "subdomain": "s2"}}"#;
-        let config = Config::load_from_overrides(&[
+        let config = Config::load_for_test(&[
             ("server.cert.dns.acmedns.server_url", server_url),
             ("server.cert.dns.acmedns.accounts", accounts_json),
         ])
@@ -1294,7 +1583,7 @@ mod tests {
 
     #[test]
     fn test_acme_dns_accounts_reject_malformed_json() {
-        Config::load_from_overrides(&[
+        Config::load_for_test(&[
             (
                 "server.cert.dns.acmedns.server_url",
                 "https://auth.example.org",
@@ -1309,7 +1598,7 @@ mod tests {
 
     #[test]
     fn test_acme_dns_accounts_empty_env_var_means_no_accounts() {
-        let config = Config::load_from_overrides(&[
+        let config = Config::load_for_test(&[
             (
                 "server.cert.dns.acmedns.server_url",
                 "https://auth.example.org",
@@ -1324,7 +1613,7 @@ mod tests {
 
     #[test]
     fn test_dns_provider_env_override() {
-        let config = Config::load_from_overrides(&[("server.cert.dns.provider", "route53")])
+        let config = Config::load_for_test(&[("server.cert.dns.provider", "route53")])
             .expect("Failed to load config");
 
         assert_eq!(
@@ -1335,7 +1624,7 @@ mod tests {
 
     #[test]
     fn test_env_config() {
-        let config = Config::load_from_overrides(&[
+        let config = Config::load_for_test(&[
             ("server.host", "0.0.0.0"),
             ("server.port", "5002"),
             (
@@ -1392,7 +1681,7 @@ mod tests {
         ))]
         let (expected_db_url, expected_db_backend) = ("memory:", DatabaseBackend::Memory);
 
-        let config = Config::load_from_overrides(&[
+        let config = Config::load_for_test(&[
             ("redis.uri", "rediss://user:password@localhost:6379/redis"),
             ("redis.require_client_auth", "true"),
             ("server.cert.email", "test@gmail.com"),
@@ -1435,7 +1724,7 @@ mod tests {
 
     #[test]
     fn test_new_config_fields_env_override() {
-        let config = Config::load_from_overrides(&[
+        let config = Config::load_for_test(&[
             ("server.cert.provisioning_strategy", "store"),
             ("aws.s3_bucket", "my-bucket"),
             ("aws.s3_key_prefix", "prefix"),
@@ -1470,12 +1759,12 @@ mod tests {
 
     #[test]
     fn test_default_rate_limits_and_bounds() {
-        let config = Config::load_from_overrides(&[]).expect("Failed to load config");
+        let config = Config::load_for_test(&[]).expect("Failed to load config");
 
-        assert_eq!(config.rate_limit.strict_burst_size, 10);
-        assert_eq!(config.rate_limit.strict_period_secs, 60);
-        assert_eq!(config.rate_limit.permissive_burst_size, 100);
-        assert_eq!(config.rate_limit.permissive_period_secs, 60);
+        assert_eq!(config.rate_limit.issuer_burst_size, 10);
+        assert_eq!(config.rate_limit.issuer_period_secs, 60);
+        assert_eq!(config.rate_limit.reads_burst_size, 100);
+        assert_eq!(config.rate_limit.reads_period_secs, 60);
         assert_eq!(config.limits.max_body_size_bytes, 2_097_152);
         assert_eq!(config.limits.max_status_index, 100_000);
         assert_eq!(config.limits.max_statuses_per_request, 5_000);
@@ -1484,11 +1773,11 @@ mod tests {
 
     #[test]
     fn test_rate_limits_and_bounds_env_override() {
-        let config = Config::load_from_overrides(&[
-            ("rate_limit.strict_burst_size", "3"),
-            ("rate_limit.strict_period_secs", "120"),
-            ("rate_limit.permissive_burst_size", "500"),
-            ("rate_limit.permissive_period_secs", "10"),
+        let config = Config::load_for_test(&[
+            ("rate_limit.issuer_burst_size", "3"),
+            ("rate_limit.issuer_period_secs", "120"),
+            ("rate_limit.reads_burst_size", "500"),
+            ("rate_limit.reads_period_secs", "10"),
             ("limits.max_body_size_bytes", "65536"),
             ("limits.max_status_index", "4096"),
             ("limits.max_statuses_per_request", "256"),
@@ -1496,10 +1785,10 @@ mod tests {
         ])
         .expect("Failed to load config");
 
-        assert_eq!(config.rate_limit.strict_burst_size, 3);
-        assert_eq!(config.rate_limit.strict_period_secs, 120);
-        assert_eq!(config.rate_limit.permissive_burst_size, 500);
-        assert_eq!(config.rate_limit.permissive_period_secs, 10);
+        assert_eq!(config.rate_limit.issuer_burst_size, 3);
+        assert_eq!(config.rate_limit.issuer_period_secs, 120);
+        assert_eq!(config.rate_limit.reads_burst_size, 500);
+        assert_eq!(config.rate_limit.reads_period_secs, 10);
         assert_eq!(config.limits.max_body_size_bytes, 65_536);
         assert_eq!(config.limits.max_status_index, 4_096);
         assert_eq!(config.limits.max_statuses_per_request, 256);
@@ -1508,7 +1797,7 @@ mod tests {
 
     #[test]
     fn test_mysql_backend_config() {
-        let config = Config::load_from_overrides(&[
+        let config = Config::load_for_test(&[
             ("database.backend", "mysql"),
             (
                 "database.url",
@@ -1525,7 +1814,7 @@ mod tests {
 
     #[test]
     fn test_sqlite_backend_config() {
-        let config = Config::load_from_overrides(&[
+        let config = Config::load_for_test(&[
             ("database.backend", "sqlite"),
             ("database.url", "sqlite::memory:"),
         ])
@@ -1574,7 +1863,7 @@ mod tests {
         // The default config must not reference any test_data/ paths or
         // other repository-local key material, ensuring it can be used
         // in production without requiring those test files
-        let config = Config::load_from_overrides(&[]).expect("Failed to load config");
+        let config = Config::load_for_test(&[]).expect("Failed to load config");
 
         // Cert store paths should be None when using ACME strategy (default on feature=acme)
         // or None/empty when using store strategy (default without feature=acme)
@@ -1618,7 +1907,7 @@ mod tests {
 
     #[test]
     fn test_invalid_database_backend_config() {
-        let result = Config::load_from_overrides(&[
+        let result = Config::load_for_test(&[
             ("database.backend", "redis"),
             (
                 "database.url",
@@ -1633,7 +1922,7 @@ mod tests {
 
     #[test]
     fn test_pool_config_env_override() {
-        let config = Config::load_from_overrides(&[
+        let config = Config::load_for_test(&[
             ("APP_DATABASE__POOL__MAX_CONNECTIONS", "20"),
             ("APP_DATABASE__POOL__MIN_CONNECTIONS", "2"),
             ("APP_DATABASE__POOL__ACQUIRE_TIMEOUT_SECS", "3"),
@@ -1650,14 +1939,201 @@ mod tests {
         assert_eq!(config.database.pool.max_lifetime_secs, 900);
     }
 
-    #[test]
-    fn test_rate_limit_client_ip_source_required_fail_closed() {
-        let result = Config::load_from_overrides(&[("rate_limit.client_ip_source", "")]);
-        assert!(result.is_err(), "Empty client_ip_source should fail closed");
-        let err = result.unwrap_err().to_string();
+    /// The fail-closed invariant: loading with *nothing* supplied for
+    /// `client_ip_source` must fail. This deliberately uses
+    /// `load_from_overrides` rather than `load_for_test`, because
+    /// `load_for_test` is the thing that supplies the value.
+    ///
+    /// The assertion targets wording unique to `RateLimitConfig::validate`;
+    /// asserting on the field name alone would also pass on a `config`-rs
+    /// deserialization error and so would not prove the gate exists.
+    ///
+    /// Runs sealed so the variable can be cleared: `load_from_overrides` reads
+    /// the real process environment, so a developer or CI job that exports
+    /// `APP_RATE_LIMIT__CLIENT_IP_SOURCE` would otherwise turn this test green
+    /// without the gate being present at all.
+    #[sealed_test]
+    fn test_client_ip_source_unset_refuses_to_start() {
+        // SAFETY: `sealed_test` runs this in its own process, so mutating the
+        // environment cannot race another test.
+        unsafe { std::env::remove_var("APP_RATE_LIMIT__CLIENT_IP_SOURCE") };
+
+        let err = Config::load_from_overrides(&[])
+            .expect_err("config with no client_ip_source must fail closed")
+            .to_string();
         assert!(
-            err.contains("client_ip_source"),
-            "Error should mention client_ip_source: {err}"
+            err.contains("must be set explicitly"),
+            "expected the fail-closed message from RateLimitConfig::validate, got: {err}"
+        );
+        assert!(
+            err.contains("connect_info") && err.contains("rightmost_x_forwarded_for"),
+            "error should list the accepted values, got: {err}"
+        );
+    }
+
+    /// Renamed budgets keep working under their previous names for one release
+    /// cycle.
+    #[sealed_test(env = [
+        ("APP_RATE_LIMIT__CLIENT_IP_SOURCE", "connect_info"),
+        ("APP_RATE_LIMIT__STRICT_BURST_SIZE", "3"),
+        ("APP_RATE_LIMIT__PERMISSIVE_PERIOD_SECS", "17"),
+        ("APP_RATE_LIMIT__UNAUTHENTICATED_BURST_SIZE", "42")
+    ])]
+    fn test_deprecated_rate_limit_env_keys_still_apply() {
+        let config = Config::load().expect("deprecated keys should still load");
+        assert_eq!(config.rate_limit.issuer_burst_size, 3);
+        assert_eq!(config.rate_limit.reads_period_secs, 17);
+        assert_eq!(config.rate_limit.write_gate_burst_size, 42);
+
+        let in_use = deprecated_env_keys_in_use();
+        assert_eq!(
+            in_use.len(),
+            3,
+            "startup must be able to report exactly which keys are deprecated: {in_use:?}"
+        );
+    }
+
+    /// An operator midway through migrating has both spellings exported. The
+    /// current one must win, or migrating would appear to have no effect.
+    #[sealed_test(env = [
+        ("APP_RATE_LIMIT__CLIENT_IP_SOURCE", "connect_info"),
+        ("APP_RATE_LIMIT__STRICT_BURST_SIZE", "3"),
+        ("APP_RATE_LIMIT__ISSUER_BURST_SIZE", "9")
+    ])]
+    fn test_current_env_key_wins_over_its_deprecated_alias() {
+        let config = Config::load().unwrap();
+        assert_eq!(config.rate_limit.issuer_burst_size, 9);
+    }
+
+    #[sealed_test(env = [("APP_RATE_LIMIT__CLIENT_IP_SOURCE", "connect_info")])]
+    fn test_no_deprecated_keys_reported_when_none_are_set() {
+        for (old, _) in DEPRECATED_ENV_KEYS {
+            // SAFETY: sealed process.
+            unsafe { std::env::remove_var(old) };
+        }
+        assert!(deprecated_env_keys_in_use().is_empty());
+    }
+
+    /// Each tier is tunable on its own; sharing a budget between two tiers
+    /// would mean retuning one silently retunes the other.
+    #[test]
+    fn test_every_tier_has_an_independent_budget() {
+        let config = Config::load_for_test(&[
+            ("rate_limit.issuer_burst_size", "1"),
+            ("rate_limit.reads_burst_size", "2"),
+            ("rate_limit.write_gate_burst_size", "3"),
+            ("rate_limit.credentials_burst_size", "4"),
+        ])
+        .unwrap();
+        assert_eq!(config.rate_limit.issuer_burst_size, 1);
+        assert_eq!(config.rate_limit.reads_burst_size, 2);
+        assert_eq!(config.rate_limit.write_gate_burst_size, 3);
+        assert_eq!(config.rate_limit.credentials_burst_size, 4);
+    }
+
+    /// Every variant must be reachable through the `APP_*` environment
+    /// variables, which are the only configuration source the server reads.
+    #[test]
+    fn test_client_ip_source_variants_round_trip() {
+        for (raw, expected) in [
+            ("connect_info", ClientIpSource::ConnectInfo),
+            (
+                "rightmost_x_forwarded_for",
+                ClientIpSource::RightmostXForwardedFor,
+            ),
+            ("x_real_ip", ClientIpSource::XRealIp),
+        ] {
+            let config = Config::load_from_overrides(&[("rate_limit.client_ip_source", raw)])
+                .unwrap_or_else(|e| panic!("`{raw}` should be accepted: {e}"));
+            assert_eq!(config.rate_limit.client_ip_source, Some(expected));
+        }
+    }
+
+    #[test]
+    fn test_trusted_hops_configurable_via_env_style_override() {
+        let config = Config::load_from_overrides(&[
+            (
+                "APP_RATE_LIMIT__CLIENT_IP_SOURCE",
+                "rightmost_x_forwarded_for",
+            ),
+            ("APP_RATE_LIMIT__TRUSTED_HOPS", "2"),
+        ])
+        .expect("trusted_hops must be expressible as a flat env var");
+        assert_eq!(
+            config.rate_limit.client_ip_source,
+            Some(ClientIpSource::RightmostXForwardedFor)
+        );
+        assert_eq!(config.rate_limit.trusted_hops, 2);
+    }
+
+    #[test]
+    fn test_unknown_client_ip_source_is_rejected() {
+        let result =
+            Config::load_from_overrides(&[("rate_limit.client_ip_source", "trust_me_bro")]);
+        assert!(result.is_err(), "unknown variants must not load");
+    }
+
+    /// `trusted_hops` is only meaningful for the XFF source. Silently ignoring
+    /// it elsewhere would let an operator believe they had configured a trust
+    /// boundary that is not in effect.
+    #[test]
+    fn test_trusted_hops_rejected_for_non_xff_source() {
+        let err = Config::load_from_overrides(&[
+            ("rate_limit.client_ip_source", "connect_info"),
+            ("rate_limit.trusted_hops", "1"),
+        ])
+        .expect_err("trusted_hops with connect_info must be rejected")
+        .to_string();
+        assert!(err.contains("trusted_hops"), "got: {err}");
+    }
+
+    /// A hop count larger than any real proxy chain means the client IP can
+    /// never be located, so every request would quietly share the peer-address
+    /// bucket. Rejecting is the only way an operator learns about the typo.
+    #[test]
+    fn test_trusted_hops_above_the_maximum_is_rejected() {
+        let err = Config::load_from_overrides(&[
+            ("rate_limit.client_ip_source", "rightmost_x_forwarded_for"),
+            ("rate_limit.trusted_hops", "9999"),
+        ])
+        .expect_err("an implausible hop count must be rejected")
+        .to_string();
+        assert!(err.contains("trusted_hops"), "got: {err}");
+
+        assert!(
+            Config::load_from_overrides(&[
+                ("rate_limit.client_ip_source", "rightmost_x_forwarded_for",),
+                ("rate_limit.trusted_hops", &MAX_TRUSTED_HOPS.to_string()),
+            ])
+            .is_ok(),
+            "the maximum itself must still be accepted"
+        );
+    }
+
+    /// The write gate must be tunable without touching the read tier, so that
+    /// changing read throughput cannot silently retighten anonymous writes.
+    #[test]
+    fn test_unauthenticated_tier_is_tunable_independently_of_reads() {
+        let config = Config::load_for_test(&[]).unwrap();
+        assert_eq!(config.rate_limit.write_gate_burst_size, 100);
+        assert_eq!(config.rate_limit.write_gate_period_secs, 60);
+        assert_eq!(config.rate_limit.credentials_burst_size, 10);
+        assert_eq!(config.rate_limit.credentials_period_secs, 60);
+    }
+
+    #[test]
+    fn test_bucket_bounds_have_safe_defaults_and_reject_zero() {
+        let config = Config::load_for_test(&[]).unwrap();
+        assert_eq!(config.rate_limit.max_buckets, 100_000);
+        assert_eq!(config.rate_limit.bucket_eviction_interval_secs, 60);
+
+        assert!(
+            Config::load_for_test(&[("rate_limit.max_buckets", "0")]).is_err(),
+            "max_buckets=0 would disable the backstop entirely"
+        );
+        assert!(
+            Config::load_for_test(&[("rate_limit.bucket_eviction_interval_secs", "0")]).is_err(),
+            "a zero eviction interval would spin"
         );
     }
 }

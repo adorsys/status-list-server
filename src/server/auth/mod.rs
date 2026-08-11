@@ -21,6 +21,44 @@ struct Claims {
     exp: usize,
 }
 
+/// The credential issuer of a request whose token signature has been verified
+/// against that issuer's registered public key.
+///
+/// Published by [`auth`] as a request extension and consumed by handlers and by
+/// the rate limiter. It is a newtype rather than a bare `String` for two
+/// reasons: the type itself is the evidence that verification happened, and a
+/// bare `String` extension could be set by any other middleware, silently
+/// changing which rate-limit bucket a request lands in.
+///
+/// The field is private and the constructor is crate-server-private, so the
+/// only way to obtain one outside `crate::server` is to have passed through
+/// [`auth`]. That keeps "this value was verified" a property the type system
+/// enforces rather than a convention.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VerifiedIssuer(String);
+
+impl VerifiedIssuer {
+    /// Only reachable from within `crate::server`, i.e. from the auth
+    /// middleware and from tests of the handlers it feeds.
+    pub(in crate::server) fn new(issuer: impl Into<String>) -> Self {
+        Self(issuer.into())
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    pub fn into_inner(self) -> String {
+        self.0
+    }
+}
+
+impl std::fmt::Display for VerifiedIssuer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
 /// Authentication middleware acting as a safeguard for unauthorized issuers
 pub async fn auth(
     State(state): State<AppState>,
@@ -58,7 +96,9 @@ pub async fn auth(
 
     let token_data = jsonwebtoken::decode::<Claims>(token, &decoding_key, &validation)?;
 
-    request.extensions_mut().insert(token_data.claims.iss);
+    request
+        .extensions_mut()
+        .insert(VerifiedIssuer::new(token_data.claims.iss));
     Ok(next.run(request).await)
 }
 
@@ -300,9 +340,9 @@ mod tests {
             .await
             .unwrap();
 
-        async fn extension_test_handler(Extension(issuer): Extension<String>) -> String {
-            assert_eq!(issuer, "test-issuer");
-            issuer
+        async fn extension_test_handler(Extension(issuer): Extension<VerifiedIssuer>) -> String {
+            assert_eq!(issuer.as_str(), "test-issuer");
+            issuer.into_inner()
         }
 
         let app = Router::new()

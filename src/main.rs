@@ -25,7 +25,10 @@ async fn main() -> Result<()> {
     // Install the default panic and error report hooks
     color_eyre::install()?;
 
-    // Load configuration first so telemetry can read its settings
+    // Load configuration first so telemetry can read its settings. Loading is
+    // side-effect free and reports nothing: it runs before the tracing
+    // subscriber exists, so `HttpServer::new` emits the startup diagnostics
+    // once logging is available.
     let config = AppConfig::load()?;
 
     // Initialize telemetry (tracing + metrics) based on environment.
@@ -36,9 +39,6 @@ async fn main() -> Result<()> {
     aws_lc_rs::default_provider()
         .install_default()
         .map_err(|e| eyre!("Failed to set crypto provider: {e:?}"))?;
-
-    // Load configuration and build the app state
-    let config = AppConfig::load()?;
 
     #[cfg(feature = "acme")]
     let (app_state, cert_manager) = build_state_with_cert_manager(&config).await?;

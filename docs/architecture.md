@@ -154,21 +154,52 @@ operator-configurable through environment variables prefixed with `APP_`.
 
 ### Rate-limiting tiers (`APP_RATE_LIMIT__*`)
 
-A token-bucket governor (`tower-governor`) is applied per route group, with
-each tier keyed and tuned independently:
+A token-bucket governor (`tower-governor`) is applied per route group. Tiers are
+ordered by how strong the identity behind a request is, so that nothing
+security-critical depends on a key the client can influence:
 
-| Tier           | Routes                                                          | Key                                                         | Tunables (defaults)                                           |
-| -------------- | --------------------------------------------------------------- | ----------------------------------------------------------- | ------------------------------------------------------------- |
-| **strict**     | `POST /api/v1/credentials`                                      | peer IP (`PeerIpKeyExtractor`)                              | `strict_burst_size` (10), `strict_period_secs` (60s)          |
-| **writes**     | `PUT`/`PATCH /api/v1/status-lists/{list_id}/statuses`           | smart IP (`SmartIpKeyExtractor`) — reads `X-Forwarded-For`, | `strict_burst_size` (10), `strict_period_secs` (60s)          |
-|                |                                                                 | `X-Real-Ip`, `Forwarded` headers, fallback to peer IP       |                                                               |
-| **permissive** | `GET /api/v1/aggregation`, `GET /api/v1/status-lists/{list_id}` | peer IP (`PeerIpKeyExtractor`)                              | `permissive_burst_size` (100), `permissive_period_secs` (60s) |
+| Tier            | Routes                                                          | Key                        | Tunables (defaults)                                             |
+| --------------- | --------------------------------------------------------------- | -------------------------- | --------------------------------------------------------------- |
+| **issuer**      | `PUT`/`PATCH /api/v1/status-lists/{list_id}/statuses`           | verified credential issuer | `issuer_burst_size` (10), `issuer_period_secs` (60s)            |
+| **write_gate**  | the same write routes, in front of authentication               | derived client IP          | `write_gate_burst_size` (100), `write_gate_period_secs` (60s)   |
+| **credentials** | `POST /api/v1/credentials`                                      | derived client IP          | `credentials_burst_size` (10), `credentials_period_secs` (60s)  |
+| **reads**       | `GET /api/v1/aggregation`, `GET /api/v1/status-lists/{list_id}` | derived client IP          | `reads_burst_size` (100), `reads_period_secs` (60s)             |
 
-The writes tier is applied **before** the `auth` middleware (rate limiting by IP
-happens first, then authentication rejects unauthenticated requests with `401`).
+Each pair is a **token bucket**, not a per-window quota: `burst_size` is the
+capacity and one token is replenished every `period_secs`. The read defaults of
+100 / 60s therefore allow a burst of 100 and then a sustained one request per
+minute, not 100 requests per minute.
+
+Layer order on the write routes, outermost first:
+
+```text
+write_gate (client IP) -> auth -> issuer (verified issuer) -> handler
+```
+
+The `issuer` tier sits **inside** `auth`, so its key is the issuer whose token
+signature has already been verified against the registered public key. Editing
+the `iss` claim does not select a different bucket — it fails authentication.
+`write_gate` exists because that ordering puts a credential lookup ahead of the
+per-issuer limiter; it bounds how much anonymous traffic can drive those
+lookups. All three are route-scoped, so an unmatched path consumes no budget.
+
+How the client IP is derived is an explicit deployment input,
+`APP_RATE_LIMIT__CLIENT_IP_SOURCE`, with no default — the server refuses to
+start until it is set. See the Rate Limiting section of the README for the
+available sources and the ingress configuration that goes with each. IPv6
+clients are keyed by `/64` rather than by individual address, so one residential
+allocation cannot mint unlimited distinct keys; IPv4-mapped addresses, which a
+dual-stack listener reports for every IPv4 client, are unwrapped to their IPv4
+form rather than masked.
+
+Note that `POST /api/v1/credentials` is unauthenticated, so the set of
+registered issuers — and therefore the `issuer` tier's key space — is bounded by
+the `credentials` tier's rate rather than by a fixed ceiling.
+
 When a bucket is exhausted the server returns `429 Too Many Requests` with a
-plain-text body `Too Many Requests! Wait for <n>s` (emitted by the governor
-middleware; it is not RFC 7807 problem+json).
+JSON `{"error": "rate_limited", ...}` body naming the tier, plus `retry-after`
+and `x-ratelimit-*` headers. `rate_limit_buckets`, `rate_limit_rejected` and
+`rate_limit_key_extraction_failed` are exported per tier.
 
 > **Note:** Governor state is held in-memory per-replica. In a horizontally
 > scaled deployment each instance maintains its own token bucket, so the
