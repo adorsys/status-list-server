@@ -38,8 +38,10 @@
 pub mod runtime;
 
 use std::net::{IpAddr, Ipv6Addr, SocketAddr};
+use std::sync::Arc;
 
 use axum::http::{HeaderMap, HeaderName, Request};
+use ipnet::IpNet;
 use opentelemetry::{KeyValue, metrics::Counter};
 use tower_governor::{errors::GovernorError, key_extractor::KeyExtractor};
 
@@ -190,11 +192,18 @@ fn rightmost_forwarded_for(
 /// definition; it is never split on commas, because taking the leftmost element
 /// of an injected list is exactly the pattern this module exists to remove.
 fn x_real_ip(headers: &HeaderMap) -> Result<IpAddr, FallbackReason> {
-    let value = headers
-        .get_all(&X_REAL_IP)
-        .iter()
-        .next_back()
-        .ok_or(FallbackReason::HeaderAbsent)?;
+    let mut values = headers.get_all(&X_REAL_IP).iter();
+    let value = values.next().ok_or(FallbackReason::HeaderAbsent)?;
+
+    // `X-Real-IP` is single-valued by definition. More than one means either a
+    // client injected its own or two proxies both wrote it, and there is no
+    // rule that says which to believe. Guessing would be exactly the leftmost/
+    // rightmost coin-flip this module exists to remove, so report it and let
+    // the caller fall back to the unforgeable peer address.
+    if values.next().is_some() {
+        return Err(FallbackReason::Unparseable);
+    }
+
     value
         .to_str()
         .ok()
@@ -210,6 +219,9 @@ fn x_real_ip(headers: &HeaderMap) -> Result<IpAddr, FallbackReason> {
 /// silent condition otherwise, hence the counter.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum FallbackReason {
+    /// The request did not arrive from a declared trusted proxy, so its
+    /// forwarding headers are only assertions by the caller.
+    UntrustedPeer,
     /// The configured header was not present at all.
     HeaderAbsent,
     /// The selected entry was not an address (obfuscated identifier, junk).
@@ -221,6 +233,7 @@ enum FallbackReason {
 impl FallbackReason {
     fn as_str(self) -> &'static str {
         match self {
+            Self::UntrustedPeer => "untrusted_peer",
             Self::HeaderAbsent => "header_absent",
             Self::Unparseable => "unparseable",
             Self::ChainTooShort => "chain_too_short",
@@ -255,20 +268,26 @@ impl KeyExtractor for VerifiedIssuerKeyExtractor {
 }
 
 /// Keys unauthenticated traffic on a client IP from an explicitly configured
-/// source.
+/// source, honoured only when the request arrives from a declared proxy.
 ///
-/// Falls back to the peer address whenever the configured header is absent or
-/// unusable. That is coarse (behind a proxy it is one shared bucket) but it is
-/// never forgeable, so the failure mode is throttling rather than bypass.
+/// `X-Forwarded-For` and `X-Real-IP` are client-supplied. Reading them is safe
+/// only if something in front of this server overwrote them, so the peer
+/// address is checked against `trusted_proxies` first. A request from anywhere
+/// else has its headers ignored entirely and is keyed on its own address --
+/// coarse, but unforgeable. That check is what makes a header source a trust
+/// boundary rather than an invitation.
 ///
-/// The fallback is invisible in the response, so each one increments
-/// `rate_limit_ip_source_fallback{tier, reason}`. A steady stream of those
-/// means the configured `client_ip_source` does not match the deployment and
-/// the tier is quietly keying every client onto one bucket.
+/// Every fallback is invisible in the response, so each one increments
+/// `rate_limit_ip_source_fallback{tier, reason}`. A steady stream of
+/// `untrusted_peer` means the deployment does not match the configuration and
+/// the header source is doing nothing.
 #[derive(Debug, Clone)]
 pub struct SecureIpKeyExtractor {
     source: ClientIpSource,
     trusted_hops: usize,
+    /// Peers whose forwarding headers are honoured. Always empty for
+    /// [`ClientIpSource::ConnectInfo`], which reads no headers.
+    trusted_proxies: Arc<[IpNet]>,
     tier: &'static str,
     fallbacks: Option<Counter<u64>>,
 }
@@ -278,12 +297,14 @@ impl SecureIpKeyExtractor {
     pub fn new(
         source: ClientIpSource,
         trusted_hops: usize,
+        trusted_proxies: Arc<[IpNet]>,
         tier: &'static str,
         meter: &opentelemetry::metrics::Meter,
     ) -> Self {
         Self {
             source,
             trusted_hops,
+            trusted_proxies,
             tier,
             fallbacks: Some(
                 meter
@@ -304,6 +325,7 @@ impl SecureIpKeyExtractor {
         Self {
             source,
             trusted_hops,
+            trusted_proxies: tests::trusted_proxies(),
             tier: "test",
             fallbacks: None,
         }
@@ -321,10 +343,23 @@ impl SecureIpKeyExtractor {
         }
     }
 
+    /// Whether this request came from a peer whose forwarding headers we honour.
+    ///
+    /// A missing `ConnectInfo` counts as untrusted: if the peer cannot be
+    /// established, it cannot be shown to be a proxy.
+    fn peer_is_trusted<T>(&self, req: &Request<T>) -> bool {
+        peer_ip(req).is_some_and(|peer| {
+            self.trusted_proxies
+                .iter()
+                .any(|network| network.contains(&peer))
+        })
+    }
+
     fn client_ip<T>(&self, req: &Request<T>) -> Option<IpAddr> {
         let derived = match self.source {
             // Nothing to fall back from: the connection address is the source.
             ClientIpSource::ConnectInfo => return peer_ip(req),
+            _ if !self.peer_is_trusted(req) => Err(FallbackReason::UntrustedPeer),
             ClientIpSource::RightmostXForwardedFor => {
                 rightmost_forwarded_for(req.headers(), self.trusted_hops)
             }
@@ -375,6 +410,12 @@ mod tests {
 
     fn ipv4(a: u8, b: u8, c: u8, d: u8) -> IpAddr {
         IpAddr::V4(Ipv4Addr::new(a, b, c, d))
+    }
+
+    /// The proxy range the extractor tests treat as trusted. `10.0.0.1`, used
+    /// as the peer throughout, sits inside it; `203.0.113.x` and friends do not.
+    pub(super) fn trusted_proxies() -> Arc<[IpNet]> {
+        Arc::from(vec!["10.0.0.0/8".parse::<IpNet>().unwrap()])
     }
 
     fn xff_extractor(trusted_hops: usize) -> SecureIpKeyExtractor {
@@ -698,6 +739,84 @@ mod tests {
         );
     }
 
+    // ---- trusted-proxy gating --------------------------------------------
+
+    /// The mirror of `spoofed_left_hand_entries_do_not_change_the_bucket`, and
+    /// the case that matters most: when the request did **not** come from a
+    /// declared proxy, the header is only an assertion by the caller. It must
+    /// be ignored entirely, so a spoofed request lands in the same bucket as an
+    /// unspoofed one from the same address.
+    #[test]
+    fn headers_from_an_untrusted_peer_cannot_change_the_bucket() {
+        let extractor = xff_extractor(0);
+        // 203.0.113.9 is outside the trusted 10.0.0.0/8 range.
+        let untrusted = ipv4(203, 0, 113, 9);
+
+        let plain = extractor.extract(&request(&[], Some(untrusted))).unwrap();
+        let spoofed = extractor
+            .extract(&request(&["1.1.1.1, 2.2.2.2"], Some(untrusted)))
+            .unwrap();
+        let spoofed_differently = extractor
+            .extract(&request(&["9.9.9.9"], Some(untrusted)))
+            .unwrap();
+
+        assert_eq!(plain, RateLimitKey::Ip(untrusted));
+        assert_eq!(plain, spoofed);
+        assert_eq!(plain, spoofed_differently);
+    }
+
+    /// Same for `x_real_ip`: the header is honoured only behind a declared proxy.
+    #[test]
+    fn x_real_ip_from_an_untrusted_peer_is_ignored() {
+        let extractor = SecureIpKeyExtractor::uninstrumented(ClientIpSource::XRealIp, 0);
+        let untrusted = ipv4(203, 0, 113, 9);
+        let req = real_ip_request(&["198.51.100.5"], untrusted);
+        assert_eq!(
+            extractor.extract(&req).unwrap(),
+            RateLimitKey::Ip(untrusted),
+            "an unproxied caller must not be able to assert its own address"
+        );
+    }
+
+    /// Rotating the header from an untrusted peer must not grow the key space -
+    /// this is the memory-exhaustion half of the original issue.
+    #[test]
+    fn rotating_headers_from_an_untrusted_peer_yield_one_key() {
+        let extractor = xff_extractor(0);
+        let untrusted = ipv4(203, 0, 113, 9);
+        let keys: std::collections::HashSet<_> = (0..50)
+            .map(|i| {
+                let spoof = format!("198.51.100.{i}");
+                extractor
+                    .extract(&request(&[spoof.as_str()], Some(untrusted)))
+                    .unwrap()
+            })
+            .collect();
+        assert_eq!(keys.len(), 1, "50 spoofed headers produced {keys:?}");
+    }
+
+    /// The trusted path still works: from a declared proxy the header is read.
+    #[test]
+    fn headers_from_a_trusted_peer_are_honoured() {
+        let extractor = xff_extractor(0);
+        let req = request(&["1.1.1.1, 198.51.100.5"], Some(ipv4(10, 0, 0, 1)));
+        assert_eq!(
+            extractor.extract(&req).unwrap(),
+            RateLimitKey::Ip(ipv4(198, 51, 100, 5))
+        );
+    }
+
+    /// A request with no connection info cannot be shown to come from a proxy,
+    /// so its headers are not honoured either.
+    #[test]
+    fn headers_without_connect_info_are_not_honoured() {
+        let extractor = xff_extractor(0);
+        assert!(matches!(
+            extractor.extract(&request(&["1.1.1.1"], None)),
+            Err(GovernorError::UnableToExtractKey)
+        ));
+    }
+
     // ---- fallback reasons ------------------------------------------------
     //
     // Every fallback below produces the same key (the peer address) and the
@@ -800,10 +919,28 @@ mod tests {
             .unwrap()
     }
 
+    /// `X-Real-IP` is single-valued. Two of them means a client injected one or
+    /// two proxies both wrote it, and nothing says which to believe. Picking
+    /// either is the coin-flip this module exists to remove, so the header is
+    /// discarded and the unforgeable peer address is used.
     #[test]
-    fn x_real_ip_is_read_from_the_last_occurrence() {
-        // Client-supplied value arrives first; the proxy's is appended.
+    fn multiple_x_real_ip_values_are_not_guessed_between() {
         let req = real_ip_request(&["9.9.9.9", "203.0.113.7"], ipv4(10, 0, 0, 1));
+        let extractor = SecureIpKeyExtractor::uninstrumented(ClientIpSource::XRealIp, 0);
+        assert_eq!(
+            extractor.extract(&req).unwrap(),
+            RateLimitKey::Ip(ipv4(10, 0, 0, 1))
+        );
+
+        let mut headers = HeaderMap::new();
+        headers.append(&X_REAL_IP, "9.9.9.9".parse().unwrap());
+        headers.append(&X_REAL_IP, "203.0.113.7".parse().unwrap());
+        assert_eq!(x_real_ip(&headers), Err(FallbackReason::Unparseable));
+    }
+
+    #[test]
+    fn a_single_x_real_ip_value_is_honoured() {
+        let req = real_ip_request(&["203.0.113.7"], ipv4(10, 0, 0, 1));
         let extractor = SecureIpKeyExtractor::uninstrumented(ClientIpSource::XRealIp, 0);
         assert_eq!(
             extractor.extract(&req).unwrap(),

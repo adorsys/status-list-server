@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use axum::{
     body::Body,
-    http::{Response, StatusCode, header},
+    http::{HeaderName, HeaderValue, Response, StatusCode, header},
 };
 use color_eyre::eyre::eyre;
 use governor::{
@@ -35,6 +35,10 @@ use crate::server::error::ErrorResponse;
 /// Governor middleware that attaches `x-ratelimit-*` headers to *successful*
 /// responses, as opposed to [`NoOpMiddleware`] which attaches none.
 type RateLimitHeaders = governor::middleware::StateInformationMiddleware;
+
+/// Names the tier that rejected a request, so clients can branch on it without
+/// parsing `error_description`.
+static X_RATELIMIT_TIER: HeaderName = HeaderName::from_static("x-ratelimit-tier");
 
 /// A tier that reports its budget to clients. Only ever the innermost limiter
 /// on a route  -  see [`GovernorPolicies`].
@@ -172,7 +176,19 @@ impl GovernorPolicies {
             eyre!("rate_limit.client_ip_source is unset; the client IP source must be configured")
         })?;
 
-        let key = |tier| SecureIpKeyExtractor::new(source, config.trusted_hops, tier, meter);
+        // Parsed once here rather than per request; `validate` has already
+        // rejected an empty set for a header source and a non-empty one for
+        // `connect_info`.
+        let trusted_proxies: Arc<[ipnet::IpNet]> = Arc::from(config.parse_trusted_proxies()?);
+        let key = |tier| {
+            SecureIpKeyExtractor::new(
+                source,
+                config.trusted_hops,
+                Arc::clone(&trusted_proxies),
+                tier,
+                meter,
+            )
+        };
 
         let reporting = |tier: &'static str,
                          burst: u32,
@@ -251,8 +267,22 @@ impl GovernorPolicies {
                     let Some(tiers) = tiers.upgrade() else {
                         return;
                     };
-                    for handle in tiers.iter() {
-                        let _ = sweep_tier(handle, max_buckets);
+                    // `retain_recent` walks every bucket and takes DashMap
+                    // shard locks that the request path also needs, so a sweep
+                    // over a large tier is a blocking CPU operation, not an
+                    // await point. Running it inline would stall every other
+                    // task on this worker thread; `spawn_blocking` moves it to
+                    // the blocking pool, and one tier per call keeps any single
+                    // unit of work small.
+                    for index in 0..tiers.len() {
+                        let tiers = Arc::clone(&tiers);
+                        let swept = tokio::task::spawn_blocking(move || {
+                            sweep_tier(&tiers[index], max_buckets)
+                        })
+                        .await;
+                        if let Err(error) = swept {
+                            tracing::warn!(%error, "rate-limit eviction sweep failed");
+                        }
                     }
                 }
             })
@@ -350,6 +380,14 @@ impl RateLimitMetrics {
                     "rate_limited",
                     format!("Rate limit exceeded for the {tier} tier. Retry in {wait_time}s."),
                 );
+                // The tier is contractual: a client needs to distinguish "you
+                // personally are writing too fast" from "this source IP is",
+                // and `error_description` is documented as human-readable and
+                // not part of the contract. A header carries it in a place
+                // clients may branch on.
+                response
+                    .headers_mut()
+                    .insert(&X_RATELIMIT_TIER, HeaderValue::from_static(tier));
                 // Carries `retry-after`, and `x-ratelimit-*` for reporting tiers.
                 if let Some(headers) = headers {
                     response.headers_mut().extend(headers);
@@ -373,13 +411,35 @@ impl RateLimitMetrics {
                     "The rate limiter could not identify the caller.".to_string(),
                 )
             }
+            // Reserved for custom key extractors. Split on the status class:
+            // a 4xx is the caller's problem and belongs on the rejection
+            // counter, while a 5xx is ours and is an extraction failure by
+            // another name - conflating them would hide a broken deployment
+            // inside a metric operators read as "clients being throttled".
             GovernorError::Other { code, msg, headers } => {
-                self.rejected.add(1, &attributes);
+                let client_fault = code.is_client_error();
+                if client_fault {
+                    self.rejected.add(1, &attributes);
+                } else {
+                    self.key_extraction_failed.add(1, &attributes);
+                    tracing::error!(
+                        tier,
+                        status = code.as_u16(),
+                        "rate limiter returned a server-side error"
+                    );
+                }
                 let mut response = json_error(
                     code,
-                    "rate_limited",
+                    if client_fault {
+                        "rate_limited"
+                    } else {
+                        "rate_limit_unavailable"
+                    },
                     msg.unwrap_or_else(|| "Request rejected by the rate limiter.".to_string()),
                 );
+                response
+                    .headers_mut()
+                    .insert(&X_RATELIMIT_TIER, HeaderValue::from_static(tier));
                 if let Some(headers) = headers {
                     response.headers_mut().extend(headers);
                 }

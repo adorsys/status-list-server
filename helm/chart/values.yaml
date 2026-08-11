@@ -74,6 +74,11 @@ statuslist:
     # setting in the same commit.
     APP_RATE_LIMIT__CLIENT_IP_SOURCE: "rightmost_x_forwarded_for"
     APP_RATE_LIMIT__TRUSTED_HOPS: "0"
+    # Whose forwarding headers are honoured. The peer address is checked against
+    # these ranges before any header is read, so traffic that bypasses ingress
+    # cannot assert its own client IP. Narrow this to the ingress controller's
+    # pod CIDR for the cluster; the default below is the usual RFC 1918 space.
+    APP_RATE_LIMIT__TRUSTED_PROXIES: "10.0.0.0/8,172.16.0.0/12,192.168.0.0/16"
     APP_SERVER__CERT__EMAIL: "info@adorsys.com"
     APP_SERVER__CERT__ORGANIZATION: "adorsys GmbH & CO KG"
     APP_SERVER__CERT__ACME_DIRECTORY_URL: "https://acme-v02.api.letsencrypt.org/directory"

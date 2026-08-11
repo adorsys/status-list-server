@@ -377,6 +377,35 @@ If the configured header is missing or unusable, the server falls back to the
 peer address. That is coarse but never forgeable, so a misconfiguration degrades
 into over-throttling rather than into a bypass.
 
+#### The trust boundary: `trusted_proxies`
+
+Selecting a header source is not on its own enough, and the server will not let
+you do it alone. `X-Forwarded-For` and `X-Real-IP` are **client-supplied**: if a
+request did not come from a proxy, whatever they contain was chosen by the
+caller. `APP_RATE_LIMIT__TRUSTED_PROXIES` is what turns the source into a trust
+boundary — a comma-separated list of CIDR ranges (a bare address is accepted and
+treated as a single host):
+
+```bash
+APP_RATE_LIMIT__CLIENT_IP_SOURCE=rightmost_x_forwarded_for
+APP_RATE_LIMIT__TRUSTED_PROXIES=10.0.0.0/8,192.168.0.0/16
+APP_RATE_LIMIT__TRUSTED_HOPS=0
+```
+
+The peer address of every request is checked against this list *before* any
+header is read. A request from anywhere else has its forwarding headers ignored
+entirely and is keyed on its own address, and increments
+`rate_limit_ip_source_fallback{reason="untrusted_peer"}`.
+
+It is required and must be non-empty for both header sources, and rejected for
+`connect_info` where it would have no meaning. Both directions fail at startup:
+you cannot enable header trust without saying whom you trust, and you cannot
+imply a boundary that is not in effect.
+
+> A sustained `untrusted_peer` rate means the configuration and the deployment
+> disagree — the header source is doing nothing, and every client is being keyed
+> on its own address. That is safe, but it is not what was configured.
+
 #### Kubernetes / ingress-nginx
 
 Keep `use-forwarded-headers` at its default of `"false"` in the ingress-nginx
@@ -446,6 +475,10 @@ steady rate here means the setting is wrong while everything looks healthy.
 `reason` says which remedy applies. Note that they are not interchangeable —
 `header_absent` and `chain_too_short` point at different settings:
 
+- **`untrusted_peer`** — the request did not arrive from a
+  `trusted_proxies` range, so its forwarding headers were ignored. Either the
+  CIDR list is wrong, or traffic is reaching the server without passing through
+  the proxy. Emitted by both header sources.
 - **`header_absent`** — the configured header was not on the request at all.
   Either no proxy is in front of this server, or the one that is does not set
   the header. The fix is `client_ip_source`; **`trusted_hops` cannot help**,

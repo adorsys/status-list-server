@@ -820,24 +820,44 @@ components:
           description: Always `no-store`; a throttling decision is not cacheable.
           schema:
             type: string
+        X-RateLimit-Tier:
+          description: |
+            Which tier rejected the request: `issuer`, `write_gate`,
+            `credentials` or `reads`. Always present, and the field to branch
+            on when a route has more than one tier — it distinguishes a
+            per-issuer limit from a per-IP one. `error_description` names the
+            tier too, but as human-readable text that is not contractual.
+          required: true
+          schema:
+            type: string
+            enum: [issuer, write_gate, credentials, reads]
         Retry-After:
-          description: Seconds to wait before retrying.
+          description: Seconds to wait before retrying. Always present.
+          schema:
+            type: integer
+            format: int64
+        X-RateLimit-After:
+          description: Seconds until the next request is permitted. Always present.
           schema:
             type: integer
             format: int64
         X-RateLimit-Limit:
-          description: Burst size configured for the tier.
+          description: |
+            Burst size configured for the tier.
+
+            **Conditional.** Only the tier that reports budget on a given route
+            emits this — see `X-RateLimit-Tier`. On the write routes that is the
+            `issuer` tier, so a rejection from `write_gate` carries
+            `Retry-After` but no `X-RateLimit-Limit`. Clients must treat it as
+            optional and fall back to `Retry-After`.
           schema:
             type: integer
         X-RateLimit-Remaining:
-          description: Requests still available in the current burst.
+          description: |
+            Requests still available in the current burst. Conditional on the
+            same terms as `X-RateLimit-Limit`.
           schema:
             type: integer
-        X-RateLimit-After:
-          description: Seconds until the next request is permitted.
-          schema:
-            type: integer
-            format: int64
       content:
         application/json:
           schema:

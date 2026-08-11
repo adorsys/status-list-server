@@ -206,22 +206,26 @@ fn api_v1_routes(
 /// Deliberately not emitted from `Config::load`: configuration is read before
 /// the tracing subscriber is installed, so anything logged there is discarded.
 fn report_config_diagnostics(config: &Config) {
-    if config.rate_limit.trusts_client_headers() {
+    // Matched rather than unwrapped: `validate` has already guaranteed this is
+    // set, but a diagnostics function is a poor place to panic if that ever
+    // stops being true.
+    if let Some(source) = config.rate_limit.client_ip_source
+        && source.trusts_headers()
+    {
         // WARN, not INFO: header-derived client IPs are only as trustworthy as
-        // the proxy in front of this server. If that proxy does not overwrite
-        // the header, clients choose their own rate-limit bucket.
+        // the proxies declared in `trusted_proxies`. Headers from anywhere else
+        // are ignored, but a wrong CIDR list makes the source a no-op.
         tracing::warn!(
-            client_ip_source = %config
-                .rate_limit
-                .client_ip_source
-                .expect("validated as set"),
+            client_ip_source = %source,
             trusted_hops = config.rate_limit.trusted_hops,
-            "rate limiter derives the client IP from a request header; this is safe only if \
-             the proxy in front of this server overwrites that header on every request path"
+            trusted_proxies = %config.rate_limit.trusted_proxies,
+            "rate limiter derives the client IP from a request header; it is honoured only for \
+             requests arriving from the declared trusted proxies, and ignored otherwise"
         );
     }
 
-    for (deprecated, current) in crate::config::deprecated_env_keys_in_use() {
+    for deprecated in crate::config::deprecated_env_keys_in_use() {
+        let current = crate::config::replacements_for(deprecated).join(", ");
         tracing::warn!(
             deprecated,
             current,
@@ -708,34 +712,67 @@ mod tests {
             ));
             let router = router_for(state, &policies);
 
-            let with_client_value = Request::builder()
-                .method(Method::GET)
-                .uri(READ_PATH)
-                .header("x-real-ip", "9.9.9.9") // client-supplied, arrives first
-                .header("x-real-ip", "203.0.113.7") // proxy-supplied
-                .extension(axum::extract::ConnectInfo(SocketAddr::new(PROXY, 45678)))
-                .body(Body::empty())
-                .unwrap();
-            let first = router.clone().oneshot(with_client_value).await.unwrap();
-            assert_ne!(first.status(), StatusCode::TOO_MANY_REQUESTS);
+            let real_ip_request = |value: &str, peer: IpAddr| {
+                Request::builder()
+                    .method(Method::GET)
+                    .uri(READ_PATH)
+                    .header("x-real-ip", value)
+                    .extension(axum::extract::ConnectInfo(SocketAddr::new(peer, 45678)))
+                    .body(Body::empty())
+                    .unwrap()
+            };
 
-            let different_client_value = Request::builder()
-                .method(Method::GET)
-                .uri(READ_PATH)
-                .header("x-real-ip", "8.8.8.8")
-                .header("x-real-ip", "203.0.113.7")
-                .extension(axum::extract::ConnectInfo(SocketAddr::new(PROXY, 45678)))
-                .body(Body::empty())
-                .unwrap();
-            let second = router
+            // From the declared proxy, the header is honoured.
+            let first = router
                 .clone()
-                .oneshot(different_client_value)
+                .oneshot(real_ip_request("203.0.113.7", PROXY))
                 .await
                 .unwrap();
+            assert_ne!(first.status(), StatusCode::TOO_MANY_REQUESTS);
+
+            let second = router
+                .clone()
+                .oneshot(real_ip_request("203.0.113.7", PROXY))
+                .await
+                .unwrap();
+            assert_eq!(second.status(), StatusCode::TOO_MANY_REQUESTS);
+            assert_eq!(policies.reads.limiter().len(), 1);
+        }
+
+        /// The header is only honoured behind a declared proxy. A caller
+        /// reaching the server directly cannot assert its own address, so
+        /// rotating the header buys it nothing.
+        #[tokio::test]
+        async fn x_real_ip_from_an_untrusted_peer_cannot_mint_buckets() {
+            let state = test_app_state(None).await;
+            let policies = policies_for(&RateLimitConfig::for_test(
+                ClientIpSource::XRealIp,
+                0,
+                10,
+                1,
+            ));
+            let router = router_for(state, &policies);
+            // Outside the trusted 10.0.0.0/8 range used by `for_test`.
+            let direct = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 9));
+
+            let spoof = |value: &str| {
+                Request::builder()
+                    .method(Method::GET)
+                    .uri(READ_PATH)
+                    .header("x-real-ip", value)
+                    .extension(axum::extract::ConnectInfo(SocketAddr::new(direct, 45678)))
+                    .body(Body::empty())
+                    .unwrap()
+            };
+
+            let first = router.clone().oneshot(spoof("198.51.100.1")).await.unwrap();
+            assert_ne!(first.status(), StatusCode::TOO_MANY_REQUESTS);
+
+            let second = router.clone().oneshot(spoof("198.51.100.2")).await.unwrap();
             assert_eq!(
                 second.status(),
                 StatusCode::TOO_MANY_REQUESTS,
-                "changing the client-supplied X-Real-IP must not buy a fresh bucket"
+                "an unproxied caller must not be able to choose its own bucket"
             );
             assert_eq!(policies.reads.limiter().len(), 1);
         }

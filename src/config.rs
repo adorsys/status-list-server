@@ -2,6 +2,7 @@ use std::{collections::HashMap, fmt, marker::PhantomData};
 
 use config::builder::DefaultState;
 use config::{Config as ConfigLib, ConfigBuilder, ConfigError, Environment};
+use ipnet::IpNet;
 #[cfg(feature = "redis")]
 use redis::{
     Client as RedisClient, ClientTlsConfig, RedisResult, TlsCertificates,
@@ -10,6 +11,7 @@ use redis::{
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Deserializer};
 use serde_aux::field_attributes::deserialize_vec_from_string_or_vec;
+use std::net::IpAddr;
 #[cfg(feature = "redis")]
 use std::time::Duration;
 
@@ -224,6 +226,24 @@ pub struct RateLimitConfig {
     /// | client -> CDN -> LB -> ingress | `client, cdn, lb` | `2` |
     #[serde(default)]
     pub trusted_hops: usize,
+    /// Comma-separated CIDR ranges of the proxies whose forwarding headers are
+    /// honoured, e.g. `10.0.0.0/8,192.168.0.0/16`.
+    ///
+    /// **This is what makes a header source safe.** `X-Forwarded-For` and
+    /// `X-Real-IP` are client-supplied: if the request did not arrive from a
+    /// proxy, whatever they contain was chosen by the caller. Declaring which
+    /// peers are proxies lets the server tell "my proxy told me the client
+    /// address" from "the caller asserted an address", and ignore the latter.
+    ///
+    /// Required and non-empty for `rightmost_x_forwarded_for` and `x_real_ip`;
+    /// rejected for `connect_info`, where it would have no meaning. A single
+    /// host is expressed as a /32 or /128.
+    ///
+    /// Parsed as a plain string rather than a list so that it is expressible as
+    /// one `APP_*` environment variable, which is the only configuration source
+    /// this server reads.
+    #[serde(default)]
+    pub trusted_proxies: String,
     /// Soft ceiling on the number of live rate-limit buckets per tier.
     ///
     /// Exceeding it logs at `ERROR` after a sweep; nothing is rejected, because
@@ -279,6 +299,30 @@ impl RateLimitConfig {
             )));
         }
 
+        // The trust boundary itself. A header source without a declared set of
+        // proxies is not "explicit configuration" at all: the header is
+        // client-supplied, so with nothing to check the peer against, any
+        // caller can assert any address. Refusing to start is the whole point
+        // of #262 - the topology must be stated, not assumed.
+        let proxies = self.parse_trusted_proxies()?;
+        if source.trusts_headers() && proxies.is_empty() {
+            return Err(ConfigError::Message(format!(
+                "rate_limit.client_ip_source is `{source}`, which reads a client-supplied \
+                 header, but rate_limit.trusted_proxies is empty. Set \
+                 APP_RATE_LIMIT__TRUSTED_PROXIES to the CIDR ranges of the proxies in front of \
+                 this server (e.g. `10.0.0.0/8`); a single host is a /32 or /128. Without it \
+                 the header is only an assertion by the caller, and any client could choose \
+                 its own rate-limit bucket."
+            )));
+        }
+        if !source.trusts_headers() && !proxies.is_empty() {
+            return Err(ConfigError::Message(format!(
+                "rate_limit.trusted_proxies is set but rate_limit.client_ip_source is \
+                 `{source}`, which never reads a forwarding header. Leaving it set would \
+                 suggest a trust boundary that is not in effect."
+            )));
+        }
+
         if self.max_buckets == 0 {
             return Err(ConfigError::Message(
                 "rate_limit.max_buckets must be greater than zero.".to_string(),
@@ -296,6 +340,30 @@ impl RateLimitConfig {
         // function goes nowhere. The header-trust warning is raised by
         // `HttpServer::new` instead  -  see `warn_about_header_trust`.
         Ok(())
+    }
+
+    /// Parses [`Self::trusted_proxies`] into CIDR ranges.
+    ///
+    /// Entries are comma-separated; a bare address is accepted and treated as a
+    /// single host (`/32` or `/128`), because writing `10.1.2.3` and meaning
+    /// "that one proxy" is the obvious thing to try.
+    pub fn parse_trusted_proxies(&self) -> Result<Vec<IpNet>, ConfigError> {
+        self.trusted_proxies
+            .split(',')
+            .map(str::trim)
+            .filter(|entry| !entry.is_empty())
+            .map(|entry| {
+                entry
+                    .parse::<IpNet>()
+                    .or_else(|_| entry.parse::<IpAddr>().map(IpNet::from))
+                    .map_err(|_| {
+                        ConfigError::Message(format!(
+                            "rate_limit.trusted_proxies entry `{entry}` is not a CIDR range or \
+                             IP address (e.g. `10.0.0.0/8`, `2001:db8::/32`, `192.0.2.7`)."
+                        ))
+                    })
+            })
+            .collect()
     }
 
     /// Whether the derived client IP comes from a client-supplied header, and
@@ -333,6 +401,13 @@ impl RateLimitConfig {
             credentials_period_secs: 600,
             client_ip_source: Some(source),
             trusted_hops,
+            // Header sources require a declared trust boundary; `PROXY` in the
+            // router tests sits in this range.
+            trusted_proxies: if source.trusts_headers() {
+                "10.0.0.0/8".to_string()
+            } else {
+                String::new()
+            },
             max_buckets: 1_000,
             bucket_eviction_interval_secs: 60,
         }
@@ -937,6 +1012,11 @@ impl RedisConfig {
 /// has a registered default, so an aliased field would be present twice in the
 /// deserialized map and serde would reject it as a duplicate field.
 pub const DEPRECATED_ENV_KEYS: &[(&str, &str)] = &[
+    // `strict_*` previously drove BOTH the write tier and credential
+    // registration, so it maps onto both replacements. Mapping it only onto
+    // `issuer_*` would silently reset a deliberately-tightened registration
+    // limit back to the 10/60s default - loosening an unauthenticated,
+    // row-creating endpoint during what is meant to be a no-op rename.
     (
         "APP_RATE_LIMIT__STRICT_BURST_SIZE",
         "APP_RATE_LIMIT__ISSUER_BURST_SIZE",
@@ -944,6 +1024,14 @@ pub const DEPRECATED_ENV_KEYS: &[(&str, &str)] = &[
     (
         "APP_RATE_LIMIT__STRICT_PERIOD_SECS",
         "APP_RATE_LIMIT__ISSUER_PERIOD_SECS",
+    ),
+    (
+        "APP_RATE_LIMIT__STRICT_BURST_SIZE",
+        "APP_RATE_LIMIT__CREDENTIALS_BURST_SIZE",
+    ),
+    (
+        "APP_RATE_LIMIT__STRICT_PERIOD_SECS",
+        "APP_RATE_LIMIT__CREDENTIALS_PERIOD_SECS",
     ),
     (
         "APP_RATE_LIMIT__PERMISSIVE_BURST_SIZE",
@@ -967,11 +1055,23 @@ pub const DEPRECATED_ENV_KEYS: &[(&str, &str)] = &[
 ///
 /// Reported at startup by `HttpServer::new`; config loading itself happens
 /// before the tracing subscriber exists, so it cannot warn.
-pub fn deprecated_env_keys_in_use() -> Vec<(&'static str, &'static str)> {
+pub fn deprecated_env_keys_in_use() -> Vec<&'static str> {
+    let mut names: Vec<&'static str> = DEPRECATED_ENV_KEYS
+        .iter()
+        .map(|(old, _)| *old)
+        .filter(|old| std::env::var_os(old).is_some())
+        .collect();
+    // One deprecated key can map onto several current ones; report it once.
+    names.dedup();
+    names
+}
+
+/// The current keys a deprecated one now feeds.
+pub fn replacements_for(deprecated: &str) -> Vec<&'static str> {
     DEPRECATED_ENV_KEYS
         .iter()
-        .copied()
-        .filter(|(old, _)| std::env::var_os(old).is_some())
+        .filter(|(old, _)| *old == deprecated)
+        .map(|(_, new)| *new)
         .collect()
 }
 
@@ -1890,11 +1990,25 @@ mod tests {
         assert_eq!(config.rate_limit.reads_period_secs, 17);
         assert_eq!(config.rate_limit.write_gate_burst_size, 42);
 
+        // `strict_*` drove credential registration too, so a tightened value
+        // must carry over there rather than silently reverting to the default.
+        assert_eq!(
+            config.rate_limit.credentials_burst_size, 3,
+            "a tightened STRICT_BURST_SIZE must not loosen credential registration"
+        );
+
         let in_use = deprecated_env_keys_in_use();
         assert_eq!(
             in_use.len(),
             3,
-            "startup must be able to report exactly which keys are deprecated: {in_use:?}"
+            "each deprecated key should be reported once, not once per replacement: {in_use:?}"
+        );
+        assert_eq!(
+            replacements_for("APP_RATE_LIMIT__STRICT_BURST_SIZE"),
+            vec![
+                "APP_RATE_LIMIT__ISSUER_BURST_SIZE",
+                "APP_RATE_LIMIT__CREDENTIALS_BURST_SIZE"
+            ]
         );
     }
 
@@ -1948,8 +2062,18 @@ mod tests {
             ),
             ("x_real_ip", ClientIpSource::XRealIp),
         ] {
-            let config = Config::load_from_overrides(&[("rate_limit.client_ip_source", raw)])
-                .unwrap_or_else(|e| panic!("`{raw}` should be accepted: {e}"));
+            // Header sources additionally require a trust boundary; see
+            // `test_header_source_requires_trusted_proxies`.
+            let proxies = if expected.trusts_headers() {
+                "10.0.0.0/8"
+            } else {
+                ""
+            };
+            let config = Config::load_from_overrides(&[
+                ("rate_limit.client_ip_source", raw),
+                ("rate_limit.trusted_proxies", proxies),
+            ])
+            .unwrap_or_else(|e| panic!("`{raw}` should be accepted: {e}"));
             assert_eq!(config.rate_limit.client_ip_source, Some(expected));
         }
     }
@@ -1961,6 +2085,7 @@ mod tests {
                 "APP_RATE_LIMIT__CLIENT_IP_SOURCE",
                 "rightmost_x_forwarded_for",
             ),
+            ("APP_RATE_LIMIT__TRUSTED_PROXIES", "10.0.0.0/8"),
             ("APP_RATE_LIMIT__TRUSTED_HOPS", "2"),
         ])
         .expect("trusted_hops must be expressible as a flat env var");
@@ -1999,6 +2124,7 @@ mod tests {
     fn test_trusted_hops_above_the_maximum_is_rejected() {
         let err = Config::load_from_overrides(&[
             ("rate_limit.client_ip_source", "rightmost_x_forwarded_for"),
+            ("rate_limit.trusted_proxies", "10.0.0.0/8"),
             ("rate_limit.trusted_hops", "9999"),
         ])
         .expect_err("an implausible hop count must be rejected")
@@ -2008,11 +2134,67 @@ mod tests {
         assert!(
             Config::load_from_overrides(&[
                 ("rate_limit.client_ip_source", "rightmost_x_forwarded_for",),
+                ("rate_limit.trusted_proxies", "10.0.0.0/8"),
                 ("rate_limit.trusted_hops", &MAX_TRUSTED_HOPS.to_string()),
             ])
             .is_ok(),
             "the maximum itself must still be accepted"
         );
+    }
+
+    /// The trust boundary itself: a header source without declared proxies is
+    /// not configuration, it is an invitation. Selecting one must fail closed.
+    #[test]
+    fn test_header_source_requires_trusted_proxies() {
+        for source in ["rightmost_x_forwarded_for", "x_real_ip"] {
+            let err = Config::load_from_overrides(&[("rate_limit.client_ip_source", source)])
+                .expect_err("a header source without trusted_proxies must fail closed")
+                .to_string();
+            assert!(
+                err.contains("trusted_proxies"),
+                "`{source}` should name the missing setting, got: {err}"
+            );
+        }
+    }
+
+    /// The mirror: declaring proxies for a source that reads no header would
+    /// suggest a boundary that is not in effect.
+    #[test]
+    fn test_connect_info_rejects_trusted_proxies() {
+        let err = Config::load_from_overrides(&[
+            ("rate_limit.client_ip_source", "connect_info"),
+            ("rate_limit.trusted_proxies", "10.0.0.0/8"),
+        ])
+        .expect_err("trusted_proxies with connect_info must be rejected")
+        .to_string();
+        assert!(err.contains("trusted_proxies"), "got: {err}");
+    }
+
+    #[test]
+    fn test_trusted_proxies_accepts_cidrs_and_bare_addresses() {
+        let config = Config::load_from_overrides(&[
+            ("rate_limit.client_ip_source", "x_real_ip"),
+            (
+                "rate_limit.trusted_proxies",
+                " 10.0.0.0/8 , 192.0.2.7 , 2001:db8::/32 ",
+            ),
+        ])
+        .expect("CIDRs, bare addresses and whitespace should all be accepted");
+        let parsed = config.rate_limit.parse_trusted_proxies().unwrap();
+        assert_eq!(parsed.len(), 3);
+        assert!(parsed[1].contains(&"192.0.2.7".parse::<IpAddr>().unwrap()));
+        assert!(!parsed[1].contains(&"192.0.2.8".parse::<IpAddr>().unwrap()));
+    }
+
+    #[test]
+    fn test_malformed_trusted_proxy_is_rejected() {
+        let err = Config::load_from_overrides(&[
+            ("rate_limit.client_ip_source", "x_real_ip"),
+            ("rate_limit.trusted_proxies", "10.0.0.0/8,not-an-address"),
+        ])
+        .expect_err("a malformed entry must be rejected")
+        .to_string();
+        assert!(err.contains("not-an-address"), "got: {err}");
     }
 
     /// The write gate must be tunable without touching the read tier, so that

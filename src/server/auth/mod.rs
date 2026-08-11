@@ -13,6 +13,7 @@ use hyper::header;
 use jsonwebtoken::{DecodingKey, Validation};
 use serde::{Deserialize, Serialize};
 
+use crate::domain::models::credential::MAX_ISSUER_LEN;
 use crate::server::AppState;
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -76,6 +77,14 @@ pub async fn auth(
 
     let alg = jsonwebtoken::decode_header(token)?.alg;
     let issuer = insecure_decode::<Claims>(token)?.claims.iss;
+
+    // The `iss` here is still unverified - it is only the lookup key. Bound it
+    // before it reaches the store: no registered issuer can exceed
+    // `MAX_ISSUER_LEN`, so a longer one cannot match, and rejecting it here
+    // keeps an unauthenticated caller from driving arbitrarily large queries.
+    if issuer.is_empty() || issuer.len() > MAX_ISSUER_LEN {
+        return Err(AuthenticationError::IssuerNotFound);
+    }
 
     let credential = state
         .service

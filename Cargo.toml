@@ -117,6 +117,10 @@ color-eyre = "0.6"
 # Utility Libraries
 uuid = { version = "1.23", features = ["v4"] }
 base64 = "0.22"
+# Trusted-proxy CIDR matching for the rate limiter's client-IP derivation.
+# Already present transitively; promoted to a direct dependency rather than
+# hand-rolling prefix arithmetic on a security-relevant path.
+ipnet = "2.12"
 time = { version = "0.3", features = ["formatting", "macros"] }
 base64url = "0.1"
 flate2 = "1.1"
