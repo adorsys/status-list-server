@@ -1483,12 +1483,7 @@ mod test {
     }
 
     #[cfg(feature = "sqlite")]
-    const TEST_EC_JWK: &str = r#"{
-        "kty": "EC",
-        "crv": "P-256",
-        "x": "NeyFv_2L67OEplNbJpR02IFis4_lFW9HYmhfF5Or6m8",
-        "y": "eAH2qe8Pg3GQ28uxA8-qNAqdwQ_zfV2uKAvJ2sLpY9M"
-    }"#;
+    const TEST_EC_JWK: &str = crate::test_fixtures::TEST_EC_PUBLIC_JWK;
 
     /// failure rollback (no partial snapshot), and the conflict path — against
     /// real SQLite, since `MockDatabase` cannot model rollback.
