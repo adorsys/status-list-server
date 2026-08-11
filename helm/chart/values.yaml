@@ -224,9 +224,6 @@ redis-ha:
         external-dns.alpha.kubernetes.io/hostname: redis.eudi-adorsys.com
         external-dns.alpha.kubernetes.io/delete: "true"
 
-redis:
-  enabled: true
-
 opentelemetry-collector:
   enabled: true
   mode: deployment
