@@ -234,7 +234,7 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
                         None
                     };
                     #[cfg(not(feature = "redis"))]
-                    let cache_opt = None;
+                    let cache_opt: Option<Box<dyn Storage>> = None;
 
                     let s3 = AwsS3::new(
                         &aws_config,
