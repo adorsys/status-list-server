@@ -17,25 +17,6 @@ statuslist:
           done
           echo "Postgres is up."
 
-    - name: wait-for-redis
-      image: busybox:1.37
-      command:
-        - "sh"
-        - "-c"
-        - |
-          {{- if and (index .Values "redis-ha" "haproxy" "tls" "enabled") (index .Values "redis-ha" "externalDnsHostname") }}
-          echo "Waiting for Redis vanity DNS to resolve..."
-          until nslookup {{ index .Values "redis-ha" "externalDnsHostname" }} >/dev/null 2>&1; do
-            echo "{{ index .Values "redis-ha" "externalDnsHostname" }} not resolvable yet. Retrying in 2s...";
-            sleep 2;
-          done
-          echo "Vanity DNS resolved. Waiting for HAProxy (TLS) at 6379..."
-          {{- end }}
-          until nc -z {{ .Release.Name }}-redis-ha-haproxy.{{ .Release.Namespace }}.svc.cluster.local 6379; do
-            echo "Redis (haproxy) not ready. Retrying in 2s...";
-            sleep 2;
-          done
-          echo "Redis (haproxy) is up."
   replicaCount: 1
   image:
     repository: ghcr.io/adorsys/status-list-server
@@ -81,7 +62,6 @@ statuslist:
     # APP_SERVER__CERT__DNS__ACMEDNS__ACCOUNTS JSON, which holds every account password)
     # must come from a secret (see externalSecret below), not from plain env values.
     APP_SERVER__CERT__DNS__PROVIDER: "route53"
-    APP_REDIS__REQUIRE_CLIENT_AUTH: "false"
     APP_AWS__SECRETS_CACHE_TTL: "300"
     APP_AWS__S3_BUCKET: "status-list-adorsys"
     APP_AWS__S3_KEY_PREFIX: ""
@@ -122,7 +102,8 @@ statuslist:
     # When ingress is empty [], ANY source can reach the service port (port-only restriction).
     # Add podSelector/namespaceSelector/ipBlock entries to restrict sources.
     ingress: []
-    # Restrict egress for internal ports (5432, 6379, 6380) to specific destinations.
+    # Restrict egress for internal ports to specific destinations.
+    # PostgreSQL (5432) is always included; Redis ports (6379, 6380) are included only when redis-ha.enabled=true.
     # External ports (443, 53) are always allowed without destination restriction.
     egressInternal: []
   resources:
@@ -186,7 +167,7 @@ secretStore:
     region: eu-central-1
 
 redis-ha:
-  enabled: true
+  enabled: false
   externalDnsHostname: redis.eudi-adorsys.com
   resources:
     requests:
@@ -243,41 +224,94 @@ redis-ha:
         external-dns.alpha.kubernetes.io/hostname: redis.eudi-adorsys.com
         external-dns.alpha.kubernetes.io/delete: "true"
 
-redis:
+opentelemetry-collector:
   enabled: true
-
-otelCollector:
-  enabled: true
-  sidecar:
-    enabled: false
-    image:
-      repository: otel/opentelemetry-collector-contrib
-      tag: "0.156.0"
-    resources:
-      requests:
-        memory: "64Mi"
-        cpu: "50m"
-      limits:
-        memory: "128Mi"
-        cpu: "100m"
-  standalone:
-    enabled: true
-    replicaCount: 1
-    image:
-      repository: otel/opentelemetry-collector-contrib
-      tag: "0.156.0"
-    service:
-      type: ClusterIP
-      grpcPort: 4317
-      httpPort: 4318
-    resources:
-      requests:
-        memory: "128Mi"
-        cpu: "100m"
-      limits:
-        memory: "256Mi"
-        cpu: "200m"
+  mode: deployment
+  image:
+    repository: otel/opentelemetry-collector-contrib
+    tag: "0.158.0"
+  podSecurityContext:
+    runAsNonRoot: true
+    runAsUser: 10001
+    runAsGroup: 10001
+    fsGroup: 10001
+    seccompProfile:
+      type: RuntimeDefault
+  securityContext:
+    readOnlyRootFilesystem: true
+    allowPrivilegeEscalation: false
+    capabilities:
+      drop:
+        - ALL
+    seccompProfile:
+      type: RuntimeDefault
+  resources:
+    requests:
+      memory: "128Mi"
+      cpu: "100m"
+    limits:
+      memory: "256Mi"
+      cpu: "200m"
+  serviceAccount:
+    # The collector uses only OTLP receivers and has no Kubernetes API access needs.
+    # Disabling automounting keeps the pod least-privileged.
+    automountServiceAccountToken: false
+  ports:
+    otlp:
+      enabled: true
+      containerPort: 4317
+      servicePort: 4317
+      protocol: TCP
+    otlp-http:
+      enabled: true
+    healthcheck:
+      enabled: true
+      containerPort: 13133
+      servicePort: 13133
+      protocol: TCP
+    jaeger-compact:
+      enabled: false
+    jaeger-thrift:
+      enabled: false
+    jaeger-grpc:
+      enabled: false
+    zipkin:
+      enabled: false
+    metrics:
+      enabled: true
   config:
+    receivers:
+      jaeger: null
+      zipkin: null
+      prometheus: null
+      otlp:
+        protocols:
+          grpc:
+            endpoint: ${env:MY_POD_IP}:4317
+          http:
+            endpoint: ${env:MY_POD_IP}:4318
+    processors:
+      memory_limiter:
+        check_interval: 1s
+        limit_percentage: 75
+        spike_limit_percentage: 15
+      batch:
+        timeout: 5s
+        send_batch_size: 1024
     exporters:
-      otlpEndpoint: ""
-      otlpTlsInsecure: true
+      debug:
+        verbosity: basic
+    service:
+      pipelines:
+        traces:
+          receivers: [otlp]
+          processors: [memory_limiter, batch]
+          exporters: [debug]
+        metrics:
+          receivers: [otlp]
+          processors: [memory_limiter, batch]
+          exporters: [debug]
+        logs:
+          receivers: [otlp]
+          processors: [memory_limiter, batch]
+          exporters: [debug]

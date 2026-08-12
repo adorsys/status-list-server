@@ -44,6 +44,7 @@ services:
   redis:
     image: redis:8.6
     container_name: redis
+    profiles: ["redis"]
     ports:
       - 6379:6379
     networks:
@@ -91,7 +92,7 @@ services:
       context: .
       dockerfile: Dockerfile
       args:
-        FEATURES: ${FEATURES:-postgres,redis,aws,acme}
+        FEATURES: ${FEATURES:-postgres,aws,acme}
     container_name: status-list-server
     env_file:
       - path: .env.template
@@ -108,13 +109,12 @@ services:
       APP_TELEMETRY__OTLP_ENDPOINT: "http://otel-collector:4317"
       APP_TELEMETRY__ENABLED: ${APP_TELEMETRY__ENABLED:-true}
       APP_TELEMETRY__SAMPLER_RATIO: ${APP_TELEMETRY__SAMPLER_RATIO:-1.0}
+      APP_REDIS__URI: ${APP_REDIS__URI:-}
     ports:
       - 8000:8000
     depends_on:
       db:
         condition: service_healthy
-      redis:
-        condition: service_started
       pebble:
         condition: service_started
       localstack:
@@ -127,7 +127,7 @@ services:
       - status-list-network
 
   otel-collector:
-    image: otel/opentelemetry-collector-contrib:0.156.0
+    image: otel/opentelemetry-collector-contrib:0.158.0
     container_name: otel-collector
     command: ["--config", "/etc/otelcol/config.yaml"]
     volumes:
