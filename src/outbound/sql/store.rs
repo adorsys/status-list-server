@@ -590,8 +590,9 @@ mod test {
     use crate::outbound::sql::models::StatusList;
     use jsonwebtoken::jwk::Jwk;
     use sea_orm::{DatabaseBackend, MockDatabase, MockExecResult, Statement, Transaction};
-    // `Migrator::up` is only called from the real-backend helpers below.
-    #[cfg(any(feature = "sqlite", feature = "mysql", feature = "postgres-tests"))]
+    // `MigratorTrait` is only needed by `sqlite_connection` below; the MySQL
+    // and Postgres helpers live in `test_containers` and import it themselves.
+    #[cfg(feature = "sqlite")]
     use sea_orm_migration::MigratorTrait;
 
     // Container fixtures live in `test_containers` because the HTTP-layer
