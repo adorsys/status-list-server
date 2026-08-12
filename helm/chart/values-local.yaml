@@ -56,35 +56,5 @@ externalSecret:
 secretStore:
   enabled: false
 
-redis-ha:
-  externalDnsHostname: ""
-  redis:
-    tlsPort: null
-    tlsReplication: false
-    authClients: "no"
-    customConfig: |
-      port 6379
-      masterauth redis
-      requirepass redis
-      protected-mode no
-      dir /data
-      save 900 1
-      maxmemory 0
-      maxmemory-policy volatile-lru
-  persistentVolume:
-    enabled: false
-    storageClass: "standard"
-    size: 5Gi
-  tls:
-    secretName: ""
-    certFile: ""
-    keyFile: ""
-  haproxy:
-    tls:
-      enabled: false
-      secretName: ""
-      keyName: ""
-    service:
-      type: NodePort
-      annotations: {}
-      nodePort: 30679
+opentelemetry-collector:
+  enabled: false

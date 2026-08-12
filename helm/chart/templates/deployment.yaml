@@ -87,25 +87,30 @@ spec:
                 {{- $_ := set $env "APP_SERVER__DOMAIN" "localhost" }}
               {{- end }}
             {{- end }}
-            {{- if .Values.otelCollector.enabled }}
-              {{- if and .Values.otelCollector.sidecar.enabled .Values.otelCollector.standalone.enabled }}
-                {{- fail "otelCollector sidecar and standalone modes are mutually exclusive" }}
-              {{- else if .Values.otelCollector.sidecar.enabled }}
-                {{- if not (hasKey $env "APP_TELEMETRY__ENABLED") }}
-                  {{- $_ := set $env "APP_TELEMETRY__ENABLED" "true" }}
+            {{- $otel := index .Values "opentelemetry-collector" | default dict }}
+            {{- if $otel.enabled }}
+              {{- if not (hasKey $env "APP_TELEMETRY__ENABLED") }}
+                {{- $_ := set $env "APP_TELEMETRY__ENABLED" "true" }}
+              {{- end }}
+              {{- if not (hasKey $env "APP_TELEMETRY__OTLP_ENDPOINT") }}
+                {{- $otlpPort := dig "ports" "otlp" "servicePort" 4317 $otel }}
+                {{- /* Mirror the upstream opentelemetry-collector.fullname helper exactly:        */}}
+                {{- /* 1. fullnameOverride → use as-is (trunc 63)                                */}}
+                {{- /* 2. else: effectiveName = nameOverride ?? chart name                        */}}
+                {{- /*    if release.contains(effectiveName) → use release (trunc 63)            */}}
+                {{- /*    else → "$release-$effectiveName" (trunc 63)                            */}}
+                {{- $collectorSvcName := "" }}
+                {{- if $otel.fullnameOverride }}
+                  {{- $collectorSvcName = $otel.fullnameOverride | trunc 63 | trimSuffix "-" }}
+                {{- else }}
+                  {{- $effectiveName := $otel.nameOverride | default "opentelemetry-collector" }}
+                  {{- if contains $effectiveName .Release.Name }}
+                    {{- $collectorSvcName = .Release.Name | trunc 63 | trimSuffix "-" }}
+                  {{- else }}
+                    {{- $collectorSvcName = printf "%s-%s" .Release.Name $effectiveName | trunc 63 | trimSuffix "-" }}
+                  {{- end }}
                 {{- end }}
-                {{- if not (hasKey $env "APP_TELEMETRY__OTLP_ENDPOINT") }}
-                  {{- $_ := set $env "APP_TELEMETRY__OTLP_ENDPOINT" "http://localhost:4317" }}
-                {{- end }}
-              {{- else if .Values.otelCollector.standalone.enabled }}
-                {{- if not (hasKey $env "APP_TELEMETRY__ENABLED") }}
-                  {{- $_ := set $env "APP_TELEMETRY__ENABLED" "true" }}
-                {{- end }}
-                {{- if not (hasKey $env "APP_TELEMETRY__OTLP_ENDPOINT") }}
-                  {{- $_ := set $env "APP_TELEMETRY__OTLP_ENDPOINT" (printf "http://%s-otel-collector.%s.svc.cluster.local:%v" (include "status-list-server-chart.fullname" .) .Release.Namespace .Values.otelCollector.standalone.service.grpcPort) }}
-                {{- end }}
-              {{- else }}
-                {{- fail "otelCollector.enabled=true requires either sidecar.enabled=true or standalone.enabled=true" }}
+                {{- $_ := set $env "APP_TELEMETRY__OTLP_ENDPOINT" (printf "http://%s.%s.svc.cluster.local:%d" $collectorSvcName .Release.Namespace ($otlpPort | int)) }}
               {{- end }}
             {{- else }}
               {{- if not (hasKey $env "APP_TELEMETRY__ENABLED") }}
@@ -150,34 +155,6 @@ spec:
               mountPath: /home/nobody/.aws
               readOnly: true
           {{- end }}
-        {{- if and .Values.otelCollector.enabled .Values.otelCollector.sidecar.enabled }}
-        - name: otel-collector
-          securityContext:
-            readOnlyRootFilesystem: true
-            allowPrivilegeEscalation: false
-            capabilities:
-              drop:
-                - ALL
-            seccompProfile:
-              type: RuntimeDefault
-          image: {{ .Values.otelCollector.sidecar.image.repository }}:{{ .Values.otelCollector.sidecar.image.tag }}
-          args: ["--config", "/etc/otelcol/config.yaml"]
-          ports:
-            - name: otlp-grpc
-              containerPort: 4317
-              protocol: TCP
-            - name: otlp-http
-              containerPort: 4318
-              protocol: TCP
-          volumeMounts:
-            - name: otel-collector-config
-              mountPath: /etc/otelcol
-              readOnly: true
-          {{- with .Values.otelCollector.sidecar.resources }}
-          resources:
-            {{- toYaml . | nindent 12 }}
-          {{- end }}
-        {{- end }}
       volumes:
         - name: tmp
           emptyDir: {}
@@ -185,10 +162,5 @@ spec:
         - name: aws-credentials-volume
           secret:
             secretName: aws-credentials-secret
-      {{- end }}
-      {{- if and .Values.otelCollector.enabled .Values.otelCollector.sidecar.enabled }}
-        - name: otel-collector-config
-          configMap:
-            name: {{ include "status-list-server-chart.fullname" . }}-otel-collector-config
       {{- end }}
 {{- end }}

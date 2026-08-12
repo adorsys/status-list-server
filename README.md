@@ -302,6 +302,14 @@ service container, and in-memory outbound adapters only), run:
 cargo check --no-default-features --features memory
 ```
 
+## Contributing
+
+Contributions are welcome and encouraged. Before contributing, please review the [architecture documentation](./docs/architecture.md), which provides an overview of our architectural design. Also refer to the [contributing guide](./CONTRIBUTING.md) for more details.
+
+## Releases
+
+This project uses [release-plz](https://release-plz.dev/) with [Conventional Commits](https://www.conventionalcommits.org/) to automate versioning and changelog generation. Every push to `main` opens or updates a Release PR. Merging that PR creates a git tag and a GitHub Release automatically.
+
 ## License
 
 Licensed under either of [Apache License, Version 2.0](LICENSE-APACHE) or [MIT license](LICENSE-MIT) at your option.
