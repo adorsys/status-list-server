@@ -175,9 +175,6 @@ features = ["alloc", "ecdsa", "pem", "pkcs8"]
 sealed_test = "1.1.0"
 wiremock = "0.6"
 sea-orm = { version = "1.1", features = ["mock"] }
-sea-orm-migration = { version = "1.1.20", default-features = false, features = [
-  "runtime-tokio-rustls",
-] }
 testcontainers-modules = {
   version = "0.15",
   features = ["localstack", "mysql", "postgres", "redis"]
