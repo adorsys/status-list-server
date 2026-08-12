@@ -1,4 +1,6 @@
 {{- if .Values.statuslist.networkPolicy.enabled }}
+{{- $redisHA := index .Values "redis-ha" | default dict -}}
+{{- $redisHAEnabled := eq (default false (index $redisHA "enabled")) true -}}
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -32,10 +34,12 @@ spec:
     - ports:
         - port: 5432
           protocol: TCP
+        {{- if $redisHAEnabled }}
         - port: 6379
           protocol: TCP
         - port: 6380
           protocol: TCP
+        {{- end }}
       {{- with .Values.statuslist.networkPolicy.egressInternal }}
       to:
         {{- toYaml . | nindent 8 }}
