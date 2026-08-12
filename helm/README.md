@@ -14,6 +14,7 @@ This chart has the following dependencies:
 
 - **PostgreSQL**: A relational database for storing application data.
 - **Redis HA**: Optional high-availability Redis cluster for the distributed certificate-material cache.
+- **OpenTelemetry Collector**: Official subchart (`open-telemetry/opentelemetry-collector`) for collecting and routing traces, metrics, and logs.
 
 These dependencies are managed by the Helm chart. PostgreSQL is enabled by default; Redis HA is disabled by default and is installed only when `redis-ha.enabled=true`.
 

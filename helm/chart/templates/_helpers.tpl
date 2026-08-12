@@ -52,27 +52,6 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end }}
 
 {{/*
-Otel Collector selector labels
-*/}}
-{{- define "status-list-server-chart.otelCollectorSelectorLabels" -}}
-app.kubernetes.io/name: {{ include "status-list-server-chart.name" . }}-otel-collector
-app.kubernetes.io/instance: {{ .Release.Name }}
-app.kubernetes.io/component: otel-collector
-{{- end }}
-
-{{/*
-Otel Collector common labels
-*/}}
-{{- define "status-list-server-chart.otelCollectorLabels" -}}
-helm.sh/chart: {{ include "status-list-server-chart.chart" . }}
-{{ include "status-list-server-chart.otelCollectorSelectorLabels" . }}
-{{- if .Chart.AppVersion }}
-app.kubernetes.io/version: {{ .Chart.AppVersion | quote }}
-{{- end }}
-app.kubernetes.io/managed-by: {{ .Release.Service }}
-{{- end }}
-
-{{/*
 Create the name of the service account to use
 */}}
 {{- define "status-list-server-chart.serviceAccountName" -}}
