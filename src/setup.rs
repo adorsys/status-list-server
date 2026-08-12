@@ -214,36 +214,41 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
                         .load()
                         .await;
 
-                    #[cfg(feature = "redis")]
-                    let cache_opt = if !config.redis.uri.expose_secret().is_empty() {
-                        match config.redis.start(None, None, None).await {
-                            Ok(redis_conn) => {
-                                Some(Redis::new(redis_conn).with_ttl(config.redis.cert_cache_ttl))
-                            }
-                            Err(e) => {
-                                tracing::warn!(
-                                    "Redis connection failed ({}); certificate cache disabled, falling back to direct S3",
-                                    e
-                                );
-                                None
-                            }
-                        }
-                    } else {
-                        None
-                    };
-                    #[cfg(not(feature = "redis"))]
-                    let cache_opt = None;
-
                     let s3 = AwsS3::new(
                         &aws_config,
                         &config.aws.s3_bucket,
                         &config.aws.region,
                         &config.aws.s3_key_prefix,
                     );
-                    let cert_st: Box<dyn Storage> = match cache_opt {
-                        Some(c) => Box::new(s3.with_cache(c)),
-                        None => Box::new(s3),
+
+                    #[cfg(feature = "redis")]
+                    let cert_st: Box<dyn Storage> = {
+                        let redis_uri = config.redis.uri.expose_secret().trim();
+                        let cache_opt = if !redis_uri.is_empty() {
+                            match config.redis.start(None, None, None).await {
+                                Ok(redis_conn) => Some(
+                                    Redis::new(redis_conn).with_ttl(config.redis.cert_cache_ttl),
+                                ),
+                                Err(e) => {
+                                    tracing::warn!(
+                                        "Redis connection failed ({}); certificate cache disabled, falling back to direct S3",
+                                        e
+                                    );
+                                    None
+                                }
+                            }
+                        } else {
+                            None
+                        };
+
+                        match cache_opt {
+                            Some(c) => Box::new(s3.with_cache(c)),
+                            None => Box::new(s3),
+                        }
                     };
+
+                    #[cfg(not(feature = "redis"))]
+                    let cert_st: Box<dyn Storage> = Box::new(s3);
 
                     let secrets_st: Box<dyn Storage> = Box::new(
                         AwsSecretsManager::new(
