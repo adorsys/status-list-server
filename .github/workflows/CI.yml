@@ -17,7 +17,7 @@ jobs:
 
     steps:
       - name: Fetch Repository
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Install Zizmor
         uses: taiki-e/install-action@c44f6b046f1c29ae5918b1e0bfdbb2f1813836fd # v2
@@ -34,7 +34,7 @@ jobs:
 
     steps:
       - name: Fetch Repository
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Install stable toolchain
         uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1
@@ -52,7 +52,7 @@ jobs:
 
     steps:
       - name: Fetch Repository
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Install Rust
         uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1
@@ -82,7 +82,7 @@ jobs:
 
     steps:
       - name: Fetch Repository
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Install Rust
         uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1
@@ -99,7 +99,7 @@ jobs:
 
     steps:
       - name: Fetch Repository
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Install Rust
         uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1
@@ -119,7 +119,7 @@ jobs:
 
     steps:
       - name: Fetch Repository
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Install Rust
         uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1
@@ -141,7 +141,7 @@ jobs:
 
     steps:
       - name: Fetch Repository
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Install stable toolchain
         uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1
@@ -161,7 +161,7 @@ jobs:
 
     steps:
       - name: Fetch Repository
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Install Rust
         uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1
@@ -181,7 +181,7 @@ jobs:
 
     steps:
       - name: Fetch Repository
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Install Rust
         uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1
@@ -189,7 +189,7 @@ jobs:
       - name: Install cargo-vet
         uses: taiki-e/install-action@c44f6b046f1c29ae5918b1e0bfdbb2f1813836fd # v2
         with:
-          tool: cargo-vet
+          tool: cargo-vet@0.10.2
 
       - name: Run cargo-vet
         run: cargo vet --locked
@@ -203,7 +203,7 @@ jobs:
 
     steps:
       - name: Fetch Repository
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Install Typos
         uses: taiki-e/install-action@c44f6b046f1c29ae5918b1e0bfdbb2f1813836fd # v2
@@ -219,7 +219,7 @@ jobs:
 
     steps:
       - name: Fetch Repository
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Install Taplo
         uses: tombi-toml/setup-tombi@f2ae7247d62521245eb2793d653b9df472b9e090 # v1
@@ -235,7 +235,7 @@ jobs:
 
     steps:
       - name: Fetch Repository
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Markdown Lint
         uses: DavidAnson/markdownlint-cli2-action@6bf21b07787794f89a243495939cd651942aeabe # v24
@@ -248,10 +248,10 @@ jobs:
 
     steps:
       - name: Fetch Repository
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Setup Helm
-        uses: azure/setup-helm@v3
+        uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
 
       - name: Build Helm dependencies
         run: |
@@ -264,7 +264,7 @@ jobs:
           helm template status-list-server helm/chart -f helm/chart/values.yaml --output-dir /tmp/rendered
 
       - name: Run Trivy config scan
-        uses: aquasecurity/trivy-action@v0.36.0
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           scan-type: config
           scan-ref: /tmp/rendered
@@ -278,10 +278,10 @@ jobs:
 
     steps:
       - name: Fetch Repository
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Setup Helm
-        uses: azure/setup-helm@v3
+        uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
 
       - name: Build Helm dependencies
         run: |
@@ -294,7 +294,7 @@ jobs:
           helm template status-list-server helm/chart -f helm/chart/values.yaml --output-dir /tmp/rendered
 
       - name: Run KubeLinter
-        uses: stackrox/kube-linter-action@v1
+        uses: stackrox/kube-linter-action@87802a2f4e01abebb3ee3c67a3002fea71f6eae5 # v1.0.7
         with:
           directory: /tmp/rendered
           format: sarif
@@ -307,7 +307,7 @@ jobs:
 
     steps:
       - name: Fetch Repository
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: YAML Lint
         uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
@@ -321,13 +321,80 @@ jobs:
       - name: Run yamlfmt
         run: yamlfmt --lint .
 
+  otel-config-validation:
+    name: OpenTelemetry Config Validation
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Fetch Repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Validate Docker Compose model
+        run: docker compose config
+
+      - name: Verify Jaeger image tag exists
+        run: docker manifest inspect jaegertracing/jaeger:2.20.0 >/dev/null
+
+      - name: Validate Compose Collector config
+        run: |
+          docker run --rm \
+            -v "$PWD/otel-collector.yaml:/etc/otelcol/config.yaml:ro" \
+            otel/opentelemetry-collector-contrib:0.156.0 \
+            validate --config /etc/otelcol/config.yaml
+
+      - name: Install Helm
+        uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+
+      - name: Install YAML parser
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y python3-yaml
+
+      - name: Build Helm dependencies
+        run: |
+          helm repo add dandydeveloper https://dandydeveloper.github.io/charts
+          helm dependency build helm/chart
+
+      - name: Render Helm chart
+        run: helm template statuslist helm/chart --namespace statuslist > /tmp/statuslist-rendered.yaml
+
+      - name: Extract rendered Helm Collector config
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import yaml
+
+          rendered = Path("/tmp/statuslist-rendered.yaml")
+          for document in yaml.safe_load_all(rendered.read_text()):
+              if not isinstance(document, dict):
+                  continue
+              metadata = document.get("metadata") or {}
+              if (
+                  document.get("kind") == "ConfigMap"
+                  and metadata.get("name", "").endswith("-otel-collector-config")
+              ):
+                  Path("/tmp/helm-otel-collector.yaml").write_text(
+                      document["data"]["config.yaml"]
+                  )
+                  break
+          else:
+              raise SystemExit("rendered Helm Collector ConfigMap was not found")
+          PY
+
+      - name: Validate rendered Helm Collector config
+        run: |
+          docker run --rm \
+            -v "/tmp/helm-otel-collector.yaml:/etc/otelcol/config.yaml:ro" \
+            otel/opentelemetry-collector-contrib:0.156.0 \
+            validate --config /etc/otelcol/config.yaml
+
   cargo-coverage:
     name: Cargo Coverage (llvm-cov)
     runs-on: ubuntu-latest
     needs: cargo-build
     steps:
       - name: Fetch Repository
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Install stable toolchain
         uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1

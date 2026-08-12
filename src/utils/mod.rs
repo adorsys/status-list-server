@@ -4,3 +4,4 @@ pub(crate) mod cache;
 pub mod cert_manager;
 pub mod keygen;
 pub(crate) mod metrics;
+pub mod telemetry;

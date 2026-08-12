@@ -10,12 +10,7 @@ use aws_config::{BehaviorVersion, Region};
 ))]
 use color_eyre::eyre::Context;
 use color_eyre::eyre::Result as EyeResult;
-#[cfg(any(
-    feature = "acme",
-    feature = "sqlite",
-    feature = "postgres",
-    feature = "mysql"
-))]
+#[cfg(feature = "acme")]
 use color_eyre::eyre::eyre;
 #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mysql"))]
 use sea_orm::ConnectOptions;
@@ -58,7 +53,7 @@ use crate::config::{
     DnsProviderKind, ENV_DEVELOPMENT, ENV_PRODUCTION, GcloudKeySource, ResolvedDnsProvider,
 };
 use crate::domain::{
-    ports::{CertificateProvider, CredentialRepo, StatusListHistoryRepo, StatusListRepo},
+    ports::{CertificateProvider, CredentialRepo, StatusListRepo, StatusListSnapshotRepo},
     service::Service,
 };
 #[cfg(feature = "aws")]
@@ -67,12 +62,13 @@ use crate::outbound::cache::MokaStatusListCache;
 #[cfg(feature = "acme")]
 use crate::outbound::cert::AcmeCertificateProvider;
 #[cfg(feature = "memory")]
-use crate::outbound::memory::{MemoryCredentials, MemoryStatusListHistory, MemoryStatusLists};
+use crate::outbound::memory::{MemoryCredentials, MemoryStatusListSnapshotRepo, MemoryStatusLists};
 #[cfg(feature = "redis")]
 use crate::outbound::redis::Redis;
 #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mysql"))]
 use crate::outbound::sql::{
-    Migrator, SeaOrmStore, SqlCredentialRepo, SqlStatusListHistoryRepo, SqlStatusListRepo,
+    Migrator, SeaOrmStore, SqlCredentialRepo, SqlStatusListRepo, SqlStatusListSnapshotRepo,
+    verify_innodb_engines,
 };
 use crate::server::AppState;
 
@@ -114,19 +110,19 @@ type BuildStateResult = (AppState, Arc<CertManager>);
 type BuildStateResult = (AppState,);
 
 async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
-    let (status_list_repo, credential_repo, status_list_history): (
+    let (status_list_repo, credential_repo, status_list_snapshot): (
         Arc<dyn StatusListRepo>,
         Arc<dyn CredentialRepo>,
-        Arc<dyn StatusListHistoryRepo>,
+        Arc<dyn StatusListSnapshotRepo>,
     ) = match config.database.backend {
         #[cfg(feature = "memory")]
         DatabaseBackend::Memory => {
-            let memory_history = MemoryStatusListHistory::default();
-            let memory_lists = MemoryStatusLists::default().with_history(&memory_history);
+            let memory_snapshot = MemoryStatusListSnapshotRepo::default();
+            let memory_lists = MemoryStatusLists::default().with_snapshot(&memory_snapshot);
             (
                 Arc::new(memory_lists),
                 Arc::new(MemoryCredentials::default()),
-                Arc::new(memory_history),
+                Arc::new(memory_snapshot),
             )
         }
         #[cfg(not(feature = "memory"))]
@@ -171,11 +167,17 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
                 .await
                 .wrap_err("Failed to run database migrations")?;
 
+            verify_innodb_engines(&db).await.wrap_err(
+                "Startup aborted: one or more tables are not using the InnoDB storage engine. \
+                     See the logged error(s) above for the table name(s) and the ALTER TABLE \
+                     runbook command to fix the issue.",
+            )?;
+
             let db_clone = Arc::new(db);
             (
                 Arc::new(SqlStatusListRepo::new(SeaOrmStore::new(db_clone.clone()))),
                 Arc::new(SqlCredentialRepo::new(SeaOrmStore::new(db_clone.clone()))),
-                Arc::new(SqlStatusListHistoryRepo::new(SeaOrmStore::new(
+                Arc::new(SqlStatusListSnapshotRepo::new(SeaOrmStore::new(
                     db_clone.clone(),
                 ))),
             )
@@ -212,29 +214,41 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
                         .load()
                         .await;
 
-                    #[cfg(feature = "redis")]
-                    let cache_opt = if !config.redis.uri.expose_secret().is_empty() {
-                        if let Ok(redis_conn) = config.redis.start(None, None, None).await {
-                            Some(Redis::new(redis_conn).with_ttl(config.redis.cert_cache_ttl))
-                        } else {
-                            None
-                        }
-                    } else {
-                        None
-                    };
-                    #[cfg(not(feature = "redis"))]
-                    let cache_opt = None;
-
                     let s3 = AwsS3::new(
                         &aws_config,
                         &config.aws.s3_bucket,
                         &config.aws.region,
                         &config.aws.s3_key_prefix,
                     );
-                    let cert_st: Box<dyn Storage> = match cache_opt {
-                        Some(c) => Box::new(s3.with_cache(c)),
-                        None => Box::new(s3),
+
+                    #[cfg(feature = "redis")]
+                    let cert_st: Box<dyn Storage> = {
+                        let redis_uri = config.redis.uri.expose_secret().trim();
+                        let cache_opt = if !redis_uri.is_empty() {
+                            match config.redis.start(None, None, None).await {
+                                Ok(redis_conn) => Some(
+                                    Redis::new(redis_conn).with_ttl(config.redis.cert_cache_ttl),
+                                ),
+                                Err(e) => {
+                                    tracing::warn!(
+                                        "Redis connection failed ({}); certificate cache disabled, falling back to direct S3",
+                                        e
+                                    );
+                                    None
+                                }
+                            }
+                        } else {
+                            None
+                        };
+
+                        match cache_opt {
+                            Some(c) => Box::new(s3.with_cache(c)),
+                            None => Box::new(s3),
+                        }
                     };
+
+                    #[cfg(not(feature = "redis"))]
+                    let cert_st: Box<dyn Storage> = Box::new(s3);
 
                     let secrets_st: Box<dyn Storage> = Box::new(
                         AwsSecretsManager::new(
@@ -328,17 +342,17 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
 
     let status_list_cache = MokaStatusListCache::new(config.cache.ttl, config.cache.max_capacity);
 
-    let history_option = if config.status_list.history_retention_secs == 0 {
+    let snapshot_option = if config.status_list.snapshot_retention_secs == 0 {
         None
     } else {
-        Some(status_list_history)
+        Some(status_list_snapshot)
     };
 
     let service = Arc::new(Service::from_arcs(
         status_list_repo,
         credential_repo,
         Arc::new(status_list_cache),
-        history_option,
+        snapshot_option,
         cert_provider,
     ));
 
@@ -351,7 +365,7 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
         max_status_index: config.limits.max_status_index,
         max_statuses_per_request: config.limits.max_statuses_per_request,
         max_serialized_list_size: config.limits.max_serialized_list_size,
-        history_retention_secs: config.status_list.history_retention_secs,
+        snapshot_retention_secs: config.status_list.snapshot_retention_secs,
     };
 
     #[cfg(feature = "acme")]
@@ -364,16 +378,16 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
     }
 }
 
-pub async fn setup_history_cleanup_scheduler(
+pub async fn setup_snapshot_cleanup_scheduler(
     app_state: AppState,
     cron_schedule: &str,
 ) -> color_eyre::Result<()> {
     use tokio_cron_scheduler::{Job, JobScheduler};
     use tracing::{error, info};
 
-    if app_state.history_retention_secs == 0 {
+    if app_state.snapshot_retention_secs == 0 {
         info!(
-            "Historical snapshots are disabled (history_retention_secs=0), skipping cleanup scheduler"
+            "Historical snapshots are disabled (snapshot_retention_secs=0), skipping cleanup scheduler"
         );
         return Ok(());
     }
@@ -385,11 +399,11 @@ pub async fn setup_history_cleanup_scheduler(
             let app_state = app_state.clone();
             Box::pin(async move {
                 let now = time::OffsetDateTime::now_utc().unix_timestamp();
-                let cutoff = now - app_state.history_retention_secs as i64;
+                let cutoff = now - app_state.snapshot_retention_secs as i64;
 
                 match app_state
                     .service
-                    .cleanup_historical_snapshots(cutoff)
+                    .cleanup_snapshots(cutoff)
                     .await
                 {
                     Ok(deleted) => {

@@ -5,7 +5,7 @@ use crate::{
 
 use super::*;
 use async_trait::async_trait;
-use metrics_util::debugging::{DebugValue, DebuggingRecorder};
+use sealed_test::prelude::*;
 use std::collections::HashMap;
 use std::sync::{
     Arc, Once,
@@ -648,60 +648,70 @@ async fn test_cert_chain_cache_invalidation_reloads_chain() {
     assert_eq!(cert_storage.load_count(), 2);
 }
 
-// Tests for renewal metrics
+fn setup_test_metrics_registry() -> prometheus::Registry {
+    use crate::config::{TelemetryConfig, TelemetryEnvironment};
+    use crate::utils::metrics::setup_metrics;
+    use opentelemetry_sdk::Resource;
 
-#[test]
-fn test_describe_renewal_metrics_is_safe_before_recorder_installed() {
-    // This should not panic even when no recorder is installed
-    // The describe_* macros are idempotent and safe to call before a recorder
-    describe_renewal_metrics();
+    let registry = prometheus::Registry::new();
+    let config = TelemetryConfig {
+        environment: TelemetryEnvironment::Development,
+        otlp_endpoint: "http://localhost:4317".to_string(),
+        sampler_ratio: 1.0,
+        enabled: false,
+    };
+    let _ = setup_metrics(
+        &registry,
+        &config,
+        Resource::builder()
+            .with_service_name("cert-manager-test")
+            .build(),
+    );
+    registry
 }
 
-#[test]
+fn counter_value(registry: &prometheus::Registry, name: &str) -> f64 {
+    registry
+        .gather()
+        .into_iter()
+        .find(|mf| mf.name().contains(name))
+        .and_then(|mf| mf.get_metric().first().map(|m| m.get_counter().value()))
+        .unwrap_or(0.0)
+}
+
+fn gauge_value(registry: &prometheus::Registry, name: &str) -> f64 {
+    registry
+        .gather()
+        .into_iter()
+        .find(|mf| mf.name().contains(name))
+        .and_then(|mf| mf.get_metric().first().map(|m| m.get_gauge().value()))
+        .unwrap_or(0.0)
+}
+
+#[sealed_test]
 fn test_init_renewal_counters_registers_zero_values() {
-    let recorder = DebuggingRecorder::new();
-    let snapshotter = recorder.snapshotter();
+    init_crypto();
+    let registry = setup_test_metrics_registry();
 
-    metrics::with_local_recorder(&recorder, || {
-        init_renewal_counters();
-    });
+    let cert_manager = CertManager::new(
+        vec!["example.com"],
+        "test@example.com",
+        None::<String>,
+        "https://acme-staging-v02.api.letsencrypt.org/directory",
+    )
+    .unwrap();
 
-    let snapshot = snapshotter.snapshot().into_hashmap();
+    cert_manager.init_renewal_counters();
 
-    let mut found_attempts = false;
-    let mut found_successes = false;
-    let mut found_failures = false;
-
-    for (composite_key, (_, _, debug_value)) in &snapshot {
-        let name = composite_key.key().name();
-        match (name, debug_value) {
-            (RENEWAL_ATTEMPTS_METRIC, DebugValue::Counter(c)) => {
-                assert_eq!(*c, 0, "attempts counter should be 0");
-                found_attempts = true;
-            }
-            (RENEWAL_SUCCESSES_METRIC, DebugValue::Counter(c)) => {
-                assert_eq!(*c, 0, "successes counter should be 0");
-                found_successes = true;
-            }
-            (RENEWAL_FAILURES_METRIC, DebugValue::Counter(c)) => {
-                assert_eq!(*c, 0, "failures counter should be 0");
-                found_failures = true;
-            }
-            _ => {}
-        }
-    }
-
-    assert!(found_attempts, "attempts counter should be registered");
-    assert!(found_successes, "successes counter should be registered");
-    assert!(found_failures, "failures counter should be registered");
+    assert_eq!(counter_value(&registry, "cert_renewal_attempts"), 0.0);
+    assert_eq!(counter_value(&registry, "cert_renewal_successes"), 0.0);
+    assert_eq!(counter_value(&registry, "cert_renewal_failures"), 0.0);
 }
 
-#[test]
+#[sealed_test]
 fn test_update_time_to_expiry_sets_gauge() {
     init_crypto();
-
-    let recorder = DebuggingRecorder::new();
-    let snapshotter = recorder.snapshotter();
+    let registry = setup_test_metrics_registry();
 
     let cert_manager = CertManager::new(
         vec!["example.com"],
@@ -715,43 +725,24 @@ fn test_update_time_to_expiry_sets_gauge() {
     let cert_data = CertificateData {
         certificate: "mock_cert".to_string(),
         valid_from: now - days_to_secs(30),
-        expires_at: now + days_to_secs(60), // expires in 60 days
+        expires_at: now + days_to_secs(60),
         updated_at: now,
     };
 
-    metrics::with_local_recorder(&recorder, || {
-        cert_manager.update_time_to_expiry(&cert_data);
-    });
+    cert_manager.update_time_to_expiry(&cert_data);
 
-    let snapshot = snapshotter.snapshot().into_hashmap();
-
-    let mut found_gauge = false;
-    for (composite_key, (_, _, debug_value)) in &snapshot {
-        let name = composite_key.key().name();
-        if name == TIME_TO_EXPIRY_METRIC
-            && let DebugValue::Gauge(g) = debug_value
-        {
-            // Should be approximately 60 days in seconds (5184000 seconds)
-            // Allow some tolerance since time moves
-            let g_f64: f64 = (*g).into();
-            assert!(
-                (5183900.0..=5184000.0).contains(&g_f64),
-                "time_to_expiry should be ~60 days in seconds, got {}",
-                g_f64
-            );
-            found_gauge = true;
-        }
-    }
-
-    assert!(found_gauge, "time_to_expiry gauge should be set");
+    let gauge_val = gauge_value(&registry, "cert_time_to_expiry_seconds");
+    let expected = days_to_secs(60) as f64;
+    assert!(
+        (gauge_val - expected).abs() < 10.0,
+        "expected gauge near {expected}, got {gauge_val}"
+    );
 }
 
-#[test]
+#[sealed_test]
 fn test_record_successful_renewal_updates_counters_and_gauge() {
     init_crypto();
-
-    let recorder = DebuggingRecorder::new();
-    let snapshotter = recorder.snapshotter();
+    let registry = setup_test_metrics_registry();
 
     let cert_manager = CertManager::new(
         vec!["example.com"],
@@ -761,51 +752,23 @@ fn test_record_successful_renewal_updates_counters_and_gauge() {
     )
     .unwrap();
 
-    // Initialize counters first
-    metrics::with_local_recorder(&recorder, || {
-        init_renewal_counters();
-        cert_manager.record_successful_renewal();
-    });
+    cert_manager.init_renewal_counters();
+    cert_manager.record_successful_renewal();
 
-    let snapshot = snapshotter.snapshot().into_hashmap();
+    assert_eq!(counter_value(&registry, "cert_renewal_successes"), 1.0);
 
-    let mut successes = None::<u64>;
-    let mut last_renewal = None::<f64>;
-
-    for (composite_key, (_, _, debug_value)) in &snapshot {
-        let name = composite_key.key().name();
-        match (name, debug_value) {
-            (RENEWAL_SUCCESSES_METRIC, DebugValue::Counter(c)) => {
-                successes = Some(*c);
-            }
-            (LAST_SUCCESSFUL_RENEWAL_METRIC, DebugValue::Gauge(g)) => {
-                last_renewal = Some(f64::from(*g));
-            }
-            _ => {}
-        }
-    }
-
-    assert_eq!(successes, Some(1), "successes counter should be 1");
-    assert!(
-        last_renewal.is_some(),
-        "last_successful_renewal gauge should be set"
-    );
-
-    // Verify the timestamp is recent (within last minute)
+    let last_renewal_ts = gauge_value(&registry, "cert_last_successful_renewal_timestamp");
     let now = now_unix_timestamp() as f64;
-    let renewal_ts = last_renewal.unwrap();
     assert!(
-        renewal_ts > now - 60.0 && renewal_ts <= now + 1.0,
-        "last_successful_renewal should be a recent timestamp"
+        (now - last_renewal_ts).abs() < 60.0,
+        "expected timestamp near {now}, got {last_renewal_ts}"
     );
 }
 
-#[test]
+#[sealed_test]
 fn test_record_failed_renewal_increments_failure_counter() {
     init_crypto();
-
-    let recorder = DebuggingRecorder::new();
-    let snapshotter = recorder.snapshotter();
+    let registry = setup_test_metrics_registry();
 
     let cert_manager = CertManager::new(
         vec!["example.com"],
@@ -815,35 +778,17 @@ fn test_record_failed_renewal_increments_failure_counter() {
     )
     .unwrap();
 
-    // Initialize counters first
-    metrics::with_local_recorder(&recorder, || {
-        init_renewal_counters();
-        cert_manager.record_failed_renewal();
-        cert_manager.record_failed_renewal();
-    });
+    cert_manager.init_renewal_counters();
+    cert_manager.record_failed_renewal();
+    cert_manager.record_failed_renewal();
 
-    let snapshot = snapshotter.snapshot().into_hashmap();
-
-    let mut failures = None::<u64>;
-
-    for (composite_key, (_, _, debug_value)) in &snapshot {
-        let name = composite_key.key().name();
-        if name == RENEWAL_FAILURES_METRIC
-            && let DebugValue::Counter(c) = debug_value
-        {
-            failures = Some(*c);
-        }
-    }
-
-    assert_eq!(failures, Some(2), "failures counter should be 2");
+    assert_eq!(counter_value(&registry, "cert_renewal_failures"), 2.0);
 }
 
-#[test]
+#[sealed_test]
 fn test_renewal_attempts_metric_via_manager() {
     init_crypto();
-
-    let recorder = DebuggingRecorder::new();
-    let snapshotter = recorder.snapshotter();
+    let registry = setup_test_metrics_registry();
 
     let cert_storage = MockStorage::new();
     let secrets_storage = MockStorage::new();
@@ -858,34 +803,15 @@ fn test_renewal_attempts_metric_via_manager() {
     .with_cert_storage(cert_storage)
     .with_secrets_storage(secrets_storage);
 
-    // Create a runtime for async operations
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .expect("tokio runtime");
 
-    // Initialize counters and trigger renewal attempt with recorder active
-    metrics::with_local_recorder(&recorder, || {
-        rt.block_on(async {
-            init_renewal_counters();
-            // This will fail but still record an attempt
-            let _ = cert_manager.renew_cert_if_needed().await;
-        });
+    rt.block_on(async {
+        cert_manager.init_renewal_counters();
+        let _ = cert_manager.renew_cert_if_needed().await;
     });
 
-    let snapshot = snapshotter.snapshot().into_hashmap();
-
-    let mut attempts = None::<u64>;
-
-    for (composite_key, (_, _, debug_value)) in &snapshot {
-        let name = composite_key.key().name();
-        if name == RENEWAL_ATTEMPTS_METRIC
-            && let DebugValue::Counter(c) = debug_value
-        {
-            attempts = Some(*c);
-        }
-    }
-
-    // Should record at least one attempt
-    assert_eq!(attempts, Some(1), "renewal attempt should be recorded");
+    assert_eq!(counter_value(&registry, "cert_renewal_attempts"), 1.0);
 }
