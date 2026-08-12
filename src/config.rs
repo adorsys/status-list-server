@@ -608,7 +608,7 @@ pub struct VaultConfig {
     pub addr: String,
     /// Authentication token.
     pub token: SecretString,
-    /// KV v2 engine mount path..
+    /// KV v2 engine mount path.
     pub mount: String,
     /// Prefix prepended to all secret paths. Default: empty.
     pub path_prefix: String,

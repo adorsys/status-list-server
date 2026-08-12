@@ -2,8 +2,8 @@
 # cargo-vet imports lock
 
 [[publisher.aws-config]]
-version = "1.9.0"
-when = "2026-07-08"
+version = "1.10.1"
+when = "2026-07-24"
 user-id = 160111
 user-login = "aws-sdk-rust-ci"
 user-name = "AWS SDK Rust Bot"
@@ -16,36 +16,36 @@ user-login = "aws-sdk-rust-ci"
 user-name = "AWS SDK Rust Bot"
 
 [[publisher.aws-runtime]]
-version = "1.8.1"
-when = "2026-07-08"
+version = "1.9.1"
+when = "2026-07-24"
 user-id = 160111
 user-login = "aws-sdk-rust-ci"
 user-name = "AWS SDK Rust Bot"
 
 [[publisher.aws-sdk-route53]]
-version = "1.116.0"
-when = "2026-07-08"
+version = "1.118.0"
+when = "2026-07-24"
 user-id = 160111
 user-login = "aws-sdk-rust-ci"
 user-name = "AWS SDK Rust Bot"
 
 [[publisher.aws-sdk-s3]]
-version = "1.138.0"
-when = "2026-07-08"
+version = "1.140.0"
+when = "2026-07-24"
 user-id = 160111
 user-login = "aws-sdk-rust-ci"
 user-name = "AWS SDK Rust Bot"
 
 [[publisher.aws-sdk-secretsmanager]]
-version = "1.109.0"
-when = "2026-07-08"
+version = "1.111.0"
+when = "2026-07-24"
 user-id = 160111
 user-login = "aws-sdk-rust-ci"
 user-name = "AWS SDK Rust Bot"
 
 [[publisher.aws-sdk-sts]]
-version = "1.108.0"
-when = "2026-07-08"
+version = "1.110.0"
+when = "2026-07-24"
 user-id = 160111
 user-login = "aws-sdk-rust-ci"
 user-name = "AWS SDK Rust Bot"
@@ -107,22 +107,22 @@ user-login = "aws-sdk-rust-ci"
 user-name = "AWS SDK Rust Bot"
 
 [[publisher.aws-smithy-query]]
-version = "0.61.1"
-when = "2026-07-07"
+version = "0.62.0"
+when = "2026-07-14"
 user-id = 160111
 user-login = "aws-sdk-rust-ci"
 user-name = "AWS SDK Rust Bot"
 
 [[publisher.aws-smithy-runtime]]
-version = "1.12.0"
-when = "2026-07-07"
+version = "1.12.1"
+when = "2026-07-23"
 user-id = 160111
 user-login = "aws-sdk-rust-ci"
 user-name = "AWS SDK Rust Bot"
 
 [[publisher.aws-smithy-runtime-api]]
-version = "1.13.0"
-when = "2026-07-07"
+version = "1.14.0"
+when = "2026-07-23"
 user-id = 160111
 user-login = "aws-sdk-rust-ci"
 user-name = "AWS SDK Rust Bot"
@@ -149,22 +149,22 @@ user-login = "aws-sdk-rust-ci"
 user-name = "AWS SDK Rust Bot"
 
 [[publisher.aws-smithy-xml]]
-version = "0.61.1"
-when = "2026-07-07"
+version = "0.62.0"
+when = "2026-07-14"
 user-id = 160111
 user-login = "aws-sdk-rust-ci"
 user-name = "AWS SDK Rust Bot"
 
 [[publisher.aws-types]]
-version = "1.4.0"
-when = "2026-07-08"
+version = "1.5.0"
+when = "2026-07-21"
 user-id = 160111
 user-login = "aws-sdk-rust-ci"
 user-name = "AWS SDK Rust Bot"
 
 [[publisher.regex]]
-version = "1.13.0"
-when = "2026-07-09"
+version = "1.13.1"
+when = "2026-07-15"
 user-id = 189
 user-login = "BurntSushi"
 user-name = "Andrew Gallant"
