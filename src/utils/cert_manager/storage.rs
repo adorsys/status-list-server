@@ -33,6 +33,14 @@ pub trait Storage: Send + Sync {
     }
     /// Delete the value associated with the given key
     async fn delete(&self, key: &str) -> Result<(), StorageError>;
+
+    /// Verify the backend is reachable without reading or storing any secret
+    /// material. Used by the readiness probe: the default implementation
+    /// considers the backend reachable, and concrete adapters that can cheaply
+    /// prove reachability (e.g. a bucket `HEAD`) override this.
+    async fn reachable(&self) -> Result<(), StorageError> {
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -48,6 +56,10 @@ impl<T: Storage + ?Sized> Storage for Box<T> {
     }
     async fn delete(&self, key: &str) -> Result<(), StorageError> {
         (**self).delete(key).await
+    }
+
+    async fn reachable(&self) -> Result<(), StorageError> {
+        (**self).reachable().await
     }
 }
 

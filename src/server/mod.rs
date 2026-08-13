@@ -3,6 +3,7 @@
 pub mod auth;
 pub mod error;
 pub mod handlers;
+pub mod health;
 pub mod rate_limit;
 
 use crate::domain::service::Service;
@@ -21,4 +22,6 @@ pub struct AppState {
     pub max_statuses_per_request: usize,
     pub max_serialized_list_size: usize,
     pub snapshot_retention_secs: u64,
+    /// Dependency readiness checks backing the `/health/ready` endpoint.
+    pub readiness: health::Readiness,
 }
