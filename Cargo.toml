@@ -7,7 +7,6 @@ edition = "2024"
 default = ["memory"]
 memory = []
 history = ["dep:sea-orm", "dep:sea-orm-migration"]
-server = ["history"]
 postgres = ["history", "sea-orm?/sqlx-postgres"]
 sqlite = ["history", "sea-orm?/sqlx-sqlite"]
 mysql = ["history", "sea-orm?/sqlx-mysql"]
