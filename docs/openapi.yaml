@@ -126,41 +126,47 @@ paths:
         "500":
           $ref: "#/components/responses/InternalServerError"
 
+  /health:
+    get:
+      operationId: legacyLivenessCheck
+      summary: Liveness check alias
+      description: Backward-compatible alias for `/health/live`.
+      security: []
+      responses:
+        "200":
+          description: Server process is up
+          content:
+            text/plain:
+              schema:
+                type: string
+              example: "OK"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+
   /health/ready:
     get:
       operationId: readinessCheck
       summary: Readiness check
       description: |
-        Returns 200 only when all critical dependencies (database, cache
-        backend, and certificate/key store) are reachable; otherwise 503.
+        Returns 200 only when all critical dependencies are reachable;
+        otherwise 503. The public response is intentionally generic; detailed
+        dependency failures are logged internally.
       security: []
       responses:
         "200":
           description: All critical dependencies are reachable
           content:
-            application/json:
+            text/plain:
               schema:
-                type: object
-                properties:
-                  ready:
-                    type: boolean
-                  checks:
-                    type: array
-                    items:
-                      type: object
-                      properties:
-                        name:
-                          type: string
-                        ok:
-                          type: boolean
-                        reason:
-                          type: string
+                type: string
+              example: "READY"
         "503":
           description: One or more critical dependencies are unavailable
           content:
-            application/json:
+            text/plain:
               schema:
-                type: object
+                type: string
+              example: "NOT_READY"
 
   /metrics:
     get:

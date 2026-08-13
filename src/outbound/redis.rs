@@ -17,15 +17,6 @@ impl Redis {
         Self { conn, ttl: None }
     }
 
-    /// Issue a `PING` against the Redis backend.
-    ///
-    /// This exercises real connectivity without reading or writing any cert
-    /// data, so it is safe to call from the `/health/ready` probe.
-    pub async fn ping(&self) -> Result<(), redis::RedisError> {
-        let mut conn = self.conn.clone();
-        redis::AsyncCommands::ping(&mut conn).await
-    }
-
     /// Set the time-to-live (TTL) for cached certificate data stored in Redis.
     ///
     /// # TTL Semantics

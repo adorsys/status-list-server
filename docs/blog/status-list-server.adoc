@@ -62,7 +62,8 @@ docker compose up --build
 +
 [source,bash]
 ----
-curl -s http://localhost:8000/health
+curl -s http://localhost:8000/health/live
+curl -s http://localhost:8000/health/ready
 curl -s http://localhost:8000/
 ----
 
@@ -85,7 +86,8 @@ curl -s http://localhost:8000/
 === API quick look
 
 - `GET /` → "Status list Server"
-- `GET /health` → liveness probe
+- `GET /health/live` → liveness probe (`/health` remains a compatibility alias)
+- `GET /health/ready` → dependency-aware readiness probe
 - `POST /api/v1/credentials` → register an issuer’s public key (JWK)
 - `PUT /api/v1/status-lists/{list_id}/statuses` (auth) → create a status list
 - `PATCH /api/v1/status-lists/{list_id}/statuses` (auth) → update a status list

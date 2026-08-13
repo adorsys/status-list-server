@@ -111,13 +111,11 @@ type BuildStateResult = (AppState, Arc<CertManager>);
 type BuildStateResult = (AppState,);
 
 async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
-    // Hoisted handles captured from the backend branches below so the readiness
-    // probe can reach the real adapters (the domain ports only expose the
-    // higher-level repositories).
+    // Hoisted DB handle captured from the backend branches below so the
+    // readiness probe can reach the real adapter (the domain ports only expose
+    // the higher-level repositories).
     #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mysql"))]
     let mut db_arc: Option<Arc<sea_orm::DatabaseConnection>> = None;
-    #[cfg(feature = "redis")]
-    let mut redis_manager: Option<redis::aio::ConnectionManager> = None;
 
     let (status_list_repo, credential_repo, status_list_snapshot): (
         Arc<dyn StatusListRepo>,
@@ -228,7 +226,6 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
                     let cache_opt = if !config.redis.uri.expose_secret().is_empty() {
                         match config.redis.start(None, None, None).await {
                             Ok(redis_conn) => {
-                                redis_manager = Some(redis_conn.clone());
                                 Some(Redis::new(redis_conn).with_ttl(config.redis.cert_cache_ttl))
                             }
                             Err(e) => {
@@ -377,12 +374,9 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
         readiness = readiness.with_check(AlwaysReady::new("database"));
     }
 
-    #[cfg(feature = "redis")]
-    {
-        if let Some(conn) = redis_manager {
-            readiness = readiness.with_check(crate::server::health::RedisCheck::new(conn));
-        }
-    }
+    // Redis is an optional certificate-cache accelerator in this setup. Startup
+    // falls back to direct certificate storage when Redis cannot connect, so it
+    // is intentionally omitted from readiness gating.
 
     #[cfg(feature = "acme")]
     {

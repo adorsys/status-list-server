@@ -70,6 +70,7 @@ impl HttpServer {
 
         let mut router = Router::new()
             .route("/", get(welcome))
+            .route("/health", get(health::live))
             .route("/health/live", get(health::live))
             .route("/health/ready", get(health::ready))
             .nest(
