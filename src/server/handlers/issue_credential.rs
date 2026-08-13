@@ -28,7 +28,10 @@ impl From<AuthenticationError> for CredentialError {
     }
 }
 
-#[tracing::instrument(skip_all, fields(issuer = payload.issuer), err(Debug))]
+/// `err(level = "info")` for the reason on `update_status`: the default ERROR
+/// level would page on write contention and on a duplicate registration, both
+/// 409s the response layer already logs at the right severity.
+#[tracing::instrument(skip_all, fields(issuer = payload.issuer), err(level = "info", Debug))]
 pub async fn credential_handler(
     State(state): State<AppState>,
     Json(payload): Json<CredentialsRequest>,
