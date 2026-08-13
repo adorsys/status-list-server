@@ -201,19 +201,15 @@ impl CertStorageProvider {
 pub enum SecretsStorageProvider {
     #[default]
     Memory,
-    #[serde(
-        rename = "aws_secrets_manager",
-        alias = "aws-secrets-manager",
-        alias = "secrets_manager"
-    )]
-    AwsSecretsManager,
+    #[serde(rename = "aws_secrets", alias = "aws_secrets_manager")]
+    AwsSecrets,
 }
 
 impl SecretsStorageProvider {
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Memory => "memory",
-            Self::AwsSecretsManager => "aws_secrets_manager",
+            Self::AwsSecrets => "aws_secrets",
         }
     }
 }
@@ -1120,14 +1116,14 @@ mod tests {
     fn test_storage_provider_overrides() {
         let config = Config::load_from_overrides(&[
             ("server.cert.cert_storage", "memory"),
-            ("server.cert.secrets_storage", "aws_secrets_manager"),
+            ("server.cert.secrets_storage", "aws_secrets"),
         ])
         .expect("Failed to load config");
 
         assert_eq!(config.server.cert.cert_storage, CertStorageProvider::Memory);
         assert_eq!(
             config.server.cert.secrets_storage,
-            SecretsStorageProvider::AwsSecretsManager
+            SecretsStorageProvider::AwsSecrets
         );
 
         let config2 = Config::load_from_overrides(&[

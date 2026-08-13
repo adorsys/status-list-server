@@ -55,8 +55,8 @@ statuslist:
     APP_SERVER__CERT__RENEWAL_CRON_SCHEDULE: "0 0 0 * * *"
     # Certificate material storage backend: memory | aws_s3
     APP_SERVER__CERT__CERT_STORAGE: "aws_s3"
-    # Secrets (key material) storage backend: memory | aws_secrets_manager
-    APP_SERVER__CERT__SECRETS_STORAGE: "aws_secrets_manager"
+    # Secrets (key material) storage backend: memory | aws_secrets
+    APP_SERVER__CERT__SECRETS_STORAGE: "aws_secrets"
     # Parsed certificate chain cache TTL in seconds. "0" means no expiry; non-provisioning replicas rely on this TTL for renewed chains.
     APP_SERVER__CERT__CHAIN_CACHE_TTL: "3600"
     # DNS provider for ACME DNS-01 challenges: route53 | cloudflare | gcloud | azure | acmedns
