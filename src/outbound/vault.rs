@@ -9,7 +9,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use color_eyre::eyre::eyre;
 use moka::future::Cache;
-use reqwest::{Client, StatusCode};
+use reqwest::{Client, StatusCode, Url};
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
 use tracing::info;
@@ -20,6 +20,7 @@ use crate::cert_manager::storage::{Storage, StorageError};
 ///
 /// Implements the [`Storage`] trait so it can be used as a secrets backend
 /// by the certificate manager.
+#[derive(Debug)]
 pub struct VaultClient {
     client: Client,
     /// Vault/OpenBao API address (e.g. `http://vault:8200`).
@@ -202,7 +203,38 @@ impl VaultClientBuilder {
     }
 
     /// Build the [`VaultClient`] adapter instance.
+    ///
+    /// # Errors
+    ///
+    /// Returns `StorageError::Backend` if:
+    /// - `addr` is empty or not a valid URL.
+    /// - The authentication token is empty.
+    /// - `mount` is empty.
     pub fn build(self) -> Result<VaultClient, StorageError> {
+        // Validate address, must be non-empty and parseable as a URL.
+        if self.addr.trim().is_empty() {
+            return Err(StorageError::Backend(eyre!(
+                "Vault configuration error: address must not be empty"
+            )));
+        }
+        Url::parse(&self.addr).map_err(|e| {
+            StorageError::Backend(eyre!("Vault configuration error: invalid address: {e}"))
+        })?;
+
+        // Validate token, must be non-empty.
+        if self.token.expose_secret().trim().is_empty() {
+            return Err(StorageError::Backend(eyre!(
+                "Vault configuration error: token must not be empty"
+            )));
+        }
+
+        // Mount must be non-empty.
+        if self.mount.trim().is_empty() {
+            return Err(StorageError::Backend(eyre!(
+                "Vault configuration error: mount path must not be empty"
+            )));
+        }
+
         let client = Client::builder()
             .timeout(self.timeout)
             .build()
@@ -352,5 +384,106 @@ impl Storage for VaultClient {
 impl From<reqwest::Error> for StorageError {
     fn from(value: reqwest::Error) -> Self {
         Self::Backend(value.into())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use secrecy::SecretString;
+
+    use super::*;
+    use crate::cert_manager::storage::StorageError;
+
+    fn valid_token() -> SecretString {
+        SecretString::from("root")
+    }
+
+    /// Panics with a descriptive message when the assertion fails.
+    fn assert_matches_backend_error(err: &StorageError, expected_fragment: &str) {
+        match err {
+            StorageError::Backend(e) => {
+                let msg = format!("{e}");
+                assert!(
+                    msg.contains(expected_fragment),
+                    "expected error to contain '{expected_fragment}', got: {msg}"
+                );
+            }
+            other => panic!("expected StorageError::Backend, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn build_rejects_empty_address() {
+        let err = VaultClient::builder("", valid_token())
+            .mount("secret")
+            .build()
+            .unwrap_err();
+        assert_matches_backend_error(&err, "address must not be empty");
+    }
+
+    #[test]
+    fn build_rejects_whitespace_only_address() {
+        let err = VaultClient::builder("   ", valid_token())
+            .mount("secret")
+            .build()
+            .unwrap_err();
+        assert_matches_backend_error(&err, "address must not be empty");
+    }
+
+    #[test]
+    fn build_rejects_invalid_url() {
+        let err = VaultClient::builder("not a url @@", valid_token())
+            .mount("secret")
+            .build()
+            .unwrap_err();
+        assert_matches_backend_error(&err, "invalid address");
+    }
+
+    #[test]
+    fn build_rejects_empty_token() {
+        let err = VaultClient::builder("http://vault:8200", SecretString::from(""))
+            .mount("secret")
+            .build()
+            .unwrap_err();
+        assert_matches_backend_error(&err, "token must not be empty");
+    }
+
+    #[test]
+    fn build_rejects_whitespace_only_token() {
+        let err = VaultClient::builder("http://vault:8200", SecretString::from("  "))
+            .mount("secret")
+            .build()
+            .unwrap_err();
+        assert_matches_backend_error(&err, "token must not be empty");
+    }
+
+    #[test]
+    fn build_rejects_empty_mount() {
+        let err = VaultClient::builder("http://vault:8200", valid_token())
+            .mount("")
+            .build()
+            .unwrap_err();
+        assert_matches_backend_error(&err, "mount path must not be empty");
+    }
+
+    #[test]
+    fn build_succeeds_with_valid_inputs() {
+        VaultClient::builder("http://vault:8200", valid_token())
+            .mount("secret")
+            .path_prefix("certs")
+            .secrets_cache_ttl(Duration::from_secs(60))
+            .build()
+            .expect("should build without error");
+    }
+
+    #[test]
+    fn build_succeeds_with_cache_disabled() {
+        VaultClient::builder("http://vault:8200", valid_token())
+            .mount("secret")
+            .secrets_cache_ttl(Duration::ZERO)
+            .build()
+            .expect("should build with cache disabled");
     }
 }
