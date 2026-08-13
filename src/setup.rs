@@ -1,6 +1,6 @@
 //! Composition root assembling outbound infrastructure adapters and creating the AppState container.
 
-#[cfg(feature = "aws")]
+#[cfg(any(feature = "aws-s3", feature = "aws-secrets", feature = "aws-route53"))]
 use aws_config::{BehaviorVersion, Region};
 #[cfg(any(
     feature = "acme",
@@ -34,7 +34,7 @@ use std::time::Duration;
 #[cfg(feature = "acme")]
 use tracing::warn;
 
-#[cfg(feature = "aws")]
+#[cfg(feature = "aws-route53")]
 use crate::cert_manager::challenge::AwsRoute53DnsProvider;
 #[cfg(feature = "acme")]
 use crate::cert_manager::challenge::{
@@ -58,8 +58,10 @@ use crate::domain::{
     ports::{CertificateProvider, CredentialRepo, StatusListRepo, StatusListSnapshotRepo},
     service::Service,
 };
-#[cfg(feature = "aws")]
-use crate::outbound::aws::{AwsS3, AwsSecretsManager};
+#[cfg(feature = "aws-s3")]
+use crate::outbound::aws::AwsS3;
+#[cfg(feature = "aws-secrets")]
+use crate::outbound::aws::AwsSecretsManager;
 use crate::outbound::cache::MokaStatusListCache;
 #[cfg(feature = "acme")]
 use crate::outbound::cert::AcmeCertificateProvider;
@@ -203,7 +205,7 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
         let cert_storage: Box<dyn Storage> = match config.server.cert.cert_storage {
             CertStorageProvider::Memory => Box::new(MemoryStorage::default()),
             CertStorageProvider::AwsS3 => {
-                #[cfg(feature = "aws")]
+                #[cfg(feature = "aws-s3")]
                 {
                     if config.aws.s3_bucket.trim().is_empty() {
                         return Err(color_eyre::eyre::eyre!(
@@ -247,10 +249,10 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
                         None => Box::new(s3),
                     }
                 }
-                #[cfg(not(feature = "aws"))]
+                #[cfg(not(feature = "aws-s3"))]
                 {
                     return Err(color_eyre::eyre::eyre!(
-                        "aws_s3 certificate storage provider selected, but 'aws' feature flag was not compiled in."
+                        "aws_s3 certificate storage provider selected, but 'aws-s3' feature is not compiled in."
                     ));
                 }
             }
@@ -258,8 +260,8 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
 
         let secrets_storage: Box<dyn Storage> = match config.server.cert.secrets_storage {
             SecretsStorageProvider::Memory => Box::new(MemoryStorage::default()),
-            SecretsStorageProvider::AwsSecretsManager => {
-                #[cfg(feature = "aws")]
+            SecretsStorageProvider::AwsSecrets => {
+                #[cfg(feature = "aws-secrets")]
                 {
                     let aws_config = aws_config::defaults(BehaviorVersion::latest())
                         .region(Region::new(config.aws.region.clone()))
@@ -274,10 +276,10 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
                         .await?,
                     )
                 }
-                #[cfg(not(feature = "aws"))]
+                #[cfg(not(feature = "aws-secrets"))]
                 {
                     return Err(color_eyre::eyre::eyre!(
-                        "aws_secrets_manager secrets storage provider selected, but 'aws' feature flag was not compiled in."
+                        "aws_secrets secrets storage provider selected, but 'aws-secrets' feature is not compiled in."
                     ));
                 }
             }
@@ -553,7 +555,7 @@ async fn build_dns_challenge_handler(
     cert_domains: &[&str],
 ) -> EyeResult<Dns01Handler> {
     let handler = match provider {
-        #[cfg(feature = "aws")]
+        #[cfg(feature = "aws-route53")]
         ResolvedDnsProvider::Route53 => {
             let aws_config = aws_config::defaults(BehaviorVersion::latest())
                 .region(Region::new(config.aws.region.clone()))
@@ -561,10 +563,10 @@ async fn build_dns_challenge_handler(
                 .await;
             Dns01Handler::new(AwsRoute53DnsProvider::new(&aws_config))
         }
-        #[cfg(not(feature = "aws"))]
+        #[cfg(not(feature = "aws-route53"))]
         ResolvedDnsProvider::Route53 => {
             return Err(eyre!(
-                "Route53 DNS provider requested, but 'aws' feature is disabled at compile time."
+                "Route53 DNS provider requested, but 'aws-route53' feature is disabled at compile time."
             ));
         }
         ResolvedDnsProvider::Cloudflare(cfg) => {
@@ -647,7 +649,7 @@ mod tests {
         let domain = config.server.domain.clone();
         let domains = [domain.as_str()];
 
-        #[cfg(feature = "aws")]
+        #[cfg(feature = "aws-route53")]
         assert!(
             build_dns_challenge_handler(DnsProviderKind::Route53, &mut config, &domains).is_ok()
         );
@@ -872,7 +874,7 @@ mod storage_provider_tests {
     }
 
     /// Selecting aws_s3 with an empty bucket should fail fast.
-    #[cfg(feature = "aws")]
+    #[cfg(feature = "aws-s3")]
     #[sealed_test(env = [
         ("APP_ENV", "development"),
         ("APP_DATABASE__BACKEND", "memory"),

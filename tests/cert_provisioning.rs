@@ -1,4 +1,4 @@
-#![cfg(all(feature = "aws", feature = "redis"))]
+#![cfg(all(feature = "aws-s3", feature = "aws-secrets", feature = "redis"))]
 
 //! Integration tests for the ACME certificate provisioning flow.
 //!

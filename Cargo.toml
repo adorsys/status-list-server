@@ -13,12 +13,11 @@ sqlite = ["sea-orm?/sqlx-sqlite", "history"]
 mysql = ["sea-orm?/sqlx-mysql", "history"]
 # Optional distributed certificate-material cache driver.
 redis = ["dep:redis"]
-aws = [
-  "dep:aws-config",
-  "dep:aws-sdk-route53",
-  "dep:aws-sdk-s3",
-  "dep:aws-sdk-secretsmanager",
-]
+# Granular AWS backend features. Each maps to a single AWS service so enabling
+# a feature clearly communicates which SDKs and dependencies are compiled in.
+aws-s3 = ["dep:aws-config", "dep:aws-sdk-s3"]
+aws-secrets = ["dep:aws-config", "dep:aws-sdk-secretsmanager"]
+aws-route53 = ["dep:aws-config", "dep:aws-sdk-route53"]
 acme = ["dep:instant-acme", "dep:rcgen"]
 # Opt-in gate for the Postgres container test. `--all-features` enables it in CI.
 postgres-tests = ["postgres"]

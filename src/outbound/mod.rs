@@ -1,4 +1,4 @@
-#[cfg(feature = "aws")]
+#[cfg(any(feature = "aws-s3", feature = "aws-secrets"))]
 pub mod aws;
 pub mod cache;
 pub mod cert;

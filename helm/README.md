@@ -50,7 +50,7 @@ helm template statuslist ./chart --namespace statuslist
 
 ### Redis-Enabled Certificate Cache
 
-To enable Redis, use an application image built with `redis,aws,acme` features, set `redis-ha.enabled=true`, provide a `redis-password` in the configured secret or ExternalSecret, and keep `APP_REDIS__URI` unset in `statuslist.env` so the chart can generate it from the Redis HA service. Set `APP_REDIS__REQUIRE_CLIENT_AUTH` and Redis HAProxy TLS values only when your Redis endpoint requires them.
+To enable Redis, use an application image built with `redis,aws-s3,aws-secrets,aws-route53,acme` features, set `redis-ha.enabled=true`, provide a `redis-password` in the configured secret or ExternalSecret, and keep `APP_REDIS__URI` unset in `statuslist.env` so the chart can generate it from the Redis HA service. Set `APP_REDIS__REQUIRE_CLIENT_AUTH` and Redis HAProxy TLS values only when your Redis endpoint requires them.
 
 ## Production Deployment Instructions
 

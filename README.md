@@ -65,18 +65,18 @@ The simplest way to run the project is with [docker compose](https://docs.docker
 docker compose up --build
 ```
 
-This command will pull all required images and start the server compiled with default compose features (`postgres,aws,acme`). Redis is not part of the default path.
+This command will pull all required images and start the server compiled with default compose features (`postgres,aws-s3,aws-secrets,aws-route53,acme`). Redis is not part of the default path.
 
 To pass custom Cargo feature flags during build, specify the `FEATURES` environment variable:
 
 ```sh
-FEATURES="mysql,aws,acme" docker compose --profile mysql up --build
+FEATURES="mysql,aws-s3,aws-secrets,aws-route53,acme" docker compose --profile mysql up --build
 ```
 
 To test the optional Redis certificate-material cache locally, enable the Redis profile, compile the Redis feature, and provide a Redis URI:
 
 ```sh
-FEATURES="postgres,redis,aws,acme" APP_REDIS__URI="redis://redis:6379" docker compose --profile redis up --build
+FEATURES="postgres,redis,aws-s3,aws-secrets,aws-route53,acme" APP_REDIS__URI="redis://redis:6379" docker compose --profile redis up --build
 ```
 
 #### Running Manually
@@ -100,7 +100,9 @@ The crate uses modular Cargo feature flags to gate optional production backend d
 | `sqlite`   | SeaORM SQLite database driver.                                                                                                                     | ❌ Opt-in  |
 | `mysql`    | SeaORM MySQL database driver.                                                                                                                      | ❌ Opt-in  |
 | `redis`    | Redis storage and certificate cache driver.                                                                                                        | ❌ Opt-in  |
-| `aws`      | AWS S3 object storage and AWS Secrets Manager drivers.                                                                                             | ❌ Opt-in  |
+| `aws-s3`      | AWS S3 certificate object storage driver.                                                                                                          | ❌ Opt-in  |
+| `aws-secrets` | AWS Secrets Manager secrets storage driver.                                                                                                        | ❌ Opt-in  |
+| `aws-route53` | AWS Route53 DNS-01 challenge driver.                                                                                                               | ❌ Opt-in  |
 | `acme`     | ACME DNS-01 certificate manager driver.                                                                                                            | ❌ Opt-in  |
 
 To build with specific backend drivers, pass the matching feature flag(s):
@@ -110,7 +112,7 @@ To build with specific backend drivers, pass the matching feature flag(s):
 cargo run --features postgres,redis
 
 # Run with all AWS and ACME production integrations, including the optional Redis cache driver
-cargo run --features postgres,redis,aws,acme
+cargo run --features postgres,redis,aws-s3,aws-secrets,aws-route53,acme
 ```
 
 ## Redis Role
