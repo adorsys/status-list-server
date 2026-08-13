@@ -93,17 +93,17 @@ By default, the server will listen on `http://localhost:8000` using in-memory re
 
 The crate uses modular Cargo feature flags to gate optional production backend drivers:
 
-| Feature    | Description                                                                                                                                        | Default    |
-| ---------- | -------------------------------------------------------------------------------------------------------------------------------------------------- | ---------- |
-| `memory`   | In-memory repositories (`MemoryStatusLists`, `MemoryCredentials`, `MemoryStatusListHistory`), Moka TTL cache, and store-based certificate storage. | ✅ Default |
-| `postgres` | SeaORM PostgreSQL database driver.                                                                                                                 | ❌ Opt-in  |
-| `sqlite`   | SeaORM SQLite database driver.                                                                                                                     | ❌ Opt-in  |
-| `mysql`    | SeaORM MySQL database driver.                                                                                                                      | ❌ Opt-in  |
-| `redis`    | Redis storage and certificate cache driver.                                                                                                        | ❌ Opt-in  |
-| `aws-s3`      | AWS S3 certificate object storage driver.                                                                                                          | ❌ Opt-in  |
-| `aws-secrets` | AWS Secrets Manager secrets storage driver.                                                                                                        | ❌ Opt-in  |
-| `aws-route53` | AWS Route53 DNS-01 challenge driver.                                                                                                               | ❌ Opt-in  |
-| `acme`     | ACME DNS-01 certificate manager driver.                                                                                                            | ❌ Opt-in  |
+| Feature      | Description                                                                                                                                        | Default    |
+| -------------| -------------------------------------------------------------------------------------------------------------------------------------------------- | ---------- |
+| `memory`     | In-memory repositories (`MemoryStatusLists`, `MemoryCredentials`, `MemoryStatusListHistory`), Moka TTL cache, and store-based certificate storage. | ✅ Default |
+| `postgres`   | SeaORM PostgreSQL database driver.                                                                                                                 | ❌ Opt-in  |
+| `sqlite`     | SeaORM SQLite database driver.                                                                                                                     | ❌ Opt-in  |
+| `mysql`      | SeaORM MySQL database driver.                                                                                                                      | ❌ Opt-in  |
+| `redis`      | Redis storage and certificate cache driver.                                                                                                        | ❌ Opt-in  |
+| `aws-s3`     | AWS S3 certificate object storage driver.                                                                                                          | ❌ Opt-in  |
+| `aws-secrets`| AWS Secrets Manager secrets storage driver.                                                                                                        | ❌ Opt-in  |
+| `aws-route53`| AWS Route53 DNS-01 challenge driver.                                                                                                               | ❌ Opt-in  |
+| `acme`       | ACME DNS-01 certificate manager driver.                                                                                                            | ❌ Opt-in  |
 
 To build with specific backend drivers, pass the matching feature flag(s):
 
