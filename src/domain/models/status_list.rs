@@ -5,6 +5,10 @@ use serde::{Deserialize, Serialize};
 use std::io::{Read, Write};
 
 /// Errors originating from domain validation, storage conflicts, or compression/parsing failures.
+///
+/// `#[non_exhaustive]` so adding a variant stays patch-level instead of tripping
+/// `cargo-semver-checks` (`enum_variant_added`).
+#[non_exhaustive]
 #[derive(Debug, thiserror::Error)]
 pub enum StatusListError {
     #[error("invalid status list index")]
@@ -31,6 +35,18 @@ pub enum StatusListError {
     IndexTooLarge { index: i32, max: i32 },
     #[error("the status list was modified concurrently")]
     Conflict,
+    /// The write lost a lock race in storage and was rolled back.
+    ///
+    /// Distinct from [`Conflict`]: there a racing writer's value won and the
+    /// client must re-read first. Here nothing was written and nobody won, so
+    /// the request is safe to retry verbatim.
+    ///
+    /// `code` is an opaque backend tag for the metric only. It never reaches the
+    /// client and nothing in the domain branches on it.
+    ///
+    /// [`Conflict`]: StatusListError::Conflict
+    #[error("the write lost a lock race ({code}) and can be retried unchanged")]
+    Contention { code: &'static str },
     #[error("the service is currently unavailable. Please try again later")]
     Unavailable,
     #[error("storage error: {0}")]
