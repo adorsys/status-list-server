@@ -228,12 +228,8 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
                     let cache_opt = if !config.redis.uri.expose_secret().is_empty() {
                         match config.redis.start(None, None, None).await {
                             Ok(redis_conn) => {
-                                redis_manager = Some(redis_conn);
-                                let redis_conn = redis_manager.as_ref().expect("just set");
-                                Some(
-                                    Redis::new(redis_conn.clone())
-                                        .with_ttl(config.redis.cert_cache_ttl),
-                                )
+                                redis_manager = Some(redis_conn.clone());
+                                Some(Redis::new(redis_conn).with_ttl(config.redis.cert_cache_ttl))
                             }
                             Err(e) => {
                                 tracing::warn!(
@@ -380,9 +376,6 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
     {
         readiness = readiness.with_check(AlwaysReady::new("database"));
     }
-
-    // The status-list cache is always in-process (Moka); it is always ready.
-    readiness = readiness.with_check(AlwaysReady::new("cache"));
 
     #[cfg(feature = "redis")]
     {

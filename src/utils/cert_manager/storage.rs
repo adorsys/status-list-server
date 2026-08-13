@@ -57,6 +57,7 @@ impl<T: Storage + ?Sized> Storage for Box<T> {
     async fn delete(&self, key: &str) -> Result<(), StorageError> {
         (**self).delete(key).await
     }
+
     async fn reachable(&self) -> Result<(), StorageError> {
         (**self).reachable().await
     }

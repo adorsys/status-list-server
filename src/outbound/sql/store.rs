@@ -25,14 +25,6 @@ impl<T> SeaOrmStore<T> {
             _phantom: std::marker::PhantomData,
         }
     }
-
-    /// Verifies the database is reachable by pinging the connection.
-    ///
-    /// Used by the `/health/ready` probe. This exercises a real connection
-    /// round-trip so a downed database surfaces as a readiness failure.
-    pub async fn ping(&self) -> Result<(), sea_orm::DbErr> {
-        (*self.db).ping().await
-    }
 }
 
 impl SeaOrmStore<StatusListRecord> {

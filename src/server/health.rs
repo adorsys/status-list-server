@@ -63,23 +63,33 @@ impl Readiness {
         for check in &self.checks {
             let check = check.clone();
             set.spawn(async move {
-                let res = tokio::time::timeout(Duration::from_secs(5), check.check())
-                    .await
-                    .unwrap_or_else(|_| Err("check timed out".to_string()));
-                (check, res)
+                let res = tokio::time::timeout(Duration::from_secs(5), check.check()).await;
+
+                let result = match res {
+                    Ok(result) => result,
+                    Err(_) => Err("readiness check timed out".to_string()),
+                };
+                (check, result)
             });
         }
 
         let mut checks: Vec<CheckResult> = Vec::with_capacity(self.checks.len());
-        while let Some(Ok((check, res))) = set.join_next().await {
-            checks.push(CheckResult {
-                name: check.name().to_string(),
-                ok: res.is_ok(),
-                reason: res.err(),
-            });
+        while let Some(joined) = set.join_next().await {
+            match joined {
+                Ok((check, res)) => checks.push(CheckResult {
+                    name: check.name().to_string(),
+                    ok: res.is_ok(),
+                    reason: res.err(),
+                }),
+                Err(err) => checks.push(CheckResult {
+                    name: "readiness_check_task".to_string(),
+                    ok: false,
+                    reason: Some(format!("readiness check task failed: {err}")),
+                }),
+            }
         }
 
-        let ready = checks.iter().all(|c| c.ok);
+        let ready = checks.len() == self.checks.len() && checks.iter().all(|c| c.ok);
         ReadinessReport { ready, checks }
     }
 }
@@ -162,7 +172,7 @@ impl ReadinessCheck for DbCheck {
     }
 
     async fn check(&self) -> Result<(), String> {
-        crate::outbound::sql::SeaOrmStore::<()>::new(self.db.clone())
+        self.db
             .ping()
             .await
             .map_err(|e| format!("database unreachable: {e}"))
@@ -190,15 +200,10 @@ impl ReadinessCheck for RedisCheck {
     }
 
     async fn check(&self) -> Result<(), String> {
-        let conn = self.conn.clone();
-        tokio::time::timeout(Duration::from_secs(5), async move {
-            crate::outbound::redis::Redis::new(conn)
-                .ping()
-                .await
-                .map_err(|e| format!("cache (redis) unreachable: {e}"))
-        })
-        .await
-        .unwrap_or_else(|_| Err("cache (redis) check timed out".to_string()))
+        crate::outbound::redis::Redis::new(self.conn.clone())
+            .ping()
+            .await
+            .map_err(|e| format!("cache (redis) unreachable: {e}"))
     }
 }
 
@@ -294,6 +299,19 @@ mod tests {
         }
     }
 
+    struct PanickingCheck;
+
+    #[async_trait::async_trait]
+    impl ReadinessCheck for PanickingCheck {
+        fn name(&self) -> &'static str {
+            "panicking"
+        }
+
+        async fn check(&self) -> Result<(), String> {
+            panic!("boom")
+        }
+    }
+
     #[tokio::test]
     async fn readiness_ready_when_all_checks_pass() {
         let readiness = Readiness::default()
@@ -316,6 +334,30 @@ mod tests {
         let failing = report.checks.iter().find(|c| c.name == "failing").unwrap();
         assert!(!failing.ok);
         assert_eq!(failing.reason.as_deref(), Some("boom"));
+    }
+
+    #[tokio::test]
+    async fn readiness_not_ready_when_a_check_panics() {
+        let readiness = Readiness::default()
+            .with_check(AlwaysReady::new("a"))
+            .with_check(PanickingCheck)
+            .with_check(AlwaysReady::new("b"));
+        let report = readiness.run().await;
+
+        assert!(!report.ready);
+        assert_eq!(report.checks.len(), 3);
+        let panicking = report
+            .checks
+            .iter()
+            .find(|c| c.name == "readiness_check_task")
+            .unwrap();
+        assert!(!panicking.ok);
+        assert!(
+            panicking
+                .reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("panicked"))
+        );
     }
 
     /// Simulates a specific dependency being unreachable, so each readiness
@@ -369,7 +411,6 @@ mod tests {
     async fn ready_returns_200_when_all_critical_dependencies_reachable() {
         let state = app_state_with_checks(vec![
             Arc::new(AlwaysReady::new("database")),
-            Arc::new(AlwaysReady::new("cache")),
             Arc::new(AlwaysReady::new("cert_store")),
         ])
         .await;

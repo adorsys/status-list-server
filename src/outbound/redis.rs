@@ -17,12 +17,6 @@ impl Redis {
         Self { conn, ttl: None }
     }
 
-    /// Return a clone of the underlying connection manager, for use where a
-    /// separate handle on the same backend is needed (e.g. readiness probing).
-    pub fn connection(&self) -> ConnectionManager {
-        self.conn.clone()
-    }
-
     /// Issue a `PING` against the Redis backend.
     ///
     /// This exercises real connectivity without reading or writing any cert
