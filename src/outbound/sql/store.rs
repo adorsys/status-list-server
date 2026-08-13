@@ -541,14 +541,12 @@ mod snapshot_txn_test_hook {
     /// and update contention tests cannot capture each other's probe.
     pub(super) struct PauseSite {
         slot: OnceLock<Mutex<Option<Probe>>>,
-        site: &'static str,
     }
 
     impl PauseSite {
-        const fn new(site: &'static str) -> Self {
+        const fn new(_site: &'static str) -> Self {
             Self {
                 slot: OnceLock::new(),
-                site,
             }
         }
 
@@ -556,12 +554,12 @@ mod snapshot_txn_test_hook {
             self.slot.get_or_init(|| Mutex::new(None))
         }
 
+        #[cfg(any(feature = "mysql", feature = "postgres-tests"))]
         pub(super) async fn install(&self, probe_to_install: Probe) {
             let mut guard = self.slot().lock().await;
             assert!(
                 guard.is_none(),
-                "only one {} contention probe can be installed at a time",
-                self.site
+                "only one contention probe can be installed at a time"
             );
             *guard = Some(probe_to_install);
         }
@@ -603,9 +601,9 @@ mod test {
     use super::*;
     use crate::outbound::sql::models::StatusList;
     use jsonwebtoken::jwk::Jwk;
-    use sea_orm::{DatabaseBackend, MockDatabase, MockExecResult};
-    // `Migrator::up` is only called from `sqlite_connection` below; the MySQL and
-    // Postgres fixtures run their own migrations inside `test_containers`.
+    use sea_orm::{DatabaseBackend, MockDatabase, MockExecResult, Statement, Transaction};
+    // `MigratorTrait` is only needed by `sqlite_connection` below; the MySQL
+    // and Postgres helpers live in `test_containers` and import it themselves.
     #[cfg(feature = "sqlite")]
     use sea_orm_migration::MigratorTrait;
 
@@ -1157,6 +1155,87 @@ mod test {
         assert_eq!(stored.updated_at, v + 1);
     }
 
+    /// A client that loses the optimistic guard should be able to follow the
+    /// contract exposed at the HTTP layer: observe 409, re-read, and retry with
+    /// the fresh `updated_at`. If the guard ever becomes permanently
+    /// unmatchable, this test fails on the retry.
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn test_update_one_conflict_loser_can_reread_and_retry() {
+        let db = sqlite_connection().await;
+        let cred_store = SeaOrmStore::<Credentials>::new(db.clone());
+        let store = SeaOrmStore::<StatusListRecord>::new(db);
+
+        let key: Jwk = serde_json::from_str(TEST_EC_JWK).unwrap();
+        let issuer = "issuer-retry-sqlite";
+        cred_store
+            .insert_one(Credentials::new(issuer.to_string(), key))
+            .await
+            .unwrap();
+
+        let v = 1000;
+        let base = StatusListRecord {
+            list_id: "list-retry-sqlite".to_string(),
+            issuer: issuer.to_string(),
+            status_list: StatusList {
+                bits: 1,
+                lst: "initial".to_string(),
+            },
+            sub: "sub-retry-sqlite".to_string(),
+            updated_at: v,
+        };
+        store.insert_one(base.clone()).await.unwrap();
+
+        let writer_a = StatusListRecord {
+            status_list: StatusList {
+                bits: 1,
+                lst: "flip-A".to_string(),
+            },
+            updated_at: v + 1,
+            ..base.clone()
+        };
+        let stale_writer_b = StatusListRecord {
+            status_list: StatusList {
+                bits: 1,
+                lst: "flip-B-stale".to_string(),
+            },
+            updated_at: v + 1,
+            ..base.clone()
+        };
+
+        assert!(store.update_one(&base.list_id, writer_a, v).await.unwrap());
+        assert!(
+            !store
+                .update_one(&base.list_id, stale_writer_b, v)
+                .await
+                .unwrap(),
+            "B should lose the stale guard first"
+        );
+
+        let reread = store.find_one_by(&base.list_id).await.unwrap().unwrap();
+        assert_eq!(reread.updated_at, v + 1);
+
+        let retry_writer_b = StatusListRecord {
+            status_list: StatusList {
+                bits: 1,
+                lst: "flip-B-retry".to_string(),
+            },
+            updated_at: reread.updated_at + 1,
+            ..reread.clone()
+        };
+        assert!(
+            store
+                .update_one(&base.list_id, retry_writer_b, reread.updated_at)
+                .await
+                .unwrap(),
+            "B's retry with the fresh guard should succeed"
+        );
+
+        let final_row = store.find_one_by(&base.list_id).await.unwrap().unwrap();
+        assert_eq!(final_row.status_list.lst, "flip-B-retry");
+        assert_eq!(final_row.updated_at, v + 2);
+    }
+
     /// Cross-backend proof (#143): the optimistic guard behaves identically on
     /// MySQL, exercising the JSON `col_expr` write and `rows_affected` semantics
     /// most likely to diverge from sqlite.
@@ -1291,6 +1370,133 @@ mod test {
             .await;
         assert!(matches!(backwards, Err(RepositoryError::UpdateError(_))));
     }
+
+    #[tokio::test]
+    async fn test_update_one_with_snapshot_transaction_log_shape() {
+        let entity = StatusListRecord {
+            list_id: "list-txn".to_string(),
+            issuer: "issuer-txn".to_string(),
+            status_list: StatusList {
+                bits: 1,
+                lst: "flip".to_string(),
+            },
+            sub: "sub-txn".to_string(),
+            updated_at: 1001,
+        };
+        let snapshot = StatusListHistoryRecord {
+            snapshot_id: "snap-txn".to_string(),
+            list_id: entity.list_id.clone(),
+            issuer: entity.issuer.clone(),
+            status_list: entity.status_list.clone(),
+            sub: entity.sub.clone(),
+            iat: entity.updated_at,
+            exp: entity.updated_at + 900,
+        };
+
+        let db_conn = Arc::new(
+            MockDatabase::new(DatabaseBackend::Postgres)
+                .append_exec_results([
+                    MockExecResult {
+                        rows_affected: 1,
+                        last_insert_id: 0,
+                    },
+                    MockExecResult {
+                        rows_affected: 1,
+                        last_insert_id: 0,
+                    },
+                ])
+                .into_connection(),
+        );
+        let store = SeaOrmStore::<StatusListRecord>::new(db_conn.clone());
+
+        assert!(
+            store
+                .update_one_with_snapshot("list-txn", entity.clone(), 1000, snapshot.clone())
+                .await
+                .unwrap()
+        );
+
+        drop(store);
+        let db_conn = Arc::try_unwrap(db_conn).expect("test should own the only DB handle");
+        assert_eq!(
+            db_conn.into_transaction_log(),
+            [Transaction::many([
+                Statement::from_string(DatabaseBackend::Postgres, "BEGIN"),
+                Statement::from_sql_and_values(
+                    DatabaseBackend::Postgres,
+                    r#"UPDATE "status_lists" SET "issuer" = $1, "status_list" = $2, "sub" = $3, "updated_at" = $4 WHERE "status_lists"."list_id" = $5 AND "status_lists"."updated_at" = $6"#,
+                    [
+                        entity.issuer.clone().into(),
+                        serde_json::to_value(entity.status_list.clone())
+                            .unwrap()
+                            .into(),
+                        entity.sub.clone().into(),
+                        entity.updated_at.into(),
+                        "list-txn".into(),
+                        1000i64.into(),
+                    ],
+                ),
+                Statement::from_sql_and_values(
+                    DatabaseBackend::Postgres,
+                    r#"INSERT INTO "status_list_history" ("snapshot_id", "list_id", "issuer", "status_list", "sub", "iat", "exp") VALUES ($1, $2, $3, $4, $5, $6, $7)"#,
+                    [
+                        snapshot.snapshot_id.clone().into(),
+                        snapshot.list_id.clone().into(),
+                        snapshot.issuer.clone().into(),
+                        serde_json::to_value(snapshot.status_list.clone())
+                            .unwrap()
+                            .into(),
+                        snapshot.sub.clone().into(),
+                        snapshot.iat.into(),
+                        snapshot.exp.into(),
+                    ],
+                ),
+                Statement::from_string(DatabaseBackend::Postgres, "COMMIT"),
+            ])]
+        );
+
+        let db_conn = Arc::new(
+            MockDatabase::new(DatabaseBackend::Postgres)
+                .append_exec_results([MockExecResult {
+                    rows_affected: 0,
+                    last_insert_id: 0,
+                }])
+                .into_connection(),
+        );
+        let store = SeaOrmStore::<StatusListRecord>::new(db_conn.clone());
+
+        assert!(
+            !store
+                .update_one_with_snapshot("list-txn", entity.clone(), 1000, snapshot)
+                .await
+                .unwrap()
+        );
+
+        drop(store);
+        let db_conn = Arc::try_unwrap(db_conn).expect("test should own the only DB handle");
+        assert_eq!(
+            db_conn.into_transaction_log(),
+            [Transaction::many([
+                Statement::from_string(DatabaseBackend::Postgres, "BEGIN"),
+                Statement::from_sql_and_values(
+                    DatabaseBackend::Postgres,
+                    r#"UPDATE "status_lists" SET "issuer" = $1, "status_list" = $2, "sub" = $3, "updated_at" = $4 WHERE "status_lists"."list_id" = $5 AND "status_lists"."updated_at" = $6"#,
+                    [
+                        entity.issuer.into(),
+                        serde_json::to_value(entity.status_list).unwrap().into(),
+                        entity.sub.into(),
+                        entity.updated_at.into(),
+                        "list-txn".into(),
+                        1000i64.into(),
+                    ],
+                ),
+                Statement::from_string(DatabaseBackend::Postgres, "ROLLBACK"),
+            ])]
+        );
+    }
+
+    #[cfg(feature = "sqlite")]
+    const TEST_EC_JWK: &str = crate::test_fixtures::TEST_EC_PUBLIC_JWK;
 
     /// failure rollback (no partial snapshot), and the conflict path — against
     /// real SQLite, since `MockDatabase` cannot model rollback.
@@ -1773,7 +1979,8 @@ mod test {
         let test_db = mysql_helpers::MysqlTestDb::start().await;
         let db = test_db.connection().await;
         let cred_store = SeaOrmStore::<Credentials>::new(db.clone());
-        let store = SeaOrmStore::<StatusListRecord>::new(db);
+        let store = SeaOrmStore::<StatusListRecord>::new(db.clone());
+        let history = SeaOrmStore::<StatusListHistoryRecord>::new(db);
 
         let key: Jwk = serde_json::from_str(
             r#"{
@@ -1831,6 +2038,15 @@ mod test {
             )
             .await
             .unwrap();
+        let snapshot = history
+            .find_valid_at(&base.list_id, v + 1)
+            .await
+            .unwrap()
+            .expect("the committed MySQL snapshot must be resolvable");
+        assert_eq!(
+            snapshot.status_list.lst, "flip-1",
+            "MySQL must round-trip the snapshot JSON"
+        );
 
         // Second update whose snapshot collides on the primary key: the INSERT
         // fails, so the whole transaction must roll back.
@@ -1883,6 +2099,7 @@ mod test {
         let test_db = postgres_helpers::postgres_connection().await;
         let cred_store = SeaOrmStore::<Credentials>::new(test_db.db.clone());
         let store = SeaOrmStore::<StatusListRecord>::new(test_db.db.clone());
+        let history = SeaOrmStore::<StatusListHistoryRecord>::new(test_db.db.clone());
 
         let key: Jwk = serde_json::from_str(
             r#"{
@@ -1940,6 +2157,15 @@ mod test {
             )
             .await
             .unwrap();
+        let snapshot = history
+            .find_valid_at(&base.list_id, v + 1)
+            .await
+            .unwrap()
+            .expect("the committed Postgres snapshot must be resolvable");
+        assert_eq!(
+            snapshot.status_list.lst, "flip-1",
+            "Postgres must round-trip the snapshot JSON"
+        );
 
         // Second update whose snapshot collides on the primary key: the INSERT
         // fails, so the whole transaction must roll back.
