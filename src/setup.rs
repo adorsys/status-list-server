@@ -72,7 +72,7 @@ use crate::outbound::redis::Redis;
 #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mysql"))]
 use crate::outbound::sql::{
     Migrator, SeaOrmStore, SqlCredentialRepo, SqlStatusListRepo, SqlStatusListSnapshotRepo,
-    verify_innodb_engines,
+    verify_binlog_format, verify_innodb_engines,
 };
 use crate::server::AppState;
 
@@ -175,6 +175,12 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
                 "Startup aborted: one or more tables are not using the InnoDB storage engine. \
                      See the logged error(s) above for the table name(s) and the ALTER TABLE \
                      runbook command to fix the issue.",
+            )?;
+
+            verify_binlog_format(&db).await.wrap_err(
+                "Startup aborted: MySQL binary logging is incompatible with the READ COMMITTED \
+                     isolation level this server pins on every write. See the logged error \
+                     above for the fix.",
             )?;
 
             let db_clone = Arc::new(db);
@@ -394,7 +400,7 @@ pub async fn setup_snapshot_cleanup_scheduler(
     cron_schedule: &str,
 ) -> color_eyre::Result<()> {
     use tokio_cron_scheduler::{Job, JobScheduler};
-    use tracing::{error, info};
+    use tracing::{error, info, warn};
 
     if app_state.snapshot_retention_secs == 0 {
         info!(
@@ -419,6 +425,19 @@ pub async fn setup_snapshot_cleanup_scheduler(
                 {
                     Ok(deleted) => {
                         info!("Cleaned up {deleted} historical status list snapshots older than {cutoff}");
+                    }
+                    // Expected, not exceptional: the sweep scans a range of
+                    // `idx_status_list_history_exp` while snapshot inserts write
+                    // into the top of it. The next run retries the lost batch, so
+                    // this must not page.
+                    Err(crate::domain::models::status_list::StatusListError::Contention {
+                        code,
+                    }) => {
+                        warn!(
+                            db.contention_code = code,
+                            "Historical snapshot cleanup lost a lock race; \
+                             the next scheduled run will retry the remaining rows"
+                        );
                     }
                     Err(e) => {
                         error!("Failed to clean up historical snapshots: {e:?}");
@@ -952,9 +971,16 @@ mod general_tests {
             )
         };
 
+        // sea-orm folds `connect_timeout` and `acquire_timeout` onto sqlx's
+        // single `PoolOptions::acquire_timeout`, and pool construction opens a
+        // connection eagerly under it — so this bound also caps the initial
+        // handshake, which exceeds a second on some hosts (Docker Desktop on
+        // Windows). Sized to clear that while staying under the holder's 10s.
+        const ACQUIRE_TIMEOUT: Duration = Duration::from_secs(5);
+
         let mut opt = ConnectOptions::new(db_url);
         opt.max_connections(1)
-            .acquire_timeout(Duration::from_secs(1))
+            .acquire_timeout(ACQUIRE_TIMEOUT)
             .sqlx_logging(false);
 
         let db = std::sync::Arc::new(
@@ -981,9 +1007,20 @@ mod general_tests {
         let elapsed = start.elapsed();
 
         assert!(result.is_err(), "Expected pool-exhaustion error, got Ok");
+        // Lower bound: the failure came from the acquire timeout, not an
+        // unrelated early error.
         assert!(
-            elapsed < Duration::from_secs(3),
-            "acquire_timeout did not fire quickly enough: {elapsed:?}"
+            elapsed >= ACQUIRE_TIMEOUT,
+            "failed before acquire_timeout could fire, so the error was not \
+             pool exhaustion: {elapsed:?}"
+        );
+        // Upper bound: it gave up instead of queueing behind the holder's 10s
+        // query. Sized against that 10s, leaving headroom for jitter.
+        const UPPER_BOUND: Duration = Duration::from_secs(8);
+        assert!(
+            elapsed < UPPER_BOUND,
+            "acquire_timeout did not fire quickly enough, so the acquire queued \
+             behind the holder rather than giving up: {elapsed:?}"
         );
     }
 }

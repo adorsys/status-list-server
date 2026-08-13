@@ -11,7 +11,7 @@ pub(crate) mod test_containers;
 
 pub use error::RepositoryError;
 pub use migrations::Migrator;
-pub(crate) use migrations::verify_innodb_engines;
+pub(crate) use migrations::{verify_binlog_format, verify_innodb_engines};
 pub use models::*;
 pub use store::SeaOrmStore;
 
@@ -241,6 +241,7 @@ impl From<RepositoryError> for CredentialError {
     fn from(value: RepositoryError) -> Self {
         match value {
             RepositoryError::DuplicateEntry => CredentialError::AlreadyExists,
+            RepositoryError::Contention { code } => CredentialError::Contention { code },
             other => CredentialError::Backend(Box::new(other)),
         }
     }
@@ -250,7 +251,68 @@ impl From<RepositoryError> for StatusListError {
     fn from(value: RepositoryError) -> Self {
         match value {
             RepositoryError::DuplicateEntry => StatusListError::AlreadyExists,
+            RepositoryError::Contention { code } => StatusListError::Contention { code },
             other => StatusListError::Backend(Box::new(other)),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::server::error::{ApiError, IntoApiError};
+    use axum::http::StatusCode;
+
+    /// Spans the chain the other tests only cover in halves: adapter error →
+    /// domain conversion → status and code the client receives. A broken `From`
+    /// here would pass both halves while shipping a 500.
+    #[test]
+    fn contention_reaches_the_client_as_409_write_contention() {
+        let status_list: StatusListError = RepositoryError::Contention { code: "40P01" }.into();
+        let api = status_list.into_api_error();
+        assert_eq!(api.status, StatusCode::CONFLICT);
+        assert_eq!(api.error, "write_contention");
+        assert_eq!(
+            api.retry_after_secs,
+            Some(1),
+            "the retry hint must survive the conversion chain"
+        );
+
+        let credential: CredentialError = RepositoryError::Contention { code: "1205" }.into();
+        let api: ApiError = credential.into_api_error();
+        assert_eq!(api.status, StatusCode::CONFLICT);
+        assert_eq!(api.error, "write_contention");
+    }
+
+    /// A duplicate key must stay a duplicate; routed through `Contention` it
+    /// would tell the client to retry a write that can never succeed.
+    #[test]
+    fn duplicate_entry_is_not_reported_as_contention() {
+        let status_list: StatusListError = RepositoryError::DuplicateEntry.into();
+        assert_eq!(
+            status_list.into_api_error().error,
+            "status_list_already_exists"
+        );
+
+        let credential: CredentialError = RepositoryError::DuplicateEntry.into();
+        assert_eq!(
+            credential.into_api_error().error,
+            "credentials_already_exist"
+        );
+    }
+
+    /// The classification carves out contention; it must not soften every
+    /// storage failure into something a client is told to retry.
+    #[test]
+    fn unclassified_storage_errors_remain_500() {
+        for err in [
+            RepositoryError::InsertError("boom".into()),
+            RepositoryError::UpdateError("boom".into()),
+            RepositoryError::FindError("boom".into()),
+        ] {
+            let api = StatusListError::from(err).into_api_error();
+            assert_eq!(api.status, StatusCode::INTERNAL_SERVER_ERROR);
+            assert!(api.retry_after_secs.is_none());
         }
     }
 }
