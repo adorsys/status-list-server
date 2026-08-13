@@ -299,7 +299,19 @@ mod tests {
     #[cfg(feature = "acme")]
     use async_trait::async_trait;
     use axum::body::to_bytes;
+    #[cfg(feature = "acme")]
+    use std::sync::Once;
     use tower::ServiceExt;
+
+    #[cfg(feature = "acme")]
+    static INIT_CRYPTO: Once = Once::new();
+
+    #[cfg(feature = "acme")]
+    fn init_crypto() {
+        INIT_CRYPTO.call_once(|| {
+            let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+        });
+    }
 
     struct FailingCheck;
 
@@ -524,6 +536,8 @@ mod tests {
     #[cfg(feature = "acme")]
     #[tokio::test]
     async fn ready_fails_when_cert_storage_is_reachable_but_secrets_storage_is_not() {
+        init_crypto();
+
         let manager = CertManager::new(
             ["example.com"],
             "test@example.com",
