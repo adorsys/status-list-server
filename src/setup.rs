@@ -1,9 +1,7 @@
 //! Composition root assembling outbound infrastructure adapters and creating the AppState container.
 
-#[cfg(any(feature = "aws", all(feature = "acme", feature = "s3-compatible")))]
+#[cfg(feature = "aws")]
 use aws_config::{BehaviorVersion, Region};
-#[cfg(all(feature = "acme", feature = "s3-compatible"))]
-use aws_credential_types::Credentials;
 #[cfg(any(
     feature = "acme",
     feature = "sqlite",
@@ -436,22 +434,15 @@ async fn build_s3_compatible_certificate_storage(
     config: &AppConfig,
 ) -> EyeResult<(Box<dyn Storage>, Box<dyn Storage>)> {
     let s3_config = &config.s3_compatible;
-    if s3_config.endpoint_url.trim().is_empty() {
-        return Err(eyre!(
-            "s3_compatible.endpoint_url is required when certificate storage backend is 's3_compatible'"
-        ));
-    }
-    if s3_config.bucket.trim().is_empty() {
-        return Err(eyre!(
-            "s3_compatible.bucket is required when certificate storage backend is 's3_compatible'"
-        ));
-    }
+    let mut builder = S3Compatible::builder()
+        .endpoint_url(&s3_config.endpoint_url)
+        .region(&s3_config.region)
+        .bucket(&s3_config.bucket)
+        .key_prefix(&s3_config.key_prefix)
+        .force_path_style(s3_config.force_path_style)
+        .auto_create_bucket(s3_config.auto_create_bucket);
 
-    let mut config_loader = aws_config::defaults(BehaviorVersion::latest())
-        .region(Region::new(s3_config.region.clone()))
-        .endpoint_url(s3_config.endpoint_url.clone());
-
-    if let (Some(access_key_id), Some(secret_access_key)) = (
+    match (
         s3_config
             .access_key_id
             .as_deref()
@@ -462,33 +453,20 @@ async fn build_s3_compatible_certificate_storage(
             .map(ExposeSecret::expose_secret)
             .filter(|value| !value.trim().is_empty()),
     ) {
-        config_loader = config_loader.credentials_provider(Credentials::new(
-            access_key_id,
-            secret_access_key,
-            None,
-            None,
-            "s3-compatible-config",
-        ));
+        (Some(access_key_id), Some(secret_access_key)) => {
+            builder = builder.credentials(access_key_id, secret_access_key);
+        }
+        (None, None) => {}
+        _ => {
+            return Err(eyre!(
+                "s3_compatible.access_key_id and s3_compatible.secret_access_key must be configured together"
+            ));
+        }
     }
 
-    let sdk_config = config_loader.load().await;
-
-    let cert_storage: Box<dyn Storage> = Box::new(S3Compatible::new(
-        &sdk_config,
-        &s3_config.bucket,
-        &s3_config.region,
-        &s3_config.key_prefix,
-        s3_config.force_path_style,
-        s3_config.auto_create_bucket,
-    ));
-    let secrets_storage: Box<dyn Storage> = Box::new(S3Compatible::new(
-        &sdk_config,
-        &s3_config.bucket,
-        &s3_config.region,
-        &s3_config.key_prefix,
-        s3_config.force_path_style,
-        s3_config.auto_create_bucket,
-    ));
+    let storage = Arc::new(builder.build().await?);
+    let cert_storage: Box<dyn Storage> = Box::new(storage.clone());
+    let secrets_storage: Box<dyn Storage> = Box::new(storage);
 
     Ok((cert_storage, secrets_storage))
 }

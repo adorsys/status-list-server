@@ -1,18 +1,23 @@
-use std::{
-    sync::atomic::{AtomicBool, Ordering},
-    time::Duration,
-};
+//! AWS outbound certificate storage adapters.
+//!
+//! This module implements [`Storage`] for AWS Secrets Manager and S3-backed
+//! certificate material. S3 objects are qualified with the configured key
+//! prefix, while optional Redis-backed caching is wired by the composition root.
+
+use std::time::Duration;
 
 use async_trait::async_trait;
 use aws_config::SdkConfig;
-use aws_sdk_s3::{Client as S3Client, types::CreateBucketConfiguration};
+use aws_sdk_s3::Client as S3Client;
 use aws_sdk_secretsmanager::Client as SecretsClient;
 use color_eyre::eyre::eyre;
 use moka::future::Cache;
-use tokio::time::sleep;
 use tracing::{info, warn};
 
-use crate::cert_manager::storage::{Storage, StorageError};
+use crate::{
+    cert_manager::storage::{Storage, StorageError},
+    outbound::s3_object_store::{S3ErrorKind, S3ObjectStore},
+};
 
 /// AWS Secrets Manager.
 pub struct AwsSecretsManager {
@@ -137,18 +142,11 @@ impl Storage for AwsSecretsManager {
 
 /// AWS S3 bucket with optional caching layer
 pub struct AwsS3 {
-    client: S3Client,
-    bucket: String,
-    region: String,
-    key_prefix: String,
+    store: S3ObjectStore,
     cache: Option<Box<dyn Storage>>,
-    bucket_exists: AtomicBool,
 }
 
 impl AwsS3 {
-    const BUCKET_MAX_RETRIES: u32 = 3;
-    const BUCKET_RETRY_DELAY: Duration = Duration::from_millis(500);
-
     /// Create a new instance of [`AwsS3`] with the given AWS parameters.
     pub fn new(
         config: &SdkConfig,
@@ -166,14 +164,15 @@ impl AwsS3 {
                 .build();
             S3Client::from_conf(dev_config)
         };
-        Self {
+        let store = S3ObjectStore::new(
             client,
-            bucket: bucket_name.into(),
-            region: region.into(),
-            key_prefix: key_prefix.into(),
-            cache: None,
-            bucket_exists: AtomicBool::new(false),
-        }
+            bucket_name,
+            region,
+            key_prefix,
+            true,
+            S3ErrorKind::AwsSdk,
+        );
+        Self { store, cache: None }
     }
 
     /// Set the cache layer if needed
@@ -181,92 +180,13 @@ impl AwsS3 {
         self.cache = Some(Box::new(cache));
         self
     }
-
-    /// Qualify a key by prepending the configured S3 key prefix.
-    fn qualify_key(&self, key: &str) -> String {
-        if self.key_prefix.is_empty() {
-            key.to_string()
-        } else if self.key_prefix.ends_with('/') {
-            format!("{}{}", self.key_prefix, key)
-        } else {
-            format!("{}/{}", self.key_prefix, key)
-        }
-    }
-
-    /// Ensure the S3 bucket exists before any operation
-    async fn ensure_bucket_exists(&self) -> Result<(), StorageError> {
-        use aws_sdk_s3::error::SdkError;
-
-        // return if bucket is already verified
-        if self.bucket_exists.load(Ordering::Relaxed) {
-            return Ok(());
-        }
-
-        let max_retries = Self::BUCKET_MAX_RETRIES;
-
-        for attempt in 0..max_retries {
-            // Check if the bucket exists
-            match self.client.head_bucket().bucket(&self.bucket).send().await {
-                Ok(_) => {
-                    info!("Bucket {} already exists. Skipping...", self.bucket);
-                    self.bucket_exists.store(true, Ordering::Relaxed);
-                    return Ok(());
-                }
-                Err(SdkError::ServiceError(err)) if err.err().is_not_found() => {
-                    // Bucket not found, attempt to create it
-                    let mut req = self.client.create_bucket().bucket(&self.bucket);
-                    if self.region != "us-east-1" {
-                        let location_constraint = self.region.parse().map_err(|_| {
-                            StorageError::AwsSdk(eyre!(
-                                "Invalid region '{}' for LocationConstraint",
-                                self.region
-                            ))
-                        })?;
-                        req = req.create_bucket_configuration(
-                            CreateBucketConfiguration::builder()
-                                .location_constraint(location_constraint)
-                                .build(),
-                        );
-                    }
-                    match req.send().await {
-                        Ok(_) => {
-                            info!("Bucket {} created successfully", self.bucket);
-                            self.bucket_exists.store(true, Ordering::Relaxed);
-                            return Ok(());
-                        }
-                        Err(create_err) => {
-                            if attempt == max_retries - 1 {
-                                return Err(StorageError::AwsSdk(create_err.into()));
-                            }
-                            warn!(
-                                "Failed to create bucket {}: {create_err}. Retrying...",
-                                self.bucket
-                            );
-                        }
-                    }
-                }
-                Err(err) => {
-                    // Wait a bit before retrying
-                    if attempt == max_retries - 1 {
-                        return Err(StorageError::AwsSdk(err.into()));
-                    }
-                    warn!("Error checking bucket {}: {err}. Retrying...", self.bucket);
-                }
-            }
-
-            if attempt < max_retries - 1 {
-                sleep(Self::BUCKET_RETRY_DELAY).await;
-            }
-        }
-        Err(StorageError::BucketUnavailable(self.bucket.clone()))
-    }
 }
 
 #[async_trait]
 impl Storage for AwsS3 {
     async fn store(&self, key: &str, data: &str) -> Result<(), StorageError> {
         // Ensure the bucket exists
-        self.ensure_bucket_exists().await?;
+        self.store.ensure_bucket_exists().await?;
 
         // Invalidate cache
         if let Some(cache) = &self.cache
@@ -276,19 +196,9 @@ impl Storage for AwsS3 {
         }
 
         // Store the object in the bucket
-        let s3_key = self.qualify_key(key);
-        let body = data.as_bytes().to_vec();
-        match self
-            .client
-            .put_object()
-            .bucket(&self.bucket)
-            .key(&s3_key)
-            .body(body.into())
-            .send()
-            .await
-        {
+        match self.store.put(key, data).await {
             Ok(_) => {
-                info!("Stored object {key} in bucket {}", self.bucket);
+                info!("Stored object {key} in S3");
                 Ok(())
             }
             Err(e) => {
@@ -302,8 +212,6 @@ impl Storage for AwsS3 {
     }
 
     async fn load(&self, key: &str) -> Result<Option<String>, StorageError> {
-        use aws_sdk_s3::error::SdkError;
-
         // Check the cache first if it exists
         if let Some(cache) = &self.cache {
             match cache.load(key).await {
@@ -316,24 +224,8 @@ impl Storage for AwsS3 {
         }
 
         // If not found in cache, try to get directly from S3
-        self.ensure_bucket_exists().await?;
-        let s3_key = self.qualify_key(key);
-        match self
-            .client
-            .get_object()
-            .bucket(&self.bucket)
-            .key(&s3_key)
-            .send()
-            .await
-        {
-            Ok(output) => {
-                let bytes = output
-                    .body
-                    .collect()
-                    .await
-                    .map_err(|e| StorageError::AwsSdk(e.into()))?;
-                let data = String::from_utf8(bytes.into_bytes().into())
-                    .map_err(|e| StorageError::InvalidData(e.to_string()))?;
+        match self.store.get(key).await {
+            Ok(Some(data)) => {
                 if let Some(cache) = &self.cache
                     && let Err(e) = cache.store(key, &data).await
                 {
@@ -341,21 +233,12 @@ impl Storage for AwsS3 {
                 }
                 Ok(Some(data))
             }
-            Err(SdkError::ServiceError(err)) if err.err().is_no_such_key() => Ok(None),
-            Err(sdk_err) => Err(StorageError::AwsSdk(sdk_err.into())),
+            other => other,
         }
     }
 
     async fn delete(&self, key: &str) -> Result<(), StorageError> {
-        let s3_key = self.qualify_key(key);
-        match self
-            .client
-            .delete_object()
-            .bucket(&self.bucket)
-            .key(&s3_key)
-            .send()
-            .await
-        {
+        match self.store.delete(key).await {
             Ok(_) => {
                 if let Some(cache) = &self.cache
                     && let Err(e) = cache.delete(key).await
@@ -364,7 +247,7 @@ impl Storage for AwsS3 {
                 }
                 Ok(())
             }
-            Err(e) => Err(StorageError::AwsSdk(e.into())),
+            Err(e) => Err(e),
         }
     }
 }

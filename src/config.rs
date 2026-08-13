@@ -86,6 +86,7 @@ pub struct Config {
     pub database: DatabaseConfig,
     pub redis: RedisConfig,
     pub aws: AwsConfig,
+    #[cfg(feature = "s3-compatible")]
     pub s3_compatible: S3CompatibleConfig,
     pub cache: CacheConfig,
     pub status_list: StatusListConfig,
@@ -622,6 +623,7 @@ pub struct AwsConfig {
     pub s3_key_prefix: String,
 }
 
+#[cfg(feature = "s3-compatible")]
 #[derive(Debug, Clone, Deserialize)]
 pub struct S3CompatibleConfig {
     pub endpoint_url: String,
@@ -834,14 +836,19 @@ fn base_builder() -> Result<ConfigBuilder<DefaultState>, ConfigError> {
         .set_default("redis.cert_cache_ttl", 3600)?
         .set_default("aws.secrets_cache_ttl", 300)?
         .set_default("aws.s3_bucket", "status-list-adorsys")?
-        .set_default("aws.s3_key_prefix", "")?
+        .set_default("aws.s3_key_prefix", "")?;
+
+    #[cfg(feature = "s3-compatible")]
+    let builder = builder
         .set_default("s3_compatible.endpoint_url", "http://localhost:9000")?
         .set_default("s3_compatible.region", "us-east-1")?
         .set_default("s3_compatible.bucket", "status-list-certs")?
         .set_default("s3_compatible.key_prefix", "certificates")?
         .set_default("s3_compatible.force_path_style", true)?
         .set_default("s3_compatible.auto_create_bucket", true)?
-        .set_default("s3_compatible.access_key_id", Option::<String>::None)?
+        .set_default("s3_compatible.access_key_id", Option::<String>::None)?;
+
+    let builder = builder
         .set_default(
             "server.cert.provisioning_strategy",
             default_provisioning_strategy,
@@ -943,14 +950,17 @@ mod tests {
             config.server.cert.storage_backend,
             CertificateStorageBackend::Memory
         );
-        assert_eq!(config.s3_compatible.endpoint_url, "http://localhost:9000");
-        assert_eq!(config.s3_compatible.region, "us-east-1");
-        assert_eq!(config.s3_compatible.bucket, "status-list-certs");
-        assert_eq!(config.s3_compatible.key_prefix, "certificates");
-        assert!(config.s3_compatible.force_path_style);
-        assert!(config.s3_compatible.auto_create_bucket);
-        assert_eq!(config.s3_compatible.access_key_id, None);
-        assert!(config.s3_compatible.secret_access_key.is_none());
+        #[cfg(feature = "s3-compatible")]
+        {
+            assert_eq!(config.s3_compatible.endpoint_url, "http://localhost:9000");
+            assert_eq!(config.s3_compatible.region, "us-east-1");
+            assert_eq!(config.s3_compatible.bucket, "status-list-certs");
+            assert_eq!(config.s3_compatible.key_prefix, "certificates");
+            assert!(config.s3_compatible.force_path_style);
+            assert!(config.s3_compatible.auto_create_bucket);
+            assert_eq!(config.s3_compatible.access_key_id, None);
+            assert!(config.s3_compatible.secret_access_key.is_none());
+        }
 
         #[cfg(feature = "acme")]
         let (expected_strategy, expected_cert_path, expected_key_path) =
@@ -1087,24 +1097,27 @@ mod tests {
             overridden.server.cert.storage_backend,
             CertificateStorageBackend::S3Compatible
         );
-        assert_eq!(overridden.s3_compatible.endpoint_url, "http://minio:9000");
-        assert_eq!(overridden.s3_compatible.region, "garage");
-        assert_eq!(overridden.s3_compatible.bucket, "cert-material");
-        assert_eq!(overridden.s3_compatible.key_prefix, "tenant-a/certs");
-        assert!(overridden.s3_compatible.force_path_style);
-        assert!(!overridden.s3_compatible.auto_create_bucket);
-        assert_eq!(
-            overridden.s3_compatible.access_key_id.as_deref(),
-            Some("minioadmin")
-        );
-        assert_eq!(
-            overridden
-                .s3_compatible
-                .secret_access_key
-                .as_ref()
-                .map(ExposeSecret::expose_secret),
-            Some("minioadmin")
-        );
+        #[cfg(feature = "s3-compatible")]
+        {
+            assert_eq!(overridden.s3_compatible.endpoint_url, "http://minio:9000");
+            assert_eq!(overridden.s3_compatible.region, "garage");
+            assert_eq!(overridden.s3_compatible.bucket, "cert-material");
+            assert_eq!(overridden.s3_compatible.key_prefix, "tenant-a/certs");
+            assert!(overridden.s3_compatible.force_path_style);
+            assert!(!overridden.s3_compatible.auto_create_bucket);
+            assert_eq!(
+                overridden.s3_compatible.access_key_id.as_deref(),
+                Some("minioadmin")
+            );
+            assert_eq!(
+                overridden
+                    .s3_compatible
+                    .secret_access_key
+                    .as_ref()
+                    .map(ExposeSecret::expose_secret),
+                Some("minioadmin")
+            );
+        }
         assert_eq!(overridden.cache.ttl, 600);
         assert_eq!(overridden.cache.max_capacity, 2000);
         assert_eq!(overridden.status_list.token_exp_secs, 1800);

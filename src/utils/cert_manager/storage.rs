@@ -13,8 +13,8 @@ pub enum StorageError {
     #[error("AWS SDK error: {0}")]
     AwsSdk(#[source] Report),
 
-    #[error("S3-compatible object storage error: {0}")]
-    ObjectStorage(#[source] Report),
+    #[error("Storage backend error: {0}")]
+    Backend(#[source] Report),
 
     #[error("The data is invalid: {0}")]
     InvalidData(String),
@@ -40,6 +40,22 @@ pub trait Storage: Send + Sync {
 
 #[async_trait]
 impl<T: Storage + ?Sized> Storage for Box<T> {
+    async fn store(&self, key: &str, value: &str) -> Result<(), StorageError> {
+        (**self).store(key, value).await
+    }
+    async fn load(&self, key: &str) -> Result<Option<String>, StorageError> {
+        (**self).load(key).await
+    }
+    async fn update(&self, key: &str, value: &str) -> Result<(), StorageError> {
+        (**self).update(key, value).await
+    }
+    async fn delete(&self, key: &str) -> Result<(), StorageError> {
+        (**self).delete(key).await
+    }
+}
+
+#[async_trait]
+impl<T: Storage + ?Sized> Storage for std::sync::Arc<T> {
     async fn store(&self, key: &str, value: &str) -> Result<(), StorageError> {
         (**self).store(key, value).await
     }

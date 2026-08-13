@@ -8,5 +8,7 @@ pub mod memory;
 pub mod redis;
 #[cfg(feature = "s3-compatible")]
 pub mod s3_compatible;
+#[cfg(any(feature = "aws", feature = "s3-compatible"))]
+pub(crate) mod s3_object_store;
 #[cfg(feature = "history")]
 pub mod sql;

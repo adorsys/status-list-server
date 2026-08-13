@@ -51,15 +51,18 @@ async fn s3_compatible_storage_round_trips_against_minio() {
         .await
         .expect("Failed to resolve MinIO port");
     let endpoint_url = format!("http://127.0.0.1:{port}");
-    let sdk_config = minio_sdk_config(endpoint_url).await;
-    let storage = S3Compatible::new(
-        &sdk_config,
-        BUCKET,
-        MINIO_REGION,
-        "tenant-a/certificates",
-        true,
-        true,
-    );
+    let sdk_config = minio_sdk_config(endpoint_url.clone()).await;
+    let storage = S3Compatible::builder()
+        .endpoint_url(&endpoint_url)
+        .region(MINIO_REGION)
+        .bucket(BUCKET)
+        .key_prefix("tenant-a/certificates")
+        .force_path_style(true)
+        .auto_create_bucket(true)
+        .credentials(MINIO_ACCESS_KEY, MINIO_SECRET_KEY)
+        .build()
+        .await
+        .expect("Failed to build S3-compatible storage");
 
     let key = "certs-example.com-cert_data.json";
     assert_eq!(storage.load(key).await.unwrap(), None);
