@@ -162,8 +162,8 @@ The following constraints are validated at startup and will cause the server to 
 - `server.port` must be between 1 and 65535 (the `u16` type enforces the upper bound)
 - `server.cert.renewal_cron_schedule` must be a valid 6-field cron expression (seconds required)
 - `aws.s3_bucket` must not be empty when `server.cert.cert_storage = "aws_s3"`
-- `server.cert.cert_storage` must match a compiled feature flag (e.g. `aws_s3` requires the `aws` feature)
-- `server.cert.secrets_storage` must match a compiled feature flag (e.g. `aws_secrets_manager` requires the `aws` feature)
+- `server.cert.cert_storage` must be compiled in (e.g. `aws_s3` requires AWS S3 support at build time)
+- `server.cert.secrets_storage` must be compiled in (e.g. `aws_secrets` requires AWS Secrets Manager support at build time)
 
 ## Security
 
@@ -223,9 +223,9 @@ The Status List Server is provisioned with a cryptographic certificate that is e
 
 Certificate object storage (`server.cert.cert_storage`) and secrets storage (`server.cert.secrets_storage`) are selected independently:
 
-- `memory` — in-process ephemeral storage (the default for both backends regardless of compiled features). AWS storage backends require explicit opt-in.
-- `aws_s3` — AWS S3 for certificate storage. Requires `aws.s3_bucket` and the `aws` feature.
-- `aws_secrets_manager` — AWS Secrets Manager for secrets storage. Requires the `aws` feature.
+- `memory` — in-process ephemeral storage (the default for both backends). AWS storage backends require explicit opt-in.
+- `aws_s3` — AWS S3 for certificate storage. Requires `aws.s3_bucket` to be set.
+- `aws_secrets` — AWS Secrets Manager for secrets storage.
 
 This allows mixed deployments such as S3-compatible object storage for certificates with an in-memory or alternative secrets backend.
 
