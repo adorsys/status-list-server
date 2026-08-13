@@ -256,6 +256,9 @@ jobs:
       - name: Build Helm dependencies
         run: |
           helm repo add dandydeveloper https://dandydeveloper.github.io/charts
+          # Upstream chart default values:
+          # https://github.com/open-telemetry/opentelemetry-helm-charts/blob/main/charts/opentelemetry-collector/values.yaml
+          helm repo add open-telemetry https://open-telemetry.github.io/opentelemetry-helm-charts
           helm dependency build helm/chart
 
       - name: Render Helm template
@@ -286,6 +289,7 @@ jobs:
       - name: Build Helm dependencies
         run: |
           helm repo add dandydeveloper https://dandydeveloper.github.io/charts
+          helm repo add open-telemetry https://open-telemetry.github.io/opentelemetry-helm-charts
           helm dependency build helm/chart
 
       - name: Render Helm template
@@ -339,7 +343,7 @@ jobs:
         run: |
           docker run --rm \
             -v "$PWD/otel-collector.yaml:/etc/otelcol/config.yaml:ro" \
-            otel/opentelemetry-collector-contrib:0.156.0 \
+            otel/opentelemetry-collector-contrib:0.158.0 \
             validate --config /etc/otelcol/config.yaml
 
       - name: Install Helm
@@ -353,6 +357,7 @@ jobs:
       - name: Build Helm dependencies
         run: |
           helm repo add dandydeveloper https://dandydeveloper.github.io/charts
+          helm repo add open-telemetry https://open-telemetry.github.io/opentelemetry-helm-charts
           helm dependency build helm/chart
 
       - name: Render Helm chart
@@ -371,12 +376,13 @@ jobs:
               metadata = document.get("metadata") or {}
               if (
                   document.get("kind") == "ConfigMap"
-                  and metadata.get("name", "").endswith("-otel-collector-config")
+                  and metadata.get("name", "").endswith("-opentelemetry-collector")
               ):
-                  Path("/tmp/helm-otel-collector.yaml").write_text(
-                      document["data"]["config.yaml"]
-                  )
-                  break
+                  data = document.get("data", {})
+                  content = data.get("relay") or data.get("config.yaml")
+                  if content:
+                      Path("/tmp/helm-otel-collector.yaml").write_text(content)
+                      break
           else:
               raise SystemExit("rendered Helm Collector ConfigMap was not found")
           PY
@@ -385,7 +391,7 @@ jobs:
         run: |
           docker run --rm \
             -v "/tmp/helm-otel-collector.yaml:/etc/otelcol/config.yaml:ro" \
-            otel/opentelemetry-collector-contrib:0.156.0 \
+            otel/opentelemetry-collector-contrib:0.158.0 \
             validate --config /etc/otelcol/config.yaml
 
   cargo-coverage:
