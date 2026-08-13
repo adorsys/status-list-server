@@ -11,6 +11,7 @@ pub(crate) mod test_containers;
 
 pub use error::RepositoryError;
 pub use migrations::Migrator;
+#[cfg(any(feature = "sqlite", feature = "postgres", feature = "mysql"))]
 pub(crate) use migrations::verify_innodb_engines;
 pub use models::*;
 pub use store::SeaOrmStore;
