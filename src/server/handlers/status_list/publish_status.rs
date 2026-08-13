@@ -15,7 +15,11 @@ use super::utils::request::StatusesRequest;
 /// Publish a new status list.
 ///
 /// Handle PUT /status-lists/{list_id}/statuses request.
-#[tracing::instrument(skip_all, fields(list_id = %list_id, issuer = %issuer), err(Debug))]
+///
+/// `err(level = "info")` for the reason on `update_status`: the default ERROR
+/// level would page on write contention and on a racing publish, both 409s the
+/// response layer already logs at the right severity.
+#[tracing::instrument(skip_all, fields(list_id = %list_id, issuer = %issuer), err(level = "info", Debug))]
 pub async fn publish_status(
     State(appstate): State<AppState>,
     Extension(issuer): Extension<String>,

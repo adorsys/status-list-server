@@ -178,7 +178,7 @@ paths:
         "400":
           $ref: "#/components/responses/BadRequest"
         "409":
-          $ref: "#/components/responses/Conflict"
+          $ref: "#/components/responses/CredentialConflict"
         "413":
           $ref: "#/components/responses/PayloadTooLarge"
         "422":
@@ -251,7 +251,7 @@ paths:
         "401":
           $ref: "#/components/responses/Unauthorized"
         "409":
-          $ref: "#/components/responses/Conflict"
+          $ref: "#/components/responses/PublishConflict"
         "413":
           $ref: "#/components/responses/PayloadTooLarge"
         "422":
@@ -647,6 +647,7 @@ components:
             - status_list_already_exists
             - credentials_already_exist
             - update_conflict
+            - write_contention
             # 422
             - status_too_large
             # 500 / 503
@@ -721,15 +722,80 @@ components:
             error: "invalid_accept_header"
             error_description: "Invalid accept header"
 
-    Conflict:
-      description: Resource already exists
+    PublishConflict:
+      description: |
+        The publish was rejected. Read the `error` field: the two cases below
+        require opposite client behaviour, and only one of them is retryable.
+
+        `status_list_already_exists` — a list with this `list_id` is already
+        published. **Retrying will never succeed**; choose a different `list_id`
+        or update the existing list instead.
+
+        `write_contention` — the write lost a lock race inside the database
+        (deadlock or lock-wait timeout) and was rolled back. Nothing was created,
+        so **retry the identical request**. A `Retry-After` header gives a floor;
+        add jitter on top, since the writers that just collided would otherwise
+        resynchronise.
+      headers:
+        Retry-After:
+          description: |
+            Present only for `write_contention`. Seconds to wait before
+            retrying — a minimum, not a schedule.
+          required: false
+          schema:
+            type: integer
+            example: 1
       content:
         application/json:
           schema:
             $ref: "#/components/schemas/ErrorResponse"
-          example:
-            error: "status_list_already_exists"
-            error_description: "Status list already exists"
+          examples:
+            alreadyExists:
+              summary: A list with this identifier is already published (do not retry)
+              value:
+                error: "status_list_already_exists"
+                error_description: "Status list already exists"
+            writeContention:
+              summary: Rolled back by a storage lock race (retry unchanged)
+              value:
+                error: "write_contention"
+                error_description: "The write lost a lock race in storage and was rolled back. Nothing was modified; retry the same request."
+
+    CredentialConflict:
+      description: |
+        The credential registration was rejected. Read the `error` field.
+
+        `credentials_already_exist` — this issuer already has credentials
+        registered. **Retrying will never succeed.**
+
+        `write_contention` — the write lost a lock race inside the database
+        (deadlock or lock-wait timeout) and was rolled back. Nothing was created,
+        so **retry the identical request** after the `Retry-After` interval plus
+        jitter.
+      headers:
+        Retry-After:
+          description: |
+            Present only for `write_contention`. Seconds to wait before
+            retrying — a minimum, not a schedule.
+          required: false
+          schema:
+            type: integer
+            example: 1
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+          examples:
+            alreadyExists:
+              summary: This issuer is already registered (do not retry)
+              value:
+                error: "credentials_already_exist"
+                error_description: "Credentials already exist for this issuer"
+            writeContention:
+              summary: Rolled back by a storage lock race (retry unchanged)
+              value:
+                error: "write_contention"
+                error_description: "The write lost a lock race in storage and was rolled back. Nothing was modified; retry the same request."
 
     PayloadTooLarge:
       description: |
@@ -772,20 +838,51 @@ components:
 
     UpdateConflict:
       description: |
-        The status list was modified concurrently between the client's read and
-        this write (optimistic-concurrency conflict): another writer's update
-        landed first, so this request was rejected rather than silently
-        overwriting it. The client should re-read the current state and retry.
+        The write was rejected because it raced another writer. Two distinct
+        cases share this status and they require **opposite** client behaviour,
+        so branch on the `error` field rather than on the status code.
 
-        Distinguished from the publish conflict by the `error` code: this
-        response carries `update_conflict`, not `status_list_already_exists`.
+        `update_conflict` — optimistic-concurrency conflict. Another writer's
+        update landed first between the client's read and this write, so this
+        request was rejected rather than silently overwriting it. The client's
+        view is stale: **re-read the current state before retrying**, because
+        replaying the same request would reapply it to a changed list.
+
+        `write_contention` — the write lost a lock race inside the database
+        (deadlock or lock-wait timeout) and was rolled back by the server.
+        Nothing was modified and no writer won, so **retry the identical
+        request**; no re-read is required. A `Retry-After` header gives a floor —
+        add jitter on top, since the writers that just collided would otherwise
+        resynchronise.
+
+        > Note for integrators: 409 is not a status most generic HTTP clients,
+        > SDKs or service meshes retry automatically. `write_contention` is
+        > transient and safe to replay, but recovering from it requires handling
+        > this code explicitly.
+      headers:
+        Retry-After:
+          description: |
+            Present only for `write_contention`. Seconds to wait before
+            retrying — a minimum, not a schedule.
+          required: false
+          schema:
+            type: integer
+            example: 1
       content:
         application/json:
           schema:
             $ref: "#/components/schemas/ErrorResponse"
-          example:
-            error: "update_conflict"
-            error_description: "The status list was modified concurrently"
+          examples:
+            updateConflict:
+              summary: A racing writer's update landed first (re-read, then retry)
+              value:
+                error: "update_conflict"
+                error_description: "The status list was modified concurrently"
+            writeContention:
+              summary: Rolled back by a storage lock race (retry unchanged)
+              value:
+                error: "write_contention"
+                error_description: "The write lost a lock race in storage and was rolled back. Nothing was modified; retry the same request."
 
     UpdateInternalServerError:
       description: |
@@ -795,16 +892,17 @@ components:
         unchanged, no snapshot was recorded, and the previous state remains
         authoritative. The request is therefore safe to retry as-is.
 
-        This differs from a `409`, which means the write was rejected because
-        another writer got there first. A `409` requires re-reading the current
-        state before retrying; a `500` does not.
+        This differs from a `409`, which means the write was rejected because it
+        raced another writer. A `409 update_conflict` requires re-reading the
+        current state before retrying; a `409 write_contention` and a `500` do
+        not — both are safe to replay as-is.
       content:
         application/json:
           schema:
             $ref: "#/components/schemas/ErrorResponse"
           example:
             error: "internal_error"
-            error_description: "Internal server error"
+            error_description: "The server encountered an unexpected error."
 
     ServiceUnavailable:
       description: Service temporarily unavailable
@@ -814,7 +912,7 @@ components:
             $ref: "#/components/schemas/ErrorResponse"
           example:
             error: "service_unavailable"
-            error_description: "The service is currently unavailable. Please try again later"
+            error_description: "the service is currently unavailable. Please try again later"
 
     InternalServerError:
       description: Internal server error
@@ -824,4 +922,4 @@ components:
             $ref: "#/components/schemas/ErrorResponse"
           example:
             error: "internal_error"
-            error_description: "Internal server error"
+            error_description: "The server encountered an unexpected error."

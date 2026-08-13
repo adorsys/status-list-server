@@ -15,7 +15,12 @@ use super::utils::request::StatusesRequest;
 /// Update statuses in a status list.
 ///
 /// Handle PATCH /status-lists/{list_id}/statuses request.
-#[tracing::instrument(skip_all, fields(list_id = %list_id, issuer = %issuer), err(Debug))]
+///
+/// `err(level = "info")` because the default emits at ERROR for every `Err`,
+/// which would page on routine write contention and on optimistic-concurrency
+/// conflicts. Severity belongs to [`ApiError`]'s `IntoResponse`, which
+/// discriminates on status; this event only adds span context.
+#[tracing::instrument(skip_all, fields(list_id = %list_id, issuer = %issuer), err(level = "info", Debug))]
 pub async fn update_status(
     State(appstate): State<AppState>,
     Extension(issuer): Extension<String>,
