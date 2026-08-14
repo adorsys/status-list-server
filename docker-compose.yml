@@ -102,6 +102,9 @@ services:
     environment:
       APP_ENV: ${APP_ENV:-development}
       APP_SERVER__ENABLE_METRICS: ${APP_SERVER__ENABLE_METRICS:-true}
+      # Required — the server refuses to start without it. Nothing proxies the
+      # container here, so the connection address is the client address.
+      APP_RATE_LIMIT__CLIENT_IP_SOURCE: ${APP_RATE_LIMIT__CLIENT_IP_SOURCE:-connect_info}
       APP_AWS__S3_BUCKET: ${APP_AWS__S3_BUCKET:-status-list-adorsys}
       APP_STATUS_LIST__TOKEN_EXP_SECS: ${APP_STATUS_LIST__TOKEN_EXP_SECS:-900}
       APP_STATUS_LIST__TOKEN_TTL_SECS: ${APP_STATUS_LIST__TOKEN_TTL_SECS:-300}

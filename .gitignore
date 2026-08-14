@@ -17,3 +17,6 @@ ipython_config.py
 
 # MacOs store files
 **/.DS_Store
+
+# Local agent/session state
+.claude/
