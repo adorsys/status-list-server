@@ -392,8 +392,6 @@ async fn test_cert_provisioning_with_openbao() {
         .with_wait_for(WaitFor::message_on_stdout(
             "Development mode should NOT be used in production",
         ))
-        .with_env_var("VAULT_DEV_ROOT_TOKEN_ID", "root")
-        .with_env_var("VAULT_DEV_LISTEN_ADDRESS", "0.0.0.0:8200")
         .with_env_var("BAO_DEV_ROOT_TOKEN_ID", "root")
         .with_env_var("BAO_DEV_LISTEN_ADDRESS", "0.0.0.0:8200")
         .start()
