@@ -108,7 +108,7 @@ commit_parsers = [
   { message = "^feat", group = "<!-- 00 -->Features" },
   { message = "^[fF]ix", group = "<!-- 01 -->Bug Fixes" },
   { message = "^refactor", group = "<!-- 02 -->Refactor" },
-  { message = "^doc", group = "<!-- 03 -->Documentation" },
+  { message = "^docs", group = "<!-- 03 -->Documentation" },
   { message = "^perf", group = "<!-- 04 -->Performance" },
   { message = "^style", group = "<!-- 05 -->Styling" },
   { message = "^test", group = "<!-- 06 -->Testing" },

@@ -24,9 +24,6 @@ jobs:
     name: Conventional Commits
     runs-on: ubuntu-latest
 
-    env:
-      CONVENTIONAL_COMMIT_PATTERN: '^(build|chore|ci|docs|feat|fix|perf|refactor|revert|style|test)(\([A-Za-z0-9._/-]+\))?!?: .+$'
-
     steps:
       - name: Fetch Repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -36,58 +33,26 @@ jobs:
 
       - name: Validate PR title
         if: ${{ github.event_name == 'pull_request' }}
+        uses: amannn/action-semantic-pull-request@48f256284bd46cdaab1048c3721360e808335d50 # v6.1.1
         env:
-          PR_TITLE: ${{ github.event.pull_request.title }}
-        run: |
-          set -euo pipefail
-
-          if [[ ! "${PR_TITLE}" =~ ${CONVENTIONAL_COMMIT_PATTERN} ]]; then
-            echo "::error title=Invalid PR title::PR title must follow Conventional Commits, for example: feat(api): add status list lookup"
-            echo "Received: ${PR_TITLE}"
-            exit 1
-          fi
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          requireScope: false
+          types: |
+            build
+            chore
+            ci
+            docs
+            feat
+            fix
+            perf
+            refactor
+            revert
+            style
+            test
 
       - name: Validate commit messages
-        env:
-          BASE_REF: ${{ github.base_ref }}
-          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
-          MERGE_GROUP_BASE_REF: ${{ github.event.merge_group.base_ref }}
-        run: |
-          set -euo pipefail
-
-          if [[ "${GITHUB_EVENT_NAME}" == "pull_request" ]]; then
-            range="${PR_BASE_SHA}..HEAD"
-          elif [[ "${GITHUB_EVENT_NAME}" == "merge_group" ]]; then
-            base_ref="${MERGE_GROUP_BASE_REF#refs/heads/}"
-            git fetch --no-tags origin "${base_ref}"
-            range="origin/${base_ref}..HEAD"
-          elif [[ -n "${BASE_REF}" ]]; then
-            git fetch --no-tags origin "${BASE_REF}"
-            range="origin/${BASE_REF}..HEAD"
-          else
-            range="HEAD~1..HEAD"
-          fi
-
-          echo "Validating non-merge commit subjects in range: ${range}"
-
-          failures=0
-          commits=0
-
-          while IFS= read -r commit; do
-            commits=$((commits + 1))
-            subject="$(git log -1 --format=%s "${commit}")"
-
-            if [[ ! "${subject}" =~ ${CONVENTIONAL_COMMIT_PATTERN} ]]; then
-              echo "::error title=Invalid commit message::${commit} '${subject}' must follow Conventional Commits"
-              failures=$((failures + 1))
-            fi
-          done < <(git log --format=%H --no-merges "${range}")
-
-          if [[ "${commits}" -eq 0 ]]; then
-            echo "No non-merge commits found to validate."
-          fi
-
-          if [[ "${failures}" -gt 0 ]]; then
-            echo "Found ${failures} non-conventional commit message(s)."
-            exit 1
-          fi
+        uses: wagoid/commitlint-github-action@6cf16efdf4da5277c791d335142c03a0bdf1766e # v6.2.1
+        with:
+          configFile: commitlint.config.mjs
+          helpURL: https://github.com/adorsys/status-list-server/blob/main/CONTRIBUTING.md#commit-messages
