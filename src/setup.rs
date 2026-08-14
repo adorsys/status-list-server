@@ -47,7 +47,8 @@ use crate::cert_manager::challenge::{
 use crate::cert_manager::http_client::DefaultHttpClient;
 #[cfg(feature = "acme")]
 use crate::cert_manager::{
-    CertManager, StoreProvisioningStrategy, storage::MemoryStorage, storage::Storage,
+    CertManager, StoreProvisioningStrategy,
+    storage::{CryptoMaterialCachePolicy, MemoryStorage, Storage},
 };
 use crate::config::{Config as AppConfig, DatabaseBackend};
 #[cfg(feature = "acme")]
@@ -59,16 +60,12 @@ use crate::domain::{
     service::Service,
 };
 #[cfg(feature = "aws")]
-use crate::outbound::aws::AwsS3;
-#[cfg(all(feature = "aws", not(feature = "vault")))]
 use crate::outbound::aws::AwsSecretsManager;
 use crate::outbound::cache::MokaStatusListCache;
 #[cfg(feature = "acme")]
 use crate::outbound::cert::AcmeCertificateProvider;
 #[cfg(feature = "memory")]
 use crate::outbound::memory::{MemoryCredentials, MemoryStatusListSnapshotRepo, MemoryStatusLists};
-#[cfg(feature = "redis")]
-use crate::outbound::redis::Redis;
 #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mysql"))]
 use crate::outbound::sql::{
     Migrator, SeaOrmStore, SqlCredentialRepo, SqlStatusListRepo, SqlStatusListSnapshotRepo,
@@ -218,98 +215,7 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
     ) = {
         let app_env = std::env::var("APP_ENV").unwrap_or(ENV_DEVELOPMENT.to_string());
         let cert_domains = [config.server.domain.as_str()];
-        let secrets_storage: Box<dyn Storage> = {
-            #[cfg(feature = "vault")]
-            {
-                tracing::info!("Using Vault KV v2 as secrets backend");
-                Box::new(
-                    VaultClient::builder(&config.vault.addr, config.vault.token.clone())
-                        .mount(&config.vault.mount)
-                        .path_prefix(&config.vault.path_prefix)
-                        .namespace(config.vault.namespace.as_deref())
-                        .secrets_cache_ttl(Duration::from_secs(config.vault.secrets_cache_ttl))
-                        .timeout(Duration::from_secs(config.vault.timeout_secs))
-                        .build()?,
-                )
-            }
-            #[cfg(not(feature = "vault"))]
-            {
-                #[cfg(feature = "aws")]
-                {
-                    if config
-                        .server
-                        .cert
-                        .store
-                        .source
-                        .eq_ignore_ascii_case("aws_secrets_manager")
-                    {
-                        let aws_config = aws_config::defaults(BehaviorVersion::latest())
-                            .region(Region::new(config.aws.region.clone()))
-                            .load()
-                            .await;
-                        Box::new(
-                            AwsSecretsManager::new(
-                                &aws_config,
-                                Duration::from_secs(config.aws.secrets_cache_ttl),
-                            )
-                            .await?,
-                        )
-                    } else {
-                        Box::new(MemoryStorage::default())
-                    }
-                }
-                #[cfg(not(feature = "aws"))]
-                Box::new(MemoryStorage::default())
-            }
-        };
-
-        // Uses S3 when available and configured, otherwise memory.
-        let cert_storage: Box<dyn Storage> = {
-            #[cfg(feature = "aws")]
-            {
-                if !config.aws.s3_bucket.is_empty() {
-                    let aws_config = aws_config::defaults(BehaviorVersion::latest())
-                        .region(Region::new(config.aws.region.clone()))
-                        .load()
-                        .await;
-
-                    #[cfg(feature = "redis")]
-                    let cache_opt = if !config.redis.uri.expose_secret().is_empty() {
-                        match config.redis.start(None, None, None).await {
-                            Ok(redis_conn) => {
-                                Some(Redis::new(redis_conn).with_ttl(config.redis.cert_cache_ttl))
-                            }
-                            Err(e) => {
-                                tracing::warn!(
-                                    "Redis connection failed ({}); certificate cache disabled, falling back to direct S3",
-                                    e
-                                );
-                                None
-                            }
-                        }
-                    } else {
-                        None
-                    };
-                    #[cfg(not(feature = "redis"))]
-                    let cache_opt = None;
-
-                    let s3 = AwsS3::new(
-                        &aws_config,
-                        &config.aws.s3_bucket,
-                        &config.aws.region,
-                        &config.aws.s3_key_prefix,
-                    );
-                    match cache_opt {
-                        Some(c) => Box::new(s3.with_cache(c)),
-                        None => Box::new(s3),
-                    }
-                } else {
-                    Box::new(MemoryStorage::default())
-                }
-            }
-            #[cfg(not(feature = "aws"))]
-            Box::new(MemoryStorage::default())
-        };
+        let material_storage = build_crypto_material_storage(config).await?;
 
         let cert_strategy = store_certificate_strategy(config)?;
         let uses_acme_strategy = config
@@ -323,8 +229,11 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
             .email(&config.server.cert.email)
             .organization(config.server.cert.organization.as_deref())
             .acme_directory_url(&config.server.cert.acme_directory_url)
-            .cert_storage(cert_storage)
-            .secrets_storage(secrets_storage)
+            .crypto_material_cache_policy(CryptoMaterialCachePolicy::new(
+                Duration::from_secs(config.server.cert.material_cache_ttl),
+                Duration::from_secs(config.server.cert.signing_key_cache_ttl),
+            ))
+            .crypto_material_storage(material_storage)
             .chain_cache_ttl(Duration::from_secs(config.server.cert.chain_cache_ttl))
             .eku(&config.server.cert.eku);
 
@@ -518,6 +427,61 @@ fn acme_dns_credentials(account: &crate::config::AcmeDnsAccount) -> AcmeDnsCrede
         password: account.password.clone(),
         subdomain: account.subdomain.clone(),
     }
+}
+
+#[cfg(feature = "acme")]
+async fn build_crypto_material_storage(config: &AppConfig) -> EyeResult<Box<dyn Storage>> {
+    let backend = config.server.cert.material_backend.as_str();
+    if backend.eq_ignore_ascii_case("memory") {
+        tracing::info!("Using in-memory cryptographic-material backend");
+        return Ok(Box::new(MemoryStorage::default()));
+    }
+
+    if backend.eq_ignore_ascii_case("vault") {
+        #[cfg(feature = "vault")]
+        {
+            tracing::info!("Using Vault KV v2 as cryptographic-material backend");
+            return Ok(Box::new(
+                VaultClient::builder(&config.vault.addr, config.vault.token.clone())
+                    .mount(&config.vault.mount)
+                    .path_prefix(&config.vault.path_prefix)
+                    .namespace(config.vault.namespace.as_deref())
+                    .secrets_cache_ttl(Duration::ZERO)
+                    .timeout(Duration::from_secs(config.vault.timeout_secs))
+                    .build()?,
+            ));
+        }
+        #[cfg(not(feature = "vault"))]
+        {
+            return Err(eyre!(
+                "cryptographic-material backend 'vault' configured, but 'vault' feature is disabled"
+            ));
+        }
+    }
+
+    if backend.eq_ignore_ascii_case("aws_secrets_manager") {
+        #[cfg(feature = "aws")]
+        {
+            tracing::info!("Using AWS Secrets Manager as cryptographic-material backend");
+            let aws_config = aws_config::defaults(BehaviorVersion::latest())
+                .region(Region::new(config.aws.region.clone()))
+                .load()
+                .await;
+            return Ok(Box::new(
+                AwsSecretsManager::new(&aws_config, Duration::ZERO).await?,
+            ));
+        }
+        #[cfg(not(feature = "aws"))]
+        {
+            return Err(eyre!(
+                "cryptographic-material backend 'aws_secrets_manager' configured, but 'aws' feature is disabled"
+            ));
+        }
+    }
+
+    Err(eyre!(
+        "unsupported cryptographic-material backend '{backend}'; expected 'memory', 'aws_secrets_manager', or 'vault'"
+    ))
 }
 
 #[cfg(feature = "acme")]

@@ -35,9 +35,9 @@ The following files are used to configure the deployment:
 
 ## Redis Role
 
-Redis is optional. The server does not use Redis for status-list persistence or status-list reads; those use the configured repository backend and the in-process Moka status-list cache. In this chart, Redis is intended only as a distributed certificate-material cache for multi-replica deployments that use the AWS S3 certificate storage path and compile the application with the `redis` feature.
+Redis is optional. The server does not use Redis for status-list persistence or status-list reads; those use the configured repository backend and the in-process Moka status-list cache. Certificate and signing-key material are managed together by the selected cryptographic-material backend; prefer the built-in material read-cache TTLs before adding Redis.
 
-Keep Redis disabled for a simpler deployment. Enable it when sharing certificate cache entries across replicas and reducing object-storage reads is worth the extra Redis dependency, credentials, TLS configuration, monitoring, and HA operations.
+Keep Redis disabled for a simpler deployment. Enable it only for explicit adapter-level integrations that still require Redis and where the extra dependency, credentials, TLS configuration, monitoring, and HA operations are worth it.
 
 ### No-Redis Deployment
 

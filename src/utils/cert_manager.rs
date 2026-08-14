@@ -9,6 +9,7 @@ pub mod http_client;
 pub mod storage;
 
 use crate::utils::cache::{CertChainCache, CertificateChain};
+use crate::utils::cert_manager::storage::{CryptoMaterialStorage, Storage};
 use crate::utils::keygen::Keypair;
 pub use builder::CertificateManagerBuilder;
 use challenge::CleanupFuture;
@@ -35,9 +36,7 @@ use tokio_cron_scheduler::{Job, JobScheduler};
 use tracing::{error, info, instrument, warn};
 use x509_parser::pem::Pem as X509Pem;
 
-use crate::cert_manager::{
-    challenge::ChallengeHandler, http_client::DefaultHttpClient, storage::Storage,
-};
+use crate::cert_manager::{challenge::ChallengeHandler, http_client::DefaultHttpClient};
 
 use opentelemetry::{
     global,
@@ -121,10 +120,8 @@ type ACMEHttpClientFactory = Box<dyn Fn() -> Box<dyn HttpClient> + Send + Sync>;
 
 /// Struct representing the certificate manager
 pub struct CertManager {
-    // Certificate storage backend
-    cert_storage: Option<Box<dyn Storage>>,
-    // Secrets storage backend
-    secrets_storage: Option<Box<dyn Storage>>,
+    // Consolidated backend for certificate chain, signing key, and ACME account material.
+    crypto_material_storage: Option<CryptoMaterialStorage>,
     // ACME challenge handler
     challenge_handler: Option<Box<dyn ChallengeHandler>>,
     // ACME client
@@ -173,8 +170,7 @@ impl CertManager {
         let cert_chain_cache = CertChainCache::new(DEFAULT_CHAIN_CACHE_TTL, domain_label);
 
         Ok(Self {
-            cert_storage: None,
-            secrets_storage: None,
+            crypto_material_storage: None,
             challenge_handler: None,
             acme_client: Arc::new(Mutex::new(None)),
             acme_http_client_factory: Some(acme_http_client_factory),
@@ -192,17 +188,24 @@ impl CertManager {
 
     /// Set the storage backend for the certificate.
     ///
-    /// **Note:** This method is required.
-    pub fn with_cert_storage(mut self, storage: impl Storage + 'static) -> Self {
-        self.cert_storage = Some(Box::new(storage));
-        self
+    /// New code should use [`Self::with_crypto_material_storage`].
+    pub fn with_cert_storage(self, storage: impl Storage + 'static) -> Self {
+        self.with_crypto_material_storage(storage)
     }
 
     /// Set the storage backend for the sensitive data.
     ///
-    /// **Note:** This method is required.
-    pub fn with_secrets_storage(mut self, storage: impl Storage + 'static) -> Self {
-        self.secrets_storage = Some(Box::new(storage));
+    /// Compatibility alias for the consolidated cryptographic-material backend.
+    ///
+    /// When used after [`Self::with_cert_storage`], this backend wins so legacy
+    /// call chains converge on the selected secrets/material backend.
+    pub fn with_secrets_storage(self, storage: impl Storage + 'static) -> Self {
+        self.with_crypto_material_storage(storage)
+    }
+
+    /// Set the consolidated backend for server certificate and signing-key material.
+    pub fn with_crypto_material_storage(mut self, storage: impl Storage + 'static) -> Self {
+        self.crypto_material_storage = Some(CryptoMaterialStorage::new(storage));
         self
     }
 
@@ -326,10 +329,7 @@ impl CertManager {
     pub(crate) async fn request_acme_certificate(&self) -> Result<CertificateData, CertError> {
         use instant_acme::RetryPolicy;
 
-        let cert_storage = self
-            .cert_storage
-            .as_ref()
-            .ok_or_else(|| CertError::Other(eyre!("Certificate storage not set")))?;
+        self.crypto_material_storage()?;
 
         let challenge_handler = self
             .challenge_handler
@@ -390,9 +390,8 @@ impl CertManager {
         let cert_data = CertificateData::new(cert_chain_pem, not_before, not_after);
 
         // Store the certificate
-        self.persist_certificate_data_with_storage(cert_storage.as_ref(), &cert_data)
-            .await?;
-        self.cache_provisioned_chain(&cert_data.certificate).await?;
+        self.persist_certificate_data(&cert_data).await?;
+        self.refresh_material_cache(&cert_data.certificate).await?;
 
         info!(
             "Certificate obtained successfully. Valid from {} to {}",
@@ -439,11 +438,11 @@ impl CertManager {
         const MAX_RETRIES: u32 = 3;
         const RETRY_DELAY: Duration = Duration::from_millis(500);
 
-        let secrets_storage = self.secrets_storage()?;
+        let material_storage = self.crypto_material_storage()?;
 
         // Try to load the existing signing key
         let secret_id = self.signing_secret_id();
-        if let Some(secret) = secrets_storage.load(&secret_id).await? {
+        if let Some(secret) = material_storage.load_signing_key(&secret_id).await? {
             info!("Found existing server secret. Skipping...");
             return Ok(secret);
         }
@@ -455,7 +454,10 @@ impl CertManager {
         let mut retries = 0;
         loop {
             info!("Trying to store the newly generated server secret...");
-            match secrets_storage.store(&secret_id, &key_pem).await {
+            match material_storage
+                .store_signing_key(&secret_id, &key_pem)
+                .await
+            {
                 Ok(_) => {
                     info!("Successfully stored the secret");
                     return Ok(key_pem);
@@ -477,9 +479,9 @@ impl CertManager {
     /// # Errors
     /// Returns an error if the certificate data cannot be parsed or if there was an issue when trying to retrieve the certificate data.
     pub async fn certificate(&self) -> Result<Option<CertificateData>, CertError> {
-        let cert_storage = self.cert_storage()?;
+        let material_storage = self.crypto_material_storage()?;
         let cert_key = self.cert_key();
-        if let Some(cert_data) = cert_storage.load(&cert_key).await? {
+        if let Some(cert_data) = material_storage.load_certificate_data(&cert_key).await? {
             return Ok(Some(serde_json::from_str(&cert_data)?));
         }
         Ok(None)
@@ -575,7 +577,7 @@ impl CertManager {
         fields(domains = ?self.domains, email = %self.email)
     )]
     async fn acme_account(&self) -> Result<Account, CertError> {
-        let secrets_storage = self.secrets_storage()?;
+        let material_storage = self.crypto_material_storage()?;
 
         let mut client_guard = self.acme_client.lock().await;
         if let Some(account) = client_guard.as_ref() {
@@ -584,7 +586,7 @@ impl CertManager {
         }
 
         let account_id = self.acme_account_id();
-        if let Some(credentials) = secrets_storage.load(&account_id).await? {
+        if let Some(credentials) = material_storage.load_secret(&account_id).await? {
             info!("Found existing credentials. Trying to load account...");
             let credentials: AccountCredentials = serde_json::from_str(&credentials)?;
             let http_client = self.create_http_client()?;
@@ -599,7 +601,7 @@ impl CertManager {
                 }
                 Err(e) => {
                     warn!("Invalid credentials: {e}\nrecreating new account...");
-                    secrets_storage.delete(&account_id).await?;
+                    material_storage.delete_secret(&account_id).await?;
                 }
             }
         }
@@ -616,8 +618,8 @@ impl CertManager {
             )
             .await?;
         // Store new credentials
-        secrets_storage
-            .store(&account_id, &serde_json::to_string(&credentials)?)
+        material_storage
+            .store_secret(&account_id, &serde_json::to_string(&credentials)?)
             .await?;
         *client_guard = Some(account.clone());
         info!("Account successfully created");
@@ -724,21 +726,15 @@ impl CertManager {
         ))
     }
 
-    pub(crate) fn cert_storage(&self) -> Result<&dyn Storage, CertError> {
-        self.cert_storage
-            .as_deref()
-            .ok_or_else(|| CertError::Other(eyre!("Certificate storage not set")))
-    }
-
-    pub(crate) fn secrets_storage(&self) -> Result<&dyn Storage, CertError> {
-        self.secrets_storage
-            .as_deref()
-            .ok_or_else(|| CertError::Other(eyre!("Secrets storage not set")))
+    pub(crate) fn crypto_material_storage(&self) -> Result<&CryptoMaterialStorage, CertError> {
+        self.crypto_material_storage
+            .as_ref()
+            .ok_or_else(|| CertError::Other(eyre!("Cryptographic-material backend not set")))
     }
 
     pub(crate) async fn signing_key_from_storage(&self) -> Result<Option<String>, CertError> {
-        self.secrets_storage()?
-            .load(&self.signing_secret_id())
+        self.crypto_material_storage()?
+            .load_signing_key(&self.signing_secret_id())
             .await
             .map_err(Into::into)
     }
@@ -747,31 +743,40 @@ impl CertManager {
         &self,
         cert_data: &CertificateData,
     ) -> Result<(), CertError> {
-        self.persist_certificate_data_with_storage(self.cert_storage()?, cert_data)
-            .await
-    }
-
-    async fn persist_certificate_data_with_storage(
-        &self,
-        cert_storage: &dyn Storage,
-        cert_data: &CertificateData,
-    ) -> Result<(), CertError> {
         let serialized_cert_data = serde_json::to_string(cert_data)?;
-        cert_storage
-            .store(&self.cert_key(), &serialized_cert_data)
+        self.crypto_material_storage()?
+            .store_certificate_data(&self.cert_key(), &serialized_cert_data)
             .await?;
         Ok(())
     }
 
     pub(crate) async fn persist_signing_key(&self, signing_key: &str) -> Result<(), CertError> {
-        let secrets_storage = self.secrets_storage()?;
+        let material_storage = self.crypto_material_storage()?;
         let secret_id = self.signing_secret_id();
-        if secrets_storage.load(&secret_id).await?.is_some() {
-            secrets_storage.update(&secret_id, signing_key).await?;
+        if material_storage
+            .load_signing_key(&secret_id)
+            .await?
+            .is_some()
+        {
+            material_storage
+                .update_signing_key(&secret_id, signing_key)
+                .await?;
         } else {
-            secrets_storage.store(&secret_id, signing_key).await?;
+            material_storage
+                .store_signing_key(&secret_id, signing_key)
+                .await?;
         }
         Ok(())
+    }
+
+    pub(crate) async fn persist_crypto_material(
+        &self,
+        cert_data: &CertificateData,
+        signing_key: &str,
+    ) -> Result<(), CertError> {
+        self.persist_certificate_data(cert_data).await?;
+        self.persist_signing_key(signing_key).await?;
+        self.refresh_material_cache(&cert_data.certificate).await
     }
 
     fn parse_cert_chain_parts(&self, cert_pem: &str) -> Result<CertificateChain, CertError> {
@@ -797,6 +802,14 @@ impl CertManager {
         // Replace eagerly so the next request never hits storage for this key.
         self.cert_chain_cache.replace(cert_key, parts).await;
         Ok(())
+    }
+
+    /// One invalidation path for lifecycle-coupled certificate and key material.
+    async fn refresh_material_cache(&self, cert_pem: &str) -> Result<(), CertError> {
+        self.crypto_material_storage()?
+            .invalidate_material(&self.cert_key(), &self.signing_secret_id())
+            .await?;
+        self.cache_provisioned_chain(cert_pem).await
     }
 
     #[inline]

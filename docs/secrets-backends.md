@@ -1,8 +1,8 @@
-# Secrets Storage Backend Guidance
+# Cryptographic-Material Backend Guidance
 
-The server supports storing sensitive cryptographic materials (such as ACME account keys and server signing keys) in secure secrets management backends.
+The server stores lifecycle-coupled cryptographic material in one selected backend by default: ACME account keys, the server signing key, and the certificate chain associated with that key.
 
-The supported secrets backends include:
+The supported material backends include:
 
 - **HashiCorp Vault / OpenBao** (KV v2 engine)
 - **AWS Secrets Manager**
