@@ -14,7 +14,7 @@ This project uses [Conventional Commits](https://www.conventionalcommits.org/) t
 [optional footer(s)]
 ```
 
-The CI job **Conventional Commits / Conventional Commits** validates PR titles
+The CI job **Conventional Commits** validates PR titles
 and every commit subject in the pull request. Use the same Conventional Commit
 format for the PR title because maintainers squash merge PRs, and the PR title
 commonly becomes the final commit subject on `main`.
@@ -65,7 +65,7 @@ release notes or semantic version bumps.
 
 1. Fork the repository and create a feature branch from `main`.
 2. Make your changes, ensuring all commits follow Conventional Commits format.
-3. Open a PR against `main` with a Conventional Commit title, for example
+3. Open a PR against `develop` with a Conventional Commit title, for example
    `feat(api): add issuer status endpoint`. CI will run automatically.
 4. Address review feedback.
 5. A maintainer will merge using **squash merge** (the squash commit message should also follow Conventional Commits format).
