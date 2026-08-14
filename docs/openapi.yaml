@@ -109,15 +109,15 @@ paths:
         "500":
           $ref: "#/components/responses/InternalServerError"
 
-  /health:
+  /health/live:
     get:
-      operationId: healthCheck
-      summary: Health check
-      description: Returns a simple health indicator.
+      operationId: livenessCheck
+      summary: Liveness check
+      description: Returns a lightweight indicator that the HTTP server process is up.
       security: []
       responses:
         "200":
-          description: Server is healthy
+          description: Server process is up
           content:
             text/plain:
               schema:
@@ -125,6 +125,48 @@ paths:
               example: "OK"
         "500":
           $ref: "#/components/responses/InternalServerError"
+
+  /health:
+    get:
+      operationId: legacyLivenessCheck
+      summary: Liveness check alias
+      description: Backward-compatible alias for `/health/live`.
+      security: []
+      responses:
+        "200":
+          description: Server process is up
+          content:
+            text/plain:
+              schema:
+                type: string
+              example: "OK"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+
+  /health/ready:
+    get:
+      operationId: readinessCheck
+      summary: Readiness check
+      description: |
+        Returns 200 only when all critical dependencies are reachable;
+        otherwise 503. The public response is intentionally generic; detailed
+        dependency failures are logged internally.
+      security: []
+      responses:
+        "200":
+          description: All critical dependencies are reachable
+          content:
+            text/plain:
+              schema:
+                type: string
+              example: "READY"
+        "503":
+          description: One or more critical dependencies are unavailable
+          content:
+            text/plain:
+              schema:
+                type: string
+              example: "NOT_READY"
 
   /metrics:
     get:

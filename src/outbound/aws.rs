@@ -133,6 +133,29 @@ impl Storage for AwsSecretsManager {
         }
         Ok(())
     }
+
+    /// Verify the Secrets Manager API is reachable without touching any real
+    /// secret, by issuing a `DescribeSecret` call for a name that is expected
+    /// not to exist. This only requires the narrow `secretsmanager:DescribeSecret`
+    /// permission.
+    async fn reachable(&self) -> Result<(), StorageError> {
+        use aws_sdk_secretsmanager::error::SdkError;
+
+        match self
+            .client
+            .describe_secret()
+            .secret_id("__health_probe_test__")
+            .send()
+            .await
+        {
+            // Secret intentionally does not exist, but the API is reachable.
+            Err(SdkError::ServiceError(err)) if err.err().is_resource_not_found_exception() => {
+                Ok(())
+            }
+            Err(e) => Err(StorageError::AwsSdk(e.into())),
+            Ok(_) => Ok(()),
+        }
+    }
 }
 
 /// AWS S3 bucket with optional caching layer
@@ -366,5 +389,25 @@ impl Storage for AwsS3 {
             }
             Err(e) => Err(StorageError::Backend(e.into())),
         }
+    }
+
+    /// Verify the S3 endpoint and configured bucket are reachable via a `HEAD`
+    /// request, which proves availability without reading or writing any object
+    /// and without creating the bucket.
+    async fn reachable(&self) -> Result<(), StorageError> {
+        use aws_sdk_s3::error::SdkError;
+
+        self.client
+            .head_bucket()
+            .bucket(&self.bucket)
+            .send()
+            .await
+            .map(|_| ())
+            .map_err(|e| match e {
+                SdkError::ServiceError(err) => {
+                    StorageError::AwsSdk(eyre!("S3 bucket unavailable: {}", err.err()))
+                }
+                other => StorageError::AwsSdk(other.into()),
+            })
     }
 }
