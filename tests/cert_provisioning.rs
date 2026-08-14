@@ -219,7 +219,7 @@ async fn test_cert_provisioning_with_aws_secrets_manager() {
         "certificate data should be present in Secrets Manager"
     );
     assert!(
-        names.iter().any(|name| *name == "keys-test.example.com"),
+        names.contains(&"keys-test.example.com"),
         "signing key should be present in Secrets Manager"
     );
 
