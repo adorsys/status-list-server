@@ -604,8 +604,12 @@ pub struct AwsConfig {
 pub struct VaultConfig {
     /// Vault / OpenBao API address (e.g. `http://vault:8200`).
     pub addr: String,
-    /// Authentication token.
-    pub token: SecretString,
+    /// AppRole role_id (can be baked into config).
+    pub role_id: String,
+    /// AppRole secret_id (deliver via secrets injector in production — never log).
+    pub secret_id: SecretString,
+    /// AppRole auth engine mount path (default: `approle`).
+    pub auth_mount: String,
     /// KV v2 engine mount path.
     pub mount: String,
     /// Prefix prepended to all secret paths. Default: empty.
@@ -834,7 +838,9 @@ fn base_builder() -> Result<ConfigBuilder<DefaultState>, ConfigError> {
         .set_default("server.cert.store.signing_key_key", Option::<String>::None)?
         .set_default("aws.region", "us-east-1")?
         .set_default("vault.addr", "http://localhost:8200")?
-        .set_default("vault.token", "")?
+        .set_default("vault.role_id", "")?
+        .set_default("vault.secret_id", "")?
+        .set_default("vault.auth_mount", "approle")?
         .set_default("vault.mount", "secret")?
         .set_default("vault.path_prefix", "")?
         .set_default("vault.namespace", Option::<String>::None)?
@@ -1528,5 +1534,49 @@ mod tests {
                 "Default config signing_key_key references test_data: {key}"
             );
         }
+
+        // Vault AppRole defaults
+        assert_eq!(default_config.vault.addr, "http://localhost:8200");
+        assert_eq!(default_config.vault.role_id, "");
+        assert_eq!(default_config.vault.secret_id.expose_secret(), "");
+        assert_eq!(default_config.vault.auth_mount, "approle");
+        assert_eq!(default_config.vault.mount, "secret");
+        assert_eq!(default_config.vault.path_prefix, "");
+        assert_eq!(default_config.vault.namespace, None);
+        assert_eq!(default_config.vault.secrets_cache_ttl, 300);
+        assert_eq!(default_config.vault.timeout_secs, 30);
+
+        // Vault AppRole overrides
+        let overridden_config = Config::load_from_overrides(&[
+            ("vault.addr", "http://vault.example.com:8200"),
+            ("vault.role_id", "my-role-id"),
+            ("vault.secret_id", "my-secret-id"),
+            ("vault.auth_mount", "custom-approle"),
+            ("vault.mount", "kv-secrets"),
+            ("vault.path_prefix", "services/status-list"),
+            ("vault.namespace", "tenant-1"),
+            ("vault.secrets_cache_ttl", "60"),
+            ("vault.timeout_secs", "15"),
+        ])
+        .expect("Failed to load overridden config");
+
+        assert_eq!(
+            overridden_config.vault.addr,
+            "http://vault.example.com:8200"
+        );
+        assert_eq!(overridden_config.vault.role_id, "my-role-id");
+        assert_eq!(
+            overridden_config.vault.secret_id.expose_secret(),
+            "my-secret-id"
+        );
+        assert_eq!(overridden_config.vault.auth_mount, "custom-approle");
+        assert_eq!(overridden_config.vault.mount, "kv-secrets");
+        assert_eq!(overridden_config.vault.path_prefix, "services/status-list");
+        assert_eq!(
+            overridden_config.vault.namespace,
+            Some("tenant-1".to_string())
+        );
+        assert_eq!(overridden_config.vault.secrets_cache_ttl, 60);
+        assert_eq!(overridden_config.vault.timeout_secs, 15);
     }
 }
