@@ -33,7 +33,7 @@ SQLite is not a distributed database, so it is not a good match for horizontally
 
 Every client-facing write — publishing a list, updating one, the snapshot each writes alongside it, and credential registration — runs in a transaction pinned to **READ COMMITTED** on PostgreSQL and MySQL. The level is set by the application, not inherited from the server, so both backends behave identically instead of running at their differing defaults (PostgreSQL READ COMMITTED, InnoDB REPEATABLE READ).
 
-The one write that is **not** pinned is the retention sweep (`delete_older_than`); see *Other notes* below.
+The one write that is **not** pinned is the retention sweep (`delete_older_than`); see _Other notes_ below.
 
 The guard itself does not depend on this. The guarded update is `UPDATE ... WHERE list_id = ? AND updated_at = ?`, a compare-and-set whose match count decides the outcome. That is a current read on both engines, so it sees the latest committed row at either level, and no write transaction issues a `SELECT` whose view could go stale.
 
@@ -50,7 +50,7 @@ SET GLOBAL transaction_isolation = 'SERIALIZABLE';
 
 then without the pin these transactions would inherit it, and a routine race between two writers — normally a clean `409 update_conflict` telling the client to re-read — would instead surface as a serialization failure. Note that this is deliberately **not overridable**: the compare-and-set is the concurrency mechanism here and it wants READ COMMITTED, regardless of what else shares the database.
 
-**Materially fewer deadlocks on MySQL.** This is the larger effect in practice, and it applies to every stock MySQL deployment, not just misconfigured ones — REPEATABLE READ *is* the InnoDB default. At REPEATABLE READ InnoDB takes next-key (gap) locks; at READ COMMITTED it locks index records only. Concretely: every snapshot insert writes `exp = now + token_exp_secs`, so concurrent inserts for unrelated lists land in the same gap of `idx_status_list_history_exp`, while the retention sweep deletes a range of that same index. Those are the ingredients of an insert-intention deadlock. Pinning removes the gap locks and with them that entire class of `1213`.
+**Materially fewer deadlocks on MySQL.** This is the larger effect in practice, and it applies to every stock MySQL deployment, not just misconfigured ones — REPEATABLE READ _is_ the InnoDB default. At REPEATABLE READ InnoDB takes next-key (gap) locks; at READ COMMITTED it locks index records only. Concretely: every snapshot insert writes `exp = now + token_exp_secs`, so concurrent inserts for unrelated lists land in the same gap of `idx_status_list_history_exp`, while the retention sweep deletes a range of that same index. Those are the ingredients of an insert-intention deadlock. Pinning removes the gap locks and with them that entire class of `1213`.
 
 ### MySQL: binary logging must be ROW or MIXED
 
