@@ -14,7 +14,7 @@ This project uses [Conventional Commits](https://www.conventionalcommits.org/) t
 [optional footer(s)]
 ```
 
-The CI job **Conventional Commits / Conventional Commits** validates PR titles
+The CI job **Conventional Commits** validates PR titles
 and every commit subject in the pull request. Use the same Conventional Commit
 format for the PR title because maintainers squash merge PRs, and the PR title
 commonly becomes the final commit subject on `main`.
