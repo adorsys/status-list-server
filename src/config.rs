@@ -872,7 +872,7 @@ fn base_builder() -> Result<ConfigBuilder<DefaultState>, ConfigError> {
         .set_default("server.cert.store.signing_key_key", Option::<String>::None)?
         .set_default("aws.region", "us-east-1")?
         .set_default("vault.addr", "http://localhost:8200")?
-        .set_default("vault.token", "root")?
+        .set_default("vault.token", "")?
         .set_default("vault.mount", "secret")?
         .set_default("vault.path_prefix", "")?
         .set_default("vault.namespace", Option::<String>::None)?
