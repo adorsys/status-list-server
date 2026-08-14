@@ -14,6 +14,11 @@ This project uses [Conventional Commits](https://www.conventionalcommits.org/) t
 [optional footer(s)]
 ```
 
+The CI job **Conventional Commits / Conventional Commits** validates both PR
+titles and commit subjects. Use the same Conventional Commit format for the PR
+title because maintainers squash merge PRs, and the PR title commonly becomes
+the final commit subject on `main`.
+
 ### Types
 
 | Type       | Purpose                                                 | Version bump |
@@ -52,13 +57,26 @@ chore(deps): bump serde from 1.0.200 to 1.0.210
 refactor(telemetry): simplify OTLP layer composition
 ```
 
+Messages such as `fixed stuff`, `update code`, or `WIP` are rejected by CI
+because `git-cliff` and `release-plz` cannot use them to compute release notes
+or semantic version bumps.
+
 ## Pull Requests
 
 1. Fork the repository and create a feature branch from `main`.
 2. Make your changes, ensuring all commits follow Conventional Commits format.
-3. Open a PR against `main`. CI will run automatically.
+3. Open a PR against `main` with a Conventional Commit title, for example
+   `feat(api): add issuer status endpoint`. CI will run automatically.
 4. Address review feedback.
 5. A maintainer will merge using **squash merge** (the squash commit message should also follow Conventional Commits format).
+
+## Branch Protection
+
+Maintainers must configure the `main` branch protection rule or repository
+ruleset to require the status check named
+**Conventional Commits / Conventional Commits** before merging. This keeps
+unconventional commit subjects out of `main`, where they would otherwise be
+ignored by `git-cliff` and `release-plz`.
 
 ## How Releases Work
 
