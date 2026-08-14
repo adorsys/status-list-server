@@ -52,7 +52,7 @@ jobs:
             test
 
       - name: Validate commit messages
-        uses: wagoid/commitlint-github-action@6cf16efdf4da5277c791d335142c03a0bdf1766e # v6.2.1
+        uses: wagoid/commitlint-github-action@b948419dd99f3fd78a6548d48f94e3df7f6bf3ed # v6.2.1
         with:
           configFile: commitlint.config.mjs
           helpURL: https://github.com/adorsys/status-list-server/blob/main/CONTRIBUTING.md#commit-messages
