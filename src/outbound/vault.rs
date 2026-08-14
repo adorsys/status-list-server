@@ -379,6 +379,31 @@ impl Storage for VaultClient {
             )))
         }
     }
+
+    /// Verify the Vault/OpenBao endpoint is reachable and the configured mount
+    /// is accessible with the provided credentials.
+    async fn reachable(&self) -> Result<(), StorageError> {
+        let url = format!("{}/v1/{}/config", self.addr, self.mount);
+        let resp = self
+            .add_auth_headers(self.client.get(&url))
+            .send()
+            .await?;
+
+        let status = resp.status();
+        if status.is_success() {
+            Ok(())
+        } else if status == StatusCode::FORBIDDEN {
+            Err(StorageError::Backend(eyre!(
+                "vault access denied for mount '{}'",
+                self.mount
+            )))
+        } else {
+            Err(StorageError::Backend(eyre!(
+                "vault readiness check failed for mount '{}': HTTP {status}",
+                self.mount
+            )))
+        }
+    }
 }
 
 impl From<reqwest::Error> for StorageError {
@@ -392,6 +417,8 @@ mod tests {
     use std::time::Duration;
 
     use secrecy::SecretString;
+    use wiremock::matchers::{header, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
 
     use super::*;
     use crate::cert_manager::storage::StorageError;
@@ -485,5 +512,83 @@ mod tests {
             .secrets_cache_ttl(Duration::ZERO)
             .build()
             .expect("should build with cache disabled");
+    }
+
+    #[tokio::test]
+    async fn reachable_returns_ok_on_200() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/secret/config"))
+            .and(header("X-Vault-Token", "root"))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&server)
+            .await;
+
+        let client = VaultClient::builder(server.uri(), valid_token())
+            .mount("secret")
+            .build()
+            .unwrap();
+
+        assert!(client.reachable().await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn reachable_returns_error_on_403() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/secret/config"))
+            .and(header("X-Vault-Token", "root"))
+            .respond_with(ResponseTemplate::new(403))
+            .mount(&server)
+            .await;
+
+        let client = VaultClient::builder(server.uri(), valid_token())
+            .mount("secret")
+            .build()
+            .unwrap();
+
+        let err = client.reachable().await.unwrap_err();
+        assert_matches_backend_error(&err, "vault access denied for mount 'secret'");
+    }
+
+    #[tokio::test]
+    async fn reachable_returns_error_on_503() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/secret/config"))
+            .respond_with(ResponseTemplate::new(503))
+            .mount(&server)
+            .await;
+
+        let client = VaultClient::builder(server.uri(), valid_token())
+            .mount("secret")
+            .build()
+            .unwrap();
+
+        let err = client.reachable().await.unwrap_err();
+        assert_matches_backend_error(
+            &err,
+            "vault readiness check failed for mount 'secret': HTTP 503",
+        );
+    }
+
+    #[tokio::test]
+    async fn reachable_passes_namespace_header_when_configured() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/custom-mount/config"))
+            .and(header("X-Vault-Token", "root"))
+            .and(header("X-Vault-Namespace", "tenant-a"))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&server)
+            .await;
+
+        let client = VaultClient::builder(server.uri(), valid_token())
+            .mount("custom-mount")
+            .namespace(Some("tenant-a"))
+            .build()
+            .unwrap();
+
+        assert!(client.reachable().await.is_ok());
     }
 }
