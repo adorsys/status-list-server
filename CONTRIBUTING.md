@@ -65,7 +65,7 @@ release notes or semantic version bumps.
 
 1. Fork the repository and create a feature branch from `main`.
 2. Make your changes, ensuring all commits follow Conventional Commits format.
-3. Open a PR against `main` with a Conventional Commit title, for example
+3. Open a PR against `develop` with a Conventional Commit title, for example
    `feat(api): add issuer status endpoint`. CI will run automatically.
 4. Address review feedback.
 5. A maintainer will merge using **squash merge** (the squash commit message should also follow Conventional Commits format).
