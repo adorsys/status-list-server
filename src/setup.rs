@@ -723,6 +723,8 @@ mod general_tests {
         let config = AppConfig::load_from_overrides(&[
             ("APP_DATABASE__BACKEND", "memory"),
             ("APP_DATABASE__URL", "memory:"),
+            #[cfg(feature = "vault")]
+            ("APP_VAULT__TOKEN", "root"),
         ])
         .expect("Failed to load config");
         tokio::runtime::Runtime::new().unwrap().block_on(async {
