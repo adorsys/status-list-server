@@ -10,8 +10,8 @@ pub enum StorageError {
     #[cfg(feature = "redis")]
     Redis(#[from] RedisError),
 
-    #[error("AWS SDK error: {0}")]
-    AwsSdk(#[source] Report),
+    #[error("storage backend error: {0}")]
+    Backend(#[source] Report),
 
     #[error("The data is invalid: {0}")]
     InvalidData(String),
