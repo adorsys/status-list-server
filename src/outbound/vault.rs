@@ -384,10 +384,7 @@ impl Storage for VaultClient {
     /// is accessible with the provided credentials.
     async fn reachable(&self) -> Result<(), StorageError> {
         let url = format!("{}/v1/{}/config", self.addr, self.mount);
-        let resp = self
-            .add_auth_headers(self.client.get(&url))
-            .send()
-            .await?;
+        let resp = self.add_auth_headers(self.client.get(&url)).send().await?;
 
         let status = resp.status();
         if status.is_success() {
