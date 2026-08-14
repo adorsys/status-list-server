@@ -18,6 +18,7 @@ use sea_orm::ConnectOptions;
 use sea_orm_migration::MigratorTrait;
 #[cfg(any(
     feature = "acme",
+    feature = "vault",
     feature = "sqlite",
     feature = "postgres",
     feature = "mysql"
@@ -26,6 +27,7 @@ use secrecy::ExposeSecret;
 use std::sync::Arc;
 #[cfg(any(
     feature = "acme",
+    feature = "vault",
     feature = "sqlite",
     feature = "postgres",
     feature = "mysql"
@@ -57,7 +59,9 @@ use crate::domain::{
     service::Service,
 };
 #[cfg(feature = "aws")]
-use crate::outbound::aws::{AwsS3, AwsSecretsManager};
+use crate::outbound::aws::AwsS3;
+#[cfg(all(feature = "aws", not(feature = "vault")))]
+use crate::outbound::aws::AwsSecretsManager;
 use crate::outbound::cache::MokaStatusListCache;
 #[cfg(feature = "acme")]
 use crate::outbound::cert::AcmeCertificateProvider;
@@ -70,6 +74,8 @@ use crate::outbound::sql::{
     Migrator, SeaOrmStore, SqlCredentialRepo, SqlStatusListRepo, SqlStatusListSnapshotRepo,
     verify_binlog_format, verify_innodb_engines,
 };
+#[cfg(feature = "vault")]
+use crate::outbound::vault::VaultClient;
 use crate::server::AppState;
 use crate::server::health::{AlwaysReady, Readiness};
 
@@ -212,17 +218,56 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
     ) = {
         let app_env = std::env::var("APP_ENV").unwrap_or(ENV_DEVELOPMENT.to_string());
         let cert_domains = [config.server.domain.as_str()];
-        let (cert_storage, secrets_storage): (Box<dyn Storage>, Box<dyn Storage>) = {
+        let secrets_storage: Box<dyn Storage> = {
+            #[cfg(feature = "vault")]
+            {
+                tracing::info!("Using Vault KV v2 as secrets backend");
+                Box::new(
+                    VaultClient::builder(&config.vault.addr, config.vault.token.clone())
+                        .mount(&config.vault.mount)
+                        .path_prefix(&config.vault.path_prefix)
+                        .namespace(config.vault.namespace.as_deref())
+                        .secrets_cache_ttl(Duration::from_secs(config.vault.secrets_cache_ttl))
+                        .timeout(Duration::from_secs(config.vault.timeout_secs))
+                        .build()?,
+                )
+            }
+            #[cfg(not(feature = "vault"))]
+            {
+                #[cfg(feature = "aws")]
+                {
+                    if config
+                        .server
+                        .cert
+                        .store
+                        .source
+                        .eq_ignore_ascii_case("aws_secrets_manager")
+                    {
+                        let aws_config = aws_config::defaults(BehaviorVersion::latest())
+                            .region(Region::new(config.aws.region.clone()))
+                            .load()
+                            .await;
+                        Box::new(
+                            AwsSecretsManager::new(
+                                &aws_config,
+                                Duration::from_secs(config.aws.secrets_cache_ttl),
+                            )
+                            .await?,
+                        )
+                    } else {
+                        Box::new(MemoryStorage::default())
+                    }
+                }
+                #[cfg(not(feature = "aws"))]
+                Box::new(MemoryStorage::default())
+            }
+        };
+
+        // Uses S3 when available and configured, otherwise memory.
+        let cert_storage: Box<dyn Storage> = {
             #[cfg(feature = "aws")]
             {
-                if config
-                    .server
-                    .cert
-                    .store
-                    .source
-                    .eq_ignore_ascii_case("aws_secrets_manager")
-                    || !config.aws.s3_bucket.is_empty()
-                {
+                if !config.aws.s3_bucket.is_empty() {
                     let aws_config = aws_config::defaults(BehaviorVersion::latest())
                         .region(Region::new(config.aws.region.clone()))
                         .load()
@@ -254,33 +299,16 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
                         &config.aws.region,
                         &config.aws.s3_key_prefix,
                     );
-                    let cert_st: Box<dyn Storage> = match cache_opt {
+                    match cache_opt {
                         Some(c) => Box::new(s3.with_cache(c)),
                         None => Box::new(s3),
-                    };
-
-                    let secrets_st: Box<dyn Storage> = Box::new(
-                        AwsSecretsManager::new(
-                            &aws_config,
-                            Duration::from_secs(config.aws.secrets_cache_ttl),
-                        )
-                        .await?,
-                    );
-                    (cert_st, secrets_st)
+                    }
                 } else {
-                    (
-                        Box::new(MemoryStorage::default()),
-                        Box::new(MemoryStorage::default()),
-                    )
+                    Box::new(MemoryStorage::default())
                 }
             }
             #[cfg(not(feature = "aws"))]
-            {
-                (
-                    Box::new(MemoryStorage::default()),
-                    Box::new(MemoryStorage::default()),
-                )
-            }
+            Box::new(MemoryStorage::default())
         };
 
         let cert_strategy = store_certificate_strategy(config)?;
@@ -644,7 +672,6 @@ mod tests {
         AcmeDnsConfig, AzureDnsConfig, CloudflareDnsConfig, DnsProviderKind, ENV_PRODUCTION,
         GcloudDnsConfig,
     };
-    use sealed_test::prelude::*;
 
     fn build_dns_challenge_handler(
         provider: DnsProviderKind,
@@ -662,9 +689,9 @@ mod tests {
             ))
     }
 
-    #[sealed_test]
+    #[test]
     fn builds_handler_for_each_configured_provider() {
-        let mut config = AppConfig::load().expect("Failed to load config");
+        let mut config = AppConfig::load_from_overrides(&[]).expect("Failed to load config");
         let domain = config.server.domain.clone();
         let domains = [domain.as_str()];
 
@@ -722,19 +749,20 @@ mod tests {
 #[cfg(test)]
 mod general_tests {
     use super::*;
-    use sealed_test::prelude::*;
 
-    /// Verifies that build_state succeeds with AppConfig::load() defaults under
+    /// Verifies that build_state succeeds with AppConfig::load_from_overrides defaults under
     /// the default feature set, catching missing test_data/ or config mismatch issues.
     /// When SQL features are enabled, uses memory backend to avoid requiring a real database.
-    #[sealed_test(env = [
-        ("APP_ENV", "development"),
-        ("APP_DATABASE__BACKEND", "memory"),
-        ("APP_DATABASE__URL", "")
-    ])]
+    #[test]
     fn build_state_succeeds_under_default_config() {
         let _ = rustls::crypto::ring::default_provider().install_default();
-        let config = AppConfig::load().expect("Failed to load config");
+        let config = AppConfig::load_from_overrides(&[
+            ("APP_DATABASE__BACKEND", "memory"),
+            ("APP_DATABASE__URL", "memory:"),
+            #[cfg(feature = "vault")]
+            ("APP_VAULT__TOKEN", "root"),
+        ])
+        .expect("Failed to load config");
         tokio::runtime::Runtime::new().unwrap().block_on(async {
             if let Err(ref e) = build_state(&config).await {
                 panic!("build_state failed under default configuration: {e:?}");
