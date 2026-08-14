@@ -6,5 +6,6 @@ pub mod cert;
 pub mod memory;
 #[cfg(feature = "redis")]
 pub mod redis;
+pub mod signing_files;
 #[cfg(feature = "history")]
 pub mod sql;
