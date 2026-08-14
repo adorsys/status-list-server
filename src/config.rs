@@ -86,6 +86,7 @@ pub struct Config {
     pub database: DatabaseConfig,
     pub redis: RedisConfig,
     pub aws: AwsConfig,
+    pub vault: VaultConfig,
     pub cache: CacheConfig,
     pub status_list: StatusListConfig,
     pub rate_limit: RateLimitConfig,
@@ -600,6 +601,26 @@ pub struct AwsConfig {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+pub struct VaultConfig {
+    /// Vault / OpenBao API address (e.g. `http://vault:8200`).
+    pub addr: String,
+    /// Authentication token.
+    pub token: SecretString,
+    /// KV v2 engine mount path.
+    pub mount: String,
+    /// Prefix prepended to all secret paths. Default: empty.
+    pub path_prefix: String,
+    /// Optional Vault Enterprise / OpenBao namespace.
+    #[serde(default)]
+    pub namespace: Option<String>,
+    /// Cache TTL for Vault secrets in seconds.
+    /// Setting this to 0 disables caching entirely.
+    pub secrets_cache_ttl: u64,
+    /// HTTP request timeout in seconds.
+    pub timeout_secs: u64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
 pub struct CacheConfig {
     /// Time-to-live for cached status list items in seconds.
     /// Setting this to 0 disables caching entirely.
@@ -812,6 +833,13 @@ fn base_builder() -> Result<ConfigBuilder<DefaultState>, ConfigError> {
         .set_default("server.cert.store.certificate_key", Option::<String>::None)?
         .set_default("server.cert.store.signing_key_key", Option::<String>::None)?
         .set_default("aws.region", "us-east-1")?
+        .set_default("vault.addr", "http://localhost:8200")?
+        .set_default("vault.token", "")?
+        .set_default("vault.mount", "secret")?
+        .set_default("vault.path_prefix", "")?
+        .set_default("vault.namespace", Option::<String>::None)?
+        .set_default("vault.secrets_cache_ttl", 300)?
+        .set_default("vault.timeout_secs", 30)?
         .set_default("cache.ttl", 5 * 60)?
         .set_default("cache.max_capacity", 100)?
         .set_default("status_list.token_exp_secs", 900)?
@@ -882,7 +910,6 @@ mod tests {
         assert_eq!(config.database.backend, expected_db_backend);
         assert_eq!(config.redis.uri.expose_secret(), "");
         assert!(!config.redis.require_client_auth);
-
         #[cfg(feature = "acme")]
         let (expected_strategy, expected_cert_path, expected_key_path) =
             ("acme", Option::<String>::None, Option::<String>::None);

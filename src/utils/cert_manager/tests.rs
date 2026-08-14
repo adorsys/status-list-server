@@ -5,7 +5,6 @@ use crate::{
 
 use super::*;
 use async_trait::async_trait;
-use sealed_test::prelude::*;
 use std::collections::HashMap;
 use std::sync::{
     Arc, Once,
@@ -688,7 +687,7 @@ fn gauge_value(registry: &prometheus::Registry, name: &str) -> f64 {
         .unwrap_or(0.0)
 }
 
-#[sealed_test]
+#[test]
 fn test_init_renewal_counters_registers_zero_values() {
     init_crypto();
     let registry = setup_test_metrics_registry();
@@ -708,7 +707,7 @@ fn test_init_renewal_counters_registers_zero_values() {
     assert_eq!(counter_value(&registry, "cert_renewal_failures"), 0.0);
 }
 
-#[sealed_test]
+#[test]
 fn test_update_time_to_expiry_sets_gauge() {
     init_crypto();
     let registry = setup_test_metrics_registry();
@@ -739,7 +738,7 @@ fn test_update_time_to_expiry_sets_gauge() {
     );
 }
 
-#[sealed_test]
+#[test]
 fn test_record_successful_renewal_updates_counters_and_gauge() {
     init_crypto();
     let registry = setup_test_metrics_registry();
@@ -765,7 +764,7 @@ fn test_record_successful_renewal_updates_counters_and_gauge() {
     );
 }
 
-#[sealed_test]
+#[test]
 fn test_record_failed_renewal_increments_failure_counter() {
     init_crypto();
     let registry = setup_test_metrics_registry();
@@ -785,7 +784,7 @@ fn test_record_failed_renewal_increments_failure_counter() {
     assert_eq!(counter_value(&registry, "cert_renewal_failures"), 2.0);
 }
 
-#[sealed_test]
+#[test]
 fn test_renewal_attempts_metric_via_manager() {
     init_crypto();
     let registry = setup_test_metrics_registry();
