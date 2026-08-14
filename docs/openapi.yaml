@@ -866,7 +866,6 @@ components:
             error: "rate_limited"
             error_description: "Rate limit exceeded for the issuer tier. Retry in 42s."
 
-
     UpdateConflict:
       description: |
         The status list was modified concurrently between the client's read and

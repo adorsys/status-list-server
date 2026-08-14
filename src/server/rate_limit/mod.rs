@@ -114,7 +114,7 @@ fn peer_ip<T>(req: &Request<T>) -> Option<IpAddr> {
 /// Proxies emit several shapes for the same address: bare (`203.0.113.7`,
 /// `2001:db8::1`), with a port (`203.0.113.7:443`), and bracketed for IPv6
 /// (`[2001:db8::1]:443`). Accepting only the bare form would make a legitimate
-/// IPv6 hop unparseable, which silently collapses the tier into a single
+/// IPv6 hop unparsable, which silently collapses the tier into a single
 /// shared bucket.
 fn parse_forwarded_ip(raw: &str) -> Option<IpAddr> {
     let raw = raw.trim();
@@ -157,7 +157,7 @@ fn forwarded_for_entries(headers: &HeaderMap) -> impl DoubleEndedIterator<Item =
 ///
 /// Fails  -  deliberately, rather than falling back to an entry further left  -
 /// when the chain is shorter than the configured number of hops or the selected
-/// entry is unparseable. Entries to the left are *less* trustworthy, so reaching
+/// entry is unparsable. Entries to the left are *less* trustworthy, so reaching
 /// for one on failure would turn a misconfiguration into a bypass. The caller
 /// falls back to the peer IP, which is coarse but unforgeable.
 ///
@@ -182,7 +182,7 @@ fn rightmost_forwarded_for(
     let entry = forwarded_for_entries(headers)
         .nth_back(trusted_hops)
         .ok_or(FallbackReason::ChainTooShort)?;
-    parse_forwarded_ip(entry).ok_or(FallbackReason::Unparseable)
+    parse_forwarded_ip(entry).ok_or(FallbackReason::Unparsable)
 }
 
 /// Reads `X-Real-IP`, taking the **last** occurrence.
@@ -201,14 +201,14 @@ fn x_real_ip(headers: &HeaderMap) -> Result<IpAddr, FallbackReason> {
     // rightmost coin-flip this module exists to remove, so report it and let
     // the caller fall back to the unforgeable peer address.
     if values.next().is_some() {
-        return Err(FallbackReason::Unparseable);
+        return Err(FallbackReason::Unparsable);
     }
 
     value
         .to_str()
         .ok()
         .and_then(parse_forwarded_ip)
-        .ok_or(FallbackReason::Unparseable)
+        .ok_or(FallbackReason::Unparsable)
 }
 
 /// Why the configured client-IP source could not be used, forcing a fall back
@@ -225,7 +225,7 @@ enum FallbackReason {
     /// The configured header was not present at all.
     HeaderAbsent,
     /// The selected entry was not an address (obfuscated identifier, junk).
-    Unparseable,
+    Unparsable,
     /// Fewer `X-Forwarded-For` entries than `trusted_hops` requires.
     ChainTooShort,
 }
@@ -235,7 +235,7 @@ impl FallbackReason {
         match self {
             Self::UntrustedPeer => "untrusted_peer",
             Self::HeaderAbsent => "header_absent",
-            Self::Unparseable => "unparseable",
+            Self::Unparsable => "unparsable",
             Self::ChainTooShort => "chain_too_short",
         }
     }
@@ -669,7 +669,7 @@ mod tests {
     /// `X-Forwarded-For`, the proxy appends a second header line. Reading only
     /// the first line would make the "rightmost" entry `9.9.9.9`.
     #[test]
-    fn a_client_supplied_xff_line_cannot_shadow_the_proxys_line() {
+    fn a_client_supplied_xff_line_cannot_shadow_the_proxies_line() {
         let req = request(
             &["9.9.9.9", "203.0.113.7, 10.0.0.1"],
             Some(ipv4(10, 0, 0, 1)),
@@ -721,7 +721,7 @@ mod tests {
     }
 
     #[test]
-    fn an_unparseable_selected_entry_falls_back_to_the_peer() {
+    fn an_unparsable_selected_entry_falls_back_to_the_peer() {
         let req = request(&["203.0.113.7, _hidden"], Some(ipv4(10, 0, 0, 1)));
         assert_eq!(
             xff_extractor(0).extract(&req).unwrap(),
@@ -860,10 +860,10 @@ mod tests {
     }
 
     #[test]
-    fn an_unparseable_entry_reports_unparseable() {
+    fn an_unparsable_entry_reports_unparsable() {
         assert_eq!(
             rightmost_forwarded_for(&headers_with(&["203.0.113.7, _hidden"]), 0),
-            Err(FallbackReason::Unparseable)
+            Err(FallbackReason::Unparsable)
         );
     }
 
@@ -881,7 +881,7 @@ mod tests {
             [
                 Err(FallbackReason::HeaderAbsent),
                 Err(FallbackReason::ChainTooShort),
-                Err(FallbackReason::Unparseable),
+                Err(FallbackReason::Unparsable),
             ]
         );
     }
@@ -892,7 +892,7 @@ mod tests {
         assert_eq!(x_real_ip(&absent), Err(FallbackReason::HeaderAbsent));
 
         absent.append(&X_REAL_IP, "_hidden".parse().unwrap());
-        assert_eq!(x_real_ip(&absent), Err(FallbackReason::Unparseable));
+        assert_eq!(x_real_ip(&absent), Err(FallbackReason::Unparsable));
     }
 
     #[test]
@@ -900,7 +900,7 @@ mod tests {
         let labels = [
             FallbackReason::HeaderAbsent.as_str(),
             FallbackReason::ChainTooShort.as_str(),
-            FallbackReason::Unparseable.as_str(),
+            FallbackReason::Unparsable.as_str(),
         ];
         let unique: std::collections::HashSet<_> = labels.iter().collect();
         assert_eq!(unique.len(), labels.len(), "labels must be distinct");
@@ -935,7 +935,7 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.append(&X_REAL_IP, "9.9.9.9".parse().unwrap());
         headers.append(&X_REAL_IP, "203.0.113.7".parse().unwrap());
-        assert_eq!(x_real_ip(&headers), Err(FallbackReason::Unparseable));
+        assert_eq!(x_real_ip(&headers), Err(FallbackReason::Unparsable));
     }
 
     #[test]

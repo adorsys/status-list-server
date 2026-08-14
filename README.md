@@ -486,7 +486,7 @@ steady rate here means the setting is wrong while everything looks healthy.
 - **`chain_too_short`** — the header was present, but had fewer entries than
   `trusted_hops` requires. This is the one case where lowering `trusted_hops` to
   match the real chain is the fix. Only `rightmost_x_forwarded_for` emits it.
-- **`unparseable`** — the selected entry was not an address, e.g. an RFC 7239
+- **`unparsable`** — the selected entry was not an address, e.g. an RFC 7239
   obfuscated identifier. Check what the proxy actually writes. Emitted by both
   header sources.
 
