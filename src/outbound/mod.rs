@@ -8,6 +8,7 @@ pub mod cert;
 pub mod gcp_secret;
 #[cfg(feature = "memory")]
 pub mod memory;
+pub mod signing_files;
 #[cfg(feature = "history")]
 pub mod sql;
 #[cfg(feature = "vault")]

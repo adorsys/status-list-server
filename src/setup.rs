@@ -88,6 +88,7 @@ use crate::outbound::cert::AcmeCertificateProvider;
 use crate::outbound::gcp_secret::GcpSecretManagerClient;
 #[cfg(feature = "memory")]
 use crate::outbound::memory::{MemoryCredentials, MemoryStatusListSnapshotRepo, MemoryStatusLists};
+use crate::outbound::signing_files::FileCertificateProvider;
 #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mysql"))]
 use crate::outbound::sql::{
     Migrator, SeaOrmStore, SqlCredentialRepo, SqlStatusListRepo, SqlStatusListSnapshotRepo,
@@ -114,12 +115,14 @@ pub async fn build_state(config: &AppConfig) -> EyeResult<AppState> {
 #[cfg(feature = "acme")]
 pub async fn build_state_with_cert_manager(
     config: &AppConfig,
-) -> EyeResult<(AppState, Arc<CertManager>)> {
+) -> EyeResult<(AppState, Option<Arc<CertManager>>)> {
     build_state_internal(config).await
 }
 
 #[cfg(feature = "acme")]
-async fn build_state_internal(config: &AppConfig) -> EyeResult<(AppState, Arc<CertManager>)> {
+async fn build_state_internal(
+    config: &AppConfig,
+) -> EyeResult<(AppState, Option<Arc<CertManager>>)> {
     build_state_impl(config).await
 }
 
@@ -130,7 +133,7 @@ async fn build_state_internal(config: &AppConfig) -> EyeResult<AppState> {
 }
 
 #[cfg(feature = "acme")]
-type BuildStateResult = (AppState, Arc<CertManager>);
+type BuildStateResult = (AppState, Option<Arc<CertManager>>);
 
 #[cfg(not(feature = "acme"))]
 type BuildStateResult = (AppState,);
@@ -234,7 +237,15 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
     let (cert_provider, cert_manager_opt): (
         Arc<dyn CertificateProvider>,
         Option<Arc<CertManager>>,
-    ) = {
+    ) = if let Some(ref signing) = config.server.signing {
+        (
+            Arc::new(FileCertificateProvider::new(
+                &signing.key_file,
+                &signing.cert_file,
+            )),
+            None,
+        )
+    } else {
         let app_env = std::env::var("APP_ENV").unwrap_or(ENV_DEVELOPMENT.to_string());
         let cert_domains = [config.server.domain.as_str()];
         let material_storage = build_crypto_storage(config).await?;
@@ -298,13 +309,24 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
     };
 
     #[cfg(not(feature = "acme"))]
-    let (cert_provider, _cert_manager_opt): (Arc<dyn CertificateProvider>, Option<()>) = (
-        Arc::new(crate::outbound::cert::StoreCertificateProvider::new(
-            config.server.cert.store.certificate_path.clone(),
-            config.server.cert.store.signing_key_path.clone(),
-        )),
-        None,
-    );
+    let (cert_provider, _cert_manager_opt): (Arc<dyn CertificateProvider>, Option<()>) =
+        if let Some(ref signing) = config.server.signing {
+            (
+                Arc::new(FileCertificateProvider::new(
+                    &signing.key_file,
+                    &signing.cert_file,
+                )),
+                None,
+            )
+        } else {
+            (
+                Arc::new(crate::outbound::cert::StoreCertificateProvider::new(
+                    config.server.cert.store.certificate_path.clone(),
+                    config.server.cert.store.signing_key_path.clone(),
+                )),
+                None,
+            )
+        };
 
     let status_list_cache = MokaStatusListCache::new(config.cache.ttl, config.cache.max_capacity);
 
@@ -367,7 +389,7 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
 
     #[cfg(feature = "acme")]
     {
-        Ok((state, cert_manager_opt.unwrap()))
+        Ok((state, cert_manager_opt))
     }
     #[cfg(not(feature = "acme"))]
     {

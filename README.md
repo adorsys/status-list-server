@@ -238,6 +238,22 @@ let manager = CertManager::builder()
 
 ACME DNS-01 challenges are solved through a configurable DNS provider. AWS Route53, Cloudflare, Google Cloud DNS, Azure DNS and self-hosted ACME-DNS are supported, selected via `APP_SERVER__CERT__DNS__PROVIDER`. See the [DNS Provider Documentation](docs/dns-providers.md) for setup instructions.
 
+### External Certificate Management (Signing Files)
+
+As an alternative to the built-in ACME / store certificate lifecycle, the server
+can read signing key and certificate chain directly from PEM-encoded files on
+disk. This is designed for environments where an external system (e.g. Kubernetes
+cert-manager) manages certificate issuance and mounts the key material as files.
+
+When `server.signing` is configured, the ACME certificate manager is **not**
+started and no secrets-backend or ACME settings are required. Files are re-read on
+every request, so certificate rotation is picked up without a pod restart.
+
+| Variable                          | Description                                        | Example                      |
+| --------------------------------- | -------------------------------------------------- | ---------------------------- |
+| `APP_SERVER__SIGNING__KEY_FILE`   | Path to the PKCS#8 PEM-encoded private signing key | `/etc/status-list/tls.key`   |
+| `APP_SERVER__SIGNING__CERT_FILE`  | Path to the PEM-encoded certificate chain          | `/etc/status-list/tls.crt`   |
+
 ## Error Handling
 
 The server implements proper error handling and returns appropriate HTTP status codes:
