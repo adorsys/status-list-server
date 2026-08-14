@@ -152,7 +152,7 @@ impl Storage for AwsSecretsManager {
             Err(SdkError::ServiceError(err)) if err.err().is_resource_not_found_exception() => {
                 Ok(())
             }
-            Err(e) => Err(StorageError::AwsSdk(e.into())),
+            Err(e) => Err(StorageError::Backend(e.into())),
             Ok(_) => Ok(()),
         }
     }
@@ -405,9 +405,9 @@ impl Storage for AwsS3 {
             .map(|_| ())
             .map_err(|e| match e {
                 SdkError::ServiceError(err) => {
-                    StorageError::AwsSdk(eyre!("S3 bucket unavailable: {}", err.err()))
+                    StorageError::Backend(eyre!("S3 bucket unavailable: {}", err.err()))
                 }
-                other => StorageError::AwsSdk(other.into()),
+                other => StorageError::Backend(other.into()),
             })
     }
 }
