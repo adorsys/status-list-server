@@ -21,7 +21,8 @@ Authentication is strictly performed via **AppRole**, which is the industry stan
 | `APP_VAULT__ADDR`              | String            | `http://127.0.0.1:8200`             | Base URL of the Vault / OpenBao cluster                                  |
 | `APP_VAULT__AUTH_MOUNT`        | String            | `"approle"`                         | Mount path of the AppRole auth engine                                    |
 | `APP_VAULT__ROLE_ID`           | String            | _(Mandatory when Vault is enabled)_ | AppRole Role ID identifier                                               |
-| `APP_VAULT__SECRET_ID`         | String (Secret)   | _(Mandatory when Vault is enabled)_ | AppRole Secret ID credential                                             |
+| `APP_VAULT__SECRET_ID`         | String (Secret)   | _(Optional if path is used)_        | AppRole Secret ID credential                                             |
+| `APP_VAULT__SECRET_ID_PATH`    | Path              | `None`                              | File path containing AppRole Secret ID (e.g. K8s volume mount)           |
 | `APP_VAULT__MOUNT`             | String            | `"secret"`                          | KV v2 secrets engine mount point                                         |
 | `APP_VAULT__PATH_PREFIX`       | String            | `""`                                | Optional prefix prepended to all secret keys (e.g. `status-list-server`) |
 | `APP_VAULT__NAMESPACE`         | String            | `None`                              | Optional Enterprise/OpenBao namespace header (`X-Vault-Namespace`)       |
@@ -141,13 +142,17 @@ APP_VAULT__NAMESPACE=my-org-namespace
 APP_VAULT__SECRETS_CACHE_TTL=600
 ```
 
-### Automated Token Lifecycle & Renewal
+### Automated Token Lifecycle & Resilience
 
-The server features an automated token manager:
+The server features an enterprise-grade automated token manager:
 
 - **Initial Login**: Exchanged via `POST /v1/auth/{auth_mount}/login` at application startup.
 - **Proactive Renewal**: Tokens are automatically renewed via `POST /v1/auth/token/renew-self` when 80% of their lease TTL has elapsed.
 - **Re-authentication Fallback**: If renewal fails (e.g. token expired or revoked), the client seamlessly re-authenticates using the AppRole credentials.
+
+### Observability & Metrics
+
+Vault authentication and token operations emit OpenTelemetry counters for successful initial logins, renewals, and re-authentications.
 
 ### Cache Behavior
 

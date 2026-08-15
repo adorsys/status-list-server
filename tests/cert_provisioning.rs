@@ -210,24 +210,36 @@ async fn setup_vault_approle(vault_port: u16) -> (String, SecretString) {
     let client = reqwest::Client::new();
 
     // Enable approle auth engine
-    let _ = client
+    let resp = client
         .post(format!("{vault_url}/v1/sys/auth/approle"))
         .header("X-Vault-Token", "root")
         .json(&serde_json::json!({
             "type": "approle"
         }))
         .send()
-        .await;
+        .await
+        .expect("Failed to enable AppRole auth engine");
+    assert!(
+        resp.status().is_success() || resp.status() == reqwest::StatusCode::BAD_REQUEST,
+        "unexpected status enabling approle: {}",
+        resp.status()
+    );
 
     // Create a policy granting full access to secrets
-    let _ = client
+    let resp = client
         .put(format!("{vault_url}/v1/sys/policy/test-policy"))
         .header("X-Vault-Token", "root")
         .json(&serde_json::json!({
             "policy": "path \"*\" { capabilities = [\"create\", \"read\", \"update\", \"delete\", \"list\"] }"
         }))
         .send()
-        .await;
+        .await
+        .expect("Failed to create test-policy");
+    assert!(
+        resp.status().is_success(),
+        "failed to create test-policy: {}",
+        resp.status()
+    );
 
     // Create a role with test-policy
     let resp = client
