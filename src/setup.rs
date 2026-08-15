@@ -222,20 +222,17 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
             #[cfg(feature = "vault")]
             {
                 tracing::info!("Using Vault KV v2 as secrets backend");
+                let secret_id = config.vault.resolve_secret_id()?;
                 Box::new(
-                    VaultClient::builder(
-                        &config.vault.addr,
-                        &config.vault.role_id,
-                        config.vault.secret_id.clone(),
-                    )
-                    .auth_mount(&config.vault.auth_mount)
-                    .mount(&config.vault.mount)
-                    .path_prefix(&config.vault.path_prefix)
-                    .namespace(config.vault.namespace.as_deref())
-                    .secrets_cache_ttl(Duration::from_secs(config.vault.secrets_cache_ttl))
-                    .timeout(Duration::from_secs(config.vault.timeout_secs))
-                    .build()
-                    .await?,
+                    VaultClient::builder(&config.vault.addr, &config.vault.role_id, secret_id)
+                        .auth_mount(&config.vault.auth_mount)
+                        .mount(&config.vault.mount)
+                        .path_prefix(&config.vault.path_prefix)
+                        .namespace(config.vault.namespace.as_deref())
+                        .secrets_cache_ttl(Duration::from_secs(config.vault.secrets_cache_ttl))
+                        .timeout(Duration::from_secs(config.vault.timeout_secs))
+                        .build()
+                        .await?,
                 )
             }
             #[cfg(not(feature = "vault"))]
