@@ -1,7 +1,7 @@
 //! Vault / OpenBao KV v2 secrets-storage adapter implementing [`Storage`].
 //!
 //! Both HashiCorp Vault and OpenBao expose the same KV v2 HTTP API, so this
-//! single adapter covers both.  Authentication is performed exclusively via
+//! single adapter covers both. Authentication is performed exclusively via
 //! the **AppRole** auth method.
 
 use std::sync::Arc;
@@ -21,7 +21,7 @@ use crate::cert_manager::storage::{Storage, StorageError};
 /// Vault / OpenBao KV v2 storage adapter.
 ///
 /// Implements the [`Storage`] trait so it can be used as a secrets backend
-/// by the certificate manager.  Authentication is performed via **AppRole**.
+/// by the certificate manager. Authentication is performed via **AppRole**.
 #[derive(Debug)]
 pub struct VaultClient {
     client: Client,
@@ -58,13 +58,15 @@ impl VaultClient {
     /// Build the full URL for KV v2 `data` operations.
     fn data_url(&self, key: &str) -> String {
         let path = self.qualify_key(key);
-        format!("{}/v1/{}/data/{}", self.addr, self.mount, path)
+        let encoded_mount = Self::encode_path_segment(&self.mount);
+        format!("{}/v1/{}/data/{}", self.addr, encoded_mount, path)
     }
 
     /// Build the full URL for KV v2 `metadata` (used by hard-delete).
     fn metadata_url(&self, key: &str) -> String {
         let path = self.qualify_key(key);
-        format!("{}/v1/{}/metadata/{}", self.addr, self.mount, path)
+        let encoded_mount = Self::encode_path_segment(&self.mount);
+        format!("{}/v1/{}/metadata/{}", self.addr, encoded_mount, path)
     }
 
     /// Qualify a key by prepending the configured path prefix, then
@@ -89,7 +91,7 @@ impl VaultClient {
     /// Unreserved characters (`A-Z a-z 0-9 - _ . ~`) and sub-delimiters
     /// allowed in path segments (`! $ & ' ( ) * + , ; = : @`) are left as-is;
     /// everything else (including `?`, `#`, ` `, `%`) is percent-encoded.
-    fn encode_path_segment(segment: &str) -> String {
+    pub(crate) fn encode_path_segment(segment: &str) -> String {
         let mut out = String::with_capacity(segment.len());
         for b in segment.bytes() {
             if b.is_ascii_alphanumeric()
@@ -244,20 +246,27 @@ impl VaultClientBuilder {
     /// - `role_id` is empty.
     /// - `secret_id` is empty.
     /// - `mount` is empty.
+    /// - `auth_mount` is empty.
     /// - The initial AppRole login fails.
     pub async fn build(self) -> Result<VaultClient, StorageError> {
+        let addr = self.addr.trim().trim_end_matches('/').to_string();
+        let role_id = self.role_id.trim().to_string();
+        let auth_mount = self.auth_mount.trim().to_string();
+        let mount = self.mount.trim().to_string();
+        let path_prefix = self.path_prefix.trim().to_string();
+
         // Validate address, must be non-empty and parseable as a URL.
-        if self.addr.trim().is_empty() {
+        if addr.is_empty() {
             return Err(StorageError::Backend(eyre!(
                 "Vault configuration error: address must not be empty"
             )));
         }
-        Url::parse(&self.addr).map_err(|e| {
+        Url::parse(&addr).map_err(|e| {
             StorageError::Backend(eyre!("Vault configuration error: invalid address: {e}"))
         })?;
 
         // Validate role_id, must be non-empty.
-        if self.role_id.trim().is_empty() {
+        if role_id.is_empty() {
             return Err(StorageError::Backend(eyre!(
                 "Vault configuration error: role_id must not be empty"
             )));
@@ -271,14 +280,14 @@ impl VaultClientBuilder {
         }
 
         // Mount must be non-empty.
-        if self.mount.trim().is_empty() {
+        if mount.is_empty() {
             return Err(StorageError::Backend(eyre!(
                 "Vault configuration error: mount path must not be empty"
             )));
         }
 
         // Auth mount must be non-empty.
-        if self.auth_mount.trim().is_empty() {
+        if auth_mount.is_empty() {
             return Err(StorageError::Backend(eyre!(
                 "Vault configuration error: auth_mount must not be empty"
             )));
@@ -300,15 +309,13 @@ impl VaultClientBuilder {
             info!("Vault secrets cache disabled (TTL=0)");
         }
 
-        let addr = self.addr.trim_end_matches('/').to_string();
-
         // Perform initial AppRole login
         let auth = TokenManager::login(
             &client,
             &addr,
-            self.role_id,
+            role_id,
             self.secret_id,
-            self.auth_mount,
+            auth_mount,
             self.namespace.as_deref(),
         )
         .await?;
@@ -316,13 +323,54 @@ impl VaultClientBuilder {
         Ok(VaultClient {
             client,
             addr,
-            mount: self.mount,
-            path_prefix: self.path_prefix,
+            mount,
+            path_prefix,
             namespace: self.namespace,
             cache,
             auth: Arc::new(auth),
         })
     }
+}
+
+/// Helper functions for OpenTelemetry Vault auth metrics.
+fn record_vault_login() {
+    opentelemetry::global::meter("status-list-server")
+        .u64_counter("vault_auth_logins_total")
+        .with_description("Total number of successful Vault AppRole logins.")
+        .build()
+        .add(1, &[]);
+}
+
+fn record_vault_renewal() {
+    opentelemetry::global::meter("status-list-server")
+        .u64_counter("vault_auth_renewals_total")
+        .with_description("Total number of successful Vault token renewals.")
+        .build()
+        .add(1, &[]);
+}
+
+fn record_vault_reauth() {
+    opentelemetry::global::meter("status-list-server")
+        .u64_counter("vault_auth_reauth_total")
+        .with_description(
+            "Total number of Vault re-authentications after token expiration or renewal failure.",
+        )
+        .build()
+        .add(1, &[]);
+}
+
+fn record_vault_auth_failure(operation: &'static str, result: &'static str) {
+    opentelemetry::global::meter("status-list-server")
+        .u64_counter("vault_auth_failures_total")
+        .with_description("Total number of Vault authentication and renewal failures.")
+        .build()
+        .add(
+            1,
+            &[
+                opentelemetry::KeyValue::new("operation", operation),
+                opentelemetry::KeyValue::new("result", result),
+            ],
+        );
 }
 
 /// Manages the Vault client token obtained via AppRole login.
@@ -331,6 +379,8 @@ impl VaultClientBuilder {
 /// - Initial login via `POST /v1/auth/{mount}/login`
 /// - Proactive renewal at 80% of TTL via `POST /v1/auth/token/renew-self`
 /// - Full re-authentication when renewal fails or the token exceeds `max_ttl`
+/// - Double-checked locking to serialize token renewals and prevent concurrency stampedes
+/// - Failure cooldown backoff to protect degraded/unreachable Vault instances
 #[derive(Debug)]
 struct TokenManager {
     /// Current client token, swapped atomically on renewal/re-login.
@@ -347,6 +397,10 @@ struct TokenManager {
     secret_id: SecretString,
     /// Auth engine mount path (default `approle`).
     auth_mount: String,
+    /// Mutex serializing proactive renewal and re-login across concurrent requests.
+    renewal_lock: tokio::sync::Mutex<()>,
+    /// Timestamp of last auth/renewal failure for backoff cooldown.
+    last_failure: RwLock<Option<Instant>>,
 }
 
 /// Response from `POST /v1/auth/{mount}/login` and `POST /v1/auth/token/renew-self`
@@ -365,13 +419,16 @@ struct AuthData {
 /// Request body for `POST /v1/auth/{mount}/login`.
 #[derive(Serialize)]
 struct LoginRequest<'a> {
-    role_id: String,
+    role_id: &'a str,
     secret_id: &'a str,
 }
 
 impl TokenManager {
-    /// Percentage of TTL at which we proactively renew/re-login.
-    const RENEW_MARGIN_PCT: u64 = 800;
+    /// Fraction of TTL elapsed before proactive renewal/re-login (80%).
+    const RENEW_MARGIN: f64 = 0.8;
+
+    /// Cooldown window after an auth failure before retrying.
+    const FAILURE_COOLDOWN: Duration = Duration::from_secs(5);
 
     /// Perform the initial AppRole login and return a ready manager.
     async fn login(
@@ -393,6 +450,8 @@ impl TokenManager {
             role_id,
             secret_id,
             auth_mount,
+            renewal_lock: tokio::sync::Mutex::new(()),
+            last_failure: RwLock::new(None),
         })
     }
 
@@ -405,9 +464,10 @@ impl TokenManager {
         auth_mount: &str,
         namespace: Option<&str>,
     ) -> Result<(SecretString, u64, bool), StorageError> {
-        let url = format!("{addr}/v1/auth/{auth_mount}/login");
+        let encoded_auth_mount = VaultClient::encode_path_segment(auth_mount);
+        let url = format!("{addr}/v1/auth/{encoded_auth_mount}/login");
         let body = LoginRequest {
-            role_id: role_id.to_string(),
+            role_id,
             secret_id: secret_id.expose_secret(),
         };
 
@@ -416,27 +476,43 @@ impl TokenManager {
             builder = builder.header("X-Vault-Namespace", ns);
         }
 
-        let resp = builder.send().await?;
+        let resp = match builder.send().await {
+            Ok(resp) => resp,
+            Err(e) => {
+                record_vault_auth_failure("login", "network_error");
+                return Err(StorageError::Backend(e.into()));
+            }
+        };
+
         let status = resp.status();
 
         if status.is_success() {
-            let login: LoginOrRenewResponse = resp.json().await?;
+            let login: LoginOrRenewResponse = match resp.json().await {
+                Ok(data) => data,
+                Err(e) => {
+                    record_vault_auth_failure("login", "deserialization_error");
+                    return Err(StorageError::Backend(e.into()));
+                }
+            };
             info!(
                 lease_duration = login.auth.lease_duration,
                 renewable = login.auth.renewable,
                 "AppRole login successful"
             );
+            record_vault_login();
             Ok((
                 SecretString::from(login.auth.client_token),
                 login.auth.lease_duration,
                 login.auth.renewable,
             ))
         } else if status == StatusCode::FORBIDDEN {
+            record_vault_auth_failure("login", "forbidden");
             Err(StorageError::Backend(eyre!(
                 "vault AppRole login denied (HTTP 403)"
             )))
         } else {
             let body_text = resp.text().await.unwrap_or_default();
+            record_vault_auth_failure("login", "http_error");
             Err(StorageError::Backend(eyre!(
                 "vault AppRole login failed: HTTP {status}: {body_text}"
             )))
@@ -444,33 +520,68 @@ impl TokenManager {
     }
 
     /// Ensure the current token is still valid, renewing or re-authenticating
-    /// as needed. This is called before every KV request.
+    /// as needed. Uses double-checked locking to serialize token renewal and prevent
+    /// thundering-herd stampedes under high concurrency.
     async fn ensure_valid(
         &self,
         client: &Client,
         addr: &str,
         namespace: Option<&str>,
     ) -> Result<(), StorageError> {
+        // Fast path: check under read lock if current token is still within safe window
+        {
+            let elapsed = self.issued_at.read().await.elapsed();
+            let ttl = *self.lease_duration.read().await;
+            let safe_window = Duration::from_secs_f64(ttl as f64 * Self::RENEW_MARGIN);
+            if ttl == 0 || elapsed < safe_window {
+                return Ok(());
+            }
+        }
+
+        // Acquire serialization lock to prevent concurrent renew/login stampedes
+        let _guard = self.renewal_lock.lock().await;
+
+        // Re-check after acquiring lock in case another task already renewed/re-logged-in
         let elapsed = self.issued_at.read().await.elapsed();
         let ttl = *self.lease_duration.read().await;
-
-        // No renewal needed if we're within the safe window (80% of TTL)
-        let safe_window = Duration::from_millis(ttl.saturating_mul(Self::RENEW_MARGIN_PCT));
+        let safe_window = Duration::from_secs_f64(ttl as f64 * Self::RENEW_MARGIN);
         if ttl == 0 || elapsed < safe_window {
             return Ok(());
+        }
+
+        // Check failure cooldown backoff to protect degraded/unreachable Vault
+        if let Some(last_fail) = *self.last_failure.read().await
+            && last_fail.elapsed() < Self::FAILURE_COOLDOWN
+        {
+            return Err(StorageError::Backend(eyre!(
+                "vault authentication in cooldown backoff after recent failure"
+            )));
         }
 
         // Try renewal first if the token is renewable
         if *self.renewable.read().await {
             match self.try_renew(client, addr, namespace).await {
-                Ok(()) => return Ok(()),
+                Ok(()) => {
+                    *self.last_failure.write().await = None;
+                    return Ok(());
+                }
                 Err(e) => {
                     warn!("Token renewal failed, re-authenticating: {e}");
                 }
             }
         }
+
         // Full re-login
-        self.re_login(client, addr, namespace).await
+        match self.re_login(client, addr, namespace).await {
+            Ok(()) => {
+                *self.last_failure.write().await = None;
+                Ok(())
+            }
+            Err(e) => {
+                *self.last_failure.write().await = Some(Instant::now());
+                Err(e)
+            }
+        }
     }
 
     /// Attempt to renew the current token via `POST /v1/auth/token/renew-self`.
@@ -490,24 +601,40 @@ impl TokenManager {
             builder = builder.header("X-Vault-Namespace", ns);
         }
 
-        let resp = builder.send().await?;
+        let resp = match builder.send().await {
+            Ok(resp) => resp,
+            Err(e) => {
+                record_vault_auth_failure("renewal", "network_error");
+                return Err(StorageError::Backend(e.into()));
+            }
+        };
+
         let status = resp.status();
 
         if status.is_success() {
-            let renew: LoginOrRenewResponse = resp.json().await?;
+            let renew: LoginOrRenewResponse = match resp.json().await {
+                Ok(data) => data,
+                Err(e) => {
+                    record_vault_auth_failure("renewal", "deserialization_error");
+                    return Err(StorageError::Backend(e.into()));
+                }
+            };
             info!(
                 lease_duration = renew.auth.lease_duration,
                 renewable = renew.auth.renewable,
                 "Token renewal successful"
             );
+            record_vault_renewal();
             *self.token.write().await = SecretString::from(renew.auth.client_token);
             *self.issued_at.write().await = Instant::now();
             *self.lease_duration.write().await = renew.auth.lease_duration;
             *self.renewable.write().await = renew.auth.renewable;
             Ok(())
         } else {
+            let body_text = resp.text().await.unwrap_or_default();
+            record_vault_auth_failure("renewal", "http_error");
             Err(StorageError::Backend(eyre!(
-                "token renewal failed: HTTP {status}"
+                "token renewal failed: HTTP {status}: {body_text}"
             )))
         }
     }
@@ -519,7 +646,7 @@ impl TokenManager {
         addr: &str,
         namespace: Option<&str>,
     ) -> Result<(), StorageError> {
-        let (new_token, lease_duration, renewable) = Self::perform_login(
+        let (new_token, lease_duration, renewable) = match Self::perform_login(
             client,
             addr,
             &self.role_id,
@@ -527,8 +654,16 @@ impl TokenManager {
             &self.auth_mount,
             namespace,
         )
-        .await?;
+        .await
+        {
+            Ok(res) => res,
+            Err(e) => {
+                record_vault_auth_failure("reauth", "login_error");
+                return Err(e);
+            }
+        };
 
+        record_vault_reauth();
         *self.token.write().await = new_token;
         *self.issued_at.write().await = Instant::now();
         *self.lease_duration.write().await = lease_duration;
@@ -668,7 +803,8 @@ impl Storage for VaultClient {
     /// Verify the Vault/OpenBao endpoint is reachable and the configured mount
     /// is accessible with the provided credentials.
     async fn reachable(&self) -> Result<(), StorageError> {
-        let url = format!("{}/v1/{}/config", self.addr, self.mount);
+        let encoded_mount = Self::encode_path_segment(&self.mount);
+        let url = format!("{}/v1/{}/config", self.addr, encoded_mount);
         let resp = self
             .add_auth_headers(self.client.get(&url))
             .await?
@@ -976,6 +1112,169 @@ mod tests {
         assert_eq!(
             client.auth.current_token().await.expose_secret(),
             "s.token-relogged"
+        );
+    }
+
+    #[tokio::test]
+    async fn vault_redaction_in_debug_and_errors() {
+        let server = MockServer::start().await;
+
+        // Mock 403 forbidden login
+        Mock::given(method("POST"))
+            .and(path("/v1/auth/approle/login"))
+            .respond_with(ResponseTemplate::new(403).set_body_string("denied by policy"))
+            .mount(&server)
+            .await;
+
+        let secret = SecretString::from("super-sensitive-secret-id");
+        let err = VaultClient::builder(server.uri(), "my-role", secret.clone())
+            .build()
+            .await
+            .unwrap_err();
+
+        let err_debug = format!("{err:?}");
+        let err_display = format!("{err}");
+        assert!(!err_debug.contains("super-sensitive-secret-id"));
+        assert!(!err_display.contains("super-sensitive-secret-id"));
+
+        // Now test successful login and check Debug representation
+        let server_ok = MockServer::start().await;
+        mock_approle_login(&server_ok, "s.secret-token-xyz", 3600).await;
+
+        let client = VaultClient::builder(server_ok.uri(), "my-role", secret)
+            .build()
+            .await
+            .unwrap();
+
+        let auth_debug = format!("{:?}", client.auth);
+        assert!(!auth_debug.contains("super-sensitive-secret-id"));
+        assert!(!auth_debug.contains("s.secret-token-xyz"));
+        assert!(auth_debug.contains("[REDACTED]"));
+    }
+
+    #[tokio::test]
+    async fn vault_concurrency_renewal_stampede_prevention() {
+        let server = MockServer::start().await;
+
+        // Initial login with short 1s TTL
+        Mock::given(method("POST"))
+            .and(path("/v1/auth/approle/login"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(auth_response("s.initial-token", 1)),
+            )
+            .up_to_n_times(1)
+            .mount(&server)
+            .await;
+
+        // Exact 1 renewal call should be made despite concurrent requests
+        Mock::given(method("POST"))
+            .and(path("/v1/auth/token/renew-self"))
+            .and(header("X-Vault-Token", "s.initial-token"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(auth_response("s.renewed-token-concurrent", 3600)),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        Mock::given(method("GET"))
+            .and(path("/v1/secret/data/concurrent-key"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": { "data": { "value": "concurrent-val" } }
+            })))
+            .mount(&server)
+            .await;
+
+        let client = Arc::new(
+            VaultClient::builder(server.uri(), valid_role_id(), valid_secret_id())
+                .secrets_cache_ttl(Duration::ZERO)
+                .build()
+                .await
+                .unwrap(),
+        );
+
+        // Wait past renewal threshold (0.8s)
+        tokio::time::sleep(Duration::from_millis(850)).await;
+
+        // Launch 10 concurrent requests
+        let mut handles = Vec::new();
+        for _ in 0..10 {
+            let client_clone = Arc::clone(&client);
+            handles.push(tokio::spawn(async move {
+                client_clone.load("concurrent-key").await
+            }));
+        }
+
+        for handle in handles {
+            let res = handle.await.unwrap();
+            assert_eq!(res.unwrap(), Some("concurrent-val".to_string()));
+        }
+
+        server.verify().await;
+        assert_eq!(
+            client.auth.current_token().await.expose_secret(),
+            "s.renewed-token-concurrent"
+        );
+    }
+
+    #[tokio::test]
+    async fn vault_auth_cooldown_backoff() {
+        let server = MockServer::start().await;
+
+        // Initial login with short 1s TTL (non-renewable to force re-login)
+        Mock::given(method("POST"))
+            .and(path("/v1/auth/approle/login"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "auth": {
+                    "client_token": "s.token-1",
+                    "lease_duration": 1,
+                    "renewable": false
+                }
+            })))
+            .up_to_n_times(1)
+            .mount(&server)
+            .await;
+
+        // Re-login fails with 500
+        Mock::given(method("POST"))
+            .and(path("/v1/auth/approle/login"))
+            .respond_with(ResponseTemplate::new(500).set_body_string("internal error"))
+            .up_to_n_times(1)
+            .mount(&server)
+            .await;
+
+        let client = VaultClient::builder(server.uri(), valid_role_id(), valid_secret_id())
+            .secrets_cache_ttl(Duration::ZERO)
+            .build()
+            .await
+            .unwrap();
+
+        // Wait past TTL
+        tokio::time::sleep(Duration::from_millis(850)).await;
+
+        // First attempt triggers re-login and fails
+        let err1 = client.load("key").await.unwrap_err();
+        assert!(err1.to_string().contains("HTTP 500"));
+
+        // Immediate second attempt should hit cooldown backoff
+        let err2 = client.load("key").await.unwrap_err();
+        assert!(err2.to_string().contains("cooldown backoff"));
+    }
+
+    #[test]
+    fn vault_url_encoding_special_characters() {
+        assert_eq!(
+            VaultClient::encode_path_segment("standard-name_123.test~"),
+            "standard-name_123.test~"
+        );
+        assert_eq!(
+            VaultClient::encode_path_segment("name with spaces"),
+            "name%20with%20spaces"
+        );
+        assert_eq!(
+            VaultClient::encode_path_segment("mount?query#fragment/slash"),
+            "mount%3Fquery%23fragment%2Fslash"
         );
     }
 }
