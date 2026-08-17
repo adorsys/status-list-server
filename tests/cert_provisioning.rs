@@ -157,7 +157,7 @@ impl TestInfra {
             &acme_directory_url,
         )
         .expect("Failed to create CertManager")
-        .with_crypto_material_storage(material_storage)
+        .with_crypto_storage(material_storage)
         .with_challenge_handler(challenge_handler)
         .with_acme_http_client(http_client)
     }

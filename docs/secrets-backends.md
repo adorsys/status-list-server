@@ -1,8 +1,8 @@
-# Cryptographic-Material Backend Guidance
+# Cryptographic Material Backend Guidance
 
 The server stores lifecycle-coupled cryptographic material in one selected backend by default: ACME account keys, the server signing key, and the certificate chain associated with that key.
 
-The supported material backends include:
+The supported backends include:
 
 - **HashiCorp Vault / OpenBao** (KV v2 engine)
 - **AWS Secrets Manager**
@@ -13,6 +13,14 @@ The supported material backends include:
 Both HashiCorp Vault and OpenBao share the KV v2 REST API interface and are supported natively when the `vault` feature flag is enabled.
 
 ### Configuration Variables
+
+| Variable                                    | Type              | Default    | Description                                                                                                  |
+| ------------------------------------------- | ----------------- | ---------- | ------------------------------------------------------------------------------------------------------------ |
+| `APP_SERVER__CERT__MATERIAL_BACKEND`        | String            | `memory`   | Primary backend for server cryptographic material: `memory`, `aws_secrets_manager`, or `vault`.              |
+| `APP_SERVER__CERT__MATERIAL_CACHE_TTL`      | Integer (seconds) | `300`      | In-memory read-cache TTL for certificate material. Set to `0` to disable this material cache.                 |
+| `APP_SERVER__CERT__SIGNING_KEY_CACHE_TTL`   | Integer (seconds) | `0`        | In-memory read-cache TTL for private signing-key material. Set to `0` to force every read to the backend.     |
+
+Backend-specific settings:
 
 | Variable                       | Type              | Default                             | Description                                                              |
 | ------------------------------ | ----------------- | ----------------------------------- | ------------------------------------------------------------------------ |
@@ -63,8 +71,9 @@ APP_VAULT__SECRETS_CACHE_TTL=600
 
 ### Cache Behavior
 
-- Secrets are cached in-memory using TTL semantics to minimize latency and Vault API request volume.
-- To disable caching entirely (forcing every read to query Vault directly), set `APP_VAULT__SECRETS_CACHE_TTL=0`.
+- Vault adapter reads may use its own backend cache via `APP_VAULT__SECRETS_CACHE_TTL`.
+- Certificate and signing-key material reads are additionally controlled by `APP_SERVER__CERT__MATERIAL_CACHE_TTL` and `APP_SERVER__CERT__SIGNING_KEY_CACHE_TTL`.
+- To require every private-key read to query the selected material backend, keep `APP_SERVER__CERT__SIGNING_KEY_CACHE_TTL=0`.
 
 ## AWS Secrets Manager
 
@@ -75,4 +84,7 @@ AWS_ACCESS_KEY_ID=test
 AWS_SECRET_ACCESS_KEY=test
 APP_AWS__REGION=us-east-1
 APP_AWS__SECRETS_CACHE_TTL=300
+APP_SERVER__CERT__MATERIAL_BACKEND=aws_secrets_manager
+APP_SERVER__CERT__MATERIAL_CACHE_TTL=300
+APP_SERVER__CERT__SIGNING_KEY_CACHE_TTL=0
 ```

@@ -100,12 +100,12 @@ impl Storage for MemoryStorage {
 /// deployments can cache public certificate chains while forcing each private
 /// key read to hit the backing secrets system.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct CryptoMaterialCachePolicy {
+pub struct CryptoCachePolicy {
     pub certificate_ttl: Duration,
     pub signing_key_ttl: Duration,
 }
 
-impl CryptoMaterialCachePolicy {
+impl CryptoCachePolicy {
     pub const NO_CACHE: Self = Self {
         certificate_ttl: Duration::ZERO,
         signing_key_ttl: Duration::ZERO,
@@ -119,7 +119,7 @@ impl CryptoMaterialCachePolicy {
     }
 }
 
-impl Default for CryptoMaterialCachePolicy {
+impl Default for CryptoCachePolicy {
     fn default() -> Self {
         Self::NO_CACHE
     }
@@ -127,23 +127,20 @@ impl Default for CryptoMaterialCachePolicy {
 
 /// Consolidated storage backend for the server certificate chain, signing key,
 /// and adjacent ACME account material.
-pub struct CryptoMaterialStorage {
+pub struct CryptoStorage {
     backend: Box<dyn Storage>,
     certificate_cache: Option<Cache<String, String>>,
     signing_key_cache: Option<Cache<String, String>>,
 }
 
-impl CryptoMaterialStorage {
+impl CryptoStorage {
     const CACHE_MAX_CAPACITY: u64 = 16;
 
     pub fn new(backend: impl Storage + 'static) -> Self {
-        Self::with_cache_policy(backend, CryptoMaterialCachePolicy::NO_CACHE)
+        Self::with_cache_policy(backend, CryptoCachePolicy::NO_CACHE)
     }
 
-    pub fn with_cache_policy(
-        backend: impl Storage + 'static,
-        policy: CryptoMaterialCachePolicy,
-    ) -> Self {
+    pub fn with_cache_policy(backend: impl Storage + 'static, policy: CryptoCachePolicy) -> Self {
         let certificate_cache = cache_for_ttl(policy.certificate_ttl);
         let signing_key_cache = cache_for_ttl(policy.signing_key_ttl);
         if policy.signing_key_ttl.is_zero() {
@@ -158,6 +155,18 @@ impl CryptoMaterialStorage {
 
     pub async fn store_certificate_data(&self, key: &str, value: &str) -> Result<(), StorageError> {
         self.backend.store(key, value).await?;
+        if let Some(cache) = &self.certificate_cache {
+            cache.insert(key.to_string(), value.to_string()).await;
+        }
+        Ok(())
+    }
+
+    pub async fn update_certificate_data(
+        &self,
+        key: &str,
+        value: &str,
+    ) -> Result<(), StorageError> {
+        self.backend.update(key, value).await?;
         if let Some(cache) = &self.certificate_cache {
             cache.insert(key.to_string(), value.to_string()).await;
         }
@@ -241,7 +250,7 @@ impl CryptoMaterialStorage {
 fn cache_for_ttl(ttl: Duration) -> Option<Cache<String, String>> {
     (!ttl.is_zero()).then(|| {
         Cache::builder()
-            .max_capacity(CryptoMaterialStorage::CACHE_MAX_CAPACITY)
+            .max_capacity(CryptoStorage::CACHE_MAX_CAPACITY)
             .time_to_live(ttl)
             .build()
     })

@@ -135,13 +135,14 @@ mod tests {
     use super::*;
     use crate::{
         config::{TelemetryConfig, TelemetryEnvironment},
-        utils::metrics::setup_metrics,
+        utils::metrics::{metrics_test_lock, setup_metrics},
     };
     use opentelemetry_sdk::Resource;
     use prometheus::{Encoder, Registry, TextEncoder};
 
     #[tokio::test]
     async fn test_counters_are_exported_to_prometheus() {
+        let _metrics_guard = metrics_test_lock();
         let registry = Registry::new();
         let config = TelemetryConfig {
             environment: TelemetryEnvironment::Development,

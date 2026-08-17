@@ -99,7 +99,7 @@ The crate uses modular Cargo feature flags to gate optional production backend d
 | `postgres` | SeaORM PostgreSQL database driver.                                                                                                                 | ❌ Opt-in  |
 | `sqlite`   | SeaORM SQLite database driver.                                                                                                                     | ❌ Opt-in  |
 | `mysql`    | SeaORM MySQL database driver.                                                                                                                      | ❌ Opt-in  |
-| `redis`    | Redis storage driver for legacy or explicit cache/storage integrations.                                                                            | ❌ Opt-in  |
+| `redis`    | Redis storage driver for explicit cache/storage integrations.                                                                                      | ❌ Opt-in  |
 | `aws`      | AWS S3 object storage and AWS Secrets Manager drivers.                                                                                             | ❌ Opt-in  |
 | `acme`     | ACME DNS-01 certificate manager driver.                                                                                                            | ❌ Opt-in  |
 
@@ -115,9 +115,7 @@ cargo run --features postgres,aws,acme
 
 ## Redis Role
 
-Redis is not required for core status-list persistence or status-list reads. Status-list records are stored by the configured repository backend (`memory`, PostgreSQL, MySQL, or SQLite), and hot status-list reads are cached in-process by `MokaStatusListCache`.
-
-The ACME certificate manager uses the selected cryptographic-material backend for both the certificate chain and signing key. Prefer the built-in material read caches (`APP_SERVER__CERT__MATERIAL_CACHE_TTL` and `APP_SERVER__CERT__SIGNING_KEY_CACHE_TTL`) before adding Redis. Redis remains available only for explicit adapter-level integrations that still opt into it.
+Redis is optional. The server does not use Redis for status-list persistence or status-list reads; those use the configured repository backend and the in-process status-list cache. Certificate and signing-key material are managed together by the selected cryptographic material backend; prefer the built-in material read-cache TTLs before adding Redis.
 
 For single-replica deployments, local development, tests, or deployments where certificate material reads are inexpensive, leave `APP_REDIS__URI` unset and omit the `redis` Cargo feature.
 
@@ -224,7 +222,7 @@ The Status List Server is provisioned with a cryptographic certificate that is e
 - ACME uses `DefaultHttpClient` unless `.acme_http_client(...)` is supplied.
 - Store provisioning does not create ACME HTTP client state unless explicitly configured.
 - `email` defaults to an empty string, `organization` defaults to none, and `eku` defaults to none.
-- `domains` and `crypto_material_storage` must always be provided.
+- `domains` and `crypto_storage` must always be provided.
 - ACME additionally requires `challenge_handler` and `acme_directory_url`.
 
 ```rust
@@ -233,7 +231,7 @@ let manager = CertManager::builder()
     .email("support@example.com")
     .organization(Some("example.com"))
     .acme_directory_url("https://acme-v02.api.letsencrypt.org/directory")
-    .crypto_material_storage(material_storage)
+    .crypto_storage(material_storage)
     .challenge_handler(challenge_handler)
     .eku(&[1, 3, 6, 1, 5, 5, 7, 3, 30])
     .acme_strategy()
@@ -243,7 +241,7 @@ let manager = CertManager::builder()
 ```rust
 let manager = CertManager::builder()
     .domains(["statuslist.example.com"])
-    .crypto_material_storage(material_storage)
+    .crypto_storage(material_storage)
     .store_strategy(StoreProvisioningStrategy::filesystem(
         "/etc/status-list/tls.crt",
         "/etc/status-list/tls.key",

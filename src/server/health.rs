@@ -229,11 +229,11 @@ impl ReadinessCheck for CertStoreCheck {
     }
 
     async fn check(&self) -> Result<(), String> {
-        let material_store = self
+        let crypto_store = self
             .manager
-            .crypto_material_storage()
+            .crypto_storage()
             .map_err(|e| format!("cryptographic-material backend not configured: {e}"))?;
-        material_store
+        crypto_store
             .reachable()
             .await
             .map_err(|e| format!("cryptographic-material backend unreachable: {e}"))
@@ -534,7 +534,7 @@ mod tests {
             "https://acme.example.com/directory",
         )
         .expect("build cert manager")
-        .with_crypto_material_storage(ReachabilityStorage::unreachable());
+        .with_crypto_storage(ReachabilityStorage::unreachable());
 
         let state =
             app_state_with_checks(vec![Arc::new(CertStoreCheck::new(Arc::new(manager)))]).await;

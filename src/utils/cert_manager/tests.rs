@@ -1,6 +1,6 @@
 use crate::{
     cert_manager::storage::{Storage, StorageError},
-    utils::keygen::Keypair,
+    utils::{keygen::Keypair, metrics::metrics_test_lock},
 };
 
 use super::*;
@@ -43,6 +43,55 @@ impl MockStorage {
     }
 }
 
+#[derive(Clone)]
+struct CreateIfAbsentStorage {
+    data: Arc<Mutex<HashMap<String, String>>>,
+    update_count: Arc<AtomicUsize>,
+}
+
+impl CreateIfAbsentStorage {
+    fn new() -> Self {
+        Self {
+            data: Arc::new(Mutex::new(HashMap::new())),
+            update_count: Arc::new(AtomicUsize::new(0)),
+        }
+    }
+
+    fn update_count(&self) -> usize {
+        self.update_count.load(Ordering::Relaxed)
+    }
+}
+
+#[async_trait]
+impl Storage for CreateIfAbsentStorage {
+    async fn store(&self, key: &str, value: &str) -> Result<(), StorageError> {
+        self.data
+            .lock()
+            .await
+            .entry(key.to_string())
+            .or_insert_with(|| value.to_string());
+        Ok(())
+    }
+
+    async fn load(&self, key: &str) -> Result<Option<String>, StorageError> {
+        Ok(self.data.lock().await.get(key).cloned())
+    }
+
+    async fn update(&self, key: &str, value: &str) -> Result<(), StorageError> {
+        self.update_count.fetch_add(1, Ordering::Relaxed);
+        self.data
+            .lock()
+            .await
+            .insert(key.to_string(), value.to_string());
+        Ok(())
+    }
+
+    async fn delete(&self, key: &str) -> Result<(), StorageError> {
+        self.data.lock().await.remove(key);
+        Ok(())
+    }
+}
+
 #[async_trait]
 impl Storage for MockStorage {
     async fn store(&self, key: &str, value: &str) -> Result<(), StorageError> {
@@ -77,10 +126,10 @@ fn test_cert_manager_builder() {
         "https://acme-staging-v02.api.letsencrypt.org/directory",
     )
     .unwrap()
-    .with_crypto_material_storage(material_storage)
+    .with_crypto_storage(material_storage)
     .with_eku(&[1, 2, 3, 4]);
 
-    assert!(manager.crypto_material_storage.is_some());
+    assert!(manager.crypto_storage.is_some());
     assert!(manager.challenge_handler.is_none());
     assert_eq!(manager.eku, Some(vec![1, 2, 3, 4]));
 }
@@ -93,7 +142,7 @@ fn test_acme_builder_requires_challenge_handler() {
         .domains(["example.com"])
         .email("test@example.com")
         .acme_directory_url("https://acme.example.com/directory")
-        .crypto_material_storage(MockStorage::new())
+        .crypto_storage(MockStorage::new())
         .acme_strategy()
         .build();
 
@@ -111,7 +160,7 @@ fn test_store_builder_does_not_require_acme_components() {
 
     let result = CertManager::builder()
         .domains(["example.com"])
-        .crypto_material_storage(MockStorage::new())
+        .crypto_storage(MockStorage::new())
         .store_strategy(StoreProvisioningStrategy::filesystem(
             "/tmp/example-cert.pem",
             "/tmp/example-key.pem",
@@ -244,7 +293,7 @@ async fn test_certificate_returns_none_if_not_found() {
         "https://acme-staging-v02.api.letsencrypt.org/directory",
     )
     .unwrap()
-    .with_crypto_material_storage(material_storage);
+    .with_crypto_storage(material_storage);
 
     let cert = cert_manager.certificate().await.unwrap();
     assert!(cert.is_none());
@@ -263,7 +312,7 @@ async fn test_certificate_storage_and_retrieval() {
         "https://acme-staging-v02.api.letsencrypt.org/directory",
     )
     .unwrap()
-    .with_crypto_material_storage(material_storage.clone());
+    .with_crypto_storage(material_storage.clone());
 
     let cert = manager.certificate().await.unwrap();
     assert!(cert.is_none());
@@ -296,7 +345,7 @@ async fn test_signing_key_generation_and_storage() {
         "https://acme-staging-v02.api.letsencrypt.org/directory",
     )
     .unwrap()
-    .with_crypto_material_storage(material_storage.clone());
+    .with_crypto_storage(material_storage.clone());
 
     // First call should generate and store a new key
     let generated_key = manager.signing_key_pem().await.unwrap();
@@ -317,8 +366,8 @@ async fn test_signing_key_generation_and_storage() {
 }
 
 #[tokio::test]
-async fn test_crypto_material_cache_policy_can_skip_private_key_cache() {
-    use crate::cert_manager::storage::CryptoMaterialCachePolicy;
+async fn test_crypto_cache_policy_can_skip_private_key_cache() {
+    use crate::cert_manager::storage::CryptoCachePolicy;
     use std::time::Duration;
 
     init_crypto();
@@ -337,11 +386,11 @@ async fn test_crypto_material_cache_policy_can_skip_private_key_cache() {
 
     let manager = CertManager::builder()
         .domains(["example.com"])
-        .crypto_material_cache_policy(CryptoMaterialCachePolicy::new(
+        .crypto_cache_policy(CryptoCachePolicy::new(
             Duration::from_secs(60),
             Duration::ZERO,
         ))
-        .crypto_material_storage(material_storage.clone())
+        .crypto_storage(material_storage.clone())
         .store_strategy(StoreProvisioningStrategy::filesystem(
             "/tmp/example-cert.pem",
             "/tmp/example-key.pem",
@@ -356,6 +405,81 @@ async fn test_crypto_material_cache_policy_can_skip_private_key_cache() {
     assert_eq!(manager.signing_key_pem().await.unwrap(), key_pem);
     assert_eq!(manager.signing_key_pem().await.unwrap(), key_pem);
     assert_eq!(material_storage.load_count(), 3);
+}
+
+#[tokio::test]
+async fn test_crypto_cache_policy_applies_after_storage_setter() {
+    use crate::cert_manager::storage::CryptoCachePolicy;
+    use std::time::Duration;
+
+    init_crypto();
+
+    let material_storage = MockStorage::new();
+    let serialized = include_str!("../../../test_data/cert_data.json");
+    material_storage
+        .store("certs-example.com-cert_data.json", serialized)
+        .await
+        .unwrap();
+
+    let manager = CertManager::builder()
+        .domains(["example.com"])
+        .crypto_storage(material_storage.clone())
+        .crypto_cache_policy(CryptoCachePolicy::new(
+            Duration::from_secs(60),
+            Duration::ZERO,
+        ))
+        .store_strategy(StoreProvisioningStrategy::filesystem(
+            "/tmp/example-cert.pem",
+            "/tmp/example-key.pem",
+        ))
+        .build()
+        .unwrap();
+
+    manager.certificate().await.unwrap();
+    manager.certificate().await.unwrap();
+
+    assert_eq!(material_storage.load_count(), 1);
+}
+
+#[tokio::test]
+async fn test_persist_certificate_data_updates_existing_material() {
+    init_crypto();
+
+    let material_storage = CreateIfAbsentStorage::new();
+    let manager = CertManager::builder()
+        .domains(["example.com"])
+        .crypto_storage(material_storage.clone())
+        .store_strategy(StoreProvisioningStrategy::filesystem(
+            "/tmp/example-cert.pem",
+            "/tmp/example-key.pem",
+        ))
+        .build()
+        .unwrap();
+
+    let first_cert: CertificateData =
+        serde_json::from_str(include_str!("../../../test_data/cert_data.json")).unwrap();
+    let replacement_cert = CertificateData {
+        certificate: include_str!("../../../test_data/test_cert2.pem").to_string(),
+        valid_from: 1,
+        expires_at: 2,
+        updated_at: 3,
+    };
+
+    manager.persist_certificate_data(&first_cert).await.unwrap();
+    manager
+        .persist_certificate_data(&replacement_cert)
+        .await
+        .unwrap();
+
+    let stored = material_storage
+        .load(&manager.cert_key())
+        .await
+        .unwrap()
+        .unwrap();
+    let stored: CertificateData = serde_json::from_str(&stored).unwrap();
+
+    assert_eq!(stored.certificate, replacement_cert.certificate);
+    assert_eq!(material_storage.update_count(), 1);
 }
 
 #[tokio::test]
@@ -379,7 +503,7 @@ async fn test_store_filesystem_strategy_persists_material() {
 
     let manager = CertManager::builder()
         .domains(["example.com"])
-        .crypto_material_storage(MockStorage::new())
+        .crypto_storage(MockStorage::new())
         .store_strategy(StoreProvisioningStrategy::filesystem(cert_path, key_path))
         .build()
         .unwrap();
@@ -422,7 +546,7 @@ async fn test_store_filesystem_strategy_accepts_der_material() {
 
     let manager = CertManager::builder()
         .domains(["example.com"])
-        .crypto_material_storage(MockStorage::new())
+        .crypto_storage(MockStorage::new())
         .store_strategy(StoreProvisioningStrategy::filesystem(cert_path, key_path))
         .build()
         .unwrap();
@@ -439,7 +563,7 @@ async fn test_store_filesystem_strategy_accepts_der_material() {
 }
 
 #[tokio::test]
-async fn test_store_secrets_strategy_persists_material() {
+async fn test_store_storage_strategy_persists_material() {
     init_crypto();
 
     let material_storage = MockStorage::new();
@@ -456,8 +580,8 @@ async fn test_store_secrets_strategy_persists_material() {
 
     let manager = CertManager::builder()
         .domains(["example.com"])
-        .crypto_material_storage(material_storage)
-        .store_strategy(StoreProvisioningStrategy::secrets_storage(
+        .crypto_storage(material_storage)
+        .store_strategy(StoreProvisioningStrategy::storage(
             "source-cert",
             "source-key",
         ))
@@ -471,7 +595,7 @@ async fn test_store_secrets_strategy_persists_material() {
 }
 
 #[tokio::test]
-async fn test_store_secrets_strategy_accepts_base64_der_material() {
+async fn test_store_storage_strategy_accepts_base64_der_material() {
     use base64::prelude::{BASE64_STANDARD, BASE64_URL_SAFE_NO_PAD, Engine as _};
 
     init_crypto();
@@ -498,8 +622,8 @@ async fn test_store_secrets_strategy_accepts_base64_der_material() {
 
     let manager = CertManager::builder()
         .domains(["example.com"])
-        .crypto_material_storage(material_storage)
-        .store_strategy(StoreProvisioningStrategy::secrets_storage(
+        .crypto_storage(material_storage)
+        .store_strategy(StoreProvisioningStrategy::storage(
             "source-cert",
             "source-key",
         ))
@@ -554,7 +678,7 @@ async fn test_cert_chain_parts() {
         "https://acme-staging-v02.api.letsencrypt.org/directory",
     )
     .unwrap()
-    .with_crypto_material_storage(material_storage.clone());
+    .with_crypto_storage(material_storage.clone());
 
     // there are 2 parts in the certificate chain
     let serialized = include_str!("../../../test_data/cert_data.json");
@@ -579,7 +703,7 @@ async fn test_cert_chain_parts_are_cached_after_first_load() {
         "https://acme-staging-v02.api.letsencrypt.org/directory",
     )
     .unwrap()
-    .with_crypto_material_storage(material_storage.clone());
+    .with_crypto_storage(material_storage.clone());
 
     let serialized = include_str!("../../../test_data/cert_data.json");
     material_storage
@@ -607,7 +731,7 @@ async fn test_cache_provisioned_chain_replaces_cached_entry() {
         "https://acme-staging-v02.api.letsencrypt.org/directory",
     )
     .unwrap()
-    .with_crypto_material_storage(material_storage.clone());
+    .with_crypto_storage(material_storage.clone());
 
     let cert_key = cert_manager.cert_key();
     let serialized = include_str!("../../../test_data/cert_data.json");
@@ -645,7 +769,7 @@ async fn test_cert_chain_cache_invalidation_reloads_chain() {
         "https://acme-staging-v02.api.letsencrypt.org/directory",
     )
     .unwrap()
-    .with_crypto_material_storage(material_storage.clone());
+    .with_crypto_storage(material_storage.clone());
 
     let cert_key = cert_manager.cert_key();
     let serialized = include_str!("../../../test_data/cert_data.json");
@@ -678,11 +802,16 @@ async fn test_cert_chain_cache_invalidation_reloads_chain() {
     assert_eq!(material_storage.load_count(), 2);
 }
 
-fn setup_test_metrics_registry() -> prometheus::Registry {
+fn setup_test_metrics_registry() -> (
+    std::sync::MutexGuard<'static, ()>,
+    prometheus::Registry,
+    opentelemetry_sdk::metrics::SdkMeterProvider,
+) {
     use crate::config::{TelemetryConfig, TelemetryEnvironment};
     use crate::utils::metrics::setup_metrics;
     use opentelemetry_sdk::Resource;
 
+    let metrics_guard = metrics_test_lock();
     let registry = prometheus::Registry::new();
     let config = TelemetryConfig {
         environment: TelemetryEnvironment::Development,
@@ -690,14 +819,15 @@ fn setup_test_metrics_registry() -> prometheus::Registry {
         sampler_ratio: 1.0,
         enabled: false,
     };
-    let _ = setup_metrics(
+    let meter_provider = setup_metrics(
         &registry,
         &config,
         Resource::builder()
             .with_service_name("cert-manager-test")
             .build(),
-    );
-    registry
+    )
+    .expect("metrics setup");
+    (metrics_guard, registry, meter_provider)
 }
 
 fn counter_value(registry: &prometheus::Registry, name: &str) -> f64 {
@@ -721,7 +851,7 @@ fn gauge_value(registry: &prometheus::Registry, name: &str) -> f64 {
 #[test]
 fn test_init_renewal_counters_registers_zero_values() {
     init_crypto();
-    let registry = setup_test_metrics_registry();
+    let (_metrics_guard, registry, _meter_provider) = setup_test_metrics_registry();
 
     let cert_manager = CertManager::new(
         vec!["example.com"],
@@ -741,7 +871,7 @@ fn test_init_renewal_counters_registers_zero_values() {
 #[test]
 fn test_update_time_to_expiry_sets_gauge() {
     init_crypto();
-    let registry = setup_test_metrics_registry();
+    let (_metrics_guard, registry, _meter_provider) = setup_test_metrics_registry();
 
     let cert_manager = CertManager::new(
         vec!["example.com"],
@@ -772,7 +902,7 @@ fn test_update_time_to_expiry_sets_gauge() {
 #[test]
 fn test_record_successful_renewal_updates_counters_and_gauge() {
     init_crypto();
-    let registry = setup_test_metrics_registry();
+    let (_metrics_guard, registry, _meter_provider) = setup_test_metrics_registry();
 
     let cert_manager = CertManager::new(
         vec!["example.com"],
@@ -798,7 +928,7 @@ fn test_record_successful_renewal_updates_counters_and_gauge() {
 #[test]
 fn test_record_failed_renewal_increments_failure_counter() {
     init_crypto();
-    let registry = setup_test_metrics_registry();
+    let (_metrics_guard, registry, _meter_provider) = setup_test_metrics_registry();
 
     let cert_manager = CertManager::new(
         vec!["example.com"],
@@ -818,7 +948,7 @@ fn test_record_failed_renewal_increments_failure_counter() {
 #[test]
 fn test_renewal_attempts_metric_via_manager() {
     init_crypto();
-    let registry = setup_test_metrics_registry();
+    let (_metrics_guard, registry, _meter_provider) = setup_test_metrics_registry();
 
     let material_storage = MockStorage::new();
 
@@ -829,7 +959,7 @@ fn test_renewal_attempts_metric_via_manager() {
         "https://acme-staging-v02.api.letsencrypt.org/directory",
     )
     .unwrap()
-    .with_crypto_material_storage(material_storage);
+    .with_crypto_storage(material_storage);
 
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()

@@ -48,7 +48,7 @@ use crate::cert_manager::http_client::DefaultHttpClient;
 #[cfg(feature = "acme")]
 use crate::cert_manager::{
     CertManager, StoreProvisioningStrategy,
-    storage::{CryptoMaterialCachePolicy, MemoryStorage, Storage},
+    storage::{CryptoCachePolicy, MemoryStorage, Storage},
 };
 use crate::config::{Config as AppConfig, DatabaseBackend};
 #[cfg(feature = "acme")]
@@ -215,7 +215,7 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
     ) = {
         let app_env = std::env::var("APP_ENV").unwrap_or(ENV_DEVELOPMENT.to_string());
         let cert_domains = [config.server.domain.as_str()];
-        let material_storage = build_crypto_material_storage(config).await?;
+        let material_storage = build_crypto_storage(config).await?;
 
         let cert_strategy = store_certificate_strategy(config)?;
         let uses_acme_strategy = config
@@ -229,11 +229,11 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
             .email(&config.server.cert.email)
             .organization(config.server.cert.organization.as_deref())
             .acme_directory_url(&config.server.cert.acme_directory_url)
-            .crypto_material_cache_policy(CryptoMaterialCachePolicy::new(
+            .crypto_cache_policy(CryptoCachePolicy::new(
                 Duration::from_secs(config.server.cert.material_cache_ttl),
                 Duration::from_secs(config.server.cert.signing_key_cache_ttl),
             ))
-            .crypto_material_storage(material_storage)
+            .crypto_storage(material_storage)
             .chain_cache_ttl(Duration::from_secs(config.server.cert.chain_cache_ttl))
             .eku(&config.server.cert.eku);
 
@@ -317,9 +317,9 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
         readiness = readiness.with_check(AlwaysReady::new("database"));
     }
 
-    // Redis is an optional certificate-cache accelerator in this setup. Startup
-    // falls back to direct certificate storage when Redis cannot connect, so it
-    // is intentionally omitted from readiness gating.
+    // Redis is optional in this setup. Certificate and signing-key material use
+    // the selected cryptographic-material backend, so Redis is intentionally
+    // omitted from readiness gating.
 
     #[cfg(feature = "acme")]
     {
@@ -430,7 +430,7 @@ fn acme_dns_credentials(account: &crate::config::AcmeDnsAccount) -> AcmeDnsCrede
 }
 
 #[cfg(feature = "acme")]
-async fn build_crypto_material_storage(config: &AppConfig) -> EyeResult<Box<dyn Storage>> {
+async fn build_crypto_storage(config: &AppConfig) -> EyeResult<Box<dyn Storage>> {
     let backend = config.server.cert.material_backend.as_str();
     if backend.eq_ignore_ascii_case("memory") {
         tracing::info!("Using in-memory cryptographic-material backend");
@@ -529,14 +529,17 @@ fn store_certificate_strategy(config: &AppConfig) -> EyeResult<Option<StoreProvi
                 signing_key_path,
             )))
         }
-        source if source.eq_ignore_ascii_case("aws_secrets_manager") => {
+        source
+            if source.eq_ignore_ascii_case("aws_secrets_manager")
+                || source.eq_ignore_ascii_case("storage") =>
+        {
             let certificate_key = cert_config
                 .store
                 .certificate_key
                 .as_deref()
                 .ok_or_else(|| {
                     eyre!(
-                        "server.cert.store.certificate_key is required for aws_secrets_manager store provisioning"
+                        "server.cert.store.certificate_key is required for storage-backed store provisioning"
                     )
                 })?;
             let signing_key_key = cert_config
@@ -545,16 +548,16 @@ fn store_certificate_strategy(config: &AppConfig) -> EyeResult<Option<StoreProvi
                 .as_deref()
                 .ok_or_else(|| {
                     eyre!(
-                        "server.cert.store.signing_key_key is required for aws_secrets_manager store provisioning"
+                        "server.cert.store.signing_key_key is required for storage-backed store provisioning"
                     )
                 })?;
-            Ok(Some(StoreProvisioningStrategy::secrets_storage(
+            Ok(Some(StoreProvisioningStrategy::storage(
                 certificate_key,
                 signing_key_key,
             )))
         }
         unsupported => Err(eyre!(
-            "unsupported certificate store source '{unsupported}'; expected 'filesystem' or 'aws_secrets_manager'"
+            "unsupported certificate store source '{unsupported}'; expected 'filesystem', 'storage', or 'aws_secrets_manager'"
         )),
     }
 }

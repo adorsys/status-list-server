@@ -12,6 +12,16 @@ use std::time::{Duration, Instant};
 
 use crate::config::TelemetryConfig;
 
+#[cfg(test)]
+static METRICS_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+#[cfg(test)]
+pub(crate) fn metrics_test_lock() -> std::sync::MutexGuard<'static, ()> {
+    METRICS_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 /// Initialize the OpenTelemetry metrics pipeline before any instruments are
 /// created. Metrics are always exposed through the in-process Prometheus
 /// registry. In production, they are also pushed to the Collector over OTLP.
@@ -203,6 +213,7 @@ mod tests {
 
     #[test]
     fn setup_metrics_registers_process_metric_families() {
+        let _metrics_guard = metrics_test_lock();
         let registry = Registry::new();
         let config = TelemetryConfig {
             environment: TelemetryEnvironment::Development,
