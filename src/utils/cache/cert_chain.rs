@@ -140,8 +140,8 @@ mod tests {
     use opentelemetry_sdk::Resource;
     use prometheus::{Encoder, Registry, TextEncoder};
 
-    #[tokio::test]
-    async fn test_counters_are_exported_to_prometheus() {
+    #[test]
+    fn test_counters_are_exported_to_prometheus() {
         let _metrics_guard = metrics_test_lock();
         let registry = Registry::new();
         let config = TelemetryConfig {
@@ -162,16 +162,23 @@ mod tests {
         let cache = CertChainCache::new(Duration::ZERO, "example.com");
         cache.init_counters();
 
-        let chain: CertificateChain = Arc::from(vec!["a".to_string()]);
-        cache.insert("k".to_string(), chain.clone()).await;
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("tokio runtime");
 
-        // hit
-        assert!(cache.get("k").await.is_some());
-        // miss
-        assert!(cache.get("missing").await.is_none());
-        // replacement
-        let new_chain: CertificateChain = Arc::from(vec!["b".to_string()]);
-        cache.replace("k".to_string(), new_chain).await;
+        rt.block_on(async {
+            let chain: CertificateChain = Arc::from(vec!["a".to_string()]);
+            cache.insert("k".to_string(), chain.clone()).await;
+
+            // hit
+            assert!(cache.get("k").await.is_some());
+            // miss
+            assert!(cache.get("missing").await.is_none());
+            // replacement
+            let new_chain: CertificateChain = Arc::from(vec!["b".to_string()]);
+            cache.replace("k".to_string(), new_chain).await;
+        });
 
         assert_counter_value(&registry, HIT_METRIC, 1.0);
         assert_counter_value(&registry, MISS_METRIC, 1.0);

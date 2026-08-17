@@ -17,8 +17,8 @@ Both HashiCorp Vault and OpenBao share the KV v2 REST API interface and are supp
 | Variable                                    | Type              | Default    | Description                                                                                                  |
 | ------------------------------------------- | ----------------- | ---------- | ------------------------------------------------------------------------------------------------------------ |
 | `APP_SERVER__CERT__MATERIAL_BACKEND`        | String            | `memory`   | Primary backend for server cryptographic material: `memory`, `aws_secrets_manager`, or `vault`.              |
-| `APP_SERVER__CERT__MATERIAL_CACHE_TTL`      | Integer (seconds) | `300`      | In-memory read-cache TTL for certificate material. Set to `0` to disable this material cache.                 |
-| `APP_SERVER__CERT__SIGNING_KEY_CACHE_TTL`   | Integer (seconds) | `0`        | In-memory read-cache TTL for private signing-key material. Set to `0` to force every read to the backend.     |
+| `APP_SERVER__CERT__MATERIAL_CACHE_TTL`      | Integer (seconds) | `300`      | In-memory read-cache TTL for certificate material. Set to `0` to disable this material cache.                |
+| `APP_SERVER__CERT__SIGNING_KEY_CACHE_TTL`   | Integer (seconds) | `0`        | In-memory read-cache TTL for private signing-key material. Set to `0` to force every read to the backend.    |
 
 Backend-specific settings:
 
