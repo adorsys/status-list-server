@@ -7,19 +7,24 @@ on:
       - v*.*.*
 env:
   IMAGE_NAME: status-list-server
-  NAMESPACE: statuslist
   CLUSTER_NAME: datev-wallet-cluster
   AWS_REGION: eu-central-1
   REGISTRY: ghcr.io
 jobs:
+  ci:
+    name: CI
+    uses: ./.github/workflows/CI.yml
+
   build-and-push:
     name: Build and Push Docker Image to GHCR
     runs-on: ubuntu-latest
+    needs: ci
     permissions:
       contents: read
       packages: write
     outputs:
       image_tag: ${{ steps.vars.outputs.SHORT_SHA }}
+      deploy_tag: ${{ steps.vars.outputs.DEPLOY_TAG }}
     steps:
       - name: Checkout source code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -33,7 +38,14 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
       - name: Get short commit SHA
         id: vars
-        run: echo "SHORT_SHA=${GITHUB_SHA::7}" >> $GITHUB_OUTPUT
+        run: |
+          SHORT_SHA="${GITHUB_SHA::7}"
+          echo "SHORT_SHA=${SHORT_SHA}" >> "$GITHUB_OUTPUT"
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            echo "DEPLOY_TAG=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+          else
+            echo "DEPLOY_TAG=sha-${SHORT_SHA}" >> "$GITHUB_OUTPUT"
+          fi
       - name: Extract Docker metadata
         id: meta
         uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6
@@ -51,26 +63,83 @@ jobs:
           push: true
           platforms: linux/amd64,linux/arm64
           tags: ${{ steps.meta.outputs.tags }}
-  deploy-to-eks:
-    name: Deploy to EKS
+
+  deploy-staging:
+    name: Deploy to Staging
     runs-on: ubuntu-latest
     needs: build-and-push
+    if: ${{ github.ref == 'refs/heads/main' }}
+    environment: staging
     permissions:
       contents: read
       id-token: write
     steps:
+      - name: Checkout source code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: Install kubectl
-        uses: azure/setup-kubectl@829323503d1be3d00ca8346e5391ca0b07a9ab0d # v5
+        uses: azure/setup-kubectl@829323503d1be3d00ca8346e5391ca0b07a9ab0d # v5.0.1
+      - name: Install Helm
+        uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6
         with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          role-session-name: status-list-server-staging-deploy
           aws-region: ${{ env.AWS_REGION }}
       - name: Update kubeconfig for EKS
         run: aws eks update-kubeconfig --name ${{ env.CLUSTER_NAME }} --region ${{ env.AWS_REGION }}
-      - name: Deploy updated image to Kubernetes
+      - name: Build Helm dependencies
         run: |
-          kubectl set image deployment/statuslist-status-list-server-deployment \
-            status-list-server=${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:sha-${{ needs.build-and-push.outputs.image_tag }} \
-            -n ${{ env.NAMESPACE }}
+          helm repo add dandydeveloper https://dandydeveloper.github.io/charts
+          helm repo add open-telemetry https://open-telemetry.github.io/opentelemetry-helm-charts
+          helm dependency build helm/chart
+      - name: Deploy chart to staging
+        run: |
+          helm upgrade --install statuslist helm/chart \
+            --namespace statuslist-staging \
+            --create-namespace \
+            --atomic \
+            --wait \
+            --timeout 10m \
+            --set-string statuslist.image.repository=${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ env.IMAGE_NAME }} \
+            --set-string statuslist.image.tag=${{ needs.build-and-push.outputs.deploy_tag }}
+
+  deploy-production:
+    name: Deploy to Production
+    runs-on: ubuntu-latest
+    needs: build-and-push
+    if: ${{ startsWith(github.ref, 'refs/tags/v') }}
+    environment: production
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Checkout source code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Install kubectl
+        uses: azure/setup-kubectl@829323503d1be3d00ca8346e5391ca0b07a9ab0d # v5.0.1
+      - name: Install Helm
+        uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          role-session-name: status-list-server-production-deploy
+          aws-region: ${{ env.AWS_REGION }}
+      - name: Update kubeconfig for EKS
+        run: aws eks update-kubeconfig --name ${{ env.CLUSTER_NAME }} --region ${{ env.AWS_REGION }}
+      - name: Build Helm dependencies
+        run: |
+          helm repo add dandydeveloper https://dandydeveloper.github.io/charts
+          helm repo add open-telemetry https://open-telemetry.github.io/opentelemetry-helm-charts
+          helm dependency build helm/chart
+      - name: Deploy chart to production
+        run: |
+          helm upgrade --install statuslist helm/chart \
+            --namespace statuslist-production \
+            --create-namespace \
+            --atomic \
+            --wait \
+            --timeout 10m \
+            --set-string statuslist.image.repository=${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ env.IMAGE_NAME }} \
+            --set-string statuslist.image.tag=${{ needs.build-and-push.outputs.deploy_tag }}

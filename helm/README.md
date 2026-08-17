@@ -54,6 +54,8 @@ To enable Redis, use an application image built with `redis,aws,acme` features, 
 
 ## Production Deployment Instructions
 
+For GitHub Actions deployments to staging and production, see the [Deployment Runbook](../docs/deployment-runbook.md). CI/CD owns production image tag injection with `statuslist.image.repository` and `statuslist.image.tag`; operators should avoid patching live images imperatively because Helm will reconcile the chart state on the next deploy. Failed upgrades roll back automatically through Helm `--atomic`; rollbacks after a successful but bad deploy are manual Helm operations.
+
 1. **Create a namespace:**
 
    ```bash
