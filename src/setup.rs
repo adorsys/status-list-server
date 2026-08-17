@@ -1,6 +1,6 @@
 //! Composition root assembling outbound infrastructure adapters and creating the AppState container.
 
-#[cfg(feature = "aws")]
+#[cfg(feature = "aws-secrets")]
 use aws_config::{BehaviorVersion, Region};
 #[cfg(any(
     feature = "acme",
@@ -36,7 +36,7 @@ use std::time::Duration;
 #[cfg(feature = "acme")]
 use tracing::warn;
 
-#[cfg(feature = "aws")]
+#[cfg(feature = "aws-secrets")]
 use crate::cert_manager::challenge::AwsRoute53DnsProvider;
 #[cfg(feature = "acme")]
 use crate::cert_manager::challenge::{
@@ -59,7 +59,7 @@ use crate::domain::{
     ports::{CertificateProvider, CredentialRepo, StatusListRepo, StatusListSnapshotRepo},
     service::Service,
 };
-#[cfg(feature = "aws")]
+#[cfg(feature = "aws-secrets")]
 use crate::outbound::aws::AwsSecretsManager;
 use crate::outbound::cache::MokaStatusListCache;
 #[cfg(feature = "acme")]
@@ -460,7 +460,7 @@ async fn build_crypto_storage(config: &AppConfig) -> EyeResult<Box<dyn Storage>>
     }
 
     if backend.eq_ignore_ascii_case("aws_secrets_manager") {
-        #[cfg(feature = "aws")]
+        #[cfg(feature = "aws-secrets")]
         {
             tracing::info!("Using AWS Secrets Manager as cryptographic-material backend");
             let aws_config = aws_config::defaults(BehaviorVersion::latest())
@@ -471,10 +471,10 @@ async fn build_crypto_storage(config: &AppConfig) -> EyeResult<Box<dyn Storage>>
                 AwsSecretsManager::new(&aws_config, Duration::ZERO).await?,
             ));
         }
-        #[cfg(not(feature = "aws"))]
+        #[cfg(not(feature = "aws-secrets"))]
         {
             return Err(eyre!(
-                "cryptographic-material backend 'aws_secrets_manager' configured, but 'aws' feature is disabled"
+                "cryptographic-material backend 'aws_secrets_manager' configured, but 'aws-secrets' feature is disabled"
             ));
         }
     }
@@ -504,60 +504,33 @@ fn store_certificate_strategy(config: &AppConfig) -> EyeResult<Option<StoreProvi
         ));
     }
 
-    match cert_config.store.source.as_str() {
-        source if source.eq_ignore_ascii_case("filesystem") => {
-            let certificate_path = cert_config
-                .store
-                .certificate_path
-                .as_deref()
-                .ok_or_else(|| {
-                    eyre!(
-                        "server.cert.store.certificate_path is required for filesystem store provisioning"
-                    )
-                })?;
-            let signing_key_path = cert_config
-                .store
-                .signing_key_path
-                .as_deref()
-                .ok_or_else(|| {
-                    eyre!(
-                        "server.cert.store.signing_key_path is required for filesystem store provisioning"
-                    )
-                })?;
-            Ok(Some(StoreProvisioningStrategy::filesystem(
-                certificate_path,
-                signing_key_path,
-            )))
-        }
-        source
-            if source.eq_ignore_ascii_case("aws_secrets_manager")
-                || source.eq_ignore_ascii_case("storage") =>
-        {
-            let certificate_key = cert_config
-                .store
-                .certificate_key
-                .as_deref()
-                .ok_or_else(|| {
-                    eyre!(
-                        "server.cert.store.certificate_key is required for storage-backed store provisioning"
-                    )
-                })?;
-            let signing_key_key = cert_config
-                .store
-                .signing_key_key
-                .as_deref()
-                .ok_or_else(|| {
-                    eyre!(
-                        "server.cert.store.signing_key_key is required for storage-backed store provisioning"
-                    )
-                })?;
-            Ok(Some(StoreProvisioningStrategy::storage(
-                certificate_key,
-                signing_key_key,
-            )))
-        }
-        unsupported => Err(eyre!(
-            "unsupported certificate store source '{unsupported}'; expected 'filesystem', 'storage', or 'aws_secrets_manager'"
+    let filesystem = (
+        cert_config.store.certificate_path.as_deref(),
+        cert_config.store.signing_key_path.as_deref(),
+    );
+    let storage = (
+        cert_config.store.certificate_key.as_deref(),
+        cert_config.store.signing_key_key.as_deref(),
+    );
+
+    match (filesystem, storage) {
+        ((Some(certificate_path), Some(signing_key_path)), (None, None)) => Ok(Some(
+            StoreProvisioningStrategy::filesystem(certificate_path, signing_key_path),
+        )),
+        ((None, None), (Some(certificate_key), Some(signing_key_key))) => Ok(Some(
+            StoreProvisioningStrategy::storage(certificate_key, signing_key_key),
+        )),
+        ((Some(_), Some(_)), (Some(_), Some(_))) => Err(eyre!(
+            "store provisioning must configure either filesystem paths or material backend keys, not both"
+        )),
+        ((Some(_), None) | (None, Some(_)), _) => Err(eyre!(
+            "filesystem store provisioning requires both server.cert.store.certificate_path and server.cert.store.signing_key_path"
+        )),
+        (_, (Some(_), None) | (None, Some(_))) => Err(eyre!(
+            "storage-backed store provisioning requires both server.cert.store.certificate_key and server.cert.store.signing_key_key"
+        )),
+        ((None, None), (None, None)) => Err(eyre!(
+            "store provisioning requires either filesystem paths or material backend keys"
         )),
     }
 }
@@ -569,7 +542,7 @@ async fn build_dns_challenge_handler(
     cert_domains: &[&str],
 ) -> EyeResult<Dns01Handler> {
     let handler = match provider {
-        #[cfg(feature = "aws")]
+        #[cfg(feature = "aws-secrets")]
         ResolvedDnsProvider::Route53 => {
             let aws_config = aws_config::defaults(BehaviorVersion::latest())
                 .region(Region::new(config.aws.region.clone()))
@@ -577,10 +550,10 @@ async fn build_dns_challenge_handler(
                 .await;
             Dns01Handler::new(AwsRoute53DnsProvider::new(&aws_config))
         }
-        #[cfg(not(feature = "aws"))]
+        #[cfg(not(feature = "aws-secrets"))]
         ResolvedDnsProvider::Route53 => {
             return Err(eyre!(
-                "Route53 DNS provider requested, but 'aws' feature is disabled at compile time."
+                "Route53 DNS provider requested, but 'aws-secrets' feature is disabled at compile time."
             ));
         }
         ResolvedDnsProvider::Cloudflare(cfg) => {
@@ -662,7 +635,7 @@ mod tests {
         let domain = config.server.domain.clone();
         let domains = [domain.as_str()];
 
-        #[cfg(feature = "aws")]
+        #[cfg(feature = "aws-secrets")]
         assert!(
             build_dns_challenge_handler(DnsProviderKind::Route53, &mut config, &domains).is_ok()
         );

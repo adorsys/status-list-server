@@ -65,18 +65,18 @@ The simplest way to run the project is with [docker compose](https://docs.docker
 docker compose up --build
 ```
 
-This command will pull all required images and start the server compiled with default compose features (`postgres,aws,acme`). Redis is not part of the default path.
+This command will pull all required images and start the server compiled with default compose features (`postgres,aws-secrets,acme`). Redis is not part of the default path.
 
 To pass custom Cargo feature flags during build, specify the `FEATURES` environment variable:
 
 ```sh
-FEATURES="mysql,aws,acme" docker compose --profile mysql up --build
+FEATURES="mysql,aws-secrets,acme" docker compose --profile mysql up --build
 ```
 
 To test the optional Redis certificate-material cache locally, enable the Redis profile, compile the Redis feature, and provide a Redis URI:
 
 ```sh
-FEATURES="postgres,redis,aws,acme" APP_REDIS__URI="redis://redis:6379" docker compose --profile redis up --build
+FEATURES="postgres,redis,aws-secrets,acme" APP_REDIS__URI="redis://redis:6379" docker compose --profile redis up --build
 ```
 
 #### Running Manually
@@ -100,7 +100,7 @@ The crate uses modular Cargo feature flags to gate optional production backend d
 | `sqlite`   | SeaORM SQLite database driver.                                                                                                                     | ❌ Opt-in  |
 | `mysql`    | SeaORM MySQL database driver.                                                                                                                      | ❌ Opt-in  |
 | `redis`    | Redis storage driver for explicit cache/storage integrations.                                                                                      | ❌ Opt-in  |
-| `aws`      | AWS S3 object storage and AWS Secrets Manager drivers.                                                                                             | ❌ Opt-in  |
+| `aws-secrets` | AWS S3 object storage, Route53 DNS-01, and AWS Secrets Manager drivers.                                                                        | ❌ Opt-in  |
 | `acme`     | ACME DNS-01 certificate manager driver.                                                                                                            | ❌ Opt-in  |
 
 To build with specific backend drivers, pass the matching feature flag(s):
@@ -110,7 +110,7 @@ To build with specific backend drivers, pass the matching feature flag(s):
 cargo run --features postgres,redis
 
 # Run with AWS and ACME production integrations
-cargo run --features postgres,aws,acme
+cargo run --features postgres,aws-secrets,acme
 ```
 
 ## Redis Role
@@ -210,8 +210,8 @@ The Status List Server is provisioned with a cryptographic certificate that is e
 
 - `server.cert.provisioning_strategy = "acme"` requests and renews certificates through ACME.
 - `server.cert.provisioning_strategy = "store"` loads externally managed certificate material and persists it into the configured cryptographic-material backend.
-- Store provisioning supports `server.cert.store.source = "filesystem"` with `certificate_path` and `signing_key_path`.
-- Store provisioning also supports `server.cert.store.source = "storage"` or `"aws_secrets_manager"` when both PEM values are already present in the configured material backend, using `certificate_key` and `signing_key_key`.
+- Store provisioning infers filesystem loading when `server.cert.store.certificate_path` and `signing_key_path` are configured.
+- Store provisioning infers storage-backed loading when `server.cert.store.certificate_key` and `signing_key_key` are configured; those keys are read from the selected cryptographic-material backend.
 - Filesystem store inputs may be PEM text or raw DER. Storage-backed store inputs may be PEM text or base64/base64url-encoded DER. Private keys must be PKCS#8 in PEM or DER form.
 - The renewal cron schedule is configured with `server.cert.renewal_cron_schedule`. For store provisioning, each scheduled run reloads the configured source and refreshes persisted material only when it changed.
 

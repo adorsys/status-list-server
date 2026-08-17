@@ -8,6 +8,18 @@ The supported backends include:
 - **AWS Secrets Manager**
 - **In-Memory** (for development and testing)
 
+## Storage Semantics
+
+All supported cryptographic-material backends use the same logical model for certificate chains and private signing keys:
+
+| Backend | Certificate chain | Private signing key | Behavior |
+| ------- | ----------------- | ------------------- | -------- |
+| In-memory | Stored as a string under the certificate material key | Stored as a string under the signing-key material key | Volatile process-local storage for development and tests |
+| AWS Secrets Manager | Stored as one secret string | Stored as one secret string | Same create, update, load, delete, cache, and invalidation path as certificate material |
+| Vault / OpenBao KV v2 | Stored as one KV v2 secret value | Stored as one KV v2 secret value | Same create, update, load, delete, cache, and invalidation path as certificate material |
+
+ACME provisioning writes the issued certificate chain and the signing key through this single abstraction. Store provisioning can seed material either from local files or from existing keys in the selected material backend, but the refreshed server material is persisted back through the same backend and invalidated together.
+
 ## HashiCorp Vault & OpenBao (KV v2)
 
 Both HashiCorp Vault and OpenBao share the KV v2 REST API interface and are supported natively when the `vault` feature flag is enabled.
@@ -29,7 +41,6 @@ Backend-specific settings:
 | `APP_VAULT__MOUNT`             | String            | `"secret"`                          | KV v2 secrets engine mount point                                         |
 | `APP_VAULT__PATH_PREFIX`       | String            | `""`                                | Optional prefix prepended to all secret keys (e.g. `status-list-server`) |
 | `APP_VAULT__NAMESPACE`         | String            | `None`                              | Optional Enterprise/OpenBao namespace header (`X-Vault-Namespace`)       |
-| `APP_VAULT__SECRETS_CACHE_TTL` | Integer (seconds) | `300` (5 minutes)                   | In-memory cache TTL in seconds. Set to `0` to disable caching.           |
 | `APP_VAULT__TIMEOUT_SECS`      | Integer (seconds) | `30`                                | HTTP request timeout duration in seconds                                 |
 
 ### Example 1: Local Development with HashiCorp Vault
@@ -47,7 +58,6 @@ APP_VAULT__ADDR=http://127.0.0.1:8200
 APP_VAULT__TOKEN=root
 APP_VAULT__MOUNT=secret
 APP_VAULT__PATH_PREFIX=dev/status-list
-APP_VAULT__SECRETS_CACHE_TTL=300
 ```
 
 ### Example 2: Deployment with OpenBao
@@ -66,24 +76,21 @@ APP_VAULT__TOKEN=s.xxxxxxxxx
 APP_VAULT__MOUNT=secret
 APP_VAULT__PATH_PREFIX=production/status-list
 APP_VAULT__NAMESPACE=my-org-namespace
-APP_VAULT__SECRETS_CACHE_TTL=600
 ```
 
 ### Cache Behavior
 
-- Vault adapter reads may use its own backend cache via `APP_VAULT__SECRETS_CACHE_TTL`.
-- Certificate and signing-key material reads are additionally controlled by `APP_SERVER__CERT__MATERIAL_CACHE_TTL` and `APP_SERVER__CERT__SIGNING_KEY_CACHE_TTL`.
+- Certificate and signing-key material reads are controlled consistently across backends by `APP_SERVER__CERT__MATERIAL_CACHE_TTL` and `APP_SERVER__CERT__SIGNING_KEY_CACHE_TTL`.
 - To require every private-key read to query the selected material backend, keep `APP_SERVER__CERT__SIGNING_KEY_CACHE_TTL=0`.
 
 ## AWS Secrets Manager
 
-When compiled with the `aws` feature flag:
+When compiled with the `aws-secrets` feature flag:
 
 ```env
 AWS_ACCESS_KEY_ID=test
 AWS_SECRET_ACCESS_KEY=test
 APP_AWS__REGION=us-east-1
-APP_AWS__SECRETS_CACHE_TTL=300
 APP_SERVER__CERT__MATERIAL_BACKEND=aws_secrets_manager
 APP_SERVER__CERT__MATERIAL_CACHE_TTL=300
 APP_SERVER__CERT__SIGNING_KEY_CACHE_TTL=0

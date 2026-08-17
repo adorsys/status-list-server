@@ -209,7 +209,6 @@ pub struct CertConfig {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct CertStoreConfig {
-    pub source: String,
     #[serde(default)]
     pub certificate_path: Option<String>,
     #[serde(default)]
@@ -600,9 +599,6 @@ pub struct DatabaseConfig {
 #[derive(Debug, Clone, Deserialize)]
 pub struct AwsConfig {
     pub region: String,
-    /// Cache TTL for AWS Secrets Manager entries in seconds.
-    /// Setting this to 0 disables caching entirely.
-    pub secrets_cache_ttl: u64,
     pub s3_bucket: String,
     pub s3_key_prefix: String,
 }
@@ -620,9 +616,6 @@ pub struct VaultConfig {
     /// Optional Vault Enterprise / OpenBao namespace.
     #[serde(default)]
     pub namespace: Option<String>,
-    /// Cache TTL for Vault secrets in seconds.
-    /// Setting this to 0 disables caching entirely.
-    pub secrets_cache_ttl: u64,
     /// HTTP request timeout in seconds.
     pub timeout_secs: u64,
 }
@@ -818,7 +811,6 @@ fn base_builder() -> Result<ConfigBuilder<DefaultState>, ConfigError> {
         .set_default("redis.uri", "")?
         .set_default("redis.require_client_auth", false)?
         .set_default("redis.cert_cache_ttl", 3600)?
-        .set_default("aws.secrets_cache_ttl", 300)?
         .set_default("aws.s3_bucket", "status-list-adorsys")?
         .set_default("aws.s3_key_prefix", "")?
         .set_default(
@@ -837,7 +829,6 @@ fn base_builder() -> Result<ConfigBuilder<DefaultState>, ConfigError> {
         .set_default("server.cert.signing_key_cache_ttl", 0)?
         .set_default("server.cert.chain_cache_ttl", default_chain_cache_ttl)?
         .set_default("server.cert.renewal_cron_schedule", "0 0 0 * * *")?
-        .set_default("server.cert.store.source", "filesystem")?
         .set_default("server.cert.store.certificate_path", default_cert_path)?
         .set_default("server.cert.store.signing_key_path", default_key_path)?
         .set_default("server.cert.store.certificate_key", Option::<String>::None)?
@@ -848,7 +839,6 @@ fn base_builder() -> Result<ConfigBuilder<DefaultState>, ConfigError> {
         .set_default("vault.mount", "secret")?
         .set_default("vault.path_prefix", "")?
         .set_default("vault.namespace", Option::<String>::None)?
-        .set_default("vault.secrets_cache_ttl", 300)?
         .set_default("vault.timeout_secs", 30)?
         .set_default("cache.ttl", 5 * 60)?
         .set_default("cache.max_capacity", 100)?
@@ -930,7 +920,6 @@ mod tests {
         assert_eq!(config.server.cert.material_backend, "memory");
         assert_eq!(config.server.cert.material_cache_ttl, 300);
         assert_eq!(config.server.cert.signing_key_cache_ttl, 0);
-        assert_eq!(config.server.cert.store.source, "filesystem");
         assert_eq!(
             config.server.cert.store.certificate_path,
             expected_cert_path
@@ -1000,7 +989,6 @@ mod tests {
             ("server.cert.renewal_cron_schedule", "0 0 12 * * *"),
             ("server.cert.dns_challenge_server_url", "http://pebble:8055"),
             ("aws.region", "us-west-2"),
-            ("aws.secrets_cache_ttl", "600"),
             ("aws.s3_bucket", "my-custom-bucket"),
             ("aws.s3_key_prefix", "status-list/prod"),
             ("cache.ttl", "600"),
@@ -1045,7 +1033,6 @@ mod tests {
             "https://acme-v02.api.letsencrypt.org/directory"
         );
         assert_eq!(overridden.aws.region, "us-west-2");
-        assert_eq!(overridden.aws.secrets_cache_ttl, 600);
         assert_eq!(overridden.aws.s3_bucket, "my-custom-bucket");
         assert_eq!(overridden.aws.s3_key_prefix, "status-list/prod");
         assert_eq!(overridden.cache.ttl, 600);

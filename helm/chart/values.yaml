@@ -62,7 +62,6 @@ statuslist:
     # APP_SERVER__CERT__DNS__ACMEDNS__ACCOUNTS JSON, which holds every account password)
     # must come from a secret (see externalSecret below), not from plain env values.
     APP_SERVER__CERT__DNS__PROVIDER: "route53"
-    APP_AWS__SECRETS_CACHE_TTL: "300"
     APP_AWS__S3_BUCKET: "status-list-adorsys"
     APP_AWS__S3_KEY_PREFIX: ""
     # Status-list record cache TTL in seconds. "0" disables this cache.
