@@ -204,7 +204,7 @@ The Status List Server is provisioned with a cryptographic certificate that is e
 - If the certificate is still considered valid according to the configured strategy, no renewal occurs; renewal is only triggered when necessary.
 - The server signing key and certificate chain are stored in one cryptographic-material backend selected by enabled Cargo features (`vault`, `aws-secrets`, or in-memory fallback).
 - Certificate and signing-key reads can be cached with `APP_SERVER__CERT__MATERIAL_CACHE_TTL` and `APP_SERVER__CERT__SIGNING_KEY_CACHE_TTL`. Set the signing-key TTL to `0` to force private-key reads to bypass the material cache.
-- Parsed certificate chains are cached in memory for `APP_SERVER__CERT__CHAIN_CACHE_TTL` seconds (default: `3600`). A value of `0` keeps entries indefinitely. In multi-replica deployments, replicas that did not perform renewal rely on this TTL to refresh their in-memory chain.
+- Parsed certificate chains stay cached in memory until certificate provisioning or renewal replaces them.
 
 **Provisioning Modes:**
 

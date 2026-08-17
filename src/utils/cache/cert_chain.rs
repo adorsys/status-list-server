@@ -1,4 +1,4 @@
-use std::{sync::Arc, time::Duration};
+use std::sync::Arc;
 
 use moka::future::Cache;
 use opentelemetry::{
@@ -19,15 +19,8 @@ const REPLACEMENT_METRIC: &str = "certificate_chain_cache_replacements";
 /// instance owns exactly one `CertChainCache`, so the cache holds at most one
 /// entry per running process.
 ///
-/// # TTL semantics
-///
-/// A **zero** TTL (`Duration::ZERO`) keeps the cache active with **no expiry**;
-/// entries persist until explicitly replaced by the provisioning hook.
-///
-/// This intentionally differs from [`StatusListCache`](crate::domain::ports::StatusListCache),
-/// where `ttl = 0` **disables** the cache entirely (inserts expire immediately).
-/// The rationale is that certificate chains only change when explicitly provisioned,
-/// making the "never expire" behavior safe for single-replica deployments.
+/// Entries do not expire by time. They stay cached until provisioning or
+/// renewal replaces the entry through the certificate manager.
 #[derive(Clone)]
 pub(crate) struct CertChainCache {
     inner: Cache<String, CertificateChain>,
@@ -50,7 +43,7 @@ impl CertChainCache {
     /// provider. Telemetry initialization must install the provider before
     /// application state constructs this cache; otherwise these handles would
     /// remain no-op for the lifetime of the process.
-    pub(crate) fn new(ttl: Duration, domain: impl AsRef<str>) -> Self {
+    pub(crate) fn new(domain: impl AsRef<str>) -> Self {
         let meter = global::meter("status-list-server");
 
         let hit_counter = meter
@@ -66,16 +59,7 @@ impl CertChainCache {
             .with_description("Certificate chain cache replacements (post-provisioning)")
             .build();
 
-        let builder = Cache::builder().max_capacity(CACHE_CAPACITY);
-        let inner = if ttl.is_zero() {
-            tracing::warn!(
-                "chain_cache_ttl=0: chain cached for process lifetime; \
-                renewals on other replicas will not be observed"
-            );
-            builder.build()
-        } else {
-            builder.time_to_live(ttl).build()
-        };
+        let inner = Cache::builder().max_capacity(CACHE_CAPACITY).build();
         Self {
             inner,
             domain_label: domain.as_ref().to_string(),
@@ -159,7 +143,7 @@ mod tests {
         )
         .expect("metrics setup");
 
-        let cache = CertChainCache::new(Duration::ZERO, "example.com");
+        let cache = CertChainCache::new("example.com");
         cache.init_counters();
 
         let rt = tokio::runtime::Builder::new_current_thread()

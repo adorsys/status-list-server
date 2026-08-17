@@ -236,7 +236,6 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
                 Duration::from_secs(config.server.cert.signing_key_cache_ttl),
             ))
             .crypto_storage(material_storage)
-            .chain_cache_ttl(Duration::from_secs(config.server.cert.chain_cache_ttl))
             .eku(&config.server.cert.eku);
 
         cert_manager_builder = if uses_acme_strategy {

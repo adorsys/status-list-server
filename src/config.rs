@@ -193,9 +193,6 @@ pub struct CertConfig {
     pub material_cache_ttl: u64,
     /// Cache TTL for private signing-key reads in seconds. `0` disables this cache.
     pub signing_key_cache_ttl: u64,
-    /// Cache TTL for parsed certificate chains in seconds.
-    /// A value of 0 keeps entries in memory indefinitely without expiration.
-    pub chain_cache_ttl: u64,
     pub renewal_cron_schedule: String,
     #[serde(default)]
     pub dns_challenge_server_url: Option<String>,
@@ -776,11 +773,6 @@ fn base_builder() -> Result<ConfigBuilder<DefaultState>, ConfigError> {
     let (default_provisioning_strategy, default_cert_path, default_key_path) =
         ("store", Option::<String>::None, Option::<String>::None);
 
-    #[cfg(feature = "acme")]
-    let default_chain_cache_ttl = crate::utils::cert_manager::DEFAULT_CHAIN_CACHE_TTL.as_secs();
-    #[cfg(not(feature = "acme"))]
-    let default_chain_cache_ttl = 86400;
-
     let telemetry_environment = match std::env::var("APP_ENV")
         .unwrap_or_default()
         .trim()
@@ -823,7 +815,6 @@ fn base_builder() -> Result<ConfigBuilder<DefaultState>, ConfigError> {
         )?
         .set_default("server.cert.material_cache_ttl", 300)?
         .set_default("server.cert.signing_key_cache_ttl", 0)?
-        .set_default("server.cert.chain_cache_ttl", default_chain_cache_ttl)?
         .set_default("server.cert.renewal_cron_schedule", "0 0 0 * * *")?
         .set_default("server.cert.store.certificate_path", default_cert_path)?
         .set_default("server.cert.store.signing_key_path", default_key_path)?
