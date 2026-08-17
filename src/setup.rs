@@ -45,10 +45,12 @@ use crate::cert_manager::challenge::{
 };
 #[cfg(feature = "acme")]
 use crate::cert_manager::http_client::DefaultHttpClient;
+#[cfg(all(feature = "acme", not(feature = "vault"), not(feature = "aws-secrets")))]
+use crate::cert_manager::storage::MemoryStorage;
 #[cfg(feature = "acme")]
 use crate::cert_manager::{
     CertManager, StoreProvisioningStrategy,
-    storage::{CryptoCachePolicy, MemoryStorage, Storage},
+    storage::{CryptoCachePolicy, Storage},
 };
 use crate::config::{Config as AppConfig, DatabaseBackend};
 #[cfg(feature = "acme")]
@@ -59,7 +61,7 @@ use crate::domain::{
     ports::{CertificateProvider, CredentialRepo, StatusListRepo, StatusListSnapshotRepo},
     service::Service,
 };
-#[cfg(feature = "aws-secrets")]
+#[cfg(all(feature = "aws-secrets", not(feature = "vault")))]
 use crate::outbound::aws::AwsSecretsManager;
 use crate::outbound::cache::MokaStatusListCache;
 #[cfg(feature = "acme")]
@@ -318,7 +320,7 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
     }
 
     // Redis is optional in this setup. Certificate and signing-key material use
-    // the selected cryptographic-material backend, so Redis is intentionally
+    // the feature-selected cryptographic-material backend, so Redis is intentionally
     // omitted from readiness gating.
 
     #[cfg(feature = "acme")]
@@ -430,58 +432,38 @@ fn acme_dns_credentials(account: &crate::config::AcmeDnsAccount) -> AcmeDnsCrede
 }
 
 #[cfg(feature = "acme")]
-async fn build_crypto_storage(config: &AppConfig) -> EyeResult<Box<dyn Storage>> {
-    let backend = config.server.cert.material_backend.as_str();
-    if backend.eq_ignore_ascii_case("memory") {
+async fn build_crypto_storage(_config: &AppConfig) -> EyeResult<Box<dyn Storage>> {
+    #[cfg(feature = "vault")]
+    {
+        tracing::info!("Using Vault KV v2 as cryptographic-material backend");
+        Ok(Box::new(
+            VaultClient::builder(&_config.vault.addr, _config.vault.token.clone())
+                .mount(&_config.vault.mount)
+                .path_prefix(&_config.vault.path_prefix)
+                .namespace(_config.vault.namespace.as_deref())
+                .secrets_cache_ttl(Duration::ZERO)
+                .timeout(Duration::from_secs(_config.vault.timeout_secs))
+                .build()?,
+        ))
+    }
+
+    #[cfg(all(not(feature = "vault"), feature = "aws-secrets"))]
+    {
+        tracing::info!("Using AWS Secrets Manager as cryptographic-material backend");
+        let aws_config = aws_config::defaults(BehaviorVersion::latest())
+            .region(Region::new(_config.aws.region.clone()))
+            .load()
+            .await;
+        Ok(Box::new(
+            AwsSecretsManager::new(&aws_config, Duration::ZERO).await?,
+        ))
+    }
+
+    #[cfg(all(not(feature = "vault"), not(feature = "aws-secrets")))]
+    {
         tracing::info!("Using in-memory cryptographic-material backend");
-        return Ok(Box::new(MemoryStorage::default()));
+        Ok(Box::new(MemoryStorage::default()))
     }
-
-    if backend.eq_ignore_ascii_case("vault") {
-        #[cfg(feature = "vault")]
-        {
-            tracing::info!("Using Vault KV v2 as cryptographic-material backend");
-            return Ok(Box::new(
-                VaultClient::builder(&config.vault.addr, config.vault.token.clone())
-                    .mount(&config.vault.mount)
-                    .path_prefix(&config.vault.path_prefix)
-                    .namespace(config.vault.namespace.as_deref())
-                    .secrets_cache_ttl(Duration::ZERO)
-                    .timeout(Duration::from_secs(config.vault.timeout_secs))
-                    .build()?,
-            ));
-        }
-        #[cfg(not(feature = "vault"))]
-        {
-            return Err(eyre!(
-                "cryptographic-material backend 'vault' configured, but 'vault' feature is disabled"
-            ));
-        }
-    }
-
-    if backend.eq_ignore_ascii_case("aws_secrets_manager") {
-        #[cfg(feature = "aws-secrets")]
-        {
-            tracing::info!("Using AWS Secrets Manager as cryptographic-material backend");
-            let aws_config = aws_config::defaults(BehaviorVersion::latest())
-                .region(Region::new(config.aws.region.clone()))
-                .load()
-                .await;
-            return Ok(Box::new(
-                AwsSecretsManager::new(&aws_config, Duration::ZERO).await?,
-            ));
-        }
-        #[cfg(not(feature = "aws-secrets"))]
-        {
-            return Err(eyre!(
-                "cryptographic-material backend 'aws_secrets_manager' configured, but 'aws-secrets' feature is disabled"
-            ));
-        }
-    }
-
-    Err(eyre!(
-        "unsupported cryptographic-material backend '{backend}'; expected 'memory', 'aws_secrets_manager', or 'vault'"
-    ))
 }
 
 #[cfg(feature = "acme")]

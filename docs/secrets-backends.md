@@ -1,6 +1,6 @@
 # Cryptographic Material Backend Guidance
 
-The server stores lifecycle-coupled cryptographic material in one selected backend by default: ACME account keys, the server signing key, and the certificate chain associated with that key.
+The server stores lifecycle-coupled cryptographic material in one backend by default: ACME account keys, the server signing key, and the certificate chain associated with that key.
 
 The supported backends include:
 
@@ -8,17 +8,7 @@ The supported backends include:
 - **AWS Secrets Manager**
 - **In-Memory** (for development and testing)
 
-## Storage Semantics
-
-All supported cryptographic-material backends use the same logical model for certificate chains and private signing keys:
-
-| Backend               | Certificate chain                                     | Private signing key                                   | Behavior                                                                                |
-| --------------------- | ----------------------------------------------------- | ----------------------------------------------------- | --------------------------------------------------------------------------------------- |
-| In-memory             | Stored as a string under the certificate material key | Stored as a string under the signing-key material key | Volatile process-local storage for development and tests                                |
-| AWS Secrets Manager   | Stored as one secret string                           | Stored as one secret string                           | Same create, update, load, delete, cache, and invalidation path as certificate material |
-| Vault / OpenBao KV v2 | Stored as one KV v2 secret value                      | Stored as one KV v2 secret value                      | Same create, update, load, delete, cache, and invalidation path as certificate material |
-
-ACME provisioning writes the issued certificate chain and the signing key through this single abstraction. Store provisioning can seed material either from local files or from existing keys in the selected material backend, but the refreshed server material is persisted back through the same backend and invalidated together.
+Backend selection is controlled by enabled Cargo features. Builds with `vault` use Vault/OpenBao. Builds with `aws-secrets` and without `vault` use AWS Secrets Manager. Builds without either backend feature use in-memory storage for local development and tests.
 
 ## HashiCorp Vault & OpenBao (KV v2)
 
@@ -28,7 +18,6 @@ Both HashiCorp Vault and OpenBao share the KV v2 REST API interface and are supp
 
 | Variable                                    | Type              | Default    | Description                                                                                                  |
 | ------------------------------------------- | ----------------- | ---------- | ------------------------------------------------------------------------------------------------------------ |
-| `APP_SERVER__CERT__MATERIAL_BACKEND`        | String            | `memory`   | Primary backend for server cryptographic material: `memory`, `aws_secrets_manager`, or `vault`.              |
 | `APP_SERVER__CERT__MATERIAL_CACHE_TTL`      | Integer (seconds) | `300`      | In-memory read-cache TTL for certificate material. Set to `0` to disable this material cache.                |
 | `APP_SERVER__CERT__SIGNING_KEY_CACHE_TTL`   | Integer (seconds) | `0`        | In-memory read-cache TTL for private signing-key material. Set to `0` to force every read to the backend.    |
 
@@ -91,7 +80,6 @@ When compiled with the `aws-secrets` feature flag:
 AWS_ACCESS_KEY_ID=test
 AWS_SECRET_ACCESS_KEY=test
 APP_AWS__REGION=us-east-1
-APP_SERVER__CERT__MATERIAL_BACKEND=aws_secrets_manager
 APP_SERVER__CERT__MATERIAL_CACHE_TTL=300
 APP_SERVER__CERT__SIGNING_KEY_CACHE_TTL=0
 ```

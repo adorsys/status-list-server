@@ -189,9 +189,6 @@ pub struct CertConfig {
     #[serde(default)]
     pub eku: Vec<u64>,
     pub acme_directory_url: String,
-    /// Primary backend for server cryptographic material (`memory`,
-    /// `aws_secrets_manager`, or `vault` when compiled in).
-    pub material_backend: String,
     /// Cache TTL for certificate material reads in seconds. `0` disables this cache.
     pub material_cache_ttl: u64,
     /// Cache TTL for private signing-key reads in seconds. `0` disables this cache.
@@ -824,7 +821,6 @@ fn base_builder() -> Result<ConfigBuilder<DefaultState>, ConfigError> {
             "server.cert.acme_directory_url",
             "https://acme-v02.api.letsencrypt.org/directory",
         )?
-        .set_default("server.cert.material_backend", "memory")?
         .set_default("server.cert.material_cache_ttl", 300)?
         .set_default("server.cert.signing_key_cache_ttl", 0)?
         .set_default("server.cert.chain_cache_ttl", default_chain_cache_ttl)?
@@ -917,7 +913,6 @@ mod tests {
         let (expected_strategy, expected_cert_path, expected_key_path) =
             ("store", Option::<String>::None, Option::<String>::None);
         assert_eq!(config.server.cert.provisioning_strategy, expected_strategy);
-        assert_eq!(config.server.cert.material_backend, "memory");
         assert_eq!(config.server.cert.material_cache_ttl, 300);
         assert_eq!(config.server.cert.signing_key_cache_ttl, 0);
         assert_eq!(
@@ -981,7 +976,6 @@ mod tests {
             ("server.cert.organization", "Test Org"),
             ("server.cert.eku", "1,3,6,1,5,5,7,3,30"),
             ("server.cert.provisioning_strategy", "store"),
-            ("server.cert.material_backend", "aws_secrets_manager"),
             ("server.cert.material_cache_ttl", "120"),
             ("server.cert.signing_key_cache_ttl", "0"),
             ("server.cert.store.certificate_path", "/certs/tls.crt"),
@@ -1045,10 +1039,6 @@ mod tests {
             Some("http://pebble:8055")
         );
         assert_eq!(overridden.server.cert.provisioning_strategy, "store");
-        assert_eq!(
-            overridden.server.cert.material_backend,
-            "aws_secrets_manager"
-        );
         assert_eq!(overridden.server.cert.material_cache_ttl, 120);
         assert_eq!(overridden.server.cert.signing_key_cache_ttl, 0);
         assert_eq!(

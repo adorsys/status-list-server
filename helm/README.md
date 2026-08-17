@@ -35,7 +35,7 @@ The following files are used to configure the deployment:
 
 ## Redis Role
 
-Redis is optional. The server does not use Redis for status-list persistence or status-list reads; those use the configured repository backend and the in-process Moka status-list cache. Certificate and signing-key material are managed together by the selected cryptographic-material backend; prefer the built-in material read-cache TTLs before adding Redis.
+Redis is optional. The server does not use Redis for status-list persistence or status-list reads; those use the configured repository backend and the in-process Moka status-list cache. Certificate and signing-key material are managed together by the feature-selected cryptographic-material backend; prefer the built-in material read-cache TTLs before adding Redis.
 
 Keep Redis disabled for a simpler deployment. Enable it only for explicit adapter-level integrations that still require Redis and where the extra dependency, credentials, TLS configuration, monitoring, and HA operations are worth it.
 

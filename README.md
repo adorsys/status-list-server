@@ -202,7 +202,7 @@ The Status List Server is provisioned with a cryptographic certificate that is e
 - Certificate issuance and renewal are managed according to the configured renewal strategy.
 - Every day, a cron job checks whether the certificate should be renewed based on this strategy.
 - If the certificate is still considered valid according to the configured strategy, no renewal occurs; renewal is only triggered when necessary.
-- The server signing key and certificate chain are stored in one selected cryptographic-material backend, configured with `server.cert.material_backend`.
+- The server signing key and certificate chain are stored in one cryptographic-material backend selected by enabled Cargo features (`vault`, `aws-secrets`, or in-memory fallback).
 - Certificate and signing-key reads can be cached with `APP_SERVER__CERT__MATERIAL_CACHE_TTL` and `APP_SERVER__CERT__SIGNING_KEY_CACHE_TTL`. Set the signing-key TTL to `0` to force private-key reads to bypass the material cache.
 - Parsed certificate chains are cached in memory for `APP_SERVER__CERT__CHAIN_CACHE_TTL` seconds (default: `3600`). A value of `0` keeps entries indefinitely. In multi-replica deployments, replicas that did not perform renewal rely on this TTL to refresh their in-memory chain.
 
@@ -211,7 +211,7 @@ The Status List Server is provisioned with a cryptographic certificate that is e
 - `server.cert.provisioning_strategy = "acme"` requests and renews certificates through ACME.
 - `server.cert.provisioning_strategy = "store"` loads externally managed certificate material and persists it into the configured cryptographic-material backend.
 - Store provisioning infers filesystem loading when `server.cert.store.certificate_path` and `signing_key_path` are configured.
-- Store provisioning infers storage-backed loading when `server.cert.store.certificate_key` and `signing_key_key` are configured; those keys are read from the selected cryptographic-material backend.
+- Store provisioning infers storage-backed loading when `server.cert.store.certificate_key` and `signing_key_key` are configured; those keys are read from the feature-selected cryptographic-material backend.
 - Filesystem store inputs may be PEM text or raw DER. Storage-backed store inputs may be PEM text or base64/base64url-encoded DER. Private keys must be PKCS#8 in PEM or DER form.
 - The renewal cron schedule is configured with `server.cert.renewal_cron_schedule`. For store provisioning, each scheduled run reloads the configured source and refreshes persisted material only when it changed.
 
