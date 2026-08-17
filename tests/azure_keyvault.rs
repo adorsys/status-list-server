@@ -164,6 +164,7 @@ async fn start_emulator(
     let client = AzureKeyVaultClient::builder(url)
         .credential(Arc::new(DummyTokenCredential))
         .http_client(http_client)
+        .verify_challenge_resource(false)
         .secrets_cache_ttl(cache_ttl)
         .build()
         .expect("Failed to build AzureKeyVaultClient");

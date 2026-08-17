@@ -45,6 +45,7 @@ pub struct AzureKeyVaultClientBuilder {
     client_secret: Option<SecretString>,
     custom_credential: Option<Arc<dyn TokenCredential>>,
     http_client: Option<Arc<dyn HttpClient>>,
+    verify_challenge_resource: Option<bool>,
     secrets_cache_ttl: Duration,
 }
 
@@ -69,6 +70,7 @@ impl std::fmt::Debug for AzureKeyVaultClientBuilder {
                 "http_client",
                 &self.http_client.as_ref().map(|_| "<http_client>"),
             )
+            .field("verify_challenge_resource", &self.verify_challenge_resource)
             .field("secrets_cache_ttl", &self.secrets_cache_ttl)
             .finish()
     }
@@ -84,6 +86,7 @@ impl AzureKeyVaultClientBuilder {
             client_secret: None,
             custom_credential: None,
             http_client: None,
+            verify_challenge_resource: None,
             secrets_cache_ttl: Duration::from_secs(300),
         }
     }
@@ -104,6 +107,15 @@ impl AzureKeyVaultClientBuilder {
     /// Set a custom [`TokenCredential`] (e.g. for custom auth).
     pub fn credential(mut self, credential: Arc<dyn TokenCredential>) -> Self {
         self.custom_credential = Some(credential);
+        self
+    }
+
+    /// Set whether to verify the challenge resource on authentication.
+    ///
+    /// Defaults to `None` (which leaves the Azure SDK's secure default of `Some(true)` enabled in production).
+    /// Set to `false` only in tests or emulator environments where challenge URLs differ.
+    pub fn verify_challenge_resource(mut self, verify: bool) -> Self {
+        self.verify_challenge_resource = Some(verify);
         self
     }
 
@@ -148,7 +160,7 @@ impl AzureKeyVaultClientBuilder {
         };
 
         let mut options = azure_security_keyvault_secrets::SecretClientOptions {
-            verify_challenge_resource: Some(false),
+            verify_challenge_resource: self.verify_challenge_resource,
             ..Default::default()
         };
 
@@ -198,6 +210,7 @@ impl Storage for AzureKeyVaultClient {
         if let Some(cache) = &self.cache {
             cache.insert(key.to_string(), value.to_string()).await;
         }
+
         Ok(())
     }
 
@@ -257,7 +270,22 @@ impl Storage for AzureKeyVaultClient {
                     Ok(())
                 } else {
                     Err(StorageError::Backend(eyre!(
-                        "Azure secret delete failed for key '{key}': {err}"
+                        "Azure secret delete failed for key '{key}': {err:?}"
+                    )))
+                }
+            }
+        }
+    }
+
+    async fn reachable(&self) -> Result<(), StorageError> {
+        match self.client.get_secret("__health_probe_test__", None).await {
+            Ok(_) => Ok(()),
+            Err(err) => {
+                if err.http_status() == Some(StatusCode::NotFound) {
+                    Ok(())
+                } else {
+                    Err(StorageError::Backend(eyre!(
+                        "Azure Key Vault readiness check failed: {err:?}"
                     )))
                 }
             }
@@ -278,6 +306,7 @@ mod tests {
                 Some("client-456"),
                 Some(SecretString::from("secret-789")),
             )
+            .verify_challenge_resource(false)
             .secrets_cache_ttl(Duration::from_secs(600));
 
         assert_eq!(
@@ -287,6 +316,11 @@ mod tests {
         assert_eq!(builder.tenant_id.as_deref(), Some("tenant-123"));
         assert_eq!(builder.client_id.as_deref(), Some("client-456"));
         assert!(builder.client_secret.is_some());
+        assert_eq!(builder.verify_challenge_resource, Some(false));
         assert_eq!(builder.secrets_cache_ttl, Duration::from_secs(600));
+
+        let debug_repr = format!("{builder:?}");
+        assert!(debug_repr.contains("<redacted>"));
+        assert!(!debug_repr.contains("secret-789"));
     }
 }

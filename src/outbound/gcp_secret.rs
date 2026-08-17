@@ -25,6 +25,15 @@ pub struct GcpSecretManagerClient {
     cache: Option<Cache<String, String>>,
 }
 
+impl std::fmt::Debug for GcpSecretManagerClient {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GcpSecretManagerClient")
+            .field("project_id", &self.project_id)
+            .field("cache", &self.cache.is_some())
+            .finish()
+    }
+}
+
 impl GcpSecretManagerClient {
     const CACHE_MAX_CAPACITY: u64 = 100;
 
@@ -50,6 +59,71 @@ impl GcpSecretManagerClient {
             "projects/{}/secrets/{}/versions/{}",
             self.project_id, key, version
         )
+    }
+
+    /// Ensure the secret container exists and add a new version with payload.
+    /// Handles concurrent container creation races (TOCTOU).
+    async fn ensure_secret_and_add_version(
+        &self,
+        key: &str,
+        value: &str,
+    ) -> Result<(), StorageError> {
+        let secret_name = self.secret_name(key);
+        let payload = SecretPayload::new().set_data(value.as_bytes().to_vec());
+
+        // Fast path: try adding secret version directly
+        match self
+            .client
+            .add_secret_version()
+            .set_parent(&secret_name)
+            .set_payload(payload.clone())
+            .send()
+            .await
+        {
+            Ok(_) => {
+                if let Some(cache) = &self.cache {
+                    cache.insert(key.to_string(), value.to_string()).await;
+                }
+                Ok(())
+            }
+            Err(e) if e.http_status_code() == Some(404) => {
+                // Container does not exist; create it
+                let secret = Secret::new().set_replication(
+                    Replication::new()
+                        .set_replication(RepEnum::Automatic(Box::new(Automatic::new()))),
+                );
+
+                match self
+                    .client
+                    .create_secret()
+                    .set_parent(self.project_parent())
+                    .set_secret_id(key)
+                    .set_secret(secret)
+                    .send()
+                    .await
+                {
+                    Ok(_) => {}
+                    // If created concurrently by another process, ignore AlreadyExists (409)
+                    Err(err) if err.http_status_code() == Some(409) => {}
+                    Err(err) => return Err(StorageError::Backend(err.into())),
+                }
+
+                // Add the secret version to the newly created container
+                self.client
+                    .add_secret_version()
+                    .set_parent(secret_name)
+                    .set_payload(payload)
+                    .send()
+                    .await
+                    .map_err(|err| StorageError::Backend(err.into()))?;
+
+                if let Some(cache) = &self.cache {
+                    cache.insert(key.to_string(), value.to_string()).await;
+                }
+                Ok(())
+            }
+            Err(e) => Err(StorageError::Backend(e.into())),
+        }
     }
 }
 
@@ -103,6 +177,12 @@ impl GcpSecretManagerClientBuilder {
 
     /// Build the [`GcpSecretManagerClient`] adapter instance.
     pub async fn build(self) -> Result<GcpSecretManagerClient, StorageError> {
+        if self.project_id.trim().is_empty() {
+            return Err(StorageError::Backend(eyre!(
+                "GCP Secret Manager configuration error: project_id must not be empty"
+            )));
+        }
+
         let mut builder = SecretManagerService::builder();
         if let Some(endpoint) = &self.endpoint {
             builder = builder.with_endpoint(endpoint).with_credentials(
@@ -150,45 +230,7 @@ impl GcpSecretManagerClientBuilder {
 #[async_trait]
 impl Storage for GcpSecretManagerClient {
     async fn store(&self, key: &str, value: &str) -> Result<(), StorageError> {
-        let secret_name = self.secret_name(key);
-
-        // Check if secret exists
-        let resp = self.client.get_secret().set_name(&secret_name).send().await;
-
-        match resp {
-            Ok(_) => {}
-            Err(e) if e.http_status_code() == Some(404) => {
-                // Create secret container with automatic replication
-                let secret = Secret::new().set_replication(
-                    Replication::new()
-                        .set_replication(RepEnum::Automatic(Box::new(Automatic::new()))),
-                );
-
-                self.client
-                    .create_secret()
-                    .set_parent(self.project_parent())
-                    .set_secret_id(key)
-                    .set_secret(secret)
-                    .send()
-                    .await?;
-            }
-            Err(e) => return Err(StorageError::Backend(e.into())),
-        };
-
-        // Add secret version with payload
-        let payload = SecretPayload::new().set_data(value.as_bytes().to_vec());
-
-        self.client
-            .add_secret_version()
-            .set_parent(secret_name)
-            .set_payload(payload)
-            .send()
-            .await?;
-
-        if let Some(cache) = &self.cache {
-            cache.insert(key.to_string(), value.to_string()).await;
-        }
-        Ok(())
+        self.ensure_secret_and_add_version(key, value).await
     }
 
     async fn load(&self, key: &str) -> Result<Option<String>, StorageError> {
@@ -231,22 +273,7 @@ impl Storage for GcpSecretManagerClient {
     }
 
     async fn update(&self, key: &str, value: &str) -> Result<(), StorageError> {
-        let secret_name = self.secret_name(key);
-
-        let payload = SecretPayload::new().set_data(value.as_bytes().to_vec());
-
-        self.client
-            .add_secret_version()
-            .set_parent(secret_name)
-            .set_payload(payload)
-            .send()
-            .await?;
-
-        if let Some(cache) = &self.cache {
-            cache.insert(key.to_string(), value.to_string()).await;
-        }
-
-        Ok(())
+        self.ensure_secret_and_add_version(key, value).await
     }
 
     async fn delete(&self, key: &str) -> Result<(), StorageError> {
@@ -316,5 +343,30 @@ mod tests {
             builder.service_account_key_path.as_deref(),
             Some("/path/to/key.json")
         );
+    }
+
+    #[tokio::test]
+    async fn test_builder_rejects_empty_project_id() {
+        let err = GcpSecretManagerClient::builder("")
+            .build()
+            .await
+            .unwrap_err();
+        match err {
+            StorageError::Backend(e) => {
+                assert!(e.to_string().contains("project_id must not be empty"));
+            }
+            other => panic!("expected StorageError::Backend, got {other:?}"),
+        }
+
+        let err_ws = GcpSecretManagerClient::builder("   ")
+            .build()
+            .await
+            .unwrap_err();
+        match err_ws {
+            StorageError::Backend(e) => {
+                assert!(e.to_string().contains("project_id must not be empty"));
+            }
+            other => panic!("expected StorageError::Backend, got {other:?}"),
+        }
     }
 }

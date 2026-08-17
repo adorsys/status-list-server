@@ -643,7 +643,8 @@ pub struct GcpSecretManagerConfig {
 #[derive(Debug, Clone, Deserialize)]
 pub struct AzureKeyVaultConfig {
     /// Azure Key Vault URL (e.g. `https://my-vault.vault.azure.net/`).
-    pub vault_url: url::Url,
+    #[serde(default)]
+    pub vault_url: Option<url::Url>,
     /// Service principal tenant ID.
     #[serde(default)]
     pub tenant_id: Option<String>,
@@ -880,7 +881,7 @@ fn base_builder() -> Result<ConfigBuilder<DefaultState>, ConfigError> {
         .set_default("vault.timeout_secs", 30)?
         .set_default("gcp_secret_manager.project_id", "")?
         .set_default("gcp_secret_manager.secrets_cache_ttl", 300)?
-        .set_default("azure_keyvault.vault_url", "")?
+        .set_default("azure_keyvault.vault_url", Option::<String>::None)?
         .set_default("azure_keyvault.secrets_cache_ttl", 300)?
         .set_default("cache.ttl", 5 * 60)?
         .set_default("cache.max_capacity", 100)?
@@ -922,6 +923,10 @@ mod tests {
         assert_eq!(config.aws.region, "us-east-1");
         assert_eq!(config.aws.s3_bucket, "status-list-adorsys");
         assert_eq!(config.aws.s3_key_prefix, "");
+        assert_eq!(config.gcp_secret_manager.project_id, "");
+        assert_eq!(config.gcp_secret_manager.secrets_cache_ttl, 300);
+        assert_eq!(config.azure_keyvault.vault_url, None);
+        assert_eq!(config.azure_keyvault.secrets_cache_ttl, 300);
         assert_eq!(config.status_list.token_exp_secs, 900);
         assert_eq!(config.status_list.token_ttl_secs, 300);
         assert_eq!(config.server.cert.renewal_cron_schedule, "0 0 0 * * *");

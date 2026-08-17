@@ -273,8 +273,11 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
             ))]
             {
                 tracing::info!("Using Azure Key Vault as secrets backend");
+                let vault_url = config.azure_keyvault.vault_url.clone().ok_or_else(|| {
+                    eyre!("Azure Key Vault configuration error: azure_keyvault.vault_url is required when azure-kv feature is enabled")
+                })?;
                 Box::new(
-                    AzureKeyVaultClient::builder(config.azure_keyvault.vault_url.clone())
+                    AzureKeyVaultClient::builder(vault_url)
                         .service_principal(
                             config.azure_keyvault.tenant_id.as_deref(),
                             config.azure_keyvault.client_id.as_deref(),
@@ -832,6 +835,13 @@ mod general_tests {
             ("APP_DATABASE__URL", "memory:"),
             #[cfg(feature = "vault")]
             ("APP_VAULT__TOKEN", "root"),
+            #[cfg(feature = "gcp-secrets")]
+            ("APP_GCP_SECRET_MANAGER__PROJECT_ID", "test-project"),
+            #[cfg(feature = "azure-kv")]
+            (
+                "APP_AZURE_KEYVAULT__VAULT_URL",
+                "https://test.vault.azure.net/",
+            ),
         ])
         .expect("Failed to load config");
         tokio::runtime::Runtime::new().unwrap().block_on(async {
