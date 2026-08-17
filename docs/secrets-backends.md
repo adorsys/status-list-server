@@ -12,11 +12,11 @@ The supported backends include:
 
 All supported cryptographic-material backends use the same logical model for certificate chains and private signing keys:
 
-| Backend | Certificate chain | Private signing key | Behavior |
-| ------- | ----------------- | ------------------- | -------- |
-| In-memory | Stored as a string under the certificate material key | Stored as a string under the signing-key material key | Volatile process-local storage for development and tests |
-| AWS Secrets Manager | Stored as one secret string | Stored as one secret string | Same create, update, load, delete, cache, and invalidation path as certificate material |
-| Vault / OpenBao KV v2 | Stored as one KV v2 secret value | Stored as one KV v2 secret value | Same create, update, load, delete, cache, and invalidation path as certificate material |
+| Backend               | Certificate chain                                     | Private signing key                                   | Behavior                                                                                |
+| --------------------- | ----------------------------------------------------- | ----------------------------------------------------- | --------------------------------------------------------------------------------------- |
+| In-memory             | Stored as a string under the certificate material key | Stored as a string under the signing-key material key | Volatile process-local storage for development and tests                                |
+| AWS Secrets Manager   | Stored as one secret string                           | Stored as one secret string                           | Same create, update, load, delete, cache, and invalidation path as certificate material |
+| Vault / OpenBao KV v2 | Stored as one KV v2 secret value                      | Stored as one KV v2 secret value                      | Same create, update, load, delete, cache, and invalidation path as certificate material |
 
 ACME provisioning writes the issued certificate chain and the signing key through this single abstraction. Store provisioning can seed material either from local files or from existing keys in the selected material backend, but the refreshed server material is persisted back through the same backend and invalidated together.
 
