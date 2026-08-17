@@ -386,10 +386,7 @@ async fn test_crypto_cache_policy_can_skip_private_key_cache() {
 
     let manager = CertManager::builder()
         .domains(["example.com"])
-        .crypto_cache_policy(CryptoCachePolicy::new(
-            Duration::from_secs(60),
-            Duration::ZERO,
-        ))
+        .crypto_cache_policy(CryptoCachePolicy::new(Duration::ZERO))
         .crypto_storage(material_storage.clone())
         .store_strategy(StoreProvisioningStrategy::filesystem(
             "/tmp/example-cert.pem",
@@ -424,10 +421,7 @@ async fn test_crypto_cache_policy_applies_after_storage_setter() {
     let manager = CertManager::builder()
         .domains(["example.com"])
         .crypto_storage(material_storage.clone())
-        .crypto_cache_policy(CryptoCachePolicy::new(
-            Duration::from_secs(60),
-            Duration::ZERO,
-        ))
+        .crypto_cache_policy(CryptoCachePolicy::new(Duration::ZERO))
         .store_strategy(StoreProvisioningStrategy::filesystem(
             "/tmp/example-cert.pem",
             "/tmp/example-key.pem",

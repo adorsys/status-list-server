@@ -231,10 +231,9 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
             .email(&config.server.cert.email)
             .organization(config.server.cert.organization.as_deref())
             .acme_directory_url(&config.server.cert.acme_directory_url)
-            .crypto_cache_policy(CryptoCachePolicy::new(
-                Duration::from_secs(config.server.cert.material_cache_ttl),
-                Duration::from_secs(config.server.cert.signing_key_cache_ttl),
-            ))
+            .crypto_cache_policy(CryptoCachePolicy::new(Duration::from_secs(
+                config.server.cert.signing_key_cache_ttl,
+            )))
             .crypto_storage(material_storage)
             .eku(&config.server.cert.eku);
 

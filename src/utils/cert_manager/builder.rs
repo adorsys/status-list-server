@@ -81,7 +81,7 @@ impl Default for CertificateManagerBuilder {
     fn default() -> Self {
         Self {
             crypto_storage: None,
-            cache_policy: CryptoCachePolicy::NO_CACHE,
+            cache_policy: CryptoCachePolicy::default(),
             challenge_handler: None,
             acme_http_client_factory: None,
             provisioning_strategy: None,

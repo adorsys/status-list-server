@@ -18,7 +18,6 @@ Both HashiCorp Vault and OpenBao share the KV v2 REST API interface and are supp
 
 | Variable                                    | Type              | Default    | Description                                                                                                  |
 | ------------------------------------------- | ----------------- | ---------- | ------------------------------------------------------------------------------------------------------------ |
-| `APP_SERVER__CERT__MATERIAL_CACHE_TTL`      | Integer (seconds) | `300`      | In-memory read-cache TTL for certificate material. Set to `0` to disable this material cache.                |
 | `APP_SERVER__CERT__SIGNING_KEY_CACHE_TTL`   | Integer (seconds) | `0`        | In-memory read-cache TTL for private signing-key material. Set to `0` to force every read to the backend.    |
 
 Backend-specific settings:
@@ -69,7 +68,8 @@ APP_VAULT__NAMESPACE=my-org-namespace
 
 ### Cache Behavior
 
-- Certificate and signing-key material reads are controlled consistently across backends by `APP_SERVER__CERT__MATERIAL_CACHE_TTL` and `APP_SERVER__CERT__SIGNING_KEY_CACHE_TTL`.
+- Certificate material stays cached until provisioning or renewal invalidates it.
+- Signing-key material reads are controlled consistently across backends by `APP_SERVER__CERT__SIGNING_KEY_CACHE_TTL`.
 - To require every private-key read to query the selected material backend, keep `APP_SERVER__CERT__SIGNING_KEY_CACHE_TTL=0`.
 
 ## AWS Secrets Manager
@@ -80,6 +80,5 @@ When compiled with the `aws-secrets` feature flag:
 AWS_ACCESS_KEY_ID=test
 AWS_SECRET_ACCESS_KEY=test
 APP_AWS__REGION=us-east-1
-APP_SERVER__CERT__MATERIAL_CACHE_TTL=300
 APP_SERVER__CERT__SIGNING_KEY_CACHE_TTL=0
 ```

@@ -203,7 +203,7 @@ The Status List Server is provisioned with a cryptographic certificate that is e
 - Every day, a cron job checks whether the certificate should be renewed based on this strategy.
 - If the certificate is still considered valid according to the configured strategy, no renewal occurs; renewal is only triggered when necessary.
 - The server signing key and certificate chain are stored in one cryptographic-material backend selected by enabled Cargo features (`vault`, `aws-secrets`, or in-memory fallback).
-- Certificate and signing-key reads can be cached with `APP_SERVER__CERT__MATERIAL_CACHE_TTL` and `APP_SERVER__CERT__SIGNING_KEY_CACHE_TTL`. Set the signing-key TTL to `0` to force private-key reads to bypass the material cache.
+- Certificate material stays cached until provisioning or renewal invalidates it. Signing-key reads can be cached with `APP_SERVER__CERT__SIGNING_KEY_CACHE_TTL`; set it to `0` to force private-key reads to bypass the material cache.
 - Parsed certificate chains stay cached in memory until certificate provisioning or renewal replaces them.
 
 **Provisioning Modes:**
