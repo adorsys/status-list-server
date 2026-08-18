@@ -236,14 +236,17 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
             #[cfg(feature = "vault")]
             {
                 tracing::info!("Using Vault KV v2 as secrets backend");
+                let secret_id = config.vault.resolve_secret_id()?;
                 Box::new(
-                    VaultClient::builder(&config.vault.addr, config.vault.token.clone())
+                    VaultClient::builder(&config.vault.addr, &config.vault.role_id, secret_id)
+                        .auth_mount(&config.vault.auth_mount)
                         .mount(&config.vault.mount)
                         .path_prefix(&config.vault.path_prefix)
                         .namespace(config.vault.namespace.as_deref())
                         .secrets_cache_ttl(Duration::from_secs(config.vault.secrets_cache_ttl))
                         .timeout(Duration::from_secs(config.vault.timeout_secs))
-                        .build()?,
+                        .build()
+                        .await?,
                 )
             }
             #[cfg(all(feature = "gcp-secrets", not(feature = "vault")))]
@@ -827,14 +830,37 @@ mod general_tests {
     /// Verifies that build_state succeeds with AppConfig::load_from_overrides defaults under
     /// the default feature set, catching missing test_data/ or config mismatch issues.
     /// When SQL features are enabled, uses memory backend to avoid requiring a real database.
-    #[test]
-    fn build_state_succeeds_under_default_config() {
+    #[tokio::test]
+    async fn build_state_succeeds_under_default_config() {
         let _ = rustls::crypto::ring::default_provider().install_default();
+        #[cfg(feature = "vault")]
+        let mock_vault = {
+            let server = wiremock::MockServer::start().await;
+            wiremock::Mock::given(wiremock::matchers::method("POST"))
+                .and(wiremock::matchers::path("/v1/auth/approle/login"))
+                .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(
+                    serde_json::json!({
+                        "auth": {
+                            "client_token": "s.mock-token",
+                            "lease_duration": 3600,
+                            "renewable": true
+                        }
+                    }),
+                ))
+                .mount(&server)
+                .await;
+            server
+        };
+
         let config = AppConfig::load_from_overrides(&[
             ("APP_DATABASE__BACKEND", "memory"),
             ("APP_DATABASE__URL", "memory:"),
             #[cfg(feature = "vault")]
-            ("APP_VAULT__TOKEN", "root"),
+            ("APP_VAULT__ADDR", &mock_vault.uri()),
+            #[cfg(feature = "vault")]
+            ("APP_VAULT__ROLE_ID", "test-role"),
+            #[cfg(feature = "vault")]
+            ("APP_VAULT__SECRET_ID", "test-secret"),
             #[cfg(feature = "gcp-secrets")]
             ("APP_GCP_SECRET_MANAGER__PROJECT_ID", "test-project"),
             #[cfg(feature = "azure-kv")]
@@ -844,11 +870,10 @@ mod general_tests {
             ),
         ])
         .expect("Failed to load config");
-        tokio::runtime::Runtime::new().unwrap().block_on(async {
-            if let Err(ref e) = build_state(&config).await {
-                panic!("build_state failed under default configuration: {e:?}");
-            }
-        });
+
+        if let Err(ref e) = build_state(&config).await {
+            panic!("build_state failed under default configuration: {e:?}");
+        }
     }
 
     /// Verifies that a saturated pool returns an error within `acquire_timeout`

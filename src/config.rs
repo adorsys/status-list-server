@@ -1,3 +1,4 @@
+use std::path::PathBuf;
 use std::{collections::HashMap, fmt, marker::PhantomData};
 
 use config::builder::DefaultState;
@@ -606,8 +607,16 @@ pub struct AwsConfig {
 pub struct VaultConfig {
     /// Vault / OpenBao API address (e.g. `http://vault:8200`).
     pub addr: String,
-    /// Authentication token.
-    pub token: SecretString,
+    /// AppRole role_id (can be baked into config).
+    pub role_id: String,
+    /// AppRole secret_id (deliver via env/secrets injector in production).
+    #[serde(default)]
+    pub secret_id: Option<SecretString>,
+    /// Optional path to file containing AppRole secret_id (e.g. Kubernetes volume mount or Docker secret).
+    #[serde(default)]
+    pub secret_id_path: Option<PathBuf>,
+    /// AppRole auth engine mount path (default: `approle`).
+    pub auth_mount: String,
     /// KV v2 engine mount path.
     pub mount: String,
     /// Prefix prepended to all secret paths. Default: empty.
@@ -620,6 +629,38 @@ pub struct VaultConfig {
     pub secrets_cache_ttl: u64,
     /// HTTP request timeout in seconds.
     pub timeout_secs: u64,
+}
+
+impl VaultConfig {
+    /// Resolve the AppRole secret_id either directly from `secret_id`
+    /// or by reading from `secret_id_path` on disk.
+    pub fn resolve_secret_id(&self) -> Result<SecretString, ConfigError> {
+        if let Some(secret_id) = &self.secret_id
+            && !secret_id.expose_secret().trim().is_empty()
+        {
+            return Ok(secret_id.clone());
+        }
+
+        if let Some(path) = &self.secret_id_path {
+            let content = std::fs::read_to_string(path).map_err(|e| {
+                ConfigError::Message(format!(
+                    "Failed to read Vault secret_id from file {path:?}: {e}"
+                ))
+            })?;
+            let trimmed = content.trim();
+            if trimmed.is_empty() {
+                return Err(ConfigError::Message(format!(
+                    "Vault secret_id file {path:?} is empty"
+                )));
+            }
+            return Ok(SecretString::from(trimmed.to_string()));
+        }
+
+        Err(ConfigError::Message(
+            "Vault configuration missing secret_id: provide 'secret_id' or 'secret_id_path'"
+                .to_string(),
+        ))
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -873,7 +914,10 @@ fn base_builder() -> Result<ConfigBuilder<DefaultState>, ConfigError> {
         .set_default("server.cert.store.signing_key_key", Option::<String>::None)?
         .set_default("aws.region", "us-east-1")?
         .set_default("vault.addr", "http://localhost:8200")?
-        .set_default("vault.token", "")?
+        .set_default("vault.role_id", "")?
+        .set_default("vault.secret_id", Option::<String>::None)?
+        .set_default("vault.secret_id_path", Option::<String>::None)?
+        .set_default("vault.auth_mount", "approle")?
         .set_default("vault.mount", "secret")?
         .set_default("vault.path_prefix", "")?
         .set_default("vault.namespace", Option::<String>::None)?
@@ -1575,5 +1619,78 @@ mod tests {
                 "Default config signing_key_key references test_data: {key}"
             );
         }
+
+        // Vault AppRole defaults
+        assert_eq!(default_config.vault.addr, "http://localhost:8200");
+        assert_eq!(default_config.vault.role_id, "");
+        assert!(default_config.vault.secret_id.is_none());
+        assert_eq!(default_config.vault.secret_id_path, None);
+        assert_eq!(default_config.vault.auth_mount, "approle");
+        assert_eq!(default_config.vault.mount, "secret");
+        assert_eq!(default_config.vault.path_prefix, "");
+        assert_eq!(default_config.vault.namespace, None);
+        assert_eq!(default_config.vault.secrets_cache_ttl, 300);
+        assert_eq!(default_config.vault.timeout_secs, 30);
+        assert!(default_config.vault.resolve_secret_id().is_err());
+
+        // Vault AppRole overrides with inline secret_id
+        let overridden_config = Config::load_from_overrides(&[
+            ("vault.addr", "http://vault.example.com:8200"),
+            ("vault.role_id", "my-role-id"),
+            ("vault.secret_id", "my-secret-id"),
+            ("vault.auth_mount", "custom-approle"),
+            ("vault.mount", "kv-secrets"),
+            ("vault.path_prefix", "services/status-list"),
+            ("vault.namespace", "tenant-1"),
+            ("vault.secrets_cache_ttl", "60"),
+            ("vault.timeout_secs", "15"),
+        ])
+        .expect("Failed to load overridden config");
+
+        assert_eq!(
+            overridden_config.vault.addr,
+            "http://vault.example.com:8200"
+        );
+        assert_eq!(overridden_config.vault.role_id, "my-role-id");
+        assert_eq!(
+            overridden_config
+                .vault
+                .resolve_secret_id()
+                .expect("failed to resolve secret_id")
+                .expose_secret(),
+            "my-secret-id"
+        );
+        assert_eq!(overridden_config.vault.auth_mount, "custom-approle");
+        assert_eq!(overridden_config.vault.mount, "kv-secrets");
+        assert_eq!(overridden_config.vault.path_prefix, "services/status-list");
+        assert_eq!(
+            overridden_config.vault.namespace,
+            Some("tenant-1".to_string())
+        );
+        assert_eq!(overridden_config.vault.secrets_cache_ttl, 60);
+        assert_eq!(overridden_config.vault.timeout_secs, 15);
+
+        // Vault AppRole overrides with secret_id_path
+        let secret_file = std::env::temp_dir().join(format!(
+            "vault_secret_id_test_{}.txt",
+            time::UtcDateTime::now().nanosecond()
+        ));
+        std::fs::write(&secret_file, "  file-secret-id-value \n").expect("write secret file");
+
+        let file_auth_config = Config::load_from_overrides(&[
+            ("vault.role_id", "my-file-role"),
+            ("vault.secret_id_path", secret_file.to_str().unwrap()),
+        ])
+        .expect("Failed to load file auth config");
+
+        assert_eq!(
+            file_auth_config
+                .vault
+                .resolve_secret_id()
+                .expect("failed to resolve secret_id from path")
+                .expose_secret(),
+            "file-secret-id-value"
+        );
+        let _ = std::fs::remove_file(&secret_file);
     }
 }
