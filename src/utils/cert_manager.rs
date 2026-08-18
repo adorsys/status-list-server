@@ -456,10 +456,10 @@ impl CertManager {
             // the provisioning-path `replace` in `cache_provisioned_chain`.
             // If a concurrent `request_certificate` replaces the cache entry
             // between our miss and this insert, we overwrite the fresh chain
-            // with the (still valid) old chain. The stale entry is bounded by
-            // the cache TTL. This is acceptable because the signing key is
-            // stable across renewals, so the old chain remains valid for
-            // token verification.
+            // with the (still valid) old chain. The stale entry persists until
+            // the next provisioning or renewal cycle. This is acceptable
+            // because the signing key is stable across renewals, so the old
+            // chain remains valid for token verification.
             self.cert_chain_cache.insert(cert_key, certs.clone()).await;
             return Ok(Some(certs));
         }
@@ -768,10 +768,10 @@ impl CertManager {
         Ok(())
     }
 
-    /// One invalidation path for lifecycle-coupled certificate and key material.
+    /// Refresh process-local caches after lifecycle-coupled certificate and key material changes.
     async fn refresh_material_cache(&self, cert_pem: &str) -> Result<(), CertError> {
         self.crypto_storage()?
-            .invalidate_material(&self.cert_key(), &self.signing_secret_id())
+            .invalidate_signing_key(&self.signing_secret_id())
             .await?;
         self.cache_provisioned_chain(cert_pem).await
     }

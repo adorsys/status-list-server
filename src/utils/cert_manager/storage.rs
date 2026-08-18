@@ -129,7 +129,8 @@ pub struct CryptoStorage {
 }
 
 impl CryptoStorage {
-    const CACHE_MAX_CAPACITY: u64 = 16;
+    const CERT_CACHE_CAPACITY: u64 = 1;
+    const KEY_CACHE_CAPACITY: u64 = 1;
 
     pub fn new(backend: impl Storage + 'static) -> Self {
         Self::with_cache_policy(backend, CryptoCachePolicy::default())
@@ -137,7 +138,7 @@ impl CryptoStorage {
 
     pub fn with_cache_policy(backend: impl Storage + 'static, policy: CryptoCachePolicy) -> Self {
         let certificate_cache = Cache::builder()
-            .max_capacity(CryptoStorage::CACHE_MAX_CAPACITY)
+            .max_capacity(CryptoStorage::CERT_CACHE_CAPACITY)
             .build();
         let signing_key_cache = cache_for_ttl(policy.signing_key_ttl);
         if policy.signing_key_ttl.is_zero() {
@@ -208,12 +209,7 @@ impl CryptoStorage {
         self.backend.delete(key).await
     }
 
-    pub async fn invalidate_material(
-        &self,
-        certificate_key: &str,
-        signing_key_key: &str,
-    ) -> Result<(), StorageError> {
-        self.certificate_cache.invalidate(certificate_key).await;
+    pub async fn invalidate_signing_key(&self, signing_key_key: &str) -> Result<(), StorageError> {
         if let Some(cache) = &self.signing_key_cache {
             cache.invalidate(signing_key_key).await;
         }
@@ -245,7 +241,7 @@ impl CryptoStorage {
 fn cache_for_ttl(ttl: Duration) -> Option<Cache<String, String>> {
     (!ttl.is_zero()).then(|| {
         Cache::builder()
-            .max_capacity(CryptoStorage::CACHE_MAX_CAPACITY)
+            .max_capacity(CryptoStorage::KEY_CACHE_CAPACITY)
             .time_to_live(ttl)
             .build()
     })

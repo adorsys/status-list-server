@@ -100,11 +100,6 @@ impl CertChainCache {
         self.inner.insert(key, value).await;
     }
 
-    #[cfg(test)]
-    pub(crate) async fn invalidate(&self, key: &str) {
-        self.inner.invalidate(key).await;
-    }
-
     fn attributes(&self) -> Vec<KeyValue> {
         if self.domain_label.is_empty() {
             vec![]

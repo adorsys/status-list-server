@@ -752,7 +752,7 @@ async fn test_cache_provisioned_chain_replaces_cached_entry() {
 }
 
 #[tokio::test]
-async fn test_cert_chain_cache_invalidation_reloads_chain() {
+async fn test_refresh_material_cache_replaces_cached_chain() {
     init_crypto();
 
     let material_storage = MockStorage::new();
@@ -778,9 +778,8 @@ async fn test_cert_chain_cache_invalidation_reloads_chain() {
         expires_at: 2,
         updated_at: 3,
     };
-    let serialized_replacement = serde_json::to_string(&replacement).unwrap();
-    material_storage
-        .store(&cert_key, &serialized_replacement)
+    cert_manager
+        .persist_certificate_data(&replacement)
         .await
         .unwrap();
 
@@ -788,12 +787,23 @@ async fn test_cert_chain_cache_invalidation_reloads_chain() {
     assert!(Arc::ptr_eq(&first, &stale_cached));
     assert_eq!(material_storage.load_count(), 1);
 
-    cert_manager.cert_chain_cache.invalidate(&cert_key).await;
+    cert_manager
+        .refresh_material_cache(&replacement.certificate)
+        .await
+        .unwrap();
     let reloaded = cert_manager.cert_chain_parts().await.unwrap().unwrap();
 
     assert_eq!(reloaded.len(), 1);
     assert!(!Arc::ptr_eq(&first, &reloaded));
-    assert_eq!(material_storage.load_count(), 2);
+    assert_eq!(material_storage.load_count(), 1);
+
+    let cert_data = cert_manager.certificate().await.unwrap().unwrap();
+    assert_eq!(cert_data.certificate, replacement.certificate);
+    assert_eq!(
+        material_storage.load_count(),
+        1,
+        "certificate material cache should stay hot after renewal refresh"
+    );
 }
 
 fn setup_test_metrics_registry() -> (
