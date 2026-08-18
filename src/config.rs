@@ -1578,7 +1578,6 @@ mod tests {
             ("vault.mount", "kv-secrets"),
             ("vault.path_prefix", "services/status-list"),
             ("vault.namespace", "tenant-1"),
-            ("vault.secrets_cache_ttl", "60"),
             ("vault.timeout_secs", "15"),
         ])
         .expect("Failed to load overridden config");
@@ -1608,7 +1607,7 @@ mod tests {
         // Vault AppRole overrides with secret_id_path
         let secret_file = std::env::temp_dir().join(format!(
             "vault_secret_id_test_{}.txt",
-            time::UtcDateTime::now().nanosecond()
+            time::OffsetDateTime::now_utc().nanosecond()
         ));
         std::fs::write(&secret_file, "  file-secret-id-value \n").expect("write secret file");
 

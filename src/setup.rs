@@ -434,18 +434,20 @@ async fn build_crypto_storage(_config: &AppConfig) -> EyeResult<Box<dyn Storage>
     #[cfg(feature = "vault")]
     {
         tracing::info!("Using Vault KV v2 as secrets backend");
-        let secret_id = config.vault.resolve_secret_id()?;
-        Box::new(
-            VaultClient::builder(&config.vault.addr, &config.vault.role_id, secret_id)
-                .auth_mount(&config.vault.auth_mount)
-                .mount(&config.vault.mount)
-                .path_prefix(&config.vault.path_prefix)
-                .namespace(config.vault.namespace.as_deref())
-                .secrets_cache_ttl(Duration::from_secs(config.vault.secrets_cache_ttl))
-                .timeout(Duration::from_secs(config.vault.timeout_secs))
+        let secret_id = _config.vault.resolve_secret_id()?;
+        Ok(Box::new(
+            VaultClient::builder(&_config.vault.addr, &_config.vault.role_id, secret_id)
+                .auth_mount(&_config.vault.auth_mount)
+                .mount(&_config.vault.mount)
+                .path_prefix(&_config.vault.path_prefix)
+                .namespace(_config.vault.namespace.as_deref())
+                .secrets_cache_ttl(Duration::from_secs(
+                    _config.server.cert.signing_key_cache_ttl,
+                ))
+                .timeout(Duration::from_secs(_config.vault.timeout_secs))
                 .build()
                 .await?,
-        )
+        ))
     }
 
     #[cfg(all(not(feature = "vault"), feature = "aws-secrets"))]
@@ -456,7 +458,11 @@ async fn build_crypto_storage(_config: &AppConfig) -> EyeResult<Box<dyn Storage>
             .load()
             .await;
         Ok(Box::new(
-            AwsSecretsManager::new(&aws_config, Duration::ZERO).await?,
+            AwsSecretsManager::new(
+                &aws_config,
+                Duration::from_secs(_config.server.cert.signing_key_cache_ttl),
+            )
+            .await?,
         ))
     }
 

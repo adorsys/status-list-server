@@ -377,7 +377,8 @@ async fn test_cert_provisioning_with_hashicorp_vault() {
     let vault_port = _vault_container.get_host_port_ipv4(8200).await.unwrap();
 
     let (role_id, secret_id) = setup_vault_approle(vault_port).await;
-    let secrets_storage = build_vault_storage(vault_port, role_id.clone(), secret_id.clone()).await;
+    let material_storage =
+        build_vault_storage(vault_port, role_id.clone(), secret_id.clone()).await;
     let cert_manager = infra
         .build_cert_manager("vault.example.com", material_storage)
         .await;
