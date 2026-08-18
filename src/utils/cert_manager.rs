@@ -343,7 +343,7 @@ impl CertManager {
 
         // Store the certificate
         self.persist_certificate_data(&cert_data).await?;
-        self.refresh_material_cache(&cert_data.certificate).await?;
+        self.cache_provisioned_chain(&cert_data.certificate).await?;
 
         info!(
             "Certificate obtained successfully. Valid from {} to {}",
@@ -740,7 +740,7 @@ impl CertManager {
     ) -> Result<(), CertError> {
         self.persist_certificate_data(cert_data).await?;
         self.persist_signing_key(signing_key).await?;
-        self.refresh_material_cache(&cert_data.certificate).await
+        self.cache_provisioned_chain(&cert_data.certificate).await
     }
 
     fn parse_cert_chain_parts(&self, cert_pem: &str) -> Result<CertificateChain, CertError> {
@@ -766,14 +766,6 @@ impl CertManager {
         // Replace eagerly so the next request never hits storage for this key.
         self.cert_chain_cache.replace(cert_key, parts).await;
         Ok(())
-    }
-
-    /// Refresh process-local caches after lifecycle-coupled certificate and key material changes.
-    async fn refresh_material_cache(&self, cert_pem: &str) -> Result<(), CertError> {
-        self.crypto_storage()?
-            .invalidate_signing_key(&self.signing_secret_id())
-            .await?;
-        self.cache_provisioned_chain(cert_pem).await
     }
 
     #[inline]

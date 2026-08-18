@@ -788,7 +788,7 @@ async fn test_refresh_material_cache_replaces_cached_chain() {
     assert_eq!(material_storage.load_count(), 1);
 
     cert_manager
-        .refresh_material_cache(&replacement.certificate)
+        .cache_provisioned_chain(&replacement.certificate)
         .await
         .unwrap();
     let reloaded = cert_manager.cert_chain_parts().await.unwrap().unwrap();
