@@ -182,6 +182,7 @@ Required IAM roles (least-privilege):
 
 - `roles/secretmanager.secretAccessor` (read secrets)
 - `roles/secretmanager.secretVersionManager` (create/update secret versions)
+- `roles/secretmanager.viewer` (read secret metadata / readiness health check)
 - `roles/secretmanager.admin` or custom role with `secretmanager.secrets.create` and `secretmanager.secrets.delete` (if automated secret creation/deletion is used)
 
 ### Example `.env` Configuration
