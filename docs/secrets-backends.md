@@ -16,20 +16,20 @@ Both HashiCorp Vault and OpenBao share the KV v2 REST API interface and are supp
 
 ### Configuration Variables
 
-| Variable                                    | Type              | Default    | Description                                                                                                  |
-| ------------------------------------------- | ----------------- | ---------- | ------------------------------------------------------------------------------------------------------------ |
-| `APP_SERVER__CERT__SIGNING_KEY_CACHE_TTL`   | Integer (seconds) | `0`        | In-memory read-cache TTL for private signing-key material. Set to `0` to force every read to the backend.    |
+| Variable                                  | Type              | Default | Description                                                                                               |
+| ----------------------------------------- | ----------------- | ------- | --------------------------------------------------------------------------------------------------------- |
+| `APP_SERVER__CERT__SIGNING_KEY_CACHE_TTL` | Integer (seconds) | `0`     | In-memory read-cache TTL for private signing-key material. Set to `0` to force every read to the backend. |
 
 Backend-specific settings:
 
-| Variable                       | Type              | Default                             | Description                                                              |
-| ------------------------------ | ----------------- | ----------------------------------- | ------------------------------------------------------------------------ |
-| `APP_VAULT__ADDR`              | String            | `http://127.0.0.1:8200`             | Base URL of the Vault / OpenBao cluster                                  |
-| `APP_VAULT__TOKEN`             | String            | _(Mandatory when Vault is enabled)_ | Authentication token (`X-Vault-Token`)                                   |
-| `APP_VAULT__MOUNT`             | String            | `"secret"`                          | KV v2 secrets engine mount point                                         |
-| `APP_VAULT__PATH_PREFIX`       | String            | `""`                                | Optional prefix prepended to all secret keys (e.g. `status-list-server`) |
-| `APP_VAULT__NAMESPACE`         | String            | `None`                              | Optional Enterprise/OpenBao namespace header (`X-Vault-Namespace`)       |
-| `APP_VAULT__TIMEOUT_SECS`      | Integer (seconds) | `30`                                | HTTP request timeout duration in seconds                                 |
+| Variable                  | Type              | Default                             | Description                                                              |
+| ------------------------- | ----------------- | ----------------------------------- | ------------------------------------------------------------------------ |
+| `APP_VAULT__ADDR`         | String            | `http://127.0.0.1:8200`             | Base URL of the Vault / OpenBao cluster                                  |
+| `APP_VAULT__TOKEN`        | String            | _(Mandatory when Vault is enabled)_ | Authentication token (`X-Vault-Token`)                                   |
+| `APP_VAULT__MOUNT`        | String            | `"secret"`                          | KV v2 secrets engine mount point                                         |
+| `APP_VAULT__PATH_PREFIX`  | String            | `""`                                | Optional prefix prepended to all secret keys (e.g. `status-list-server`) |
+| `APP_VAULT__NAMESPACE`    | String            | `None`                              | Optional Enterprise/OpenBao namespace header (`X-Vault-Namespace`)       |
+| `APP_VAULT__TIMEOUT_SECS` | Integer (seconds) | `30`                                | HTTP request timeout duration in seconds                                 |
 
 ### Example 1: Local Development with HashiCorp Vault
 
