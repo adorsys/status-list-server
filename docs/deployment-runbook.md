@@ -4,38 +4,30 @@ This runbook describes the GitHub Actions deployment flow for the Status List Se
 
 ## Deployment Flow
 
-The deploy workflow is `.github/workflows/deploy.yml`. It runs on pushes to `main` and tags matching `v*.*.*`.
+The deploy workflow is `.github/workflows/deploy.yml`. It runs on pushes to `main` and release tags matching `v*.*.*`.
 
-Every deploy run first executes the reusable CI workflow, builds and pushes a multi-architecture image to GHCR, then deploys the Helm chart with the image tag selected for the target environment.
+- Pushes to `main` run CI checks and build and push the Docker image to GHCR.
+- Release tags matching `v*.*.*` deploy to the production cluster.
 
-### Staging
+## How It Works
 
-Pushes to `main` deploy to:
+Every workflow run first executes the reusable CI workflow, builds and pushes a multi-architecture image to GHCR. Release tag runs then deploy the Helm chart with the semver image tag to production.
 
-- GitHub environment: `staging`
-- Kubernetes namespace: `staging`
-- Helm release: `statuslist`
-- Image tag: `sha-<short_sha>`
+### Image Tags
 
-The staging deploy command is equivalent to:
+| Trigger              | Image Tags                                                  |
+|----------------------|-------------------------------------------------------------|
+| Push to `main`       | `sha-<short_sha>`                                           |
+| Release tag `v*.*.*` | `<major>.<minor>`, `<version>`, `sha-<short_sha>`, `latest` |
 
-```bash
-helm upgrade --install statuslist helm/chart \
-  --namespace staging \
-  --create-namespace \
-  --atomic \
-  --wait \
-  --timeout 10m \
-  --set-string statuslist.image.repository=ghcr.io/adorsys/status-list-server \
-  --set-string statuslist.image.tag=sha-<short_sha>
-```
+The `latest` tag is only applied to official release tags, not to intermediate commits from `main`. This follows standard OCI/Docker distribution conventions where `latest` represents the latest stable release.
 
-### Production
+### Production Deploy
 
 Release tags matching `v*.*.*` deploy to:
 
 - GitHub environment: `production`
-- Kubernetes namespace: `production`
+- Kubernetes namespace: `statuslist-production`
 - Helm release: `statuslist`
 - Image tag: semantic version without the leading `v`
 
@@ -45,7 +37,7 @@ The production deploy command is equivalent to:
 
 ```bash
 helm upgrade --install statuslist helm/chart \
-  --namespace production \
+  --namespace statuslist-production \
   --create-namespace \
   --atomic \
   --wait \
@@ -58,14 +50,11 @@ Configure the GitHub `production` environment with required reviewers so product
 
 ## Required GitHub and AWS Setup
 
-Create GitHub environments named `staging` and `production`. Each environment must expose:
+Create the GitHub `production` environment with:
 
 - `AWS_DEPLOY_ROLE_ARN`: IAM role ARN assumed by the deploy job through GitHub OIDC.
-
-Configure environment protection rules:
-
-- `staging`: allow deployments from the `main` branch.
-- `production`: allow deployments from protected release tags matching `v*.*.*` and require reviewers.
+- Required reviewers: configure at least one approver.
+- Deployment branches/tags: restrict to release tags matching `v*.*.*`.
 
 The deploy job requires:
 
@@ -73,32 +62,30 @@ The deploy job requires:
 - IAM trust for `token.actions.githubusercontent.com`
 - AWS permission to describe the EKS cluster and perform the Kubernetes operations needed by Helm
 
-Recommended OIDC trust subjects:
+Recommended OIDC trust subject for production:
 
-- Staging: `repo:adorsys/status-list-server:environment:staging`
-- Production: `repo:adorsys/status-list-server:environment:production`
+```text
+repo:adorsys/status-list-server:environment:production
+```
 
-When a GitHub Actions job uses an environment, GitHub's default OIDC `sub` claim references the environment name. Keep branch and tag scoping in the GitHub environment protection rules. For repositories using immutable OIDC subject claims, adjust the `repo:` prefix to the immutable owner and repository ID format shown by GitHub.
+When a GitHub Actions job uses an environment, GitHub's default OIDC `sub` claim references the environment name. For repositories using immutable OIDC subject claims, adjust the `repo:` prefix to the immutable owner and repository ID format shown by GitHub.
 
 ## Verification
 
 After a deploy, verify the Helm release and Kubernetes rollout:
 
 ```bash
-helm status statuslist -n staging
-helm history statuslist -n staging
-kubectl rollout status deployment/statuslist-status-list-server-deployment -n staging
-kubectl logs -l app.kubernetes.io/name=status-list-server -n staging --tail=100
+helm status statuslist -n statuslist-production
+helm history statuslist -n statuslist-production
+kubectl rollout status deployment/statuslist-status-list-server-deployment -n statuslist-production
+kubectl logs -l app.kubernetes.io/name=status-list-server -n statuslist-production --tail=100
 ```
-
-For production, replace `staging` with `production`.
 
 Smoke-check the running service:
 
 ```bash
-kubectl get pods -n production
-kubectl describe pod -l app.kubernetes.io/name=status-list-server -n production
-kubectl exec deploy/statuslist-status-list-server-deployment -n production -- test -r /home/nobody/.aws/credentials
+kubectl get pods -n statuslist-production
+kubectl describe pod -l app.kubernetes.io/name=status-list-server -n statuslist-production
 ```
 
 If certificate provisioning or AWS-backed storage is enabled, also confirm the app can reach AWS services by checking application logs for successful S3, Secrets Manager, or certificate renewal operations.
@@ -113,17 +100,15 @@ There are two rollback paths:
 List available revisions:
 
 ```bash
-helm history statuslist -n production
+helm history statuslist -n statuslist-production
 ```
 
 Rollback to a known-good revision:
 
 ```bash
-helm rollback statuslist <revision> -n production --wait --timeout 10m
-kubectl rollout status deployment/statuslist-status-list-server-deployment -n production
+helm rollback statuslist <revision> -n statuslist-production --wait --timeout 10m
+kubectl rollout status deployment/statuslist-status-list-server-deployment -n statuslist-production
 ```
-
-Use the same commands with `-n staging` for staging.
 
 ## Failure Triage
 
@@ -138,8 +123,8 @@ Check:
 
 - The GitHub environment name matches the IAM trust subject.
 - `AWS_DEPLOY_ROLE_ARN` exists in the selected environment.
-- The role trust references this repository and the correct branch or tag pattern.
-- Issue #236 infrastructure has been merged and applied.
+- The role trust references this repository and the correct branch or environment.
+- OIDC IAM role has been created and applied (see issue #236).
 
 ### Helm Timeout
 
@@ -151,10 +136,10 @@ Symptoms:
 Check:
 
 ```bash
-helm history statuslist -n <namespace>
-kubectl get pods -n <namespace>
-kubectl describe pod -l app.kubernetes.io/name=status-list-server -n <namespace>
-kubectl logs -l app.kubernetes.io/name=status-list-server -n <namespace> --tail=200
+helm history statuslist -n statuslist-production
+kubectl get pods -n statuslist-production
+kubectl describe pod -l app.kubernetes.io/name=status-list-server -n statuslist-production
+kubectl logs -l app.kubernetes.io/name=status-list-server -n statuslist-production --tail=200
 ```
 
 ### Image Pull Failure
@@ -165,9 +150,7 @@ Symptoms:
 
 Check:
 
-- The workflow pushed the expected GHCR tag.
-- Staging uses `sha-<short_sha>`.
-- Production uses the semver tag without the leading `v`.
+- The workflow pushed the expected GHCR tag with the semver format.
 - The cluster can pull from GHCR.
 
 ### Readiness Failure
@@ -184,44 +167,7 @@ Check:
 - ExternalSecret and SecretStore status.
 - Application configuration injected through Helm values.
 
-### AWS Credential or Certificate Access Failure
+## External Dependencies
 
-Symptoms:
-
-- The app starts but fails S3, Secrets Manager, Route53, or certificate operations.
-- Logs mention missing AWS credentials or permission denied.
-
-Check:
-
-- The chart mounts credentials at `/home/nobody/.aws`.
-- The pod runs as the configured non-root user.
-- The mounted secret contains the expected files.
-- The IAM permissions behind the credentials cover the configured AWS operations.
-
-## Deferred / External Prerequisites
-
-The following work is intentionally not implemented by issue #248.
-
-### TODO: Issue #236 - OIDC IAM Role and Environment Setup
-
-Owner: issue #236.
-
-Issue #248 depends on this work. The deploy workflow expects environment-scoped `AWS_DEPLOY_ROLE_ARN` secrets and IAM roles that trust GitHub OIDC subjects for `staging` and `production`.
-
-If this is missing, deploy jobs fail during `configure-aws-credentials` or `aws eks update-kubeconfig`.
-
-### TODO: Issue #239 - Helm Chart Hardening
-
-Owner: issue #239.
-
-Issue #248 depends on the chart hardening remaining present on the target branch. The chart must include production-ready probes, resource requests and limits, network policy, non-root security context, and the non-root-compatible AWS credential mount.
-
-If this is missing, deployments may fail security checks, fail readiness, or start pods that cannot read AWS credentials.
-
-### TODO: Issue #247 - Release-plz Tag Behavior
-
-Owner: issue #247.
-
-Issue #248 depends on release tags being created correctly. Production deploys only run for tags matching `v*.*.*`, and the workflow deploys the matching semver image tag without the leading `v`.
-
-If this is missing, production deploys will not start automatically after a release, or the workflow may not find the expected image tag.
+- **Issue #236**: OIDC IAM role and GitHub environment setup must be completed before first deploy.
+- **Issue #239**: Chart hardening (IRSA migration of cert-manager/Route53 credentials) is pending.
