@@ -164,13 +164,104 @@ impl TestInfra {
 }
 
 #[cfg(feature = "vault")]
-fn build_vault_storage(vault_port: u16) -> VaultClient {
+async fn setup_vault_approle(vault_port: u16) -> (String, SecretString) {
     let vault_url = format!("http://127.0.0.1:{vault_port}");
-    VaultClient::builder(vault_url, SecretString::from("root".to_string()))
+    let client = reqwest::Client::new();
+
+    // Enable approle auth engine
+    let resp = client
+        .post(format!("{vault_url}/v1/sys/auth/approle"))
+        .header("X-Vault-Token", "root")
+        .json(&serde_json::json!({
+            "type": "approle"
+        }))
+        .send()
+        .await
+        .expect("Failed to enable AppRole auth engine");
+    assert!(
+        resp.status().is_success() || resp.status() == reqwest::StatusCode::BAD_REQUEST,
+        "unexpected status enabling approle: {}",
+        resp.status()
+    );
+
+    // Create a policy granting full access to secrets
+    let resp = client
+        .put(format!("{vault_url}/v1/sys/policy/test-policy"))
+        .header("X-Vault-Token", "root")
+        .json(&serde_json::json!({
+            "policy": "path \"*\" { capabilities = [\"create\", \"read\", \"update\", \"delete\", \"list\"] }"
+        }))
+        .send()
+        .await
+        .expect("Failed to create test-policy");
+    assert!(
+        resp.status().is_success(),
+        "failed to create test-policy: {}",
+        resp.status()
+    );
+
+    // Create a role with test-policy
+    let resp = client
+        .post(format!("{vault_url}/v1/auth/approle/role/status-list-role"))
+        .header("X-Vault-Token", "root")
+        .json(&serde_json::json!({
+            "token_policies": ["test-policy"],
+            "token_ttl": "1h",
+            "token_max_ttl": "4h"
+        }))
+        .send()
+        .await
+        .expect("Failed to create AppRole");
+    assert!(resp.status().is_success());
+
+    // Read role-id
+    let resp = client
+        .get(format!(
+            "{vault_url}/v1/auth/approle/role/status-list-role/role-id"
+        ))
+        .header("X-Vault-Token", "root")
+        .send()
+        .await
+        .expect("Failed to get role-id");
+    let role_data: serde_json::Value = resp.json().await.expect("Failed to parse role-id response");
+    let role_id = role_data["data"]["role_id"].as_str().unwrap().to_string();
+
+    // Generate secret-id
+    let resp = client
+        .post(format!(
+            "{vault_url}/v1/auth/approle/role/status-list-role/secret-id"
+        ))
+        .header("X-Vault-Token", "root")
+        .send()
+        .await
+        .expect("Failed to generate secret-id");
+    let secret_data: serde_json::Value = resp
+        .json()
+        .await
+        .expect("Failed to parse secret-id response");
+    let secret_id = SecretString::from(
+        secret_data["data"]["secret_id"]
+            .as_str()
+            .unwrap()
+            .to_string(),
+    );
+
+    (role_id, secret_id)
+}
+
+#[cfg(feature = "vault")]
+async fn build_vault_storage(
+    vault_port: u16,
+    role_id: String,
+    secret_id: SecretString,
+) -> VaultClient {
+    let vault_url = format!("http://127.0.0.1:{vault_port}");
+    VaultClient::builder(vault_url, role_id, secret_id)
         .mount("secret")
         .path_prefix("status-list")
         .secrets_cache_ttl(Duration::ZERO)
         .build()
+        .await
         .expect("Failed to build VaultClient")
 }
 
@@ -285,7 +376,8 @@ async fn test_cert_provisioning_with_hashicorp_vault() {
         .expect("Failed to start HashicorpVault container");
     let vault_port = _vault_container.get_host_port_ipv4(8200).await.unwrap();
 
-    let material_storage = build_vault_storage(vault_port);
+    let (role_id, secret_id) = setup_vault_approle(vault_port).await;
+    let secrets_storage = build_vault_storage(vault_port, role_id.clone(), secret_id.clone()).await;
     let cert_manager = infra
         .build_cert_manager("vault.example.com", material_storage)
         .await;
@@ -305,8 +397,8 @@ async fn test_cert_provisioning_with_hashicorp_vault() {
     assert!(cert_data.valid_from < cert_data.expires_at);
     assert!(cert_data.updated_at > 0);
 
-    // Verify certificate and signing key were stored in Vault through one material backend.
-    let vault_reader = build_vault_storage(vault_port);
+    // Verify certificate and signing key were stored in Vault.
+    let vault_reader = build_vault_storage(vault_port, role_id, secret_id).await;
     let certificate = Storage::load(&vault_reader, "certs-example.com-cert_data.json")
         .await
         .expect("Failed to load certificate data from Vault");
@@ -350,7 +442,9 @@ async fn test_cert_provisioning_with_openbao() {
         .expect("Failed to start OpenBao container");
     let openbao_port = _openbao_container.get_host_port_ipv4(8200).await.unwrap();
 
-    let material_storage = build_vault_storage(openbao_port);
+    let (role_id, secret_id) = setup_vault_approle(openbao_port).await;
+    let material_storage =
+        build_vault_storage(openbao_port, role_id.clone(), secret_id.clone()).await;
     let cert_manager = infra
         .build_cert_manager("openbao.example.com", material_storage)
         .await;
@@ -370,8 +464,8 @@ async fn test_cert_provisioning_with_openbao() {
     assert!(cert_data.valid_from < cert_data.expires_at);
     assert!(cert_data.updated_at > 0);
 
-    // Verify certificate and signing key were stored in OpenBao through one material backend.
-    let openbao_reader = build_vault_storage(openbao_port);
+    // Verify certificate and signing key were stored in OpenBao.
+    let openbao_reader = build_vault_storage(openbao_port, role_id, secret_id).await;
     let certificate = Storage::load(&openbao_reader, "certs-example.com-cert_data.json")
         .await
         .expect("Failed to load certificate data from OpenBao");
