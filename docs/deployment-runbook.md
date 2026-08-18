@@ -15,9 +15,9 @@ Every workflow run first executes the reusable CI workflow, builds and pushes a 
 
 ### Image Tags
 
-| Trigger | Image Tags |
-|---------|------------|
-| Push to `main` | `sha-<short_sha>` |
+| Trigger              | Image Tags                                                  |
+|----------------------|-------------------------------------------------------------|
+| Push to `main`       | `sha-<short_sha>`                                           |
 | Release tag `v*.*.*` | `<major>.<minor>`, `<version>`, `sha-<short_sha>`, `latest` |
 
 The `latest` tag is only applied to official release tags, not to intermediate commits from `main`. This follows standard OCI/Docker distribution conventions where `latest` represents the latest stable release.
@@ -64,7 +64,7 @@ The deploy job requires:
 
 Recommended OIDC trust subject for production:
 
-```
+```text
 repo:adorsys/status-list-server:environment:production
 ```
 
