@@ -303,6 +303,21 @@ impl Storage for GcpSecretManagerClient {
             ))),
         }
     }
+
+    /// Verify the GCP Secret Manager API is reachable without touching any real
+    /// secret, by requesting metadata for a secret name that is expected
+    /// not to exist.
+    async fn reachable(&self) -> Result<(), StorageError> {
+        let secret_name = self.secret_name("__health_probe_test__");
+
+        match self.client.get_secret().set_name(secret_name).send().await {
+            Ok(_) => Ok(()),
+            Err(err) if err.http_status_code() == Some(404) => Ok(()),
+            Err(err) => Err(StorageError::Backend(eyre!(
+                "GCP Secret Manager readiness check failed: {err}"
+            ))),
+        }
+    }
 }
 
 impl From<google_cloud_secretmanager_v1::Error> for StorageError {

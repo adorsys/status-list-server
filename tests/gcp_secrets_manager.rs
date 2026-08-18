@@ -120,3 +120,14 @@ async fn test_gcp_secret_manager_cache_behavior() {
     let second_load = client.load(secret_key).await.expect("Failed second load");
     assert_eq!(second_load.as_deref(), Some(secret_value));
 }
+
+#[tokio::test]
+async fn test_gcp_secret_manager_reachable() {
+    let (_container, client) = start_emulator(Duration::ZERO).await;
+
+    let reachable_result = client.reachable().await;
+    assert!(
+        reachable_result.is_ok(),
+        "Client should be reachable via emulator: {reachable_result:?}"
+    );
+}
