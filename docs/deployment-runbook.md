@@ -88,7 +88,7 @@ kubectl get pods -n statuslist-production
 kubectl describe pod -l app.kubernetes.io/name=status-list-server -n statuslist-production
 ```
 
-If certificate provisioning or AWS-backed storage is enabled, also confirm the app can reach AWS services by checking application logs for successful S3, Secrets Manager, or certificate renewal operations.
+If certificate provisioning or AWS-backed storage is enabled, also confirm the app can reach AWS services by checking application logs for successful Secrets Manager or certificate renewal operations.
 
 ## Rollback
 
@@ -171,3 +171,32 @@ Check:
 
 - **Issue #236**: OIDC IAM role and GitHub environment setup must be completed before first deploy.
 - **Issue #239**: Chart hardening (IRSA migration of cert-manager/Route53 credentials) is pending.
+
+## Redis Removal Cleanup (breaking change)
+
+This chart no longer deploys the Redis HA subchart (`redis-ha`), its application
+env vars, its NetworkPolicy rules, or its TLS-sync CronJob. If a previous release
+was deployed with `redis-ha.enabled=true`, the removal of the subchart **orphans**
+Kubernetes resources that Helm does not delete. Clean these up as an ops action
+item before/after the first deploy that carries this chart:
+
+1. **`statuslist-haproxy-tls` secret** — this secret holds the TLS key (`redis.pem`)
+   for the Redis HAProxy load balancer, including the **production wildcard private
+   key**. Because it may contain the production private key, treat it as sensitive
+   and verify it is no longer referenced by any live HAProxy before deleting. Delete
+   it only after confirming no running Redis HAProxy service depends on it:
+   ```bash
+   kubectl delete secret statuslist-haproxy-tls -n statuslist-production
+   ```
+2. **Oracle-HA persistent volume claims** — the Redis HA subchart provisions PVCs
+   (e.g. `status-list-server-redis-ha-pvc-*` / release-scoped claims). These retain
+   any persisted Redis data and storage. Delete the claims (and, if you no longer
+   need the data, the underlying PVs / storage volumes):
+   ```bash
+   kubectl get pvc -n statuslist-production | grep redis
+   kubectl delete pvc -l release=statuslist,app=redis-ha -n statuslist-production
+   ```
+   Confirm the backing volumes are released before removing them to avoid data loss.
+
+There is no code change required for this cleanup; it is purely an operational step
+that must be performed once when adopting this chart version.
