@@ -41,15 +41,6 @@ services:
     networks:
       - status-list-network
 
-  redis:
-    image: redis:8.6
-    container_name: redis
-    profiles: ["redis"]
-    ports:
-      - 6379:6379
-    networks:
-      - status-list-network
-
   localstack:
     container_name: localstack
     image: localstack/localstack:4.14
@@ -109,7 +100,6 @@ services:
       APP_TELEMETRY__OTLP_ENDPOINT: "http://otel-collector:4317"
       APP_TELEMETRY__ENABLED: ${APP_TELEMETRY__ENABLED:-true}
       APP_TELEMETRY__SAMPLER_RATIO: ${APP_TELEMETRY__SAMPLER_RATIO:-1.0}
-      APP_REDIS__URI: ${APP_REDIS__URI:-}
     ports:
       - 8000:8000
     depends_on:
