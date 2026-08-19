@@ -47,7 +47,7 @@ services:
     ports:
       - 4566:4566
     environment:
-      - SERVICES=s3,secretsmanager
+      - SERVICES=secretsmanager
     healthcheck:
       test: ["CMD-SHELL", "curl -f http://localhost:4566/"]
       interval: 5s
@@ -93,7 +93,6 @@ services:
     environment:
       APP_ENV: ${APP_ENV:-development}
       APP_SERVER__ENABLE_METRICS: ${APP_SERVER__ENABLE_METRICS:-true}
-      APP_AWS__S3_BUCKET: ${APP_AWS__S3_BUCKET:-status-list-adorsys}
       APP_STATUS_LIST__TOKEN_EXP_SECS: ${APP_STATUS_LIST__TOKEN_EXP_SECS:-900}
       APP_STATUS_LIST__TOKEN_TTL_SECS: ${APP_STATUS_LIST__TOKEN_TTL_SECS:-300}
       APP_TELEMETRY__ENVIRONMENT: ${APP_TELEMETRY__ENVIRONMENT:-development}

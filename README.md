@@ -143,7 +143,6 @@ The following constraints are validated at startup and will cause the server to 
 
 - `server.port` must be between 1 and 65535 (the `u16` type enforces the upper bound)
 - `server.cert.renewal_cron_schedule` must be a valid 6-field cron expression (seconds required)
-- `aws.s3_bucket` must not be empty
 
 ## Security
 
