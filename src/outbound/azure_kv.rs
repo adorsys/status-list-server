@@ -6,10 +6,8 @@ use std::time::Duration;
 use async_trait::async_trait;
 use azure_core::credentials::{Secret as AzureSecret, TokenCredential};
 use azure_core::http::{HttpClient, StatusCode};
-use azure_identity::{
-    ClientSecretCredential, DeveloperToolsCredential, ManagedIdentityCredential,
-    WorkloadIdentityCredential,
-};
+use azure_identity::ClientSecretCredential;
+pub use azure_identity_helpers::default_azure_credential::DefaultAzureCredential;
 use azure_security_keyvault_secrets::SecretClient;
 use azure_security_keyvault_secrets::models::SetSecretParameters;
 use color_eyre::eyre::eyre;
@@ -53,9 +51,9 @@ pub struct AzureKeyVaultClientBuilder {
     client_id: Option<String>,
     client_secret: Option<SecretString>,
     custom_credential: Option<Arc<dyn TokenCredential>>,
-    http_client: Option<Arc<dyn HttpClient>>,
-    verify_challenge_resource: Option<bool>,
+    verify_challenge_resource: bool,
     secrets_cache_ttl: Duration,
+    http_client: Option<Arc<dyn HttpClient>>,
 }
 
 impl std::fmt::Debug for AzureKeyVaultClientBuilder {
@@ -86,7 +84,7 @@ impl std::fmt::Debug for AzureKeyVaultClientBuilder {
 }
 
 impl AzureKeyVaultClientBuilder {
-    /// Create a new [`AzureKeyVaultClientBuilder`] with the Vault URL.
+    /// Create a new [`AzureKeyVaultClientBuilder`] with the vault URL.
     pub fn new(vault_url: Url) -> Self {
         Self {
             vault_url,
@@ -94,37 +92,34 @@ impl AzureKeyVaultClientBuilder {
             client_id: None,
             client_secret: None,
             custom_credential: None,
-            http_client: None,
-            verify_challenge_resource: None,
+            verify_challenge_resource: true,
             secrets_cache_ttl: Duration::from_secs(300),
+            http_client: None,
         }
     }
 
     /// Set explicit service principal credentials.
     pub fn service_principal(
         mut self,
-        tenant_id: Option<impl Into<String>>,
-        client_id: Option<impl Into<String>>,
+        tenant_id: Option<&str>,
+        client_id: Option<&str>,
         client_secret: Option<SecretString>,
     ) -> Self {
-        self.tenant_id = tenant_id.map(Into::into);
-        self.client_id = client_id.map(Into::into);
+        self.tenant_id = tenant_id.map(String::from);
+        self.client_id = client_id.map(String::from);
         self.client_secret = client_secret;
         self
     }
 
-    /// Set a custom [`TokenCredential`] (e.g. for custom auth).
+    /// Provide a custom [`TokenCredential`].
     pub fn credential(mut self, credential: Arc<dyn TokenCredential>) -> Self {
         self.custom_credential = Some(credential);
         self
     }
 
-    /// Set whether to verify the challenge resource on authentication.
-    ///
-    /// Defaults to `None` (which leaves the Azure SDK's secure default of `Some(true)` enabled in production).
-    /// Set to `false` only in tests or emulator environments where challenge URLs differ.
+    /// Configure whether to verify the challenge resource matches the vault URL.
     pub fn verify_challenge_resource(mut self, verify: bool) -> Self {
-        self.verify_challenge_resource = Some(verify);
+        self.verify_challenge_resource = verify;
         self
     }
 
@@ -136,7 +131,7 @@ impl AzureKeyVaultClientBuilder {
         self
     }
 
-    /// Set a custom [`HttpClient`] transport (e.g. for testing over HTTP).
+    /// Provide a custom HTTP client for testing or specific transport configurations.
     ///
     /// This replaces the default HTTP transport used by the Azure SDK client.
     pub fn http_client(mut self, http_client: Arc<dyn HttpClient>) -> Self {
@@ -160,22 +155,14 @@ impl AzureKeyVaultClientBuilder {
             .map_err(|e| {
                 StorageError::Backend(eyre!("failed to create Azure ClientSecretCredential: {e}"))
             })?
-        } else if let Ok(cred) = WorkloadIdentityCredential::new(None) {
-            cred as Arc<dyn TokenCredential>
-        } else if let Ok(cred) = ManagedIdentityCredential::new(None) {
-            cred as Arc<dyn TokenCredential>
         } else {
-            DeveloperToolsCredential::new(None)
-                .map(|cred| cred as Arc<dyn TokenCredential>)
-                .map_err(|e| {
-                    StorageError::Backend(eyre!(
-                        "failed to create Azure credential (tried WorkloadIdentity, ManagedIdentity, DeveloperTools): {e}"
-                    ))
-                })?
+            DefaultAzureCredential::new().map_err(|e| {
+                StorageError::Backend(eyre!("failed to create DefaultAzureCredential: {e}"))
+            })?
         };
 
         let mut options = azure_security_keyvault_secrets::SecretClientOptions {
-            verify_challenge_resource: self.verify_challenge_resource,
+            verify_challenge_resource: Some(self.verify_challenge_resource),
             ..Default::default()
         };
 
@@ -212,16 +199,43 @@ impl Storage for AzureKeyVaultClient {
             ..Default::default()
         };
 
-        self.client
+        let set_res = self
+            .client
             .set_secret(
                 &secret_name,
-                parameters.try_into().map_err(|e| {
+                parameters.clone().try_into().map_err(|e| {
                     StorageError::Backend(eyre!("failed to serialize Azure secret parameters: {e}"))
                 })?,
                 None,
             )
-            .await
-            .map_err(|e| StorageError::Backend(eyre!("failed to set Azure secret '{key}': {e}")))?;
+            .await;
+
+        match set_res {
+            Ok(_) => {}
+            Err(err) if err.http_status() == Some(StatusCode::Conflict) => {
+                // If the secret is in soft-deleted state, recover it and retry setting the secret
+                let _ = self.client.recover_deleted_secret(&secret_name, None).await;
+                self.client
+                    .set_secret(
+                        &secret_name,
+                        parameters.try_into().map_err(|e| {
+                            StorageError::Backend(eyre!(
+                                "failed to serialize Azure secret parameters: {e}"
+                            ))
+                        })?,
+                        None,
+                    )
+                    .await
+                    .map_err(|e| {
+                        StorageError::Backend(eyre!("failed to set Azure secret '{key}': {e}"))
+                    })?;
+            }
+            Err(e) => {
+                return Err(StorageError::Backend(eyre!(
+                    "failed to set Azure secret '{key}': {e}"
+                )));
+            }
+        }
 
         if let Some(cache) = &self.cache {
             cache.insert(key.to_string(), value.to_string()).await;
@@ -340,7 +354,7 @@ mod tests {
         assert_eq!(builder.tenant_id.as_deref(), Some("tenant-123"));
         assert_eq!(builder.client_id.as_deref(), Some("client-456"));
         assert!(builder.client_secret.is_some());
-        assert_eq!(builder.verify_challenge_resource, Some(false));
+        assert!(!builder.verify_challenge_resource);
         assert_eq!(builder.secrets_cache_ttl, Duration::from_secs(600));
 
         let debug_repr = format!("{builder:?}");

@@ -13,7 +13,13 @@ mysql = ["history", "sea-orm?/sqlx-mysql"]
 redis = ["dep:redis"]
 vault = ["acme"]
 gcp-secrets = ["acme", "dep:google-cloud-auth", "dep:google-cloud-secretmanager-v1"]
-azure-kv = ["acme", "dep:azure_core", "dep:azure_identity", "dep:azure_security_keyvault_secrets"]
+azure-kv = [
+  "acme",
+  "dep:azure_core",
+  "dep:azure_identity",
+  "dep:azure-identity-helpers",
+  "dep:azure_security_keyvault_secrets",
+]
 aws-secrets = [
   "acme",
   "dep:aws-config",
@@ -183,6 +189,10 @@ optional = true
 
 [dependencies.azure_core]
 version = "1"
+optional = true
+
+[dependencies.azure-identity-helpers]
+version = "0.2"
 optional = true
 
 [dependencies.redis]
