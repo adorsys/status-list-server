@@ -665,9 +665,12 @@ pub struct GcpSecretManagerConfig {
     /// Path to the service account key JSON file.
     #[serde(default)]
     pub service_account_key_path: Option<String>,
-    /// Optional custom gRPC endpoint URL (e.g. for emulator testing).
+    /// Optional custom gRPC endpoint URL (e.g. for regional endpoints, VPC-SC, or emulator testing).
     #[serde(default)]
     pub endpoint: Option<String>,
+    /// Allow anonymous credentials (for local testing/emulator only).
+    #[serde(default)]
+    pub allow_anonymous_credentials: bool,
     /// Cache TTL for GCP secrets in seconds.
     /// Setting this to 0 disables caching entirely.
     pub secrets_cache_ttl: u64,
@@ -908,6 +911,7 @@ fn base_builder() -> Result<ConfigBuilder<DefaultState>, ConfigError> {
         .set_default("vault.namespace", Option::<String>::None)?
         .set_default("vault.timeout_secs", 30)?
         .set_default("gcp_secret_manager.project_id", "")?
+        .set_default("gcp_secret_manager.allow_anonymous_credentials", false)?
         .set_default("gcp_secret_manager.secrets_cache_ttl", 300)?
         .set_default("azure_keyvault.vault_url", Option::<String>::None)?
         .set_default("azure_keyvault.secrets_cache_ttl", 300)?

@@ -45,7 +45,13 @@ use crate::cert_manager::challenge::{
 };
 #[cfg(feature = "acme")]
 use crate::cert_manager::http_client::DefaultHttpClient;
-#[cfg(all(feature = "acme", not(feature = "vault"), not(feature = "aws-secrets")))]
+#[cfg(all(
+    feature = "acme",
+    not(feature = "vault"),
+    not(feature = "gcp-secrets"),
+    not(feature = "azure-kv"),
+    not(feature = "aws-secrets")
+))]
 use crate::cert_manager::storage::MemoryStorage;
 #[cfg(feature = "acme")]
 use crate::cert_manager::{
@@ -61,7 +67,12 @@ use crate::domain::{
     ports::{CertificateProvider, CredentialRepo, StatusListRepo, StatusListSnapshotRepo},
     service::Service,
 };
-#[cfg(all(feature = "aws-secrets", not(feature = "vault")))]
+#[cfg(all(
+    feature = "aws-secrets",
+    not(feature = "vault"),
+    not(feature = "gcp-secrets"),
+    not(feature = "azure-kv")
+))]
 use crate::outbound::aws::AwsSecretsManager;
 #[cfg(all(
     feature = "azure-kv",
@@ -472,6 +483,7 @@ async fn build_crypto_storage(_config: &AppConfig) -> EyeResult<Box<dyn Storage>
                         .as_deref(),
                 )
                 .endpoint(_config.gcp_secret_manager.endpoint.as_deref())
+                .allow_anonymous_credentials(_config.gcp_secret_manager.allow_anonymous_credentials)
                 .secrets_cache_ttl(Duration::from_secs(
                     _config.server.cert.signing_key_cache_ttl,
                 ))
@@ -488,8 +500,8 @@ async fn build_crypto_storage(_config: &AppConfig) -> EyeResult<Box<dyn Storage>
     {
         tracing::info!("Using Azure Key Vault as secrets backend");
         let vault_url = _config.azure_keyvault.vault_url.clone().ok_or_else(|| {
-                    eyre!("Azure Key Vault _configuration error: azure_keyvault.vault_url is required when azure-kv feature is enabled")
-                })?;
+            eyre!("Azure Key Vault configuration error: azure_keyvault.vault_url is required when azure-kv is enabled")
+        })?;
         Ok(Box::new(
             AzureKeyVaultClient::builder(vault_url)
                 .service_principal(

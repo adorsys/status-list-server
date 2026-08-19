@@ -171,6 +171,7 @@ pub struct GcpSecretManagerClientBuilder {
     service_account_key: Option<SecretString>,
     service_account_key_path: Option<String>,
     endpoint: Option<String>,
+    allow_anonymous_credentials: bool,
     secrets_cache_ttl: Duration,
 }
 
@@ -182,6 +183,7 @@ impl GcpSecretManagerClientBuilder {
             service_account_key: None,
             service_account_key_path: None,
             endpoint: None,
+            allow_anonymous_credentials: false,
             secrets_cache_ttl: Duration::from_secs(300),
         }
     }
@@ -198,9 +200,15 @@ impl GcpSecretManagerClientBuilder {
         self
     }
 
-    /// Set a custom endpoint URL (e.g. for emulator testing).
+    /// Set a custom endpoint URL (e.g. for regional endpoints, VPC-SC, or emulator testing).
     pub fn endpoint(mut self, endpoint: Option<impl Into<String>>) -> Self {
         self.endpoint = endpoint.map(Into::into);
+        self
+    }
+
+    /// Set whether to allow anonymous credentials (for local emulator testing only).
+    pub fn allow_anonymous_credentials(mut self, allow: bool) -> Self {
+        self.allow_anonymous_credentials = allow;
         self
     }
 
@@ -222,11 +230,13 @@ impl GcpSecretManagerClientBuilder {
 
         let mut builder = SecretManagerService::builder();
         if let Some(endpoint) = &self.endpoint {
-            builder = builder.with_endpoint(endpoint).with_credentials(
+            builder = builder.with_endpoint(endpoint);
+        }
+        if self.allow_anonymous_credentials {
+            builder = builder.with_credentials(
                 google_cloud_auth::credentials::anonymous::Builder::new().build(),
             );
-        }
-        if let Some(key_secret) = &self.service_account_key {
+        } else if let Some(key_secret) = &self.service_account_key {
             let key_json: serde_json::Value = serde_json::from_str(key_secret.expose_secret())?;
             let creds = service_account::Builder::new(key_json).build()?;
             builder = builder.with_credentials(creds);

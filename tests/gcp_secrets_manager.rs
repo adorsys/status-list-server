@@ -39,6 +39,7 @@ async fn start_emulator(
 
     let client = GcpSecretManagerClient::builder(TEST_PROJECT_ID)
         .endpoint(Some(&endpoint))
+        .allow_anonymous_credentials(true)
         .secrets_cache_ttl(cache_ttl)
         .build()
         .await
