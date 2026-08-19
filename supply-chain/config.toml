@@ -1451,10 +1451,6 @@ criteria = "safe-to-deploy"
 version = "0.14.9"
 criteria = "safe-to-deploy"
 
-[[exemptions.redis]]
-version = "1.5.0"
-criteria = "safe-to-deploy"
-
 [[exemptions.redox_syscall]]
 version = "0.5.18"
 criteria = "safe-to-deploy"
