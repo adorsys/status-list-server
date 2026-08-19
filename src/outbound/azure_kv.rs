@@ -286,7 +286,9 @@ impl Storage for AzureKeyVaultClient {
                     .recover_deleted_secret(&secret_name, None)
                     .await
                     .map_err(|e| {
-                        warn!("Failed to initiate recovery for soft-deleted Azure secret '{key}': {e}");
+                        warn!(
+                            "Failed to initiate recovery for soft-deleted Azure secret '{key}': {e}"
+                        );
                         StorageError::Backend(eyre!(
                             "failed to initiate recovery of soft-deleted Azure secret '{key}': {e}"
                         ))
