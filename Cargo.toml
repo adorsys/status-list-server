@@ -12,7 +12,8 @@ sqlite = ["history", "sea-orm?/sqlx-sqlite"]
 mysql = ["history", "sea-orm?/sqlx-mysql"]
 redis = ["dep:redis"]
 vault = ["acme"]
-aws = [
+aws-secrets = [
+  "acme",
   "dep:aws-config",
   "dep:aws-sdk-route53",
   "dep:aws-sdk-s3",

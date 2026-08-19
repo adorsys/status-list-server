@@ -70,10 +70,10 @@ SET GLOBAL binlog_format = 'ROW';  -- then restart the server
 
 ## Compose Profiles
 
-`docker compose up` starts PostgreSQL by default and builds the container with `postgres,aws,acme` features enabled. To run the MySQL service instead:
+`docker compose up` starts PostgreSQL by default and builds the container with `postgres,aws-secrets,acme` features enabled. To run the MySQL service instead:
 
 ```bash
-FEATURES="mysql,aws,acme" docker compose --profile mysql up --build
+FEATURES="mysql,aws-secrets,acme" docker compose --profile mysql up --build
 ```
 
 There is no separate MariaDB service because MariaDB uses the same MySQL-driver path (`mysql://` URL). Connect to a MariaDB host by pointing `APP_DATABASE__URL` at your MariaDB instance on port 3306 (the default) and setting `APP_DATABASE__BACKEND=mysql`.
@@ -86,6 +86,6 @@ There is no separate MariaDB service because MariaDB uses the same MySQL-driver 
 
 ## Redis Is Not A Database Backend
 
-Redis is not used for status-list persistence or for the status-list read path. Reads use the configured database/repository plus the in-process Moka cache. The optional `redis` feature provides a distributed certificate-material cache for the AWS S3 certificate storage path when `APP_REDIS__URI` is set.
+Redis is not used for status-list persistence or for the status-list read path. Reads use the configured database/repository plus the in-process Moka cache. Certificate and signing-key material are managed together by the feature-selected cryptographic-material backend; prefer the built-in material read-cache TTLs before adding another service.
 
-Use Redis when multiple application replicas should share cached certificate material and reducing backend object-storage reads is worth the added Redis credentials, TLS, HA, and monitoring work. Leave it disabled for local, single-replica, and simple deployments.
+Keep Redis disabled for local, single-replica, and simple deployments. Enable it only for explicit adapter-level integrations that still require Redis and where the added credentials, TLS, HA, and monitoring work is justified.

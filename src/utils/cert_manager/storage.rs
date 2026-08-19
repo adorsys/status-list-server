@@ -1,7 +1,9 @@
 use async_trait::async_trait;
 use color_eyre::eyre::Error as Report;
+use moka::future::Cache;
 #[cfg(feature = "redis")]
 use redis::RedisError;
+use std::time::Duration;
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -90,4 +92,157 @@ impl Storage for MemoryStorage {
         self.values.write().await.remove(key);
         Ok(())
     }
+}
+
+/// Cache policy for server cryptographic material.
+///
+/// Certificate material is always cached until explicit invalidation during
+/// provisioning or renewal. Private-key material remains policy-controlled so
+/// deployments can force each private-key read to hit the backing secrets system.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CryptoCachePolicy {
+    pub signing_key_ttl: Duration,
+}
+
+impl CryptoCachePolicy {
+    pub const NO_PRIVATE_KEY_CACHE: Self = Self {
+        signing_key_ttl: Duration::ZERO,
+    };
+
+    pub fn new(signing_key_ttl: Duration) -> Self {
+        Self { signing_key_ttl }
+    }
+}
+
+impl Default for CryptoCachePolicy {
+    fn default() -> Self {
+        Self::NO_PRIVATE_KEY_CACHE
+    }
+}
+
+/// Consolidated storage backend for the server certificate chain, signing key,
+/// and adjacent ACME account material.
+pub struct CryptoStorage {
+    backend: Box<dyn Storage>,
+    certificate_cache: Cache<String, String>,
+    signing_key_cache: Option<Cache<String, String>>,
+}
+
+impl CryptoStorage {
+    const CERT_CACHE_CAPACITY: u64 = 1;
+    const KEY_CACHE_CAPACITY: u64 = 1;
+
+    pub fn new(backend: impl Storage + 'static) -> Self {
+        Self::with_cache_policy(backend, CryptoCachePolicy::default())
+    }
+
+    pub fn with_cache_policy(backend: impl Storage + 'static, policy: CryptoCachePolicy) -> Self {
+        let certificate_cache = Cache::builder()
+            .max_capacity(CryptoStorage::CERT_CACHE_CAPACITY)
+            .build();
+        let signing_key_cache = cache_for_ttl(policy.signing_key_ttl);
+        if policy.signing_key_ttl.is_zero() {
+            tracing::info!("server signing-key material cache disabled");
+        }
+        Self {
+            backend: Box::new(backend),
+            certificate_cache,
+            signing_key_cache,
+        }
+    }
+
+    pub async fn store_certificate_data(&self, key: &str, value: &str) -> Result<(), StorageError> {
+        self.backend.store(key, value).await?;
+        self.certificate_cache
+            .insert(key.to_string(), value.to_string())
+            .await;
+        Ok(())
+    }
+
+    pub async fn update_certificate_data(
+        &self,
+        key: &str,
+        value: &str,
+    ) -> Result<(), StorageError> {
+        self.backend.update(key, value).await?;
+        self.certificate_cache
+            .insert(key.to_string(), value.to_string())
+            .await;
+        Ok(())
+    }
+
+    pub async fn load_certificate_data(&self, key: &str) -> Result<Option<String>, StorageError> {
+        self.load_with_cache(key, Some(&self.certificate_cache))
+            .await
+    }
+
+    pub async fn store_signing_key(&self, key: &str, value: &str) -> Result<(), StorageError> {
+        self.backend.store(key, value).await?;
+        if let Some(cache) = &self.signing_key_cache {
+            cache.insert(key.to_string(), value.to_string()).await;
+        }
+        Ok(())
+    }
+
+    pub async fn load_signing_key(&self, key: &str) -> Result<Option<String>, StorageError> {
+        self.load_with_cache(key, self.signing_key_cache.as_ref())
+            .await
+    }
+
+    pub async fn update_signing_key(&self, key: &str, value: &str) -> Result<(), StorageError> {
+        self.backend.update(key, value).await?;
+        if let Some(cache) = &self.signing_key_cache {
+            cache.insert(key.to_string(), value.to_string()).await;
+        }
+        Ok(())
+    }
+
+    pub async fn load_secret(&self, key: &str) -> Result<Option<String>, StorageError> {
+        self.backend.load(key).await
+    }
+
+    pub async fn store_secret(&self, key: &str, value: &str) -> Result<(), StorageError> {
+        self.backend.store(key, value).await
+    }
+
+    pub async fn delete_secret(&self, key: &str) -> Result<(), StorageError> {
+        self.backend.delete(key).await
+    }
+
+    pub async fn invalidate_signing_key(&self, signing_key_key: &str) -> Result<(), StorageError> {
+        if let Some(cache) = &self.signing_key_cache {
+            cache.invalidate(signing_key_key).await;
+        }
+        Ok(())
+    }
+
+    pub async fn reachable(&self) -> Result<(), StorageError> {
+        self.backend.reachable().await
+    }
+
+    async fn load_with_cache(
+        &self,
+        key: &str,
+        cache: Option<&Cache<String, String>>,
+    ) -> Result<Option<String>, StorageError> {
+        if let Some(cache) = cache
+            && let Some(value) = cache.get(key).await
+        {
+            return Ok(Some(value));
+        }
+        let loaded = self.backend.load(key).await?;
+        if let (Some(cache), Some(value)) = (cache, loaded.as_ref()) {
+            cache.insert(key.to_string(), value.clone()).await;
+        }
+        Ok(loaded)
+    }
+}
+
+fn cache_for_ttl(ttl: Duration) -> Option<Cache<String, String>> {
+    (!ttl.is_zero()).then(|| {
+        Cache::builder()
+            .max_capacity(CryptoStorage::KEY_CACHE_CAPACITY)
+            .time_to_live(ttl)
+            .build()
+    })
 }

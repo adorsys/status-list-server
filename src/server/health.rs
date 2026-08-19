@@ -229,21 +229,14 @@ impl ReadinessCheck for CertStoreCheck {
     }
 
     async fn check(&self) -> Result<(), String> {
-        let cert_store = self
+        let crypto_store = self
             .manager
-            .cert_storage()
-            .map_err(|e| format!("cert storage not configured: {e}"))?;
-        crate::cert_manager::storage::Storage::reachable(cert_store)
+            .crypto_storage()
+            .map_err(|e| format!("cryptographic-material backend not configured: {e}"))?;
+        crypto_store
+            .reachable()
             .await
-            .map_err(|e| format!("cert store unreachable: {e}"))?;
-
-        let secrets_store = self
-            .manager
-            .secrets_storage()
-            .map_err(|e| format!("secrets storage not configured: {e}"))?;
-        crate::cert_manager::storage::Storage::reachable(secrets_store)
-            .await
-            .map_err(|e| format!("secrets store unreachable: {e}"))
+            .map_err(|e| format!("cryptographic-material backend unreachable: {e}"))
     }
 }
 
@@ -500,10 +493,6 @@ mod tests {
 
     #[cfg(feature = "acme")]
     impl ReachabilityStorage {
-        fn reachable() -> Self {
-            Self { reachable: true }
-        }
-
         fn unreachable() -> Self {
             Self { reachable: false }
         }
@@ -535,7 +524,7 @@ mod tests {
 
     #[cfg(feature = "acme")]
     #[tokio::test]
-    async fn ready_fails_when_cert_storage_is_reachable_but_secrets_storage_is_not() {
+    async fn ready_fails_when_crypto_material_backend_is_unreachable() {
         init_crypto();
 
         let manager = CertManager::new(
@@ -545,8 +534,7 @@ mod tests {
             "https://acme.example.com/directory",
         )
         .expect("build cert manager")
-        .with_cert_storage(ReachabilityStorage::reachable())
-        .with_secrets_storage(ReachabilityStorage::unreachable());
+        .with_crypto_storage(ReachabilityStorage::unreachable());
 
         let state =
             app_state_with_checks(vec![Arc::new(CertStoreCheck::new(Arc::new(manager)))]).await;
