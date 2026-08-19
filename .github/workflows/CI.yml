@@ -75,6 +75,17 @@ jobs:
             exit 1
           fi
 
+  docker-build:
+    name: Docker Build Smoke
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Fetch Repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Docker build (production features)
+        run: docker build --build-arg FEATURES=postgres,aws-secrets,acme .
+
   cargo-clippy:
     name: Cargo Clippy Check
     runs-on: ubuntu-latest
