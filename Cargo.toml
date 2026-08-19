@@ -14,7 +14,8 @@ redis = ["dep:redis"]
 vault = ["acme"]
 gcp-secrets = ["acme", "dep:google-cloud-auth", "dep:google-cloud-secretmanager-v1"]
 azure-kv = ["acme", "dep:azure_core", "dep:azure_identity", "dep:azure_security_keyvault_secrets"]
-aws = [
+aws-secrets = [
+  "acme",
   "dep:aws-config",
   "dep:aws-sdk-route53",
   "dep:aws-sdk-s3",

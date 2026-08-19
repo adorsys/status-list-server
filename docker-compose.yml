@@ -92,7 +92,7 @@ services:
       context: .
       dockerfile: Dockerfile
       args:
-        FEATURES: ${FEATURES:-postgres,aws,acme}
+        FEATURES: ${FEATURES:-postgres,aws-secrets,acme}
     container_name: status-list-server
     env_file:
       - path: .env.template

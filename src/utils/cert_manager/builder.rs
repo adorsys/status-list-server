@@ -1,13 +1,13 @@
-use std::sync::Arc;
-use std::time::Duration;
-
 use instant_acme::{Account, HttpClient};
+use std::sync::Arc;
 use tokio::sync::Mutex;
 
 use super::{
     AcmeProvisioningStrategy, CertError, CertManager, CertManagerMetrics, CertProvisioningStrategy,
-    DEFAULT_CHAIN_CACHE_TTL, RenewalStrategy, StoreProvisioningStrategy,
-    challenge::ChallengeHandler, http_client::DefaultHttpClient, storage::Storage,
+    RenewalStrategy, StoreProvisioningStrategy,
+    challenge::ChallengeHandler,
+    http_client::DefaultHttpClient,
+    storage::{CryptoCachePolicy, CryptoStorage, Storage},
 };
 use crate::utils::cache::CertChainCache;
 
@@ -23,12 +23,11 @@ type ACMEHttpClientFactory = Box<dyn Fn() -> Box<dyn HttpClient> + Send + Sync>;
 /// - organization: none
 /// - EKU: none
 /// - ACME directory URL: empty string, but required when ACME is selected
-/// - storage backends, domains, and ACME challenge handler: not set
+/// - cryptographic material backend, domains, and ACME challenge handler: not set
 ///
 /// Required for all strategies:
 /// - at least one domain
-/// - certificate storage backend
-/// - secrets storage backend
+/// - cryptographic-material backend
 ///
 /// Required for ACME:
 /// - challenge handler
@@ -46,8 +45,7 @@ type ACMEHttpClientFactory = Box<dyn Fn() -> Box<dyn HttpClient> + Send + Sync>;
 ///     .email("support@example.com")
 ///     .organization(Some("example.com"))
 ///     .acme_directory_url("https://acme-v02.api.letsencrypt.org/directory")
-///     .cert_storage(cert_storage)
-///     .secrets_storage(secrets_storage)
+///     .crypto_storage(material_storage)
 ///     .challenge_handler(challenge_handler)
 ///     .eku(&[1, 3, 6, 1, 5, 5, 7, 3, 30])
 ///     .acme_strategy()
@@ -58,8 +56,7 @@ type ACMEHttpClientFactory = Box<dyn Fn() -> Box<dyn HttpClient> + Send + Sync>;
 /// ```ignore
 /// let manager = CertManager::builder()
 ///     .domains(["statuslist.example.com"])
-///     .cert_storage(cert_storage)
-///     .secrets_storage(secrets_storage)
+///     .crypto_storage(material_storage)
 ///     .store_strategy(StoreProvisioningStrategy::filesystem(
 ///         "/etc/status-list/tls.crt",
 ///         "/etc/status-list/tls.key",
@@ -67,13 +64,12 @@ type ACMEHttpClientFactory = Box<dyn Fn() -> Box<dyn HttpClient> + Send + Sync>;
 ///     .build()?;
 /// ```
 pub struct CertificateManagerBuilder {
-    cert_storage: Option<Box<dyn Storage>>,
-    secrets_storage: Option<Box<dyn Storage>>,
+    crypto_storage: Option<Box<dyn Storage>>,
+    cache_policy: CryptoCachePolicy,
     challenge_handler: Option<Box<dyn ChallengeHandler>>,
     acme_http_client_factory: Option<ACMEHttpClientFactory>,
     provisioning_strategy: Option<Box<dyn CertProvisioningStrategy>>,
     renewal_strategy: RenewalStrategy,
-    chain_cache_ttl: Option<Duration>,
     domains: Vec<String>,
     email: Option<String>,
     organization: Option<String>,
@@ -84,13 +80,12 @@ pub struct CertificateManagerBuilder {
 impl Default for CertificateManagerBuilder {
     fn default() -> Self {
         Self {
-            cert_storage: None,
-            secrets_storage: None,
+            crypto_storage: None,
+            cache_policy: CryptoCachePolicy::default(),
             challenge_handler: None,
             acme_http_client_factory: None,
             provisioning_strategy: None,
             renewal_strategy: RenewalStrategy::PercentageOfLifetime(None),
-            chain_cache_ttl: None,
             domains: Vec::new(),
             email: None,
             organization: None,
@@ -130,15 +125,15 @@ impl CertificateManagerBuilder {
         self
     }
 
-    /// Set the certificate storage backend.
-    pub fn cert_storage(mut self, storage: impl Storage + 'static) -> Self {
-        self.cert_storage = Some(Box::new(storage));
+    /// Set the consolidated backend for server certificate and signing-key material.
+    pub fn crypto_storage(mut self, storage: impl Storage + 'static) -> Self {
+        self.crypto_storage = Some(Box::new(storage));
         self
     }
 
-    /// Set the signing key and ACME account storage backend.
-    pub fn secrets_storage(mut self, storage: impl Storage + 'static) -> Self {
-        self.secrets_storage = Some(Box::new(storage));
+    /// Set cache policy for certificate and signing-key material reads.
+    pub fn crypto_cache_policy(mut self, policy: CryptoCachePolicy) -> Self {
+        self.cache_policy = policy;
         self
     }
 
@@ -166,12 +161,6 @@ impl CertificateManagerBuilder {
         self
     }
 
-    /// Set the certificate chain cache TTL.
-    pub fn chain_cache_ttl(mut self, ttl: Duration) -> Self {
-        self.chain_cache_ttl = Some(ttl);
-        self
-    }
-
     /// Use ACME provisioning.
     pub fn acme_strategy(mut self) -> Self {
         self.provisioning_strategy = Some(Box::new(AcmeProvisioningStrategy));
@@ -192,12 +181,10 @@ impl CertificateManagerBuilder {
             ));
         }
 
-        let cert_storage = self.cert_storage.ok_or_else(|| {
-            CertError::Validation("certificate storage backend must be configured".to_string())
-        })?;
-        let secrets_storage = self.secrets_storage.ok_or_else(|| {
-            CertError::Validation("secrets storage backend must be configured".to_string())
-        })?;
+        let crypto_storage = self.crypto_storage.ok_or(CertError::Validation(
+            "cryptographic-material backend must be configured".to_string(),
+        ))?;
+        let crypto_storage = CryptoStorage::with_cache_policy(crypto_storage, self.cache_policy);
 
         let default_strategy: Box<dyn CertProvisioningStrategy> =
             Box::new(AcmeProvisioningStrategy);
@@ -234,13 +221,11 @@ impl CertificateManagerBuilder {
             None => None,
         };
 
-        let ttl = self.chain_cache_ttl.unwrap_or(DEFAULT_CHAIN_CACHE_TTL);
         let domain_label = self.domains.first().map(String::as_str).unwrap_or_default();
-        let cert_chain_cache = CertChainCache::new(ttl, domain_label);
+        let cert_chain_cache = CertChainCache::new(domain_label);
 
         Ok(CertManager {
-            cert_storage: Some(cert_storage),
-            secrets_storage: Some(secrets_storage),
+            crypto_storage: Some(crypto_storage),
             challenge_handler: self.challenge_handler,
             acme_client: Arc::new(Mutex::new(None::<Account>)),
             acme_http_client_factory: http_client_factory,

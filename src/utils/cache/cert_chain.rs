@@ -1,4 +1,4 @@
-use std::{sync::Arc, time::Duration};
+use std::sync::Arc;
 
 use moka::future::Cache;
 use opentelemetry::{
@@ -19,15 +19,8 @@ const REPLACEMENT_METRIC: &str = "certificate_chain_cache_replacements";
 /// instance owns exactly one `CertChainCache`, so the cache holds at most one
 /// entry per running process.
 ///
-/// # TTL semantics
-///
-/// A **zero** TTL (`Duration::ZERO`) keeps the cache active with **no expiry**;
-/// entries persist until explicitly replaced by the provisioning hook.
-///
-/// This intentionally differs from [`StatusListCache`](crate::domain::ports::StatusListCache),
-/// where `ttl = 0` **disables** the cache entirely (inserts expire immediately).
-/// The rationale is that certificate chains only change when explicitly provisioned,
-/// making the "never expire" behavior safe for single-replica deployments.
+/// Entries do not expire by time. They stay cached until provisioning or
+/// renewal replaces the entry through the certificate manager.
 #[derive(Clone)]
 pub(crate) struct CertChainCache {
     inner: Cache<String, CertificateChain>,
@@ -50,7 +43,7 @@ impl CertChainCache {
     /// provider. Telemetry initialization must install the provider before
     /// application state constructs this cache; otherwise these handles would
     /// remain no-op for the lifetime of the process.
-    pub(crate) fn new(ttl: Duration, domain: impl AsRef<str>) -> Self {
+    pub(crate) fn new(domain: impl AsRef<str>) -> Self {
         let meter = global::meter("status-list-server");
 
         let hit_counter = meter
@@ -66,16 +59,7 @@ impl CertChainCache {
             .with_description("Certificate chain cache replacements (post-provisioning)")
             .build();
 
-        let builder = Cache::builder().max_capacity(CACHE_CAPACITY);
-        let inner = if ttl.is_zero() {
-            tracing::warn!(
-                "chain_cache_ttl=0: chain cached for process lifetime; \
-                renewals on other replicas will not be observed"
-            );
-            builder.build()
-        } else {
-            builder.time_to_live(ttl).build()
-        };
+        let inner = Cache::builder().max_capacity(CACHE_CAPACITY).build();
         Self {
             inner,
             domain_label: domain.as_ref().to_string(),
@@ -116,11 +100,6 @@ impl CertChainCache {
         self.inner.insert(key, value).await;
     }
 
-    #[cfg(test)]
-    pub(crate) async fn invalidate(&self, key: &str) {
-        self.inner.invalidate(key).await;
-    }
-
     fn attributes(&self) -> Vec<KeyValue> {
         if self.domain_label.is_empty() {
             vec![]
@@ -135,13 +114,14 @@ mod tests {
     use super::*;
     use crate::{
         config::{TelemetryConfig, TelemetryEnvironment},
-        utils::metrics::setup_metrics,
+        utils::metrics::{metrics_test_lock, setup_metrics},
     };
     use opentelemetry_sdk::Resource;
     use prometheus::{Encoder, Registry, TextEncoder};
 
-    #[tokio::test]
-    async fn test_counters_are_exported_to_prometheus() {
+    #[test]
+    fn test_counters_are_exported_to_prometheus() {
+        let _metrics_guard = metrics_test_lock();
         let registry = Registry::new();
         let config = TelemetryConfig {
             environment: TelemetryEnvironment::Development,
@@ -158,19 +138,26 @@ mod tests {
         )
         .expect("metrics setup");
 
-        let cache = CertChainCache::new(Duration::ZERO, "example.com");
+        let cache = CertChainCache::new("example.com");
         cache.init_counters();
 
-        let chain: CertificateChain = Arc::from(vec!["a".to_string()]);
-        cache.insert("k".to_string(), chain.clone()).await;
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("tokio runtime");
 
-        // hit
-        assert!(cache.get("k").await.is_some());
-        // miss
-        assert!(cache.get("missing").await.is_none());
-        // replacement
-        let new_chain: CertificateChain = Arc::from(vec!["b".to_string()]);
-        cache.replace("k".to_string(), new_chain).await;
+        rt.block_on(async {
+            let chain: CertificateChain = Arc::from(vec!["a".to_string()]);
+            cache.insert("k".to_string(), chain.clone()).await;
+
+            // hit
+            assert!(cache.get("k").await.is_some());
+            // miss
+            assert!(cache.get("missing").await.is_none());
+            // replacement
+            let new_chain: CertificateChain = Arc::from(vec!["b".to_string()]);
+            cache.replace("k".to_string(), new_chain).await;
+        });
 
         assert_counter_value(&registry, HIT_METRIC, 1.0);
         assert_counter_value(&registry, MISS_METRIC, 1.0);
