@@ -67,8 +67,6 @@ use crate::outbound::cache::MokaStatusListCache;
 use crate::outbound::cert::AcmeCertificateProvider;
 #[cfg(feature = "memory")]
 use crate::outbound::memory::{MemoryCredentials, MemoryStatusListSnapshotRepo, MemoryStatusLists};
-#[cfg(feature = "redis")]
-use crate::outbound::redis::Redis;
 #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mysql"))]
 use crate::outbound::sql::{
     Migrator, SeaOrmStore, SqlCredentialRepo, SqlStatusListRepo, SqlStatusListSnapshotRepo,
@@ -276,36 +274,13 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
                         .load()
                         .await;
 
-                    #[cfg(feature = "redis")]
-                    let cache_opt = if !config.redis.uri.expose_secret().is_empty() {
-                        match config.redis.start(None, None, None).await {
-                            Ok(redis_conn) => {
-                                Some(Redis::new(redis_conn).with_ttl(config.redis.cert_cache_ttl))
-                            }
-                            Err(e) => {
-                                tracing::warn!(
-                                    "Redis connection failed ({}); certificate cache disabled, falling back to direct S3",
-                                    e
-                                );
-                                None
-                            }
-                        }
-                    } else {
-                        None
-                    };
-                    #[cfg(not(feature = "redis"))]
-                    let cache_opt = None;
-
                     let s3 = AwsS3::new(
                         &aws_config,
                         &config.aws.s3_bucket,
                         &config.aws.region,
                         &config.aws.s3_key_prefix,
                     );
-                    match cache_opt {
-                        Some(c) => Box::new(s3.with_cache(c)),
-                        None => Box::new(s3),
-                    }
+                    Box::new(s3)
                 } else {
                     Box::new(MemoryStorage::default())
                 }
@@ -410,10 +385,6 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
     {
         readiness = readiness.with_check(AlwaysReady::new("database"));
     }
-
-    // Redis is an optional certificate-cache accelerator in this setup. Startup
-    // falls back to direct certificate storage when Redis cannot connect, so it
-    // is intentionally omitted from readiness gating.
 
     #[cfg(feature = "acme")]
     {

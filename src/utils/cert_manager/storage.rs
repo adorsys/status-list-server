@@ -1,15 +1,9 @@
 use async_trait::async_trait;
 use color_eyre::eyre::Error as Report;
-#[cfg(feature = "redis")]
-use redis::RedisError;
 use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum StorageError {
-    #[error("Redis error: {0}")]
-    #[cfg(feature = "redis")]
-    Redis(#[from] RedisError),
-
     #[error("storage backend error: {0}")]
     Backend(#[source] Report),
 

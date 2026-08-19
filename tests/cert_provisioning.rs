@@ -1,4 +1,4 @@
-#![cfg(all(feature = "aws", feature = "redis"))]
+#![cfg(feature = "aws")]
 
 //! Integration tests for the ACME certificate provisioning flow.
 //!
@@ -6,7 +6,6 @@
 //! - **Pebble** (ACME CA test server)
 //! - **challtestsrv** (DNS server for Pebble)
 //! - **LocalStack** (S3 + Secrets Manager)
-//! - **Redis** (S3 cache layer)
 //! - **Vault** (if enabled) or **OpenBao** (if enabled)
 
 use std::{sync::Arc, time::Duration};
@@ -24,13 +23,11 @@ use status_list_server::{
         http_client::DefaultHttpClient,
     },
     outbound::aws::{AwsS3, AwsSecretsManager},
-    outbound::redis::Redis as RedisStorage,
 };
 #[cfg(feature = "vault")]
 use testcontainers_modules::hashicorp_vault::HashicorpVault;
 use testcontainers_modules::{
     localstack::LocalStack,
-    redis::Redis,
     testcontainers::{
         ContainerAsync, GenericImage, ImageExt,
         core::{IntoContainerPort, WaitFor},
@@ -61,12 +58,10 @@ struct TestInfra {
     _challtestsrv: ContainerAsync<GenericImage>,
     _pebble: ContainerAsync<GenericImage>,
     _localstack: ContainerAsync<LocalStack>,
-    _redis: ContainerAsync<Redis>,
 
     pebble_acme_port: u16,
     challtestsrv_port: u16,
     localstack_port: u16,
-    redis_port: u16,
 }
 
 impl TestInfra {
@@ -118,26 +113,17 @@ impl TestInfra {
             .await
             .expect("Failed to start LocalStack");
 
-        let redis = Redis::default()
-            .with_tag("8.6")
-            .start()
-            .await
-            .expect("Failed to start Redis");
-
         let pebble_acme_port = pebble.get_host_port_ipv4(14000).await.unwrap();
         let challtestsrv_port = challtestsrv.get_host_port_ipv4(8055).await.unwrap();
         let localstack_port = localstack.get_host_port_ipv4(4566).await.unwrap();
-        let redis_port = redis.get_host_port_ipv4(6379).await.unwrap();
 
         Self {
             _challtestsrv: challtestsrv,
             _pebble: pebble,
             _localstack: localstack,
-            _redis: redis,
             pebble_acme_port,
             challtestsrv_port,
             localstack_port,
-            redis_port,
         }
     }
 
@@ -151,17 +137,7 @@ impl TestInfra {
             .await
     }
 
-    /// Create a Redis connection manager for the cache layer.
-    async fn redis_connection(&self) -> redis::aio::ConnectionManager {
-        let url = format!("redis://127.0.0.1:{}", self.redis_port);
-        let client = redis::Client::open(url).expect("Failed to create Redis client");
-        client
-            .get_connection_manager()
-            .await
-            .expect("Failed to get Redis connection manager")
-    }
-
-    /// Build a `CertManager` with `AwsS3` + `Redis` cache for cert storage,
+    /// Build a `CertManager` with `AwsS3` cert storage,
     /// and the provided `secrets_storage` backend for signing keys.
     async fn build_cert_manager(
         &self,
@@ -169,10 +145,8 @@ impl TestInfra {
         secrets_storage: impl Storage + 'static,
     ) -> CertManager {
         let aws_config = self.aws_config().await;
-        let redis_conn = self.redis_connection().await;
 
-        let cache = RedisStorage::new(redis_conn);
-        let cert_storage = AwsS3::new(&aws_config, BUCKET_NAME, AWS_REGION, "").with_cache(cache);
+        let cert_storage = AwsS3::new(&aws_config, BUCKET_NAME, AWS_REGION, "");
 
         let challtestsrv_url = format!("http://127.0.0.1:{}", self.challtestsrv_port);
         let dns_provider = PebbleDnsProvider::new(&challtestsrv_url);

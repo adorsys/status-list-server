@@ -28,7 +28,7 @@ impl AwsSecretsManager {
     /// - If `secrets_cache_ttl` is non-zero, an in-memory cache is created with that TTL.
     ///
     /// This TTL semantics is consistent with other caches in the application
-    /// (status-list cache for status-lists and Redis for certificate data).
+    /// (status-list cache for status-lists and certificate data).
     pub async fn new(
         config: &SdkConfig,
         secrets_cache_ttl: Duration,
