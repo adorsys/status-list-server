@@ -76,8 +76,10 @@ use sha2::{Digest, Sha256};
 ///
 /// If the sanitized key exceeds 127 characters, it is truncated to 110 characters
 /// and appended with a hyphen and a 16-character hex SHA-256 digest of the full original
-/// key (`110 + 1 + 16 = 127` chars). This prevents collisions between distinct keys
-/// that share a long prefix (e.g. multi-domain signing secret keys).
+/// key (`110 + 1 + 16 = 127` chars). This disambiguates distinct keys exceeding 127
+/// characters that would otherwise collide due to sharing a common prefix (e.g. multi-domain
+/// signing secret keys). Note: for keys under 127 characters, normalization is a character-replacement
+/// mapping and does not hash.
 pub fn normalize_key(key: &str) -> String {
     let sanitized: String = key
         .chars()
@@ -94,6 +96,9 @@ pub fn normalize_key(key: &str) -> String {
         hasher.update(key.as_bytes());
         let digest = format!("{:x}", hasher.finalize());
         let hash_suffix = &digest[..16];
+        // Invariant: `sanitized` contains only single-byte ASCII characters `[0-9a-zA-Z-]`
+        // due to the character mapping above, so byte index 110 is guaranteed to be a valid
+        // UTF-8 character boundary.
         let prefix = &sanitized[..110];
         format!("{prefix}-{hash_suffix}")
     } else {
