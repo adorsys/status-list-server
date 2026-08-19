@@ -65,13 +65,19 @@ impl<T: Storage + ?Sized> Storage for Box<T> {
     }
 }
 
+use sha2::{Digest, Sha256};
+
 /// Normalize a storage key so it is valid and consistent across all secrets backends
 /// (AWS Secrets Manager, GCP Secret Manager, Azure Key Vault, HashiCorp Vault, Memory).
 ///
 /// Azure Key Vault is the most restrictive provider, requiring 1–127 characters
 /// and admitting only ASCII alphanumeric characters and hyphens `[0-9a-zA-Z-]`.
-/// This function replaces any character outside `[0-9a-zA-Z-]` with `-` and truncates
-/// to 127 characters.
+/// This function replaces any character outside `[0-9a-zA-Z-]` with `-`.
+///
+/// If the sanitized key exceeds 127 characters, it is truncated to 110 characters
+/// and appended with a hyphen and a 16-character hex SHA-256 digest of the full original
+/// key (`110 + 1 + 16 = 127` chars). This prevents collisions between distinct keys
+/// that share a long prefix (e.g. multi-domain signing secret keys).
 pub fn normalize_key(key: &str) -> String {
     let sanitized: String = key
         .chars()
@@ -84,7 +90,12 @@ pub fn normalize_key(key: &str) -> String {
         })
         .collect();
     if sanitized.len() > 127 {
-        sanitized[..127].to_string()
+        let mut hasher = Sha256::new();
+        hasher.update(key.as_bytes());
+        let digest = format!("{:x}", hasher.finalize());
+        let hash_suffix = &digest[..16];
+        let prefix = &sanitized[..110];
+        format!("{prefix}-{hash_suffix}")
     } else {
         sanitized
     }
@@ -302,5 +313,16 @@ mod tests {
         let long_key = "a".repeat(200);
         let normalized_long = normalize_key(&long_key);
         assert_eq!(normalized_long.len(), 127);
+
+        let long_key1 = format!("keys-{}-test1", "a".repeat(150));
+        let long_key2 = format!("keys-{}-test2", "a".repeat(150));
+        let norm1 = normalize_key(&long_key1);
+        let norm2 = normalize_key(&long_key2);
+        assert_eq!(norm1.len(), 127);
+        assert_eq!(norm2.len(), 127);
+        assert_ne!(
+            norm1, norm2,
+            "Distinct long keys sharing a prefix must not collide"
+        );
     }
 }
