@@ -17,7 +17,6 @@ azure-kv = [
   "acme",
   "dep:azure_core",
   "dep:azure_identity",
-  "dep:azure-identity-helpers",
   "dep:azure_security_keyvault_secrets",
 ]
 aws-secrets = [
@@ -189,10 +188,6 @@ optional = true
 
 [dependencies.azure_core]
 version = "1"
-optional = true
-
-[dependencies.azure-identity-helpers]
-version = "0.2"
 optional = true
 
 [dependencies.redis]

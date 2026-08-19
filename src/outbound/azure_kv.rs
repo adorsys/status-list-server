@@ -4,19 +4,86 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use azure_core::credentials::{Secret as AzureSecret, TokenCredential};
+use azure_core::credentials::{
+    AccessToken, Secret as AzureSecret, TokenCredential, TokenRequestOptions,
+};
 use azure_core::http::{HttpClient, StatusCode};
-use azure_identity::ClientSecretCredential;
-pub use azure_identity_helpers::default_azure_credential::DefaultAzureCredential;
+use azure_identity::{
+    ClientSecretCredential, DeveloperToolsCredential, ManagedIdentityCredential,
+    WorkloadIdentityCredential,
+};
 use azure_security_keyvault_secrets::SecretClient;
 use azure_security_keyvault_secrets::models::SetSecretParameters;
 use color_eyre::eyre::eyre;
 use moka::future::Cache;
 use secrecy::{ExposeSecret, SecretString};
-use tracing::info;
+use tracing::{debug, info, warn};
 use url::Url;
 
 use crate::cert_manager::storage::{Storage, StorageError, normalize_key};
+
+/// Chained token credential that evaluates official Azure identity sources in order:
+/// Workload Identity -> Managed Identity -> Developer Tools.
+///
+/// Unlike probing at construction time, this queries each credential source during
+/// token acquisition (`get_token`), falling through to subsequent sources only if
+/// preceding sources cannot acquire a token.
+#[derive(Debug)]
+pub struct DefaultAzureCredential {
+    sources: Vec<(&'static str, Arc<dyn TokenCredential>)>,
+}
+
+impl DefaultAzureCredential {
+    /// Create a new [`DefaultAzureCredential`] chain with available credential sources.
+    pub fn new() -> Result<Arc<Self>, StorageError> {
+        let mut sources: Vec<(&'static str, Arc<dyn TokenCredential>)> = Vec::new();
+
+        if let Ok(cred) = WorkloadIdentityCredential::new(None) {
+            sources.push(("WorkloadIdentityCredential", cred));
+        }
+        if let Ok(cred) = ManagedIdentityCredential::new(None) {
+            sources.push(("ManagedIdentityCredential", cred));
+        }
+        if let Ok(cred) = DeveloperToolsCredential::new(None) {
+            sources.push(("DeveloperToolsCredential", cred));
+        }
+
+        if sources.is_empty() {
+            return Err(StorageError::Backend(eyre!(
+                "failed to initialize Azure credential chain: no credential sources could be constructed"
+            )));
+        }
+
+        Ok(Arc::new(Self { sources }))
+    }
+}
+
+#[async_trait]
+impl TokenCredential for DefaultAzureCredential {
+    async fn get_token(
+        &self,
+        scopes: &[&str],
+        options: Option<TokenRequestOptions<'_>>,
+    ) -> azure_core::Result<AccessToken> {
+        let mut last_error = None;
+        for (name, cred) in &self.sources {
+            match cred.get_token(scopes, options.clone()).await {
+                Ok(token) => return Ok(token),
+                Err(err) => {
+                    debug!("{name} could not obtain token: {err}");
+                    last_error = Some(err);
+                }
+            }
+        }
+
+        Err(last_error.unwrap_or_else(|| {
+            azure_core::Error::with_message(
+                azure_core::error::ErrorKind::Other,
+                "All Azure credentials in default chain failed to acquire a token",
+            )
+        }))
+    }
+}
 
 /// Azure Key Vault secret storage adapter.
 ///
@@ -213,22 +280,57 @@ impl Storage for AzureKeyVaultClient {
         match set_res {
             Ok(_) => {}
             Err(err) if err.http_status() == Some(StatusCode::Conflict) => {
-                // If the secret is in soft-deleted state, recover it and retry setting the secret
-                let _ = self.client.recover_deleted_secret(&secret_name, None).await;
+                // Secret is in soft-deleted state. Trigger recovery and poll until available.
+                info!("Azure secret '{key}' is in soft-deleted state; initiating recovery");
                 self.client
-                    .set_secret(
-                        &secret_name,
-                        parameters.try_into().map_err(|e| {
-                            StorageError::Backend(eyre!(
-                                "failed to serialize Azure secret parameters: {e}"
-                            ))
-                        })?,
-                        None,
-                    )
+                    .recover_deleted_secret(&secret_name, None)
                     .await
                     .map_err(|e| {
-                        StorageError::Backend(eyre!("failed to set Azure secret '{key}': {e}"))
+                        warn!("Failed to initiate recovery for soft-deleted Azure secret '{key}': {e}");
+                        StorageError::Backend(eyre!(
+                            "failed to initiate recovery of soft-deleted Azure secret '{key}': {e}"
+                        ))
                     })?;
+
+                // Recovery in Azure Key Vault is asynchronous; poll with bounded backoff
+                let mut recovered = false;
+                for attempt in 1..=10 {
+                    tokio::time::sleep(Duration::from_millis(attempt * 200)).await;
+                    match self
+                        .client
+                        .set_secret(
+                            &secret_name,
+                            parameters.clone().try_into().map_err(|e| {
+                                StorageError::Backend(eyre!(
+                                    "failed to serialize Azure secret parameters: {e}"
+                                ))
+                            })?,
+                            None,
+                        )
+                        .await
+                    {
+                        Ok(_) => {
+                            recovered = true;
+                            break;
+                        }
+                        Err(retry_err) if retry_err.http_status() == Some(StatusCode::Conflict) => {
+                            debug!(
+                                "Azure secret '{key}' recovery still pending (attempt {attempt}/10)"
+                            );
+                        }
+                        Err(other_err) => {
+                            return Err(StorageError::Backend(eyre!(
+                                "failed to set Azure secret '{key}' after recovery: {other_err}"
+                            )));
+                        }
+                    }
+                }
+
+                if !recovered {
+                    return Err(StorageError::Backend(eyre!(
+                        "timeout waiting for Azure secret '{key}' recovery to complete"
+                    )));
+                }
             }
             Err(e) => {
                 return Err(StorageError::Backend(eyre!(
@@ -293,7 +395,9 @@ impl Storage for AzureKeyVaultClient {
                     cache.invalidate(key).await;
                 }
                 // Try purging the soft-deleted secret if purge is allowed on the vault
-                let _ = self.client.purge_deleted_secret(&secret_name, None).await;
+                if let Err(e) = self.client.purge_deleted_secret(&secret_name, None).await {
+                    warn!("Azure purge for deleted secret '{key}' skipped/failed: {e}");
+                }
                 Ok(())
             }
             Err(err) => {

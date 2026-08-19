@@ -772,23 +772,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "azure-identity-helpers"
-version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3e6446a64bf8bdc70460a7b0f53ae77a206327851d2f2b21d2ee6bfc988ca2ab"
-dependencies = [
- "async-lock",
- "async-trait",
- "azure_core",
- "azure_identity",
- "futures",
- "serde",
- "time",
- "tracing",
- "url",
-]
-
-[[package]]
 name = "azure_core"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5934,7 +5917,6 @@ dependencies = [
  "aws-sdk-s3",
  "aws-sdk-secretsmanager",
  "axum",
- "azure-identity-helpers",
  "azure_core",
  "azure_identity",
  "azure_security_keyvault_secrets",
