@@ -1,0 +1,47 @@
+# Example values for AWS EKS deployments using IAM Roles for Service Accounts (IRSA).
+# This file demonstrates Workload Identity without static AWS credentials.
+#
+# Prerequisites:
+# 1. EKS cluster with OIDC provider configured
+# 2. IAM role with trust policy for the EKS OIDC provider
+# 3. Role annotations on the ServiceAccount (see below)
+#
+# Usage:
+#   helm install statuslist ./chart \
+#     --namespace statuslist \
+#     -f chart/values.yaml \
+#     -f chart/values-aws-irsa.yaml
+#
+# See docs/workload-identity.md for the full IRSA setup guide.
+
+serviceAccount:
+  create: true
+  name: statuslist-sa
+  annotations:
+    # Replace with your actual IAM role ARN
+    eks.amazonaws.com/role-arn: arn:aws:iam::123456789012:role/statuslist-irsa
+
+externalSecret:
+  enabled: true
+
+# Workload Identity mode: no static AWS credentials mounted into the pod.
+# The cloud SDK automatically uses IRSA credentials from the ServiceAccount.
+statuslist:
+  aws:
+    region: eu-central-1
+    # mountCredentials: false is the default — no static creds mount
+    # mountCredentials: false
+
+# ESO syncs postgres-password and redis-password from AWS Secrets Manager.
+# The SecretStore uses the IRSA credentials automatically.
+secretStore:
+  enabled: true
+  provider: aws
+  aws:
+    service: SecretsManager
+    region: eu-central-1
+
+# Disable Redis for simpler deployments.
+# Enable it only for multi-replica deployments sharing certificate cache via S3.
+redis-ha:
+  enabled: false

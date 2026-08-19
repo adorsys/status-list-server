@@ -12,9 +12,14 @@ The supported secrets backends include:
 
 Both HashiCorp Vault and OpenBao share the KV v2 REST API interface and are supported natively when the `vault` feature flag is enabled.
 
-Authentication is strictly performed via **AppRole**, which is the industry standard machine-to-machine authentication mechanism for production deployments.
+The server supports two authentication methods:
 
-### Configuration Variables
+- **AppRole**: Industry-standard machine-to-machine auth using `role_id`/`secret_id` credentials.
+- **Kubernetes ServiceAccount**: No static credentials required — uses the projected ServiceAccount token.
+
+### AppRole Authentication
+
+#### Configuration Variables
 
 | Variable                       | Type              | Default                             | Description                                                              |
 | ------------------------------ | ----------------- | ----------------------------------- | ------------------------------------------------------------------------ |
@@ -127,20 +132,85 @@ APP_VAULT__PATH_PREFIX=dev/status-list
 APP_VAULT__SECRETS_CACHE_TTL=300
 ```
 
-### Example 2: Production Deployment with OpenBao / Vault
+### Example 2: Production Deployment with OpenBao / Vault (AppRole)
 
-In Kubernetes or ECS, inject the `role_id` and `secret_id` via Kubernetes Secrets or IAM-bound orchestration:
+In Kubernetes, deliver the `role_id` and `secret_id` via Kubernetes Secrets or the ESO Vault provider:
 
 ```env
 APP_VAULT__ADDR=http://openbao-service.openbao.svc.cluster.local:8200
 APP_VAULT__AUTH_MOUNT=approle
 APP_VAULT__ROLE_ID=ba0a1234-5678-90ab-cdef-1234567890ab
-APP_VAULT__SECRET_ID=fe987654-3210-fedc-ba09-876543210fed
+APP_VAULT__SECRET_ID_PATH=/var/run/secrets/vault/secret_id
 APP_VAULT__MOUNT=secret
 APP_VAULT__PATH_PREFIX=production/status-list
 APP_VAULT__NAMESPACE=my-org-namespace
 APP_VAULT__SECRETS_CACHE_TTL=600
 ```
+
+### Vault Kubernetes Auth (No Static Credentials)
+
+Use Kubernetes ServiceAccount token projection to authenticate with Vault without AppRole `role_id`/`secret_id` secrets. The service account must be bound to a Vault Kubernetes auth role.
+
+**Key difference from AppRole:** No `APP_VAULT__ROLE_ID` or `APP_VAULT__SECRET_ID` required. The app uses the projected Kubernetes ServiceAccount token automatically mounted at `TOKEN_PATH`.
+
+#### Configuration Variables
+
+| Variable                    | Type   | Default                                  | Description                                              |
+|-----------------------------|--------|------------------------------------------|----------------------------------------------------------|
+| `APP_VAULT__ADDR`           | String | `http://127.0.0.1:8200`                 | Vault server URL                                          |
+| `APP_VAULT__AUTH_MOUNT`     | String | `"kubernetes"`                          | Mount path for Kubernetes auth                            |
+| `APP_VAULT__TOKEN_PATH`     | Path   | `/var/run/secrets/tokens/vaulttoken`    | Path to projected ServiceAccount token                   |
+| `APP_VAULT__MOUNT`          | String | `"secret"`                              | KV v2 mount                                              |
+| `APP_VAULT__PATH_PREFIX`    | String | `""`                                    | Optional prefix for secret paths                         |
+| `APP_VAULT__NAMESPACE`      | String | `None`                                  | Optional Vault namespace header                          |
+| `APP_VAULT__SECRETS_CACHE_TTL` | Integer | `300`                                 | In-memory cache TTL in seconds                           |
+
+#### Server-Side Vault Setup
+
+1. **Enable Kubernetes auth:**
+
+   ```bash
+   vault auth enable kubernetes
+   ```
+
+2. **Configure the Kubernetes auth method:**
+
+   ```bash
+   vault write auth/kubernetes/config \
+     token_reViewer_jwt="$(cat /var/run/secrets/kubernetes.io/serviceaccount/token)" \
+     kubernetes_host="https://$KUBERNETES_PORT_443_TCP_ADDR:443" \
+     kubernetes_ca_cert=@/var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+   ```
+
+3. **Create the Vault policy** (see [Least-Privilege Vault / OpenBao Policy](#least-privilege-vault--openbao-policy)).
+
+4. **Create the Kubernetes auth role:**
+
+   ```bash
+   vault write auth/kubernetes/role/statuslist-role \
+     bound_service_account_names=statuslist-sa \
+     bound_service_account_namespaces=statuslist \
+     policies=statuslist-policy \
+     token_ttl=1h \
+     token_max_ttl=4h
+   ```
+
+   Replace `statuslist-sa` and `statuslist` with your actual ServiceAccount name and namespace.
+
+5. **Create the ServiceAccount** in Kubernetes with your platform's Workload Identity annotations (see [docs/workload-identity.md](workload-identity.md)).
+
+#### Example: Vault K8s Auth Environment Variables
+
+```env
+APP_VAULT__ADDR=http://vault.openbao.svc.cluster.local:8200
+APP_VAULT__AUTH_MOUNT=kubernetes
+APP_VAULT__TOKEN_PATH=/var/run/secrets/tokens/vaulttoken
+APP_VAULT__MOUNT=secret
+APP_VAULT__PATH_PREFIX=production/status-list
+APP_VAULT__SECRETS_CACHE_TTL=300
+```
+
+See [docs/workload-identity.md](workload-identity.md#vault-kubernetes-auth) for the full Helm deployment guide using `values-vault-k8s.yaml`.
 
 ### Automated Token Lifecycle & Resilience
 
@@ -148,7 +218,7 @@ The server features an enterprise-grade automated token manager:
 
 - **Initial Login**: Exchanged via `POST /v1/auth/{auth_mount}/login` at application startup.
 - **Proactive Renewal**: Tokens are automatically renewed via `POST /v1/auth/token/renew-self` when 80% of their lease TTL has elapsed.
-- **Re-authentication Fallback**: If renewal fails (e.g. token expired or revoked), the client seamlessly re-authenticates using the AppRole credentials.
+- **Re-authentication Fallback**: If renewal fails (e.g. token expired or revoked), the client seamlessly re-authenticates using the configured credentials (AppRole or K8s token).
 
 ### Observability & Metrics
 
@@ -159,9 +229,77 @@ Vault authentication and token operations emit OpenTelemetry counters for succes
 - Secrets are cached in-memory using TTL semantics to minimize latency and Vault API request volume.
 - To disable caching entirely (forcing every read to query Vault directly), set `APP_VAULT__SECRETS_CACHE_TTL=0`.
 
+## Authentication & Secrets Delivery Decision Tree
+
+Choose the combination of **application authentication** and **secrets delivery** that matches your infrastructure:
+
+```
+Start: What is your secrets backend?
+│
+├─► AWS Secrets Manager
+│   │
+│   └─► What is your Kubernetes platform?
+│       ├─► AWS EKS
+│       │   └─► Use: AWS IRSA
+│       │         (Workload Identity: no static creds)
+│       │         Chart: values-aws-irsa.yaml
+│       │         Doc: docs/workload-identity.md
+│       │
+│       └─► Other EKS-compat (Fargate, etc.)
+│           └─► Use: AWS IRSA with Fargate profile
+│
+├─► HashiCorp Vault / OpenBao
+│   │
+│   └─► What authentication method?
+│       ├─► Kubernetes ServiceAccount (IRSA/GKE WI/Azure WIF available)
+│       │   └─► Use: Vault Kubernetes Auth
+│       │         (No role_id/secret_id needed)
+│       │         Chart: values-vault-k8s.yaml
+│       │         Doc: docs/workload-identity.md
+│       │
+│       └─► AppRole credentials exist in K8s Secrets
+│           └─► Use: Vault AppRole + K8s volume mount
+│                 (Delivered via ESO or static secret)
+│                 Doc: This doc (AppRole section above)
+│
+├─► GCP Secret Manager
+│   └─► Use: GKE Workload Identity
+│         Chart: values-gke-wi.yaml
+│         Doc: docs/workload-identity.md
+│
+└─► Azure Key Vault
+    └─► Use: AKS Workload Identity Federation
+          Chart: values-aks-wif.yaml
+          Doc: docs/workload-identity.md
+```
+
+### Decision Matrix
+
+| Secrets Backend             | Cloud/Platform      | Auth Method               | ESO Provider | Static Creds? |
+|-----------------------------|---------------------|---------------------------|--------------|--------------|
+| AWS Secrets Manager         | AWS EKS             | IRSA                      | `aws`        | No           |
+| AWS Secrets Manager         | Any K8s             | ESO + mounted credentials  | `aws`        | Yes (legacy) |
+| Vault / OpenBao KV          | Any                 | AppRole (file/Vault Agent) | `vault`      | Yes (legacy) |
+| Vault / OpenBao KV          | EKS / GKE / AKS     | Vault K8s Auth            | `vault`      | No           |
+| GCP Secret Manager          | GKE                 | GKE Workload Identity     | `gcp`        | No           |
+| Azure Key Vault             | AKS                 | AKS Workload Identity Fed. | `azure`     | No           |
+
+**Key terminology:**
+
+- **Application Vault auth**: How the *application binary* authenticates to Vault to read/write secrets. Two modes: `approle` (uses `role_id`/`secret_id`) or `kubernetes` (uses projected ServiceAccount token, no static secrets).
+- **ESO SecretStore provider**: How the *External Secrets Operator* synchronizes secrets from the external backend into Kubernetes Secrets. Independent of how the app authenticates to Vault.
+
+These are independent concerns:
+
+- You can use Vault K8s auth for the app + ESO `vault` provider for secret sync.
+- You can use AWS IRSA for the app + ESO `aws` provider for secret sync.
+- The app never needs to know which ESO provider in use.
+
+For the complete Workload Identity setup guide covering AWS IRSA, GKE WI, AKS WIF, and Vault K8s auth, see [docs/workload-identity.md](workload-identity.md).
+
 ## AWS Secrets Manager
 
-When compiled with the `aws` feature flag:
+When compiled with the `aws` feature flag and deployed without Workload Identity:
 
 ```env
 AWS_ACCESS_KEY_ID=test
@@ -169,3 +307,5 @@ AWS_SECRET_ACCESS_KEY=test
 APP_AWS__REGION=us-east-1
 APP_AWS__SECRETS_CACHE_TTL=300
 ```
+
+For Workload Identity deployments (recommended), see [docs/workload-identity.md](workload-identity.md#aws-eks--iam-roles-for-service-accounts-irsa) — no static credentials needed.

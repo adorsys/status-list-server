@@ -33,6 +33,54 @@ The following files are used to configure the deployment:
 - **`redis-ha.persistentVolume.enabled`**: Enable or disable persistent storage for Redis.
 - **`redis-ha.enabled`**: Enable the optional Redis HA dependency and application Redis environment variables.
 
+## Workload Identity Deployment
+
+The chart supports deploying without static cloud credentials using cloud-provider Workload Identity. See [docs/workload-identity.md](../docs/workload-identity.md) for detailed cloud-specific setup instructions covering AWS IRSA, GKE Workload Identity, AKS Workload Identity Federation, and Vault Kubernetes Auth.
+
+### Quick-Start by Platform
+
+| Platform     | Example Values File              | Auth Method                        |
+|--------------|----------------------------------|------------------------------------|
+| AWS EKS      | `values-aws-irsa.yaml`           | IAM Roles for Service Accounts     |
+| GKE          | `values-gke-wi.yaml`             | GKE Workload Identity              |
+| AKS          | `values-aks-wif.yaml`            | AKS Workload Identity Federation   |
+| Any (Vault)  | `values-vault-k8s.yaml`          | Vault Kubernetes Auth              |
+
+### Deploying with AWS IRSA
+
+```bash
+helm dependency build ./chart
+helm install statuslist ./chart \
+  --namespace statuslist \
+  -f chart/values.yaml \
+  -f chart/values-aws-irsa.yaml
+```
+
+### Deploying with Vault K8s Auth
+
+```bash
+helm install statuslist ./chart \
+  --namespace statuslist \
+  -f chart/values.yaml \
+  -f chart/values-vault-k8s.yaml
+```
+
+### Decision Tree
+
+Not sure which path to use? See the **Authentication & Secrets Delivery Decision Tree** in [docs/secrets-backends.md](../docs/secrets-backends.md) for a step-by-step guide to choosing the right configuration.
+
+### Rendering All Provider Variants
+
+The CI validates that all provider values files render cleanly. Run locally:
+
+```bash
+helm dependency build ./chart
+for file in values-aws-irsa values-vault-k8s values-gke-wi values-aks-wif; do
+  helm template statuslist ./chart -f chart/values.yaml -f "chart/${file}.yaml" > /tmp/rendered-${file}.yaml
+  echo "✓ ${file}.yaml rendered $(wc -l < /tmp/rendered-${file}.yaml) lines"
+done
+```
+
 ## Redis Role
 
 Redis is optional. The server does not use Redis for status-list persistence or status-list reads; those use the configured repository backend and the in-process Moka status-list cache. In this chart, Redis is intended only as a distributed certificate-material cache for multi-replica deployments that use the AWS S3 certificate storage path and compile the application with the `redis` feature.

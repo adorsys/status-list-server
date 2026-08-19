@@ -1,0 +1,77 @@
+# Example values for deployments using Vault Kubernetes Auth.
+# No role_id/secret_id credentials required — the app uses the projected
+# Kubernetes ServiceAccount token automatically.
+#
+# Prerequisites:
+# 1. Vault enabled with Kubernetes auth method
+# 2. ServiceAccount bound to a Vault Kubernetes auth role
+#
+# Usage:
+#   helm install statuslist ./chart \
+#     --namespace statuslist \
+#     -f chart/values.yaml \
+#     -f chart/values-vault-k8s.yaml
+#
+# Combine with values-aws-irsa.yaml for hybrid: IRSA for Route53 ACME + Vault K8s auth for secrets.
+#   helm install statuslist ./chart \
+#     --namespace statuslist \
+#     -f chart/values.yaml \
+#     -f chart/values-aws-irsa.yaml \
+#     -f chart/values-vault-k8s.yaml
+#
+# See docs/workload-identity.md and docs/secrets-backends.md for setup instructions.
+
+serviceAccount:
+  create: true
+  name: statuslist-sa
+  # Annotations for cloud WI (optional — only needed if the app accesses cloud resources directly)
+  annotations: {}
+
+# Vault K8s auth environment variables.
+# The app authenticates to Vault using the projected ServiceAccount token.
+statuslist:
+  aws:
+    region: eu-central-1
+  env:
+    APP_VAULT__ADDR: http://vault.openbao.svc.cluster.local:8200
+    APP_VAULT__AUTH_MOUNT: kubernetes
+    # TOKEN_PATH must match where the SA token is projected:
+    # - Kubernetes projects tokens to /var/run/secrets/kubernetes.io/serviceaccount/token
+    # - Vault Agent or CSI driver may project to /var/run/secrets/tokens/vaulttoken
+    # Adjust to match your deployment's token projection mechanism.
+    APP_VAULT__TOKEN_PATH: /var/run/secrets/tokens/vaulttoken
+    APP_VAULT__MOUNT: secret
+    APP_VAULT__PATH_PREFIX: production/status-list
+    APP_VAULT__SECRETS_CACHE_TTL: "300"
+    APP_AWS__S3_BUCKET: status-list-adorsys
+    APP_AWS__SECRETS_CACHE_TTL: "300"
+
+# ESO fetches operational secrets from Vault.
+# The SecretStore uses Vault with Kubernetes auth (no role_id/secret_id).
+externalSecret:
+  enabled: true
+  spec:
+    secretStoreRef:
+      name: statuslist-secret-store
+      kind: SecretStore
+    data:
+      - secretKey: postgres-password
+        remoteRef:
+          key: statuslist/postgres-password
+          property: POSTGRES_PASSWORD
+      - secretKey: redis-password
+        remoteRef:
+          key: statuslist/redis-password
+          property: REDIS_PASSWORD
+
+secretStore:
+  enabled: true
+  provider: vault
+  vault:
+    server: http://vault.openbao.svc.cluster.local:8200
+    path: secret
+    auth: kubernetes
+
+# Disable Redis for simpler deployments.
+redis-ha:
+  enabled: false
