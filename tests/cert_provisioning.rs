@@ -1,17 +1,16 @@
-#![cfg(feature = "aws")]
+#![cfg(feature = "aws-secrets")]
 
 //! Integration tests for the ACME certificate provisioning flow.
 //!
 //! These tests require Docker to be running. They spin up:
 //! - **Pebble** (ACME CA test server)
 //! - **challtestsrv** (DNS server for Pebble)
-//! - **LocalStack** (S3 + Secrets Manager)
+//! - **LocalStack** (Secrets Manager)
 //! - **Vault** (if enabled) or **OpenBao** (if enabled)
 
 use std::{sync::Arc, time::Duration};
 
 use aws_config::BehaviorVersion;
-use aws_sdk_s3::Client as S3Client;
 #[cfg(feature = "vault")]
 use secrecy::SecretString;
 #[cfg(feature = "vault")]
@@ -22,7 +21,7 @@ use status_list_server::{
         challenge::{Dns01Handler, PebbleDnsProvider},
         http_client::DefaultHttpClient,
     },
-    outbound::aws::{AwsS3, AwsSecretsManager},
+    outbound::aws::AwsSecretsManager,
 };
 #[cfg(feature = "vault")]
 use testcontainers_modules::hashicorp_vault::HashicorpVault;
@@ -41,7 +40,6 @@ const PEBBLE_TAG: &str = "2.10";
 const CHALLTESTSRV_IMAGE: &str = "ghcr.io/letsencrypt/pebble-challtestsrv";
 const CHALLTESTSRV_TAG: &str = "2.10";
 
-const BUCKET_NAME: &str = "status-list-adorsys";
 const AWS_REGION: &str = "us-east-1";
 
 #[cfg(feature = "vault")]
@@ -108,7 +106,7 @@ impl TestInfra {
 
         let localstack = LocalStack::default()
             .with_tag("4.14")
-            .with_env_var("SERVICES", "s3,secretsmanager")
+            .with_env_var("SERVICES", "secretsmanager")
             .start()
             .await
             .expect("Failed to start LocalStack");
@@ -137,17 +135,13 @@ impl TestInfra {
             .await
     }
 
-    /// Build a `CertManager` with `AwsS3` cert storage,
-    /// and the provided `secrets_storage` backend for signing keys.
+    /// Build a `CertManager` with one cryptographic-material backend for both
+    /// certificate chains and signing keys.
     async fn build_cert_manager(
         &self,
         domain: &str,
-        secrets_storage: impl Storage + 'static,
+        material_storage: impl Storage + 'static,
     ) -> CertManager {
-        let aws_config = self.aws_config().await;
-
-        let cert_storage = AwsS3::new(&aws_config, BUCKET_NAME, AWS_REGION, "");
-
         let challtestsrv_url = format!("http://127.0.0.1:{}", self.challtestsrv_port);
         let dns_provider = PebbleDnsProvider::new(&challtestsrv_url);
         let challenge_handler = Dns01Handler::new(dns_provider);
@@ -163,18 +157,9 @@ impl TestInfra {
             &acme_directory_url,
         )
         .expect("Failed to create CertManager")
-        .with_cert_storage(cert_storage)
-        .with_secrets_storage(secrets_storage)
+        .with_crypto_storage(material_storage)
         .with_challenge_handler(challenge_handler)
         .with_acme_http_client(http_client)
-    }
-
-    /// Create an S3 client (path-style).
-    async fn s3_client(&self) -> S3Client {
-        let aws_config = self.aws_config().await;
-        let c = S3Client::new(&aws_config);
-        let dev_config = c.config().to_builder().force_path_style(true).build();
-        S3Client::from_conf(dev_config)
     }
 }
 
@@ -286,11 +271,11 @@ async fn test_cert_provisioning_with_aws_secrets_manager() {
 
     let infra = TestInfra::start("provision").await;
     let aws_config = infra.aws_config().await;
-    let secrets_storage = AwsSecretsManager::new(&aws_config, Duration::from_millis(0))
+    let material_storage = AwsSecretsManager::new(&aws_config, Duration::from_millis(0))
         .await
         .expect("Failed to create AwsSecretsManager");
     let cert_manager = infra
-        .build_cert_manager("test.example.com", secrets_storage)
+        .build_cert_manager("test.example.com", material_storage)
         .await;
 
     // Request a certificate
@@ -308,18 +293,7 @@ async fn test_cert_provisioning_with_aws_secrets_manager() {
     assert!(cert_data.valid_from < cert_data.expires_at);
     assert!(cert_data.updated_at > 0);
 
-    // Verify certificate is persisted in S3
-    let s3 = infra.s3_client().await;
-    let objects = s3
-        .list_objects_v2()
-        .bucket(BUCKET_NAME)
-        .send()
-        .await
-        .expect("Failed to list S3 objects");
-    let keys: Vec<_> = objects.contents().iter().filter_map(|o| o.key()).collect();
-    assert!(keys.iter().any(|k| k.contains("cert_data.json")));
-
-    // Verify signing key is in Secrets Manager
+    // Verify certificate and signing key are in the same material backend.
     let aws_config = infra.aws_config().await;
     let secrets = aws_sdk_secretsmanager::Client::new(&aws_config)
         .list_secrets()
@@ -331,7 +305,14 @@ async fn test_cert_provisioning_with_aws_secrets_manager() {
         .iter()
         .filter_map(|s| s.name())
         .collect();
-    assert!(!names.is_empty());
+    assert!(
+        names.iter().any(|name| name.contains("cert_data.json")),
+        "certificate data should be present in Secrets Manager"
+    );
+    assert!(
+        names.contains(&"keys-test.example.com"),
+        "signing key should be present in Secrets Manager"
+    );
 
     // Verify cert chain extraction
     let cert_chain = cert_manager
@@ -349,12 +330,12 @@ async fn test_certificate_renewal_with_existing_cert() {
 
     let infra = TestInfra::start("renew").await;
     let aws_config = infra.aws_config().await;
-    let secrets_storage = AwsSecretsManager::new(&aws_config, Duration::from_millis(0))
+    let material_storage = AwsSecretsManager::new(&aws_config, Duration::from_millis(0))
         .await
         .expect("Failed to create AwsSecretsManager");
     let cert_manager = Arc::new(
         infra
-            .build_cert_manager("renew.example.com", secrets_storage)
+            .build_cert_manager("renew.example.com", material_storage)
             .await,
     );
 
@@ -396,16 +377,17 @@ async fn test_cert_provisioning_with_hashicorp_vault() {
     let vault_port = _vault_container.get_host_port_ipv4(8200).await.unwrap();
 
     let (role_id, secret_id) = setup_vault_approle(vault_port).await;
-    let secrets_storage = build_vault_storage(vault_port, role_id.clone(), secret_id.clone()).await;
+    let material_storage =
+        build_vault_storage(vault_port, role_id.clone(), secret_id.clone()).await;
     let cert_manager = infra
-        .build_cert_manager("vault.example.com", secrets_storage)
+        .build_cert_manager("vault.example.com", material_storage)
         .await;
 
     // Request a certificate
     let cert_data = cert_manager
         .request_certificate()
         .await
-        .expect("Certificate provisioning failed with Vault secrets backend");
+        .expect("Certificate provisioning failed with Vault material backend");
 
     // Verify the certificate content
     assert!(
@@ -416,19 +398,15 @@ async fn test_cert_provisioning_with_hashicorp_vault() {
     assert!(cert_data.valid_from < cert_data.expires_at);
     assert!(cert_data.updated_at > 0);
 
-    // Verify certificate is persisted in S3 (cert storage)
-    let s3 = infra.s3_client().await;
-    let objects = s3
-        .list_objects_v2()
-        .bucket(BUCKET_NAME)
-        .send()
-        .await
-        .expect("Failed to list S3 objects");
-    let keys: Vec<_> = objects.contents().iter().filter_map(|o| o.key()).collect();
-    assert!(keys.iter().any(|k| k.contains("cert_data.json")));
-
-    // Verify signing key was stored in Vault (secrets storage)
+    // Verify certificate and signing key were stored in Vault.
     let vault_reader = build_vault_storage(vault_port, role_id, secret_id).await;
+    let certificate = Storage::load(&vault_reader, "certs-example.com-cert_data.json")
+        .await
+        .expect("Failed to load certificate data from Vault");
+    assert!(
+        certificate.is_some(),
+        "certificate data should be present in Vault"
+    );
     let signing_key = Storage::load(&vault_reader, "keys-vault.example.com")
         .await
         .expect("Failed to load signing_key from Vault");
@@ -466,17 +444,17 @@ async fn test_cert_provisioning_with_openbao() {
     let openbao_port = _openbao_container.get_host_port_ipv4(8200).await.unwrap();
 
     let (role_id, secret_id) = setup_vault_approle(openbao_port).await;
-    let secrets_storage =
+    let material_storage =
         build_vault_storage(openbao_port, role_id.clone(), secret_id.clone()).await;
     let cert_manager = infra
-        .build_cert_manager("openbao.example.com", secrets_storage)
+        .build_cert_manager("openbao.example.com", material_storage)
         .await;
 
     // Request a certificate
     let cert_data = cert_manager
         .request_certificate()
         .await
-        .expect("Certificate provisioning failed with OpenBao secrets backend");
+        .expect("Certificate provisioning failed with OpenBao material backend");
 
     // Verify the certificate content
     assert!(
@@ -487,19 +465,15 @@ async fn test_cert_provisioning_with_openbao() {
     assert!(cert_data.valid_from < cert_data.expires_at);
     assert!(cert_data.updated_at > 0);
 
-    // Verify certificate is persisted in S3 (cert storage)
-    let s3 = infra.s3_client().await;
-    let objects = s3
-        .list_objects_v2()
-        .bucket(BUCKET_NAME)
-        .send()
-        .await
-        .expect("Failed to list S3 objects");
-    let keys: Vec<_> = objects.contents().iter().filter_map(|o| o.key()).collect();
-    assert!(keys.iter().any(|k| k.contains("cert_data.json")));
-
-    // Verify signing key was stored in OpenBao (secrets storage)
+    // Verify certificate and signing key were stored in OpenBao.
     let openbao_reader = build_vault_storage(openbao_port, role_id, secret_id).await;
+    let certificate = Storage::load(&openbao_reader, "certs-example.com-cert_data.json")
+        .await
+        .expect("Failed to load certificate data from OpenBao");
+    assert!(
+        certificate.is_some(),
+        "certificate data should be present in OpenBao"
+    );
     let signing_key = Storage::load(&openbao_reader, "keys-openbao.example.com")
         .await
         .expect("Failed to load signing_key from OpenBao");

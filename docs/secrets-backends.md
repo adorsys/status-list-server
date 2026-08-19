@@ -1,12 +1,14 @@
-# Secrets Storage Backend Guidance
+# Cryptographic Material Backend Guidance
 
-The server supports storing sensitive cryptographic materials (such as ACME account keys and server signing keys) in secure secrets management backends.
+The server stores lifecycle-coupled cryptographic material in one backend by default: ACME account keys, the server signing key, and the certificate chain associated with that key.
 
-The supported secrets backends include:
+The supported backends include:
 
 - **HashiCorp Vault / OpenBao**
 - **AWS Secrets Manager**
 - **In-Memory** (for development and testing)
+
+Backend selection is controlled by enabled Cargo features. Builds with `vault` use Vault/OpenBao. Builds with `aws-secrets` and without `vault` use AWS Secrets Manager. Builds without either backend feature use in-memory storage for local development and tests.
 
 ## HashiCorp Vault & OpenBao (KV v2)
 
@@ -124,7 +126,6 @@ APP_VAULT__ROLE_ID=your-role-id-here
 APP_VAULT__SECRET_ID=your-secret-id-here
 APP_VAULT__MOUNT=secret
 APP_VAULT__PATH_PREFIX=dev/status-list
-APP_VAULT__SECRETS_CACHE_TTL=300
 ```
 
 ### Example 2: Production Deployment with OpenBao / Vault
@@ -139,7 +140,6 @@ APP_VAULT__SECRET_ID=fe987654-3210-fedc-ba09-876543210fed
 APP_VAULT__MOUNT=secret
 APP_VAULT__PATH_PREFIX=production/status-list
 APP_VAULT__NAMESPACE=my-org-namespace
-APP_VAULT__SECRETS_CACHE_TTL=600
 ```
 
 ### Automated Token Lifecycle & Resilience
@@ -156,16 +156,17 @@ Vault authentication and token operations emit OpenTelemetry counters for succes
 
 ### Cache Behavior
 
-- Secrets are cached in-memory using TTL semantics to minimize latency and Vault API request volume.
-- To disable caching entirely (forcing every read to query Vault directly), set `APP_VAULT__SECRETS_CACHE_TTL=0`.
+- Certificate material stays cached until provisioning or renewal invalidates it.
+- Signing-key material reads are controlled consistently across backends by `APP_SERVER__CERT__SIGNING_KEY_CACHE_TTL`.
+- To require every private-key read to query the selected material backend, keep `APP_SERVER__CERT__SIGNING_KEY_CACHE_TTL=0`.
 
 ## AWS Secrets Manager
 
-When compiled with the `aws` feature flag:
+When compiled with the `aws-secrets` feature flag:
 
 ```env
 AWS_ACCESS_KEY_ID=test
 AWS_SECRET_ACCESS_KEY=test
 APP_AWS__REGION=us-east-1
-APP_AWS__SECRETS_CACHE_TTL=300
+APP_SERVER__CERT__SIGNING_KEY_CACHE_TTL=0
 ```

@@ -1,6 +1,6 @@
 //! Composition root assembling outbound infrastructure adapters and creating the AppState container.
 
-#[cfg(feature = "aws")]
+#[cfg(feature = "aws-secrets")]
 use aws_config::{BehaviorVersion, Region};
 #[cfg(any(
     feature = "acme",
@@ -36,7 +36,7 @@ use std::time::Duration;
 #[cfg(feature = "acme")]
 use tracing::warn;
 
-#[cfg(feature = "aws")]
+#[cfg(feature = "aws-secrets")]
 use crate::cert_manager::challenge::AwsRoute53DnsProvider;
 #[cfg(feature = "acme")]
 use crate::cert_manager::challenge::{
@@ -45,9 +45,12 @@ use crate::cert_manager::challenge::{
 };
 #[cfg(feature = "acme")]
 use crate::cert_manager::http_client::DefaultHttpClient;
+#[cfg(all(feature = "acme", not(feature = "vault"), not(feature = "aws-secrets")))]
+use crate::cert_manager::storage::MemoryStorage;
 #[cfg(feature = "acme")]
 use crate::cert_manager::{
-    CertManager, StoreProvisioningStrategy, storage::MemoryStorage, storage::Storage,
+    CertManager, StoreProvisioningStrategy,
+    storage::{CryptoCachePolicy, Storage},
 };
 use crate::config::{Config as AppConfig, DatabaseBackend};
 #[cfg(feature = "acme")]
@@ -58,9 +61,7 @@ use crate::domain::{
     ports::{CertificateProvider, CredentialRepo, StatusListRepo, StatusListSnapshotRepo},
     service::Service,
 };
-#[cfg(feature = "aws")]
-use crate::outbound::aws::AwsS3;
-#[cfg(all(feature = "aws", not(feature = "vault")))]
+#[cfg(all(feature = "aws-secrets", not(feature = "vault")))]
 use crate::outbound::aws::AwsSecretsManager;
 use crate::outbound::cache::MokaStatusListCache;
 #[cfg(feature = "acme")]
@@ -216,78 +217,7 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
     ) = {
         let app_env = std::env::var("APP_ENV").unwrap_or(ENV_DEVELOPMENT.to_string());
         let cert_domains = [config.server.domain.as_str()];
-        let secrets_storage: Box<dyn Storage> = {
-            #[cfg(feature = "vault")]
-            {
-                tracing::info!("Using Vault KV v2 as secrets backend");
-                let secret_id = config.vault.resolve_secret_id()?;
-                Box::new(
-                    VaultClient::builder(&config.vault.addr, &config.vault.role_id, secret_id)
-                        .auth_mount(&config.vault.auth_mount)
-                        .mount(&config.vault.mount)
-                        .path_prefix(&config.vault.path_prefix)
-                        .namespace(config.vault.namespace.as_deref())
-                        .secrets_cache_ttl(Duration::from_secs(config.vault.secrets_cache_ttl))
-                        .timeout(Duration::from_secs(config.vault.timeout_secs))
-                        .build()
-                        .await?,
-                )
-            }
-            #[cfg(not(feature = "vault"))]
-            {
-                #[cfg(feature = "aws")]
-                {
-                    if config
-                        .server
-                        .cert
-                        .store
-                        .source
-                        .eq_ignore_ascii_case("aws_secrets_manager")
-                    {
-                        let aws_config = aws_config::defaults(BehaviorVersion::latest())
-                            .region(Region::new(config.aws.region.clone()))
-                            .load()
-                            .await;
-                        Box::new(
-                            AwsSecretsManager::new(
-                                &aws_config,
-                                Duration::from_secs(config.aws.secrets_cache_ttl),
-                            )
-                            .await?,
-                        )
-                    } else {
-                        Box::new(MemoryStorage::default())
-                    }
-                }
-                #[cfg(not(feature = "aws"))]
-                Box::new(MemoryStorage::default())
-            }
-        };
-
-        // Uses S3 when available and configured, otherwise memory.
-        let cert_storage: Box<dyn Storage> = {
-            #[cfg(feature = "aws")]
-            {
-                if !config.aws.s3_bucket.is_empty() {
-                    let aws_config = aws_config::defaults(BehaviorVersion::latest())
-                        .region(Region::new(config.aws.region.clone()))
-                        .load()
-                        .await;
-
-                    let s3 = AwsS3::new(
-                        &aws_config,
-                        &config.aws.s3_bucket,
-                        &config.aws.region,
-                        &config.aws.s3_key_prefix,
-                    );
-                    Box::new(s3)
-                } else {
-                    Box::new(MemoryStorage::default())
-                }
-            }
-            #[cfg(not(feature = "aws"))]
-            Box::new(MemoryStorage::default())
-        };
+        let material_storage = build_crypto_storage(config).await?;
 
         let cert_strategy = store_certificate_strategy(config)?;
         let uses_acme_strategy = config
@@ -301,9 +231,10 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
             .email(&config.server.cert.email)
             .organization(config.server.cert.organization.as_deref())
             .acme_directory_url(&config.server.cert.acme_directory_url)
-            .cert_storage(cert_storage)
-            .secrets_storage(secrets_storage)
-            .chain_cache_ttl(Duration::from_secs(config.server.cert.chain_cache_ttl))
+            .crypto_cache_policy(CryptoCachePolicy::new(Duration::from_secs(
+                config.server.cert.signing_key_cache_ttl,
+            )))
+            .crypto_storage(material_storage)
             .eku(&config.server.cert.eku);
 
         cert_manager_builder = if uses_acme_strategy {
@@ -495,6 +426,50 @@ fn acme_dns_credentials(account: &crate::config::AcmeDnsAccount) -> AcmeDnsCrede
 }
 
 #[cfg(feature = "acme")]
+async fn build_crypto_storage(_config: &AppConfig) -> EyeResult<Box<dyn Storage>> {
+    #[cfg(feature = "vault")]
+    {
+        tracing::info!("Using Vault KV v2 as secrets backend");
+        let secret_id = _config.vault.resolve_secret_id()?;
+        Ok(Box::new(
+            VaultClient::builder(&_config.vault.addr, &_config.vault.role_id, secret_id)
+                .auth_mount(&_config.vault.auth_mount)
+                .mount(&_config.vault.mount)
+                .path_prefix(&_config.vault.path_prefix)
+                .namespace(_config.vault.namespace.as_deref())
+                .secrets_cache_ttl(Duration::from_secs(
+                    _config.server.cert.signing_key_cache_ttl,
+                ))
+                .timeout(Duration::from_secs(_config.vault.timeout_secs))
+                .build()
+                .await?,
+        ))
+    }
+
+    #[cfg(all(not(feature = "vault"), feature = "aws-secrets"))]
+    {
+        tracing::info!("Using AWS Secrets Manager as cryptographic-material backend");
+        let aws_config = aws_config::defaults(BehaviorVersion::latest())
+            .region(Region::new(_config.aws.region.clone()))
+            .load()
+            .await;
+        Ok(Box::new(
+            AwsSecretsManager::new(
+                &aws_config,
+                Duration::from_secs(_config.server.cert.signing_key_cache_ttl),
+            )
+            .await?,
+        ))
+    }
+
+    #[cfg(all(not(feature = "vault"), not(feature = "aws-secrets")))]
+    {
+        tracing::info!("Using in-memory cryptographic-material backend");
+        Ok(Box::new(MemoryStorage::default()))
+    }
+}
+
+#[cfg(feature = "acme")]
 fn store_certificate_strategy(config: &AppConfig) -> EyeResult<Option<StoreProvisioningStrategy>> {
     let cert_config = &config.server.cert;
     if cert_config
@@ -514,57 +489,33 @@ fn store_certificate_strategy(config: &AppConfig) -> EyeResult<Option<StoreProvi
         ));
     }
 
-    match cert_config.store.source.as_str() {
-        source if source.eq_ignore_ascii_case("filesystem") => {
-            let certificate_path = cert_config
-                .store
-                .certificate_path
-                .as_deref()
-                .ok_or_else(|| {
-                    eyre!(
-                        "server.cert.store.certificate_path is required for filesystem store provisioning"
-                    )
-                })?;
-            let signing_key_path = cert_config
-                .store
-                .signing_key_path
-                .as_deref()
-                .ok_or_else(|| {
-                    eyre!(
-                        "server.cert.store.signing_key_path is required for filesystem store provisioning"
-                    )
-                })?;
-            Ok(Some(StoreProvisioningStrategy::filesystem(
-                certificate_path,
-                signing_key_path,
-            )))
-        }
-        source if source.eq_ignore_ascii_case("aws_secrets_manager") => {
-            let certificate_key = cert_config
-                .store
-                .certificate_key
-                .as_deref()
-                .ok_or_else(|| {
-                    eyre!(
-                        "server.cert.store.certificate_key is required for aws_secrets_manager store provisioning"
-                    )
-                })?;
-            let signing_key_key = cert_config
-                .store
-                .signing_key_key
-                .as_deref()
-                .ok_or_else(|| {
-                    eyre!(
-                        "server.cert.store.signing_key_key is required for aws_secrets_manager store provisioning"
-                    )
-                })?;
-            Ok(Some(StoreProvisioningStrategy::secrets_storage(
-                certificate_key,
-                signing_key_key,
-            )))
-        }
-        unsupported => Err(eyre!(
-            "unsupported certificate store source '{unsupported}'; expected 'filesystem' or 'aws_secrets_manager'"
+    let filesystem = (
+        cert_config.store.certificate_path.as_deref(),
+        cert_config.store.signing_key_path.as_deref(),
+    );
+    let storage = (
+        cert_config.store.certificate_key.as_deref(),
+        cert_config.store.signing_key_key.as_deref(),
+    );
+
+    match (filesystem, storage) {
+        ((Some(certificate_path), Some(signing_key_path)), (None, None)) => Ok(Some(
+            StoreProvisioningStrategy::filesystem(certificate_path, signing_key_path),
+        )),
+        ((None, None), (Some(certificate_key), Some(signing_key_key))) => Ok(Some(
+            StoreProvisioningStrategy::storage(certificate_key, signing_key_key),
+        )),
+        ((Some(_), Some(_)), (Some(_), Some(_))) => Err(eyre!(
+            "store provisioning must configure either filesystem paths or material backend keys, not both"
+        )),
+        ((Some(_), None) | (None, Some(_)), _) => Err(eyre!(
+            "filesystem store provisioning requires both server.cert.store.certificate_path and server.cert.store.signing_key_path"
+        )),
+        (_, (Some(_), None) | (None, Some(_))) => Err(eyre!(
+            "storage-backed store provisioning requires both server.cert.store.certificate_key and server.cert.store.signing_key_key"
+        )),
+        ((None, None), (None, None)) => Err(eyre!(
+            "store provisioning requires either filesystem paths or material backend keys"
         )),
     }
 }
@@ -576,7 +527,7 @@ async fn build_dns_challenge_handler(
     cert_domains: &[&str],
 ) -> EyeResult<Dns01Handler> {
     let handler = match provider {
-        #[cfg(feature = "aws")]
+        #[cfg(feature = "aws-secrets")]
         ResolvedDnsProvider::Route53 => {
             let aws_config = aws_config::defaults(BehaviorVersion::latest())
                 .region(Region::new(config.aws.region.clone()))
@@ -584,10 +535,10 @@ async fn build_dns_challenge_handler(
                 .await;
             Dns01Handler::new(AwsRoute53DnsProvider::new(&aws_config))
         }
-        #[cfg(not(feature = "aws"))]
+        #[cfg(not(feature = "aws-secrets"))]
         ResolvedDnsProvider::Route53 => {
             return Err(eyre!(
-                "Route53 DNS provider requested, but 'aws' feature is disabled at compile time."
+                "Route53 DNS provider requested, but 'aws-secrets' feature is disabled at compile time."
             ));
         }
         ResolvedDnsProvider::Cloudflare(cfg) => {
@@ -669,7 +620,7 @@ mod tests {
         let domain = config.server.domain.clone();
         let domains = [domain.as_str()];
 
-        #[cfg(feature = "aws")]
+        #[cfg(feature = "aws-secrets")]
         assert!(
             build_dns_challenge_handler(DnsProviderKind::Route53, &mut config, &domains).is_ok()
         );

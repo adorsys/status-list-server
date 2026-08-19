@@ -11,7 +11,8 @@ postgres = ["history", "sea-orm?/sqlx-postgres"]
 sqlite = ["history", "sea-orm?/sqlx-sqlite"]
 mysql = ["history", "sea-orm?/sqlx-mysql"]
 vault = ["acme"]
-aws = [
+aws-secrets = [
+  "acme",
   "dep:aws-config",
   "dep:aws-sdk-route53",
   "dep:aws-sdk-s3",

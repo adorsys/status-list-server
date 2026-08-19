@@ -182,9 +182,8 @@ pub struct CertConfig {
     #[serde(default)]
     pub eku: Vec<u64>,
     pub acme_directory_url: String,
-    /// Cache TTL for parsed certificate chains in seconds.
-    /// A value of 0 keeps entries in memory indefinitely without expiration.
-    pub chain_cache_ttl: u64,
+    /// Cache TTL for private signing-key reads in seconds. `0` disables this cache.
+    pub signing_key_cache_ttl: u64,
     pub renewal_cron_schedule: String,
     #[serde(default)]
     pub dns_challenge_server_url: Option<String>,
@@ -195,7 +194,6 @@ pub struct CertConfig {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct CertStoreConfig {
-    pub source: String,
     #[serde(default)]
     pub certificate_path: Option<String>,
     #[serde(default)]
@@ -575,9 +573,6 @@ pub struct DatabaseConfig {
 #[derive(Debug, Clone, Deserialize)]
 pub struct AwsConfig {
     pub region: String,
-    /// Cache TTL for AWS Secrets Manager entries in seconds.
-    /// Setting this to 0 disables caching entirely.
-    pub secrets_cache_ttl: u64,
     pub s3_bucket: String,
     pub s3_key_prefix: String,
 }
@@ -603,9 +598,6 @@ pub struct VaultConfig {
     /// Optional Vault Enterprise / OpenBao namespace.
     #[serde(default)]
     pub namespace: Option<String>,
-    /// Cache TTL for Vault secrets in seconds.
-    /// Setting this to 0 disables caching entirely.
-    pub secrets_cache_ttl: u64,
     /// HTTP request timeout in seconds.
     pub timeout_secs: u64,
 }
@@ -738,11 +730,6 @@ fn base_builder() -> Result<ConfigBuilder<DefaultState>, ConfigError> {
     let (default_provisioning_strategy, default_cert_path, default_key_path) =
         ("store", Option::<String>::None, Option::<String>::None);
 
-    #[cfg(feature = "acme")]
-    let default_chain_cache_ttl = crate::utils::cert_manager::DEFAULT_CHAIN_CACHE_TTL.as_secs();
-    #[cfg(not(feature = "acme"))]
-    let default_chain_cache_ttl = 86400;
-
     let telemetry_environment = match std::env::var("APP_ENV")
         .unwrap_or_default()
         .trim()
@@ -781,9 +768,8 @@ fn base_builder() -> Result<ConfigBuilder<DefaultState>, ConfigError> {
             "server.cert.acme_directory_url",
             "https://acme-v02.api.letsencrypt.org/directory",
         )?
-        .set_default("server.cert.chain_cache_ttl", default_chain_cache_ttl)?
+        .set_default("server.cert.signing_key_cache_ttl", 0)?
         .set_default("server.cert.renewal_cron_schedule", "0 0 0 * * *")?
-        .set_default("server.cert.store.source", "filesystem")?
         .set_default("server.cert.store.certificate_path", default_cert_path)?
         .set_default("server.cert.store.signing_key_path", default_key_path)?
         .set_default("server.cert.store.certificate_key", Option::<String>::None)?
@@ -797,7 +783,6 @@ fn base_builder() -> Result<ConfigBuilder<DefaultState>, ConfigError> {
         .set_default("vault.mount", "secret")?
         .set_default("vault.path_prefix", "")?
         .set_default("vault.namespace", Option::<String>::None)?
-        .set_default("vault.secrets_cache_ttl", 300)?
         .set_default("vault.timeout_secs", 30)?
         .set_default("cache.ttl", 5 * 60)?
         .set_default("cache.max_capacity", 100)?
@@ -874,7 +859,7 @@ mod tests {
         let (expected_strategy, expected_cert_path, expected_key_path) =
             ("store", Option::<String>::None, Option::<String>::None);
         assert_eq!(config.server.cert.provisioning_strategy, expected_strategy);
-        assert_eq!(config.server.cert.store.source, "filesystem");
+        assert_eq!(config.server.cert.signing_key_cache_ttl, 0);
         assert_eq!(
             config.server.cert.store.certificate_path,
             expected_cert_path
@@ -934,12 +919,12 @@ mod tests {
             ("server.cert.organization", "Test Org"),
             ("server.cert.eku", "1,3,6,1,5,5,7,3,30"),
             ("server.cert.provisioning_strategy", "store"),
+            ("server.cert.signing_key_cache_ttl", "0"),
             ("server.cert.store.certificate_path", "/certs/tls.crt"),
             ("server.cert.store.signing_key_path", "/certs/tls.key"),
             ("server.cert.renewal_cron_schedule", "0 0 12 * * *"),
             ("server.cert.dns_challenge_server_url", "http://pebble:8055"),
             ("aws.region", "us-west-2"),
-            ("aws.secrets_cache_ttl", "600"),
             ("aws.s3_bucket", "my-custom-bucket"),
             ("aws.s3_key_prefix", "status-list/prod"),
             ("cache.ttl", "600"),
@@ -979,7 +964,6 @@ mod tests {
             "https://acme-v02.api.letsencrypt.org/directory"
         );
         assert_eq!(overridden.aws.region, "us-west-2");
-        assert_eq!(overridden.aws.secrets_cache_ttl, 600);
         assert_eq!(overridden.aws.s3_bucket, "my-custom-bucket");
         assert_eq!(overridden.aws.s3_key_prefix, "status-list/prod");
         assert_eq!(overridden.cache.ttl, 600);
@@ -992,6 +976,7 @@ mod tests {
             Some("http://pebble:8055")
         );
         assert_eq!(overridden.server.cert.provisioning_strategy, "store");
+        assert_eq!(overridden.server.cert.signing_key_cache_ttl, 0);
         assert_eq!(
             overridden.server.cert.store.certificate_path.as_deref(),
             Some("/certs/tls.crt")
@@ -1488,7 +1473,6 @@ mod tests {
         assert_eq!(default_config.vault.mount, "secret");
         assert_eq!(default_config.vault.path_prefix, "");
         assert_eq!(default_config.vault.namespace, None);
-        assert_eq!(default_config.vault.secrets_cache_ttl, 300);
         assert_eq!(default_config.vault.timeout_secs, 30);
         assert!(default_config.vault.resolve_secret_id().is_err());
 
@@ -1501,7 +1485,6 @@ mod tests {
             ("vault.mount", "kv-secrets"),
             ("vault.path_prefix", "services/status-list"),
             ("vault.namespace", "tenant-1"),
-            ("vault.secrets_cache_ttl", "60"),
             ("vault.timeout_secs", "15"),
         ])
         .expect("Failed to load overridden config");
@@ -1526,13 +1509,12 @@ mod tests {
             overridden_config.vault.namespace,
             Some("tenant-1".to_string())
         );
-        assert_eq!(overridden_config.vault.secrets_cache_ttl, 60);
         assert_eq!(overridden_config.vault.timeout_secs, 15);
 
         // Vault AppRole overrides with secret_id_path
         let secret_file = std::env::temp_dir().join(format!(
             "vault_secret_id_test_{}.txt",
-            time::UtcDateTime::now().nanosecond()
+            time::OffsetDateTime::now_utc().nanosecond()
         ));
         std::fs::write(&secret_file, "  file-secret-id-value \n").expect("write secret file");
 
