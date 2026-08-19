@@ -62,9 +62,5 @@ minikube stop
 ## Notes
 
 - `values-local.yaml` only overrides what differs from production defaults (NodePorts, disabled ingress/secret-store, lighter resources).
-- Redis, Redis TLS, and AWS-specific resources remain disabled; no additional setup required.
+- AWS-specific resources remain disabled; no additional setup required.
 - If pods fail with `CreateContainerConfigError`, check that `statuslist-secret` exists in the `local` namespace.
-
-## Optional Redis Cache
-
-Redis is only useful here if you want to exercise the distributed certificate-material cache path. Add `--set redis-ha.enabled=true`, add `redis-password` to `statuslist-secret`, and run an application image built with the `redis` feature plus `APP_REDIS__URI` configured. The default local chart intentionally avoids that dependency.

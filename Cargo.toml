@@ -10,13 +10,11 @@ history = ["dep:sea-orm", "dep:sea-orm-migration"]
 postgres = ["history", "sea-orm?/sqlx-postgres"]
 sqlite = ["history", "sea-orm?/sqlx-sqlite"]
 mysql = ["history", "sea-orm?/sqlx-mysql"]
-redis = ["dep:redis"]
 vault = ["acme"]
 aws-secrets = [
   "acme",
   "dep:aws-config",
   "dep:aws-sdk-route53",
-  "dep:aws-sdk-s3",
   "dep:aws-sdk-secretsmanager",
 ]
 acme = ["dep:instant-acme", "dep:rcgen"]
@@ -144,12 +142,6 @@ default-features = false
 features = ["default-https-client", "rt-tokio"]
 optional = true
 
-[dependencies.aws-sdk-s3]
-version = "1"
-default-features = false
-features = ["default-https-client", "rt-tokio", "sigv4a"]
-optional = true
-
 [dependencies.aws-sdk-route53]
 version = "1"
 default-features = false
@@ -162,11 +154,6 @@ default-features = false
 features = ["default-https-client", "rt-tokio"]
 optional = true
 
-[dependencies.redis]
-version = "1.3"
-features = ["connection-manager", "tokio-rustls-comp"]
-optional = true
-
 [dependencies.p256]
 version = "0.14"
 features = ["alloc", "ecdsa", "pem", "pkcs8"]
@@ -176,7 +163,7 @@ wiremock = "0.6"
 sea-orm = { version = "1.1", features = ["mock"] }
 testcontainers-modules = {
   version = "0.15",
-  features = ["hashicorp_vault", "localstack", "mysql", "postgres", "redis"]
+  features = ["hashicorp_vault", "localstack", "mysql", "postgres"]
 }
 
 [target.'cfg(not(target_env = "msvc"))'.dependencies]
