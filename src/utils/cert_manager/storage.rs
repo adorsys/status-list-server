@@ -65,6 +65,47 @@ impl<T: Storage + ?Sized> Storage for Box<T> {
     }
 }
 
+use sha2::{Digest, Sha256};
+
+/// Normalize a storage key so it is valid and consistent across all secrets backends
+/// (AWS Secrets Manager, GCP Secret Manager, Azure Key Vault, HashiCorp Vault, Memory).
+///
+/// Azure Key Vault is the most restrictive provider, requiring 1–127 characters
+/// and admitting only ASCII alphanumeric characters and hyphens `[0-9a-zA-Z-]`.
+/// This function replaces any character outside `[0-9a-zA-Z-]` with `-`.
+///
+/// If the sanitized key exceeds 127 characters, it is truncated to 110 characters
+/// and appended with a hyphen and a 16-character hex SHA-256 digest of the full original
+/// key (`110 + 1 + 16 = 127` chars). This disambiguates distinct keys exceeding 127
+/// characters that would otherwise collide due to sharing a common prefix (e.g. multi-domain
+/// signing secret keys). Note: for keys under 127 characters, normalization is a character-replacement
+/// mapping and does not hash.
+pub fn normalize_key(key: &str) -> String {
+    let sanitized: String = key
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    if sanitized.len() > 127 {
+        let mut hasher = Sha256::new();
+        hasher.update(key.as_bytes());
+        let digest = format!("{:x}", hasher.finalize());
+        let hash_suffix = &digest[..16];
+        // Invariant: `sanitized` contains only single-byte ASCII characters `[0-9a-zA-Z-]`
+        // due to the character mapping above, so byte index 110 is guaranteed to be a valid
+        // UTF-8 character boundary.
+        let prefix = &sanitized[..110];
+        format!("{prefix}-{hash_suffix}")
+    } else {
+        sanitized
+    }
+}
+
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -77,19 +118,22 @@ pub struct MemoryStorage {
 #[async_trait]
 impl Storage for MemoryStorage {
     async fn store(&self, key: &str, value: &str) -> Result<(), StorageError> {
+        let normalized = normalize_key(key);
         self.values
             .write()
             .await
-            .insert(key.to_string(), value.to_string());
+            .insert(normalized, value.to_string());
         Ok(())
     }
 
     async fn load(&self, key: &str) -> Result<Option<String>, StorageError> {
-        Ok(self.values.read().await.get(key).cloned())
+        let normalized = normalize_key(key);
+        Ok(self.values.read().await.get(&normalized).cloned())
     }
 
     async fn delete(&self, key: &str) -> Result<(), StorageError> {
-        self.values.write().await.remove(key);
+        let normalized = normalize_key(key);
+        self.values.write().await.remove(&normalized);
         Ok(())
     }
 }
@@ -245,4 +289,45 @@ fn cache_for_ttl(ttl: Duration) -> Option<Cache<String, String>> {
             .time_to_live(ttl)
             .build()
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_normalize_key() {
+        assert_eq!(
+            normalize_key("keys-status.example.com"),
+            "keys-status-example-com"
+        );
+        assert_eq!(
+            normalize_key("acme_accounts-example.com"),
+            "acme-accounts-example-com"
+        );
+        assert_eq!(
+            normalize_key("certs-status.example.com-cert_data.json"),
+            "certs-status-example-com-cert-data-json"
+        );
+        assert_eq!(normalize_key("valid-key-123"), "valid-key-123");
+        assert_eq!(
+            normalize_key("key/with:special@chars.and+symbols"),
+            "key-with-special-chars-and-symbols"
+        );
+
+        let long_key = "a".repeat(200);
+        let normalized_long = normalize_key(&long_key);
+        assert_eq!(normalized_long.len(), 127);
+
+        let long_key1 = format!("keys-{}-test1", "a".repeat(150));
+        let long_key2 = format!("keys-{}-test2", "a".repeat(150));
+        let norm1 = normalize_key(&long_key1);
+        let norm2 = normalize_key(&long_key2);
+        assert_eq!(norm1.len(), 127);
+        assert_eq!(norm2.len(), 127);
+        assert_ne!(
+            norm1, norm2,
+            "Distinct long keys sharing a prefix must not collide"
+        );
+    }
 }
