@@ -83,4 +83,3 @@ There is no separate MariaDB service because MariaDB uses the same MySQL-driver 
 - For high availability, prefer PostgreSQL or MySQL backed by a managed HA service or a replicated cluster.
 - Avoid SQLite for multi-replica production deployments.
 - If you need distributed storage semantics, use a database that already provides them rather than trying to layer them on top of SQLite.
-
