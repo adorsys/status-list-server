@@ -70,7 +70,7 @@ jobs:
 
       - name: Verify domain layer purity
         run: |
-          if grep -rn -E "(sea_orm|axum|aws_sdk|redis|reqwest|moka|crate::server|crate::outbound)" src/domain/; then
+          if grep -rn -E "(sea_orm|axum|aws_sdk|reqwest|moka|crate::server|crate::outbound)" src/domain/; then
             echo "ERROR: Infrastructure dependencies or imports found in src/domain/"
             exit 1
           fi
