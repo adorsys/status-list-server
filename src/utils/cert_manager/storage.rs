@@ -11,9 +11,6 @@ pub enum StorageError {
 
     #[error("The data is invalid: {0}")]
     InvalidData(String),
-
-    #[error("Bucket {0} is unavailable")]
-    BucketUnavailable(String),
 }
 
 /// Abstract interface for storage backends used by the certificate manager.

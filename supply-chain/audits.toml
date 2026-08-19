@@ -27,12 +27,6 @@ user-id = 160111 # AWS SDK Rust Bot (aws-sdk-rust-ci)
 start = "2022-06-22"
 end = "2027-07-14"
 
-[[trusted.aws-sdk-s3]]
-criteria = "safe-to-deploy"
-user-id = 160111 # AWS SDK Rust Bot (aws-sdk-rust-ci)
-start = "2022-06-22"
-end = "2027-07-14"
-
 [[trusted.aws-sdk-secretsmanager]]
 criteria = "safe-to-deploy"
 user-id = 160111 # AWS SDK Rust Bot (aws-sdk-rust-ci)

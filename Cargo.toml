@@ -15,7 +15,6 @@ aws-secrets = [
   "acme",
   "dep:aws-config",
   "dep:aws-sdk-route53",
-  "dep:aws-sdk-s3",
   "dep:aws-sdk-secretsmanager",
 ]
 acme = ["dep:instant-acme", "dep:rcgen"]
@@ -141,12 +140,6 @@ optional = true
 version = "1"
 default-features = false
 features = ["default-https-client", "rt-tokio"]
-optional = true
-
-[dependencies.aws-sdk-s3]
-version = "1"
-default-features = false
-features = ["default-https-client", "rt-tokio", "sigv4a"]
 optional = true
 
 [dependencies.aws-sdk-route53]

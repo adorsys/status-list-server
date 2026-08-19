@@ -573,8 +573,6 @@ pub struct DatabaseConfig {
 #[derive(Debug, Clone, Deserialize)]
 pub struct AwsConfig {
     pub region: String,
-    pub s3_bucket: String,
-    pub s3_key_prefix: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -754,9 +752,6 @@ fn base_builder() -> Result<ConfigBuilder<DefaultState>, ConfigError> {
         .set_default("database.pool.connect_timeout_secs", 10u64)?
         .set_default("database.pool.idle_timeout_secs", 600u64)?
         .set_default("database.pool.max_lifetime_secs", 1800u64)?
-        .set_default("aws.secrets_cache_ttl", 300)?
-        .set_default("aws.s3_bucket", "status-list-adorsys")?
-        .set_default("aws.s3_key_prefix", "")?
         .set_default(
             "server.cert.provisioning_strategy",
             default_provisioning_strategy,
@@ -822,8 +817,6 @@ mod tests {
             "https://acme-v02.api.letsencrypt.org/directory"
         );
         assert_eq!(config.aws.region, "us-east-1");
-        assert_eq!(config.aws.s3_bucket, "status-list-adorsys");
-        assert_eq!(config.aws.s3_key_prefix, "");
         assert_eq!(config.status_list.token_exp_secs, 900);
         assert_eq!(config.status_list.token_ttl_secs, 300);
         assert_eq!(config.server.cert.renewal_cron_schedule, "0 0 0 * * *");
@@ -925,8 +918,6 @@ mod tests {
             ("server.cert.renewal_cron_schedule", "0 0 12 * * *"),
             ("server.cert.dns_challenge_server_url", "http://pebble:8055"),
             ("aws.region", "us-west-2"),
-            ("aws.s3_bucket", "my-custom-bucket"),
-            ("aws.s3_key_prefix", "status-list/prod"),
             ("cache.ttl", "600"),
             ("cache.max_capacity", "2000"),
             ("status_list.token_exp_secs", "1800"),
@@ -964,8 +955,6 @@ mod tests {
             "https://acme-v02.api.letsencrypt.org/directory"
         );
         assert_eq!(overridden.aws.region, "us-west-2");
-        assert_eq!(overridden.aws.s3_bucket, "my-custom-bucket");
-        assert_eq!(overridden.aws.s3_key_prefix, "status-list/prod");
         assert_eq!(overridden.cache.ttl, 600);
         assert_eq!(overridden.cache.max_capacity, 2000);
         assert_eq!(overridden.status_list.token_exp_secs, 1800);
