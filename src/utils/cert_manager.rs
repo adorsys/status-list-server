@@ -9,6 +9,7 @@ pub mod http_client;
 pub mod storage;
 
 use crate::utils::cache::{CertChainCache, CertificateChain};
+use crate::utils::cert_manager::storage::{CryptoStorage, Storage};
 use crate::utils::keygen::Keypair;
 pub use builder::CertificateManagerBuilder;
 use challenge::CleanupFuture;
@@ -35,9 +36,7 @@ use tokio_cron_scheduler::{Job, JobScheduler};
 use tracing::{error, info, instrument, warn};
 use x509_parser::pem::Pem as X509Pem;
 
-use crate::cert_manager::{
-    challenge::ChallengeHandler, http_client::DefaultHttpClient, storage::Storage,
-};
+use crate::cert_manager::{challenge::ChallengeHandler, http_client::DefaultHttpClient};
 
 use opentelemetry::{
     global,
@@ -88,12 +87,6 @@ impl Default for CertManagerMetrics {
     }
 }
 
-/// Default cache TTL when no override is supplied.
-///
-/// Exported as a single source of truth: `Config::load` references this
-/// constant so the runtime default and the code fallback always agree.
-pub const DEFAULT_CHAIN_CACHE_TTL: Duration = Duration::from_secs(3600);
-
 /// Struct that hold the certificate and its metadata
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct CertificateData {
@@ -121,10 +114,8 @@ type ACMEHttpClientFactory = Box<dyn Fn() -> Box<dyn HttpClient> + Send + Sync>;
 
 /// Struct representing the certificate manager
 pub struct CertManager {
-    // Certificate storage backend
-    cert_storage: Option<Box<dyn Storage>>,
-    // Secrets storage backend
-    secrets_storage: Option<Box<dyn Storage>>,
+    // Consolidated backend for certificate chain, signing key, and ACME account material.
+    crypto_storage: Option<CryptoStorage>,
     // ACME challenge handler
     challenge_handler: Option<Box<dyn ChallengeHandler>>,
     // ACME client
@@ -170,11 +161,10 @@ impl CertManager {
 
         let domains: Vec<String> = domains.into_iter().map(|d| d.into()).collect();
         let domain_label = domains.first().map(String::as_str).unwrap_or_default();
-        let cert_chain_cache = CertChainCache::new(DEFAULT_CHAIN_CACHE_TTL, domain_label);
+        let cert_chain_cache = CertChainCache::new(domain_label);
 
         Ok(Self {
-            cert_storage: None,
-            secrets_storage: None,
+            crypto_storage: None,
             challenge_handler: None,
             acme_client: Arc::new(Mutex::new(None)),
             acme_http_client_factory: Some(acme_http_client_factory),
@@ -190,19 +180,9 @@ impl CertManager {
         })
     }
 
-    /// Set the storage backend for the certificate.
-    ///
-    /// **Note:** This method is required.
-    pub fn with_cert_storage(mut self, storage: impl Storage + 'static) -> Self {
-        self.cert_storage = Some(Box::new(storage));
-        self
-    }
-
-    /// Set the storage backend for the sensitive data.
-    ///
-    /// **Note:** This method is required.
-    pub fn with_secrets_storage(mut self, storage: impl Storage + 'static) -> Self {
-        self.secrets_storage = Some(Box::new(storage));
+    /// Set the consolidated backend for server certificate and signing-key material.
+    pub fn with_crypto_storage(mut self, storage: impl Storage + 'static) -> Self {
+        self.crypto_storage = Some(CryptoStorage::new(storage));
         self
     }
 
@@ -236,31 +216,6 @@ impl CertManager {
         strategy: impl CertProvisioningStrategy + 'static,
     ) -> Self {
         self.provisioning_strategy = Box::new(strategy);
-        self
-    }
-
-    /// Override the in-memory parsed certificate chain cache TTL.
-    ///
-    /// A zero duration keeps the cache active with no TTL safety expiry; cache
-    /// replacement still happens whenever this manager provisions a new certificate.
-    ///
-    /// **Multi-replica deployments:** Only the replica that performs the
-    /// provisioning call (`request_certificate`) replaces its in-memory cache.
-    /// Non-provisioning replicas therefore rely on the TTL as the only refresh
-    /// mechanism for picking up a newly provisioned chain. Set `ttl = 0` only
-    /// when the process is guaranteed to re-provision or restart on every
-    /// rotation — otherwise long-lived replicas with a disabled TTL will serve
-    /// the stale chain until they happen to re-provision.
-    ///
-    /// **Staleness safety:** This caching strategy is safe because the signing
-    /// key is stable across certificate renewals — the provisioning flow reuses
-    /// the stored secret key (`signing_key_pem`). If renewal ever rotates the
-    /// signing key, the staleness window becomes a token-validation outage:
-    /// verifiers would receive the old certificate chain while tokens are
-    /// signed with the new key.
-    pub fn with_cert_chain_cache_ttl(mut self, ttl: Duration) -> Self {
-        let domain_label = self.domains.first().map(String::as_str).unwrap_or_default();
-        self.cert_chain_cache = CertChainCache::new(ttl, domain_label);
         self
     }
 
@@ -326,10 +281,7 @@ impl CertManager {
     pub(crate) async fn request_acme_certificate(&self) -> Result<CertificateData, CertError> {
         use instant_acme::RetryPolicy;
 
-        let cert_storage = self
-            .cert_storage
-            .as_ref()
-            .ok_or_else(|| CertError::Other(eyre!("Certificate storage not set")))?;
+        self.crypto_storage()?;
 
         let challenge_handler = self
             .challenge_handler
@@ -390,8 +342,7 @@ impl CertManager {
         let cert_data = CertificateData::new(cert_chain_pem, not_before, not_after);
 
         // Store the certificate
-        self.persist_certificate_data_with_storage(cert_storage.as_ref(), &cert_data)
-            .await?;
+        self.persist_certificate_data(&cert_data).await?;
         self.cache_provisioned_chain(&cert_data.certificate).await?;
 
         info!(
@@ -439,11 +390,11 @@ impl CertManager {
         const MAX_RETRIES: u32 = 3;
         const RETRY_DELAY: Duration = Duration::from_millis(500);
 
-        let secrets_storage = self.secrets_storage()?;
+        let material_storage = self.crypto_storage()?;
 
         // Try to load the existing signing key
         let secret_id = self.signing_secret_id();
-        if let Some(secret) = secrets_storage.load(&secret_id).await? {
+        if let Some(secret) = material_storage.load_signing_key(&secret_id).await? {
             info!("Found existing server secret. Skipping...");
             return Ok(secret);
         }
@@ -455,7 +406,10 @@ impl CertManager {
         let mut retries = 0;
         loop {
             info!("Trying to store the newly generated server secret...");
-            match secrets_storage.store(&secret_id, &key_pem).await {
+            match material_storage
+                .store_signing_key(&secret_id, &key_pem)
+                .await
+            {
                 Ok(_) => {
                     info!("Successfully stored the secret");
                     return Ok(key_pem);
@@ -477,9 +431,9 @@ impl CertManager {
     /// # Errors
     /// Returns an error if the certificate data cannot be parsed or if there was an issue when trying to retrieve the certificate data.
     pub async fn certificate(&self) -> Result<Option<CertificateData>, CertError> {
-        let cert_storage = self.cert_storage()?;
+        let material_storage = self.crypto_storage()?;
         let cert_key = self.cert_key();
-        if let Some(cert_data) = cert_storage.load(&cert_key).await? {
+        if let Some(cert_data) = material_storage.load_certificate_data(&cert_key).await? {
             return Ok(Some(serde_json::from_str(&cert_data)?));
         }
         Ok(None)
@@ -502,10 +456,10 @@ impl CertManager {
             // the provisioning-path `replace` in `cache_provisioned_chain`.
             // If a concurrent `request_certificate` replaces the cache entry
             // between our miss and this insert, we overwrite the fresh chain
-            // with the (still valid) old chain. The stale entry is bounded by
-            // the cache TTL. This is acceptable because the signing key is
-            // stable across renewals, so the old chain remains valid for
-            // token verification.
+            // with the (still valid) old chain. The stale entry persists until
+            // the next provisioning or renewal cycle. This is acceptable
+            // because the signing key is stable across renewals, so the old
+            // chain remains valid for token verification.
             self.cert_chain_cache.insert(cert_key, certs.clone()).await;
             return Ok(Some(certs));
         }
@@ -575,7 +529,7 @@ impl CertManager {
         fields(domains = ?self.domains, email = %self.email)
     )]
     async fn acme_account(&self) -> Result<Account, CertError> {
-        let secrets_storage = self.secrets_storage()?;
+        let material_storage = self.crypto_storage()?;
 
         let mut client_guard = self.acme_client.lock().await;
         if let Some(account) = client_guard.as_ref() {
@@ -584,7 +538,7 @@ impl CertManager {
         }
 
         let account_id = self.acme_account_id();
-        if let Some(credentials) = secrets_storage.load(&account_id).await? {
+        if let Some(credentials) = material_storage.load_secret(&account_id).await? {
             info!("Found existing credentials. Trying to load account...");
             let credentials: AccountCredentials = serde_json::from_str(&credentials)?;
             let http_client = self.create_http_client()?;
@@ -599,7 +553,7 @@ impl CertManager {
                 }
                 Err(e) => {
                     warn!("Invalid credentials: {e}\nrecreating new account...");
-                    secrets_storage.delete(&account_id).await?;
+                    material_storage.delete_secret(&account_id).await?;
                 }
             }
         }
@@ -616,8 +570,8 @@ impl CertManager {
             )
             .await?;
         // Store new credentials
-        secrets_storage
-            .store(&account_id, &serde_json::to_string(&credentials)?)
+        material_storage
+            .store_secret(&account_id, &serde_json::to_string(&credentials)?)
             .await?;
         *client_guard = Some(account.clone());
         info!("Account successfully created");
@@ -724,21 +678,15 @@ impl CertManager {
         ))
     }
 
-    pub(crate) fn cert_storage(&self) -> Result<&dyn Storage, CertError> {
-        self.cert_storage
-            .as_deref()
-            .ok_or_else(|| CertError::Other(eyre!("Certificate storage not set")))
-    }
-
-    pub(crate) fn secrets_storage(&self) -> Result<&dyn Storage, CertError> {
-        self.secrets_storage
-            .as_deref()
-            .ok_or_else(|| CertError::Other(eyre!("Secrets storage not set")))
+    pub(crate) fn crypto_storage(&self) -> Result<&CryptoStorage, CertError> {
+        self.crypto_storage
+            .as_ref()
+            .ok_or_else(|| CertError::Other(eyre!("Cryptographic-material backend not set")))
     }
 
     pub(crate) async fn signing_key_from_storage(&self) -> Result<Option<String>, CertError> {
-        self.secrets_storage()?
-            .load(&self.signing_secret_id())
+        self.crypto_storage()?
+            .load_signing_key(&self.signing_secret_id())
             .await
             .map_err(Into::into)
     }
@@ -747,31 +695,52 @@ impl CertManager {
         &self,
         cert_data: &CertificateData,
     ) -> Result<(), CertError> {
-        self.persist_certificate_data_with_storage(self.cert_storage()?, cert_data)
-            .await
-    }
-
-    async fn persist_certificate_data_with_storage(
-        &self,
-        cert_storage: &dyn Storage,
-        cert_data: &CertificateData,
-    ) -> Result<(), CertError> {
         let serialized_cert_data = serde_json::to_string(cert_data)?;
-        cert_storage
-            .store(&self.cert_key(), &serialized_cert_data)
-            .await?;
+        let material_storage = self.crypto_storage()?;
+        let cert_key = self.cert_key();
+        if material_storage
+            .load_certificate_data(&cert_key)
+            .await?
+            .is_some()
+        {
+            material_storage
+                .update_certificate_data(&cert_key, &serialized_cert_data)
+                .await?;
+        } else {
+            material_storage
+                .store_certificate_data(&cert_key, &serialized_cert_data)
+                .await?;
+        }
         Ok(())
     }
 
     pub(crate) async fn persist_signing_key(&self, signing_key: &str) -> Result<(), CertError> {
-        let secrets_storage = self.secrets_storage()?;
+        let material_storage = self.crypto_storage()?;
         let secret_id = self.signing_secret_id();
-        if secrets_storage.load(&secret_id).await?.is_some() {
-            secrets_storage.update(&secret_id, signing_key).await?;
+        if material_storage
+            .load_signing_key(&secret_id)
+            .await?
+            .is_some()
+        {
+            material_storage
+                .update_signing_key(&secret_id, signing_key)
+                .await?;
         } else {
-            secrets_storage.store(&secret_id, signing_key).await?;
+            material_storage
+                .store_signing_key(&secret_id, signing_key)
+                .await?;
         }
         Ok(())
+    }
+
+    pub(crate) async fn persist_crypto_material(
+        &self,
+        cert_data: &CertificateData,
+        signing_key: &str,
+    ) -> Result<(), CertError> {
+        self.persist_certificate_data(cert_data).await?;
+        self.persist_signing_key(signing_key).await?;
+        self.cache_provisioned_chain(&cert_data.certificate).await
     }
 
     fn parse_cert_chain_parts(&self, cert_pem: &str) -> Result<CertificateChain, CertError> {
