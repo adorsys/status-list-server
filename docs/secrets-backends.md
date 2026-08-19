@@ -168,23 +168,44 @@ When compiled with the `gcp-secrets` feature flag, secrets are stored in GCP Sec
 
 ### Configuration Variables
 
-| Variable                                           | Type              | Default                          | Description                                                    |
-| -------------------------------------------------- | ----------------- | -------------------------------- | -------------------------------------------------------------- |
-| `APP_GCP_SECRET_MANAGER__PROJECT_ID`               | String            | _(Required when GCP is enabled)_ | GCP Project ID where secrets are hosted                        |
-| `APP_GCP_SECRET_MANAGER__SERVICE_ACCOUNT_KEY`      | String (JSON)     | `None`                           | Optional inline service account JSON key string                |
-| `APP_GCP_SECRET_MANAGER__SERVICE_ACCOUNT_KEY_PATH` | String            | `None`                           | Optional filepath to service account JSON key file             |
-| `APP_SERVER__CERT__SIGNING_KEY_CACHE_TTL`          | Integer (seconds) | `300` (5 minutes)                | In-memory cache TTL in seconds. Set to `0` to disable caching. |
+| Variable                                              | Type              | Default                          | Description                                                                    |
+| ----------------------------------------------------- | ----------------- | -------------------------------- | ------------------------------------------------------------------------------ |
+| `APP_GCP_SECRET_MANAGER__PROJECT_ID`                  | String            | _(Required when GCP is enabled)_ | GCP Project ID where secrets are hosted                                        |
+| `APP_GCP_SECRET_MANAGER__SERVICE_ACCOUNT_KEY`         | String (JSON)     | `None`                           | Optional inline service account JSON key string                                |
+| `APP_GCP_SECRET_MANAGER__SERVICE_ACCOUNT_KEY_PATH`    | String            | `None`                           | Optional filepath to service account JSON key file                             |
+| `APP_GCP_SECRET_MANAGER__ENDPOINT`                    | String (URL)      | `None`                           | Optional custom endpoint (for regional endpoints, VPC-SC, or emulator testing) |
+| `APP_GCP_SECRET_MANAGER__ALLOW_ANONYMOUS_CREDENTIALS` | Boolean           | `false`                          | Allow anonymous credentials without ADC (for local emulator/testing only)      |
+| `APP_SERVER__CERT__SIGNING_KEY_CACHE_TTL`             | Integer (seconds) | `300` (5 minutes)                | In-memory cache TTL in seconds. Set to `0` to disable caching.                 |
 
 ### Authentication & IAM Permissions
 
-By default, authentication uses **Application Default Credentials (ADC)** (discovering environment credentials, GKE workload identity, service account metadata server, etc.).
+By default, authentication uses **Application Default Credentials (ADC)** (discovering environment credentials via `GOOGLE_APPLICATION_CREDENTIALS`, GKE workload identity, or Compute Engine metadata server).
 
-Required IAM roles (least-privilege):
+#### Least-Privilege IAM Roles
 
-- `roles/secretmanager.secretAccessor` (read secrets)
-- `roles/secretmanager.secretVersionManager` (create/update secret versions)
-- `roles/secretmanager.viewer` (read secret metadata / readiness health check)
-- `roles/secretmanager.admin` or custom role with `secretmanager.secrets.create` and `secretmanager.secrets.delete` (if automated secret creation/deletion is used)
+Avoid granting broad project-level `roles/secretmanager.admin` (which permits modifying IAM policies on all secrets). Instead, use the combination of built-in least-privilege roles or a custom role:
+
+##### Option 1: Built-in Predefined Roles (Recommended)
+
+- `roles/secretmanager.secretAccessor`: Access secret payload data (`secretmanager.versions.access`).
+- `roles/secretmanager.secretVersionManager`: Add new secret versions (`secretmanager.versions.add`).
+- `roles/secretmanager.viewer`: Read secret metadata and support readiness health check probes (`secretmanager.secrets.get`).
+
+##### Option 2: Custom Role (Least-Privilege for Full Lifecycle)
+
+If the server manages the creation and deletion of secret containers directly, create a custom IAM role restricted to the following permissions:
+
+```yaml
+title: "Status List Server Secrets Operator"
+stage: "GA"
+includedPermissions:
+  - secretmanager.secrets.get
+  - secretmanager.secrets.create
+  - secretmanager.secrets.delete
+  - secretmanager.versions.add
+  - secretmanager.versions.access
+  - secretmanager.versions.list
+```
 
 ### Example `.env` Configuration
 
