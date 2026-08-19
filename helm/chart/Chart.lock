@@ -2,9 +2,6 @@ dependencies:
 - name: postgres
   repository: oci://registry-1.docker.io/cloudpirates
   version: 0.8.2
-- name: redis-ha
-  repository: https://dandydeveloper.github.io/charts
-  version: 4.35.0
 - name: opentelemetry-collector
   repository: https://open-telemetry.github.io/opentelemetry-helm-charts
   version: 0.169.0
