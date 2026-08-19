@@ -163,7 +163,7 @@ Symptoms:
 Check:
 
 - `/health/ready` responses in pod logs.
-- PostgreSQL and optional Redis readiness.
+- PostgreSQL readiness.
 - ExternalSecret and SecretStore status.
 - Application configuration injected through Helm values.
 

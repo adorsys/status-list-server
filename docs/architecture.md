@@ -173,7 +173,7 @@ middleware; it is not RFC 7807 problem+json).
 > **Note:** Governor state is held in-memory per-replica. In a horizontally
 > scaled deployment each instance maintains its own token bucket, so the
 > effective cluster-wide rate limit is `burst_size × replica_count`. A
-> shared backend (e.g. Redis) is **not** used for rate-limit state; see
+> shared backend is **not** used for rate-limit state; see
 > [tower-governor](https://crates.io/crates/tower-governor) for
 > alternative storage backends.
 

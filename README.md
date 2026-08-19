@@ -39,7 +39,6 @@ Before running the server, ensure you have the following tools installed:
 
 - [Rust & Cargo](https://www.rust-lang.org/tools/install) (Latest stable).
 - A supported database backend: PostgreSQL, MySQL, or SQLite for persistent deployments. The default local mode uses in-memory repositories.
-- [Redis](https://redis.io/download) is optional and only needed when you enable the distributed certificate-material cache.
 - [Docker](https://www.docker.com/get-started/) (optional, for local testing).
 
 ### Run locally
@@ -65,18 +64,12 @@ The simplest way to run the project is with [docker compose](https://docs.docker
 docker compose up --build
 ```
 
-This command will pull all required images and start the server compiled with default compose features (`postgres,aws,acme`). Redis is not part of the default path.
+This command will pull all required images and start the server compiled with default compose features (`postgres,aws,acme`).
 
 To pass custom Cargo feature flags during build, specify the `FEATURES` environment variable:
 
 ```sh
 FEATURES="mysql,aws,acme" docker compose --profile mysql up --build
-```
-
-To test the optional Redis certificate-material cache locally, enable the Redis profile, compile the Redis feature, and provide a Redis URI:
-
-```sh
-FEATURES="postgres,redis,aws,acme" APP_REDIS__URI="redis://redis:6379" docker compose --profile redis up --build
 ```
 
 #### Running Manually
@@ -87,7 +80,7 @@ To start the server in zero-infrastructure default in-memory mode, execute:
 cargo run
 ```
 
-By default, the server will listen on `http://localhost:8000` using in-memory repositories, Moka cache, and store-based certificate management. No external databases, Redis, or cloud services are required for development.
+By default, the server will listen on `http://localhost:8000` using in-memory repositories, Moka cache, and store-based certificate management. No external databases or cloud services are required for development.
 
 ## Cargo Feature Matrix
 
@@ -99,27 +92,18 @@ The crate uses modular Cargo feature flags to gate optional production backend d
 | `postgres` | SeaORM PostgreSQL database driver.                                                                                                                 | ❌ Opt-in  |
 | `sqlite`   | SeaORM SQLite database driver.                                                                                                                     | ❌ Opt-in  |
 | `mysql`    | SeaORM MySQL database driver.                                                                                                                      | ❌ Opt-in  |
-| `redis`    | Redis storage and certificate cache driver.                                                                                                        | ❌ Opt-in  |
 | `aws`      | AWS S3 object storage and AWS Secrets Manager drivers.                                                                                             | ❌ Opt-in  |
 | `acme`     | ACME DNS-01 certificate manager driver.                                                                                                            | ❌ Opt-in  |
 
 To build with specific backend drivers, pass the matching feature flag(s):
 
 ```bash
-# Run with PostgreSQL and Redis support available
-cargo run --features postgres,redis
+# Run with PostgreSQL support available
+cargo run --features postgres
 
-# Run with all AWS and ACME production integrations, including the optional Redis cache driver
-cargo run --features postgres,redis,aws,acme
+# Run with all AWS and ACME production integrations
+cargo run --features postgres,aws,acme
 ```
-
-## Redis Role
-
-Redis is not required for core status-list persistence or status-list reads. Status-list records are stored by the configured repository backend (`memory`, PostgreSQL, MySQL, or SQLite), and hot status-list reads are cached in-process by `MokaStatusListCache`.
-
-When compiled with the `redis` feature and configured with a non-empty `APP_REDIS__URI`, Redis is used only as an optional distributed cache for certificate material loaded from S3 by the ACME/AWS certificate manager path. This can help multi-replica deployments share certificate cache entries and reduce repeated object-storage reads. The tradeoff is an extra operational dependency: Redis credentials, TLS settings if used, availability monitoring, backups or persistence choices, and HA/upgrade complexity.
-
-For single-replica deployments, local development, tests, or deployments where certificate material reads are inexpensive, leave `APP_REDIS__URI` unset and omit the `redis` Cargo feature.
 
 For deployment guidance and backend tradeoffs, see [`docs/database-backends.md`](docs/database-backends.md).
 
