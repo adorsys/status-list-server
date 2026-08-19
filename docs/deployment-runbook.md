@@ -185,17 +185,21 @@ item before/after the first deploy that carries this chart:
    key**. Because it may contain the production private key, treat it as sensitive
    and verify it is no longer referenced by any live HAProxy before deleting. Delete
    it only after confirming no running Redis HAProxy service depends on it:
+
    ```bash
    kubectl delete secret statuslist-haproxy-tls -n statuslist-production
    ```
+
 2. **Oracle-HA persistent volume claims** — the Redis HA subchart provisions PVCs
    (e.g. `status-list-server-redis-ha-pvc-*` / release-scoped claims). These retain
    any persisted Redis data and storage. Delete the claims (and, if you no longer
    need the data, the underlying PVs / storage volumes):
+
    ```bash
    kubectl get pvc -n statuslist-production | grep redis
    kubectl delete pvc -l release=statuslist,app=redis-ha -n statuslist-production
    ```
+
    Confirm the backing volumes are released before removing them to avoid data loss.
 
 There is no code change required for this cleanup; it is purely an operational step
