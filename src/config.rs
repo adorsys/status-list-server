@@ -596,8 +596,19 @@ pub struct AwsConfig {
     pub s3_key_prefix: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum VaultAuthMethod {
+    #[default]
+    Approle,
+    Kubernetes,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct VaultConfig {
+    /// Authentication method to use with Vault / OpenBao (`approle` or `kubernetes`).
+    #[serde(default)]
+    pub auth_method: VaultAuthMethod,
     /// Vault / OpenBao API address (e.g. `http://vault:8200`).
     pub addr: String,
     /// AppRole role_id (can be baked into config).
@@ -610,6 +621,13 @@ pub struct VaultConfig {
     pub secret_id_path: Option<PathBuf>,
     /// AppRole auth engine mount path (default: `approle`).
     pub auth_mount: String,
+    /// Kubernetes auth role name.
+    #[serde(default)]
+    pub k8s_role: Option<String>,
+    /// Path to Kubernetes service account JWT token.
+    pub k8s_token_path: PathBuf,
+    /// Kubernetes auth engine mount path (default: `kubernetes`).
+    pub k8s_auth_mount: String,
     /// KV v2 engine mount path.
     pub mount: String,
     /// Prefix prepended to all secret paths. Default: empty.
@@ -859,11 +877,18 @@ fn base_builder() -> Result<ConfigBuilder<DefaultState>, ConfigError> {
         .set_default("server.cert.store.certificate_key", Option::<String>::None)?
         .set_default("server.cert.store.signing_key_key", Option::<String>::None)?
         .set_default("aws.region", "us-east-1")?
+        .set_default("vault.auth_method", "approle")?
         .set_default("vault.addr", "http://localhost:8200")?
         .set_default("vault.role_id", "")?
         .set_default("vault.secret_id", Option::<String>::None)?
         .set_default("vault.secret_id_path", Option::<String>::None)?
         .set_default("vault.auth_mount", "approle")?
+        .set_default("vault.k8s_role", Option::<String>::None)?
+        .set_default(
+            "vault.k8s_token_path",
+            "/var/run/secrets/kubernetes.io/serviceaccount/token",
+        )?
+        .set_default("vault.k8s_auth_mount", "kubernetes")?
         .set_default("vault.mount", "secret")?
         .set_default("vault.path_prefix", "")?
         .set_default("vault.namespace", Option::<String>::None)?
@@ -1558,11 +1583,18 @@ mod tests {
         }
 
         // Vault AppRole defaults
+        assert_eq!(default_config.vault.auth_method, VaultAuthMethod::Approle);
         assert_eq!(default_config.vault.addr, "http://localhost:8200");
         assert_eq!(default_config.vault.role_id, "");
         assert!(default_config.vault.secret_id.is_none());
         assert_eq!(default_config.vault.secret_id_path, None);
         assert_eq!(default_config.vault.auth_mount, "approle");
+        assert_eq!(default_config.vault.k8s_role, None);
+        assert_eq!(
+            default_config.vault.k8s_token_path,
+            PathBuf::from("/var/run/secrets/kubernetes.io/serviceaccount/token")
+        );
+        assert_eq!(default_config.vault.k8s_auth_mount, "kubernetes");
         assert_eq!(default_config.vault.mount, "secret");
         assert_eq!(default_config.vault.path_prefix, "");
         assert_eq!(default_config.vault.namespace, None);
@@ -1626,5 +1658,25 @@ mod tests {
             "file-secret-id-value"
         );
         let _ = std::fs::remove_file(&secret_file);
+
+        // Vault Kubernetes auth overrides
+        let k8s_config = Config::load_from_overrides(&[
+            ("vault.auth_method", "kubernetes"),
+            ("vault.k8s_role", "my-k8s-service-role"),
+            ("vault.k8s_token_path", "/custom/token/path"),
+            ("vault.k8s_auth_mount", "custom-k8s"),
+        ])
+        .expect("Failed to load k8s auth config");
+
+        assert_eq!(k8s_config.vault.auth_method, VaultAuthMethod::Kubernetes);
+        assert_eq!(
+            k8s_config.vault.k8s_role,
+            Some("my-k8s-service-role".to_string())
+        );
+        assert_eq!(
+            k8s_config.vault.k8s_token_path,
+            PathBuf::from("/custom/token/path")
+        );
+        assert_eq!(k8s_config.vault.k8s_auth_mount, "custom-k8s");
     }
 }

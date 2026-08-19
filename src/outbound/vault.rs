@@ -1,9 +1,10 @@
 //! Vault / OpenBao KV v2 secrets-storage adapter implementing [`Storage`].
 //!
 //! Both HashiCorp Vault and OpenBao expose the same KV v2 HTTP API, so this
-//! single adapter covers both. Authentication is performed exclusively via
-//! the **AppRole** auth method.
+//! single adapter covers both. Authentication is supported via **AppRole**
+//! or **Kubernetes** auth methods.
 
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -21,7 +22,8 @@ use crate::cert_manager::storage::{Storage, StorageError};
 /// Vault / OpenBao KV v2 storage adapter.
 ///
 /// Implements the [`Storage`] trait so it can be used as a secrets backend
-/// by the certificate manager. Authentication is performed via **AppRole**.
+/// by the certificate manager. Authentication is supported via **AppRole**
+/// and **Kubernetes** auth methods.
 #[derive(Debug)]
 pub struct VaultClient {
     client: Client,
@@ -35,7 +37,7 @@ pub struct VaultClient {
     namespace: Option<String>,
     /// Optional in-process TTL cache.
     cache: Option<Cache<String, String>>,
-    /// AppRole token manager.
+    /// Token manager handling authentication and proactive renewal.
     auth: Arc<TokenManager>,
 }
 
@@ -47,12 +49,22 @@ impl VaultClient {
 
     /// Return a [`VaultClientBuilder`] for constructing a [`VaultClient`] adapter
     /// with AppRole authentication.
-    pub fn builder(
+    pub fn builder_approle(
         addr: impl Into<String>,
         role_id: impl Into<String>,
         secret_id: SecretString,
     ) -> VaultClientBuilder {
-        VaultClientBuilder::new(addr, role_id, secret_id)
+        VaultClientBuilder::approle(addr, role_id, secret_id)
+    }
+
+    /// Return a [`VaultClientBuilder`] for constructing a [`VaultClient`] adapter
+    /// with Kubernetes authentication.
+    pub fn builder_kubernetes(
+        addr: impl Into<String>,
+        role: impl Into<String>,
+        token_path: impl Into<PathBuf>,
+    ) -> VaultClientBuilder {
+        VaultClientBuilder::kubernetes(addr, role, token_path)
     }
 
     /// Build the full URL for KV v2 `data` operations.
@@ -124,7 +136,7 @@ impl VaultClient {
         out
     }
 
-    /// Ensure the AppRole token is valid, then add common headers to a request.
+    /// Ensure the Vault token is valid, then add common headers to a request.
     async fn add_auth_headers(
         &self,
         builder: reqwest::RequestBuilder,
@@ -143,22 +155,34 @@ impl VaultClient {
     }
 }
 
-/// Builder for constructing a [`VaultClient`] adapter with AppRole authentication.
+/// Authentication configuration for [`VaultClientBuilder`].
+#[derive(Debug, Clone)]
+enum AuthConfig {
+    AppRole {
+        role_id: String,
+        secret_id: SecretString,
+    },
+    Kubernetes {
+        role: String,
+        token_path: PathBuf,
+    },
+}
+
+/// Builder for constructing a [`VaultClient`] adapter with AppRole or Kubernetes authentication.
 ///
 /// # Optional Fields & Default Behavior
 /// - `mount`: KV v2 secret engine mount path. **Default**: `"secret"`
 /// - `path_prefix`: Prefix prepended to all secret keys. **Default**: `""` (no prefix)
 /// - `namespace`: Optional Vault Enterprise / OpenBao namespace header (`X-Vault-Namespace`). **Default**: `None`
-/// - `auth_mount`: AppRole auth engine mount path. **Default**: `"approle"`
+/// - `auth_mount`: Auth engine mount path. **Default**: `"approle"` for AppRole, `"kubernetes"` for Kubernetes
 /// - `secrets_cache_ttl`: In-memory TTL cache duration for fetched secrets. Setting to `Duration::ZERO` disables caching. **Default**: 5 minutes
 /// - `timeout`: HTTP client request timeout. **Default**: 30 seconds
 #[derive(Debug, Clone)]
 pub struct VaultClientBuilder {
     addr: String,
-    role_id: String,
-    secret_id: SecretString,
+    auth: AuthConfig,
+    auth_mount: Option<String>,
     mount: String,
-    auth_mount: String,
     path_prefix: String,
     namespace: Option<String>,
     secrets_cache_ttl: Duration,
@@ -166,18 +190,41 @@ pub struct VaultClientBuilder {
 }
 
 impl VaultClientBuilder {
-    /// Create a new [`VaultClientBuilder`] with AppRole credentials.
-    pub fn new(
+    /// Create a new [`VaultClientBuilder`] configured for AppRole authentication.
+    pub fn approle(
         addr: impl Into<String>,
         role_id: impl Into<String>,
         secret_id: SecretString,
     ) -> Self {
         Self {
             addr: addr.into(),
-            role_id: role_id.into(),
-            secret_id,
+            auth: AuthConfig::AppRole {
+                role_id: role_id.into(),
+                secret_id,
+            },
+            auth_mount: None,
             mount: "secret".to_string(),
-            auth_mount: "approle".to_string(),
+            path_prefix: String::new(),
+            namespace: None,
+            secrets_cache_ttl: Duration::from_secs(300),
+            timeout: Duration::from_secs(30),
+        }
+    }
+
+    /// Create a new [`VaultClientBuilder`] configured for Kubernetes authentication.
+    pub fn kubernetes(
+        addr: impl Into<String>,
+        role: impl Into<String>,
+        token_path: impl Into<PathBuf>,
+    ) -> Self {
+        Self {
+            addr: addr.into(),
+            auth: AuthConfig::Kubernetes {
+                role: role.into(),
+                token_path: token_path.into(),
+            },
+            auth_mount: None,
+            mount: "secret".to_string(),
             path_prefix: String::new(),
             namespace: None,
             secrets_cache_ttl: Duration::from_secs(300),
@@ -193,11 +240,11 @@ impl VaultClientBuilder {
         self
     }
 
-    /// Set the AppRole auth engine mount path.
+    /// Set the auth engine mount path.
     ///
-    /// **Default**: `"approle"`
+    /// **Default**: `"approle"` for AppRole auth, `"kubernetes"` for Kubernetes auth.
     pub fn auth_mount(mut self, auth_mount: impl Into<String>) -> Self {
-        self.auth_mount = auth_mount.into();
+        self.auth_mount = Some(auth_mount.into());
         self
     }
 
@@ -237,21 +284,19 @@ impl VaultClientBuilder {
 
     /// Build the [`VaultClient`] adapter instance.
     ///
-    /// Performs the initial AppRole login during construction.
+    /// Performs the initial login (AppRole or Kubernetes) during construction.
     ///
     /// # Errors
     ///
     /// Returns `StorageError::Backend` if:
     /// - `addr` is empty or not a valid URL.
-    /// - `role_id` is empty.
-    /// - `secret_id` is empty.
     /// - `mount` is empty.
     /// - `auth_mount` is empty.
-    /// - The initial AppRole login fails.
+    /// - AppRole credentials (`role_id` or `secret_id`) are empty.
+    /// - Kubernetes credentials (`role` is empty, or `token_path` cannot be read/is empty).
+    /// - The initial login fails.
     pub async fn build(self) -> Result<VaultClient, StorageError> {
         let addr = self.addr.trim().trim_end_matches('/').to_string();
-        let role_id = self.role_id.trim().to_string();
-        let auth_mount = self.auth_mount.trim().to_string();
         let mount = self.mount.trim().to_string();
         let path_prefix = self.path_prefix.trim().to_string();
 
@@ -265,20 +310,6 @@ impl VaultClientBuilder {
             StorageError::Backend(eyre!("Vault configuration error: invalid address: {e}"))
         })?;
 
-        // Validate role_id, must be non-empty.
-        if role_id.is_empty() {
-            return Err(StorageError::Backend(eyre!(
-                "Vault configuration error: role_id must not be empty"
-            )));
-        }
-
-        // Validate secret_id, must be non-empty.
-        if self.secret_id.expose_secret().trim().is_empty() {
-            return Err(StorageError::Backend(eyre!(
-                "Vault configuration error: secret_id must not be empty"
-            )));
-        }
-
         // Mount must be non-empty.
         if mount.is_empty() {
             return Err(StorageError::Backend(eyre!(
@@ -286,12 +317,54 @@ impl VaultClientBuilder {
             )));
         }
 
+        let auth_mount = match self.auth_mount {
+            Some(ref m) => m.trim().to_string(),
+            None => match self.auth {
+                AuthConfig::AppRole { .. } => "approle".to_string(),
+                AuthConfig::Kubernetes { .. } => "kubernetes".to_string(),
+            },
+        };
+
         // Auth mount must be non-empty.
         if auth_mount.is_empty() {
             return Err(StorageError::Backend(eyre!(
                 "Vault configuration error: auth_mount must not be empty"
             )));
         }
+
+        let backend = match self.auth {
+            AuthConfig::AppRole { role_id, secret_id } => {
+                let role_id = role_id.trim().to_string();
+                if role_id.is_empty() {
+                    return Err(StorageError::Backend(eyre!(
+                        "Vault configuration error: role_id must not be empty"
+                    )));
+                }
+                if secret_id.expose_secret().trim().is_empty() {
+                    return Err(StorageError::Backend(eyre!(
+                        "Vault configuration error: secret_id must not be empty"
+                    )));
+                }
+                AuthBackend::AppRole {
+                    role_id,
+                    secret_id,
+                    auth_mount,
+                }
+            }
+            AuthConfig::Kubernetes { role, token_path } => {
+                let role = role.trim().to_string();
+                if role.is_empty() {
+                    return Err(StorageError::Backend(eyre!(
+                        "Vault configuration error: role must not be empty"
+                    )));
+                }
+                AuthBackend::Kubernetes {
+                    role,
+                    token_path,
+                    auth_mount,
+                }
+            }
+        };
 
         let client = Client::builder()
             .timeout(self.timeout)
@@ -309,16 +382,7 @@ impl VaultClientBuilder {
             info!("Vault secrets cache disabled (TTL=0)");
         }
 
-        // Perform initial AppRole login
-        let auth = TokenManager::login(
-            &client,
-            &addr,
-            role_id,
-            self.secret_id,
-            auth_mount,
-            self.namespace.as_deref(),
-        )
-        .await?;
+        let auth = TokenManager::login(&client, &addr, backend, self.namespace.as_deref()).await?;
 
         Ok(VaultClient {
             client,
@@ -333,12 +397,12 @@ impl VaultClientBuilder {
 }
 
 /// Helper functions for OpenTelemetry Vault auth metrics.
-fn record_vault_login() {
+fn record_vault_login(method: &'static str) {
     opentelemetry::global::meter("status-list-server")
         .u64_counter("vault_auth_logins_total")
-        .with_description("Total number of successful Vault AppRole logins.")
+        .with_description("Total number of successful Vault logins.")
         .build()
-        .add(1, &[]);
+        .add(1, &[opentelemetry::KeyValue::new("method", method)]);
 }
 
 fn record_vault_renewal() {
@@ -349,17 +413,17 @@ fn record_vault_renewal() {
         .add(1, &[]);
 }
 
-fn record_vault_reauth() {
+fn record_vault_reauth(method: &'static str) {
     opentelemetry::global::meter("status-list-server")
         .u64_counter("vault_auth_reauth_total")
         .with_description(
             "Total number of Vault re-authentications after token expiration or renewal failure.",
         )
         .build()
-        .add(1, &[]);
+        .add(1, &[opentelemetry::KeyValue::new("method", method)]);
 }
 
-fn record_vault_auth_failure(operation: &'static str, result: &'static str) {
+fn record_vault_auth_failure(operation: &'static str, result: &'static str, method: &'static str) {
     opentelemetry::global::meter("status-list-server")
         .u64_counter("vault_auth_failures_total")
         .with_description("Total number of Vault authentication and renewal failures.")
@@ -369,11 +433,150 @@ fn record_vault_auth_failure(operation: &'static str, result: &'static str) {
             &[
                 opentelemetry::KeyValue::new("operation", operation),
                 opentelemetry::KeyValue::new("result", result),
+                opentelemetry::KeyValue::new("method", method),
             ],
         );
 }
 
-/// Manages the Vault client token obtained via AppRole login.
+/// Authentication backend configuration for Vault.
+#[derive(Debug)]
+enum AuthBackend {
+    AppRole {
+        role_id: String,
+        secret_id: SecretString,
+        auth_mount: String,
+    },
+    Kubernetes {
+        role: String,
+        token_path: PathBuf,
+        auth_mount: String,
+    },
+}
+
+impl AuthBackend {
+    fn method_name(&self) -> &'static str {
+        match self {
+            Self::AppRole { .. } => "approle",
+            Self::Kubernetes { .. } => "kubernetes",
+        }
+    }
+
+    async fn login(
+        &self,
+        client: &Client,
+        addr: &str,
+        namespace: Option<&str>,
+    ) -> Result<(SecretString, u64, bool), StorageError> {
+        let method = self.method_name();
+        let auth_mount = match self {
+            Self::AppRole { auth_mount, .. } | Self::Kubernetes { auth_mount, .. } => auth_mount,
+        };
+        let encoded_auth_mount = VaultClient::encode_path_segment(auth_mount);
+        let url = format!("{addr}/v1/auth/{encoded_auth_mount}/login");
+
+        let body: serde_json::Value = match self {
+            Self::AppRole {
+                role_id, secret_id, ..
+            } => serde_json::json!({
+                "role_id": role_id,
+                "secret_id": secret_id.expose_secret(),
+            }),
+            Self::Kubernetes {
+                role, token_path, ..
+            } => {
+                let token_content = tokio::fs::read_to_string(token_path).await.map_err(|e| {
+                    record_vault_auth_failure("login", "token_read_error", method);
+                    StorageError::Backend(eyre!(
+                        "failed to read Kubernetes service account token from {token_path:?}: {e}"
+                    ))
+                })?;
+                let trimmed = token_content.trim();
+                if trimmed.is_empty() {
+                    record_vault_auth_failure("login", "token_empty_error", method);
+                    return Err(StorageError::Backend(eyre!(
+                        "Kubernetes service account token in {token_path:?} is empty"
+                    )));
+                }
+                serde_json::json!({ "role": role, "jwt": trimmed })
+            }
+        };
+
+        Self::perform_login(client, &url, &body, namespace, method).await
+    }
+
+    /// Send the login POST and handle the response.
+    ///
+    /// Shared by both AppRole and Kubernetes auth methods; the caller builds
+    /// the method-specific URL and body, then delegates here for the common
+    /// HTTP round-trip, deserialization, and metrics recording.
+    async fn perform_login(
+        client: &Client,
+        url: &str,
+        body: &serde_json::Value,
+        namespace: Option<&str>,
+        method: &'static str,
+    ) -> Result<(SecretString, u64, bool), StorageError> {
+        let mut builder = client.post(url).json(body);
+        if let Some(ns) = namespace {
+            builder = builder.header("X-Vault-Namespace", ns);
+        }
+
+        let resp = match builder.send().await {
+            Ok(resp) => resp,
+            Err(e) => {
+                record_vault_auth_failure("login", "network_error", method);
+                return Err(StorageError::Backend(e.into()));
+            }
+        };
+
+        let status = resp.status();
+
+        if status.is_success() {
+            let login: LoginOrRenewResponse = match resp.json().await {
+                Ok(data) => data,
+                Err(e) => {
+                    record_vault_auth_failure("login", "deserialization_error", method);
+                    return Err(StorageError::Backend(e.into()));
+                }
+            };
+            info!(
+                lease_duration = login.auth.lease_duration,
+                renewable = login.auth.renewable,
+                auth_method = method,
+                "{method} login successful"
+            );
+            record_vault_login(method);
+            Ok((
+                SecretString::from(login.auth.client_token),
+                login.auth.lease_duration,
+                login.auth.renewable,
+            ))
+        } else if status == StatusCode::FORBIDDEN {
+            record_vault_auth_failure("login", "forbidden", method);
+            let label = match method {
+                "approle" => "AppRole",
+                "kubernetes" => "Kubernetes",
+                other => other,
+            };
+            Err(StorageError::Backend(eyre!(
+                "vault {label} login denied (HTTP 403)"
+            )))
+        } else {
+            let body_text = resp.text().await.unwrap_or_default();
+            record_vault_auth_failure("login", "http_error", method);
+            let label = match method {
+                "approle" => "AppRole",
+                "kubernetes" => "Kubernetes",
+                other => other,
+            };
+            Err(StorageError::Backend(eyre!(
+                "vault {label} login failed: HTTP {status}: {body_text}"
+            )))
+        }
+    }
+}
+
+/// Manages the Vault client token obtained via AppRole or Kubernetes login.
 ///
 /// Handles:
 /// - Initial login via `POST /v1/auth/{mount}/login`
@@ -391,12 +594,8 @@ struct TokenManager {
     lease_duration: RwLock<u64>,
     /// Whether the current token is renewable.
     renewable: RwLock<bool>,
-    /// AppRole role ID.
-    role_id: String,
-    /// AppRole secret ID.
-    secret_id: SecretString,
-    /// Auth engine mount path (default `approle`).
-    auth_mount: String,
+    /// Underlying authentication backend.
+    backend: AuthBackend,
     /// Mutex serializing proactive renewal and re-login across concurrent requests.
     renewal_lock: tokio::sync::Mutex<()>,
     /// Timestamp of last auth/renewal failure for backoff cooldown.
@@ -416,13 +615,6 @@ struct AuthData {
     renewable: bool,
 }
 
-/// Request body for `POST /v1/auth/{mount}/login`.
-#[derive(Serialize)]
-struct LoginRequest<'a> {
-    role_id: &'a str,
-    secret_id: &'a str,
-}
-
 impl TokenManager {
     /// Fraction of TTL elapsed before proactive renewal/re-login (80%).
     const RENEW_MARGIN: f64 = 0.8;
@@ -430,93 +622,24 @@ impl TokenManager {
     /// Cooldown window after an auth failure before retrying.
     const FAILURE_COOLDOWN: Duration = Duration::from_secs(5);
 
-    /// Perform the initial AppRole login and return a ready manager.
+    /// Perform the initial login and return a ready manager.
     async fn login(
         client: &Client,
         addr: &str,
-        role_id: String,
-        secret_id: SecretString,
-        auth_mount: String,
+        backend: AuthBackend,
         namespace: Option<&str>,
     ) -> Result<Self, StorageError> {
-        let (token, lease_duration, renewable) =
-            Self::perform_login(client, addr, &role_id, &secret_id, &auth_mount, namespace).await?;
+        let (token, lease_duration, renewable) = backend.login(client, addr, namespace).await?;
 
         Ok(Self {
             token: RwLock::new(token),
             issued_at: RwLock::new(Instant::now()),
             lease_duration: RwLock::new(lease_duration),
             renewable: RwLock::new(renewable),
-            role_id,
-            secret_id,
-            auth_mount,
+            backend,
             renewal_lock: tokio::sync::Mutex::new(()),
             last_failure: RwLock::new(None),
         })
-    }
-
-    /// Execute the AppRole login HTTP call.
-    async fn perform_login(
-        client: &Client,
-        addr: &str,
-        role_id: &str,
-        secret_id: &SecretString,
-        auth_mount: &str,
-        namespace: Option<&str>,
-    ) -> Result<(SecretString, u64, bool), StorageError> {
-        let encoded_auth_mount = VaultClient::encode_path_segment(auth_mount);
-        let url = format!("{addr}/v1/auth/{encoded_auth_mount}/login");
-        let body = LoginRequest {
-            role_id,
-            secret_id: secret_id.expose_secret(),
-        };
-
-        let mut builder = client.post(&url).json(&body);
-        if let Some(ns) = namespace {
-            builder = builder.header("X-Vault-Namespace", ns);
-        }
-
-        let resp = match builder.send().await {
-            Ok(resp) => resp,
-            Err(e) => {
-                record_vault_auth_failure("login", "network_error");
-                return Err(StorageError::Backend(e.into()));
-            }
-        };
-
-        let status = resp.status();
-
-        if status.is_success() {
-            let login: LoginOrRenewResponse = match resp.json().await {
-                Ok(data) => data,
-                Err(e) => {
-                    record_vault_auth_failure("login", "deserialization_error");
-                    return Err(StorageError::Backend(e.into()));
-                }
-            };
-            info!(
-                lease_duration = login.auth.lease_duration,
-                renewable = login.auth.renewable,
-                "AppRole login successful"
-            );
-            record_vault_login();
-            Ok((
-                SecretString::from(login.auth.client_token),
-                login.auth.lease_duration,
-                login.auth.renewable,
-            ))
-        } else if status == StatusCode::FORBIDDEN {
-            record_vault_auth_failure("login", "forbidden");
-            Err(StorageError::Backend(eyre!(
-                "vault AppRole login denied (HTTP 403)"
-            )))
-        } else {
-            let body_text = resp.text().await.unwrap_or_default();
-            record_vault_auth_failure("login", "http_error");
-            Err(StorageError::Backend(eyre!(
-                "vault AppRole login failed: HTTP {status}: {body_text}"
-            )))
-        }
     }
 
     /// Ensure the current token is still valid, renewing or re-authenticating
@@ -604,7 +727,7 @@ impl TokenManager {
         let resp = match builder.send().await {
             Ok(resp) => resp,
             Err(e) => {
-                record_vault_auth_failure("renewal", "network_error");
+                record_vault_auth_failure("renewal", "network_error", self.backend.method_name());
                 return Err(StorageError::Backend(e.into()));
             }
         };
@@ -615,7 +738,11 @@ impl TokenManager {
             let renew: LoginOrRenewResponse = match resp.json().await {
                 Ok(data) => data,
                 Err(e) => {
-                    record_vault_auth_failure("renewal", "deserialization_error");
+                    record_vault_auth_failure(
+                        "renewal",
+                        "deserialization_error",
+                        self.backend.method_name(),
+                    );
                     return Err(StorageError::Backend(e.into()));
                 }
             };
@@ -632,38 +759,30 @@ impl TokenManager {
             Ok(())
         } else {
             let body_text = resp.text().await.unwrap_or_default();
-            record_vault_auth_failure("renewal", "http_error");
+            record_vault_auth_failure("renewal", "http_error", self.backend.method_name());
             Err(StorageError::Backend(eyre!(
                 "token renewal failed: HTTP {status}: {body_text}"
             )))
         }
     }
 
-    /// Perform a full re-login via AppRole.
+    /// Perform a full re-login.
     async fn re_login(
         &self,
         client: &Client,
         addr: &str,
         namespace: Option<&str>,
     ) -> Result<(), StorageError> {
-        let (new_token, lease_duration, renewable) = match Self::perform_login(
-            client,
-            addr,
-            &self.role_id,
-            &self.secret_id,
-            &self.auth_mount,
-            namespace,
-        )
-        .await
-        {
-            Ok(res) => res,
-            Err(e) => {
-                record_vault_auth_failure("reauth", "login_error");
-                return Err(e);
-            }
-        };
+        let (new_token, lease_duration, renewable) =
+            match self.backend.login(client, addr, namespace).await {
+                Ok(res) => res,
+                Err(e) => {
+                    record_vault_auth_failure("reauth", "login_error", self.backend.method_name());
+                    return Err(e);
+                }
+            };
 
-        record_vault_reauth();
+        record_vault_reauth(self.backend.method_name());
         *self.token.write().await = new_token;
         *self.issued_at.write().await = Instant::now();
         *self.lease_duration.write().await = lease_duration;
@@ -865,6 +984,16 @@ mod tests {
         })
     }
 
+    /// Write a temp file with a unique name and return its path.
+    fn write_temp_token(suffix: &str, content: &str) -> PathBuf {
+        let p = std::env::temp_dir().join(format!(
+            "k8s_token_{suffix}_{}.txt",
+            time::OffsetDateTime::now_utc().nanosecond()
+        ));
+        std::fs::write(&p, content).expect("write temp token");
+        p
+    }
+
     async fn mock_approle_login(server: &MockServer, token: &str, lease_duration: u64) {
         Mock::given(method("POST"))
             .and(path("/v1/auth/approle/login"))
@@ -875,38 +1004,104 @@ mod tests {
             .await;
     }
 
+    async fn mock_k8s_login(server: &MockServer, jwt: &str, role: &str, token: &str, lease: u64) {
+        Mock::given(method("POST"))
+            .and(path("/v1/auth/kubernetes/login"))
+            .and(body_json(json!({ "role": role, "jwt": jwt })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(auth_response(token, lease)))
+            .mount(server)
+            .await;
+    }
+
+    /// Mount KV v2 store/load/delete mocks for a given key.
+    async fn mock_kv_round_trip(server: &MockServer, key: &str, value: &str, token: &str) {
+        Mock::given(method("POST"))
+            .and(path(format!("/v1/secret/data/{key}")))
+            .and(header("X-Vault-Token", token))
+            .and(body_json(json!({ "data": { "value": value } })))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(json!({ "data": { "version": 1 } })),
+            )
+            .mount(server)
+            .await;
+
+        Mock::given(method("GET"))
+            .and(path(format!("/v1/secret/data/{key}")))
+            .and(header("X-Vault-Token", token))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": { "data": { "value": value } }
+            })))
+            .mount(server)
+            .await;
+
+        Mock::given(method("DELETE"))
+            .and(path(format!("/v1/secret/metadata/{key}")))
+            .and(header("X-Vault-Token", token))
+            .respond_with(ResponseTemplate::new(204))
+            .mount(server)
+            .await;
+    }
+
     #[tokio::test]
     async fn build_validates_required_fields() {
+        let token_path = write_temp_token("valid", "jwt-content");
+        let empty_path = write_temp_token("empty", "   \n");
+        let missing_path = std::env::temp_dir().join("k8s_nonexistent.txt");
+
         let cases: Vec<(VaultClientBuilder, &str)> = vec![
             (
-                VaultClient::builder("", valid_role_id(), valid_secret_id()),
+                VaultClient::builder_approle("", valid_role_id(), valid_secret_id()),
                 "address must not be empty",
             ),
             (
-                VaultClient::builder("   ", valid_role_id(), valid_secret_id()),
+                VaultClient::builder_approle("   ", valid_role_id(), valid_secret_id()),
                 "address must not be empty",
             ),
             (
-                VaultClient::builder("not a url @@", valid_role_id(), valid_secret_id()),
+                VaultClient::builder_approle("not a url @@", valid_role_id(), valid_secret_id()),
                 "invalid address",
             ),
             (
-                VaultClient::builder("http://vault:8200", "", valid_secret_id()),
-                "role_id must not be empty",
-            ),
-            (
-                VaultClient::builder("http://vault:8200", valid_role_id(), SecretString::from("")),
-                "secret_id must not be empty",
-            ),
-            (
-                VaultClient::builder("http://vault:8200", valid_role_id(), valid_secret_id())
-                    .mount(""),
+                VaultClient::builder_approle(
+                    "http://vault:8200",
+                    valid_role_id(),
+                    valid_secret_id(),
+                )
+                .mount(""),
                 "mount path must not be empty",
             ),
             (
-                VaultClient::builder("http://vault:8200", valid_role_id(), valid_secret_id())
-                    .auth_mount(""),
+                VaultClient::builder_approle(
+                    "http://vault:8200",
+                    valid_role_id(),
+                    valid_secret_id(),
+                )
+                .auth_mount(""),
                 "auth_mount must not be empty",
+            ),
+            (
+                VaultClient::builder_approle("http://vault:8200", "", valid_secret_id()),
+                "role_id must not be empty",
+            ),
+            (
+                VaultClient::builder_approle(
+                    "http://vault:8200",
+                    valid_role_id(),
+                    SecretString::from(""),
+                ),
+                "secret_id must not be empty",
+            ),
+            (
+                VaultClient::builder_kubernetes("http://vault:8200", "", &token_path),
+                "role must not be empty",
+            ),
+            (
+                VaultClient::builder_kubernetes("http://vault:8200", "r", &missing_path),
+                "failed to read Kubernetes service account token",
+            ),
+            (
+                VaultClient::builder_kubernetes("http://vault:8200", "r", &empty_path),
+                "Kubernetes service account token in",
             ),
         ];
 
@@ -917,110 +1112,146 @@ mod tests {
                 "expected error containing '{expected_err}', got: {err}"
             );
         }
+
+        let _ = std::fs::remove_file(&token_path);
+        let _ = std::fs::remove_file(&empty_path);
     }
 
     #[tokio::test]
     async fn approle_login_and_kv_round_trip() {
         let server = MockServer::start().await;
         mock_approle_login(&server, "s.test-token", 3600).await;
+        mock_kv_round_trip(&server, "my-key", "secret-payload", "s.test-token").await;
 
-        Mock::given(method("POST"))
-            .and(path("/v1/secret/data/my-key"))
-            .and(header("X-Vault-Token", "s.test-token"))
-            .and(body_json(json!({ "data": { "value": "secret-payload" } })))
-            .respond_with(
-                ResponseTemplate::new(200).set_body_json(json!({ "data": { "version": 1 } })),
-            )
-            .mount(&server)
-            .await;
-
-        Mock::given(method("GET"))
-            .and(path("/v1/secret/data/my-key"))
-            .and(header("X-Vault-Token", "s.test-token"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                "data": { "data": { "value": "secret-payload" } }
-            })))
-            .mount(&server)
-            .await;
-
-        Mock::given(method("DELETE"))
-            .and(path("/v1/secret/metadata/my-key"))
-            .and(header("X-Vault-Token", "s.test-token"))
-            .respond_with(ResponseTemplate::new(204))
-            .mount(&server)
-            .await;
-
-        let client = VaultClient::builder(server.uri(), valid_role_id(), valid_secret_id())
+        let client = VaultClient::builder_approle(server.uri(), valid_role_id(), valid_secret_id())
             .secrets_cache_ttl(Duration::ZERO)
             .build()
             .await
             .unwrap();
 
         client.store("my-key", "secret-payload").await.unwrap();
-        let loaded = client.load("my-key").await.unwrap();
-        assert_eq!(loaded, Some("secret-payload".to_string()));
+        assert_eq!(
+            client.load("my-key").await.unwrap(),
+            Some("secret-payload".to_string())
+        );
         client.delete("my-key").await.unwrap();
     }
 
     #[tokio::test]
-    async fn approle_login_failure_modes() {
+    async fn kubernetes_login_and_kv_round_trip() {
+        let token_path = write_temp_token("roundtrip", "  my-k8s-jwt \n");
         let server = MockServer::start().await;
+        mock_k8s_login(&server, "my-k8s-jwt", "my-role", "s.k8s-token", 3600).await;
+        mock_kv_round_trip(&server, "k8s-key", "k8s-payload", "s.k8s-token").await;
 
+        let client = VaultClient::builder_kubernetes(server.uri(), "my-role", &token_path)
+            .secrets_cache_ttl(Duration::ZERO)
+            .build()
+            .await
+            .unwrap();
+
+        client.store("k8s-key", "k8s-payload").await.unwrap();
+        assert_eq!(
+            client.load("k8s-key").await.unwrap(),
+            Some("k8s-payload".to_string())
+        );
+        client.delete("k8s-key").await.unwrap();
+        let _ = std::fs::remove_file(&token_path);
+    }
+
+    #[tokio::test]
+    async fn login_failure_returns_denied_error() {
+        // AppRole
+        let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/v1/auth/approle/login"))
             .respond_with(ResponseTemplate::new(403))
             .mount(&server)
             .await;
-
-        let err = VaultClient::builder(server.uri(), valid_role_id(), valid_secret_id())
+        let err = VaultClient::builder_approle(server.uri(), valid_role_id(), valid_secret_id())
             .build()
             .await
             .unwrap_err();
         assert!(err.to_string().contains("AppRole login denied"));
+
+        // Kubernetes
+        let token_path = write_temp_token("fail", "jwt");
+        let k8s_server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/auth/kubernetes/login"))
+            .respond_with(ResponseTemplate::new(403))
+            .mount(&k8s_server)
+            .await;
+        let err = VaultClient::builder_kubernetes(k8s_server.uri(), "role", &token_path)
+            .build()
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("Kubernetes login denied"));
+        let _ = std::fs::remove_file(&token_path);
     }
 
     #[tokio::test]
-    async fn approle_login_custom_mount_and_namespace() {
-        let server = MockServer::start().await;
-
+    async fn login_custom_mount_and_namespace() {
+        // AppRole
+        let ar_server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/v1/auth/custom-auth/login"))
             .and(header("X-Vault-Namespace", "tenant-corp"))
             .respond_with(
                 ResponseTemplate::new(200).set_body_json(auth_response("s.ns-token", 3600)),
             )
-            .mount(&server)
+            .mount(&ar_server)
             .await;
-
-        let client = VaultClient::builder(server.uri(), valid_role_id(), valid_secret_id())
-            .auth_mount("custom-auth")
-            .namespace(Some("tenant-corp"))
-            .build()
-            .await
-            .expect("should authenticate with custom auth mount and namespace");
-
+        let client =
+            VaultClient::builder_approle(ar_server.uri(), valid_role_id(), valid_secret_id())
+                .auth_mount("custom-auth")
+                .namespace(Some("tenant-corp"))
+                .build()
+                .await
+                .expect("AppRole custom mount + namespace");
         assert_eq!(
             client.auth.current_token().await.expose_secret(),
             "s.ns-token"
         );
+
+        // Kubernetes
+        let token_path = write_temp_token("custom", "custom-jwt");
+        let k8s_server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/auth/custom-k8s/login"))
+            .and(header("X-Vault-Namespace", "tenant-k8s"))
+            .and(body_json(
+                json!({ "role": "k8s-role", "jwt": "custom-jwt" }),
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(auth_response("s.k8s-ns", 3600)))
+            .mount(&k8s_server)
+            .await;
+        let client = VaultClient::builder_kubernetes(k8s_server.uri(), "k8s-role", &token_path)
+            .auth_mount("custom-k8s")
+            .namespace(Some("tenant-k8s"))
+            .build()
+            .await
+            .expect("K8s custom mount + namespace");
+        assert_eq!(
+            client.auth.current_token().await.expose_secret(),
+            "s.k8s-ns"
+        );
+        let _ = std::fs::remove_file(&token_path);
     }
 
     #[tokio::test]
     async fn reachable_endpoint_status_handling() {
         let server = MockServer::start().await;
         mock_approle_login(&server, "s.test-token", 3600).await;
-
         Mock::given(method("GET"))
             .and(path("/v1/secret/config"))
             .respond_with(ResponseTemplate::new(200))
             .mount(&server)
             .await;
-
-        let client = VaultClient::builder(server.uri(), valid_role_id(), valid_secret_id())
+        let client = VaultClient::builder_approle(server.uri(), valid_role_id(), valid_secret_id())
             .build()
             .await
             .unwrap();
-
         assert!(client.reachable().await.is_ok());
     }
 
@@ -1028,18 +1259,15 @@ mod tests {
     async fn reachable_returns_error_on_failure() {
         let server = MockServer::start().await;
         mock_approle_login(&server, "s.test-token", 3600).await;
-
         Mock::given(method("GET"))
             .and(path("/v1/secret/config"))
             .respond_with(ResponseTemplate::new(403))
             .mount(&server)
             .await;
-
-        let client = VaultClient::builder(server.uri(), valid_role_id(), valid_secret_id())
+        let client = VaultClient::builder_approle(server.uri(), valid_role_id(), valid_secret_id())
             .build()
             .await
             .unwrap();
-
         let err = client.reachable().await.unwrap_err();
         assert!(err.to_string().contains("access denied"));
     }
@@ -1092,7 +1320,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let client = VaultClient::builder(server.uri(), valid_role_id(), valid_secret_id())
+        let client = VaultClient::builder_approle(server.uri(), valid_role_id(), valid_secret_id())
             .secrets_cache_ttl(Duration::ZERO)
             .build()
             .await
@@ -1116,47 +1344,126 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn vault_redaction_in_debug_and_errors() {
+    async fn kubernetes_token_renewal_and_rotation_reauth() {
+        let token_path = write_temp_token("rotation", "jwt-initial");
         let server = MockServer::start().await;
 
-        // Mock 403 forbidden login
+        mock_k8s_login(&server, "jwt-initial", "role", "s.k8s-1", 1).await;
+
         Mock::given(method("POST"))
-            .and(path("/v1/auth/approle/login"))
-            .respond_with(ResponseTemplate::new(403).set_body_string("denied by policy"))
+            .and(path("/v1/auth/token/renew-self"))
+            .and(header("X-Vault-Token", "s.k8s-1"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(auth_response("s.k8s-renewed", 1)),
+            )
+            .up_to_n_times(1)
             .mount(&server)
             .await;
 
-        let secret = SecretString::from("super-sensitive-secret-id");
-        let err = VaultClient::builder(server.uri(), "my-role", secret.clone())
-            .build()
-            .await
-            .unwrap_err();
+        Mock::given(method("POST"))
+            .and(path("/v1/auth/token/renew-self"))
+            .and(header("X-Vault-Token", "s.k8s-renewed"))
+            .respond_with(ResponseTemplate::new(403))
+            .mount(&server)
+            .await;
 
-        let err_debug = format!("{err:?}");
-        let err_display = format!("{err}");
-        assert!(!err_debug.contains("super-sensitive-secret-id"));
-        assert!(!err_display.contains("super-sensitive-secret-id"));
+        mock_k8s_login(&server, "jwt-rotated", "role", "s.k8s-relogged", 3600).await;
 
-        // Now test successful login and check Debug representation
-        let server_ok = MockServer::start().await;
-        mock_approle_login(&server_ok, "s.secret-token-xyz", 3600).await;
+        Mock::given(method("GET"))
+            .and(path("/v1/secret/data/k"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": { "data": { "value": "v" } }
+            })))
+            .mount(&server)
+            .await;
 
-        let client = VaultClient::builder(server_ok.uri(), "my-role", secret)
+        let client = VaultClient::builder_kubernetes(server.uri(), "role", &token_path)
+            .secrets_cache_ttl(Duration::ZERO)
             .build()
             .await
             .unwrap();
 
-        let auth_debug = format!("{:?}", client.auth);
-        assert!(!auth_debug.contains("super-sensitive-secret-id"));
-        assert!(!auth_debug.contains("s.secret-token-xyz"));
-        assert!(auth_debug.contains("[REDACTED]"));
+        tokio::time::sleep(Duration::from_millis(850)).await;
+        client.load("k").await.unwrap();
+        assert_eq!(
+            client.auth.current_token().await.expose_secret(),
+            "s.k8s-renewed"
+        );
+
+        std::fs::write(&token_path, "jwt-rotated").expect("write rotated token");
+        tokio::time::sleep(Duration::from_millis(850)).await;
+        client.load("k").await.unwrap();
+        assert_eq!(
+            client.auth.current_token().await.expose_secret(),
+            "s.k8s-relogged"
+        );
+
+        let _ = std::fs::remove_file(&token_path);
+    }
+
+    #[tokio::test]
+    async fn secrets_redacted_in_debug_and_errors() {
+        let ar_fail = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/auth/approle/login"))
+            .respond_with(ResponseTemplate::new(403).set_body_string("denied"))
+            .mount(&ar_fail)
+            .await;
+
+        let secret = SecretString::from("super-sensitive-secret-id");
+        let err = VaultClient::builder_approle(ar_fail.uri(), "my-role", secret.clone())
+            .build()
+            .await
+            .unwrap_err();
+        assert!(!format!("{err:?}").contains("super-sensitive-secret-id"));
+        assert!(!format!("{err}").contains("super-sensitive-secret-id"));
+
+        let ar_ok = MockServer::start().await;
+        mock_approle_login(&ar_ok, "s.secret-token-xyz", 3600).await;
+        let client = VaultClient::builder_approle(ar_ok.uri(), "my-role", secret)
+            .build()
+            .await
+            .unwrap();
+        let dbg = format!("{:?}", client.auth);
+        assert!(!dbg.contains("super-sensitive-secret-id"));
+        assert!(!dbg.contains("s.secret-token-xyz"));
+        assert!(dbg.contains("[REDACTED]"));
+
+        let token_path = write_temp_token("redact", "sens-jwt");
+        let k_fail = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/auth/kubernetes/login"))
+            .respond_with(ResponseTemplate::new(403))
+            .mount(&k_fail)
+            .await;
+        let err = VaultClient::builder_kubernetes(k_fail.uri(), "role", &token_path)
+            .build()
+            .await
+            .unwrap_err();
+        assert!(!format!("{err:?}").contains("sens-jwt"));
+
+        let k_ok = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/auth/kubernetes/login"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(auth_response("s.k8s-secret", 3600)),
+            )
+            .mount(&k_ok)
+            .await;
+        let client = VaultClient::builder_kubernetes(k_ok.uri(), "role", &token_path)
+            .build()
+            .await
+            .unwrap();
+        let dbg = format!("{:?}", client.auth);
+        assert!(!dbg.contains("s.k8s-secret"));
+        assert!(dbg.contains("[REDACTED]"));
+        let _ = std::fs::remove_file(&token_path);
     }
 
     #[tokio::test]
     async fn vault_concurrency_renewal_stampede_prevention() {
         let server = MockServer::start().await;
 
-        // Initial login with short 1s TTL
         Mock::given(method("POST"))
             .and(path("/v1/auth/approle/login"))
             .respond_with(
@@ -1166,13 +1473,12 @@ mod tests {
             .mount(&server)
             .await;
 
-        // Exact 1 renewal call should be made despite concurrent requests
         Mock::given(method("POST"))
             .and(path("/v1/auth/token/renew-self"))
             .and(header("X-Vault-Token", "s.initial-token"))
             .respond_with(
                 ResponseTemplate::new(200)
-                    .set_body_json(auth_response("s.renewed-token-concurrent", 3600)),
+                    .set_body_json(auth_response("s.renewed-concurrent", 3600)),
             )
             .expect(1)
             .mount(&server)
@@ -1187,7 +1493,7 @@ mod tests {
             .await;
 
         let client = Arc::new(
-            VaultClient::builder(server.uri(), valid_role_id(), valid_secret_id())
+            VaultClient::builder_approle(server.uri(), valid_role_id(), valid_secret_id())
                 .secrets_cache_ttl(Duration::ZERO)
                 .build()
                 .await
@@ -1214,7 +1520,7 @@ mod tests {
         server.verify().await;
         assert_eq!(
             client.auth.current_token().await.expose_secret(),
-            "s.renewed-token-concurrent"
+            "s.renewed-concurrent"
         );
     }
 
@@ -1226,11 +1532,7 @@ mod tests {
         Mock::given(method("POST"))
             .and(path("/v1/auth/approle/login"))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                "auth": {
-                    "client_token": "s.token-1",
-                    "lease_duration": 1,
-                    "renewable": false
-                }
+                "auth": { "client_token": "s.token-1", "lease_duration": 1, "renewable": false }
             })))
             .up_to_n_times(1)
             .mount(&server)
@@ -1244,7 +1546,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let client = VaultClient::builder(server.uri(), valid_role_id(), valid_secret_id())
+        let client = VaultClient::builder_approle(server.uri(), valid_role_id(), valid_secret_id())
             .secrets_cache_ttl(Duration::ZERO)
             .build()
             .await
