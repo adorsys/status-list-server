@@ -14,22 +14,28 @@ Backend selection is controlled by enabled Cargo features. Builds with `vault` u
 
 Both HashiCorp Vault and OpenBao share the KV v2 REST API interface and are supported natively when the `vault` feature flag is enabled.
 
-Authentication is strictly performed via **AppRole**, which is the industry standard machine-to-machine authentication mechanism for production deployments.
+Authentication is supported via **AppRole** or **Kubernetes** auth methods:
+
+- **AppRole**: Standard machine-to-machine authentication mechanism using `role_id` and `secret_id`.
+- **Kubernetes**: Native pod authentication using Kubernetes ServiceAccount JWT tokens (`/var/run/secrets/kubernetes.io/serviceaccount/token`), avoiding the need to distribute static credentials.
 
 ### Configuration Variables
 
-| Variable                       | Type              | Default                             | Description                                                              |
-| ------------------------------ | ----------------- | ----------------------------------- | ------------------------------------------------------------------------ |
-| `APP_VAULT__ADDR`              | String            | `http://127.0.0.1:8200`             | Base URL of the Vault / OpenBao cluster                                  |
-| `APP_VAULT__AUTH_MOUNT`        | String            | `"approle"`                         | Mount path of the AppRole auth engine                                    |
-| `APP_VAULT__ROLE_ID`           | String            | _(Mandatory when Vault is enabled)_ | AppRole Role ID identifier                                               |
-| `APP_VAULT__SECRET_ID`         | String (Secret)   | _(Optional if path is used)_        | AppRole Secret ID credential                                             |
-| `APP_VAULT__SECRET_ID_PATH`    | Path              | `None`                              | File path containing AppRole Secret ID (e.g. K8s volume mount)           |
-| `APP_VAULT__MOUNT`             | String            | `"secret"`                          | KV v2 secrets engine mount point                                         |
-| `APP_VAULT__PATH_PREFIX`       | String            | `""`                                | Optional prefix prepended to all secret keys (e.g. `status-list-server`) |
-| `APP_VAULT__NAMESPACE`         | String            | `None`                              | Optional Enterprise/OpenBao namespace header (`X-Vault-Namespace`)       |
-| `APP_VAULT__SECRETS_CACHE_TTL` | Integer (seconds) | `300` (5 minutes)                   | In-memory cache TTL in seconds. Set to `0` to disable caching.           |
-| `APP_VAULT__TIMEOUT_SECS`      | Integer (seconds) | `30`                                | HTTP request timeout duration in seconds                                 |
+| Variable                    | Type              | Default                                               | Description                                                              |
+| --------------------------- | ----------------- | ----------------------------------------------------- | ------------------------------------------------------------------------ |
+| `APP_VAULT__AUTH_METHOD`    | String            | `"approle"`                                           | Authentication method: `approle` or `kubernetes`                         |
+| `APP_VAULT__ADDR`           | String            | `http://127.0.0.1:8200`                               | Base URL of the Vault / OpenBao cluster                                  |
+| `APP_VAULT__AUTH_MOUNT`     | String            | `"approle"`                                           | Mount path of the AppRole auth engine (used when `auth_method=approle`)  |
+| `APP_VAULT__ROLE_ID`        | String            | `""`                                                  | AppRole Role ID identifier (required for `approle`)                      |
+| `APP_VAULT__SECRET_ID`      | String (Secret)   | `None`                                                | AppRole Secret ID credential (optional if path is used)                  |
+| `APP_VAULT__SECRET_ID_PATH` | Path              | `None`                                                | File path containing AppRole Secret ID (e.g. volume mount)               |
+| `APP_VAULT__K8S_ROLE`       | String            | `None`                                                | Vault Kubernetes auth role name (required when `auth_method=kubernetes`) |
+| `APP_VAULT__K8S_TOKEN_PATH` | Path              | `/var/run/secrets/kubernetes.io/serviceaccount/token` | Path to projected ServiceAccount JWT token file                          |
+| `APP_VAULT__K8S_AUTH_MOUNT` | String            | `"kubernetes"`                                        | Mount path of the Kubernetes auth engine                                 |
+| `APP_VAULT__MOUNT`          | String            | `"secret"`                                            | KV v2 secrets engine mount point                                         |
+| `APP_VAULT__PATH_PREFIX`    | String            | `""`                                                  | Optional prefix prepended to all secret keys (e.g. `status-list-server`) |
+| `APP_VAULT__NAMESPACE`      | String            | `None`                                                | Optional Enterprise/OpenBao namespace header (`X-Vault-Namespace`)       |
+| `APP_VAULT__TIMEOUT_SECS`   | Integer (seconds) | `30`                                                  | HTTP request timeout duration in seconds                                 |
 
 ### Least-Privilege Vault / OpenBao Policy
 
@@ -128,11 +134,12 @@ APP_VAULT__MOUNT=secret
 APP_VAULT__PATH_PREFIX=dev/status-list
 ```
 
-### Example 2: Production Deployment with OpenBao / Vault
+### Example 2: Production Deployment with OpenBao / Vault (AppRole)
 
 In Kubernetes or ECS, inject the `role_id` and `secret_id` via Kubernetes Secrets or IAM-bound orchestration:
 
 ```env
+APP_VAULT__AUTH_METHOD=approle
 APP_VAULT__ADDR=http://openbao-service.openbao.svc.cluster.local:8200
 APP_VAULT__AUTH_MOUNT=approle
 APP_VAULT__ROLE_ID=ba0a1234-5678-90ab-cdef-1234567890ab
@@ -142,13 +149,43 @@ APP_VAULT__PATH_PREFIX=production/status-list
 APP_VAULT__NAMESPACE=my-org-namespace
 ```
 
+### Example 3: Production Deployment with Kubernetes Authentication
+
+When running inside a Kubernetes cluster, configure the server to authenticate using the pod's projected ServiceAccount token:
+
+1. **Configure Vault Kubernetes Auth Engine**:
+
+   ```bash
+   vault auth enable kubernetes
+   vault write auth/kubernetes/config \
+     kubernetes_host="https://kubernetes.default.svc:443"
+
+   vault write auth/kubernetes/role/status-list-role \
+     bound_service_account_names="status-list-server" \
+     bound_service_account_namespaces="default" \
+     token_policies="status-list-policy" \
+     token_ttl=1h
+   ```
+
+2. **Configure your pod environment**:
+
+   ```env
+   APP_VAULT__AUTH_METHOD=kubernetes
+   APP_VAULT__ADDR=http://vault.vault.svc.cluster.local:8200
+   APP_VAULT__K8S_ROLE=status-list-role
+   APP_VAULT__K8S_TOKEN_PATH=/var/run/secrets/kubernetes.io/serviceaccount/token
+   APP_VAULT__K8S_AUTH_MOUNT=kubernetes
+   APP_VAULT__MOUNT=secret
+   APP_VAULT__PATH_PREFIX=production/status-list
+   ```
+
 ### Automated Token Lifecycle & Resilience
 
 The server features an enterprise-grade automated token manager:
 
-- **Initial Login**: Exchanged via `POST /v1/auth/{auth_mount}/login` at application startup.
+- **Initial Login**: Authenticates via `POST /v1/auth/{auth_mount}/login` at application startup (using AppRole credentials or projected Kubernetes SA JWT).
 - **Proactive Renewal**: Tokens are automatically renewed via `POST /v1/auth/token/renew-self` when 80% of their lease TTL has elapsed.
-- **Re-authentication Fallback**: If renewal fails (e.g. token expired or revoked), the client seamlessly re-authenticates using the AppRole credentials.
+- **Re-authentication Fallback**: If renewal fails (e.g. token expired or revoked), the client seamlessly re-authenticates using the configured auth backend (re-reading rotated Kubernetes SA tokens from disk automatically).
 
 ### Observability & Metrics
 
