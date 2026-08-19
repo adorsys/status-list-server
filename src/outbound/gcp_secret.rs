@@ -77,10 +77,10 @@ impl GcpSecretManagerClient {
         if err.http_status_code() == Some(404) {
             return true;
         }
-        if let Some(status) = err.status() {
-            if status.code == 5.into() || status.code.name() == "NOT_FOUND" {
-                return true;
-            }
+        if let Some(status) = err.status()
+            && (status.code == 5.into() || status.code.name() == "NOT_FOUND")
+        {
+            return true;
         }
         false
     }
@@ -89,10 +89,10 @@ impl GcpSecretManagerClient {
         if err.http_status_code() == Some(409) {
             return true;
         }
-        if let Some(status) = err.status() {
-            if status.code == 6.into() || status.code.name() == "ALREADY_EXISTS" {
-                return true;
-            }
+        if let Some(status) = err.status()
+            && (status.code == 6.into() || status.code.name() == "ALREADY_EXISTS")
+        {
+            return true;
         }
         false
     }
