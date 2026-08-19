@@ -8,6 +8,11 @@ release_always = false
 # API library contract, which a binary-only crate does not expose, so the check
 # has nothing meaningful to verify and would only add noise.
 semver_check = false
+
+# publish is disabled because this crate is not published to crates.io. It is
+# distributed via Docker images and GitHub releases instead, so release-plz
+# should tag and produce changelog/release artifacts without attempting to
+# publish a crate to the registry.
 publish = false
 
 git_release_body = """
