@@ -7,7 +7,7 @@ The supported backends include:
 - **HashiCorp Vault / OpenBao** (KV v2 engine, feature flag: `vault`)
 - **GCP Secret Manager** (feature flag: `gcp-secrets`)
 - **Azure Key Vault** (feature flag: `azure-kv`)
-- **AWS Secrets Manager** (feature flag: `aws`)
+- **AWS Secrets Manager** (feature flag: `aws-secrets`)
 - **In-Memory** (for development and testing)
 
 Backend selection is controlled by enabled Cargo features. Builds with `vault` use Vault/OpenBao. Builds with `aws-secrets` and without `vault` use AWS Secrets Manager. Builds without either backend feature use in-memory storage for local development and tests.
@@ -20,18 +20,18 @@ Authentication is strictly performed via **AppRole**, which is the industry stan
 
 ### Configuration Variables
 
-| Variable                       | Type              | Default                             | Description                                                              |
-| ------------------------------ | ----------------- | ----------------------------------- | ------------------------------------------------------------------------ |
-| `APP_VAULT__ADDR`              | String            | `http://127.0.0.1:8200`             | Base URL of the Vault / OpenBao cluster                                  |
-| `APP_VAULT__AUTH_MOUNT`        | String            | `"approle"`                         | Mount path of the AppRole auth engine                                    |
-| `APP_VAULT__ROLE_ID`           | String            | _(Mandatory when Vault is enabled)_ | AppRole Role ID identifier                                               |
-| `APP_VAULT__SECRET_ID`         | String (Secret)   | _(Optional if path is used)_        | AppRole Secret ID credential                                             |
-| `APP_VAULT__SECRET_ID_PATH`    | Path              | `None`                              | File path containing AppRole Secret ID (e.g. K8s volume mount)           |
-| `APP_VAULT__MOUNT`             | String            | `"secret"`                          | KV v2 secrets engine mount point                                         |
-| `APP_VAULT__PATH_PREFIX`       | String            | `""`                                | Optional prefix prepended to all secret keys (e.g. `status-list-server`) |
-| `APP_VAULT__NAMESPACE`         | String            | `None`                              | Optional Enterprise/OpenBao namespace header (`X-Vault-Namespace`)       |
-| `APP_VAULT__SECRETS_CACHE_TTL` | Integer (seconds) | `300` (5 minutes)                   | In-memory cache TTL in seconds. Set to `0` to disable caching.           |
-| `APP_VAULT__TIMEOUT_SECS`      | Integer (seconds) | `30`                                | HTTP request timeout duration in seconds                                 |
+| Variable                                  | Type              | Default                             | Description                                                              |
+| ----------------------------------------- | ----------------- | ----------------------------------- | ------------------------------------------------------------------------ |
+| `APP_VAULT__ADDR`                         | String            | `http://127.0.0.1:8200`             | Base URL of the Vault / OpenBao cluster                                  |
+| `APP_VAULT__AUTH_MOUNT`                   | String            | `"approle"`                         | Mount path of the AppRole auth engine                                    |
+| `APP_VAULT__ROLE_ID`                      | String            | _(Mandatory when Vault is enabled)_ | AppRole Role ID identifier                                               |
+| `APP_VAULT__SECRET_ID`                    | String (Secret)   | _(Optional if path is used)_        | AppRole Secret ID credential                                             |
+| `APP_VAULT__SECRET_ID_PATH`               | Path              | `None`                              | File path containing AppRole Secret ID (e.g. K8s volume mount)           |
+| `APP_VAULT__MOUNT`                        | String            | `"secret"`                          | KV v2 secrets engine mount point                                         |
+| `APP_VAULT__PATH_PREFIX`                  | String            | `""`                                | Optional prefix prepended to all secret keys (e.g. `status-list-server`) |
+| `APP_VAULT__NAMESPACE`                    | String            | `None`                              | Optional Enterprise/OpenBao namespace header (`X-Vault-Namespace`)       |
+| `APP_SERVER__CERT__SIGNING_KEY_CACHE_TTL` | Integer (seconds) | `300` (5 minutes)                   | In-memory cache TTL in seconds. Set to `0` to disable caching.           |
+| `APP_VAULT__TIMEOUT_SECS`                 | Integer (seconds) | `30`                                | HTTP request timeout duration in seconds                                 |
 
 ### Least-Privilege Vault / OpenBao Policy
 
@@ -173,7 +173,7 @@ When compiled with the `gcp-secrets` feature flag, secrets are stored in GCP Sec
 | `APP_GCP_SECRET_MANAGER__PROJECT_ID`               | String            | _(Required when GCP is enabled)_ | GCP Project ID where secrets are hosted                        |
 | `APP_GCP_SECRET_MANAGER__SERVICE_ACCOUNT_KEY`      | String (JSON)     | `None`                           | Optional inline service account JSON key string                |
 | `APP_GCP_SECRET_MANAGER__SERVICE_ACCOUNT_KEY_PATH` | String            | `None`                           | Optional filepath to service account JSON key file             |
-| `APP_GCP_SECRET_MANAGER__SECRETS_CACHE_TTL`        | Integer (seconds) | `300` (5 minutes)                | In-memory cache TTL in seconds. Set to `0` to disable caching. |
+| `APP_SERVER__CERT__SIGNING_KEY_CACHE_TTL`          | Integer (seconds) | `300` (5 minutes)                | In-memory cache TTL in seconds. Set to `0` to disable caching. |
 
 ### Authentication & IAM Permissions
 
@@ -190,7 +190,7 @@ Required IAM roles (least-privilege):
 
 ```env
 APP_GCP_SECRET_MANAGER__PROJECT_ID=my-gcp-project-123
-APP_GCP_SECRET_MANAGER__SECRETS_CACHE_TTL=300
+APP_SERVER__CERT__SIGNING_KEY_CACHE_TTL=300
 GOOGLE_APPLICATION_CREDENTIALS=/path/to/credentials.json
 ```
 
@@ -200,13 +200,13 @@ When compiled with the `azure-kv` feature flag, secrets are stored in Azure Key 
 
 ### Configuration Variables
 
-| Variable                                | Type              | Default                               | Description                                                    |
-| --------------------------------------- | ----------------- | ------------------------------------- | -------------------------------------------------------------- |
-| `APP_AZURE_KEYVAULT__VAULT_URL`         | String            | \_(Required when Azure KV is enabled) | Azure Key Vault URL (e.g. `https://my-vault.vault.azure.net/`) |
-| `APP_AZURE_KEYVAULT__TENANT_ID`         | String            | `None`                                | Azure AD Tenant ID (for service principal auth)                |
-| `APP_AZURE_KEYVAULT__CLIENT_ID`         | String            | `None`                                | Azure AD Client ID (for service principal auth)                |
-| `APP_AZURE_KEYVAULT__CLIENT_SECRET`     | String            | `None`                                | Azure AD Client Secret (for service principal auth)            |
-| `APP_AZURE_KEYVAULT__SECRETS_CACHE_TTL` | Integer (seconds) | `300` (5 minutes)                     | In-memory cache TTL in seconds. Set to `0` to disable caching. |
+| Variable                                  | Type              | Default                               | Description                                                    |
+| ----------------------------------------- | ----------------- | ------------------------------------- | -------------------------------------------------------------- |
+| `APP_AZURE_KEYVAULT__VAULT_URL`           | String            | \_(Required when Azure KV is enabled) | Azure Key Vault URL (e.g. `https://my-vault.vault.azure.net/`) |
+| `APP_AZURE_KEYVAULT__TENANT_ID`           | String            | `None`                                | Azure AD Tenant ID (for service principal auth)                |
+| `APP_AZURE_KEYVAULT__CLIENT_ID`           | String            | `None`                                | Azure AD Client ID (for service principal auth)                |
+| `APP_AZURE_KEYVAULT__CLIENT_SECRET`       | String            | `None`                                | Azure AD Client Secret (for service principal auth)            |
+| `APP_SERVER__CERT__SIGNING_KEY_CACHE_TTL` | Integer (seconds) | `300` (5 minutes)                     | In-memory cache TTL in seconds. Set to `0` to disable caching. |
 
 ### Authentication & RBAC Permissions
 
@@ -238,7 +238,7 @@ APP_AZURE_KEYVAULT__VAULT_URL=https://prod-vault.vault.azure.net/
 APP_AZURE_KEYVAULT__TENANT_ID=00000000-0000-0000-0000-000000000000
 APP_AZURE_KEYVAULT__CLIENT_ID=11111111-1111-1111-1111-111111111111
 APP_AZURE_KEYVAULT__CLIENT_SECRET=supersecret
-APP_AZURE_KEYVAULT__SECRETS_CACHE_TTL=300
+APP_SERVER__CERT__SIGNING_KEY_CACHE_TTL=300
 ```
 
 ## AWS Secrets Manager
