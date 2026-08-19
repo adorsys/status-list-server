@@ -12,7 +12,7 @@ use moka::future::Cache;
 use tokio::time::sleep;
 use tracing::{info, warn};
 
-use crate::cert_manager::storage::{Storage, StorageError};
+use crate::cert_manager::storage::{Storage, StorageError, normalize_key};
 
 /// AWS Secrets Manager.
 pub struct AwsSecretsManager {
@@ -54,18 +54,25 @@ impl AwsSecretsManager {
 impl Storage for AwsSecretsManager {
     async fn store(&self, name: &str, data: &str) -> Result<(), StorageError> {
         use aws_sdk_secretsmanager::error::SdkError;
+        let secret_name = normalize_key(name);
 
         // Store a secret only if it does not already exist
-        match self.client.describe_secret().secret_id(name).send().await {
+        match self
+            .client
+            .describe_secret()
+            .secret_id(&secret_name)
+            .send()
+            .await
+        {
             Ok(_) => {
-                warn!("Secret {name} already exists. Skipping...");
+                warn!("Secret {secret_name} already exists. Skipping...");
                 Ok(())
             }
             Err(SdkError::ServiceError(err)) if err.err().is_resource_not_found_exception() => {
                 // Secret does not exist, try to create it
                 self.client
                     .create_secret()
-                    .name(name)
+                    .name(&secret_name)
                     .secret_string(data)
                     .send()
                     .await
@@ -78,6 +85,7 @@ impl Storage for AwsSecretsManager {
 
     async fn load(&self, name: &str) -> Result<Option<String>, StorageError> {
         use aws_sdk_secretsmanager::error::SdkError;
+        let secret_name = normalize_key(name);
 
         if let Some(cache) = &self.cache
             && let Some(value) = cache.get(name).await
@@ -85,7 +93,13 @@ impl Storage for AwsSecretsManager {
             return Ok(Some(value));
         }
 
-        match self.client.get_secret_value().secret_id(name).send().await {
+        match self
+            .client
+            .get_secret_value()
+            .secret_id(&secret_name)
+            .send()
+            .await
+        {
             Ok(value) => {
                 if let Some(secret_string) = value.secret_string {
                     if let Some(cache) = &self.cache {
@@ -106,9 +120,10 @@ impl Storage for AwsSecretsManager {
     }
 
     async fn update(&self, name: &str, data: &str) -> Result<(), StorageError> {
+        let secret_name = normalize_key(name);
         self.client
             .put_secret_value()
-            .secret_id(name)
+            .secret_id(&secret_name)
             .secret_string(data)
             .send()
             .await
@@ -121,9 +136,10 @@ impl Storage for AwsSecretsManager {
     }
 
     async fn delete(&self, name: &str) -> Result<(), StorageError> {
+        let secret_name = normalize_key(name);
         self.client
             .delete_secret()
-            .secret_id(name)
+            .secret_id(&secret_name)
             .send()
             .await
             .map_err(|e| StorageError::Backend(e.into()))?;
@@ -144,7 +160,7 @@ impl Storage for AwsSecretsManager {
         match self
             .client
             .describe_secret()
-            .secret_id("__health_probe_test__")
+            .secret_id("health-probe-do-not-create")
             .send()
             .await
         {

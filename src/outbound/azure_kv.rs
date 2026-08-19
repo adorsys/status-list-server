@@ -6,7 +6,10 @@ use std::time::Duration;
 use async_trait::async_trait;
 use azure_core::credentials::{Secret as AzureSecret, TokenCredential};
 use azure_core::http::{HttpClient, StatusCode};
-use azure_identity::{ClientSecretCredential, DeveloperToolsCredential};
+use azure_identity::{
+    ClientSecretCredential, DeveloperToolsCredential, ManagedIdentityCredential,
+    WorkloadIdentityCredential,
+};
 use azure_security_keyvault_secrets::SecretClient;
 use azure_security_keyvault_secrets::models::SetSecretParameters;
 use color_eyre::eyre::eyre;
@@ -15,7 +18,7 @@ use secrecy::{ExposeSecret, SecretString};
 use tracing::info;
 use url::Url;
 
-use crate::cert_manager::storage::{Storage, StorageError};
+use crate::cert_manager::storage::{Storage, StorageError, normalize_key};
 
 /// Azure Key Vault secret storage adapter.
 ///
@@ -33,6 +36,12 @@ impl AzureKeyVaultClient {
     /// for the given Key Vault URL.
     pub fn builder(vault_url: Url) -> AzureKeyVaultClientBuilder {
         AzureKeyVaultClientBuilder::new(vault_url)
+    }
+
+    /// Sanitize key to satisfy Azure Key Vault object naming rules:
+    /// 1-127 characters, containing only 0-9, a-z, A-Z, and -.
+    pub(crate) fn qualify_key(key: &str) -> String {
+        normalize_key(key)
     }
 }
 
@@ -151,12 +160,18 @@ impl AzureKeyVaultClientBuilder {
             .map_err(|e| {
                 StorageError::Backend(eyre!("failed to create Azure ClientSecretCredential: {e}"))
             })?
+        } else if let Ok(cred) = WorkloadIdentityCredential::new(None) {
+            cred as Arc<dyn TokenCredential>
+        } else if let Ok(cred) = ManagedIdentityCredential::new(None) {
+            cred as Arc<dyn TokenCredential>
         } else {
-            DeveloperToolsCredential::new(None).map_err(|e| {
-                StorageError::Backend(eyre!(
-                    "failed to create Azure DeveloperToolsCredential: {e}"
-                ))
-            })?
+            DeveloperToolsCredential::new(None)
+                .map(|cred| cred as Arc<dyn TokenCredential>)
+                .map_err(|e| {
+                    StorageError::Backend(eyre!(
+                        "failed to create Azure credential (tried WorkloadIdentity, ManagedIdentity, DeveloperTools): {e}"
+                    ))
+                })?
         };
 
         let mut options = azure_security_keyvault_secrets::SecretClientOptions {
@@ -191,6 +206,7 @@ impl AzureKeyVaultClientBuilder {
 #[async_trait]
 impl Storage for AzureKeyVaultClient {
     async fn store(&self, key: &str, value: &str) -> Result<(), StorageError> {
+        let secret_name = Self::qualify_key(key);
         let parameters = SetSecretParameters {
             value: Some(value.to_string()),
             ..Default::default()
@@ -198,7 +214,7 @@ impl Storage for AzureKeyVaultClient {
 
         self.client
             .set_secret(
-                key,
+                &secret_name,
                 parameters.try_into().map_err(|e| {
                     StorageError::Backend(eyre!("failed to serialize Azure secret parameters: {e}"))
                 })?,
@@ -221,7 +237,8 @@ impl Storage for AzureKeyVaultClient {
             return Ok(Some(val));
         }
 
-        match self.client.get_secret(key, None).await {
+        let secret_name = Self::qualify_key(key);
+        match self.client.get_secret(&secret_name, None).await {
             Ok(resp) => {
                 let model = resp.into_model().map_err(|e| {
                     StorageError::Backend(eyre!(
@@ -243,7 +260,7 @@ impl Storage for AzureKeyVaultClient {
                     Ok(None)
                 } else {
                     Err(StorageError::Backend(eyre!(
-                        "Azure secret load failed for key '{key}': {err:?}"
+                        "Azure secret load failed for key '{key}': {err}"
                     )))
                 }
             }
@@ -255,11 +272,14 @@ impl Storage for AzureKeyVaultClient {
     }
 
     async fn delete(&self, key: &str) -> Result<(), StorageError> {
-        match self.client.delete_secret(key, None).await {
+        let secret_name = Self::qualify_key(key);
+        match self.client.delete_secret(&secret_name, None).await {
             Ok(_) => {
                 if let Some(cache) = &self.cache {
                     cache.invalidate(key).await;
                 }
+                // Try purging the soft-deleted secret if purge is allowed on the vault
+                let _ = self.client.purge_deleted_secret(&secret_name, None).await;
                 Ok(())
             }
             Err(err) => {
@@ -270,7 +290,7 @@ impl Storage for AzureKeyVaultClient {
                     Ok(())
                 } else {
                     Err(StorageError::Backend(eyre!(
-                        "Azure secret delete failed for key '{key}': {err:?}"
+                        "Azure secret delete failed for key '{key}': {err}"
                     )))
                 }
             }
@@ -278,14 +298,18 @@ impl Storage for AzureKeyVaultClient {
     }
 
     async fn reachable(&self) -> Result<(), StorageError> {
-        match self.client.get_secret("__health_probe_test__", None).await {
+        match self
+            .client
+            .get_secret("health-probe-do-not-create", None)
+            .await
+        {
             Ok(_) => Ok(()),
             Err(err) => {
                 if err.http_status() == Some(StatusCode::NotFound) {
                     Ok(())
                 } else {
                     Err(StorageError::Backend(eyre!(
-                        "Azure Key Vault readiness check failed: {err:?}"
+                        "Azure Key Vault readiness check failed: {err}"
                     )))
                 }
             }
@@ -322,5 +346,25 @@ mod tests {
         let debug_repr = format!("{builder:?}");
         assert!(debug_repr.contains("<redacted>"));
         assert!(!debug_repr.contains("secret-789"));
+    }
+
+    #[test]
+    fn test_qualify_key() {
+        assert_eq!(
+            AzureKeyVaultClient::qualify_key("keys-status.example.com"),
+            "keys-status-example-com"
+        );
+        assert_eq!(
+            AzureKeyVaultClient::qualify_key("acme_accounts-example.com"),
+            "acme-accounts-example-com"
+        );
+        assert_eq!(
+            AzureKeyVaultClient::qualify_key("certs-status.example.com-cert_data.json"),
+            "certs-status-example-com-cert-data-json"
+        );
+        assert_eq!(
+            AzureKeyVaultClient::qualify_key("valid-key-123"),
+            "valid-key-123"
+        );
     }
 }

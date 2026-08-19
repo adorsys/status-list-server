@@ -13,7 +13,7 @@ use moka::future::Cache;
 use secrecy::{ExposeSecret, SecretString};
 use tracing::info;
 
-use crate::cert_manager::storage::{Storage, StorageError};
+use crate::cert_manager::storage::{Storage, StorageError, normalize_key};
 
 /// GCP Secret Manager storage adapter.
 ///
@@ -43,6 +43,12 @@ impl GcpSecretManagerClient {
         GcpSecretManagerClientBuilder::new(project_id)
     }
 
+    /// Sanitize secret ID to satisfy GCP Secret Manager naming rules:
+    /// 1-255 characters, containing only [a-zA-Z0-9_-].
+    pub(crate) fn qualify_key(key: &str) -> String {
+        normalize_key(key)
+    }
+
     /// Formats the parent resource name for secret creation (`projects/{project_id}`).
     fn project_parent(&self) -> String {
         format!("projects/{}", self.project_id)
@@ -50,15 +56,45 @@ impl GcpSecretManagerClient {
 
     /// Formats the resource name for a secret (`projects/{project_id}/secrets/{key}`).
     fn secret_name(&self, key: &str) -> String {
-        format!("projects/{}/secrets/{}", self.project_id, key)
+        format!(
+            "projects/{}/secrets/{}",
+            self.project_id,
+            Self::qualify_key(key)
+        )
     }
 
     /// Formats the resource name for accessing a secret version (`projects/{project_id}/secrets/{key}/versions/{version}`).
     fn secret_version_name(&self, key: &str, version: &str) -> String {
         format!(
             "projects/{}/secrets/{}/versions/{}",
-            self.project_id, key, version
+            self.project_id,
+            Self::qualify_key(key),
+            version
         )
+    }
+
+    fn is_not_found(err: &google_cloud_secretmanager_v1::Error) -> bool {
+        if err.http_status_code() == Some(404) {
+            return true;
+        }
+        if let Some(status) = err.status() {
+            if status.code == 5.into() || status.code.name() == "NOT_FOUND" {
+                return true;
+            }
+        }
+        false
+    }
+
+    fn is_already_exists(err: &google_cloud_secretmanager_v1::Error) -> bool {
+        if err.http_status_code() == Some(409) {
+            return true;
+        }
+        if let Some(status) = err.status() {
+            if status.code == 6.into() || status.code.name() == "ALREADY_EXISTS" {
+                return true;
+            }
+        }
+        false
     }
 
     /// Ensure the secret container exists and add a new version with payload.
@@ -68,6 +104,7 @@ impl GcpSecretManagerClient {
         key: &str,
         value: &str,
     ) -> Result<(), StorageError> {
+        let secret_id = Self::qualify_key(key);
         let secret_name = self.secret_name(key);
         let payload = SecretPayload::new().set_data(value.as_bytes().to_vec());
 
@@ -86,7 +123,7 @@ impl GcpSecretManagerClient {
                 }
                 Ok(())
             }
-            Err(e) if e.http_status_code() == Some(404) => {
+            Err(e) if Self::is_not_found(&e) => {
                 // Container does not exist; create it
                 let secret = Secret::new().set_replication(
                     Replication::new()
@@ -97,14 +134,14 @@ impl GcpSecretManagerClient {
                     .client
                     .create_secret()
                     .set_parent(self.project_parent())
-                    .set_secret_id(key)
+                    .set_secret_id(secret_id)
                     .set_secret(secret)
                     .send()
                     .await
                 {
                     Ok(_) => {}
                     // If created concurrently by another process, ignore AlreadyExists (409)
-                    Err(err) if err.http_status_code() == Some(409) => {}
+                    Err(err) if Self::is_already_exists(&err) => {}
                     Err(err) => return Err(StorageError::Backend(err.into())),
                 }
 
@@ -262,7 +299,7 @@ impl Storage for GcpSecretManagerClient {
                 Ok(Some(secret_str))
             }
             Err(err) => {
-                if err.http_status_code() == Some(404) {
+                if Self::is_not_found(&err) {
                     return Ok(None);
                 }
                 Err(StorageError::Backend(eyre!(
@@ -292,7 +329,7 @@ impl Storage for GcpSecretManagerClient {
                 }
                 Ok(())
             }
-            Err(err) if err.http_status_code() == Some(404) => {
+            Err(err) if Self::is_not_found(&err) => {
                 if let Some(cache) = &self.cache {
                     cache.invalidate(key).await;
                 }
@@ -308,11 +345,11 @@ impl Storage for GcpSecretManagerClient {
     /// secret, by requesting metadata for a secret name that is expected
     /// not to exist.
     async fn reachable(&self) -> Result<(), StorageError> {
-        let secret_name = self.secret_name("__health_probe_test__");
+        let secret_name = self.secret_name("health-probe-do-not-create");
 
         match self.client.get_secret().set_name(secret_name).send().await {
             Ok(_) => Ok(()),
-            Err(err) if err.http_status_code() == Some(404) => Ok(()),
+            Err(err) if Self::is_not_found(&err) => Ok(()),
             Err(err) => Err(StorageError::Backend(eyre!(
                 "GCP Secret Manager readiness check failed: {err}"
             ))),
@@ -383,5 +420,25 @@ mod tests {
             }
             other => panic!("expected StorageError::Backend, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn test_qualify_key() {
+        assert_eq!(
+            GcpSecretManagerClient::qualify_key("keys-status.example.com"),
+            "keys-status-example-com"
+        );
+        assert_eq!(
+            GcpSecretManagerClient::qualify_key("acme_accounts-example.com"),
+            "acme-accounts-example-com"
+        );
+        assert_eq!(
+            GcpSecretManagerClient::qualify_key("certs-status.example.com-cert_data.json"),
+            "certs-status-example-com-cert-data-json"
+        );
+        assert_eq!(
+            GcpSecretManagerClient::qualify_key("valid_key-123"),
+            "valid-key-123"
+        );
     }
 }

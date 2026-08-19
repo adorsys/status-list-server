@@ -63,6 +63,31 @@ impl<T: Storage + ?Sized> Storage for Box<T> {
     }
 }
 
+/// Normalize a storage key so it is valid and consistent across all secrets backends
+/// (AWS Secrets Manager, GCP Secret Manager, Azure Key Vault, HashiCorp Vault, Memory).
+///
+/// Azure Key Vault is the most restrictive provider, requiring 1–127 characters
+/// and admitting only ASCII alphanumeric characters and hyphens `[0-9a-zA-Z-]`.
+/// This function replaces any character outside `[0-9a-zA-Z-]` with `-` and truncates
+/// to 127 characters.
+pub fn normalize_key(key: &str) -> String {
+    let sanitized: String = key
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    if sanitized.len() > 127 {
+        sanitized[..127].to_string()
+    } else {
+        sanitized
+    }
+}
+
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -75,19 +100,52 @@ pub struct MemoryStorage {
 #[async_trait]
 impl Storage for MemoryStorage {
     async fn store(&self, key: &str, value: &str) -> Result<(), StorageError> {
+        let normalized = normalize_key(key);
         self.values
             .write()
             .await
-            .insert(key.to_string(), value.to_string());
+            .insert(normalized, value.to_string());
         Ok(())
     }
 
     async fn load(&self, key: &str) -> Result<Option<String>, StorageError> {
-        Ok(self.values.read().await.get(key).cloned())
+        let normalized = normalize_key(key);
+        Ok(self.values.read().await.get(&normalized).cloned())
     }
 
     async fn delete(&self, key: &str) -> Result<(), StorageError> {
-        self.values.write().await.remove(key);
+        let normalized = normalize_key(key);
+        self.values.write().await.remove(&normalized);
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_normalize_key() {
+        assert_eq!(
+            normalize_key("keys-status.example.com"),
+            "keys-status-example-com"
+        );
+        assert_eq!(
+            normalize_key("acme_accounts-example.com"),
+            "acme-accounts-example-com"
+        );
+        assert_eq!(
+            normalize_key("certs-status.example.com-cert_data.json"),
+            "certs-status-example-com-cert-data-json"
+        );
+        assert_eq!(normalize_key("valid-key-123"), "valid-key-123");
+        assert_eq!(
+            normalize_key("key/with:special@chars.and+symbols"),
+            "key-with-special-chars-and-symbols"
+        );
+
+        let long_key = "a".repeat(200);
+        let normalized_long = normalize_key(&long_key);
+        assert_eq!(normalized_long.len(), 127);
     }
 }

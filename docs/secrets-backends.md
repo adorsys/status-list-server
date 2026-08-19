@@ -209,15 +209,26 @@ When compiled with the `azure-kv` feature flag, secrets are stored in Azure Key 
 
 ### Authentication & RBAC Permissions
 
-If `tenant_id`, `client_id`, and `client_secret` are provided, the adapter authenticates as a Service Principal. Otherwise, it falls back to Azure developer/workload identity credentials (`AZURE_TENANT_ID`, `AZURE_CLIENT_ID`, `AZURE_CLIENT_SECRET`, or Azure CLI credentials).
+The Azure Key Vault must be configured to use the **Azure role-based access control (Azure RBAC)** permission model (recommended) or legacy access policies.
 
-Required RBAC roles (least-privilege):
+#### Authentication Methods
 
-- **Key Vault Secrets Officer** (full CRUD access to secrets)
-- Or custom role with data actions:
-  - `Microsoft.KeyVault/vaults/secrets/read`
-  - `Microsoft.KeyVault/vaults/secrets/write`
-  - `Microsoft.KeyVault/vaults/secrets/delete`
+1. **Explicit Service Principal**: Configure `APP_AZURE_KEYVAULT__TENANT_ID`, `APP_AZURE_KEYVAULT__CLIENT_ID`, and `APP_AZURE_KEYVAULT__CLIENT_SECRET`.
+2. **Workload Identity (AKS)**: In Azure Kubernetes Service with Workload Identity enabled, credentials are automatically resolved via `AZURE_FEDERATED_TOKEN_FILE`, `AZURE_CLIENT_ID`, and `AZURE_TENANT_ID`.
+3. **Managed Identity**: In Azure VM, App Service, or Container Apps environments, credentials are automatically resolved via the Managed Identity service.
+4. **Developer Tools**: In local environments, credentials are automatically resolved from the Azure CLI (`az login`).
+
+#### Required Roles & Permissions
+
+- **Key Vault Secrets Officer** built-in RBAC role (recommended for full CRUD access on secrets).
+- Or a custom role with the following data actions:
+  - `Microsoft.KeyVault/vaults/secrets/getSecret/action`
+  - `Microsoft.KeyVault/vaults/secrets/setSecret/action`
+  - `Microsoft.KeyVault/vaults/secrets/deleteSecret/action`
+  - `Microsoft.KeyVault/vaults/secrets/purge/action` (optional, to permanently purge soft-deleted secrets so their names can be reused immediately)
+
+> [!NOTE]
+> Azure Key Vault has soft-delete enabled by default. When a secret is deleted, the adapter attempts to purge it immediately if the identity has purge permissions and purge protection is not enforced on the vault.
 
 ### Example `.env` Configuration
 

@@ -51,7 +51,7 @@ async fn start_emulator(
 async fn test_gcp_secret_manager_storage_lifecycle() {
     let (_container, client) = start_emulator(Duration::ZERO).await;
 
-    let secret_key = "test-cert-key";
+    let secret_key = "keys-status.example.com";
     let secret_value = "-----BEGIN PRIVATE KEY-----\nMIIEvgIBADANBgkqhkiG9w0BAQEFAASCBKgwggSkAgEAAoIBAQC...\n-----END PRIVATE KEY-----";
 
     // Secret should not exist initially

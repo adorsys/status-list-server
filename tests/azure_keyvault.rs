@@ -176,7 +176,7 @@ async fn start_emulator(
 async fn test_azure_keyvault_storage_lifecycle() {
     let (_container, client) = start_emulator(Duration::ZERO).await;
 
-    let secret_key = "test-cert-key";
+    let secret_key = "keys-status.example.com";
     let secret_value =
         "-----BEGIN PRIVATE KEY-----\nMIIEvgIBADANBgkqhkiG9w0BAQEF\n-----END PRIVATE KEY-----";
 
@@ -250,4 +250,15 @@ async fn test_azure_keyvault_cache_behavior() {
     // Second fetch should be served from cache
     let second_load = client.load(secret_key).await.expect("Failed second load");
     assert_eq!(second_load.as_deref(), Some(secret_value));
+}
+
+#[tokio::test]
+async fn test_azure_keyvault_reachable() {
+    let (_container, client) = start_emulator(Duration::ZERO).await;
+
+    let reachable_result = client.reachable().await;
+    assert!(
+        reachable_result.is_ok(),
+        "Client should be reachable via emulator: {reachable_result:?}"
+    );
 }

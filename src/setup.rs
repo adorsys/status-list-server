@@ -72,12 +72,7 @@ use crate::outbound::azure_kv::AzureKeyVaultClient;
 use crate::outbound::cache::MokaStatusListCache;
 #[cfg(feature = "acme")]
 use crate::outbound::cert::AcmeCertificateProvider;
-#[cfg(all(
-    feature = "gcp-secrets",
-    feature = "acme",
-    not(feature = "vault"),
-    not(feature = "azure-kv")
-))]
+#[cfg(all(feature = "gcp-secrets", feature = "acme", not(feature = "vault")))]
 use crate::outbound::gcp_secret::GcpSecretManagerClient;
 #[cfg(feature = "memory")]
 use crate::outbound::memory::{MemoryCredentials, MemoryStatusListSnapshotRepo, MemoryStatusLists};
@@ -357,19 +352,19 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
                     } else {
                         None
                     };
-                    #[cfg(not(feature = "redis"))]
-                    let cache_opt = None;
-
                     let s3 = AwsS3::new(
                         &aws_config,
                         &config.aws.s3_bucket,
                         &config.aws.region,
                         &config.aws.s3_key_prefix,
                     );
+                    #[cfg(feature = "redis")]
                     match cache_opt {
                         Some(c) => Box::new(s3.with_cache(c)),
                         None => Box::new(s3),
                     }
+                    #[cfg(not(feature = "redis"))]
+                    Box::new(s3)
                 } else {
                     Box::new(MemoryStorage::default())
                 }
