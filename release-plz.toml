@@ -2,6 +2,11 @@
 changelog_path = "./CHANGELOG.md"
 changelog_config = "cliff.toml"
 release_always = false
+
+# semver_check is disabled because this is a standalone binary crate, not a
+# published library crate on crates.io. cargo-semver-checks validates a public
+# API library contract, which a binary-only crate does not expose, so the check
+# has nothing meaningful to verify and would only add noise.
 semver_check = false
 publish = false
 
