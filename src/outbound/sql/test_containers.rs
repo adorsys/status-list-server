@@ -49,7 +49,7 @@ pub(crate) mod mysql_helpers {
     use std::sync::Arc;
     use testcontainers_modules::{
         mysql::Mysql as MysqlImage,
-        testcontainers::{ContainerAsync, runners::AsyncRunner},
+        testcontainers::{ContainerAsync, ImageExt, runners::AsyncRunner},
     };
     use tokio::sync::OnceCell;
 
@@ -71,6 +71,7 @@ pub(crate) mod mysql_helpers {
             let node = MYSQL_CONTAINER
                 .get_or_init(|| async {
                     MysqlImage::default()
+                        .with_tag("26.7")
                         .start()
                         .await
                         .expect("Failed to start MySQL container")

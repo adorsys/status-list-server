@@ -55,13 +55,8 @@ pub enum StoreProvisioningSource {
         certificate_path: PathBuf,
         signing_key_path: PathBuf,
     },
-    /// Load PEM-encoded certificate chain and PKCS#8 signing key from configured storage backends.
+    /// Load PEM-encoded certificate chain and PKCS#8 signing key from the configured material backend.
     Storage {
-        certificate_key: String,
-        signing_key_key: String,
-    },
-    /// Load PEM-encoded certificate chain and PKCS#8 signing key from the secrets backend.
-    SecretsStorage {
         certificate_key: String,
         signing_key_key: String,
     },
@@ -94,19 +89,6 @@ impl StoreProvisioningStrategy {
         }
     }
 
-    /// Build a store strategy that loads both PEM values from the configured secrets backend.
-    pub fn secrets_storage(
-        certificate_key: impl Into<String>,
-        signing_key_key: impl Into<String>,
-    ) -> Self {
-        Self {
-            source: StoreProvisioningSource::SecretsStorage {
-                certificate_key: certificate_key.into(),
-                signing_key_key: signing_key_key.into(),
-            },
-        }
-    }
-
     async fn load_material(&self, manager: &CertManager) -> Result<(Vec<u8>, Vec<u8>), CertError> {
         match &self.source {
             StoreProvisioningSource::Filesystem {
@@ -131,50 +113,23 @@ impl StoreProvisioningStrategy {
                 certificate_key,
                 signing_key_key,
             } => {
-                let cert_storage = manager.cert_storage()?;
-                let secrets_storage = manager.secrets_storage()?;
-                let certificate = cert_storage.load(certificate_key).await?.ok_or_else(|| {
-                    CertError::Validation(format!(
-                        "store certificate key '{certificate_key}' was not found"
-                    ))
-                })?;
-                let signing_key =
-                    secrets_storage
-                        .load(signing_key_key)
-                        .await?
-                        .ok_or_else(|| {
-                            CertError::Validation(format!(
-                                "store signing key key '{signing_key_key}' was not found"
-                            ))
-                        })?;
-                Ok((
-                    decode_text_material(certificate, "certificate")?,
-                    decode_text_material(signing_key, "signing key")?,
-                ))
-            }
-            StoreProvisioningSource::SecretsStorage {
-                certificate_key,
-                signing_key_key,
-            } => {
-                let secrets_storage = manager.secrets_storage()?;
-                let certificate =
-                    secrets_storage
-                        .load(certificate_key)
-                        .await?
-                        .ok_or_else(|| {
-                            CertError::Validation(format!(
-                                "store certificate secret '{certificate_key}' was not found"
-                            ))
-                        })?;
-                let signing_key =
-                    secrets_storage
-                        .load(signing_key_key)
-                        .await?
-                        .ok_or_else(|| {
-                            CertError::Validation(format!(
-                                "store signing key secret '{signing_key_key}' was not found"
-                            ))
-                        })?;
+                let material_storage = manager.crypto_storage()?;
+                let certificate = material_storage
+                    .load_secret(certificate_key)
+                    .await?
+                    .ok_or_else(|| {
+                        CertError::Validation(format!(
+                            "store certificate key '{certificate_key}' was not found"
+                        ))
+                    })?;
+                let signing_key = material_storage
+                    .load_secret(signing_key_key)
+                    .await?
+                    .ok_or_else(|| {
+                        CertError::Validation(format!(
+                            "store signing key '{signing_key_key}' was not found"
+                        ))
+                    })?;
                 Ok((
                     decode_text_material(certificate, "certificate")?,
                     decode_text_material(signing_key, "signing key")?,
@@ -214,10 +169,8 @@ impl CertProvisioningStrategy for StoreProvisioningStrategy {
             return Ok(current_certificate.unwrap_or(certificate_data));
         }
 
-        manager.persist_certificate_data(&certificate_data).await?;
-        manager.persist_signing_key(&signing_key_pem).await?;
         manager
-            .cache_provisioned_chain(&certificate_data.certificate)
+            .persist_crypto_material(&certificate_data, &signing_key_pem)
             .await?;
         info!("Store certificate material refreshed");
         Ok(certificate_data)

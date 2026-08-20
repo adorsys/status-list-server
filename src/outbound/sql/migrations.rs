@@ -84,6 +84,68 @@ pub(crate) async fn verify_innodb_engines(db: &sea_orm::DatabaseConnection) -> R
     evaluate_table_engines(table_pairs)
 }
 
+/// Refuses to boot a MySQL deployment whose binary logging is incompatible with
+/// the READ COMMITTED level the store pins on every write.
+///
+/// InnoDB at READ COMMITTED requires row-based binary logging. Under
+/// `binlog_format = STATEMENT` writes fail with error 1665
+/// (`ER_BINLOG_STMT_MODE_AND_ROW_ENGINE`) — an opaque 500 at first publish, on a
+/// server that started up cleanly. `ROW` and `MIXED` are both fine, and 8.0
+/// defaults to `ROW`, so this only fires where `STATEMENT` was set deliberately.
+///
+/// No-op on PostgreSQL and SQLite.
+pub(crate) async fn verify_binlog_format(db: &sea_orm::DatabaseConnection) -> Result<(), DbErr> {
+    use sea_orm::{ConnectionTrait, FromQueryResult, Statement};
+
+    if db.get_database_backend() != sea_orm::DatabaseBackend::MySql {
+        return Ok(());
+    }
+
+    #[derive(Debug, FromQueryResult)]
+    struct BinlogFormat {
+        #[sea_orm(from_alias = "binlog_format")]
+        binlog_format: String,
+    }
+
+    let row = BinlogFormat::find_by_statement(Statement::from_string(
+        sea_orm::DatabaseBackend::MySql,
+        "SELECT @@GLOBAL.binlog_format AS binlog_format",
+    ))
+    .one(db)
+    .await?;
+
+    // A server built without binary logging exposes no such variable, and has no
+    // replication to be incompatible with. Absence is a pass.
+    let Some(row) = row else {
+        return Ok(());
+    };
+
+    evaluate_binlog_format(&row.binlog_format)
+}
+
+/// Decision half of [`verify_binlog_format`], testable without a live server.
+pub(crate) fn evaluate_binlog_format(format: &str) -> Result<(), DbErr> {
+    use tracing::error;
+
+    if !format.eq_ignore_ascii_case("STATEMENT") {
+        return Ok(());
+    }
+
+    error!(
+        binlog_format = %format,
+        "MySQL is configured with binlog_format=STATEMENT, which InnoDB cannot \
+         combine with the READ COMMITTED isolation level this server pins on \
+         every write. Writes would fail with error 1665 \
+         (ER_BINLOG_STMT_MODE_AND_ROW_ENGINE). To fix, set binlog_format=ROW \
+         (or MIXED) on the server and restart it."
+    );
+
+    Err(DbErr::Custom(format!(
+        "MySQL binlog_format is '{format}'; InnoDB at READ COMMITTED requires \
+         ROW or MIXED binary logging"
+    )))
+}
+
 /// Evaluates storage engines for required tables and returns an error if any non-InnoDB engine is found.
 pub(crate) fn evaluate_table_engines<'a, I>(rows: I) -> Result<(), DbErr>
 where
@@ -582,6 +644,41 @@ mod tests {
         for backend in [DatabaseBackend::Sqlite, DatabaseBackend::Postgres] {
             let db = MockDatabase::new(backend).into_connection();
             let result = verify_innodb_engines(&db).await;
+            assert!(result.is_ok(), "must skip non-MySQL backend {backend:?}");
+        }
+    }
+
+    #[test]
+    fn statement_binlog_format_is_rejected() {
+        for variant in ["STATEMENT", "statement", "Statement"] {
+            let err = evaluate_binlog_format(variant)
+                .expect_err("binlog_format=STATEMENT is incompatible with READ COMMITTED");
+            assert!(
+                err.to_string().contains(variant),
+                "the refusal must name the offending value; got {err}"
+            );
+        }
+    }
+
+    /// `MIXED` promotes these statements to row format, so rejecting it would
+    /// refuse to boot a valid deployment.
+    #[test]
+    fn row_and_mixed_binlog_formats_are_accepted() {
+        for variant in ["ROW", "row", "MIXED", "mixed"] {
+            assert!(
+                evaluate_binlog_format(variant).is_ok(),
+                "binlog_format={variant} is compatible and must not block startup"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn verify_binlog_format_skips_non_mysql_backends() {
+        use sea_orm::{DatabaseBackend, MockDatabase};
+
+        for backend in [DatabaseBackend::Sqlite, DatabaseBackend::Postgres] {
+            let db = MockDatabase::new(backend).into_connection();
+            let result = verify_binlog_format(&db).await;
             assert!(result.is_ok(), "must skip non-MySQL backend {backend:?}");
         }
     }

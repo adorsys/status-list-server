@@ -1,12 +1,12 @@
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, ConnectionTrait, DatabaseBackend, DatabaseConnection,
-    EntityTrait, QueryFilter, QueryOrder, QuerySelect, Set, Statement, TransactionTrait, Value,
-    sea_query::Expr,
+    DatabaseTransaction, DbErr, EntityTrait, IsolationLevel, QueryFilter, QueryOrder, QuerySelect,
+    Set, Statement, TransactionTrait, Value, sea_query::Expr,
 };
 use std::sync::Arc;
 use tracing::warn;
 
-use super::error::RepositoryError;
+use super::error::{RepositoryError, contention_err};
 use super::models::{
     Credentials, StatusListHistoryRecord, StatusListRecord, credentials, status_list_history,
     status_lists,
@@ -25,9 +25,51 @@ impl<T> SeaOrmStore<T> {
             _phantom: std::marker::PhantomData,
         }
     }
+
+    /// Begins a transaction pinned to READ COMMITTED, so PostgreSQL and MySQL
+    /// run at the same level rather than at their differing defaults (READ
+    /// COMMITTED and REPEATABLE READ).
+    ///
+    /// Used by every client-facing write: both publish paths, both update paths,
+    /// and credential registration. Deliberately *not* used by
+    /// `delete_older_than`, which is a batched background sweep and inherits the
+    /// server default.
+    ///
+    /// The guard does not need it — `UPDATE ... WHERE` is a current read on both
+    /// engines, and no transaction here issues a `SELECT`. Pinning buys:
+    ///
+    /// - A raised server default (`default_transaction_isolation`,
+    ///   `transaction_isolation`) can no longer turn a guard miss into a
+    ///   serialization failure.
+    /// - On InnoDB, READ COMMITTED drops next-key locks. Snapshot inserts all
+    ///   land in the same gap of `idx_status_list_history_exp`, which the
+    ///   retention sweep also scans, so this removes a real source of `1213`.
+    ///   This applies to every stock MySQL deployment, since REPEATABLE READ is
+    ///   the InnoDB default.
+    ///
+    /// Cost is three extra round trips per write (`SET TRANSACTION`, `BEGIN`,
+    /// `COMMIT`); sea-orm issues the isolation level as its own statement.
+    ///
+    /// MySQL requires `binlog_format` ROW or MIXED at this level; STATEMENT
+    /// fails these writes with error 1665. `verify_binlog_format` checks at boot.
+    ///
+    /// SQLite and the mock backend are excluded: SQLite has no per-transaction
+    /// isolation and sea-orm warns on every transaction if a level is supplied.
+    async fn begin_read_committed(&self) -> Result<DatabaseTransaction, DbErr> {
+        match self.db.get_database_backend() {
+            DatabaseBackend::Postgres | DatabaseBackend::MySql => {
+                self.db
+                    .begin_with_config(Some(IsolationLevel::ReadCommitted), None)
+                    .await
+            }
+            _ => self.db.begin().await,
+        }
+    }
 }
 
 impl SeaOrmStore<StatusListRecord> {
+    /// Pinned like `insert_one_with_snapshot`, so a racing publish reports the
+    /// same error whichever path `history_retention_secs` selects.
     #[tracing::instrument(skip(self, entity), fields(db.system = "sea-orm"))]
     pub async fn insert_one(&self, entity: StatusListRecord) -> Result<(), RepositoryError> {
         let active = status_lists::ActiveModel {
@@ -37,10 +79,20 @@ impl SeaOrmStore<StatusListRecord> {
             sub: Set(entity.sub),
             updated_at: Set(entity.updated_at),
         };
-        status_lists::Entity::insert(active)
-            .exec_without_returning(&*self.db)
+        let txn = self.begin_read_committed().await.map_err(map_insert_err)?;
+        if let Err(insert_err) = status_lists::Entity::insert(active)
+            .exec_without_returning(&txn)
             .await
-            .map_err(map_insert_err)?;
+        {
+            txn.rollback().await.map_err(|rollback_err| {
+                RepositoryError::InsertError(format!(
+                    "status list insert failed ({insert_err}); \
+                     rolling the transaction back also failed: {rollback_err}"
+                ))
+            })?;
+            return Err(map_insert_err(insert_err));
+        }
+        txn.commit().await.map_err(map_insert_err)?;
         Ok(())
     }
 
@@ -53,6 +105,7 @@ impl SeaOrmStore<StatusListRecord> {
     /// A duplicate `list_id` is still reported as
     /// [`RepositoryError::DuplicateEntry`] so the publish conflict keeps mapping
     /// to 409 rather than 500.
+    ///
     #[tracing::instrument(skip(self, entity, snapshot))]
     pub async fn insert_one_with_snapshot(
         &self,
@@ -69,11 +122,7 @@ impl SeaOrmStore<StatusListRecord> {
             )));
         }
 
-        let txn = self
-            .db
-            .begin()
-            .await
-            .map_err(|e| RepositoryError::InsertError(e.to_string()))?;
+        let txn = self.begin_read_committed().await.map_err(map_insert_err)?;
 
         let active = status_lists::ActiveModel {
             list_id: Set(entity.list_id),
@@ -86,17 +135,16 @@ impl SeaOrmStore<StatusListRecord> {
             .exec_without_returning(&txn)
             .await
         {
-            // `insert_err` is captured *before* the rollback and classified
-            // after it, which is what keeps a duplicate a 409 rather than a 500:
-            // on Postgres the failed statement poisons the transaction (`25P02`),
-            // so a classification read from the rollback's own error would
-            // degrade to a generic backend failure. Verified on MySQL and
-            // Postgres by `assert_duplicate_list_id_is_conflict`.
+            // `insert_err` is classified after the rollback, not from it: on
+            // Postgres the failed statement poisons the transaction (`25P02`),
+            // so reading the rollback's own error would degrade a duplicate to a
+            // 500. Verified by `assert_duplicate_list_id_is_conflict`.
             //
-            // If the rollback itself fails the classification is deliberately
-            // dropped and the caller gets a 500. A transaction that will not
-            // roll back is a server fault, not a client conflict, and telling
-            // the client "retry with a different id" would be wrong.
+            // Explicit rather than left to `Drop`: MySQL's 1205 rolls back only
+            // the statement (`innodb_rollback_on_timeout` is `OFF`).
+            //
+            // A failed rollback drops the classification and returns 500 — no
+            // 409 can promise "nothing landed" when the write may still land.
             txn.rollback().await.map_err(|rollback_err| {
                 RepositoryError::InsertError(format!(
                     "status list insert failed ({insert_err}); \
@@ -117,7 +165,7 @@ impl SeaOrmStore<StatusListRecord> {
                      rolling back the status list insert also failed: {rollback_err}"
                 ))
             })?;
-            return Err(RepositoryError::InsertError(insert_err.to_string()));
+            return Err(map_snapshot_insert_err(insert_err));
         }
 
         #[cfg(test)]
@@ -125,9 +173,7 @@ impl SeaOrmStore<StatusListRecord> {
             .pause(&probed_list_id)
             .await;
 
-        txn.commit()
-            .await
-            .map_err(|e| RepositoryError::InsertError(e.to_string()))?;
+        txn.commit().await.map_err(map_insert_err)?;
         Ok(())
     }
 
@@ -138,7 +184,7 @@ impl SeaOrmStore<StatusListRecord> {
         status_lists::Entity::find_by_id(value)
             .one(&*self.db)
             .await
-            .map_err(|e| RepositoryError::FindError(e.to_string()))
+            .map_err(find_err)
     }
 
     #[tracing::instrument(skip(self), fields(issuer))]
@@ -151,7 +197,7 @@ impl SeaOrmStore<StatusListRecord> {
             .all(&*self.db)
             .await
             .map(|tokens| tokens.into_iter().collect())
-            .map_err(|e| RepositoryError::FindError(e.to_string()))
+            .map_err(find_err)
     }
 
     /// Optimistic-concurrency update guarded on `updated_at`:
@@ -159,22 +205,22 @@ impl SeaOrmStore<StatusListRecord> {
     /// guard did not match — a racing writer advanced the stamp, or the row is
     /// gone — so a lost update was prevented.
     ///
-    /// Uses `rows_affected` rather than `SELECT ... FOR UPDATE` because its
-    /// semantics are identical across all three sea-orm backends (#143).
-    ///
     /// `rows_affected` is used deliberately: its semantics are identical across
     /// the Postgres/MySQL/SQLite sea-orm backends, unlike `SELECT ... FOR UPDATE`
     /// row locking (see #143).
     ///
+    /// Wrapped in a pinned transaction rather than run as a single autocommit
+    /// statement. Autocommit would be correct, but this is the guarded update
+    /// used when history is disabled (`history_retention_secs = 0`), and leaving
+    /// it unpinned made the same race report `update_conflict` on one deployment
+    /// and `write_contention` on another. Costs three extra round trips.
+    ///
     /// # Caller contract
     ///
     /// `entity.updated_at` MUST be strictly greater than `expected_updated_at`.
-    /// The guard only prevents a lost update if the write *advances* the stamp:
-    /// with a non-advancing value (`new == expected`) two same-second writers
-    /// would both match `WHERE updated_at = expected` and both succeed, silently
-    /// losing a flip. This invariant is enforced below rather than trusted, so a
-    /// future caller that forgets to advance the stamp fails loudly instead of
-    /// reintroducing the race.
+    /// With a non-advancing stamp two same-second writers would both match
+    /// `WHERE updated_at = expected` and both succeed, losing a flip. Enforced
+    /// below rather than trusted.
     #[tracing::instrument(skip(self, entity), fields(db.system = "sea-orm"))]
     pub async fn update_one(
         &self,
@@ -190,6 +236,8 @@ impl SeaOrmStore<StatusListRecord> {
                 entity.updated_at, expected_updated_at
             )));
         }
+        let txn = self.begin_read_committed().await.map_err(map_update_err)?;
+
         let result = status_lists::Entity::update_many()
             .col_expr(status_lists::Column::Issuer, Expr::value(entity.issuer))
             .col_expr(
@@ -203,9 +251,26 @@ impl SeaOrmStore<StatusListRecord> {
             )
             .filter(status_lists::Column::ListId.eq(list_id))
             .filter(status_lists::Column::UpdatedAt.eq(expected_updated_at))
-            .exec(&*self.db)
-            .await
-            .map_err(|e| RepositoryError::UpdateError(e.to_string()))?;
+            .exec(&txn)
+            .await;
+
+        let result = match result {
+            Ok(result) => result,
+            Err(update_err) => {
+                // Classified after the rollback, and the classification dropped
+                // if the rollback fails — see `insert_one_with_snapshot` for why
+                // a transaction that will not roll back must not become a 409.
+                txn.rollback().await.map_err(|rollback_err| {
+                    RepositoryError::UpdateError(format!(
+                        "guarded update failed ({update_err}); \
+                         rolling the transaction back also failed: {rollback_err}"
+                    ))
+                })?;
+                return Err(map_update_err(update_err));
+            }
+        };
+
+        txn.commit().await.map_err(map_update_err)?;
         Ok(result.rows_affected > 0)
     }
 
@@ -217,13 +282,12 @@ impl SeaOrmStore<StatusListRecord> {
     /// sea-orm backends (#143). Same `false`-on-guard-miss and
     /// strictly-advancing-stamp contract as `update_one`.
     ///
-    /// Concurrency cost: unlike `update_one`, the exclusive row lock taken by
-    /// the `UPDATE` is held until `COMMIT`, spanning the snapshot `INSERT`'s
-    /// round trip. A racing writer guarded on the same stamp therefore *blocks*
-    /// on that lock rather than immediately reading `rows_affected == 0`; it
-    /// still resolves to `false` once the winner commits, so the outcome is
-    /// unchanged, but a conflict now costs a lock wait instead of failing fast.
-    /// Callers that treat conflicts as cheap should account for that.
+    /// Concurrency cost: the `UPDATE`'s row lock is held until `COMMIT`, across
+    /// the snapshot `INSERT`. A racing writer guarded on the same stamp blocks
+    /// on that lock instead of reading `rows_affected == 0` immediately. It
+    /// still resolves to `false`, but a conflict costs a lock wait.
+    ///
+    /// Pinned to READ COMMITTED, same as `update_one`.
     #[tracing::instrument(skip(self, entity, snapshot), fields(db.system = "sea-orm"))]
     pub async fn update_one_with_snapshot(
         &self,
@@ -248,11 +312,7 @@ impl SeaOrmStore<StatusListRecord> {
             )));
         }
 
-        let txn = self
-            .db
-            .begin()
-            .await
-            .map_err(|e| RepositoryError::UpdateError(e.to_string()))?;
+        let txn = self.begin_read_committed().await.map_err(map_update_err)?;
 
         let result = status_lists::Entity::update_many()
             .col_expr(status_lists::Column::Issuer, Expr::value(entity.issuer))
@@ -268,8 +328,20 @@ impl SeaOrmStore<StatusListRecord> {
             .filter(status_lists::Column::ListId.eq(list_id))
             .filter(status_lists::Column::UpdatedAt.eq(expected_updated_at))
             .exec(&txn)
-            .await
-            .map_err(|e| RepositoryError::UpdateError(e.to_string()))?;
+            .await;
+
+        let result = match result {
+            Ok(result) => result,
+            Err(update_err) => {
+                txn.rollback().await.map_err(|rollback_err| {
+                    RepositoryError::UpdateError(format!(
+                        "guarded update failed ({update_err}); \
+                         rolling the transaction back also failed: {rollback_err}"
+                    ))
+                })?;
+                return Err(map_update_err(update_err));
+            }
+        };
 
         if result.rows_affected == 0 {
             if let Err(e) = txn.rollback().await {
@@ -289,7 +361,7 @@ impl SeaOrmStore<StatusListRecord> {
                      rolling back the row update also failed: {rollback_err}"
                 ))
             })?;
-            return Err(RepositoryError::InsertError(insert_err.to_string()));
+            return Err(map_snapshot_insert_err(insert_err));
         }
 
         #[cfg(test)]
@@ -297,9 +369,7 @@ impl SeaOrmStore<StatusListRecord> {
             .pause(list_id)
             .await;
 
-        txn.commit()
-            .await
-            .map_err(|e| RepositoryError::UpdateError(e.to_string()))?;
+        txn.commit().await.map_err(map_update_err)?;
         Ok(true)
     }
 
@@ -307,7 +377,7 @@ impl SeaOrmStore<StatusListRecord> {
         let result = status_lists::Entity::delete_by_id(value)
             .exec(&*self.db)
             .await
-            .map_err(|e| RepositoryError::DeleteError(e.to_string()))?;
+            .map_err(map_delete_err)?;
         Ok(result.rows_affected > 0)
     }
 
@@ -320,7 +390,7 @@ impl SeaOrmStore<StatusListRecord> {
             .filter(status_lists::Column::Sub.eq(issuer))
             .all(&*self.db)
             .await
-            .map_err(|e| RepositoryError::FindError(e.to_string()))
+            .map_err(find_err)
     }
 
     #[tracing::instrument(skip(self), fields(db.system = "sea-orm"))]
@@ -328,7 +398,7 @@ impl SeaOrmStore<StatusListRecord> {
         status_lists::Entity::find()
             .all(&*self.db)
             .await
-            .map_err(|e| RepositoryError::FindError(e.to_string()))
+            .map_err(find_err)
     }
 
     #[tracing::instrument(skip(self), fields(db.system = "sea-orm"))]
@@ -341,7 +411,7 @@ impl SeaOrmStore<StatusListRecord> {
             .into_tuple::<String>()
             .all(&*self.db)
             .await
-            .map_err(|e| RepositoryError::FindError(e.to_string()))
+            .map_err(find_err)
     }
 }
 
@@ -352,7 +422,7 @@ impl SeaOrmStore<StatusListHistoryRecord> {
         status_list_history::Entity::insert(active)
             .exec_without_returning(&*self.db)
             .await
-            .map_err(map_insert_err)?;
+            .map_err(map_snapshot_insert_err)?;
         Ok(())
     }
 
@@ -380,7 +450,7 @@ impl SeaOrmStore<StatusListHistoryRecord> {
             .order_by_desc(status_list_history::Column::Iat)
             .one(&*self.db)
             .await
-            .map_err(|e| RepositoryError::FindError(e.to_string()))
+            .map_err(find_err)
     }
 
     /// Deletes snapshots older than the given cutoff timestamp.
@@ -426,7 +496,7 @@ impl SeaOrmStore<StatusListHistoryRecord> {
                     vec![Value::from(cutoff), Value::from(BATCH_SIZE)],
                 ))
                 .await
-                .map_err(|e| RepositoryError::DeleteError(e.to_string()))?
+                .map_err(map_delete_err)?
                 .rows_affected();
 
             total_deleted += count;
@@ -448,12 +518,24 @@ impl SeaOrmStore<StatusListHistoryRecord> {
 }
 
 impl SeaOrmStore<Credentials> {
+    /// Pinned so registration cannot inherit a raised server default and turn a
+    /// duplicate issuer into a serialization failure.
     pub async fn insert_one(&self, entity: Credentials) -> Result<(), RepositoryError> {
         let active: credentials::ActiveModel = entity.into();
-        credentials::Entity::insert(active)
-            .exec_without_returning(&*self.db)
+        let txn = self.begin_read_committed().await.map_err(map_insert_err)?;
+        if let Err(insert_err) = credentials::Entity::insert(active)
+            .exec_without_returning(&txn)
             .await
-            .map_err(map_insert_err)?;
+        {
+            txn.rollback().await.map_err(|rollback_err| {
+                RepositoryError::InsertError(format!(
+                    "credential insert failed ({insert_err}); \
+                     rolling the transaction back also failed: {rollback_err}"
+                ))
+            })?;
+            return Err(map_insert_err(insert_err));
+        }
+        txn.commit().await.map_err(map_insert_err)?;
         Ok(())
     }
 
@@ -462,7 +544,7 @@ impl SeaOrmStore<Credentials> {
             .one(&*self.db)
             .await
             .map(|opt| opt.map(Credentials::from))
-            .map_err(|e| RepositoryError::FindError(e.to_string()))
+            .map_err(find_err)
     }
 
     pub async fn update_one(
@@ -473,15 +555,12 @@ impl SeaOrmStore<Credentials> {
         let existing = credentials::Entity::find_by_id(issuer)
             .one(&*self.db)
             .await
-            .map_err(|e| RepositoryError::FindError(e.to_string()))?;
+            .map_err(find_err)?;
         if existing.is_none() {
             return Ok(false);
         }
         let active: credentials::ActiveModel = entity.into();
-        active
-            .update(&*self.db)
-            .await
-            .map_err(|e| RepositoryError::UpdateError(e.to_string()))?;
+        active.update(&*self.db).await.map_err(map_update_err)?;
         Ok(true)
     }
 
@@ -489,7 +568,7 @@ impl SeaOrmStore<Credentials> {
         let result = credentials::Entity::delete_by_id(value)
             .exec(&*self.db)
             .await
-            .map_err(|e| RepositoryError::DeleteError(e.to_string()))?;
+            .map_err(map_delete_err)?;
         Ok(result.rows_affected > 0)
     }
 }
@@ -509,11 +588,41 @@ impl SeaOrmStore<Credentials> {
 /// deleted mid-request — a server-side consistency failure, correctly a 500.
 /// If that ever stops holding, add a `ForeignKeyConstraintViolation` arm rather
 /// than widening the unique-violation one.
+///
+/// Order matters in the body: the duplicate-key check runs first, so a unique
+/// violation is never reclassified as retryable contention.
 fn map_insert_err(e: sea_orm::DbErr) -> RepositoryError {
     match e.sql_err() {
         Some(sea_orm::SqlErr::UniqueConstraintViolation(_)) => RepositoryError::DuplicateEntry,
-        _ => RepositoryError::InsertError(e.to_string()),
+        _ => contention_err(&e).unwrap_or_else(|| RepositoryError::InsertError(e.to_string())),
     }
+}
+
+fn map_update_err(e: sea_orm::DbErr) -> RepositoryError {
+    contention_err(&e).unwrap_or_else(|| RepositoryError::UpdateError(e.to_string()))
+}
+
+/// For `status_list_history` inserts, which must **not** use [`map_insert_err`].
+///
+/// A unique violation there is a `snapshot_id` UUID collision, not a client
+/// republishing a list, so reporting `DuplicateEntry` would surface it as
+/// `409 status_list_already_exists` — a lie to the caller. Guarded by
+/// `test_sqlite_update_with_snapshot_is_atomic`. Contention is still classified.
+fn map_snapshot_insert_err(e: sea_orm::DbErr) -> RepositoryError {
+    contention_err(&e).unwrap_or_else(|| RepositoryError::InsertError(e.to_string()))
+}
+
+/// Classified because the retention sweep is the likeliest deadlock victim: it
+/// scans a range of `idx_status_list_history_exp` while snapshot inserts write
+/// into the top of that same range.
+fn map_delete_err(e: sea_orm::DbErr) -> RepositoryError {
+    contention_err(&e).unwrap_or_else(|| RepositoryError::DeleteError(e.to_string()))
+}
+
+/// Not a classifier, unlike its `map_*_err` siblings: contention maps to 409,
+/// and a 409 on a read claims a conflict with state the request never proposed.
+fn find_err(e: sea_orm::DbErr) -> RepositoryError {
+    RepositoryError::FindError(e.to_string())
 }
 
 /// Lets a contention test hold a transaction open at a chosen point so a second
@@ -544,7 +653,7 @@ mod snapshot_txn_test_hook {
     }
 
     impl PauseSite {
-        const fn new(_site: &'static str) -> Self {
+        const fn new() -> Self {
             Self {
                 slot: OnceLock::new(),
             }
@@ -554,12 +663,14 @@ mod snapshot_txn_test_hook {
             self.slot.get_or_init(|| Mutex::new(None))
         }
 
+        /// Only the container tests install probes, so under any other feature
+        /// set this is dead code and `-D warnings` rejects it.
         #[cfg(any(feature = "mysql", feature = "postgres-tests"))]
         pub(super) async fn install(&self, probe_to_install: Probe) {
             let mut guard = self.slot().lock().await;
             assert!(
                 guard.is_none(),
-                "only one contention probe can be installed at a time"
+                "a contention probe is already installed at this pause site"
             );
             *guard = Some(probe_to_install);
         }
@@ -589,11 +700,11 @@ mod snapshot_txn_test_hook {
 
     /// Inside `update_one_with_snapshot`, after the snapshot INSERT, while the
     /// guarded UPDATE still holds its exclusive row lock.
-    pub(super) static UPDATE_BEFORE_COMMIT: PauseSite = PauseSite::new("update_one_with_snapshot");
+    pub(super) static UPDATE_BEFORE_COMMIT: PauseSite = PauseSite::new();
 
     /// Inside `insert_one_with_snapshot`, after the snapshot INSERT, while the
     /// row INSERT still holds its uncommitted primary-key entry.
-    pub(super) static INSERT_BEFORE_COMMIT: PauseSite = PauseSite::new("insert_one_with_snapshot");
+    pub(super) static INSERT_BEFORE_COMMIT: PauseSite = PauseSite::new();
 }
 
 #[cfg(test)]
@@ -2799,5 +2910,447 @@ mod test {
             "Postgres",
         )
         .await;
+    }
+
+    /// Blocks until at least `expected` sessions are waiting on a lock.
+    ///
+    /// Used instead of a fixed sleep: contention tests must interleave two
+    /// sessions, and a sleep that expires early silently asserts something
+    /// other than what the test claims.
+    #[cfg(feature = "postgres-tests")]
+    async fn await_blocked_sessions(db: &DatabaseConnection, expected: i64) {
+        use std::time::{Duration, Instant};
+
+        let deadline = Instant::now() + Duration::from_secs(20);
+        loop {
+            let blocked = db
+                .query_one(Statement::from_string(
+                    DatabaseBackend::Postgres,
+                    "SELECT count(*) AS blocked FROM pg_stat_activity \
+                     WHERE datname = current_database() \
+                       AND wait_event_type = 'Lock'",
+                ))
+                .await
+                .expect("failed to inspect pg_stat_activity")
+                .expect("count(*) always returns a row")
+                .try_get::<i64>("", "blocked")
+                .expect("failed to read blocked-session count");
+
+            if blocked >= expected {
+                return;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "timed out waiting for {expected} blocked session(s); saw {blocked}"
+            );
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    }
+
+    /// Forces a real MySQL `1205` (`ER_LOCK_WAIT_TIMEOUT`). The only way to
+    /// exercise the `SqlxMySqlError` downcast, since the driver error type
+    /// cannot be constructed outside its own crate.
+    ///
+    /// Distinct from `test_mysql_concurrent_update_loses_guarded_update`: there
+    /// the blocked writer acquires the lock and reports `Ok(false)`; here it
+    /// never acquires it at all.
+    ///
+    /// Holds the lock with raw SQL rather than the `update_snapshot_test_hook`
+    /// probe, which is a process-global singleton that asserts single
+    /// installation and would race the other test.
+    #[cfg(feature = "mysql")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_mysql_lock_wait_timeout_maps_to_contention() {
+        let test_db = mysql_helpers::MysqlTestDb::start().await;
+
+        let conn_a = mysql_helpers::connect_to_test_db(&test_db.url, 1).await;
+        let conn_b = mysql_helpers::connect_to_test_db(&test_db.url, 1).await;
+
+        // Both pools are pinned to a single connection, so this session setting
+        // sticks to the connection B actually uses. Without it B would wait out
+        // InnoDB's 50s default and the test would hang rather than fail.
+        conn_b
+            .execute_unprepared("SET SESSION innodb_lock_wait_timeout = 1")
+            .await
+            .expect("failed to shorten B's lock wait");
+
+        let store_b = SeaOrmStore::<StatusListRecord>::new(Arc::new(conn_b));
+
+        let key: Jwk = serde_json::from_str(crate::test_fixtures::TEST_EC_PUBLIC_JWK).unwrap();
+        let issuer = "issuer-lockwait-mysql";
+        let cred_store = SeaOrmStore::<Credentials>::new(Arc::new(
+            mysql_helpers::connect_to_test_db(&test_db.url, 1).await,
+        ));
+        cred_store
+            .insert_one(Credentials::new(issuer.to_string(), key))
+            .await
+            .unwrap();
+
+        let v = 1000;
+        let list_id = "list-lockwait-mysql";
+        let base = StatusListRecord {
+            list_id: list_id.to_string(),
+            issuer: issuer.to_string(),
+            status_list: StatusList {
+                bits: 1,
+                lst: "initial".to_string(),
+            },
+            sub: "sub-lockwait-mysql".to_string(),
+            updated_at: v,
+        };
+        SeaOrmStore::<StatusListRecord>::new(cred_store.db.clone())
+            .insert_one(base.clone())
+            .await
+            .unwrap();
+
+        // A takes an exclusive row lock and holds it, uncommitted.
+        let txn_a = conn_a.begin().await.expect("failed to begin A");
+        txn_a
+            .execute(Statement::from_sql_and_values(
+                DatabaseBackend::MySql,
+                "UPDATE status_lists SET sub = 'locked-by-a' WHERE list_id = ?",
+                vec![Value::from(list_id)],
+            ))
+            .await
+            .expect("A failed to take the row lock");
+
+        // B's guard is valid — the row really is still at `v`. B fails purely
+        // because it cannot acquire the lock within its 1s budget, which is what
+        // makes this contention rather than a lost race.
+        let result = store_b
+            .update_one(
+                list_id,
+                StatusListRecord {
+                    status_list: StatusList {
+                        bits: 1,
+                        lst: "writer-b".to_string(),
+                    },
+                    updated_at: v + 1,
+                    ..base.clone()
+                },
+                v,
+            )
+            .await;
+
+        assert!(
+            matches!(result, Err(RepositoryError::Contention { code: "1205" })),
+            "MySQL 1205 must classify as Contention (409) reporting its own \
+             error number, not an opaque UpdateError (500); got {result:?}"
+        );
+
+        txn_a.rollback().await.expect("failed to release A's lock");
+    }
+
+    /// Credential registration is a pinned write too, and reaches the client as
+    /// `409 write_contention` via `CredentialError`, not `StatusListError`.
+    #[cfg(feature = "mysql")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_mysql_credential_insert_contention_is_classified() {
+        let test_db = mysql_helpers::MysqlTestDb::start().await;
+
+        let conn_a = mysql_helpers::connect_to_test_db(&test_db.url, 1).await;
+        let conn_b = mysql_helpers::connect_to_test_db(&test_db.url, 1).await;
+        conn_b
+            .execute_unprepared("SET SESSION innodb_lock_wait_timeout = 1")
+            .await
+            .expect("failed to shorten B's lock wait");
+
+        let issuer = "issuer-contention-credential";
+        let key: Jwk = serde_json::from_str(crate::test_fixtures::TEST_EC_PUBLIC_JWK).unwrap();
+
+        // A holds the primary-key entry uncommitted, so B's insert of the same
+        // issuer blocks on it rather than failing fast as a duplicate.
+        let txn_a = conn_a.begin().await.expect("failed to begin A");
+        txn_a
+            .execute(Statement::from_sql_and_values(
+                DatabaseBackend::MySql,
+                "INSERT INTO credentials (issuer, public_key) VALUES (?, ?)",
+                vec![
+                    Value::from(issuer),
+                    Value::from(serde_json::to_value(&key).unwrap()),
+                ],
+            ))
+            .await
+            .expect("A failed to claim the issuer key");
+
+        let store_b = SeaOrmStore::<Credentials>::new(Arc::new(conn_b));
+        let result = store_b
+            .insert_one(Credentials::new(issuer.to_string(), key))
+            .await;
+
+        assert!(
+            matches!(result, Err(RepositoryError::Contention { code: "1205" })),
+            "a blocked credential insert must classify as Contention, not \
+             DuplicateEntry or an opaque InsertError; got {result:?}"
+        );
+
+        txn_a.rollback().await.expect("failed to release A's lock");
+    }
+
+    /// Forces a real Postgres `40P01` (`deadlock_detected`). The only way to
+    /// exercise the `SqlxPostgresError` downcast, since the driver error type
+    /// cannot be constructed outside its own crate.
+    ///
+    /// `40P01` rather than `40001` because a serialization failure needs a
+    /// transaction above READ COMMITTED, which no pinned write can be.
+    ///
+    /// The cycle:
+    ///
+    /// ```text
+    /// A: INSERT history 'snap-deadlock'          -- holds the unique key
+    /// B: UPDATE status_lists (repo)              -- holds the row lock
+    /// B: INSERT history 'snap-deadlock'          -- waits on A's key
+    /// A: UPDATE status_lists (same row)          -- waits on B's row lock
+    /// ```
+    ///
+    /// Postgres runs `CheckDeadLock` in a waiter when that waiter's
+    /// `deadlock_timeout` fires, and a waiter finding no cycle does not
+    /// re-check. B necessarily waits first, so without intervention A would be
+    /// the victim and the repository call would pass straight through. Setting
+    /// B's timeout to 2s and A's to 30s makes B check after the cycle closes,
+    /// so B is the victim.
+    #[cfg(feature = "postgres-tests")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+    async fn test_postgres_deadlock_maps_to_contention() {
+        use std::time::Duration;
+
+        let test_db = postgres_helpers::postgres_connection().await;
+        let conn_a = postgres_helpers::connect_to_test_db(&test_db.url, 1).await;
+        let conn_b = postgres_helpers::connect_to_test_db(&test_db.url, 1).await;
+
+        // Victim selection. Both pools are pinned to one connection, so a
+        // session-scoped setting sticks to the session that uses it.
+        conn_a
+            .execute_unprepared("SET SESSION deadlock_timeout = '30s'")
+            .await
+            .expect("failed to lengthen A's deadlock timeout");
+        conn_b
+            .execute_unprepared("SET SESSION deadlock_timeout = '2s'")
+            .await
+            .expect("failed to shorten B's deadlock timeout");
+
+        let store_b = SeaOrmStore::<StatusListRecord>::new(Arc::new(conn_b));
+
+        let key: Jwk = serde_json::from_str(crate::test_fixtures::TEST_EC_PUBLIC_JWK).unwrap();
+        let issuer = "issuer-deadlock-postgres";
+        let cred_store = SeaOrmStore::<Credentials>::new(test_db.db.clone());
+        cred_store
+            .insert_one(Credentials::new(issuer.to_string(), key))
+            .await
+            .unwrap();
+
+        let v = 1000;
+        let list_id = "deadlock-row";
+        let snapshot_id = "snap-deadlock";
+        let base = StatusListRecord {
+            list_id: list_id.to_string(),
+            issuer: issuer.to_string(),
+            status_list: StatusList {
+                bits: 1,
+                lst: "initial".to_string(),
+            },
+            sub: "sub-deadlock".to_string(),
+            updated_at: v,
+        };
+        SeaOrmStore::<StatusListRecord>::new(test_db.db.clone())
+            .insert_one(base.clone())
+            .await
+            .unwrap();
+
+        // A claims the snapshot's primary key and holds it uncommitted, so B's
+        // history insert will block on it.
+        let txn_a = conn_a.begin().await.expect("failed to begin A");
+        txn_a
+            .execute(Statement::from_sql_and_values(
+                DatabaseBackend::Postgres,
+                "INSERT INTO status_list_history \
+                 (snapshot_id, list_id, issuer, status_list, sub, iat, exp) \
+                 VALUES ($1, $2, $3, $4, $5, $6, $7)",
+                vec![
+                    Value::from(snapshot_id),
+                    Value::from(list_id),
+                    Value::from(issuer),
+                    Value::from(serde_json::json!({ "bits": 1, "lst": "a" })),
+                    Value::from("sub-deadlock"),
+                    Value::from(v),
+                    Value::from(v + 900),
+                ],
+            ))
+            .await
+            .expect("A failed to claim the snapshot key");
+
+        // B takes the row lock, then blocks on A's snapshot key.
+        let b_call = tokio::spawn(async move {
+            store_b
+                .update_one_with_snapshot(
+                    list_id,
+                    StatusListRecord {
+                        status_list: StatusList {
+                            bits: 1,
+                            lst: "writer-b".to_string(),
+                        },
+                        updated_at: v + 1,
+                        ..base
+                    },
+                    v,
+                    StatusListHistoryRecord {
+                        snapshot_id: snapshot_id.to_string(),
+                        list_id: list_id.to_string(),
+                        issuer: issuer.to_string(),
+                        status_list: StatusList {
+                            bits: 1,
+                            lst: "writer-b".to_string(),
+                        },
+                        sub: "sub-deadlock".to_string(),
+                        iat: v + 1,
+                        exp: v + 901,
+                    },
+                )
+                .await
+        });
+
+        // B must hold the row lock before A closes the cycle, or A waits on a
+        // lock B has not taken yet and the test hangs for real.
+        await_blocked_sessions(&test_db.db, 1).await;
+
+        // A closes the cycle. Blocks until B is rolled back as the victim, whose
+        // rollback releases the row lock A is waiting on.
+        txn_a
+            .execute(Statement::from_sql_and_values(
+                DatabaseBackend::Postgres,
+                "UPDATE status_lists SET sub = 'a' WHERE list_id = $1",
+                vec![Value::from(list_id)],
+            ))
+            .await
+            .expect("A must acquire the row lock once B is rolled back as the deadlock victim");
+
+        let result = tokio::time::timeout(Duration::from_secs(30), b_call)
+            .await
+            .expect("timed out waiting for B")
+            .expect("B panicked");
+
+        assert!(
+            matches!(result, Err(RepositoryError::Contention { code: "40P01" })),
+            "Postgres 40P01 must classify as Contention (409) reporting its own \
+             SQLSTATE, not an opaque error (500); got {result:?}"
+        );
+    }
+
+    /// Raises the session default to REPEATABLE READ and commits a racing write
+    /// underneath an in-flight guarded update. Without the pin the update
+    /// inherits REPEATABLE READ and fails with `40001`; with it the race
+    /// degrades to a guard miss, `Ok(false)`, which the service layer turns into
+    /// `409 update_conflict`. Fails if the pin is removed.
+    ///
+    /// Both write paths are covered because `update_one` was unpinned until
+    /// recently: a deployment with `history_retention_secs = 0` reported
+    /// `write_contention` where one with history reported `update_conflict` for
+    /// the same race. This asserts they now agree.
+    #[cfg(feature = "postgres-tests")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+    async fn test_postgres_pinned_isolation_downgrades_serialization_failure() {
+        use std::time::Duration;
+
+        for with_snapshot in [false, true] {
+            let test_db = postgres_helpers::postgres_connection().await;
+            let conn_a = postgres_helpers::connect_to_test_db(&test_db.url, 1).await;
+            let conn_b = postgres_helpers::connect_to_test_db(&test_db.url, 1).await;
+
+            conn_b
+                .execute_unprepared(
+                    "SET SESSION CHARACTERISTICS AS TRANSACTION ISOLATION LEVEL REPEATABLE READ",
+                )
+                .await
+                .expect("failed to raise B's isolation level");
+
+            let store_b = SeaOrmStore::<StatusListRecord>::new(Arc::new(conn_b));
+
+            let key: Jwk = serde_json::from_str(crate::test_fixtures::TEST_EC_PUBLIC_JWK).unwrap();
+            let issuer = "issuer-pinned-postgres";
+            let cred_store = SeaOrmStore::<Credentials>::new(test_db.db.clone());
+            cred_store
+                .insert_one(Credentials::new(issuer.to_string(), key))
+                .await
+                .unwrap();
+
+            let v = 1000;
+            let list_id = "pinned-row";
+            let base = StatusListRecord {
+                list_id: list_id.to_string(),
+                issuer: issuer.to_string(),
+                status_list: StatusList {
+                    bits: 1,
+                    lst: "initial".to_string(),
+                },
+                sub: "sub-pinned".to_string(),
+                updated_at: v,
+            };
+            SeaOrmStore::<StatusListRecord>::new(test_db.db.clone())
+                .insert_one(base.clone())
+                .await
+                .unwrap();
+
+            let txn_a = conn_a.begin().await.expect("failed to begin A");
+            txn_a
+                .execute(Statement::from_sql_and_values(
+                    DatabaseBackend::Postgres,
+                    "UPDATE status_lists SET sub = 'a', updated_at = $1 WHERE list_id = $2",
+                    vec![Value::from(v + 5), Value::from(list_id)],
+                ))
+                .await
+                .expect("A failed to take the row lock");
+
+            let updated = StatusListRecord {
+                status_list: StatusList {
+                    bits: 1,
+                    lst: "writer-b".to_string(),
+                },
+                updated_at: v + 1,
+                ..base
+            };
+            let b_call = tokio::spawn(async move {
+                if with_snapshot {
+                    store_b
+                        .update_one_with_snapshot(
+                            list_id,
+                            updated,
+                            v,
+                            StatusListHistoryRecord {
+                                snapshot_id: "snap-pinned".to_string(),
+                                list_id: list_id.to_string(),
+                                issuer: issuer.to_string(),
+                                status_list: StatusList {
+                                    bits: 1,
+                                    lst: "writer-b".to_string(),
+                                },
+                                sub: "sub-pinned".to_string(),
+                                iat: v + 1,
+                                exp: v + 901,
+                            },
+                        )
+                        .await
+                } else {
+                    store_b.update_one(list_id, updated, v).await
+                }
+            });
+
+            // Block until B is actually waiting on A's row lock, so A's commit
+            // lands underneath an in-flight statement rather than before one.
+            await_blocked_sessions(&test_db.db, 1).await;
+            txn_a.commit().await.expect("A failed to commit");
+
+            let result = tokio::time::timeout(Duration::from_secs(30), b_call)
+                .await
+                .expect("timed out waiting for B")
+                .expect("B panicked");
+
+            assert!(
+                matches!(result, Ok(false)),
+                "the pinned transaction must see A's committed stamp and report a \
+                 clean guard miss; a serialization failure here means the pin was \
+                 lost and the session default leaked in. \
+                 with_snapshot={with_snapshot}, got {result:?}"
+            );
+        }
     }
 }

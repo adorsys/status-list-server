@@ -65,18 +65,18 @@ The simplest way to run the project is with [docker compose](https://docs.docker
 docker compose up --build
 ```
 
-This command will pull all required images and start the server compiled with default compose features (`postgres,aws,acme`). Redis is not part of the default path.
+This command will pull all required images and start the server compiled with default compose features (`postgres,aws-secrets,acme`). Redis is not part of the default path.
 
 To pass custom Cargo feature flags during build, specify the `FEATURES` environment variable:
 
 ```sh
-FEATURES="mysql,aws,acme" docker compose --profile mysql up --build
+FEATURES="mysql,aws-secrets,acme" docker compose --profile mysql up --build
 ```
 
 To test the optional Redis certificate-material cache locally, enable the Redis profile, compile the Redis feature, and provide a Redis URI:
 
 ```sh
-FEATURES="postgres,redis,aws,acme" APP_REDIS__URI="redis://redis:6379" docker compose --profile redis up --build
+FEATURES="postgres,redis,aws-secrets,acme" APP_REDIS__URI="redis://redis:6379" docker compose --profile redis up --build
 ```
 
 #### Running Manually
@@ -93,15 +93,15 @@ By default, the server will listen on `http://localhost:8000` using in-memory re
 
 The crate uses modular Cargo feature flags to gate optional production backend drivers:
 
-| Feature    | Description                                                                                                                                        | Default    |
-| ---------- | -------------------------------------------------------------------------------------------------------------------------------------------------- | ---------- |
-| `memory`   | In-memory repositories (`MemoryStatusLists`, `MemoryCredentials`, `MemoryStatusListHistory`), Moka TTL cache, and store-based certificate storage. | ✅ Default |
-| `postgres` | SeaORM PostgreSQL database driver.                                                                                                                 | ❌ Opt-in  |
-| `sqlite`   | SeaORM SQLite database driver.                                                                                                                     | ❌ Opt-in  |
-| `mysql`    | SeaORM MySQL database driver.                                                                                                                      | ❌ Opt-in  |
-| `redis`    | Redis storage and certificate cache driver.                                                                                                        | ❌ Opt-in  |
-| `aws`      | AWS S3 object storage and AWS Secrets Manager drivers.                                                                                             | ❌ Opt-in  |
-| `acme`     | ACME DNS-01 certificate manager driver.                                                                                                            | ❌ Opt-in  |
+| Feature       | Description                                                             | Default    |
+| ------------- | ----------------------------------------------------------------------- | ---------- |
+| `memory`      | In-memory repositories, TTL cache, and store-based certificate storage. | ✅ Default |
+| `postgres`    | SeaORM PostgreSQL database driver.                                      | ❌ Opt-in  |
+| `sqlite`      | SeaORM SQLite database driver.                                          | ❌ Opt-in  |
+| `mysql`       | SeaORM MySQL database driver.                                           | ❌ Opt-in  |
+| `redis`       | Redis storage driver for explicit cache/storage integrations.           | ❌ Opt-in  |
+| `aws-secrets` | Route53 DNS-01, and AWS Secrets Manager drivers.                        | ❌ Opt-in  |
+| `acme`        | ACME DNS-01 certificate manager driver.                                 | ❌ Opt-in  |
 
 To build with specific backend drivers, pass the matching feature flag(s):
 
@@ -109,15 +109,13 @@ To build with specific backend drivers, pass the matching feature flag(s):
 # Run with PostgreSQL and Redis support available
 cargo run --features postgres,redis
 
-# Run with all AWS and ACME production integrations, including the optional Redis cache driver
-cargo run --features postgres,redis,aws,acme
+# Run with AWS and ACME production integrations
+cargo run --features postgres,aws-secrets,acme
 ```
 
 ## Redis Role
 
-Redis is not required for core status-list persistence or status-list reads. Status-list records are stored by the configured repository backend (`memory`, PostgreSQL, MySQL, or SQLite), and hot status-list reads are cached in-process by `MokaStatusListCache`.
-
-When compiled with the `redis` feature and configured with a non-empty `APP_REDIS__URI`, Redis is used only as an optional distributed cache for certificate material loaded from S3 by the ACME/AWS certificate manager path. This can help multi-replica deployments share certificate cache entries and reduce repeated object-storage reads. The tradeoff is an extra operational dependency: Redis credentials, TLS settings if used, availability monitoring, backups or persistence choices, and HA/upgrade complexity.
+Redis is optional. The server does not use Redis for status-list persistence or status-list reads; those use the configured repository backend and the in-process status-list cache. Certificate and signing-key material are managed together by the selected cryptographic material backend; prefer the built-in material read-cache TTLs before adding Redis.
 
 For single-replica deployments, local development, tests, or deployments where certificate material reads are inexpensive, leave `APP_REDIS__URI` unset and omit the `redis` Cargo feature.
 
@@ -204,14 +202,16 @@ The Status List Server is provisioned with a cryptographic certificate that is e
 - Certificate issuance and renewal are managed according to the configured renewal strategy.
 - Every day, a cron job checks whether the certificate should be renewed based on this strategy.
 - If the certificate is still considered valid according to the configured strategy, no renewal occurs; renewal is only triggered when necessary.
-- Parsed certificate chains are cached in memory for `APP_SERVER__CERT__CHAIN_CACHE_TTL` seconds (default: `3600`). A value of `0` keeps entries indefinitely. In multi-replica deployments, replicas that did not perform renewal rely on this TTL to refresh their in-memory chain.
+- The server signing key and certificate chain are stored in one cryptographic-material backend selected by enabled Cargo features (`vault`, `aws-secrets`, or in-memory fallback).
+- Certificate material stays cached until provisioning or renewal invalidates it. Signing-key reads can be cached with `APP_SERVER__CERT__SIGNING_KEY_CACHE_TTL`; set it to `0` to force private-key reads to bypass the material cache.
+- Parsed certificate chains stay cached in memory until certificate provisioning or renewal replaces them.
 
 **Provisioning Modes:**
 
 - `server.cert.provisioning_strategy = "acme"` requests and renews certificates through ACME.
-- `server.cert.provisioning_strategy = "store"` loads externally managed certificate material and persists it into the configured certificate/secrets storage.
-- Store provisioning supports `server.cert.store.source = "filesystem"` with `certificate_path` and `signing_key_path`.
-- Store provisioning also supports `server.cert.store.source = "storage"` for the configured certificate/secrets storage backends, or `"aws_secrets_manager"` when both PEM values are stored in the configured secrets backend, using `certificate_key` and `signing_key_key`.
+- `server.cert.provisioning_strategy = "store"` loads externally managed certificate material and persists it into the configured cryptographic-material backend.
+- Store provisioning infers filesystem loading when `server.cert.store.certificate_path` and `signing_key_path` are configured.
+- Store provisioning infers storage-backed loading when `server.cert.store.certificate_key` and `signing_key_key` are configured; those keys are read from the feature-selected cryptographic-material backend.
 - Filesystem store inputs may be PEM text or raw DER. Storage-backed store inputs may be PEM text or base64/base64url-encoded DER. Private keys must be PKCS#8 in PEM or DER form.
 - The renewal cron schedule is configured with `server.cert.renewal_cron_schedule`. For store provisioning, each scheduled run reloads the configured source and refreshes persisted material only when it changed.
 
@@ -222,7 +222,7 @@ The Status List Server is provisioned with a cryptographic certificate that is e
 - ACME uses `DefaultHttpClient` unless `.acme_http_client(...)` is supplied.
 - Store provisioning does not create ACME HTTP client state unless explicitly configured.
 - `email` defaults to an empty string, `organization` defaults to none, and `eku` defaults to none.
-- `domains`, `cert_storage`, and `secrets_storage` must always be provided.
+- `domains` and `crypto_storage` must always be provided.
 - ACME additionally requires `challenge_handler` and `acme_directory_url`.
 
 ```rust
@@ -231,8 +231,7 @@ let manager = CertManager::builder()
     .email("support@example.com")
     .organization(Some("example.com"))
     .acme_directory_url("https://acme-v02.api.letsencrypt.org/directory")
-    .cert_storage(cert_storage)
-    .secrets_storage(secrets_storage)
+    .crypto_storage(material_storage)
     .challenge_handler(challenge_handler)
     .eku(&[1, 3, 6, 1, 5, 5, 7, 3, 30])
     .acme_strategy()
@@ -242,8 +241,7 @@ let manager = CertManager::builder()
 ```rust
 let manager = CertManager::builder()
     .domains(["statuslist.example.com"])
-    .cert_storage(cert_storage)
-    .secrets_storage(secrets_storage)
+    .crypto_storage(material_storage)
     .store_strategy(StoreProvisioningStrategy::filesystem(
         "/etc/status-list/tls.crt",
         "/etc/status-list/tls.key",

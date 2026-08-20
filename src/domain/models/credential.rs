@@ -3,12 +3,24 @@
 use serde::{Deserialize, Serialize};
 
 /// Domain errors encountered during issuer credential management.
+///
+/// `#[non_exhaustive]` so adding a variant stays patch-level instead of tripping
+/// `cargo-semver-checks` (`enum_variant_added`).
+#[non_exhaustive]
 #[derive(Debug, thiserror::Error)]
 pub enum CredentialError {
     #[error("invalid public JWK: {0}")]
     InvalidPublicJwk(String),
     #[error("credentials already exist for this issuer")]
     AlreadyExists,
+    /// The write lost a lock race in storage and was rolled back; the request is
+    /// safe to retry verbatim. Mirrors [`StatusListError::Contention`], `code`
+    /// included, so the same driver error does not become a 409 on one write
+    /// path and a 500 on the other.
+    ///
+    /// [`StatusListError::Contention`]: crate::domain::models::status_list::StatusListError::Contention
+    #[error("the write lost a lock race ({code}) and can be retried unchanged")]
+    Contention { code: &'static str },
     #[error("storage error: {0}")]
     Backend(#[source] Box<dyn std::error::Error + Send + Sync>),
 }
