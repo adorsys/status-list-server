@@ -36,7 +36,12 @@ pub struct PublicJwk(pub Vec<u8>);
 impl PublicJwk {
     /// Create public JWK bytes from UTF-8 JSON.
     ///
-    /// Ensures the payload is a valid JSON object without enforcing key types.
+    /// Ensures the payload is a valid JSON object and rejects shared-secret
+    /// (`kty: "oct"`) keys. An `oct` key is unusable for asymmetric management
+    /// token verification: the auth middleware treats it as an HMAC key and
+    /// refuses it, so accepting it here would create a credential that is
+    /// accepted at registration (201) yet permanently rejected at request time.
+    /// Rejecting it up front keeps the registration contract honest.
     pub fn try_new(bytes: Vec<u8>) -> Result<Self, CredentialError> {
         let value: serde_json::Value = serde_json::from_slice(&bytes).map_err(|err| {
             CredentialError::InvalidPublicJwk(format!("expected UTF-8 JSON: {err}"))
@@ -44,6 +49,17 @@ impl PublicJwk {
         if !value.is_object() {
             return Err(CredentialError::InvalidPublicJwk(
                 "expected a JSON object".to_string(),
+            ));
+        }
+        let kty = value
+            .get("kty")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        if kty == "oct" {
+            return Err(CredentialError::InvalidPublicJwk(
+                "shared-secret (kty: oct) keys are not supported for management \
+                 token verification"
+                    .to_string(),
             ));
         }
         Ok(Self(bytes))

@@ -158,6 +158,11 @@ The following constraints are validated at startup and will cause the server to 
 - `server.port` must be between 1 and 65535 (the `u16` type enforces the upper bound)
 - `server.cert.renewal_cron_schedule` must be a valid 6-field cron expression (seconds required)
 - `aws.s3_bucket` must not be empty
+- the configured clock-skew leeway must not exceed the current Unix epoch
+  (otherwise `exp`/`nbf` validation would underflow and reject all traffic)
+- the maximum token lifetime must not be `0` (which would reject all traffic)
+- the clock-skew leeway must be strictly less than the maximum token lifetime
+  (otherwise the lifetime bound is meaningless)
 
 ## Security
 
@@ -172,10 +177,32 @@ The server uses JWT-based authentication with the following requirements:
    Authorization: Bearer <jwt_token>
    ```
 
-3. The JWT token must:
+3. The JWT token must be a valid JWS ([RFC 7519](https://www.rfc-editor.org/rfc/rfc7519)) with
+   the following requirements. The claims below are the standard registered claims
+   defined in [RFC 7519 §4.1](https://www.rfc-editor.org/rfc/rfc7519#section-4.1)
+   (`iss` §4.1.1, `aud` §4.1.3, `exp` §4.1.4, `nbf` §4.1.5, `iat` §4.1.6):
    - Be signed with the private key corresponding to the registered public key
    - Have `iss` (issuer) claim matching the registered issuer
-   - Have valid `exp` (expiration) and `iat` (issued at) claims
+   - Have `exp` (expiration) and `iat` (issued at) claims
+   - Optionally include `nbf` (not before); when present it must be in the past
+     (within the configured leeway)
+   - Optionally include `aud` (audience); when an expected audience is
+     configured, the `aud` claim is **required** and must match that value
+
+A maximum token lifetime of `3600` seconds is enforced by default to limit
+the blast radius if a token is leaked. To opt out, configure the maximum token
+lifetime as unset; the server will warn at startup that management tokens
+carry no upper lifetime bound.
+
+Any token that fails validation is rejected with a generic `401` `invalid_token`
+response that does not disclose which claim failed.
+
+> **Breaking change from 1.0.1:** this release hardens management-token
+> validation. Tokens must now carry a valid `iat` claim (previously optional),
+> and the `jwt_error` / `issuer_not_found` stable error codes were replaced by
+> the uniform `invalid_token` code. Symmetric `kty: "oct"` (shared-secret) keys
+> are no longer accepted by the credential registration endpoint. Clients
+> should branch on `invalid_token` rather than on the removed codes.
 
 Example JWT token header:
 
