@@ -9,7 +9,7 @@ FROM builder-${TARGETARCH} AS builder
 ARG APP_NAME
 ARG TARGETPLATFORM
 ARG TARGETARCH
-ARG FEATURES="postgres,aws,acme"
+ARG FEATURES="postgres,aws-secrets,acme"
 WORKDIR /app
 
 # Set the Rust target and build the application
