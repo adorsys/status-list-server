@@ -12,6 +12,16 @@ use std::time::{Duration, Instant};
 
 use crate::config::TelemetryConfig;
 
+#[cfg(test)]
+static METRICS_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+#[cfg(test)]
+pub(crate) fn metrics_test_lock() -> std::sync::MutexGuard<'static, ()> {
+    METRICS_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 /// Initialize the OpenTelemetry metrics pipeline before any instruments are
 /// created. Metrics are always exposed through the in-process Prometheus
 /// registry. In production, they are also pushed to the Collector over OTLP.
@@ -46,7 +56,7 @@ pub(crate) fn setup_metrics(
     Ok(provider)
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 struct ProcessMetrics {
     cpu_seconds_total: Option<f64>,
     open_fds: Option<u64>,
@@ -203,6 +213,7 @@ mod tests {
 
     #[test]
     fn setup_metrics_registers_process_metric_families() {
+        let _metrics_guard = metrics_test_lock();
         let registry = Registry::new();
         let config = TelemetryConfig {
             environment: TelemetryEnvironment::Development,
@@ -226,19 +237,58 @@ mod tests {
             .map(|family| family.name().to_string())
             .collect::<std::collections::HashSet<_>>();
 
-        for expected in [
-            "process_cpu_seconds_total",
-            "process_open_fds",
-            "process_max_fds",
-            "process_virtual_memory_bytes",
-            "process_virtual_memory_max_bytes",
-            "process_resident_memory_bytes",
-            "process_start_time_seconds",
-            "process_threads",
-        ] {
+        // Observers only report when the collector yields a value, and
+        // `metrics_process` does not expose every field on every platform.
+        // Asserting the full set would test the host OS rather than the
+        // registration wiring, so derive it from what the collector reports.
+        let snapshot = get_process_snapshot();
+        let expected = [
+            (
+                "process_cpu_seconds_total",
+                snapshot.cpu_seconds_total.is_some(),
+            ),
+            ("process_open_fds", snapshot.open_fds.is_some()),
+            ("process_max_fds", snapshot.max_fds.is_some()),
+            (
+                "process_virtual_memory_bytes",
+                snapshot.virtual_memory_bytes.is_some(),
+            ),
+            (
+                "process_virtual_memory_max_bytes",
+                snapshot.virtual_memory_max_bytes.is_some(),
+            ),
+            (
+                "process_resident_memory_bytes",
+                snapshot.resident_memory_bytes.is_some(),
+            ),
+            (
+                "process_start_time_seconds",
+                snapshot.start_time_seconds.is_some(),
+            ),
+            ("process_threads", snapshot.threads.is_some()),
+        ];
+
+        // Without a floor, a `setup_metrics` that registered no observers at all
+        // would filter every field out and pass the loop below vacuously. Six is
+        // what `metrics-process` reports on the thinnest supported platform
+        // (Windows, missing `virtual_memory_max_bytes` and `threads`).
+        const ALWAYS_AVAILABLE: usize = 6;
+        let available = expected.iter().filter(|(_, available)| *available).count();
+        assert!(
+            available >= ALWAYS_AVAILABLE,
+            "collector reported only {available} of {ALWAYS_AVAILABLE} \
+             universally-available process metrics on this platform \
+             ({snapshot:?}); the assertions below would be vacuous"
+        );
+
+        for (family, available) in expected {
+            if !available {
+                continue;
+            }
             assert!(
-                families.contains(expected),
-                "missing process metric family {expected}; got {families:?}"
+                families.contains(family),
+                "collector reported a value for {family} but it was not exported; \
+                 got {families:?}"
             );
         }
     }

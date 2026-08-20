@@ -7,13 +7,20 @@ edition = "2024"
 default = ["memory"]
 memory = []
 history = ["dep:sea-orm", "dep:sea-orm-migration"]
-server = ["history"]
-postgres = ["sea-orm?/sqlx-postgres", "history"]
-sqlite = ["sea-orm?/sqlx-sqlite", "history"]
-mysql = ["sea-orm?/sqlx-mysql", "history"]
-# Optional distributed certificate-material cache driver.
+postgres = ["history", "sea-orm?/sqlx-postgres"]
+sqlite = ["history", "sea-orm?/sqlx-sqlite"]
+mysql = ["history", "sea-orm?/sqlx-mysql"]
 redis = ["dep:redis"]
-aws = [
+vault = ["acme"]
+gcp-secrets = ["acme", "dep:google-cloud-auth", "dep:google-cloud-secretmanager-v1"]
+azure-kv = [
+  "acme",
+  "dep:azure_core",
+  "dep:azure_identity",
+  "dep:azure_security_keyvault_secrets",
+]
+aws-secrets = [
+  "acme",
   "dep:aws-config",
   "dep:aws-sdk-route53",
   "dep:aws-sdk-s3",
@@ -123,6 +130,7 @@ flate2 = "1.1"
 x509-parser = "0.18"
 public-suffix = "0.1"
 tokio-cron-scheduler = "0.15"
+url = { version = "2.5", features = ["serde"] }
 
 # Database and ORM
 [dependencies.sea-orm]
@@ -162,6 +170,26 @@ default-features = false
 features = ["default-https-client", "rt-tokio"]
 optional = true
 
+[dependencies.google-cloud-secretmanager-v1]
+version = "1"
+optional = true
+
+[dependencies.google-cloud-auth]
+version = "1"
+optional = true
+
+[dependencies.azure_security_keyvault_secrets]
+version = "1"
+optional = true
+
+[dependencies.azure_identity]
+version = "1"
+optional = true
+
+[dependencies.azure_core]
+version = "1"
+optional = true
+
 [dependencies.redis]
 version = "1.3"
 features = ["connection-manager", "tokio-rustls-comp"]
@@ -172,13 +200,12 @@ version = "0.14"
 features = ["alloc", "ecdsa", "pem", "pkcs8"]
 
 [dev-dependencies]
-sealed_test = "1.1.0"
 wiremock = "0.6"
 sea-orm = { version = "1.1", features = ["mock"] }
-testcontainers-modules = {
-  version = "0.15",
-  features = ["localstack", "mysql", "postgres", "redis"]
-}
+
+[dev-dependencies.testcontainers-modules]
+version = "0.15"
+features = ["hashicorp_vault", "localstack", "mysql", "postgres", "redis"]
 
 [target.'cfg(not(target_env = "msvc"))'.dependencies]
 tikv-jemallocator = "0.7"

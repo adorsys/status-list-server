@@ -1,4 +1,4 @@
-use std::{future::Future, pin::Pin};
+use std::{future::Future, pin::Pin, sync::Arc};
 
 use axum::body::Bytes;
 use hyper::Request;
@@ -8,7 +8,7 @@ use hyper_util::{
     rt::TokioExecutor,
 };
 use instant_acme::{BodyWrapper, BytesResponse, Error, HttpClient};
-use rustls::{ClientConfig, RootCertStore};
+use rustls::{ClientConfig, RootCertStore, crypto::aws_lc_rs};
 use rustls_pki_types::{CertificateDer, pem::PemObject};
 
 use crate::cert_manager::CertError;
@@ -54,9 +54,12 @@ impl ClientInner {
             root_store.add_parsable_certificates(certs_der);
         }
         root_store.extend(webpki_roots::TLS_SERVER_ROOTS.to_vec());
-        let tls_config = ClientConfig::builder()
-            .with_root_certificates(root_store)
-            .with_no_client_auth();
+        let tls_config =
+            ClientConfig::builder_with_provider(Arc::new(aws_lc_rs::default_provider()))
+                .with_safe_default_protocol_versions()
+                .map_err(|e| CertError::Validation(e.to_string()))?
+                .with_root_certificates(root_store)
+                .with_no_client_auth();
         let http_builder = HttpsConnectorBuilder::new()
             .with_tls_config(tls_config)
             .https_only()
