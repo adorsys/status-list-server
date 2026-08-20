@@ -81,8 +81,10 @@ EOF
 
 ### 3. Attach Required Policies
 
+The server now stores all cryptographic material (certificate chain, signing key, ACME account material) in a single backend. When compiled with `aws-secrets` (and without `vault`), that backend is AWS Secrets Manager, so the IRSA role needs Route53 (ACME DNS-01) and full Secrets Manager CRUD — S3 is no longer used at runtime:
+
 ```bash
-# Inline policy for Route53 ACME DNS-01 + Secrets Manager + S3
+# Inline policy for Route53 ACME DNS-01 + Secrets Manager (single crypto-material backend)
 cat > /tmp/irsa-policy.json <<'EOF'
 {
   "Version": "2012-10-17",
@@ -100,15 +102,13 @@ cat > /tmp/irsa-policy.json <<'EOF'
     {
       "Effect": "Allow",
       "Action": [
+        "secretsmanager:DescribeSecret",
+        "secretsmanager:CreateSecret",
         "secretsmanager:GetSecretValue",
-        "secretsmanager:DescribeSecret"
+        "secretsmanager:PutSecretValue",
+        "secretsmanager:DeleteSecret"
       ],
       "Resource": "arn:aws:secretsmanager:REGION:ACCOUNT_ID:secret:statuslist/*"
-    },
-    {
-      "Effect": "Allow",
-      "Action": ["s3:GetObject", "s3:PutObject", "s3:DeleteObject"],
-      "Resource": "arn:aws:s3:::BUCKET_NAME/*"
     }
   ]
 }
@@ -119,6 +119,8 @@ aws iam put-role-policy \
   --policy-name statuslist-route53 \
   --policy-document file:///tmp/irsa-policy.json
 ```
+
+> **Note:** If the server is compiled with the `vault` feature, cryptographic material is stored in Vault/OpenBao instead, and the pod may not need Secrets Manager permissions at all (Route53 for ACME remains unless you mount a static DNS credential).
 
 ### 4. Deploy with Helm
 

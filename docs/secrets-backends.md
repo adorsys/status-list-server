@@ -33,7 +33,7 @@ The server supports two authentication methods:
 | `APP_VAULT__MOUNT`             | String            | `"secret"`                          | KV v2 secrets engine mount point                                         |
 | `APP_VAULT__PATH_PREFIX`       | String            | `""`                                | Optional prefix prepended to all secret keys (e.g. `status-list-server`) |
 | `APP_VAULT__NAMESPACE`         | String            | `None`                              | Optional Enterprise/OpenBao namespace header (`X-Vault-Namespace`)       |
-| `APP_VAULT__SECRETS_CACHE_TTL` | Integer (seconds) | `300` (5 minutes)                   | In-memory cache TTL in seconds. Set to `0` to disable caching.           |
+| `APP_SERVER__CERT__SIGNING_KEY_CACHE_TTL` | Integer (seconds) | `0`                | In-memory cache TTL (seconds) for private signing-key reads. Set to `0` to disable caching. |
 | `APP_VAULT__TIMEOUT_SECS`      | Integer (seconds) | `30`                                | HTTP request timeout duration in seconds                                 |
 
 ### Least-Privilege Vault / OpenBao Policy
@@ -163,7 +163,7 @@ Use Kubernetes ServiceAccount token projection to authenticate with Vault withou
 | `APP_VAULT__MOUNT`          | String | `"secret"`                              | KV v2 mount                                              |
 | `APP_VAULT__PATH_PREFIX`    | String | `""`                                    | Optional prefix for secret paths                         |
 | `APP_VAULT__NAMESPACE`      | String | `None`                                  | Optional Vault namespace header                          |
-| `APP_VAULT__SECRETS_CACHE_TTL` | Integer | `300`                                 | In-memory cache TTL in seconds                           |
+| `APP_SERVER__CERT__SIGNING_KEY_CACHE_TTL` | Integer | `0`                    | In-memory cache TTL (seconds) for private signing-key reads. Set to `0` to disable caching. |
 
 #### Server-Side Vault Setup
 
@@ -207,7 +207,8 @@ APP_VAULT__AUTH_MOUNT=kubernetes
 APP_VAULT__TOKEN_PATH=/var/run/secrets/tokens/vaulttoken
 APP_VAULT__MOUNT=secret
 APP_VAULT__PATH_PREFIX=production/status-list
-APP_VAULT__SECRETS_CACHE_TTL=300
+# Private signing-key cache TTL (seconds); 0 disables caching
+APP_SERVER__CERT__SIGNING_KEY_CACHE_TTL=0
 ```
 
 See [docs/workload-identity.md](workload-identity.md#vault-kubernetes-auth) for the full Helm deployment guide using `values-vault-k8s.yaml`.
