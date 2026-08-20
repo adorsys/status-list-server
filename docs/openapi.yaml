@@ -464,14 +464,21 @@ components:
       description: |
         Signed JWT Bearer token. The token must be signed with the private key
         corresponding to the public key registered for the issuer. The payload
-        must contain:
+        must contain the following claims:
 
-        - `iss`: the registered issuer identifier
-        - `iat`: issued-at timestamp
-        - `exp`: expiration timestamp
+        - `iss` (required): the registered issuer identifier
+        - `exp` (required): expiration timestamp
+        - `iat` (required): issued-at timestamp
+        - `nbf` (optional): not-before timestamp; when present it must be in the
+          past (within the configured leeway)
+        - `aud` (optional): audience; when an expected audience is configured
+          for the server it must match one of those values
 
-        The server validates the signature using the registered JWK and verifies
-        that the `iss` claim matches the registered issuer.
+        The server validates the signature using the registered JWK, verifies
+        that the `iss` claim matches the registered issuer, and enforces the
+        configured leeway and maximum token lifetime. Tokens that fail signature
+        or claim validation are rejected with a generic `401 invalid_token`
+        response that does not disclose which claim failed.
 
         Mutual TLS (mTLS) for issuer authentication is not implemented in the
         current release; this security scheme may be added in a future version.
@@ -495,12 +502,13 @@ components:
       description: |
         JSON Web Key representing the issuer's public key. The exact fields
         depend on the key type (e.g., `kty`, `crv`, `x`, `y` for EC keys).
+        Symmetric shared-secret keys (`kty: "oct"`) are rejected.
       required:
         - kty
       properties:
         kty:
           type: string
-          description: Key type.
+          description: Key type. `oct` (shared secret) is not supported.
           example: "EC"
         crv:
           type: string
@@ -675,9 +683,7 @@ components:
             - index_too_large
             # 401 — emitted by the authentication middleware
             - invalid_auth_header
-            - jwt_error
-            - unsupported_algorithm
-            - issuer_not_found
+            - invalid_token
             # 403
             - issuer_mismatch
             # 404
@@ -731,8 +737,8 @@ components:
           schema:
             $ref: "#/components/schemas/ErrorResponse"
           example:
-            error: "invalid_auth_header"
-            error_description: "Missing or invalid Authorization header"
+            error: "invalid_token"
+            error_description: "Token is invalid"
 
     Forbidden:
       description: Insufficient permissions to access the resource

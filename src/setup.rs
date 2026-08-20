@@ -136,6 +136,16 @@ type BuildStateResult = (AppState, Arc<CertManager>);
 type BuildStateResult = (AppState,);
 
 async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
+    config.server.auth.validate()?;
+
+    if config.server.auth.max_token_lifetime_secs.is_none() {
+        tracing::warn!(
+            "no maximum token lifetime is set: management tokens have no upper \
+             lifetime bound and are replayable until `exp`. Set one (e.g. 3600 \
+             seconds) to limit the blast radius of a leaked token."
+        );
+    }
+
     // Hoisted DB handle captured from the backend branches below so the
     // readiness probe can reach the real adapter (the domain ports only expose
     // the higher-level repositories).
@@ -366,6 +376,11 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
         max_statuses_per_request: config.limits.max_statuses_per_request,
         max_serialized_list_size: config.limits.max_serialized_list_size,
         snapshot_retention_secs: config.status_list.snapshot_retention_secs,
+        auth: crate::server::AuthPolicy {
+            max_token_lifetime_secs: config.server.auth.max_token_lifetime_secs,
+            leeway_secs: config.server.auth.leeway_secs,
+            expected_audience: empty_to_none(config.server.auth.expected_audience.clone()),
+        },
         readiness,
     };
 

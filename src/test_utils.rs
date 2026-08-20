@@ -14,8 +14,7 @@ use crate::outbound::memory::{MemoryCredentials, MemoryStatusListSnapshotRepo, M
 use crate::outbound::sql::{
     SeaOrmStore, SqlCredentialRepo, SqlStatusListRepo, SqlStatusListSnapshotRepo,
 };
-use crate::server::AppState;
-use crate::server::health::Readiness;
+use crate::server::{AppState, AuthPolicy, health::Readiness};
 #[cfg(feature = "acme")]
 use crate::{cert_manager::storage::StorageError, utils::cert_manager::storage::Storage};
 use async_trait::async_trait;
@@ -90,7 +89,12 @@ pub(crate) async fn test_app_state_without_snapshots() -> AppState {
         max_statuses_per_request: 5_000,
         max_serialized_list_size: 1_048_576,
         snapshot_retention_secs: 0,
-        readiness: crate::server::health::Readiness::new(Vec::new()),
+        auth: AuthPolicy {
+            max_token_lifetime_secs: None,
+            leeway_secs: 60,
+            expected_audience: None,
+        },
+        readiness: Readiness::new(Vec::new()),
     }
 }
 
@@ -180,6 +184,11 @@ async fn build_test_app_state(
         max_statuses_per_request: 5_000,
         max_serialized_list_size,
         snapshot_retention_secs: 7776000,
+        auth: AuthPolicy {
+            max_token_lifetime_secs: None,
+            leeway_secs: 60,
+            expected_audience: None,
+        },
         readiness: Readiness::default(),
     }
 }

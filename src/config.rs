@@ -180,6 +180,57 @@ pub struct ServerConfig {
     pub cert: CertConfig,
     pub enable_metrics: bool,
     pub aggregation_uri: Option<String>,
+    pub auth: AuthConfig,
+}
+
+/// Management-token claim validation policy applied by the authentication
+/// middleware to bearer JWTs.
+#[derive(Debug, Clone, Deserialize)]
+pub struct AuthConfig {
+    /// Maximum allowed lifetime of a management token, computed as
+    /// `exp - iat`. Defaults to 3600 seconds; setting it to `None` requires an
+    /// explicit operator opt-out and removes the upper bound. When unset, no
+    /// upper bound is enforced (a startup warning is emitted).
+    pub max_token_lifetime_secs: Option<u64>,
+    /// Clock skew leeway (in seconds) tolerated when validating `exp` and
+    /// `nbf`. Defaults to 60.
+    pub leeway_secs: u64,
+    /// When set, the bearer token's `aud` claim must match this audience.
+    /// When unset, the `aud` claim is not validated.
+    pub expected_audience: Option<String>,
+}
+
+impl AuthConfig {
+    /// Validates the auth policy, failing fast on operator misconfiguration
+    /// rather than silently rejecting all (or effectively all) traffic at
+    /// request time.
+    pub fn validate(&self) -> Result<(), ConfigError> {
+        let now = time::OffsetDateTime::now_utc()
+            .unix_timestamp()
+            .try_into()
+            .map_err(|_| ConfigError::Message("System clock error".to_string()))?;
+        if self.leeway_secs > now {
+            return Err(ConfigError::Message(format!(
+                "configured clock-skew leeway ({}) exceeds the current Unix epoch; \
+                 token validation would reject all traffic",
+                self.leeway_secs
+            )));
+        }
+        if let Some(max) = self.max_token_lifetime_secs {
+            if max == 0 {
+                return Err(ConfigError::Message(
+                    "maximum token lifetime must not be 0 (rejects all traffic)".to_string(),
+                ));
+            }
+            if self.leeway_secs >= max {
+                return Err(ConfigError::Message(format!(
+                    "clock-skew leeway ({}) must be less than the maximum token lifetime ({})",
+                    self.leeway_secs, max
+                )));
+            }
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -870,6 +921,9 @@ fn base_builder() -> Result<ConfigBuilder<DefaultState>, ConfigError> {
         .set_default("server.port", 8000)?
         .set_default("server.enable_metrics", false)?
         .set_default("server.aggregation_uri", Option::<String>::None)?
+        .set_default("server.auth.max_token_lifetime_secs", 3600u64)?
+        .set_default("server.auth.leeway_secs", 60u64)?
+        .set_default("server.auth.expected_audience", Option::<String>::None)?
         .set_default("database.url", default_db_url)?
         .set_default("database.backend", default_db_backend)?
         .set_default("database.pool.max_connections", 5u32)?
@@ -1002,6 +1056,9 @@ mod tests {
             expected_cert_path
         );
         assert_eq!(config.server.cert.store.signing_key_path, expected_key_path);
+        assert_eq!(config.server.auth.leeway_secs, 60);
+        assert_eq!(config.server.auth.max_token_lifetime_secs, Some(3600));
+        assert_eq!(config.server.auth.expected_audience, None);
 
         assert_eq!(config.rate_limit.strict_burst_size, 10);
         assert_eq!(config.rate_limit.strict_period_secs, 60);
@@ -1166,6 +1223,38 @@ mod tests {
         .expect("Failed to load sqlite config");
         assert_eq!(sqlite_cfg.database.backend, DatabaseBackend::Sqlite);
         assert_eq!(sqlite_cfg.database.url.expose_secret(), "sqlite::memory:");
+    }
+
+    #[test]
+    fn test_auth_policy_default_valid() {
+        let config = Config::load_from_overrides(&[]).expect("Failed to load config");
+        config
+            .server
+            .auth
+            .validate()
+            .expect("default auth is valid");
+    }
+
+    #[test]
+    fn test_auth_policy_rejects_zero_max_lifetime() {
+        let auth = AuthConfig {
+            max_token_lifetime_secs: Some(0),
+            leeway_secs: 60,
+            expected_audience: None,
+        };
+        assert!(auth.validate().is_err());
+    }
+
+    #[test]
+    fn test_auth_policy_rejects_leeway_ge_max_lifetime() {
+        for (leeway, max, ok) in [(60, 60, false), (61, 60, false), (5, 60, true)] {
+            let auth = AuthConfig {
+                max_token_lifetime_secs: Some(max),
+                leeway_secs: leeway,
+                expected_audience: None,
+            };
+            assert_eq!(auth.validate().is_ok(), ok, "leeway={leeway} max={max}");
+        }
     }
 
     #[test]
