@@ -12,7 +12,7 @@ use moka::future::Cache;
 use tokio::time::sleep;
 use tracing::{info, warn};
 
-use crate::cert_manager::storage::{Storage, StorageError};
+use crate::cert_manager::storage::{Storage, StorageError, normalize_key};
 
 /// AWS Secrets Manager.
 pub struct AwsSecretsManager {
@@ -54,30 +54,38 @@ impl AwsSecretsManager {
 impl Storage for AwsSecretsManager {
     async fn store(&self, name: &str, data: &str) -> Result<(), StorageError> {
         use aws_sdk_secretsmanager::error::SdkError;
+        let secret_name = normalize_key(name);
 
         // Store a secret only if it does not already exist
-        match self.client.describe_secret().secret_id(name).send().await {
+        match self
+            .client
+            .describe_secret()
+            .secret_id(&secret_name)
+            .send()
+            .await
+        {
             Ok(_) => {
-                warn!("Secret {name} already exists. Skipping...");
+                warn!("Secret {secret_name} already exists. Skipping...");
                 Ok(())
             }
             Err(SdkError::ServiceError(err)) if err.err().is_resource_not_found_exception() => {
                 // Secret does not exist, try to create it
                 self.client
                     .create_secret()
-                    .name(name)
+                    .name(&secret_name)
                     .secret_string(data)
                     .send()
                     .await
-                    .map_err(|e| StorageError::AwsSdk(e.into()))?;
+                    .map_err(|e| StorageError::Backend(e.into()))?;
                 Ok(())
             }
-            Err(sdk_err) => Err(StorageError::AwsSdk(sdk_err.into())),
+            Err(sdk_err) => Err(StorageError::Backend(sdk_err.into())),
         }
     }
 
     async fn load(&self, name: &str) -> Result<Option<String>, StorageError> {
         use aws_sdk_secretsmanager::error::SdkError;
+        let secret_name = normalize_key(name);
 
         if let Some(cache) = &self.cache
             && let Some(value) = cache.get(name).await
@@ -85,7 +93,13 @@ impl Storage for AwsSecretsManager {
             return Ok(Some(value));
         }
 
-        match self.client.get_secret_value().secret_id(name).send().await {
+        match self
+            .client
+            .get_secret_value()
+            .secret_id(&secret_name)
+            .send()
+            .await
+        {
             Ok(value) => {
                 if let Some(secret_string) = value.secret_string {
                     if let Some(cache) = &self.cache {
@@ -101,18 +115,19 @@ impl Storage for AwsSecretsManager {
             {
                 Ok(None)
             }
-            Err(err) => Err(StorageError::AwsSdk(eyre!("{err}"))),
+            Err(err) => Err(StorageError::Backend(eyre!("{err}"))),
         }
     }
 
     async fn update(&self, name: &str, data: &str) -> Result<(), StorageError> {
+        let secret_name = normalize_key(name);
         self.client
             .put_secret_value()
-            .secret_id(name)
+            .secret_id(&secret_name)
             .secret_string(data)
             .send()
             .await
-            .map_err(|e| StorageError::AwsSdk(e.into()))?;
+            .map_err(|e| StorageError::Backend(e.into()))?;
 
         if let Some(cache) = &self.cache {
             cache.insert(name.to_string(), data.to_string()).await;
@@ -121,17 +136,41 @@ impl Storage for AwsSecretsManager {
     }
 
     async fn delete(&self, name: &str) -> Result<(), StorageError> {
+        let secret_name = normalize_key(name);
         self.client
             .delete_secret()
-            .secret_id(name)
+            .secret_id(&secret_name)
             .send()
             .await
-            .map_err(|e| StorageError::AwsSdk(e.into()))?;
+            .map_err(|e| StorageError::Backend(e.into()))?;
 
         if let Some(cache) = &self.cache {
             cache.invalidate(name).await;
         }
         Ok(())
+    }
+
+    /// Verify the Secrets Manager API is reachable without touching any real
+    /// secret, by issuing a `DescribeSecret` call for a name that is expected
+    /// not to exist. This only requires the narrow `secretsmanager:DescribeSecret`
+    /// permission.
+    async fn reachable(&self) -> Result<(), StorageError> {
+        use aws_sdk_secretsmanager::error::SdkError;
+
+        match self
+            .client
+            .describe_secret()
+            .secret_id("health-probe-do-not-create")
+            .send()
+            .await
+        {
+            // Secret intentionally does not exist, but the API is reachable.
+            Err(SdkError::ServiceError(err)) if err.err().is_resource_not_found_exception() => {
+                Ok(())
+            }
+            Err(e) => Err(StorageError::Backend(e.into())),
+            Ok(_) => Ok(()),
+        }
     }
 }
 
@@ -217,7 +256,7 @@ impl AwsS3 {
                     let mut req = self.client.create_bucket().bucket(&self.bucket);
                     if self.region != "us-east-1" {
                         let location_constraint = self.region.parse().map_err(|_| {
-                            StorageError::AwsSdk(eyre!(
+                            StorageError::Backend(eyre!(
                                 "Invalid region '{}' for LocationConstraint",
                                 self.region
                             ))
@@ -236,7 +275,7 @@ impl AwsS3 {
                         }
                         Err(create_err) => {
                             if attempt == max_retries - 1 {
-                                return Err(StorageError::AwsSdk(create_err.into()));
+                                return Err(StorageError::Backend(create_err.into()));
                             }
                             warn!(
                                 "Failed to create bucket {}: {create_err}. Retrying...",
@@ -248,7 +287,7 @@ impl AwsS3 {
                 Err(err) => {
                     // Wait a bit before retrying
                     if attempt == max_retries - 1 {
-                        return Err(StorageError::AwsSdk(err.into()));
+                        return Err(StorageError::Backend(err.into()));
                     }
                     warn!("Error checking bucket {}: {err}. Retrying...", self.bucket);
                 }
@@ -296,7 +335,7 @@ impl Storage for AwsS3 {
                 if let Some(cache) = &self.cache {
                     let _ = cache.delete(key).await;
                 }
-                Err(StorageError::AwsSdk(e.into()))
+                Err(StorageError::Backend(e.into()))
             }
         }
     }
@@ -331,7 +370,7 @@ impl Storage for AwsS3 {
                     .body
                     .collect()
                     .await
-                    .map_err(|e| StorageError::AwsSdk(e.into()))?;
+                    .map_err(|e| StorageError::Backend(e.into()))?;
                 let data = String::from_utf8(bytes.into_bytes().into())
                     .map_err(|e| StorageError::InvalidData(e.to_string()))?;
                 if let Some(cache) = &self.cache
@@ -342,7 +381,7 @@ impl Storage for AwsS3 {
                 Ok(Some(data))
             }
             Err(SdkError::ServiceError(err)) if err.err().is_no_such_key() => Ok(None),
-            Err(sdk_err) => Err(StorageError::AwsSdk(sdk_err.into())),
+            Err(sdk_err) => Err(StorageError::Backend(sdk_err.into())),
         }
     }
 
@@ -364,7 +403,27 @@ impl Storage for AwsS3 {
                 }
                 Ok(())
             }
-            Err(e) => Err(StorageError::AwsSdk(e.into())),
+            Err(e) => Err(StorageError::Backend(e.into())),
         }
+    }
+
+    /// Verify the S3 endpoint and configured bucket are reachable via a `HEAD`
+    /// request, which proves availability without reading or writing any object
+    /// and without creating the bucket.
+    async fn reachable(&self) -> Result<(), StorageError> {
+        use aws_sdk_s3::error::SdkError;
+
+        self.client
+            .head_bucket()
+            .bucket(&self.bucket)
+            .send()
+            .await
+            .map(|_| ())
+            .map_err(|e| match e {
+                SdkError::ServiceError(err) => {
+                    StorageError::Backend(eyre!("S3 bucket unavailable: {}", err.err()))
+                }
+                other => StorageError::Backend(other.into()),
+            })
     }
 }

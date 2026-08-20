@@ -1,3 +1,4 @@
+use std::path::PathBuf;
 use std::{collections::HashMap, fmt, marker::PhantomData};
 
 use config::builder::DefaultState;
@@ -86,6 +87,9 @@ pub struct Config {
     pub database: DatabaseConfig,
     pub redis: RedisConfig,
     pub aws: AwsConfig,
+    pub vault: VaultConfig,
+    pub gcp_secret_manager: GcpSecretManagerConfig,
+    pub azure_keyvault: AzureKeyVaultConfig,
     pub cache: CacheConfig,
     pub status_list: StatusListConfig,
     pub rate_limit: RateLimitConfig,
@@ -188,9 +192,8 @@ pub struct CertConfig {
     #[serde(default)]
     pub eku: Vec<u64>,
     pub acme_directory_url: String,
-    /// Cache TTL for parsed certificate chains in seconds.
-    /// A value of 0 keeps entries in memory indefinitely without expiration.
-    pub chain_cache_ttl: u64,
+    /// Cache TTL for private signing-key reads in seconds. `0` disables this cache.
+    pub signing_key_cache_ttl: u64,
     pub renewal_cron_schedule: String,
     #[serde(default)]
     pub dns_challenge_server_url: Option<String>,
@@ -201,7 +204,6 @@ pub struct CertConfig {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct CertStoreConfig {
-    pub source: String,
     #[serde(default)]
     pub certificate_path: Option<String>,
     #[serde(default)]
@@ -592,11 +594,105 @@ pub struct DatabaseConfig {
 #[derive(Debug, Clone, Deserialize)]
 pub struct AwsConfig {
     pub region: String,
-    /// Cache TTL for AWS Secrets Manager entries in seconds.
-    /// Setting this to 0 disables caching entirely.
-    pub secrets_cache_ttl: u64,
     pub s3_bucket: String,
     pub s3_key_prefix: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct VaultConfig {
+    /// Vault / OpenBao API address (e.g. `http://vault:8200`).
+    pub addr: String,
+    /// AppRole role_id (can be baked into config).
+    pub role_id: String,
+    /// AppRole secret_id (deliver via env/secrets injector in production).
+    #[serde(default)]
+    pub secret_id: Option<SecretString>,
+    /// Optional path to file containing AppRole secret_id (e.g. Kubernetes volume mount or Docker secret).
+    #[serde(default)]
+    pub secret_id_path: Option<PathBuf>,
+    /// AppRole auth engine mount path (default: `approle`).
+    pub auth_mount: String,
+    /// KV v2 engine mount path.
+    pub mount: String,
+    /// Prefix prepended to all secret paths. Default: empty.
+    pub path_prefix: String,
+    /// Optional Vault Enterprise / OpenBao namespace.
+    #[serde(default)]
+    pub namespace: Option<String>,
+    /// HTTP request timeout in seconds.
+    pub timeout_secs: u64,
+}
+
+impl VaultConfig {
+    /// Resolve the AppRole secret_id either directly from `secret_id`
+    /// or by reading from `secret_id_path` on disk.
+    pub fn resolve_secret_id(&self) -> Result<SecretString, ConfigError> {
+        if let Some(secret_id) = &self.secret_id
+            && !secret_id.expose_secret().trim().is_empty()
+        {
+            return Ok(secret_id.clone());
+        }
+
+        if let Some(path) = &self.secret_id_path {
+            let content = std::fs::read_to_string(path).map_err(|e| {
+                ConfigError::Message(format!(
+                    "Failed to read Vault secret_id from file {path:?}: {e}"
+                ))
+            })?;
+            let trimmed = content.trim();
+            if trimmed.is_empty() {
+                return Err(ConfigError::Message(format!(
+                    "Vault secret_id file {path:?} is empty"
+                )));
+            }
+            return Ok(SecretString::from(trimmed.to_string()));
+        }
+
+        Err(ConfigError::Message(
+            "Vault configuration missing secret_id: provide 'secret_id' or 'secret_id_path'"
+                .to_string(),
+        ))
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct GcpSecretManagerConfig {
+    /// GCP project ID.
+    pub project_id: String,
+    /// Service account key JSON, inline.
+    #[serde(default)]
+    pub service_account_key: Option<SecretString>,
+    /// Path to the service account key JSON file.
+    #[serde(default)]
+    pub service_account_key_path: Option<String>,
+    /// Optional custom gRPC endpoint URL (e.g. for regional endpoints, VPC-SC, or emulator testing).
+    #[serde(default)]
+    pub endpoint: Option<String>,
+    /// Allow anonymous credentials (for local testing/emulator only).
+    #[serde(default)]
+    pub allow_anonymous_credentials: bool,
+    /// Cache TTL for GCP secrets in seconds.
+    /// Setting this to 0 disables caching entirely.
+    pub secrets_cache_ttl: u64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct AzureKeyVaultConfig {
+    /// Azure Key Vault URL (e.g. `https://my-vault.vault.azure.net/`).
+    #[serde(default)]
+    pub vault_url: Option<url::Url>,
+    /// Service principal tenant ID.
+    #[serde(default)]
+    pub tenant_id: Option<String>,
+    /// Service principal client ID.
+    #[serde(default)]
+    pub client_id: Option<String>,
+    /// Service principal client secret.
+    #[serde(default)]
+    pub client_secret: Option<SecretString>,
+    /// Cache TTL for Azure Key Vault secrets in seconds.
+    /// Setting this to 0 disables caching entirely.
+    pub secrets_cache_ttl: u64,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -758,11 +854,6 @@ fn base_builder() -> Result<ConfigBuilder<DefaultState>, ConfigError> {
     let (default_provisioning_strategy, default_cert_path, default_key_path) =
         ("store", Option::<String>::None, Option::<String>::None);
 
-    #[cfg(feature = "acme")]
-    let default_chain_cache_ttl = crate::utils::cert_manager::DEFAULT_CHAIN_CACHE_TTL.as_secs();
-    #[cfg(not(feature = "acme"))]
-    let default_chain_cache_ttl = 86400;
-
     let telemetry_environment = match std::env::var("APP_ENV")
         .unwrap_or_default()
         .trim()
@@ -790,7 +881,6 @@ fn base_builder() -> Result<ConfigBuilder<DefaultState>, ConfigError> {
         .set_default("redis.uri", "")?
         .set_default("redis.require_client_auth", false)?
         .set_default("redis.cert_cache_ttl", 3600)?
-        .set_default("aws.secrets_cache_ttl", 300)?
         .set_default("aws.s3_bucket", "status-list-adorsys")?
         .set_default("aws.s3_key_prefix", "")?
         .set_default(
@@ -804,14 +894,27 @@ fn base_builder() -> Result<ConfigBuilder<DefaultState>, ConfigError> {
             "server.cert.acme_directory_url",
             "https://acme-v02.api.letsencrypt.org/directory",
         )?
-        .set_default("server.cert.chain_cache_ttl", default_chain_cache_ttl)?
+        .set_default("server.cert.signing_key_cache_ttl", 0)?
         .set_default("server.cert.renewal_cron_schedule", "0 0 0 * * *")?
-        .set_default("server.cert.store.source", "filesystem")?
         .set_default("server.cert.store.certificate_path", default_cert_path)?
         .set_default("server.cert.store.signing_key_path", default_key_path)?
         .set_default("server.cert.store.certificate_key", Option::<String>::None)?
         .set_default("server.cert.store.signing_key_key", Option::<String>::None)?
         .set_default("aws.region", "us-east-1")?
+        .set_default("vault.addr", "http://localhost:8200")?
+        .set_default("vault.role_id", "")?
+        .set_default("vault.secret_id", Option::<String>::None)?
+        .set_default("vault.secret_id_path", Option::<String>::None)?
+        .set_default("vault.auth_mount", "approle")?
+        .set_default("vault.mount", "secret")?
+        .set_default("vault.path_prefix", "")?
+        .set_default("vault.namespace", Option::<String>::None)?
+        .set_default("vault.timeout_secs", 30)?
+        .set_default("gcp_secret_manager.project_id", "")?
+        .set_default("gcp_secret_manager.allow_anonymous_credentials", false)?
+        .set_default("gcp_secret_manager.secrets_cache_ttl", 300)?
+        .set_default("azure_keyvault.vault_url", Option::<String>::None)?
+        .set_default("azure_keyvault.secrets_cache_ttl", 300)?
         .set_default("cache.ttl", 5 * 60)?
         .set_default("cache.max_capacity", 100)?
         .set_default("status_list.token_exp_secs", 900)?
@@ -852,6 +955,10 @@ mod tests {
         assert_eq!(config.aws.region, "us-east-1");
         assert_eq!(config.aws.s3_bucket, "status-list-adorsys");
         assert_eq!(config.aws.s3_key_prefix, "");
+        assert_eq!(config.gcp_secret_manager.project_id, "");
+        assert_eq!(config.gcp_secret_manager.secrets_cache_ttl, 300);
+        assert_eq!(config.azure_keyvault.vault_url, None);
+        assert_eq!(config.azure_keyvault.secrets_cache_ttl, 300);
         assert_eq!(config.status_list.token_exp_secs, 900);
         assert_eq!(config.status_list.token_ttl_secs, 300);
         assert_eq!(config.server.cert.renewal_cron_schedule, "0 0 0 * * *");
@@ -882,7 +989,6 @@ mod tests {
         assert_eq!(config.database.backend, expected_db_backend);
         assert_eq!(config.redis.uri.expose_secret(), "");
         assert!(!config.redis.require_client_auth);
-
         #[cfg(feature = "acme")]
         let (expected_strategy, expected_cert_path, expected_key_path) =
             ("acme", Option::<String>::None, Option::<String>::None);
@@ -890,7 +996,7 @@ mod tests {
         let (expected_strategy, expected_cert_path, expected_key_path) =
             ("store", Option::<String>::None, Option::<String>::None);
         assert_eq!(config.server.cert.provisioning_strategy, expected_strategy);
-        assert_eq!(config.server.cert.store.source, "filesystem");
+        assert_eq!(config.server.cert.signing_key_cache_ttl, 0);
         assert_eq!(
             config.server.cert.store.certificate_path,
             expected_cert_path
@@ -952,12 +1058,12 @@ mod tests {
             ("server.cert.organization", "Test Org"),
             ("server.cert.eku", "1,3,6,1,5,5,7,3,30"),
             ("server.cert.provisioning_strategy", "store"),
+            ("server.cert.signing_key_cache_ttl", "0"),
             ("server.cert.store.certificate_path", "/certs/tls.crt"),
             ("server.cert.store.signing_key_path", "/certs/tls.key"),
             ("server.cert.renewal_cron_schedule", "0 0 12 * * *"),
             ("server.cert.dns_challenge_server_url", "http://pebble:8055"),
             ("aws.region", "us-west-2"),
-            ("aws.secrets_cache_ttl", "600"),
             ("aws.s3_bucket", "my-custom-bucket"),
             ("aws.s3_key_prefix", "status-list/prod"),
             ("cache.ttl", "600"),
@@ -1002,7 +1108,6 @@ mod tests {
             "https://acme-v02.api.letsencrypt.org/directory"
         );
         assert_eq!(overridden.aws.region, "us-west-2");
-        assert_eq!(overridden.aws.secrets_cache_ttl, 600);
         assert_eq!(overridden.aws.s3_bucket, "my-custom-bucket");
         assert_eq!(overridden.aws.s3_key_prefix, "status-list/prod");
         assert_eq!(overridden.cache.ttl, 600);
@@ -1015,6 +1120,7 @@ mod tests {
             Some("http://pebble:8055")
         );
         assert_eq!(overridden.server.cert.provisioning_strategy, "store");
+        assert_eq!(overridden.server.cert.signing_key_cache_ttl, 0);
         assert_eq!(
             overridden.server.cert.store.certificate_path.as_deref(),
             Some("/certs/tls.crt")
@@ -1501,5 +1607,75 @@ mod tests {
                 "Default config signing_key_key references test_data: {key}"
             );
         }
+
+        // Vault AppRole defaults
+        assert_eq!(default_config.vault.addr, "http://localhost:8200");
+        assert_eq!(default_config.vault.role_id, "");
+        assert!(default_config.vault.secret_id.is_none());
+        assert_eq!(default_config.vault.secret_id_path, None);
+        assert_eq!(default_config.vault.auth_mount, "approle");
+        assert_eq!(default_config.vault.mount, "secret");
+        assert_eq!(default_config.vault.path_prefix, "");
+        assert_eq!(default_config.vault.namespace, None);
+        assert_eq!(default_config.vault.timeout_secs, 30);
+        assert!(default_config.vault.resolve_secret_id().is_err());
+
+        // Vault AppRole overrides with inline secret_id
+        let overridden_config = Config::load_from_overrides(&[
+            ("vault.addr", "http://vault.example.com:8200"),
+            ("vault.role_id", "my-role-id"),
+            ("vault.secret_id", "my-secret-id"),
+            ("vault.auth_mount", "custom-approle"),
+            ("vault.mount", "kv-secrets"),
+            ("vault.path_prefix", "services/status-list"),
+            ("vault.namespace", "tenant-1"),
+            ("vault.timeout_secs", "15"),
+        ])
+        .expect("Failed to load overridden config");
+
+        assert_eq!(
+            overridden_config.vault.addr,
+            "http://vault.example.com:8200"
+        );
+        assert_eq!(overridden_config.vault.role_id, "my-role-id");
+        assert_eq!(
+            overridden_config
+                .vault
+                .resolve_secret_id()
+                .expect("failed to resolve secret_id")
+                .expose_secret(),
+            "my-secret-id"
+        );
+        assert_eq!(overridden_config.vault.auth_mount, "custom-approle");
+        assert_eq!(overridden_config.vault.mount, "kv-secrets");
+        assert_eq!(overridden_config.vault.path_prefix, "services/status-list");
+        assert_eq!(
+            overridden_config.vault.namespace,
+            Some("tenant-1".to_string())
+        );
+        assert_eq!(overridden_config.vault.timeout_secs, 15);
+
+        // Vault AppRole overrides with secret_id_path
+        let secret_file = std::env::temp_dir().join(format!(
+            "vault_secret_id_test_{}.txt",
+            time::OffsetDateTime::now_utc().nanosecond()
+        ));
+        std::fs::write(&secret_file, "  file-secret-id-value \n").expect("write secret file");
+
+        let file_auth_config = Config::load_from_overrides(&[
+            ("vault.role_id", "my-file-role"),
+            ("vault.secret_id_path", secret_file.to_str().unwrap()),
+        ])
+        .expect("Failed to load file auth config");
+
+        assert_eq!(
+            file_auth_config
+                .vault
+                .resolve_secret_id()
+                .expect("failed to resolve secret_id from path")
+                .expose_secret(),
+            "file-secret-id-value"
+        );
+        let _ = std::fs::remove_file(&secret_file);
     }
 }

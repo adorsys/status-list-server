@@ -1,6 +1,6 @@
 //! Composition root assembling outbound infrastructure adapters and creating the AppState container.
 
-#[cfg(feature = "aws")]
+#[cfg(feature = "aws-secrets")]
 use aws_config::{BehaviorVersion, Region};
 #[cfg(any(
     feature = "acme",
@@ -18,6 +18,7 @@ use sea_orm::ConnectOptions;
 use sea_orm_migration::MigratorTrait;
 #[cfg(any(
     feature = "acme",
+    feature = "vault",
     feature = "sqlite",
     feature = "postgres",
     feature = "mysql"
@@ -26,6 +27,7 @@ use secrecy::ExposeSecret;
 use std::sync::Arc;
 #[cfg(any(
     feature = "acme",
+    feature = "vault",
     feature = "sqlite",
     feature = "postgres",
     feature = "mysql"
@@ -34,7 +36,7 @@ use std::time::Duration;
 #[cfg(feature = "acme")]
 use tracing::warn;
 
-#[cfg(feature = "aws")]
+#[cfg(feature = "aws-secrets")]
 use crate::cert_manager::challenge::AwsRoute53DnsProvider;
 #[cfg(feature = "acme")]
 use crate::cert_manager::challenge::{
@@ -43,9 +45,18 @@ use crate::cert_manager::challenge::{
 };
 #[cfg(feature = "acme")]
 use crate::cert_manager::http_client::DefaultHttpClient;
+#[cfg(all(
+    feature = "acme",
+    not(feature = "vault"),
+    not(feature = "gcp-secrets"),
+    not(feature = "azure-kv"),
+    not(feature = "aws-secrets")
+))]
+use crate::cert_manager::storage::MemoryStorage;
 #[cfg(feature = "acme")]
 use crate::cert_manager::{
-    CertManager, StoreProvisioningStrategy, storage::MemoryStorage, storage::Storage,
+    CertManager, StoreProvisioningStrategy,
+    storage::{CryptoCachePolicy, Storage},
 };
 use crate::config::{Config as AppConfig, DatabaseBackend};
 #[cfg(feature = "acme")]
@@ -56,21 +67,36 @@ use crate::domain::{
     ports::{CertificateProvider, CredentialRepo, StatusListRepo, StatusListSnapshotRepo},
     service::Service,
 };
-#[cfg(feature = "aws")]
-use crate::outbound::aws::{AwsS3, AwsSecretsManager};
+#[cfg(all(
+    feature = "aws-secrets",
+    not(feature = "vault"),
+    not(feature = "gcp-secrets"),
+    not(feature = "azure-kv")
+))]
+use crate::outbound::aws::AwsSecretsManager;
+#[cfg(all(
+    feature = "azure-kv",
+    feature = "acme",
+    not(feature = "vault"),
+    not(feature = "gcp-secrets")
+))]
+use crate::outbound::azure_kv::AzureKeyVaultClient;
 use crate::outbound::cache::MokaStatusListCache;
 #[cfg(feature = "acme")]
 use crate::outbound::cert::AcmeCertificateProvider;
+#[cfg(all(feature = "gcp-secrets", feature = "acme", not(feature = "vault")))]
+use crate::outbound::gcp_secret::GcpSecretManagerClient;
 #[cfg(feature = "memory")]
 use crate::outbound::memory::{MemoryCredentials, MemoryStatusListSnapshotRepo, MemoryStatusLists};
-#[cfg(feature = "redis")]
-use crate::outbound::redis::Redis;
 #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mysql"))]
 use crate::outbound::sql::{
     Migrator, SeaOrmStore, SqlCredentialRepo, SqlStatusListRepo, SqlStatusListSnapshotRepo,
-    verify_innodb_engines,
+    verify_binlog_format, verify_innodb_engines,
 };
+#[cfg(feature = "vault")]
+use crate::outbound::vault::VaultClient;
 use crate::server::AppState;
+use crate::server::health::{AlwaysReady, Readiness};
 
 /// Assembles application configuration, connects outbound repositories, and builds `AppState`.
 #[cfg(feature = "acme")]
@@ -110,6 +136,12 @@ type BuildStateResult = (AppState, Arc<CertManager>);
 type BuildStateResult = (AppState,);
 
 async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
+    // Hoisted DB handle captured from the backend branches below so the
+    // readiness probe can reach the real adapter (the domain ports only expose
+    // the higher-level repositories).
+    #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mysql"))]
+    let mut db_arc: Option<Arc<sea_orm::DatabaseConnection>> = None;
+
     let (status_list_repo, credential_repo, status_list_snapshot): (
         Arc<dyn StatusListRepo>,
         Arc<dyn CredentialRepo>,
@@ -173,7 +205,14 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
                      runbook command to fix the issue.",
             )?;
 
+            verify_binlog_format(&db).await.wrap_err(
+                "Startup aborted: MySQL binary logging is incompatible with the READ COMMITTED \
+                     isolation level this server pins on every write. See the logged error \
+                     above for the fix.",
+            )?;
+
             let db_clone = Arc::new(db);
+            db_arc = Some(db_clone.clone());
             (
                 Arc::new(SqlStatusListRepo::new(SeaOrmStore::new(db_clone.clone()))),
                 Arc::new(SqlCredentialRepo::new(SeaOrmStore::new(db_clone.clone()))),
@@ -198,81 +237,7 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
     ) = {
         let app_env = std::env::var("APP_ENV").unwrap_or(ENV_DEVELOPMENT.to_string());
         let cert_domains = [config.server.domain.as_str()];
-        let (cert_storage, secrets_storage): (Box<dyn Storage>, Box<dyn Storage>) = {
-            #[cfg(feature = "aws")]
-            {
-                if config
-                    .server
-                    .cert
-                    .store
-                    .source
-                    .eq_ignore_ascii_case("aws_secrets_manager")
-                    || !config.aws.s3_bucket.is_empty()
-                {
-                    let aws_config = aws_config::defaults(BehaviorVersion::latest())
-                        .region(Region::new(config.aws.region.clone()))
-                        .load()
-                        .await;
-
-                    let s3 = AwsS3::new(
-                        &aws_config,
-                        &config.aws.s3_bucket,
-                        &config.aws.region,
-                        &config.aws.s3_key_prefix,
-                    );
-
-                    #[cfg(feature = "redis")]
-                    let cert_st: Box<dyn Storage> = {
-                        let redis_uri = config.redis.uri.expose_secret().trim();
-                        let cache_opt = if !redis_uri.is_empty() {
-                            match config.redis.start(None, None, None).await {
-                                Ok(redis_conn) => Some(
-                                    Redis::new(redis_conn).with_ttl(config.redis.cert_cache_ttl),
-                                ),
-                                Err(e) => {
-                                    tracing::warn!(
-                                        "Redis connection failed ({}); certificate cache disabled, falling back to direct S3",
-                                        e
-                                    );
-                                    None
-                                }
-                            }
-                        } else {
-                            None
-                        };
-
-                        match cache_opt {
-                            Some(c) => Box::new(s3.with_cache(c)),
-                            None => Box::new(s3),
-                        }
-                    };
-
-                    #[cfg(not(feature = "redis"))]
-                    let cert_st: Box<dyn Storage> = Box::new(s3);
-
-                    let secrets_st: Box<dyn Storage> = Box::new(
-                        AwsSecretsManager::new(
-                            &aws_config,
-                            Duration::from_secs(config.aws.secrets_cache_ttl),
-                        )
-                        .await?,
-                    );
-                    (cert_st, secrets_st)
-                } else {
-                    (
-                        Box::new(MemoryStorage::default()),
-                        Box::new(MemoryStorage::default()),
-                    )
-                }
-            }
-            #[cfg(not(feature = "aws"))]
-            {
-                (
-                    Box::new(MemoryStorage::default()),
-                    Box::new(MemoryStorage::default()),
-                )
-            }
-        };
+        let material_storage = build_crypto_storage(config).await?;
 
         let cert_strategy = store_certificate_strategy(config)?;
         let uses_acme_strategy = config
@@ -286,9 +251,10 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
             .email(&config.server.cert.email)
             .organization(config.server.cert.organization.as_deref())
             .acme_directory_url(&config.server.cert.acme_directory_url)
-            .cert_storage(cert_storage)
-            .secrets_storage(secrets_storage)
-            .chain_cache_ttl(Duration::from_secs(config.server.cert.chain_cache_ttl))
+            .crypto_cache_policy(CryptoCachePolicy::new(Duration::from_secs(
+                config.server.cert.signing_key_cache_ttl,
+            )))
+            .crypto_storage(material_storage)
             .eku(&config.server.cert.eku);
 
         cert_manager_builder = if uses_acme_strategy {
@@ -356,6 +322,40 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
         cert_provider,
     ));
 
+    // Assemble the readiness probes from the real adapters captured above.
+    let mut readiness = Readiness::default();
+
+    #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mysql"))]
+    {
+        match db_arc {
+            Some(db) => readiness = readiness.with_check(crate::server::health::DbCheck::new(db)),
+            None => readiness = readiness.with_check(AlwaysReady::new("database")),
+        }
+    }
+    #[cfg(not(any(feature = "sqlite", feature = "postgres", feature = "mysql")))]
+    {
+        readiness = readiness.with_check(AlwaysReady::new("database"));
+    }
+
+    // Redis is optional in this setup. Certificate and signing-key material use
+    // the feature-selected cryptographic-material backend, so Redis is intentionally
+    // omitted from readiness gating.
+
+    #[cfg(feature = "acme")]
+    {
+        if let Some(manager) = &cert_manager_opt {
+            readiness =
+                readiness.with_check(crate::server::health::CertStoreCheck::new(manager.clone()));
+        }
+    }
+    #[cfg(not(feature = "acme"))]
+    {
+        readiness = readiness.with_check(crate::server::health::FilesystemCertCheck::new(
+            config.server.cert.store.certificate_path.clone(),
+            config.server.cert.store.signing_key_path.clone(),
+        ));
+    }
+
     let state = AppState {
         service,
         server_domain: config.server.domain.clone(),
@@ -366,6 +366,7 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
         max_statuses_per_request: config.limits.max_statuses_per_request,
         max_serialized_list_size: config.limits.max_serialized_list_size,
         snapshot_retention_secs: config.status_list.snapshot_retention_secs,
+        readiness,
     };
 
     #[cfg(feature = "acme")]
@@ -383,7 +384,7 @@ pub async fn setup_snapshot_cleanup_scheduler(
     cron_schedule: &str,
 ) -> color_eyre::Result<()> {
     use tokio_cron_scheduler::{Job, JobScheduler};
-    use tracing::{error, info};
+    use tracing::{error, info, warn};
 
     if app_state.snapshot_retention_secs == 0 {
         info!(
@@ -408,6 +409,19 @@ pub async fn setup_snapshot_cleanup_scheduler(
                 {
                     Ok(deleted) => {
                         info!("Cleaned up {deleted} historical status list snapshots older than {cutoff}");
+                    }
+                    // Expected, not exceptional: the sweep scans a range of
+                    // `idx_status_list_history_exp` while snapshot inserts write
+                    // into the top of it. The next run retries the lost batch, so
+                    // this must not page.
+                    Err(crate::domain::models::status_list::StatusListError::Contention {
+                        code,
+                    }) => {
+                        warn!(
+                            db.contention_code = code,
+                            "Historical snapshot cleanup lost a lock race; \
+                             the next scheduled run will retry the remaining rows"
+                        );
                     }
                     Err(e) => {
                         error!("Failed to clean up historical snapshots: {e:?}");
@@ -436,6 +450,106 @@ fn acme_dns_credentials(account: &crate::config::AcmeDnsAccount) -> AcmeDnsCrede
 }
 
 #[cfg(feature = "acme")]
+async fn build_crypto_storage(_config: &AppConfig) -> EyeResult<Box<dyn Storage>> {
+    #[cfg(feature = "vault")]
+    {
+        tracing::info!("Using Vault KV v2 as secrets backend");
+        let secret_id = _config.vault.resolve_secret_id()?;
+        Ok(Box::new(
+            VaultClient::builder(&_config.vault.addr, &_config.vault.role_id, secret_id)
+                .auth_mount(&_config.vault.auth_mount)
+                .mount(&_config.vault.mount)
+                .path_prefix(&_config.vault.path_prefix)
+                .namespace(_config.vault.namespace.as_deref())
+                .secrets_cache_ttl(Duration::from_secs(
+                    _config.server.cert.signing_key_cache_ttl,
+                ))
+                .timeout(Duration::from_secs(_config.vault.timeout_secs))
+                .build()
+                .await?,
+        ))
+    }
+
+    #[cfg(all(feature = "gcp-secrets", not(feature = "vault")))]
+    {
+        tracing::info!("Using GCP Secret Manager as secrets backend");
+        Ok(Box::new(
+            GcpSecretManagerClient::builder(&_config.gcp_secret_manager.project_id)
+                .service_account_key(_config.gcp_secret_manager.service_account_key.clone())
+                .service_account_key_path(
+                    _config
+                        .gcp_secret_manager
+                        .service_account_key_path
+                        .as_deref(),
+                )
+                .endpoint(_config.gcp_secret_manager.endpoint.as_deref())
+                .allow_anonymous_credentials(_config.gcp_secret_manager.allow_anonymous_credentials)
+                .secrets_cache_ttl(Duration::from_secs(
+                    _config.server.cert.signing_key_cache_ttl,
+                ))
+                .build()
+                .await?,
+        ))
+    }
+
+    #[cfg(all(
+        feature = "azure-kv",
+        not(feature = "vault"),
+        not(feature = "gcp-secrets")
+    ))]
+    {
+        tracing::info!("Using Azure Key Vault as secrets backend");
+        let vault_url = _config.azure_keyvault.vault_url.clone().ok_or_else(|| {
+            eyre!("Azure Key Vault configuration error: azure_keyvault.vault_url is required when azure-kv is enabled")
+        })?;
+        Ok(Box::new(
+            AzureKeyVaultClient::builder(vault_url)
+                .service_principal(
+                    _config.azure_keyvault.tenant_id.as_deref(),
+                    _config.azure_keyvault.client_id.as_deref(),
+                    _config.azure_keyvault.client_secret.clone(),
+                )
+                .secrets_cache_ttl(Duration::from_secs(
+                    _config.server.cert.signing_key_cache_ttl,
+                ))
+                .build()?,
+        ))
+    }
+
+    #[cfg(all(
+        feature = "aws-secrets",
+        not(feature = "vault"),
+        not(feature = "gcp-secrets"),
+        not(feature = "azure-kv")
+    ))]
+    {
+        tracing::info!("Using AWS Secrets Manager as cryptographic-material backend");
+        let aws_config = aws_config::defaults(BehaviorVersion::latest())
+            .region(Region::new(_config.aws.region.clone()))
+            .load()
+            .await;
+        Ok(Box::new(
+            AwsSecretsManager::new(
+                &aws_config,
+                Duration::from_secs(_config.server.cert.signing_key_cache_ttl),
+            )
+            .await?,
+        ))
+    }
+
+    #[cfg(not(any(
+        feature = "vault",
+        feature = "gcp-secrets",
+        feature = "azure-kv",
+        feature = "aws-secrets"
+    )))]
+    {
+        tracing::info!("Using in-memory cryptographic-material backend");
+        Ok(Box::new(MemoryStorage::default()))
+    }
+}
+
+#[cfg(feature = "acme")]
 fn store_certificate_strategy(config: &AppConfig) -> EyeResult<Option<StoreProvisioningStrategy>> {
     let cert_config = &config.server.cert;
     if cert_config
@@ -455,57 +569,33 @@ fn store_certificate_strategy(config: &AppConfig) -> EyeResult<Option<StoreProvi
         ));
     }
 
-    match cert_config.store.source.as_str() {
-        source if source.eq_ignore_ascii_case("filesystem") => {
-            let certificate_path = cert_config
-                .store
-                .certificate_path
-                .as_deref()
-                .ok_or_else(|| {
-                    eyre!(
-                        "server.cert.store.certificate_path is required for filesystem store provisioning"
-                    )
-                })?;
-            let signing_key_path = cert_config
-                .store
-                .signing_key_path
-                .as_deref()
-                .ok_or_else(|| {
-                    eyre!(
-                        "server.cert.store.signing_key_path is required for filesystem store provisioning"
-                    )
-                })?;
-            Ok(Some(StoreProvisioningStrategy::filesystem(
-                certificate_path,
-                signing_key_path,
-            )))
-        }
-        source if source.eq_ignore_ascii_case("aws_secrets_manager") => {
-            let certificate_key = cert_config
-                .store
-                .certificate_key
-                .as_deref()
-                .ok_or_else(|| {
-                    eyre!(
-                        "server.cert.store.certificate_key is required for aws_secrets_manager store provisioning"
-                    )
-                })?;
-            let signing_key_key = cert_config
-                .store
-                .signing_key_key
-                .as_deref()
-                .ok_or_else(|| {
-                    eyre!(
-                        "server.cert.store.signing_key_key is required for aws_secrets_manager store provisioning"
-                    )
-                })?;
-            Ok(Some(StoreProvisioningStrategy::secrets_storage(
-                certificate_key,
-                signing_key_key,
-            )))
-        }
-        unsupported => Err(eyre!(
-            "unsupported certificate store source '{unsupported}'; expected 'filesystem' or 'aws_secrets_manager'"
+    let filesystem = (
+        cert_config.store.certificate_path.as_deref(),
+        cert_config.store.signing_key_path.as_deref(),
+    );
+    let storage = (
+        cert_config.store.certificate_key.as_deref(),
+        cert_config.store.signing_key_key.as_deref(),
+    );
+
+    match (filesystem, storage) {
+        ((Some(certificate_path), Some(signing_key_path)), (None, None)) => Ok(Some(
+            StoreProvisioningStrategy::filesystem(certificate_path, signing_key_path),
+        )),
+        ((None, None), (Some(certificate_key), Some(signing_key_key))) => Ok(Some(
+            StoreProvisioningStrategy::storage(certificate_key, signing_key_key),
+        )),
+        ((Some(_), Some(_)), (Some(_), Some(_))) => Err(eyre!(
+            "store provisioning must configure either filesystem paths or material backend keys, not both"
+        )),
+        ((Some(_), None) | (None, Some(_)), _) => Err(eyre!(
+            "filesystem store provisioning requires both server.cert.store.certificate_path and server.cert.store.signing_key_path"
+        )),
+        (_, (Some(_), None) | (None, Some(_))) => Err(eyre!(
+            "storage-backed store provisioning requires both server.cert.store.certificate_key and server.cert.store.signing_key_key"
+        )),
+        ((None, None), (None, None)) => Err(eyre!(
+            "store provisioning requires either filesystem paths or material backend keys"
         )),
     }
 }
@@ -517,7 +607,7 @@ async fn build_dns_challenge_handler(
     cert_domains: &[&str],
 ) -> EyeResult<Dns01Handler> {
     let handler = match provider {
-        #[cfg(feature = "aws")]
+        #[cfg(feature = "aws-secrets")]
         ResolvedDnsProvider::Route53 => {
             let aws_config = aws_config::defaults(BehaviorVersion::latest())
                 .region(Region::new(config.aws.region.clone()))
@@ -525,10 +615,10 @@ async fn build_dns_challenge_handler(
                 .await;
             Dns01Handler::new(AwsRoute53DnsProvider::new(&aws_config))
         }
-        #[cfg(not(feature = "aws"))]
+        #[cfg(not(feature = "aws-secrets"))]
         ResolvedDnsProvider::Route53 => {
             return Err(eyre!(
-                "Route53 DNS provider requested, but 'aws' feature is disabled at compile time."
+                "Route53 DNS provider requested, but 'aws-secrets' feature is disabled at compile time."
             ));
         }
         ResolvedDnsProvider::Cloudflare(cfg) => {
@@ -587,7 +677,6 @@ mod tests {
         AcmeDnsConfig, AzureDnsConfig, CloudflareDnsConfig, DnsProviderKind, ENV_PRODUCTION,
         GcloudDnsConfig,
     };
-    use sealed_test::prelude::*;
 
     fn build_dns_challenge_handler(
         provider: DnsProviderKind,
@@ -605,13 +694,13 @@ mod tests {
             ))
     }
 
-    #[sealed_test]
+    #[test]
     fn builds_handler_for_each_configured_provider() {
-        let mut config = AppConfig::load().expect("Failed to load config");
+        let mut config = AppConfig::load_from_overrides(&[]).expect("Failed to load config");
         let domain = config.server.domain.clone();
         let domains = [domain.as_str()];
 
-        #[cfg(feature = "aws")]
+        #[cfg(feature = "aws-secrets")]
         assert!(
             build_dns_challenge_handler(DnsProviderKind::Route53, &mut config, &domains).is_ok()
         );
@@ -665,24 +754,54 @@ mod tests {
 #[cfg(test)]
 mod general_tests {
     use super::*;
-    use sealed_test::prelude::*;
 
-    /// Verifies that build_state succeeds with AppConfig::load() defaults under
+    /// Verifies that build_state succeeds with AppConfig::load_from_overrides defaults under
     /// the default feature set, catching missing test_data/ or config mismatch issues.
     /// When SQL features are enabled, uses memory backend to avoid requiring a real database.
-    #[sealed_test(env = [
-        ("APP_ENV", "development"),
-        ("APP_DATABASE__BACKEND", "memory"),
-        ("APP_DATABASE__URL", "")
-    ])]
-    fn build_state_succeeds_under_default_config() {
+    #[tokio::test]
+    async fn build_state_succeeds_under_default_config() {
         let _ = rustls::crypto::ring::default_provider().install_default();
-        let config = AppConfig::load().expect("Failed to load config");
-        tokio::runtime::Runtime::new().unwrap().block_on(async {
-            if let Err(ref e) = build_state(&config).await {
-                panic!("build_state failed under default configuration: {e:?}");
-            }
-        });
+        #[cfg(feature = "vault")]
+        let mock_vault = {
+            let server = wiremock::MockServer::start().await;
+            wiremock::Mock::given(wiremock::matchers::method("POST"))
+                .and(wiremock::matchers::path("/v1/auth/approle/login"))
+                .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(
+                    serde_json::json!({
+                        "auth": {
+                            "client_token": "s.mock-token",
+                            "lease_duration": 3600,
+                            "renewable": true
+                        }
+                    }),
+                ))
+                .mount(&server)
+                .await;
+            server
+        };
+
+        let config = AppConfig::load_from_overrides(&[
+            ("APP_DATABASE__BACKEND", "memory"),
+            ("APP_DATABASE__URL", "memory:"),
+            #[cfg(feature = "vault")]
+            ("APP_VAULT__ADDR", &mock_vault.uri()),
+            #[cfg(feature = "vault")]
+            ("APP_VAULT__ROLE_ID", "test-role"),
+            #[cfg(feature = "vault")]
+            ("APP_VAULT__SECRET_ID", "test-secret"),
+            #[cfg(feature = "gcp-secrets")]
+            ("APP_GCP_SECRET_MANAGER__PROJECT_ID", "test-project"),
+            #[cfg(feature = "azure-kv")]
+            (
+                "APP_AZURE_KEYVAULT__VAULT_URL",
+                "https://test.vault.azure.net/",
+            ),
+        ])
+        .expect("Failed to load config");
+
+        if let Err(ref e) = build_state(&config).await {
+            panic!("build_state failed under default configuration: {e:?}");
+        }
     }
 
     /// Verifies that a saturated pool returns an error within `acquire_timeout`
@@ -717,9 +836,16 @@ mod general_tests {
             )
         };
 
+        // sea-orm folds `connect_timeout` and `acquire_timeout` onto sqlx's
+        // single `PoolOptions::acquire_timeout`, and pool construction opens a
+        // connection eagerly under it — so this bound also caps the initial
+        // handshake, which exceeds a second on some hosts (Docker Desktop on
+        // Windows). Sized to clear that while staying under the holder's 10s.
+        const ACQUIRE_TIMEOUT: Duration = Duration::from_secs(5);
+
         let mut opt = ConnectOptions::new(db_url);
         opt.max_connections(1)
-            .acquire_timeout(Duration::from_secs(1))
+            .acquire_timeout(ACQUIRE_TIMEOUT)
             .sqlx_logging(false);
 
         let db = std::sync::Arc::new(
@@ -746,9 +872,20 @@ mod general_tests {
         let elapsed = start.elapsed();
 
         assert!(result.is_err(), "Expected pool-exhaustion error, got Ok");
+        // Lower bound: the failure came from the acquire timeout, not an
+        // unrelated early error.
         assert!(
-            elapsed < Duration::from_secs(3),
-            "acquire_timeout did not fire quickly enough: {elapsed:?}"
+            elapsed >= ACQUIRE_TIMEOUT,
+            "failed before acquire_timeout could fire, so the error was not \
+             pool exhaustion: {elapsed:?}"
+        );
+        // Upper bound: it gave up instead of queueing behind the holder's 10s
+        // query. Sized against that 10s, leaving headroom for jitter.
+        const UPPER_BOUND: Duration = Duration::from_secs(8);
+        assert!(
+            elapsed < UPPER_BOUND,
+            "acquire_timeout did not fire quickly enough, so the acquire queued \
+             behind the holder rather than giving up: {elapsed:?}"
         );
     }
 }

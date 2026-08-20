@@ -38,7 +38,7 @@ scenarios:
     weight: 30
     flow:
       - get:
-          url: "/health"
+          url: "/health/live"
           expect:
             - statusCode: 200
             - contentType: text/plain; charset=utf-8
