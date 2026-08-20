@@ -3,7 +3,14 @@ changelog_path = "./CHANGELOG.md"
 changelog_config = "cliff.toml"
 release_always = false
 semver_check = false
+# For an initial release without a matching tag, create a one-commit baseline.
+# After the first tag is created, release-plz automatically uses commits since that tag.
+max_analyze_commits = 1
+
+[[package]]
+name = "status-list-server"
 publish = false
+git_only = true
 
 git_release_body = """
 {{ changelog }}
