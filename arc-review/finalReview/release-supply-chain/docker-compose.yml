@@ -1,0 +1,14 @@
+services:
+  release-supply-chain-poc:
+    image: python:3.12-alpine
+    working_dir: /repo
+    network_mode: none
+    read_only: true
+    command:
+      - python3
+      - arc-review/finalReview/release-supply-chain/poc_release_supply_chain.py
+      - --repo
+      - /repo
+      - --confirm-read-only
+    volumes:
+      - ../../..:/repo:ro

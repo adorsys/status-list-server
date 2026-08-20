@@ -1,0 +1,40 @@
+services:
+  db:
+    image: postgres:18.4
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: status-list
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d status-list"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+
+  app:
+    build:
+      context: ../../..
+      dockerfile: Dockerfile
+      args:
+        FEATURES: postgres
+    environment:
+      APP_TELEMETRY__ENABLED: "false"
+      APP_SERVER__HOST: 0.0.0.0
+      APP_SERVER__PORT: "8000"
+      APP_SERVER__CERT__PROVISIONING_STRATEGY: store
+      APP_SERVER__CERT__STORE__SOURCE: filesystem
+      APP_SERVER__CERT__STORE__CERTIFICATE_PATH: /certs/test_cert.pem
+      APP_SERVER__CERT__STORE__SIGNING_KEY_PATH: /certs/ec-private.pem
+      APP_DATABASE__URL: postgres://postgres:postgres@db:5432/status-list
+      APP_DATABASE__BACKEND: postgres
+      APP_CACHE__TTL: "0"
+      APP_RATE_LIMIT__STRICT_BURST_SIZE: "100"
+      APP_RATE_LIMIT__PERMISSIVE_BURST_SIZE: "1000"
+      RUST_LOG: info
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:18007:8000"
+    volumes:
+      - ../../../test_data:/certs:ro

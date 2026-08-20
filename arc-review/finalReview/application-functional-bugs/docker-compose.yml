@@ -1,0 +1,76 @@
+x-app-environment: &app-environment
+  APP_TELEMETRY__ENABLED: "false"
+  APP_SERVER__HOST: 0.0.0.0
+  APP_SERVER__PORT: "8000"
+  APP_SERVER__CERT__PROVISIONING_STRATEGY: store
+  APP_SERVER__CERT__STORE__SOURCE: filesystem
+  APP_SERVER__CERT__STORE__CERTIFICATE_PATH: /certs/test_cert.pem
+  APP_SERVER__CERT__STORE__SIGNING_KEY_PATH: /certs/ec-private.pem
+  APP_DATABASE__URL: postgres://postgres:postgres@db:5432/status-list
+  APP_DATABASE__BACKEND: postgres
+  APP_CACHE__TTL: "300"
+  APP_STATUS_LIST__TOKEN_EXP_SECS: "4"
+  APP_STATUS_LIST__TOKEN_TTL_SECS: "1"
+  APP_RATE_LIMIT__STRICT_BURST_SIZE: "100"
+  APP_RATE_LIMIT__PERMISSIVE_BURST_SIZE: "1000"
+  RUST_LOG: info
+
+x-app: &app
+  build:
+    context: ../../..
+    dockerfile: Dockerfile
+    args:
+      FEATURES: postgres
+  environment: *app-environment
+  volumes:
+    - ../../../test_data:/certs:ro
+
+services:
+  db:
+    image: postgres:18.4
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: status-list
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d status-list"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+
+  app-a:
+    <<: *app
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:18004:8000"
+
+  wait-app-a:
+    image: busybox:1.37
+    depends_on:
+      app-a:
+        condition: service_started
+    command:
+      - sh
+      - -c
+      - until wget -q -O /dev/null http://app-a:8000/health; do sleep 1; done
+
+  app-b:
+    <<: *app
+    depends_on:
+      wait-app-a:
+        condition: service_completed_successfully
+    ports:
+      - "127.0.0.1:18005:8000"
+
+  broken-signer:
+    <<: *app
+    environment:
+      <<: *app-environment
+      APP_SERVER__CERT__STORE__CERTIFICATE_PATH: /certs/intentionally-missing.pem
+    depends_on:
+      wait-app-a:
+        condition: service_completed_successfully
+    ports:
+      - "127.0.0.1:18006:8000"
