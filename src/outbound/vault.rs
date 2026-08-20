@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 use tracing::{info, warn};
 
-use crate::cert_manager::storage::{Storage, StorageError};
+use crate::cert_manager::storage::{Storage, StorageError, normalize_key};
 
 /// Vault / OpenBao KV v2 storage adapter.
 ///
@@ -85,12 +85,13 @@ impl VaultClient {
     /// percent-encode each path segment so that characters such as `?`, `#`,
     /// or spaces cannot corrupt the HTTP request URL.
     fn qualify_key(&self, key: &str) -> String {
+        let normalized = normalize_key(key);
         let raw = if self.path_prefix.is_empty() {
-            key.to_string()
+            normalized
         } else if self.path_prefix.ends_with('/') {
-            format!("{}{}", self.path_prefix, key)
+            format!("{}{}", self.path_prefix, normalized)
         } else {
-            format!("{}/{}", self.path_prefix, key)
+            format!("{}/{}", self.path_prefix, normalized)
         };
         raw.split('/')
             .map(Self::encode_path_segment)

@@ -4,8 +4,10 @@ The server stores lifecycle-coupled cryptographic material in one backend by def
 
 The supported backends include:
 
-- **HashiCorp Vault / OpenBao**
-- **AWS Secrets Manager**
+- **HashiCorp Vault / OpenBao** (KV v2 engine, feature flag: `vault`)
+- **GCP Secret Manager** (feature flag: `gcp-secrets`)
+- **Azure Key Vault** (feature flag: `azure-kv`)
+- **AWS Secrets Manager** (feature flag: `aws-secrets`)
 - **In-Memory** (for development and testing)
 
 Backend selection is controlled by enabled Cargo features. Builds with `vault` use Vault/OpenBao. Builds with `aws-secrets` and without `vault` use AWS Secrets Manager. Builds without either backend feature use in-memory storage for local development and tests.
@@ -196,6 +198,106 @@ Vault authentication and token operations emit OpenTelemetry counters for succes
 - Certificate material stays cached until provisioning or renewal invalidates it.
 - Signing-key material reads are controlled consistently across backends by `APP_SERVER__CERT__SIGNING_KEY_CACHE_TTL`.
 - To require every private-key read to query the selected material backend, keep `APP_SERVER__CERT__SIGNING_KEY_CACHE_TTL=0`.
+
+## GCP Secret Manager
+
+When compiled with the `gcp-secrets` feature flag, secrets are stored in GCP Secret Manager.
+
+### Configuration Variables
+
+| Variable                                              | Type              | Default                          | Description                                                                    |
+| ----------------------------------------------------- | ----------------- | -------------------------------- | ------------------------------------------------------------------------------ |
+| `APP_GCP_SECRET_MANAGER__PROJECT_ID`                  | String            | _(Required when GCP is enabled)_ | GCP Project ID where secrets are hosted                                        |
+| `APP_GCP_SECRET_MANAGER__SERVICE_ACCOUNT_KEY`         | String (JSON)     | `None`                           | Optional inline service account JSON key string                                |
+| `APP_GCP_SECRET_MANAGER__SERVICE_ACCOUNT_KEY_PATH`    | String            | `None`                           | Optional filepath to service account JSON key file                             |
+| `APP_GCP_SECRET_MANAGER__ENDPOINT`                    | String (URL)      | `None`                           | Optional custom endpoint (for regional endpoints, VPC-SC, or emulator testing) |
+| `APP_GCP_SECRET_MANAGER__ALLOW_ANONYMOUS_CREDENTIALS` | Boolean           | `false`                          | Allow anonymous credentials without ADC (for local emulator/testing only)      |
+| `APP_SERVER__CERT__SIGNING_KEY_CACHE_TTL`             | Integer (seconds) | `300` (5 minutes)                | In-memory cache TTL in seconds. Set to `0` to disable caching.                 |
+
+### Authentication & IAM Permissions
+
+By default, authentication uses **Application Default Credentials (ADC)** (discovering environment credentials via `GOOGLE_APPLICATION_CREDENTIALS`, GKE workload identity, or Compute Engine metadata server).
+
+#### Least-Privilege IAM Roles
+
+Avoid granting broad project-level `roles/secretmanager.admin` (which permits modifying IAM policies on all secrets). Instead, use the combination of built-in least-privilege roles or a custom role:
+
+##### Option 1: Built-in Predefined Roles (Recommended)
+
+- `roles/secretmanager.secretAccessor`: Access secret payload data (`secretmanager.versions.access`).
+- `roles/secretmanager.secretVersionManager`: Add new secret versions (`secretmanager.versions.add`).
+- `roles/secretmanager.viewer`: Read secret metadata and support readiness health check probes (`secretmanager.secrets.get`).
+
+##### Option 2: Custom Role (Least-Privilege for Full Lifecycle)
+
+If the server manages the creation and deletion of secret containers directly, create a custom IAM role restricted to the following permissions:
+
+```yaml
+title: "Status List Server Secrets Operator"
+stage: "GA"
+includedPermissions:
+  - secretmanager.secrets.get
+  - secretmanager.secrets.create
+  - secretmanager.secrets.delete
+  - secretmanager.versions.add
+  - secretmanager.versions.access
+  - secretmanager.versions.list
+```
+
+### Example `.env` Configuration
+
+```env
+APP_GCP_SECRET_MANAGER__PROJECT_ID=my-gcp-project-123
+APP_SERVER__CERT__SIGNING_KEY_CACHE_TTL=300
+GOOGLE_APPLICATION_CREDENTIALS=/path/to/credentials.json
+```
+
+## Azure Key Vault
+
+When compiled with the `azure-kv` feature flag, secrets are stored in Azure Key Vault.
+
+### Configuration Variables
+
+| Variable                                  | Type              | Default                               | Description                                                    |
+| ----------------------------------------- | ----------------- | ------------------------------------- | -------------------------------------------------------------- |
+| `APP_AZURE_KEYVAULT__VAULT_URL`           | String            | \_(Required when Azure KV is enabled) | Azure Key Vault URL (e.g. `https://my-vault.vault.azure.net/`) |
+| `APP_AZURE_KEYVAULT__TENANT_ID`           | String            | `None`                                | Azure AD Tenant ID (for service principal auth)                |
+| `APP_AZURE_KEYVAULT__CLIENT_ID`           | String            | `None`                                | Azure AD Client ID (for service principal auth)                |
+| `APP_AZURE_KEYVAULT__CLIENT_SECRET`       | String            | `None`                                | Azure AD Client Secret (for service principal auth)            |
+| `APP_SERVER__CERT__SIGNING_KEY_CACHE_TTL` | Integer (seconds) | `300` (5 minutes)                     | In-memory cache TTL in seconds. Set to `0` to disable caching. |
+
+### Authentication & RBAC Permissions
+
+The Azure Key Vault must be configured to use the **Azure role-based access control (Azure RBAC)** permission model (recommended) or legacy access policies.
+
+#### Authentication Methods
+
+1. **Explicit Service Principal**: Configure `APP_AZURE_KEYVAULT__TENANT_ID`, `APP_AZURE_KEYVAULT__CLIENT_ID`, and `APP_AZURE_KEYVAULT__CLIENT_SECRET`.
+2. **Workload Identity (AKS)**: In Azure Kubernetes Service with Workload Identity enabled, credentials are automatically resolved via `AZURE_FEDERATED_TOKEN_FILE`, `AZURE_CLIENT_ID`, and `AZURE_TENANT_ID`.
+3. **Managed Identity**: In Azure VM, App Service, or Container Apps environments, credentials are automatically resolved via the Managed Identity service.
+4. **Developer Tools**: In local environments, credentials are automatically resolved from the Azure CLI (`az login`).
+
+#### Required Roles & Permissions
+
+- **Key Vault Secrets Officer** built-in RBAC role (recommended for full CRUD access on secrets).
+- Or a custom role with the following data actions:
+  - `Microsoft.KeyVault/vaults/secrets/getSecret/action`
+  - `Microsoft.KeyVault/vaults/secrets/setSecret/action`
+  - `Microsoft.KeyVault/vaults/secrets/deleteSecret/action`
+  - `Microsoft.KeyVault/vaults/secrets/purge/action` (optional, to permanently purge soft-deleted secrets so their names can be reused immediately)
+
+> [!NOTE]
+> Azure Key Vault has soft-delete enabled by default. When a secret is deleted, the adapter attempts to purge it immediately if the identity has purge permissions and purge protection is not enforced on the vault.
+
+### Example `.env` Configuration
+
+```env
+APP_AZURE_KEYVAULT__VAULT_URL=https://prod-vault.vault.azure.net/
+APP_AZURE_KEYVAULT__TENANT_ID=00000000-0000-0000-0000-000000000000
+APP_AZURE_KEYVAULT__CLIENT_ID=11111111-1111-1111-1111-111111111111
+APP_AZURE_KEYVAULT__CLIENT_SECRET=supersecret
+APP_SERVER__CERT__SIGNING_KEY_CACHE_TTL=300
+```
 
 ## AWS Secrets Manager
 

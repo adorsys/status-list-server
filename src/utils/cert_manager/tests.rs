@@ -95,20 +95,20 @@ impl Storage for CreateIfAbsentStorage {
 #[async_trait]
 impl Storage for MockStorage {
     async fn store(&self, key: &str, value: &str) -> Result<(), StorageError> {
-        self.data
-            .lock()
-            .await
-            .insert(key.to_string(), value.to_string());
+        let key = storage::normalize_key(key);
+        self.data.lock().await.insert(key, value.to_string());
         Ok(())
     }
 
     async fn load(&self, key: &str) -> Result<Option<String>, StorageError> {
+        let key = storage::normalize_key(key);
         self.load_count.fetch_add(1, Ordering::Relaxed);
-        Ok(self.data.lock().await.get(key).cloned())
+        Ok(self.data.lock().await.get(&key).cloned())
     }
 
     async fn delete(&self, key: &str) -> Result<(), StorageError> {
-        self.data.lock().await.remove(key);
+        let key = storage::normalize_key(key);
+        self.data.lock().await.remove(&key);
         Ok(())
     }
 }
