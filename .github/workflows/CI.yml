@@ -261,10 +261,64 @@ jobs:
           helm repo add open-telemetry https://open-telemetry.github.io/opentelemetry-helm-charts
           helm dependency build helm/chart
 
-      - name: Render Helm template
+      - name: Render Helm templates
         run: |
           mkdir -p /tmp/rendered
-          helm template status-list-server helm/chart -f helm/chart/values.yaml --output-dir /tmp/rendered
+          helm template status-list-server helm/chart -f helm/chart/values.yaml --output-dir /tmp/rendered/default
+          helm template status-list-server helm/chart --set serviceAccount.create=false --output-dir /tmp/rendered/no-sa
+          helm template status-list-server helm/chart --set statuslist.aws.mountCredentials=true --output-dir /tmp/rendered/legacy-creds
+          helm template status-list-server helm/chart --set secretStore.provider=vault --output-dir /tmp/rendered/vault
+          helm template status-list-server helm/chart --set secretStore.provider=gcp --output-dir /tmp/rendered/gcp
+          # Azure Workload Identity: ESO uses its own ServiceAccount, not the app KSA.
+          helm template status-list-server helm/chart \
+            --set secretStore.provider=azure \
+            --set secretStore.azure.authType=WorkloadIdentity \
+            --set secretStore.azure.serviceAccountRef.name=eso-controller-sa \
+            --output-dir /tmp/rendered/azure
+          helm template status-list-server helm/chart \
+            --set secretStore.provider=raw \
+            --set-string secretStore.raw.provider.webhook.severity=high \
+            --output-dir /tmp/rendered/raw
+          helm template status-list-server helm/chart \
+            --set externalSecret.enabled=false \
+            --set statuslist.fallbackSecret.enabled=true \
+            --set-string statuslist.fallbackSecret.stringData.postgres-password=x \
+            --output-dir /tmp/rendered/fallback
+          # Scaling readiness: opt-in HPA + PDB.
+          helm template status-list-server helm/chart \
+            --set autoscaling.enabled=true \
+            --set podDisruptionBudget.enabled=true \
+            --output-dir /tmp/rendered/scaling
+
+          # Negative render tests: invalid provider and empty raw:{} must fail closed.
+          if helm template status-list-server helm/chart --set secretStore.provider=invalid >/dev/null 2>&1; then
+            echo "ERROR: provider=invalid should fail"; exit 1
+          fi
+          if helm template status-list-server helm/chart --set secretStore.provider=raw >/dev/null 2>&1; then
+            echo "ERROR: provider=raw with empty secretStore.raw should fail"; exit 1
+          fi
+          # Contradictory modes: ESO disabled but SecretStore enabled must not render a SecretStore.
+          if helm template status-list-server helm/chart \
+              --set externalSecret.enabled=false \
+              --set secretStore.enabled=true 2>/dev/null | grep -q "kind: SecretStore"; then
+            echo "ERROR: no-ESO mode must not render a SecretStore CR"; exit 1
+          fi
+
+          # Upgrade render test: legacy secretStore.aws.region must be preserved for APP_AWS__REGION.
+          REGION=$(helm template status-list-server helm/chart --set secretStore.aws.region=us-west-2 \
+            | grep -A1 'name: APP_AWS__REGION' | grep 'value:' | sed -E 's/.*value: "?([^"]*)"?.*/\1/')
+          if [ "$REGION" != "us-west-2" ]; then
+            echo "ERROR: APP_AWS__REGION should fall back to legacy secretStore.aws.region, got '$REGION'"; exit 1
+          fi
+          # Upgrade render test: custom fallback secret name must propagate to the Deployment secretKeyRef.
+          if ! helm template status-list-server helm/chart \
+              --set externalSecret.enabled=false \
+              --set statuslist.fallbackSecret.enabled=true \
+              --set statuslist.fallbackSecret.name=mycustomsecret \
+              --set-string statuslist.fallbackSecret.stringData.postgres-password=x 2>/dev/null \
+              | grep -q 'name: mycustomsecret'; then
+            echo "ERROR: custom fallback secret name not propagated"; exit 1
+          fi
 
       - name: Run Trivy config scan
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
@@ -292,10 +346,64 @@ jobs:
           helm repo add open-telemetry https://open-telemetry.github.io/opentelemetry-helm-charts
           helm dependency build helm/chart
 
-      - name: Render Helm template
+      - name: Render Helm templates
         run: |
           mkdir -p /tmp/rendered
-          helm template status-list-server helm/chart -f helm/chart/values.yaml --output-dir /tmp/rendered
+          helm template status-list-server helm/chart -f helm/chart/values.yaml --output-dir /tmp/rendered/default
+          helm template status-list-server helm/chart --set serviceAccount.create=false --output-dir /tmp/rendered/no-sa
+          helm template status-list-server helm/chart --set statuslist.aws.mountCredentials=true --output-dir /tmp/rendered/legacy-creds
+          helm template status-list-server helm/chart --set secretStore.provider=vault --output-dir /tmp/rendered/vault
+          helm template status-list-server helm/chart --set secretStore.provider=gcp --output-dir /tmp/rendered/gcp
+          # Azure Workload Identity: ESO uses its own ServiceAccount, not the app KSA.
+          helm template status-list-server helm/chart \
+            --set secretStore.provider=azure \
+            --set secretStore.azure.authType=WorkloadIdentity \
+            --set secretStore.azure.serviceAccountRef.name=eso-controller-sa \
+            --output-dir /tmp/rendered/azure
+          helm template status-list-server helm/chart \
+            --set secretStore.provider=raw \
+            --set-string secretStore.raw.provider.webhook.severity=high \
+            --output-dir /tmp/rendered/raw
+          helm template status-list-server helm/chart \
+            --set externalSecret.enabled=false \
+            --set statuslist.fallbackSecret.enabled=true \
+            --set-string statuslist.fallbackSecret.stringData.postgres-password=x \
+            --output-dir /tmp/rendered/fallback
+          # Scaling readiness: opt-in HPA + PDB.
+          helm template status-list-server helm/chart \
+            --set autoscaling.enabled=true \
+            --set podDisruptionBudget.enabled=true \
+            --output-dir /tmp/rendered/scaling
+
+          # Negative render tests: invalid provider and empty raw:{} must fail closed.
+          if helm template status-list-server helm/chart --set secretStore.provider=invalid >/dev/null 2>&1; then
+            echo "ERROR: provider=invalid should fail"; exit 1
+          fi
+          if helm template status-list-server helm/chart --set secretStore.provider=raw >/dev/null 2>&1; then
+            echo "ERROR: provider=raw with empty secretStore.raw should fail"; exit 1
+          fi
+          # Contradictory modes: ESO disabled but SecretStore enabled must not render a SecretStore.
+          if helm template status-list-server helm/chart \
+              --set externalSecret.enabled=false \
+              --set secretStore.enabled=true 2>/dev/null | grep -q "kind: SecretStore"; then
+            echo "ERROR: no-ESO mode must not render a SecretStore CR"; exit 1
+          fi
+
+          # Upgrade render test: legacy secretStore.aws.region must be preserved for APP_AWS__REGION.
+          REGION=$(helm template status-list-server helm/chart --set secretStore.aws.region=us-west-2 \
+            | grep -A1 'name: APP_AWS__REGION' | grep 'value:' | sed -E 's/.*value: "?([^"]*)"?.*/\1/')
+          if [ "$REGION" != "us-west-2" ]; then
+            echo "ERROR: APP_AWS__REGION should fall back to legacy secretStore.aws.region, got '$REGION'"; exit 1
+          fi
+          # Upgrade render test: custom fallback secret name must propagate to the Deployment secretKeyRef.
+          if ! helm template status-list-server helm/chart \
+              --set externalSecret.enabled=false \
+              --set statuslist.fallbackSecret.enabled=true \
+              --set statuslist.fallbackSecret.name=mycustomsecret \
+              --set-string statuslist.fallbackSecret.stringData.postgres-password=x 2>/dev/null \
+              | grep -q 'name: mycustomsecret'; then
+            echo "ERROR: custom fallback secret name not propagated"; exit 1
+          fi
 
       - name: Run KubeLinter
         uses: stackrox/kube-linter-action@87802a2f4e01abebb3ee3c67a3002fea71f6eae5 # v1.0.7
