@@ -63,6 +63,36 @@ Create the name of the service account to use
 {{- end }}
 
 {{/*
+Effective name of the Kubernetes Secret the application reads (postgres/redis passwords).
+When External Secrets Operator is enabled this is the ExternalSecret target name;
+otherwise it is the fallback Secret name (defaults to "statuslist-secret").
+Centralised here so the Deployment, PostgreSQL, and Redis all reference a single name.
+*/}}
+{{- define "status-list-server-chart.appSecretName" -}}
+{{- if .Values.externalSecret.enabled }}
+{{- .Values.externalSecret.spec.target.name }}
+{{- else }}
+{{- .Values.statuslist.fallbackSecret.name | default "statuslist-secret" }}
+{{- end }}
+{{- end }}
+
+{{/*
+Effective AWS region for the application (renders APP_AWS__REGION).
+Preference: explicit statuslist.aws.region, then legacy secretStore.aws.region
+(upgrade-compatible fallback), then a final default so new installs keep working.
+*/}}
+{{- define "status-list-server-chart.appRegion" -}}
+{{- $r := .Values.statuslist.aws.region }}
+{{- if not $r }}
+{{- $r = .Values.secretStore.aws.region }}
+{{- end }}
+{{- if not $r }}
+{{- $r = "eu-central-1" }}
+{{- end }}
+{{- $r }}
+{{- end }}
+
+{{/*
 Resolve the Redis connection URI based on chart values.
 */}}
 {{- define "status-list-server-chart.redisUri" -}}
