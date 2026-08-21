@@ -1,0 +1,138 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "properties": {
+    "serviceAccount": {
+      "type": "object",
+      "properties": {
+        "create": { "type": "boolean" },
+        "name": { "type": "string" },
+        "automountServiceAccountToken": { "type": "boolean" },
+        "annotations": { "type": "object" },
+        "labels": { "type": "object" }
+      }
+    },
+    "statuslist": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "replicaCount": { "type": "integer" },
+        "podLabels": { "type": "object" },
+        "aws": {
+          "type": "object",
+          "properties": {
+            "mountCredentials": { "type": "boolean" },
+            "region": { "type": "string" }
+          }
+        },
+        "fallbackSecret": {
+          "type": "object",
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "name": { "type": "string" },
+            "stringData": {
+              "type": "object",
+              "additionalProperties": { "type": "string" }
+            }
+          }
+        }
+      }
+    },
+    "externalSecret": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "spec": {
+          "type": "object",
+          "properties": {
+            "secretStoreRef": {
+              "type": "object",
+              "properties": {
+                "name": { "type": "string" },
+                "kind": { "type": "string" }
+              }
+            },
+            "target": {
+              "type": "object",
+              "properties": {
+                "name": { "type": "string" },
+                "creationPolicy": { "type": "string" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "secretStore": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "provider": {
+          "type": "string",
+          "enum": ["aws", "vault", "gcp", "azure", "raw"]
+        },
+        "aws": {
+          "type": "object",
+          "properties": {
+            "service": { "type": "string" },
+            "region": { "type": "string" }
+          }
+        },
+        "vault": {
+          "type": "object",
+          "properties": {
+            "server": { "type": "string" },
+            "path": { "type": "string" },
+            "auth": { "type": "object" }
+          }
+        },
+        "gcp": {
+          "type": "object",
+          "properties": {
+            "projectID": { "type": "string" },
+            "auth": { "type": "object" }
+          }
+        },
+        "azure": {
+          "type": "object",
+          "properties": {
+            "tenantId": { "type": "string" },
+            "clientId": { "type": "string" },
+            "vaultUrl": { "type": "string" },
+            "authType": { "type": "string" },
+            "serviceAccountRef": {
+              "type": "object",
+              "properties": {
+                "name": { "type": "string" },
+                "namespace": { "type": ["string", "null"] }
+              }
+            },
+            "auth": { "type": "object" }
+          }
+        },
+        "raw": {
+          "type": "object",
+          "description": "Full ESO provider spec passthrough. Must include a top-level 'provider' key when secretStore.provider=raw; render-time validation rejects an empty/raw-only object."
+        }
+      }
+    },
+    "autoscaling": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "minReplicas": { "type": "integer", "minimum": 1 },
+        "maxReplicas": { "type": "integer", "minimum": 1 },
+        "metrics": { "type": "array" },
+        "behavior": { "type": "object" }
+      }
+    },
+    "podDisruptionBudget": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "minAvailable": { "type": ["integer", "string", "null"] },
+        "maxUnavailable": { "type": ["integer", "string", "null"] }
+      }
+    }
+  }
+}
