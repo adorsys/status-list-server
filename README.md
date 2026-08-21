@@ -294,7 +294,7 @@ Contributions are welcome and encouraged. Before contributing, please review the
 
 ## Releases
 
-This project uses [release-plz](https://release-plz.dev/) with [Conventional Commits](https://www.conventionalcommits.org/) to automate versioning and changelog generation. Every push to `main` opens or updates a Release PR. Merging that PR creates a git tag and a GitHub Release automatically.
+This project uses [release-plz](https://release-plz.dev/) with [Conventional Commits](https://www.conventionalcommits.org/) to automate versioning and changelog generation. Every push to `main` opens or updates a Release PR. Merging that PR creates a git tag and a GitHub Release automatically. The first Release PR creates the initial changelog entry.
 
 ## License
 
