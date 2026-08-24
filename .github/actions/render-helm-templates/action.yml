@@ -69,6 +69,7 @@ runs:
         # from the External Secrets Operator identity.
         helm template status-list-server helm/chart \
           --set serviceAccount.name=azure-app-sa \
+          --set 'serviceAccount.annotations.azure\.workload\.identity/client-id=11111111-2222-3333-4444-555555555555' \
           --set secretStore.provider=azure \
           --set secretStore.azure.authType=WorkloadIdentity \
           --set secretStore.azure.serviceAccountRef.name=eso-controller-sa \
@@ -78,6 +79,9 @@ runs:
           --output-dir /tmp/rendered/wl-azure
         if ! grep -qE 'azure\.workload\.identity/use:\s*"?true"?$' /tmp/rendered/wl-azure/status-list-server/templates/deployment.yaml; then
           echo "ERROR: Azure WI app pod label azure.workload.identity/use=true missing"; exit 1
+        fi
+        if ! grep -q 'azure.workload.identity/client-id: 11111111-2222-3333-4444-555555555555' /tmp/rendered/wl-azure/status-list-server/templates/serviceaccount.yaml; then
+          echo "ERROR: Azure WI app ServiceAccount missing azure.workload.identity/client-id annotation"; exit 1
         fi
         if ! grep -q 'serviceAccountName: azure-app-sa' /tmp/rendered/wl-azure/status-list-server/templates/deployment.yaml; then
           echo "ERROR: Azure WI Deployment must reference application ServiceAccount azure-app-sa"; exit 1
