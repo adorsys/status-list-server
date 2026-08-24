@@ -16,7 +16,7 @@ Every workflow run first executes the reusable CI workflow, builds and pushes a 
 ### Image Tags
 
 | Trigger              | Image Tags                                                  |
-|----------------------|-------------------------------------------------------------|
+| -------------------- | ----------------------------------------------------------- |
 | Push to `main`       | `sha-<short_sha>`                                           |
 | Release tag `v*.*.*` | `<major>.<minor>`, `<version>`, `sha-<short_sha>`, `latest` |
 

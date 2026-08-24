@@ -45,7 +45,13 @@ use crate::cert_manager::challenge::{
 };
 #[cfg(feature = "acme")]
 use crate::cert_manager::http_client::DefaultHttpClient;
-#[cfg(all(feature = "acme", not(feature = "vault"), not(feature = "aws-secrets")))]
+#[cfg(all(
+    feature = "acme",
+    not(feature = "vault"),
+    not(feature = "gcp-secrets"),
+    not(feature = "azure-kv"),
+    not(feature = "aws-secrets")
+))]
 use crate::cert_manager::storage::MemoryStorage;
 #[cfg(feature = "acme")]
 use crate::cert_manager::{
@@ -61,11 +67,25 @@ use crate::domain::{
     ports::{CertificateProvider, CredentialRepo, StatusListRepo, StatusListSnapshotRepo},
     service::Service,
 };
-#[cfg(all(feature = "aws-secrets", not(feature = "vault")))]
+#[cfg(all(
+    feature = "aws-secrets",
+    not(feature = "vault"),
+    not(feature = "gcp-secrets"),
+    not(feature = "azure-kv")
+))]
 use crate::outbound::aws::AwsSecretsManager;
+#[cfg(all(
+    feature = "azure-kv",
+    feature = "acme",
+    not(feature = "vault"),
+    not(feature = "gcp-secrets")
+))]
+use crate::outbound::azure_kv::AzureKeyVaultClient;
 use crate::outbound::cache::MokaStatusListCache;
 #[cfg(feature = "acme")]
 use crate::outbound::cert::AcmeCertificateProvider;
+#[cfg(all(feature = "gcp-secrets", feature = "acme", not(feature = "vault")))]
+use crate::outbound::gcp_secret::GcpSecretManagerClient;
 #[cfg(feature = "memory")]
 use crate::outbound::memory::{MemoryCredentials, MemoryStatusListSnapshotRepo, MemoryStatusLists};
 #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mysql"))]
@@ -446,7 +466,58 @@ async fn build_crypto_storage(_config: &AppConfig) -> EyeResult<Box<dyn Storage>
         ))
     }
 
-    #[cfg(all(not(feature = "vault"), feature = "aws-secrets"))]
+    #[cfg(all(feature = "gcp-secrets", not(feature = "vault")))]
+    {
+        tracing::info!("Using GCP Secret Manager as secrets backend");
+        Ok(Box::new(
+            GcpSecretManagerClient::builder(&_config.gcp_secret_manager.project_id)
+                .service_account_key(_config.gcp_secret_manager.service_account_key.clone())
+                .service_account_key_path(
+                    _config
+                        .gcp_secret_manager
+                        .service_account_key_path
+                        .as_deref(),
+                )
+                .endpoint(_config.gcp_secret_manager.endpoint.as_deref())
+                .allow_anonymous_credentials(_config.gcp_secret_manager.allow_anonymous_credentials)
+                .secrets_cache_ttl(Duration::from_secs(
+                    _config.server.cert.signing_key_cache_ttl,
+                ))
+                .build()
+                .await?,
+        ))
+    }
+
+    #[cfg(all(
+        feature = "azure-kv",
+        not(feature = "vault"),
+        not(feature = "gcp-secrets")
+    ))]
+    {
+        tracing::info!("Using Azure Key Vault as secrets backend");
+        let vault_url = _config.azure_keyvault.vault_url.clone().ok_or_else(|| {
+            eyre!("Azure Key Vault configuration error: azure_keyvault.vault_url is required when azure-kv is enabled")
+        })?;
+        Ok(Box::new(
+            AzureKeyVaultClient::builder(vault_url)
+                .service_principal(
+                    _config.azure_keyvault.tenant_id.as_deref(),
+                    _config.azure_keyvault.client_id.as_deref(),
+                    _config.azure_keyvault.client_secret.clone(),
+                )
+                .secrets_cache_ttl(Duration::from_secs(
+                    _config.server.cert.signing_key_cache_ttl,
+                ))
+                .build()?,
+        ))
+    }
+
+    #[cfg(all(
+        feature = "aws-secrets",
+        not(feature = "vault"),
+        not(feature = "gcp-secrets"),
+        not(feature = "azure-kv")
+    ))]
     {
         tracing::info!("Using AWS Secrets Manager as cryptographic-material backend");
         let aws_config = aws_config::defaults(BehaviorVersion::latest())
@@ -462,7 +533,12 @@ async fn build_crypto_storage(_config: &AppConfig) -> EyeResult<Box<dyn Storage>
         ))
     }
 
-    #[cfg(all(not(feature = "vault"), not(feature = "aws-secrets")))]
+    #[cfg(not(any(
+        feature = "vault",
+        feature = "gcp-secrets",
+        feature = "azure-kv",
+        feature = "aws-secrets"
+    )))]
     {
         tracing::info!("Using in-memory cryptographic-material backend");
         Ok(Box::new(MemoryStorage::default()))
@@ -709,6 +785,13 @@ mod general_tests {
             ("APP_VAULT__ROLE_ID", "test-role"),
             #[cfg(feature = "vault")]
             ("APP_VAULT__SECRET_ID", "test-secret"),
+            #[cfg(feature = "gcp-secrets")]
+            ("APP_GCP_SECRET_MANAGER__PROJECT_ID", "test-project"),
+            #[cfg(feature = "azure-kv")]
+            (
+                "APP_AZURE_KEYVAULT__VAULT_URL",
+                "https://test.vault.azure.net/",
+            ),
         ])
         .expect("Failed to load config");
 

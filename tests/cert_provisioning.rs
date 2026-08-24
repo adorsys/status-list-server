@@ -305,13 +305,18 @@ async fn test_cert_provisioning_with_aws_secrets_manager() {
         .iter()
         .filter_map(|s| s.name())
         .collect();
+    let expected_cert_key = status_list_server::cert_manager::storage::normalize_key(
+        "certs-example.com-cert_data.json",
+    );
+    let expected_signing_key =
+        status_list_server::cert_manager::storage::normalize_key("keys-test.example.com");
     assert!(
-        names.iter().any(|name| name.contains("cert_data.json")),
-        "certificate data should be present in Secrets Manager"
+        names.contains(&expected_cert_key.as_str()),
+        "certificate data should be present in Secrets Manager: {names:?}"
     );
     assert!(
-        names.contains(&"keys-test.example.com"),
-        "signing key should be present in Secrets Manager"
+        names.contains(&expected_signing_key.as_str()),
+        "signing key should be present in Secrets Manager: {names:?}"
     );
 
     // Verify cert chain extraction

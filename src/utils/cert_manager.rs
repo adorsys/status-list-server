@@ -778,17 +778,20 @@ impl CertManager {
 
     #[inline]
     fn cert_key(&self) -> String {
-        format!("certs-{}-cert_data.json", tld_plus_one(&self.domains))
+        storage::normalize_key(&format!(
+            "certs-{}-cert_data.json",
+            tld_plus_one(&self.domains)
+        ))
     }
 
     #[inline]
     fn acme_account_id(&self) -> String {
-        format!("acme_accounts-{}", tld_plus_one(&self.domains))
+        storage::normalize_key(&format!("acme_accounts-{}", tld_plus_one(&self.domains)))
     }
 
     #[inline]
     fn signing_secret_id(&self) -> String {
-        format!("keys-{}", self.domains.join("-"))
+        storage::normalize_key(&format!("keys-{}", self.domains.join("-")))
     }
 }
 
