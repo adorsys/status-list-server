@@ -454,10 +454,34 @@ async fn build_crypto_storage(_config: &AppConfig) -> EyeResult<Box<dyn Storage>
     #[cfg(feature = "vault")]
     {
         tracing::info!("Using Vault KV v2 as secrets backend");
-        let secret_id = _config.vault.resolve_secret_id()?;
+        let builder = match _config.vault.auth_method {
+            crate::config::VaultAuthMethod::Approle => {
+                if _config.vault.role_id.trim().is_empty() {
+                    return Err(color_eyre::eyre::eyre!(
+                        "Vault auth_method=approle requires 'role_id' to be configured"
+                    ));
+                }
+                let secret_id = _config.vault.resolve_secret_id()?;
+                VaultClient::builder_approle(&_config.vault.addr, &_config.vault.role_id, secret_id)
+                    .auth_mount(&_config.vault.auth_mount)
+            }
+            crate::config::VaultAuthMethod::Kubernetes => {
+                let k8s_role = _config.vault.k8s_role.as_deref().ok_or_else(|| {
+                    color_eyre::eyre::eyre!(
+                        "Vault auth_method=kubernetes requires 'k8s_role' to be configured"
+                    )
+                })?;
+                VaultClient::builder_kubernetes(
+                    &_config.vault.addr,
+                    k8s_role,
+                    &_config.vault.k8s_token_path,
+                )
+                .auth_mount(&_config.vault.k8s_auth_mount)
+            }
+        };
+
         Ok(Box::new(
-            VaultClient::builder(&_config.vault.addr, &_config.vault.role_id, secret_id)
-                .auth_mount(&_config.vault.auth_mount)
+            builder
                 .mount(&_config.vault.mount)
                 .path_prefix(&_config.vault.path_prefix)
                 .namespace(_config.vault.namespace.as_deref())
