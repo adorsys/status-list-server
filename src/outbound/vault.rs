@@ -294,7 +294,7 @@ impl VaultClientBuilder {
     /// - `mount` is empty.
     /// - `auth_mount` is empty.
     /// - AppRole credentials (`role_id` or `secret_id`) are empty.
-    /// - Kubernetes credentials (`role` is empty, or `token_path` cannot be read/is empty).
+    /// - Kubernetes credentials (`role` must not be empty; `token_path` is read and validated during initial login).
     /// - The initial login fails.
     pub async fn build(self) -> Result<VaultClient, StorageError> {
         let addr = self.addr.trim().trim_end_matches('/').to_string();
@@ -406,12 +406,12 @@ fn record_vault_login(method: &'static str) {
         .add(1, &[opentelemetry::KeyValue::new("method", method)]);
 }
 
-fn record_vault_renewal() {
+fn record_vault_renewal(method: &'static str) {
     opentelemetry::global::meter("status-list-server")
         .u64_counter("vault_auth_renewals_total")
         .with_description("Total number of successful Vault token renewals.")
         .build()
-        .add(1, &[]);
+        .add(1, &[opentelemetry::KeyValue::new("method", method)]);
 }
 
 fn record_vault_reauth(method: &'static str) {
@@ -752,7 +752,7 @@ impl TokenManager {
                 renewable = renew.auth.renewable,
                 "Token renewal successful"
             );
-            record_vault_renewal();
+            record_vault_renewal(self.backend.method_name());
             *self.token.write().await = SecretString::from(renew.auth.client_token);
             *self.issued_at.write().await = Instant::now();
             *self.lease_duration.write().await = renew.auth.lease_duration;
@@ -987,10 +987,8 @@ mod tests {
 
     /// Write a temp file with a unique name and return its path.
     fn write_temp_token(suffix: &str, content: &str) -> PathBuf {
-        let p = std::env::temp_dir().join(format!(
-            "k8s_token_{suffix}_{}.txt",
-            time::OffsetDateTime::now_utc().nanosecond()
-        ));
+        let p =
+            std::env::temp_dir().join(format!("k8s_token_{suffix}_{}.txt", uuid::Uuid::new_v4()));
         std::fs::write(&p, content).expect("write temp token");
         p
     }
