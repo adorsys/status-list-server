@@ -347,13 +347,13 @@ Findings about crates belong to `cargo-audit` and are fixed at the lockfile. Fin
 
 ### The Release Feature Set
 
-Source-level CI compiles two feature sets: `--all-features`, and `--no-default-features --features memory`. The image is built with neither. Its `ARG FEATURES="postgres,aws-secrets,acme"` selects `aws-secrets` **without** `redis`, and that combination was reachable from no CI job at all.
+Source-level CI compiles two feature sets: `--all-features`, and `--no-default-features --features memory`. The image is built with neither. Its `ARG FEATURES="postgres,aws-secrets,acme"` names a combination that was reachable from no CI job at all.
 
-It also named a feature that does not exist. The value was `postgres,aws,acme`, and `Cargo.toml` defines `aws-secrets`, not `aws` — so `cargo` would have rejected it outright.
+Nothing validated that string. `ARG FEATURES` is a bare string handed to `cargo build` inside the image build, so a value naming no real feature is caught only when someone cuts a release — and it had one. The value was `postgres,aws,acme`, and `Cargo.toml` defines `aws-secrets`, not `aws`, so `cargo` would have rejected it outright.
 
-Beyond that it did not compile. `src/setup.rs` had a `#[cfg(not(feature = "redis"))] let cache_opt = None;` whose type is only inferrable from a `with_cache(impl Storage)` call that the `redis` build supplies and the non-`redis` build does not, so the release build failed with `E0282`. `--all-features` could not catch it, because enabling `redis` compiles that line out; the memory-only check could not catch it, because it has no `aws-secrets`.
+`--all-features` does not stand in for the real set either. Cargo unifies features across the dependency graph, so enabling every feature of this crate compiles its shared dependencies with the union of theirs: `--all-features` turns on `postgres`, `sqlite`, and `mysql` together and builds `sea-orm` with all three `sqlx` backends, where the release set builds it with `sqlx-postgres` alone. The secret backends behave the same way — `--all-features` compiles `vault`, `gcp-secrets`, `azure-kv`, and `aws-secrets` at once; the image ships `aws-secrets` by itself.
 
-This is the shape worth remembering: **enabling every feature is not a superset of shipping some of them.** `#[cfg(not(...))]` branches only exist in the absence of a feature, so `--all-features` systematically skips exactly the code that ships when a feature is off.
+This is the shape worth remembering: **enabling every feature is not a superset of shipping some of them.** Unification builds the graph differently, and `#[cfg(not(...))]` branches exist only in the absence of a feature — so `--all-features` is its own configuration, not an upper bound on the ones you ship.
 
 `cargo-build` now runs a `Release image feature set` step that reads `ARG FEATURES` out of the `Dockerfile` and checks that combination, so the release build's feature set is verified on every pull request rather than at release time. Reading it from the `Dockerfile` rather than repeating it is deliberate: a duplicated feature list would drift, and the drift would restore the gap silently.
 

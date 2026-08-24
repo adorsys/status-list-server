@@ -93,11 +93,13 @@ jobs:
         run: cargo check --no-default-features --features memory
 
       - name: Release image feature set
-        # The feature set the release image is actually built with. Neither job above
-        # reaches it: `--all-features` enables `redis`, which compiles out the
-        # `#[cfg(not(feature = "redis"))]` branches, and the memory-only check has no
-        # `aws`. `aws` without `redis` was therefore reachable from no CI job at all --
-        # and it did not compile, so the release image could not be built.
+        # The feature set the release image is actually built with. Two gaps make it
+        # worth checking on its own. Nothing validates the `ARG FEATURES` string: it is
+        # a bare string handed to `cargo build` inside the image build, so a value
+        # naming no real feature fails only when someone cuts a release. And
+        # `--all-features` above does not stand in for it -- cargo unifies features
+        # across the graph, so enabling everything builds `sea-orm` with all three
+        # `sqlx` backends where the release set builds it with `sqlx-postgres` alone.
         #
         # Read out of the Dockerfile rather than duplicated, so changing FEATURES there
         # cannot silently stop this from checking what ships.
