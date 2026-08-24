@@ -1,10 +1,9 @@
 name: Build and Deploy to EKS
 on:
   push:
-    branches:
-      - main
     tags:
       - v*.*.*
+  workflow_dispatch:
 env:
   IMAGE_NAME: status-list-server
   CLUSTER_NAME: datev-wallet-cluster
