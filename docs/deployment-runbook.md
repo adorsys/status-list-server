@@ -190,7 +190,7 @@ item before/after the first deploy that carries this chart:
    kubectl delete secret statuslist-haproxy-tls -n statuslist-production
    ```
 
-2. **Oracle-HA persistent volume claims** — the Redis HA subchart provisions PVCs
+2. **Redis HA persistent volume claims** — the Redis HA subchart provisions PVCs
    (e.g. `status-list-server-redis-ha-pvc-*` / release-scoped claims). These retain
    any persisted Redis data and storage. Delete the claims (and, if you no longer
    need the data, the underlying PVs / storage volumes):
