@@ -23,21 +23,22 @@ Authentication is supported via **AppRole** or **Kubernetes** auth methods:
 
 ### Configuration Variables
 
-| Variable                    | Type              | Default                                               | Description                                                              |
-| --------------------------- | ----------------- | ----------------------------------------------------- | ------------------------------------------------------------------------ |
-| `APP_VAULT__AUTH_METHOD`    | String            | `"approle"`                                           | Authentication method: `approle` or `kubernetes`                         |
-| `APP_VAULT__ADDR`           | String            | `http://127.0.0.1:8200`                               | Base URL of the Vault / OpenBao cluster                                  |
-| `APP_VAULT__AUTH_MOUNT`     | String            | `"approle"`                                           | Mount path of the AppRole auth engine (used when `auth_method=approle`)  |
-| `APP_VAULT__ROLE_ID`        | String            | `""`                                                  | AppRole Role ID identifier (required for `approle`)                      |
-| `APP_VAULT__SECRET_ID`      | String (Secret)   | `None`                                                | AppRole Secret ID credential (optional if path is used)                  |
-| `APP_VAULT__SECRET_ID_PATH` | Path              | `None`                                                | File path containing AppRole Secret ID (e.g. volume mount)               |
-| `APP_VAULT__K8S_ROLE`       | String            | `None`                                                | Vault Kubernetes auth role name (required when `auth_method=kubernetes`) |
-| `APP_VAULT__K8S_TOKEN_PATH` | Path              | `/var/run/secrets/kubernetes.io/serviceaccount/token` | Path to projected ServiceAccount JWT token file                          |
-| `APP_VAULT__K8S_AUTH_MOUNT` | String            | `"kubernetes"`                                        | Mount path of the Kubernetes auth engine                                 |
-| `APP_VAULT__MOUNT`          | String            | `"secret"`                                            | KV v2 secrets engine mount point                                         |
-| `APP_VAULT__PATH_PREFIX`    | String            | `""`                                                  | Optional prefix prepended to all secret keys (e.g. `status-list-server`) |
-| `APP_VAULT__NAMESPACE`      | String            | `None`                                                | Optional Enterprise/OpenBao namespace header (`X-Vault-Namespace`)       |
-| `APP_VAULT__TIMEOUT_SECS`   | Integer (seconds) | `30`                                                  | HTTP request timeout duration in seconds                                 |
+| Variable                                  | Type              | Default                                               | Description                                                              |
+| ----------------------------------------- | ----------------- | ----------------------------------------------------- | ------------------------------------------------------------------------ |
+| `APP_VAULT__AUTH_METHOD`                  | String            | `"approle"`                                           | Authentication method: `approle` or `kubernetes`                         |
+| `APP_VAULT__ADDR`                         | String            | `http://127.0.0.1:8200`                               | Base URL of the Vault / OpenBao cluster                                  |
+| `APP_VAULT__AUTH_MOUNT`                   | String            | `"approle"`                                           | Mount path of the AppRole auth engine (used when `auth_method=approle`)  |
+| `APP_VAULT__ROLE_ID`                      | String            | `""`                                                  | AppRole Role ID identifier (required for `approle`)                      |
+| `APP_VAULT__SECRET_ID`                    | String (Secret)   | `None`                                                | AppRole Secret ID credential (optional if path is used)                  |
+| `APP_VAULT__SECRET_ID_PATH`               | Path              | `None`                                                | File path containing AppRole Secret ID (e.g. volume mount)               |
+| `APP_VAULT__K8S_ROLE`                     | String            | `None`                                                | Vault Kubernetes auth role name (required when `auth_method=kubernetes`) |
+| `APP_VAULT__K8S_TOKEN_PATH`               | Path              | `/var/run/secrets/kubernetes.io/serviceaccount/token` | Path to projected ServiceAccount JWT token file                          |
+| `APP_VAULT__K8S_AUTH_MOUNT`               | String            | `"kubernetes"`                                        | Mount path of the Kubernetes auth engine                                 |
+| `APP_VAULT__MOUNT`                        | String            | `"secret"`                                            | KV v2 secrets engine mount point                                         |
+| `APP_VAULT__PATH_PREFIX`                  | String            | `""`                                                  | Optional prefix prepended to all secret keys (e.g. `status-list-server`) |
+| `APP_VAULT__NAMESPACE`                    | String            | `None`                                                | Optional Enterprise/OpenBao namespace header (`X-Vault-Namespace`)       |
+| `APP_SERVER__CERT__SIGNING_KEY_CACHE_TTL` | Integer (seconds) | `300` (5 minutes)                                     | In-memory cache TTL in seconds. Set to `0` to disable caching.           |
+| `APP_VAULT__TIMEOUT_SECS`                 | Integer (seconds) | `30`                                                  | HTTP request timeout duration in seconds                                 |
 
 ### Least-Privilege Vault / OpenBao Policy
 
@@ -179,6 +180,53 @@ When running inside a Kubernetes cluster, configure the server to authenticate u
    APP_VAULT__K8S_AUTH_MOUNT=kubernetes
    APP_VAULT__MOUNT=secret
    APP_VAULT__PATH_PREFIX=production/status-list
+   ```
+
+### Manual Testing with a Local Vault Dev Server (Kubernetes Auth)
+
+To test the Kubernetes authentication workflow against a local Vault dev server:
+
+1. **Start a local Vault dev server**:
+
+   ```bash
+   vault server -dev -dev-root-token-id="root" -dev-listen-address="127.0.0.1:8200"
+   export VAULT_ADDR="http://127.0.0.1:8200"
+   export VAULT_TOKEN="root"
+   ```
+
+2. **Enable and configure the Kubernetes auth method**:
+
+   ```bash
+   # Enable the Kubernetes auth engine
+   vault auth enable kubernetes
+
+   # Configure local/mock verification for dev/test environments
+   vault write auth/kubernetes/config \
+     kubernetes_host="https://127.0.0.1:6443" \
+     disable_issuer_verification=true \
+     disable_local_ca_jwt=true
+
+   # Write policy and create a test role
+   vault policy write status-list-policy status-list-policy.hcl
+   vault write auth/kubernetes/role/status-list-role \
+     bound_service_account_names="status-list-server" \
+     bound_service_account_namespaces="default" \
+     token_policies="status-list-policy" \
+     token_ttl=1h
+   ```
+
+3. **Run the server with test credentials**:
+
+   ```bash
+   # Write your test ServiceAccount JWT token to a file
+   echo "$TEST_SA_JWT" > /tmp/k8s-token.jwt
+
+   # Run status-list-server with Vault Kubernetes auth
+   APP_VAULT__AUTH_METHOD=kubernetes \
+   APP_VAULT__ADDR=http://127.0.0.1:8200 \
+   APP_VAULT__K8S_ROLE=status-list-role \
+   APP_VAULT__K8S_TOKEN_PATH=/tmp/k8s-token.jwt \
+   cargo run --features "vault,postgres,acme"
    ```
 
 ### Automated Token Lifecycle & Resilience
