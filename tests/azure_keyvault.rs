@@ -200,8 +200,11 @@ async fn test_azure_keyvault_storage_lifecycle() {
         .expect("Failed to load secret");
     assert_eq!(loaded.as_deref(), Some(secret_value));
 
-    // Overwrite secret with new version (brief sleep ensures distinct version timestamp)
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    // Overwrite secret with a new version. The emulator resolves the "latest"
+    // version by ordering on the `updated` attribute, which it records with
+    // one-second granularity, and ties resolve to the oldest row. Sleeping a
+    // full second guarantees the two versions land in distinct second buckets.
+    tokio::time::sleep(Duration::from_millis(1100)).await;
     let updated_value =
         "-----BEGIN PRIVATE KEY-----\nUPDATED_KEY_MATERIAL\n-----END PRIVATE KEY-----";
     client
