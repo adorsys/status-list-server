@@ -128,15 +128,12 @@ externalSecret:
 statuslist:
   fallbackSecret:
     enabled: true
-    name: "statuslist-secret"
     stringData:
       postgres-password: "change-me"
       redis-password: "change-me"   # only needed when redis-ha.enabled=true
 ```
 
-The fallback `Secret` is rendered only when `externalSecret.enabled=false` **and** `statuslist.fallbackSecret.enabled=true`. It uses `stringData`, so plain string values are base64-encoded by the API server.
-
-**Secret-name propagation:** The Deployment's `POSTGRES_PASSWORD` / `REDIS_PASSWORD` `secretKeyRef` entries resolve the effective application-secret name through a single helper: `externalSecret.spec.target.name` in ESO mode, or `statuslist.fallbackSecret.name` in fallback mode. When you override `statuslist.fallbackSecret.name`, the application and the fallback `Secret` both use it. Keep `postgres.auth.existingSecret` and `redis-ha.existingSecret` in sync with the same name.
+The fallback `Secret` is rendered only when `externalSecret.enabled=false` **and** `statuslist.fallbackSecret.enabled=true`. It uses `stringData`, so plain string values are base64-encoded by the API server. The fallback secret is always named `statuslist-secret` — the single supported name that the Deployment's `POSTGRES_PASSWORD` / `REDIS_PASSWORD` `secretKeyRef`, `postgres.auth.existingSecret`, and `redis-ha.existingSecret` all reference, so it is not independently configurable.
 
 ## Horizontal Autoscaling and Pod Disruption Budget
 

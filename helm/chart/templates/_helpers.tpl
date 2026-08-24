@@ -72,7 +72,7 @@ Centralised here so the Deployment, PostgreSQL, and Redis all reference a single
 {{- if .Values.externalSecret.enabled }}
 {{- .Values.externalSecret.spec.target.name }}
 {{- else }}
-{{- .Values.statuslist.fallbackSecret.name | default "statuslist-secret" }}
+{{- "statuslist-secret" }}
 {{- end }}
 {{- end }}
 

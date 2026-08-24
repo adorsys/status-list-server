@@ -38,6 +38,44 @@ runs:
           --set podDisruptionBudget.maxUnavailable=1 \
           --set podDisruptionBudget.minAvailable=null \
           --output-dir /tmp/rendered/scaling
+        # Primary Workload Identity path: a non-default application ServiceAccount with a
+        # cloud role binding (EKS IRSA annotation). Assert the SA + annotation are rendered
+        # and the Deployment references the custom SA, not the default.
+        helm template status-list-server helm/chart \
+          --set serviceAccount.name=statuslist-app-sa \
+          --set-string 'serviceAccount.annotations.eks\.amazonaws\.com/role-arn=arn:aws:iam::123456789012:role/statuslist-irsa' \
+          --set externalSecret.enabled=false \
+          --set statuslist.fallbackSecret.enabled=true \
+          --set-string statuslist.fallbackSecret.stringData.postgres-password=x \
+          --output-dir /tmp/rendered/wl-app
+        if ! grep -q 'name: statuslist-app-sa' /tmp/rendered/wl-app/status-list-server/templates/serviceaccount.yaml; then
+          echo "ERROR: workload-identity render missing application ServiceAccount statuslist-app-sa"; exit 1
+        fi
+        if ! grep -q 'eks.amazonaws.com/role-arn: arn:aws:iam::123456789012:role/statuslist-irsa' /tmp/rendered/wl-app/status-list-server/templates/serviceaccount.yaml; then
+          echo "ERROR: workload-identity render missing IRSA role annotation"; exit 1
+        fi
+        if ! grep -q 'serviceAccountName: statuslist-app-sa' /tmp/rendered/wl-app/status-list-server/templates/deployment.yaml; then
+          echo "ERROR: Deployment must reference application ServiceAccount statuslist-app-sa"; exit 1
+        fi
+        # Azure Workload Identity primary path: application pod label + application KSA distinct
+        # from the External Secrets Operator identity.
+        helm template status-list-server helm/chart \
+          --set serviceAccount.name=azure-app-sa \
+          --set secretStore.provider=azure \
+          --set secretStore.azure.authType=WorkloadIdentity \
+          --set secretStore.azure.serviceAccountRef.name=eso-controller-sa \
+          --set 'statuslist.podLabels.azure\.workload\.identity/use=true' \
+          --output-dir /tmp/rendered/wl-azure
+        if ! grep -qE 'azure\.workload\.identity/use:\s*"?true"?$' /tmp/rendered/wl-azure/status-list-server/templates/deployment.yaml; then
+          echo "ERROR: Azure WI app pod label azure.workload.identity/use=true missing"; exit 1
+        fi
+        if ! grep -q 'serviceAccountName: azure-app-sa' /tmp/rendered/wl-azure/status-list-server/templates/deployment.yaml; then
+          echo "ERROR: Azure WI Deployment must reference application ServiceAccount azure-app-sa"; exit 1
+        fi
+        # ESO identity must be distinct from the application KSA on the Azure WI path.
+        if [ "$(grep -A2 'serviceAccountRef:' /tmp/rendered/wl-azure/status-list-server/templates/secret-store.yaml | grep 'name:' | head -1 | sed -E 's/.*name: ([^ ]+).*/\1/')" = "azure-app-sa" ]; then
+          echo "ERROR: ESO serviceAccountRef must be distinct from the application ServiceAccount"; exit 1
+        fi
 
         # Negative render tests: invalid provider and empty raw:{} must fail closed.
         if helm template status-list-server helm/chart --set secretStore.provider=invalid >/dev/null 2>&1; then
@@ -52,6 +90,27 @@ runs:
             --set secretStore.enabled=true 2>/dev/null | grep -q "kind: SecretStore"; then
           echo "ERROR: no-ESO mode must not render a SecretStore CR"; exit 1
         fi
+        # Fail-closed scaling: HPA must reject minReplicas > maxReplicas.
+        if helm template status-list-server helm/chart \
+            --set autoscaling.enabled=true \
+            --set autoscaling.minReplicas=5 \
+            --set autoscaling.maxReplicas=2 >/dev/null 2>&1; then
+          echo "ERROR: autoscaling.minReplicas > maxReplicas should fail"; exit 1
+        fi
+        # Fail-closed scaling: PDB must reject both minAvailable and maxUnavailable set.
+        if helm template status-list-server helm/chart \
+            --set podDisruptionBudget.enabled=true \
+            --set podDisruptionBudget.minAvailable=1 \
+            --set podDisruptionBudget.maxUnavailable=1 >/dev/null 2>&1; then
+          echo "ERROR: PDB with both minAvailable and maxUnavailable should fail"; exit 1
+        fi
+        # Fail-closed scaling: PDB must reject neither minAvailable nor maxUnavailable set.
+        if helm template status-list-server helm/chart \
+            --set podDisruptionBudget.enabled=true \
+            --set podDisruptionBudget.minAvailable=null \
+            --set podDisruptionBudget.maxUnavailable=null >/dev/null 2>&1; then
+          echo "ERROR: PDB with neither minAvailable nor maxUnavailable should fail"; exit 1
+        fi
 
         # Upgrade render test: legacy secretStore.aws.region must be preserved for APP_AWS__REGION.
         REGION=$(helm template status-list-server helm/chart --set secretStore.aws.region=us-west-2 \
@@ -59,12 +118,14 @@ runs:
         if [ "$REGION" != "us-west-2" ]; then
           echo "ERROR: APP_AWS__REGION should fall back to legacy secretStore.aws.region, got '$REGION'"; exit 1
         fi
-        # Upgrade render test: custom fallback secret name must propagate to the Deployment secretKeyRef.
-        if ! helm template status-list-server helm/chart \
+        # Upgrade render test: the fallback Secret consumes the same single supported name the
+        # Deployment's POSTGRES_PASSWORD secretKeyRef references (statuslist-secret). Assert the
+        # actual secretKeyRef name, not a loose global grep.
+        PGREF=$(helm template status-list-server helm/chart \
             --set externalSecret.enabled=false \
             --set statuslist.fallbackSecret.enabled=true \
-            --set statuslist.fallbackSecret.name=mycustomsecret \
             --set-string statuslist.fallbackSecret.stringData.postgres-password=x 2>/dev/null \
-            | grep -q 'name: mycustomsecret'; then
-          echo "ERROR: custom fallback secret name not propagated"; exit 1
+          | grep -A3 'name: POSTGRES_PASSWORD' | grep 'name:' | tail -1 | sed -E 's/.*name: ([a-zA-Z0-9-]+)$/\1/')
+        if [ "$PGREF" != "statuslist-secret" ]; then
+          echo "ERROR: POSTGRES_PASSWORD secretKeyRef must reference statuslist-secret, got '$PGREF'"; exit 1
         fi
