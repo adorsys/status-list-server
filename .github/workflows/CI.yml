@@ -1,5 +1,10 @@
 name: "CI"
 
+# PERMISSIONS. deploy.yml calls this workflow, and a called workflow can only narrow
+# the caller's token. Every job here is therefore capped at what deploy.yml's `ci`
+# job grants. A job needing a new scope must have it added in BOTH files, or it fails
+# only on the deploy.yml path.
+
 on:
   merge_group:
   workflow_dispatch:
@@ -14,6 +19,9 @@ jobs:
   zizmor-security:
     name: Zizmor Security Check
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
 
     steps:
       - name: Fetch Repository
@@ -24,8 +32,24 @@ jobs:
         with:
           tool: zizmor@1.28.0
 
+      # SARIF for the full finding set, then a blocking pass at high severity and
+      # high confidence. This previously ran as `zizmor ... || true`, which is a
+      # linter that cannot fail: findings on the repository's highest-privilege
+      # workflows were computed and discarded. Tighten the threshold as the
+      # lower-severity backlog is triaged.
       - name: Run Zizmor
-        run: zizmor .github/workflows/ || true
+        run: |
+          set -eu
+          zizmor --format sarif .github/workflows/ > zizmor.sarif || true
+          zizmor --min-severity high --min-confidence high .github/workflows/
+
+      - name: Upload Zizmor SARIF
+        if: always()
+        continue-on-error: true
+        uses: github/codeql-action/upload-sarif@4187e74d05793876e9989daffde9c3e66b4acd07 # v3
+        with:
+          sarif_file: zizmor.sarif
+          category: zizmor
 
   cargo-fmt:
     name: Cargo Format Check
@@ -67,6 +91,25 @@ jobs:
 
       - name: Memory-only Build
         run: cargo check --no-default-features --features memory
+
+      # The feature set the release image is actually built with. Neither job above
+      # reaches it: `--all-features` enables `redis`, which compiles out the
+      # `#[cfg(not(feature = "redis"))]` branches, and the memory-only check has no
+      # `aws`. `aws` without `redis` was therefore reachable from no CI job at all --
+      # and it did not compile, so the release image could not be built.
+      #
+      # Read out of the Dockerfile rather than duplicated, so changing FEATURES there
+      # cannot silently stop this from checking what ships.
+      - name: Release image feature set
+        run: |
+          set -euo pipefail
+          features=$(sed -nE 's/^ARG FEATURES="([^"]+)".*/\1/p' Dockerfile)
+          if [ -z "${features}" ]; then
+            echo "::error::could not read ARG FEATURES from Dockerfile"
+            exit 1
+          fi
+          echo "release image features: ${features}"
+          cargo check --workspace --features "${features}"
 
       - name: Verify domain layer purity
         run: |
@@ -261,6 +304,15 @@ jobs:
       - name: Fetch Repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
+      # Before the scan that consumes the file, so a malformed entry fails in seconds
+      # as itself rather than later as a scanner error on an unrelated change.
+      - name: Validate .trivyignore.yaml
+        run: |
+          set -eu
+          python3 -c 'import yaml' 2>/dev/null || pip install --quiet pyyaml
+          python3 -m unittest discover -s scripts/tests -p 'test_*.py'
+          python3 scripts/check-trivyignore.py .trivyignore.yaml
+
       - name: Setup Helm
         uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
 
@@ -277,6 +329,81 @@ jobs:
           mkdir -p /tmp/rendered
           helm template status-list-server helm/chart -f helm/chart/values.yaml --output-dir /tmp/rendered
 
+      # The image/imagePullPolicy conditionals in templates/deployment.yaml are what
+      # make "production runs the artifact CI scanned" true, and every other render
+      # here uses default values, so only the tag branch would otherwise be exercised.
+      - name: Verify image reference resolution
+        run: |
+          set -euo pipefail
+          repo="ghcr.io/adorsys/status-list-server"
+          digest="sha256:$(printf 'a%.0s' $(seq 1 64))"
+          app_version=$(helm show chart helm/chart | sed -nE 's/^appVersion:[[:space:]]*"?([^"]+)"?[[:space:]]*$/\1/p')
+          echo "chart appVersion: ${app_version}"
+
+          # Selected by container name rather than by whether the image happens to be
+          # quoted, so adding or quoting an initContainer cannot silently retarget it.
+          # `tr` strips any quoting yq adds and the CR from a CRLF checkout.
+          render() {
+            helm template status-list-server helm/chart -s templates/deployment.yaml "$@" \
+              | yq '.spec.template.spec.containers[]
+                    | select(.name == "status-list-server")
+                    | (.image, .imagePullPolicy)' \
+              | tr -d '"\r' \
+              | tr '\n' '|'
+          }
+
+          expect() {
+            want="$1"; shift
+            got=$(render "$@")
+            if [ "${got}" != "${want}" ]; then
+              echo "::error::helm rendered the wrong image reference for: $*"
+              echo "  expected: ${want}"
+              echo "  actual:   ${got}"
+              exit 1
+            fi
+            echo "ok: $* -> ${want}"
+          }
+
+          # appVersion is the default image tag when neither tag nor digest is set, so
+          # drift from the crate version points default installs at a stale image with
+          # nothing failing. First `version = ` line is [package]; later ones are deps.
+          crate_version=$(grep -m1 '^version = ' Cargo.toml | sed -E 's/^version = "([^"]+)".*/\1/')
+          if [ "${app_version}" != "${crate_version}" ]; then
+            echo "::error::Chart appVersion (${app_version}) does not match Cargo.toml version (${crate_version}). appVersion is the chart's default image tag, so this points default installs at the wrong image."
+            exit 1
+          fi
+          echo "appVersion matches crate version: ${crate_version}"
+
+          # A digest is content-addressed, so IfNotPresent; a tag is mutable, so Always.
+          expect "${repo}@${digest}|IfNotPresent|" \
+            --set-string statuslist.image.digest="${digest}"
+          expect "${repo}:test-tag|Always|" \
+            --set-string statuslist.image.tag=test-tag
+          # Digest wins over a tag supplied alongside it, which is what deploy.yml does.
+          expect "${repo}@${digest}|IfNotPresent|" \
+            --set-string statuslist.image.tag=test-tag \
+            --set-string statuslist.image.digest="${digest}"
+          # No tag and no digest falls back to appVersion, never to "latest".
+          expect "${repo}:${app_version}|Always|"
+          # An explicit pullPolicy still overrides the derived one.
+          expect "${repo}@${digest}|Always|" \
+            --set-string statuslist.image.digest="${digest}" \
+            --set-string statuslist.image.pullPolicy=Always
+          # `--set x=null` is the documented way to clear a value; it must fall back to
+          # the tag, not render `repo@<nil>`.
+          expect "${repo}:test-tag|Always|" \
+            --set-string statuslist.image.tag=test-tag \
+            --set statuslist.image.digest=null
+
+          # A malformed digest must fail at template time, not 10 minutes later as an
+          # ImagePullBackOff under `helm upgrade --atomic --wait`.
+          if helm template status-list-server helm/chart -s templates/deployment.yaml \
+               --set-string statuslist.image.digest=not-a-digest > /dev/null 2>&1; then
+            echo "::error::chart accepted a malformed image digest instead of failing."
+            exit 1
+          fi
+          echo "ok: malformed digest rejected at template time"
+
       - name: Run Trivy config scan
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
@@ -289,6 +416,12 @@ jobs:
   kube-linter:
     name: KubeLinter Scan (Helm Chart)
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # For the SARIF upload below. Note this workflow is also called as a reusable
+      # workflow from deploy.yml, and a called workflow can only narrow the caller's
+      # token -- so deploy.yml's `ci` job grants the same scope.
+      security-events: write
 
     steps:
       - name: Fetch Repository
@@ -315,6 +448,29 @@ jobs:
           format: sarif
           config: .kube-linter.yaml
           output-file: kube-linter-results.sarif
+
+      # `if: always()` because the SARIF is most worth having in exactly the run
+      # where the scan failed -- writing a findings file and then discarding it on
+      # the failure path was the original defect. `continue-on-error` because the
+      # upload cannot succeed for a pull request from a fork, where write scopes are
+      # withheld, and a code-scanning outage should not fail a lint job.
+      - name: Upload KubeLinter SARIF to code scanning
+        if: always()
+        continue-on-error: true
+        uses: github/codeql-action/upload-sarif@4187e74d05793876e9989daffde9c3e66b4acd07 # v3
+        with:
+          sarif_file: kube-linter-results.sarif
+          category: kube-linter
+
+      # Kept alongside the code-scanning upload rather than instead of it: alerts on
+      # a fork pull request go nowhere, and this is the only copy that run keeps.
+      - name: Upload KubeLinter SARIF artifact
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: kube-linter-results
+          path: kube-linter-results.sarif
+          if-no-files-found: warn
 
   yaml-lint:
     name: YAML Lint and Format Check
