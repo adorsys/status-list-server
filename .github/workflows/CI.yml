@@ -32,12 +32,12 @@ jobs:
         with:
           tool: zizmor@1.28.0
 
-      # SARIF for the full finding set, then a blocking pass at high severity and
-      # high confidence. This previously ran as `zizmor ... || true`, which is a
-      # linter that cannot fail: findings on the repository's highest-privilege
-      # workflows were computed and discarded. Tighten the threshold as the
-      # lower-severity backlog is triaged.
       - name: Run Zizmor
+        # SARIF for the full finding set, then a blocking pass at high severity and
+        # high confidence. This previously ran as `zizmor ... || true`, which is a
+        # linter that cannot fail: findings on the repository's highest-privilege
+        # workflows were computed and discarded. Tighten the threshold as the
+        # lower-severity backlog is triaged.
         run: |
           set -eu
           zizmor --format sarif .github/workflows/ > zizmor.sarif || true
@@ -92,15 +92,15 @@ jobs:
       - name: Memory-only Build
         run: cargo check --no-default-features --features memory
 
-      # The feature set the release image is actually built with. Neither job above
-      # reaches it: `--all-features` enables `redis`, which compiles out the
-      # `#[cfg(not(feature = "redis"))]` branches, and the memory-only check has no
-      # `aws`. `aws` without `redis` was therefore reachable from no CI job at all --
-      # and it did not compile, so the release image could not be built.
-      #
-      # Read out of the Dockerfile rather than duplicated, so changing FEATURES there
-      # cannot silently stop this from checking what ships.
       - name: Release image feature set
+        # The feature set the release image is actually built with. Neither job above
+        # reaches it: `--all-features` enables `redis`, which compiles out the
+        # `#[cfg(not(feature = "redis"))]` branches, and the memory-only check has no
+        # `aws`. `aws` without `redis` was therefore reachable from no CI job at all --
+        # and it did not compile, so the release image could not be built.
+        #
+        # Read out of the Dockerfile rather than duplicated, so changing FEATURES there
+        # cannot silently stop this from checking what ships.
         run: |
           set -euo pipefail
           features=$(sed -nE 's/^ARG FEATURES="([^"]+)".*/\1/p' Dockerfile)
@@ -304,9 +304,9 @@ jobs:
       - name: Fetch Repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      # Before the scan that consumes the file, so a malformed entry fails in seconds
-      # as itself rather than later as a scanner error on an unrelated change.
       - name: Validate .trivyignore.yaml
+        # Before the scan that consumes the file, so a malformed entry fails in seconds
+        # as itself rather than later as a scanner error on an unrelated change.
         run: |
           set -eu
           python3 -c 'import yaml' 2>/dev/null || pip install --quiet pyyaml
@@ -329,10 +329,10 @@ jobs:
           mkdir -p /tmp/rendered
           helm template status-list-server helm/chart -f helm/chart/values.yaml --output-dir /tmp/rendered
 
-      # The image/imagePullPolicy conditionals in templates/deployment.yaml are what
-      # make "production runs the artifact CI scanned" true, and every other render
-      # here uses default values, so only the tag branch would otherwise be exercised.
       - name: Verify image reference resolution
+        # The image/imagePullPolicy conditionals in templates/deployment.yaml are what
+        # make "production runs the artifact CI scanned" true, and every other render
+        # here uses default values, so only the tag branch would otherwise be exercised.
         run: |
           set -euo pipefail
           repo="ghcr.io/adorsys/status-list-server"
@@ -449,12 +449,12 @@ jobs:
           config: .kube-linter.yaml
           output-file: kube-linter-results.sarif
 
-      # `if: always()` because the SARIF is most worth having in exactly the run
-      # where the scan failed -- writing a findings file and then discarding it on
-      # the failure path was the original defect. `continue-on-error` because the
-      # upload cannot succeed for a pull request from a fork, where write scopes are
-      # withheld, and a code-scanning outage should not fail a lint job.
       - name: Upload KubeLinter SARIF to code scanning
+        # `if: always()` because the SARIF is most worth having in exactly the run
+        # where the scan failed -- writing a findings file and then discarding it on
+        # the failure path was the original defect. `continue-on-error` because the
+        # upload cannot succeed for a pull request from a fork, where write scopes are
+        # withheld, and a code-scanning outage should not fail a lint job.
         if: always()
         continue-on-error: true
         uses: github/codeql-action/upload-sarif@4187e74d05793876e9989daffde9c3e66b4acd07 # v3
@@ -462,9 +462,9 @@ jobs:
           sarif_file: kube-linter-results.sarif
           category: kube-linter
 
-      # Kept alongside the code-scanning upload rather than instead of it: alerts on
-      # a fork pull request go nowhere, and this is the only copy that run keeps.
       - name: Upload KubeLinter SARIF artifact
+        # Kept alongside the code-scanning upload rather than instead of it: alerts on
+        # a fork pull request go nowhere, and this is the only copy that run keeps.
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:

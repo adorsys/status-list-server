@@ -68,10 +68,10 @@ jobs:
           else
             echo "DEPLOY_TAG=sha-${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
           fi
-      # Only the immutable commit-scoped tag is published here. Semver and `latest`
-      # are applied by `promote-tags` after the scan, so a rejected image never
-      # becomes an advertised release for consumers outside this pipeline.
       - name: Extract Docker metadata
+        # Only the immutable commit-scoped tag is published here. Semver and `latest`
+        # are applied by `promote-tags` after the scan, so a rejected image never
+        # becomes an advertised release for consumers outside this pipeline.
         id: meta
         uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6
         with:
@@ -95,9 +95,9 @@ jobs:
           # index, which is why the image cannot be scanned before it is pushed.
           provenance: mode=max
           sbom: true
-      # An empty digest would silently fall back to tag-based deployment, which is
-      # the failure this pipeline exists to prevent.
       - name: Assert a digest was produced
+        # An empty digest would silently fall back to tag-based deployment, which is
+        # the failure this pipeline exists to prevent.
         env:
           DIGEST: ${{ steps.build.outputs.digest }}
         run: |
@@ -135,10 +135,10 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # `IMAGE_REF` is a multi-platform index. Resolving the child manifest fixes
-      # which architecture is scanned by construction, rather than leaving it to
-      # Trivy's default and asserting the result afterwards.
       - name: Resolve the architecture manifest to scan
+        # `IMAGE_REF` is a multi-platform index. Resolving the child manifest fixes
+        # which architecture is scanned by construction, rather than leaving it to
+        # Trivy's default and asserting the result afterwards.
         run: |
           set -euo pipefail
           index=$(docker buildx imagetools inspect --raw "$IMAGE_REF")
@@ -159,10 +159,10 @@ jobs:
           echo "SCAN_REF=${IMAGE_BASE}@${manifest}" >> "$GITHUB_ENV"
           echo "scanning linux/${SCAN_ARCH}: ${manifest}"
 
-      # One scan, unfiltered. Every view below is derived from it by `trivy convert`,
-      # so the table a maintainer reads and the set the gate evaluates are the same
-      # data, and the image is pulled once.
       - name: Scan image
+        # One scan, unfiltered. Every view below is derived from it by `trivy convert`,
+        # so the table a maintainer reads and the set the gate evaluates are the same
+        # data, and the image is pulled once.
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           scan-type: image
@@ -200,9 +200,9 @@ jobs:
           [ -s trivy-gate-findings.json ] || echo '{"Results":[]}' > trivy-gate-findings.json
           [ -s trivy-highcrit-all.json ] || echo '{"Results":[]}' > trivy-highcrit-all.json
 
-      # After the scan, not before: registry metadata is a separate failure domain,
-      # and a transient imagetools error here must not cost the trivy reports.
       - name: Collect published SBOMs
+        # After the scan, not before: registry metadata is a separate failure domain,
+        # and a transient imagetools error here must not cost the trivy reports.
         run: |
           set -euo pipefail
           : > sbom-summary.md
@@ -244,10 +244,10 @@ jobs:
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
-      # `warn`, not `error`: the artifacts-always-exist guarantee belongs to the
-      # `[ -s ... ]` fallbacks above. Failing here would only add a second red step
-      # when an earlier one already died.
       - name: Upload scan reports
+        # `warn`, not `error`: the artifacts-always-exist guarantee belongs to the
+        # `[ -s ... ]` fallbacks above. Failing here would only add a second red step
+        # when an earlier one already died.
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
@@ -259,9 +259,9 @@ jobs:
             trivy-gate-findings.json
           if-no-files-found: warn
 
-      # Separate artifact: a lost SBOM must not take down the upload carrying the
-      # scan results. Absence is caught by the assertion below instead.
       - name: Upload published SBOMs
+        # Separate artifact: a lost SBOM must not take down the upload carrying the
+        # scan results. Absence is caught by the assertion below instead.
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
@@ -276,13 +276,13 @@ jobs:
       # Uploading would succeed into a place nobody reads. Results live in the
       # artifacts above; a durable sink needs the scheduled re-scan (#410).
 
-      # Closes the chain opposite the Dockerfile's .dep-v0 assertion: that covers the
-      # binary, this covers the SBOM BuildKit attached. Runs after the uploads so a
-      # failure still leaves the reports attached for triage.
-      #
-      # `index .SBOM` needs a multi-platform index; a single-platform build fails here
-      # with "can't index item of type imagetools.sbomStub" rather than at the build.
       - name: Assert published SBOMs list Rust crates
+        # Closes the chain opposite the Dockerfile's .dep-v0 assertion: that covers the
+        # binary, this covers the SBOM BuildKit attached. Runs after the uploads so a
+        # failure still leaves the reports attached for triage.
+        #
+        # `index .SBOM` needs a multi-platform index; a single-platform build fails here
+        # with "can't index item of type imagetools.sbomStub" rather than at the build.
         run: |
           set -eu
           for platform in linux/amd64 linux/arm64; do
@@ -295,14 +295,14 @@ jobs:
             echo "$platform: $crates distinct cargo packages"
           done
 
-      # A clean scan is the expected result, which is the problem: a gate that has
-      # never fired is indistinguishable from one that cannot fire. Both directions
-      # are proved against fixtures before a pass is treated as meaningful.
-      #
-      # Exit status alone is not enough evidence — a missing fixture or a `trivy` not
-      # on PATH also exits non-zero — so the failing case must also name the ID it was
-      # given. Only a gate that really evaluated the report can print it back.
       - name: Prove the gate can fail
+        # A clean scan is the expected result, which is the problem: a gate that has
+        # never fired is indistinguishable from one that cannot fire. Both directions
+        # are proved against fixtures before a pass is treated as meaningful.
+        #
+        # Exit status alone is not enough evidence — a missing fixture or a `trivy` not
+        # on PATH also exits non-zero — so the failing case must also name the ID it was
+        # given. Only a gate that really evaluated the report can print it back.
         run: |
           set -eu
           fixture=scripts/testdata/gate-selftest-findings.json
@@ -343,9 +343,9 @@ jobs:
           fi
           echo "gate self-test: clean report correctly passes the gate"
 
-      # Blocks on any HIGH or CRITICAL surviving the ledger, with ignore-unfixed off.
-      # Thresholds and rationale: docs/supply-chain.md, "The Gate Blocks".
       - name: Vulnerability gate
+        # Blocks on any HIGH or CRITICAL surviving the ledger, with ignore-unfixed off.
+        # Thresholds and rationale: docs/supply-chain.md, "The Gate Blocks".
         run: |
           set -eu
           # Advisories, not rows: one CVE across three crates is three table rows but
@@ -405,10 +405,10 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # `v*.*.*` matches prereleases — the glob absorbs `-rc1` — so `latest` is
-      # withheld from them explicitly. metadata-action already withholds
-      # {{major}}.{{minor}}; raw tags get no such treatment.
       - name: Extract release tags
+        # `v*.*.*` matches prereleases — the glob absorbs `-rc1` — so `latest` is
+        # withheld from them explicitly. metadata-action already withholds
+        # {{major}}.{{minor}}; raw tags get no such treatment.
         id: meta
         uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6
         with:
@@ -418,9 +418,9 @@ jobs:
             type=semver,pattern={{major}}.{{minor}}
             type=raw,value=latest,enable=${{ !contains(github.ref_name, '-') }}
 
-      # `imagetools create` copies manifest descriptors by digest: nothing is rebuilt
-      # and the tags resolve to exactly the scanned index.
       - name: Promote digest to release tags
+        # `imagetools create` copies manifest descriptors by digest: nothing is rebuilt
+        # and the tags resolve to exactly the scanned index.
         env:
           TAGS: ${{ steps.meta.outputs.tags }}
         run: |
@@ -437,10 +437,10 @@ jobs:
           fi
           docker buildx imagetools create "${args[@]}" "$IMAGE_REF"
 
-      # Attestations are separate unknown/unknown-platform manifests. They should
-      # survive a descriptor copy, but a silent drop would publish a release whose
-      # SBOM and provenance vanished with nothing failing.
       - name: Verify attestations survived promotion
+        # Attestations are separate unknown/unknown-platform manifests. They should
+        # survive a descriptor copy, but a silent drop would publish a release whose
+        # SBOM and provenance vanished with nothing failing.
         run: |
           set -eu
           release_ref="${IMAGE_BASE}:${DEPLOY_TAG}"
@@ -507,8 +507,8 @@ jobs:
           helm repo add dandydeveloper https://dandydeveloper.github.io/charts
           helm repo add open-telemetry https://open-telemetry.github.io/opentelemetry-helm-charts
           helm dependency build helm/chart
-      # Deploying without a digest would silently fall back to the mutable tag.
       - name: Deploy chart
+        # Deploying without a digest would silently fall back to the mutable tag.
         run: |
           set -eu
           case "${IMAGE_DIGEST}" in

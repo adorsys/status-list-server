@@ -24,7 +24,7 @@ The vulnerability gate blocks on any HIGH or CRITICAL finding that survives the 
 ### Image Tags
 
 | Trigger              | Image Tags                               | Applied               |
-|----------------------|------------------------------------------|-----------------------|
+| -------------------- | ---------------------------------------- | --------------------- |
 | Manual dispatch      | `sha-<short_sha>`                        | At build              |
 | Release tag `v*.*.*` | `sha-<short_sha>`                        | At build              |
 | Release tag `v*.*.*` | `<major>.<minor>`, `<version>`, `latest` | After the scan passes |

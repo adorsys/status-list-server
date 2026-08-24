@@ -1,10 +1,10 @@
 misconfigurations:
-  # KSV-0014, "Root file system is not read-only" (HIGH). The vendored subchart
-  # exposes no values-level override. Revisit when one does.
+  # AVD-KSV-0014 is "Root file system is not read-only" (HIGH). Rationale lives in
+  # `statement`, which scripts/check-trivyignore.py requires, rather than in
+  # comments beside it.
   - id: AVD-KSV-0014
     statement: >-
-      Third-party subchart pod specs (postgres) that the chart cannot override.
-      The application's own Deployment sets readOnlyRootFilesystem: true.
+      Third-party subchart pod specs (postgres) that the chart cannot override; it exposes no values-level setting for it. The application's own Deployment does set readOnlyRootFilesystem: true, so this does not cover our workload. Revisit if the chart gains the setting.
     paths:
       - "*/charts/postgres*/**"
 

@@ -16,16 +16,16 @@ That distinction matters more than it first appears. Blocking only the deploy wo
 
 `scan-image` runs one scan and derives every view from it:
 
-| Step                     | Severities       | Unfixed  | Ignore file  | Fails the job          | Output                               |
-| ------------------------ | ---------------- | -------- | ------------ | ---------------------- | ------------------------------------ |
-| Resolve arch manifest    | n/a              | n/a      | n/a          | Yes                    | `SCAN_REF`                           |
-| Scan image               | All              | Included | Not applied  | No                     | `trivy-image-report.json`            |
-| Derive reports           | All / HIGH+      | Included | Gate set only | No                     | `.txt`, two gate sets                |
-| Collect published SBOMs  | n/a              | n/a      | n/a          | After 3 failed fetches | `sbom-amd64.json`, `sbom-arm64.json` |
-| Job summary + artifacts  | n/a              | n/a      | n/a          | No (`if: always()`)    | Summary, run artifacts               |
-| Assert SBOMs list crates | n/a              | n/a      | n/a          | Yes                    | None                                 |
-| Prove the gate can fail  | n/a              | n/a      | n/a          | Yes                    | None                                 |
-| Vulnerability gate       | HIGH, CRITICAL   | Included | Applied      | Yes                    | Blocking + suppressed counts         |
+| Step                     | Severities     | Unfixed  | Ignore file   | Fails the job          | Output                               |
+| ------------------------ | -------------- | -------- | ------------- | ---------------------- | ------------------------------------ |
+| Resolve arch manifest    | n/a            | n/a      | n/a           | Yes                    | `SCAN_REF`                           |
+| Scan image               | All            | Included | Not applied   | No                     | `trivy-image-report.json`            |
+| Derive reports           | All / HIGH+    | Included | Gate set only | No                     | `.txt`, two gate sets                |
+| Collect published SBOMs  | n/a            | n/a      | n/a           | After 3 failed fetches | `sbom-amd64.json`, `sbom-arm64.json` |
+| Job summary + artifacts  | n/a            | n/a      | n/a           | No (`if: always()`)    | Summary, run artifacts               |
+| Assert SBOMs list crates | n/a            | n/a      | n/a           | Yes                    | None                                 |
+| Prove the gate can fail  | n/a            | n/a      | n/a           | Yes                    | None                                 |
+| Vulnerability gate       | HIGH, CRITICAL | Included | Applied       | Yes                    | Blocking + suppressed counts         |
 
 `Derive reports` produces two HIGH/CRITICAL sets: `trivy-highcrit-all.json` before the exception ledger and `trivy-gate-findings.json` after it. The gate reports the difference, so a green result distinguishes "nothing was found" from "everything found was accepted".
 
@@ -71,11 +71,11 @@ none
 
 The three package counts differ, and the ordering is the point:
 
-| Source                          | Count | Why                                    |
-| ------------------------------- | ----- | -------------------------------------- |
-| `Cargo.lock`                    | 663   | every crate, all features and targets  |
-| `.dep-v0` via `rust-audit-info` | 521   | crates linked in, runtime and build    |
-| Trivy reading the image         | 469   | the runtime set the scanner evaluates  |
+| Source                          | Count | Why                                   |
+| ------------------------------- | ----- | ------------------------------------- |
+| `Cargo.lock`                    | 663   | every crate, all features and targets |
+| `.dep-v0` via `rust-audit-info` | 521   | crates linked in, runtime and build   |
+| Trivy reading the image         | 469   | the runtime set the scanner evaluates |
 
 `663 ⊇ 521 ⊇ 469`, which is what makes the lockfile a valid stand-in when no image exists yet. It also means the build assertion and the scanner are counting different things by design: the assertion only needs to prove the section is present and non-empty.
 
@@ -296,14 +296,14 @@ Duplicate IDs are deliberately *not* rejected: the same rule legitimately appear
 
 This repository now suppresses crate advisories in two places, and they are not connected:
 
-|                 | `deny.toml` `[advisories] ignore`   | `.trivyignore.yaml` `vulnerabilities`      |
-| --------------- | ----------------------------------- | ------------------------------------------ |
-| Read by         | `cargo-deny`, on every pull request | `trivy`, on releases and in `trivy-config` |
-| Applies to      | the dependency graph                | the built image                            |
-| Reason recorded | free-text comment                   | `statement` field                          |
-| Expires         | no                                  | yes, `expired_at` required                 |
-| Enforced        | no                                  | `scripts/check-trivyignore.py` (tested)    |
-| Suppressions visible | no                             | counted in every gate summary              |
+|                      | `deny.toml` `[advisories] ignore`   | `.trivyignore.yaml` `vulnerabilities`      |
+| -------------------- | ----------------------------------- | ------------------------------------------ |
+| Read by              | `cargo-deny`, on every pull request | `trivy`, on releases and in `trivy-config` |
+| Applies to           | the dependency graph                | the built image                            |
+| Reason recorded      | free-text comment                   | `statement` field                          |
+| Expires              | no                                  | yes, `expired_at` required                 |
+| Enforced             | no                                  | `scripts/check-trivyignore.py` (tested)    |
+| Suppressions visible | no                                  | counted in every gate summary              |
 
 Today `deny.toml` ignores `RUSTSEC-2023-0071` (rsa) and `RUSTSEC-2026-0235` (rkyv), and `.trivyignore.yaml` ignores neither, because Trivy's database does not flag either at the versions this project pins — verified, not assumed. So the two ledgers do not currently disagree.
 
