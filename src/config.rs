@@ -739,9 +739,20 @@ impl RedisConfig {
 
         let scheme = trim_non_empty(self.scheme.as_deref()).unwrap_or("redis");
         if scheme != "redis" && scheme != "rediss" {
-            return Err(ConfigError::Message(
-                "Invalid redis.scheme: expected 'redis' or 'rediss'".to_string(),
-            ));
+            // Sanitize the scheme value to prevent injection in error messages
+            let sanitized: String = scheme
+                .chars()
+                .take(20)
+                .filter(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '-')
+                .collect();
+            return Err(ConfigError::Message(format!(
+                "Invalid redis.scheme: expected 'redis' or 'rediss', got '{}'",
+                if sanitized.is_empty() {
+                    "<empty>"
+                } else {
+                    &sanitized
+                }
+            )));
         }
 
         let host = required_config_field(self.host.as_deref(), "redis.host")?;
@@ -760,7 +771,12 @@ impl RedisConfig {
                     encode_url_part(password)
                 )
             }
-            (None, Some(password)) => format!(":{}@", encode_url_part(password)),
+            (None, Some(password)) => {
+                // Redis AUTH protocol supports password-only authentication (AUTH <password>).
+                // The leading colon in the URL userinfo section indicates an empty username
+                // while still providing a password, which is the standard format for this case.
+                format!(":{}@", encode_url_part(password))
+            }
             (Some(_), None) => {
                 return Err(ConfigError::Message(
                     "Missing required config field: redis.password".to_string(),

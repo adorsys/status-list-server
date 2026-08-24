@@ -134,7 +134,7 @@ spec:
             - name: APP_DATABASE__HOST
               value: "{{ .Release.Name }}-postgres.{{ .Release.Namespace }}.svc.cluster.local"
             - name: APP_DATABASE__PORT
-              value: "5432"
+              value: {{ .Values.postgres.auth.port | default "5432" | quote }}
             - name: APP_DATABASE__USERNAME
               value: {{ .Values.postgres.auth.username | quote }}
             - name: APP_DATABASE__PASSWORD

@@ -22,10 +22,12 @@ fn deployment_template_uses_split_database_and_redis_credentials() {
 
     for expected in [
         "APP_DATABASE__HOST",
+        "APP_DATABASE__PORT",
         "APP_DATABASE__USERNAME",
         "APP_DATABASE__PASSWORD",
         "APP_DATABASE__NAME",
         "APP_REDIS__HOST",
+        "APP_REDIS__PORT",
         "APP_REDIS__PASSWORD",
         "secretKeyRef:",
         "postgres-password",
