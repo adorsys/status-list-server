@@ -82,7 +82,7 @@ moka = { version = "0.12", features = ["future"] }
 
 # Cryptography and Security
 rand = "0.10"
-pem = "3"
+pem = "4"
 coset = "0.4"
 instant-acme = { version = "0.8", optional = true }
 rustls = "0.23"
@@ -90,8 +90,8 @@ webpki-roots = "1"
 rustls-pki-types = "1.15"
 secrecy = { version = "0.10", features = ["serde"] }
 rcgen = { version = "0.14", features = ["pem"], optional = true }
-jsonwebtoken = { version = "10.4", features = ["aws_lc_rs"] }
-sha2 = "0.10"
+jsonwebtoken = { version = "11.0", features = ["aws_lc_rs"] }
+sha2 = "0.11"
 hex = "0.4"
 
 # Serialization
@@ -123,7 +123,7 @@ color-eyre = "0.6"
 
 # Utility Libraries
 uuid = { version = "1.23", features = ["v4"] }
-base64 = "0.22"
+base64 = "0.23"
 time = { version = "0.3", features = ["formatting", "macros"] }
 base64url = "0.1"
 flate2 = "1.1"
@@ -134,13 +134,13 @@ url = { version = "2.5", features = ["serde"] }
 
 # Database and ORM
 [dependencies.sea-orm]
-version = "1.1"
+version = "2.0"
 default-features = false
 features = ["macros", "runtime-tokio-rustls", "with-json"]
 optional = true
 
 [dependencies.sea-orm-migration]
-version = "1.1.20"
+version = "2.0.2"
 default-features = false
 features = ["runtime-tokio-rustls"]
 optional = true
@@ -201,7 +201,7 @@ features = ["alloc", "ecdsa", "pem", "pkcs8"]
 
 [dev-dependencies]
 wiremock = "0.6"
-sea-orm = { version = "1.1", features = ["mock"] }
+sea-orm = { version = "2.0", features = ["mock"] }
 
 [dev-dependencies.testcontainers-modules]
 version = "0.15"
