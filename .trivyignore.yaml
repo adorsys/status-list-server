@@ -2,7 +2,3 @@ misconfigurations:
   - id: AVD-KSV-0014
     paths:
       - "*/charts/postgres*/**"
-      - "*/charts/redis-ha*/**"
-  - id: AVD-KSV-0118
-    paths:
-      - "*/charts/redis-ha*/**"

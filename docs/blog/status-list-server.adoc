@@ -80,7 +80,7 @@ curl -s http://localhost:8000/
   * Authenticated publish/update using a JWT Bearer signed by the issuer’s private key
 - Reliability & ops
   * ACME-based certificate provisioning/renewal
-  * Redis/TTL caches and DB indices for performance
+  * TTL caches and DB indices for performance
   * Multi-arch static builds and Helm deployment options
 
 === API quick look

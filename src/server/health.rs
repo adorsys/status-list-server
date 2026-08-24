@@ -472,19 +472,6 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn redis_cache_failure_does_not_gate_readiness() {
-        let state = app_state_with_checks(vec![
-            Arc::new(AlwaysReady::new("database")),
-            Arc::new(AlwaysReady::new("cert_store")),
-        ])
-        .await;
-
-        let resp = call_handler(state, "/health/ready").await;
-
-        assert_eq!(resp.status(), StatusCode::OK);
-    }
-
     #[cfg(feature = "acme")]
     #[derive(Clone)]
     struct ReachabilityStorage {
