@@ -456,6 +456,11 @@ async fn build_crypto_storage(_config: &AppConfig) -> EyeResult<Box<dyn Storage>
         tracing::info!("Using Vault KV v2 as secrets backend");
         let builder = match _config.vault.auth_method {
             crate::config::VaultAuthMethod::Approle => {
+                if _config.vault.role_id.trim().is_empty() {
+                    return Err(color_eyre::eyre::eyre!(
+                        "Vault auth_method=approle requires 'role_id' to be configured"
+                    ));
+                }
                 let secret_id = _config.vault.resolve_secret_id()?;
                 VaultClient::builder_approle(&_config.vault.addr, &_config.vault.role_id, secret_id)
                     .auth_mount(&_config.vault.auth_mount)
