@@ -550,7 +550,22 @@ impl DnsConfig {
 pub struct RedisConfig {
     /// Redis connection URI. Leave empty to disable the optional Redis-backed
     /// certificate-material cache, even when the `redis` feature is compiled.
+    ///
+    /// Production Kubernetes deployments should prefer the split host/password
+    /// fields below so pod metadata does not contain a fully assembled URI.
     pub uri: SecretString,
+    #[serde(default)]
+    pub scheme: Option<String>,
+    #[serde(default)]
+    pub host: Option<String>,
+    #[serde(default)]
+    pub port: Option<u16>,
+    #[serde(default)]
+    pub username: Option<String>,
+    #[serde(default)]
+    pub password: Option<SecretString>,
+    #[serde(default)]
+    pub database: Option<u8>,
     pub require_client_auth: bool,
     /// Cache TTL for Redis TLS certificates in seconds.
     /// Setting this to 0 disables caching entirely.
@@ -584,11 +599,180 @@ pub struct DatabasePoolConfig {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct DatabaseConfig {
+    /// Full database URL. This remains supported for local and non-Kubernetes
+    /// deployments, but Kubernetes manifests should prefer the split fields
+    /// below to avoid exposing an assembled credential URL in pod metadata.
     pub url: SecretString,
+    #[serde(default)]
+    pub host: Option<String>,
+    #[serde(default)]
+    pub port: Option<u16>,
+    #[serde(default)]
+    pub username: Option<String>,
+    #[serde(default)]
+    pub password: Option<SecretString>,
+    #[serde(default)]
+    pub name: Option<String>,
     /// Validated against the URL scheme at startup.
     #[serde(default)]
     pub backend: DatabaseBackend,
     pub pool: DatabasePoolConfig,
+}
+
+fn trim_non_empty(value: Option<&str>) -> Option<&str> {
+    value.map(str::trim).filter(|value| !value.is_empty())
+}
+
+fn encode_url_part(value: &str) -> String {
+    value
+        .as_bytes()
+        .iter()
+        .fold(String::with_capacity(value.len()), |mut encoded, byte| {
+            match byte {
+                b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                    encoded.push(char::from(*byte))
+                }
+                _ => {
+                    let _ = fmt::Write::write_fmt(&mut encoded, format_args!("%{byte:02X}"));
+                }
+            }
+            encoded
+        })
+}
+
+fn required_config_field<'a>(value: Option<&'a str>, field: &str) -> Result<&'a str, ConfigError> {
+    trim_non_empty(value)
+        .ok_or_else(|| ConfigError::Message(format!("Missing required config field: {field}")))
+}
+
+impl DatabaseConfig {
+    fn has_split_connection_fields(&self) -> bool {
+        self.host
+            .as_deref()
+            .is_some_and(|value| !value.trim().is_empty())
+            || self
+                .username
+                .as_deref()
+                .is_some_and(|value| !value.trim().is_empty())
+            || self
+                .password
+                .as_ref()
+                .is_some_and(|value| !value.expose_secret().trim().is_empty())
+            || self
+                .name
+                .as_deref()
+                .is_some_and(|value| !value.trim().is_empty())
+            || self.port.is_some()
+    }
+
+    /// Resolve the database connection string from either the backward-compatible
+    /// full URL or the split connection fields used by the Helm chart.
+    pub fn resolved_url(&self) -> Result<SecretString, ConfigError> {
+        if !self.has_split_connection_fields() {
+            return Ok(self.url.clone());
+        }
+
+        let scheme = match self.backend {
+            DatabaseBackend::Postgres => "postgres",
+            DatabaseBackend::MySql => "mysql",
+            DatabaseBackend::Memory | DatabaseBackend::Sqlite => {
+                return Err(ConfigError::Message(format!(
+                    "Split database connection fields are only supported for postgres/mysql; configured backend is '{}'",
+                    self.backend.as_str()
+                )));
+            }
+        };
+        let default_port = match self.backend {
+            DatabaseBackend::Postgres => 5432,
+            DatabaseBackend::MySql => 3306,
+            DatabaseBackend::Memory | DatabaseBackend::Sqlite => unreachable!(),
+        };
+
+        let host = required_config_field(self.host.as_deref(), "database.host")?;
+        let username = required_config_field(self.username.as_deref(), "database.username")?;
+        let password = self
+            .password
+            .as_ref()
+            .and_then(|value| trim_non_empty(Some(value.expose_secret())))
+            .ok_or_else(|| {
+                ConfigError::Message("Missing required config field: database.password".to_string())
+            })?;
+        let name = required_config_field(self.name.as_deref(), "database.name")?;
+        let port = self.port.unwrap_or(default_port);
+
+        Ok(SecretString::from(format!(
+            "{scheme}://{}:{}@{host}:{port}/{}",
+            encode_url_part(username),
+            encode_url_part(password),
+            encode_url_part(name)
+        )))
+    }
+}
+
+impl RedisConfig {
+    fn has_split_connection_fields(&self) -> bool {
+        self.host
+            .as_deref()
+            .is_some_and(|value| !value.trim().is_empty())
+            || self
+                .password
+                .as_ref()
+                .is_some_and(|value| !value.expose_secret().trim().is_empty())
+            || self
+                .username
+                .as_deref()
+                .is_some_and(|value| !value.trim().is_empty())
+            || self
+                .scheme
+                .as_deref()
+                .is_some_and(|value| !value.trim().is_empty())
+            || self.port.is_some()
+            || self.database.is_some()
+    }
+
+    /// Resolve the Redis connection URI from either the full URI or split fields.
+    /// Missing-field errors mention only config keys, never secret values.
+    pub fn resolved_uri(&self) -> Result<SecretString, ConfigError> {
+        if !self.has_split_connection_fields() {
+            return Ok(self.uri.clone());
+        }
+
+        let scheme = trim_non_empty(self.scheme.as_deref()).unwrap_or("redis");
+        if scheme != "redis" && scheme != "rediss" {
+            return Err(ConfigError::Message(
+                "Invalid redis.scheme: expected 'redis' or 'rediss'".to_string(),
+            ));
+        }
+
+        let host = required_config_field(self.host.as_deref(), "redis.host")?;
+        let port = self.port.unwrap_or(6379);
+        let database = self.database.map(|db| format!("/{db}")).unwrap_or_default();
+        let authority = match (
+            trim_non_empty(self.username.as_deref()),
+            self.password
+                .as_ref()
+                .and_then(|value| trim_non_empty(Some(value.expose_secret()))),
+        ) {
+            (Some(username), Some(password)) => {
+                format!(
+                    "{}:{}@",
+                    encode_url_part(username),
+                    encode_url_part(password)
+                )
+            }
+            (None, Some(password)) => format!(":{}@", encode_url_part(password)),
+            (Some(_), None) => {
+                return Err(ConfigError::Message(
+                    "Missing required config field: redis.password".to_string(),
+                ));
+            }
+            (None, None) => String::new(),
+        };
+
+        Ok(SecretString::from(format!(
+            "{scheme}://{authority}{host}:{port}{database}"
+        )))
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -746,9 +930,17 @@ impl RedisConfig {
         key_pem: Option<&str>,
         root_cert: Option<&str>,
     ) -> RedisResult<ConnectionManager> {
+        let uri = self.resolved_uri().map_err(|err| {
+            redis::RedisError::from((
+                redis::ErrorKind::InvalidClientConfig,
+                "invalid Redis configuration",
+                err.to_string(),
+            ))
+        })?;
+
         let client = if !self.require_client_auth {
             tracing::info!("Connecting to Redis (no client authentication)");
-            RedisClient::open(self.uri.expose_secret())?
+            RedisClient::open(uri.expose_secret())?
         } else {
             tracing::info!("Connecting to Redis with TLS and client authentication");
 
@@ -772,7 +964,7 @@ impl RedisConfig {
             let root_cert = root_cert.map(|cert| cert.as_bytes().to_vec());
 
             RedisClient::build_with_tls(
-                self.uri.expose_secret(),
+                uri.expose_secret(),
                 TlsCertificates {
                     client_tls,
                     root_cert,
@@ -1143,6 +1335,68 @@ mod tests {
         assert_eq!(overridden.database.pool.connect_timeout_secs, 15);
         assert_eq!(overridden.database.pool.idle_timeout_secs, 300);
         assert_eq!(overridden.database.pool.max_lifetime_secs, 900);
+
+        let split_db_cfg = Config::load_from_overrides(&[
+            ("database.backend", "postgres"),
+            ("database.host", "postgres.statuslist.svc.cluster.local"),
+            ("database.port", "5432"),
+            ("database.username", "user@example.com"),
+            ("database.password", "secret value"),
+            ("database.name", "status/list"),
+        ])
+        .expect("Failed to load split database config");
+        assert_eq!(
+            split_db_cfg
+                .database
+                .resolved_url()
+                .expect("split database config should resolve")
+                .expose_secret(),
+            "postgres://user%40example.com:secret%20value@postgres.statuslist.svc.cluster.local:5432/status%2Flist"
+        );
+
+        let missing_db_password = Config::load_from_overrides(&[
+            ("database.backend", "postgres"),
+            ("database.host", "postgres.statuslist.svc.cluster.local"),
+            ("database.username", "postgres"),
+            ("database.name", "status-list"),
+        ])
+        .expect("Failed to load incomplete split database config")
+        .database
+        .resolved_url()
+        .expect_err("missing split database password should fail");
+        let missing_db_password = missing_db_password.to_string();
+        assert!(missing_db_password.contains("database.password"));
+        assert!(!missing_db_password.contains("postgres://"));
+        assert!(!missing_db_password.contains("status-list"));
+
+        let split_redis_cfg = Config::load_from_overrides(&[
+            ("redis.scheme", "rediss"),
+            ("redis.host", "redis.example.com"),
+            ("redis.port", "6379"),
+            ("redis.password", "redis secret"),
+            ("redis.database", "2"),
+        ])
+        .expect("Failed to load split Redis config");
+        assert_eq!(
+            split_redis_cfg
+                .redis
+                .resolved_uri()
+                .expect("split Redis config should resolve")
+                .expose_secret(),
+            "rediss://:redis%20secret@redis.example.com:6379/2"
+        );
+
+        let missing_redis_host = Config::load_from_overrides(&[
+            ("redis.scheme", "rediss"),
+            ("redis.password", "redis secret"),
+        ])
+        .expect("Failed to load incomplete split Redis config")
+        .redis
+        .resolved_uri()
+        .expect_err("missing split Redis host should fail");
+        let missing_redis_host = missing_redis_host.to_string();
+        assert!(missing_redis_host.contains("redis.host"));
+        assert!(!missing_redis_host.contains("redis secret"));
 
         // 3. Database backend overrides (MySQL & SQLite)
         let mysql_cfg = Config::load_from_overrides(&[

@@ -121,11 +121,6 @@ spec:
             - name: {{ $name }}
               value: {{ $value | quote }}
             {{- end }}
-            - name: POSTGRES_PASSWORD
-              valueFrom:
-                secretKeyRef:
-                  name: {{ if .Values.externalSecret.enabled }}{{ .Values.externalSecret.spec.target.name }}{{ else }}statuslist-secret{{ end }}
-                  key: postgres-password
             {{- if .Values.secretStore.enabled }}
             - name: APP_AWS__REGION
               value: {{ .Values.secretStore.aws.region | quote }}
@@ -134,18 +129,33 @@ spec:
             - name: AWS_CONFIG_FILE
               value: /home/nobody/.aws/config
             {{- end }}
-            - name: POSTGRES_DB
+            - name: APP_DATABASE__BACKEND
+              value: "postgres"
+            - name: APP_DATABASE__HOST
+              value: "{{ .Release.Name }}-postgres.{{ .Release.Namespace }}.svc.cluster.local"
+            - name: APP_DATABASE__PORT
+              value: "5432"
+            - name: APP_DATABASE__USERNAME
+              value: {{ .Values.postgres.auth.username | quote }}
+            - name: APP_DATABASE__PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ if .Values.externalSecret.enabled }}{{ .Values.externalSecret.spec.target.name }}{{ else }}statuslist-secret{{ end }}
+                  key: postgres-password
+            - name: APP_DATABASE__NAME
               value: {{ .Values.postgres.auth.database | quote }}
-            - name: APP_DATABASE__URL
-              value: "postgres://$(POSTGRES_USER):$(POSTGRES_PASSWORD)@{{ .Release.Name }}-postgres.{{ .Release.Namespace }}.svc.cluster.local:5432/$(POSTGRES_DB)"
             {{- if $redisHAEnabled }}
-            - name: REDIS_PASSWORD
+            - name: APP_REDIS__SCHEME
+              value: {{ include "status-list-server-chart.redisScheme" . | quote }}
+            - name: APP_REDIS__HOST
+              value: {{ include "status-list-server-chart.redisHost" . | quote }}
+            - name: APP_REDIS__PORT
+              value: {{ include "status-list-server-chart.redisPort" . | quote }}
+            - name: APP_REDIS__PASSWORD
               valueFrom:
                 secretKeyRef:
                   name: {{ if .Values.externalSecret.enabled }}{{ .Values.externalSecret.spec.target.name }}{{ else }}statuslist-secret{{ end }}
                   key: redis-password
-            - name: APP_REDIS__URI
-              value: {{ include "status-list-server-chart.redisUri" . | quote }}
             {{- end }}
           volumeMounts:
             - name: tmp

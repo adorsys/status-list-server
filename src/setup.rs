@@ -165,7 +165,11 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
         }
         #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mysql"))]
         db_backend => {
-            let db_url = config.database.url.expose_secret();
+            let resolved_db_url = config
+                .database
+                .resolved_url()
+                .wrap_err("Invalid database connection configuration")?;
+            let db_url = resolved_db_url.expose_secret();
             if !db_backend.validate_url_scheme(db_url) {
                 return Err(color_eyre::eyre::eyre!(
                     "URL scheme does not match configured backend '{}'. Expected URL starting with {}",

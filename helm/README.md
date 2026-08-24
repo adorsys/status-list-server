@@ -50,7 +50,18 @@ helm template statuslist ./chart --namespace statuslist
 
 ### Redis-Enabled Certificate Cache
 
-To enable Redis, use an application image built with `redis,aws-secrets,acme` features, set `redis-ha.enabled=true`, provide a `redis-password` in the configured secret or ExternalSecret, and keep `APP_REDIS__URI` unset in `statuslist.env` so the chart can generate it from the Redis HA service. Set `APP_REDIS__REQUIRE_CLIENT_AUTH` and Redis HAProxy TLS values only when your Redis endpoint requires them.
+To enable Redis, use an application image built with `redis,aws-secrets,acme` features, set `redis-ha.enabled=true`, and provide a `redis-password` in the configured secret or ExternalSecret. Keep `APP_REDIS__URI` unset in `statuslist.env`; the chart emits split `APP_REDIS__SCHEME`, `APP_REDIS__HOST`, `APP_REDIS__PORT`, and secret-backed `APP_REDIS__PASSWORD` fields so pod metadata does not contain a fully assembled Redis URI. Set `APP_REDIS__REQUIRE_CLIENT_AUTH` and Redis HAProxy TLS values only when your Redis endpoint requires them.
+
+## Credential Exposure Model
+
+The chart intentionally avoids rendering fully assembled SQL database URLs or Redis URIs in the Deployment. The application assembles those connection strings inside the process from split configuration fields:
+
+- Database: `APP_DATABASE__HOST`, `APP_DATABASE__PORT`, `APP_DATABASE__USERNAME`, `APP_DATABASE__PASSWORD`, `APP_DATABASE__NAME`
+- Redis, when enabled: `APP_REDIS__SCHEME`, `APP_REDIS__HOST`, `APP_REDIS__PORT`, `APP_REDIS__PASSWORD`
+
+Password fields are rendered with `valueFrom.secretKeyRef`, so `kubectl describe pod` shows the referenced Secret name/key rather than a connection string containing credentials. Operators should still restrict RBAC for pod inspection, Secret reads, exec access, ephemeral containers, and workload log access to trusted roles only, because environment variables are visible inside the running container and Secret references identify where credentials live.
+
+`APP_DATABASE__URL` and `APP_REDIS__URI` remain supported by the application for local or custom deployments, but using them directly in Kubernetes pod specs accepts the tradeoff that users with pod-inspection permissions may see assembled connection strings. Prefer the split fields for Helm-managed deployments.
 
 ## Production Deployment Instructions
 

@@ -151,8 +151,19 @@ statuslist:
 
 ```yaml
 env:
-  APP_REDIS__REQUIRE_CLIENT_AUTH: "false"
-  APP_REDIS__URI: "rediss://:$(REDIS_PASSWORD)@redis.eudi-adorsys.com:6379"
+  - name: APP_REDIS__REQUIRE_CLIENT_AUTH
+    value: "false"
+  - name: APP_REDIS__SCHEME
+    value: "rediss"
+  - name: APP_REDIS__HOST
+    value: "redis.eudi-adorsys.com"
+  - name: APP_REDIS__PORT
+    value: "6379"
+  - name: APP_REDIS__PASSWORD
+    valueFrom:
+      secretKeyRef:
+        name: statuslist-secret
+        key: redis-password
 ```
 
 **Key Points**:
@@ -160,6 +171,7 @@ env:
 - `rediss://` scheme enables TLS
 - `APP_REDIS__REQUIRE_CLIENT_AUTH: "false"` disables client certificate authentication
 - Uses external DNS name that matches certificate CN (`*.eudi-adorsys.com`)
+- The application assembles the Redis URI inside the container so pod metadata does not contain the full credential-bearing URI
 
 ## Why This Architecture?
 
