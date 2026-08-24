@@ -14,6 +14,9 @@ spec:
   {{- if .Values.podDisruptionBudget.maxUnavailable }}
   maxUnavailable: {{ .Values.podDisruptionBudget.maxUnavailable }}
   {{- end }}
+  # Allow eviction of unhealthy pods so voluntary disruption is not blocked by
+  # unhealthy replicas (kube-linter: pdb-unhealthy-pod-eviction-policy).
+  unhealthyPodEvictionPolicy: AlwaysAllow
   selector:
     matchLabels:
       {{- include "status-list-server-chart.selectorLabels" . | nindent 6 }}

@@ -145,7 +145,7 @@ Scaling is opt-in and disabled by default. Enable autoscaling and a Pod Disrupti
 ```yaml
 autoscaling:
   enabled: true
-  minReplicas: 1
+  minReplicas: 2
   maxReplicas: 5
   metrics:
     - type: Resource
@@ -157,7 +157,9 @@ autoscaling:
 
 podDisruptionBudget:
   enabled: true
-  minAvailable: 1
+  # With HPA enabled the Deployment omits `replicas`, so prefer maxUnavailable (or set
+  # minAvailable below autoscaling.minReplicas) to keep the PDB valid.
+  maxUnavailable: 1
 ```
 
 When `autoscaling.enabled=true` the Deployment's `replicas` field is omitted (HPA controls the count). Scaled Pods share the application ServiceAccount; each Pod receives its own short-lived Workload Identity token, so no per-Pod cloud registration is required.
