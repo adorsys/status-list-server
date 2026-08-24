@@ -301,8 +301,9 @@ jobs:
           config: .kube-linter.yaml
           output-file: kube-linter-results.sarif
           # Pin the kube-linter binary instead of floating on 'latest' so lint
-          # results are reproducible across runs.
-          version: "0.8.3"
+          # results are reproducible across runs. The value must be the release
+          # tag (with the leading 'v'), as the action fetches releases/tags/<v>.
+          version: "v0.8.3"
 
   yaml-lint:
     name: YAML Lint and Format Check
