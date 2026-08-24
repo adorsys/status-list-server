@@ -56,7 +56,7 @@ mod tests {
     use crate::test_utils::test_app_state;
     use axum::{
         Router,
-        body::Body,
+        body::{Body, to_bytes},
         extract::Request,
         http::{Method, header},
         routing::post,
@@ -126,5 +126,33 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    #[tokio::test]
+    async fn test_publish_credentials_rejects_oct_key() {
+        let app_state = test_app_state(None).await;
+        let app = create_test_router(app_state);
+
+        // A symmetric (shared-secret) key must be rejected up front with a 400
+        // `invalid_public_jwk` rather than accepted and permanently rejected at
+        // request time.
+        let body = r#"{"issuer": "test_issuer", "public_key": {"kty": "oct", "k": "GawgguFyGrWKav7AX4VKUg"}}"#;
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/issue-credential")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(json["error"], "invalid_public_jwk");
     }
 }

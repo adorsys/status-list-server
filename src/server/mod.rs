@@ -22,6 +22,19 @@ pub struct AppState {
     pub max_statuses_per_request: usize,
     pub max_serialized_list_size: usize,
     pub snapshot_retention_secs: u64,
+    /// Management-token claim validation policy applied by the auth middleware.
+    pub auth: AuthPolicy,
     /// Dependency readiness checks backing the `/health/ready` endpoint.
     pub readiness: health::Readiness,
+}
+
+/// Management-token claim validation policy consumed by the auth middleware.
+#[derive(Debug, Clone)]
+pub struct AuthPolicy {
+    /// Maximum allowed token lifetime in seconds (`exp - iat`); `None` disables.
+    pub max_token_lifetime_secs: Option<u64>,
+    /// Clock-skew leeway in seconds for `exp`/`nbf`.
+    pub leeway_secs: u64,
+    /// Expected `aud` claim; `None` disables audience validation.
+    pub expected_audience: Option<String>,
 }
