@@ -54,7 +54,7 @@
             "target": {
               "type": "object",
               "properties": {
-                "name": { "type": "string" },
+                "name": { "const": "statuslist-secret" },
                 "creationPolicy": { "type": "string" }
               }
             }

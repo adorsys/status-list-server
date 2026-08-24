@@ -203,6 +203,10 @@ externalSecret:
       name: statuslist-secret-store
       kind: SecretStore
     target:
+      # Single supported application-secret name (statuslist-secret), shared with the
+      # Deployment, PostgreSQL (postgres.auth.existingSecret), and Redis
+      # (redis-ha.existingSecret). A custom value fails at render time; this field is
+      # intentionally not configurable.
       name: statuslist-secret
       creationPolicy: Owner
     data:

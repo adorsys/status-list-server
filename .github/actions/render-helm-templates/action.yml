@@ -12,13 +12,21 @@ runs:
         helm template status-list-server helm/chart -f helm/chart/values.yaml --output-dir /tmp/rendered/default
         helm template status-list-server helm/chart --set serviceAccount.create=false --output-dir /tmp/rendered/no-sa
         helm template status-list-server helm/chart --set statuslist.aws.mountCredentials=true --output-dir /tmp/rendered/legacy-creds
-        helm template status-list-server helm/chart --set secretStore.provider=vault --output-dir /tmp/rendered/vault
-        helm template status-list-server helm/chart --set secretStore.provider=gcp --output-dir /tmp/rendered/gcp
+        helm template status-list-server helm/chart \
+          --set secretStore.provider=vault \
+          --set secretStore.vault.server=https://vault.example.com \
+          --output-dir /tmp/rendered/vault
+        helm template status-list-server helm/chart \
+          --set secretStore.provider=gcp \
+          --set secretStore.gcp.projectID=my-project-id \
+          --output-dir /tmp/rendered/gcp
         # Azure Workload Identity: ESO uses its own ServiceAccount, not the app KSA.
         helm template status-list-server helm/chart \
           --set secretStore.provider=azure \
           --set secretStore.azure.authType=WorkloadIdentity \
           --set secretStore.azure.serviceAccountRef.name=eso-controller-sa \
+          --set secretStore.azure.tenantId=00000000-0000-0000-0000-000000000000 \
+          --set secretStore.azure.vaultUrl=https://example.vault.azure.net \
           --output-dir /tmp/rendered/azure
         helm template status-list-server helm/chart \
           --set secretStore.provider=raw \
@@ -64,6 +72,8 @@ runs:
           --set secretStore.provider=azure \
           --set secretStore.azure.authType=WorkloadIdentity \
           --set secretStore.azure.serviceAccountRef.name=eso-controller-sa \
+          --set secretStore.azure.tenantId=00000000-0000-0000-0000-000000000000 \
+          --set secretStore.azure.vaultUrl=https://example.vault.azure.net \
           --set 'statuslist.podLabels.azure\.workload\.identity/use=true' \
           --output-dir /tmp/rendered/wl-azure
         if ! grep -qE 'azure\.workload\.identity/use:\s*"?true"?$' /tmp/rendered/wl-azure/status-list-server/templates/deployment.yaml; then
@@ -83,6 +93,25 @@ runs:
         fi
         if helm template status-list-server helm/chart --set secretStore.provider=raw >/dev/null 2>&1; then
           echo "ERROR: provider=raw with empty secretStore.raw should fail"; exit 1
+        fi
+        # Fail-closed provider fields: mandatory fields must be provided, not empty defaults.
+        if helm template status-list-server helm/chart --set secretStore.provider=vault >/dev/null 2>&1; then
+          echo "ERROR: provider=vault with empty secretStore.vault.server should fail"; exit 1
+        fi
+        if helm template status-list-server helm/chart --set secretStore.provider=gcp >/dev/null 2>&1; then
+          echo "ERROR: provider=gcp with empty secretStore.gcp.projectID should fail"; exit 1
+        fi
+        if helm template status-list-server helm/chart \
+            --set secretStore.provider=azure \
+            --set secretStore.azure.authType=WorkloadIdentity \
+            --set secretStore.azure.vaultUrl=https://example.vault.azure.net >/dev/null 2>&1; then
+          echo "ERROR: provider=azure with empty secretStore.azure.tenantId should fail"; exit 1
+        fi
+        if helm template status-list-server helm/chart \
+            --set secretStore.provider=azure \
+            --set secretStore.azure.tenantId=00000000-0000-0000-0000-000000000000 \
+            --set secretStore.azure.vaultUrl=https://example.vault.azure.net >/dev/null 2>&1; then
+          echo "ERROR: provider=azure without identity configuration should fail"; exit 1
         fi
         # Contradictory modes: ESO disabled but SecretStore enabled must not render a SecretStore.
         if helm template status-list-server helm/chart \
@@ -128,4 +157,14 @@ runs:
           | grep -A3 'name: POSTGRES_PASSWORD' | grep 'name:' | tail -1 | sed -E 's/.*name: ([a-zA-Z0-9-]+)$/\1/')
         if [ "$PGREF" != "statuslist-secret" ]; then
           echo "ERROR: POSTGRES_PASSWORD secretKeyRef must reference statuslist-secret, got '$PGREF'"; exit 1
+        fi
+        # ESO one-name invariant: every consumer shares the single name statuslist-secret, so a
+        # custom externalSecret.spec.target.name must fail at render time.
+        if helm template status-list-server helm/chart \
+            --set externalSecret.spec.target.name=custom-eso-secret >/dev/null 2>&1; then
+          echo "ERROR: externalSecret.spec.target.name other than statuslist-secret should fail"; exit 1
+        fi
+        # In ESO mode the ExternalSecret target name must equal the app/PostgreSQL/Redis secret name.
+        if ! helm template status-list-server helm/chart 2>/dev/null | grep -A1 '^  target:' | grep -q 'name: statuslist-secret'; then
+          echo "ERROR: ExternalSecret target.name must be statuslist-secret"; exit 1
         fi

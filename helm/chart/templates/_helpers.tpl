@@ -64,16 +64,14 @@ Create the name of the service account to use
 
 {{/*
 Effective name of the Kubernetes Secret the application reads (postgres/redis passwords).
-When External Secrets Operator is enabled this is the ExternalSecret target name;
-otherwise it is the fallback Secret name (defaults to "statuslist-secret").
-Centralised here so the Deployment, PostgreSQL, and Redis all reference a single name.
+Single supported name: "statuslist-secret" in both ESO mode (ExternalSecret target) and
+fallback mode. The Deployment, PostgreSQL (postgres.auth.existingSecret), Redis
+(redis-ha.existingSecret), and the fallback Secret all reference this same name, so it is
+not independently configurable. ESO mode validates externalSecret.spec.target.name against
+it at render time.
 */}}
 {{- define "status-list-server-chart.appSecretName" -}}
-{{- if .Values.externalSecret.enabled }}
-{{- .Values.externalSecret.spec.target.name }}
-{{- else }}
 {{- "statuslist-secret" }}
-{{- end }}
 {{- end }}
 
 {{/*
