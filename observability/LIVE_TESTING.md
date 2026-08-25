@@ -20,15 +20,15 @@ It is the **hands-on companion** to:
 
 ## 1. What you are validating
 
-| SLI | Recording rule | Dashboard panel | Alert(s) |
-|---|---|---|---|
-| Request latency (p95) | `sli:request_latency:p95:5m` | Request latency | `RequestLatencyFastBurn` / `SlowBurn` |
-| Error rate | `sli:error_rate:5m` | Error rate | `ErrorRateFastBurn` / `SlowBurn` |
-| Cache hit ratio | `sli:cache_hit_ratio:5m` | Cache hit ratio | `CacheHitRatioLow` |
-| DB latency (p95) | `sli:db_query_latency:p95:5m` | DB p95 | `DbLatencyFastBurn` / `SlowBurn` |
-| Token-gen failure | `sli:token_gen_failure_rate:5m` | Token-gen failure | `TokenGenerationFastBurn` / `SlowBurn` |
-| Cert renewal failure | `sli:cert_renewal_failure_rate:5m` | Cert renewal failure | `CertRenewalFailures` |
-| Error budget | `sli:error_budget:success:30d` | Error budget | — (derived) |
+| SLI                   | Recording rule                     | Dashboard panel      | Alert(s)                               |
+| --------------------- | ---------------------------------- | -------------------- | -------------------------------------- |
+| Request latency (p95) | `sli:request_latency:p95:5m`       | Request latency      | `RequestLatencyFastBurn` / `SlowBurn`  |
+| Error rate            | `sli:error_rate:5m`                | Error rate           | `ErrorRateFastBurn` / `SlowBurn`       |
+| Cache hit ratio       | `sli:cache_hit_ratio:5m`           | Cache hit ratio      | `CacheHitRatioLow`                     |
+| DB latency (p95)      | `sli:db_query_latency:p95:5m`      | DB p95               | `DbLatencyFastBurn` / `SlowBurn`       |
+| Token-gen failure     | `sli:token_gen_failure_rate:5m`    | Token-gen failure    | `TokenGenerationFastBurn` / `SlowBurn` |
+| Cert renewal failure  | `sli:cert_renewal_failure_rate:5m` | Cert renewal failure | `CertRenewalFailures`                  |
+| Error budget          | `sli:error_budget:success:30d`     | Error budget         | — (derived)                            |
 
 The dashboard and alerts both query the `sli:*` recording rules, never raw
 metrics, so a single number drives both.
@@ -63,12 +63,12 @@ docker compose up -d
 
 Service name / host port (from the resolved `docker compose config`):
 
-| Service | In-Docker name | Host port |
-|---|---|---|
-| Prometheus | `prometheus:9090` | `9092` |
-| Grafana | `grafana:3000` | `3000` |
-| Alertmanager | `alertmanager:9093` | `9093` |
-| OTel collector (Prom exporter) | `otel-collector:8889` | `8889` |
+| Service                        | In-Docker name        | Host port |
+| ------------------------------ | --------------------- | --------- |
+| Prometheus                     | `prometheus:9090`     | `9092`    |
+| Grafana                        | `grafana:3000`        | `3000`    |
+| Alertmanager                   | `alertmanager:9093`   | `9093`    |
+| OTel collector (Prom exporter) | `otel-collector:8889` | `8889`    |
 
 > **Port-conflict gotcha.** Host ports are shared across all running Compose
 > projects on the machine. If another project's `prometheus`/`grafana` already
@@ -343,14 +343,14 @@ Fast-burn (page) alerts require **both** the 1h and 6h windows to breach, so
 sustain a fault for several minutes. The sections above walk each alert end to
 end. A compact cheat-sheet:
 
-| Alert | How to trigger | Verify |
-|---|---|---|
-| `ErrorRateFastBurn`/`SlowBurn` | Stop the DB and run read load so reads return 5xx | `curl -s http://localhost:9092/api/v1/alerts` |
-| `RequestLatencyFastBurn` | Add latency (e.g. `tc qdisc` delay, or saturate the DB) so p95 > 0.3s for 5m+1h | alert state |
-| `DbLatencyFastBurn` | Hold a row lock / `pg_sleep` while hammering reads | alert state |
-| `TokenGenerationFastBurn` | Break the signing-key backend while running token flows | alert state |
-| `CacheHitRatioLow` (warn) | Burst many distinct list IDs (cold cache) so hit ratio < 0.85 for 15m | Alertmanager |
-| `CertRenewalFailures` (warn) | Stop `pebble` around the renewal cadence | Alertmanager |
+| Alert                          | How to trigger                                                                  | Verify                                        |
+| ------------------------------ | ------------------------------------------------------------------------------- | --------------------------------------------- |
+| `ErrorRateFastBurn`/`SlowBurn` | Stop the DB and run read load so reads return 5xx                               | `curl -s http://localhost:9092/api/v1/alerts` |
+| `RequestLatencyFastBurn`       | Add latency (e.g. `tc qdisc` delay, or saturate the DB) so p95 > 0.3s for 5m+1h | alert state                                   |
+| `DbLatencyFastBurn`            | Hold a row lock / `pg_sleep` while hammering reads                              | alert state                                   |
+| `TokenGenerationFastBurn`      | Break the signing-key backend while running token flows                         | alert state                                   |
+| `CacheHitRatioLow` (warn)      | Burst many distinct list IDs (cold cache) so hit ratio < 0.85 for 15m           | Alertmanager                                  |
+| `CertRenewalFailures` (warn)   | Stop `pebble` around the renewal cadence                                        | Alertmanager                                  |
 
 Check fire + routing:
 
@@ -380,17 +380,17 @@ webhook/email receiver in production (no credentials are committed).
 
 ## Troubleshooting
 
-| Symptom | Fix |
-|---|---|
-| `GET /metrics` -> 404 | App started without `APP_SERVER__ENABLE_METRICS=true` — restart with it. |
-| `app:8000` target down | App runs on the host, not in Docker; point the scrape target at the bridge gateway (Section 5). |
-| Ports 9090/3000 unreachable | Competing project owns them; check `docker port prometheus/grafana` and free the port. |
-| "Data source prometheus was not found" | Datasource UID mismatch — pin `uid: prometheus` (Section 6) and recreate Grafana. |
-| Prompt `429 Too Many Requests` | Rate limiter keys by source IP; raise limits (Section 7a) for single-IP load. |
-| Panels show `No data` / `NaN` | That SLI's code path hasn't run yet; generate the matching traffic (Section 7). |
-| `422 public_key invalid type` | Send a JWK, not a PEM (Section 7). |
-| `422` on status publish | Use integer statuses `0/1/2`, not strings (Section 7). |
-| Recording rules show `NaN` right after start | `rate()[5m]` needs a couple of minutes of scrape history; it resolves. |
+| Symptom                                      | Fix                                                                                             |
+| -------------------------------------------- | ----------------------------------------------------------------------------------------------- |
+| `GET /metrics` -> 404                        | App started without `APP_SERVER__ENABLE_METRICS=true` — restart with it.                        |
+| `app:8000` target down                       | App runs on the host, not in Docker; point the scrape target at the bridge gateway (Section 5). |
+| Ports 9090/3000 unreachable                  | Competing project owns them; check `docker port prometheus/grafana` and free the port.          |
+| "Data source prometheus was not found"       | Datasource UID mismatch — pin `uid: prometheus` (Section 6) and recreate Grafana.               |
+| Prompt `429 Too Many Requests`               | Rate limiter keys by source IP; raise limits (Section 7a) for single-IP load.                   |
+| Panels show `No data` / `NaN`                | That SLI's code path hasn't run yet; generate the matching traffic (Section 7).                 |
+| `422 public_key invalid type`                | Send a JWK, not a PEM (Section 7).                                                              |
+| `422` on status publish                      | Use integer statuses `0/1/2`, not strings (Section 7).                                          |
+| Recording rules show `NaN` right after start | `rate()[5m]` needs a couple of minutes of scrape history; it resolves.                          |
 
 See the per-alert runbooks in `observability/runbooks/` for diagnostics and
 mitigation when an alert fires for real.

@@ -17,15 +17,15 @@ The app exports through the OTel `opentelemetry-prometheus` exporter, which
 appends suffixes and the `otel_scope_name="status-list-server"` label. The names
 below are the **exported** Prometheus series, not the raw instrument names:
 
-| Instrument (source) | Exported series |
-|---|---|
-| `http_server_duration` histogram (`s`) | `http_server_duration_seconds{...}` |
-| `http_server_requests` counter | `http_server_requests_total{...}` |
-| `db_query_duration` histogram (`s`) | `db_query_duration_seconds{...}` |
-| `status_list_cache_hits` / `_misses` | `status_list_cache_hits_total` / `_misses_total` |
-| `token_generation_attempts` / `_failures` | `token_generation_attempts_total` / `_failures_total` |
-| `cert_renewal_attempts` / `_successes` / `_failures` | `cert_renewal_*_total` |
-| `certificate_chain_cache_hits` / `_misses` | `certificate_chain_cache_*_total` |
+| Instrument (source)                                  | Exported series                                       |
+| ---------------------------------------------------- | ----------------------------------------------------- |
+| `http_server_duration` histogram (`s`)               | `http_server_duration_seconds{...}`                   |
+| `http_server_requests` counter                       | `http_server_requests_total{...}`                     |
+| `db_query_duration` histogram (`s`)                  | `db_query_duration_seconds{...}`                      |
+| `status_list_cache_hits` / `_misses`                 | `status_list_cache_hits_total` / `_misses_total`      |
+| `token_generation_attempts` / `_failures`            | `token_generation_attempts_total` / `_failures_total` |
+| `cert_renewal_attempts` / `_successes` / `_failures` | `cert_renewal_*_total`                                |
+| `certificate_chain_cache_hits` / `_misses`           | `certificate_chain_cache_*_total`                     |
 
 Every query in this repo scopes with `{otel_scope_name="status-list-server"}` to
 avoid double counting if multiple instrumentation scopes ever appear, and
@@ -35,14 +35,14 @@ set keeps cardinality in check.
 
 ## Per-SLI table
 
-| SLI | Metric source | Example target | Window | Alert windows / burn thresholds |
-|---|---|---|---|---|
-| Request latency | `http_server_duration_seconds` histogram | p95 < **300 ms** | 30d | fast page: 1h > 300ms **and** 6h > 300ms; slow warn: 6h > 300ms |
-| Error rate | `sum(rate(http_server_requests_total{status_class="5xx"}[...])) / sum(rate(http_server_requests_total[...]))` | ≥ **99.5%** success (≤ 0.5% 5xx) | 30d | fast page: ≥14.4x (0.072) over 1h **and** 6h; slow warn: ≥6x (0.030) over 6h |
-| Cache hit ratio | `status_list_cache_hits_total / (hits_total + misses_total)` | ≥ **85%** | 7d | warn-only (degradation, not outage) |
-| DB latency | `db_query_duration_seconds` histogram | p95 < **50 ms** | 30d | fast page: 1h > 50ms **and** 6h > 50ms; slow warn: 6h > 50ms |
-| Cert renewal failure | `cert_renewal_failures_total / cert_renewal_attempts_total` | < **1%** | 7d | warn-only (op risk) |
-| Token-gen failure | `token_generation_failures_total / token_generation_attempts_total` | < **0.5%** | 30d | fast page: ≥14.4x (0.072) over 1h **and** 6h; slow warn: ≥6x (0.030) over 6h |
+| SLI                  | Metric source                                                                                                 | Example target                   | Window | Alert windows / burn thresholds                                              |
+| -------------------- | ------------------------------------------------------------------------------------------------------------- | -------------------------------- | ------ | ---------------------------------------------------------------------------- |
+| Request latency      | `http_server_duration_seconds` histogram                                                                      | p95 < **300 ms**                 | 30d    | fast page: 1h > 300ms **and** 6h > 300ms; slow warn: 6h > 300ms              |
+| Error rate           | `sum(rate(http_server_requests_total{status_class="5xx"}[...])) / sum(rate(http_server_requests_total[...]))` | ≥ **99.5%** success (≤ 0.5% 5xx) | 30d    | fast page: ≥14.4x (0.072) over 1h **and** 6h; slow warn: ≥6x (0.030) over 6h |
+| Cache hit ratio      | `status_list_cache_hits_total / (hits_total + misses_total)`                                                  | ≥ **85%**                        | 7d     | warn-only (degradation, not outage)                                          |
+| DB latency           | `db_query_duration_seconds` histogram                                                                         | p95 < **50 ms**                  | 30d    | fast page: 1h > 50ms **and** 6h > 50ms; slow warn: 6h > 50ms                 |
+| Cert renewal failure | `cert_renewal_failures_total / cert_renewal_attempts_total`                                                   | < **1%**                         | 7d     | warn-only (op risk)                                                          |
+| Token-gen failure    | `token_generation_failures_total / token_generation_attempts_total`                                           | < **0.5%**                       | 30d    | fast page: ≥14.4x (0.072) over 1h **and** 6h; slow warn: ≥6x (0.030) over 6h |
 
 ### Why these windows
 - **30d** for latency/error/DB/token: matches the standard Google SRE "monthly

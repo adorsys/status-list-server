@@ -3,7 +3,7 @@
 SLO dashboards, Prometheus recording/alerting rules, and runbooks for
 `status-list-server`, versioned as code and PR-reviewed.
 
-```
+```text
 observability/
   slo/README.md                  # SLI/SLO definitions + methodology (Phase 2)
   prometheus/
