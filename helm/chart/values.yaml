@@ -61,8 +61,6 @@ statuslist:
     # APP_SERVER__CERT__DNS__ACMEDNS__ACCOUNTS JSON, which holds every account password)
     # must come from a secret (see externalSecret below), not from plain env values.
     APP_SERVER__CERT__DNS__PROVIDER: "route53"
-    APP_AWS__S3_BUCKET: "status-list-adorsys"
-    APP_AWS__S3_KEY_PREFIX: ""
     # Status-list record cache TTL in seconds. "0" disables this cache.
     APP_CACHE__TTL: "300"
     APP_CACHE__MAX_CAPACITY: "1000"
@@ -101,7 +99,7 @@ statuslist:
     # Add podSelector/namespaceSelector/ipBlock entries to restrict sources.
     ingress: []
     # Restrict egress for internal ports to specific destinations.
-    # PostgreSQL (5432) is always included; Redis ports (6379, 6380) are included only when redis-ha.enabled=true.
+    # PostgreSQL (5432) is always included.
     # External ports (443, 53) are always allowed without destination restriction.
     egressInternal: []
   resources:
@@ -154,73 +152,11 @@ externalSecret:
         remoteRef:
           key: statuslist-secret
           property: POSTGRES_PASSWORD
-      - secretKey: redis-password
-        remoteRef:
-          key: statuslist-secret
-          property: REDIS_PASSWORD
 
 secretStore:
   enabled: true
   aws:
     region: eu-central-1
-
-redis-ha:
-  enabled: false
-  externalDnsHostname: redis.eudi-adorsys.com
-  resources:
-    requests:
-      cpu: 100m
-      memory: 200Mi
-    limits:
-      cpu: 500m
-      memory: 700Mi
-  image:
-    repository: docker.io/redis
-    tag: 8.2
-  redis:
-    port: 6379
-    tlsPort: 6380
-    tlsReplication: true
-    authClients: "no"
-    config:
-      tls-port: 6380
-      tls-cert-file: /tls-certs/tls.crt
-      tls-key-file: /tls-certs/tls.key
-      tls-auth-clients: "no"
-  replicas: 1
-  auth: true
-  existingSecret: statuslist-secret
-  authKey: redis-password
-  persistentVolume:
-    enabled: true
-    storageClass: high-performance
-    accessModes:
-      - ReadWriteOnce
-    size: 10Gi
-  tls:
-    secretName: statuslist-tls
-    certFile: tls.crt
-    keyFile: tls.key
-  haproxy:
-    enabled: true
-    replicas: 1
-    resources:
-      requests:
-        cpu: 100m
-        memory: 128Mi
-      limits:
-        cpu: 200m
-        memory: 256Mi
-    tls:
-      enabled: true
-      secretName: statuslist-haproxy-tls
-      keyName: redis.pem
-    service:
-      type: LoadBalancer
-      annotations:
-        service.beta.kubernetes.io/aws-load-balancer-type: "nlb"
-        external-dns.alpha.kubernetes.io/hostname: redis.eudi-adorsys.com
-        external-dns.alpha.kubernetes.io/delete: "true"
 
 opentelemetry-collector:
   enabled: true

@@ -29,13 +29,6 @@ user-id = 160111
 user-login = "aws-sdk-rust-ci"
 user-name = "AWS SDK Rust Bot"
 
-[[publisher.aws-sdk-s3]]
-version = "1.142.0"
-when = "2026-08-17"
-user-id = 160111
-user-login = "aws-sdk-rust-ci"
-user-name = "AWS SDK Rust Bot"
-
 [[publisher.aws-sdk-secretsmanager]]
 version = "1.112.0"
 when = "2026-08-17"
@@ -60,20 +53,6 @@ user-name = "AWS SDK Rust Bot"
 [[publisher.aws-smithy-async]]
 version = "1.3.0"
 when = "2026-07-07"
-user-id = 160111
-user-login = "aws-sdk-rust-ci"
-user-name = "AWS SDK Rust Bot"
-
-[[publisher.aws-smithy-checksums]]
-version = "0.65.0"
-when = "2026-07-07"
-user-id = 160111
-user-login = "aws-sdk-rust-ci"
-user-name = "AWS SDK Rust Bot"
-
-[[publisher.aws-smithy-eventstream]]
-version = "0.61.2"
-when = "2026-08-12"
 user-id = 160111
 user-login = "aws-sdk-rust-ci"
 user-name = "AWS SDK Rust Bot"

@@ -717,14 +717,12 @@ mod snapshot_txn_test_hook {
             self.slot.get_or_init(|| Mutex::new(None))
         }
 
-        /// Only the container tests install probes, so under any other feature
-        /// set this is dead code and `-D warnings` rejects it.
         #[cfg(any(feature = "mysql", feature = "postgres-tests"))]
         pub(super) async fn install(&self, probe_to_install: Probe) {
             let mut guard = self.slot().lock().await;
             assert!(
                 guard.is_none(),
-                "a contention probe is already installed at this pause site"
+                "only one contention probe can be installed at a time"
             );
             *guard = Some(probe_to_install);
         }

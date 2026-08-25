@@ -83,9 +83,3 @@ There is no separate MariaDB service because MariaDB uses the same MySQL-driver 
 - For high availability, prefer PostgreSQL or MySQL backed by a managed HA service or a replicated cluster.
 - Avoid SQLite for multi-replica production deployments.
 - If you need distributed storage semantics, use a database that already provides them rather than trying to layer them on top of SQLite.
-
-## Redis Is Not A Database Backend
-
-Redis is not used for status-list persistence or for the status-list read path. Reads use the configured database/repository plus the in-process Moka cache. Certificate and signing-key material are managed together by the feature-selected cryptographic-material backend; prefer the built-in material read-cache TTLs before adding another service.
-
-Keep Redis disabled for local, single-replica, and simple deployments. Enable it only for explicit adapter-level integrations that still require Redis and where the added credentials, TLS, HA, and monitoring work is justified.
