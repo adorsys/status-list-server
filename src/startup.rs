@@ -530,6 +530,7 @@ mod tests {
                 .build(),
         )
         .expect("metrics setup");
+        drop(_metrics_guard);
 
         async fn ok_handler() -> impl IntoResponse {
             "ok"

@@ -129,6 +129,7 @@ mod tests {
                 .build(),
         )
         .expect("metrics setup");
+        drop(_metrics_guard);
 
         let ok: Result<(), &str> = time_query("op", "res", async { Ok(()) }).await;
         assert!(ok.is_ok());

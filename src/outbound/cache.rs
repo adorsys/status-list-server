@@ -14,7 +14,7 @@ const MISS_METRIC: &str = "status_list_cache_misses";
 
 /// Cache-hit/miss SLI counters.
 ///
-/// Handles are cached through [`cached_instruments`], keyed on the global
+/// Handles are cached through `cached_instruments`, keyed on the global
 /// meter-provider generation, so a fresh provider (e.g. a re-run of
 /// `setup_metrics` in tests) never leaves stale no-op handles behind. Unlike an
 /// eager `global::meter()` binding at construction, this is robust to the cache
@@ -56,7 +56,7 @@ impl MokaStatusListCache {
     /// behavior: inserted entries expire immediately and reads miss.
     ///
     /// Counter handles are resolved lazily and generation-aware through
-    /// [`cached_instruments`], so they stay valid regardless of whether the
+    /// `cached_instruments`, so they stay valid regardless of whether the
     /// global meter provider has been installed yet.
     pub fn new(ttl_secs: u64, max_capacity: u64) -> Self {
         if ttl_secs == 0 {
