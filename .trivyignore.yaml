@@ -1,4 +1,4 @@
 misconfigurations:
   - id: AVD-KSV-0014
     paths:
-      - "*/charts/postgres*/**"
+      - "**/charts/postgres*/**"
