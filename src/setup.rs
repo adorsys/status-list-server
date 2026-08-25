@@ -341,10 +341,6 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
         readiness = readiness.with_check(AlwaysReady::new("database"));
     }
 
-    // Redis is optional in this setup. Certificate and signing-key material use
-    // the feature-selected cryptographic-material backend, so Redis is intentionally
-    // omitted from readiness gating.
-
     #[cfg(feature = "acme")]
     {
         if let Some(manager) = &cert_manager_opt {

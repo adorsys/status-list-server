@@ -3,16 +3,9 @@ use std::{collections::HashMap, fmt, marker::PhantomData};
 
 use config::builder::DefaultState;
 use config::{Config as ConfigLib, ConfigBuilder, ConfigError, Environment};
-#[cfg(feature = "redis")]
-use redis::{
-    Client as RedisClient, ClientTlsConfig, RedisResult, TlsCertificates,
-    aio::{ConnectionManager, ConnectionManagerConfig},
-};
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Deserializer};
 use serde_aux::field_attributes::deserialize_vec_from_string_or_vec;
-#[cfg(feature = "redis")]
-use std::time::Duration;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -85,7 +78,6 @@ pub const ENV_DEVELOPMENT: &str = "development";
 pub struct Config {
     pub server: ServerConfig,
     pub database: DatabaseConfig,
-    pub redis: RedisConfig,
     pub aws: AwsConfig,
     pub vault: VaultConfig,
     pub gcp_secret_manager: GcpSecretManagerConfig,
@@ -546,32 +538,6 @@ impl DnsConfig {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
-pub struct RedisConfig {
-    /// Redis connection URI. Leave empty to disable the optional Redis-backed
-    /// certificate-material cache, even when the `redis` feature is compiled.
-    ///
-    /// Production Kubernetes deployments should prefer the split host/password
-    /// fields below so pod metadata does not contain a fully assembled URI.
-    pub uri: SecretString,
-    #[serde(default)]
-    pub scheme: Option<String>,
-    #[serde(default)]
-    pub host: Option<String>,
-    #[serde(default)]
-    pub port: Option<u16>,
-    #[serde(default)]
-    pub username: Option<String>,
-    #[serde(default)]
-    pub password: Option<SecretString>,
-    #[serde(default)]
-    pub database: Option<u8>,
-    pub require_client_auth: bool,
-    /// Cache TTL for Redis TLS certificates in seconds.
-    /// Setting this to 0 disables caching entirely.
-    pub cert_cache_ttl: u64,
-}
-
 /// Connection-pool tuning for the production (Postgres/MySQL) backends.
 ///
 /// Defaults are chosen so a single-replica deployment with a fresh Postgres
@@ -709,93 +675,9 @@ impl DatabaseConfig {
     }
 }
 
-impl RedisConfig {
-    fn has_split_connection_fields(&self) -> bool {
-        self.host
-            .as_deref()
-            .is_some_and(|value| !value.trim().is_empty())
-            || self
-                .password
-                .as_ref()
-                .is_some_and(|value| !value.expose_secret().trim().is_empty())
-            || self
-                .username
-                .as_deref()
-                .is_some_and(|value| !value.trim().is_empty())
-            || self
-                .scheme
-                .as_deref()
-                .is_some_and(|value| !value.trim().is_empty())
-            || self.port.is_some()
-            || self.database.is_some()
-    }
-
-    /// Resolve the Redis connection URI from either the full URI or split fields.
-    /// Missing-field errors mention only config keys, never secret values.
-    pub fn resolved_uri(&self) -> Result<SecretString, ConfigError> {
-        if !self.has_split_connection_fields() {
-            return Ok(self.uri.clone());
-        }
-
-        let scheme = trim_non_empty(self.scheme.as_deref()).unwrap_or("redis");
-        if scheme != "redis" && scheme != "rediss" {
-            // Sanitize the scheme value to prevent injection in error messages
-            let sanitized: String = scheme
-                .chars()
-                .take(20)
-                .filter(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '-')
-                .collect();
-            return Err(ConfigError::Message(format!(
-                "Invalid redis.scheme: expected 'redis' or 'rediss', got '{}'",
-                if sanitized.is_empty() {
-                    "<empty>"
-                } else {
-                    &sanitized
-                }
-            )));
-        }
-
-        let host = required_config_field(self.host.as_deref(), "redis.host")?;
-        let port = self.port.unwrap_or(6379);
-        let database = self.database.map(|db| format!("/{db}")).unwrap_or_default();
-        let authority = match (
-            trim_non_empty(self.username.as_deref()),
-            self.password
-                .as_ref()
-                .and_then(|value| trim_non_empty(Some(value.expose_secret()))),
-        ) {
-            (Some(username), Some(password)) => {
-                format!(
-                    "{}:{}@",
-                    encode_url_part(username),
-                    encode_url_part(password)
-                )
-            }
-            (None, Some(password)) => {
-                // Redis AUTH protocol supports password-only authentication (AUTH <password>).
-                // The leading colon in the URL userinfo section indicates an empty username
-                // while still providing a password, which is the standard format for this case.
-                format!(":{}@", encode_url_part(password))
-            }
-            (Some(_), None) => {
-                return Err(ConfigError::Message(
-                    "Missing required config field: redis.password".to_string(),
-                ));
-            }
-            (None, None) => String::new(),
-        };
-
-        Ok(SecretString::from(format!(
-            "{scheme}://{authority}{host}:{port}{database}"
-        )))
-    }
-}
-
 #[derive(Debug, Clone, Deserialize)]
 pub struct AwsConfig {
     pub region: String,
-    pub s3_bucket: String,
-    pub s3_key_prefix: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
@@ -942,76 +824,6 @@ pub struct StatusListConfig {
     pub snapshot_retention_secs: u64,
 }
 
-#[cfg(feature = "redis")]
-impl RedisConfig {
-    /// Establishes a new Redis connection based on the configuration.
-    ///
-    /// If it is `true`, the connection will use TLS with client authentication, and the URI **must** use the `rediss://` scheme.
-    ///
-    /// To enable mutual TLS (mTLS), both `cert_pem` and `key_pem` must be provided.
-    /// If one is missing, the client-side authentication will not be effective.
-    ///
-    /// # Parameters
-    /// - `cert_pem`: The client certificate in PEM format (required for mTLS).
-    /// - `key_pem`: The client private key in PEM format (required for mTLS).
-    /// - `root_cert`: The custom root certificate in PEM format (required for client authentication).
-    ///
-    /// # Errors
-    /// Returns an error if the connection cannot be established.
-    pub async fn start(
-        &self,
-        cert_pem: Option<&str>,
-        key_pem: Option<&str>,
-        root_cert: Option<&str>,
-    ) -> RedisResult<ConnectionManager> {
-        let uri = self.resolved_uri().map_err(|err| {
-            redis::RedisError::from((
-                redis::ErrorKind::InvalidClientConfig,
-                "invalid Redis configuration",
-                err.to_string(),
-            ))
-        })?;
-
-        let client = if !self.require_client_auth {
-            tracing::info!("Connecting to Redis (no client authentication)");
-            RedisClient::open(uri.expose_secret())?
-        } else {
-            tracing::info!("Connecting to Redis with TLS and client authentication");
-
-            let client_tls = match (cert_pem, key_pem) {
-                (Some(cert), Some(key)) => {
-                    tracing::debug!("Using client TLS certificates");
-                    Some(ClientTlsConfig {
-                        client_cert: cert.as_bytes().to_vec(),
-                        client_key: key.as_bytes().to_vec(),
-                    })
-                }
-                _ => {
-                    tracing::warn!("Client authentication required but no certificates provided");
-                    return Err(redis::RedisError::from((
-                        redis::ErrorKind::Io,
-                        "Client authentication required but no certificates provided",
-                    )));
-                }
-            };
-
-            let root_cert = root_cert.map(|cert| cert.as_bytes().to_vec());
-
-            RedisClient::build_with_tls(
-                uri.expose_secret(),
-                TlsCertificates {
-                    client_tls,
-                    root_cert,
-                },
-            )?
-        };
-
-        let config =
-            ConnectionManagerConfig::new().set_connection_timeout(Some(Duration::from_secs(60)));
-        client.get_connection_manager_with_config(config).await
-    }
-}
-
 impl Config {
     /// Loads configuration from built-in defaults, then overrides them with
     /// values sourced from the process environment.
@@ -1027,7 +839,6 @@ impl Config {
         let mut builder = base_builder()?
             // Override config values via environment variables
             // The environment variables should be prefixed with 'APP_' and use '__' as a separator
-            // Example: APP_REDIS__REQUIRE_CLIENT_AUTH=false
             .add_source(
                 Environment::with_prefix("APP")
                     .prefix_separator("_")
@@ -1104,11 +915,6 @@ fn base_builder() -> Result<ConfigBuilder<DefaultState>, ConfigError> {
         .set_default("database.pool.connect_timeout_secs", 10u64)?
         .set_default("database.pool.idle_timeout_secs", 600u64)?
         .set_default("database.pool.max_lifetime_secs", 1800u64)?
-        .set_default("redis.uri", "")?
-        .set_default("redis.require_client_auth", false)?
-        .set_default("redis.cert_cache_ttl", 3600)?
-        .set_default("aws.s3_bucket", "status-list-adorsys")?
-        .set_default("aws.s3_key_prefix", "")?
         .set_default(
             "server.cert.provisioning_strategy",
             default_provisioning_strategy,
@@ -1186,8 +992,6 @@ mod tests {
             "https://acme-v02.api.letsencrypt.org/directory"
         );
         assert_eq!(config.aws.region, "us-east-1");
-        assert_eq!(config.aws.s3_bucket, "status-list-adorsys");
-        assert_eq!(config.aws.s3_key_prefix, "");
         assert_eq!(config.gcp_secret_manager.project_id, "");
         assert_eq!(config.gcp_secret_manager.secrets_cache_ttl, 300);
         assert_eq!(config.azure_keyvault.vault_url, None);
@@ -1220,8 +1024,6 @@ mod tests {
 
         assert_eq!(config.database.url.expose_secret(), expected_db_url);
         assert_eq!(config.database.backend, expected_db_backend);
-        assert_eq!(config.redis.uri.expose_secret(), "");
-        assert!(!config.redis.require_client_auth);
         #[cfg(feature = "acme")]
         let (expected_strategy, expected_cert_path, expected_key_path) =
             ("acme", Option::<String>::None, Option::<String>::None);
@@ -1281,8 +1083,6 @@ mod tests {
                 "database.url",
                 "postgres://user:password@localhost:5432/status-list",
             ),
-            ("redis.uri", "rediss://user:password@localhost:6379/redis"),
-            ("redis.require_client_auth", "true"),
             ("server.cert.email", "test@gmail.com"),
             (
                 "server.cert.acme_directory_url",
@@ -1297,8 +1097,6 @@ mod tests {
             ("server.cert.renewal_cron_schedule", "0 0 12 * * *"),
             ("server.cert.dns_challenge_server_url", "http://pebble:8055"),
             ("aws.region", "us-west-2"),
-            ("aws.s3_bucket", "my-custom-bucket"),
-            ("aws.s3_key_prefix", "status-list/prod"),
             ("cache.ttl", "600"),
             ("cache.max_capacity", "2000"),
             ("status_list.token_exp_secs", "1800"),
@@ -1330,19 +1128,12 @@ mod tests {
             overridden.database.url.expose_secret(),
             "postgres://user:password@localhost:5432/status-list"
         );
-        assert_eq!(
-            overridden.redis.uri.expose_secret(),
-            "rediss://user:password@localhost:6379/redis"
-        );
-        assert!(overridden.redis.require_client_auth);
         assert_eq!(overridden.server.cert.email, "test@gmail.com");
         assert_eq!(
             overridden.server.cert.acme_directory_url,
             "https://acme-v02.api.letsencrypt.org/directory"
         );
         assert_eq!(overridden.aws.region, "us-west-2");
-        assert_eq!(overridden.aws.s3_bucket, "my-custom-bucket");
-        assert_eq!(overridden.aws.s3_key_prefix, "status-list/prod");
         assert_eq!(overridden.cache.ttl, 600);
         assert_eq!(overridden.cache.max_capacity, 2000);
         assert_eq!(overridden.status_list.token_exp_secs, 1800);
@@ -1409,35 +1200,6 @@ mod tests {
         assert!(missing_db_password.contains("database.password"));
         assert!(!missing_db_password.contains("postgres://"));
         assert!(!missing_db_password.contains("status-list"));
-
-        let split_redis_cfg = Config::load_from_overrides(&[
-            ("redis.scheme", "rediss"),
-            ("redis.host", "redis.example.com"),
-            ("redis.port", "6379"),
-            ("redis.password", "redis secret"),
-            ("redis.database", "2"),
-        ])
-        .expect("Failed to load split Redis config");
-        assert_eq!(
-            split_redis_cfg
-                .redis
-                .resolved_uri()
-                .expect("split Redis config should resolve")
-                .expose_secret(),
-            "rediss://:redis%20secret@redis.example.com:6379/2"
-        );
-
-        let missing_redis_host = Config::load_from_overrides(&[
-            ("redis.scheme", "rediss"),
-            ("redis.password", "redis secret"),
-        ])
-        .expect("Failed to load incomplete split Redis config")
-        .redis
-        .resolved_uri()
-        .expect_err("missing split Redis host should fail");
-        let missing_redis_host = missing_redis_host.to_string();
-        assert!(missing_redis_host.contains("redis.host"));
-        assert!(!missing_redis_host.contains("redis secret"));
 
         // 3. Database backend overrides (MySQL & SQLite)
         let mysql_cfg = Config::load_from_overrides(&[
@@ -1644,7 +1406,7 @@ mod tests {
     fn test_critical_validations() {
         // Invalid database backend configuration
         let invalid_db_res = Config::load_from_overrides(&[
-            ("database.backend", "redis"),
+            ("database.backend", "invalid-backend"),
             (
                 "database.url",
                 "postgres://user:password@localhost:5432/status-list",

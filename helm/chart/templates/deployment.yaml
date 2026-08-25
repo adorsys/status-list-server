@@ -1,6 +1,4 @@
 {{- if .Values.statuslist.enabled }}
-{{- $redisHA := index .Values "redis-ha" | default dict -}}
-{{- $redisHAEnabled := eq (default false (index $redisHA "enabled")) true -}}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -144,19 +142,6 @@ spec:
                   key: postgres-password
             - name: APP_DATABASE__NAME
               value: {{ .Values.postgres.auth.database | quote }}
-            {{- if $redisHAEnabled }}
-            - name: APP_REDIS__SCHEME
-              value: {{ include "status-list-server-chart.redisScheme" . | quote }}
-            - name: APP_REDIS__HOST
-              value: {{ include "status-list-server-chart.redisHost" . | quote }}
-            - name: APP_REDIS__PORT
-              value: {{ include "status-list-server-chart.redisPort" . | quote }}
-            - name: APP_REDIS__PASSWORD
-              valueFrom:
-                secretKeyRef:
-                  name: {{ if .Values.externalSecret.enabled }}{{ .Values.externalSecret.spec.target.name }}{{ else }}statuslist-secret{{ end }}
-                  key: redis-password
-            {{- end }}
           volumeMounts:
             - name: tmp
               mountPath: /tmp

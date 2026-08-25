@@ -1,5 +1,5 @@
 #[test]
-fn deployment_template_uses_split_database_and_redis_credentials() {
+fn deployment_template_uses_split_database_credentials() {
     let deployment = include_str!("../helm/chart/templates/deployment.yaml");
     let helpers = include_str!("../helm/chart/templates/_helpers.tpl");
 
@@ -9,7 +9,7 @@ fn deployment_template_uses_split_database_and_redis_credentials() {
     );
     assert!(
         !deployment.contains("APP_REDIS__URI"),
-        "Helm deployment must not render a fully assembled Redis URI in pod metadata"
+        "Helm deployment must not render Redis URI metadata after Redis chart removal"
     );
     assert!(
         !deployment.contains("$(POSTGRES_PASSWORD)") && !deployment.contains("$(REDIS_PASSWORD)"),
@@ -26,12 +26,8 @@ fn deployment_template_uses_split_database_and_redis_credentials() {
         "APP_DATABASE__USERNAME",
         "APP_DATABASE__PASSWORD",
         "APP_DATABASE__NAME",
-        "APP_REDIS__HOST",
-        "APP_REDIS__PORT",
-        "APP_REDIS__PASSWORD",
         "secretKeyRef:",
         "postgres-password",
-        "redis-password",
     ] {
         assert!(
             deployment.contains(expected),
