@@ -117,11 +117,13 @@ jobs:
       packages: read
     env:
       IMAGE_REF: ${{ needs.build-and-push.outputs.image_ref }}
-      # Vulnerability scanning covers one architecture: both are built from the same
-      # lockfile into a scratch image with no OS packages, so the package sets are
-      # identical. The SBOM assertion covers both, because whether BuildKit's
-      # cataloguer ran is a per-platform property the package set says nothing about.
-      SCAN_ARCH: amd64
+      # Every published architecture is scanned. A shared lockfile does not make the
+      # package sets identical: the two images are built by different builder images
+      # to different Rust targets, and `cargo auditable` records the graph Cargo
+      # resolved for that target, not the lockfile's union across targets. Scanning
+      # one architecture would let an advisory reaching only the other be promoted
+      # and deployed without ever crossing the gate.
+      SCAN_ARCHES: amd64 arm64
     steps:
       - name: Fetch Repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -135,70 +137,90 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Resolve the architecture manifest to scan
-        # `IMAGE_REF` is a multi-platform index. Resolving the child manifest fixes
-        # which architecture is scanned by construction, rather than leaving it to
+      - name: Resolve the architecture manifests to scan
+        # `IMAGE_REF` is a multi-platform index. Resolving each child manifest fixes
+        # which architectures are scanned by construction, rather than leaving it to
         # Trivy's default and asserting the result afterwards.
         run: |
           set -euo pipefail
           index=$(docker buildx imagetools inspect --raw "$IMAGE_REF")
 
-          # env.SCAN_ARCH rather than a --arg variable: `$arch` in a single-quoted
-          # jq program reads as an unexpanded shell variable.
-          matches=$(printf '%s' "$index" | jq -c '[.manifests[]
-            | select(.platform.os == "linux" and .platform.architecture == env.SCAN_ARCH)
-            | .digest]')
+          for arch in $SCAN_ARCHES; do
+            # env.SCAN_ARCH rather than a --arg variable: `$arch` in a single-quoted
+            # jq program reads as an unexpanded shell variable.
+            matches=$(printf '%s' "$index" | SCAN_ARCH="$arch" jq -c '[.manifests[]
+              | select(.platform.os == "linux" and .platform.architecture == env.SCAN_ARCH)
+              | .digest]')
 
-          count=$(printf '%s' "$matches" | jq 'length')
-          if [ "$count" -ne 1 ]; then
-            echo "::error::expected exactly one linux/${SCAN_ARCH} manifest in ${IMAGE_REF}, found ${count}."
-            exit 1
-          fi
+            count=$(printf '%s' "$matches" | jq 'length')
+            if [ "$count" -ne 1 ]; then
+              echo "::error::expected exactly one linux/${arch} manifest in ${IMAGE_REF}, found ${count}."
+              exit 1
+            fi
 
-          manifest=$(printf '%s' "$matches" | jq -r '.[0]')
-          echo "SCAN_REF=${IMAGE_BASE}@${manifest}" >> "$GITHUB_ENV"
-          echo "scanning linux/${SCAN_ARCH}: ${manifest}"
+            manifest=$(printf '%s' "$matches" | jq -r '.[0]')
+            # Upper-cased because the scan steps read these back as `env.SCAN_REF_AMD64`
+            # and `env.SCAN_REF_ARM64`, which a `uses:` step cannot build dynamically.
+            echo "SCAN_REF_$(printf '%s' "$arch" | tr '[:lower:]' '[:upper:]')=${IMAGE_BASE}@${manifest}" >> "$GITHUB_ENV"
+            echo "scanning linux/${arch}: ${manifest}"
+          done
 
-      - name: Scan image
-        # One scan, unfiltered. Every view below is derived from it by `trivy convert`,
-        # so the table a maintainer reads and the set the gate evaluates are the same
-        # data, and the image is pulled once.
+      - name: Scan image (amd64)
+        # One scan per architecture, unfiltered. Every view below is derived from these
+        # by `trivy convert`, so the table a maintainer reads and the set the gate
+        # evaluates are the same data, and each image is pulled once.
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           scan-type: image
-          image-ref: ${{ env.SCAN_REF }}
+          image-ref: ${{ env.SCAN_REF_AMD64 }}
           severity: UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL
           ignore-unfixed: false
           exit-code: 0
           format: json
-          output: trivy-image-report.json
+          output: trivy-image-report-amd64.json
+
+      - name: Scan image (arm64)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: image
+          image-ref: ${{ env.SCAN_REF_ARM64 }}
+          severity: UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL
+          ignore-unfixed: false
+          exit-code: 0
+          format: json
+          output: trivy-image-report-arm64.json
 
       - name: Derive reports
         run: |
+          set -eu
           # trivy-action puts the binary on PATH for later steps; fail loudly rather
           # than silently skipping every derived report if that stops being true.
           trivy --version > /dev/null
 
-          trivy convert --format table --output trivy-image-report.txt trivy-image-report.json
+          for arch in $SCAN_ARCHES; do
+            report="trivy-image-report-${arch}.json"
 
-          # Two HIGH/CRITICAL sets: before and after the ledger. The difference is
-          # what the exceptions suppressed, reported in the gate summary so a green
-          # gate distinguishes "nothing found" from "everything accepted".
-          trivy convert \
-            --severity HIGH,CRITICAL \
-            --format json --output trivy-highcrit-all.json \
-            trivy-image-report.json
+            trivy convert --format table --output "trivy-image-report-${arch}.txt" "$report"
 
-          trivy convert \
-            --severity HIGH,CRITICAL \
-            --ignorefile .trivyignore.yaml \
-            --format json --output trivy-gate-findings.json \
-            trivy-image-report.json
+            # Two HIGH/CRITICAL sets per architecture: before and after the ledger. The
+            # difference is what the exceptions suppressed, reported in the gate summary
+            # so a green gate distinguishes "nothing found" from "everything accepted".
+            trivy convert \
+              --severity HIGH,CRITICAL \
+              --format json --output "trivy-highcrit-all-${arch}.json" \
+              "$report"
 
-          # A clean scan must still produce every artifact.
-          [ -s trivy-image-report.txt ] || echo "No vulnerabilities reported." > trivy-image-report.txt
-          [ -s trivy-gate-findings.json ] || echo '{"Results":[]}' > trivy-gate-findings.json
-          [ -s trivy-highcrit-all.json ] || echo '{"Results":[]}' > trivy-highcrit-all.json
+            trivy convert \
+              --severity HIGH,CRITICAL \
+              --ignorefile .trivyignore.yaml \
+              --format json --output "trivy-gate-findings-${arch}.json" \
+              "$report"
+
+            # A clean scan must still produce every artifact.
+            [ -s "trivy-image-report-${arch}.txt" ] || echo "No vulnerabilities reported." > "trivy-image-report-${arch}.txt"
+            [ -s "trivy-gate-findings-${arch}.json" ] || echo '{"Results":[]}' > "trivy-gate-findings-${arch}.json"
+            [ -s "trivy-highcrit-all-${arch}.json" ] || echo '{"Results":[]}' > "trivy-highcrit-all-${arch}.json"
+          done
 
       - name: Collect published SBOMs
         # After the scan, not before: registry metadata is a separate failure domain,
@@ -222,26 +244,36 @@ jobs:
           done
 
       - name: Publish report to job summary
+        # Deliberately small: what was scanned, how much was found, and where the full
+        # reports are. The complete tables and JSON are uploaded as artifacts below, so
+        # reproducing them here only buries the gate decision underneath them.
         if: always()
         run: |
+          set -eu
           {
             echo "## Container image scan"
             echo
             echo "Index: \`${IMAGE_REF}\`"
             echo
-            echo "Scanned: \`${SCAN_REF:-unresolved}\`"
+            echo "| Platform | Scanned digest | HIGH/CRITICAL |"
+            echo "| --- | --- | --- |"
+            for arch in $SCAN_ARCHES; do
+              var="SCAN_REF_$(printf '%s' "$arch" | tr '[:lower:]' '[:upper:]')"
+              ref="${!var:-}"
+              findings="trivy-highcrit-all-${arch}.json"
+              if [ -s "$findings" ]; then
+                count=$(jq '[.Results[]?.Vulnerabilities[]?.VulnerabilityID] | unique | length' "$findings")
+              else
+                count="not scanned"
+              fi
+              echo "| \`linux/${arch}\` | \`${ref##*@}\` | ${count} |"
+            done
             echo
             echo "### Published SBOM"
             echo
             cat sbom-summary.md 2>/dev/null || echo "_SBOM collection did not complete._"
             echo
-            echo "### Findings"
-            echo
-            echo '```text'
-            # Step summaries are capped at 1 MiB.
-            head -c 900000 trivy-image-report.txt 2>/dev/null || echo "No report produced."
-            echo
-            echo '```'
+            echo "Full tables and JSON: the \`container-scan-reports\` artifact on this run."
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload scan reports
@@ -253,10 +285,10 @@ jobs:
         with:
           name: container-scan-reports
           path: |
-            trivy-image-report.json
-            trivy-image-report.txt
-            trivy-highcrit-all.json
-            trivy-gate-findings.json
+            trivy-image-report-*.json
+            trivy-image-report-*.txt
+            trivy-highcrit-all-*.json
+            trivy-gate-findings-*.json
           if-no-files-found: warn
 
       - name: Upload published SBOMs
@@ -349,10 +381,11 @@ jobs:
         run: |
           set -eu
           # Advisories, not rows: one CVE across three crates is three table rows but
-          # one thing to triage.
-          advisories=$(jq '[.Results[]?.Vulnerabilities[]?.VulnerabilityID] | unique | length' trivy-gate-findings.json)
-          occurrences=$(jq '[.Results[]?.Vulnerabilities[]?] | length' trivy-gate-findings.json)
-          total=$(jq '[.Results[]?.Vulnerabilities[]?.VulnerabilityID] | unique | length' trivy-highcrit-all.json)
+          # one thing to triage. Counted across every scanned architecture, because an
+          # advisory reaching only one of them still blocks the release.
+          advisories=$(jq -s '[.[].Results[]?.Vulnerabilities[]?.VulnerabilityID] | unique | length' trivy-gate-findings-*.json)
+          occurrences=$(jq -s '[.[].Results[]?.Vulnerabilities[]?] | length' trivy-gate-findings-*.json)
+          total=$(jq -s '[.[].Results[]?.Vulnerabilities[]?.VulnerabilityID] | unique | length' trivy-highcrit-all-*.json)
           suppressed=$(( total - advisories ))
 
           echo "HIGH/CRITICAL after exceptions: ${advisories} advisories across ${occurrences} package occurrences (${suppressed} suppressed by .trivyignore.yaml)"
@@ -361,24 +394,31 @@ jobs:
             echo "### Vulnerability gate"
             echo
             if [ "${advisories}" -eq 0 ]; then
-              echo "No HIGH or CRITICAL findings after exceptions."
+              echo "No HIGH or CRITICAL findings after exceptions, on any scanned architecture."
             else
               echo "\`${advisories}\` distinct HIGH/CRITICAL advisories (\`${occurrences}\` package occurrences) block this release."
               echo
               echo "Triage steps and the exception format are in \`docs/supply-chain.md\`."
-              echo "The exact blocking set is \`trivy-gate-findings.json\` in the \`container-scan-reports\` artifact."
+              echo "The exact blocking set is \`trivy-gate-findings-<arch>.json\` in the \`container-scan-reports\` artifact."
             fi
             echo
             if [ "${suppressed}" -gt 0 ]; then
-              echo "\`${suppressed}\` HIGH/CRITICAL advisories were suppressed by \`.trivyignore.yaml\`. The unsuppressed set is \`trivy-highcrit-all.json\`."
+              echo "\`${suppressed}\` HIGH/CRITICAL advisories were suppressed by \`.trivyignore.yaml\`. The unsuppressed set is \`trivy-highcrit-all-<arch>.json\`."
             else
               echo "No findings were suppressed by \`.trivyignore.yaml\`."
             fi
           } >> "$GITHUB_STEP_SUMMARY"
 
           # Rendered from the gate set itself, so the table, the counts and the exit
-          # code are by construction the same data.
-          sh scripts/vuln-gate.sh trivy-gate-findings.json
+          # code are by construction the same data. Every architecture is rendered
+          # before failing, so one run shows the whole blocking set rather than the
+          # first architecture that happened to trip.
+          status=0
+          for arch in $SCAN_ARCHES; do
+            echo "--- linux/${arch} ---"
+            sh scripts/vuln-gate.sh "trivy-gate-findings-${arch}.json" || status=1
+          done
+          exit "$status"
 
   promote-tags:
     name: Promote Scanned Digest to Release Tags
