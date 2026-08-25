@@ -206,7 +206,7 @@ Symptoms:
 
 Check:
 
-- `trivy-gate-findings.json` in the `container-scan-reports` artifact is the exact blocking set. The gate's table is rendered from that same file, so the summary count and the table cannot disagree.
+- `trivy-gate-findings-<arch>.json` in the `container-scan-reports` artifact is the exact blocking set for that architecture. The gate's table is rendered from those same files, so the summary count and the table cannot disagree.
 - The summary reports distinct advisories and package occurrences separately. One CVE affecting three crates is three rows in the table and one thing to triage.
 - Whether the advisory is already argued in `deny.toml`. The two ledgers are not connected, so a release can block on something `cargo-deny` has been ignoring deliberately.
 
