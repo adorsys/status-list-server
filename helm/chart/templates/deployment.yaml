@@ -1,7 +1,4 @@
 {{- if .Values.statuslist.enabled }}
-{{- if and .Values.externalSecret.enabled .Values.statuslist.fallbackSecret.enabled }}
-{{- fail "externalSecret.enabled and statuslist.fallbackSecret.enabled cannot both be true: choose either External Secrets Operator or the fallback Secret for secret delivery, not both" }}
-{{- end }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
