@@ -133,9 +133,6 @@ protect_breaking_commits = true
 filter_commits = false
 # glob pattern for matching git tags
 tag_pattern = "v[0-9]*"
-# regex for skipping tags — leave empty; skip_tags anchors the comparison range
-# which is wrong for pre-releases (use ignore_tags instead)
-skip_tags = ""
 # regex for ignoring tags completely (no changelog block, no comparison anchor)
 # rc, beta, alpha are all treated identically: excluded as if they never existed
 ignore_tags = "rc|beta|alpha"
