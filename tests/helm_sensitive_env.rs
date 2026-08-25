@@ -1,9 +1,63 @@
-use std::process::Command;
+use std::{
+    fs,
+    path::{Path, PathBuf},
+    process::Command,
+};
+
+fn copy_dir(src: &Path, dst: &Path) {
+    fs::create_dir_all(dst).expect("failed to create test chart directory");
+    for entry in fs::read_dir(src).expect("failed to read chart directory") {
+        let entry = entry.expect("failed to read chart entry");
+        let src_path = entry.path();
+        let dst_path = dst.join(entry.file_name());
+        if src_path.is_dir() {
+            copy_dir(&src_path, &dst_path);
+        } else {
+            fs::copy(&src_path, &dst_path).expect("failed to copy chart file");
+        }
+    }
+}
+
+fn dependency_free_chart() -> PathBuf {
+    let chart_dir = PathBuf::from(format!(
+        "target/helm-sensitive-env-chart-{}-{}",
+        std::process::id(),
+        std::thread::current().name().unwrap_or("test")
+    ));
+
+    if chart_dir.exists() {
+        fs::remove_dir_all(&chart_dir).expect("failed to remove stale test chart directory");
+    }
+    fs::create_dir_all(&chart_dir).expect("failed to create test chart directory");
+    fs::copy("helm/chart/values.yaml", chart_dir.join("values.yaml"))
+        .expect("failed to copy chart values");
+    copy_dir(
+        Path::new("helm/chart/templates"),
+        &chart_dir.join("templates"),
+    );
+    fs::write(
+        chart_dir.join("Chart.yaml"),
+        r#"apiVersion: v2
+name: status-list-server
+description: Test chart copy without remote dependencies
+type: application
+version: 0.1.0
+appVersion: "1.0.0"
+"#,
+    )
+    .expect("failed to write dependency-free Chart.yaml");
+
+    chart_dir
+}
 
 fn render_helm(args: &[&str]) -> String {
+    let chart_dir = dependency_free_chart();
     let output = Command::new("helm")
-        .args(["template", "status-list-server", "helm/chart"])
-        .args(["-f", "helm/chart/values.yaml"])
+        .arg("template")
+        .arg("status-list-server")
+        .arg(&chart_dir)
+        .arg("-f")
+        .arg(chart_dir.join("values.yaml"))
         .args(["--namespace", "statuslist"])
         .args([
             "--set",
@@ -80,9 +134,13 @@ fn rendered_chart_respects_database_backend_override() {
 
 #[test]
 fn rendered_chart_rejects_assembled_database_url_env() {
+    let chart_dir = dependency_free_chart();
     let output = Command::new("helm")
-        .args(["template", "status-list-server", "helm/chart"])
-        .args(["-f", "helm/chart/values.yaml"])
+        .arg("template")
+        .arg("status-list-server")
+        .arg(&chart_dir)
+        .arg("-f")
+        .arg(chart_dir.join("values.yaml"))
         .args(["--namespace", "statuslist"])
         .args([
             "--set",
@@ -110,9 +168,13 @@ fn rendered_chart_rejects_assembled_database_url_env() {
 
 #[test]
 fn rendered_chart_requires_database_port_env() {
+    let chart_dir = dependency_free_chart();
     let output = Command::new("helm")
-        .args(["template", "status-list-server", "helm/chart"])
-        .args(["-f", "helm/chart/values.yaml"])
+        .arg("template")
+        .arg("status-list-server")
+        .arg(&chart_dir)
+        .arg("-f")
+        .arg(chart_dir.join("values.yaml"))
         .args(["--namespace", "statuslist"])
         .args([
             "--set",

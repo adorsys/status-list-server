@@ -11,6 +11,7 @@ env:
   REGISTRY: ghcr.io
   HELM_RELEASE_NAME: statuslist
   HELM_NAMESPACE: statuslist-production
+  APP_DATABASE_PORT: ${{ vars.APP_DATABASE_PORT }}
 jobs:
   ci:
     name: CI
@@ -102,4 +103,5 @@ jobs:
             --wait \
             --timeout 10m \
             --set-string statuslist.image.repository=${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ env.IMAGE_NAME }} \
-            --set-string statuslist.image.tag=${{ needs.build-and-push.outputs.deploy_tag }}
+            --set-string statuslist.image.tag=${{ needs.build-and-push.outputs.deploy_tag }} \
+            --set-string statuslist.env.APP_DATABASE__PORT="${APP_DATABASE_PORT}"
