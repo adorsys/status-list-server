@@ -311,7 +311,9 @@ jobs:
         # as itself rather than later as a scanner error on an unrelated change.
         run: |
           set -eu
-          python3 -c 'import yaml' 2>/dev/null || pip install --quiet pyyaml
+          # apt rather than pip: the runner's PyYAML comes from the distribution, so
+          # this pulls no unpinned dependency into every pull request.
+          python3 -c 'import yaml' 2>/dev/null || sudo apt-get install -y python3-yaml
           python3 -m unittest discover -s scripts/tests -p 'test_*.py'
           python3 scripts/check-trivyignore.py .trivyignore.yaml
 
