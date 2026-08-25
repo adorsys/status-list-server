@@ -129,7 +129,10 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Docker build (production features)
-        run: docker build --build-arg FEATURES=postgres,aws-secrets,acme .
+        # No `--build-arg FEATURES`: the Dockerfile's `ARG FEATURES` default already is
+        # the release feature set, so passing it here would be a second copy to keep in
+        # sync, and a stale one would smoke-test a set the release never builds.
+        run: docker build .
 
   cargo-clippy:
     name: Cargo Clippy Check
