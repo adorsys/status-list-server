@@ -44,7 +44,7 @@ jobs:
     outputs:
       deploy_tag: ${{ steps.vars.outputs.DEPLOY_TAG }}
       image_digest: ${{ steps.build.outputs.digest }}
-      image_ref: ${{ env.IMAGE_BASE }}@${{ steps.build.outputs.digest }}
+      image_ref: ${{ steps.digest.outputs.IMAGE_REF }}
     steps:
       - name: Checkout source code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -98,6 +98,12 @@ jobs:
       - name: Assert a digest was produced
         # An empty digest would silently fall back to tag-based deployment, which is
         # the failure this pipeline exists to prevent.
+        #
+        # `IMAGE_REF` is assembled here rather than in the job's `outputs:` block so it
+        # is built in shell, where `IMAGE_BASE` is plainly in scope, and only after the
+        # digest is known non-empty. Assembled in `outputs:` it would still be emitted
+        # as `<base>@` with no digest if this check ever stopped holding.
+        id: digest
         env:
           DIGEST: ${{ steps.build.outputs.digest }}
         run: |
@@ -106,6 +112,7 @@ jobs:
             exit 1
           fi
           echo "image digest: $DIGEST"
+          echo "IMAGE_REF=${IMAGE_BASE}@${DIGEST}" >> "$GITHUB_OUTPUT"
 
   scan-image:
     name: Scan Image for Vulnerabilities
