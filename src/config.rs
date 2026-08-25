@@ -610,6 +610,22 @@ fn encode_url_part(value: &str) -> String {
         })
 }
 
+fn format_database_url_host(host: &str) -> String {
+    if host.parse::<std::net::Ipv6Addr>().is_ok() {
+        format!("[{host}]")
+    } else {
+        host.to_string()
+    }
+}
+
+fn database_host_is_ipv6(host: &str) -> bool {
+    host.parse::<std::net::Ipv6Addr>().is_ok()
+        || host
+            .strip_prefix('[')
+            .and_then(|value| value.strip_suffix(']'))
+            .is_some_and(|value| value.parse::<std::net::Ipv6Addr>().is_ok())
+}
+
 fn required_config_field<'a>(value: Option<&'a str>, field: &str) -> Result<&'a str, ConfigError> {
     trim_non_empty(value)
         .ok_or_else(|| ConfigError::Message(format!("Missing required config field: {field}")))
@@ -660,6 +676,10 @@ fn validate_database_query(query: &str) -> Result<(), ConfigError> {
 }
 
 fn validate_database_host(host: &str) -> Result<(), ConfigError> {
+    if database_host_is_ipv6(host) {
+        return Ok(());
+    }
+
     let invalid = host.chars().any(char::is_whitespace)
         || host.contains('/')
         || host.contains('@')
@@ -670,7 +690,7 @@ fn validate_database_host(host: &str) -> Result<(), ConfigError> {
         || host.starts_with('-')
         || host.ends_with('-')
         || host.starts_with('.')
-        || host.ends_with('.');
+        || host.trim_end_matches('.').is_empty();
 
     if invalid {
         return Err(ConfigError::Message(
@@ -740,6 +760,7 @@ impl DatabaseConfig {
 
         let host = required_config_field(self.host.as_deref(), "database.host")?;
         validate_database_host(host)?;
+        let url_host = format_database_url_host(host);
         let username = required_config_field(self.username.as_deref(), "database.username")?;
         let password = required_secret_field(self.password.as_ref(), "database.password")?;
         let name = required_config_field(self.name.as_deref(), "database.name")?;
@@ -753,7 +774,7 @@ impl DatabaseConfig {
             .unwrap_or_default();
 
         Ok(SecretString::from(format!(
-            "{scheme}://{}:{}@{host}:{port}/{}{query}",
+            "{scheme}://{}:{}@{url_host}:{port}/{}{query}",
             encode_url_part(username),
             encode_url_part(password),
             encode_url_part(name)
@@ -1307,6 +1328,67 @@ mod tests {
             "backend=postgres, host=postgres.statuslist.svc.cluster.local, port=5432, database=status/list"
         );
         assert!(!split_db_cfg.database.redacted_target().contains("secret"));
+
+        let ipv6_db_cfg = Config::load_from_overrides(&[
+            ("database.backend", "postgres"),
+            ("database.host", "fd00::1"),
+            ("database.username", "postgres"),
+            ("database.password", "secret"),
+            ("database.name", "status-list"),
+        ])
+        .expect("Failed to load IPv6 split database config");
+        assert_eq!(
+            ipv6_db_cfg
+                .database
+                .resolved_url()
+                .expect("IPv6 split database config should resolve")
+                .expose_secret(),
+            "postgres://postgres:secret@[fd00::1]:5432/status-list"
+        );
+
+        let bracketed_ipv6_db_cfg = Config::load_from_overrides(&[
+            ("database.backend", "postgres"),
+            ("database.host", "[fd00::1]"),
+            ("database.username", "postgres"),
+            ("database.password", "secret"),
+            ("database.name", "status-list"),
+        ])
+        .expect("Failed to load bracketed IPv6 split database config");
+        assert_eq!(
+            bracketed_ipv6_db_cfg
+                .database
+                .resolved_url()
+                .expect("bracketed IPv6 split database config should resolve")
+                .expose_secret(),
+            "postgres://postgres:secret@[fd00::1]:5432/status-list"
+        );
+
+        let fqdn_db_cfg = Config::load_from_overrides(&[
+            ("database.backend", "postgres"),
+            ("database.host", "db.example.internal."),
+            ("database.username", "postgres"),
+            ("database.password", "secret"),
+            ("database.name", "status-list"),
+        ])
+        .expect("Failed to load trailing-dot FQDN split database config");
+        assert_eq!(
+            fqdn_db_cfg
+                .database
+                .resolved_url()
+                .expect("trailing-dot FQDN split database config should resolve")
+                .expose_secret(),
+            "postgres://postgres:secret@db.example.internal.:5432/status-list"
+        );
+
+        let missing_db_url = Config::load_from_overrides(&[])
+            .expect("Failed to load default config")
+            .database
+            .resolved_url()
+            .expect_err(
+                "database config should fail closed when neither URL nor split fields are set",
+            )
+            .to_string();
+        assert!(missing_db_url.contains("database.url or split database fields"));
 
         let mixed_db_cfg = Config::load_from_overrides(&[
             ("database.backend", "postgres"),

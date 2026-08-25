@@ -90,6 +90,12 @@ jobs:
           aws-region: ${{ env.AWS_REGION }}
       - name: Update kubeconfig for EKS
         run: aws eks update-kubeconfig --name ${{ env.CLUSTER_NAME }} --region ${{ env.AWS_REGION }}
+      - name: Validate deployment configuration
+        run: |
+          if [[ -z "${APP_DATABASE_PORT}" ]]; then
+            echo "APP_DATABASE_PORT repository/environment variable is required" >&2
+            exit 1
+          fi
       - name: Build Helm dependencies
         run: |
           helm repo add open-telemetry https://open-telemetry.github.io/opentelemetry-helm-charts

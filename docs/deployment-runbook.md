@@ -53,6 +53,7 @@ Configure the GitHub `production` environment with required reviewers so product
 Create the GitHub `production` environment with:
 
 - `AWS_DEPLOY_ROLE_ARN`: IAM role ARN assumed by the deploy job through GitHub OIDC.
+- `APP_DATABASE_PORT`: database service port passed to Helm as `statuslist.env.APP_DATABASE__PORT` (for example `5432` for PostgreSQL).
 - Required reviewers: configure at least one approver.
 - Deployment branches/tags: restrict to release tags matching `v*.*.*`.
 
