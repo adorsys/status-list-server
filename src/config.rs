@@ -568,7 +568,7 @@ pub struct DatabaseConfig {
     /// Full database URL. This remains supported for local and non-Kubernetes
     /// deployments, but Kubernetes manifests should prefer the split fields
     /// below to avoid exposing an assembled credential URL in pod metadata.
-    pub url: SecretString,
+    pub url: Option<SecretString>,
     #[serde(default)]
     pub host: Option<String>,
     #[serde(default)]
@@ -625,6 +625,40 @@ fn required_secret_field<'a>(
         .ok_or_else(|| ConfigError::Message(format!("Missing required config field: {field}")))
 }
 
+fn validate_database_query(query: &str) -> Result<(), ConfigError> {
+    let query = query.trim_start_matches('?');
+    if query.is_empty() {
+        return Ok(());
+    }
+
+    for (key, _) in url::form_urlencoded::parse(query.as_bytes()) {
+        if key.is_empty()
+            || !key
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '.')
+        {
+            return Err(ConfigError::Message(
+                "Invalid database.query: query parameter keys must be non-empty and contain only ASCII letters, digits, '.', '_' or '-'".to_string(),
+            ));
+        }
+
+        let key = key.to_ascii_lowercase();
+        if key.contains("password")
+            || key.contains("passwd")
+            || key.contains("secret")
+            || key.contains("token")
+            || key == "user"
+            || key == "username"
+        {
+            return Err(ConfigError::Message(format!(
+                "Invalid database.query: credential-like query parameter key '{key}' is not allowed"
+            )));
+        }
+    }
+
+    Ok(())
+}
+
 fn validate_database_host(host: &str) -> Result<(), ConfigError> {
     let invalid = host.chars().any(char::is_whitespace)
         || host.contains('/')
@@ -675,9 +709,14 @@ impl DatabaseConfig {
     /// full URL or the split connection fields used by the Helm chart.
     pub fn resolved_url(&self) -> Result<SecretString, ConfigError> {
         if !self.has_split_connection_fields() {
-            return Ok(self.url.clone());
+            return self.url.clone().ok_or_else(|| {
+                ConfigError::Message(
+                    "Missing required config field: database.url or split database fields"
+                        .to_string(),
+                )
+            });
         }
-        if !self.url_is_default() {
+        if self.url.is_some() {
             return Err(ConfigError::Message(
                 "Ambiguous database configuration: use either database.url or split database fields, not both".to_string(),
             ));
@@ -706,7 +745,11 @@ impl DatabaseConfig {
         let name = required_config_field(self.name.as_deref(), "database.name")?;
         let port = self.port.unwrap_or(default_port);
         let query = trim_non_empty(self.query.as_deref())
-            .map(|query| format!("?{}", query.trim_start_matches('?')))
+            .map(|query| {
+                validate_database_query(query)?;
+                Ok(format!("?{}", query.trim_start_matches('?')))
+            })
+            .transpose()?
             .unwrap_or_default();
 
         Ok(SecretString::from(format!(
@@ -718,38 +761,26 @@ impl DatabaseConfig {
     }
 
     pub fn redacted_target(&self) -> String {
-        if self.has_split_connection_fields() {
-            let host = trim_non_empty(self.host.as_deref()).unwrap_or("<missing-host>");
-            let name = trim_non_empty(self.name.as_deref()).unwrap_or("<missing-name>");
-            let port = self.port.map(|port| port.to_string()).unwrap_or_else(|| {
-                match self.backend {
-                    DatabaseBackend::Postgres => 5432,
-                    DatabaseBackend::MySql => 3306,
-                    DatabaseBackend::Memory | DatabaseBackend::Sqlite => 0,
-                }
-                .to_string()
-            });
-            return format!(
-                "backend={}, host={}, port={}, database={}",
-                self.backend.as_str(),
+        match (
+            self.has_split_connection_fields(),
+            self.backend,
+            trim_non_empty(self.host.as_deref()),
+            trim_non_empty(self.name.as_deref()),
+        ) {
+            (true, DatabaseBackend::Postgres, Some(host), Some(name)) => format!(
+                "backend=postgres, host={}, port={}, database={}",
                 host,
-                port,
+                self.port.unwrap_or(5432),
                 name
-            );
+            ),
+            (true, DatabaseBackend::MySql, Some(host), Some(name)) => format!(
+                "backend=mysql, host={}, port={}, database={}",
+                host,
+                self.port.unwrap_or(3306),
+                name
+            ),
+            _ => format!("backend={}", self.backend.as_str()),
         }
-
-        format!("backend={}", self.backend.as_str())
-    }
-
-    fn url_is_default(&self) -> bool {
-        matches!(
-            self.url.expose_secret(),
-            "postgres://postgres:postgres@localhost:5432/status-list"
-                | "mysql://mysql:mysql@localhost:3306/status-list"
-                | "sqlite::memory:"
-                | "memory:"
-                | "memory"
-        )
     }
 }
 
@@ -935,6 +966,12 @@ impl Config {
 
         let config = builder.build()?;
         let config: Config = config.try_deserialize()?;
+        if let Some(host) = trim_non_empty(config.database.host.as_deref()) {
+            validate_database_host(host)?;
+        }
+        if let Some(query) = trim_non_empty(config.database.query.as_deref()) {
+            validate_database_query(query)?;
+        }
         Ok(config)
     }
 }
@@ -946,21 +983,17 @@ impl Config {
 /// that there is exactly one source of truth for the default configuration.
 fn base_builder() -> Result<ConfigBuilder<DefaultState>, ConfigError> {
     #[cfg(feature = "postgres")]
-    let (default_db_url, default_db_backend) = (
-        "postgres://postgres:postgres@localhost:5432/status-list",
-        "postgres",
-    );
+    let default_db_backend = "postgres";
     #[cfg(all(not(feature = "postgres"), feature = "sqlite"))]
-    let (default_db_url, default_db_backend) = ("sqlite::memory:", "sqlite");
+    let default_db_backend = "sqlite";
     #[cfg(all(not(feature = "postgres"), not(feature = "sqlite"), feature = "mysql"))]
-    let (default_db_url, default_db_backend) =
-        ("mysql://mysql:mysql@localhost:3306/status-list", "mysql");
+    let default_db_backend = "mysql";
     #[cfg(all(
         not(feature = "postgres"),
         not(feature = "sqlite"),
         not(feature = "mysql")
     ))]
-    let (default_db_url, default_db_backend) = ("memory:", "memory");
+    let default_db_backend = "memory";
 
     #[cfg(feature = "acme")]
     let (default_provisioning_strategy, default_cert_path, default_key_path) =
@@ -985,7 +1018,7 @@ fn base_builder() -> Result<ConfigBuilder<DefaultState>, ConfigError> {
         .set_default("server.port", 8000)?
         .set_default("server.enable_metrics", false)?
         .set_default("server.aggregation_uri", Option::<String>::None)?
-        .set_default("database.url", default_db_url)?
+        .set_default("database.url", Option::<String>::None)?
         .set_default("database.backend", default_db_backend)?
         .set_default("database.pool.max_connections", 5u32)?
         .set_default("database.pool.min_connections", 1u32)?
@@ -1082,25 +1115,22 @@ mod tests {
 
         // Feature-gated default database expectations
         #[cfg(feature = "postgres")]
-        let (expected_db_url, expected_db_backend) = (
-            "postgres://postgres:postgres@localhost:5432/status-list",
-            DatabaseBackend::Postgres,
-        );
+        let expected_db_backend = DatabaseBackend::Postgres;
         #[cfg(all(not(feature = "postgres"), feature = "sqlite"))]
-        let (expected_db_url, expected_db_backend) = ("sqlite::memory:", DatabaseBackend::Sqlite);
+        let expected_db_backend = DatabaseBackend::Sqlite;
         #[cfg(all(not(feature = "postgres"), not(feature = "sqlite"), feature = "mysql"))]
-        let (expected_db_url, expected_db_backend) = (
-            "mysql://mysql:mysql@localhost:3306/status-list",
-            DatabaseBackend::MySql,
-        );
+        let expected_db_backend = DatabaseBackend::MySql;
         #[cfg(all(
             not(feature = "postgres"),
             not(feature = "sqlite"),
             not(feature = "mysql")
         ))]
-        let (expected_db_url, expected_db_backend) = ("memory:", DatabaseBackend::Memory);
+        let expected_db_backend = DatabaseBackend::Memory;
 
-        assert_eq!(config.database.url.expose_secret(), expected_db_url);
+        assert!(
+            config.database.url.is_none(),
+            "database.url should not have a credential-bearing built-in default"
+        );
         assert_eq!(config.database.backend, expected_db_backend);
         #[cfg(feature = "acme")]
         let (expected_strategy, expected_cert_path, expected_key_path) =
@@ -1203,7 +1233,12 @@ mod tests {
             Some("https://example.com/aggregation")
         );
         assert_eq!(
-            overridden.database.url.expose_secret(),
+            overridden
+                .database
+                .url
+                .as_ref()
+                .expect("database.url override should be set")
+                .expose_secret(),
             "postgres://user:password@localhost:5432/status-list"
         );
         assert_eq!(overridden.server.cert.email, "test@gmail.com");
@@ -1301,13 +1336,24 @@ mod tests {
             ("database.password", "secret"),
             ("database.name", "status-list"),
         ])
-        .expect("Failed to load invalid host database config")
-        .database
-        .resolved_url()
         .expect_err("database.host must reject URL-shaped values")
         .to_string();
         assert!(invalid_host_error.contains("database.host"));
         assert!(!invalid_host_error.contains("secret"));
+
+        let invalid_query_error = Config::load_from_overrides(&[
+            ("database.backend", "postgres"),
+            ("database.host", "postgres.statuslist.svc.cluster.local"),
+            ("database.username", "postgres"),
+            ("database.password", "secret"),
+            ("database.name", "status-list"),
+            ("database.query", "sslmode=verify-full&password=secret"),
+        ])
+        .expect_err("database.query must reject credential-like keys")
+        .to_string();
+        assert!(invalid_query_error.contains("database.query"));
+        assert!(!invalid_query_error.contains("postgres://"));
+        assert!(!invalid_query_error.contains("secret"));
 
         let missing_db_password = Config::load_from_overrides(&[
             ("database.backend", "postgres"),
@@ -1335,7 +1381,12 @@ mod tests {
         .expect("Failed to load mysql config");
         assert_eq!(mysql_cfg.database.backend, DatabaseBackend::MySql);
         assert_eq!(
-            mysql_cfg.database.url.expose_secret(),
+            mysql_cfg
+                .database
+                .url
+                .as_ref()
+                .expect("mysql database.url override should be set")
+                .expose_secret(),
             "mysql://user:password@localhost:3306/status-list"
         );
 
@@ -1345,7 +1396,15 @@ mod tests {
         ])
         .expect("Failed to load sqlite config");
         assert_eq!(sqlite_cfg.database.backend, DatabaseBackend::Sqlite);
-        assert_eq!(sqlite_cfg.database.url.expose_secret(), "sqlite::memory:");
+        assert_eq!(
+            sqlite_cfg
+                .database
+                .url
+                .as_ref()
+                .expect("sqlite database.url override should be set")
+                .expose_secret(),
+            "sqlite::memory:"
+        );
     }
 
     #[test]
@@ -1770,11 +1829,13 @@ mod tests {
                 "Default config signing_key_path references test_data: {path}"
             );
         }
-        let db_url = default_config.database.url.expose_secret();
-        assert!(
-            !db_url.contains("test_data"),
-            "Default config database URL references test_data: {db_url}"
-        );
+        if let Some(db_url) = default_config.database.url.as_ref() {
+            let db_url = db_url.expose_secret();
+            assert!(
+                !db_url.contains("test_data"),
+                "Default config database URL references test_data: {db_url}"
+            );
+        }
         if let Some(key) = default_config.server.cert.store.certificate_key.as_deref() {
             assert!(
                 !key.contains("test_data"),

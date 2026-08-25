@@ -13,7 +13,7 @@ use color_eyre::eyre::Result as EyeResult;
 #[cfg(feature = "acme")]
 use color_eyre::eyre::eyre;
 #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mysql"))]
-use sea_orm::ConnectOptions;
+use sea_orm::{ConnectOptions, DbErr};
 #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mysql"))]
 use sea_orm_migration::MigratorTrait;
 #[cfg(any(
@@ -97,6 +97,28 @@ use crate::outbound::sql::{
 use crate::outbound::vault::VaultClient;
 use crate::server::AppState;
 use crate::server::health::{AlwaysReady, Readiness};
+
+#[cfg(any(feature = "sqlite", feature = "postgres", feature = "mysql"))]
+fn classify_db_connect_error(err: &DbErr) -> &'static str {
+    match err {
+        DbErr::ConnectionAcquire(_) => "connection_acquire",
+        DbErr::Conn(_) => "connection",
+        DbErr::Exec(_) => "execution",
+        DbErr::Query(_) => "query",
+        DbErr::TryIntoErr { .. } => "conversion",
+        DbErr::ConvertFromU64(_) => "conversion",
+        DbErr::UnpackInsertId => "last_insert_id",
+        DbErr::UpdateGetPrimaryKey => "missing_primary_key",
+        DbErr::RecordNotFound(_) => "record_not_found",
+        DbErr::AttrNotSet(_) => "attribute_not_set",
+        DbErr::Custom(_) => "custom",
+        DbErr::Type(_) => "type",
+        DbErr::Json(_) => "json",
+        DbErr::Migration(_) => "migration",
+        DbErr::RecordNotInserted => "record_not_inserted",
+        DbErr::RecordNotUpdated => "record_not_updated",
+    }
+}
 
 /// Assembles application configuration, connects outbound repositories, and builds `AppState`.
 #[cfg(feature = "acme")]
@@ -195,9 +217,10 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
                     .sqlx_logging(false);
             }
 
-            let db = sea_orm::Database::connect(opt).await.map_err(|_| {
+            let db = sea_orm::Database::connect(opt).await.map_err(|err| {
                 color_eyre::eyre::eyre!(
-                    "Failed to connect to database ({})",
+                    "Failed to connect to database (kind={}, {})",
+                    classify_db_connect_error(&err),
                     config.database.redacted_target()
                 )
             })?;
@@ -829,6 +852,35 @@ mod general_tests {
         if let Err(ref e) = build_state(&config).await {
             panic!("build_state failed under default configuration: {e:?}");
         }
+    }
+
+    #[cfg(feature = "postgres")]
+    #[tokio::test]
+    async fn db_connect_error_redacts_sentinel_password() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+
+        let sentinel = "SENTINEL_PASSWORD_SHOULD_NOT_LEAK";
+        let config = AppConfig::load_from_overrides(&[
+            ("APP_DATABASE__BACKEND", "postgres"),
+            ("APP_DATABASE__HOST", "127.0.0.1"),
+            ("APP_DATABASE__PORT", "1"),
+            ("APP_DATABASE__USERNAME", "postgres"),
+            ("APP_DATABASE__PASSWORD", sentinel),
+            ("APP_DATABASE__NAME", "status-list"),
+            ("APP_DATABASE__POOL__CONNECT_TIMEOUT_SECS", "1"),
+            ("APP_DATABASE__POOL__ACQUIRE_TIMEOUT_SECS", "1"),
+        ])
+        .expect("Failed to load postgres config");
+
+        let err = build_state(&config)
+            .await
+            .expect_err("unreachable postgres port should fail");
+        let rendered = format!("{err:?}");
+
+        assert!(rendered.contains("Failed to connect to database"));
+        assert!(rendered.contains("kind="));
+        assert!(!rendered.contains(sentinel));
+        assert!(!rendered.contains("postgres://"));
     }
 
     /// Verifies that a saturated pool returns an error within `acquire_timeout`

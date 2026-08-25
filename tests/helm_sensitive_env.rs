@@ -1,7 +1,7 @@
 use std::{
     fs,
     path::{Path, PathBuf},
-    process::Command,
+    process::{Command, Output},
 };
 
 fn copy_dir(src: &Path, dst: &Path) {
@@ -50,24 +50,42 @@ appVersion: "1.0.0"
     chart_dir
 }
 
-fn render_helm(args: &[&str]) -> String {
-    let chart_dir = dependency_free_chart();
-    let output = Command::new("helm")
-        .arg("template")
-        .arg("status-list-server")
-        .arg(&chart_dir)
-        .arg("-f")
-        .arg(chart_dir.join("values.yaml"))
-        .args(["--namespace", "statuslist"])
-        .args([
-            "--set",
-            "postgres.enabled=false",
-            "--set",
-            "opentelemetry-collector.enabled=false",
-        ])
-        .args(args)
+fn helm_available() -> bool {
+    Command::new("helm")
+        .args(["version", "--client"])
         .output()
-        .expect("failed to execute helm template");
+        .is_ok_and(|output| output.status.success())
+}
+
+fn helm_template(args: &[&str]) -> Option<Output> {
+    if !helm_available() {
+        eprintln!("skipping Helm render assertions because helm is not installed");
+        return None;
+    }
+
+    let chart_dir = dependency_free_chart();
+    Some(
+        Command::new("helm")
+            .arg("template")
+            .arg("status-list-server")
+            .arg(&chart_dir)
+            .arg("-f")
+            .arg(chart_dir.join("values.yaml"))
+            .args(["--namespace", "statuslist"])
+            .args([
+                "--set",
+                "postgres.enabled=false",
+                "--set",
+                "opentelemetry-collector.enabled=false",
+            ])
+            .args(args)
+            .output()
+            .expect("failed to execute helm template"),
+    )
+}
+
+fn render_helm(args: &[&str]) -> Option<String> {
+    let output = helm_template(args)?;
 
     assert!(
         output.status.success(),
@@ -75,12 +93,26 @@ fn render_helm(args: &[&str]) -> String {
         String::from_utf8_lossy(&output.stderr)
     );
 
-    String::from_utf8(output.stdout).expect("helm template output should be valid UTF-8")
+    Some(String::from_utf8(output.stdout).expect("helm template output should be valid UTF-8"))
+}
+
+fn render_helm_failure(args: &[&str]) -> Option<Output> {
+    let output = helm_template(args)?;
+
+    assert!(
+        !output.status.success(),
+        "helm template should have failed, stdout: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+
+    Some(output)
 }
 
 #[test]
 fn rendered_chart_uses_split_database_credentials() {
-    let rendered = render_helm(&["--set", "statuslist.env.APP_DATABASE__PORT=5432"]);
+    let Some(rendered) = render_helm(&["--set", "statuslist.env.APP_DATABASE__PORT=5432"]) else {
+        return;
+    };
 
     assert!(
         !rendered.contains("APP_DATABASE__URL"),
@@ -119,12 +151,14 @@ fn rendered_chart_uses_split_database_credentials() {
 
 #[test]
 fn rendered_chart_respects_database_backend_override() {
-    let rendered = render_helm(&[
+    let Some(rendered) = render_helm(&[
         "--set",
         "statuslist.env.APP_DATABASE__BACKEND=mysql",
         "--set",
         "statuslist.env.APP_DATABASE__PORT=3306",
-    ]);
+    ]) else {
+        return;
+    };
 
     assert!(
         rendered.contains("name: APP_DATABASE__BACKEND\n              value: \"mysql\""),
@@ -133,32 +167,35 @@ fn rendered_chart_respects_database_backend_override() {
 }
 
 #[test]
-fn rendered_chart_rejects_assembled_database_url_env() {
-    let chart_dir = dependency_free_chart();
-    let output = Command::new("helm")
-        .arg("template")
-        .arg("status-list-server")
-        .arg(&chart_dir)
-        .arg("-f")
-        .arg(chart_dir.join("values.yaml"))
-        .args(["--namespace", "statuslist"])
-        .args([
-            "--set",
-            "postgres.enabled=false",
-            "--set",
-            "opentelemetry-collector.enabled=false",
-        ])
-        .args([
-            "--set",
-            "statuslist.env.APP_DATABASE__URL=postgres://user:pass@db:5432/status-list",
-        ])
-        .output()
-        .expect("failed to execute helm template");
+fn rendered_chart_renders_database_query() {
+    let Some(rendered) = render_helm(&[
+        "--set",
+        "statuslist.env.APP_DATABASE__PORT=5432",
+        "--set",
+        "statuslist.env.APP_DATABASE__QUERY=sslmode=verify-full&sslrootcert=/var/run/postgres/ca.crt",
+    ]) else {
+        return;
+    };
 
     assert!(
-        !output.status.success(),
-        "helm template should reject APP_DATABASE__URL in statuslist.env"
+        rendered.contains(
+            "name: APP_DATABASE__QUERY\n              value: \"sslmode=verify-full&sslrootcert=/var/run/postgres/ca.crt\""
+        ),
+        "rendered Helm output must preserve operator-provided database query"
     );
+}
+
+#[test]
+fn rendered_chart_rejects_assembled_database_url_env() {
+    let Some(output) = render_helm_failure(&[
+        "--set",
+        "statuslist.env.APP_DATABASE__PORT=5432",
+        "--set",
+        "statuslist.env.APP_DATABASE__URL=postgres://user:pass@db:5432/status-list",
+    ]) else {
+        return;
+    };
+
     assert!(
         String::from_utf8_lossy(&output.stderr)
             .contains("statuslist.env.APP_DATABASE__URL is not supported"),
@@ -167,28 +204,29 @@ fn rendered_chart_rejects_assembled_database_url_env() {
 }
 
 #[test]
-fn rendered_chart_requires_database_port_env() {
-    let chart_dir = dependency_free_chart();
-    let output = Command::new("helm")
-        .arg("template")
-        .arg("status-list-server")
-        .arg(&chart_dir)
-        .arg("-f")
-        .arg(chart_dir.join("values.yaml"))
-        .args(["--namespace", "statuslist"])
-        .args([
-            "--set",
-            "postgres.enabled=false",
-            "--set",
-            "opentelemetry-collector.enabled=false",
-        ])
-        .output()
-        .expect("failed to execute helm template");
+fn rendered_chart_rejects_plain_database_password_env() {
+    let Some(output) = render_helm_failure(&[
+        "--set",
+        "statuslist.env.APP_DATABASE__PORT=5432",
+        "--set",
+        "statuslist.env.APP_DATABASE__PASSWORD=plain-secret",
+    ]) else {
+        return;
+    };
 
     assert!(
-        !output.status.success(),
-        "helm template should reject a missing APP_DATABASE__PORT"
+        String::from_utf8_lossy(&output.stderr)
+            .contains("statuslist.env.APP_DATABASE__PASSWORD must not be set as a plain env value"),
+        "helm template should explain that plain database passwords are not supported"
     );
+}
+
+#[test]
+fn rendered_chart_requires_database_port_env() {
+    let Some(output) = render_helm_failure(&[]) else {
+        return;
+    };
+
     assert!(
         String::from_utf8_lossy(&output.stderr)
             .contains("statuslist.env.APP_DATABASE__PORT is required"),
