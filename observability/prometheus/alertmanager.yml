@@ -1,0 +1,39 @@
+# Alertmanager routing.
+#
+# No channel credentials (PagerDuty/Slack/Opsgenie tokens) live in this repo on
+# purpose. The webhook URLs below are placeholders that operators MUST replace
+# with a real receiver endpoint. Keep this file versioned so route changes are
+# PR-reviewed; wire the resolved URLs via an out-of-band secret/operator config.
+
+route:
+  group_by: ['alertname', 'sli']
+  group_wait: 30s
+  group_interval: 5m
+  repeat_interval: 4h
+  receiver: 'default'
+  routes:
+    - matchers:
+        - severity="page"
+      receiver: 'page'
+    - matchers:
+        - severity="warn"
+      receiver: 'warn'
+
+receivers:
+  # Resolved notifications default to the lowest-noise receiver.
+  - name: 'default'
+    webhook_configs:
+      - url: 'http://localhost:9093/hooks/default'
+        send_resolved: true
+
+  # Page: on-call escalation for the fast-burn / outage alerts.
+  - name: 'page'
+    webhook_configs:
+      - url: 'http://localhost:9093/hooks/page'
+        send_resolved: true
+
+  # Warn: async channel for slow-burn and degradation alerts.
+  - name: 'warn'
+    webhook_configs:
+      - url: 'http://localhost:9093/hooks/warn'
+        send_resolved: true

@@ -1,0 +1,130 @@
+groups:
+  # Multi-window multi-burn-rate alerts (Google SRE). Each outage SLI has a
+  # fast-burn page pair (short + long window aligned) and a slow-burn warn pair.
+  # `severity` drives Alertmanager routing (see alertmanager.yml); `runbook_url`
+  # points at the in-repo runbook for the SLI.
+  - name: slo-alerts
+    rules:
+      # --- Request latency ---------------------------------------------------
+      - alert: RequestLatencyFastBurn
+        expr: |
+          sli:request_latency:p95:5m > 0.3
+          and
+          sli:request_latency:p95:1h > 0.3
+        for: 2m
+        labels:
+          severity: page
+          sli: request_latency
+        annotations:
+          summary: "Request latency P95 is burning the error budget fast (>300ms in both 5m and 1h)"
+          runbook_url: "runbooks/request-latency.md"
+
+      - alert: RequestLatencySlowBurn
+        expr: |
+          sli:request_latency:p95:1h > 0.3
+        for: 30m
+        labels:
+          severity: warn
+          sli: request_latency
+        annotations:
+          summary: "Request latency P95 sustained above 300ms for 1h"
+          runbook_url: "runbooks/request-latency.md"
+
+      # --- Error rate --------------------------------------------------------
+      - alert: ErrorRateFastBurn
+        expr: |
+          sli:error_rate:5m >= 0.072
+          and
+          sli:error_rate:1h >= 0.072
+        for: 2m
+        labels:
+          severity: page
+          sli: error_rate
+        annotations:
+          summary: "5xx error rate is burning the error budget fast (>=14.4x over 30d budget)"
+          runbook_url: "runbooks/error-rate.md"
+
+      - alert: ErrorRateSlowBurn
+        expr: |
+          sli:error_rate:1h >= 0.005
+        for: 30m
+        labels:
+          severity: warn
+          sli: error_rate
+        annotations:
+          summary: "5xx error rate sustained at or above the 0.5% SLO for 1h"
+          runbook_url: "runbooks/error-rate.md"
+
+      # --- DB latency --------------------------------------------------------
+      - alert: DbLatencyFastBurn
+        expr: |
+          sli:db_query_latency:p95:5m > 0.05
+          and
+          sli:db_query_latency:p95:1h > 0.05
+        for: 2m
+        labels:
+          severity: page
+          sli: db_latency
+        annotations:
+          summary: "DB query latency P95 is burning the error budget fast (>50ms in both 5m and 1h)"
+          runbook_url: "runbooks/db-latency.md"
+
+      - alert: DbLatencySlowBurn
+        expr: |
+          sli:db_query_latency:p95:1h > 0.05
+        for: 30m
+        labels:
+          severity: warn
+          sli: db_latency
+        annotations:
+          summary: "DB query latency P95 sustained above 50ms for 1h"
+          runbook_url: "runbooks/db-latency.md"
+
+      # --- Token generation --------------------------------------------------
+      - alert: TokenGenerationFastBurn
+        expr: |
+          sli:token_gen_failure_rate:5m >= 0.072
+          and
+          sli:token_gen_failure_rate:1h >= 0.072
+        for: 2m
+        labels:
+          severity: page
+          sli: token_generation
+        annotations:
+          summary: "Token-generation failures are burning the error budget fast (>=14.4x)"
+          runbook_url: "runbooks/token-generation.md"
+
+      - alert: TokenGenerationSlowBurn
+        expr: |
+          sli:token_gen_failure_rate:1h >= 0.005
+        for: 30m
+        labels:
+          severity: warn
+          sli: token_generation
+        annotations:
+          summary: "Token-generation failure rate sustained at or above the 0.5% SLO for 1h"
+          runbook_url: "runbooks/token-generation.md"
+
+      # --- Cache hit ratio (warn-only degradation) ---------------------------
+      - alert: CacheHitRatioLow
+        expr: |
+          sli:cache_hit_ratio:5m < 0.85
+        for: 15m
+        labels:
+          severity: warn
+          sli: cache_hit_ratio
+        annotations:
+          summary: "Status-list cache hit ratio below 85% for 15m (degradation, not outage)"
+          runbook_url: "runbooks/cache-hit-ratio.md"
+
+      # --- Certificate renewal (warn-only operational risk) ------------------
+      - alert: CertRenewalFailures
+        expr: |
+          sli:cert_renewal_failure_rate:5m >= 0.01
+        for: 15m
+        labels:
+          severity: warn
+          sli: cert_renewal
+        annotations:
+          summary: "Certificate renewal failure rate at or above 1% for 15m"
+          runbook_url: "runbooks/cert-renewal.md"

@@ -1,0 +1,44 @@
+# End-to-end alert tests: drives raw series through the recording rules (included
+# below) so the `sli:*` names exist, then asserts which alerts fire.
+#
+# NOTE: annotations on firing alerts must match the rule exactly (promtool
+# compares them literally), so they are duplicated here.
+rule_files:
+  - ../rules/recording.rules.yml
+  - ../rules/alerting.rules.yml
+evaluation_interval: 1m
+tests:
+  # Constant heavy 5xx traffic -> error_rate 0.1 >= 0.072 in BOTH the 5m and 1h
+  # windows, sustained for > 2m, so ErrorRateFastBurn pages. No histogram/DB
+  # data exists, so the latency/DB/token alerts must NOT fire.
+  - interval: 1m
+    input_series:
+      - series: >-
+          http_server_requests_total{otel_scope_name="status-list-server",method="GET",route="/x",status_class="5xx"}
+        values: '0+100x120'
+      - series: >-
+          http_server_requests_total{otel_scope_name="status-list-server",method="GET",route="/x",status_class="2xx"}
+        values: '0+900x120'
+    alert_rule_test:
+      - eval_time: 100m
+        alertname: ErrorRateFastBurn
+        exp_alerts:
+          - exp_labels:
+              severity: "page"
+              sli: "error_rate"
+            exp_annotations:
+              summary: "5xx error rate is burning the error budget fast (>=14.4x over 30d budget)"
+              runbook_url: "runbooks/error-rate.md"
+      # Alerts that depend on missing series (histograms / token / cache) must not fire.
+      - eval_time: 100m
+        alertname: RequestLatencyFastBurn
+        exp_alerts: []
+      - eval_time: 100m
+        alertname: DbLatencyFastBurn
+        exp_alerts: []
+      - eval_time: 100m
+        alertname: TokenGenerationFastBurn
+        exp_alerts: []
+      - eval_time: 100m
+        alertname: CacheHitRatioLow
+        exp_alerts: []

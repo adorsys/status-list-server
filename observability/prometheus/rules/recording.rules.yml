@@ -1,0 +1,82 @@
+groups:
+  # Pre-aggregated SLI series. Dashboards and alerts query these `sli:*` names
+  # rather than raw metrics so they share a single number. All are scoped to the
+  # status-list-server instrumentation scope and use `sum ... by (...)` to keep
+  # cardinality bounded. Denominators are guarded with clamp_min(x, 0) so a
+  # divide-by-zero yields 0 (no NaN/Inf) without masking a real 0-denominator.
+  - name: sli
+    rules:
+      # Overall p95 request latency over 5m (alert + headline number).
+      - record: sli:request_latency:p95:5m
+        expr: |
+          histogram_quantile(0.95, sum(rate(http_server_duration_seconds_bucket{otel_scope_name="status-list-server"}[5m])) by (le))
+
+      # Per-route p95 request latency (dashboard drill-down).
+      - record: sli:request_latency:p95:5m:route
+        expr: |
+          histogram_quantile(0.95, sum(rate(http_server_duration_seconds_bucket{otel_scope_name="status-list-server"}[5m])) by (route, le))
+
+      # Fraction of requests that returned 5xx in the last 5m.
+      - record: sli:error_rate:5m
+        expr: |
+          sum(rate(http_server_requests_total{otel_scope_name="status-list-server",status_class="5xx"}[5m]))
+          / clamp_min(sum(rate(http_server_requests_total{otel_scope_name="status-list-server"}[5m])), 0)
+
+      # Fraction of status-list reads served from the in-process cache.
+      - record: sli:cache_hit_ratio:5m
+        expr: |
+          sum(rate(status_list_cache_hits_total{otel_scope_name="status-list-server"}[5m]))
+          / clamp_min(
+              sum(rate(status_list_cache_hits_total{otel_scope_name="status-list-server"}[5m]))
+              + sum(rate(status_list_cache_misses_total{otel_scope_name="status-list-server"}[5m])),
+              0
+            )
+
+      # Overall p95 DB query latency (alert + headline).
+      - record: sli:db_query_latency:p95:5m
+        expr: |
+          histogram_quantile(0.95, sum(rate(db_query_duration_seconds_bucket{otel_scope_name="status-list-server"}[5m])) by (le))
+
+      # Per-operation p95 DB query latency (dashboard drill-down).
+      - record: sli:db_query_latency:p95:5m:operation
+        expr: |
+          histogram_quantile(0.95, sum(rate(db_query_duration_seconds_bucket{otel_scope_name="status-list-server"}[5m])) by (operation, le))
+
+      # Fraction of certificate renewal attempts that failed.
+      - record: sli:cert_renewal_failure_rate:5m
+        expr: |
+          sum(rate(cert_renewal_failures_total{otel_scope_name="status-list-server"}[5m]))
+          / clamp_min(sum(rate(cert_renewal_attempts_total{otel_scope_name="status-list-server"}[5m])), 0)
+
+      # Fraction of token-generation attempts that failed.
+      - record: sli:token_gen_failure_rate:5m
+        expr: |
+          sum(rate(token_generation_failures_total{otel_scope_name="status-list-server"}[5m]))
+          / clamp_min(sum(rate(token_generation_attempts_total{otel_scope_name="status-list-server"}[5m])), 0)
+
+      # Long-window (1h) variants of the outage SLIs, aligned so the
+      # multi-window multi-burn-rate alerts compare the same quantity at two
+      # ranges.
+      - record: sli:request_latency:p95:1h
+        expr: |
+          histogram_quantile(0.95, sum(rate(http_server_duration_seconds_bucket{otel_scope_name="status-list-server"}[1h])) by (le))
+
+      - record: sli:error_rate:1h
+        expr: |
+          sum(rate(http_server_requests_total{otel_scope_name="status-list-server",status_class="5xx"}[1h]))
+          / clamp_min(sum(rate(http_server_requests_total{otel_scope_name="status-list-server"}[1h])), 0)
+
+      - record: sli:db_query_latency:p95:1h
+        expr: |
+          histogram_quantile(0.95, sum(rate(db_query_duration_seconds_bucket{otel_scope_name="status-list-server"}[1h])) by (le))
+
+      - record: sli:token_gen_failure_rate:1h
+        expr: |
+          sum(rate(token_generation_failures_total{otel_scope_name="status-list-server"}[1h]))
+          / clamp_min(sum(rate(token_generation_attempts_total{otel_scope_name="status-list-server"}[1h])), 0)
+
+      # Remaining error budget (1 = fully intact). Target hard-coded here to the
+      # 99.5% success SLO so a single rule drives both the dashboard gauge and
+      # the burn-rate math; change it in slo/README.md + this rule together.
+      - record: sli:error_budget:success:30d
+        expr: 1 - sli:error_rate:5m / 0.005

@@ -4,9 +4,11 @@ use std::time::Duration;
 
 use axum::{
     Router,
-    extract::DefaultBodyLimit,
-    middleware::from_fn_with_state,
-    response::IntoResponse,
+    body::Body,
+    extract::{DefaultBodyLimit, MatchedPath},
+    http::Request,
+    middleware::{self, Next, from_fn_with_state},
+    response::{IntoResponse, Response},
     routing::{get, patch, post, put},
 };
 use color_eyre::eyre::{Context, eyre};
@@ -86,6 +88,7 @@ impl HttpServer {
                 TraceLayer::new_for_http()
                     .make_span_with(crate::utils::telemetry::make_http_request_span),
             )
+            .layer(middleware::from_fn(track_http_metrics))
             .layer(CatchPanicLayer::new())
             .layer(cors)
             .layer(RequestBodyLimitLayer::new(max_body_size))
@@ -204,6 +207,34 @@ fn api_v1_routes(
         .merge(protected)
         .merge(credentials)
         .merge(public_reads)
+}
+
+/// Axum middleware recording HTTP latency + request-count SLIs.
+///
+/// Keyed by the bounded route pattern (via [`MatchedPath`]), the HTTP method,
+/// and the response status class. Runs after routing so `MatchedPath` is
+/// populated, giving bounded cardinality regardless of path parameters.
+async fn track_http_metrics(request: Request<Body>, next: Next) -> Response {
+    let start = std::time::Instant::now();
+    let method = request.method().clone();
+    let route = request
+        .extensions()
+        .get::<MatchedPath>()
+        .map(|p| p.as_str().to_string())
+        .unwrap_or_else(|| "unmatched".to_string());
+
+    let response = next.run(request).await;
+
+    let status = response.status();
+    let status_class = format!("{}xx", status.as_u16() / 100);
+    crate::utils::metrics_http::record_request(
+        method.as_str(),
+        &route,
+        &status_class,
+        start.elapsed().as_secs_f64(),
+    );
+
+    response
 }
 
 fn attach_metrics(router: Router, config: &Config, registry: Registry) -> Router {
@@ -473,5 +504,93 @@ mod tests {
         let body = resp.text().await.unwrap();
         let parsed: IpAddr = body.parse().unwrap();
         assert!(parsed.is_loopback());
+    }
+
+    /// The HTTP metrics layer must record the bounded route pattern (not the
+    /// raw URI) and the status class for every request that passes through it.
+    #[tokio::test]
+    async fn http_metrics_middleware_records_route_and_status() {
+        use crate::utils::metrics::{metrics_test_lock, setup_metrics};
+        use opentelemetry_sdk::Resource;
+        use prometheus::{Encoder, Registry, TextEncoder};
+
+        let _metrics_guard = metrics_test_lock();
+        let registry = Registry::new();
+        let config = crate::config::TelemetryConfig {
+            environment: crate::config::TelemetryEnvironment::Development,
+            otlp_endpoint: "http://localhost:4317".to_string(),
+            sampler_ratio: 1.0,
+            enabled: false,
+        };
+        let _meter_provider = setup_metrics(
+            &registry,
+            &config,
+            Resource::builder()
+                .with_service_name("status-list-server-test")
+                .build(),
+        )
+        .expect("metrics setup");
+
+        async fn ok_handler() -> impl IntoResponse {
+            "ok"
+        }
+        async fn boom_handler() -> StatusCode {
+            StatusCode::INTERNAL_SERVER_ERROR
+        }
+
+        let router = Router::new()
+            .route("/ok", get(ok_handler))
+            .route("/boom", get(boom_handler))
+            .layer(middleware::from_fn(track_http_metrics))
+            .with_state(());
+
+        let resp = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/ok")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let resp = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/boom")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+
+        let mut buffer = Vec::new();
+        TextEncoder::new()
+            .encode(&registry.gather(), &mut buffer)
+            .expect("encode metrics");
+        let body = String::from_utf8(buffer).expect("metrics are valid UTF-8");
+
+        assert!(
+            body.contains(
+                "http_server_requests_total{method=\"GET\",route=\"/ok\",status_class=\"2xx\""
+            ),
+            "expected 2xx counter for /ok; body:\n{body}"
+        );
+        assert!(
+            body.contains(
+                "http_server_requests_total{method=\"GET\",route=\"/boom\",status_class=\"5xx\""
+            ),
+            "expected 5xx counter for /boom; body:\n{body}"
+        );
+        assert!(
+            body.contains("http_server_duration_seconds_count"),
+            "expected duration histogram count; body:\n{body}"
+        );
     }
 }

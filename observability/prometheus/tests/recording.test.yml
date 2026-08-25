@@ -1,0 +1,44 @@
+rule_files:
+  - ../rules/recording.rules.yml
+evaluation_interval: 1m
+tests:
+  # Verifies the deterministic ratio recording rules produce expected values on
+  # synthetic series (single status_class / format buckets, so sum() collapses to
+  # one series and the ratio is exact).
+  - interval: 1m
+    input_series:
+      - series: >-
+          http_server_requests_total{otel_scope_name="status-list-server",method="GET",route="/status-lists/{list_id}",status_class="5xx"}
+        values: '0+5x20'
+      - series: >-
+          http_server_requests_total{otel_scope_name="status-list-server",method="GET",route="/status-lists/{list_id}",status_class="2xx"}
+        values: '0+95x20'
+      - series: >-
+          token_generation_failures_total{otel_scope_name="status-list-server",format="jwt"}
+        values: '0+2x20'
+      - series: >-
+          token_generation_attempts_total{otel_scope_name="status-list-server",format="jwt"}
+        values: '0+100x20'
+      - series: >-
+          cert_renewal_failures_total{otel_scope_name="status-list-server"}
+        values: '0+1x20'
+      - series: >-
+          cert_renewal_attempts_total{otel_scope_name="status-list-server"}
+        values: '0+50x20'
+    promql_expr_test:
+      # 5xx rate = 5/20ths of total 5xx, total = 5xx+2xx = 100/20ths -> ratio 0.05
+      - expr: 'sli:error_rate:5m'
+        eval_time: 20m
+        exp_samples:
+          - labels: '{__name__="sli:error_rate:5m"}'
+            value: 0.05
+      - expr: 'sli:token_gen_failure_rate:5m'
+        eval_time: 20m
+        exp_samples:
+          - labels: '{__name__="sli:token_gen_failure_rate:5m"}'
+            value: 0.02
+      - expr: 'sli:cert_renewal_failure_rate:5m'
+        eval_time: 20m
+        exp_samples:
+          - labels: '{__name__="sli:cert_renewal_failure_rate:5m"}'
+            value: 0.02

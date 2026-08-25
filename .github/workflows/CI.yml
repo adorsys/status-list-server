@@ -394,6 +394,49 @@ jobs:
             otel/opentelemetry-collector-contrib:0.158.0 \
             validate --config /etc/otelcol/config.yaml
 
+  prometheus-rules-validation:
+    name: Prometheus Rules & Dashboard Validation
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Fetch Repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Validate Prometheus recording rules
+        run: |
+          docker run --rm --entrypoint promtool \
+            -v "$PWD/observability/prometheus:/etc/prometheus:ro" \
+            prom/prometheus:v3.11.3 check rules /etc/prometheus/rules/recording.rules.yml
+
+      - name: Validate Prometheus alerting rules
+        run: |
+          docker run --rm --entrypoint promtool \
+            -v "$PWD/observability/prometheus:/etc/prometheus:ro" \
+            prom/prometheus:v3.11.3 check rules /etc/prometheus/rules/alerting.rules.yml
+
+      - name: Validate Prometheus config
+        run: |
+          docker run --rm --entrypoint promtool \
+            -v "$PWD/observability/prometheus:/etc/prometheus:ro" \
+            prom/prometheus:v3.11.3 check config /etc/prometheus/prometheus.yml
+
+      - name: Run promtool recording rule tests
+        run: |
+          docker run --rm --entrypoint promtool \
+            -v "$PWD/observability/prometheus:/etc/prometheus:ro" \
+            prom/prometheus:v3.11.3 test rules /etc/prometheus/tests/recording.test.yml
+
+      - name: Run promtool alerting rule tests
+        run: |
+          docker run --rm --entrypoint promtool \
+            -v "$PWD/observability/prometheus:/etc/prometheus:ro" \
+            prom/prometheus:v3.11.3 test rules /etc/prometheus/tests/alerting.test.yml
+
+      - name: Verify dashboard JSON is committed and valid
+        run: |
+          test -s observability/dashboards/generated/status-list-slo.json
+          python3 -c "import json; json.load(open('observability/dashboards/generated/status-list-slo.json'))"
+
   cargo-coverage:
     name: Cargo Coverage (llvm-cov)
     runs-on: ubuntu-latest
