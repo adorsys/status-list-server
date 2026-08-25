@@ -579,6 +579,10 @@ pub struct DatabaseConfig {
     pub password: Option<SecretString>,
     #[serde(default)]
     pub name: Option<String>,
+    /// Optional URL query string for driver/TLS settings, for example
+    /// `sslmode=verify-full&sslrootcert=/certs/ca.crt`.
+    #[serde(default)]
+    pub query: Option<String>,
     /// Validated against the URL scheme at startup.
     #[serde(default)]
     pub backend: DatabaseBackend,
@@ -629,6 +633,10 @@ impl DatabaseConfig {
                 .as_deref()
                 .is_some_and(|value| !value.trim().is_empty())
             || self.port.is_some()
+            || self
+                .query
+                .as_deref()
+                .is_some_and(|value| !value.trim().is_empty())
     }
 
     /// Resolve the database connection string from either the backward-compatible
@@ -636,6 +644,11 @@ impl DatabaseConfig {
     pub fn resolved_url(&self) -> Result<SecretString, ConfigError> {
         if !self.has_split_connection_fields() {
             return Ok(self.url.clone());
+        }
+        if !self.url_is_default() {
+            return Err(ConfigError::Message(
+                "Ambiguous database configuration: use either database.url or split database fields, not both".to_string(),
+            ));
         }
 
         let scheme = match self.backend {
@@ -665,13 +678,51 @@ impl DatabaseConfig {
             })?;
         let name = required_config_field(self.name.as_deref(), "database.name")?;
         let port = self.port.unwrap_or(default_port);
+        let query = trim_non_empty(self.query.as_deref())
+            .map(|query| format!("?{}", query.trim_start_matches('?')))
+            .unwrap_or_default();
 
         Ok(SecretString::from(format!(
-            "{scheme}://{}:{}@{host}:{port}/{}",
+            "{scheme}://{}:{}@{host}:{port}/{}{query}",
             encode_url_part(username),
             encode_url_part(password),
             encode_url_part(name)
         )))
+    }
+
+    pub fn redacted_target(&self) -> String {
+        if self.has_split_connection_fields() {
+            let host = trim_non_empty(self.host.as_deref()).unwrap_or("<missing-host>");
+            let name = trim_non_empty(self.name.as_deref()).unwrap_or("<missing-name>");
+            let port = self.port.map(|port| port.to_string()).unwrap_or_else(|| {
+                match self.backend {
+                    DatabaseBackend::Postgres => 5432,
+                    DatabaseBackend::MySql => 3306,
+                    DatabaseBackend::Memory | DatabaseBackend::Sqlite => 0,
+                }
+                .to_string()
+            });
+            return format!(
+                "backend={}, host={}, port={}, database={}",
+                self.backend.as_str(),
+                host,
+                port,
+                name
+            );
+        }
+
+        format!("backend={}", self.backend.as_str())
+    }
+
+    fn url_is_default(&self) -> bool {
+        matches!(
+            self.url.expose_secret(),
+            "postgres://postgres:postgres@localhost:5432/status-list"
+                | "mysql://mysql:mysql@localhost:3306/status-list"
+                | "sqlite::memory:"
+                | "memory:"
+                | "memory"
+        )
     }
 }
 
@@ -1175,6 +1226,10 @@ mod tests {
             ("database.username", "user@example.com"),
             ("database.password", "secret value"),
             ("database.name", "status/list"),
+            (
+                "database.query",
+                "sslmode=verify-full&sslrootcert=/var/run/postgres/ca.crt",
+            ),
         ])
         .expect("Failed to load split database config");
         assert_eq!(
@@ -1183,8 +1238,34 @@ mod tests {
                 .resolved_url()
                 .expect("split database config should resolve")
                 .expose_secret(),
-            "postgres://user%40example.com:secret%20value@postgres.statuslist.svc.cluster.local:5432/status%2Flist"
+            "postgres://user%40example.com:secret%20value@postgres.statuslist.svc.cluster.local:5432/status%2Flist?sslmode=verify-full&sslrootcert=/var/run/postgres/ca.crt"
         );
+        assert_eq!(
+            split_db_cfg.database.redacted_target(),
+            "backend=postgres, host=postgres.statuslist.svc.cluster.local, port=5432, database=status/list"
+        );
+        assert!(!split_db_cfg.database.redacted_target().contains("secret"));
+
+        let mixed_db_cfg = Config::load_from_overrides(&[
+            ("database.backend", "postgres"),
+            (
+                "database.url",
+                "postgres://custom:secret@custom-db:5432/custom",
+            ),
+            ("database.host", "postgres.statuslist.svc.cluster.local"),
+            ("database.username", "postgres"),
+            ("database.password", "split secret"),
+            ("database.name", "status-list"),
+        ])
+        .expect("Failed to load mixed database config");
+        let mixed_db_error = mixed_db_cfg
+            .database
+            .resolved_url()
+            .expect_err("mixed database.url and split fields should fail")
+            .to_string();
+        assert!(mixed_db_error.contains("Ambiguous database configuration"));
+        assert!(!mixed_db_error.contains("custom:secret"));
+        assert!(!mixed_db_error.contains("split secret"));
 
         let missing_db_password = Config::load_from_overrides(&[
             ("database.backend", "postgres"),

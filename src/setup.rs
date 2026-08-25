@@ -195,9 +195,12 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
                     .sqlx_logging(false);
             }
 
-            let db = sea_orm::Database::connect(opt)
-                .await
-                .wrap_err("Failed to connect to database")?;
+            let db = sea_orm::Database::connect(opt).await.map_err(|_| {
+                color_eyre::eyre::eyre!(
+                    "Failed to connect to database ({})",
+                    config.database.redacted_target()
+                )
+            })?;
 
             Migrator::up(&db, None)
                 .await

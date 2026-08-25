@@ -78,6 +78,12 @@ spec:
             {{- range $name, $value := .Values.statuslist.env }}
             {{- $_ := set $env $name $value }}
             {{- end }}
+            {{- if hasKey $env "APP_DATABASE__URL" }}
+              {{- fail "statuslist.env.APP_DATABASE__URL is not supported by this chart because it exposes assembled credentials in pod metadata; use APP_DATABASE__HOST/PORT/USERNAME/NAME/QUERY plus the chart-managed APP_DATABASE__PASSWORD SecretKeyRef" }}
+            {{- end }}
+            {{- if hasKey $env "APP_DATABASE__PASSWORD" }}
+              {{- fail "statuslist.env.APP_DATABASE__PASSWORD must not be set as a plain env value; provide postgres.auth.existingSecret or externalSecret data for the postgres-password key" }}
+            {{- end }}
             {{- if not (hasKey $env "APP_SERVER__DOMAIN") }}
               {{- if .Values.statuslist.ingress.externalDnsHostname }}
                 {{- $_ := set $env "APP_SERVER__DOMAIN" .Values.statuslist.ingress.externalDnsHostname }}
@@ -115,6 +121,21 @@ spec:
                 {{- $_ := set $env "APP_TELEMETRY__ENABLED" "false" }}
               {{- end }}
             {{- end }}
+            {{- if not (hasKey $env "APP_DATABASE__BACKEND") }}
+              {{- $_ := set $env "APP_DATABASE__BACKEND" "postgres" }}
+            {{- end }}
+            {{- if not (hasKey $env "APP_DATABASE__HOST") }}
+              {{- $_ := set $env "APP_DATABASE__HOST" (printf "%s-postgres.%s.svc.cluster.local" .Release.Name .Release.Namespace) }}
+            {{- end }}
+            {{- if not (hasKey $env "APP_DATABASE__PORT") }}
+              {{- $_ := set $env "APP_DATABASE__PORT" (.Values.postgres.auth.port | default "5432" | toString) }}
+            {{- end }}
+            {{- if not (hasKey $env "APP_DATABASE__USERNAME") }}
+              {{- $_ := set $env "APP_DATABASE__USERNAME" .Values.postgres.auth.username }}
+            {{- end }}
+            {{- if not (hasKey $env "APP_DATABASE__NAME") }}
+              {{- $_ := set $env "APP_DATABASE__NAME" .Values.postgres.auth.database }}
+            {{- end }}
             {{- range $name, $value := $env }}
             - name: {{ $name }}
               value: {{ $value | quote }}
@@ -127,21 +148,11 @@ spec:
             - name: AWS_CONFIG_FILE
               value: /home/nobody/.aws/config
             {{- end }}
-            - name: APP_DATABASE__BACKEND
-              value: "postgres"
-            - name: APP_DATABASE__HOST
-              value: "{{ .Release.Name }}-postgres.{{ .Release.Namespace }}.svc.cluster.local"
-            - name: APP_DATABASE__PORT
-              value: {{ .Values.postgres.auth.port | default "5432" | quote }}
-            - name: APP_DATABASE__USERNAME
-              value: {{ .Values.postgres.auth.username | quote }}
             - name: APP_DATABASE__PASSWORD
               valueFrom:
                 secretKeyRef:
                   name: {{ if .Values.externalSecret.enabled }}{{ .Values.externalSecret.spec.target.name }}{{ else }}statuslist-secret{{ end }}
                   key: postgres-password
-            - name: APP_DATABASE__NAME
-              value: {{ .Values.postgres.auth.database | quote }}
           volumeMounts:
             - name: tmp
               mountPath: /tmp

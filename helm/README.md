@@ -34,11 +34,13 @@ The following files are used to configure the deployment:
 
 The chart intentionally avoids rendering fully assembled SQL database URLs in the Deployment. The application assembles the connection string inside the process from split configuration fields:
 
-- Database: `APP_DATABASE__HOST`, `APP_DATABASE__PORT`, `APP_DATABASE__USERNAME`, `APP_DATABASE__PASSWORD`, `APP_DATABASE__NAME`
+- Database: `APP_DATABASE__HOST`, `APP_DATABASE__PORT`, `APP_DATABASE__USERNAME`, `APP_DATABASE__PASSWORD`, `APP_DATABASE__NAME`, and optional `APP_DATABASE__QUERY`
+
+Use `APP_DATABASE__QUERY` for non-secret driver parameters such as `sslmode=verify-full&sslrootcert=/var/run/postgres/ca.crt`. Do not put credentials in query parameters.
 
 Password fields are rendered with `valueFrom.secretKeyRef`, so `kubectl describe pod` shows the referenced Secret name/key rather than a connection string containing credentials. Operators should still restrict RBAC for pod inspection, Secret reads, exec access, ephemeral containers, and workload log access to trusted roles only, because environment variables are visible inside the running container and Secret references identify where credentials live.
 
-`APP_DATABASE__URL` remains supported by the application for local or custom deployments, but using it directly in Kubernetes pod specs accepts the tradeoff that users with pod-inspection permissions may see assembled connection strings. Prefer the split fields for Helm-managed deployments.
+`APP_DATABASE__URL` remains supported by the application for local or custom deployments, but the Helm chart rejects it in `statuslist.env` because using it directly in Kubernetes pod specs accepts the tradeoff that users with pod-inspection permissions may see assembled connection strings. Prefer the split fields for Helm-managed deployments. When any split database field is provided, the application rejects a simultaneous custom `database.url` to avoid silent precedence surprises.
 
 ## Production Deployment Instructions
 
