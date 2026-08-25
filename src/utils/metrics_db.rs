@@ -1,18 +1,14 @@
-//! Database query latency and error SLI instruments.
+//! Database query latency SLI instruments.
 //!
-//! These back the DB-latency and DB-error series used by the SLO dashboards and
-//! burn-rate alerts in `observability/`:
+//! These back the DB-latency series used by the SLO dashboards and burn-rate
+//! alerts in `observability/`:
 //! - `db_query_duration_seconds` – histogram of storage-query latency
-//! - `db_query_errors_total` – counter of failed storage queries
 //!
 //! Handles are cached on first use (they are only ever needed after
 //! `init_telemetry`/`setup_metrics` has installed the global provider, so the
 //! cached handles are valid).
 
-use opentelemetry::{
-    KeyValue, global,
-    metrics::{Counter, Histogram},
-};
+use opentelemetry::{KeyValue, global, metrics::Histogram};
 use std::{
     future::Future,
     sync::{Mutex, OnceLock},
@@ -20,7 +16,6 @@ use std::{
 };
 
 const QUERY_DURATION_METRIC: &str = "db_query_duration";
-const QUERY_ERRORS_METRIC: &str = "db_query_errors";
 
 /// Bucket boundaries (seconds) tuned to this service's DB SLO target of p95 < 50 ms.
 const QUERY_BUCKETS: &[f64] = &[
@@ -30,7 +25,6 @@ const QUERY_BUCKETS: &[f64] = &[
 #[derive(Clone)]
 struct DbMetrics {
     duration: Histogram<f64>,
-    errors: Counter<u64>,
 }
 
 fn db_metrics() -> DbMetrics {
@@ -44,15 +38,11 @@ fn db_metrics() -> DbMetrics {
                 .with_unit("s")
                 .with_boundaries(QUERY_BUCKETS.to_vec())
                 .build(),
-            errors: meter
-                .u64_counter(QUERY_ERRORS_METRIC)
-                .with_description("Total number of failed database queries")
-                .build(),
         }
     })
 }
 
-/// Record a completed (successful or failed) query's duration.
+/// Record a completed query's latency.
 pub(crate) fn record_db_query(operation: &'static str, resource: &'static str, seconds: f64) {
     db_metrics().duration.record(
         seconds,
@@ -63,19 +53,7 @@ pub(crate) fn record_db_query(operation: &'static str, resource: &'static str, s
     );
 }
 
-/// Record a query failure so an error rate is derivable from
-/// `db_query_errors_total / db_query_duration_seconds_count`.
-pub(crate) fn record_db_query_error(operation: &'static str, resource: &'static str) {
-    db_metrics().errors.add(
-        1,
-        &[
-            KeyValue::new("operation", operation),
-            KeyValue::new("resource", resource),
-        ],
-    );
-}
-
-/// Run `fut`, timing it and recording latency + an error counter on `Err`.
+/// Run `fut`, timing it and recording the query latency.
 pub(crate) async fn time_query<T, E, F>(
     operation: &'static str,
     resource: &'static str,
@@ -87,9 +65,6 @@ where
     let start = Instant::now();
     let result = fut.await;
     record_db_query(operation, resource, start.elapsed().as_secs_f64());
-    if result.is_err() {
-        record_db_query_error(operation, resource);
-    }
     result
 }
 
@@ -104,7 +79,7 @@ mod tests {
     use prometheus::{Encoder, Registry, TextEncoder};
 
     #[test]
-    fn db_metrics_record_duration_and_error_series() {
+    fn db_metrics_record_duration_series() {
         let _metrics_guard = metrics_test_lock();
         let registry = Registry::new();
         let config = TelemetryConfig {
@@ -123,7 +98,6 @@ mod tests {
         .expect("metrics setup");
 
         record_db_query("find", "status_list", 0.003);
-        record_db_query_error("find", "status_list");
 
         let mut buffer = Vec::new();
         TextEncoder::new()
@@ -135,16 +109,10 @@ mod tests {
             body.contains("db_query_duration_seconds_bucket"),
             "expected duration histogram; body:\n{body}"
         );
-        assert!(
-            body.contains(
-                "db_query_errors_total{operation=\"find\",resource=\"status_list\",otel_scope_name=\"status-list-server\"} 1"
-            ),
-            "expected error counter; body:\n{body}"
-        );
     }
 
     #[tokio::test]
-    async fn time_query_records_error_only_on_err() {
+    async fn time_query_records_duration_for_ok_and_err() {
         let _metrics_guard = metrics_test_lock();
         let registry = Registry::new();
         let config = TelemetryConfig {
@@ -174,10 +142,8 @@ mod tests {
             .expect("encode metrics");
         let body = String::from_utf8(buffer).expect("metrics are valid UTF-8");
         assert!(
-            body.contains(
-                "db_query_errors_total{operation=\"op\",resource=\"res\",otel_scope_name=\"status-list-server\"} 1"
-            ),
-            "expected exactly one error counter; body:\n{body}"
+            body.contains("db_query_duration_seconds_bucket"),
+            "expected duration histogram; body:\n{body}"
         );
     }
 }

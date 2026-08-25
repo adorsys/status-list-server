@@ -22,7 +22,6 @@ below are the **exported** Prometheus series, not the raw instrument names:
 | `http_server_duration` histogram (`s`) | `http_server_duration_seconds{...}` |
 | `http_server_requests` counter | `http_server_requests_total{...}` |
 | `db_query_duration` histogram (`s`) | `db_query_duration_seconds{...}` |
-| `db_query_errors` counter | `db_query_errors_total{...}` |
 | `status_list_cache_hits` / `_misses` | `status_list_cache_hits_total` / `_misses_total` |
 | `token_generation_attempts` / `_failures` | `token_generation_attempts_total` / `_failures_total` |
 | `cert_renewal_attempts` / `_successes` / `_failures` | `cert_renewal_*_total` |

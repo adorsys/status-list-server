@@ -27,8 +27,6 @@ lowers the cache hit ratio and raises HTTP latency.
 ```promql
 # Which operation is slow?
 histogram_quantile(0.95, sum(rate(db_query_duration_seconds_bucket{otel_scope_name="status-list-server"}[5m])) by (operation, le))
-# Error rate redistribution
-sum(rate(db_query_errors_total{otel_scope_name="status-list-server"}[5m])) by (operation)
 # Contention
 sum(rate(db_write_contention_total[5m]))
 ```

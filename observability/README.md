@@ -17,7 +17,6 @@ observability/
     generated/*.json             # committed dashboard Grafana loads
     provisioning/                # Grafana datasource + file provider
   runbooks/*.md                  # one per alert/SLI (Phase 6)
-  LIVE_TESTING.md                # end-to-end alert firing guide (Phase 8)
 ```
 
 ## Metric sources
@@ -25,7 +24,7 @@ observability/
 The SLIs are emitted by the app and exported via the OTel `opentelemetry-prometheus`
 exporter (which appends `_total`/`_seconds` and the `otel_scope_name` label).
 Phase 1 added: `http_server_duration_seconds`, `http_server_requests_total`,
-`db_query_duration_seconds`, `db_query_errors_total`, `status_list_cache_hits_total`
+`db_query_duration_seconds`, `status_list_cache_hits_total`
 /`_misses_total`, and `token_generation_attempts_total`/`_failures_total`.
 Cert-renewal and cert-chain-cache series already existed.
 
@@ -42,9 +41,6 @@ docker compose up -d   # brings up app + otel-collector + prometheus + grafana
 ```
 
 Dashboard generation is documented in `dashboards/README.md`.
-
-Live / load testing of the running stack (firing each alert end-to-end) is
-documented in `LIVE_TESTING.md`.
 
 ## Deployment note
 

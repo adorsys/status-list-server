@@ -30,8 +30,6 @@ is an outage SLI and pages.
 sli:token_gen_failure_rate:5m
 sum(rate(token_generation_failures_total{otel_scope_name="status-list-server"}[5m])) by (format)
 sum(rate(token_generation_attempts_total{otel_scope_name="status-list-server"}[5m])) by (format)
-# Backends on the path
-sum(rate(db_query_errors_total{otel_scope_name="status-list-server"}[5m]))
 ```
 
 ```bash
