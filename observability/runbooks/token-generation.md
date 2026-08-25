@@ -8,8 +8,9 @@ Alerts:
 ## What fired
 
 The fraction of status-list token-generation attempts that failed exceeded the
-0.5% SLO (fast burn >= 14.4x / slow burn >= 1x). Token generation failing means
-clients cannot read a status list — it is an outage SLI and pages.
+0.5% SLO (fast burn >= 14.4x over a 1h+6h window / slow burn >= 6x over a 6h
+window). Token generation failing means clients cannot read a status list — it
+is an outage SLI and pages.
 
 ## Ranked likely causes
 

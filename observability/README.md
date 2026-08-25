@@ -17,6 +17,7 @@ observability/
     generated/*.json             # committed dashboard Grafana loads
     provisioning/                # Grafana datasource + file provider
   runbooks/*.md                  # one per alert/SLI (Phase 6)
+  LIVE_TESTING.md                # end-to-end alert firing guide (Phase 8)
 ```
 
 ## Metric sources

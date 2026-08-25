@@ -4,41 +4,59 @@ evaluation_interval: 1m
 tests:
   # Verifies the deterministic ratio recording rules produce expected values on
   # synthetic series (single status_class / format buckets, so sum() collapses to
-  # one series and the ratio is exact).
+  # one series and the ratio is exact). A 70-minute run gives the 5m and 1h
+  # window variants enough data to resolve.
   - interval: 1m
     input_series:
       - series: >-
           http_server_requests_total{otel_scope_name="status-list-server",method="GET",route="/status-lists/{list_id}",status_class="5xx"}
-        values: '0+5x20'
+        values: '0+5x70'
       - series: >-
           http_server_requests_total{otel_scope_name="status-list-server",method="GET",route="/status-lists/{list_id}",status_class="2xx"}
-        values: '0+95x20'
+        values: '0+95x70'
       - series: >-
           token_generation_failures_total{otel_scope_name="status-list-server",format="jwt"}
-        values: '0+2x20'
+        values: '0+2x70'
       - series: >-
           token_generation_attempts_total{otel_scope_name="status-list-server",format="jwt"}
-        values: '0+100x20'
+        values: '0+100x70'
       - series: >-
           cert_renewal_failures_total{otel_scope_name="status-list-server"}
-        values: '0+1x20'
+        values: '0+1x70'
       - series: >-
           cert_renewal_attempts_total{otel_scope_name="status-list-server"}
-        values: '0+50x20'
+        values: '0+50x70'
+      - series: >-
+          status_list_cache_hits_total{otel_scope_name="status-list-server",cache="status_list"}
+        values: '0+3x70'
+      - series: >-
+          status_list_cache_misses_total{otel_scope_name="status-list-server",cache="status_list"}
+        values: '0+1x70'
     promql_expr_test:
       # 5xx rate = 5/20ths of total 5xx, total = 5xx+2xx = 100/20ths -> ratio 0.05
       - expr: 'sli:error_rate:5m'
-        eval_time: 20m
+        eval_time: 70m
         exp_samples:
           - labels: '{__name__="sli:error_rate:5m"}'
             value: 0.05
+      - expr: 'sli:error_rate:1h'
+        eval_time: 70m
+        exp_samples:
+          - labels: '{__name__="sli:error_rate:1h"}'
+            value: 0.05
       - expr: 'sli:token_gen_failure_rate:5m'
-        eval_time: 20m
+        eval_time: 70m
         exp_samples:
           - labels: '{__name__="sli:token_gen_failure_rate:5m"}'
             value: 0.02
       - expr: 'sli:cert_renewal_failure_rate:5m'
-        eval_time: 20m
+        eval_time: 70m
         exp_samples:
           - labels: '{__name__="sli:cert_renewal_failure_rate:5m"}'
             value: 0.02
+      # hits/(hits+misses) = 3/(3+1) = 0.75 (exactly representable)
+      - expr: 'sli:cache_hit_ratio:5m'
+        eval_time: 70m
+        exp_samples:
+          - labels: '{__name__="sli:cache_hit_ratio:5m"}'
+            value: 0.75

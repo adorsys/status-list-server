@@ -63,7 +63,7 @@ impl HttpMetrics {
         let duration_attrs = [
             KeyValue::new("method", method.to_string()),
             KeyValue::new("route", route.to_string()),
-            KeyValue::new("status", status_class.to_string()),
+            KeyValue::new("status_class", status_class.to_string()),
         ];
         self.duration.record(seconds, &duration_attrs);
 

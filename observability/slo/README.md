@@ -36,20 +36,20 @@ set keeps cardinality in check.
 
 ## Per-SLI table
 
-| SLI | Metric source | Example target | Window | Burn-rate budget |
+| SLI | Metric source | Example target | Window | Alert windows / burn thresholds |
 |---|---|---|---|---|
-| Request latency | `http_server_duration_seconds` histogram | p95 < **300 ms** | 30d | 14.4 burned min/day at 1x, alerted at 2h/13.68h per Google SRE |
-| Error rate | `sum(rate(http_server_requests_total{status_class="5xx"}[...])) / sum(rate(http_server_requests_total[...]))` | ≥ **99.5%** success (≤ 0.5% 5xx) | 30d | 14.4 min/day |
+| Request latency | `http_server_duration_seconds` histogram | p95 < **300 ms** | 30d | fast page: 1h > 300ms **and** 6h > 300ms; slow warn: 6h > 300ms |
+| Error rate | `sum(rate(http_server_requests_total{status_class="5xx"}[...])) / sum(rate(http_server_requests_total[...]))` | ≥ **99.5%** success (≤ 0.5% 5xx) | 30d | fast page: ≥14.4x (0.072) over 1h **and** 6h; slow warn: ≥6x (0.030) over 6h |
 | Cache hit ratio | `status_list_cache_hits_total / (hits_total + misses_total)` | ≥ **85%** | 7d | warn-only (degradation, not outage) |
-| DB latency | `db_query_duration_seconds` histogram | p95 < **50 ms** | 30d | 14.4 min/day |
+| DB latency | `db_query_duration_seconds` histogram | p95 < **50 ms** | 30d | fast page: 1h > 50ms **and** 6h > 50ms; slow warn: 6h > 50ms |
 | Cert renewal failure | `cert_renewal_failures_total / cert_renewal_attempts_total` | < **1%** | 7d | warn-only (op risk) |
-| Token-gen failure | `token_generation_failures_total / token_generation_attempts_total` | < **0.5%** | 30d | 14.4 min/day |
+| Token-gen failure | `token_generation_failures_total / token_generation_attempts_total` | < **0.5%** | 30d | fast page: ≥14.4x (0.072) over 1h **and** 6h; slow warn: ≥6x (0.030) over 6h |
 
 ### Why these windows
 - **30d** for latency/error/DB/token: matches the standard Google SRE "monthly
-  rolling" objective and gives the burn-rate math clean long/short window pairs
-  (`1h` vs `5m` / `6h` vs `30m`). A 30d window is also long enough that a single
-  incident's error budget isn't exhausted by background noise.
+  rolling" objective. The **30d window feeds only the remaining-budget gauge**
+  (`sli:error_budget:success:30d`); alerts use the `1h`+`6h` window pair so a
+  single incident's error budget isn't exhausted by background noise.
 - **7d** for cache hit ratio and cert renewal: these are *health* indicators
   that can turn over fast (a config change flips hit ratio within hours) and are
   alertable as degradation rather than burned revenue. A shorter window makes the
@@ -82,17 +82,20 @@ We follow Google SRE's multi-window multi-burn-rate model (`severity=page`
 slow + fast pairs) per SLI that represents an outage (request latency, error
 rate, DB latency, token-gen). See `observability/prometheus/rules/alerting.rules.yml`.
 
-- **Fast burn (page)**: error budget burned at ≥ 14.4x over a short window
-  (e.g. 1h vs the 30d budget) — something is actively broken now.
-- **Slow burn (warn)**: budget burned at ≥ 1x over a long window long enough to
-  confirm it is sustained, not a blip.
+- **Fast burn (page)**: the burn rate exceeds **14.4x** the 0.5% budget
+  (error/token ratio ≥ 0.072) — or the latency P95 breaches its threshold — on
+  **both a short (1h) and a long (6h) window** with `for: 5m`. Requiring two
+  aligned windows means a single spiky 5m burst cannot page on its own.
+- **Slow burn (warn)**: the burn rate exceeds **6x** the 0.5% budget
+  (error/token ratio ≥ 0.030), or the latency P95 breaches its threshold, on a
+  **long (6h) window** with `for: 30m` — sustained degradation, not a blip.
 - **Cache hit ratio & cert renewal** are **warn-only**: they degrade availability
   or security but do not immediately fail requests, so they page via a human
   review instead of an on-call page.
 
 Two windows are required because a single short window makes the SLO a function
-of noise (spiky traffic trips a 5m window that a 1h window clears), and a single
-long window is too slow to catch a fast outage.
+of noise (spiky traffic trips a short window that a longer window clears), and a
+single long window is too slow to catch a fast outage.
 
 ## How to tune
 

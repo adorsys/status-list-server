@@ -1,7 +1,7 @@
 //! In-process status-list cache adapter.
 use async_trait::async_trait;
 use moka::future::Cache as MokaCache;
-use opentelemetry::{KeyValue, global, metrics::Counter};
+use opentelemetry::{KeyValue, metrics::Counter};
 use std::{sync::Arc, time::Duration};
 
 use crate::domain::{
@@ -12,11 +12,41 @@ use crate::domain::{
 const HIT_METRIC: &str = "status_list_cache_hits";
 const MISS_METRIC: &str = "status_list_cache_misses";
 
+/// Cache-hit/miss SLI counters.
+///
+/// Handles are cached through [`cached_instruments`], keyed on the global
+/// meter-provider generation, so a fresh provider (e.g. a re-run of
+/// `setup_metrics` in tests) never leaves stale no-op handles behind. Unlike an
+/// eager `global::meter()` binding at construction, this is robust to the cache
+/// being built before `init_telemetry`.
+#[derive(Clone)]
+struct CacheMetrics {
+    hits: Counter<u64>,
+    misses: Counter<u64>,
+}
+
+fn cache_metrics() -> CacheMetrics {
+    static METRICS: std::sync::OnceLock<std::sync::Mutex<Option<(u64, CacheMetrics)>>> =
+        std::sync::OnceLock::new();
+    crate::utils::metrics::cached_instruments(&METRICS, || {
+        let meter = opentelemetry::global::meter("status-list-server");
+        CacheMetrics {
+            hits: meter
+                .u64_counter(HIT_METRIC)
+                .with_description("Status-list cache hits")
+                .build(),
+            misses: meter
+                .u64_counter(MISS_METRIC)
+                .with_description("Status-list cache misses")
+                .build(),
+        }
+    })
+}
+
 #[derive(Clone)]
 pub struct MokaStatusListCache {
     inner: MokaCache<String, Arc<StatusListRecord>>,
-    hit_counter: Counter<u64>,
-    miss_counter: Counter<u64>,
+    metrics: CacheMetrics,
 }
 
 impl MokaStatusListCache {
@@ -25,37 +55,19 @@ impl MokaStatusListCache {
     /// A `ttl_secs` value of `0` preserves the existing "cache disabled"
     /// behavior: inserted entries expire immediately and reads miss.
     ///
-    /// Counters are created eagerly from the OpenTelemetry global meter
-    /// provider. Telemetry initialization must install the provider before
-    /// application state constructs this cache; otherwise these handles would
-    /// remain no-op for the lifetime of the process. `build_state` (which is
-    /// invoked after `init_telemetry`) satisfies this.
+    /// Counter handles are resolved lazily and generation-aware through
+    /// [`cached_instruments`], so they stay valid regardless of whether the
+    /// global meter provider has been installed yet.
     pub fn new(ttl_secs: u64, max_capacity: u64) -> Self {
         if ttl_secs == 0 {
             tracing::info!("Cache disabled (TTL=0)");
         }
-        let meter = global::meter("status-list-server");
-        let hit_counter = meter
-            .u64_counter(HIT_METRIC)
-            .with_description("Status-list cache hits")
-            .build();
-        let miss_counter = meter
-            .u64_counter(MISS_METRIC)
-            .with_description("Status-list cache misses")
-            .build();
-
-        hit_counter.add(0, &[]);
-        miss_counter.add(0, &[]);
-
+        let metrics = cache_metrics();
         let inner = MokaCache::builder()
             .time_to_live(Duration::from_secs(ttl_secs))
             .max_capacity(max_capacity)
             .build();
-        Self {
-            inner,
-            hit_counter,
-            miss_counter,
-        }
+        Self { inner, metrics }
     }
 }
 
@@ -64,10 +76,12 @@ impl StatusListCache for MokaStatusListCache {
     async fn get(&self, key: &str) -> Result<Option<StatusListRecord>, StatusListError> {
         let cached = self.inner.get(key).await;
         if cached.is_some() {
-            self.hit_counter
+            self.metrics
+                .hits
                 .add(1, &[KeyValue::new("cache", "status_list")]);
         } else {
-            self.miss_counter
+            self.metrics
+                .misses
                 .add(1, &[KeyValue::new("cache", "status_list")]);
         }
         Ok(cached.map(|arc| (*arc).clone()))

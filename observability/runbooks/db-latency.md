@@ -7,7 +7,7 @@ Alerts:
 
 ## What fired
 
-The p95 DB query latency over the 5m and 1h windows exceeded the 50 ms SLO.
+The p95 DB query latency over the 1h and 6h windows exceeded the 50 ms SLO.
 Because reads are cached, every cache miss pays this directly — a slow DB also
 lowers the cache hit ratio and raises HTTP latency.
 

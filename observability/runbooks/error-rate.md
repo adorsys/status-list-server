@@ -7,9 +7,9 @@ Alerts:
 
 ## What fired
 
-The fraction of requests returning 5xx over the 5m and 1h windows exceeded the
-0.5% SLO (fast burn >= 14.4x / slow burn >= 1x). A page means clients are
-consistently getting server errors.
+The fraction of requests returning 5xx exceeded the 0.5% SLO (fast burn >=
+14.4x over a 1h+6h window / slow burn >= 6x over a 6h window). A page means
+clients are consistently getting server errors.
 
 ## Ranked likely causes
 

@@ -1,108 +1,112 @@
 groups:
   # Multi-window multi-burn-rate alerts (Google SRE). Each outage SLI has a
-  # fast-burn page pair (short + long window aligned) and a slow-burn warn pair.
-  # `severity` drives Alertmanager routing (see alertmanager.yml); `runbook_url`
-  # points at the in-repo runbook for the SLI.
+  # fast-burn page pair (short 1h + long 6h window, aligned) and a slow-burn
+  # warn pair on the long window. `severity` drives Alertmanager routing (see
+  # alertmanager.yml); `runbook_url` points at the in-repo runbook for the SLI.
+  #
+  # Burn-rate thresholds (0.5% budget -> 14.4x = 0.072 fast, 6x = 0.030 slow).
+  # Latency SLOs are threshold-based (p95), so their "burn" is a sustained
+  # threshold breach over matched windows rather than a ratio burn rate.
   - name: slo-alerts
     rules:
-      # --- Request latency ---------------------------------------------------
+      # --- Request latency (SLO: p95 < 300ms) --------------------------------
       - alert: RequestLatencyFastBurn
         expr: |
-          sli:request_latency:p95:5m > 0.3
-          and
           sli:request_latency:p95:1h > 0.3
-        for: 2m
+          and
+          sli:request_latency:p95:6h > 0.3
+        for: 5m
         labels:
           severity: page
           sli: request_latency
         annotations:
-          summary: "Request latency P95 is burning the error budget fast (>300ms in both 5m and 1h)"
+          summary: "Request latency P95 sustainably above 300ms (>300ms in both 1h and 6h)"
           runbook_url: "runbooks/request-latency.md"
 
       - alert: RequestLatencySlowBurn
         expr: |
-          sli:request_latency:p95:1h > 0.3
+          sli:request_latency:p95:6h > 0.3
         for: 30m
         labels:
           severity: warn
           sli: request_latency
         annotations:
-          summary: "Request latency P95 sustained above 300ms for 1h"
+          summary: "Request latency P95 sustained above 300ms for 6h"
           runbook_url: "runbooks/request-latency.md"
 
-      # --- Error rate --------------------------------------------------------
+      # --- Error rate (SLO: >=99.5% success, 0.5% budget) --------------------
       - alert: ErrorRateFastBurn
         expr: |
-          sli:error_rate:5m >= 0.072
-          and
           sli:error_rate:1h >= 0.072
-        for: 2m
+          and
+          sli:error_rate:6h >= 0.072
+        for: 5m
         labels:
           severity: page
           sli: error_rate
         annotations:
-          summary: "5xx error rate is burning the error budget fast (>=14.4x over 30d budget)"
+          summary: "5xx error rate burning the error budget fast (>=14.4x over 0.5% budget in both 1h and 6h)"
           runbook_url: "runbooks/error-rate.md"
 
       - alert: ErrorRateSlowBurn
         expr: |
-          sli:error_rate:1h >= 0.005
+          sli:error_rate:6h >= 0.030
         for: 30m
         labels:
           severity: warn
           sli: error_rate
         annotations:
-          summary: "5xx error rate sustained at or above the 0.5% SLO for 1h"
+          summary: "5xx error rate burning the error budget slowly (>=6x over 0.5% budget for 6h)"
           runbook_url: "runbooks/error-rate.md"
 
-      # --- DB latency --------------------------------------------------------
+      # --- DB latency (SLO: p95 < 50ms) --------------------------------------
       - alert: DbLatencyFastBurn
         expr: |
-          sli:db_query_latency:p95:5m > 0.05
-          and
           sli:db_query_latency:p95:1h > 0.05
-        for: 2m
+          and
+          sli:db_query_latency:p95:6h > 0.05
+        for: 5m
         labels:
           severity: page
           sli: db_latency
         annotations:
-          summary: "DB query latency P95 is burning the error budget fast (>50ms in both 5m and 1h)"
+          summary: "DB query latency P95 sustainably above 50ms (>50ms in both 1h and 6h)"
           runbook_url: "runbooks/db-latency.md"
 
       - alert: DbLatencySlowBurn
         expr: |
-          sli:db_query_latency:p95:1h > 0.05
+          sli:db_query_latency:p95:6h > 0.05
         for: 30m
         labels:
           severity: warn
           sli: db_latency
         annotations:
-          summary: "DB query latency P95 sustained above 50ms for 1h"
+          summary: "DB query latency P95 sustained above 50ms for 6h"
           runbook_url: "runbooks/db-latency.md"
 
-      # --- Token generation --------------------------------------------------
+      # --- Token generation (SLO: <0.5% failure, warn-only is not acceptable) -
       - alert: TokenGenerationFastBurn
         expr: |
-          sli:token_gen_failure_rate:5m >= 0.072
-          and
           sli:token_gen_failure_rate:1h >= 0.072
-        for: 2m
+          and
+          sli:token_gen_failure_rate:6h >= 0.072
+        for: 5m
         labels:
           severity: page
           sli: token_generation
         annotations:
-          summary: "Token-generation failures are burning the error budget fast (>=14.4x)"
+          summary: "Token-generation failures burning the error budget fast (>=14.4x over 0.5% budget in both 1h and 6h)"
           runbook_url: "runbooks/token-generation.md"
 
       - alert: TokenGenerationSlowBurn
         expr: |
-          sli:token_gen_failure_rate:1h >= 0.005
+          sli:token_gen_failure_rate:6h >= 0.030
         for: 30m
         labels:
           severity: warn
           sli: token_generation
         annotations:
-          summary: "Token-generation failure rate sustained at or above the 0.5% SLO for 1h"
+          summary: "Token-generation failure rate burning the error budget slowly (>=6x over 0.5% budget for 6h)"
           runbook_url: "runbooks/token-generation.md"
 
       # --- Cache hit ratio (warn-only degradation) ---------------------------

@@ -9,7 +9,7 @@ It is the **hands-on companion** to:
 - `docs/observability.md` — telemetry/metrics architecture and env contract.
 - `observability/slo/README.md` — SLI/SLO definitions and targets.
 - `observability/README.md` — layout and validation commands.
-- `observability/LIVE_TESTING.md` — how to fire each alert deliberately.
+- `observability/runbooks/*.md` — per-alert runbooks with diagnostics/mitigation.
 
 > What "correct" means here: the app **serves** metrics on `/metrics`, Prometheus
 > **scrapes** them and evaluates the `sli:*` recording rules + alert rules, and
@@ -339,9 +339,9 @@ last 5–15 minutes), or data will look flat/empty.
 ## 9. Fire each alert end-to-end (optional but recommended for reviewers)
 
 Prometheus evaluates with `scrape_interval: 2s`, `evaluation_interval: 15s`.
-Fast-burn (page) alerts require **both** the 5m and 1h windows to breach, so
-sustain a fault for several minutes. See `observability/LIVE_TESTING.md` for the
-full matrix. A compact cheat-sheet:
+Fast-burn (page) alerts require **both** the 1h and 6h windows to breach, so
+sustain a fault for several minutes. The sections above walk each alert end to
+end. A compact cheat-sheet:
 
 | Alert | How to trigger | Verify |
 |---|---|---|
@@ -392,5 +392,5 @@ webhook/email receiver in production (no credentials are committed).
 | `422` on status publish | Use integer statuses `0/1/2`, not strings (Section 7). |
 | Recording rules show `NaN` right after start | `rate()[5m]` needs a couple of minutes of scrape history; it resolves. |
 
-See also `observability/LIVE_TESTING.md` and the per-alert runbooks in
-`observability/runbooks/`.
+See the per-alert runbooks in `observability/runbooks/` for diagnostics and
+mitigation when an alert fires for real.

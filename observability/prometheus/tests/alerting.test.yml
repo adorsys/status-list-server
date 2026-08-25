@@ -1,6 +1,9 @@
 # End-to-end alert tests: drives raw series through the recording rules (included
 # below) so the `sli:*` names exist, then asserts which alerts fire.
 #
+# A 400-minute run gives both the 1h and 6h window recording rules enough data
+# to resolve so the multi-window alerts can be exercised.
+#
 # NOTE: annotations on firing alerts must match the rule exactly (promtool
 # compares them literally), so they are duplicated here.
 rule_files:
@@ -8,37 +11,47 @@ rule_files:
   - ../rules/alerting.rules.yml
 evaluation_interval: 1m
 tests:
-  # Constant heavy 5xx traffic -> error_rate 0.1 >= 0.072 in BOTH the 5m and 1h
-  # windows, sustained for > 2m, so ErrorRateFastBurn pages. No histogram/DB
-  # data exists, so the latency/DB/token alerts must NOT fire.
+  # Constant heavy 5xx traffic -> error_rate 0.1 >= 0.072 (fast) and >= 0.030
+  # (slow) on the aligned 1h+6h windows, so BOTH ErrorRateFastBurn (page) and
+  # ErrorRateSlowBurn (warn) fire. No histogram / DB / token / cache data
+  # exists, so those alerts must NOT fire.
   - interval: 1m
     input_series:
       - series: >-
           http_server_requests_total{otel_scope_name="status-list-server",method="GET",route="/x",status_class="5xx"}
-        values: '0+100x120'
+        values: '0+100x400'
       - series: >-
           http_server_requests_total{otel_scope_name="status-list-server",method="GET",route="/x",status_class="2xx"}
-        values: '0+900x120'
+        values: '0+900x400'
     alert_rule_test:
-      - eval_time: 100m
+      - eval_time: 400m
         alertname: ErrorRateFastBurn
         exp_alerts:
           - exp_labels:
               severity: "page"
               sli: "error_rate"
             exp_annotations:
-              summary: "5xx error rate is burning the error budget fast (>=14.4x over 30d budget)"
+              summary: "5xx error rate burning the error budget fast (>=14.4x over 0.5% budget in both 1h and 6h)"
+              runbook_url: "runbooks/error-rate.md"
+      - eval_time: 400m
+        alertname: ErrorRateSlowBurn
+        exp_alerts:
+          - exp_labels:
+              severity: "warn"
+              sli: "error_rate"
+            exp_annotations:
+              summary: "5xx error rate burning the error budget slowly (>=6x over 0.5% budget for 6h)"
               runbook_url: "runbooks/error-rate.md"
       # Alerts that depend on missing series (histograms / token / cache) must not fire.
-      - eval_time: 100m
+      - eval_time: 400m
         alertname: RequestLatencyFastBurn
         exp_alerts: []
-      - eval_time: 100m
+      - eval_time: 400m
         alertname: DbLatencyFastBurn
         exp_alerts: []
-      - eval_time: 100m
+      - eval_time: 400m
         alertname: TokenGenerationFastBurn
         exp_alerts: []
-      - eval_time: 100m
+      - eval_time: 400m
         alertname: CacheHitRatioLow
         exp_alerts: []
