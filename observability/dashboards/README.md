@@ -10,7 +10,7 @@ always loads the reviewed artifact (no manual import).
 - `provisioning/` — file-provider and datasource configs consumed by Grafana on
   startup (mounted by `docker-compose.yml`).
 
-## Regenerate
+## Regenerate 
 
 ```bash
 cd observability/dashboards/src
