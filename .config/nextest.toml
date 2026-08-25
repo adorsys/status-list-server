@@ -2,7 +2,7 @@
 #
 # Two suites start real Docker containers: the SQL backend proofs, one database
 # per test (`src/outbound/sql/test_containers.rs`), and the ACME provisioning
-# tests, which start four apiece — pebble, challtestsrv, localstack and redis
+# tests, which start three apiece — pebble, challtestsrv and localstack
 # (`tests/cert_provisioning.rs`). nextest runs tests in parallel by default, so
 # unconstrained these try to boot a dozen servers at once and starve each other
 # of CPU during init. The failures land *before* any test code runs and look

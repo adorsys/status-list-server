@@ -8,8 +8,6 @@ pub mod cert;
 pub mod gcp_secret;
 #[cfg(feature = "memory")]
 pub mod memory;
-#[cfg(feature = "redis")]
-pub mod redis;
 #[cfg(feature = "history")]
 pub mod sql;
 #[cfg(feature = "vault")]
