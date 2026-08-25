@@ -102,5 +102,6 @@ jobs:
             --atomic \
             --wait \
             --timeout 10m \
+            -f helm/chart/values-production.yaml \
             --set-string statuslist.image.repository=${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ env.IMAGE_NAME }} \
             --set-string statuslist.image.tag=${{ needs.build-and-push.outputs.deploy_tag }}

@@ -17,7 +17,7 @@
       "properties": {
         "enabled": { "type": "boolean" },
         "replicaCount": { "type": "integer" },
-        "podLabels": { "type": "object" },
+        "podLabels": { "type": "object", "additionalProperties": { "type": "string" } },
         "aws": {
           "type": "object",
           "properties": {
@@ -96,9 +96,10 @@
           "type": "object",
           "properties": {
             "tenantId": { "type": "string" },
-            "clientId": { "type": "string" },
             "vaultUrl": { "type": "string" },
-            "authType": { "type": "string" },
+            "authType": { "type": "string", "enum": ["", "ServicePrincipal", "ManagedIdentity", "WorkloadIdentity"] },
+            "environmentType": { "type": "string" },
+            "identityId": { "type": "string" },
             "serviceAccountRef": {
               "type": "object",
               "properties": {
@@ -106,7 +107,7 @@
                 "namespace": { "type": ["string", "null"] }
               }
             },
-            "auth": { "type": "object" }
+            "authSecretRef": { "type": "object" }
           }
         },
         "raw": {

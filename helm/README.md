@@ -96,21 +96,22 @@ secretStore:
     auth: {}
   azure:
     tenantId: ""
-    clientId: ""
     vaultUrl: ""
-    authType: WorkloadIdentity      # WorkloadIdentity | ManagedIdentity | ClientSecret
+    authType: ""                  # ServicePrincipal | ManagedIdentity | WorkloadIdentity
+    environmentType: ""           # optional: PublicCloud (default) | USGovernmentCloud | ChinaCloud | GermanCloud
+    identityId: ""                # ManagedIdentity: select one of multiple managed identities
     serviceAccountRef:
-      name: ""                      # ESO's own least-privilege identity
+      name: ""                    # WorkloadIdentity: ESO's own least-privilege identity
       namespace: ""
-    auth: {}
-  raw: {}                           # full provider spec passthrough (must include a `provider` key)
+    authSecretRef: {}             # ServicePrincipal: clientId/clientSecret/tenantId secret selectors
+  raw: {}                         # provider body passthrough (rendered directly under spec.provider)
 ```
 
 - **aws** (`SecretsManager` or `ParameterStore`): `service` and `region`. `region` falls back to the effective app region when empty.
 - **vault** (Vault / OpenBao-compatible): `server`, `path`, and an optional `auth` block.
 - **gcp**: `projectID` plus an optional `auth` block (use Workload Identity for ambient auth).
-- **azure**: `tenantId`, `clientId` (optional), `vaultUrl`, and an `authType`. For Workload Identity use `authType: WorkloadIdentity` and bind `serviceAccountRef` to **External Secrets Operator's own identity** (least privilege) — **not** the application ServiceAccount. Managed-identity or client-secret auth uses `authType` `ManagedIdentity` / `ClientSecret` together with the `auth` block.
-- **raw**: pass the full `spec.provider` through `secretStore.raw` for unsupported ESO providers without editing the chart. `secretStore.raw` must include a top-level `provider` key; an empty `raw: {}` is **rejected** so this path never silently emits a weakened SecretStore.
+- **azure**: `tenantId`, `vaultUrl`, and an `authType` validated as an enum per the ESO `AzureKVProvider` CRD — `ServicePrincipal | ManagedIdentity | WorkloadIdentity` (there is **no** `ClientSecret` authType). For Workload Identity use `authType: WorkloadIdentity` and bind `serviceAccountRef` to **External Secrets Operator's own identity** (least privilege) — **not** the application ServiceAccount. Managed-identity selection uses `identityId`; ServicePrincipal client credentials go under the `authSecretRef` block. `environmentType` is optional.
+- **raw**: pass the concrete provider body through `secretStore.raw`, **rendered directly under `spec.provider`** for unsupported ESO providers without editing the chart. `secretStore.raw` holds only the provider body (no extra top-level `provider` key); an empty `raw: {}` is **rejected** so this path never silently emits a weakened SecretStore.
 
 Provider selection is fail-closed: an unsupported `secretStore.provider` value is rejected by the chart's `values.schema.json` and a Helm `fail`, and contradictory mode combinations (ESO disabled while a SecretStore is requested) do not render the ESO CR.
 
@@ -165,6 +166,8 @@ Deployments currently relying on the implicit static credential mount (`secretSt
 2. Configure Workload Identity: attach the role annotation via `serviceAccount.annotations` (e.g. `eks.amazonaws.com/role-arn` for EKS IRSA).
 3. Flip to Workload Identity: set `statuslist.aws.mountCredentials=false` (the default).
 4. After verification, delete the mounted `aws-credentials-secret` and any legacy static AWS GitHub secrets.
+
+For production, the deploy workflow applies [`values-production.yaml`](./chart/values-production.yaml), which wires the application ServiceAccount IRSA annotation and keeps `statuslist.aws.mountCredentials=false`. Update the `eks.amazonaws.com/role-arn` in that file to the provisioned IRSA role **before** the first Workload Identity deploy, otherwise the deployment would have no AWS credentials.
 
 ## Production Deployment Instructions
 

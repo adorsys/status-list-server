@@ -227,19 +227,25 @@ secretStore:
     auth: {}
   azure:
     tenantId: ""
-    clientId: ""
     vaultUrl: ""
-    # Azure Workload Identity: set to "WorkloadIdentity" and provide serviceAccountRef.name
-    # bound to the External Secrets Operator's own identity (least privilege), NOT the
-    # application ServiceAccount. Managed identity / client-secret auth uses authType
-    # "ManagedIdentity" or "ClientSecret" together with the auth block below.
+    # Azure authType per the External Secrets Operator AzureKVProvider CRD:
+    # ServicePrincipal | ManagedIdentity | WorkloadIdentity. Managed identity
+    # selection uses identityId; ServicePrincipal client credentials go under
+    # authSecretRef. (authType "ClientSecret" is not a valid CRD value.)
     authType: ""
+    environmentType: ""
+    identityId: ""
     serviceAccountRef:
-      name: "" # e.g. eso-controller-sa
+      name: "" # e.g. eso-controller-sa (WorkloadIdentity) bound to the ESO identity
       namespace: ""
-    auth: {}
+    authSecretRef: {}
   # Full ESO provider spec passthrough for unsupported providers (when provider=raw).
-  # Must include a top-level `provider` key, e.g.:\n  #   raw:\n  #     provider:\n  #       yourProvider:\n  #         ...\n  # `raw: {}` is rejected to avoid silently emitting an empty/insecure SecretStore.
+  # secretStore.raw holds ONLY the concrete provider body rendered directly under
+  # spec.provider (no extra top-level 'provider' key), e.g.:
+  #   raw:
+  #     webhook:
+  #       url: ...
+  # 'raw: {}' is rejected to avoid silently emitting an empty/insecure SecretStore.
   raw: {}
 
 opentelemetry-collector:

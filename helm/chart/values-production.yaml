@@ -1,0 +1,24 @@
+# Production values for helm/chart. Applied by the production deploy workflow
+# (deploy.yml) on release-tag deploys to the statuslist-production namespace.
+
+# Application Workload Identity (EKS IRSA).
+# The application ServiceAccount carries the IAM role annotation used for ambient
+# AWS credentials (Route53 DNS-01, Secrets Manager, S3). statuslist.aws.mountCredentials
+# stays false (Workload Identity mode) because credentials are provided by this role.
+#
+# IMPORTANT: the arn below must reference a provisioned IRSA role whose trust policy
+# allows sts:AssumeRoleWithWebIdentity for this ServiceAccount (namespace + SA name).
+# Create it before the first Workload Identity deploy; until then the deployment
+# would have no AWS credentials. See docs/workload-identity.md and the OIDC plan.
+serviceAccount:
+  create: true
+  name: statuslist-sa
+  annotations:
+    eks.amazonaws.com/role-arn: "arn:aws:iam::000000000000:role/statuslist-production-irsa"
+
+statuslist:
+  aws:
+    # Workload Identity mode: no static credential files are mounted. The IAM role
+    # above supplies ambient credentials.
+    mountCredentials: false
+    region: eu-central-1

@@ -30,8 +30,16 @@ runs:
           --output-dir /tmp/rendered/azure
         helm template status-list-server helm/chart \
           --set secretStore.provider=raw \
-          --set-string secretStore.raw.provider.webhook.severity=high \
+          --set-string 'secretStore.raw.webhook.severity=high' \
           --output-dir /tmp/rendered/raw
+        # raw renders the provider body directly under spec.provider (no extra
+        # nested 'provider' key, which would produce an invalid spec.provider.provider.*).
+        if grep -qE '^\s{4}provider:\s*$' /tmp/rendered/raw/status-list-server/templates/secret-store.yaml; then
+          echo "ERROR: raw render must place the provider body directly under spec.provider (found nested provider under provider)"; exit 1
+        fi
+        if ! grep -qE '^\s{4}webhook:' /tmp/rendered/raw/status-list-server/templates/secret-store.yaml; then
+          echo "ERROR: raw render missing webhook provider from secretStore.raw"; exit 1
+        fi
         helm template status-list-server helm/chart \
           --set externalSecret.enabled=false \
           --set statuslist.fallbackSecret.enabled=true \
@@ -65,6 +73,19 @@ runs:
         if ! grep -q 'serviceAccountName: statuslist-app-sa' /tmp/rendered/wl-app/status-list-server/templates/deployment.yaml; then
           echo "ERROR: Deployment must reference application ServiceAccount statuslist-app-sa"; exit 1
         fi
+        # Production Workload Identity path: values-production.yaml (used by deploy.yml) wires
+        # the application ServiceAccount IRSA annotation and keeps mountCredentials=false.
+        helm template status-list-server helm/chart -f helm/chart/values-production.yaml \
+          --output-dir /tmp/rendered/wl-prod
+        if ! grep -q 'eks.amazonaws.com/role-arn:' /tmp/rendered/wl-prod/status-list-server/templates/serviceaccount.yaml; then
+          echo "ERROR: values-production.yaml must render the application IRSA role annotation"; exit 1
+        fi
+        if ! grep -q 'serviceAccountName: statuslist-sa' /tmp/rendered/wl-prod/status-list-server/templates/deployment.yaml; then
+          echo "ERROR: values-production.yaml Deployment must reference the app ServiceAccount statuslist-sa"; exit 1
+        fi
+        if grep -qE 'AWS_SHARED_CREDENTIALS_FILE|aws-credentials' /tmp/rendered/wl-prod/status-list-server/templates/deployment.yaml; then
+          echo "ERROR: values-production.yaml must not mount static AWS credentials (Workload Identity mode)"; exit 1
+        fi
         # Azure Workload Identity primary path: application pod label + application KSA distinct
         # from the External Secrets Operator identity.
         helm template status-list-server helm/chart \
@@ -75,10 +96,10 @@ runs:
           --set secretStore.azure.serviceAccountRef.name=eso-controller-sa \
           --set secretStore.azure.tenantId=00000000-0000-0000-0000-000000000000 \
           --set secretStore.azure.vaultUrl=https://example.vault.azure.net \
-          --set 'statuslist.podLabels.azure\.workload\.identity/use=true' \
+          --set-string 'statuslist.podLabels.azure\.workload\.identity/use=true' \
           --output-dir /tmp/rendered/wl-azure
-        if ! grep -qE 'azure\.workload\.identity/use:\s*"?true"?$' /tmp/rendered/wl-azure/status-list-server/templates/deployment.yaml; then
-          echo "ERROR: Azure WI app pod label azure.workload.identity/use=true missing"; exit 1
+        if ! grep -qE 'azure\.workload\.identity/use:\s*"true"$' /tmp/rendered/wl-azure/status-list-server/templates/deployment.yaml; then
+          echo "ERROR: Azure WI app pod label azure.workload.identity/use=\"true\" (string, not boolean) missing"; exit 1
         fi
         if ! grep -q 'azure.workload.identity/client-id: 11111111-2222-3333-4444-555555555555' /tmp/rendered/wl-azure/status-list-server/templates/serviceaccount.yaml; then
           echo "ERROR: Azure WI app ServiceAccount missing azure.workload.identity/client-id annotation"; exit 1
@@ -109,13 +130,21 @@ runs:
             --set secretStore.provider=azure \
             --set secretStore.azure.authType=WorkloadIdentity \
             --set secretStore.azure.vaultUrl=https://example.vault.azure.net >/dev/null 2>&1; then
-          echo "ERROR: provider=azure with empty secretStore.azure.tenantId should fail"; exit 1
+          echo "ERROR: provider=azure WorkloadIdentity without serviceAccountRef.name should fail"; exit 1
         fi
         if helm template status-list-server helm/chart \
             --set secretStore.provider=azure \
             --set secretStore.azure.tenantId=00000000-0000-0000-0000-000000000000 \
             --set secretStore.azure.vaultUrl=https://example.vault.azure.net >/dev/null 2>&1; then
           echo "ERROR: provider=azure without identity configuration should fail"; exit 1
+        fi
+        # authType is an enum per the ESO AzureKVProvider CRD; an invalid value must fail.
+        if helm template status-list-server helm/chart \
+            --set secretStore.provider=azure \
+            --set secretStore.azure.authType=ClientSecret \
+            --set secretStore.azure.tenantId=t \
+            --set secretStore.azure.vaultUrl=https://example.vault.azure.net >/dev/null 2>&1; then
+          echo "ERROR: provider=azure with invalid authType=ClientSecret should fail"; exit 1
         fi
         # Contradictory modes: ESO disabled but SecretStore enabled must not render a SecretStore.
         if helm template status-list-server helm/chart \
