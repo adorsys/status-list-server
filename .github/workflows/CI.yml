@@ -266,7 +266,6 @@ jobs:
 
       - name: Build Helm dependencies
         run: |
-          helm repo add dandydeveloper https://dandydeveloper.github.io/charts
           # Upstream chart default values:
           # https://github.com/open-telemetry/opentelemetry-helm-charts/blob/main/charts/opentelemetry-collector/values.yaml
           helm repo add open-telemetry https://open-telemetry.github.io/opentelemetry-helm-charts
@@ -299,7 +298,6 @@ jobs:
 
       - name: Build Helm dependencies
         run: |
-          helm repo add dandydeveloper https://dandydeveloper.github.io/charts
           helm repo add open-telemetry https://open-telemetry.github.io/opentelemetry-helm-charts
           helm dependency build helm/chart
 
@@ -367,7 +365,6 @@ jobs:
 
       - name: Build Helm dependencies
         run: |
-          helm repo add dandydeveloper https://dandydeveloper.github.io/charts
           helm repo add open-telemetry https://open-telemetry.github.io/opentelemetry-helm-charts
           helm dependency build helm/chart
 

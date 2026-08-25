@@ -6,7 +6,25 @@ The server validates the configured database backend at startup and supports the
 - `mysql`
 - `sqlite`
 
-MariaDB is not a separate backend in this codebase. If you run MariaDB-compatible infrastructure, configure the app with `APP_DATABASE__BACKEND=mysql` and a `mysql://` URL.
+MariaDB is not a separate backend in this codebase. If you run MariaDB-compatible infrastructure, configure the app with `APP_DATABASE__BACKEND=mysql` and either split MySQL fields or a `mysql://` URL for local/custom deployments.
+
+## Connection Configuration
+
+For Kubernetes and other orchestrated deployments, prefer split database fields so pod metadata does not contain a fully assembled URL with credentials:
+
+```env
+APP_DATABASE__BACKEND=postgres
+APP_DATABASE__HOST=db.example.internal
+APP_DATABASE__PORT=5432
+APP_DATABASE__USERNAME=statuslist
+APP_DATABASE__PASSWORD=delivered-by-secret-manager
+APP_DATABASE__NAME=status-list
+APP_DATABASE__QUERY=sslmode=verify-full&sslrootcert=/var/run/postgres/ca.crt
+```
+
+`APP_DATABASE__QUERY` is optional and intended for non-secret driver/TLS parameters. Do not place credentials in query parameters.
+
+`APP_DATABASE__URL` remains supported for local and custom deployments. Do not combine it with any split database field; startup rejects that ambiguous configuration.
 
 ## Recommended Use
 
@@ -76,7 +94,7 @@ SET GLOBAL binlog_format = 'ROW';  -- then restart the server
 FEATURES="mysql,aws-secrets,acme" docker compose --profile mysql up --build
 ```
 
-There is no separate MariaDB service because MariaDB uses the same MySQL-driver path (`mysql://` URL). Connect to a MariaDB host by pointing `APP_DATABASE__URL` at your MariaDB instance on port 3306 (the default) and setting `APP_DATABASE__BACKEND=mysql`.
+There is no separate MariaDB service because MariaDB uses the same MySQL-driver path. Connect to a MariaDB host by setting `APP_DATABASE__BACKEND=mysql`, `APP_DATABASE__HOST`, `APP_DATABASE__PORT`, `APP_DATABASE__USERNAME`, `APP_DATABASE__PASSWORD`, and `APP_DATABASE__NAME`. For local/custom deployments, a `mysql://` `APP_DATABASE__URL` is still supported when no split database fields are set.
 
 ## HA And Distributed Storage
 

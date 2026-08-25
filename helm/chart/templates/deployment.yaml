@@ -84,6 +84,9 @@ spec:
             {{- if hasKey $env "APP_DATABASE__PASSWORD" }}
               {{- fail "statuslist.env.APP_DATABASE__PASSWORD must not be set as a plain env value; provide postgres.auth.existingSecret or externalSecret data for the postgres-password key" }}
             {{- end }}
+            {{- if or (not (hasKey $env "APP_DATABASE__PORT")) (eq (trim (toString (get $env "APP_DATABASE__PORT"))) "") }}
+              {{- fail "statuslist.env.APP_DATABASE__PORT is required; set it to the database service port" }}
+            {{- end }}
             {{- if not (hasKey $env "APP_SERVER__DOMAIN") }}
               {{- if .Values.statuslist.ingress.externalDnsHostname }}
                 {{- $_ := set $env "APP_SERVER__DOMAIN" .Values.statuslist.ingress.externalDnsHostname }}
@@ -126,9 +129,6 @@ spec:
             {{- end }}
             {{- if not (hasKey $env "APP_DATABASE__HOST") }}
               {{- $_ := set $env "APP_DATABASE__HOST" (printf "%s-postgres.%s.svc.cluster.local" .Release.Name .Release.Namespace) }}
-            {{- end }}
-            {{- if not (hasKey $env "APP_DATABASE__PORT") }}
-              {{- $_ := set $env "APP_DATABASE__PORT" (.Values.postgres.auth.port | default "5432" | toString) }}
             {{- end }}
             {{- if not (hasKey $env "APP_DATABASE__USERNAME") }}
               {{- $_ := set $env "APP_DATABASE__USERNAME" .Values.postgres.auth.username }}

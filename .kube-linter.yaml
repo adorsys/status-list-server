@@ -6,8 +6,6 @@ checks:
     - "unset-cpu-requirements"
     - "unset-memory-requirements"
     - "no-read-only-root-fs"
-    # Cache TTL env vars (e.g. APP_CACHE__TTL) are numeric durations, not secrets.
-    - "env-var-secret"
     # The status-list-server:latest and init container busybox images are
     # template defaults overridden by CI tag injection at deploy time.
     - "latest-tag"

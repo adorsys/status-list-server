@@ -44,7 +44,6 @@ statuslist:
     externalDnsHostname: statuslist.eudi-adorsys.com
   env:
     RUST_LOG: "info"
-    POSTGRES_USER: "postgres"
     APP_ENV: "production"
     APP_SERVER__HOST: "0.0.0.0"
     APP_SERVER__PORT: "8000"

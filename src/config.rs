@@ -615,6 +615,38 @@ fn required_config_field<'a>(value: Option<&'a str>, field: &str) -> Result<&'a 
         .ok_or_else(|| ConfigError::Message(format!("Missing required config field: {field}")))
 }
 
+fn required_secret_field<'a>(
+    value: Option<&'a SecretString>,
+    field: &str,
+) -> Result<&'a str, ConfigError> {
+    value
+        .map(SecretString::expose_secret)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| ConfigError::Message(format!("Missing required config field: {field}")))
+}
+
+fn validate_database_host(host: &str) -> Result<(), ConfigError> {
+    let invalid = host.chars().any(char::is_whitespace)
+        || host.contains('/')
+        || host.contains('@')
+        || host.contains('?')
+        || host.contains('#')
+        || host.contains(':')
+        || host.contains('\\')
+        || host.starts_with('-')
+        || host.ends_with('-')
+        || host.starts_with('.')
+        || host.ends_with('.');
+
+    if invalid {
+        return Err(ConfigError::Message(
+            "Invalid database.host: expected a hostname or IP address without scheme, port, path, userinfo, query, or fragment".to_string(),
+        ));
+    }
+
+    Ok(())
+}
+
 impl DatabaseConfig {
     fn has_split_connection_fields(&self) -> bool {
         self.host
@@ -627,7 +659,7 @@ impl DatabaseConfig {
             || self
                 .password
                 .as_ref()
-                .is_some_and(|value| !value.expose_secret().trim().is_empty())
+                .is_some_and(|value| !value.expose_secret().is_empty())
             || self
                 .name
                 .as_deref()
@@ -668,14 +700,9 @@ impl DatabaseConfig {
         };
 
         let host = required_config_field(self.host.as_deref(), "database.host")?;
+        validate_database_host(host)?;
         let username = required_config_field(self.username.as_deref(), "database.username")?;
-        let password = self
-            .password
-            .as_ref()
-            .and_then(|value| trim_non_empty(Some(value.expose_secret())))
-            .ok_or_else(|| {
-                ConfigError::Message("Missing required config field: database.password".to_string())
-            })?;
+        let password = required_secret_field(self.password.as_ref(), "database.password")?;
         let name = required_config_field(self.name.as_deref(), "database.name")?;
         let port = self.port.unwrap_or(default_port);
         let query = trim_non_empty(self.query.as_deref())
@@ -1224,7 +1251,7 @@ mod tests {
             ("database.host", "postgres.statuslist.svc.cluster.local"),
             ("database.port", "5432"),
             ("database.username", "user@example.com"),
-            ("database.password", "secret value"),
+            ("database.password", " secret value "),
             ("database.name", "status/list"),
             (
                 "database.query",
@@ -1238,7 +1265,7 @@ mod tests {
                 .resolved_url()
                 .expect("split database config should resolve")
                 .expose_secret(),
-            "postgres://user%40example.com:secret%20value@postgres.statuslist.svc.cluster.local:5432/status%2Flist?sslmode=verify-full&sslrootcert=/var/run/postgres/ca.crt"
+            "postgres://user%40example.com:%20secret%20value%20@postgres.statuslist.svc.cluster.local:5432/status%2Flist?sslmode=verify-full&sslrootcert=/var/run/postgres/ca.crt"
         );
         assert_eq!(
             split_db_cfg.database.redacted_target(),
@@ -1266,6 +1293,21 @@ mod tests {
         assert!(mixed_db_error.contains("Ambiguous database configuration"));
         assert!(!mixed_db_error.contains("custom:secret"));
         assert!(!mixed_db_error.contains("split secret"));
+
+        let invalid_host_error = Config::load_from_overrides(&[
+            ("database.backend", "postgres"),
+            ("database.host", "postgres://db.internal:5432/status-list"),
+            ("database.username", "postgres"),
+            ("database.password", "secret"),
+            ("database.name", "status-list"),
+        ])
+        .expect("Failed to load invalid host database config")
+        .database
+        .resolved_url()
+        .expect_err("database.host must reject URL-shaped values")
+        .to_string();
+        assert!(invalid_host_error.contains("database.host"));
+        assert!(!invalid_host_error.contains("secret"));
 
         let missing_db_password = Config::load_from_overrides(&[
             ("database.backend", "postgres"),
