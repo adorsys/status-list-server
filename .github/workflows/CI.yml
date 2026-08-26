@@ -119,8 +119,6 @@ jobs:
   cargo-fmt:
     name: Cargo Format Check
     runs-on: ubuntu-latest
-    # Deliberately not `needs: zizmor-security` -- that chain made a network-dependent
-    # check the root of every Rust job. Blocking comes from `ci-success` below instead.
 
     steps:
       - name: Fetch Repository
@@ -163,16 +161,8 @@ jobs:
         run: cargo check --no-default-features --features memory
 
       - name: Release image feature set
-        # The feature set the release image is actually built with. Two gaps make it
-        # worth checking on its own. Nothing validates the `ARG FEATURES` string: it is
-        # a bare string handed to `cargo build` inside the image build, so a value
-        # naming no real feature fails only when someone cuts a release. And
-        # `--all-features` above does not stand in for it -- cargo unifies features
-        # across the graph, so enabling everything builds `sea-orm` with all three
-        # `sqlx` backends where the release set builds it with `sqlx-postgres` alone.
-        #
-        # Read out of the Dockerfile rather than duplicated, so changing FEATURES there
-        # cannot silently stop this from checking what ships.
+        # `--all-features` does not cover this -- cargo unifies features, so the release
+        # set is never compiled as such. Read from the Dockerfile so it cannot drift.
         run: |
           set -euo pipefail
           features=$(sed -nE 's/^ARG FEATURES="([^"]+)".*/\1/p' Dockerfile)
@@ -446,9 +436,8 @@ jobs:
             --output-dir /tmp/rendered
 
       - name: Verify image reference resolution
-        # Rationale and the individual expectations are in the script. It runs here
-        # rather than in a workflow of its own because it asserts against a rendered
-        # chart, which this job has already built.
+        # Runs here rather than in its own workflow because it asserts against the
+        # rendered chart this job already built.
         run: bash scripts/verify-image-reference.sh
 
       - name: Run Trivy config scan
@@ -465,9 +454,8 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      # For the SARIF upload below. Note this workflow is also called as a reusable
-      # workflow from deploy.yml, and a called workflow can only narrow the caller's
-      # token -- so deploy.yml's `ci` job grants the same scope.
+      # For the SARIF upload below. deploy.yml's `ci` job must grant this too -- a
+      # called workflow can only narrow the caller's token.
       security-events: write
 
     steps:
@@ -503,11 +491,8 @@ jobs:
           output-file: kube-linter-results.sarif
 
       - name: Upload KubeLinter SARIF to code scanning
-        # `if: always()` because the SARIF is most worth having in exactly the run
-        # where the scan failed -- writing a findings file and then discarding it on
-        # the failure path was the original defect. `continue-on-error` because the
-        # upload cannot succeed for a pull request from a fork, where write scopes are
-        # withheld, and a code-scanning outage should not fail a lint job.
+        # `always()` so the SARIF survives the failing run it matters for.
+        # `continue-on-error` because fork PRs withhold write scopes.
         if: always()
         continue-on-error: true
         uses: github/codeql-action/upload-sarif@4187e74d05793876e9989daffde9c3e66b4acd07 # v3

@@ -1,9 +1,7 @@
 name: Build and Deploy to EKS
 on:
-  # Release tags only. A two-architecture build plus scan costs ~40 minutes and
-  # publishes to GHCR, which is not worth spending on every merge. The consequence
-  # is that the image is scanned once per release and nothing re-scans it after
-  # that; see docs/supply-chain.md, "Known Gaps".
+  # Release tags only -- a two-arch build plus scan costs ~40 minutes. Consequence:
+  # the image is scanned once per release and never again; see docs/supply-chain.md.
   push:
     tags:
       - v*.*.*
@@ -109,9 +107,8 @@ jobs:
             echo "DEPLOY_TAG=sha-${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
           fi
       - name: Extract Docker metadata
-        # Only the immutable commit-scoped tag is published here. Semver and `latest`
-        # are applied by `promote-tags` after the scan, so a rejected image never
-        # becomes an advertised release for consumers outside this pipeline.
+        # Only the sha tag here. `promote-tags` applies semver and `latest` after the
+        # scan, so a rejected image never becomes an advertised release.
         id: meta
         uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6
         with:
@@ -129,20 +126,13 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
-          # Set explicitly: the action defaults to mode=max on public repos and
-          # mode=min on private ones, so visibility changes would silently degrade
-          # provenance. BuildKit attaches both as in-toto manifests in the pushed
-          # index, which is why the image cannot be scanned before it is pushed.
+          # Explicit: the action defaults to mode=max on public repos and mode=min on
+          # private, so a visibility change would silently degrade provenance.
           provenance: mode=max
           sbom: true
       - name: Assert a digest was produced
-        # An empty digest would silently fall back to tag-based deployment, which is
-        # the failure this pipeline exists to prevent.
-        #
-        # `IMAGE_REF` is assembled here rather than in the job's `outputs:` block so it
-        # is built in shell, where `IMAGE_BASE` is plainly in scope, and only after the
-        # digest is known non-empty. Assembled in `outputs:` it would still be emitted
-        # as `<base>@` with no digest if this check ever stopped holding.
+        # An empty digest would silently fall back to tag-based deployment. Built in
+        # shell rather than `outputs:`, which would emit `<base>@` with no digest.
         id: digest
         env:
           DIGEST: ${{ steps.build.outputs.digest }}
@@ -164,12 +154,8 @@ jobs:
       packages: read
     env:
       IMAGE_REF: ${{ needs.build-and-push.outputs.image_ref }}
-      # Every published architecture is scanned. A shared lockfile does not make the
-      # package sets identical: the two images are built by different builder images
-      # to different Rust targets, and `cargo auditable` records the graph Cargo
-      # resolved for that target, not the lockfile's union across targets. Scanning
-      # one architecture would let an advisory reaching only the other be promoted
-      # and deployed without ever crossing the gate.
+      # Both arches: `cargo auditable` records the graph cargo resolved per target, so
+      # a shared lockfile does not make the two package sets identical.
       SCAN_ARCHES: amd64 arm64
     steps:
       - name: Fetch Repository
@@ -185,9 +171,8 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Resolve the architecture manifests to scan
-        # `IMAGE_REF` is a multi-platform index. Resolving each child manifest fixes
-        # which architectures are scanned by construction, rather than leaving it to
-        # Trivy's default and asserting the result afterwards.
+        # Resolving each child manifest fixes which arches are scanned by construction,
+        # rather than trusting Trivy's default and checking afterwards.
         run: |
           set -euo pipefail
           index=$(docker buildx imagetools inspect --raw "$IMAGE_REF")
@@ -213,9 +198,8 @@ jobs:
           done
 
       - name: Scan image (amd64)
-        # One scan per architecture, unfiltered. Every view below is derived from these
-        # by `trivy convert`, so the table a maintainer reads and the set the gate
-        # evaluates are the same data, and each image is pulled once.
+        # Unfiltered; every view below is `trivy convert`ed from these, so the table and
+        # the gate read the same data and each image is pulled once.
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           scan-type: image
@@ -249,9 +233,8 @@ jobs:
 
             trivy convert --format table --output "trivy-image-report-${arch}.txt" "$report"
 
-            # Two HIGH/CRITICAL sets per architecture: before and after the ledger. The
-            # difference is what the exceptions suppressed, reported in the gate summary
-            # so a green gate distinguishes "nothing found" from "everything accepted".
+            # Before and after the ledger: the difference is what the exceptions hid, so
+            # a green gate distinguishes "nothing found" from "everything accepted".
             trivy convert \
               --severity HIGH,CRITICAL \
               --format json --output "trivy-highcrit-all-${arch}.json" \
@@ -291,9 +274,8 @@ jobs:
           done
 
       - name: Publish report to job summary
-        # Deliberately small: what was scanned, how much was found, and where the full
-        # reports are. The complete tables and JSON are uploaded as artifacts below, so
-        # reproducing them here only buries the gate decision underneath them.
+        # Deliberately small -- the full tables and JSON are artifacts below. Inlining
+        # them would bury the gate decision.
         if: always()
         run: |
           set -eu
@@ -324,9 +306,8 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload scan reports
-        # `warn`, not `error`: the artifacts-always-exist guarantee belongs to the
-        # `[ -s ... ]` fallbacks above. Failing here would only add a second red step
-        # when an earlier one already died.
+        # `warn`, not `error`: the `[ -s ... ]` fallbacks above guarantee the files.
+        # Failing here would only add a second red step.
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
@@ -350,18 +331,12 @@ jobs:
             sbom-arm64.json
           if-no-files-found: warn
 
-      # No code-scanning upload: this workflow only runs on `refs/tags/*`, and alerts
-      # filed against a tag ref are not surfaced in the Security tab's branch view.
-      # Uploading would succeed into a place nobody reads. Results live in the
-      # artifacts above; a durable sink needs the scheduled re-scan (#410).
+      # No code-scanning upload: alerts filed against a tag ref never surface in the
+      # Security tab's branch view. A durable sink needs the scheduled re-scan (#410).
 
       - name: Assert published SBOMs list Rust crates
-        # Closes the chain opposite the Dockerfile's .dep-v0 assertion: that covers the
-        # binary, this covers the SBOM BuildKit attached. Runs after the uploads so a
-        # failure still leaves the reports attached for triage.
-        #
-        # `index .SBOM` needs a multi-platform index; a single-platform build fails here
-        # with "can't index item of type imagetools.sbomStub" rather than at the build.
+        # Covers the SBOM BuildKit attached; the Dockerfile's .dep-v0 check covers the
+        # binary. `index .SBOM` needs a multi-platform index or it errors here.
         run: |
           set -eu
           for platform in linux/amd64 linux/arm64; do
@@ -375,13 +350,8 @@ jobs:
           done
 
       - name: Prove the gate can fail
-        # A clean scan is the expected result, which is the problem: a gate that has
-        # never fired is indistinguishable from one that cannot fire. Both directions
-        # are proved against fixtures before a pass is treated as meaningful.
-        #
-        # Exit status alone is not enough evidence — a missing fixture or a `trivy` not
-        # on PATH also exits non-zero — so the failing case must also name the ID it was
-        # given. Only a gate that really evaluated the report can print it back.
+        # A gate that never fired is indistinguishable from one that cannot fire, so
+        # prove both directions. The failing case must name the ID it was given.
         run: |
           set -eu
           fixture=scripts/testdata/gate-selftest-findings.json
@@ -427,9 +397,8 @@ jobs:
         # Thresholds and rationale: docs/supply-chain.md, "The Gate Blocks".
         run: |
           set -eu
-          # Advisories, not rows: one CVE across three crates is three table rows but
-          # one thing to triage. Counted across every scanned architecture, because an
-          # advisory reaching only one of them still blocks the release.
+          # Advisories, not rows: one CVE across three crates is one thing to triage.
+          # Counted across every arch -- a single-arch advisory still blocks.
           advisories=$(jq -s '[.[].Results[]?.Vulnerabilities[]?.VulnerabilityID] | unique | length' trivy-gate-findings-*.json)
           occurrences=$(jq -s '[.[].Results[]?.Vulnerabilities[]?] | length' trivy-gate-findings-*.json)
           total=$(jq -s '[.[].Results[]?.Vulnerabilities[]?.VulnerabilityID] | unique | length' trivy-highcrit-all-*.json)
@@ -456,10 +425,8 @@ jobs:
             fi
           } >> "$GITHUB_STEP_SUMMARY"
 
-          # Rendered from the gate set itself, so the table, the counts and the exit
-          # code are by construction the same data. Every architecture is rendered
-          # before failing, so one run shows the whole blocking set rather than the
-          # first architecture that happened to trip.
+          # Rendered from the gate set itself, so table, counts and exit code cannot
+          # disagree. Every arch renders before failing, so one run shows all of it.
           status=0
           for arch in $SCAN_ARCHES; do
             echo "--- linux/${arch} ---"
@@ -473,9 +440,8 @@ jobs:
     needs:
       - build-and-push
       - scan-image
-    # Gated positively on `push`: workflow_dispatch accepts any ref including tags,
-    # so a ref test alone would not keep dispatch off the release path. Naming the
-    # trigger that may release also keeps future triggers out of it by default.
+    # Positively gated on `push`: workflow_dispatch accepts tag refs too, so a ref
+    # test alone would not keep dispatch off the release path.
     if: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') }}
     timeout-minutes: 15
     permissions:
@@ -493,9 +459,8 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Extract release tags
-        # `v*.*.*` matches prereleases — the glob absorbs `-rc1` — so `latest` is
-        # withheld from them explicitly. metadata-action already withholds
-        # {{major}}.{{minor}}; raw tags get no such treatment.
+        # The `v*.*.*` glob absorbs prereleases, so `latest` is withheld explicitly.
+        # metadata-action already withholds {{major}}.{{minor}}; raw tags do not.
         id: meta
         uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6
         with:
@@ -525,9 +490,8 @@ jobs:
           docker buildx imagetools create "${args[@]}" "$IMAGE_REF"
 
       - name: Verify attestations survived promotion
-        # Attestations are separate unknown/unknown-platform manifests. They should
-        # survive a descriptor copy, but a silent drop would publish a release whose
-        # SBOM and provenance vanished with nothing failing.
+        # Attestations are separate manifests; a silent drop would publish a release
+        # whose SBOM and provenance vanished with nothing failing.
         run: |
           set -eu
           release_ref="${IMAGE_BASE}:${DEPLOY_TAG}"
@@ -546,9 +510,8 @@ jobs:
   deploy:
     name: Deploy to Production
     runs-on: ubuntu-latest
-    # Depending on promote-tags keeps tags and production consistent: a release is
-    # never deployed without being tagged. Recovery from a promotion failure is a
-    # re-run of that job, not a new release.
+    # Keeps tags and production consistent -- never deploy an untagged release.
+    # Recovery from a promotion failure is a re-run of that job.
     needs:
       - build-and-push
       - scan-image
@@ -556,9 +519,8 @@ jobs:
     if: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') }}
     timeout-minutes: 30
     environment: production
-    # Keyed on the environment, not the ref: two tags pushed in quick succession are
-    # different refs and would otherwise drive `helm upgrade` concurrently against
-    # the same release.
+    # Keyed on the environment, not the ref: two tags pushed in quick succession
+    # would otherwise run `helm upgrade` concurrently against the same release.
     concurrency:
       group: deploy-production
       cancel-in-progress: false
