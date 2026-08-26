@@ -27,7 +27,9 @@ The following files are used to configure the deployment:
 ### Key Configuration Options
 
 - **`statuslist.image.repository`**: The Docker image for the application.
-- **`statuslist.image.tag`**: The Docker image tag.
+- **`statuslist.image.tag`**: The Docker image tag. Used only when `statuslist.image.digest` is empty. Defaults to empty, which falls back to the chart's `appVersion` — not to `latest`, so an upgrade that changes nothing in the chart cannot change the running image and a rollback stays reproducible. `appVersion` therefore has to track the latest released application version.
+- **`statuslist.image.pullPolicy`**: Defaults to empty, which derives the policy from how the image is named: `IfNotPresent` when a digest is set, because a digest is content-addressed and re-pulling it can only fetch the same bytes, and `Always` for a tag, which is mutable. Set it explicitly to override.
+- **`statuslist.image.digest`**: An image digest as `sha256:` plus 64 hex characters; anything else is rejected at template time. When set it takes precedence over `statuslist.image.tag`, and the deployment runs `repository@digest`. Production deploys set this so the running image is the exact artifact CI scanned; tags are mutable and a digest is not. Leave it empty for local and manual installs to get tag-based deployment.
 - **`postgres.persistence.enabled`**: Enable or disable persistent storage for PostgreSQL.
 
 ## Credential Exposure Model
@@ -54,7 +56,7 @@ The application no longer provides a built-in `database.url` default. Non-Helm a
 
 ## Production Deployment Instructions
 
-For GitHub Actions deployments to production, see the [Deployment Runbook](../docs/deployment-runbook.md). CI/CD owns production image tag injection with `statuslist.image.repository` and `statuslist.image.tag`; operators should avoid patching live images imperatively because Helm will reconcile the chart state on the next deploy. Failed upgrades roll back automatically through Helm `--atomic`; rollbacks after a successful but bad deploy are manual Helm operations.
+For GitHub Actions deployments to production, see the [Deployment Runbook](../docs/deployment-runbook.md). CI/CD owns production image injection with `statuslist.image.repository`, `statuslist.image.tag` and `statuslist.image.digest`. The digest is what determines the running image; the tag is passed alongside it for readability in `helm history` and release notes. Because of that precedence, do not run `helm upgrade --reuse-values` with only a changed tag: the stored digest still wins, so the upgrade reports success and changes nothing. Pass both, or clear the digest with `--set statuslist.image.digest=null`. A digest that is not `sha256:` followed by 64 hex characters is rejected at template time. Operators should avoid patching live images imperatively because Helm will reconcile the chart state on the next deploy. Failed upgrades roll back automatically through Helm `--atomic`; rollbacks after a successful but bad deploy are manual Helm operations.
 
 1. **Create a namespace:**
 

@@ -20,8 +20,14 @@ statuslist:
   replicaCount: 1
   image:
     repository: ghcr.io/adorsys/status-list-server
-    pullPolicy: Always
-    tag: "latest"
+    # Empty derives from how the image is named: IfNotPresent for a digest, Always
+    # for a mutable tag. Set explicitly to override.
+    pullPolicy: ""
+    # Empty falls back to appVersion. Defaulting to "latest" would let an upgrade
+    # that changes nothing in this chart still change the running image.
+    tag: ""
+    # "sha256:...". Takes precedence over tag and pins the exact digest CI scanned.
+    digest: ""
   service:
     enabled: true
     type: ClusterIP
