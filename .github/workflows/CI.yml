@@ -11,6 +11,12 @@ on:
   workflow_call:
   pull_request:
 
+# Default for every job; a job needing more declares it itself. Reached through
+# `workflow_call`, and a called workflow can only narrow the token it is handed -- so
+# a scope added here must also be granted by deploy.yml's `ci` job or the run fails.
+permissions:
+  contents: read
+
 concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
@@ -19,46 +25,78 @@ jobs:
   zizmor-security:
     name: Zizmor Security Check
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      security-events: write
 
     steps:
       - name: Fetch Repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-      - name: Install Zizmor
-        uses: taiki-e/install-action@c44f6b046f1c29ae5918b1e0bfdbb2f1813836fd # v2
         with:
-          tool: zizmor@1.28.0
+          persist-credentials: false
 
+      # Fail-closed: a finding at any severity fails this job. Fix findings rather than
+      # reaching for `|| true`, `min-severity`, or a narrower `inputs:`. To accept one,
+      # put `# zizmor: ignore[rule]` on the line it anchors to -- `ignore-start` /
+      # `ignore-end` blocks are not zizmor syntax and suppress nothing.
       - name: Run Zizmor
-        # SARIF for the full finding set, then a blocking pass at high severity and
-        # high confidence. This previously ran as `zizmor ... || true`, which is a
-        # linter that cannot fail: findings on the repository's highest-privilege
-        # workflows were computed and discarded. Tighten the threshold as the
-        # lower-severity backlog is triaged.
-        run: |
-          set -eu
-          zizmor --format sarif .github/workflows/ > zizmor.sarif || true
-          zizmor --min-severity high --min-confidence high .github/workflows/
-
-      - name: Upload Zizmor SARIF
-        if: always()
-        continue-on-error: true
-        uses: github/codeql-action/upload-sarif@4187e74d05793876e9989daffde9c3e66b4acd07 # v3
+        uses: zizmorcore/zizmor-action@3dc1ecc9bcb9e94e9b2c709687979e1298497054 # v0.6.2
         with:
-          sarif_file: zizmor.sarif
-          category: zizmor
+          # `.` not `.github/workflows/`: also audits .github/dependabot.yml.
+          inputs: .
+          persona: regular
+          # `known-vulnerable-actions` needs the API; the action supplies the token.
+          online-audits: true
+          # SARIF upload would need `security-events: write` on a read-only job.
+          advanced-security: false
+          # Mutually exclusive with advanced-security. Without it findings land only in
+          # the raw log with no anchors on the diff.
+          annotations: true
+
+      # auto_merge.yml suppresses `bot-conditions`, and that suppression silences the
+      # audit for whatever the condition later becomes -- so assert the guards it
+      # assumes are still there. Parses the condition rather than grepping: a text
+      # match would also accept `user.login` in a comment, or an inverted comparison.
+      #
+      # `!cancelled()`, not `always()`: a zizmor failure must not skip this, but a
+      # cancelled run should. The `${{ }}` wrapper is required -- bare `!` is a YAML tag.
+      - name: Assert dependabot auto-merge keeps its author check
+        if: ${{ !cancelled() }}
+        run: |
+          condition=$(yq '.jobs.dependabot.if' .github/workflows/auto_merge.yml) || {
+            echo "Could not parse .github/workflows/auto_merge.yml"
+            exit 1
+          }
+
+          for guard in \
+            "github.event.pull_request.user.login == 'dependabot[bot]'" \
+            "github.event.pull_request.head.repo.full_name == github.repository"; do
+            case "$condition" in
+              *"$guard"*) ;;
+              *)
+                echo "auto_merge.yml lost a required guard on its dependabot job:"
+                echo "  ${guard}"
+                echo
+                echo "Its '# zizmor: ignore[bot-conditions]' comment assumes github.actor"
+                echo "is paired with an unspoofable author check. Restore the guard, or"
+                echo "delete the ignore comment so zizmor can flag this itself."
+                echo
+                echo "Background: the High severity bot-conditions finding in #417."
+                exit 1
+                ;;
+            esac
+          done
+
+          echo "auto_merge.yml still carries both guards."
 
   cargo-fmt:
     name: Cargo Format Check
     runs-on: ubuntu-latest
-    needs: zizmor-security
+    # Deliberately not `needs: zizmor-security` -- that chain made a network-dependent
+    # check the root of every Rust job. Blocking comes from `ci-success` below instead.
 
     steps:
       - name: Fetch Repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Install stable toolchain
         uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1
@@ -77,6 +115,8 @@ jobs:
     steps:
       - name: Fetch Repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Install Rust
         uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1
@@ -142,6 +182,8 @@ jobs:
     steps:
       - name: Fetch Repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Install Rust
         uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1
@@ -159,6 +201,8 @@ jobs:
     steps:
       - name: Fetch Repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Install Rust
         uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1
@@ -167,7 +211,7 @@ jobs:
         uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
 
       - name: Install cargo-nextest
-        uses: taiki-e/install-action@c44f6b046f1c29ae5918b1e0bfdbb2f1813836fd # v2
+        uses: taiki-e/install-action@c44f6b046f1c29ae5918b1e0bfdbb2f1813836fd # v2.84.1
         with:
           tool: nextest
 
@@ -182,6 +226,8 @@ jobs:
     steps:
       - name: Fetch Repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Install Rust
         uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1
@@ -204,6 +250,8 @@ jobs:
     steps:
       - name: Fetch Repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Install stable toolchain
         uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1
@@ -224,12 +272,14 @@ jobs:
     steps:
       - name: Fetch Repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Install Rust
         uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1
 
       - name: Install cargo-machete
-        uses: taiki-e/install-action@c44f6b046f1c29ae5918b1e0bfdbb2f1813836fd # v2
+        uses: taiki-e/install-action@c44f6b046f1c29ae5918b1e0bfdbb2f1813836fd # v2.84.1
         with:
           tool: cargo-machete
 
@@ -244,12 +294,14 @@ jobs:
     steps:
       - name: Fetch Repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Install Rust
         uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1
 
       - name: Install cargo-vet
-        uses: taiki-e/install-action@c44f6b046f1c29ae5918b1e0bfdbb2f1813836fd # v2
+        uses: taiki-e/install-action@c44f6b046f1c29ae5918b1e0bfdbb2f1813836fd # v2.84.1
         with:
           tool: cargo-vet@0.10.2
 
@@ -266,9 +318,11 @@ jobs:
     steps:
       - name: Fetch Repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Install Typos
-        uses: taiki-e/install-action@c44f6b046f1c29ae5918b1e0bfdbb2f1813836fd # v2
+        uses: taiki-e/install-action@c44f6b046f1c29ae5918b1e0bfdbb2f1813836fd # v2.84.1
         with:
           tool: typos-cli
 
@@ -282,9 +336,11 @@ jobs:
     steps:
       - name: Fetch Repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Install Taplo
-        uses: tombi-toml/setup-tombi@f2ae7247d62521245eb2793d653b9df472b9e090 # v1
+        uses: tombi-toml/setup-tombi@f2ae7247d62521245eb2793d653b9df472b9e090 # v1.2.4
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -298,9 +354,11 @@ jobs:
     steps:
       - name: Fetch Repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Markdown Lint
-        uses: DavidAnson/markdownlint-cli2-action@6bf21b07787794f89a243495939cd651942aeabe # v24
+        uses: DavidAnson/markdownlint-cli2-action@6bf21b07787794f89a243495939cd651942aeabe # v24.1.0
         with:
           globs: "**/*.md"
 
@@ -311,6 +369,8 @@ jobs:
     steps:
       - name: Fetch Repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Validate .trivyignore.yaml
         # Before the scan that consumes the file, so a malformed entry fails in seconds
@@ -371,6 +431,8 @@ jobs:
     steps:
       - name: Fetch Repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Setup Helm
         uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
@@ -428,6 +490,8 @@ jobs:
     steps:
       - name: Fetch Repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: YAML Lint
         uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
@@ -448,6 +512,8 @@ jobs:
     steps:
       - name: Fetch Repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Validate Docker Compose model
         run: docker compose config
@@ -522,6 +588,8 @@ jobs:
     steps:
       - name: Fetch Repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Install stable toolchain
         uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1
@@ -529,7 +597,7 @@ jobs:
           components: llvm-tools-preview
 
       - name: Install cargo-llvm-cov and cargo-nextest
-        uses: taiki-e/install-action@c44f6b046f1c29ae5918b1e0bfdbb2f1813836fd # v2
+        uses: taiki-e/install-action@c44f6b046f1c29ae5918b1e0bfdbb2f1813836fd # v2.84.1
         with:
           tool: cargo-llvm-cov@0.6.16,nextest@0.9.101 # or an version that is working now because of our sha pin 
 
@@ -542,3 +610,50 @@ jobs:
           name: coverage-report
           path: target/llvm-cov/html
           if-no-files-found: error
+
+  # THE SINGLE REQUIRED STATUS CHECK -- set branch protection to require `CI Success`
+  # and nothing else here. The jobs above are unchained, so without this a zizmor
+  # failure leaves every other check green and the PR mergeable. Gating here rather
+  # than on a hand-maintained checks list means a new job cannot escape the gate.
+  ci-success:
+    name: CI Success
+    if: ${{ !cancelled() }}
+    needs:
+      - zizmor-security
+      - cargo-fmt
+      - cargo-build
+      - docker-build
+      - cargo-clippy
+      - cargo-nextest
+      - cargo-doc
+      - check-crate-type
+      - cargo-test-doc
+      - cargo-machete
+      - cargo-vet
+      - cargo-deny
+      - typos-cli
+      - tombi-toml-lint
+      - markdown-lint
+      - trivy-config
+      - kube-linter
+      - yaml-lint
+      - otel-config-validation
+      - cargo-coverage
+    runs-on: ubuntu-latest
+    permissions: {}
+    steps:
+      # Printed so a failure shows which job caused it without expanding the UI.
+      - name: Summarise job results
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: printf '%s\n' "$NEEDS"
+
+      # A GitHub expression, not a shell script parsing `toJSON(needs)` -- no jq, no
+      # runner-image dependency. `skipped` is absent on purpose so skipped jobs pass:
+      # cargo-test-doc is gated on is_lib, which crate_type.yml derives from
+      # `targets[0].kind`, so it can start skipping without anyone touching CI.
+      - name: Fail if any job failed or was cancelled
+        if: ${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') }}
+        run: |
+          echo "One or more required jobs did not succeed -- see the results above."
+          exit 1

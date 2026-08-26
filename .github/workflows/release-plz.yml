@@ -30,6 +30,8 @@ jobs:
         with:
           client-id: ${{ vars.RELEASE_BOT_CLIENT_ID }}
           private-key: ${{ secrets.RELEASE_BOT_PRIVATE_KEY }}
+          # An App token ignores the job's `permissions:` block and carries the
+          # installation's full grant unless narrowed here.
           permission-contents: write
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -74,6 +76,8 @@ jobs:
         with:
           client-id: ${{ vars.RELEASE_BOT_CLIENT_ID }}
           private-key: ${{ secrets.RELEASE_BOT_PRIVATE_KEY }}
+          # As above; `release-pr` also opens the release PR, so it needs
+          # pull-requests on top of contents.
           permission-contents: write
           permission-pull-requests: write
       - name: Checkout repository

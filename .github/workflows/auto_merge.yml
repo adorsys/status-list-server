@@ -2,30 +2,29 @@ name: Auto Merge Dependabot
 
 on:
   pull_request:
-  workflow_dispatch:
 
-# zizmor: ignore-start: excessive-permissions
-# This workflow requires write permissions for auto-merge functionality.
-# These are pre-existing permissions that will be reviewed separately.
+# `contents: write` for `gh pr merge --auto`, `pull-requests: write` for
+# `gh pr review --approve`; everything unlisted is `none`.
 permissions:
   contents: write
   pull-requests: write
-# zizmor: ignore-end
 
 jobs:
   dependabot:
     runs-on: ubuntu-latest
-    # `github.event.pull_request.user.login`, not `github.actor`. `github.actor` is
-    # the last actor to touch the triggering context, not the author of the pull
-    # request, so a pull request whose HEAD commit appears to be authored by
-    # Dependabot satisfies it while the branch history remains attacker-controlled.
-    # This job approves and enables auto-merge, so that guard being bypassable means
-    # arbitrary code merges without review. `user.login` is the account that opened
-    # the pull request and cannot be reassigned by later activity.
+    # `user.login` is who opened the PR -- fixed at open time, unspoofable, and the
+    # actual authorization check. `github.actor` alone is spoofable (zizmor flags it),
+    # which is why it is paired here rather than removed; it narrows, it does not
+    # prevent. `head.repo.full_name` excludes forks.
     #
-    # Behaviour is unchanged for `workflow_dispatch`: there is no pull request in the
-    # event payload, so this evaluates false exactly as the previous condition did.
-    if: github.event.pull_request.user.login == 'dependabot[bot]'
+    # SAFETY DEPENDS ON BRANCH PROTECTION: without `dismiss_stale_reviews`, a push to
+    # an open dependabot branch merges on the already-armed auto-merge and no condition
+    # here stops it. Not assertable in CI (needs `administration: read`) -- see #417.
+    #
+    # Keep the ignore comment on this `if:` header: below is a folded scalar where `#`
+    # is literal text and would corrupt the condition.
+    if: >- # zizmor: ignore[bot-conditions]
+      github.event.pull_request.user.login == 'dependabot[bot]' && github.actor == 'dependabot[bot]' && github.event.pull_request.head.repo.full_name == github.repository
     steps:
       - name: Dependabot metadata
         id: metadata
