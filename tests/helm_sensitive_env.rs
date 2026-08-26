@@ -222,14 +222,15 @@ fn rendered_chart_rejects_plain_database_password_env() {
 }
 
 #[test]
-fn rendered_chart_requires_database_port_env() {
-    let Some(output) = render_helm_failure(&[]) else {
+fn rendered_chart_uses_default_database_port() {
+    // With APP_DATABASE__PORT now defaulting to "5432" in values.yaml,
+    // the chart should render successfully without explicit --set
+    let Some(rendered) = render_helm(&[]) else {
         return;
     };
 
     assert!(
-        String::from_utf8_lossy(&output.stderr)
-            .contains("statuslist.env.APP_DATABASE__PORT is required"),
-        "helm template should tell users to input APP_DATABASE__PORT"
+        rendered.contains("name: APP_DATABASE__PORT\n              value: \"5432\""),
+        "rendered Helm output must use default database port 5432 from values.yaml"
     );
 }
