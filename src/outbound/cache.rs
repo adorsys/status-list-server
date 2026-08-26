@@ -46,7 +46,6 @@ fn cache_metrics() -> CacheMetrics {
 #[derive(Clone)]
 pub struct MokaStatusListCache {
     inner: MokaCache<String, Arc<StatusListRecord>>,
-    metrics: CacheMetrics,
 }
 
 impl MokaStatusListCache {
@@ -55,19 +54,19 @@ impl MokaStatusListCache {
     /// A `ttl_secs` value of `0` preserves the existing "cache disabled"
     /// behavior: inserted entries expire immediately and reads miss.
     ///
-    /// Counter handles are resolved lazily and generation-aware through
-    /// `cached_instruments`, so they stay valid regardless of whether the
-    /// global meter provider has been installed yet.
+    /// Counter handles are resolved lazily and generation-aware on every read
+    /// through `cache_metrics`/`cached_instruments`, so they stay valid
+    /// regardless of whether the global meter provider has been installed yet
+    /// or has since been replaced (e.g. a re-run of `setup_metrics` in tests).
     pub fn new(ttl_secs: u64, max_capacity: u64) -> Self {
         if ttl_secs == 0 {
             tracing::info!("Cache disabled (TTL=0)");
         }
-        let metrics = cache_metrics();
         let inner = MokaCache::builder()
             .time_to_live(Duration::from_secs(ttl_secs))
             .max_capacity(max_capacity)
             .build();
-        Self { inner, metrics }
+        Self { inner }
     }
 }
 
@@ -75,12 +74,13 @@ impl MokaStatusListCache {
 impl StatusListCache for MokaStatusListCache {
     async fn get(&self, key: &str) -> Result<Option<StatusListRecord>, StatusListError> {
         let cached = self.inner.get(key).await;
+        let metrics = cache_metrics();
         if cached.is_some() {
-            self.metrics
+            metrics
                 .hits
                 .add(1, &[KeyValue::new("cache", "status_list")]);
         } else {
-            self.metrics
+            metrics
                 .misses
                 .add(1, &[KeyValue::new("cache", "status_list")]);
         }

@@ -217,20 +217,26 @@ fn api_v1_routes(
 async fn track_http_metrics(request: Request<Body>, next: Next) -> Response {
     let start = std::time::Instant::now();
     let method = request.method().clone();
-    let route = request
-        .extensions()
-        .get::<MatchedPath>()
-        .map(|p| p.as_str().to_string())
-        .unwrap_or_else(|| "unmatched".to_string());
+    let matched = request.extensions().get::<MatchedPath>().cloned();
+    let route: &str = matched
+        .as_ref()
+        .map(|p| p.as_str())
+        .unwrap_or("unmatched");
 
     let response = next.run(request).await;
 
-    let status = response.status();
-    let status_class = format!("{}xx", status.as_u16() / 100);
+    let status_class = match response.status().as_u16() / 100 {
+        1 => "1xx",
+        2 => "2xx",
+        3 => "3xx",
+        4 => "4xx",
+        5 => "5xx",
+        _ => "unknown",
+    };
     crate::utils::metrics_http::record_request(
         method.as_str(),
-        &route,
-        &status_class,
+        route,
+        status_class,
         start.elapsed().as_secs_f64(),
     );
 

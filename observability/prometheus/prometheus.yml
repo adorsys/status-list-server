@@ -16,11 +16,12 @@ alerting:
 
 scrape_configs:
   - job_name: 'status_list_server'
-    # For local / non-dockerised development the app runs on the host, so scrape
-    # it via the docker bridge gateway. Swap back to 'app:8000' when the app is
-    # a compose service.
+    # The app runs as the compose service 'app' on port 8000, so it is scraped
+    # by DNS name on the compose network. For local / non-dockerised
+    # development (binary run on the host), point this at the host gateway
+    # instead, e.g. 'host.docker.internal:8000'.
     static_configs:
-      - targets: ['192.168.0.1:8000']
+      - targets: ['app:8000']
 
   - job_name: 'pushgateway'
     static_configs:
