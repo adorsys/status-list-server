@@ -33,54 +33,68 @@ For a detailed explanation of the architecture and component design, see the [ar
 
 ## Quick Start
 
-### Prerequisites
+### Deployment & Runtime Prerequisites
 
-Before running the server, ensure you have the following tools installed:
+Prerequisites depend on how you run the server:
 
-- [Rust & Cargo](https://www.rust-lang.org/tools/install) (Latest stable).
-- A supported database backend: PostgreSQL, MySQL, or SQLite for persistent deployments. The default local mode uses in-memory repositories.
-- [Docker](https://www.docker.com/get-started/) (optional, for local testing).
+- **Local Development (Zero-Infrastructure Default):**
+  - [Rust & Cargo](https://www.rust-lang.org/tools/install) (Latest stable).
+  - No external services required! By default, the server runs completely in-memory using Moka for caching and store-based certificate mode. Redis, external databases, and cloud service accounts are **not** needed.
+- **Docker Compose Setup:**
+  - [Docker](https://www.docker.com/get-started/) & Docker Compose plugin.
+- **Production Deployment (Optional Integrations):**
+  - Persistent database: PostgreSQL or MySQL (or single-node SQLite).
+  - Secret Management Backend: HashiCorp Vault / OpenBao, AWS Secrets Manager, GCP Secret Manager, or Azure Key Vault.
+  - ACME DNS-01 Provider: AWS Route53, Cloudflare, Google Cloud DNS, Azure DNS, or ACME-DNS.
+  - Telemetry: OpenTelemetry Collector (OTLP gRPC).
 
-### Run locally
+> [!NOTE]
+> **Redis & Cloud Services**: Redis is not a prerequisite or runtime requirement for this service. In-process TTL caching is handled natively via Moka. AWS and other cloud services are optional production integrations rather than baseline requirements.
 
-**Clone the Repository:**
+### Default Runtime Mode
+
+By default, executing `cargo run` boots the server in a lightweight, infrastructure-free local mode:
+
+- **Storage**: In-memory repositories (`memory` Cargo feature & `APP_DATABASE__BACKEND=memory`).
+- **Caching**: In-process TTL caching via Moka (`APP_CACHE__*`).
+- **Certificates**: Store-based certificate strategy (`APP_SERVER__CERT__PROVISIONING_STRATEGY=store`).
+
+### Run Locally
+
+**1. Clone the Repository:**
 
 ```bash
 git clone https://github.com/adorsys/status-list-server.git
 cd status-list-server
 ```
 
-**Environment Variables:**
+**2. Environment Variables (Optional):**
 
-Create a `.env` file in the root directory. Take a look at the [.env.template](.env.template) file for an example of the required variables.
+Create a `.env` file in the root directory. Refer to [.env.template](.env.template) for an example of all configurable variables.
 
-#### Running with Docker Compose
+**3. Running Manually (Lightweight / In-Memory Mode):**
 
-The simplest way to run the project is with [docker compose](https://docs.docker.com/compose/):
-
-- Execute the command below at the root of the project:
-
-```sh
-docker compose up --build
-```
-
-This command will pull all required images and start the server compiled with default compose features (`postgres,aws-secrets,acme`).
-
-To pass custom Cargo feature flags during build, specify the `FEATURES` environment variable:
-
-```sh
-FEATURES="mysql,aws-secrets,acme" docker compose --profile mysql up --build
-```
-
-#### Running Manually
-
-To start the server in zero-infrastructure default in-memory mode, execute:
+To start the server in zero-infrastructure default mode:
 
 ```bash
 cargo run
 ```
 
-By default, the server will listen on `http://localhost:8000` using in-memory repositories, Moka cache, and store-based certificate management. No external databases or cloud services are required for development.
+By default, the server listens on `http://localhost:8000`.
+
+**4. Running with Docker Compose:**
+
+To launch the full containerized environment (PostgreSQL, LocalStack for AWS Secrets Manager, Pebble ACME server, OpenTelemetry collector, Jaeger, and Prometheus):
+
+```bash
+docker compose up --build
+```
+
+To run with custom feature flags in Docker Compose (e.g. MySQL backend):
+
+```bash
+FEATURES="mysql,aws-secrets,acme" docker compose --profile mysql up --build
+```
 
 ## Cargo Feature Matrix
 
