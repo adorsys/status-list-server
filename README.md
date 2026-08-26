@@ -100,17 +100,17 @@ FEATURES="mysql,aws-secrets,acme" docker compose --profile mysql up --build
 
 The crate uses modular Cargo feature flags to compile optional production backend drivers and secret managers:
 
-| Feature       | Description                                                                     | Default    |
-| ------------- | ------------------------------------------------------------------------------- | ---------- |
+| Feature       | Description                                                                    | Default    |
+| ------------- | ------------------------------------------------------------------------------ | ---------- |
 | `memory`      | In-memory repositories, TTL cache (Moka), and store-based certificate storage. | ✅ Default |
-| `postgres`    | SeaORM PostgreSQL database driver.                                              | ❌ Opt-in  |
-| `sqlite`      | SeaORM SQLite database driver.                                                  | ❌ Opt-in  |
-| `mysql`       | SeaORM MySQL database driver.                                                   | ❌ Opt-in  |
-| `acme`        | ACME DNS-01 certificate manager driver (`instant-acme`, `rcgen`).               | ❌ Opt-in  |
-| `aws-secrets` | Route53 DNS-01 challenge driver and AWS Secrets Manager integration.            | ❌ Opt-in  |
-| `vault`       | HashiCorp Vault / OpenBao secrets backend integration.                          | ❌ Opt-in  |
-| `gcp-secrets` | GCP Secret Manager secrets driver and Google Cloud DNS integration.             | ❌ Opt-in  |
-| `azure-kv`    | Azure Key Vault secrets driver and Azure DNS integration.                       | ❌ Opt-in  |
+| `postgres`    | SeaORM PostgreSQL database driver.                                             | ❌ Opt-in  |
+| `sqlite`      | SeaORM SQLite database driver.                                                 | ❌ Opt-in  |
+| `mysql`       | SeaORM MySQL database driver.                                                  | ❌ Opt-in  |
+| `acme`        | ACME DNS-01 certificate manager driver (`instant-acme`, `rcgen`).              | ❌ Opt-in  |
+| `aws-secrets` | Route53 DNS-01 challenge driver and AWS Secrets Manager integration.           | ❌ Opt-in  |
+| `vault`       | HashiCorp Vault / OpenBao secrets backend integration.                         | ❌ Opt-in  |
+| `gcp-secrets` | GCP Secret Manager secrets driver and Google Cloud DNS integration.            | ❌ Opt-in  |
+| `azure-kv`    | Azure Key Vault secrets driver and Azure DNS integration.                      | ❌ Opt-in  |
 
 To build or run with specific backend drivers, pass the matching feature flag(s):
 
@@ -156,16 +156,46 @@ When the optional `APP_SERVER__AGGREGATION_URI` configuration is set, every emit
 
 ## Configuration
 
-All runtime behavior is controlled via environment variables prefixed with `APP_` and using `__` as a nested separator (e.g. `APP_SERVER__PORT=8000`). Sensible defaults are built in, so only non-default values need to be set. See [`.env.template`](.env.template) for a complete example.
+All runtime settings can be configured via environment variables prefixed with `APP_` using `__` as a nested delimiter (e.g. `APP_SERVER__PORT=8000`). Sensible defaults are built-in for all options.
 
-For deployment guidance and backend tradeoffs, see [`docs/database-backends.md`](docs/database-backends.md).
+### Key Configuration Settings
 
-### Validation
+| Prefix / Category | Key Setting                                 | Default                            | Description                                                          |
+| ----------------- | ------------------------------------------- | ---------------------------------- | -------------------------------------------------------------------- |
+| **Server**        | `APP_SERVER__HOST`                          | `localhost`                        | Server bind host address                                             |
+|                   | `APP_SERVER__PORT`                          | `8000`                             | Server HTTP port                                                     |
+|                   | `APP_SERVER__DOMAIN`                        | `localhost`                        | Primary server domain                                                |
+|                   | `APP_SERVER__ENABLE_METRICS`                | `false`                            | Expose `/metrics` Prometheus endpoint                                |
+|                   | `APP_SERVER__AGGREGATION_URI`               | `None`                             | Optional public aggregation URI emitted in tokens                    |
+| **Database**      | `APP_DATABASE__BACKEND`                     | `memory`                           | Backend type (`memory`, `postgres`, `mysql`, `sqlite`)               |
+|                   | `APP_DATABASE__URL`                         | `memory:`                          | Connection string or URI                                             |
+|                   | `APP_DATABASE__POOL__MAX_CONNECTIONS`       | `5`                                | Connection pool size limit                                           |
+| **Certificates**  | `APP_SERVER__CERT__PROVISIONING_STRATEGY`   | `store` (`acme` if feature active) | Provisioning mode (`store` or `acme`)                                |
+|                   | `APP_SERVER__CERT__EMAIL`                   | `admin@example.com`                | Contact email for ACME certificate registration                      |
+|                   | `APP_SERVER__CERT__RENEWAL_CRON_SCHEDULE`   | `0 0 0 * * *`                      | 6-field cron expression for cert renewal checks                      |
+|                   | `APP_SERVER__CERT__STORE__CERTIFICATE_PATH` | `None`                             | Path to PEM/DER certificate file (filesystem store)                  |
+|                   | `APP_SERVER__CERT__STORE__SIGNING_KEY_PATH` | `None`                             | Path to PKCS#8 private key file (filesystem store)                   |
+|                   | `APP_SERVER__CERT__DNS__PROVIDER`           | Auto-resolved                      | DNS provider (`route53`, `cloudflare`, `gcloud`, `azure`, `acmedns`) |
+| **Cache**         | `APP_CACHE__TTL`                            | `300`                              | Status list item cache TTL (seconds; `0` disables)                   |
+|                   | `APP_CACHE__MAX_CAPACITY`                   | `100`                              | Maximum cached status list entries                                   |
+| **Status List**   | `APP_STATUS_LIST__TOKEN_EXP_SECS`           | `900`                              | Token expiration duration (seconds)                                  |
+|                   | `APP_STATUS_LIST__TOKEN_TTL_SECS`           | `300`                              | Token time-to-live duration (seconds)                                |
+|                   | `APP_STATUS_LIST__SNAPSHOT_RETENTION_SECS`  | `7776000`                          | Snapshot retention period (seconds; 90 days)                         |
+| **Telemetry**     | `APP_TELEMETRY__ENVIRONMENT`                | `development`                      | Mode (`development` for stdout, `production` for OTLP)               |
+|                   | `APP_TELEMETRY__OTLP_ENDPOINT`              | `http://localhost:4317`            | OTLP collector gRPC endpoint                                         |
+|                   | `APP_TELEMETRY__ENABLED`                    | `true`                             | Enable OpenTelemetry tracing pipeline                                |
+|                   | `APP_TELEMETRY__SAMPLER_RATIO`              | `1.0`                              | Sampling ratio (`0.0` to `1.0`)                                      |
 
-The following constraints are validated at startup and will cause the server to fail fast if violated:
+A complete sample configuration is available in [.env.template](.env.template).
 
-- `server.port` must be between 1 and 65535 (the `u16` type enforces the upper bound)
-- `server.cert.renewal_cron_schedule` must be a valid 6-field cron expression (seconds required)
+### Validation Constraints
+
+The application validates settings at startup and fails fast if invalid:
+
+- `APP_SERVER__PORT` must be between `1` and `65535`.
+- `APP_SERVER__CERT__RENEWAL_CRON_SCHEDULE` must be a valid 6-field cron expression (with seconds).
+- Database URL schemes must match the selected `APP_DATABASE__BACKEND` (e.g. `postgres://` for `postgres`).
+- `APP_TELEMETRY__SAMPLER_RATIO` must be a finite number between `0.0` and `1.0`.
 
 ## Security
 
