@@ -197,6 +197,23 @@ The application validates settings at startup and fails fast if invalid:
 - Database URL schemes must match the selected `APP_DATABASE__BACKEND` (e.g. `postgres://` for `postgres`).
 - `APP_TELEMETRY__SAMPLER_RATIO` must be a finite number between `0.0` and `1.0`.
 
+## Documentation Index
+
+Detailed documentation for architecture, storage backends, secret management, DNS providers, and deployment operations is available in the [`docs/`](docs/) directory and [`helm/`](helm/) folder:
+
+| Document                                                   | Topic & Scope                                                                                    |
+| ---------------------------------------------------------- | ------------------------------------------------------------------------------------------------ |
+| [`docs/architecture.md`](docs/architecture.md)             | High-level system architecture, component overview, and token workflows                          |
+| [`docs/database-backends.md`](docs/database-backends.md)   | Database backends (PostgreSQL, MySQL, SQLite), pool tuning, and transaction isolation            |
+| [`docs/secrets-backends.md`](docs/secrets-backends.md)     | Secret backends (HashiCorp Vault, AWS Secrets Manager, GCP Secret Manager, Azure Key Vault)      |
+| [`docs/dns-providers.md`](docs/dns-providers.md)           | ACME DNS-01 provider configurations (Route53, Cloudflare, Google Cloud DNS, Azure DNS, ACME-DNS) |
+| [`docs/observability.md`](docs/observability.md)           | OpenTelemetry integration, tracing, OTLP collector setup, Prometheus metrics, and Jaeger         |
+| [`docs/deployment-runbook.md`](docs/deployment-runbook.md) | Operations, database migrations, backup/restore procedures, and zero-downtime upgrades           |
+| [`docs/LOCAL_DEPLOYMENT.md`](docs/LOCAL_DEPLOYMENT.md)     | Local testing setups and Docker Compose instructions                                             |
+| [`docs/compliance_matrix.md`](docs/compliance_matrix.md)   | Spec compliance matrix for OAuth Token Status List draft-21                                      |
+| [`docs/openapi.yaml`](docs/openapi.yaml)                   | Complete OpenAPI 3.1 REST API specification                                                      |
+| [`helm/README.md`](helm/README.md)                         | Kubernetes deployment using the official Helm chart                                              |
+
 ## Security
 
 ### Authentication
@@ -305,25 +322,35 @@ The server implements proper error handling and returns appropriate HTTP status 
 
 ## Deployment
 
-The server can be deployed using a containerization platform such as Docker.
+For production deployments:
 
-### Helm Chart Deployment
+- **Kubernetes**: Refer to the [Helm Chart Guide](helm/README.md).
+- **Operations & Runbooks**: Refer to the [Deployment Runbook](docs/deployment-runbook.md) for database migration, backup, and operational guidelines.
 
-A Helm chart is provided for easy deployment on Kubernetes. For detailed instructions, see the [Helm Deployment Guide](helm/README.md).
+## Testing & Local Quality Checks
 
-## Testing
-
-You can run the tests using the following command:
+Run unit and integration tests:
 
 ```bash
 cargo test
 ```
 
-To verify the infrastructure-free application composition (domain models, domain ports,
-service container, and in-memory outbound adapters only), run:
+Verify zero-infrastructure / in-memory composition:
 
 ```bash
 cargo check --no-default-features --features memory
+```
+
+Run complete local CI checks (format, clippy, tests, and dependency checks):
+
+```bash
+./local-ci.sh
+```
+
+Run markdown linting:
+
+```bash
+npx --yes markdownlint-cli2 README.md
 ```
 
 ## Contributing
