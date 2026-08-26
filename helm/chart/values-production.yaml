@@ -1,25 +1,22 @@
 # Production values for helm/chart. Applied by the production deploy workflow
 # (deploy.yml) on release-tag deploys to the statuslist-production namespace.
 
-# Application Workload Identity (EKS IRSA).
-# The application ServiceAccount carries the IAM role annotation used for ambient
-# AWS credentials (Route53 DNS-01, Secrets Manager, S3). statuslist.aws.mountCredentials
-# stays false (Workload Identity mode) because credentials are provided by this role.
+# Default secret/credential provisioning is External Secrets Operator (ESO): the
+# chart's default statuslist.aws.mountCredentials=true mounts the ESO-provisioned
+# aws-credentials-secret under /home/nobody/.aws. Production keeps that default, so
+# no Workload Identity ServiceAccount annotation is required and no static AWS
+# credential files are managed by hand — ESO synchronizes them.
 #
-# IMPORTANT: the arn below must reference a provisioned IRSA role whose trust policy
-# allows sts:AssumeRoleWithWebIdentity for this ServiceAccount (namespace + SA name).
-# Create it before the first Workload Identity deploy; until then the deployment
-# would have no AWS credentials (see the "ServiceAccount and Workload Identity"
-# section in helm/README.md and docs/deployment-runbook.md).
+# If you prefer Workload Identity / IRSA instead, opt in by attaching the role
+# annotation below and setting statuslist.aws.mountCredentials=false (see the
+# "ServiceAccount and Workload Identity" section in helm/README.md and
+# docs/deployment-runbook.md).
 serviceAccount:
   create: true
-  name: statuslist-sa
-  annotations:
-    eks.amazonaws.com/role-arn: "arn:aws:iam::000000000000:role/statuslist-production-irsa"
 
 statuslist:
   aws:
-    # Workload Identity mode: no static credential files are mounted. The IAM role
-    # above supplies ambient credentials.
-    mountCredentials: false
+    # ESO-mounted credentials (the chart default). Set false + IRSA annotation for
+    # Workload Identity mode.
+    mountCredentials: true
     region: eu-central-1

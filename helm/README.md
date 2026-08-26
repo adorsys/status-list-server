@@ -61,20 +61,24 @@ statuslist:
 
 The ServiceAccount annotation alone is not sufficient for Azure; both the annotation and this pod label must be present.
 
-## AWS Configuration and Workload Identity vs. Static Credentials
+## AWS Configuration and Static Credentials vs. Workload Identity
+
+The default secret/credential provisioning path is **External Secrets Operator (ESO)**. By default the application mounts the ESO-provisioned `aws-credentials-secret` into the pod; Workload Identity is opt-in.
 
 ```yaml
 statuslist:
   aws:
-    mountCredentials: false   # opt-in static credential files (legacy / non-IRSA)
+    mountCredentials: true    # default: mount the ESO-provisioned aws-credentials-secret under /home/nobody/.aws
     region: ""                # plain, non-secret; renders APP_AWS__REGION
 ```
 
-By default (`statuslist.aws.mountCredentials=false`, Workload Identity mode) **no AWS credentials are mounted** into the pod. The application authenticates using ambient credentials provided by the ServiceAccount role annotation. `statuslist.aws.region` is a plain (non-secret) value; `APP_AWS__REGION` is rendered whenever an effective region is set, independent of `secretStore.provider` and `mountCredentials`.
+`statuslist.aws.region` is a plain (non-secret) value; `APP_AWS__REGION` is rendered whenever an effective region is set, independent of `secretStore.provider` and `mountCredentials`.
+
+**Workload Identity is opt-in:** to switch to ambient Workload Identity / IRSA, set `statuslist.aws.mountCredentials=false` (no credentials mounted) and attach the cloud role annotation via `serviceAccount.annotations` (e.g. `eks.amazonaws.com/role-arn` for EKS IRSA, or the GCP / Azure WI annotations described above). The application then authenticates using the ambient credentials provided by that role instead of mounted files.
 
 **Upgrade compatibility:** The effective `APP_AWS__REGION` resolves as `statuslist.aws.region`, falling back to the legacy `secretStore.aws.region` and then `eu-central-1`. Installations that previously set only `secretStore.aws.region` keep that region for the application across upgrade.
 
-To preserve legacy static-credential behavior (pre-Workload-Identity), set `statuslist.aws.mountCredentials=true`. This mounts the operator-created `aws-credentials-secret` at `/home/nobody/.aws` and sets `AWS_SHARED_CREDENTIALS_FILE` / `AWS_CONFIG_FILE`.
+When `statuslist.aws.mountCredentials=true` (the default), the operator (or the ESO `ExternalSecret`) must provide an `aws-credentials-secret` containing the AWS credentials file; the chart mounts it at `/home/nobody/.aws` and sets `AWS_SHARED_CREDENTIALS_FILE` / `AWS_CONFIG_FILE`.
 
 ### Least-privilege IAM policy for the application role
 
@@ -200,16 +204,16 @@ podDisruptionBudget:
 
 When `autoscaling.enabled=true` the Deployment's `replicas` field is omitted (HPA controls the count). Scaled Pods share the application ServiceAccount; each Pod receives its own short-lived Workload Identity token, so no per-Pod cloud registration is required.
 
-## Migration: Static Credentials to Workload Identity
+## Migration: Static Credentials (ESO) to Workload Identity
 
-Deployments currently relying on the implicit static credential mount (`secretStore.enabled=true` with an external `aws-credentials-secret`) must opt back in explicitly until Workload Identity is configured:
+The chart now defaults to the ESO-mounted static-credential path (`statuslist.aws.mountCredentials=true`, the `aws-credentials-secret`). Moving to Workload Identity / IRSA is an opt-in migration:
 
-1. Until IRSA/WI is ready, set `statuslist.aws.mountCredentials=true` to keep mounting the static credentials.
+1. Ensure the default ESO path works: `externalSecret.enabled=true` (or an operator-created secret) provides the `aws-credentials-secret` mounted under `/home/nobody/.aws`.
 2. Configure Workload Identity: attach the role annotation via `serviceAccount.annotations` (e.g. `eks.amazonaws.com/role-arn` for EKS IRSA).
-3. Flip to Workload Identity: set `statuslist.aws.mountCredentials=false` (the default).
+3. Flip to Workload Identity: set `statuslist.aws.mountCredentials=false`.
 4. After verification, delete the mounted `aws-credentials-secret` and any legacy static AWS GitHub secrets.
 
-For production, the deploy workflow applies [`values-production.yaml`](./chart/values-production.yaml), which wires the application ServiceAccount IRSA annotation and keeps `statuslist.aws.mountCredentials=false`. Update the `eks.amazonaws.com/role-arn` in that file to the provisioned IRSA role **before** the first Workload Identity deploy, otherwise the deployment would have no AWS credentials.
+For production, the deploy workflow applies [`values-production.yaml`](./chart/values-production.yaml), which opts into Workload Identity by wiring the application ServiceAccount IRSA annotation and setting `statuslist.aws.mountCredentials=false`. Update the `eks.amazonaws.com/role-arn` in that file to the provisioned IRSA role **before** the first Workload Identity deploy, otherwise the deployment would have no AWS credentials.
 
 ## Production Deployment Instructions
 

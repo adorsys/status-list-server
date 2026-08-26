@@ -104,18 +104,16 @@ runs:
         if ! grep -q 'serviceAccountName: statuslist-app-sa' /tmp/rendered/wl-app/status-list-server/templates/deployment.yaml; then
           echo "ERROR: Deployment must reference application ServiceAccount statuslist-app-sa"; exit 1
         fi
-        # Production Workload Identity path: values-production.yaml (used by deploy.yml) wires
-        # the application ServiceAccount IRSA annotation and keeps mountCredentials=false.
+        # Production path: values-production.yaml (used by deploy.yml) keeps the ESO-mounted
+        # credential default (statuslist.aws.mountCredentials=true) and renders no Workload
+        # Identity IRSA annotation.
         helm template status-list-server helm/chart -f helm/chart/values-production.yaml \
           --output-dir /tmp/rendered/wl-prod
-        if ! grep -q 'eks.amazonaws.com/role-arn:' /tmp/rendered/wl-prod/status-list-server/templates/serviceaccount.yaml; then
-          echo "ERROR: values-production.yaml must render the application IRSA role annotation"; exit 1
+        if grep -q 'eks.amazonaws.com/role-arn:' /tmp/rendered/wl-prod/status-list-server/templates/serviceaccount.yaml; then
+          echo "ERROR: values-production.yaml must not render an IRSA role annotation (ESO-mounted default)"; exit 1
         fi
-        if ! grep -q 'serviceAccountName: statuslist-sa' /tmp/rendered/wl-prod/status-list-server/templates/deployment.yaml; then
-          echo "ERROR: values-production.yaml Deployment must reference the app ServiceAccount statuslist-sa"; exit 1
-        fi
-        if grep -qE 'AWS_SHARED_CREDENTIALS_FILE|aws-credentials' /tmp/rendered/wl-prod/status-list-server/templates/deployment.yaml; then
-          echo "ERROR: values-production.yaml must not mount static AWS credentials (Workload Identity mode)"; exit 1
+        if ! grep -qE 'AWS_SHARED_CREDENTIALS_FILE|aws-credentials-volume' /tmp/rendered/wl-prod/status-list-server/templates/deployment.yaml; then
+          echo "ERROR: values-production.yaml must mount the ESO-provisioned AWS credentials (mountCredentials=true default)"; exit 1
         fi
         # Azure Workload Identity primary path: application pod label + application KSA distinct
         # from the External Secrets Operator identity.

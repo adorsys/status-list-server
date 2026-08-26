@@ -82,10 +82,13 @@ statuslist:
     APP_TELEMETRY__SAMPLER_RATIO: "1.0"
   # AWS configuration for the application.
   aws:
-    # Opt-in static credential-file mount (legacy / non-Workload-Identity deployments).
-    # When false (default, Workload Identity mode) no AWS credentials are mounted into the pod;
-    # ambient credentials are provided by the ServiceAccount role annotation (EKS IRSA / GCP / Azure WI).
-    mountCredentials: false
+    # Mount the AWS credential files (aws-credentials-secret) into the pod. This is the default
+    # (true) so that External Secrets Operator (externalSecret.enabled, the default secret-delivery
+    # path) can provision the application's AWS credentials as a Kubernetes Secret that is mounted
+    # at /home/nobody/.aws. Workload Identity mode (EKS IRSA / GCP / Azure WI) is opt-in: set this
+    # to false and attach the cloud role annotation via serviceAccount.annotations, then the app
+    # uses ambient credentials instead of mounted files.
+    mountCredentials: true
     # Plain (non-secret) AWS region. APP_AWS__REGION is rendered when set, independent of
     # secretStore.provider and statuslist.aws.mountCredentials. Leave empty (default) to
     # fall back to secretStore.aws.region, then to "eu-central-1".
