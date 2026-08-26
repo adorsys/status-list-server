@@ -24,6 +24,16 @@
             "mountCredentials": { "type": "boolean" },
             "region": { "type": "string" }
           }
+        },
+        "fallbackSecret": {
+          "type": "object",
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "stringData": {
+              "type": "object",
+              "additionalProperties": { "type": "string" }
+            }
+          }
         }
       }
     },

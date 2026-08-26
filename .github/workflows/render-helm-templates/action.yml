@@ -40,6 +40,11 @@ runs:
         if ! grep -qE '^\s{4}webhook:' /tmp/rendered/raw/status-list-server/templates/secret-store.yaml; then
           echo "ERROR: raw render missing webhook provider from secretStore.raw"; exit 1
         fi
+        helm template status-list-server helm/chart \
+          --set externalSecret.enabled=false \
+          --set statuslist.fallbackSecret.enabled=true \
+          --set-string statuslist.fallbackSecret.stringData.postgres-password=x \
+          --output-dir /tmp/rendered/fallback
         # Scaling readiness: opt-in HPA + PDB. In HPA mode the Deployment omits
         # `replicas`, so use maxUnavailable (not minAvailable) to satisfy
         # kube-linter's pdb-min-available check (minAvailable must be < replicas).
@@ -55,6 +60,9 @@ runs:
         helm template status-list-server helm/chart \
           --set serviceAccount.name=statuslist-app-sa \
           --set-string 'serviceAccount.annotations.eks\.amazonaws\.com/role-arn=arn:aws:iam::123456789012:role/statuslist-irsa' \
+          --set externalSecret.enabled=false \
+          --set statuslist.fallbackSecret.enabled=true \
+          --set-string statuslist.fallbackSecret.stringData.postgres-password=x \
           --output-dir /tmp/rendered/wl-app
         if ! grep -q 'name: statuslist-app-sa' /tmp/rendered/wl-app/status-list-server/templates/serviceaccount.yaml; then
           echo "ERROR: workload-identity render missing application ServiceAccount statuslist-app-sa"; exit 1
@@ -171,6 +179,17 @@ runs:
           | grep -A1 'name: APP_AWS__REGION' | grep 'value:' | sed -E 's/.*value: "?([^"]*)"?.*/\1/' || true)
         if [ "$REGION" != "us-west-2" ]; then
           echo "ERROR: APP_AWS__REGION should fall back to legacy secretStore.aws.region, got '$REGION'"; exit 1
+        fi
+        # Upgrade render test: the fallback Secret consumes the same single supported name the
+        # Deployment's POSTGRES_PASSWORD secretKeyRef references (statuslist-secret). Assert the
+        # actual secretKeyRef name, not a loose global grep.
+        PGREF=$(helm template status-list-server helm/chart \
+            --set externalSecret.enabled=false \
+            --set statuslist.fallbackSecret.enabled=true \
+            --set-string statuslist.fallbackSecret.stringData.postgres-password=x 2>/dev/null \
+          | grep -A3 'name: POSTGRES_PASSWORD' | grep 'name:' | tail -1 | sed -E 's/.*name: ([a-zA-Z0-9-]+)$/\1/')
+        if [ "$PGREF" != "statuslist-secret" ]; then
+          echo "ERROR: POSTGRES_PASSWORD secretKeyRef must reference statuslist-secret, got '$PGREF'"; exit 1
         fi
         # ESO one-name invariant: every consumer shares the single name statuslist-secret, so a
         # custom externalSecret.spec.target.name must fail at render time.

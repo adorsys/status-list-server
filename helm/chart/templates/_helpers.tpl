@@ -64,10 +64,10 @@ Create the name of the service account to use
 
 {{/*
 Effective name of the Kubernetes Secret the application reads (postgres password).
-Single supported name: "statuslist-secret", the ExternalSecret target. The Deployment and
-PostgreSQL (postgres.auth.existingSecret) both reference this same name, so it is not
-independently configurable. ESO mode validates externalSecret.spec.target.name against it
-at render time.
+Single supported name: "statuslist-secret" in both ESO mode (ExternalSecret target) and
+fallback mode. The Deployment, PostgreSQL (postgres.auth.existingSecret), and the fallback
+Secret all reference this same name, so it is not independently configurable. ESO mode
+validates externalSecret.spec.target.name against it at render time.
 */}}
 {{- define "status-list-server-chart.appSecretName" -}}
 {{- "statuslist-secret" }}

@@ -78,7 +78,7 @@ To preserve legacy static-credential behavior (pre-Workload-Identity), set `stat
 
 ## SecretStore Providers
 
-External Secret Operator's `SecretStore` is provider-neutral via `secretStore.provider` (`aws` | `vault` | `gcp` | `azure` | `raw`). The shipped default is `aws`. A `SecretStore` is rendered **only** when `externalSecret.enabled=true` **and** `secretStore.enabled=true`. Secret delivery is via External Secrets Operator; there is no fallback Kubernetes Secret mode.
+External Secret Operator's `SecretStore` is provider-neutral via `secretStore.provider` (`aws` | `vault` | `gcp` | `azure` | `raw`). The shipped default is `aws`. A `SecretStore` is rendered **only** when `externalSecret.enabled=true` **and** `secretStore.enabled=true` — in the no-ESO fallback mode it is never emitted, so a cluster without ESO CRDs accepts the release.
 
 ```yaml
 secretStore:
@@ -114,6 +114,23 @@ secretStore:
 - **raw**: pass the concrete provider body through `secretStore.raw`, **rendered directly under `spec.provider`** for unsupported ESO providers without editing the chart. `secretStore.raw` holds only the provider body (no extra top-level `provider` key); an empty `raw: {}` is **rejected** so this path never silently emits a weakened SecretStore.
 
 Provider selection is fail-closed: an unsupported `secretStore.provider` value is rejected by the chart's `values.schema.json` and a Helm `fail`, and contradictory mode combinations (ESO disabled while a SecretStore is requested) do not render the ESO CR.
+
+## Fallback Kubernetes Secret (no External Secrets Operator)
+
+For clusters that do **not** run External Secret Operator, the chart can render a plain Kubernetes `Secret` that the Deployment references:
+
+```yaml
+externalSecret:
+  enabled: false
+
+statuslist:
+  fallbackSecret:
+    enabled: true
+    stringData:
+      postgres-password: "change-me"
+```
+
+The fallback `Secret` is rendered only when `externalSecret.enabled=false` **and** `statuslist.fallbackSecret.enabled=true`. It uses `stringData`, so plain string values are base64-encoded by the API server. The fallback secret is always named `statuslist-secret` — the single supported name that the Deployment's `POSTGRES_PASSWORD` `secretKeyRef` and `postgres.auth.existingSecret` both reference, so it is not independently configurable.
 
 ## Horizontal Autoscaling and Pod Disruption Budget
 

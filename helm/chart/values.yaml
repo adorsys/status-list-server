@@ -90,6 +90,16 @@ statuslist:
     # secretStore.provider and statuslist.aws.mountCredentials. Leave empty (default) to
     # fall back to secretStore.aws.region, then to "eu-central-1".
     region: ""
+  # Fallback Kubernetes Secret for clusters that do not run External Secrets Operator.
+  # Only rendered when externalSecret.enabled=false AND statuslist.fallbackSecret.enabled=true.
+  # Values are plain strings; the API server base64-encodes them (stringData).
+  # The secret is always named "statuslist-secret" (single supported name). PostgreSQL
+  # (postgres.auth.existingSecret) references the same name, so it is deliberately not
+  # independently configurable.
+  fallbackSecret:
+    enabled: false
+    stringData:
+      postgres-password: ""
   livenessProbe:
     httpGet:
       path: /health/live
@@ -164,8 +174,9 @@ postgres:
     username: postgres
     database: status-list
     # Must reference the same secret the application reads (see _helpers.tpl
-    # "status-list-server-chart.appSecretName"). The chart uses the single supported name
-    # "statuslist-secret" — keep it in sync with externalSecret.spec.target.name.
+    # "status-list-server-chart.appSecretName"). In fallback (no-ESO) mode the chart
+    # renders a Secret named "statuslist-secret" (single supported name), so this stays
+    # fixed. In ESO mode keep it in sync with externalSecret.spec.target.name.
     existingSecret: statuslist-secret
     secretKeys:
       passwordKey: postgres-password
@@ -190,8 +201,8 @@ externalSecret:
       kind: SecretStore
     target:
       # Single supported application-secret name (statuslist-secret), shared with the
-      # Deployment and PostgreSQL (postgres.auth.existingSecret). A custom value fails at
-      # render time; this field is intentionally not configurable.
+      # Deployment, PostgreSQL (postgres.auth.existingSecret), and the fallback Secret.
+      # A custom value fails at render time; this field is intentionally not configurable.
       name: statuslist-secret
       creationPolicy: Owner
     data:
