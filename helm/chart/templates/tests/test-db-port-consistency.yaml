@@ -51,16 +51,35 @@ metadata:
     helm.sh/hook: test
     helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
 spec:
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 65534
+    runAsGroup: 65534
+    fsGroup: 65534
+    seccompProfile:
+      type: RuntimeDefault
   containers:
     - name: test
       image: busybox:1.37
       command: ['sh', '/tests/test.sh']
+      securityContext:
+        readOnlyRootFilesystem: true
+        allowPrivilegeEscalation: false
+        capabilities:
+          drop:
+            - ALL
+        seccompProfile:
+          type: RuntimeDefault
       volumeMounts:
         - name: tests
           mountPath: /tests
+        - name: tmp
+          mountPath: /tmp
   volumes:
     - name: tests
       configMap:
         name: {{ include "status-list-server-chart.fullname" . }}-test-db-port
+    - name: tmp
+      emptyDir: {}
   restartPolicy: Never
 {{- end }}
