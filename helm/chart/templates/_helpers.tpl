@@ -61,3 +61,11 @@ Create the name of the service account to use
 {{- default "default" .Values.serviceAccount.name }}
 {{- end }}
 {{- end }}
+
+{{/*
+Database port helper: returns the configured database port from env or default
+*/}}
+{{- define "status-list-server-chart.dbPort" -}}
+{{- $env := .Values.statuslist.env | default dict }}
+{{- get $env "APP_DATABASE__PORT" | default "5432" }}
+{{- end }}
