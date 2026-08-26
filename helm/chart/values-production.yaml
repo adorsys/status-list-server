@@ -9,7 +9,8 @@
 # IMPORTANT: the arn below must reference a provisioned IRSA role whose trust policy
 # allows sts:AssumeRoleWithWebIdentity for this ServiceAccount (namespace + SA name).
 # Create it before the first Workload Identity deploy; until then the deployment
-# would have no AWS credentials. See docs/workload-identity.md and the OIDC plan.
+# would have no AWS credentials (see the "ServiceAccount and Workload Identity"
+# section in helm/README.md and docs/deployment-runbook.md).
 serviceAccount:
   create: true
   name: statuslist-sa

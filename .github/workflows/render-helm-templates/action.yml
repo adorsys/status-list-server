@@ -40,6 +40,37 @@ runs:
         if ! grep -qE '^\s{4}webhook:' /tmp/rendered/raw/status-list-server/templates/secret-store.yaml; then
           echo "ERROR: raw render missing webhook provider from secretStore.raw"; exit 1
         fi
+        # Default (ESO) mode must render the SecretStore + ExternalSecret and no fallback Secret.
+        if [ ! -f /tmp/rendered/default/status-list-server/templates/secret-store.yaml ]; then
+          echo "ERROR: default render must produce a SecretStore"; exit 1
+        fi
+        if [ ! -f /tmp/rendered/default/status-list-server/templates/external-secrets.yaml ]; then
+          echo "ERROR: default render must produce an ExternalSecret"; exit 1
+        fi
+        if [ -f /tmp/rendered/default/status-list-server/templates/secret.yaml ]; then
+          echo "ERROR: default (ESO) render must not emit the fallback Secret"; exit 1
+        fi
+        # serviceAccount.create=false must render no application ServiceAccount.
+        if [ -f /tmp/rendered/no-sa/status-list-server/templates/serviceaccount.yaml ]; then
+          echo "ERROR: serviceAccount.create=false must not render an application ServiceAccount"; exit 1
+        fi
+        # mountCredentials=true renders the static AWS credential env vars and volume.
+        if ! grep -q 'AWS_SHARED_CREDENTIALS_FILE' /tmp/rendered/legacy-creds/status-list-server/templates/deployment.yaml; then
+          echo "ERROR: mountCredentials=true must render AWS_SHARED_CREDENTIALS_FILE"; exit 1
+        fi
+        if ! grep -q 'aws-credentials-volume' /tmp/rendered/legacy-creds/status-list-server/templates/deployment.yaml; then
+          echo "ERROR: mountCredentials=true must render the aws-credentials-volume"; exit 1
+        fi
+        # Each advertised provider renders its own SecretStore provider body.
+        if ! grep -qE '^\s+vault:' /tmp/rendered/vault/status-list-server/templates/secret-store.yaml; then
+          echo "ERROR: vault provider SecretStore missing vault block"; exit 1
+        fi
+        if ! grep -qE '^\s+gcpsm:' /tmp/rendered/gcp/status-list-server/templates/secret-store.yaml; then
+          echo "ERROR: gcp provider SecretStore missing gcpsm block"; exit 1
+        fi
+        if ! grep -qE '^\s+azurekv:' /tmp/rendered/azure/status-list-server/templates/secret-store.yaml; then
+          echo "ERROR: azure provider SecretStore missing azurekv block"; exit 1
+        fi
         helm template status-list-server helm/chart \
           --set externalSecret.enabled=false \
           --set statuslist.fallbackSecret.enabled=true \

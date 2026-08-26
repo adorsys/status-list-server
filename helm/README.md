@@ -76,6 +76,48 @@ By default (`statuslist.aws.mountCredentials=false`, Workload Identity mode) **n
 
 To preserve legacy static-credential behavior (pre-Workload-Identity), set `statuslist.aws.mountCredentials=true`. This mounts the operator-created `aws-credentials-secret` at `/home/nobody/.aws` and sets `AWS_SHARED_CREDENTIALS_FILE` / `AWS_CONFIG_FILE`.
 
+### Least-privilege IAM policy for the application role
+
+Attach a least-privilege policy to the IRSA role referenced by `serviceAccount.annotations.eks.amazonaws.com/role-arn` (via the trust policy above), scoped to the resources the server actually uses:
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "Route53DNS01",
+      "Effect": "Allow",
+      "Action": [
+        "route53:ChangeResourceRecordSets",
+        "route53:ListResourceRecordSets",
+        "route53:GetChange"
+      ],
+      "Resource": [
+        "arn:aws:route53:::hostedzone/<HOSTED_ZONE_ID>",
+        "arn:aws:route53:::change/*"
+      ]
+    },
+    {
+      "Sid": "SecretsManager",
+      "Effect": "Allow",
+      "Action": [
+        "secretsmanager:GetSecretValue",
+        "secretsmanager:DescribeSecret"
+      ],
+      "Resource": "arn:aws:secretsmanager:<REGION>:<ACCOUNT_ID>:secret:status-list/*"
+    },
+    {
+      "Sid": "S3StatusList",
+      "Effect": "Allow",
+      "Action": ["s3:GetObject", "s3:PutObject", "s3:DeleteObject"],
+      "Resource": "arn:aws:s3:::status-list-adorsys/*"
+    }
+  ]
+}
+```
+
+Replace `<HOSTED_ZONE_ID>`, `<REGION>`, and `<ACCOUNT_ID>` with your values, and drop any `Sid` the server does not need so the role stays minimal.
+
 ## SecretStore Providers
 
 External Secret Operator's `SecretStore` is provider-neutral via `secretStore.provider` (`aws` | `vault` | `gcp` | `azure` | `raw`). The shipped default is `aws`. A `SecretStore` is rendered **only** when `externalSecret.enabled=true` **and** `secretStore.enabled=true` — in the no-ESO fallback mode it is never emitted, so a cluster without ESO CRDs accepts the release.
