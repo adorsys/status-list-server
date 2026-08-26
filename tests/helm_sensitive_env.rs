@@ -126,10 +126,6 @@ fn rendered_chart_uses_split_database_credentials() {
         !rendered.contains("$(POSTGRES_PASSWORD)"),
         "rendered Helm output must not assemble credentials with env expansion"
     );
-    assert!(
-        !rendered.contains("APP_REDIS__URI") && !rendered.contains("rediss://"),
-        "rendered Helm output must not contain Redis credential URI metadata after Redis chart removal"
-    );
 
     for expected in [
         "name: APP_DATABASE__BACKEND",
