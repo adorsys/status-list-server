@@ -11,9 +11,8 @@ on:
 jobs:
   clean-cache:
     runs-on: ubuntu-latest
-    # No checkout: this only talks to the API. GH_REPO replaces it -- `gh` resolves the
-    # repo from `--repo`, `GH_REPO`, then the git remote, never `GITHUB_REPOSITORY`,
-    # so without it the step fails with "not a git repository".
+    # No checkout, so `gh` has no git remote to infer the repo from. It never reads
+    # GITHUB_REPOSITORY, hence GH_REPO.
     steps:
       - run: gh cache delete --all
         env:

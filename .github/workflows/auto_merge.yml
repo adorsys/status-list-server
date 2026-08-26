@@ -12,17 +12,8 @@ permissions:
 jobs:
   dependabot:
     runs-on: ubuntu-latest
-    # `user.login` is who opened the PR -- fixed at open time, unspoofable, and the
-    # actual authorization check. `github.actor` alone is spoofable (zizmor flags it),
-    # which is why it is paired here rather than removed; it narrows, it does not
-    # prevent. `head.repo.full_name` excludes forks.
-    #
-    # SAFETY DEPENDS ON BRANCH PROTECTION: without `dismiss_stale_reviews`, a push to
-    # an open dependabot branch merges on the already-armed auto-merge and no condition
-    # here stops it. Not assertable in CI (needs `administration: read`) -- see #417.
-    #
-    # Keep the ignore comment on this `if:` header: below is a folded scalar where `#`
-    # is literal text and would corrupt the condition.
+    # `user.login` is the real check, `github.actor` only narrows it; neither helps
+    # without `dismiss_stale_reviews` (#417). Ignore must stay on this header line.
     if: >- # zizmor: ignore[bot-conditions]
       github.event.pull_request.user.login == 'dependabot[bot]' && github.actor == 'dependabot[bot]' && github.event.pull_request.head.repo.full_name == github.repository
     steps:
@@ -34,18 +25,8 @@ jobs:
           alert-lookup: true
           compat-lookup: true
 
-      # Decided once, here, rather than repeated as an `if:` on each step below -- three
-      # copies of the predicate is three chances for them to disagree, and the approve
-      # step disagreeing with the merge step is what "approved but never merged", or
-      # worse "merged without the intended gate", looks like.
-      #
-      # Auto-merge is limited to patch and minor bumps. `fetch-metadata` already exposes
-      # the semver class and it was not being read, so a *major* upgrade was approved
-      # with GITHUB_TOKEN and merged without anyone reading it. An unknown or empty
-      # update-type is treated as ineligible: this fails closed.
-      #
-      # github-actions updates stay excluded regardless of semver class -- a moved tag
-      # is a supply-chain event, not a version bump.
+      # Patch and minor only, never github-actions. Unknown or empty update-type is
+      # ineligible, so this fails closed. Decided once so the steps cannot disagree.
       - name: Decide whether this PR may auto-merge
         id: gate
         env:

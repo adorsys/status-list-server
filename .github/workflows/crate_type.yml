@@ -8,8 +8,7 @@ on:
       is_bin:
         value: ${{ jobs.check-crate-type.outputs.is_bin }}
 
-# Declared even though zizmor exempts `workflow_call`-only files: this states the
-# workflow's side of the permission contract instead of relying on that exemption.
+# Declared rather than relying on zizmor's `workflow_call` exemption.
 permissions:
   contents: read
 
@@ -26,15 +25,8 @@ jobs:
         uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1
 
       - name: Searching for lib
-        # Every target of every workspace member, not `targets[0]`. Cargo does not
-        # promise an ordering, so keying on the first target let `is_lib` flip without
-        # anyone touching this file -- and `cargo-test-doc` is gated on it while
-        # `ci-success` treats a skipped job as a pass, so doc tests could silently stop
-        # running with CI still green.
-        #
-        # Matched exactly rather than by substring: `contains(.., 'lib')` also matched
-        # `cdylib` and `rlib`. Uses jq, which is preinstalled on the runner, rather
-        # than pulling an unpinned jql whose query syntax changes across majors.
+        # All targets, not `targets[0]`: cargo does not promise an ordering, so keying
+        # on the first one let `is_lib` flip and silently skip cargo-test-doc.
         id: searching
         run: |
           set -euo pipefail

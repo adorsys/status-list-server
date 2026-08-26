@@ -11,8 +11,7 @@ on:
   # and `deploy` require `event_name == 'push'`, so dispatch never releases.
   workflow_dispatch:
 
-# A job-level `permissions:` block replaces this default rather than merging with it,
-# so a scope added here does not reach any job that declares its own -- add it in both.
+# A job-level `permissions:` block replaces this default rather than merging with it.
 permissions:
   contents: read
 
@@ -29,16 +28,15 @@ env:
   HELM_NAMESPACE: statuslist-production
   APP_DATABASE_PORT: ${{ vars.APP_DATABASE_PORT }}
 jobs:
-  # No `if:` guard: a skipped job skips everything that `needs:` it, which would take
-  # workflow_dispatch builds down with it. The non-tag case is handled in the step.
+  # No `if:` guard -- a skip here would cascade to everything that needs it. The
+  # non-tag case is handled inside the step.
   validate-tag:
     name: Validate release tag
     runs-on: ubuntu-latest
     permissions: {}
     steps:
-      # `v*.*.*` is a refspec glob, not semver: `v2024.01.release` matches it. On a
-      # non-semver tag metadata-action drops every `type=semver` entry and `deploy_tag`
-      # falls through to `latest`, pinning production to a mutable tag silently.
+      # `v*.*.*` is a refspec glob, not semver -- `v2024.01.release` matches. On those,
+      # metadata-action drops the semver tags and deploy falls through to `latest`.
       - name: Assert the tag is semver
         env:
           REF_NAME: ${{ github.ref_name }}
@@ -81,11 +79,8 @@ jobs:
       contents: read
       packages: write
     outputs:
-      # Derived in the `vars` step rather than from `steps.meta.outputs.version`: this
-      # job publishes only the sha tag, so metadata-action's `version` here is that sha
-      # and not the release version. The two derivations cannot diverge because
-      # `validate-tag` has already rejected anything that is not strict semver, which is
-      # exactly the case where `${GITHUB_REF_NAME#v}` and `{{version}}` disagree.
+      # From `vars`, not `meta`: this job publishes only the sha tag, so
+      # `meta.outputs.version` would be that sha rather than the release version.
       deploy_tag: ${{ steps.vars.outputs.DEPLOY_TAG }}
       image_digest: ${{ steps.build.outputs.digest }}
       image_ref: ${{ steps.digest.outputs.IMAGE_REF }}
@@ -105,8 +100,7 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
       - name: Resolve deploy tag
-        # `validate-tag` has already rejected any tag that is not strict semver, so on
-        # the release path this is the same version metadata-action would compute.
+        # Safe to derive by hand: `validate-tag` has already rejected non-semver tags.
         id: vars
         run: |
           if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
@@ -608,11 +602,8 @@ jobs:
           helm repo add open-telemetry https://open-telemetry.github.io/opentelemetry-helm-charts
           helm dependency build helm/chart
       - name: Deploy chart
-        # Deploying without a digest would silently fall back to the mutable tag.
-        # `:?` on each expansion names the cause: helm rejects an empty value only as
-        # a YAML error pointing nowhere near it. Both come from the job's `env:` block
-        # rather than being interpolated, since `deploy_tag` traces back to a tag name
-        # a person chooses.
+        # `:?` because helm reports an empty value as a YAML error pointing nowhere
+        # near the cause. Via env, not interpolation: the tag is attacker-influenced.
         run: |
           helm upgrade --install ${{ env.HELM_RELEASE_NAME }} helm/chart \
             --namespace ${{ env.HELM_NAMESPACE }} \

@@ -1,19 +1,13 @@
 name: "CI"
 
-# PERMISSIONS. deploy.yml calls this workflow, and a called workflow can only narrow
-# the caller's token. Every job here is therefore capped at what deploy.yml's `ci`
-# job grants. A job needing a new scope must have it added in BOTH files, or it fails
-# only on the deploy.yml path.
-
 on:
   merge_group:
   workflow_dispatch:
   workflow_call:
   pull_request:
 
-# Default for every job; a job needing more declares it itself. Reached through
-# `workflow_call`, and a called workflow can only narrow the token it is handed -- so
-# a scope added here must also be granted by deploy.yml's `ci` job or the run fails.
+# A scope added here must also be granted by deploy.yml's `ci` job, which calls this
+# workflow: a called workflow can only narrow the caller's token.
 permissions:
   contents: read
 
@@ -26,13 +20,8 @@ jobs:
     name: Zizmor Security Check
     runs-on: ubuntu-latest
     env:
-      # One pin, read by both the gate and its self-test below.
-      #
-      # The action's `version` input defaults to `latest`. On a fail-closed gate that
-      # means an upstream zizmor release can turn every pull request in the repository
-      # red with nothing changed here, at a time nobody chose. Neither Dependabot nor
-      # the action's SHA pin covers this -- the SHA pins the action, not the scanner it
-      # downloads -- so bumping this is a deliberate, reviewed change.
+      # The action's `version` defaults to `latest`, so without this an upstream zizmor
+      # release turns every PR red. The action's SHA pins the action, not the scanner.
       ZIZMOR_VERSION: "1.28.0"
 
     steps:
@@ -41,31 +30,22 @@ jobs:
         with:
           persist-credentials: false
 
-      # Fail-closed: a finding at any severity fails this job. Fix findings rather than
-      # reaching for `|| true`, `min-severity`, or a narrower `inputs:`. To accept one,
-      # put `# zizmor: ignore[rule]` on the line it anchors to -- `ignore-start` /
-      # `ignore-end` blocks are not zizmor syntax and suppress nothing.
+      # Fail-closed at every severity. To accept a finding use `# zizmor: ignore[rule]`
+      # on the line it anchors to; `ignore-start`/`ignore-end` suppress nothing.
       - name: Run Zizmor
         uses: zizmorcore/zizmor-action@3dc1ecc9bcb9e94e9b2c709687979e1298497054 # v0.6.2
         with:
           version: ${{ env.ZIZMOR_VERSION }}
-          # `.` not `.github/workflows/`: also audits .github/dependabot.yml.
+          # `.` also picks up .github/dependabot.yml.
           inputs: .
           persona: regular
-          # `known-vulnerable-actions` needs the API; the action supplies the token.
           online-audits: true
-          # Annotations, not SARIF: findings anchor on the diff where they are being
-          # introduced. Keeps this job on the workflow default `contents: read`.
+          # SARIF would need `security-events: write`; annotations anchor on the diff.
           advanced-security: false
-          # Mutually exclusive with advanced-security. Without it findings land only in
-          # the raw log with no anchors on the diff.
           annotations: true
 
-      # The step above passing means either "the workflows are clean" or "the scanner
-      # stopped failing", and those look identical from here. The self-test separates
-      # them by running the same pinned scanner against a fixture with a known finding
-      # and requiring a non-zero exit. Installed as a CLI because the action deliberately
-      # fails the job on findings, which is the opposite of what this needs to observe.
+      # A green gate and a broken gate look identical from here. CLI, not the action:
+      # the self-test needs to observe a failure, which the action would turn into one.
       - name: Install zizmor for the self-test
         if: ${{ !cancelled() }}
         uses: taiki-e/install-action@c44f6b046f1c29ae5918b1e0bfdbb2f1813836fd # v2.84.1
@@ -76,29 +56,22 @@ jobs:
         if: ${{ !cancelled() }}
         run: bash scripts/zizmor-selftest.sh
 
-      # auto_merge.yml suppresses `bot-conditions`, and that suppression silences the
-      # audit for whatever the condition later becomes -- so assert the guards it
-      # assumes are still there. Parses the condition rather than grepping: a text
-      # match would also accept `user.login` in a comment, or an inverted comparison.
-      #
-      # `!cancelled()`, not `always()`: a zizmor failure must not skip this, but a
-      # cancelled run should. The `${{ }}` wrapper is required -- bare `!` is a YAML tag.
+      # auto_merge.yml suppresses `bot-conditions`, which silences the audit for whatever
+      # that condition later becomes. Assert the guards the suppression assumes.
       - name: Assert dependabot auto-merge keeps its author check
         if: ${{ !cancelled() }}
         run: |
           set -euo pipefail
 
-          # `yq` exits 0 and prints "null" for a missing key, so test the value rather
-          # than the exit status -- a renamed job must not read as a passing condition.
+          # yq exits 0 and prints "null" for a missing key, so test the value.
           condition=$(yq '.jobs.dependabot.if' .github/workflows/auto_merge.yml)
           if [ -z "$condition" ] || [ "$condition" = "null" ]; then
             echo "::error::no .jobs.dependabot.if in auto_merge.yml -- was the job renamed?"
             exit 1
           fi
 
-          # github.actor is asserted too: it is the clause the ignore comment exists
-          # for, so dropping it would leave a suppression that silently hides a genuine
-          # bot-conditions regression if it were ever reintroduced.
+          # github.actor included: dropping it would leave a suppression with nothing
+          # left to suppress, hiding a real regression if it came back.
           for guard in \
             "github.event.pull_request.user.login == 'dependabot[bot]'" \
             "github.actor == 'dependabot[bot]'" \
@@ -121,10 +94,8 @@ jobs:
 
           echo "auto_merge.yml still carries all three guards."
 
-      # `ci-success` gates on a hand-maintained `needs:` list, so a job added here can
-      # otherwise fail while the required check stays green. That is not hypothetical:
-      # `docker-build` was added and missed the list. Compare the two sets instead of
-      # trusting review to catch it.
+      # `ci-success.needs` is hand-maintained, so a job missing from it fails without
+      # blocking the merge. `docker-build` already did.
       - name: Assert every job is gated by ci-success
         if: ${{ !cancelled() }}
         run: |
@@ -230,17 +201,12 @@ jobs:
           persist-credentials: false
 
       - name: Set up Docker Buildx
-        # Needed for the GitHub Actions cache backend below; the default docker driver
-        # cannot export to it.
+        # The default docker driver cannot export to the gha cache backend.
         uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
 
       - name: Docker build (production features)
-        # No `--build-arg FEATURES`: the Dockerfile's `ARG FEATURES` default already is
-        # the release feature set, so passing it here would be a second copy to keep in
-        # sync, and a stale one would smoke-test a set the release never builds.
-        #
-        # `--load` is deliberately absent: this only needs to prove the image builds,
-        # and skipping the export keeps the smoke test off the critical path.
+        # No FEATURES build-arg: the Dockerfile default is already the release set, and
+        # a second copy would drift.
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7
         with:
           context: .
@@ -689,19 +655,8 @@ jobs:
           path: target/llvm-cov/html
           if-no-files-found: error
 
-  # THE SINGLE REQUIRED STATUS CHECK -- set branch protection to require `CI Success`
-  # and nothing else here. The jobs above are unchained, so without this a zizmor
-  # failure leaves every other check green and the PR mergeable.
-  #
-  # `needs:` below IS a hand-maintained list, and a job missing from it is a job that
-  # cannot block a merge. That is not hypothetical -- `docker-build` was added and
-  # missed it. The "Assert every job is gated by ci-success" step in zizmor-security
-  # compares this list against `.jobs` and fails on any omission, so adding a job here
-  # is enforced rather than remembered.
-  #
-  # Rollout order matters; see CONTRIBUTING.md, "Branch Protection". Removing the
-  # individual job names from the required list before `CI Success` is required leaves
-  # a window where nothing blocks.
+  # The single required status check -- the jobs above are unchained, so nothing else
+  # here represents the suite. Rollout order: CONTRIBUTING.md, "Branch Protection".
   ci-success:
     name: CI Success
     if: ${{ !cancelled() }}
@@ -735,13 +690,8 @@ jobs:
           NEEDS: ${{ toJSON(needs) }}
         run: printf '%s\n' "$NEEDS"
 
-      # A GitHub expression rather than a shell script parsing `toJSON(needs)`.
-      #
-      # `skipped` is absent, so a skipped job passes. The only job that legitimately
-      # skips is cargo-test-doc, gated on `is_lib` from crate_type.yml -- which now
-      # matches "lib" across every workspace target rather than reading `targets[0]`,
-      # so it no longer flips on cargo's target ordering. A skip there means the
-      # workspace genuinely has no lib target, not that detection drifted.
+      # `skipped` is omitted deliberately: cargo-test-doc skips on a workspace with no
+      # lib target, which is legitimate.
       - name: Fail if any job failed or was cancelled
         if: ${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') }}
         run: |
