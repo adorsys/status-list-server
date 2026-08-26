@@ -258,6 +258,10 @@ The server can be deployed using a containerization platform such as Docker.
 
 A Helm chart is provided for easy deployment on Kubernetes. For detailed instructions, see the [Helm Deployment Guide](helm/README.md).
 
+### Container Supply Chain
+
+Release images are scanned by digest and carry an SBOM and SLSA provenance, and release tags are applied only after the scan. See the [Container Supply Chain guide](docs/supply-chain.md) for thresholds, verification commands, and how to triage findings.
+
 ## Testing
 
 You can run the tests using the following command:

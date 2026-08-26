@@ -1,0 +1,14 @@
+{
+  "SchemaVersion": 2,
+  "CreatedAt": "2026-08-20T07:22:45.747699524Z",
+  "ArtifactName": "gate-selftest-clean",
+  "ArtifactType": "container_image",
+  "Results": [
+    {
+      "Target": "gate-selftest-clean (synthetic)",
+      "Class": "os-pkgs",
+      "Type": "alpine",
+      "Vulnerabilities": []
+    }
+  ]
+}

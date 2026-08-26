@@ -1,5 +1,10 @@
 name: "CI"
 
+# PERMISSIONS. deploy.yml calls this workflow, and a called workflow can only narrow
+# the caller's token. Every job here is therefore capped at what deploy.yml's `ci`
+# job grants. A job needing a new scope must have it added in BOTH files, or it fails
+# only on the deploy.yml path.
+
 on:
   merge_group:
   workflow_dispatch:
@@ -14,6 +19,9 @@ jobs:
   zizmor-security:
     name: Zizmor Security Check
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
 
     steps:
       - name: Fetch Repository
@@ -25,7 +33,23 @@ jobs:
           tool: zizmor@1.28.0
 
       - name: Run Zizmor
-        run: zizmor .github/workflows/ || true
+        # SARIF for the full finding set, then a blocking pass at high severity and
+        # high confidence. This previously ran as `zizmor ... || true`, which is a
+        # linter that cannot fail: findings on the repository's highest-privilege
+        # workflows were computed and discarded. Tighten the threshold as the
+        # lower-severity backlog is triaged.
+        run: |
+          set -eu
+          zizmor --format sarif .github/workflows/ > zizmor.sarif || true
+          zizmor --min-severity high --min-confidence high .github/workflows/
+
+      - name: Upload Zizmor SARIF
+        if: always()
+        continue-on-error: true
+        uses: github/codeql-action/upload-sarif@4187e74d05793876e9989daffde9c3e66b4acd07 # v3
+        with:
+          sarif_file: zizmor.sarif
+          category: zizmor
 
   cargo-fmt:
     name: Cargo Format Check
@@ -68,6 +92,27 @@ jobs:
       - name: Memory-only Build
         run: cargo check --no-default-features --features memory
 
+      - name: Release image feature set
+        # The feature set the release image is actually built with. Two gaps make it
+        # worth checking on its own. Nothing validates the `ARG FEATURES` string: it is
+        # a bare string handed to `cargo build` inside the image build, so a value
+        # naming no real feature fails only when someone cuts a release. And
+        # `--all-features` above does not stand in for it -- cargo unifies features
+        # across the graph, so enabling everything builds `sea-orm` with all three
+        # `sqlx` backends where the release set builds it with `sqlx-postgres` alone.
+        #
+        # Read out of the Dockerfile rather than duplicated, so changing FEATURES there
+        # cannot silently stop this from checking what ships.
+        run: |
+          set -euo pipefail
+          features=$(sed -nE 's/^ARG FEATURES="([^"]+)".*/\1/p' Dockerfile)
+          if [ -z "${features}" ]; then
+            echo "::error::could not read ARG FEATURES from Dockerfile"
+            exit 1
+          fi
+          echo "release image features: ${features}"
+          cargo check --workspace --features "${features}"
+
       - name: Verify domain layer purity
         run: |
           if grep -rn -E "(sea_orm|axum|aws_sdk|reqwest|moka|crate::server|crate::outbound)" src/domain/; then
@@ -84,7 +129,10 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Docker build (production features)
-        run: docker build --build-arg FEATURES=postgres,aws-secrets,acme .
+        # No `--build-arg FEATURES`: the Dockerfile's `ARG FEATURES` default already is
+        # the release feature set, so passing it here would be a second copy to keep in
+        # sync, and a stale one would smoke-test a set the release never builds.
+        run: docker build .
 
   cargo-clippy:
     name: Cargo Clippy Check
@@ -261,6 +309,17 @@ jobs:
       - name: Fetch Repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
+      - name: Validate .trivyignore.yaml
+        # Before the scan that consumes the file, so a malformed entry fails in seconds
+        # as itself rather than later as a scanner error on an unrelated change.
+        run: |
+          set -eu
+          # apt rather than pip: the runner's PyYAML comes from the distribution, so
+          # this pulls no unpinned dependency into every pull request.
+          python3 -c 'import yaml' 2>/dev/null || sudo apt-get install -y python3-yaml
+          python3 -m unittest discover -s scripts/tests -p 'test_*.py'
+          python3 scripts/check-trivyignore.py .trivyignore.yaml
+
       - name: Setup Helm
         uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
 
@@ -277,6 +336,12 @@ jobs:
           mkdir -p /tmp/rendered
           helm template status-list-server helm/chart -f helm/chart/values.yaml --output-dir /tmp/rendered
 
+      - name: Verify image reference resolution
+        # Rationale and the individual expectations are in the script. It runs here
+        # rather than in a workflow of its own because it asserts against a rendered
+        # chart, which this job has already built.
+        run: bash scripts/verify-image-reference.sh
+
       - name: Run Trivy config scan
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
@@ -289,6 +354,12 @@ jobs:
   kube-linter:
     name: KubeLinter Scan (Helm Chart)
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # For the SARIF upload below. Note this workflow is also called as a reusable
+      # workflow from deploy.yml, and a called workflow can only narrow the caller's
+      # token -- so deploy.yml's `ci` job grants the same scope.
+      security-events: write
 
     steps:
       - name: Fetch Repository
@@ -315,6 +386,29 @@ jobs:
           format: sarif
           config: .kube-linter.yaml
           output-file: kube-linter-results.sarif
+
+      - name: Upload KubeLinter SARIF to code scanning
+        # `if: always()` because the SARIF is most worth having in exactly the run
+        # where the scan failed -- writing a findings file and then discarding it on
+        # the failure path was the original defect. `continue-on-error` because the
+        # upload cannot succeed for a pull request from a fork, where write scopes are
+        # withheld, and a code-scanning outage should not fail a lint job.
+        if: always()
+        continue-on-error: true
+        uses: github/codeql-action/upload-sarif@4187e74d05793876e9989daffde9c3e66b4acd07 # v3
+        with:
+          sarif_file: kube-linter-results.sarif
+          category: kube-linter
+
+      - name: Upload KubeLinter SARIF artifact
+        # Kept alongside the code-scanning upload rather than instead of it: alerts on
+        # a fork pull request go nowhere, and this is the only copy that run keeps.
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: kube-linter-results
+          path: kube-linter-results.sarif
+          if-no-files-found: warn
 
   yaml-lint:
     name: YAML Lint and Format Check
