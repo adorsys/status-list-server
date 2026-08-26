@@ -78,6 +78,33 @@ repository rulesets to require the status check named
 unconventional commit subjects out of protected branches, where they would
 otherwise be ignored by `git-cliff` and `release-plz`.
 
+They must also require **`CI Success`**, and require *only* that check from
+`CI.yml`. The jobs in `CI.yml` deliberately do not depend on one another, so that a
+network-dependent scanner is not the root of every Rust job. The consequence is that
+a failing job no longer cascades: `ci-success` is what aggregates them, and it is the
+only thing that can represent the whole suite to branch protection.
+
+The order matters when changing this. Requiring individual job names *before*
+`ci-success` exists, or removing them *before* `CI Success` is required, both leave a
+window where a failing job blocks nothing:
+
+1. Merge the PR that introduces `ci-success`.
+2. Add **`CI Success`** to the required status checks.
+3. Only then remove the individual `CI.yml` job names from the required list.
+
+`ci-success` fails if any job it needs reported `failure` or `cancelled`. A `skipped`
+job passes, because `cargo-test-doc` legitimately skips on a workspace with no library
+target. A dedicated CI step asserts that every job in `CI.yml` appears in
+`ci-success.needs`, so a new job cannot silently escape the gate.
+
+### Dependabot auto-merge
+
+`auto_merge.yml` approves and enables auto-merge only for patch and minor updates, and
+never for `github-actions` updates. It depends on **"Dismiss stale pull request
+approvals when new commits are pushed"** being enabled on the protected branch. Without
+it, auto-merge armed when the pull request opened stays armed, and a later push merges
+as soon as checks pass — no condition in the workflow can prevent that.
+
 ## How Releases Work
 
 This project uses [release-plz](https://release-plz.dev/) to fully automate versioning and releases. Here is how the process works:

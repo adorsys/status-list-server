@@ -34,22 +34,62 @@ jobs:
           alert-lookup: true
           compat-lookup: true
 
+      # Decided once, here, rather than repeated as an `if:` on each step below -- three
+      # copies of the predicate is three chances for them to disagree, and the approve
+      # step disagreeing with the merge step is what "approved but never merged", or
+      # worse "merged without the intended gate", looks like.
+      #
+      # Auto-merge is limited to patch and minor bumps. `fetch-metadata` already exposes
+      # the semver class and it was not being read, so a *major* upgrade was approved
+      # with GITHUB_TOKEN and merged without anyone reading it. An unknown or empty
+      # update-type is treated as ineligible: this fails closed.
+      #
+      # github-actions updates stay excluded regardless of semver class -- a moved tag
+      # is a supply-chain event, not a version bump.
+      - name: Decide whether this PR may auto-merge
+        id: gate
+        env:
+          ECOSYSTEM: ${{ steps.metadata.outputs.package-ecosystem }}
+          UPDATE_TYPE: ${{ steps.metadata.outputs.update-type }}
+        run: |
+          set -euo pipefail
+          eligible=false
+          case "$ECOSYSTEM" in
+            github-actions)
+              reason="github-actions updates always need manual review"
+              ;;
+            *)
+              case "$UPDATE_TYPE" in
+                version-update:semver-patch|version-update:semver-minor)
+                  eligible=true
+                  reason="${UPDATE_TYPE#version-update:}"
+                  ;;
+                "")
+                  reason="fetch-metadata reported no update-type"
+                  ;;
+                *)
+                  reason="${UPDATE_TYPE#version-update:} needs manual review"
+                  ;;
+              esac
+              ;;
+          esac
+          echo "eligible=${eligible}" >> "$GITHUB_OUTPUT"
+          echo "auto-merge eligible: ${eligible} (${reason})"
+
       - name: Approve the PR
-        if: steps.metadata.outputs.package-ecosystem != 'github-actions'
+        if: steps.gate.outputs.eligible == 'true'
         run: gh pr review --approve "$PR_URL"
         env:
           PR_URL: ${{ github.event.pull_request.html_url }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Enable auto-merge for Dependabot PRs
-        if: steps.metadata.outputs.package-ecosystem != 'github-actions'
+        if: steps.gate.outputs.eligible == 'true'
         run: gh pr merge --auto --squash "$PR_URL"
         env:
-          PR_URL: ${{github.event.pull_request.html_url}}
-          GH_TOKEN: ${{secrets.GITHUB_TOKEN}}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Skip auto-merge for GitHub Actions updates
-        if: steps.metadata.outputs.package-ecosystem == 'github-actions'
-        run: |
-          echo "GitHub Actions update detected - manual review required for security"
-          echo "Skipped auto-merge for dependency fingerprint"
+      - name: Explain why auto-merge was withheld
+        if: steps.gate.outputs.eligible != 'true'
+        run: echo "Left for manual review -- see the eligibility decision above."

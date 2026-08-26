@@ -25,6 +25,15 @@ jobs:
   zizmor-security:
     name: Zizmor Security Check
     runs-on: ubuntu-latest
+    env:
+      # One pin, read by both the gate and its self-test below.
+      #
+      # The action's `version` input defaults to `latest`. On a fail-closed gate that
+      # means an upstream zizmor release can turn every pull request in the repository
+      # red with nothing changed here, at a time nobody chose. Neither Dependabot nor
+      # the action's SHA pin covers this -- the SHA pins the action, not the scanner it
+      # downloads -- so bumping this is a deliberate, reviewed change.
+      ZIZMOR_VERSION: "1.28.0"
 
     steps:
       - name: Fetch Repository
@@ -39,16 +48,33 @@ jobs:
       - name: Run Zizmor
         uses: zizmorcore/zizmor-action@3dc1ecc9bcb9e94e9b2c709687979e1298497054 # v0.6.2
         with:
+          version: ${{ env.ZIZMOR_VERSION }}
           # `.` not `.github/workflows/`: also audits .github/dependabot.yml.
           inputs: .
           persona: regular
           # `known-vulnerable-actions` needs the API; the action supplies the token.
           online-audits: true
-          # SARIF upload would need `security-events: write` on a read-only job.
+          # Annotations, not SARIF: findings anchor on the diff where they are being
+          # introduced. Keeps this job on the workflow default `contents: read`.
           advanced-security: false
           # Mutually exclusive with advanced-security. Without it findings land only in
           # the raw log with no anchors on the diff.
           annotations: true
+
+      # The step above passing means either "the workflows are clean" or "the scanner
+      # stopped failing", and those look identical from here. The self-test separates
+      # them by running the same pinned scanner against a fixture with a known finding
+      # and requiring a non-zero exit. Installed as a CLI because the action deliberately
+      # fails the job on findings, which is the opposite of what this needs to observe.
+      - name: Install zizmor for the self-test
+        if: ${{ !cancelled() }}
+        uses: taiki-e/install-action@c44f6b046f1c29ae5918b1e0bfdbb2f1813836fd # v2.84.1
+        with:
+          tool: zizmor@${{ env.ZIZMOR_VERSION }}
+
+      - name: Assert the scanner still fails on a known finding
+        if: ${{ !cancelled() }}
+        run: bash scripts/zizmor-selftest.sh
 
       # auto_merge.yml suppresses `bot-conditions`, and that suppression silences the
       # audit for whatever the condition later becomes -- so assert the guards it
@@ -60,18 +86,27 @@ jobs:
       - name: Assert dependabot auto-merge keeps its author check
         if: ${{ !cancelled() }}
         run: |
-          condition=$(yq '.jobs.dependabot.if' .github/workflows/auto_merge.yml) || {
-            echo "Could not parse .github/workflows/auto_merge.yml"
-            exit 1
-          }
+          set -euo pipefail
 
+          # `yq` exits 0 and prints "null" for a missing key, so test the value rather
+          # than the exit status -- a renamed job must not read as a passing condition.
+          condition=$(yq '.jobs.dependabot.if' .github/workflows/auto_merge.yml)
+          if [ -z "$condition" ] || [ "$condition" = "null" ]; then
+            echo "::error::no .jobs.dependabot.if in auto_merge.yml -- was the job renamed?"
+            exit 1
+          fi
+
+          # github.actor is asserted too: it is the clause the ignore comment exists
+          # for, so dropping it would leave a suppression that silently hides a genuine
+          # bot-conditions regression if it were ever reintroduced.
           for guard in \
             "github.event.pull_request.user.login == 'dependabot[bot]'" \
+            "github.actor == 'dependabot[bot]'" \
             "github.event.pull_request.head.repo.full_name == github.repository"; do
             case "$condition" in
               *"$guard"*) ;;
               *)
-                echo "auto_merge.yml lost a required guard on its dependabot job:"
+                echo "::error::auto_merge.yml lost a required guard on its dependabot job:"
                 echo "  ${guard}"
                 echo
                 echo "Its '# zizmor: ignore[bot-conditions]' comment assumes github.actor"
@@ -84,7 +119,31 @@ jobs:
             esac
           done
 
-          echo "auto_merge.yml still carries both guards."
+          echo "auto_merge.yml still carries all three guards."
+
+      # `ci-success` gates on a hand-maintained `needs:` list, so a job added here can
+      # otherwise fail while the required check stays green. That is not hypothetical:
+      # `docker-build` was added and missed the list. Compare the two sets instead of
+      # trusting review to catch it.
+      - name: Assert every job is gated by ci-success
+        if: ${{ !cancelled() }}
+        run: |
+          set -euo pipefail
+
+          yq -r '.jobs | keys | .[] | select(. != "ci-success")' \
+            .github/workflows/CI.yml | sort > /tmp/ci-jobs
+          yq -r '.jobs.ci-success.needs[]' \
+            .github/workflows/CI.yml | sort > /tmp/ci-gated
+
+          missing=$(comm -23 /tmp/ci-jobs /tmp/ci-gated)
+
+          if [ -n "$missing" ]; then
+            echo "::error::these CI.yml jobs are not in ci-success.needs, so they do not block merges:"
+            printf '  %s\n' $missing
+            exit 1
+          fi
+
+          echo "every CI.yml job is gated by ci-success."
 
   cargo-fmt:
     name: Cargo Format Check
@@ -167,12 +226,28 @@ jobs:
     steps:
       - name: Fetch Repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Docker Buildx
+        # Needed for the GitHub Actions cache backend below; the default docker driver
+        # cannot export to it.
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
 
       - name: Docker build (production features)
         # No `--build-arg FEATURES`: the Dockerfile's `ARG FEATURES` default already is
         # the release feature set, so passing it here would be a second copy to keep in
         # sync, and a stale one would smoke-test a set the release never builds.
-        run: docker build .
+        #
+        # `--load` is deliberately absent: this only needs to prove the image builds,
+        # and skipping the export keeps the smoke test off the critical path.
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7
+        with:
+          context: .
+          file: ./Dockerfile
+          push: false
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
 
   cargo-clippy:
     name: Cargo Clippy Check
@@ -213,7 +288,8 @@ jobs:
       - name: Install cargo-nextest
         uses: taiki-e/install-action@c44f6b046f1c29ae5918b1e0bfdbb2f1813836fd # v2.84.1
         with:
-          tool: nextest
+          # Same pin as the coverage job below, so both run the same test harness.
+          tool: nextest@0.9.101
 
       - name: Run Cargo Tests
         run: cargo nextest run --workspace --all-targets --all-features
@@ -281,7 +357,7 @@ jobs:
       - name: Install cargo-machete
         uses: taiki-e/install-action@c44f6b046f1c29ae5918b1e0bfdbb2f1813836fd # v2.84.1
         with:
-          tool: cargo-machete
+          tool: cargo-machete@0.9.2
 
       - name: Check for unused dependencies
         run: cargo machete --with-metadata
@@ -324,7 +400,7 @@ jobs:
       - name: Install Typos
         uses: taiki-e/install-action@c44f6b046f1c29ae5918b1e0bfdbb2f1813836fd # v2.84.1
         with:
-          tool: typos-cli
+          tool: typos-cli@1.49.0
 
       - name: run typos
         run: typos
@@ -599,7 +675,9 @@ jobs:
       - name: Install cargo-llvm-cov and cargo-nextest
         uses: taiki-e/install-action@c44f6b046f1c29ae5918b1e0bfdbb2f1813836fd # v2.84.1
         with:
-          tool: cargo-llvm-cov@0.6.16,nextest@0.9.101 # or an version that is working now because of our sha pin 
+          # Both pinned: cargo-llvm-cov and nextest have to agree on the test-runner
+          # interface, so they are bumped together rather than floating independently.
+          tool: cargo-llvm-cov@0.6.16,nextest@0.9.101
 
       - name: Generate code coverage
         run: cargo llvm-cov nextest --workspace --all-features --html --output-dir target/llvm-cov/html
@@ -613,8 +691,17 @@ jobs:
 
   # THE SINGLE REQUIRED STATUS CHECK -- set branch protection to require `CI Success`
   # and nothing else here. The jobs above are unchained, so without this a zizmor
-  # failure leaves every other check green and the PR mergeable. Gating here rather
-  # than on a hand-maintained checks list means a new job cannot escape the gate.
+  # failure leaves every other check green and the PR mergeable.
+  #
+  # `needs:` below IS a hand-maintained list, and a job missing from it is a job that
+  # cannot block a merge. That is not hypothetical -- `docker-build` was added and
+  # missed it. The "Assert every job is gated by ci-success" step in zizmor-security
+  # compares this list against `.jobs` and fails on any omission, so adding a job here
+  # is enforced rather than remembered.
+  #
+  # Rollout order matters; see CONTRIBUTING.md, "Branch Protection". Removing the
+  # individual job names from the required list before `CI Success` is required leaves
+  # a window where nothing blocks.
   ci-success:
     name: CI Success
     if: ${{ !cancelled() }}
@@ -648,10 +735,13 @@ jobs:
           NEEDS: ${{ toJSON(needs) }}
         run: printf '%s\n' "$NEEDS"
 
-      # A GitHub expression, not a shell script parsing `toJSON(needs)` -- no jq, no
-      # runner-image dependency. `skipped` is absent on purpose so skipped jobs pass:
-      # cargo-test-doc is gated on is_lib, which crate_type.yml derives from
-      # `targets[0].kind`, so it can start skipping without anyone touching CI.
+      # A GitHub expression rather than a shell script parsing `toJSON(needs)`.
+      #
+      # `skipped` is absent, so a skipped job passes. The only job that legitimately
+      # skips is cargo-test-doc, gated on `is_lib` from crate_type.yml -- which now
+      # matches "lib" across every workspace target rather than reading `targets[0]`,
+      # so it no longer flips on cargo's target ordering. A skip there means the
+      # workspace genuinely has no lib target, not that detection drifted.
       - name: Fail if any job failed or was cancelled
         if: ${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') }}
         run: |

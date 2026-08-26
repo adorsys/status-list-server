@@ -1,0 +1,18 @@
+# Fixture for scripts/zizmor-selftest.sh. Deliberately vulnerable.
+#
+# Kept outside .github/workflows/ on purpose: it must not be collected by the real
+# audit, and it must never be a runnable workflow. The checkout below omits
+# `persist-credentials: false`, which is the `artipacked` finding the self-test
+# asserts zizmor still reports.
+#
+# Do not "fix" this file. Its findings are the assertion.
+name: zizmor selftest fixture
+on: [push]
+
+permissions: {}
+
+jobs:
+  deliberately-vulnerable:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

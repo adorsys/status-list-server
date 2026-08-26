@@ -18,25 +18,32 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Fetch Repository
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
       - name: Install stable toolchain
         uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1
 
-      - name: Install jql
-        uses: taiki-e/install-action@c44f6b046f1c29ae5918b1e0bfdbb2f1813836fd # v2.84.1
-        with:
-          tool: jql
-
       - name: Searching for lib
+        # Every target of every workspace member, not `targets[0]`. Cargo does not
+        # promise an ordering, so keying on the first target let `is_lib` flip without
+        # anyone touching this file -- and `cargo-test-doc` is gated on it while
+        # `ci-success` treats a skipped job as a pass, so doc tests could silently stop
+        # running with CI still green.
+        #
+        # Matched exactly rather than by substring: `contains(.., 'lib')` also matched
+        # `cdylib` and `rlib`. Uses jq, which is preinstalled on the runner, rather
+        # than pulling an unpinned jql whose query syntax changes across majors.
         id: searching
         run: |
-          result=$(cargo metadata --format-version=1 --no-deps | jql '"packages"|>"targets"<|[0]|>"kind"' | jql '..' -i);
-          echo "targets=$result" >> "$GITHUB_OUTPUT";
-          echo kind of targets $result;
+          set -euo pipefail
+          kinds=$(cargo metadata --format-version=1 --no-deps \
+            | jq -c '[.packages[].targets[].kind[]] | unique')
+          echo "kinds of targets: ${kinds}"
+          echo "is_lib=$(printf '%s' "$kinds" | jq -r 'any(. == "lib") | tostring')" >> "$GITHUB_OUTPUT"
+          echo "is_bin=$(printf '%s' "$kinds" | jq -r 'any(. == "bin") | tostring')" >> "$GITHUB_OUTPUT"
 
     outputs:
-      is_lib: ${{ contains(steps.searching.outputs.targets, 'lib') }}
-      is_bin: ${{ contains(steps.searching.outputs.targets, 'bin') }}
+      is_lib: ${{ steps.searching.outputs.is_lib }}
+      is_bin: ${{ steps.searching.outputs.is_bin }}

@@ -91,7 +91,7 @@ jobs:
       image_ref: ${{ steps.digest.outputs.IMAGE_REF }}
     steps:
       - name: Checkout source code
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           # The build needs the source, not the token. Left persisted it stays in
           # .git/config for every later step, including the Docker build context.
@@ -578,7 +578,7 @@ jobs:
       IMAGE_DIGEST: ${{ needs.build-and-push.outputs.image_digest }}
     steps:
       - name: Checkout source code
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           # Only the Helm chart is needed here; the deploy authenticates to AWS via
           # OIDC, not the checkout token.
