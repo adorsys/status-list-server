@@ -3,7 +3,9 @@ name: status-list-server
 description: Helm chart for deploying status list server on AWS EKS
 type: application
 version: 0.3.0
-appVersion: "1.0.0"
+# Default image tag when statuslist.image.tag and .digest are both empty, so it must
+# match the crate version. CI enforces this.
+appVersion: "1.0.1"
 dependencies:
   - name: postgres
     version: 0.8.2
