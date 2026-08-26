@@ -73,6 +73,8 @@ spec:
           resources:
             {{- toYaml . | nindent 12 }}
           {{- end }}
+          {{- $secretStore := .Values.secretStore | default dict }}
+          {{- $awsSecretBackend := and $secretStore.enabled (eq ($secretStore.provider | default "aws") "aws") }}
           env:
             {{- $env := dict }}
             {{- range $name, $value := .Values.statuslist.env }}
@@ -81,6 +83,8 @@ spec:
             {{- if not (hasKey $env "APP_SERVER__DOMAIN") }}
               {{- if .Values.statuslist.ingress.externalDnsHostname }}
                 {{- $_ := set $env "APP_SERVER__DOMAIN" .Values.statuslist.ingress.externalDnsHostname }}
+              {{- else if .Values.global.domain }}
+                {{- $_ := set $env "APP_SERVER__DOMAIN" .Values.global.domain }}
               {{- else }}
                 {{- $_ := set $env "APP_SERVER__DOMAIN" "localhost" }}
               {{- end }}
@@ -124,7 +128,7 @@ spec:
                 secretKeyRef:
                   name: {{ if .Values.externalSecret.enabled }}{{ .Values.externalSecret.spec.target.name }}{{ else }}statuslist-secret{{ end }}
                   key: postgres-password
-            {{- if .Values.secretStore.enabled }}
+            {{- if $awsSecretBackend }}
             - name: APP_AWS__REGION
               value: {{ .Values.secretStore.aws.region | quote }}
             - name: AWS_SHARED_CREDENTIALS_FILE
@@ -139,7 +143,7 @@ spec:
           volumeMounts:
             - name: tmp
               mountPath: /tmp
-          {{- if .Values.secretStore.enabled }}
+          {{- if $awsSecretBackend }}
             - name: aws-credentials-volume
               mountPath: /home/nobody/.aws
               readOnly: true
@@ -147,7 +151,7 @@ spec:
       volumes:
         - name: tmp
           emptyDir: {}
-      {{- if .Values.secretStore.enabled }}
+      {{- if $awsSecretBackend }}
         - name: aws-credentials-volume
           secret:
             secretName: aws-credentials-secret

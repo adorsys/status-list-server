@@ -272,6 +272,9 @@ jobs:
           helm repo add open-telemetry https://open-telemetry.github.io/opentelemetry-helm-charts
           helm dependency build helm/chart
 
+      - name: Lint Helm chart
+        run: helm lint helm/chart
+
       - name: Render Helm template
         run: |
           mkdir -p /tmp/rendered
@@ -315,6 +318,34 @@ jobs:
           format: sarif
           config: .kube-linter.yaml
           output-file: kube-linter-results.sarif
+
+  helm-values-validation:
+    name: Helm Values Validation (default, aws, local)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Fetch Repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Setup Helm
+        uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+
+      - name: Build Helm dependencies
+        run: |
+          helm repo add dandydeveloper https://dandydeveloper.github.io/charts
+          helm repo add open-telemetry https://open-telemetry.github.io/opentelemetry-helm-charts
+          helm dependency build helm/chart
+
+      - name: Lint and render all value sets
+        run: |
+          set -euo pipefail
+          for values in values.yaml values-aws.yaml values-local.yaml; do
+            echo "==> Linting with ${values}"
+            helm lint helm/chart -f "helm/chart/${values}"
+            echo "==> Rendering with ${values}"
+            helm template statuslist helm/chart -f "helm/chart/${values}" --namespace statuslist \
+              --output-dir "/tmp/rendered-${values%.yaml}" >/dev/null
+          done
 
   yaml-lint:
     name: YAML Lint and Format Check

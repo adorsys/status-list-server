@@ -1,6 +1,3 @@
-global:
-  storageClass: "standard"
-
 statuslist:
   initContainers:
     - name: wait-for-postgres
@@ -43,7 +40,7 @@ postgres:
   persistence:
     enabled: false
     size: 5Gi
-    storageClass: "standard"
+    storageClass: ""
   image:
     registry: docker.io
     repository: postgres

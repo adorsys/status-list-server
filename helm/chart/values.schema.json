@@ -1,0 +1,390 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "additionalProperties": true,
+  "properties": {
+    "global": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "domain": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Chart-wide public domain. Leave empty to use cluster defaults."
+        }
+      }
+    },
+    "statuslist": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "replicaCount": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "service": {
+          "type": "object",
+          "additionalProperties": true,
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            },
+            "type": {
+              "type": "string",
+              "enum": [
+                "ClusterIP",
+                "NodePort",
+                "LoadBalancer",
+                "ExternalName"
+              ]
+            },
+            "port": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 65535
+            },
+            "targetPort": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 65535
+            },
+            "nodePort": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "minimum": 1,
+              "maximum": 65535
+            },
+            "annotations": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        "ingress": {
+          "type": "object",
+          "additionalProperties": true,
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            },
+            "externalDnsHostname": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "pathType": {
+              "type": "string",
+              "enum": [
+                "Prefix",
+                "Exact",
+                "ImplementationSpecific"
+              ]
+            },
+            "tls": {
+              "type": "object",
+              "additionalProperties": true,
+              "properties": {
+                "hosts": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "secretName": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        },
+        "networkPolicy": {
+          "type": "object",
+          "additionalProperties": true,
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            }
+          }
+        }
+      }
+    },
+    "postgres": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "persistence": {
+          "type": "object",
+          "additionalProperties": true,
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            },
+            "size": {
+              "type": "string"
+            },
+            "storageClass": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Empty string uses the cluster default storage class."
+            }
+          }
+        }
+      }
+    },
+    "externalSecret": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        }
+      }
+    },
+    "secretStore": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "provider": {
+          "type": "string",
+          "enum": [
+            "aws",
+            "gcpsm",
+            "azurekv"
+          ],
+          "description": "external-secrets SecretStore provider. The require provider-specific fields are enforced below (allOf)."
+        },
+        "aws": {
+          "type": "object",
+          "additionalProperties": true,
+          "properties": {
+            "region": {
+              "type": "string"
+            }
+          }
+        },
+        "gcpsm": {
+          "type": "object",
+          "additionalProperties": true,
+          "properties": {
+            "projectID": {
+              "type": "string"
+            }
+          }
+        },
+        "azurekv": {
+          "type": "object",
+          "additionalProperties": true,
+          "properties": {
+            "tenantId": {
+              "type": "string"
+            },
+            "vaultUrl": {
+              "type": "string"
+            },
+            "authType": {
+              "type": "string"
+            }
+          }
+        }
+      }
+    },
+    "opentelemetry-collector": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        }
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "secretStore": {
+            "properties": {
+              "enabled": {
+                "const": true
+              }
+            },
+            "required": [
+              "enabled"
+            ]
+          }
+        },
+        "required": [
+          "secretStore"
+        ]
+      },
+      "then": {
+        "properties": {
+          "secretStore": {
+            "required": [
+              "provider"
+            ]
+          }
+        }
+      },
+      "$comment": "An enabled SecretStore must select a provider, and the fields that provider needs."
+    },
+    {
+      "if": {
+        "properties": {
+          "secretStore": {
+            "properties": {
+              "enabled": {
+                "const": true
+              },
+              "provider": {
+                "const": "aws"
+              }
+            },
+            "required": [
+              "enabled",
+              "provider"
+            ]
+          }
+        },
+        "required": [
+          "secretStore"
+        ]
+      },
+      "then": {
+        "properties": {
+          "secretStore": {
+            "required": [
+              "aws"
+            ],
+            "properties": {
+              "aws": {
+                "required": [
+                  "region"
+                ],
+                "properties": {
+                  "region": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "secretStore": {
+            "properties": {
+              "enabled": {
+                "const": true
+              },
+              "provider": {
+                "const": "gcpsm"
+              }
+            },
+            "required": [
+              "enabled",
+              "provider"
+            ]
+          }
+        },
+        "required": [
+          "secretStore"
+        ]
+      },
+      "then": {
+        "properties": {
+          "secretStore": {
+            "required": [
+              "gcpsm"
+            ],
+            "properties": {
+              "gcpsm": {
+                "required": [
+                  "projectID"
+                ],
+                "properties": {
+                  "projectID": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "secretStore": {
+            "properties": {
+              "enabled": {
+                "const": true
+              },
+              "provider": {
+                "const": "azurekv"
+              }
+            },
+            "required": [
+              "enabled",
+              "provider"
+            ]
+          }
+        },
+        "required": [
+          "secretStore"
+        ]
+      },
+      "then": {
+        "properties": {
+          "secretStore": {
+            "required": [
+              "azurekv"
+            ],
+            "properties": {
+              "azurekv": {
+                "required": [
+                  "tenantId",
+                  "vaultUrl"
+                ],
+                "properties": {
+                  "tenantId": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "vaultUrl": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  ]
+}

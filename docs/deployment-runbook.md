@@ -38,13 +38,15 @@ The production deploy command is equivalent to:
 ```bash
 helm upgrade --install statuslist helm/chart \
   --namespace statuslist-production \
-  --create-namespace \
+  -f helm/chart/values-aws.yaml \
   --atomic \
   --wait \
   --timeout 10m \
   --set-string statuslist.image.repository=ghcr.io/adorsys/status-list-server \
   --set-string statuslist.image.tag=0.5.0
 ```
+
+The chart defaults are vendor-neutral; the `values-aws.yaml` overlay restores the AWS/EKS behavior (SecretsManager SecretStore, Route53 DNS provider, the public domain, and the storage class) and is what the production deploy workflow applies.
 
 Configure the GitHub `production` environment with required reviewers so production deploys pause for approval before AWS credentials are requested.
 

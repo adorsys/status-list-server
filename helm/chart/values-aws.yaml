@@ -1,0 +1,48 @@
+# AWS/EKS deployment overlay.
+#
+# The chart defaults are vendor-neutral. This overlay restores the AWS/EKS
+# behavior that was historically baked into values.yaml: the public domain,
+# provider-specific storage class, AWS SecretsManager SecretStore, and AWS
+# Service annotations. Use it with:
+#
+#   helm install statuslist ./helm/chart -f ./helm/chart/values-aws.yaml
+#   helm template ./helm/chart -f ./helm/chart/values-aws.yaml
+#
+# The production deploy workflow (deploy.yml) applies this overlay, so the
+# live EKS deployment keeps the historical AWS behavior.
+#
+# Prerequisites on the cluster:
+#   - external-secrets operator installed with the AWS provider.
+#   - A Secret named `aws-credentials-secret` holding the app's AWS shared
+#     credentials (mounted into the pod at /home/nobody/.aws).
+global:
+  domain: "eudi-adorsys.com"
+
+statuslist:
+  service:
+    # AWS NLB annotations for a LoadBalancer Service, if desired. Uncomment
+    # and switch service.type to LoadBalancer to expose via an AWS NLB.
+    # annotations:
+    #   service.beta.kubernetes.io/aws-load-balancer-type: "nlb"
+    annotations: {}
+  ingress:
+    externalDnsHostname: "statuslist.eudi-adorsys.com"
+    tls:
+      hosts:
+        - "*.eudi-adorsys.com"
+  env:
+    # ACME DNS-01 challenge provider (AWS Route53).
+    APP_SERVER__CERT__DNS__PROVIDER: "route53"
+
+postgres:
+  persistence:
+    storageClass: "high-performance"
+
+secretStore:
+  enabled: true
+  provider: aws
+  aws:
+    region: eu-central-1
+
+externalSecret:
+  enabled: true

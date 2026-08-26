@@ -100,6 +100,7 @@ jobs:
         run: |
           helm upgrade --install ${{ env.HELM_RELEASE_NAME }} helm/chart \
             --namespace ${{ env.HELM_NAMESPACE }} \
+            -f helm/chart/values-aws.yaml \
             --wait \
             --rollback-on-failure \
             --timeout 10m \

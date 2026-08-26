@@ -1,4 +1,12 @@
 {{- if .Values.statuslist.ingress.enabled }}
+{{- $host := .Values.statuslist.ingress.externalDnsHostname | default .Values.global.domain }}
+{{- $tlsHosts := .Values.statuslist.ingress.tls.hosts }}
+{{- /* When no explicit TLS hosts are given, derive a single host from the
+       actual rendered ingress host so the certificate always matches the
+       host that is served, instead of silently using a different domain. */}}
+{{- if and (not $tlsHosts) $host (ne $host "localhost") }}
+  {{- $tlsHosts = list $host }}
+{{- end }}
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
@@ -7,8 +15,8 @@ metadata:
     {{- include "status-list-server-chart.labels" . | nindent 4 }}
   namespace: {{ .Release.Namespace }}
   annotations:
-    {{- if .Values.statuslist.ingress.externalDnsHostname }}
-    external-dns.alpha.kubernetes.io/hostname: {{ .Values.statuslist.ingress.externalDnsHostname }}
+    {{- if $host }}
+    external-dns.alpha.kubernetes.io/hostname: {{ $host }}
     {{- end }}
     {{- if .Values.statuslist.ingress.annotations }}
     {{- toYaml .Values.statuslist.ingress.annotations | nindent 4 }}
@@ -17,8 +25,8 @@ metadata:
 spec:
   ingressClassName: nginx
   rules:
-  {{- if .Values.statuslist.ingress.externalDnsHostname }}
-  - host: {{ .Values.statuslist.ingress.externalDnsHostname }}
+  {{- if $host }}
+  - host: {{ $host }}
   {{- else }}
   - host: localhost
   {{- end }}
@@ -31,10 +39,10 @@ spec:
             name: {{ include "status-list-server-chart.fullname" . }}-service
             port:
               number: {{ .Values.statuslist.service.port }}
-  {{- if .Values.statuslist.ingress.tls.secretName }}
+  {{- if and .Values.statuslist.ingress.tls.secretName $tlsHosts }}
   tls:
   - hosts:
-    {{- range .Values.statuslist.ingress.tls.hosts }}
+    {{- range $tlsHosts }}
     - {{ . | quote }}
     {{- end }}
     secretName: {{ .Values.statuslist.ingress.tls.secretName }}

@@ -1,5 +1,7 @@
 global:
-  storageClass: "high-performance"
+  # Chart-wide public domain. Ingress hosts and the app domain fall back to this.
+  # Set by environment-specific overlays (e.g. values-aws.yaml); empty by default.
+  domain: ""
 
 statuslist:
   enabled: true
@@ -28,6 +30,9 @@ statuslist:
     port: 8081
     targetPort: 8000
     nodePort: null
+    # Provider-specific Service annotations (e.g. AWS NLB annotations) go in
+    # environment overlays, not in defaults.
+    annotations: {}
   ingress:
     enabled: true
     path: /
@@ -38,10 +43,13 @@ statuslist:
       nginx.ingress.kubernetes.io/force-ssl-redirect: "true"
       nginx.ingress.kubernetes.io/proxy-body-size: "10m"
     tls:
-      hosts:
-        - "*.eudi-adorsys.com"
+      # When this list is empty, the ingress host itself is used as the TLS
+      # host (see templates/ingress.yaml). Set explicitly for wildcard or
+      # multi-host certificates.
+      hosts: []
       secretName: statuslist-tls
-    externalDnsHostname: statuslist.eudi-adorsys.com
+    # Defaults to global.domain when unset.
+    externalDnsHostname: ""
   env:
     RUST_LOG: "info"
     POSTGRES_USER: "postgres"
@@ -60,7 +68,7 @@ statuslist:
     # Provider credentials (e.g. APP_SERVER__CERT__DNS__CLOUDFLARE__API_TOKEN, or the
     # APP_SERVER__CERT__DNS__ACMEDNS__ACCOUNTS JSON, which holds every account password)
     # must come from a secret (see externalSecret below), not from plain env values.
-    APP_SERVER__CERT__DNS__PROVIDER: "route53"
+    # Set APP_SERVER__CERT__DNS__PROVIDER in an environment overlay (e.g. "route53" for AWS).
     # Status-list record cache TTL in seconds. "0" disables this cache.
     APP_CACHE__TTL: "300"
     APP_CACHE__MAX_CAPACITY: "1000"
@@ -128,7 +136,8 @@ postgres:
   persistence:
     enabled: true
     size: 10Gi
-    storageClass: high-performance
+    # Empty string uses the cluster default storage class.
+    storageClass: ""
   service:
     type: ClusterIP
     port: 5432
@@ -136,7 +145,11 @@ postgres:
     tag: "18.0"
 
 externalSecret:
-  enabled: true
+  # Disabled by default so the chart is vendor-neutral. When disabled, the
+  # operator provisions the `statuslist-secret` (with key `postgres-password`)
+  # out of band. Environment overlays (e.g. values-aws.yaml) enable this and
+  # pull the password from the provider's secret store.
+  enabled: false
   metadata:
     name: statuslist-external-secret
   spec:
@@ -154,9 +167,11 @@ externalSecret:
           property: POSTGRES_PASSWORD
 
 secretStore:
-  enabled: true
-  aws:
-    region: eu-central-1
+  # Disabled by default so the chart is vendor-neutral. When enabled, the
+  # external-secrets provider is selected via `provider` (aws | gcpsm | azurekv),
+  # rendered by templates/secret-store.yaml, and the matching config block must
+  # be supplied (see values-aws.yaml for an aws example).
+  enabled: false
 
 opentelemetry-collector:
   enabled: true
