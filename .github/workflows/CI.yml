@@ -286,6 +286,26 @@ jobs:
           exit-code: 1
           trivyignores: .trivyignore.yaml
 
+  helm-template-local:
+    name: Helm Template Check (Local Values)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Fetch Repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Setup Helm
+        uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+
+      - name: Build Helm dependencies
+        run: |
+          helm repo add dandydeveloper https://dandydeveloper.github.io/charts
+          helm repo add open-telemetry https://open-telemetry.github.io/opentelemetry-helm-charts
+          helm dependency build helm/chart
+
+      - name: Validate Helm template with local values
+        run: helm template statuslist-local helm/chart -f helm/chart/values-local.yaml --namespace local
+
   kube-linter:
     name: KubeLinter Scan (Helm Chart)
     runs-on: ubuntu-latest
