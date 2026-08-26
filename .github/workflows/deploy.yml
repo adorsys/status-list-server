@@ -81,6 +81,8 @@ jobs:
         uses: azure/setup-kubectl@829323503d1be3d00ca8346e5391ca0b07a9ab0d # v5.0.1
       - name: Install Helm
         uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+        with:
+          version: v4.2.4
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6
         with:
@@ -98,9 +100,8 @@ jobs:
         run: |
           helm upgrade --install ${{ env.HELM_RELEASE_NAME }} helm/chart \
             --namespace ${{ env.HELM_NAMESPACE }} \
-            --create-namespace \
-            --atomic \
             --wait \
+            --rollback-on-failure \
             --timeout 10m \
             --set-string statuslist.image.repository=${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ env.IMAGE_NAME }} \
             --set-string statuslist.image.tag=${{ needs.build-and-push.outputs.deploy_tag }}
