@@ -8,6 +8,12 @@ rule_files:
   - /etc/prometheus/rules/recording.rules.yml
   - /etc/prometheus/rules/alerting.rules.yml
 
+# Route fired alerts to the in-stack Alertmanager (which forwards to Discord).
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets: ['alertmanager:9093']
+
 scrape_configs:
   - job_name: 'status_list_server'
     # For local / non-dockerised development the app runs on the host, so scrape

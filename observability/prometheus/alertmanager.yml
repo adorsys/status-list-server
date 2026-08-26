@@ -22,18 +22,24 @@ route:
 receivers:
   # Resolved notifications default to the lowest-noise receiver.
   - name: 'default'
-    webhook_configs:
-      - url: 'http://localhost:9093/hooks/default'
+    discord_configs:
+      - webhook_url: 'https://discord.com/api/webhooks/1542131196698566746/u4iIymJozjvThThb0MGC6INgWMKeIMpAbCYdFyL8x-61QV3Hq6poM2QOPvux3pRXXOt3'
         send_resolved: true
+        title: '{{ template "discord.default.title" . }}'
+        message: '{{ template "discord.default.message" . }}'
 
   # Page: on-call escalation for the fast-burn / outage alerts.
   - name: 'page'
-    webhook_configs:
-      - url: 'http://localhost:9093/hooks/page'
+    discord_configs:
+      - webhook_url: 'https://discord.com/api/webhooks/1542131196698566746/u4iIymJozjvThThb0MGC6INgWMKeIMpAbCYdFyL8x-61QV3Hq6poM2QOPvux3pRXXOt3'
         send_resolved: true
+        title: '{{ template "discord.default.title" . }}'
+        message: '{{ template "discord.default.message" . }}'
 
   # Warn: async channel for slow-burn and degradation alerts.
   - name: 'warn'
-    webhook_configs:
-      - url: 'http://localhost:9093/hooks/warn'
+    discord_configs:
+      - webhook_url: 'https://discord.com/api/webhooks/1542131196698566746/u4iIymJozjvThThb0MGC6INgWMKeIMpAbCYdFyL8x-61QV3Hq6poM2QOPvux3pRXXOt3'
         send_resolved: true
+        title: '{{ template "discord.default.title" . }}'
+        message: '{{ template "discord.default.message" . }}'
