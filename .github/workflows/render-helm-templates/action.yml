@@ -140,6 +140,43 @@ runs:
         if [ "$(grep -A2 'serviceAccountRef:' /tmp/rendered/wl-azure/status-list-server/templates/secret-store.yaml | grep 'name:' | head -1 | sed -E 's/.*name: ([^ ]+).*/\1/')" = "azure-app-sa" ]; then
           echo "ERROR: ESO serviceAccountRef must be distinct from the application ServiceAccount"; exit 1
         fi
+        # Azure ManagedIdentity path: renders identityId + authType, no serviceAccountRef.
+        helm template status-list-server helm/chart \
+          --set secretStore.provider=azure \
+          --set secretStore.azure.authType=ManagedIdentity \
+          --set secretStore.azure.identityId=00000000-0000-0000-0000-000000000000 \
+          --set secretStore.azure.tenantId=00000000-0000-0000-0000-000000000000 \
+          --set secretStore.azure.vaultUrl=https://example.vault.azure.net \
+          --output-dir /tmp/rendered/azure-mi
+        if ! grep -qE '^\s+authType: "ManagedIdentity"' /tmp/rendered/azure-mi/status-list-server/templates/secret-store.yaml; then
+          echo "ERROR: Azure ManagedIdentity render missing authType=ManagedIdentity"; exit 1
+        fi
+        if ! grep -qE '^\s+identityId:' /tmp/rendered/azure-mi/status-list-server/templates/secret-store.yaml; then
+          echo "ERROR: Azure ManagedIdentity render missing identityId field"; exit 1
+        fi
+        if grep -qE 'serviceAccountRef:' /tmp/rendered/azure-mi/status-list-server/templates/secret-store.yaml; then
+          echo "ERROR: Azure ManagedIdentity render must not include serviceAccountRef"; exit 1
+        fi
+        # Azure ServicePrincipal path: renders authType + authSecretRef, no serviceAccountRef.
+        helm template status-list-server helm/chart \
+          --set secretStore.provider=azure \
+          --set secretStore.azure.authType=ServicePrincipal \
+          --set secretStore.azure.tenantId=00000000-0000-0000-0000-000000000000 \
+          --set secretStore.azure.vaultUrl=https://example.vault.azure.net \
+          --set-string 'secretStore.azure.authSecretRef.clientId.name=azure-client-id' \
+          --set-string 'secretStore.azure.authSecretRef.clientId.key=client-id' \
+          --set-string 'secretStore.azure.authSecretRef.clientSecret.name=azure-client-secret' \
+          --set-string 'secretStore.azure.authSecretRef.clientSecret.key=client-secret' \
+          --output-dir /tmp/rendered/azure-sp
+        if ! grep -qE '^\s+authType: "ServicePrincipal"' /tmp/rendered/azure-sp/status-list-server/templates/secret-store.yaml; then
+          echo "ERROR: Azure ServicePrincipal render missing authType=ServicePrincipal"; exit 1
+        fi
+        if ! grep -qE '^\s+authSecretRef:' /tmp/rendered/azure-sp/status-list-server/templates/secret-store.yaml; then
+          echo "ERROR: Azure ServicePrincipal render missing authSecretRef block"; exit 1
+        fi
+        if grep -qE 'serviceAccountRef:' /tmp/rendered/azure-sp/status-list-server/templates/secret-store.yaml; then
+          echo "ERROR: Azure ServicePrincipal render must not include serviceAccountRef"; exit 1
+        fi
 
         # Negative render tests: invalid provider and empty raw:{} must fail closed.
         if helm template status-list-server helm/chart --set secretStore.provider=invalid >/dev/null 2>&1; then

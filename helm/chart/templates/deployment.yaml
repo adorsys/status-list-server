@@ -31,7 +31,9 @@ spec:
         {{- toYaml . | nindent 8 }}
         {{- end }}
     spec:
+      {{- if or .Values.serviceAccount.create (ne .Values.serviceAccount.name "") }}
       serviceAccountName: {{ include "status-list-server-chart.serviceAccountName" . }}
+      {{- end }}
       {{- with .Values.statuslist.initContainers }}
       initContainers:
         {{- range $ic := . }}
@@ -133,9 +135,10 @@ spec:
                 secretKeyRef:
                   name: {{ include "status-list-server-chart.appSecretName" . }}
                   key: postgres-password
-            {{- if include "status-list-server-chart.appRegion" . }}
+            {{- $appRegion := include "status-list-server-chart.appRegion" . }}
+            {{- if and (eq .Values.secretStore.provider "aws") $appRegion }}
             - name: APP_AWS__REGION
-              value: {{ include "status-list-server-chart.appRegion" . | quote }}
+              value: {{ $appRegion | quote }}
             {{- end }}
             {{- if .Values.statuslist.aws.mountCredentials }}
             - name: AWS_SHARED_CREDENTIALS_FILE

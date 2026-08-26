@@ -213,7 +213,7 @@ The chart now defaults to the ESO-mounted static-credential path (`statuslist.aw
 3. Flip to Workload Identity: set `statuslist.aws.mountCredentials=false`.
 4. After verification, delete the mounted `aws-credentials-secret` and any legacy static AWS GitHub secrets.
 
-For production, the deploy workflow applies [`values-production.yaml`](./chart/values-production.yaml), which opts into Workload Identity by wiring the application ServiceAccount IRSA annotation and setting `statuslist.aws.mountCredentials=false`. Update the `eks.amazonaws.com/role-arn` in that file to the provisioned IRSA role **before** the first Workload Identity deploy, otherwise the deployment would have no AWS credentials.
+For production, the deploy workflow applies [`values-production.yaml`](./chart/values-production.yaml), which currently keeps the chart default: **ESO-mounted credentials** (`statuslist.aws.mountCredentials=true`). No Workload Identity / IRSA annotation is required today; External Secrets Operator provisions the `aws-credentials-secret` that is mounted under `/home/nobody/.aws`. Migrating production to Workload Identity / IRSA is the documented opt-in step above — wire the `eks.amazonaws.com/role-arn` annotation and set `statuslist.aws.mountCredentials=false` in `values-production.yaml` **only after** the IRSA role is provisioned, otherwise the next deploy would have no AWS credentials.
 
 ## Production Deployment Instructions
 

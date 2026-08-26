@@ -141,7 +141,11 @@ statuslist:
 serviceAccount:
   create: true
   name: "" # default: fullname (via _helpers.tpl)
-  automountServiceAccountToken: true
+  # Default false: the application does not need to call the Kubernetes API, so do not
+  # mount the SA bearer token (NSA/CISA Kubernetes hardening, CIS Benchmark 5.1.6).
+  # This does NOT break Workload Identity — IRSA / GCP WI / Azure WI use projected OIDC
+  # tokens injected by the cloud admission webhook, independent of this setting.
+  automountServiceAccountToken: false
   annotations: {} # e.g. eks.amazonaws.com/role-arn for EKS IRSA
   labels: {}
 
@@ -161,6 +165,9 @@ autoscaling:
 podDisruptionBudget:
   enabled: false
   # Set exactly one of minAvailable / maxUnavailable (int, percentage string, or null).
+  # WARNING: must be < replicaCount (or < autoscaling.minReplicas when HPA is enabled).
+  # Setting minAvailable equal to or greater than the replica count blocks ALL voluntary
+  # pod evictions (node drains, cluster upgrades) indefinitely. Prefer maxUnavailable.
   minAvailable: 1
   maxUnavailable: null
 
@@ -240,6 +247,8 @@ secretStore:
     identityId: ""
     serviceAccountRef:
       name: "" # e.g. eso-controller-sa (WorkloadIdentity) bound to the ESO identity
+      # namespace: should match the External Secrets Operator controller namespace.
+      # Leave empty when ESO is deployed in the same namespace as this release (the default).
       namespace: ""
     authSecretRef: {}
   # Full ESO provider spec passthrough for unsupported providers (when provider=raw).

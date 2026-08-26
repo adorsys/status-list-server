@@ -73,7 +73,7 @@
         "aws": {
           "type": "object",
           "properties": {
-            "service": { "type": "string" },
+            "service": { "type": "string", "enum": ["SecretsManager", "ParameterStore"] },
             "region": { "type": "string" }
           }
         },

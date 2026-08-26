@@ -74,17 +74,15 @@ validates externalSecret.spec.target.name against it at render time.
 {{- end }}
 
 {{/*
-Effective AWS region for the application (renders APP_AWS__REGION).
-Preference: explicit statuslist.aws.region, then legacy secretStore.aws.region
-(upgrade-compatible fallback), then a final default so new installs keep working.
+Effective AWS region for the application (renders APP_AWS__REGION for the AWS secretStore
+provider). Preference: explicit statuslist.aws.region, then the legacy secretStore.aws.region
+(upgrade-compatible fallback). Returns empty when neither is set, so APP_AWS__REGION is opt-in
+(explicitly configured) rather than injected unconditionally for non-AWS providers.
 */}}
 {{- define "status-list-server-chart.appRegion" -}}
 {{- $r := .Values.statuslist.aws.region }}
 {{- if not $r }}
 {{- $r = .Values.secretStore.aws.region }}
-{{- end }}
-{{- if not $r }}
-{{- $r = "eu-central-1" }}
 {{- end }}
 {{- $r }}
 {{- end }}
