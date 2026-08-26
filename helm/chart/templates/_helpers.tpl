@@ -63,9 +63,11 @@ Create the name of the service account to use
 {{- end }}
 
 {{/*
-Database port helper: returns the configured database port from env or default
+Database port helper: returns the configured database port from env.
+Note: APP_DATABASE__PORT is required by deployment.yaml; this helper
+assumes the value exists and does not provide a default.
 */}}
 {{- define "status-list-server-chart.dbPort" -}}
 {{- $env := .Values.statuslist.env | default dict }}
-{{- get $env "APP_DATABASE__PORT" | default "5432" }}
+{{- get $env "APP_DATABASE__PORT" }}
 {{- end }}

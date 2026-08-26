@@ -718,11 +718,6 @@ impl DatabaseConfig {
                 .name
                 .as_deref()
                 .is_some_and(|value| !value.trim().is_empty())
-            || self.port.is_some()
-            || self
-                .query
-                .as_deref()
-                .is_some_and(|value| !value.trim().is_empty())
     }
 
     /// Resolve the database connection string from either the backward-compatible

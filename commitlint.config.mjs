@@ -17,4 +17,8 @@ export default {
   rules: {
     "type-enum": [2, "always", allowedTypes],
   },
+  ignores: [
+    // Ignore merge commits (e.g., "Merge branch 'develop' into ...")
+    (message) => message.startsWith("Merge "),
+  ],
 };
