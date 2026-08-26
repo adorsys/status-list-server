@@ -98,28 +98,37 @@ FEATURES="mysql,aws-secrets,acme" docker compose --profile mysql up --build
 
 ## Cargo Feature Matrix
 
-The crate uses modular Cargo feature flags to gate optional production backend drivers:
+The crate uses modular Cargo feature flags to compile optional production backend drivers and secret managers:
 
-| Feature       | Description                                                             | Default    |
-| ------------- | ----------------------------------------------------------------------- | ---------- |
-| `memory`      | In-memory repositories, TTL cache, and store-based certificate storage. | ✅ Default |
-| `postgres`    | SeaORM PostgreSQL database driver.                                      | ❌ Opt-in  |
-| `sqlite`      | SeaORM SQLite database driver.                                          | ❌ Opt-in  |
-| `mysql`       | SeaORM MySQL database driver.                                           | ❌ Opt-in  |
-| `aws-secrets` | Route53 DNS-01, and AWS Secrets Manager drivers.                        | ❌ Opt-in  |
-| `acme`        | ACME DNS-01 certificate manager driver.                                 | ❌ Opt-in  |
+| Feature       | Description                                                                     | Default    |
+| ------------- | ------------------------------------------------------------------------------- | ---------- |
+| `memory`      | In-memory repositories, TTL cache (Moka), and store-based certificate storage. | ✅ Default |
+| `postgres`    | SeaORM PostgreSQL database driver.                                              | ❌ Opt-in  |
+| `sqlite`      | SeaORM SQLite database driver.                                                  | ❌ Opt-in  |
+| `mysql`       | SeaORM MySQL database driver.                                                   | ❌ Opt-in  |
+| `acme`        | ACME DNS-01 certificate manager driver (`instant-acme`, `rcgen`).               | ❌ Opt-in  |
+| `aws-secrets` | Route53 DNS-01 challenge driver and AWS Secrets Manager integration.            | ❌ Opt-in  |
+| `vault`       | HashiCorp Vault / OpenBao secrets backend integration.                          | ❌ Opt-in  |
+| `gcp-secrets` | GCP Secret Manager secrets driver and Google Cloud DNS integration.             | ❌ Opt-in  |
+| `azure-kv`    | Azure Key Vault secrets driver and Azure DNS integration.                       | ❌ Opt-in  |
 
-To build with specific backend drivers, pass the matching feature flag(s):
+To build or run with specific backend drivers, pass the matching feature flag(s):
 
 ```bash
-# Run with PostgreSQL support available
+# Run with PostgreSQL database support
 cargo run --features postgres
+
+# Run with SQLite database support
+cargo run --features sqlite
 
 # Run with AWS and ACME production integrations
 cargo run --features postgres,aws-secrets,acme
+
+# Run with HashiCorp Vault integration
+cargo run --features postgres,vault
 ```
 
-For deployment guidance and backend tradeoffs, see [`docs/database-backends.md`](docs/database-backends.md).
+For detailed tradeoffs and operational recommendations, see [`docs/database-backends.md`](docs/database-backends.md) and [`docs/secrets-backends.md`](docs/secrets-backends.md).
 
 ## API Documentation
 
