@@ -61,6 +61,21 @@ runs:
         if ! grep -q 'aws-credentials-volume' /tmp/rendered/legacy-creds/status-list-server/templates/deployment.yaml; then
           echo "ERROR: mountCredentials=true must render the aws-credentials-volume"; exit 1
         fi
+        # Full wiring: mountCredentials=true must ALSO render the ExternalSecret that creates
+        # "aws-credentials-secret" (the volume's secret), with credentials + config keys, so a
+        # first release never mounts a Secret nothing creates.
+        if ! grep -q 'name: statuslist-external-secret-aws-credentials' /tmp/rendered/legacy-creds/status-list-server/templates/external-secrets.yaml; then
+          echo "ERROR: mountCredentials=true must render the aws-credentials ExternalSecret"; exit 1
+        fi
+        if ! grep -qE 'name: aws-credentials-secret' /tmp/rendered/legacy-creds/status-list-server/templates/external-secrets.yaml; then
+          echo "ERROR: aws-credentials ExternalSecret must target aws-credentials-secret"; exit 1
+        fi
+        if ! grep -A2 'secretKey: credentials' /tmp/rendered/legacy-creds/status-list-server/templates/external-secrets.yaml | grep -q 'remoteRef'; then
+          echo "ERROR: aws-credentials ExternalSecret missing credentials remoteRef"; exit 1
+        fi
+        if ! grep -A2 'secretKey: config' /tmp/rendered/legacy-creds/status-list-server/templates/external-secrets.yaml | grep -q 'remoteRef'; then
+          echo "ERROR: aws-credentials ExternalSecret missing config remoteRef"; exit 1
+        fi
         # Each advertised provider renders its own SecretStore provider body.
         if ! grep -qE '^\s+vault:' /tmp/rendered/vault/status-list-server/templates/secret-store.yaml; then
           echo "ERROR: vault provider SecretStore missing vault block"; exit 1

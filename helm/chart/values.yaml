@@ -95,6 +95,18 @@ statuslist:
     # to false and attach the cloud role annotation via serviceAccount.annotations, then the app
     # uses ambient credentials instead of mounted files.
     mountCredentials: true
+    # When mountCredentials=true and externalSecret.enabled (the default ESO path), the chart also
+    # renders a second ExternalSecret that provisions "aws-credentials-secret" — the exact Secret
+    # the Deployment's credential volume references (see deployment.yaml). Without it the Pod could
+    # never mount that volume and would stay unready. The remote source holds the AWS shared
+    # "credentials" and "config" file contents.
+    credentialsSecret:
+      # Remote key in the configured SecretStore that holds both AWS shared files.
+      remoteKey: "statuslist-aws-credentials"
+      # Property within remoteKey holding the AWS shared credentials file (INI: [default] ...).
+      credentialsProperty: "CREDENTIALS"
+      # Property within remoteKey holding the AWS shared config file.
+      configProperty: "CONFIG"
     # Plain (non-secret) AWS region. APP_AWS__REGION is rendered only when an effective
     # region is explicitly configured. Leave empty (default) so the application does not
     # override the AWS SDK's instance-metadata region discovery (recommended for

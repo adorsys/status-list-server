@@ -22,6 +22,14 @@
           "type": "object",
           "properties": {
             "mountCredentials": { "type": "boolean" },
+            "credentialsSecret": {
+              "type": "object",
+              "properties": {
+                "remoteKey": { "type": "string" },
+                "credentialsProperty": { "type": "string" },
+                "configProperty": { "type": "string" }
+              }
+            },
             "region": { "type": "string" }
           }
         },

@@ -72,6 +72,10 @@ statuslist:
   aws:
     mountCredentials: true    # default: mount the ESO-provisioned aws-credentials-secret under /home/nobody/.aws
     region: ""                # plain, non-secret; renders APP_AWS__REGION
+    credentialsSecret:
+      remoteKey: "statuslist-aws-credentials"   # SecretStore key holding both AWS shared files
+      credentialsProperty: "CREDENTIALS"        # property in remoteKey with the credentials file
+      configProperty: "CONFIG"                  # property in remoteKey with the config file
 ```
 
 `statuslist.aws.region` is a plain (non-secret) value; `APP_AWS__REGION` is rendered whenever an effective region is set, independent of `secretStore.provider` and `mountCredentials`.
@@ -80,7 +84,11 @@ statuslist:
 
 **Upgrade compatibility:** The effective `APP_AWS__REGION` resolves as `statuslist.aws.region`, falling back to the legacy `secretStore.aws.region` and then `eu-central-1`. Installations that previously set only `secretStore.aws.region` keep that region for the application across upgrade.
 
-When `statuslist.aws.mountCredentials=true` (the default), the operator (or the ESO `ExternalSecret`) must provide an `aws-credentials-secret` containing the AWS credentials file; the chart mounts it at `/home/nobody/.aws` and sets `AWS_SHARED_CREDENTIALS_FILE` / `AWS_CONFIG_FILE`.
+When `statuslist.aws.mountCredentials=true` (the default) **and** `externalSecret.enabled=true` (the default ESO path), the chart itself renders a second `ExternalSecret` that provisions `aws-credentials-secret` — the exact Secret the Deployment's credential volume references. It synchronizes two keys into that Secret:
+- `credentials` ← `remoteKey`/`credentialsProperty` (the AWS shared credentials file, INI format, e.g. `[default]\naws_access_key_id=...\naws_secret_access_key=...`)
+- `config` ← `remoteKey`/`configProperty` (the AWS shared config file)
+
+The chart mounts that Secret at `/home/nobody/.aws` and sets `AWS_SHARED_CREDENTIALS_FILE` / `AWS_CONFIG_FILE`. Because the chart now owns provisioning of `aws-credentials-secret`, a first release never mounts a Secret that nothing created. In the no-ESO fallback mode (`externalSecret.enabled=false`), the mounted path is not wired automatically — operators must create `aws-credentials-secret` themselves or use Workload Identity.
 
 ### Least-privilege IAM policy for the application role
 
@@ -210,12 +218,12 @@ When `autoscaling.enabled=true` the Deployment's `replicas` field is omitted (HP
 
 The chart now defaults to the ESO-mounted static-credential path (`statuslist.aws.mountCredentials=true`, the `aws-credentials-secret`). Moving to Workload Identity / IRSA is an opt-in migration:
 
-1. Ensure the default ESO path works: `externalSecret.enabled=true` (or an operator-created secret) provides the `aws-credentials-secret` mounted under `/home/nobody/.aws`.
+1. Ensure the default ESO path works: `externalSecret.enabled=true` — the chart's `statuslist-external-secret-aws-credentials` ExternalSecret provisions `aws-credentials-secret` (holding `credentials` + `config`), which is mounted under `/home/nobody/.aws`.
 2. Configure Workload Identity: attach the role annotation via `serviceAccount.annotations` (e.g. `eks.amazonaws.com/role-arn` for EKS IRSA).
 3. Flip to Workload Identity: set `statuslist.aws.mountCredentials=false`.
 4. After verification, delete the mounted `aws-credentials-secret` and any legacy static AWS GitHub secrets.
 
-For production, the deploy workflow applies [`values-production.yaml`](./chart/values-production.yaml), which currently keeps the chart default: **ESO-mounted credentials** (`statuslist.aws.mountCredentials=true`). No Workload Identity / IRSA annotation is required today; External Secrets Operator provisions the `aws-credentials-secret` that is mounted under `/home/nobody/.aws`. Migrating production to Workload Identity / IRSA is the documented opt-in step above — wire the `eks.amazonaws.com/role-arn` annotation and set `statuslist.aws.mountCredentials=false` in `values-production.yaml` **only after** the IRSA role is provisioned, otherwise the next deploy would have no AWS credentials.
+For production, the deploy workflow applies [`values-production.yaml`](./chart/values-production.yaml), which currently keeps the chart default: **ESO-mounted credentials** (`statuslist.aws.mountCredentials=true`). No Workload Identity / IRSA annotation is required today; the chart's `statuslist-external-secret-aws-credentials` ExternalSecret provisions the `aws-credentials-secret` that is mounted under `/home/nobody/.aws`. Migrating production to Workload Identity / IRSA is the documented opt-in step above — wire the `eks.amazonaws.com/role-arn` annotation and set `statuslist.aws.mountCredentials=false` in `values-production.yaml` **only after** the IRSA role is provisioned, otherwise the next deploy would have no AWS credentials.
 
 ## Credential Exposure Model
 
