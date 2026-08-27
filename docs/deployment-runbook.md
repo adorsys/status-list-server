@@ -25,11 +25,11 @@ The vulnerability gate blocks on any HIGH or CRITICAL finding that survives the 
 
 The release workflow publishes **5 multi-arch image variants** with distinct suffixes for different cloud providers and secret storage models. See the image variant matrix in `values.yaml` for the full description of each variant.
 
-| Trigger              | Image Tags                                                                | Applied                |
-| -------------------- | ------------------------------------------------------------------------- | ---------------------- |
-| Manual dispatch      | `sha-<short_sha>-<variant>`                                               | At build               |
-| Release tag `v*.*.*` | `sha-<short_sha>-<variant>`                                               | At build               |
-| Release tag `v*.*.*` | `<version>-<variant>`, `<major>.<minor>-<variant>`, `latest-<variant>`      | After the scan passes  |
+| Trigger              | Image Tags                                                                 | Applied                 |
+| -------------------- | -------------------------------------------------------------------------- | ----------------------- |
+| Manual dispatch      | `sha-<short_sha>-<variant>`                                                | At build                |
+| Release tag `v*.*.*` | `sha-<short_sha>-<variant>`                                                | At build                |
+| Release tag `v*.*.*` | `<version>-<variant>`, `<major>.<minor>-<variant>`, `latest-<variant>`       | After the scan passes   |
 
 Where `<variant>` is one of: `aws`, `gcp`, `azure`, `vault`, `fscert`.
 
