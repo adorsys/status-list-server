@@ -25,11 +25,11 @@ The vulnerability gate blocks on any HIGH or CRITICAL finding that survives the 
 
 The release workflow publishes **5 multi-arch image variants** with distinct suffixes for different cloud providers and secret storage models. See the image variant matrix in `values.yaml` for the full description of each variant.
 
-| Trigger              | Image Tags                                                               | Applied               |
-| -------------------- | ------------------------------------------------------------------------ | --------------------- |
-| Manual dispatch      | `sha-<short_sha>-<variant>`                                              | At build              |
-| Release tag `v*.*.*` | `sha-<short_sha>-<variant>`                                              | At build              |
-| Release tag `v*.*.*` | `<version>-<variant>`, `<major>.<minor>-<variant>`, `latest-<variant>` | After the scan passes |
+| Trigger              | Image Tags                                                                | Applied                |
+| -------------------- | ------------------------------------------------------------------------- | ---------------------- |
+| Manual dispatch      | `sha-<short_sha>-<variant>`                                               | At build               |
+| Release tag `v*.*.*` | `sha-<short_sha>-<variant>`                                               | At build               |
+| Release tag `v*.*.*` | `<version>-<variant>`, `<major>.<minor>-<variant>`, `latest-<variant>`      | After the scan passes  |
 
 Where `<variant>` is one of: `aws`, `gcp`, `azure`, `vault`, `fscert`.
 
@@ -48,13 +48,13 @@ Release tags are applied by the `promote-tags` job using `docker buildx imagetoo
 
 Choose the variant that matches your cloud provider and secret storage model:
 
-| Variant   | Best For                            | Required Infrastructure                   |
-| --------- | ----------------------------------- | ----------------------------------------- |
-| `-aws`    | AWS EKS deployments                 | AWS Secrets Manager, Route53 DNS          |
-| `-gcp`    | GCP GKE deployments                 | GCP Secret Manager, Cloud DNS             |
-| `-azure`  | Azure AKS deployments               | Azure Key Vault, Azure DNS              |
-| `-vault`  | Multi-cloud or on-prem              | HashiCorp Vault / OpenBao cluster       |
-| `-fscert` | Air-gapped/constrained environments | Filesystem-mounted certificates and keys |
+| Variant   | Best For                            | Required Infrastructure                    |
+| --------- | ----------------------------------- | ------------------------------------------ |
+| `-aws`    | AWS EKS deployments                 | AWS Secrets Manager, Route53 DNS           |
+| `-gcp`    | GCP GKE deployments                 | GCP Secret Manager, Cloud DNS              |
+| `-azure`  | Azure AKS deployments               | Azure Key Vault, Azure DNS                 |
+| `-vault`  | Multi-cloud or on-prem              | HashiCorp Vault / OpenBao cluster          |
+| `-fscert` | Air-gapped/constrained environments | Filesystem-mounted certificates and keys   |
 
 To select a variant, set the image tag with the appropriate suffix in your Helm values or deployment command:
 
