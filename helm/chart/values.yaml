@@ -349,6 +349,14 @@ redis-ha:
         service.beta.kubernetes.io/aws-load-balancer-type: "nlb"
         external-dns.alpha.kubernetes.io/hostname: redis.eudi-adorsys.com
         external-dns.alpha.kubernetes.io/delete: "true"
+  # TLS certificate sync CronJob (redis-ha-cert-sync.yaml). The sync reads the
+  # source certificate secret (redis-ha.tls.secretName) and mirrors it into the
+  # HAProxy TLS secret (redis-ha.haproxy.tls.secretName). The kubectl image used by
+  # the job is configurable here.
+  certSync:
+    image:
+      repository: bitnami/kubectl
+      tag: "1.31"
 
 opentelemetry-collector:
   enabled: true

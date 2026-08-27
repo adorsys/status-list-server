@@ -112,7 +112,7 @@
         },
         "raw": {
           "type": "object",
-          "description": "Full ESO provider spec passthrough. Must include a top-level 'provider' key when secretStore.provider=raw; render-time validation rejects an empty/raw-only object."
+          "description": "Full ESO provider spec passthrough for unsupported providers (secretStore.provider=raw). Holds ONLY the concrete provider body rendered directly under spec.provider (no extra top-level 'provider' key), e.g. { webhook: { url: '...' } }. Render-time validation rejects an empty/raw-only object to avoid emitting an insecure SecretStore."
         }
       }
     },

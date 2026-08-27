@@ -18,6 +18,13 @@ DNS / LB propagation is not instantaneous.
 {{- $redisHA := index .Values "redis-ha" | default dict -}}
 {{- $haproxy := index $redisHA "haproxy" | default dict -}}
 {{- $haproxyTls := index $haproxy "tls" | default dict -}}
+{{- $redisTls := index $redisHA "tls" | default dict -}}
+{{- $sourceSecret := default "statuslist-tls" $redisTls.secretName -}}
+{{- $targetSecret := default "statuslist-haproxy-tls" $haproxyTls.secretName -}}
+{{- $pemKey := default "redis.pem" $haproxyTls.keyName -}}
+{{- $certSync := index $redisHA "certSync" | default dict -}}
+{{- $certSyncImage := index $certSync "image" | default dict -}}
+{{- $kubectlImage := printf "%s:%s" (default "bitnami/kubectl" $certSyncImage.repository) (default "1.31" $certSyncImage.tag) -}}
 {{- if and (eq (default false (index $redisHA "enabled")) true) (eq (default true (index $haproxy "enabled")) true) (eq (default false (index $haproxyTls "enabled")) true) }}
 ---
 apiVersion: v1
@@ -40,13 +47,13 @@ rules:
   - apiGroups: [""]
     resources: ["secrets"]
     resourceNames:
-      - statuslist-tls
+      - {{ $sourceSecret }}
     verbs: ["get"]
   # The HAProxy TLS secret is the only one the job creates/updates/patches.
   - apiGroups: [""]
     resources: ["secrets"]
     resourceNames:
-      - statuslist-haproxy-tls
+      - {{ $targetSecret }}
     verbs: ["get", "create", "update", "patch"]
   - apiGroups: ["apps"]
     resources: ["deployments"]
@@ -103,7 +110,7 @@ spec:
               type: RuntimeDefault
           containers:
             - name: redis-cert-sync
-              image: bitnami/kubectl:1.31
+              image: {{ $kubectlImage }}
               imagePullPolicy: IfNotPresent
               resources:
                 requests:
@@ -133,29 +140,29 @@ spec:
                   TMP_DIR="$(mktemp -d)"
                   trap 'rm -rf "$TMP_DIR"' EXIT
 
-                  echo "Fetching base certificate from secret statuslist-tls in namespace ${NS}..."
-                  kubectl get secret statuslist-tls -n "${NS}" -o jsonpath='{.data.tls\.crt}' | base64 -d > "${TMP_DIR}/tls.crt"
-                  kubectl get secret statuslist-tls -n "${NS}" -o jsonpath='{.data.tls\.key}' | base64 -d > "${TMP_DIR}/tls.key"
+                  echo "Fetching base certificate from secret {{ $sourceSecret }} in namespace ${NS}..."
+                  kubectl get secret {{ $sourceSecret }} -n "${NS}" -o jsonpath='{.data.tls\.crt}' | base64 -d > "${TMP_DIR}/tls.crt"
+                  kubectl get secret {{ $sourceSecret }} -n "${NS}" -o jsonpath='{.data.tls\.key}' | base64 -d > "${TMP_DIR}/tls.key"
 
-                  cat "${TMP_DIR}/tls.crt" "${TMP_DIR}/tls.key" > "${TMP_DIR}/redis.pem"
+                  cat "${TMP_DIR}/tls.crt" "${TMP_DIR}/tls.key" > "${TMP_DIR}/{{ $pemKey }}"
 
-                  # If the HAProxy secret exists, compare the current redis.pem with the new one.
-                  if kubectl get secret statuslist-haproxy-tls -n "${NS}" >/dev/null 2>&1; then
-                    echo "Existing statuslist-haproxy-tls secret found, comparing redis.pem..."
-                    kubectl get secret statuslist-haproxy-tls -n "${NS}" -o jsonpath='{.data.redis\.pem}' | base64 -d > "${TMP_DIR}/existing-redis.pem" || true
+                  # If the HAProxy secret exists, compare the current pem with the new one.
+                  if kubectl get secret {{ $targetSecret }} -n "${NS}" >/dev/null 2>&1; then
+                    echo "Existing {{ $targetSecret }} secret found, comparing {{ $pemKey }}..."
+                    kubectl get secret {{ $targetSecret }} -n "${NS}" -o jsonpath='{.data.{{ replace "." "\\." $pemKey }}}' | base64 -d > "${TMP_DIR}/existing-pem" || true
 
-                    if [ -s "${TMP_DIR}/existing-redis.pem" ] && cmp -s "${TMP_DIR}/redis.pem" "${TMP_DIR}/existing-redis.pem"; then
+                    if [ -s "${TMP_DIR}/existing-pem" ] && cmp -s "${TMP_DIR}/{{ $pemKey }}" "${TMP_DIR}/existing-pem"; then
                       echo "Redis HAProxy certificate is already up to date. No changes applied."
                       exit 0
                     fi
                   else
-                    echo "statuslist-haproxy-tls secret does not exist yet. It will be created."
+                    echo "{{ $targetSecret }} secret does not exist yet. It will be created."
                   fi
 
-                  echo "Applying updated statuslist-haproxy-tls secret..."
-                  kubectl create secret generic statuslist-haproxy-tls \
+                  echo "Applying updated {{ $targetSecret }} secret..."
+                  kubectl create secret generic {{ $targetSecret }} \
                     -n "${NS}" \
-                    --from-file=redis.pem="${TMP_DIR}/redis.pem" \
+                    --from-file={{ $pemKey }}="${TMP_DIR}/{{ $pemKey }}" \
                     --dry-run=client -o yaml | kubectl apply -f -
 
                   echo "Redis HAProxy TLS secret synced successfully. Restarting HAProxy deployment to pick up new certificate..."
