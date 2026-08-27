@@ -215,7 +215,7 @@ runs:
         # Contradictory modes: ESO disabled but SecretStore enabled must not render a SecretStore.
         if helm template status-list-server helm/chart \
             --set externalSecret.enabled=false \
-            --set secretStore.enabled=true 2>/dev/null | grep -q "kind: SecretStore"; then
+            --set secretStore.enabled=true 2>/dev/null | grep "kind: SecretStore" >/dev/null; then
           echo "ERROR: no-ESO mode must not render a SecretStore CR"; exit 1
         fi
         # Inverse: an ExternalSecret must not render without a SecretStore (dangling secretStoreRef).
@@ -251,7 +251,7 @@ runs:
             --set podDisruptionBudget.enabled=true \
             --set podDisruptionBudget.minAvailable=0 \
             --set podDisruptionBudget.maxUnavailable=null 2>/dev/null \
-          | grep -qE '^\s+minAvailable: 0$'; then
+          | grep -E '^\s+minAvailable: 0$' >/dev/null; then
           echo "ERROR: PDB with minAvailable: 0 must render minAvailable: 0 (explicit zero preserved)"; exit 1
         fi
         # Conversely an explicit maxUnavailable: 0 must render as maxUnavailable: 0.
@@ -259,7 +259,7 @@ runs:
             --set podDisruptionBudget.enabled=true \
             --set podDisruptionBudget.minAvailable=null \
             --set podDisruptionBudget.maxUnavailable=0 2>/dev/null \
-          | grep -qE '^\s+maxUnavailable: 0$'; then
+          | grep -E '^\s+maxUnavailable: 0$' >/dev/null; then
           echo "ERROR: PDB with maxUnavailable: 0 must render maxUnavailable: 0 (explicit zero preserved)"; exit 1
         fi
 
@@ -319,24 +319,24 @@ runs:
           echo "ERROR: externalSecret.spec.target.name other than statuslist-secret should fail"; exit 1
         fi
         # In ESO mode the ExternalSecret target name must equal the app/PostgreSQL/Redis secret name.
-        if ! helm template status-list-server helm/chart 2>/dev/null | grep -A1 '^  target:' | grep -q 'name: statuslist-secret'; then
+        if ! helm template status-list-server helm/chart 2>/dev/null | grep -A1 '^  target:' | grep 'name: statuslist-secret' >/dev/null; then
           echo "ERROR: ExternalSecret target.name must be statuslist-secret"; exit 1
         fi
         # NetworkPolicy is opt-in: the default must NOT render a NetworkPolicy (an open
         # port-only ingress rule would equal no ingress restriction).
-        if helm template status-list-server helm/chart 2>/dev/null | grep -q 'kind: NetworkPolicy'; then
+        if helm template status-list-server helm/chart 2>/dev/null | grep 'kind: NetworkPolicy' >/dev/null; then
           echo "ERROR: default render must NOT emit a NetworkPolicy (networkPolicy.enabled defaults to false)"; exit 1
         fi
         # When enabled, internal egress must be scoped to the target pods, not any pod.
         if ! helm template status-list-server helm/chart \
             --set statuslist.networkPolicy.enabled=true \
             --set 'redis-ha.enabled=true' --set 'redis-ha.auth=true' 2>/dev/null \
-          | grep -qE 'app\.kubernetes\.io/name: postgres'; then
+          | grep -E 'app\.kubernetes\.io/name: postgres' >/dev/null; then
           echo "ERROR: NetworkPolicy egress must scope PostgreSQL to its pods (app.kubernetes.io/name: postgres)"; exit 1
         fi
         if ! helm template status-list-server helm/chart \
             --set statuslist.networkPolicy.enabled=true \
             --set 'redis-ha.enabled=true' --set 'redis-ha.auth=true' 2>/dev/null \
-          | grep -qE '^\s+- podSelector:\s*$'; then
+          | grep -E '^\s+- podSelector:\s*$' >/dev/null; then
           echo "ERROR: NetworkPolicy egress internal rule must have a to:/podSelector (not any pod)"; exit 1
         fi
