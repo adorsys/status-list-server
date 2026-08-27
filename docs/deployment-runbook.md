@@ -29,7 +29,7 @@ The release workflow publishes **5 multi-arch image variants** with distinct suf
 | -------------------- | ------------------------------------------------------------------------ | --------------------- |
 | Manual dispatch      | `sha-<short_sha>-<variant>`                                              | At build              |
 | Release tag `v*.*.*` | `sha-<short_sha>-<variant>`                                              | At build              |
-| Release tag `v*.*.*` | `<version>-<variant>`, `<major>.<minor>-<variant>`, `latest-<variant>`    | After the scan passes |
+| Release tag `v*.*.*` | `<version>-<variant>`, `<major>.<minor>-<variant>`, `latest-<variant>` | After the scan passes |
 
 Where `<variant>` is one of: `aws`, `gcp`, `azure`, `vault`, `fscert`.
 
@@ -52,9 +52,9 @@ Choose the variant that matches your cloud provider and secret storage model:
 | --------- | ----------------------------------- | ----------------------------------------- |
 | `-aws`    | AWS EKS deployments                 | AWS Secrets Manager, Route53 DNS          |
 | `-gcp`    | GCP GKE deployments                 | GCP Secret Manager, Cloud DNS             |
-| `-azure`  | Azure AKS deployments                 | Azure Key Vault, Azure DNS                |
-| `-vault`  | Multi-cloud or on-prem              | HashiCorp Vault / OpenBao cluster         |
-| `-fscert` | Air-gapped/constrained environments | Filesystem-mounted certificates and keys  |
+| `-azure`  | Azure AKS deployments               | Azure Key Vault, Azure DNS              |
+| `-vault`  | Multi-cloud or on-prem              | HashiCorp Vault / OpenBao cluster       |
+| `-fscert` | Air-gapped/constrained environments | Filesystem-mounted certificates and keys |
 
 To select a variant, set the image tag with the appropriate suffix in your Helm values or deployment command:
 
