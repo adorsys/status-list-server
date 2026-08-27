@@ -37,10 +37,21 @@ jobs:
           kinds=$(cargo metadata --format-version=1 --no-deps \
             | jq -c '[.packages[].targets[].kind[]] | unique')
           echo "kinds of targets: ${kinds}"
-          echo "is_lib=$(printf '%s' "$kinds" | jq -r \
+
+          # Assigned before being written: a command substitution inside `echo`'s
+          # arguments keeps `echo`'s exit status, so `set -e` would not see jq fail
+          # and the empty value would silently skip cargo-test-doc.
+          is_lib=$(printf '%s' "$kinds" | jq -r \
             '["lib","rlib","dylib","cdylib","staticlib","proc-macro"] as $lib
-             | any(IN($lib[])) | tostring')" >> "$GITHUB_OUTPUT"
-          echo "is_bin=$(printf '%s' "$kinds" | jq -r 'any(. == "bin") | tostring')" >> "$GITHUB_OUTPUT"
+             | any(IN($lib[])) | tostring')
+          is_bin=$(printf '%s' "$kinds" | jq -r 'any(. == "bin") | tostring')
+
+          if [ -z "$is_lib" ] || [ -z "$is_bin" ]; then
+            echo "::error::target-kind detection produced no value (is_lib='${is_lib}' is_bin='${is_bin}')."
+            exit 1
+          fi
+
+          printf 'is_lib=%s\nis_bin=%s\n' "$is_lib" "$is_bin" >> "$GITHUB_OUTPUT"
 
     outputs:
       is_lib: ${{ steps.searching.outputs.is_lib }}

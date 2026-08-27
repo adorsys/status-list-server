@@ -40,48 +40,49 @@ jobs:
           inputs: .
           persona: regular
           online-audits: true
-          # SARIF would need `security-events: write`; annotations anchor on the diff.
+          # `annotations` and `advanced-security` are mutually exclusive in this action.
+          # A fail-closed gate wants findings on the diff, not in a tab that stays empty.
           advanced-security: false
           annotations: true
 
-      # A missing fixture makes zizmor exit 3, which is also a step failure, so the
-      # assertion below would pass on a self-test that audited nothing.
-      - name: Assert the self-test fixture exists
-        if: ${{ !cancelled() }}
-        run: test -f scripts/testdata/zizmor-selftest-workflow.yml
-
-      # A green gate and a broken gate look identical from here. The defect this
-      # catches is a wiring one -- the gate used to run as `zizmor ... || true` -- so
-      # the self-test drives the same action, not a separately installed CLI.
-      - name: Run the gate against a known-bad fixture
-        id: selftest
-        if: ${{ !cancelled() }}
-        continue-on-error: true
-        uses: zizmorcore/zizmor-action@3dc1ecc9bcb9e94e9b2c709687979e1298497054 # v0.6.2
-        with:
-          version: ${{ env.ZIZMOR_VERSION }}
-          inputs: scripts/testdata/zizmor-selftest-workflow.yml
-          persona: regular
-          # Offline, so the fixture's verdict cannot move with the advisory database.
-          online-audits: false
-          advanced-security: false
-          # The fixture is deliberately vulnerable; annotating it would be noise.
-          annotations: false
-
-      - name: Assert the gate failed on the fixture
+      - name: Assert the gate fails on a known-bad fixture
         if: ${{ !cancelled() }}
         env:
-          OUTCOME: ${{ steps.selftest.outcome }}
+          FIXTURE: scripts/testdata/zizmor-selftest-workflow.yml
+          ZIZMOR_IMAGE: ghcr.io/zizmorcore/zizmor:1.28.0@sha256:8e6b3e4fb74d1aa5d23e83ea369f386c66eced0d1fb944d32cd8b2aac100b00d
         run: |
-          set -euo pipefail
-          if [ "$OUTCOME" != "failure" ]; then
-            echo "::error::the gate passed a workflow with a known finding (outcome: ${OUTCOME})."
-            echo "Do not trust what this job reports above: the same action, at the same"
-            echo "version, with the same inputs wiring, let a deliberate finding through."
-            echo "Fixture: scripts/testdata/zizmor-selftest-workflow.yml"
+          set -uo pipefail
+
+          test -f "$FIXTURE" || {
+            echo "::error::self-test fixture is missing: ${FIXTURE}"
+            exit 1
+          }
+
+          rc=0
+          out=$(docker run --rm \
+            --volume "${GITHUB_WORKSPACE}:/workspace:ro" \
+            --workdir /workspace \
+            "$ZIZMOR_IMAGE" \
+            --persona=regular --no-online-audits --color=never --format=plain \
+            -- "$FIXTURE" 2>&1) || rc=$?
+          printf '%s\n' "$out"
+
+          # 13 is zizmor's "findings were reported". 3 is "no inputs collected" and 1
+          # is any other error -- both would pass a bare non-zero check.
+          if [ "$rc" -ne 13 ]; then
+            echo "::error::expected exit 13 (findings reported) from the fixture, got ${rc}."
+            echo "Do not trust what this job reports above: the gate did not evaluate"
+            echo "the fixture, so a clean result for this repository proves nothing."
             exit 1
           fi
-          echo "self-test passed: the gate fails on a workflow with a known finding."
+
+          if ! printf '%s' "$out" | grep -q 'artipacked'; then
+            echo "::error::the gate failed on the fixture but did not report artipacked."
+            echo "The fixture asserts a checkout without persist-credentials: false."
+            exit 1
+          fi
+
+          echo "self-test passed: the gate fails, and names the finding, on a known-bad workflow."
 
       # `ci-success.needs` is hand-maintained, so a job missing from it fails without
       # blocking the merge. `docker-build` already did.
@@ -629,7 +630,7 @@ jobs:
   # CONTRIBUTING.md, "Branch Protection".
   ci-success:
     name: CI Success
-    if: ${{ !cancelled() }}
+    if: always()
     needs:
       - zizmor-security
       - cargo-fmt
@@ -659,9 +660,6 @@ jobs:
         env:
           NEEDS: ${{ toJSON(needs) }}
         run: printf '%s\n' "$NEEDS"
-
-      # `skipped` is omitted deliberately: cargo-test-doc skips on a workspace with no
-      # lib target, which is legitimate.
       - name: Fail if any job failed or was cancelled
         if: ${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') }}
         run: |

@@ -130,11 +130,18 @@ jobs:
           cache-to: type=gha,mode=max
           # Explicit: the action defaults to mode=max on public repos and mode=min on
           # private, so a visibility change would silently degrade provenance.
+          #
+          # BuildKit attaches both as in-toto manifests in the pushed index, which is
+          # why the image cannot be scanned before it is pushed.
           provenance: mode=max
           sbom: true
       - name: Assert a digest was produced
-        # An empty digest would silently fall back to tag-based deployment. Built in
-        # shell rather than `outputs:`, which would emit `<base>@` with no digest.
+        # An empty digest would silently fall back to tag-based deployment.
+        #
+        # `IMAGE_REF` is assembled here rather than in the job's `outputs:` block so it
+        # is built in shell, where `IMAGE_BASE` is in scope, and only after the digest
+        # is known non-empty. Assembled in `outputs:` it would still be emitted as
+        # `<base>@` with no digest if this check ever stopped holding.
         id: digest
         env:
           DIGEST: ${{ steps.build.outputs.digest }}
@@ -156,8 +163,12 @@ jobs:
       packages: read
     env:
       IMAGE_REF: ${{ needs.build-and-push.outputs.image_ref }}
-      # Both arches: `cargo auditable` records the graph cargo resolved per target, so
-      # a shared lockfile does not make the two package sets identical.
+      # Every published architecture is scanned. A shared lockfile does not make the
+      # package sets identical: the two images are built by different builder images
+      # to different Rust targets, and `cargo auditable` records the graph cargo
+      # resolved for that target, not the lockfile's union across targets. Scanning
+      # one architecture would let an advisory reaching only the other be promoted
+      # and deployed without ever crossing the gate.
       SCAN_ARCHES: amd64 arm64
     steps:
       - name: Fetch Repository
