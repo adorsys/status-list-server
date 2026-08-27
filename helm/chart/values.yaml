@@ -11,7 +11,7 @@ statuslist:
         - "-c"
         - |
           echo "Waiting for postgres..."
-          until nc -z {{ .Release.Name }}-postgres.{{ .Release.Namespace }}.svc.cluster.local 5432; do
+          until nc -z {{ .Release.Name }}-postgres.{{ .Release.Namespace }}.svc.cluster.local {{ include "status-list-server-chart.dbPort" . }}; do
             echo "postgres not ready. Retrying in 2s...";
             sleep 2;
           done
@@ -50,7 +50,6 @@ statuslist:
     externalDnsHostname: statuslist.eudi-adorsys.com
   env:
     RUST_LOG: "info"
-    POSTGRES_USER: "postgres"
     APP_ENV: "production"
     APP_SERVER__HOST: "0.0.0.0"
     APP_SERVER__PORT: "8000"
@@ -67,6 +66,7 @@ statuslist:
     # APP_SERVER__CERT__DNS__ACMEDNS__ACCOUNTS JSON, which holds every account password)
     # must come from a secret (see externalSecret below), not from plain env values.
     APP_SERVER__CERT__DNS__PROVIDER: "route53"
+    APP_DATABASE__PORT: "5432"
     # Status-list record cache TTL in seconds. "0" disables this cache.
     APP_CACHE__TTL: "300"
     APP_CACHE__MAX_CAPACITY: "1000"
