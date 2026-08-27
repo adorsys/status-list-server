@@ -354,9 +354,17 @@ redis-ha:
   # HAProxy TLS secret (redis-ha.haproxy.tls.secretName). The kubectl image used by
   # the job is configurable here.
   certSync:
+    # Runs daily at 02:00 UTC. cert-manager renews at ~2/3 of a certificate's
+    # lifetime and writes the renewed secret immediately, so a weekly sync would
+    # present the old certificate for up to ~6 days; daily bounds the lag to <24h.
+    schedule: "0 2 * * *"
     image:
       repository: bitnami/kubectl
+      # Pin to a specific patch version (e.g. "1.31.2"), not a floating major.minor,
+      # and prefer a `digest` so the tag cannot be silently retargeted.
       tag: "1.31"
+      # digest: "sha256:<64 hex characters>" # optional; pins the image immutably
+      digest: ""
 
 opentelemetry-collector:
   enabled: true
