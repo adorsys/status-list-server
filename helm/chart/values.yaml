@@ -103,12 +103,13 @@ statuslist:
   # Only rendered when externalSecret.enabled=false AND statuslist.fallbackSecret.enabled=true.
   # Values are plain strings; the API server base64-encodes them (stringData).
   # The secret is always named "statuslist-secret" (single supported name). PostgreSQL
-  # (postgres.auth.existingSecret) references the same name, so it is deliberately not
-  # independently configurable.
+  # (postgres.auth.existingSecret) and Redis (redis-ha.existingSecret, when enabled)
+  # reference the same name, so it is deliberately not independently configurable.
   fallbackSecret:
     enabled: false
     stringData:
       postgres-password: ""
+      redis-password: ""
   livenessProbe:
     httpGet:
       path: /health/live
@@ -131,7 +132,8 @@ statuslist:
     # Add podSelector/namespaceSelector/ipBlock entries to restrict sources.
     ingress: []
     # Restrict egress for internal ports to specific destinations.
-    # PostgreSQL (5432) is always included.
+    # PostgreSQL (5432) is always included; Redis ports (6379, 6380) are included
+    # only when redis-ha.enabled=true.
     # External ports (443, 53) are always allowed without destination restriction.
     egressInternal: []
   resources:
@@ -217,7 +219,8 @@ externalSecret:
       kind: SecretStore
     target:
       # Single supported application-secret name (statuslist-secret), shared with the
-      # Deployment, PostgreSQL (postgres.auth.existingSecret), and the fallback Secret.
+      # Deployment, PostgreSQL (postgres.auth.existingSecret), Redis (redis-ha.existingSecret),
+      # and the fallback Secret.
       # A custom value fails at render time; this field is intentionally not configurable.
       name: statuslist-secret
       creationPolicy: Owner
@@ -226,6 +229,10 @@ externalSecret:
         remoteRef:
           key: statuslist-secret
           property: POSTGRES_PASSWORD
+      - secretKey: redis-password
+        remoteRef:
+          key: statuslist-secret
+          property: REDIS_PASSWORD
 
 secretStore:
   enabled: true
@@ -265,6 +272,69 @@ secretStore:
   #       url: ...
   # 'raw: {}' is rejected to avoid silently emitting an empty/insecure SecretStore.
   raw: {}
+
+# Redis HA subchart (bitnami redis-ha). Disabled by default; enable when the
+# application's Redis cache is required. The application reads the Redis password
+# from the same single application-secret (statuslist-secret) as PostgreSQL.
+redis-ha:
+  enabled: false
+  externalDnsHostname: redis.eudi-adorsys.com
+  resources:
+    requests:
+      cpu: 100m
+      memory: 200Mi
+    limits:
+      cpu: 500m
+      memory: 700Mi
+  image:
+    repository: docker.io/redis
+    tag: 8.2
+  redis:
+    port: 6379
+    tlsPort: 6380
+    tlsReplication: true
+    authClients: "no"
+    config:
+      tls-port: 6380
+      tls-cert-file: /tls-certs/tls.crt
+      tls-key-file: /tls-certs/tls.key
+      tls-auth-clients: "no"
+  replicas: 1
+  auth: true
+  # Same single application-secret name as postgres.auth.existingSecret and the
+  # Deployment's REDIS_PASSWORD secretKeyRef. Not independently configurable.
+  existingSecret: statuslist-secret
+  authKey: redis-password
+  persistentVolume:
+    enabled: true
+    storageClass: high-performance
+    accessModes:
+      - ReadWriteOnce
+    size: 10Gi
+  tls:
+    secretName: statuslist-tls
+    certFile: tls.crt
+    keyFile: tls.key
+  haproxy:
+    enabled: true
+    replicas: 1
+    resources:
+      requests:
+        cpu: 100m
+        memory: 128Mi
+      limits:
+        cpu: 200m
+        memory: 256Mi
+    tls:
+      enabled: true
+      secretName: statuslist-haproxy-tls
+      keyName: redis.pem
+    service:
+      type: LoadBalancer
+      annotations:
+        service.beta.kubernetes.io/aws-load-balancer-type: "nlb"
+        external-dns.alpha.kubernetes.io/hostname: redis.eudi-adorsys.com
+        external-dns.alpha.kubernetes.io/delete: "true"
 
 opentelemetry-collector:
   enabled: true

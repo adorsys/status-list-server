@@ -2,6 +2,8 @@
 {{- if and .Values.externalSecret.enabled .Values.statuslist.fallbackSecret.enabled }}
 {{- fail "externalSecret.enabled and statuslist.fallbackSecret.enabled cannot both be true: choose either External Secrets Operator or the fallback Secret for secret delivery, not both" }}
 {{- end }}
+{{- $redisHA := index .Values "redis-ha" | default dict -}}
+{{- $redisHAEnabled := eq (default false (index $redisHA "enabled")) true -}}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -162,6 +164,15 @@ spec:
               value: {{ .Values.postgres.auth.database | quote }}
             - name: APP_DATABASE__URL
               value: "postgres://$(POSTGRES_USER):$(POSTGRES_PASSWORD)@{{ .Release.Name }}-postgres.{{ .Release.Namespace }}.svc.cluster.local:5432/$(POSTGRES_DB)"
+            {{- if $redisHAEnabled }}
+            - name: REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "status-list-server-chart.appSecretName" . }}
+                  key: redis-password
+            - name: APP_REDIS__URI
+              value: {{ include "status-list-server-chart.redisUri" . | quote }}
+            {{- end }}
           volumeMounts:
             - name: tmp
               mountPath: /tmp

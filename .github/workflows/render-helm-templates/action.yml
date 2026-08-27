@@ -257,6 +257,28 @@ runs:
         if [ "$PGREF" != "statuslist-secret" ]; then
           echo "ERROR: POSTGRES_PASSWORD secretKeyRef must reference statuslist-secret, got '$PGREF'"; exit 1
         fi
+        # Redis HA + fallback mode: the Redis password secretKeyRef must also reference the
+        # single application-secret name. Rendering with redis-ha.enabled=true lets a future
+        # refactor that points Redis at a different secret name fail CI instead of passing
+        # undetected (PR #397 review).
+        REDISREF=$(helm template status-list-server helm/chart \
+            --set externalSecret.enabled=false \
+            --set statuslist.fallbackSecret.enabled=true \
+            --set-string statuslist.fallbackSecret.stringData.postgres-password=x \
+            --set 'redis-ha.enabled=true' \
+            --set 'redis-ha.auth=true' 2>/dev/null \
+          | grep -A3 'name: REDIS_PASSWORD' | grep 'name:' | tail -1 | sed -E 's/.*name: ([a-zA-Z0-9-]+)$/\1/')
+        if [ "$REDISREF" != "statuslist-secret" ]; then
+          echo "ERROR: REDIS_PASSWORD secretKeyRef must reference statuslist-secret, got '$REDISREF'"; exit 1
+        fi
+        # Redis HA in ESO mode: the ExternalSecret carries redis-password into the single
+        # application-secret, and the Deployment REDIS_PASSWORD secretKeyRef reads it from there.
+        if ! helm template status-list-server helm/chart \
+            --set 'redis-ha.enabled=true' \
+            --set 'redis-ha.auth=true' 2>/dev/null \
+          | grep -A3 'name: REDIS_PASSWORD' | grep -q 'name: statuslist-secret'; then
+          echo "ERROR: ESO mode Redis password secretKeyRef must reference statuslist-secret"; exit 1
+        fi
         # ESO one-name invariant: every consumer shares the single name statuslist-secret, so a
         # custom externalSecret.spec.target.name must fail at render time.
         if helm template status-list-server helm/chart \

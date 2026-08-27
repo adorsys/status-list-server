@@ -86,3 +86,33 @@ provider). Preference: explicit statuslist.aws.region, then the legacy secretSto
 {{- end }}
 {{- $r }}
 {{- end }}
+
+{{/*
+Resolve the Redis connection URI based on chart values. Only meaningful when the
+redis-ha subchart is enabled (redis-ha.enabled=true). Uses the same single
+application-secret name as PostgreSQL (REDIS_PASSWORD secretKeyRef).
+
+The password is intentionally NOT embedded in the URI: the Deployment exposes it
+as the REDIS_PASSWORD env var (secretKeyRef) so the application authenticates with
+it separately, avoiding credential leakage in the URL string and any URI-encoding
+issues from special characters in the password.
+*/}}
+{{- define "status-list-server-chart.redisUri" -}}
+{{- $redisHA := index .Values "redis-ha" | default dict -}}
+{{- $redisCfg := index $redisHA "redis" | default dict -}}
+{{- $haproxy := index $redisHA "haproxy" | default dict -}}
+{{- $haproxyEnabled := default true (index $haproxy "enabled") -}}
+{{- $haproxyTls := index $haproxy "tls" | default dict -}}
+{{- $tlsEnabled := and $haproxyEnabled (eq (default false (index $haproxyTls "enabled")) true) -}}
+{{- $externalHostname := default "" (index $redisHA "externalDnsHostname") -}}
+{{- $port := default 6379 (index $redisCfg "port") -}}
+{{- $scheme := ternary "rediss" "redis" $tlsEnabled -}}
+{{- $host := printf "%s-redis-ha-haproxy.%s.svc.cluster.local" .Release.Name .Release.Namespace -}}
+{{- if not $haproxyEnabled }}
+  {{- $host = printf "%s-redis-ha.%s.svc.cluster.local" .Release.Name .Release.Namespace -}}
+{{- end }}
+{{- if and $tlsEnabled (ne $externalHostname "") }}
+  {{- $host = $externalHostname -}}
+{{- end }}
+{{- printf "%s://%s:%v" $scheme $host $port -}}
+{{- end }}
