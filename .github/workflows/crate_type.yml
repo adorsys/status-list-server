@@ -22,18 +22,24 @@ jobs:
           persist-credentials: false
 
       - name: Install stable toolchain
-        uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1
+        uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1.17.0
 
       - name: Searching for lib
         # All targets, not `targets[0]`: cargo does not promise an ordering, so keying
         # on the first one let `is_lib` flip and silently skip cargo-test-doc.
+        #
+        # Every library kind counts, not just "lib". A crate declaring `crate-type =
+        # ["cdylib"]` still has doc tests, and `is_lib: false` skips them silently --
+        # ci-success treats a skipped job as a pass.
         id: searching
         run: |
           set -euo pipefail
           kinds=$(cargo metadata --format-version=1 --no-deps \
             | jq -c '[.packages[].targets[].kind[]] | unique')
           echo "kinds of targets: ${kinds}"
-          echo "is_lib=$(printf '%s' "$kinds" | jq -r 'any(. == "lib") | tostring')" >> "$GITHUB_OUTPUT"
+          echo "is_lib=$(printf '%s' "$kinds" | jq -r \
+            '["lib","rlib","dylib","cdylib","staticlib","proc-macro"] as $lib
+             | any(IN($lib[])) | tostring')" >> "$GITHUB_OUTPUT"
           echo "is_bin=$(printf '%s' "$kinds" | jq -r 'any(. == "bin") | tostring')" >> "$GITHUB_OUTPUT"
 
     outputs:

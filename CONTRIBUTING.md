@@ -79,18 +79,22 @@ unconventional commit subjects out of protected branches, where they would
 otherwise be ignored by `git-cliff` and `release-plz`.
 
 They must also require **`CI Success`**, and require *only* that check from
-`CI.yml`. The jobs in `CI.yml` deliberately do not depend on one another, so that a
-network-dependent scanner is not the root of every Rust job. The consequence is that
-a failing job no longer cascades: `ci-success` is what aggregates them, and it is the
-only thing that can represent the whole suite to branch protection.
+`CI.yml`. The jobs in `CI.yml` form several independent chains — the Rust jobs hang
+off `cargo-build`, the linters and scanners stand alone — deliberately, so that a
+network-dependent scanner is not the root of every Rust job. No single job therefore
+represents the suite; `ci-success` is what aggregates them, and it is the only thing
+that can represent the whole suite to branch protection.
 
-The order matters when changing this. Requiring individual job names *before*
-`ci-success` exists, or removing them *before* `CI Success` is required, both leave a
-window where a failing job blocks nothing:
+As of this writing the `Rules` ruleset on `develop` requires exactly one status
+check — `Conventional Commits` — and the `main branch guards` ruleset requires none.
+Nothing in `CI.yml` blocks a merge today, so adding `CI Success` closes a real gap
+rather than reshuffling an existing list:
 
 1. Merge the PR that introduces `ci-success`.
-2. Add **`CI Success`** to the required status checks.
-3. Only then remove the individual `CI.yml` job names from the required list.
+2. Add **`CI Success`** to the required status checks on both rulesets.
+3. If individual `CI.yml` job names are ever added to a ruleset, remove them only
+   *after* `CI Success` is required — doing it in the other order leaves a window
+   where a failing job blocks nothing.
 
 `ci-success` fails if any job it needs reported `failure` or `cancelled`. A `skipped`
 job passes, because `cargo-test-doc` legitimately skips on a workspace with no library
@@ -99,11 +103,24 @@ target. A dedicated CI step asserts that every job in `CI.yml` appears in
 
 ### Dependabot auto-merge
 
-`auto_merge.yml` approves and enables auto-merge only for patch and minor updates, and
-never for `github-actions` updates. It depends on **"Dismiss stale pull request
-approvals when new commits are pushed"** being enabled on the protected branch. Without
-it, auto-merge armed when the pull request opened stays armed, and a later push merges
-as soon as checks pass — no condition in the workflow can prevent that.
+`auto_merge.yml` arms auto-merge for patch and minor updates, and never for
+`github-actions` updates. It does not approve anything: review stays human, and the
+merge fires on its own once the approvals land and the checks are green.
+
+**This needs the repository setting *Allow auto-merge* to be on** — Settings →
+General → Pull Requests. It is currently off, so `gh pr merge --auto` fails and the
+job reports the reason. Turning it on does not weaken anything: the `Rules` ruleset
+still requires two approving reviews with `require_last_push_approval` before an
+armed pull request can merge.
+
+The workflow previously ran `gh pr review --approve` as well. That never worked —
+every run since it was added failed with `GitHub Actions is not permitted to approve
+pull requests (addPullRequestReview)`, which is the *Allow GitHub Actions to create
+and approve pull requests* setting rather than the workflow's `permissions:` block.
+Because approve failed, the auto-merge step behind it was skipped every time. The
+step was removed rather than unblocked: a bot approval could not satisfy a two-review
+requirement anyway, and having CI approve its own dependency bumps is the thing the
+review requirement exists to prevent.
 
 ## How Releases Work
 

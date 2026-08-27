@@ -1,5 +1,6 @@
-# Fixture for scripts/zizmor-selftest.sh -- deliberately vulnerable, do not "fix" it.
-# The missing `persist-credentials: false` below is the assertion.
+# Fixture for CI.yml's zizmor self-test -- deliberately vulnerable, do not "fix" it.
+# The missing `persist-credentials: false` below is the assertion. It lives outside
+# .github/ so the gate's own `inputs: .` does not collect it.
 name: zizmor selftest fixture
 on: [push]
 

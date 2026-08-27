@@ -3,8 +3,9 @@ name: Auto Merge Dependabot
 on:
   pull_request:
 
-# `contents: write` for `gh pr merge --auto`, `pull-requests: write` for
-# `gh pr review --approve`; everything unlisted is `none`.
+# `pull-requests: write` to arm auto-merge; `contents: write` because `--auto` merges
+# immediately when the pull request is already mergeable rather than arming anything.
+# Everything unlisted is `none`.
 permissions:
   contents: write
   pull-requests: write
@@ -12,18 +13,16 @@ permissions:
 jobs:
   dependabot:
     runs-on: ubuntu-latest
-    # `user.login` is the real check, `github.actor` only narrows it; neither helps
-    # without `dismiss_stale_reviews` (#417). Ignore must stay on this header line.
-    if: >- # zizmor: ignore[bot-conditions]
-      github.event.pull_request.user.login == 'dependabot[bot]' && github.actor == 'dependabot[bot]' && github.event.pull_request.head.repo.full_name == github.repository
+    # `user.login`, not `github.actor`: the actor is whoever last touched the pull
+    # request, so it is both spoofable and wrong after a maintainer reopens one.
+    if: >-
+      github.event.pull_request.user.login == 'dependabot[bot]' && github.event.pull_request.head.repo.full_name == github.repository
     steps:
       - name: Dependabot metadata
         id: metadata
-        uses: dependabot/fetch-metadata@25dd0e34f4fe68f24cc83900b1fe3fe149efef98 # v3
+        uses: dependabot/fetch-metadata@25dd0e34f4fe68f24cc83900b1fe3fe149efef98 # v3.1.0
         with:
           github-token: "${{ secrets.GITHUB_TOKEN }}"
-          alert-lookup: true
-          compat-lookup: true
 
       # Patch and minor only, never github-actions. Unknown or empty update-type is
       # ineligible, so this fails closed. Decided once so the steps cannot disagree.
@@ -57,19 +56,25 @@ jobs:
           echo "eligible=${eligible}" >> "$GITHUB_OUTPUT"
           echo "auto-merge eligible: ${eligible} (${reason})"
 
-      - name: Approve the PR
-        if: steps.gate.outputs.eligible == 'true'
-        run: gh pr review --approve "$PR_URL"
-        env:
-          PR_URL: ${{ github.event.pull_request.html_url }}
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
+      # No approval step. `gh pr review --approve` cannot work here -- GitHub refuses
+      # `addPullRequestReview` from Actions -- and the ruleset requires two approvals
+      # with `require_last_push_approval`, which one bot approval could not satisfy
+      # anyway. Arming auto-merge is the whole job: reviews stay human, and the merge
+      # fires on its own once they land and the checks are green.
       - name: Enable auto-merge for Dependabot PRs
         if: steps.gate.outputs.eligible == 'true'
-        run: gh pr merge --auto --squash "$PR_URL"
         env:
           PR_URL: ${{ github.event.pull_request.html_url }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          if ! gh pr merge --auto --squash "$PR_URL"; then
+            echo "::error::could not arm auto-merge on ${PR_URL}."
+            echo "The usual cause is the repository setting 'Allow auto-merge' being"
+            echo "off: Settings -> General -> Pull Requests. See CONTRIBUTING.md,"
+            echo "'Dependabot auto-merge'."
+            exit 1
+          fi
 
       - name: Explain why auto-merge was withheld
         if: steps.gate.outputs.eligible != 'true'

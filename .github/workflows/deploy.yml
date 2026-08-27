@@ -62,6 +62,8 @@ jobs:
   ci:
     name: CI
     uses: ./.github/workflows/CI.yml
+    # A malformed tag fails in seconds; without this the whole suite runs first.
+    needs: validate-tag
     # A called workflow can only narrow the caller's token, so CI.yml's kube-linter
     # job needs its SARIF upload scope granted here too.
     permissions:
@@ -110,14 +112,14 @@ jobs:
         # Only the sha tag here. `promote-tags` applies semver and `latest` after the
         # scan, so a rejected image never becomes an advertised release.
         id: meta
-        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
         with:
           images: ${{ env.IMAGE_BASE }}
           tags: |
             type=sha,format=short,prefix=sha-
       - name: Build and push Docker image
         id: build
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
           context: .
           file: ./Dockerfile
@@ -164,7 +166,7 @@ jobs:
           persist-credentials: false
 
       - name: Login to GHCR
-        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4
+        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
@@ -309,7 +311,7 @@ jobs:
         # `warn`, not `error`: the `[ -s ... ]` fallbacks above guarantee the files.
         # Failing here would only add a second red step.
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: container-scan-reports
           path: |
@@ -323,7 +325,7 @@ jobs:
         # Separate artifact: a lost SBOM must not take down the upload carrying the
         # scan results. Absence is caught by the assertion below instead.
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: container-sboms
           path: |
@@ -452,7 +454,7 @@ jobs:
       DEPLOY_TAG: ${{ needs.build-and-push.outputs.deploy_tag }}
     steps:
       - name: Login to GHCR
-        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4
+        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
@@ -462,7 +464,7 @@ jobs:
         # The `v*.*.*` glob absorbs prereleases, so `latest` is withheld explicitly.
         # metadata-action already withholds {{major}}.{{minor}}; raw tags do not.
         id: meta
-        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
         with:
           images: ${{ env.IMAGE_BASE }}
           tags: |
@@ -546,7 +548,7 @@ jobs:
         with:
           version: v4.2.4
       - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6
+        uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6.2.3
         with:
           role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
           role-session-name: status-list-server-deploy
@@ -564,8 +566,13 @@ jobs:
           helm repo add open-telemetry https://open-telemetry.github.io/opentelemetry-helm-charts
           helm dependency build helm/chart
       - name: Deploy chart
-        # `:?` because helm reports an empty value as a YAML error pointing nowhere
-        # near the cause. Via env, not interpolation: the tag is attacker-influenced.
+        # The digest is what pins production to the image the scan gate passed; an
+        # empty one silently falls back to the mutable tag. `:?` because helm reports
+        # an empty value as a YAML error pointing nowhere near the cause.
+        #
+        # The tag and digest come from `env:` rather than `${{ }}` because they are
+        # derived from the pushed ref. The release name and namespace are workflow
+        # literals, so interpolating those is safe.
         run: |
           helm upgrade --install ${{ env.HELM_RELEASE_NAME }} helm/chart \
             --namespace ${{ env.HELM_NAMESPACE }} \
