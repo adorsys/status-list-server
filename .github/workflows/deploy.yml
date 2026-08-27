@@ -561,6 +561,7 @@ jobs:
       - name: Build Helm dependencies
         run: |
           helm repo add open-telemetry https://open-telemetry.github.io/opentelemetry-helm-charts
+          helm repo add dandydeveloper https://dandydeveloper.github.io/charts
           helm dependency build helm/chart
       - name: Deploy chart
         # Deploying without a digest would silently fall back to the mutable tag.
