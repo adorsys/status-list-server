@@ -348,8 +348,8 @@ end. A compact cheat-sheet:
 | `RequestLatencyFastBurn`       | Add latency (e.g. `tc qdisc` delay, or saturate the DB) so p95 > 0.3s for 5m+1h | alert state                                   |
 | `DbLatencyFastBurn`            | Hold a row lock / `pg_sleep` while hammering reads                              | alert state                                   |
 | `TokenGenerationFastBurn`      | Break the signing-key backend while running token flows                         | alert state                                   |
-| `CacheHitRatioLow` (warn)      | Burst many distinct list IDs (cold cache) so hit ratio < 0.85 for 15m           | alert state                                  |
-| `CertRenewalFailures` (warn)   | Stop `pebble` around the renewal cadence                                        | alert state                                  |
+| `CacheHitRatioLow` (warn)      | Burst many distinct list IDs (cold cache) so hit ratio < 0.85 for 15m           | alert state                                   |
+| `CertRenewalFailures` (warn)   | Stop `pebble` around the renewal cadence                                        | alert state                                   |
 
 Check fire:
 
