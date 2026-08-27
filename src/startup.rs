@@ -224,7 +224,10 @@ async fn track_http_metrics(request: Request<Body>, next: Next) -> Response {
     let matched = request.extensions().get::<MatchedPath>().cloned();
     let route: &str = matched.as_ref().map(|p| p.as_str()).unwrap_or("unmatched");
 
-    if matches!(route, "/health" | "/health/live" | "/health/ready" | "/metrics") {
+    if matches!(
+        route,
+        "/health" | "/health/live" | "/health/ready" | "/metrics"
+    ) {
         return next.run(request).await;
     }
 
