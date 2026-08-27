@@ -181,6 +181,7 @@ tests:
               sli: "cache_hit_ratio"
             exp_annotations:
               summary: "Status-list cache hit ratio below 85% for 15m (degradation, not outage)"
+              description: "Current cache hit ratio: 60%"
               runbook_url: "runbooks/cache-hit-ratio.md"
       - eval_time: 400m
         alertname: CertRenewalFailures
@@ -191,3 +192,66 @@ tests:
             exp_annotations:
               summary: "Certificate renewal failure rate at or above 1% for 15m"
               runbook_url: "runbooks/cert-renewal.md"
+
+  # Edge case: no input series at all. Every recording rule evaluates to NaN /
+  # no series, and every alert (including the mult-window and ErrorBudgetCritical
+  # alerts, which depend on windows with no data) must stay silent.
+  - interval: 1m
+    input_series: []
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: ErrorRateFastBurn
+        exp_alerts: []
+      - eval_time: 10m
+        alertname: ErrorRateSlowBurn
+        exp_alerts: []
+      - eval_time: 10m
+        alertname: RequestLatencyFastBurn
+        exp_alerts: []
+      - eval_time: 10m
+        alertname: RequestLatencySlowBurn
+        exp_alerts: []
+      - eval_time: 10m
+        alertname: DbLatencyFastBurn
+        exp_alerts: []
+      - eval_time: 10m
+        alertname: DbLatencySlowBurn
+        exp_alerts: []
+      - eval_time: 10m
+        alertname: TokenGenerationFastBurn
+        exp_alerts: []
+      - eval_time: 10m
+        alertname: TokenGenerationSlowBurn
+        exp_alerts: []
+      - eval_time: 10m
+        alertname: CacheHitRatioLow
+        exp_alerts: []
+      - eval_time: 10m
+        alertname: CertRenewalFailures
+        exp_alerts: []
+      - eval_time: 10m
+        alertname: ErrorBudgetCritical
+        exp_alerts: []
+
+  # ErrorBudgetCritical positive fire. A 6h interval spans a full 30d so the
+  # sli:error_rate:30d window resolves. 50% 5xx => error_rate:30d = 0.5, so the
+  # remaining budget clamps to 0 (< 0.1) and the alert pages.
+  - interval: 6h
+    input_series:
+      - series: >-
+          http_server_requests_total{otel_scope_name="status-list-server",method="GET",route="/x",status_class="5xx"}
+        values: '0+50x120'
+      - series: >-
+          http_server_requests_total{otel_scope_name="status-list-server",method="GET",route="/x",status_class="2xx"}
+        values: '0+50x120'
+    alert_rule_test:
+      - eval_time: 30d
+        alertname: ErrorBudgetCritical
+        exp_alerts:
+          - exp_labels:
+              severity: "page"
+              sli: "error_budget"
+            exp_annotations:
+              summary: "Error budget is below 10% for the 30d window"
+              description: "Remaining error budget: 0%"
+              runbook_url: "runbooks/error-budget.md"

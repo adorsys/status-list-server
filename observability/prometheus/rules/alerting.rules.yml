@@ -119,7 +119,25 @@ groups:
           sli: cache_hit_ratio
         annotations:
           summary: "Status-list cache hit ratio below 85% for 15m (degradation, not outage)"
+          description: "Current cache hit ratio: {{ $value | humanizePercentage }}"
           runbook_url: "runbooks/cache-hit-ratio.md"
+
+      # --- Error budget exhaustion (critical page) ---------------------------
+      # Fires when the 30d error budget (sli:error_budget:success:30d) drops
+      # below 10% remaining: error_rate:30d is fast approaching the 0.5% target.
+      # The NaN-when-no-data behaviour of the recording rule means a missing
+      # series does not trip this (NaN < 0.1 is false).
+      - alert: ErrorBudgetCritical
+        expr: |
+          sli:error_budget:success:30d < 0.1
+        for: 5m
+        labels:
+          severity: page
+          sli: error_budget
+        annotations:
+          summary: "Error budget is below 10% for the 30d window"
+          description: "Remaining error budget: {{ $value | humanizePercentage }}"
+          runbook_url: "runbooks/error-budget.md"
 
       # --- Certificate renewal (warn-only operational risk) ------------------
       - alert: CertRenewalFailures

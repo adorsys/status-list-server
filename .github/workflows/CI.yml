@@ -450,7 +450,12 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Validate Docker Compose model
+        # docker-compose.yml requires GRAFANA_ADMIN_PASSWORD (no insecure admin
+        # default); supply a placeholder here because this step only validates the
+        # compose model, not the real credential.
         run: docker compose config
+        env:
+          GRAFANA_ADMIN_PASSWORD: placeholder-not-a-real-credential
 
       - name: Verify Jaeger image tag exists
         run: docker manifest inspect jaegertracing/jaeger:2.20.0 >/dev/null
@@ -561,6 +566,19 @@ jobs:
         run: |
           test -s observability/dashboards/generated/status-list-slo.json
           python3 -c "import json; json.load(open('observability/dashboards/generated/status-list-slo.json'))"
+
+      - name: Verify dashboard matches generator (no drift)
+        # Regenerates the committed JSON and fails if it differs from what the
+        # generator produces, so a panel-intent change without a regenerated
+        # artifact cannot land silently.
+        run: |
+          cd observability/dashboards/src
+          npm install --no-audit --no-fund
+          npm run generate-dashboards
+          git diff --exit-code ../generated/status-list-slo.json
+        env:
+          # The generator has no side effects beyond writing ../generated.
+          NODE_ENV: production
 
   cargo-coverage:
     name: Cargo Coverage (llvm-cov)

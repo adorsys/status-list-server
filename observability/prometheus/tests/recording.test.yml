@@ -60,3 +60,31 @@ tests:
         exp_samples:
           - labels: '{__name__="sli:cache_hit_ratio:5m"}'
             value: 0.75
+
+  # The 30d failure-rate recording rules need a full 30d window to resolve, so
+  # they get a dedicated block at a 6h interval (120 samples = 30d).
+  - interval: 6h
+    input_series:
+      - series: >-
+          token_generation_failures_total{otel_scope_name="status-list-server",format="jwt"}
+        values: '0+2x120'
+      - series: >-
+          token_generation_attempts_total{otel_scope_name="status-list-server",format="jwt"}
+        values: '0+100x120'
+      - series: >-
+          cert_renewal_failures_total{otel_scope_name="status-list-server"}
+        values: '0+1x120'
+      - series: >-
+          cert_renewal_attempts_total{otel_scope_name="status-list-server"}
+        values: '0+50x120'
+    promql_expr_test:
+      - expr: 'sli:token_gen_failure_rate:30d'
+        eval_time: 30d
+        exp_samples:
+          - labels: '{__name__="sli:token_gen_failure_rate:30d"}'
+            value: 0.02
+      - expr: 'sli:cert_renewal_failure_rate:30d'
+        eval_time: 30d
+        exp_samples:
+          - labels: '{__name__="sli:cert_renewal_failure_rate:30d"}'
+            value: 0.02

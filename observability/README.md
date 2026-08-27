@@ -41,6 +41,15 @@ docker compose up -d   # brings up app + otel-collector + prometheus + grafana
 
 Dashboard generation is documented in `dashboards/README.md`.
 
+## Datasource UID requirement
+
+Every panel in the committed dashboard (`generated/status-list-slo.json`) pins
+its Prometheus datasource by UID `prometheus` (see
+`dashboards/provisioning/datasources.yml`). Any environment that loads this
+dashboard — including a production/managed Grafana — **must** register its
+Prometheus datasource with exactly that UID, or the panels will not resolve.
+Do not rely on the datasource *name*; Grafana matches the committed UID.
+
 ## Retention requirement
 
 The error-budget gauge and the 30d window recording rules (`sli:error_rate:30d`,

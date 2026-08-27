@@ -120,3 +120,32 @@ on sustained degradation, on purpose, to avoid paging on a blip.
    before widening the alert severity.
 4. Tune targets, then update this table, `alerting.rules.yml`, and re-run
    `promtool test rules`.
+
+## Thresholds are hard-coded: keep them in lockstep
+
+Every SLO target in this doc is duplicated as a **literal constant** in more than
+one file. A change to a target must be applied to **all** of them together, or
+dashboards and alerts drift from the documented objective:
+
+| Target            | Files that hard-code it                                                                                                          |
+| ----------------- | -------------------------------------------------------------------------------------------------------------------------------- |
+| 300 ms latency    | `alerting.rules.yml` (0.3), `dashboards/src/generate.mjs` (0.3), this doc                                                        |
+| 0.5% error budget | `recording.rules.yml` (`0.005` denominator), `alerting.rules.yml` (0.072/0.030), `dashboards/src/generate.mjs` (0.005), this doc |
+| 85% cache hit     | `alerting.rules.yml` (0.85), `dashboards/src/generate.mjs` (0.85), this doc                                                      |
+| 50 ms DB latency  | `alerting.rules.yml` (0.05), `dashboards/src/generate.mjs` (0.05), this doc                                                      |
+| 1% cert renewal   | `alerting.rules.yml` (0.01), `dashboards/src/generate.mjs` (0.01), this doc                                                      |
+| 0.5% token-gen    | `recording.rules.yml` (0.005), `alerting.rules.yml` (0.072/0.030), this doc                                                      |
+
+Because the dashboard JSON is generated, change `dashboards/src/generate.mjs`
+and commit the regenerated `generated/status-list-slo.json` (`npm run
+generate-dashboards`) together.
+
+## Error budget exhaustion alert
+
+Beyond the fast/slow burn pairs, `ErrorBudgetCritical` (`alerting.rules.yml`)
+pages when the 30d remaining budget (`sli:error_budget:success:30d`) falls below
+10%, i.e. when `sli:error_rate:30d` approaches 90% of the 0.5% target. See
+`runbooks/error-budget.md`. The 30d failure-rate windows for token generation and
+cert renewal (`sli:token_gen_failure_rate:30d`,
+`sli:cert_renewal_failure_rate:30d`) exist to support the same long-window
+health comparison.

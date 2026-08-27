@@ -47,7 +47,8 @@ curl -s http://localhost:8000/metrics | grep http_server_duration_seconds_bucket
 3. If a single route is implicated, confirm the route pattern is bounded
    (no unaggregated path-parameter labels inflating p95).
 4. Only widen the SLO after confirming the regression is truly retuned and the
-   30d budget has headroom — change `observability/slo/README.md` with the rule.
+   30d budget has headroom — change `observability/slo/README.md` (with its
+   rationale for the 300 ms target and its consistency requirements) with the rule.
 
 ## Escalation
 

@@ -73,6 +73,12 @@ groups:
         expr: |
           sum(rate(cert_renewal_failures_total{otel_scope_name="status-list-server"}[5m]))
           / sum(rate(cert_renewal_attempts_total{otel_scope_name="status-list-server"}[5m]))
+      # 30d: the true SLO window, consistent with sli:error_rate:30d so the
+      # long-term health of every availability SLI is comparable.
+      - record: sli:cert_renewal_failure_rate:30d
+        expr: |
+          sum(rate(cert_renewal_failures_total{otel_scope_name="status-list-server"}[30d]))
+          / sum(rate(cert_renewal_attempts_total{otel_scope_name="status-list-server"}[30d]))
 
       # --- Token-generation failure rate (ratio, burn-rate SLO) ---------------
       - record: sli:token_gen_failure_rate:5m
@@ -87,12 +93,18 @@ groups:
         expr: |
           sum(rate(token_generation_failures_total{otel_scope_name="status-list-server"}[6h]))
           / sum(rate(token_generation_attempts_total{otel_scope_name="status-list-server"}[6h]))
+      # 30d: the true SLO window, consistent with sli:error_rate:30d.
+      - record: sli:token_gen_failure_rate:30d
+        expr: |
+          sum(rate(token_generation_failures_total{otel_scope_name="status-list-server"}[30d]))
+          / sum(rate(token_generation_attempts_total{otel_scope_name="status-list-server"}[30d]))
 
       # --- Remaining error budget (0 = exhausted, 1 = fully intact) ----------
       # Computed from the true SLO window (`sli:error_rate:30d`), not a 5m
       # snapshot, and clamped to [0,1] so the gauge cannot go negative or above
-      # 100%. The 0.5% target is hard-coded here AND in slo/README.md together;
-      # change both in lockstep.
+      # 100%. The 0.5% target is hard-coded here (the `0.005` in the denominator)
+      # AND as the "0.5%" row in slo/README.md AND as the warn threshold in the
+      # dashboard generator — change all three in lockstep.
       - record: sli:error_budget:success:30d
         expr: |
           clamp_max(clamp_min(1 - sli:error_rate:30d / 0.005, 0), 1)
