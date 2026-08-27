@@ -95,9 +95,10 @@ statuslist:
     # to false and attach the cloud role annotation via serviceAccount.annotations, then the app
     # uses ambient credentials instead of mounted files.
     mountCredentials: true
-    # Plain (non-secret) AWS region. APP_AWS__REGION is rendered when set, independent of
-    # secretStore.provider and statuslist.aws.mountCredentials. Leave empty (default) to
-    # fall back to secretStore.aws.region, then to "eu-central-1".
+    # Plain (non-secret) AWS region. APP_AWS__REGION is rendered only when an effective
+    # region is explicitly configured. Leave empty (default) so the application does not
+    # override the AWS SDK's instance-metadata region discovery (recommended for
+    # pure-IRSA / Workload Identity).
     region: ""
   # Fallback Kubernetes Secret for clusters that do not run External Secrets Operator.
   # Only rendered when externalSecret.enabled=false AND statuslist.fallbackSecret.enabled=true.
@@ -147,6 +148,10 @@ statuslist:
 # ServiceAccount for the application pods. Used to attach Workload Identity role annotations
 # (EKS IRSA: eks.amazonaws.com/role-arn, GCP WI, Azure WI) for ambient cloud credentials.
 serviceAccount:
+  # create=true renders the ServiceAccount and injects serviceAccountName (default: chart
+  # fullname, or the value of `name`). create=false with an empty `name` injects NO
+  # serviceAccountName, so the pod runs as the namespace default ServiceAccount (which may
+  # carry its own cloud role); set `name` explicitly when disabling chart SA creation.
   create: true
   name: "" # default: fullname (via _helpers.tpl)
   # Default false: the application does not need to call the Kubernetes API, so do not
@@ -173,11 +178,14 @@ autoscaling:
 podDisruptionBudget:
   enabled: false
   # Set exactly one of minAvailable / maxUnavailable (int, percentage string, or null).
-  # WARNING: must be < replicaCount (or < autoscaling.minReplicas when HPA is enabled).
-  # Setting minAvailable equal to or greater than the replica count blocks ALL voluntary
-  # pod evictions (node drains, cluster upgrades) indefinitely. Prefer maxUnavailable.
-  minAvailable: 1
-  maxUnavailable: null
+  # WARNING: minAvailable must be < replicaCount (or < autoscaling.minReplicas when HPA
+  # is enabled); setting it equal to or greater than the replica count blocks ALL voluntary
+  # pod evictions (node drains, cluster upgrades) indefinitely. The SAFE DEFAULT is
+  # maxUnavailable: 1, which allows one voluntary eviction regardless of replica count.
+  # An explicit 0 is preserved (valid: prevents voluntary disruptions); only an explicit
+  # null counts as "unset".
+  minAvailable: null
+  maxUnavailable: 1
 
 postgres:
   enabled: true
@@ -240,7 +248,13 @@ secretStore:
   provider: aws
   aws:
     service: SecretsManager # SecretsManager | ParameterStore
-    region: "eu-central-1" # applies to the AWS SecretStore; APP_AWS__REGION falls back to this when statuslist.aws.region is empty
+    # Empty by default: APP_AWS__REGION is only injected into the pod when a region is
+    # explicitly configured (via statuslist.aws.region, or the legacy secretStore.aws.region
+    # upgrade fallback). For pure-IRSA / Workload Identity installs that rely on the AWS SDK
+    # discovering the region from instance metadata, leave both empty so no APP_AWS__REGION
+    # overrides the SDK. The ESO AWS SecretStore still needs a region; it independently falls
+    # back to eu-central-1 at the CR level (not injected into the pod).
+    region: ""
   vault:
     server: ""
     path: "secret"

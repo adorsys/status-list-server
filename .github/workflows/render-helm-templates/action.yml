@@ -218,6 +218,12 @@ runs:
             --set secretStore.enabled=true 2>/dev/null | grep -q "kind: SecretStore"; then
           echo "ERROR: no-ESO mode must not render a SecretStore CR"; exit 1
         fi
+        # Inverse: an ExternalSecret must not render without a SecretStore (dangling secretStoreRef).
+        if helm template status-list-server helm/chart \
+            --set externalSecret.enabled=true \
+            --set secretStore.enabled=false >/dev/null 2>&1; then
+          echo "ERROR: externalSecret.enabled with secretStore.enabled=false should fail (dangling secretStoreRef)"; exit 1
+        fi
         # Fail-closed scaling: HPA must reject minReplicas > maxReplicas.
         if helm template status-list-server helm/chart \
             --set autoscaling.enabled=true \
