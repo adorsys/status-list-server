@@ -35,10 +35,22 @@ spec:
         - port: 6380
           protocol: TCP
         {{- end }}
-      {{- with .Values.statuslist.networkPolicy.egressInternal }}
+      # Scope internal egress to the target pods, not "any pod in the cluster".
+      # PostgreSQL is always a dependency; Redis ports are scoped only when
+      # redis-ha.enabled=true. Additional destinations can be appended via
+      # statuslist.networkPolicy.egressInternal.
       to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: postgres
+        {{- if $redisHAEnabled }}
+        - podSelector:
+            matchLabels:
+              app: redis-ha
+        {{- end }}
+        {{- with .Values.statuslist.networkPolicy.egressInternal }}
         {{- toYaml . | nindent 8 }}
-      {{- end }}
+        {{- end }}
     - ports:
         - port: 443
           protocol: TCP
@@ -52,5 +64,10 @@ spec:
           protocol: TCP
         - port: 4318
           protocol: TCP
+      # Scope OTLP egress to the opentelemetry-collector pods only.
+      to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: opentelemetry-collector
     {{- end }}
 {{- end }}
