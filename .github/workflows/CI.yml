@@ -163,6 +163,9 @@ jobs:
       - name: Install Rust
         uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1
 
+      - name: Install Helm
+        uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+
       - name: Install cargo-nextest
         uses: taiki-e/install-action@c44f6b046f1c29ae5918b1e0bfdbb2f1813836fd # v2
         with:
@@ -325,16 +328,20 @@ jobs:
 
       - name: Build Helm dependencies
         run: |
-          helm repo add dandydeveloper https://dandydeveloper.github.io/charts
           # Upstream chart default values:
           # https://github.com/open-telemetry/opentelemetry-helm-charts/blob/main/charts/opentelemetry-collector/values.yaml
           helm repo add open-telemetry https://open-telemetry.github.io/opentelemetry-helm-charts
           helm dependency build helm/chart
 
       - name: Render Helm template
+        env:
+          APP_DATABASE_PORT: "5432"
         run: |
           mkdir -p /tmp/rendered
-          helm template status-list-server helm/chart -f helm/chart/values.yaml --output-dir /tmp/rendered
+          helm template status-list-server helm/chart \
+            -f helm/chart/values.yaml \
+            --set-string statuslist.env.APP_DATABASE__PORT="${APP_DATABASE_PORT}" \
+            --output-dir /tmp/rendered
 
       - name: Verify image reference resolution
         # Rationale and the individual expectations are in the script. It runs here
@@ -370,14 +377,18 @@ jobs:
 
       - name: Build Helm dependencies
         run: |
-          helm repo add dandydeveloper https://dandydeveloper.github.io/charts
           helm repo add open-telemetry https://open-telemetry.github.io/opentelemetry-helm-charts
           helm dependency build helm/chart
 
       - name: Render Helm template
+        env:
+          APP_DATABASE_PORT: "5432"
         run: |
           mkdir -p /tmp/rendered
-          helm template status-list-server helm/chart -f helm/chart/values.yaml --output-dir /tmp/rendered
+          helm template status-list-server helm/chart \
+            -f helm/chart/values.yaml \
+            --set-string statuslist.env.APP_DATABASE__PORT="${APP_DATABASE_PORT}" \
+            --output-dir /tmp/rendered
 
       - name: Run KubeLinter
         uses: stackrox/kube-linter-action@87802a2f4e01abebb3ee3c67a3002fea71f6eae5 # v1.0.7
@@ -461,12 +472,17 @@ jobs:
 
       - name: Build Helm dependencies
         run: |
-          helm repo add dandydeveloper https://dandydeveloper.github.io/charts
           helm repo add open-telemetry https://open-telemetry.github.io/opentelemetry-helm-charts
           helm dependency build helm/chart
 
       - name: Render Helm chart
-        run: helm template statuslist helm/chart --namespace statuslist > /tmp/statuslist-rendered.yaml
+        env:
+          APP_DATABASE_PORT: "5432"
+        run: |
+          helm template statuslist helm/chart \
+            --namespace statuslist \
+            --set-string statuslist.env.APP_DATABASE__PORT="${APP_DATABASE_PORT}" \
+            > /tmp/statuslist-rendered.yaml
 
       - name: Extract rendered Helm Collector config
         run: |
