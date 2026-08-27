@@ -104,13 +104,12 @@ statuslist:
   # Only rendered when externalSecret.enabled=false AND statuslist.fallbackSecret.enabled=true.
   # Values are plain strings; the API server base64-encodes them (stringData).
   # The secret is always named "statuslist-secret" (single supported name). PostgreSQL
-  # (postgres.auth.existingSecret) and Redis (redis-ha.existingSecret, when enabled)
-  # reference the same name, so it is deliberately not independently configurable.
+  # (postgres.auth.existingSecret) references the same name, so it is deliberately not
+  # independently configurable.
   fallbackSecret:
     enabled: false
     stringData:
       postgres-password: ""
-      redis-password: ""
   livenessProbe:
     httpGet:
       path: /health/live
@@ -140,8 +139,8 @@ statuslist:
     # When ingress is empty [] (and enabled=true), ANY source can reach the service port.
     # Add podSelector/namespaceSelector/ipBlock entries to restrict sources.
     ingress: []
-    # Additional internal egress destinations beyond the built-in PostgreSQL / Redis-HA /
-    # OTel pod selectors (which are scoped to the target pods by default). Each entry is a
+    # Additional internal egress destinations beyond the built-in PostgreSQL / OTel
+    # pod selectors (which are scoped to the target pods by default). Each entry is a
     # `to:` NetworkPolicy selector.
     # External ports (443, 53) are always allowed without destination restriction.
     egressInternal: []
@@ -235,8 +234,7 @@ externalSecret:
       kind: SecretStore
     target:
       # Single supported application-secret name (statuslist-secret), shared with the
-      # Deployment, PostgreSQL (postgres.auth.existingSecret), Redis (redis-ha.existingSecret),
-      # and the fallback Secret.
+      # Deployment, PostgreSQL (postgres.auth.existingSecret), and the fallback Secret.
       # A custom value fails at render time; this field is intentionally not configurable.
       name: statuslist-secret
       creationPolicy: Owner
@@ -245,10 +243,6 @@ externalSecret:
         remoteRef:
           key: statuslist-secret
           property: POSTGRES_PASSWORD
-      - secretKey: redis-password
-        remoteRef:
-          key: statuslist-secret
-          property: REDIS_PASSWORD
 
 secretStore:
   enabled: true
@@ -294,85 +288,6 @@ secretStore:
   #       url: ...
   # 'raw: {}' is rejected to avoid silently emitting an empty/insecure SecretStore.
   raw: {}
-
-# Redis HA subchart (bitnami redis-ha). Disabled by default; enable when the
-# application's Redis cache is required. The application reads the Redis password
-# from the same single application-secret (statuslist-secret) as PostgreSQL.
-redis-ha:
-  enabled: false
-  externalDnsHostname: redis.eudi-adorsys.com
-  resources:
-    requests:
-      cpu: 100m
-      memory: 200Mi
-    limits:
-      cpu: 500m
-      memory: 700Mi
-  image:
-    repository: docker.io/redis
-    tag: 8.2
-  redis:
-    port: 6379
-    tlsPort: 6380
-    tlsReplication: true
-    authClients: "no"
-    config:
-      tls-port: 6380
-      tls-cert-file: /tls-certs/tls.crt
-      tls-key-file: /tls-certs/tls.key
-      tls-auth-clients: "no"
-  replicas: 1
-  auth: true
-  # Same single application-secret name as postgres.auth.existingSecret and the
-  # Deployment's REDIS_PASSWORD secretKeyRef. Not independently configurable.
-  existingSecret: statuslist-secret
-  authKey: redis-password
-  persistentVolume:
-    enabled: true
-    storageClass: high-performance
-    accessModes:
-      - ReadWriteOnce
-    size: 10Gi
-  tls:
-    secretName: statuslist-tls
-    certFile: tls.crt
-    keyFile: tls.key
-  haproxy:
-    enabled: true
-    replicas: 1
-    resources:
-      requests:
-        cpu: 100m
-        memory: 128Mi
-      limits:
-        cpu: 200m
-        memory: 256Mi
-    tls:
-      enabled: true
-      secretName: statuslist-haproxy-tls
-      keyName: redis.pem
-    service:
-      type: LoadBalancer
-      annotations:
-        service.beta.kubernetes.io/aws-load-balancer-type: "nlb"
-        external-dns.alpha.kubernetes.io/hostname: redis.eudi-adorsys.com
-        external-dns.alpha.kubernetes.io/delete: "true"
-  # TLS certificate sync CronJob (redis-ha-cert-sync.yaml). The sync reads the
-  # source certificate secret (redis-ha.tls.secretName) and mirrors it into the
-  # HAProxy TLS secret (redis-ha.haproxy.tls.secretName). The kubectl image used by
-  # the job is configurable here.
-  certSync:
-    # Runs daily at 02:00 UTC. cert-manager renews at ~2/3 of a certificate's
-    # lifetime and writes the renewed secret immediately, so a weekly sync would
-    # present the old certificate for up to ~6 days; daily bounds the lag to <24h.
-    schedule: "0 2 * * *"
-    image:
-      repository: bitnami/kubectl
-      # Pin to a specific patch version (e.g. "1.31.2"), not a floating major.minor,
-      # and prefer a `digest` so the tag cannot be silently retargeted.
-      tag: "1.31"
-      # digest: "sha256:<64 hex characters>" # optional; pins the image immutably
-      digest: ""
 
 opentelemetry-collector:
   enabled: true

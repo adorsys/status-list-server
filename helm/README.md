@@ -13,7 +13,6 @@ This guide provides instructions for deploying the Status List Server using the 
 This chart has the following dependencies:
 
 - **PostgreSQL**: A relational database for storing application data.
-- **Redis HA**: A Redis high-availability subchart (`redis-ha`, dandydeveloper/charts). Off by default; enable via `redis-ha.enabled=true`.
 - **OpenTelemetry Collector**: Official subchart (`open-telemetry/opentelemetry-collector`) for collecting and routing traces, metrics, and logs.
 
 These dependencies are managed by the Helm chart. PostgreSQL is enabled by default.
@@ -177,29 +176,9 @@ statuslist:
     enabled: true
     stringData:
       postgres-password: "change-me"
-      redis-password: "change-me"   # only required when redis-ha.enabled=true
 ```
 
-The fallback `Secret` is rendered only when `externalSecret.enabled=false` **and** `statuslist.fallbackSecret.enabled=true`. It uses `stringData`, so plain string values are base64-encoded by the API server. The fallback secret is always named `statuslist-secret` — the single supported name that the Deployment's `POSTGRES_PASSWORD` (and `REDIS_PASSWORD` when Redis is enabled) `secretKeyRef` and `postgres.auth.existingSecret` all reference, so it is not independently configurable.
-
-## Redis HA
-
-Redis HA is provided by the `redis-ha` subchart and is **disabled by default** (`redis-ha.enabled=false`). Enable it only when the application's Redis cache is required:
-
-```yaml
-redis-ha:
-  enabled: true
-  existingSecret: statuslist-secret   # default; same single application-secret as PostgreSQL
-  authKey: redis-password
-```
-
-When enabled, the chart:
-- Renders the `Redis` password into the Deployment via a `REDIS_PASSWORD` `secretKeyRef` pointing at the same `statuslist-secret` the application and PostgreSQL use, and an `APP_REDIS__URI` computed from the subchart's service / TLS settings (see `_helpers.tpl` `status-list-server-chart.redisUri`). The URI intentionally carries no credentials — the application authenticates using the `REDIS_PASSWORD` env var, so a password with URI-special characters cannot misparse the connection string.
-- Adds Redis egress ports (6379, 6380) to the application `NetworkPolicy`.
-- Renders the `redis-cert-sync` `CronJob` when the HAProxy TLS proxy is enabled, keeping the HAProxy TLS secret (`statuslist-haproxy-tls`) synchronized with the wildcard certificate in `statuslist-tls`. The job's service account is least-privileged (read-only on the source wildcard secret, read/write only on the HAProxy TLS secret). The job runs **daily** (`redis-ha.certSync.schedule`, default `"0 2 * * *"`) so the synced secret never lags more than ~24h behind a cert-manager renewal, and mounts an `emptyDir` at `/tmp` so `mktemp -d` works under `readOnlyRootFilesystem` on hardened runtimes.
-- The sync job's `kubectl` image is configurable via `redis-ha.certSync.image`. Pin it to a specific patch version (e.g. `tag: "1.31.2"`) and, for production, an immutable `digest: "sha256:…"` so the image cannot be silently retargeted.
-
-The Redis password must exist in the single application-secret (`statuslist-secret`): via ESO (`externalSecret.spec.data` includes `redis-password`) or the fallback `Secret` above.
+The fallback `Secret` is rendered only when `externalSecret.enabled=false` **and** `statuslist.fallbackSecret.enabled=true`. It uses `stringData`, so plain string values are base64-encoded by the API server. The fallback secret is always named `statuslist-secret` — the single supported name that the Deployment's `POSTGRES_PASSWORD` `secretKeyRef` and `postgres.auth.existingSecret` all reference, so it is not independently configurable.
 
 ## Horizontal Autoscaling and Pod Disruption Budget
 
