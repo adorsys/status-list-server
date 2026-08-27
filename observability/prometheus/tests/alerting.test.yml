@@ -55,3 +55,139 @@ tests:
       - eval_time: 400m
         alertname: CacheHitRatioLow
         exp_alerts: []
+
+  # Positive-fire coverage for every alert not exercised above. Histogram
+  # buckets are crafted so record-rule p95 lands clearly above the latency
+  # thresholds (request >= 300ms, DB >= 50ms), and the ratio counters are set to
+  # breach the burn-rate / ratio thresholds. A 400-minute run resolves the 1h and
+  # 6h windows and outlasts every `for:` duration.
+  - interval: 1m
+    input_series:
+      # Request latency: cumulative 90/100 by le="0.5", 100/100 by le="1"
+      # -> p95 interpolates to ~0.75s > 0.3s.
+      - series: >-
+          http_server_duration_seconds_bucket{otel_scope_name="status-list-server",le="0.1"}
+        values: '0+20x400'
+      - series: >-
+          http_server_duration_seconds_bucket{otel_scope_name="status-list-server",le="0.3"}
+        values: '0+80x400'
+      - series: >-
+          http_server_duration_seconds_bucket{otel_scope_name="status-list-server",le="0.5"}
+        values: '0+90x400'
+      - series: >-
+          http_server_duration_seconds_bucket{otel_scope_name="status-list-server",le="1"}
+        values: '0+100x400'
+      - series: >-
+          http_server_duration_seconds_bucket{otel_scope_name="status-list-server",le="+Inf"}
+        values: '0+100x400'
+      # DB query latency: cumulative 90/100 by le="0.1", 100/100 by le="1"
+      # -> p95 interpolates to ~0.55s > 0.05s.
+      - series: >-
+          db_query_duration_seconds_bucket{otel_scope_name="status-list-server",le="0.01"}
+        values: '0+20x400'
+      - series: >-
+          db_query_duration_seconds_bucket{otel_scope_name="status-list-server",le="0.05"}
+        values: '0+80x400'
+      - series: >-
+          db_query_duration_seconds_bucket{otel_scope_name="status-list-server",le="0.1"}
+        values: '0+90x400'
+      - series: >-
+          db_query_duration_seconds_bucket{otel_scope_name="status-list-server",le="1"}
+        values: '0+100x400'
+      - series: >-
+          db_query_duration_seconds_bucket{otel_scope_name="status-list-server",le="+Inf"}
+        values: '0+100x400'
+      # Token generation: 10 failures / 100 attempts = 0.10 >= 0.072 (both 1h and 6h).
+      - series: >-
+          token_generation_failures_total{otel_scope_name="status-list-server",format="jwt"}
+        values: '0+10x400'
+      - series: >-
+          token_generation_attempts_total{otel_scope_name="status-list-server",format="jwt"}
+        values: '0+100x400'
+      # Cache hits 3 / (3 + 2) = 0.60 < 0.85.
+      - series: >-
+          status_list_cache_hits_total{otel_scope_name="status-list-server",cache="status_list"}
+        values: '0+3x400'
+      - series: >-
+          status_list_cache_misses_total{otel_scope_name="status-list-server",cache="status_list"}
+        values: '0+2x400'
+      # Cert renewal: 2 failures / 100 attempts = 0.02 >= 0.01.
+      - series: >-
+          cert_renewal_failures_total{otel_scope_name="status-list-server"}
+        values: '0+2x400'
+      - series: >-
+          cert_renewal_attempts_total{otel_scope_name="status-list-server"}
+        values: '0+100x400'
+    alert_rule_test:
+      - eval_time: 400m
+        alertname: RequestLatencyFastBurn
+        exp_alerts:
+          - exp_labels:
+              severity: "page"
+              sli: "request_latency"
+            exp_annotations:
+              summary: "Request latency P95 sustainably above 300ms (>300ms in both 1h and 6h)"
+              runbook_url: "runbooks/request-latency.md"
+      - eval_time: 400m
+        alertname: RequestLatencySlowBurn
+        exp_alerts:
+          - exp_labels:
+              severity: "warn"
+              sli: "request_latency"
+            exp_annotations:
+              summary: "Request latency P95 sustained above 300ms for 6h"
+              runbook_url: "runbooks/request-latency.md"
+      - eval_time: 400m
+        alertname: DbLatencyFastBurn
+        exp_alerts:
+          - exp_labels:
+              severity: "page"
+              sli: "db_latency"
+            exp_annotations:
+              summary: "DB query latency P95 sustainably above 50ms (>50ms in both 1h and 6h)"
+              runbook_url: "runbooks/db-latency.md"
+      - eval_time: 400m
+        alertname: DbLatencySlowBurn
+        exp_alerts:
+          - exp_labels:
+              severity: "warn"
+              sli: "db_latency"
+            exp_annotations:
+              summary: "DB query latency P95 sustained above 50ms for 6h"
+              runbook_url: "runbooks/db-latency.md"
+      - eval_time: 400m
+        alertname: TokenGenerationFastBurn
+        exp_alerts:
+          - exp_labels:
+              severity: "page"
+              sli: "token_generation"
+            exp_annotations:
+              summary: "Token-generation failures burning the error budget fast (>=14.4x over 0.5% budget in both 1h and 6h)"
+              runbook_url: "runbooks/token-generation.md"
+      - eval_time: 400m
+        alertname: TokenGenerationSlowBurn
+        exp_alerts:
+          - exp_labels:
+              severity: "warn"
+              sli: "token_generation"
+            exp_annotations:
+              summary: "Token-generation failure rate burning the error budget slowly (>=6x over 0.5% budget for 6h)"
+              runbook_url: "runbooks/token-generation.md"
+      - eval_time: 400m
+        alertname: CacheHitRatioLow
+        exp_alerts:
+          - exp_labels:
+              severity: "warn"
+              sli: "cache_hit_ratio"
+            exp_annotations:
+              summary: "Status-list cache hit ratio below 85% for 15m (degradation, not outage)"
+              runbook_url: "runbooks/cache-hit-ratio.md"
+      - eval_time: 400m
+        alertname: CertRenewalFailures
+        exp_alerts:
+          - exp_labels:
+              severity: "warn"
+              sli: "cert_renewal"
+            exp_annotations:
+              summary: "Certificate renewal failure rate at or above 1% for 15m"
+              runbook_url: "runbooks/cert-renewal.md"

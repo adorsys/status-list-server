@@ -42,8 +42,32 @@ docker compose up -d   # brings up app + otel-collector + prometheus + grafana
 
 Dashboard generation is documented in `dashboards/README.md`.
 
+## Retention requirement
+
+The error-budget gauge and the 30d window recording rules (`sli:error_rate:30d`,
+`sli:error_budget:success:30d`) evaluate `rate(...[30d])`. PromQL silently uses
+only the samples actually retained, so the 30d window is **unreliable unless the
+Prometheus TSDB retains at least 31 days**. The Prometheus default is 15 days
+(`--storage.tsdb.retention.time=15d`), which would halve the window and make the
+error-budget gauge read artificially optimistic.
+
+Production Prometheus **must** be configured with:
+
+```text
+--storage.tsdb.retention.time=31d
+```
+
+(or the equivalent in a managed Prometheus config). Without this, the error
+budget gauge is not trustworthy. The dev `docker-compose.yml` stack is a local
+demo and does not need this set.
+
 ## Deployment note
 
 The repo ships standalone Prometheus + Grafana + a local Alertmanager for a dev
 stack. Production wiring to a managed stack is an operator step (no credentials
-or CRDs in this repo); `alertmanager.yml` receivers are placeholders.
+or CRDs in this repo); `alertmanager.yml` receivers hold **no webhook URLs at
+all** — a live Discord webhook was removed and replaced with `webhook_url_file`
+pointing at mounted secrets. `docker-compose.yml` writes those secrets from the
+`ALERTMANAGER_DISCORD_WEBHOOK_{DEFAULT,PAGE,WARN}` environment variables (default
+`REPLACE_ME`, inert), so the real endpoints stay out-of-band in a secrets
+manager / operator config.

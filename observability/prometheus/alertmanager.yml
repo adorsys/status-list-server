@@ -1,45 +1,49 @@
 # Alertmanager routing.
 #
-# No channel credentials (PagerDuty/Slack/Opsgenie tokens) live in this repo on
-# purpose. The webhook URLs below are placeholders that operators MUST replace
-# with a real receiver endpoint. Keep this file versioned so route changes are
-# PR-reviewed; wire the resolved URLs via an out-of-band secret/operator config.
+# No notification credentials (webhook URLs/tokens) live in this repo on
+# purpose. Each receiver reads its Discord webhook URL from a secrets file
+# mounted at /etc/alertmanager/secrets/*; the real endpoints stay out-of-band
+# (secrets manager / operator config). docker-compose.yml injects those files at
+# container start from the ALERTMANAGER_DISCORD_WEBHOOK_* environment variables.
 
 route:
   group_by: ['alertname', 'sli']
   group_wait: 30s
   group_interval: 5m
-  repeat_interval: 4h
   receiver: 'default'
   routes:
     - matchers:
         - severity="page"
       receiver: 'page'
+      repeat_interval: 4h
     - matchers:
         - severity="warn"
       receiver: 'warn'
+      repeat_interval: 24h
 
 receivers:
   # Resolved notifications default to the lowest-noise receiver.
   - name: 'default'
     discord_configs:
-      - webhook_url: 'https://discord.com/api/webhooks/1542131196698566746/u4iIymJozjvThThb0MGC6INgWMKeIMpAbCYdFyL8x-61QV3Hq6poM2QOPvux3pRXXOt3'
+      - webhook_url_file: '/etc/alertmanager/secrets/discord-default'
         send_resolved: true
         title: '{{ template "discord.default.title" . }}'
         message: '{{ template "discord.default.message" . }}'
 
-  # Page: on-call escalation for the fast-burn / outage alerts.
+  # Page: on-call escalation for the fast-burn / outage alerts. Calls on-call
+  # every 4h during an outage.
   - name: 'page'
     discord_configs:
-      - webhook_url: 'https://discord.com/api/webhooks/1542131196698566746/u4iIymJozjvThThb0MGC6INgWMKeIMpAbCYdFyL8x-61QV3Hq6poM2QOPvux3pRXXOt3'
+      - webhook_url_file: '/etc/alertmanager/secrets/discord-page'
         send_resolved: true
         title: '{{ template "discord.default.title" . }}'
         message: '{{ template "discord.default.message" . }}'
 
-  # Warn: async channel for slow-burn and degradation alerts.
+  # Warn: async channel for slow-burn and degradation alerts. Notifies at most
+  # once per day to keep sustained degradation noise down.
   - name: 'warn'
     discord_configs:
-      - webhook_url: 'https://discord.com/api/webhooks/1542131196698566746/u4iIymJozjvThThb0MGC6INgWMKeIMpAbCYdFyL8x-61QV3Hq6poM2QOPvux3pRXXOt3'
+      - webhook_url_file: '/etc/alertmanager/secrets/discord-warn'
         send_resolved: true
         title: '{{ template "discord.default.title" . }}'
         message: '{{ template "discord.default.message" . }}'

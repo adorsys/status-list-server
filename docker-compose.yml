@@ -164,12 +164,28 @@ services:
     restart: unless-stopped
     ports:
       - 9093:9093
+    environment:
+      # Discord receiver webhooks, injected at runtime from these env vars (set
+      # them in .env / secrets manager). The REPLACE_ME defaults are inert and
+      # only keep the stack running with notifications disabled. The entrypoint
+      # below writes each value into a secrets file that Alertmanager reads via
+      # `webhook_url_file` (it cannot inline env vars in `webhook_url`).
+      ALERTMANAGER_DISCORD_WEBHOOK_DEFAULT: ${ALERTMANAGER_DISCORD_WEBHOOK_DEFAULT:-https://discord.com/api/webhooks/REPLACE_ME/REPLACE_ME}
+      ALERTMANAGER_DISCORD_WEBHOOK_PAGE: ${ALERTMANAGER_DISCORD_WEBHOOK_PAGE:-https://discord.com/api/webhooks/REPLACE_ME/REPLACE_ME}
+      ALERTMANAGER_DISCORD_WEBHOOK_WARN: ${ALERTMANAGER_DISCORD_WEBHOOK_WARN:-https://discord.com/api/webhooks/REPLACE_ME/REPLACE_ME}
     volumes:
       - ./observability/prometheus/alertmanager.yml:/etc/alertmanager/alertmanager.yml
     networks:
       - status-list-network
-    command:
-      - '--config.file=/etc/alertmanager/alertmanager.yml'
+    entrypoint:
+      - /bin/sh
+      - -ec
+      - |
+        mkdir -p /etc/alertmanager/secrets
+        printf '%s' "$$ALERTMANAGER_DISCORD_WEBHOOK_DEFAULT" > /etc/alertmanager/secrets/discord-default
+        printf '%s' "$$ALERTMANAGER_DISCORD_WEBHOOK_PAGE" > /etc/alertmanager/secrets/discord-page
+        printf '%s' "$$ALERTMANAGER_DISCORD_WEBHOOK_WARN" > /etc/alertmanager/secrets/discord-warn
+        exec /bin/alertmanager --config.file=/etc/alertmanager/alertmanager.yml
 
   grafana:
     image: grafana/grafana:12.0.0

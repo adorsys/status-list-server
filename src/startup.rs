@@ -214,11 +214,19 @@ fn api_v1_routes(
 /// Keyed by the bounded route pattern (via [`MatchedPath`]), the HTTP method,
 /// and the response status class. Runs after routing so `MatchedPath` is
 /// populated, giving bounded cardinality regardless of path parameters.
+///
+/// Health/liveness/readiness and the metrics endpoint are excluded from the SLI
+/// so their traffic neither inflates the error-rate denominator (2xx probes)
+/// nor trips ErrorRateFastBurn on a transient readiness-probe 5xx.
 async fn track_http_metrics(request: Request<Body>, next: Next) -> Response {
     let start = std::time::Instant::now();
     let method = request.method().clone();
     let matched = request.extensions().get::<MatchedPath>().cloned();
     let route: &str = matched.as_ref().map(|p| p.as_str()).unwrap_or("unmatched");
+
+    if matches!(route, "/health" | "/health/live" | "/health/ready" | "/metrics") {
+        return next.run(request).await;
+    }
 
     let response = next.run(request).await;
 

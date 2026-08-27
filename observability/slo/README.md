@@ -96,6 +96,21 @@ Two windows are required because a single short window makes the SLO a function
 of noise (spiky traffic trips a short window that a longer window clears), and a
 single long window is too slow to catch a fast outage.
 
+### Latency alerts are threshold-based, not burn-rate
+
+Latency alerts are threshold-based on trailing-window quantiles, not burn-rate:
+they compare `histogram_quantile(0.95, rate(...))` sampled over the 1h/6h windows
+against a fixed threshold, rather than a ratio-to-budget burn rate. Because those
+windows are long trailing averages, they respond slowly to brief spikes — a
+30-second p95=800ms spike moves a 1h trailing average by only ~0.8%, far below
+the 300ms threshold. A sustained breach of 10+ minutes is the minimum that will
+meaningfully move the 1h window.
+
+Expect, therefore, that a short latency spike visible in traces may not fire a
+latency alert. This is accepted divergence (documented below): the latency alerts
+`RequestLatencyFastBurn`/`SlowBurn` and `DbLatencyFastBurn`/`SlowBurn` fire only
+on sustained degradation, on purpose, to avoid paging on a blip.
+
 ## How to tune
 
 1. Collect 30d of production data.
