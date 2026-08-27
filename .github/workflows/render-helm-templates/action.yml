@@ -245,6 +245,23 @@ runs:
             --set podDisruptionBudget.maxUnavailable=null >/dev/null 2>&1; then
           echo "ERROR: PDB with neither minAvailable nor maxUnavailable should fail"; exit 1
         fi
+        # An explicit minAvailable: 0 is a valid PDB setting (prevents voluntary disruptions)
+        # and must be preserved as an integer, NOT treated as unset (0 is falsy in Go templates).
+        if ! helm template status-list-server helm/chart \
+            --set podDisruptionBudget.enabled=true \
+            --set podDisruptionBudget.minAvailable=0 \
+            --set podDisruptionBudget.maxUnavailable=null 2>/dev/null \
+          | grep -qE '^\s+minAvailable: 0$'; then
+          echo "ERROR: PDB with minAvailable: 0 must render minAvailable: 0 (explicit zero preserved)"; exit 1
+        fi
+        # Conversely an explicit maxUnavailable: 0 must render as maxUnavailable: 0.
+        if ! helm template status-list-server helm/chart \
+            --set podDisruptionBudget.enabled=true \
+            --set podDisruptionBudget.minAvailable=null \
+            --set podDisruptionBudget.maxUnavailable=0 2>/dev/null \
+          | grep -qE '^\s+maxUnavailable: 0$'; then
+          echo "ERROR: PDB with maxUnavailable: 0 must render maxUnavailable: 0 (explicit zero preserved)"; exit 1
+        fi
 
         # Upgrade render test: legacy secretStore.aws.region must be preserved for APP_AWS__REGION.
         REGION=$(helm template status-list-server helm/chart --set secretStore.aws.region=us-west-2 \
@@ -271,11 +288,21 @@ runs:
             --set externalSecret.enabled=false \
             --set statuslist.fallbackSecret.enabled=true \
             --set-string statuslist.fallbackSecret.stringData.postgres-password=x \
+            --set-string statuslist.fallbackSecret.stringData.redis-password=y \
             --set 'redis-ha.enabled=true' \
             --set 'redis-ha.auth=true' 2>/dev/null \
           | grep -A3 'name: REDIS_PASSWORD' | grep 'name:' | tail -1 | sed -E 's/.*name: ([a-zA-Z0-9-]+)$/\1/')
         if [ "$REDISREF" != "statuslist-secret" ]; then
           echo "ERROR: REDIS_PASSWORD secretKeyRef must reference statuslist-secret, got '$REDISREF'"; exit 1
+        fi
+        # Fail-closed fallback + redis-ha: both postgres-password and redis-password must be set.
+        if helm template status-list-server helm/chart \
+            --set externalSecret.enabled=false \
+            --set statuslist.fallbackSecret.enabled=true \
+            --set-string statuslist.fallbackSecret.stringData.postgres-password=x \
+            --set 'redis-ha.enabled=true' \
+            --set 'redis-ha.auth=true' >/dev/null 2>&1; then
+          echo "ERROR: fallback mode with redis-ha.enabled must require a non-empty redis-password"; exit 1
         fi
         # Redis HA in ESO mode: the ExternalSecret carries redis-password into the single
         # application-secret, and the Deployment REDIS_PASSWORD secretKeyRef reads it from there.
