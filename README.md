@@ -144,6 +144,8 @@ The following constraints are validated at startup and will cause the server to 
 - `server.port` must be between 1 and 65535 (the `u16` type enforces the upper bound)
 - `server.cert.renewal_cron_schedule` must be a valid 6-field cron expression (seconds required)
 
+For a comprehensive reference of startup validations, fail-fast behaviors, and remediation steps, see [`docs/startup-validation.md`](docs/startup-validation.md).
+
 ## Security
 
 ### Authentication

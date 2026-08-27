@@ -2,6 +2,8 @@
 
 The server stores lifecycle-coupled cryptographic material in one backend by default: ACME account keys, the server signing key, and the certificate chain associated with that key.
 
+For startup validation and fail-fast behavior specific to secrets backends, see [`startup-validation.md`](startup-validation.md#2-secrets-backend-validations).
+
 The supported backends include:
 
 - **HashiCorp Vault / OpenBao** (KV v2 engine, feature flag: `vault`)

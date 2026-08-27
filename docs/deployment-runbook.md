@@ -130,6 +130,8 @@ kubectl rollout status deployment/statuslist-status-list-server-deployment -n st
 
 ## Failure Triage
 
+For a comprehensive table of startup validations, required conditions, and remediation steps, see [`startup-validation.md`](startup-validation.md).
+
 ### OIDC Denied
 
 Symptoms:
