@@ -113,6 +113,48 @@ jobs:
           echo "release image features: ${features}"
           cargo check --workspace --features "${features}"
 
+  cargo-build-variants:
+    name: Cargo Build Variants (${{ matrix.variant }})
+    runs-on: ubuntu-latest
+    needs: cargo-fmt
+    timeout-minutes: 45
+    strategy:
+      matrix:
+        variant:
+          - aws
+          - gcp
+          - azure
+          - vault
+          - fscert
+        include:
+          - variant: aws
+            features: "postgres,aws-secrets,acme"
+          - variant: gcp
+            features: "postgres,gcp-secrets,acme"
+          - variant: azure
+            features: "postgres,azure-kv,acme"
+          - variant: vault
+            features: "postgres,vault,acme"
+          - variant: fscert
+            features: "postgres,acme"
+
+    steps:
+      - name: Fetch Repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install Rust
+        uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake golang-go
+
+      - name: Cargo Check Variant (${{ matrix.variant }})
+        run: |
+          echo "Checking variant ${{ matrix.variant }} with features: ${{ matrix.features }}"
+          cargo check --workspace --features "${{ matrix.features }}"
+
       - name: Verify domain layer purity
         run: |
           if grep -rn -E "(sea_orm|axum|aws_sdk|reqwest|moka|crate::server|crate::outbound)" src/domain/; then
@@ -121,18 +163,34 @@ jobs:
           fi
 
   docker-build:
-    name: Docker Build Smoke
+    name: Docker Build Smoke (${{ matrix.variant }})
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        variant:
+          - aws
+          - gcp
+          - azure
+          - vault
+          - fscert
+        include:
+          - variant: aws
+            features: "postgres,aws-secrets,acme"
+          - variant: gcp
+            features: "postgres,gcp-secrets,acme"
+          - variant: azure
+            features: "postgres,azure-kv,acme"
+          - variant: vault
+            features: "postgres,vault,acme"
+          - variant: fscert
+            features: "postgres,acme"
 
     steps:
       - name: Fetch Repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - name: Docker build (production features)
-        # No `--build-arg FEATURES`: the Dockerfile's `ARG FEATURES` default already is
-        # the release feature set, so passing it here would be a second copy to keep in
-        # sync, and a stale one would smoke-test a set the release never builds.
-        run: docker build .
+      - name: Docker build (${{ matrix.variant }} variant)
+        run: docker build --build-arg FEATURES="${{ matrix.features }}" .
 
   cargo-clippy:
     name: Cargo Clippy Check
