@@ -39,7 +39,6 @@ Before running the server, ensure you have the following tools installed:
 
 - [Rust & Cargo](https://www.rust-lang.org/tools/install) (Latest stable).
 - A supported database backend: PostgreSQL, MySQL, or SQLite for persistent deployments. The default local mode uses in-memory repositories.
-- [Redis](https://redis.io/download) is optional and only needed when you enable the distributed certificate-material cache.
 - [Docker](https://www.docker.com/get-started/) (optional, for local testing).
 
 ### Run locally
@@ -65,18 +64,12 @@ The simplest way to run the project is with [docker compose](https://docs.docker
 docker compose up --build
 ```
 
-This command will pull all required images and start the server compiled with default compose features (`postgres,aws-secrets,acme`). Redis is not part of the default path.
+This command will pull all required images and start the server compiled with default compose features (`postgres,aws-secrets,acme`).
 
 To pass custom Cargo feature flags during build, specify the `FEATURES` environment variable:
 
 ```sh
 FEATURES="mysql,aws-secrets,acme" docker compose --profile mysql up --build
-```
-
-To test the optional Redis certificate-material cache locally, enable the Redis profile, compile the Redis feature, and provide a Redis URI:
-
-```sh
-FEATURES="postgres,redis,aws-secrets,acme" APP_REDIS__URI="redis://redis:6379" docker compose --profile redis up --build
 ```
 
 #### Running Manually
@@ -87,7 +80,7 @@ To start the server in zero-infrastructure default in-memory mode, execute:
 cargo run
 ```
 
-By default, the server will listen on `http://localhost:8000` using in-memory repositories, Moka cache, and store-based certificate management. No external databases, Redis, or cloud services are required for development.
+By default, the server will listen on `http://localhost:8000` using in-memory repositories, Moka cache, and store-based certificate management. No external databases or cloud services are required for development.
 
 ## Cargo Feature Matrix
 
@@ -99,25 +92,18 @@ The crate uses modular Cargo feature flags to gate optional production backend d
 | `postgres`    | SeaORM PostgreSQL database driver.                                      | ❌ Opt-in  |
 | `sqlite`      | SeaORM SQLite database driver.                                          | ❌ Opt-in  |
 | `mysql`       | SeaORM MySQL database driver.                                           | ❌ Opt-in  |
-| `redis`       | Redis storage driver for explicit cache/storage integrations.           | ❌ Opt-in  |
 | `aws-secrets` | Route53 DNS-01, and AWS Secrets Manager drivers.                        | ❌ Opt-in  |
 | `acme`        | ACME DNS-01 certificate manager driver.                                 | ❌ Opt-in  |
 
 To build with specific backend drivers, pass the matching feature flag(s):
 
 ```bash
-# Run with PostgreSQL and Redis support available
-cargo run --features postgres,redis
+# Run with PostgreSQL support available
+cargo run --features postgres
 
 # Run with AWS and ACME production integrations
 cargo run --features postgres,aws-secrets,acme
 ```
-
-## Redis Role
-
-Redis is optional. The server does not use Redis for status-list persistence or status-list reads; those use the configured repository backend and the in-process status-list cache. Certificate and signing-key material are managed together by the selected cryptographic material backend; prefer the built-in material read-cache TTLs before adding Redis.
-
-For single-replica deployments, local development, tests, or deployments where certificate material reads are inexpensive, leave `APP_REDIS__URI` unset and omit the `redis` Cargo feature.
 
 For deployment guidance and backend tradeoffs, see [`docs/database-backends.md`](docs/database-backends.md).
 
@@ -157,7 +143,6 @@ The following constraints are validated at startup and will cause the server to 
 
 - `server.port` must be between 1 and 65535 (the `u16` type enforces the upper bound)
 - `server.cert.renewal_cron_schedule` must be a valid 6-field cron expression (seconds required)
-- `aws.s3_bucket` must not be empty
 
 ## Security
 
@@ -273,6 +258,10 @@ The server can be deployed using a containerization platform such as Docker.
 
 A Helm chart is provided for easy deployment on Kubernetes. For detailed instructions, see the [Helm Deployment Guide](helm/README.md).
 
+### Container Supply Chain
+
+Release images are scanned by digest and carry an SBOM and SLSA provenance, and release tags are applied only after the scan. See the [Container Supply Chain guide](docs/supply-chain.md) for thresholds, verification commands, and how to triage findings.
+
 ## Testing
 
 You can run the tests using the following command:
@@ -294,7 +283,7 @@ Contributions are welcome and encouraged. Before contributing, please review the
 
 ## Releases
 
-This project uses [release-plz](https://release-plz.dev/) with [Conventional Commits](https://www.conventionalcommits.org/) to automate versioning and changelog generation. Every push to `main` opens or updates a Release PR. Merging that PR creates a git tag and a GitHub Release automatically.
+This project uses [release-plz](https://release-plz.dev/) with [Conventional Commits](https://www.conventionalcommits.org/) to automate versioning and changelog generation. Every push to `main` opens or updates a Release PR. Merging that PR creates a git tag and a GitHub Release automatically. The first Release PR creates the initial changelog entry.
 
 ## License
 

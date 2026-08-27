@@ -13,7 +13,7 @@ use color_eyre::eyre::Result as EyeResult;
 #[cfg(feature = "acme")]
 use color_eyre::eyre::eyre;
 #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mysql"))]
-use sea_orm::ConnectOptions;
+use sea_orm::{ConnectOptions, DbErr};
 #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mysql"))]
 use sea_orm_migration::MigratorTrait;
 #[cfg(any(
@@ -45,7 +45,13 @@ use crate::cert_manager::challenge::{
 };
 #[cfg(feature = "acme")]
 use crate::cert_manager::http_client::DefaultHttpClient;
-#[cfg(all(feature = "acme", not(feature = "vault"), not(feature = "aws-secrets")))]
+#[cfg(all(
+    feature = "acme",
+    not(feature = "vault"),
+    not(feature = "gcp-secrets"),
+    not(feature = "azure-kv"),
+    not(feature = "aws-secrets")
+))]
 use crate::cert_manager::storage::MemoryStorage;
 #[cfg(feature = "acme")]
 use crate::cert_manager::{
@@ -61,11 +67,25 @@ use crate::domain::{
     ports::{CertificateProvider, CredentialRepo, StatusListRepo, StatusListSnapshotRepo},
     service::Service,
 };
-#[cfg(all(feature = "aws-secrets", not(feature = "vault")))]
+#[cfg(all(
+    feature = "aws-secrets",
+    not(feature = "vault"),
+    not(feature = "gcp-secrets"),
+    not(feature = "azure-kv")
+))]
 use crate::outbound::aws::AwsSecretsManager;
+#[cfg(all(
+    feature = "azure-kv",
+    feature = "acme",
+    not(feature = "vault"),
+    not(feature = "gcp-secrets")
+))]
+use crate::outbound::azure_kv::AzureKeyVaultClient;
 use crate::outbound::cache::MokaStatusListCache;
 #[cfg(feature = "acme")]
 use crate::outbound::cert::AcmeCertificateProvider;
+#[cfg(all(feature = "gcp-secrets", feature = "acme", not(feature = "vault")))]
+use crate::outbound::gcp_secret::GcpSecretManagerClient;
 #[cfg(feature = "memory")]
 use crate::outbound::memory::{MemoryCredentials, MemoryStatusListSnapshotRepo, MemoryStatusLists};
 #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mysql"))]
@@ -77,6 +97,28 @@ use crate::outbound::sql::{
 use crate::outbound::vault::VaultClient;
 use crate::server::AppState;
 use crate::server::health::{AlwaysReady, Readiness};
+
+#[cfg(any(feature = "sqlite", feature = "postgres", feature = "mysql"))]
+fn classify_db_connect_error(err: &DbErr) -> &'static str {
+    match err {
+        DbErr::ConnectionAcquire(_) => "connection_acquire",
+        DbErr::Conn(_) => "connection",
+        DbErr::Exec(_) => "execution",
+        DbErr::Query(_) => "query",
+        DbErr::TryIntoErr { .. } => "conversion",
+        DbErr::ConvertFromU64(_) => "conversion",
+        DbErr::UnpackInsertId => "last_insert_id",
+        DbErr::UpdateGetPrimaryKey => "missing_primary_key",
+        DbErr::RecordNotFound(_) => "record_not_found",
+        DbErr::AttrNotSet(_) => "attribute_not_set",
+        DbErr::Custom(_) => "custom",
+        DbErr::Type(_) => "type",
+        DbErr::Json(_) => "json",
+        DbErr::Migration(_) => "migration",
+        DbErr::RecordNotInserted => "record_not_inserted",
+        DbErr::RecordNotUpdated => "record_not_updated",
+    }
+}
 
 /// Assembles application configuration, connects outbound repositories, and builds `AppState`.
 #[cfg(feature = "acme")]
@@ -145,7 +187,11 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
         }
         #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mysql"))]
         db_backend => {
-            let db_url = config.database.url.expose_secret();
+            let resolved_db_url = config
+                .database
+                .resolved_url()
+                .wrap_err("Invalid database connection configuration")?;
+            let db_url = resolved_db_url.expose_secret();
             if !db_backend.validate_url_scheme(db_url) {
                 return Err(color_eyre::eyre::eyre!(
                     "URL scheme does not match configured backend '{}'. Expected URL starting with {}",
@@ -171,9 +217,13 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
                     .sqlx_logging(false);
             }
 
-            let db = sea_orm::Database::connect(opt)
-                .await
-                .wrap_err("Failed to connect to database")?;
+            let db = sea_orm::Database::connect(opt).await.map_err(|err| {
+                color_eyre::eyre::eyre!(
+                    "Failed to connect to database (kind={}, {})",
+                    classify_db_connect_error(&err),
+                    config.database.redacted_target()
+                )
+            })?;
 
             Migrator::up(&db, None)
                 .await
@@ -317,10 +367,6 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
         readiness = readiness.with_check(AlwaysReady::new("database"));
     }
 
-    // Redis is optional in this setup. Certificate and signing-key material use
-    // the feature-selected cryptographic-material backend, so Redis is intentionally
-    // omitted from readiness gating.
-
     #[cfg(feature = "acme")]
     {
         if let Some(manager) = &cert_manager_opt {
@@ -434,10 +480,34 @@ async fn build_crypto_storage(_config: &AppConfig) -> EyeResult<Box<dyn Storage>
     #[cfg(feature = "vault")]
     {
         tracing::info!("Using Vault KV v2 as secrets backend");
-        let secret_id = _config.vault.resolve_secret_id()?;
+        let builder = match _config.vault.auth_method {
+            crate::config::VaultAuthMethod::Approle => {
+                if _config.vault.role_id.trim().is_empty() {
+                    return Err(color_eyre::eyre::eyre!(
+                        "Vault auth_method=approle requires 'role_id' to be configured"
+                    ));
+                }
+                let secret_id = _config.vault.resolve_secret_id()?;
+                VaultClient::builder_approle(&_config.vault.addr, &_config.vault.role_id, secret_id)
+                    .auth_mount(&_config.vault.auth_mount)
+            }
+            crate::config::VaultAuthMethod::Kubernetes => {
+                let k8s_role = _config.vault.k8s_role.as_deref().ok_or_else(|| {
+                    color_eyre::eyre::eyre!(
+                        "Vault auth_method=kubernetes requires 'k8s_role' to be configured"
+                    )
+                })?;
+                VaultClient::builder_kubernetes(
+                    &_config.vault.addr,
+                    k8s_role,
+                    &_config.vault.k8s_token_path,
+                )
+                .auth_mount(&_config.vault.k8s_auth_mount)
+            }
+        };
+
         Ok(Box::new(
-            VaultClient::builder(&_config.vault.addr, &_config.vault.role_id, secret_id)
-                .auth_mount(&_config.vault.auth_mount)
+            builder
                 .mount(&_config.vault.mount)
                 .path_prefix(&_config.vault.path_prefix)
                 .namespace(_config.vault.namespace.as_deref())
@@ -450,7 +520,58 @@ async fn build_crypto_storage(_config: &AppConfig) -> EyeResult<Box<dyn Storage>
         ))
     }
 
-    #[cfg(all(not(feature = "vault"), feature = "aws-secrets"))]
+    #[cfg(all(feature = "gcp-secrets", not(feature = "vault")))]
+    {
+        tracing::info!("Using GCP Secret Manager as secrets backend");
+        Ok(Box::new(
+            GcpSecretManagerClient::builder(&_config.gcp_secret_manager.project_id)
+                .service_account_key(_config.gcp_secret_manager.service_account_key.clone())
+                .service_account_key_path(
+                    _config
+                        .gcp_secret_manager
+                        .service_account_key_path
+                        .as_deref(),
+                )
+                .endpoint(_config.gcp_secret_manager.endpoint.as_deref())
+                .allow_anonymous_credentials(_config.gcp_secret_manager.allow_anonymous_credentials)
+                .secrets_cache_ttl(Duration::from_secs(
+                    _config.server.cert.signing_key_cache_ttl,
+                ))
+                .build()
+                .await?,
+        ))
+    }
+
+    #[cfg(all(
+        feature = "azure-kv",
+        not(feature = "vault"),
+        not(feature = "gcp-secrets")
+    ))]
+    {
+        tracing::info!("Using Azure Key Vault as secrets backend");
+        let vault_url = _config.azure_keyvault.vault_url.clone().ok_or_else(|| {
+            eyre!("Azure Key Vault configuration error: azure_keyvault.vault_url is required when azure-kv is enabled")
+        })?;
+        Ok(Box::new(
+            AzureKeyVaultClient::builder(vault_url)
+                .service_principal(
+                    _config.azure_keyvault.tenant_id.as_deref(),
+                    _config.azure_keyvault.client_id.as_deref(),
+                    _config.azure_keyvault.client_secret.clone(),
+                )
+                .secrets_cache_ttl(Duration::from_secs(
+                    _config.server.cert.signing_key_cache_ttl,
+                ))
+                .build()?,
+        ))
+    }
+
+    #[cfg(all(
+        feature = "aws-secrets",
+        not(feature = "vault"),
+        not(feature = "gcp-secrets"),
+        not(feature = "azure-kv")
+    ))]
     {
         tracing::info!("Using AWS Secrets Manager as cryptographic-material backend");
         let aws_config = aws_config::defaults(BehaviorVersion::latest())
@@ -466,7 +587,12 @@ async fn build_crypto_storage(_config: &AppConfig) -> EyeResult<Box<dyn Storage>
         ))
     }
 
-    #[cfg(all(not(feature = "vault"), not(feature = "aws-secrets")))]
+    #[cfg(not(any(
+        feature = "vault",
+        feature = "gcp-secrets",
+        feature = "azure-kv",
+        feature = "aws-secrets"
+    )))]
     {
         tracing::info!("Using in-memory cryptographic-material backend");
         Ok(Box::new(MemoryStorage::default()))
@@ -713,12 +839,48 @@ mod general_tests {
             ("APP_VAULT__ROLE_ID", "test-role"),
             #[cfg(feature = "vault")]
             ("APP_VAULT__SECRET_ID", "test-secret"),
+            #[cfg(feature = "gcp-secrets")]
+            ("APP_GCP_SECRET_MANAGER__PROJECT_ID", "test-project"),
+            #[cfg(feature = "azure-kv")]
+            (
+                "APP_AZURE_KEYVAULT__VAULT_URL",
+                "https://test.vault.azure.net/",
+            ),
         ])
         .expect("Failed to load config");
 
         if let Err(ref e) = build_state(&config).await {
             panic!("build_state failed under default configuration: {e:?}");
         }
+    }
+
+    #[cfg(feature = "postgres")]
+    #[tokio::test]
+    async fn db_connect_error_redacts_sentinel_password() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+
+        let sentinel = "SENTINEL_PASSWORD_SHOULD_NOT_LEAK";
+        let config = AppConfig::load_from_overrides(&[
+            ("APP_DATABASE__BACKEND", "postgres"),
+            ("APP_DATABASE__HOST", "127.0.0.1"),
+            ("APP_DATABASE__PORT", "1"),
+            ("APP_DATABASE__USERNAME", "postgres"),
+            ("APP_DATABASE__PASSWORD", sentinel),
+            ("APP_DATABASE__NAME", "status-list"),
+            ("APP_DATABASE__POOL__CONNECT_TIMEOUT_SECS", "1"),
+            ("APP_DATABASE__POOL__ACQUIRE_TIMEOUT_SECS", "1"),
+        ])
+        .expect("Failed to load postgres config");
+
+        let err = build_state(&config)
+            .await
+            .expect_err("unreachable postgres port should fail");
+        let rendered = format!("{err:?}");
+
+        assert!(rendered.contains("Failed to connect to database"));
+        assert!(rendered.contains("kind="));
+        assert!(!rendered.contains(sentinel));
+        assert!(!rendered.contains("postgres://"));
     }
 
     /// Verifies that a saturated pool returns an error within `acquire_timeout`

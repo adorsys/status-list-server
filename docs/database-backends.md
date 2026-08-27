@@ -6,7 +6,31 @@ The server validates the configured database backend at startup and supports the
 - `mysql`
 - `sqlite`
 
-MariaDB is not a separate backend in this codebase. If you run MariaDB-compatible infrastructure, configure the app with `APP_DATABASE__BACKEND=mysql` and a `mysql://` URL.
+MariaDB is not a separate backend in this codebase. If you run MariaDB-compatible infrastructure, configure the app with `APP_DATABASE__BACKEND=mysql` and either split MySQL fields or a `mysql://` URL for local/custom deployments.
+
+## Connection Configuration
+
+For Kubernetes and other orchestrated deployments, prefer split database fields so pod metadata does not contain a fully assembled URL with credentials:
+
+```env
+APP_DATABASE__BACKEND=postgres
+APP_DATABASE__HOST=db.example.internal
+APP_DATABASE__PORT=5432
+APP_DATABASE__USERNAME=statuslist
+APP_DATABASE__PASSWORD=delivered-by-secret-manager
+APP_DATABASE__NAME=status-list
+APP_DATABASE__QUERY=sslmode=verify-full&sslrootcert=/var/run/postgres/ca.crt
+```
+
+`APP_DATABASE__QUERY` is optional and intended for non-secret driver/TLS parameters. Do not place credentials in query parameters.
+
+`APP_DATABASE__URL` remains supported for local and custom deployments. Do not combine it with any split database field; startup rejects that ambiguous configuration.
+
+When deploying the Helm chart, `APP_DATABASE__PASSWORD` is not accepted as a plain `statuslist.env` value. The chart injects it from a Kubernetes Secret key named `postgres-password`. For external databases, point the split host/port/backend/name/user fields at the external database and create or sync the expected Secret/key with that database password. The key name is a hard chart contract even when `APP_DATABASE__BACKEND=mysql` is used for MySQL or MariaDB.
+
+The bundled in-cluster PostgreSQL chart is used without chart-managed database TLS material. For managed or external databases, prefer TLS by setting non-secret query parameters such as `APP_DATABASE__QUERY=sslmode=verify-full&sslrootcert=/var/run/postgres/ca.crt`. The application passes these parameters through after validating that query keys are not credential-like; the referenced CA path must already exist in the container.
+
+The application no longer ships a credential-bearing default `database.url`. Non-Helm deployments must set either `APP_DATABASE__URL` or the split fields explicitly. For SQLite local development, set `APP_DATABASE__URL=sqlite::memory:?cache=shared` and `APP_DATABASE__BACKEND=sqlite`.
 
 ## Recommended Use
 
@@ -76,16 +100,10 @@ SET GLOBAL binlog_format = 'ROW';  -- then restart the server
 FEATURES="mysql,aws-secrets,acme" docker compose --profile mysql up --build
 ```
 
-There is no separate MariaDB service because MariaDB uses the same MySQL-driver path (`mysql://` URL). Connect to a MariaDB host by pointing `APP_DATABASE__URL` at your MariaDB instance on port 3306 (the default) and setting `APP_DATABASE__BACKEND=mysql`.
+There is no separate MariaDB service because MariaDB uses the same MySQL-driver path. Connect to a MariaDB host by setting `APP_DATABASE__BACKEND=mysql`, `APP_DATABASE__HOST`, `APP_DATABASE__PORT`, `APP_DATABASE__USERNAME`, `APP_DATABASE__PASSWORD`, and `APP_DATABASE__NAME`. For local/custom deployments, a `mysql://` `APP_DATABASE__URL` is still supported when no split database fields are set.
 
 ## HA And Distributed Storage
 
 - For high availability, prefer PostgreSQL or MySQL backed by a managed HA service or a replicated cluster.
 - Avoid SQLite for multi-replica production deployments.
 - If you need distributed storage semantics, use a database that already provides them rather than trying to layer them on top of SQLite.
-
-## Redis Is Not A Database Backend
-
-Redis is not used for status-list persistence or for the status-list read path. Reads use the configured database/repository plus the in-process Moka cache. Certificate and signing-key material are managed together by the feature-selected cryptographic-material backend; prefer the built-in material read-cache TTLs before adding another service.
-
-Keep Redis disabled for local, single-replica, and simple deployments. Enable it only for explicit adapter-level integrations that still require Redis and where the added credentials, TLS, HA, and monitoring work is justified.

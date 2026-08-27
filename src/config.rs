@@ -3,16 +3,9 @@ use std::{collections::HashMap, fmt, marker::PhantomData};
 
 use config::builder::DefaultState;
 use config::{Config as ConfigLib, ConfigBuilder, ConfigError, Environment};
-#[cfg(feature = "redis")]
-use redis::{
-    Client as RedisClient, ClientTlsConfig, RedisResult, TlsCertificates,
-    aio::{ConnectionManager, ConnectionManagerConfig},
-};
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Deserializer};
 use serde_aux::field_attributes::deserialize_vec_from_string_or_vec;
-#[cfg(feature = "redis")]
-use std::time::Duration;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -85,9 +78,10 @@ pub const ENV_DEVELOPMENT: &str = "development";
 pub struct Config {
     pub server: ServerConfig,
     pub database: DatabaseConfig,
-    pub redis: RedisConfig,
     pub aws: AwsConfig,
     pub vault: VaultConfig,
+    pub gcp_secret_manager: GcpSecretManagerConfig,
+    pub azure_keyvault: AzureKeyVaultConfig,
     pub cache: CacheConfig,
     pub status_list: StatusListConfig,
     pub rate_limit: RateLimitConfig,
@@ -544,17 +538,6 @@ impl DnsConfig {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
-pub struct RedisConfig {
-    /// Redis connection URI. Leave empty to disable the optional Redis-backed
-    /// certificate-material cache, even when the `redis` feature is compiled.
-    pub uri: SecretString,
-    pub require_client_auth: bool,
-    /// Cache TTL for Redis TLS certificates in seconds.
-    /// Setting this to 0 disables caching entirely.
-    pub cert_cache_ttl: u64,
-}
-
 /// Connection-pool tuning for the production (Postgres/MySQL) backends.
 ///
 /// Defaults are chosen so a single-replica deployment with a fresh Postgres
@@ -582,22 +565,259 @@ pub struct DatabasePoolConfig {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct DatabaseConfig {
-    pub url: SecretString,
+    /// Full database URL. This remains supported for local and non-Kubernetes
+    /// deployments, but Kubernetes manifests should prefer the split fields
+    /// below to avoid exposing an assembled credential URL in pod metadata.
+    pub url: Option<SecretString>,
+    #[serde(default)]
+    pub host: Option<String>,
+    #[serde(default)]
+    pub port: Option<u16>,
+    #[serde(default)]
+    pub username: Option<String>,
+    #[serde(default)]
+    pub password: Option<SecretString>,
+    #[serde(default)]
+    pub name: Option<String>,
+    /// Optional URL query string for driver/TLS settings, for example
+    /// `sslmode=verify-full&sslrootcert=/certs/ca.crt`.
+    #[serde(default)]
+    pub query: Option<String>,
     /// Validated against the URL scheme at startup.
     #[serde(default)]
     pub backend: DatabaseBackend,
     pub pool: DatabasePoolConfig,
 }
 
+fn trim_non_empty(value: Option<&str>) -> Option<&str> {
+    value.map(str::trim).filter(|value| !value.is_empty())
+}
+
+fn encode_url_part(value: &str) -> String {
+    value
+        .as_bytes()
+        .iter()
+        .fold(String::with_capacity(value.len()), |mut encoded, byte| {
+            match byte {
+                b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                    encoded.push(char::from(*byte))
+                }
+                _ => {
+                    let _ = fmt::Write::write_fmt(&mut encoded, format_args!("%{byte:02X}"));
+                }
+            }
+            encoded
+        })
+}
+
+fn format_database_url_host(host: &str) -> String {
+    if host.parse::<std::net::Ipv6Addr>().is_ok() {
+        format!("[{host}]")
+    } else {
+        host.to_string()
+    }
+}
+
+fn database_host_is_ipv6(host: &str) -> bool {
+    host.parse::<std::net::Ipv6Addr>().is_ok()
+        || host
+            .strip_prefix('[')
+            .and_then(|value| value.strip_suffix(']'))
+            .is_some_and(|value| value.parse::<std::net::Ipv6Addr>().is_ok())
+}
+
+fn required_config_field<'a>(value: Option<&'a str>, field: &str) -> Result<&'a str, ConfigError> {
+    trim_non_empty(value)
+        .ok_or_else(|| ConfigError::Message(format!("Missing required config field: {field}")))
+}
+
+fn required_secret_field<'a>(
+    value: Option<&'a SecretString>,
+    field: &str,
+) -> Result<&'a str, ConfigError> {
+    value
+        .map(SecretString::expose_secret)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| ConfigError::Message(format!("Missing required config field: {field}")))
+}
+
+fn validate_database_query(query: &str) -> Result<(), ConfigError> {
+    let query = query.trim_start_matches('?');
+    if query.is_empty() {
+        return Ok(());
+    }
+
+    for (key, _) in url::form_urlencoded::parse(query.as_bytes()) {
+        if key.is_empty()
+            || !key
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '.')
+        {
+            return Err(ConfigError::Message(
+                "Invalid database.query: query parameter keys must be non-empty and contain only ASCII letters, digits, '.', '_' or '-'".to_string(),
+            ));
+        }
+
+        let key = key.to_ascii_lowercase();
+        if key.contains("password")
+            || key.contains("passwd")
+            || key.contains("secret")
+            || key.contains("token")
+            || key == "user"
+            || key == "username"
+        {
+            return Err(ConfigError::Message(format!(
+                "Invalid database.query: credential-like query parameter key '{key}' is not allowed"
+            )));
+        }
+    }
+
+    Ok(())
+}
+
+fn validate_database_host(host: &str) -> Result<(), ConfigError> {
+    if database_host_is_ipv6(host) {
+        return Ok(());
+    }
+
+    let invalid = host.chars().any(char::is_whitespace)
+        || host.contains('/')
+        || host.contains('@')
+        || host.contains('?')
+        || host.contains('#')
+        || host.contains(':')
+        || host.contains('\\')
+        || host.starts_with('-')
+        || host.ends_with('-')
+        || host.starts_with('.')
+        || host.trim_end_matches('.').is_empty();
+
+    if invalid {
+        return Err(ConfigError::Message(
+            "Invalid database.host: expected a hostname or IP address without scheme, port, path, userinfo, query, or fragment".to_string(),
+        ));
+    }
+
+    Ok(())
+}
+
+impl DatabaseConfig {
+    fn has_split_connection_fields(&self) -> bool {
+        self.host
+            .as_deref()
+            .is_some_and(|value| !value.trim().is_empty())
+            || self
+                .username
+                .as_deref()
+                .is_some_and(|value| !value.trim().is_empty())
+            || self
+                .password
+                .as_ref()
+                .is_some_and(|value| !value.expose_secret().is_empty())
+            || self
+                .name
+                .as_deref()
+                .is_some_and(|value| !value.trim().is_empty())
+    }
+
+    /// Resolve the database connection string from either the backward-compatible
+    /// full URL or the split connection fields used by the Helm chart.
+    pub fn resolved_url(&self) -> Result<SecretString, ConfigError> {
+        if !self.has_split_connection_fields() {
+            return self.url.clone().ok_or_else(|| {
+                ConfigError::Message(
+                    "Missing required config field: database.url or split database fields"
+                        .to_string(),
+                )
+            });
+        }
+        if self.url.is_some() {
+            return Err(ConfigError::Message(
+                "Ambiguous database configuration: use either database.url or split database fields, not both".to_string(),
+            ));
+        }
+
+        let scheme = match self.backend {
+            DatabaseBackend::Postgres => "postgres",
+            DatabaseBackend::MySql => "mysql",
+            DatabaseBackend::Memory | DatabaseBackend::Sqlite => {
+                return Err(ConfigError::Message(format!(
+                    "Split database connection fields are only supported for postgres/mysql; configured backend is '{}'",
+                    self.backend.as_str()
+                )));
+            }
+        };
+        let default_port = match self.backend {
+            DatabaseBackend::Postgres => 5432,
+            DatabaseBackend::MySql => 3306,
+            DatabaseBackend::Memory | DatabaseBackend::Sqlite => unreachable!(),
+        };
+
+        let host = required_config_field(self.host.as_deref(), "database.host")?;
+        validate_database_host(host)?;
+        let url_host = format_database_url_host(host);
+        let username = required_config_field(self.username.as_deref(), "database.username")?;
+        let password = required_secret_field(self.password.as_ref(), "database.password")?;
+        let name = required_config_field(self.name.as_deref(), "database.name")?;
+        let port = self.port.unwrap_or(default_port);
+        let query = trim_non_empty(self.query.as_deref())
+            .map(|query| {
+                validate_database_query(query)?;
+                Ok(format!("?{}", query.trim_start_matches('?')))
+            })
+            .transpose()?
+            .unwrap_or_default();
+
+        Ok(SecretString::from(format!(
+            "{scheme}://{}:{}@{url_host}:{port}/{}{query}",
+            encode_url_part(username),
+            encode_url_part(password),
+            encode_url_part(name)
+        )))
+    }
+
+    pub fn redacted_target(&self) -> String {
+        match (
+            self.has_split_connection_fields(),
+            self.backend,
+            trim_non_empty(self.host.as_deref()),
+            trim_non_empty(self.name.as_deref()),
+        ) {
+            (true, DatabaseBackend::Postgres, Some(host), Some(name)) => format!(
+                "backend=postgres, host={}, port={}, database={}",
+                host,
+                self.port.unwrap_or(5432),
+                name
+            ),
+            (true, DatabaseBackend::MySql, Some(host), Some(name)) => format!(
+                "backend=mysql, host={}, port={}, database={}",
+                host,
+                self.port.unwrap_or(3306),
+                name
+            ),
+            _ => format!("backend={}", self.backend.as_str()),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct AwsConfig {
     pub region: String,
-    pub s3_bucket: String,
-    pub s3_key_prefix: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum VaultAuthMethod {
+    #[default]
+    Approle,
+    Kubernetes,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct VaultConfig {
+    /// Authentication method to use with Vault / OpenBao (`approle` or `kubernetes`).
+    #[serde(default)]
+    pub auth_method: VaultAuthMethod,
     /// Vault / OpenBao API address (e.g. `http://vault:8200`).
     pub addr: String,
     /// AppRole role_id (can be baked into config).
@@ -610,6 +830,13 @@ pub struct VaultConfig {
     pub secret_id_path: Option<PathBuf>,
     /// AppRole auth engine mount path (default: `approle`).
     pub auth_mount: String,
+    /// Kubernetes auth role name.
+    #[serde(default)]
+    pub k8s_role: Option<String>,
+    /// Path to Kubernetes service account JWT token.
+    pub k8s_token_path: PathBuf,
+    /// Kubernetes auth engine mount path (default: `kubernetes`).
+    pub k8s_auth_mount: String,
     /// KV v2 engine mount path.
     pub mount: String,
     /// Prefix prepended to all secret paths. Default: empty.
@@ -654,6 +881,46 @@ impl VaultConfig {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+pub struct GcpSecretManagerConfig {
+    /// GCP project ID.
+    pub project_id: String,
+    /// Service account key JSON, inline.
+    #[serde(default)]
+    pub service_account_key: Option<SecretString>,
+    /// Path to the service account key JSON file.
+    #[serde(default)]
+    pub service_account_key_path: Option<String>,
+    /// Optional custom gRPC endpoint URL (e.g. for regional endpoints, VPC-SC, or emulator testing).
+    #[serde(default)]
+    pub endpoint: Option<String>,
+    /// Allow anonymous credentials (for local testing/emulator only).
+    #[serde(default)]
+    pub allow_anonymous_credentials: bool,
+    /// Cache TTL for GCP secrets in seconds.
+    /// Setting this to 0 disables caching entirely.
+    pub secrets_cache_ttl: u64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct AzureKeyVaultConfig {
+    /// Azure Key Vault URL (e.g. `https://my-vault.vault.azure.net/`).
+    #[serde(default)]
+    pub vault_url: Option<url::Url>,
+    /// Service principal tenant ID.
+    #[serde(default)]
+    pub tenant_id: Option<String>,
+    /// Service principal client ID.
+    #[serde(default)]
+    pub client_id: Option<String>,
+    /// Service principal client secret.
+    #[serde(default)]
+    pub client_secret: Option<SecretString>,
+    /// Cache TTL for Azure Key Vault secrets in seconds.
+    /// Setting this to 0 disables caching entirely.
+    pub secrets_cache_ttl: u64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
 pub struct CacheConfig {
     /// Time-to-live for cached status list items in seconds.
     /// Setting this to 0 disables caching entirely.
@@ -682,68 +949,6 @@ pub struct StatusListConfig {
     pub snapshot_retention_secs: u64,
 }
 
-#[cfg(feature = "redis")]
-impl RedisConfig {
-    /// Establishes a new Redis connection based on the configuration.
-    ///
-    /// If it is `true`, the connection will use TLS with client authentication, and the URI **must** use the `rediss://` scheme.
-    ///
-    /// To enable mutual TLS (mTLS), both `cert_pem` and `key_pem` must be provided.
-    /// If one is missing, the client-side authentication will not be effective.
-    ///
-    /// # Parameters
-    /// - `cert_pem`: The client certificate in PEM format (required for mTLS).
-    /// - `key_pem`: The client private key in PEM format (required for mTLS).
-    /// - `root_cert`: The custom root certificate in PEM format (required for client authentication).
-    ///
-    /// # Errors
-    /// Returns an error if the connection cannot be established.
-    pub async fn start(
-        &self,
-        cert_pem: Option<&str>,
-        key_pem: Option<&str>,
-        root_cert: Option<&str>,
-    ) -> RedisResult<ConnectionManager> {
-        let client = if !self.require_client_auth {
-            tracing::info!("Connecting to Redis (no client authentication)");
-            RedisClient::open(self.uri.expose_secret())?
-        } else {
-            tracing::info!("Connecting to Redis with TLS and client authentication");
-
-            let client_tls = match (cert_pem, key_pem) {
-                (Some(cert), Some(key)) => {
-                    tracing::debug!("Using client TLS certificates");
-                    Some(ClientTlsConfig {
-                        client_cert: cert.as_bytes().to_vec(),
-                        client_key: key.as_bytes().to_vec(),
-                    })
-                }
-                _ => {
-                    tracing::warn!("Client authentication required but no certificates provided");
-                    return Err(redis::RedisError::from((
-                        redis::ErrorKind::Io,
-                        "Client authentication required but no certificates provided",
-                    )));
-                }
-            };
-
-            let root_cert = root_cert.map(|cert| cert.as_bytes().to_vec());
-
-            RedisClient::build_with_tls(
-                self.uri.expose_secret(),
-                TlsCertificates {
-                    client_tls,
-                    root_cert,
-                },
-            )?
-        };
-
-        let config =
-            ConnectionManagerConfig::new().set_connection_timeout(Some(Duration::from_secs(60)));
-        client.get_connection_manager_with_config(config).await
-    }
-}
-
 impl Config {
     /// Loads configuration from built-in defaults, then overrides them with
     /// values sourced from the process environment.
@@ -759,7 +964,6 @@ impl Config {
         let mut builder = base_builder()?
             // Override config values via environment variables
             // The environment variables should be prefixed with 'APP_' and use '__' as a separator
-            // Example: APP_REDIS__REQUIRE_CLIENT_AUTH=false
             .add_source(
                 Environment::with_prefix("APP")
                     .prefix_separator("_")
@@ -778,6 +982,12 @@ impl Config {
 
         let config = builder.build()?;
         let config: Config = config.try_deserialize()?;
+        if let Some(host) = trim_non_empty(config.database.host.as_deref()) {
+            validate_database_host(host)?;
+        }
+        if let Some(query) = trim_non_empty(config.database.query.as_deref()) {
+            validate_database_query(query)?;
+        }
         Ok(config)
     }
 }
@@ -789,21 +999,17 @@ impl Config {
 /// that there is exactly one source of truth for the default configuration.
 fn base_builder() -> Result<ConfigBuilder<DefaultState>, ConfigError> {
     #[cfg(feature = "postgres")]
-    let (default_db_url, default_db_backend) = (
-        "postgres://postgres:postgres@localhost:5432/status-list",
-        "postgres",
-    );
+    let default_db_backend = "postgres";
     #[cfg(all(not(feature = "postgres"), feature = "sqlite"))]
-    let (default_db_url, default_db_backend) = ("sqlite::memory:", "sqlite");
+    let default_db_backend = "sqlite";
     #[cfg(all(not(feature = "postgres"), not(feature = "sqlite"), feature = "mysql"))]
-    let (default_db_url, default_db_backend) =
-        ("mysql://mysql:mysql@localhost:3306/status-list", "mysql");
+    let default_db_backend = "mysql";
     #[cfg(all(
         not(feature = "postgres"),
         not(feature = "sqlite"),
         not(feature = "mysql")
     ))]
-    let (default_db_url, default_db_backend) = ("memory:", "memory");
+    let default_db_backend = "memory";
 
     #[cfg(feature = "acme")]
     let (default_provisioning_strategy, default_cert_path, default_key_path) =
@@ -828,7 +1034,7 @@ fn base_builder() -> Result<ConfigBuilder<DefaultState>, ConfigError> {
         .set_default("server.port", 8000)?
         .set_default("server.enable_metrics", false)?
         .set_default("server.aggregation_uri", Option::<String>::None)?
-        .set_default("database.url", default_db_url)?
+        .set_default("database.url", Option::<String>::None)?
         .set_default("database.backend", default_db_backend)?
         .set_default("database.pool.max_connections", 5u32)?
         .set_default("database.pool.min_connections", 1u32)?
@@ -836,11 +1042,6 @@ fn base_builder() -> Result<ConfigBuilder<DefaultState>, ConfigError> {
         .set_default("database.pool.connect_timeout_secs", 10u64)?
         .set_default("database.pool.idle_timeout_secs", 600u64)?
         .set_default("database.pool.max_lifetime_secs", 1800u64)?
-        .set_default("redis.uri", "")?
-        .set_default("redis.require_client_auth", false)?
-        .set_default("redis.cert_cache_ttl", 3600)?
-        .set_default("aws.s3_bucket", "status-list-adorsys")?
-        .set_default("aws.s3_key_prefix", "")?
         .set_default(
             "server.cert.provisioning_strategy",
             default_provisioning_strategy,
@@ -859,15 +1060,27 @@ fn base_builder() -> Result<ConfigBuilder<DefaultState>, ConfigError> {
         .set_default("server.cert.store.certificate_key", Option::<String>::None)?
         .set_default("server.cert.store.signing_key_key", Option::<String>::None)?
         .set_default("aws.region", "us-east-1")?
+        .set_default("vault.auth_method", "approle")?
         .set_default("vault.addr", "http://localhost:8200")?
         .set_default("vault.role_id", "")?
         .set_default("vault.secret_id", Option::<String>::None)?
         .set_default("vault.secret_id_path", Option::<String>::None)?
         .set_default("vault.auth_mount", "approle")?
+        .set_default("vault.k8s_role", Option::<String>::None)?
+        .set_default(
+            "vault.k8s_token_path",
+            "/var/run/secrets/kubernetes.io/serviceaccount/token",
+        )?
+        .set_default("vault.k8s_auth_mount", "kubernetes")?
         .set_default("vault.mount", "secret")?
         .set_default("vault.path_prefix", "")?
         .set_default("vault.namespace", Option::<String>::None)?
         .set_default("vault.timeout_secs", 30)?
+        .set_default("gcp_secret_manager.project_id", "")?
+        .set_default("gcp_secret_manager.allow_anonymous_credentials", false)?
+        .set_default("gcp_secret_manager.secrets_cache_ttl", 300)?
+        .set_default("azure_keyvault.vault_url", Option::<String>::None)?
+        .set_default("azure_keyvault.secrets_cache_ttl", 300)?
         .set_default("cache.ttl", 5 * 60)?
         .set_default("cache.max_capacity", 100)?
         .set_default("status_list.token_exp_secs", 900)?
@@ -906,8 +1119,10 @@ mod tests {
             "https://acme-v02.api.letsencrypt.org/directory"
         );
         assert_eq!(config.aws.region, "us-east-1");
-        assert_eq!(config.aws.s3_bucket, "status-list-adorsys");
-        assert_eq!(config.aws.s3_key_prefix, "");
+        assert_eq!(config.gcp_secret_manager.project_id, "");
+        assert_eq!(config.gcp_secret_manager.secrets_cache_ttl, 300);
+        assert_eq!(config.azure_keyvault.vault_url, None);
+        assert_eq!(config.azure_keyvault.secrets_cache_ttl, 300);
         assert_eq!(config.status_list.token_exp_secs, 900);
         assert_eq!(config.status_list.token_ttl_secs, 300);
         assert_eq!(config.server.cert.renewal_cron_schedule, "0 0 0 * * *");
@@ -916,28 +1131,23 @@ mod tests {
 
         // Feature-gated default database expectations
         #[cfg(feature = "postgres")]
-        let (expected_db_url, expected_db_backend) = (
-            "postgres://postgres:postgres@localhost:5432/status-list",
-            DatabaseBackend::Postgres,
-        );
+        let expected_db_backend = DatabaseBackend::Postgres;
         #[cfg(all(not(feature = "postgres"), feature = "sqlite"))]
-        let (expected_db_url, expected_db_backend) = ("sqlite::memory:", DatabaseBackend::Sqlite);
+        let expected_db_backend = DatabaseBackend::Sqlite;
         #[cfg(all(not(feature = "postgres"), not(feature = "sqlite"), feature = "mysql"))]
-        let (expected_db_url, expected_db_backend) = (
-            "mysql://mysql:mysql@localhost:3306/status-list",
-            DatabaseBackend::MySql,
-        );
+        let expected_db_backend = DatabaseBackend::MySql;
         #[cfg(all(
             not(feature = "postgres"),
             not(feature = "sqlite"),
             not(feature = "mysql")
         ))]
-        let (expected_db_url, expected_db_backend) = ("memory:", DatabaseBackend::Memory);
+        let expected_db_backend = DatabaseBackend::Memory;
 
-        assert_eq!(config.database.url.expose_secret(), expected_db_url);
+        assert!(
+            config.database.url.is_none(),
+            "database.url should not have a credential-bearing built-in default"
+        );
         assert_eq!(config.database.backend, expected_db_backend);
-        assert_eq!(config.redis.uri.expose_secret(), "");
-        assert!(!config.redis.require_client_auth);
         #[cfg(feature = "acme")]
         let (expected_strategy, expected_cert_path, expected_key_path) =
             ("acme", Option::<String>::None, Option::<String>::None);
@@ -997,8 +1207,6 @@ mod tests {
                 "database.url",
                 "postgres://user:password@localhost:5432/status-list",
             ),
-            ("redis.uri", "rediss://user:password@localhost:6379/redis"),
-            ("redis.require_client_auth", "true"),
             ("server.cert.email", "test@gmail.com"),
             (
                 "server.cert.acme_directory_url",
@@ -1013,8 +1221,6 @@ mod tests {
             ("server.cert.renewal_cron_schedule", "0 0 12 * * *"),
             ("server.cert.dns_challenge_server_url", "http://pebble:8055"),
             ("aws.region", "us-west-2"),
-            ("aws.s3_bucket", "my-custom-bucket"),
-            ("aws.s3_key_prefix", "status-list/prod"),
             ("cache.ttl", "600"),
             ("cache.max_capacity", "2000"),
             ("status_list.token_exp_secs", "1800"),
@@ -1043,22 +1249,20 @@ mod tests {
             Some("https://example.com/aggregation")
         );
         assert_eq!(
-            overridden.database.url.expose_secret(),
+            overridden
+                .database
+                .url
+                .as_ref()
+                .expect("database.url override should be set")
+                .expose_secret(),
             "postgres://user:password@localhost:5432/status-list"
         );
-        assert_eq!(
-            overridden.redis.uri.expose_secret(),
-            "rediss://user:password@localhost:6379/redis"
-        );
-        assert!(overridden.redis.require_client_auth);
         assert_eq!(overridden.server.cert.email, "test@gmail.com");
         assert_eq!(
             overridden.server.cert.acme_directory_url,
             "https://acme-v02.api.letsencrypt.org/directory"
         );
         assert_eq!(overridden.aws.region, "us-west-2");
-        assert_eq!(overridden.aws.s3_bucket, "my-custom-bucket");
-        assert_eq!(overridden.aws.s3_key_prefix, "status-list/prod");
         assert_eq!(overridden.cache.ttl, 600);
         assert_eq!(overridden.cache.max_capacity, 2000);
         assert_eq!(overridden.status_list.token_exp_secs, 1800);
@@ -1093,6 +1297,156 @@ mod tests {
         assert_eq!(overridden.database.pool.idle_timeout_secs, 300);
         assert_eq!(overridden.database.pool.max_lifetime_secs, 900);
 
+        let split_db_cfg = Config::load_from_overrides(&[
+            ("database.backend", "postgres"),
+            ("database.host", "postgres.statuslist.svc.cluster.local"),
+            ("database.port", "5432"),
+            ("database.username", "user@example.com"),
+            ("database.password", " secret value "),
+            ("database.name", "status/list"),
+            (
+                "database.query",
+                "sslmode=verify-full&sslrootcert=/var/run/postgres/ca.crt",
+            ),
+        ])
+        .expect("Failed to load split database config");
+        assert_eq!(
+            split_db_cfg
+                .database
+                .resolved_url()
+                .expect("split database config should resolve")
+                .expose_secret(),
+            "postgres://user%40example.com:%20secret%20value%20@postgres.statuslist.svc.cluster.local:5432/status%2Flist?sslmode=verify-full&sslrootcert=/var/run/postgres/ca.crt"
+        );
+        assert_eq!(
+            split_db_cfg.database.redacted_target(),
+            "backend=postgres, host=postgres.statuslist.svc.cluster.local, port=5432, database=status/list"
+        );
+        assert!(!split_db_cfg.database.redacted_target().contains("secret"));
+
+        let ipv6_db_cfg = Config::load_from_overrides(&[
+            ("database.backend", "postgres"),
+            ("database.host", "fd00::1"),
+            ("database.username", "postgres"),
+            ("database.password", "secret"),
+            ("database.name", "status-list"),
+        ])
+        .expect("Failed to load IPv6 split database config");
+        assert_eq!(
+            ipv6_db_cfg
+                .database
+                .resolved_url()
+                .expect("IPv6 split database config should resolve")
+                .expose_secret(),
+            "postgres://postgres:secret@[fd00::1]:5432/status-list"
+        );
+
+        let bracketed_ipv6_db_cfg = Config::load_from_overrides(&[
+            ("database.backend", "postgres"),
+            ("database.host", "[fd00::1]"),
+            ("database.username", "postgres"),
+            ("database.password", "secret"),
+            ("database.name", "status-list"),
+        ])
+        .expect("Failed to load bracketed IPv6 split database config");
+        assert_eq!(
+            bracketed_ipv6_db_cfg
+                .database
+                .resolved_url()
+                .expect("bracketed IPv6 split database config should resolve")
+                .expose_secret(),
+            "postgres://postgres:secret@[fd00::1]:5432/status-list"
+        );
+
+        let fqdn_db_cfg = Config::load_from_overrides(&[
+            ("database.backend", "postgres"),
+            ("database.host", "db.example.internal."),
+            ("database.username", "postgres"),
+            ("database.password", "secret"),
+            ("database.name", "status-list"),
+        ])
+        .expect("Failed to load trailing-dot FQDN split database config");
+        assert_eq!(
+            fqdn_db_cfg
+                .database
+                .resolved_url()
+                .expect("trailing-dot FQDN split database config should resolve")
+                .expose_secret(),
+            "postgres://postgres:secret@db.example.internal.:5432/status-list"
+        );
+
+        let missing_db_url = Config::load_from_overrides(&[])
+            .expect("Failed to load default config")
+            .database
+            .resolved_url()
+            .expect_err(
+                "database config should fail closed when neither URL nor split fields are set",
+            )
+            .to_string();
+        assert!(missing_db_url.contains("database.url or split database fields"));
+
+        let mixed_db_cfg = Config::load_from_overrides(&[
+            ("database.backend", "postgres"),
+            (
+                "database.url",
+                "postgres://custom:secret@custom-db:5432/custom",
+            ),
+            ("database.host", "postgres.statuslist.svc.cluster.local"),
+            ("database.username", "postgres"),
+            ("database.password", "split secret"),
+            ("database.name", "status-list"),
+        ])
+        .expect("Failed to load mixed database config");
+        let mixed_db_error = mixed_db_cfg
+            .database
+            .resolved_url()
+            .expect_err("mixed database.url and split fields should fail")
+            .to_string();
+        assert!(mixed_db_error.contains("Ambiguous database configuration"));
+        assert!(!mixed_db_error.contains("custom:secret"));
+        assert!(!mixed_db_error.contains("split secret"));
+
+        let invalid_host_error = Config::load_from_overrides(&[
+            ("database.backend", "postgres"),
+            ("database.host", "postgres://db.internal:5432/status-list"),
+            ("database.username", "postgres"),
+            ("database.password", "secret"),
+            ("database.name", "status-list"),
+        ])
+        .expect_err("database.host must reject URL-shaped values")
+        .to_string();
+        assert!(invalid_host_error.contains("database.host"));
+        assert!(!invalid_host_error.contains("secret"));
+
+        let invalid_query_error = Config::load_from_overrides(&[
+            ("database.backend", "postgres"),
+            ("database.host", "postgres.statuslist.svc.cluster.local"),
+            ("database.username", "postgres"),
+            ("database.password", "secret"),
+            ("database.name", "status-list"),
+            ("database.query", "sslmode=verify-full&password=secret"),
+        ])
+        .expect_err("database.query must reject credential-like keys")
+        .to_string();
+        assert!(invalid_query_error.contains("database.query"));
+        assert!(!invalid_query_error.contains("postgres://"));
+        assert!(!invalid_query_error.contains("secret"));
+
+        let missing_db_password = Config::load_from_overrides(&[
+            ("database.backend", "postgres"),
+            ("database.host", "postgres.statuslist.svc.cluster.local"),
+            ("database.username", "postgres"),
+            ("database.name", "status-list"),
+        ])
+        .expect("Failed to load incomplete split database config")
+        .database
+        .resolved_url()
+        .expect_err("missing split database password should fail");
+        let missing_db_password = missing_db_password.to_string();
+        assert!(missing_db_password.contains("database.password"));
+        assert!(!missing_db_password.contains("postgres://"));
+        assert!(!missing_db_password.contains("status-list"));
+
         // 3. Database backend overrides (MySQL & SQLite)
         let mysql_cfg = Config::load_from_overrides(&[
             ("database.backend", "mysql"),
@@ -1104,7 +1458,12 @@ mod tests {
         .expect("Failed to load mysql config");
         assert_eq!(mysql_cfg.database.backend, DatabaseBackend::MySql);
         assert_eq!(
-            mysql_cfg.database.url.expose_secret(),
+            mysql_cfg
+                .database
+                .url
+                .as_ref()
+                .expect("mysql database.url override should be set")
+                .expose_secret(),
             "mysql://user:password@localhost:3306/status-list"
         );
 
@@ -1114,7 +1473,15 @@ mod tests {
         ])
         .expect("Failed to load sqlite config");
         assert_eq!(sqlite_cfg.database.backend, DatabaseBackend::Sqlite);
-        assert_eq!(sqlite_cfg.database.url.expose_secret(), "sqlite::memory:");
+        assert_eq!(
+            sqlite_cfg
+                .database
+                .url
+                .as_ref()
+                .expect("sqlite database.url override should be set")
+                .expose_secret(),
+            "sqlite::memory:"
+        );
     }
 
     #[test]
@@ -1298,7 +1665,7 @@ mod tests {
     fn test_critical_validations() {
         // Invalid database backend configuration
         let invalid_db_res = Config::load_from_overrides(&[
-            ("database.backend", "redis"),
+            ("database.backend", "invalid-backend"),
             (
                 "database.url",
                 "postgres://user:password@localhost:5432/status-list",
@@ -1539,11 +1906,13 @@ mod tests {
                 "Default config signing_key_path references test_data: {path}"
             );
         }
-        let db_url = default_config.database.url.expose_secret();
-        assert!(
-            !db_url.contains("test_data"),
-            "Default config database URL references test_data: {db_url}"
-        );
+        if let Some(db_url) = default_config.database.url.as_ref() {
+            let db_url = db_url.expose_secret();
+            assert!(
+                !db_url.contains("test_data"),
+                "Default config database URL references test_data: {db_url}"
+            );
+        }
         if let Some(key) = default_config.server.cert.store.certificate_key.as_deref() {
             assert!(
                 !key.contains("test_data"),
@@ -1558,11 +1927,18 @@ mod tests {
         }
 
         // Vault AppRole defaults
+        assert_eq!(default_config.vault.auth_method, VaultAuthMethod::Approle);
         assert_eq!(default_config.vault.addr, "http://localhost:8200");
         assert_eq!(default_config.vault.role_id, "");
         assert!(default_config.vault.secret_id.is_none());
         assert_eq!(default_config.vault.secret_id_path, None);
         assert_eq!(default_config.vault.auth_mount, "approle");
+        assert_eq!(default_config.vault.k8s_role, None);
+        assert_eq!(
+            default_config.vault.k8s_token_path,
+            PathBuf::from("/var/run/secrets/kubernetes.io/serviceaccount/token")
+        );
+        assert_eq!(default_config.vault.k8s_auth_mount, "kubernetes");
         assert_eq!(default_config.vault.mount, "secret");
         assert_eq!(default_config.vault.path_prefix, "");
         assert_eq!(default_config.vault.namespace, None);
@@ -1626,5 +2002,25 @@ mod tests {
             "file-secret-id-value"
         );
         let _ = std::fs::remove_file(&secret_file);
+
+        // Vault Kubernetes auth overrides
+        let k8s_config = Config::load_from_overrides(&[
+            ("vault.auth_method", "kubernetes"),
+            ("vault.k8s_role", "my-k8s-service-role"),
+            ("vault.k8s_token_path", "/custom/token/path"),
+            ("vault.k8s_auth_mount", "custom-k8s"),
+        ])
+        .expect("Failed to load k8s auth config");
+
+        assert_eq!(k8s_config.vault.auth_method, VaultAuthMethod::Kubernetes);
+        assert_eq!(
+            k8s_config.vault.k8s_role,
+            Some("my-k8s-service-role".to_string())
+        );
+        assert_eq!(
+            k8s_config.vault.k8s_token_path,
+            PathBuf::from("/custom/token/path")
+        );
+        assert_eq!(k8s_config.vault.k8s_auth_mount, "custom-k8s");
     }
 }
