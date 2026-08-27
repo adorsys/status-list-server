@@ -218,10 +218,7 @@ async fn track_http_metrics(request: Request<Body>, next: Next) -> Response {
     let start = std::time::Instant::now();
     let method = request.method().clone();
     let matched = request.extensions().get::<MatchedPath>().cloned();
-    let route: &str = matched
-        .as_ref()
-        .map(|p| p.as_str())
-        .unwrap_or("unmatched");
+    let route: &str = matched.as_ref().map(|p| p.as_str()).unwrap_or("unmatched");
 
     let response = next.run(request).await;
 
