@@ -10,7 +10,6 @@ observability/
     prometheus.yml               # full scrape + rule_files config
     rules/recording.rules.yml    # pre-aggregated sli:* series (Phase 3)
     rules/    alerting.rules.yml     # multi-window multi-burn-rate alerts (Phase 4)
-    generate-alertmanager-config.sh  # renders Alertmanager receivers from env (Phase 4)
     tests/*.test.yml             # promtool rule tests (Phase 7)
   dashboards/
     src/                         # deterministic generator (Phase 5)
@@ -63,13 +62,7 @@ demo and does not need this set.
 
 ## Deployment note
 
-The repo ships standalone Prometheus + Grafana + a local Alertmanager for a dev
-stack. Production wiring to a managed stack is an operator step (no credentials
-or CRDs in this repo). Notifications are **platform-agnostic**: the Alertmanager
-config is rendered at container start by
-`observability/prometheus/generate-alertmanager-config.sh`, which emits the
-native receiver for the platform selected via `ALERTMANAGER_PLATFORM`
-(`slack|discord|teams|mattermost|email|webhook`) using the matching credential
-env var. The same stack therefore works with whichever channel the customer
-uses, with no per-platform repo code. Real tokens stay out of version control —
-they're supplied via `.env` / a secrets manager.
+The repo ships standalone Prometheus + Grafana for a dev stack. Production
+wiring to a managed stack is an operator step (no credentials or CRDs in this
+repo). Alert delivery to an external notification channel (e.g. via
+Alertmanager webhooks) is handled outside of this repository.

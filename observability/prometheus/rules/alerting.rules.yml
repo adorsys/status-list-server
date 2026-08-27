@@ -1,8 +1,8 @@
 groups:
   # Multi-window multi-burn-rate alerts (Google SRE). Each outage SLI has a
   # fast-burn page pair (short 1h + long 6h window, aligned) and a slow-burn
-  # warn pair on the long window. `severity` drives Alertmanager routing (see
-  # alertmanager.yml); `runbook_url` points at the in-repo runbook for the SLI.
+  # warn pair on the long window. `severity` (`page`/`warn`) marks alert
+  # importance; `runbook_url` points at the in-repo runbook for the SLI.
   #
   # Burn-rate thresholds (0.5% budget -> 14.4x = 0.072 fast, 6x = 0.030 slow).
   # Latency SLOs are threshold-based (p95), so their "burn" is a sustained

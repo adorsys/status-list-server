@@ -1,8 +1,8 @@
 # SLO Observability — Live Demo Guide
 
 This guide walks a reviewer or operator through validating the SLO stack end to
-end: dashboard panels populate with real data, and Prometheus / Alertmanager
-alerts fire against a running `status-list-server`.
+end: dashboard panels populate with real data, and Prometheus alerts fire
+against a running `status-list-server`.
 
 It is the **hands-on companion** to:
 
@@ -14,7 +14,7 @@ It is the **hands-on companion** to:
 > What "correct" means here: the app **serves** metrics on `/metrics`, Prometheus
 > **scrapes** them and evaluates the `sli:*` recording rules + alert rules, and
 > Grafana **renders** those `sli:*` series on the committed dashboard. The whole
-> pipeline is [app] -> [Prometheus] -> [Grafana/Alertmanager].
+> pipeline is [app] -> [Prometheus] -> [Grafana].
 
 ---
 
@@ -67,7 +67,6 @@ Service name / host port (from the resolved `docker compose config`):
 | ------------------------------ | --------------------- | --------- |
 | Prometheus                     | `prometheus:9090`     | `9092`    |
 | Grafana                        | `grafana:3000`        | `3000`    |
-| Alertmanager                   | `alertmanager:9093`   | `9093`    |
 | OTel collector (Prom exporter) | `otel-collector:8889` | `8889`    |
 
 > **Port-conflict gotcha.** Host ports are shared across all running Compose
@@ -349,23 +348,17 @@ end. A compact cheat-sheet:
 | `RequestLatencyFastBurn`       | Add latency (e.g. `tc qdisc` delay, or saturate the DB) so p95 > 0.3s for 5m+1h | alert state                                   |
 | `DbLatencyFastBurn`            | Hold a row lock / `pg_sleep` while hammering reads                              | alert state                                   |
 | `TokenGenerationFastBurn`      | Break the signing-key backend while running token flows                         | alert state                                   |
-| `CacheHitRatioLow` (warn)      | Burst many distinct list IDs (cold cache) so hit ratio < 0.85 for 15m           | Alertmanager                                  |
-| `CertRenewalFailures` (warn)   | Stop `pebble` around the renewal cadence                                        | Alertmanager                                  |
+| `CacheHitRatioLow` (warn)      | Burst many distinct list IDs (cold cache) so hit ratio < 0.85 for 15m           | alert state                                  |
+| `CertRenewalFailures` (warn)   | Stop `pebble` around the renewal cadence                                        | alert state                                  |
 
-Check fire + routing:
+Check fire:
 
 ```bash
 curl -s http://localhost:9092/api/v1/alerts | python3 -c 'import sys,json;[print(a["labels"].get("alertname"),a["state"]) for a in json.load(sys.stdin)["data"]["alerts"]]'
-curl -s http://localhost:9093/api/v2/alerts | python3 -m json.tool
 ```
 
-Notifications are **platform-agnostic**: the Alertmanager config is rendered at
-container start by `observability/prometheus/generate-alertmanager-config.sh`
-from `ALERTMANAGER_PLATFORM` + the matching credential env var (see
-`.env.template`). To see an alert land in the customer's channel, set
-`ALERTMANAGER_PLATFORM` (e.g. `slack`/`discord`/`email`) and its credential in
-`.env`, recreate Alertmanager, then trigger an alert above. No credentials are
-committed.
+Alert delivery to an external notification channel (e.g. via Alertmanager
+webhooks) is handled outside of this repository.
 
 ---
 
