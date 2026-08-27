@@ -108,8 +108,10 @@ target. A dedicated CI step asserts that every job in `CI.yml` appears in
 merge fires on its own once the approvals land and the checks are green.
 
 **This needs the repository setting *Allow auto-merge* to be on** — Settings →
-General → Pull Requests. It is currently off, so `gh pr merge --auto` fails and the
-job reports the reason. Turning it on does not weaken anything: the `Rules` ruleset
+General → Pull Requests. It is currently off by choice, so nothing is ever armed:
+the job warns and passes rather than failing, because a job that is red on every
+dependency bump only teaches people to ignore red. Any *other* failure to arm still
+fails the job. Turning the setting on does not weaken anything: the `Rules` ruleset
 still requires two approving reviews with `require_last_push_approval` before an
 armed pull request can merge.
 

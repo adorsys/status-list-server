@@ -56,25 +56,32 @@ jobs:
           echo "eligible=${eligible}" >> "$GITHUB_OUTPUT"
           echo "auto-merge eligible: ${eligible} (${reason})"
 
-      # No approval step. `gh pr review --approve` cannot work here -- GitHub refuses
-      # `addPullRequestReview` from Actions -- and the ruleset requires two approvals
-      # with `require_last_push_approval`, which one bot approval could not satisfy
-      # anyway. Arming auto-merge is the whole job: reviews stay human, and the merge
-      # fires on its own once they land and the checks are green.
       - name: Enable auto-merge for Dependabot PRs
         if: steps.gate.outputs.eligible == 'true'
         env:
           PR_URL: ${{ github.event.pull_request.html_url }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          set -euo pipefail
-          if ! gh pr merge --auto --squash "$PR_URL"; then
-            echo "::error::could not arm auto-merge on ${PR_URL}."
-            echo "The usual cause is the repository setting 'Allow auto-merge' being"
-            echo "off: Settings -> General -> Pull Requests. See CONTRIBUTING.md,"
-            echo "'Dependabot auto-merge'."
-            exit 1
+          set -uo pipefail
+          if out=$(gh pr merge --auto --squash "$PR_URL" 2>&1); then
+            printf '%s\n' "$out"
+            exit 0
           fi
+          printf '%s\n' "$out"
+
+          # `Allow auto-merge` being off is a repository setting, not a fault in this
+          # pull request, and it fails every eligible one until it is turned on. A job
+          # that is red on every dependency bump teaches people to ignore red, so this
+          # case warns. Every other failure still fails.
+          if printf '%s' "$out" | grep -qiE 'auto[ -]?merge is not allowed'; then
+            echo "::warning::auto-merge is disabled for this repository, so nothing was armed."
+            echo "Turn it on at Settings -> General -> Pull Requests. See CONTRIBUTING.md,"
+            echo "'Dependabot auto-merge'. This pull request was otherwise eligible."
+            exit 0
+          fi
+
+          echo "::error::could not arm auto-merge on ${PR_URL}."
+          exit 1
 
       - name: Explain why auto-merge was withheld
         if: steps.gate.outputs.eligible != 'true'
