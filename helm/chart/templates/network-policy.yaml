@@ -27,7 +27,7 @@ spec:
 
   egress:
     - ports:
-        - port: 5432
+        - port: {{ include "status-list-server-chart.dbPort" . | int }}
           protocol: TCP
         {{- if $redisHAEnabled }}
         - port: 6379

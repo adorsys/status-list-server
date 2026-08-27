@@ -23,6 +23,7 @@ env:
   IMAGE_BASE: ghcr.io/${{ github.repository_owner }}/status-list-server
   HELM_RELEASE_NAME: statuslist
   HELM_NAMESPACE: statuslist-production
+  APP_DATABASE_PORT: ${{ vars.APP_DATABASE_PORT }}
 jobs:
   ci:
     name: CI
@@ -551,9 +552,14 @@ jobs:
           aws-region: ${{ env.AWS_REGION }}
       - name: Update kubeconfig for EKS
         run: aws eks update-kubeconfig --name ${{ env.CLUSTER_NAME }} --region ${{ env.AWS_REGION }}
+      - name: Validate deployment configuration
+        run: |
+          if [[ -z "${APP_DATABASE_PORT}" ]]; then
+            echo "APP_DATABASE_PORT repository/environment variable is required" >&2
+            exit 1
+          fi
       - name: Build Helm dependencies
         run: |
-          helm repo add dandydeveloper https://dandydeveloper.github.io/charts
           helm repo add open-telemetry https://open-telemetry.github.io/opentelemetry-helm-charts
           helm dependency build helm/chart
       - name: Deploy chart
@@ -567,4 +573,5 @@ jobs:
             -f helm/chart/values-production.yaml \
             --set-string "statuslist.image.repository=${IMAGE_BASE}" \
             --set-string "statuslist.image.tag=${DEPLOY_TAG}" \
-            --set-string "statuslist.image.digest=${IMAGE_DIGEST}"
+            --set-string "statuslist.image.digest=${IMAGE_DIGEST}" \
+            --set-string "statuslist.env.APP_DATABASE__PORT=${APP_DATABASE_PORT}"
