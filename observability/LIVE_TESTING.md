@@ -359,8 +359,13 @@ curl -s http://localhost:9092/api/v1/alerts | python3 -c 'import sys,json;[print
 curl -s http://localhost:9093/api/v2/alerts | python3 -m json.tool
 ```
 
-The `alertmanager.yml` receivers are placeholders for a local stack; wire a real
-webhook/email receiver in production (no credentials are committed).
+Notifications are **platform-agnostic**: the Alertmanager config is rendered at
+container start by `observability/prometheus/generate-alertmanager-config.sh`
+from `ALERTMANAGER_PLATFORM` + the matching credential env var (see
+`.env.template`). To see an alert land in the customer's channel, set
+`ALERTMANAGER_PLATFORM` (e.g. `slack`/`discord`/`email`) and its credential in
+`.env`, recreate Alertmanager, then trigger an alert above. No credentials are
+committed.
 
 ---
 
