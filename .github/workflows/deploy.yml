@@ -24,6 +24,15 @@ env:
   HELM_RELEASE_NAME: statuslist
   HELM_NAMESPACE: statuslist-production
   APP_DATABASE_PORT: ${{ vars.APP_DATABASE_PORT }}
+  # Image variant matrix - defined once and reused across jobs
+  VARIANT_MATRIX: |
+    [
+      {"suffix": "aws", "features": "postgres,aws-secrets,acme", "description": "PostgreSQL database with AWS Secrets Manager and Route53 DNS support"},
+      {"suffix": "gcp", "features": "postgres,gcp-secrets,acme", "description": "PostgreSQL database with GCP Secret Manager and Cloud DNS support"},
+      {"suffix": "azure", "features": "postgres,azure-kv,acme", "description": "PostgreSQL database with Azure Key Vault and Azure DNS support"},
+      {"suffix": "vault", "features": "postgres,vault,acme", "description": "PostgreSQL database with HashiCorp Vault / OpenBao token material storage"},
+      {"suffix": "fscert", "features": "postgres,acme", "description": "PostgreSQL database with filesystem-mounted token signing keys and certificates"}
+    ]
 
 jobs:
   ci:
@@ -45,22 +54,7 @@ jobs:
       packages: write
     strategy:
       matrix:
-        variant:
-          - suffix: aws
-            features: "postgres,aws-secrets,acme"
-            description: "PostgreSQL database with AWS Secrets Manager and Route53 DNS support"
-          - suffix: gcp
-            features: "postgres,gcp-secrets,acme"
-            description: "PostgreSQL database with GCP Secret Manager and Cloud DNS support"
-          - suffix: azure
-            features: "postgres,azure-kv,acme"
-            description: "PostgreSQL database with Azure Key Vault and Azure DNS support"
-          - suffix: vault
-            features: "postgres,vault,acme"
-            description: "PostgreSQL database with HashiCorp Vault / OpenBao token material storage"
-          - suffix: fscert
-            features: "postgres,acme"
-            description: "PostgreSQL database with filesystem-mounted token signing keys and certificates"
+        variant: ${{ fromJSON(env.VARIANT_MATRIX) }}
     outputs:
       deploy_tag: ${{ steps.vars.outputs.DEPLOY_TAG }}
       image_digest_${{ matrix.variant.suffix }}: ${{ steps.build.outputs.digest }}
@@ -156,12 +150,7 @@ jobs:
       packages: read
     strategy:
       matrix:
-        variant:
-          - suffix: aws
-          - suffix: gcp
-          - suffix: azure
-          - suffix: vault
-          - suffix: fscert
+        variant: ${{ fromJSON(env.VARIANT_MATRIX) }}
     env:
       IMAGE_REF: ${{ needs.build-and-push.outputs[format('image_ref_{0}', matrix.variant.suffix)] }}
       # Every published architecture is scanned. A shared lockfile does not make the
@@ -483,22 +472,7 @@ jobs:
       packages: write
     strategy:
       matrix:
-        variant:
-          - suffix: aws
-            features: "postgres,aws-secrets,acme"
-            description: "PostgreSQL database with AWS Secrets Manager and Route53 DNS support"
-          - suffix: gcp
-            features: "postgres,gcp-secrets,acme"
-            description: "PostgreSQL database with GCP Secret Manager and Cloud DNS support"
-          - suffix: azure
-            features: "postgres,azure-kv,acme"
-            description: "PostgreSQL database with Azure Key Vault and Azure DNS support"
-          - suffix: vault
-            features: "postgres,vault,acme"
-            description: "PostgreSQL database with HashiCorp Vault / OpenBao token material storage"
-          - suffix: fscert
-            features: "postgres,acme"
-            description: "PostgreSQL database with filesystem-mounted token signing keys and certificates"
+        variant: ${{ fromJSON(env.VARIANT_MATRIX) }}
     env:
       IMAGE_REF: ${{ needs.build-and-push.outputs[format('image_ref_{0}', matrix.variant.suffix)] }}
       DEPLOY_TAG: ${{ needs.build-and-push.outputs.deploy_tag }}
