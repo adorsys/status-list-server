@@ -24,7 +24,6 @@ env:
   HELM_RELEASE_NAME: statuslist
   HELM_NAMESPACE: statuslist-production
   APP_DATABASE_PORT: ${{ vars.APP_DATABASE_PORT }}
-  # Image variant matrix - defined once and reused across jobs
   VARIANT_MATRIX: |
     [
       {"suffix": "aws", "features": "postgres,aws-secrets,acme", "description": "PostgreSQL database with AWS Secrets Manager and Route53 DNS support"},
@@ -45,7 +44,7 @@ jobs:
       security-events: write
 
   build-and-push:
-    name: Build and Push Docker Image to GHCR (${{ matrix.variant.suffix }})
+    name: Build and Push Docker Image to GHCR
     runs-on: ubuntu-latest
     needs: ci
     timeout-minutes: 60
@@ -141,7 +140,7 @@ jobs:
           echo "IMAGE_REF=${IMAGE_BASE}@${DIGEST}" >> "$GITHUB_OUTPUT"
 
   scan-image:
-    name: Scan Image for Vulnerabilities (${{ matrix.variant.suffix }})
+    name: Scan Image for Vulnerabilities
     runs-on: ubuntu-latest
     needs: build-and-push
     timeout-minutes: 20
