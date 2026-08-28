@@ -21,7 +21,7 @@ groups:
           sli: request_latency
         annotations:
           summary: "Request latency P95 sustainably above 300ms (>300ms in both 1h and 6h)"
-          runbook_url: "runbooks/request-latency.md"
+          runbook_url: "https://github.com/adorsys/status-list-server/blob/develop/observability/runbooks/request-latency.md"
 
       - alert: RequestLatencySlowBurn
         expr: |
@@ -32,7 +32,7 @@ groups:
           sli: request_latency
         annotations:
           summary: "Request latency P95 sustained above 300ms for 6h"
-          runbook_url: "runbooks/request-latency.md"
+          runbook_url: "https://github.com/adorsys/status-list-server/blob/develop/observability/runbooks/request-latency.md"
 
       # --- Error rate (SLO: >=99.5% success, 0.5% budget) --------------------
       - alert: ErrorRateFastBurn
@@ -46,7 +46,7 @@ groups:
           sli: error_rate
         annotations:
           summary: "5xx error rate burning the error budget fast (>=14.4x over 0.5% budget in both 1h and 6h)"
-          runbook_url: "runbooks/error-rate.md"
+          runbook_url: "https://github.com/adorsys/status-list-server/blob/develop/observability/runbooks/error-rate.md"
 
       - alert: ErrorRateSlowBurn
         expr: |
@@ -57,7 +57,7 @@ groups:
           sli: error_rate
         annotations:
           summary: "5xx error rate burning the error budget slowly (>=6x over 0.5% budget for 6h)"
-          runbook_url: "runbooks/error-rate.md"
+          runbook_url: "https://github.com/adorsys/status-list-server/blob/develop/observability/runbooks/error-rate.md"
 
       # --- DB latency (SLO: p95 < 50ms) --------------------------------------
       - alert: DbLatencyFastBurn
@@ -71,7 +71,7 @@ groups:
           sli: db_latency
         annotations:
           summary: "DB query latency P95 sustainably above 50ms (>50ms in both 1h and 6h)"
-          runbook_url: "runbooks/db-latency.md"
+          runbook_url: "https://github.com/adorsys/status-list-server/blob/develop/observability/runbooks/db-latency.md"
 
       - alert: DbLatencySlowBurn
         expr: |
@@ -82,7 +82,7 @@ groups:
           sli: db_latency
         annotations:
           summary: "DB query latency P95 sustained above 50ms for 6h"
-          runbook_url: "runbooks/db-latency.md"
+          runbook_url: "https://github.com/adorsys/status-list-server/blob/develop/observability/runbooks/db-latency.md"
 
       # --- Token generation (SLO: <0.5% failure, warn-only is not acceptable) -
       - alert: TokenGenerationFastBurn
@@ -96,7 +96,7 @@ groups:
           sli: token_generation
         annotations:
           summary: "Token-generation failures burning the error budget fast (>=14.4x over 0.5% budget in both 1h and 6h)"
-          runbook_url: "runbooks/token-generation.md"
+          runbook_url: "https://github.com/adorsys/status-list-server/blob/develop/observability/runbooks/token-generation.md"
 
       - alert: TokenGenerationSlowBurn
         expr: |
@@ -107,7 +107,7 @@ groups:
           sli: token_generation
         annotations:
           summary: "Token-generation failure rate burning the error budget slowly (>=6x over 0.5% budget for 6h)"
-          runbook_url: "runbooks/token-generation.md"
+          runbook_url: "https://github.com/adorsys/status-list-server/blob/develop/observability/runbooks/token-generation.md"
 
       # --- Cache hit ratio (warn-only degradation) ---------------------------
       - alert: CacheHitRatioLow
@@ -120,7 +120,7 @@ groups:
         annotations:
           summary: "Status-list cache hit ratio below 85% for 15m (degradation, not outage)"
           description: "Current cache hit ratio: {{ $value | humanizePercentage }}"
-          runbook_url: "runbooks/cache-hit-ratio.md"
+          runbook_url: "https://github.com/adorsys/status-list-server/blob/develop/observability/runbooks/cache-hit-ratio.md"
 
       # --- Error budget exhaustion (critical page) ---------------------------
       # Fires when the 30d error budget (sli:error_budget:success:30d) drops
@@ -137,7 +137,7 @@ groups:
         annotations:
           summary: "Error budget is below 10% for the 30d window"
           description: "Remaining error budget: {{ $value | humanizePercentage }}"
-          runbook_url: "runbooks/error-budget.md"
+          runbook_url: "https://github.com/adorsys/status-list-server/blob/develop/observability/runbooks/error-budget.md"
 
       # --- Certificate renewal (warn-only operational risk) ------------------
       - alert: CertRenewalFailures
@@ -149,4 +149,4 @@ groups:
           sli: cert_renewal
         annotations:
           summary: "Certificate renewal failure rate at or above 1% for 15m"
-          runbook_url: "runbooks/cert-renewal.md"
+          runbook_url: "https://github.com/adorsys/status-list-server/blob/develop/observability/runbooks/cert-renewal.md"

@@ -4,11 +4,14 @@
 // `../generated/status-list-slo.json`. The output is byte-for-byte stable
 // (JSON.stringify with 2-space indent), so a changed intent shows up as a
 // reviewable diff in the committed JSON.
-import { mkdirSync, writeFileSync } from "node:fs";
+import { readFileSync, mkdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const here = dirname(fileURLToPath(import.meta.url));
+const sloThresholds = JSON.parse(
+  readFileSync(join(here, "../../slo/thresholds.json"), "utf8")
+);
 
 const thresholds = (steps, unit) => ({ unit, thresholds: { mode: "absolute", steps } });
 
@@ -42,8 +45,8 @@ const dashboard = {
   refresh: "15s",
   time: { from: "now-1h", to: "now" },
   panels: [
-    timeseries("Request latency P95", "sli:request_latency:p95:5m", "p95", "s", 0.3, 0, 0),
-    timeseries("Error rate", "sli:error_rate:5m", "5xx ratio", "percentunit", 0.005, 12, 0),
+    timeseries("Request latency P95", "sli:request_latency:p95:5m", "p95", "s", sloThresholds.request_latency_p95_seconds, 0, 0),
+    timeseries("Error rate", "sli:error_rate:5m", "5xx ratio", "percentunit", sloThresholds.error_rate_target_ratio, 12, 0),
     {
       title: "Error budget remaining (30d)",
       type: "stat",
@@ -60,10 +63,10 @@ const dashboard = {
       },
       targets: [{ expr: "sli:error_budget:success:30d", refId: "A" }],
     },
-    timeseries("Cache hit ratio", "sli:cache_hit_ratio:5m", "hit ratio", "percentunit", 0.85, 0, 12),
-    timeseries("DB query latency P95", "sli:db_query_latency:p95:5m", "p95", "s", 0.05, 12, 12),
-    timeseries("Cert renewal failure rate", "sli:cert_renewal_failure_rate:5m", "failure rate", "percentunit", 0.01, 0, 20),
-    timeseries("Token generation failure rate", "sli:token_gen_failure_rate:5m", "failure rate", "percentunit", 0.005, 12, 20),
+    timeseries("Cache hit ratio", "sli:cache_hit_ratio:5m", "hit ratio", "percentunit", sloThresholds.cache_hit_ratio_min, 0, 12),
+    timeseries("DB query latency P95", "sli:db_query_latency:p95:5m", "p95", "s", sloThresholds.db_query_latency_p95_seconds, 12, 12),
+    timeseries("Cert renewal failure rate", "sli:cert_renewal_failure_rate:5m", "failure rate", "percentunit", sloThresholds.cert_renewal_failure_rate_max, 0, 20),
+    timeseries("Token generation failure rate", "sli:token_gen_failure_rate:5m", "failure rate", "percentunit", sloThresholds.token_gen_failure_rate_max, 12, 20),
   ],
 };
 

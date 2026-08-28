@@ -5,17 +5,22 @@ SLO dashboards, Prometheus recording/alerting rules, and runbooks for
 
 ```text
 observability/
-  slo/README.md                  # SLI/SLO definitions + methodology (Phase 2)
+  slo/thresholds.json            # single source of truth for SLO targets
+  slo/lint-thresholds.mjs        # CI linter verifying target lockstep
+  slo/README.md                  # SLI/SLO definitions + methodology
   prometheus/
-    prometheus.yml               # full scrape + rule_files config
-    rules/recording.rules.yml    # pre-aggregated sli:* series (Phase 3)
-    rules/    alerting.rules.yml     # multi-window multi-burn-rate alerts (Phase 4)
-    tests/*.test.yml             # promtool rule tests (Phase 7)
+    prometheus.yml               # dev scrape config (2s scrape interval)
+    prometheus.production.yml    # production scrape config (15s scrape interval)
+    rules/recording.rules.yml    # pre-aggregated sli:* series
+    rules/alerting.rules.yml     # multi-window multi-burn-rate alerts
+    tests/*.test.yml             # promtool rule tests
+  alertmanager/
+    alertmanager.example.yml     # example routing config (severity page -> PagerDuty, warn -> Slack)
   dashboards/
-    src/                         # deterministic generator (Phase 5)
+    src/                         # deterministic generator
     generated/*.json             # committed dashboard Grafana loads
     provisioning/                # Grafana datasource + file provider
-  runbooks/*.md                  # one per alert/SLI (Phase 6)
+  runbooks/*.md                  # one per alert/SLI
 ```
 
 ## Metric sources
@@ -32,8 +37,13 @@ Cert-renewal and cert-chain-cache series already existed.
 ```bash
 # Rules + tests (offline, via Prometheus image)
 promtool check rules observability/prometheus/rules/*.rules.yml
+promtool check config observability/prometheus/prometheus.yml
+promtool check config observability/prometheus/prometheus.production.yml
 promtool test rules observability/prometheus/tests/recording.test.yml
 promtool test rules observability/prometheus/tests/alerting.test.yml
+
+# SLO threshold consistency lint
+node observability/slo/lint-thresholds.mjs
 
 # Full stack
 docker compose up -d   # brings up app + otel-collector + prometheus + grafana
@@ -66,12 +76,13 @@ Production Prometheus **must** be configured with:
 ```
 
 (or the equivalent in a managed Prometheus config). Without this, the error
-budget gauge is not trustworthy. The dev `docker-compose.yml` stack is a local
-demo and does not need this set.
+budget gauge is not trustworthy. The dev `docker-compose.yml` stack includes
+this flag to model production behavior.
 
 ## Deployment note
 
-The repo ships standalone Prometheus + Grafana for a dev stack. Production
-wiring to a managed stack is an operator step (no credentials or CRDs in this
-repo). Alert delivery to an external notification channel (e.g. via
-Alertmanager webhooks) is handled outside of this repository.
+The repo ships standalone Prometheus + Grafana for a dev stack. For Kubernetes
+environments running `kube-prometheus-stack`, the Helm chart includes optional
+`templates/servicemonitor.yaml` (`serviceMonitor.enabled: true`) and
+`templates/prometheusrule.yaml` (`prometheusRule.enabled: true`). Alert delivery
+routing is documented in `observability/alertmanager/alertmanager.example.yml`.

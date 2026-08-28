@@ -1,0 +1,61 @@
+# Example Alertmanager Configuration for status-list-server
+#
+# Route tree:
+#   - severity=page -> PagerDuty (critical outages requiring immediate on-call response)
+#   - severity=warn -> Slack / Microsoft Teams (degradations and non-page alerts)
+#
+# Credentials and endpoints use <PLACEHOLDER> notation. Operators must replace
+# these with real environment variables or secret store references.
+
+global:
+  resolve_timeout: 5m
+  # PagerDuty integration global key fallback
+  pagerduty_url: "https://events.pagerduty.com/v2/enqueue"
+
+route:
+  group_by: ["alertname", "cluster", "service", "namespace"]
+  group_wait: 30s
+  group_interval: 5m
+  repeat_interval: 4h
+  receiver: "slack-notifications"
+  routes:
+    # High-priority pages (multi-window fast burn, error budget critical)
+    - match:
+        severity: page
+      receiver: "pagerduty-high-priority"
+      continue: false
+
+    # Warnings (slow burn, cache hit ratio low, cert renewal failures)
+    - match:
+        severity: warn
+      receiver: "slack-notifications"
+      continue: false
+
+inhibit_rules:
+  # Inhibit warn alerts if a page alert is already firing for the same SLI
+  - source_match:
+      severity: page
+    target_match:
+      severity: warn
+    equal: ["sli", "namespace"]
+
+receivers:
+  - name: "pagerduty-high-priority"
+    pagerduty_configs:
+      - routing_key: "<PAGERDUTY_INTEGRATION_KEY>"
+        severity: "critical"
+        description: '{{ .CommonAnnotations.summary }}'
+        details:
+          runbook_url: '{{ .CommonAnnotations.runbook_url }}'
+          firing_alerts: '{{ template "pagerduty.default.instances" . }}'
+
+  - name: "slack-notifications"
+    slack_configs:
+      - api_url: "<SLACK_WEBHOOK_URL>"
+        channel: "#status-list-alerts"
+        send_resolved: true
+        title: '[{{ .Status | toUpper }}] {{ .CommonLabels.alertname }}'
+        text: >-
+          *Summary:* {{ .CommonAnnotations.summary }}
+          *Severity:* {{ .CommonLabels.severity }}
+          *Runbook:* {{ .CommonAnnotations.runbook_url }}

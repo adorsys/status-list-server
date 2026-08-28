@@ -240,7 +240,7 @@ import requests, uuid, time, json
 
 BASE = "http://localhost:8000"
 s = requests.Session()
-data = json.load(open("/home/arthur/Documents/adorsys/status-list-server/artillery-tests/scripts/test-tokens.json"))
+data = json.load(open("artillery-tests/scripts/test-tokens.json"))
 jwk, issuer, tokens = data["publicKeyJwk"], data["issuerId"], data["tokens"]
 
 # 1) Register issuer with a JWK (202 = new, 409 = already exists)

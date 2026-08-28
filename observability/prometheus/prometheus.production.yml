@@ -1,0 +1,28 @@
+# PRODUCTION PROMETHEUS CONFIGURATION
+#
+# MANDATORY OPERATOR STARTUP FLAG:
+# Prometheus MUST be started with `--storage.tsdb.retention.time=31d` (or equivalent).
+# The default 15-day retention silently halves the 30-day window evaluated by
+# `sli:error_budget:success:30d`, `sli:error_rate:30d`, and `sli:token_gen_failure_rate:30d`,
+# causing error-budget gauges to read artificially optimistic without raising an error.
+
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+rule_files:
+  - /etc/prometheus/rules/recording.rules.yml
+  - /etc/prometheus/rules/alerting.rules.yml
+
+scrape_configs:
+  - job_name: 'status_list_server'
+    static_configs:
+      - targets: ['app:8000']
+
+  - job_name: 'pushgateway'
+    static_configs:
+      - targets: ['pushgateway:9091']
+
+  - job_name: 'otel-collector'
+    static_configs:
+      - targets: ['otel-collector:8889']

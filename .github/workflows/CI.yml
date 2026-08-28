@@ -534,11 +534,18 @@ jobs:
             -v "$PWD/observability/prometheus:/etc/prometheus:ro" \
             prom/prometheus:v3.11.3 check rules /etc/prometheus/rules/alerting.rules.yml
 
-      - name: Validate Prometheus config
+      - name: Validate Prometheus config (dev and production)
         run: |
           docker run --rm --entrypoint promtool \
             -v "$PWD/observability/prometheus:/etc/prometheus:ro" \
             prom/prometheus:v3.11.3 check config /etc/prometheus/prometheus.yml
+          docker run --rm --entrypoint promtool \
+            -v "$PWD/observability/prometheus:/etc/prometheus:ro" \
+            prom/prometheus:v3.11.3 check config /etc/prometheus/prometheus.production.yml
+
+      - name: Lint SLO thresholds consistency
+        run: |
+          node observability/slo/lint-thresholds.mjs
 
       - name: Run promtool recording rule tests
         run: |
