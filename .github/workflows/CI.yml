@@ -368,12 +368,28 @@ jobs:
 
       - name: Build Helm dependencies
         run: |
-          helm repo add dandydeveloper https://dandydeveloper.github.io/charts
           helm repo add open-telemetry https://open-telemetry.github.io/opentelemetry-helm-charts
           helm dependency build helm/chart
 
       - name: Validate Helm template with local values
-        run: helm template statuslist-local helm/chart -f helm/chart/values-local.yaml --namespace local
+        run: |
+          set -euo pipefail
+          output_file="/tmp/statuslist-local-rendered.yaml"
+          helm template statuslist-local helm/chart -f helm/chart/values-local.yaml --namespace local > "$output_file"
+
+          # Verify APP_ENV is set to "development" as expected for local values
+          if ! grep -q 'name: APP_ENV' "$output_file" && grep -q 'value: "development"' "$output_file"; then
+            echo "ERROR: APP_ENV=development not found in rendered template"
+            exit 1
+          fi
+
+          # Verify init container uses pinned busybox tag
+          if ! grep -q 'image: busybox:1.38' "$output_file"; then
+            echo "ERROR: init container image 'busybox:1.38' not found in rendered template"
+            exit 1
+          fi
+
+          echo "Helm template validation passed: APP_ENV=development and busybox:1.38 init container verified"
 
   kube-linter:
     name: KubeLinter Scan (Helm Chart)
