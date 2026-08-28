@@ -378,7 +378,8 @@ jobs:
           helm template statuslist-local helm/chart -f helm/chart/values-local.yaml --namespace local > "$output_file"
 
           # Verify APP_ENV is set to "development" as expected for local values
-          if ! grep -q 'name: APP_ENV' "$output_file" && grep -q 'value: "development"' "$output_file"; then
+          # The pattern matches the multi-line YAML structure: - name: APP_ENV followed by value: "development"
+          if ! grep -A1 'name: APP_ENV' "$output_file" | grep -q 'value: "development"'; then
             echo "ERROR: APP_ENV=development not found in rendered template"
             exit 1
           fi
