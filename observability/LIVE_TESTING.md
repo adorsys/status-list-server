@@ -28,7 +28,7 @@ It is the **hands-on companion** to:
 | DB latency (p95)      | `sli:db_query_latency:p95:5m`      | DB p95               | `DbLatencyFastBurn` / `SlowBurn`       |
 | Token-gen failure     | `sli:token_gen_failure_rate:5m`    | Token-gen failure    | `TokenGenerationFastBurn` / `SlowBurn` |
 | Cert renewal failure  | `sli:cert_renewal_failure_rate:5m` | Cert renewal failure | `CertRenewalFailures`                  |
-| Error budget          | `sli:error_budget:success:30d`     | Error budget         | — (derived)                            |
+| Error budget          | `sli:error_budget:success:30d`     | Error budget         | `ErrorBudgetCritical`                  |
 
 The dashboard and alerts both query the `sli:*` recording rules, never raw
 metrics, so a single number drives both.
@@ -175,7 +175,7 @@ docker compose up -d --force-recreate grafana
 Verify:
 
 ```bash
-curl -s -u admin:admin http://localhost:3000/api/datasources | python3 -c 'import sys,json;[print(x["name"],x["uid"]) for x in json.load(sys.stdin)]'
+curl -s -u "admin:${GRAFANA_ADMIN_PASSWORD}" http://localhost:3000/api/datasources | python3 -c 'import sys,json;[print(x["name"],x["uid"]) for x in json.load(sys.stdin)]'
 # -> Prometheus prometheus
 ```
 
@@ -322,7 +322,7 @@ sli:error_budget:success:30d         1           # full budget
 
 ## 8. View the Grafana dashboard
 
-Open `http://localhost:3000` (admin/admin) -> **Status List SLO**
+Open `http://localhost:3000` (login using `GRAFANA_ADMIN_PASSWORD` configured in `docker-compose.yml`) -> **Status List SLO**
 (direct: `http://localhost:3000/d/status-list-slo/status-list-slo`).
 
 Panels (all query `sli:*` recording rules):

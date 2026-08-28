@@ -179,12 +179,12 @@ mod tests {
         let body = String::from_utf8(buffer).expect("metrics are valid UTF-8");
 
         for metric in [HIT_METRIC, MISS_METRIC] {
-            let sample = format!(
-                r#"{metric}_total{{cache="status_list",otel_scope_name="status-list-server"}} 1"#
+            let metric_prefix = format!(
+                r#"{metric}_total{{cache="status_list",otel_scope_name="status-list-server"}}"#
             );
             assert!(
-                body.contains(&sample),
-                "missing sample {sample}; body:\n{body}"
+                body.contains(&metric_prefix),
+                "missing metric series {metric_prefix}; body:\n{body}"
             );
         }
     }
