@@ -172,7 +172,7 @@ All runtime settings can be configured via environment variables prefixed with `
 |                   | `APP_SERVER__CERT__RENEWAL_CRON_SCHEDULE`   | `0 0 0 * * *`                      | 6-field cron expression for cert renewal checks                      |
 |                   | `APP_SERVER__CERT__STORE__CERTIFICATE_PATH` | `None`                             | Path to PEM/DER certificate file (filesystem store)                  |
 |                   | `APP_SERVER__CERT__STORE__SIGNING_KEY_PATH` | `None`                             | Path to PKCS#8 private key file (filesystem store)                   |
-|                   | `APP_SERVER__CERT__DNS__PROVIDER`           | Auto-resolved                      | DNS provider (`route53`, `cloudflare`, `gcloud`, `azure`, `acmedns`) |
+|                   | `APP_SERVER__CERT__DNS__PROVIDER`           | Auto-resolved                      | DNS provider (route53/cloudflare/gcloud/azure/acmedns/pebble)        |
 | **Cache**         | `APP_CACHE__TTL`                            | `300`                              | Status list item cache TTL (seconds; `0` disables)                   |
 |                   | `APP_CACHE__MAX_CAPACITY`                   | `100`                              | Maximum cached status list entries                                   |
 | **Status List**   | `APP_STATUS_LIST__TOKEN_EXP_SECS`           | `900`                              | Token expiration duration (seconds)                                  |
