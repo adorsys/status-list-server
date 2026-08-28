@@ -6,11 +6,11 @@ This runbook is for **you**: you have the Status List Server project and want to
 
 You have three broad ways to run the Status List Server:
 
-| Option | Cluster | Purpose | Chart values |
-| --- | --- | --- | --- |
-| **Local / development** | Minikube, kind, Docker Desktop | Manual testing, iteration | `values-local.yaml` |
-| **Self-managed deploy (recommended)** | Any cluster you own | A real, repeatable deployment | `values.yaml` (+ your own overrides) |
-| **Bundled chart only** | Any cluster | Bring-your-own containers / compose (non-Helm) | n/a (Docker / Kubernetes manifests) |
+| Option                                | Cluster                        | Purpose                                        | Chart values                         |
+| ------------------------------------- | ------------------------------ | ---------------------------------------------- | ------------------------------------ |
+| **Local / development**               | Minikube, kind, Docker Desktop | Manual testing, iteration                      | `values-local.yaml`                  |
+| **Self-managed deploy (recommended)** | Any cluster you own            | A real, repeatable deployment                  | `values.yaml` (+ your own overrides) |
+| **Bundled chart only**                | Any cluster                    | Bring-your-own containers / compose (non-Helm) | n/a (Docker / Kubernetes manifests)  |
 
 The project ships a Helm chart (`helm/chart`) that is the recommended, supported way to deploy. The chart bundles:
 
@@ -129,8 +129,8 @@ For a stable, reproducible deploy, pin the exact image:
 statuslist:
   image:
     repository: <your-registry>/status-list-server
-    tag: "1.0.1"          # used when digest is empty
-    digest: "sha256:<64 hex chars>"   # takes precedence over tag
+    tag: "1.0.1" # used when digest is empty
+    digest: "sha256:<64 hex chars>" # takes precedence over tag
 ```
 
 When `digest` is set it takes precedence over `tag`, and Kubernetes runs `repository@digest`. `pullPolicy` derives automatically (`IfNotPresent` for a digest, `Always` for a mutable tag). A malformed digest (`not sha256:` + 64 hex) is rejected at template time rather than failing at pull time.
@@ -196,7 +196,7 @@ The fallback Secret is always named `statuslist-secret`. Because it uses `string
 For a production-shape deployment enable scaling and disruption budgets together (disabled by default):
 
 ```yaml
-replicaCount: 2   # or enable autoscaling below
+replicaCount: 2 # or enable autoscaling below
 
 autoscaling:
   enabled: true

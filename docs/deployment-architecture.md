@@ -4,7 +4,7 @@
 
 The Status List Server is a Rust-based microservice deployed on AWS EKS. This document describes the complete deployment architecture from source code to running service.
 
-```
+```text
 ┌─────────────────────────────────────────────────────────────────────────────┐
 │                           DEPLOYMENT ARCHITECTURE                           │
 └─────────────────────────────────────────────────────────────────────────────┘
@@ -41,18 +41,18 @@ The Status List Server is a Rust-based microservice deployed on AWS EKS. This do
 
 ## 1. Technology Stack
 
-| Component          | Technology                      | Purpose                                    |
-| -------------------|--------------------------------| ------------------------------------------ |
-| Language           | Rust (Edition 2024)            | High-performance, memory-safe backend      |
-| Web Framework      | Axum 0.8                       | Async HTTP server                          |
-| Database           | PostgreSQL 18 / MySQL 9        | Persistent storage via SeaORM              |
-| Container          | Docker / BuildKit              | Multi-platform builds (amd64, arm64)       |
-| Orchestration      | Kubernetes (AWS EKS)           | Container orchestration                    |
-| Package Manager    | Helm 3                         | Kubernetes resource management             |
-| Observability      | OpenTelemetry + Prometheus     | Tracing, metrics, log aggregation          |
-| Secrets            | External Secrets Operator      | AWS Secrets Manager integration           |
-| DNS                | External-DNS + cert-manager    | Automated DNS + TLS certificates          |
-| CDN/Load Balancing | AWS NLB                        | Load balancing and global distribution    |
+| Component          | Technology                  | Purpose                                |
+| ------------------ | --------------------------- | -------------------------------------- |
+| Language           | Rust (Edition 2024)         | High-performance, memory-safe backend  |
+| Web Framework      | Axum 0.8                    | Async HTTP server                      |
+| Database           | PostgreSQL 18 / MySQL 9     | Persistent storage via SeaORM          |
+| Container          | Docker / BuildKit           | Multi-platform builds (amd64, arm64)   |
+| Orchestration      | Kubernetes (AWS EKS)        | Container orchestration                |
+| Package Manager    | Helm 3                      | Kubernetes resource management         |
+| Observability      | OpenTelemetry + Prometheus  | Tracing, metrics, log aggregation      |
+| Secrets            | External Secrets Operator   | AWS Secrets Manager integration        |
+| DNS                | External-DNS + cert-manager | Automated DNS + TLS certificates       |
+| CDN/Load Balancing | AWS NLB                     | Load balancing and global distribution |
 
 ---
 
@@ -79,16 +79,16 @@ USER 65534
 
 Cargo features gate production backend drivers:
 
-| Feature       | Description                                                              | Default       |
-| ------------- | ------------------------------------------------------------------------ | ------------- |
-| `memory`      | In-memory storage + Moka cache                                           | ✅ Active     |
-| `postgres`    | PostgreSQL via SeaORM                                                     | Opt-in        |
-| `mysql`       | MySQL via SeaORM                                                          | Opt-in        |
-| `sqlite`      | SQLite via SeaORM                                                         | Opt-in        |
-| `redis`       | Redis certificate cache driver                                           | Opt-in        |
-| `aws-secrets` | Route53 DNS-01 + AWS Secrets Manager (single crypto-material backend)   | Opt-in        |
-| `vault`       | Vault/OpenBao KV v2 crypto-material backend                              | Opt-in        |
-| `acme`        | ACME DNS-01 certificate provisioning                                      | Opt-in        |
+| Feature       | Description                                                           | Default   |
+| ------------- | --------------------------------------------------------------------- | --------- |
+| `memory`      | In-memory storage + Moka cache                                        | ✅ Active |
+| `postgres`    | PostgreSQL via SeaORM                                                 | Opt-in    |
+| `mysql`       | MySQL via SeaORM                                                      | Opt-in    |
+| `sqlite`      | SQLite via SeaORM                                                     | Opt-in    |
+| `redis`       | Redis certificate cache driver                                        | Opt-in    |
+| `aws-secrets` | Route53 DNS-01 + AWS Secrets Manager (single crypto-material backend) | Opt-in    |
+| `vault`       | Vault/OpenBao KV v2 crypto-material backend                           | Opt-in    |
+| `acme`        | ACME DNS-01 certificate provisioning                                  | Opt-in    |
 
 Production builds include: `FEATURES="postgres,aws-secrets,acme"` (or `postgres,vault,acme` to store crypto material in Vault/OpenBao).
 
@@ -98,7 +98,7 @@ Production builds include: `FEATURES="postgres,aws-secrets,acme"` (or `postgres,
 
 ### 3.1 Image Structure
 
-```
+```text
 ┌─────────────────────────────────────────────────────────┐
 │              status-list-server:latest                  │
 ├─────────────────────────────────────────────────────────┤
@@ -126,7 +126,7 @@ Production builds include: `FEATURES="postgres,aws-secrets,acme"` (or `postgres,
 
 ### 4.1 Pipeline Overview
 
-```
+```text
 ┌─────────────────────────────────────────────────────────────────┐
 │                    GitHub Actions CI/CD                          │
 └─────────────────────────────────────────────────────────────────┘
@@ -161,20 +161,20 @@ Production builds include: `FEATURES="postgres,aws-secrets,acme"` (or `postgres,
 
 ### 4.2 CI Jobs
 
-| Job                  | Purpose                                           |
-| -------------------- | ------------------------------------------------- |
-| `zizmor-security`    | Workflow security scanning                        |
-| `cargo-fmt`          | Rust formatting check                             |
-| `cargo-build`        | Full workspace compilation                        |
-| `cargo-clippy`       | Linting with clippy                               |
-| `cargo-nextest`      | Parallel test execution                           |
-| `cargo-doc`          | Documentation generation                          |
-| `cargo-machete`       | Unused dependency detection                       |
-| `cargo-vet`           | Dependency vulnerability auditing                 |
-| `cargo-deny`          | License and security policy checks                |
-| `trivy-config`        | Helm chart vulnerability scanning                  |
-| `kube-linter`         | Kubernetes manifests linting                      |
-| `cargo-coverage`      | LLVM code coverage report                         |
+| Job               | Purpose                            |
+| ----------------- | ---------------------------------- |
+| `zizmor-security` | Workflow security scanning         |
+| `cargo-fmt`       | Rust formatting check              |
+| `cargo-build`     | Full workspace compilation         |
+| `cargo-clippy`    | Linting with clippy                |
+| `cargo-nextest`   | Parallel test execution            |
+| `cargo-doc`       | Documentation generation           |
+| `cargo-machete`   | Unused dependency detection        |
+| `cargo-vet`       | Dependency vulnerability auditing  |
+| `cargo-deny`      | License and security policy checks |
+| `trivy-config`    | Helm chart vulnerability scanning  |
+| `kube-linter`     | Kubernetes manifests linting       |
+| `cargo-coverage`  | LLVM code coverage report          |
 
 ### 4.3 CD Pipeline
 
@@ -198,7 +198,7 @@ tags: |
 
 ### 5.1 Architecture on EKS
 
-```
+```text
 ┌─────────────────────────────────────────────────────────────────────────┐
 │                           AWS EKS Cluster                              │
 ├─────────────────────────────────────────────────────────────────────────┤
@@ -247,7 +247,7 @@ tags: |
 | Component                | CPU Request | Memory Request | CPU Limit | Memory Limit |
 | ------------------------ | ----------- | -------------- | --------- | ------------ |
 | status-list-server       | 250m        | 256Mi          | 500m      | 512Mi        |
-| PostgreSQL                | 250m        | 256Mi          | 500m      | 512Mi        |
+| PostgreSQL               | 250m        | 256Mi          | 500m      | 512Mi        |
 | OTEL Collector           | 100m        | 128Mi          | 200m      | 256Mi        |
 | OTEL Collector (sidecar) | 50m         | 64Mi           | 100m      | 128Mi        |
 
@@ -255,7 +255,7 @@ tags: |
 
 ## 6. Helm Chart Structure
 
-```
+```text
 helm/chart/
 ├── Chart.yaml              # Chart metadata and dependencies
 ├── values.yaml             # Production default values
@@ -278,9 +278,9 @@ helm/chart/
 
 ### 6.1 Chart Dependencies
 
-| Dependency       | Version | Repository                        | Purpose                        |
-| ---------------- | ------- | --------------------------------- | ------------------------------ |
-| PostgreSQL       | 0.8.2   | `oci://registry-1.docker.io/cloudpirates` | Database storage   |
+| Dependency              | Version | Repository                                                   | Purpose               |
+| ----------------------- | ------- | ------------------------------------------------------------ | --------------------- |
+| PostgreSQL              | 0.8.2   | `oci://registry-1.docker.io/cloudpirates`                    | Database storage      |
 | OpenTelemetry Collector | 0.169.0 | `https://open-telemetry.github.io/opentelemetry-helm-charts` | Metrics, traces, logs |
 
 ### 6.2 Key Values
@@ -290,16 +290,16 @@ helm/chart/
 statuslist:
   image:
     repository: ghcr.io/adorsys/status-list-server
-    tag: "latest"  # Overridden by CD pipeline
+    tag: "latest" # Overridden by CD pipeline
     pullPolicy: Always
 
-# Service configuration
+  # Service configuration
   service:
     type: ClusterIP
     port: 8081
     targetPort: 8000
 
-# Ingress with TLS
+  # Ingress with TLS
   ingress:
     enabled: true
     annotations:
@@ -318,29 +318,29 @@ statuslist:
 
 ### 7.1 Environment Variables
 
-| Variable                           | Default         | Description                                 |
-| ---------------------------------- | --------------- | ------------------------------------------ |
-| `APP_ENV`                          | `development`   | Runtime environment                        |
-| `APP_SERVER__PORT`                 | `8000`          | Server port                                |
-| `APP_DATABASE__BACKEND`            | `postgres`      | Database driver                            |
-| `APP_STATUS_LIST__TOKEN_EXP_SECS`  | `900`           | Status list expiration (15 min)            |
-| `APP_STATUS_LIST__TOKEN_TTL_SECS`  | `300`           | Status list TTL (5 min)                    |
-| `APP_CACHE__TTL`                   | `300`           | Status list cache TTL                      |
-| `APP_RATE_LIMIT__*`                | Various         | Rate limiting configuration                |
-| `APP_LIMITS__MAX_BODY_SIZE_BYTES`  | `2097152`       | Max request body (2 MiB)                   |
-| `APP_SERVER__CERT__ACME_*`          | —               | ACME certificate provisioning              |
-| `APP_TELEMETRY__ENABLED`           | `true`          | OpenTelemetry export                       |
-| `APP_TELEMETRY__OTLP_ENDPOINT`     | `localhost:4317` | OTLP gRPC endpoint                         |
+| Variable                          | Default          | Description                     |
+| --------------------------------- | ---------------- | ------------------------------- |
+| `APP_ENV`                         | `development`    | Runtime environment             |
+| `APP_SERVER__PORT`                | `8000`           | Server port                     |
+| `APP_DATABASE__BACKEND`           | `postgres`       | Database driver                 |
+| `APP_STATUS_LIST__TOKEN_EXP_SECS` | `900`            | Status list expiration (15 min) |
+| `APP_STATUS_LIST__TOKEN_TTL_SECS` | `300`            | Status list TTL (5 min)         |
+| `APP_CACHE__TTL`                  | `300`            | Status list cache TTL           |
+| `APP_RATE_LIMIT__*`               | Various          | Rate limiting configuration     |
+| `APP_LIMITS__MAX_BODY_SIZE_BYTES` | `2097152`        | Max request body (2 MiB)        |
+| `APP_SERVER__CERT__ACME_*`        | —                | ACME certificate provisioning   |
+| `APP_TELEMETRY__ENABLED`          | `true`           | OpenTelemetry export            |
+| `APP_TELEMETRY__OTLP_ENDPOINT`    | `localhost:4317` | OTLP gRPC endpoint              |
 
 ### 7.2 DNS Providers for ACME
 
-| Provider   | Environment Variable Prefix                      |
-| ---------- | ------------------------------------------------ |
-| AWS Route53 | `APP_SERVER__CERT__DNS__ROUTE53__*`             |
-| Cloudflare | `APP_SERVER__CERT__DNS__CLOUDFLARE__*`          |
-| Google Cloud DNS | `APP_SERVER__CERT__DNS__GCLOUD__*`           |
-| Azure DNS   | `APP_SERVER__CERT__DNS__AZURE__*`               |
-| ACME-DNS    | `APP_SERVER__CERT__DNS__ACMEDNS__*`             |
+| Provider         | Environment Variable Prefix            |
+| ---------------- | -------------------------------------- |
+| AWS Route53      | `APP_SERVER__CERT__DNS__ROUTE53__*`    |
+| Cloudflare       | `APP_SERVER__CERT__DNS__CLOUDFLARE__*` |
+| Google Cloud DNS | `APP_SERVER__CERT__DNS__GCLOUD__*`     |
+| Azure DNS        | `APP_SERVER__CERT__DNS__AZURE__*`      |
+| ACME-DNS         | `APP_SERVER__CERT__DNS__ACMEDNS__*`    |
 
 ---
 
@@ -348,7 +348,7 @@ statuslist:
 
 ### 8.1 Data Flow
 
-```
+```text
 ┌─────────────────────────────────────────────────────────────────┐
 │                      Observability Architecture                  │
 └─────────────────────────────────────────────────────────────────┘
@@ -392,12 +392,12 @@ statuslist:
 
 When running with Docker Compose:
 
-| Service              | URL                       |
-| -------------------- | ------------------------- |
-| Status List Server   | `http://localhost:8000`    |
-| Prometheus UI        | `http://localhost:9090`   |
-| Jaeger UI            | `http://localhost:16686`  |
-| Metrics endpoint     | `http://localhost:8000/metrics` |
+| Service            | URL                             |
+| ------------------ | ------------------------------- |
+| Status List Server | `http://localhost:8000`         |
+| Prometheus UI      | `http://localhost:9090`         |
+| Jaeger UI          | `http://localhost:16686`        |
+| Metrics endpoint   | `http://localhost:8000/metrics` |
 
 ---
 
@@ -422,12 +422,12 @@ The Helm chart no longer deploys the Redis HA subchart. Status-list reads and wr
 
 ### 9.3 Database Selection
 
-| Use Case                     | Recommended Backend |
-| ---------------------------- | ------------------- |
-| Production HA                | PostgreSQL          |
-| MySQL-compatible infra       | MySQL               |
-| Single-node / Development    | SQLite              |
-| Distributed production        | PostgreSQL / MySQL   |
+| Use Case                  | Recommended Backend |
+| ------------------------- | ------------------- |
+| Production HA             | PostgreSQL          |
+| MySQL-compatible infra    | MySQL               |
+| Single-node / Development | SQLite              |
+| Distributed production    | PostgreSQL / MySQL  |
 
 ---
 
@@ -464,20 +464,20 @@ egress:
 
 ### 10.3 Rate Limiting
 
-| Tier       | Burst | Period | Routes                           |
-| ---------- | ----- | ------ | -------------------------------- |
-| Strict     | 10    | 60s    | `POST /api/v1/credentials`       |
-| Writes     | 10    | 60s    | `PUT/PATCH /status-lists/*`      |
+| Tier       | Burst | Period | Routes                             |
+| ---------- | ----- | ------ | ---------------------------------- |
+| Strict     | 10    | 60s    | `POST /api/v1/credentials`         |
+| Writes     | 10    | 60s    | `PUT/PATCH /status-lists/*`        |
 | Permissive | 100   | 60s    | `GET /status-lists/*`, aggregation |
 
 ### 10.4 Request Bounds
 
-| Bound                     | Value      | Response Code     |
-| ------------------------- | ---------- | ----------------- |
-| `max_body_size_bytes`     | 2 MiB      | `413`             |
-| `max_status_index`        | 100,000    | `400`             |
-| `max_statuses_per_request`| 5,000      | `400`             |
-| `max_serialized_list_size`| 1 MiB      | `422`             |
+| Bound                      | Value   | Response Code |
+| -------------------------- | ------- | ------------- |
+| `max_body_size_bytes`      | 2 MiB   | `413`         |
+| `max_status_index`         | 100,000 | `400`         |
+| `max_statuses_per_request` | 5,000   | `400`         |
+| `max_serialized_list_size` | 1 MiB   | `422`         |
 
 ---
 
@@ -530,33 +530,33 @@ egress:
 
 ## Appendix: API Endpoints
 
-| Method | Endpoint                              | Auth | Description                         |
-| ------ | ------------------------------------- | ---- | ----------------------------------- |
-| GET    | `/api/v1/status-lists/{id}`           | No   | Retrieve status list (JWT/CWT)       |
-| GET    | `/api/v1/aggregation`                 | No   | List all status list URIs            |
-| POST   | `/api/v1/credentials`                 | No   | Register issuer credentials          |
-| PUT    | `/api/v1/status-lists/{id}/statuses`   | JWT  | Publish full status list             |
-| PATCH  | `/api/v1/status-lists/{id}/statuses`   | JWT  | Partial status update               |
-| GET    | `/health`                             | No   | Health check endpoint               |
-| GET    | `/metrics`                            | No   | Prometheus metrics                  |
+| Method | Endpoint                             | Auth | Description                    |
+| ------ | ------------------------------------ | ---- | ------------------------------ |
+| GET    | `/api/v1/status-lists/{id}`          | No   | Retrieve status list (JWT/CWT) |
+| GET    | `/api/v1/aggregation`                | No   | List all status list URIs      |
+| POST   | `/api/v1/credentials`                | No   | Register issuer credentials    |
+| PUT    | `/api/v1/status-lists/{id}/statuses` | JWT  | Publish full status list       |
+| PATCH  | `/api/v1/status-lists/{id}/statuses` | JWT  | Partial status update          |
+| GET    | `/health`                            | No   | Health check endpoint          |
+| GET    | `/metrics`                           | No   | Prometheus metrics             |
 
 ---
 
 ## Appendix: Error Codes
 
-| Code | Meaning                                      |
-| ---- | -------------------------------------------- |
-| 400  | Invalid request / bound exceeded             |
-| 401  | Missing or invalid Bearer token              |
-| 403  | Issuer does not own the list                 |
-| 404  | Status list not found                        |
+| Code | Meaning                                     |
+| ---- | ------------------------------------------- |
+| 400  | Invalid request / bound exceeded            |
+| 401  | Missing or invalid Bearer token             |
+| 403  | Issuer does not own the list                |
+| 404  | Status list not found                       |
 | 406  | Unsupported Accept header                   |
 | 409  | Resource already exists / concurrent update |
 | 413  | Request body too large                      |
 | 422  | Serialized list too large / unparsable JWK  |
-| 429  | Rate limit quota exhausted                   |
-| 500  | Internal server error                        |
-| 503  | Service unavailable                          |
+| 429  | Rate limit quota exhausted                  |
+| 500  | Internal server error                       |
+| 503  | Service unavailable                         |
 
 ---
 
