@@ -1,4 +1,7 @@
 {{- if .Values.statuslist.enabled }}
+{{- if and .Values.externalSecret.enabled .Values.statuslist.fallbackSecret.enabled }}
+{{- fail "externalSecret.enabled and statuslist.fallbackSecret.enabled cannot both be true: choose either External Secrets Operator or the fallback Secret for secret delivery, not both" }}
+{{- end }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -7,7 +10,9 @@ metadata:
     {{- include "status-list-server-chart.labels" . | nindent 4 }}
   namespace: {{ .Release.Namespace }}
 spec:
+  {{- if not .Values.autoscaling.enabled }}
   replicas: {{ .Values.statuslist.replicaCount }}
+  {{- end }}
   selector:
     matchLabels:
       {{- include "status-list-server-chart.selectorLabels" . | nindent 6 }}
@@ -22,7 +27,13 @@ spec:
         {{- end }}
       labels:
         {{- include "status-list-server-chart.labels" . | nindent 8 }}
+        {{- with .Values.statuslist.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
     spec:
+      {{- if or .Values.serviceAccount.create (ne .Values.serviceAccount.name "") }}
+      serviceAccountName: {{ include "status-list-server-chart.serviceAccountName" . }}
+      {{- end }}
       {{- with .Values.statuslist.initContainers }}
       initContainers:
         {{- range $ic := . }}
@@ -55,8 +66,20 @@ spec:
                 - ALL
             seccompProfile:
               type: RuntimeDefault
-          image: {{ .Values.statuslist.image.repository }}:{{ .Values.statuslist.image.tag }}
-          imagePullPolicy: {{ .Values.statuslist.image.pullPolicy }}
+          {{- $image := .Values.statuslist.image }}
+          {{- /* `default ""` rather than `toString`: toString renders a nil digest as
+                 "<nil>", so `--set statuslist.image.digest=null` -- the documented way
+                 to clear it -- would pin the image to a literal "<nil>". */}}
+          {{- $digest := $image.digest | default "" }}
+          {{- if and $digest (not (regexMatch "^sha256:[a-f0-9]{64}$" $digest)) }}
+          {{- fail (printf "statuslist.image.digest must be sha256:<64 hex chars>, got %q" $digest) }}
+          {{- end }}
+          {{- $pinned := ne $digest "" }}
+          {{- /* Digest pins the exact scanned artifact; tag falls back to appVersion,
+                 never to "latest". An empty pullPolicy derives from which one is in use:
+                 a digest is content-addressed, a tag is mutable. */}}
+          image: "{{ $image.repository }}{{ if $pinned }}@{{ $digest }}{{ else }}:{{ $image.tag | default $.Chart.AppVersion }}{{ end }}"
+          imagePullPolicy: {{ $image.pullPolicy | default (ternary "IfNotPresent" "Always" $pinned) }}
           ports:
             - name: http
               containerPort: {{ .Values.statuslist.service.targetPort | int }}
@@ -77,6 +100,15 @@ spec:
             {{- $env := dict }}
             {{- range $name, $value := .Values.statuslist.env }}
             {{- $_ := set $env $name $value }}
+            {{- end }}
+            {{- if hasKey $env "APP_DATABASE__URL" }}
+              {{- fail "statuslist.env.APP_DATABASE__URL is not supported by this chart because it exposes assembled credentials in pod metadata; use APP_DATABASE__HOST/PORT/USERNAME/NAME/QUERY plus the chart-managed APP_DATABASE__PASSWORD SecretKeyRef" }}
+            {{- end }}
+            {{- if hasKey $env "APP_DATABASE__PASSWORD" }}
+              {{- fail "statuslist.env.APP_DATABASE__PASSWORD must not be set as a plain env value; provide postgres.auth.existingSecret or externalSecret data for the postgres-password key" }}
+            {{- end }}
+            {{- if or (not (hasKey $env "APP_DATABASE__PORT")) (eq (trim (toString (get $env "APP_DATABASE__PORT"))) "") }}
+              {{- fail "statuslist.env.APP_DATABASE__PORT is required; set it to the database service port" }}
             {{- end }}
             {{- if not (hasKey $env "APP_SERVER__DOMAIN") }}
               {{- if .Values.statuslist.ingress.externalDnsHostname }}
@@ -115,31 +147,42 @@ spec:
                 {{- $_ := set $env "APP_TELEMETRY__ENABLED" "false" }}
               {{- end }}
             {{- end }}
+            {{- if not (hasKey $env "APP_DATABASE__BACKEND") }}
+              {{- $_ := set $env "APP_DATABASE__BACKEND" "postgres" }}
+            {{- end }}
+            {{- if not (hasKey $env "APP_DATABASE__HOST") }}
+              {{- $_ := set $env "APP_DATABASE__HOST" (printf "%s-postgres.%s.svc.cluster.local" .Release.Name .Release.Namespace) }}
+            {{- end }}
+            {{- if not (hasKey $env "APP_DATABASE__USERNAME") }}
+              {{- $_ := set $env "APP_DATABASE__USERNAME" .Values.postgres.auth.username }}
+            {{- end }}
+            {{- if not (hasKey $env "APP_DATABASE__NAME") }}
+              {{- $_ := set $env "APP_DATABASE__NAME" .Values.postgres.auth.database }}
+            {{- end }}
             {{- range $name, $value := $env }}
             - name: {{ $name }}
               value: {{ $value | quote }}
             {{- end }}
-            - name: POSTGRES_PASSWORD
-              valueFrom:
-                secretKeyRef:
-                  name: {{ if .Values.externalSecret.enabled }}{{ .Values.externalSecret.spec.target.name }}{{ else }}statuslist-secret{{ end }}
-                  key: postgres-password
-            {{- if .Values.secretStore.enabled }}
+            {{- $appRegion := include "status-list-server-chart.appRegion" . }}
+            {{- if and (eq .Values.secretStore.provider "aws") $appRegion }}
             - name: APP_AWS__REGION
-              value: {{ .Values.secretStore.aws.region | quote }}
+              value: {{ $appRegion | quote }}
+            {{- end }}
+            {{- if .Values.statuslist.aws.mountCredentials }}
             - name: AWS_SHARED_CREDENTIALS_FILE
               value: /home/nobody/.aws/credentials
             - name: AWS_CONFIG_FILE
               value: /home/nobody/.aws/config
             {{- end }}
-            - name: POSTGRES_DB
-              value: {{ .Values.postgres.auth.database | quote }}
-            - name: APP_DATABASE__URL
-              value: "postgres://$(POSTGRES_USER):$(POSTGRES_PASSWORD)@{{ .Release.Name }}-postgres.{{ .Release.Namespace }}.svc.cluster.local:5432/$(POSTGRES_DB)"
+            - name: APP_DATABASE__PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "status-list-server-chart.appSecretName" . }}
+                  key: postgres-password
           volumeMounts:
             - name: tmp
               mountPath: /tmp
-          {{- if .Values.secretStore.enabled }}
+          {{- if .Values.statuslist.aws.mountCredentials }}
             - name: aws-credentials-volume
               mountPath: /home/nobody/.aws
               readOnly: true
@@ -147,7 +190,7 @@ spec:
       volumes:
         - name: tmp
           emptyDir: {}
-      {{- if .Values.secretStore.enabled }}
+      {{- if .Values.statuslist.aws.mountCredentials }}
         - name: aws-credentials-volume
           secret:
             secretName: aws-credentials-secret

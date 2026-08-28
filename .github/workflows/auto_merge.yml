@@ -15,7 +15,17 @@ permissions:
 jobs:
   dependabot:
     runs-on: ubuntu-latest
-    if: github.actor == 'dependabot[bot]'
+    # `github.event.pull_request.user.login`, not `github.actor`. `github.actor` is
+    # the last actor to touch the triggering context, not the author of the pull
+    # request, so a pull request whose HEAD commit appears to be authored by
+    # Dependabot satisfies it while the branch history remains attacker-controlled.
+    # This job approves and enables auto-merge, so that guard being bypassable means
+    # arbitrary code merges without review. `user.login` is the account that opened
+    # the pull request and cannot be reassigned by later activity.
+    #
+    # Behaviour is unchanged for `workflow_dispatch`: there is no pull request in the
+    # event payload, so this evaluates false exactly as the previous condition did.
+    if: github.event.pull_request.user.login == 'dependabot[bot]'
     steps:
       - name: Dependabot metadata
         id: metadata

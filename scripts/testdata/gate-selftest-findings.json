@@ -1,0 +1,25 @@
+{
+  "SchemaVersion": 2,
+  "CreatedAt": "2026-08-20T07:22:45.747699524Z",
+  "ArtifactName": "gate-selftest",
+  "ArtifactType": "container_image",
+  "Results": [
+    {
+      "Target": "gate-selftest (synthetic)",
+      "Class": "os-pkgs",
+      "Type": "alpine",
+      "Vulnerabilities": [
+        {
+          "VulnerabilityID": "CVE-2021-36159",
+          "PkgName": "apk-tools",
+          "InstalledVersion": "2.10.6-r0",
+          "FixedVersion": "2.10.7-r0",
+          "Status": "fixed",
+          "Severity": "CRITICAL",
+          "Title": "libfetch: an out of boundary read while libfetch uses strtol to parse the relevant numbers into address bytes leads to information leak or crash",
+          "PrimaryURL": "https://avd.aquasec.com/nvd/cve-2021-36159"
+        }
+      ]
+    }
+  ]
+}

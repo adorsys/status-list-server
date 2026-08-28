@@ -327,6 +327,10 @@ For production deployments:
 - **Kubernetes**: Refer to the [Helm Chart Guide](helm/README.md).
 - **Operations & Runbooks**: Refer to the [Deployment Runbook](docs/deployment-runbook.md) for database migration, backup, and operational guidelines.
 
+### Container Supply Chain
+
+Release images are scanned by digest and carry an SBOM and SLSA provenance, and release tags are applied only after the scan. See the [Container Supply Chain guide](docs/supply-chain.md) for thresholds, verification commands, and how to triage findings.
+
 ## Testing & Local Quality Checks
 
 Run unit and integration tests:
