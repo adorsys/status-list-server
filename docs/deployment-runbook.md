@@ -74,7 +74,7 @@ Release tags matching `v*.*.*` deploy to:
 - Helm release: `statuslist`
 - Image tag: semantic version without the leading `v`
 
-For example, tag `v0.5.0` deploys the AWS variant with image tag `0.5.0-aws`. The production deployment uses the `-aws` variant by default; other variants (`-gcp`, `-azure`, `-vault`, `-fscert`) can be selected by updating the Helm values.
+For example, tag `v0.5.0` deploys the AWS variant with image tag `0.5.0-aws`. The production deployment uses the `-aws` variant by default; other variants (`-gcp`, `-azure`, `-vault`, `-fscert`) can be selected by setting the `DEPLOY_VARIANT` Actions variable in the `production` environment (e.g., `gcp`, `azure`, `vault`, `fscert`). The default is `aws`.
 
 The production deploy command is equivalent to (using the AWS variant):
 
