@@ -39,7 +39,7 @@ Prerequisites depend on how you run the server:
 
 - **Local Development (Zero-Infrastructure Default):**
   - [Rust & Cargo](https://www.rust-lang.org/tools/install) (Latest stable).
-  - No external services required! By default, the server runs completely in-memory using Moka for caching and store-based certificate mode. Redis, external databases, and cloud service accounts are **not** needed.
+  - No external services required! By default, the server runs completely in-memory using Moka for caching and store-based certificate mode. External databases and cloud service accounts are **not** needed.
 - **Docker Compose Setup:**
   - [Docker](https://www.docker.com/get-started/) & Docker Compose plugin.
 - **Production Deployment (Optional Integrations):**
@@ -47,9 +47,6 @@ Prerequisites depend on how you run the server:
   - Secret Management Backend: HashiCorp Vault / OpenBao, AWS Secrets Manager, GCP Secret Manager, or Azure Key Vault.
   - ACME DNS-01 Provider: AWS Route53, Cloudflare, Google Cloud DNS, Azure DNS, or ACME-DNS.
   - Telemetry: OpenTelemetry Collector (OTLP gRPC).
-
-> [!NOTE]
-> **Redis & Cloud Services**: Redis is not a prerequisite or runtime requirement for this service. In-process TTL caching is handled natively via Moka. AWS and other cloud services are optional production integrations rather than baseline requirements.
 
 ### Default Runtime Mode
 
