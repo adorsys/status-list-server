@@ -226,10 +226,10 @@ tags: |
 │  │  ┌─────────────────────────┼───────────────────────────────┐  │   │
 │  │  │                         │                               │  │   │
 │  │  ▼                         ▼                               ▼  │   │
-│  │ ┌─────────────┐    ┌─────────────┐    ┌─────────────────┐      │   │
-│  │ │ PostgreSQL  │    │   Redis HA  │    │ OTEL Collector   │      │   │
-│  │ │  (Pods)     │    │  (Pods)     │    │  (Standalone)    │      │   │
-│  │ └─────────────┘    └─────────────┘    └─────────────────┘      │   │
+│  │ ┌─────────────┐    ┌─────────────────┐                      │   │
+│  │ │ PostgreSQL  │    │ OTEL Collector  │                      │   │
+│  │ │  (Pods)     │    │  (Standalone)   │                      │   │
+│  │ └─────────────┘    └─────────────────┘                      │   │
 │  └─────────────────────────────────────────────────────────────────┘   │
 │                                                                         │
 │  ┌─────────────────────────────────────────────────────────────────┐   │
@@ -248,8 +248,7 @@ tags: |
 | ------------------------ | ----------- | -------------- | --------- | ------------ |
 | status-list-server       | 250m        | 256Mi          | 500m      | 512Mi        |
 | PostgreSQL                | 250m        | 256Mi          | 500m      | 512Mi        |
-| Redis HA                 | 100m        | 200Mi          | 500m      | 700Mi        |
-| HAProxy (Redis)          | 100m        | 128Mi          | 200m      | 256Mi        |
+| OTEL Collector           | 100m        | 128Mi          | 200m      | 256Mi        |
 | OTEL Collector (sidecar) | 50m         | 64Mi           | 100m      | 128Mi        |
 
 ---
@@ -261,17 +260,19 @@ helm/chart/
 ├── Chart.yaml              # Chart metadata and dependencies
 ├── values.yaml             # Production default values
 ├── values-local.yaml       # Local development values
+├── values-production.yaml  # Production values applied by the deploy workflow
 ├── templates/
 │   ├── deployment.yaml     # Application deployment
 │   ├── service.yaml        # ClusterIP service
-│   ├── serviceaccount.yaml # Workload Identity / IRSA service account
+│   ├── serviceaccount.yaml # ServiceAccount (Workload Identity / IRSA annotations)
 │   ├── ingress.yaml        # NGINX ingress with TLS
 │   ├── network-policy.yaml # Kubernetes network policies
+│   ├── secret-store.yaml   # Provider-neutral SecretStore configuration
 │   ├── external-secrets.yaml   # ESO ExternalSecret integration
-│   ├── secret-store.yaml       # Provider-neutral SecretStore configuration
-│   ├── secret.yaml             # Fallback Kubernetes Secret (non-ESO clusters)
-│   ├── redis-ha-cert-sync.yaml # Redis TLS certificate sync
-│   └── otel-collector-*.yaml   # OpenTelemetry collector configs
+│   ├── secret.yaml         # Fallback Kubernetes Secret (non-ESO clusters)
+│   ├── hpa.yaml            # Horizontal Pod Autoscaler (opt-in)
+│   ├── pdb.yaml            # Pod Disruption Budget (opt-in)
+│   └── tests/              # Helm chart smoke tests
 └── README.md               # Deployment documentation
 ```
 
@@ -280,7 +281,7 @@ helm/chart/
 | Dependency       | Version | Repository                        | Purpose                        |
 | ---------------- | ------- | --------------------------------- | ------------------------------ |
 | PostgreSQL       | 0.8.2   | `oci://registry-1.docker.io/cloudpirates` | Database storage   |
-| Redis HA         | 4.35.0  | `https://dandydeveloper.github.io/charts` | Certificate cache (optional) |
+| OpenTelemetry Collector | 0.169.0 | `https://open-telemetry.github.io/opentelemetry-helm-charts` | Metrics, traces, logs |
 
 ### 6.2 Key Values
 
@@ -404,23 +405,20 @@ When running with Docker Compose:
 
 ### 9.1 Secrets Management
 
-Secrets are delivered to the application through **External Secrets Operator (ESO)**. The chart renders:
+Secrets are delivered to the application through **External Secrets Operator (ESO)**, the default secret-delivery path — not Workload Identity. The chart renders:
 
 - A `SecretStore` (`secret-store.yaml`) that is **provider-neutral** — `secretStore.provider` selects between `aws` (Secrets Manager / Parameter Store), `vault` (Vault / OpenBao), `gcp` (Secret Manager), `azure` (Key Vault), or `raw` (full provider passthrough for unsupported ESO providers).
-- An `ExternalSecret` (`external-secrets.yaml`, gated on `externalSecret.enabled`) that syncs the `postgres-password` and `redis-password` keys into the `statuslist-secret` Kubernetes Secret.
+- An `ExternalSecret` (`external-secrets.yaml`, gated on `externalSecret.enabled`) that syncs the `postgres-password` key into the `statuslist-secret` Kubernetes Secret.
+- A second `ExternalSecret` that provisions `aws-credentials-secret` so the ESO-mounted credentials path is complete (rendered only when `externalSecret.enabled=true` **and** `statuslist.aws.mountCredentials=true`).
 - A **fallback Kubernetes `Secret`** (`secret.yaml`) for clusters that do not run ESO, rendered only when `externalSecret.enabled=false` and `statuslist.fallbackSecret.enabled=true`.
 
-**Workload Identity / IRSA:** the application pod uses a dedicated `ServiceAccount` (`serviceAccount.create=true`). AWS/GCP/Azure ambient credentials are attached via `serviceAccount.annotations` (e.g. `eks.amazonaws.com/role-arn` for EKS IRSA). The chart defaults to Workload Identity mode — no static AWS credentials are mounted into the pod (`statuslist.aws.mountCredentials=false`). Legacy deployments that still use a mounted `aws-credentials-secret` must set `statuslist.aws.mountCredentials=true` until Workload Identity is configured.
+**ESO-mounted credentials (default):** the chart defaults to `statuslist.aws.mountCredentials=true`, so the application pod mounts the ESO-provisioned `aws-credentials-secret` at `/home/nobody/.aws`. Production (`values-production.yaml`) keeps this default, so no static credential files are managed by hand and no Workload Identity annotation is required.
 
-### 9.2 Redis HA Integration (Optional)
+**Workload Identity / IRSA (opt-in):** the application pod uses a dedicated `ServiceAccount` (`serviceAccount.create=true`). AWS/GCP/Azure ambient credentials are attached via `serviceAccount.annotations` (e.g. `eks.amazonaws.com/role-arn` for EKS IRSA). To opt in, set `statuslist.aws.mountCredentials=false` and attach the cloud role annotation; the application then uses ambient credentials instead of mounted files. See [Secrets Risk: ESO vs Workload Identity](secrets-risk-eso-vs-workload-identity.md) for the trade-offs.
 
-Redis is **optional** for production deployments.
+### 9.2 Redis
 
-| Deployment Type | Redis Required | Purpose                        |
-| --------------- | -------------- | ------------------------------ |
-| Single replica  | ❌ No          | Moka in-process cache sufficient |
-| Multi-replica   | ⚠️ Optional    | Shared certificate cache        |
-| AWS S3 cert path | ⚠️ Optional    | Distributed cert cache entry sharing |
+The Helm chart no longer deploys the Redis HA subchart. Status-list reads and writes use the configured repository backend plus the in-process Moka cache, so Redis is not a runtime dependency of the deployment chart. Redis remains available behind the crate-level `redis` feature for application images that require an explicit adapter-level Redis integration.
 
 ### 9.3 Database Selection
 
@@ -564,9 +562,10 @@ egress:
 
 ## Further Reading
 
-- [Hexagonal Architecture Documentation](docs/hexagonal-architecture.md)
+- [Secrets Risk: ESO vs Workload Identity](secrets-risk-eso-vs-workload-identity.md)
 - [Database Backend Guidance](docs/database-backends.md)
 - [Observability Guide](docs/observability.md)
 - [DNS Provider Setup](docs/dns-providers.md)
-- [Redis TLS Setup](docs/REDIS_TLS_SETUP.md)
+- [Secrets Backend Guidance](docs/secrets-backends.md)
 - [Helm Deployment Guide](helm/README.md)
+- [Deployment Runbook](docs/deployment-runbook.md)
