@@ -4,6 +4,11 @@
 changelog_path = "./CHANGELOG.md"
 changelog_config = "cliff.toml"
 release_always = false
+
+# semver_check is disabled because this is a standalone binary crate, not a library
+# published on crates.io. Since there is no public library API contract exposed to
+# external callers, cargo-semver-checks has no baseline version on the registry to
+# compare API changes against.
 semver_check = false
 
 [[package]]
