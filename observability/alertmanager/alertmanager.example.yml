@@ -39,7 +39,6 @@ route:
       receiver: "slack-notifications"
       continue: false
 
-
 inhibit_rules:
   # Inhibit warn alerts if a page alert is already firing for the same SLI
   - source_match:
