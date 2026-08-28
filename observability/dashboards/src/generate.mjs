@@ -64,6 +64,22 @@ const dashboard = {
       },
       targets: [{ expr: "sli:error_budget:success:30d", refId: "A" }],
     },
+    {
+      title: "Token-gen error budget (30d)",
+      type: "stat",
+      datasource: { type: "prometheus", uid: "prometheus" },
+      gridPos: { h: 4, w: 12, x: 12, y: 8 },
+      fieldConfig: {
+        defaults: thresholds(
+          [
+            { color: "green", value: null },
+            { color: "red", value: 0 },
+          ],
+          "percentunit"
+        ),
+      },
+      targets: [{ expr: "sli:token_gen_error_budget:30d", refId: "A" }],
+    },
     timeseries("Cache hit ratio", "sli:cache_hit_ratio:5m", "hit ratio", "percentunit", sloThresholds.cache_hit_ratio_min, 0, 12),
     timeseries("DB query latency P95", "sli:db_query_latency:p95:5m", "p95", "s", sloThresholds.db_query_latency_p95_seconds, 12, 12),
     timeseries("Cert renewal failure rate", "sli:cert_renewal_failure_rate:5m", "failure rate", "percentunit", sloThresholds.cert_renewal_failure_rate_max, 0, 20),

@@ -77,14 +77,30 @@ tests:
       - series: >-
           cert_renewal_attempts_total{otel_scope_name="status-list-server"}
         values: '0+50x120'
+      - series: >-
+          status_list_cache_hits_total{otel_scope_name="status-list-server"}
+        values: '0+3x120'
+      - series: >-
+          status_list_cache_misses_total{otel_scope_name="status-list-server"}
+        values: '0+1x120'
     promql_expr_test:
       - expr: 'sli:token_gen_failure_rate:30d'
         eval_time: 30d
         exp_samples:
           - labels: '{__name__="sli:token_gen_failure_rate:30d"}'
             value: 0.02
+      - expr: 'sli:cert_renewal_failure_rate:7d'
+        eval_time: 30d
+        exp_samples:
+          - labels: '{__name__="sli:cert_renewal_failure_rate:7d"}'
+            value: 0.02
       - expr: 'sli:cert_renewal_failure_rate:30d'
         eval_time: 30d
         exp_samples:
           - labels: '{__name__="sli:cert_renewal_failure_rate:30d"}'
             value: 0.02
+      - expr: 'sli:cache_hit_ratio:7d'
+        eval_time: 30d
+        exp_samples:
+          - labels: '{__name__="sli:cache_hit_ratio:7d"}'
+            value: 0.75

@@ -131,6 +131,44 @@
       ]
     },
     {
+      "title": "Token-gen error budget (30d)",
+      "type": "stat",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 12,
+        "x": 12,
+        "y": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 0
+              }
+            ]
+          }
+        }
+      },
+      "targets": [
+        {
+          "expr": "sli:token_gen_error_budget:30d",
+          "refId": "A"
+        }
+      ]
+    },
+    {
       "title": "Cache hit ratio",
       "type": "timeseries",
       "datasource": {

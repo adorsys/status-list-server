@@ -35,8 +35,12 @@ spec:
           expr: histogram_quantile(0.95, sum(rate(db_query_duration_seconds_bucket{otel_scope_name="status-list-server"}[6h])) by (le))
         - record: sli:cache_hit_ratio:5m
           expr: sum(rate(status_list_cache_hits_total{otel_scope_name="status-list-server"}[5m])) / (sum(rate(status_list_cache_hits_total{otel_scope_name="status-list-server"}[5m])) + sum(rate(status_list_cache_misses_total{otel_scope_name="status-list-server"}[5m])))
+        - record: sli:cache_hit_ratio:7d
+          expr: sum(rate(status_list_cache_hits_total{otel_scope_name="status-list-server"}[7d])) / (sum(rate(status_list_cache_hits_total{otel_scope_name="status-list-server"}[7d])) + sum(rate(status_list_cache_misses_total{otel_scope_name="status-list-server"}[7d])))
         - record: sli:cert_renewal_failure_rate:5m
           expr: sum(rate(cert_renewal_failures_total{otel_scope_name="status-list-server"}[5m])) / sum(rate(cert_renewal_attempts_total{otel_scope_name="status-list-server"}[5m]))
+        - record: sli:cert_renewal_failure_rate:7d
+          expr: sum(rate(cert_renewal_failures_total{otel_scope_name="status-list-server"}[7d])) / sum(rate(cert_renewal_attempts_total{otel_scope_name="status-list-server"}[7d]))
         - record: sli:cert_renewal_failure_rate:30d
           expr: sum(rate(cert_renewal_failures_total{otel_scope_name="status-list-server"}[30d])) / sum(rate(cert_renewal_attempts_total{otel_scope_name="status-list-server"}[30d]))
         - record: sli:token_gen_failure_rate:5m

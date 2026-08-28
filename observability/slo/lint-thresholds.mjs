@@ -25,7 +25,8 @@ checkMatch(alertingRules, "alerting.rules.yml", /> 0\.3/, `request latency p95 t
 checkMatch(readme, "slo/README.md", /300 ms/, "documented 300 ms request latency target");
 
 // 2. Error Rate (0.005 budget, 0.072 fast burn, 0.030 slow burn)
-checkMatch(recordingRules, "recording.rules.yml", /\/ 0\.005/, `error budget denominator ${thresholds.error_rate_target_ratio}`);
+const errTargetRegex = new RegExp(`sli:error_budget:success:30d[\\s\\S]*?\\/ ${thresholds.error_rate_target_ratio}`);
+checkMatch(recordingRules, "recording.rules.yml", errTargetRegex, `HTTP error budget denominator ${thresholds.error_rate_target_ratio}`);
 checkMatch(alertingRules, "alerting.rules.yml", />= 0\.072/, `error rate fast burn ${thresholds.fast_burn_threshold}`);
 checkMatch(alertingRules, "alerting.rules.yml", />= 0\.030/, `error rate slow burn ${thresholds.slow_burn_threshold}`);
 checkMatch(readme, "slo/README.md", /99\.5%/, "documented 99.5% error budget target");
@@ -43,6 +44,8 @@ checkMatch(alertingRules, "alerting.rules.yml", />= 0\.01/, `cert renewal failur
 checkMatch(readme, "slo/README.md", /1%/, "documented 1% cert renewal failure rate target");
 
 // 6. Token Generation Failure Rate (0.005 budget, 0.072 fast burn, 0.030 slow burn)
+const tokenErrTargetRegex = new RegExp(`sli:token_gen_error_budget:30d[\\s\\S]*?\\/ ${thresholds.token_gen_failure_rate_max}`);
+checkMatch(recordingRules, "recording.rules.yml", tokenErrTargetRegex, `token gen error budget denominator ${thresholds.token_gen_failure_rate_max}`);
 checkMatch(alertingRules, "alerting.rules.yml", /sli:token_gen_failure_rate:1h >= 0\.072/, `token gen fast burn ${thresholds.fast_burn_threshold}`);
 checkMatch(alertingRules, "alerting.rules.yml", /sli:token_gen_failure_rate:6h >= 0\.030/, `token gen slow burn ${thresholds.slow_burn_threshold}`);
 checkMatch(readme, "slo/README.md", /0\.5%/, "documented 0.5% token gen failure target");

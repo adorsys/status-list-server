@@ -67,12 +67,21 @@ groups:
           sum(rate(status_list_cache_hits_total{otel_scope_name="status-list-server"}[5m]))
           / (sum(rate(status_list_cache_hits_total{otel_scope_name="status-list-server"}[5m]))
              + sum(rate(status_list_cache_misses_total{otel_scope_name="status-list-server"}[5m])))
+      - record: sli:cache_hit_ratio:7d
+        expr: |
+          sum(rate(status_list_cache_hits_total{otel_scope_name="status-list-server"}[7d]))
+          / (sum(rate(status_list_cache_hits_total{otel_scope_name="status-list-server"}[7d]))
+             + sum(rate(status_list_cache_misses_total{otel_scope_name="status-list-server"}[7d])))
 
       # --- Certificate renewal failure rate (ratio, warn-only) ----------------
       - record: sli:cert_renewal_failure_rate:5m
         expr: |
           sum(rate(cert_renewal_failures_total{otel_scope_name="status-list-server"}[5m]))
           / sum(rate(cert_renewal_attempts_total{otel_scope_name="status-list-server"}[5m]))
+      - record: sli:cert_renewal_failure_rate:7d
+        expr: |
+          sum(rate(cert_renewal_failures_total{otel_scope_name="status-list-server"}[7d]))
+          / sum(rate(cert_renewal_attempts_total{otel_scope_name="status-list-server"}[7d]))
       # 30d: the true SLO window, consistent with sli:error_rate:30d so the
       # long-term health of every availability SLI is comparable.
       - record: sli:cert_renewal_failure_rate:30d
