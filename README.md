@@ -353,6 +353,7 @@ cargo check --no-default-features --features memory
 Run complete local CI checks (format, clippy, tests, and dependency checks):
 
 ```bash
+# Requires cargo-nextest: cargo install cargo-nextest
 ./local-ci.sh
 ```
 
