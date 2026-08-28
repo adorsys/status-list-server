@@ -33,7 +33,7 @@ This document catalogs mandatory production configuration validations and their 
 
 <!-- markdownlint-enable MD060 -->
 
-**Secret Redaction**: The database URL (containing credentials) is stored as `SecretString`. Connection failure errors redact the password portion; only the scheme and host are visible in logs.
+**Secret Redaction**: The database URL (containing credentials) is stored as `SecretString`. Connection failure errors redact the password portion; only the scheme and host are visible in logs
 
 ---
 
@@ -50,22 +50,23 @@ The cryptographic material backend (signing keys, certificates) is selected by c
 | `vault.role_id` (AppRole) | Non-empty string when `auth_method=approle` | **Fatal**: `eyre!` error: "requires 'role_id' to be configured" | N/A | Configure via Helm `values.yaml` or ExternalSecrets |
 | `vault.secret_id` XOR `vault.secret_id_path` (AppRole) | At least one must be non-empty | **Fatal**: `eyre!` error: "missing secret_id: provide 'secret_id' or 'secret_id_path'" | N/A | Mount secret via Kubernetes volume or inject via ExternalSecrets |
 | `vault.secret_id_path` (AppRole) | File must exist and contain non-empty content | **Fatal**: `eyre!` error with file path | N/A | Verify volume mount and secret injection |
-| `vault.k8s_role` (Kubernetes) | Non-empty string when `auth_method=kubernetes` | **Fatal**: `eyre!` error: "requires 'k8s_role' to be configured" | N/A | Configure Vault Kubernetes auth role |
+| `vault.k8s_role` (Kubernetes) | Non-empty string when `auth_method=kubernetes` | **Runtime Fatal**: `eyre!` error: "Vault auth_method=kubernetes requires 'k8s_role' to be configured" | N/A | Configure Vault Kubernetes auth role |
 | `vault.k8s_token_path` (Kubernetes) | File must exist at path | **Runtime Fatal**: Token read failure during login | N/A | Verify projected ServiceAccount token volume mount |
 | `vault.mount` | Non-empty mount path (default: `secret`) | **Fatal**: Config parsing or Vault API error | N/A | Configure KV v2 engine mount path |
 | Vault connectivity | Login must succeed | **Fatal**: Vault client build failure | **NOT_READY**: "cryptographic-material backend unreachable" | Check Vault TLS, namespace, auth credentials |
 | `gcp_secret_manager.project_id` | Non-empty when `gcp-secrets` feature enabled (no `vault`) | **Runtime Fatal**: Client initialization error | N/A | Set GCP project ID; ensure Workload Identity or ADC configured |
 | `gcp_secret_manager.service_account_key` OR `service_account_key_path` | At least one valid credential when not using ADC | **Runtime Fatal**: Authentication failure | N/A | Configure service account key or ensure GKE Workload Identity |
-| `azure_keyvault.vault_url` | Non-empty valid URL when `azure-kv` feature enabled (no `vault`, `gcp-secrets`) | **Fatal**: `eyre!` error: "vault_url is required" | N/A | Set Azure Key Vault URL |
-| `azure_keyvault.tenant_id` | Non-empty for Service Principal auth | **Runtime Fatal**: Authentication failure | N/A | Configure Azure AD tenant ID |
-| `azure_keyvault.client_id` | Non-empty for Service Principal auth | **Runtime Fatal**: Authentication failure | N/A | Configure Azure AD application/client ID |
-| `azure_keyvault.client_secret` | Non-empty for Service Principal auth | **Runtime Fatal**: Authentication failure | N/A | Configure via ExternalSecrets; never commit to Git |
+| `gcp_secret_manager.allow_anonymous_credentials` | Must be `true` for emulator/testing; not for production | **Warning**: Logs anonymous credential use | N/A | Enable only for local testing with GCP emulator |
+| `azure_keyvault.vault_url` | Non-empty valid URL when `azure-kv` feature enabled (no `vault`, `gcp-secrets`)<br>*Note: Optional in config, validated at runtime* | **Fatal**: `eyre!` error: "Azure Key Vault configuration error: azure_keyvault.vault_url is required when azure-kv is enabled" | N/A | Set Azure Key Vault URL |
+| `azure_keyvault.tenant_id` | Non-empty for Service Principal auth<br>*Note: Optional in config, validated at runtime* | **Runtime Fatal**: Authentication failure | N/A | Configure Azure AD tenant ID |
+| `azure_keyvault.client_id` | Non-empty for Service Principal auth<br>*Note: Optional in config, validated at runtime* | **Runtime Fatal**: Authentication failure | N/A | Configure Azure AD application/client ID |
+| `azure_keyvault.client_secret` | Non-empty for Service Principal auth<br>*Note: Optional in config, validated at runtime* | **Runtime Fatal**: Authentication failure | N/A | Configure via ExternalSecrets; never commit to Git |
 | AWS Secrets Manager | `aws.region` must be valid | **Runtime Fatal**: AWS SDK configuration error | N/A | Set valid AWS region (e.g., `us-east-1`, `eu-central-1`) |
 | AWS Secrets Manager | IAM credentials or IRSA must be valid | **Runtime Fatal**: AWS auth failure | N/A | Verify IRSA annotation or IAM credentials |
 
 <!-- markdownlint-enable MD060 -->
 
-**Secret Redaction**: All secret fields (`vault.secret_id`, `vault.client_secret`, `azure_keyvault.client_secret`, `gcp_secret_manager.service_account_key`, ACME-DNS passwords) are stored as `SecretString`. Error messages never expose these values; they reference the configuration key name only.
+**Secret Redaction**: All secret fields (`vault.secret_id`, `vault.secret_id_path` file contents, `azure_keyvault.client_secret`, `gcp_secret_manager.service_account_key`, ACME-DNS passwords) are stored as `SecretString`. Error messages never expose these values; they reference the configuration key name only.
 
 ---
 
@@ -84,9 +85,9 @@ The cryptographic material backend (signing keys, certificates) is selected by c
 | Store strategy: `server.cert.store.signing_key_path` | Valid filesystem path readable by container | **Fatal** (if configured): `eyre!` error | N/A | Mount private key via Kubernetes secret; ensure restricted permissions |
 | Store strategy: `server.cert.store.certificate_key` | Valid key in secrets backend | **Readiness Failure**: Backend lookup fails | **NOT_READY**: "cryptographic-material backend unreachable" | Ensure key exists in Vault/AWS/GCP/Azure |
 | Store strategy: `server.cert.store.signing_key_key` | Valid key in secrets backend | **Readiness Failure**: Backend lookup fails | **NOT_READY**: "cryptographic-material backend unreachable" | Ensure key exists in secrets backend |
-| Store strategy validation | Must configure filesystem XOR storage keys, not both | **Fatal**: `eyre!` error: "must configure either filesystem paths or material backend keys, not both" | N/A | Remove one configuration method |
-| Store strategy validation | Filesystem requires both cert AND key paths | **Fatal**: `eyre!` error: "requires both certificate_path and signing_key_path" | N/A | Configure both paths |
-| Store strategy validation | Storage-backed requires both cert AND key keys | **Fatal**: `eyre!` error: "requires both certificate_key and signing_key_key" | N/A | Configure both keys |
+| Store strategy validation | Must configure filesystem XOR storage keys, not both | **Fatal**: `eyre!` error: "store provisioning must configure either filesystem paths or material backend keys, not both" | N/A | Remove one configuration method |
+| Store strategy validation | Filesystem requires both cert AND key paths | **Fatal**: `eyre!` error: "filesystem store provisioning requires both server.cert.store.certificate_path and server.cert.store.signing_key_path" | N/A | Configure both paths |
+| Store strategy validation | Storage-backed requires both cert AND key keys | **Fatal**: `eyre!` error: "storage-backed store provisioning requires both server.cert.store.certificate_key and server.cert.store.signing_key_key" | N/A | Configure both keys |
 | Filesystem certs (non-ACME) | Files must exist and be readable | N/A | **NOT_READY**: "cert store file '{path}' unavailable" or "not readable" | Verify volume mounts, file permissions (should be 0600 for keys) |
 
 <!-- markdownlint-enable MD060 -->
@@ -170,7 +171,7 @@ The following configuration values are stored as `secrecy::SecretString` and are
 
 | Component | Secret Fields |
 |-----------|--------------|
-| **Database** | `database.url` (entire connection string with password) |
+| **Database** | `database.url` (entire connection string with password), `database.password` (split credentials) |
 | **Vault/AppRole** | `vault.secret_id`, `vault.secret_id_path` file contents |
 | **Vault/K8s** | `vault.k8s_token_path` file contents (read at runtime) |
 | **GCP** | `gcp_secret_manager.service_account_key`, key file contents |
