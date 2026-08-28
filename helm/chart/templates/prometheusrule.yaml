@@ -132,7 +132,7 @@ spec:
             sli: cache_hit_ratio
           annotations:
             summary: "Status-list cache hit ratio below 85% for 15m (degradation, not outage)"
-            description: "Current cache hit ratio: {{ $value | humanizePercentage }}"
+            description: 'Current cache hit ratio: {{ `{{ $value | humanizePercentage }}` }}'
             runbook_url: "https://github.com/adorsys/status-list-server/blob/develop/observability/runbooks/cache-hit-ratio.md"
         - alert: ErrorBudgetCritical
           expr: sli:error_budget:success:30d < 0.1
@@ -142,7 +142,7 @@ spec:
             sli: error_budget
           annotations:
             summary: "Error budget is below 10% for the 30d window"
-            description: "Remaining error budget: {{ $value | humanizePercentage }}"
+            description: 'Remaining error budget: {{ `{{ $value | humanizePercentage }}` }}'
             runbook_url: "https://github.com/adorsys/status-list-server/blob/develop/observability/runbooks/error-budget.md"
         - alert: CertRenewalFailures
           expr: sli:cert_renewal_failure_rate:5m >= 0.01

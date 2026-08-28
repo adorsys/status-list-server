@@ -10,7 +10,7 @@ statuslist:
         - "-c"
         - |
           echo "Waiting for postgres..."
-          until nc -z {{ .Release.Name }}-postgres.{{ .Release.Namespace }}.svc.cluster.local {{ include "status-list-server-chart.dbPort" . }}; do
+          until nc -z status-list-server-postgres.default.svc.cluster.local 5432; do
             echo "postgres not ready. Retrying in 2s...";
             sleep 2;
           done
