@@ -113,7 +113,6 @@ jobs:
           echo "release image features: ${features}"
           cargo check --workspace --features "${features}"
 
-
       - name: Verify domain layer purity
         run: |
           if grep -rn -E "(sea_orm|axum|aws_sdk|reqwest|moka|crate::server|crate::outbound)" src/domain/; then
