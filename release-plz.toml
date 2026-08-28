@@ -1,3 +1,5 @@
+# Note: release-plz's [workspace] table defines default configuration settings
+# for release-plz across packages; it is unrelated to Cargo workspaces (this crate has none).
 [workspace]
 changelog_path = "./CHANGELOG.md"
 changelog_config = "cliff.toml"
