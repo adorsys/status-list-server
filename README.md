@@ -182,6 +182,14 @@ All runtime settings can be configured via environment variables prefixed with `
 |                   | `APP_TELEMETRY__OTLP_ENDPOINT`              | `http://localhost:4317`            | OTLP collector gRPC endpoint                                         |
 |                   | `APP_TELEMETRY__ENABLED`                    | `true`                             | Enable OpenTelemetry tracing pipeline                                |
 |                   | `APP_TELEMETRY__SAMPLER_RATIO`              | `1.0`                              | Sampling ratio (`0.0` to `1.0`)                                      |
+| **Rate Limit**    | `APP_RATE_LIMIT__STRICT_BURST_SIZE`         | `10`                               | Burst size for write endpoints (strict tier)                         |
+|                   | `APP_RATE_LIMIT__STRICT_PERIOD_SECS`        | `60`                               | Time window for strict tier (seconds)                                |
+|                   | `APP_RATE_LIMIT__PERMISSIVE_BURST_SIZE`     | `100`                              | Burst size for read endpoints (permissive tier)                      |
+|                   | `APP_RATE_LIMIT__PERMISSIVE_PERIOD_SECS`    | `60`                               | Time window for permissive tier (seconds)                            |
+| **Limits**        | `APP_LIMITS__MAX_BODY_SIZE_BYTES`           | `2097152`                          | Maximum request body size (2 MiB)                                    |
+|                   | `APP_LIMITS__MAX_STATUS_INDEX`              | `100000`                           | Maximum status list index value                                      |
+|                   | `APP_LIMITS__MAX_STATUSES_PER_REQUEST`      | `5000`                             | Maximum statuses per update request                                  |
+|                   | `APP_LIMITS__MAX_SERIALIZED_LIST_SIZE`      | `1048576`                          | Maximum serialized list size (1 MiB)                                 |
 
 A complete sample configuration is available in [.env.template](.env.template).
 
