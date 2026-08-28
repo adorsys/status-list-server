@@ -200,6 +200,13 @@ spec:
             {{- end }}
             {{- end }}
             {{- end }}
+            {{- /* Watcher poll interval for credential rotation detection */}}
+            {{- if and .Values.statuslist.watcher .Values.statuslist.watcher.pollIntervalSecs }}
+            {{- if ne .Values.statuslist.watcher.pollIntervalSecs "" }}
+            - name: APP_WATCHER__POLL_INTERVAL_SECS
+              value: {{ .Values.statuslist.watcher.pollIntervalSecs | quote }}
+            {{- end }}
+            {{- end }}
             - name: APP_DATABASE__PASSWORD
               valueFrom:
                 secretKeyRef:

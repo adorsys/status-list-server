@@ -133,6 +133,11 @@ statuslist:
   # When token key mounts are present, APP_SERVER__CERT__STORE__CERTIFICATE_PATH and
   # APP_SERVER__CERT__STORE__SIGNING_KEY_PATH are injected automatically.
   secretMounts: []
+
+  # Watcher configuration for file-based credential rotation detection.
+  # When pollIntervalSecs is set, APP_WATCHER__POLL_INTERVAL_SECS is automatically injected.
+  watcher:
+    pollIntervalSecs: ""
     # Example: Database credentials mounted as files
     # - name: db-credentials
     #   secretName: postgres-access

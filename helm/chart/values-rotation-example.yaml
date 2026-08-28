@@ -18,7 +18,7 @@ externalSecret:
   metadata:
     name: statuslist-external-secret
   spec:
-    refreshInterval: 5m  # Poll frequently for rotation
+    refreshInterval: 5m # Poll frequently for rotation
     secretStoreRef:
       name: vault-cluster-store
       kind: ClusterSecretStore
@@ -78,6 +78,11 @@ statuslist:
         - key: internal-api-key
           path: internal-api-key
 
+  # File watcher for credential rotation detection
+  # Application polls these paths and reloads credentials when files change
+  watcher:
+    pollIntervalSecs: "60"
+
   env:
     RUST_LOG: "info"
     APP_ENV: "production"
@@ -89,10 +94,6 @@ statuslist:
     APP_DATABASE__PORT: "5432"
     APP_DATABASE__BACKEND: "postgres"
     # Password is read from file (APP_DATABASE__PASSWORD_FILE auto-injected)
-
-    # File watcher for credential rotation detection
-    # Application polls these paths and reloads credentials when files change
-    APP_WATCHER__POLL_INTERVAL_SECS: "60"
 
     # Certificate store configuration
     # Paths are auto-injected when token-signing-keys mount is present:
@@ -122,6 +123,10 @@ statuslist:
       memory: "1Gi"
       cpu: "1000m"
 
+  # High Availability Configuration
+  # Use multiple replicas for zero-downtime deployments
+  replicaCount: 3
+
 # PostgreSQL Configuration
 postgres:
   enabled: true
@@ -136,10 +141,6 @@ postgres:
     enabled: true
     size: 50Gi
     storageClass: fast-ssd
-
-# High Availability Configuration
-# Use multiple replicas for zero-downtime deployments
-  replicaCount: 3
 
 autoscaling:
   enabled: true
@@ -162,8 +163,8 @@ serviceAccount:
   create: true
   automountServiceAccountToken: false
   annotations: {}
-    # For EKS IRSA:
-    # eks.amazonaws.com/role-arn: arn:aws:iam::123456789012:role/statuslist
+  # For EKS IRSA:
+  # eks.amazonaws.com/role-arn: arn:aws:iam::123456789012:role/statuslist
 
 networkPolicy:
   enabled: true
