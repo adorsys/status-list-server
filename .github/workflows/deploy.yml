@@ -570,6 +570,7 @@ jobs:
             --wait \
             --rollback-on-failure \
             --timeout 10m \
+            -f helm/chart/values-production.yaml \
             --set-string "statuslist.image.repository=${IMAGE_BASE}" \
             --set-string "statuslist.image.tag=${DEPLOY_TAG}" \
             --set-string "statuslist.image.digest=${IMAGE_DIGEST}" \

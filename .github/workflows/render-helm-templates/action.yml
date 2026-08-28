@@ -1,0 +1,323 @@
+name: "Render Helm Templates"
+description: "Render all Helm chart variants into /tmp/rendered and run render-time negative tests."
+
+runs:
+  using: "composite"
+  steps:
+    - name: Render Helm templates
+      shell: bash
+      run: |
+        set -euo pipefail
+        mkdir -p /tmp/rendered
+        helm template status-list-server helm/chart -f helm/chart/values.yaml --output-dir /tmp/rendered/default
+        helm template status-list-server helm/chart --set serviceAccount.create=false --output-dir /tmp/rendered/no-sa
+        helm template status-list-server helm/chart --set statuslist.aws.mountCredentials=true --output-dir /tmp/rendered/legacy-creds
+        helm template status-list-server helm/chart \
+          --set secretStore.provider=vault \
+          --set secretStore.vault.server=https://vault.example.com \
+          --output-dir /tmp/rendered/vault
+        helm template status-list-server helm/chart \
+          --set secretStore.provider=gcp \
+          --set secretStore.gcp.projectID=my-project-id \
+          --output-dir /tmp/rendered/gcp
+        # Azure Workload Identity: ESO uses its own ServiceAccount, not the app KSA.
+        helm template status-list-server helm/chart \
+          --set secretStore.provider=azure \
+          --set secretStore.azure.authType=WorkloadIdentity \
+          --set secretStore.azure.serviceAccountRef.name=eso-controller-sa \
+          --set secretStore.azure.tenantId=00000000-0000-0000-0000-000000000000 \
+          --set secretStore.azure.vaultUrl=https://example.vault.azure.net \
+          --output-dir /tmp/rendered/azure
+        helm template status-list-server helm/chart \
+          --set secretStore.provider=raw \
+          --set-string 'secretStore.raw.webhook.severity=high' \
+          --output-dir /tmp/rendered/raw
+        # raw renders the provider body directly under spec.provider (no extra
+        # nested 'provider' key, which would produce an invalid spec.provider.provider.*).
+        if grep -qE '^\s{4}provider:\s*$' /tmp/rendered/raw/status-list-server/templates/secret-store.yaml; then
+          echo "ERROR: raw render must place the provider body directly under spec.provider (found nested provider under provider)"; exit 1
+        fi
+        if ! grep -qE '^\s{4}webhook:' /tmp/rendered/raw/status-list-server/templates/secret-store.yaml; then
+          echo "ERROR: raw render missing webhook provider from secretStore.raw"; exit 1
+        fi
+        # Default (ESO) mode must render the SecretStore + ExternalSecret and no fallback Secret.
+        if [ ! -f /tmp/rendered/default/status-list-server/templates/secret-store.yaml ]; then
+          echo "ERROR: default render must produce a SecretStore"; exit 1
+        fi
+        if [ ! -f /tmp/rendered/default/status-list-server/templates/external-secrets.yaml ]; then
+          echo "ERROR: default render must produce an ExternalSecret"; exit 1
+        fi
+        if [ -f /tmp/rendered/default/status-list-server/templates/secret.yaml ]; then
+          echo "ERROR: default (ESO) render must not emit the fallback Secret"; exit 1
+        fi
+        # serviceAccount.create=false must render no application ServiceAccount.
+        if [ -f /tmp/rendered/no-sa/status-list-server/templates/serviceaccount.yaml ]; then
+          echo "ERROR: serviceAccount.create=false must not render an application ServiceAccount"; exit 1
+        fi
+        # mountCredentials=true renders the static AWS credential env vars and volume.
+        if ! grep -q 'AWS_SHARED_CREDENTIALS_FILE' /tmp/rendered/legacy-creds/status-list-server/templates/deployment.yaml; then
+          echo "ERROR: mountCredentials=true must render AWS_SHARED_CREDENTIALS_FILE"; exit 1
+        fi
+        if ! grep -q 'aws-credentials-volume' /tmp/rendered/legacy-creds/status-list-server/templates/deployment.yaml; then
+          echo "ERROR: mountCredentials=true must render the aws-credentials-volume"; exit 1
+        fi
+        # Full wiring: mountCredentials=true must ALSO render the ExternalSecret that creates
+        # "aws-credentials-secret" (the volume's secret), with credentials + config keys, so a
+        # first release never mounts a Secret nothing creates.
+        if ! grep -q 'name: statuslist-external-secret-aws-credentials' /tmp/rendered/legacy-creds/status-list-server/templates/external-secrets.yaml; then
+          echo "ERROR: mountCredentials=true must render the aws-credentials ExternalSecret"; exit 1
+        fi
+        if ! grep -qE 'name: aws-credentials-secret' /tmp/rendered/legacy-creds/status-list-server/templates/external-secrets.yaml; then
+          echo "ERROR: aws-credentials ExternalSecret must target aws-credentials-secret"; exit 1
+        fi
+        if ! grep -A2 'secretKey: credentials' /tmp/rendered/legacy-creds/status-list-server/templates/external-secrets.yaml | grep -q 'remoteRef'; then
+          echo "ERROR: aws-credentials ExternalSecret missing credentials remoteRef"; exit 1
+        fi
+        if ! grep -A2 'secretKey: config' /tmp/rendered/legacy-creds/status-list-server/templates/external-secrets.yaml | grep -q 'remoteRef'; then
+          echo "ERROR: aws-credentials ExternalSecret missing config remoteRef"; exit 1
+        fi
+        # Each advertised provider renders its own SecretStore provider body.
+        if ! grep -qE '^\s+vault:' /tmp/rendered/vault/status-list-server/templates/secret-store.yaml; then
+          echo "ERROR: vault provider SecretStore missing vault block"; exit 1
+        fi
+        if ! grep -qE '^\s+gcpsm:' /tmp/rendered/gcp/status-list-server/templates/secret-store.yaml; then
+          echo "ERROR: gcp provider SecretStore missing gcpsm block"; exit 1
+        fi
+        if ! grep -qE '^\s+azurekv:' /tmp/rendered/azure/status-list-server/templates/secret-store.yaml; then
+          echo "ERROR: azure provider SecretStore missing azurekv block"; exit 1
+        fi
+        helm template status-list-server helm/chart \
+          --set externalSecret.enabled=false \
+          --set statuslist.fallbackSecret.enabled=true \
+          --set-string statuslist.fallbackSecret.stringData.postgres-password=x \
+          --output-dir /tmp/rendered/fallback
+        # Scaling readiness: opt-in HPA + PDB. In HPA mode the Deployment omits
+        # `replicas`, so use maxUnavailable (not minAvailable) to satisfy
+        # kube-linter's pdb-min-available check (minAvailable must be < replicas).
+        helm template status-list-server helm/chart \
+          --set autoscaling.enabled=true \
+          --set podDisruptionBudget.enabled=true \
+          --set podDisruptionBudget.maxUnavailable=1 \
+          --set podDisruptionBudget.minAvailable=null \
+          --output-dir /tmp/rendered/scaling
+        # Primary Workload Identity path: a non-default application ServiceAccount with a
+        # cloud role binding (EKS IRSA annotation). Assert the SA + annotation are rendered
+        # and the Deployment references the custom SA, not the default.
+        helm template status-list-server helm/chart \
+          --set serviceAccount.name=statuslist-app-sa \
+          --set-string 'serviceAccount.annotations.eks\.amazonaws\.com/role-arn=arn:aws:iam::123456789012:role/statuslist-irsa' \
+          --set externalSecret.enabled=false \
+          --set statuslist.fallbackSecret.enabled=true \
+          --set-string statuslist.fallbackSecret.stringData.postgres-password=x \
+          --output-dir /tmp/rendered/wl-app
+        if ! grep -q 'name: statuslist-app-sa' /tmp/rendered/wl-app/status-list-server/templates/serviceaccount.yaml; then
+          echo "ERROR: workload-identity render missing application ServiceAccount statuslist-app-sa"; exit 1
+        fi
+        if ! grep -q 'eks.amazonaws.com/role-arn: arn:aws:iam::123456789012:role/statuslist-irsa' /tmp/rendered/wl-app/status-list-server/templates/serviceaccount.yaml; then
+          echo "ERROR: workload-identity render missing IRSA role annotation"; exit 1
+        fi
+        if ! grep -q 'serviceAccountName: statuslist-app-sa' /tmp/rendered/wl-app/status-list-server/templates/deployment.yaml; then
+          echo "ERROR: Deployment must reference application ServiceAccount statuslist-app-sa"; exit 1
+        fi
+        # Production path: values-production.yaml (used by deploy.yml) keeps the ESO-mounted
+        # credential default (statuslist.aws.mountCredentials=true) and renders no Workload
+        # Identity IRSA annotation.
+        helm template status-list-server helm/chart -f helm/chart/values-production.yaml \
+          --output-dir /tmp/rendered/wl-prod
+        if grep -q 'eks.amazonaws.com/role-arn:' /tmp/rendered/wl-prod/status-list-server/templates/serviceaccount.yaml; then
+          echo "ERROR: values-production.yaml must not render an IRSA role annotation (ESO-mounted default)"; exit 1
+        fi
+        if ! grep -qE 'AWS_SHARED_CREDENTIALS_FILE|aws-credentials-volume' /tmp/rendered/wl-prod/status-list-server/templates/deployment.yaml; then
+          echo "ERROR: values-production.yaml must mount the ESO-provisioned AWS credentials (mountCredentials=true default)"; exit 1
+        fi
+        # Azure Workload Identity primary path: application pod label + application KSA distinct
+        # from the External Secrets Operator identity.
+        helm template status-list-server helm/chart \
+          --set serviceAccount.name=azure-app-sa \
+          --set 'serviceAccount.annotations.azure\.workload\.identity/client-id=11111111-2222-3333-4444-555555555555' \
+          --set secretStore.provider=azure \
+          --set secretStore.azure.authType=WorkloadIdentity \
+          --set secretStore.azure.serviceAccountRef.name=eso-controller-sa \
+          --set secretStore.azure.tenantId=00000000-0000-0000-0000-000000000000 \
+          --set secretStore.azure.vaultUrl=https://example.vault.azure.net \
+          --set-string 'statuslist.podLabels.azure\.workload\.identity/use=true' \
+          --output-dir /tmp/rendered/wl-azure
+        if ! grep -qE 'azure\.workload\.identity/use:\s*"true"$' /tmp/rendered/wl-azure/status-list-server/templates/deployment.yaml; then
+          echo "ERROR: Azure WI app pod label azure.workload.identity/use=\"true\" (string, not boolean) missing"; exit 1
+        fi
+        if ! grep -q 'azure.workload.identity/client-id: 11111111-2222-3333-4444-555555555555' /tmp/rendered/wl-azure/status-list-server/templates/serviceaccount.yaml; then
+          echo "ERROR: Azure WI app ServiceAccount missing azure.workload.identity/client-id annotation"; exit 1
+        fi
+        if ! grep -q 'serviceAccountName: azure-app-sa' /tmp/rendered/wl-azure/status-list-server/templates/deployment.yaml; then
+          echo "ERROR: Azure WI Deployment must reference application ServiceAccount azure-app-sa"; exit 1
+        fi
+        # ESO identity must be distinct from the application KSA on the Azure WI path.
+        if [ "$(grep -A2 'serviceAccountRef:' /tmp/rendered/wl-azure/status-list-server/templates/secret-store.yaml | grep 'name:' | head -1 | sed -E 's/.*name: ([^ ]+).*/\1/')" = "azure-app-sa" ]; then
+          echo "ERROR: ESO serviceAccountRef must be distinct from the application ServiceAccount"; exit 1
+        fi
+        # Azure ManagedIdentity path: renders identityId + authType, no serviceAccountRef.
+        helm template status-list-server helm/chart \
+          --set secretStore.provider=azure \
+          --set secretStore.azure.authType=ManagedIdentity \
+          --set secretStore.azure.identityId=00000000-0000-0000-0000-000000000000 \
+          --set secretStore.azure.tenantId=00000000-0000-0000-0000-000000000000 \
+          --set secretStore.azure.vaultUrl=https://example.vault.azure.net \
+          --output-dir /tmp/rendered/azure-mi
+        if ! grep -qE '^\s+authType: "ManagedIdentity"' /tmp/rendered/azure-mi/status-list-server/templates/secret-store.yaml; then
+          echo "ERROR: Azure ManagedIdentity render missing authType=ManagedIdentity"; exit 1
+        fi
+        if ! grep -qE '^\s+identityId:' /tmp/rendered/azure-mi/status-list-server/templates/secret-store.yaml; then
+          echo "ERROR: Azure ManagedIdentity render missing identityId field"; exit 1
+        fi
+        if grep -qE 'serviceAccountRef:' /tmp/rendered/azure-mi/status-list-server/templates/secret-store.yaml; then
+          echo "ERROR: Azure ManagedIdentity render must not include serviceAccountRef"; exit 1
+        fi
+        # Azure ServicePrincipal path: renders authType + authSecretRef, no serviceAccountRef.
+        helm template status-list-server helm/chart \
+          --set secretStore.provider=azure \
+          --set secretStore.azure.authType=ServicePrincipal \
+          --set secretStore.azure.tenantId=00000000-0000-0000-0000-000000000000 \
+          --set secretStore.azure.vaultUrl=https://example.vault.azure.net \
+          --set-string 'secretStore.azure.authSecretRef.clientId.name=azure-client-id' \
+          --set-string 'secretStore.azure.authSecretRef.clientId.key=client-id' \
+          --set-string 'secretStore.azure.authSecretRef.clientSecret.name=azure-client-secret' \
+          --set-string 'secretStore.azure.authSecretRef.clientSecret.key=client-secret' \
+          --output-dir /tmp/rendered/azure-sp
+        if ! grep -qE '^\s+authType: "ServicePrincipal"' /tmp/rendered/azure-sp/status-list-server/templates/secret-store.yaml; then
+          echo "ERROR: Azure ServicePrincipal render missing authType=ServicePrincipal"; exit 1
+        fi
+        if ! grep -qE '^\s+authSecretRef:' /tmp/rendered/azure-sp/status-list-server/templates/secret-store.yaml; then
+          echo "ERROR: Azure ServicePrincipal render missing authSecretRef block"; exit 1
+        fi
+        if grep -qE 'serviceAccountRef:' /tmp/rendered/azure-sp/status-list-server/templates/secret-store.yaml; then
+          echo "ERROR: Azure ServicePrincipal render must not include serviceAccountRef"; exit 1
+        fi
+
+        # Negative render tests: invalid provider and empty raw:{} must fail closed.
+        if helm template status-list-server helm/chart --set secretStore.provider=invalid >/dev/null 2>&1; then
+          echo "ERROR: provider=invalid should fail"; exit 1
+        fi
+        if helm template status-list-server helm/chart --set secretStore.provider=raw >/dev/null 2>&1; then
+          echo "ERROR: provider=raw with empty secretStore.raw should fail"; exit 1
+        fi
+        # Fail-closed provider fields: mandatory fields must be provided, not empty defaults.
+        if helm template status-list-server helm/chart --set secretStore.provider=vault >/dev/null 2>&1; then
+          echo "ERROR: provider=vault with empty secretStore.vault.server should fail"; exit 1
+        fi
+        if helm template status-list-server helm/chart --set secretStore.provider=gcp >/dev/null 2>&1; then
+          echo "ERROR: provider=gcp with empty secretStore.gcp.projectID should fail"; exit 1
+        fi
+        if helm template status-list-server helm/chart \
+            --set secretStore.provider=azure \
+            --set secretStore.azure.authType=WorkloadIdentity \
+            --set secretStore.azure.vaultUrl=https://example.vault.azure.net >/dev/null 2>&1; then
+          echo "ERROR: provider=azure WorkloadIdentity without serviceAccountRef.name should fail"; exit 1
+        fi
+        if helm template status-list-server helm/chart \
+            --set secretStore.provider=azure \
+            --set secretStore.azure.tenantId=00000000-0000-0000-0000-000000000000 \
+            --set secretStore.azure.vaultUrl=https://example.vault.azure.net >/dev/null 2>&1; then
+          echo "ERROR: provider=azure without identity configuration should fail"; exit 1
+        fi
+        # authType is an enum per the ESO AzureKVProvider CRD; an invalid value must fail.
+        if helm template status-list-server helm/chart \
+            --set secretStore.provider=azure \
+            --set secretStore.azure.authType=ClientSecret \
+            --set secretStore.azure.tenantId=t \
+            --set secretStore.azure.vaultUrl=https://example.vault.azure.net >/dev/null 2>&1; then
+          echo "ERROR: provider=azure with invalid authType=ClientSecret should fail"; exit 1
+        fi
+        # Contradictory modes: ESO disabled but SecretStore enabled must not render a SecretStore.
+        if helm template status-list-server helm/chart \
+            --set externalSecret.enabled=false \
+            --set secretStore.enabled=true 2>/dev/null | grep "kind: SecretStore" >/dev/null; then
+          echo "ERROR: no-ESO mode must not render a SecretStore CR"; exit 1
+        fi
+        # Inverse: an ExternalSecret must not render without a SecretStore (dangling secretStoreRef).
+        if helm template status-list-server helm/chart \
+            --set externalSecret.enabled=true \
+            --set secretStore.enabled=false >/dev/null 2>&1; then
+          echo "ERROR: externalSecret.enabled with secretStore.enabled=false should fail (dangling secretStoreRef)"; exit 1
+        fi
+        # Fail-closed scaling: HPA must reject minReplicas > maxReplicas.
+        if helm template status-list-server helm/chart \
+            --set autoscaling.enabled=true \
+            --set autoscaling.minReplicas=5 \
+            --set autoscaling.maxReplicas=2 >/dev/null 2>&1; then
+          echo "ERROR: autoscaling.minReplicas > maxReplicas should fail"; exit 1
+        fi
+        # Fail-closed scaling: PDB must reject both minAvailable and maxUnavailable set.
+        if helm template status-list-server helm/chart \
+            --set podDisruptionBudget.enabled=true \
+            --set podDisruptionBudget.minAvailable=1 \
+            --set podDisruptionBudget.maxUnavailable=1 >/dev/null 2>&1; then
+          echo "ERROR: PDB with both minAvailable and maxUnavailable should fail"; exit 1
+        fi
+        # Fail-closed scaling: PDB must reject neither minAvailable nor maxUnavailable set.
+        if helm template status-list-server helm/chart \
+            --set podDisruptionBudget.enabled=true \
+            --set podDisruptionBudget.minAvailable=null \
+            --set podDisruptionBudget.maxUnavailable=null >/dev/null 2>&1; then
+          echo "ERROR: PDB with neither minAvailable nor maxUnavailable should fail"; exit 1
+        fi
+        # An explicit minAvailable: 0 is a valid PDB setting (prevents voluntary disruptions)
+        # and must be preserved as an integer, NOT treated as unset (0 is falsy in Go templates).
+        if ! helm template status-list-server helm/chart \
+            --set podDisruptionBudget.enabled=true \
+            --set podDisruptionBudget.minAvailable=0 \
+            --set podDisruptionBudget.maxUnavailable=null 2>/dev/null \
+          | grep -E '^\s+minAvailable: 0$' >/dev/null; then
+          echo "ERROR: PDB with minAvailable: 0 must render minAvailable: 0 (explicit zero preserved)"; exit 1
+        fi
+        # Conversely an explicit maxUnavailable: 0 must render as maxUnavailable: 0.
+        if ! helm template status-list-server helm/chart \
+            --set podDisruptionBudget.enabled=true \
+            --set podDisruptionBudget.minAvailable=null \
+            --set podDisruptionBudget.maxUnavailable=0 2>/dev/null \
+          | grep -E '^\s+maxUnavailable: 0$' >/dev/null; then
+          echo "ERROR: PDB with maxUnavailable: 0 must render maxUnavailable: 0 (explicit zero preserved)"; exit 1
+        fi
+
+        # Upgrade render test: legacy secretStore.aws.region must be preserved for APP_AWS__REGION.
+        REGION=$(helm template status-list-server helm/chart --set secretStore.aws.region=us-west-2 \
+          | grep -A1 'name: APP_AWS__REGION' | grep 'value:' | sed -E 's/.*value: "?([^"]*)"?.*/\1/' || true)
+        if [ "$REGION" != "us-west-2" ]; then
+          echo "ERROR: APP_AWS__REGION should fall back to legacy secretStore.aws.region, got '$REGION'"; exit 1
+        fi
+        # Upgrade render test: the fallback Secret consumes the same single supported name the
+        # Deployment's POSTGRES_PASSWORD secretKeyRef references (statuslist-secret). Assert the
+        # actual secretKeyRef name, not a loose global grep.
+        PGREF=$(helm template status-list-server helm/chart \
+            --set externalSecret.enabled=false \
+            --set statuslist.fallbackSecret.enabled=true \
+            --set-string statuslist.fallbackSecret.stringData.postgres-password=x 2>/dev/null \
+          | grep -A3 'name: POSTGRES_PASSWORD' | grep 'name:' | tail -1 | sed -E 's/.*name: ([a-zA-Z0-9-]+)$/\1/')
+        if [ "$PGREF" != "statuslist-secret" ]; then
+          echo "ERROR: POSTGRES_PASSWORD secretKeyRef must reference statuslist-secret, got '$PGREF'"; exit 1
+        fi
+        # ESO one-name invariant: every consumer shares the single name statuslist-secret, so a
+        # custom externalSecret.spec.target.name must fail at render time.
+        if helm template status-list-server helm/chart \
+            --set externalSecret.spec.target.name=custom-eso-secret >/dev/null 2>&1; then
+          echo "ERROR: externalSecret.spec.target.name other than statuslist-secret should fail"; exit 1
+        fi
+        # In ESO mode the ExternalSecret target name must equal the app/PostgreSQL secret name.
+        if ! helm template status-list-server helm/chart 2>/dev/null | grep -A1 '^  target:' | grep 'name: statuslist-secret' >/dev/null; then
+          echo "ERROR: ExternalSecret target.name must be statuslist-secret"; exit 1
+        fi
+        # NetworkPolicy is opt-in: the default must NOT render a NetworkPolicy (an open
+        # port-only ingress rule would equal no ingress restriction).
+        if helm template status-list-server helm/chart 2>/dev/null | grep 'kind: NetworkPolicy' >/dev/null; then
+          echo "ERROR: default render must NOT emit a NetworkPolicy (networkPolicy.enabled defaults to false)"; exit 1
+        fi
+        # When enabled, internal egress must be scoped to the target pods, not any pod.
+        if ! helm template status-list-server helm/chart \
+            --set statuslist.networkPolicy.enabled=true 2>/dev/null \
+          | grep -E 'app\.kubernetes\.io/name: postgres' >/dev/null; then
+          echo "ERROR: NetworkPolicy egress must scope PostgreSQL to its pods (app.kubernetes.io/name: postgres)"; exit 1
+        fi
+        if ! helm template status-list-server helm/chart \
+            --set statuslist.networkPolicy.enabled=true 2>/dev/null \
+          | grep -E '^\s+- podSelector:\s*$' >/dev/null; then
+          echo "ERROR: NetworkPolicy egress internal rule must have a to:/podSelector (not any pod)"; exit 1
+        fi
