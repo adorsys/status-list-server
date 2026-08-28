@@ -39,20 +39,16 @@ set keeps cardinality in check.
 | -------------------- | ------------------------------------------------------------------------------------------------------------- | -------------------------------- | ------ | ---------------------------------------------------------------------------- |
 | Request latency      | `http_server_duration_seconds` histogram                                                                      | p95 < **300 ms**                 | 30d    | fast page: 1h > 300ms **and** 6h > 300ms; slow warn: 6h > 300ms              |
 | Error rate           | `sum(rate(http_server_requests_total{status_class="5xx"}[...])) / sum(rate(http_server_requests_total[...]))` | ≥ **99.5%** success (≤ 0.5% 5xx) | 30d    | fast page: ≥14.4x (0.072) over 1h **and** 6h; slow warn: ≥6x (0.030) over 6h |
-| Cache hit ratio      | `status_list_cache_hits_total / (hits_total + misses_total)`                                                  | ≥ **85%**                        | 7d     | warn-only (degradation, not outage)                                          |
+| Cache hit ratio      | `status_list_cache_hits_total / (hits_total + misses_total)`                                                  | ≥ **85%**                        | 5m     | warn-only (degradation, not outage)                                          |
 | DB latency           | `db_query_duration_seconds` histogram                                                                         | p95 < **50 ms**                  | 30d    | fast page: 1h > 50ms **and** 6h > 50ms; slow warn: 6h > 50ms                 |
-| Cert renewal failure | `cert_renewal_failures_total / cert_renewal_attempts_total`                                                   | < **1%**                         | 7d     | warn-only (op risk)                                                          |
+| Cert renewal failure | `cert_renewal_failures_total / cert_renewal_attempts_total`                                                   | < **1%**                         | 30d    | warn-only (op risk; evaluated over 5m and 30d)                               |
 | Token-gen failure    | `token_generation_failures_total / token_generation_attempts_total`                                           | < **0.5%**                       | 30d    | fast page: ≥14.4x (0.072) over 1h **and** 6h; slow warn: ≥6x (0.030) over 6h |
 
 ### Why these windows
-- **30d** for latency/error/DB/token: matches the standard Google SRE "monthly
-  rolling" objective. The **30d window feeds only the remaining-budget gauge**
-  (`sli:error_budget:success:30d`); alerts use the `1h`+`6h` window pair so a
-  single incident's error budget isn't exhausted by background noise.
-- **7d** for cache hit ratio and cert renewal: these are *health* indicators
-  that can turn over fast (a config change flips hit ratio within hours) and are
-  alertable as degradation rather than burned revenue. A shorter window makes the
-  alert responsive to regressions.
+- **30d** for latency/error/DB/token/cert: matches the standard Google SRE "monthly
+  rolling" objective. The **30d window feeds the long-term health metrics and budget gauges**
+  (`sli:error_budget:success:30d`, `sli:token_gen_error_budget:30d`, `sli:cert_renewal_failure_rate:30d`); alerts use fast/slow burn or specific alert windows so a single incident does not consume the whole month at once.
+- **5m** for cache hit ratio: hit ratio is a *health* indicator that can turn over fast (a config change flips hit ratio within hours) and is alertable as degradation rather than burned revenue. A shorter 5m window makes the alert responsive to instant regressions.
 
 ### Why these targets
 - **p95 < 300 ms latency**: the SLO from the artillery `load-test.yml` commits to
@@ -68,9 +64,8 @@ set keeps cardinality in check.
 - **p95 < 50 ms DB latency**: the in-process cache makes DB reads rare, so the
   DB path tolerates a much tighter latency SLO than the HTTP surface. If cache
   misses spike, this is the canary.
-- **< 1% cert renewal failure** (7d): renewal happens on a cron, so rate is low;
-  1% catches repeated ACME/backend failures without paging on a single transient
-  failure.
+- **< 1% cert renewal failure** (30d): renewal happens on a cron, so rate is low;
+  1% catches repeated ACME/backend failures over 30d and short spikes over 5m without paging on a single transient failure.
 - **< 0.5% token-gen failure**: token generation failing means clients cannot
   read a status list. 0.5% err budget over 30d keeps this available without
   paging on an isolated signing-key cache miss.
@@ -111,6 +106,15 @@ latency alert. This is accepted divergence (documented below): the latency alert
 `RequestLatencyFastBurn`/`SlowBurn` and `DbLatencyFastBurn`/`SlowBurn` fire only
 on sustained degradation, on purpose, to avoid paging on a blip.
 
+## Quarterly SLO Review Process
+
+1. Query 30d of `sli:*` recording rule data from Prometheus/Grafana.
+2. Calculate actual performance vs documented targets.
+3. If an SLO performance is >99.9% with zero near-misses, consider tightening targets; if performance is <90% or continuously breached, investigate root causes and consider loosening targets or adjusting architecture.
+4. If breached monthly, document root cause and remediation actions taken.
+5. Update `thresholds.json` and regenerate dashboards using `npm run generate-dashboards`.
+6. Update runbooks with new diagnostic queries, thresholds, and escalation paths.
+
 ## How to tune
 
 1. Collect 30d of production data.
@@ -144,8 +148,4 @@ generate-dashboards`) together.
 
 Beyond the fast/slow burn pairs, `ErrorBudgetCritical` (`alerting.rules.yml`)
 pages when the 30d remaining budget (`sli:error_budget:success:30d`) falls below
-10%, i.e. when `sli:error_rate:30d` approaches 90% of the 0.5% target. See
-`runbooks/error-budget.md`. The 30d failure-rate windows for token generation and
-cert renewal (`sli:token_gen_failure_rate:30d`,
-`sli:cert_renewal_failure_rate:30d`) exist to support the same long-window
-health comparison.
+10%, i.e. when `sli:error_rate:30d` approaches 90% of the 0.5% target. Similarly, `TokenGenErrorBudgetCritical` pages when `sli:token_gen_error_budget:30d` falls below 10%, and `CertRenewalErrorBudgetCritical` alerts when 30d cert renewal failure rate exceeds 1%. See `runbooks/error-budget.md`, `runbooks/token-generation.md`, and `runbooks/cert-renewal.md`.

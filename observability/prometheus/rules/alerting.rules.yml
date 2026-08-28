@@ -139,6 +139,18 @@ groups:
           description: "Remaining error budget: {{ $value | humanizePercentage }}"
           runbook_url: "https://github.com/adorsys/status-list-server/blob/develop/observability/runbooks/error-budget.md"
 
+      - alert: TokenGenErrorBudgetCritical
+        expr: |
+          sli:token_gen_error_budget:30d < 0.1
+        for: 5m
+        labels:
+          severity: page
+          sli: token_gen_error_budget
+        annotations:
+          summary: "Token generation error budget below 10% for the 30d window"
+          description: "Remaining token generation error budget: {{ $value | humanizePercentage }}"
+          runbook_url: "https://github.com/adorsys/status-list-server/blob/develop/observability/runbooks/token-generation.md"
+
       # --- Certificate renewal (warn-only operational risk) ------------------
       - alert: CertRenewalFailures
         expr: |
@@ -150,3 +162,16 @@ groups:
         annotations:
           summary: "Certificate renewal failure rate at or above 1% for 15m"
           runbook_url: "https://github.com/adorsys/status-list-server/blob/develop/observability/runbooks/cert-renewal.md"
+
+      - alert: CertRenewalErrorBudgetCritical
+        expr: |
+          sli:cert_renewal_failure_rate:30d >= 0.01
+        for: 5m
+        labels:
+          severity: page
+          sli: cert_renewal
+        annotations:
+          summary: "Certificate renewal failure rate exceeded 1% over 30d"
+          description: "Current 30d cert renewal failure rate: {{ $value | humanizePercentage }}"
+          runbook_url: "https://github.com/adorsys/status-list-server/blob/develop/observability/runbooks/cert-renewal.md"
+

@@ -37,8 +37,9 @@ function timeseries(title, expr, legend, unit, warnAt, x, y, w = 12, h = 8) {
 
 const dashboard = {
   title: "Status List SLO",
-  uid: "status-list-slo",
+  uid: process.env.GRAFANA_DASHBOARD_UID || "status-list-slo",
   version: 1,
+
   schemaVersion: 39,
   tags: ["status-list", "slo"],
   timezone: "utc",

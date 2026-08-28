@@ -228,7 +228,18 @@ prometheusRule:
   # Additional labels required by your Prometheus Operator (e.g. release: kube-prometheus-stack)
   labels: {}
 
+# Configurable SLO target thresholds for PrometheusRule alerting rules
+slo:
+  errorRateTarget: 0.005
+  fastBurnMultiplier: 14.4
+  slowBurnMultiplier: 6.0
+  requestLatencyP95: 0.3
+  dbLatencyP95: 0.05
+  cacheHitRatioMin: 0.85
+  certRenewalFailureMax: 0.01
+
 postgres:
+
   enabled: true
   resources:
     requests:

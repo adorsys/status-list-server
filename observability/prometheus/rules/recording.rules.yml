@@ -113,3 +113,8 @@ groups:
       - record: sli:error_budget:success:30d
         expr: |
           clamp_max(clamp_min(1 - sli:error_rate:30d / 0.005, 0), 1)
+
+      - record: sli:token_gen_error_budget:30d
+        expr: |
+          clamp_max(clamp_min(1 - sli:token_gen_failure_rate:30d / 0.005, 0), 1)
+

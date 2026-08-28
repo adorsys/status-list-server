@@ -19,6 +19,14 @@ route:
   repeat_interval: 4h
   receiver: "slack-notifications"
   routes:
+    # SLI-based routing for specialized on-call rotations
+    - match_re:
+        sli: (error_rate|request_latency)
+      receiver: "platform-oncall"
+    - match_re:
+        sli: (cert_renewal|token_generation)
+      receiver: "security-oncall"
+
     # High-priority pages (multi-window fast burn, error budget critical)
     - match:
         severity: page
@@ -30,6 +38,7 @@ route:
         severity: warn
       receiver: "slack-notifications"
       continue: false
+
 
 inhibit_rules:
   # Inhibit warn alerts if a page alert is already firing for the same SLI
