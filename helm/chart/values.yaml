@@ -239,7 +239,6 @@ slo:
   certRenewalFailureMax: 0.01
 
 postgres:
-
   enabled: true
   resources:
     requests:
