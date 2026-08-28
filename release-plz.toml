@@ -17,6 +17,11 @@ name = "status-list-server"
 # publish is disabled because this crate is distributed via Docker images and
 # GitHub releases, not published to crates.io.
 publish = false
+
+# git_only = true instructs release-plz to look for existing git tags to determine the
+# current version rather than checking the Cargo registry (making it load-bearing for
+# version determination). While git_only also skips registry publishing, pairing it
+# with publish = false is intentional to remain explicit and prevent re-coupling to crates.io.
 git_only = true
 
 git_release_body = """
