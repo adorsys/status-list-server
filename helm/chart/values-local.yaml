@@ -10,11 +10,16 @@ statuslist:
         - "-c"
         - |
           echo "Waiting for postgres..."
-          until nc -z {{ .Release.Name }}-postgres.{{ .Release.Namespace }}.svc.cluster.local 5432; do
+          until nc -z {{ .Release.Name }}-postgres.{{ .Release.Namespace }}.svc.cluster.local {{ include "status-list-server-chart.dbPort" . }}; do
             echo "postgres not ready. Retrying in 2s...";
             sleep 2;
           done
           echo "Postgres is up."
+
+  aws:
+    # Local has no External Secrets Operator and no cloud role, so do not mount the
+    # ESO-provisioned aws-credentials-secret (the chart default is mountCredentials=true).
+    mountCredentials: false
 
   image:
     pullPolicy: IfNotPresent
