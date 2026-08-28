@@ -456,7 +456,7 @@ jobs:
           exit "$status"
 
   promote-tags:
-    name: Promote Scanned Digest to Release Tags (${{ matrix.variant.suffix }})
+    name: Promote Scanned Digest to Release Tags
     runs-on: ubuntu-latest
     needs:
       - build-and-push
