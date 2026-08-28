@@ -62,6 +62,9 @@ statuslist:
     APP_SERVER__CERT__EKU: "1,3,6,1,5,5,7,3,30"
     APP_SERVER__CERT__RENEWAL_CRON_SCHEDULE: "0 0 0 * * *"
     # Parsed certificate chain cache TTL in seconds. "0" means no expiry; non-provisioning replicas rely on this TTL for renewed chains.
+    # File watcher poll interval in seconds for credential rotation detection.
+    # Set to enable automatic reloading of credentials from mounted secret files.
+    # APP_WATCHER__POLL_INTERVAL_SECS: "60"
     # DNS provider for ACME DNS-01 challenges: route53 | cloudflare | gcloud | azure | acmedns
     # (pebble also exists but is a development-only fake, not for deployments)
     # See docs/dns-providers.md for the settings each provider needs.
@@ -122,6 +125,30 @@ statuslist:
     enabled: false
     stringData:
       postgres-password: ""
+
+  # File-based secret mounts for production credential/key rotation.
+  # Mounts Kubernetes Secrets as files into the container at specified paths.
+  # This enables zero-downtime rotation and is more secure than env vars for sensitive data.
+  # When database secret mount is present, APP_DATABASE__PASSWORD_FILE is injected automatically.
+  # When token key mounts are present, APP_SERVER__CERT__STORE__CERTIFICATE_PATH and
+  # APP_SERVER__CERT__STORE__SIGNING_KEY_PATH are injected automatically.
+  secretMounts: []
+    # Example: Database credentials mounted as files
+    # - name: db-credentials
+    #   secretName: postgres-access
+    #   mountPath: /etc/secrets/database
+    #   items:
+    #     - key: password
+    #       path: password
+    # Example: Token signing keys for certificate rotation
+    # - name: token-signing-keys
+    #   secretName: statuslist-token-keys
+    #   mountPath: /etc/secrets/token-keys
+    #   items:
+    #     - key: statuslist.crt
+    #       path: statuslist.crt
+    #     - key: statuslist.key
+    #       path: statuslist.key
   livenessProbe:
     httpGet:
       path: /health/live

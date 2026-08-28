@@ -22,6 +22,9 @@ spec:
         prometheus.io/scrape: "true"
         prometheus.io/port: {{ .Values.statuslist.service.targetPort | quote }}
         prometheus.io/path: "/metrics"
+        {{- if .Values.externalSecret.enabled }}
+        checksum/secret: {{ include (print $.Template.BasePath "/external-secrets.yaml") . | sha256sum }}
+        {{- end }}
         {{- with .Values.podAnnotations }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
@@ -174,6 +177,29 @@ spec:
             - name: AWS_CONFIG_FILE
               value: /home/nobody/.aws/config
             {{- end }}
+            {{- /* File-based secret mounts: database credentials */}}
+            {{- range .Values.statuslist.secretMounts }}
+            {{- if eq .name "db-credentials" }}
+            - name: APP_DATABASE__PASSWORD_FILE
+              value: {{ .mountPath }}/{{ (index .items 0).path }}
+            {{- end }}
+            {{- end }}
+            {{- /* File-based secret mounts: token signing keys */}}
+            {{- range .Values.statuslist.secretMounts }}
+            {{- if eq .name "token-signing-keys" }}
+            {{- $mountPath := .mountPath }}
+            {{- range .items }}
+            {{- if eq .key "statuslist.crt" }}
+            - name: APP_SERVER__CERT__STORE__CERTIFICATE_PATH
+              value: {{ $mountPath }}/{{ .path }}
+            {{- end }}
+            {{- if eq .key "statuslist.key" }}
+            - name: APP_SERVER__CERT__STORE__SIGNING_KEY_PATH
+              value: {{ $mountPath }}/{{ .path }}
+            {{- end }}
+            {{- end }}
+            {{- end }}
+            {{- end }}
             - name: APP_DATABASE__PASSWORD
               valueFrom:
                 secretKeyRef:
@@ -187,6 +213,11 @@ spec:
               mountPath: /home/nobody/.aws
               readOnly: true
           {{- end }}
+          {{- range .Values.statuslist.secretMounts }}
+            - name: {{ .name }}
+              mountPath: {{ .mountPath }}
+              readOnly: true
+          {{- end }}
       volumes:
         - name: tmp
           emptyDir: {}
@@ -194,5 +225,14 @@ spec:
         - name: aws-credentials-volume
           secret:
             secretName: aws-credentials-secret
+      {{- end }}
+      {{- range .Values.statuslist.secretMounts }}
+        - name: {{ .name }}
+          secret:
+            secretName: {{ .secretName }}
+            {{- with .items }}
+            items:
+              {{- toYaml . | nindent 14 }}
+            {{- end }}
       {{- end }}
 {{- end }}
