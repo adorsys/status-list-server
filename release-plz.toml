@@ -13,6 +13,9 @@ semver_check = false
 
 [[package]]
 name = "status-list-server"
+
+# publish is disabled because this crate is distributed via Docker images and
+# GitHub releases, not published to crates.io.
 publish = false
 git_only = true
 
