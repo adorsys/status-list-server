@@ -1,14 +1,21 @@
 # Runbook: Certificate Renewal
 
-Alert:
+Alerts:
 
-- `CertRenewalFailures` (severity=warn)
+- `CertRenewalFailures` (severity=warn) — fires when the renewal failure rate is
+  at/above 1% over the last 7 days.
+- `CertRenewalErrorBudgetCritical` (severity=page) — fires when the renewal
+  failure rate is at/above 50% over the 30-day window (the renewal loop is
+  broken and the certificate will expire).
 
 ## What fired
 
-The certificate-renewal failure rate reached 1% over 15m. Renewal runs on a
-cron; this is operational risk (a certificate about to expire), not an outage —
-so it is warn-only.
+Wallet renewals run on a low-frequency cycle (every few days, governed by the
+renewal strategy), not a continuous stream, so short `rate` windows are
+meaningless. `CertRenewalFailures` therefore uses a 7-day window that is
+guaranteed to observe a full renewal cycle. `CertRenewalErrorBudgetCritical`
+pages only when >=50% of renewals over 30 days have failed — a single transient
+failure (e.g. 1 of ~30 renewals) raises the warn alert but does not page on-call.
 
 ## Ranked likely causes
 
@@ -24,8 +31,8 @@ so it is warn-only.
 ## Diagnostics
 
 ```promql
-sum(rate(cert_renewal_failures_total{otel_scope_name="status-list-server"}[15m]))
-sum(rate(cert_renewal_attempts_total{otel_scope_name="status-list-server"}[15m]))
+sum(rate(cert_renewal_failures_total{otel_scope_name="status-list-server"}[7d]))
+sum(rate(cert_renewal_attempts_total{otel_scope_name="status-list-server"}[7d]))
 ```
 
 ```bash

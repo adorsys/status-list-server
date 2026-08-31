@@ -18,6 +18,7 @@ groups:
         for: 5m
         labels:
           severity: page
+          service: status-list-server
           sli: request_latency
         annotations:
           summary: "Request latency P95 sustainably above 300ms (>300ms in both 1h and 6h)"
@@ -29,6 +30,7 @@ groups:
         for: 30m
         labels:
           severity: warn
+          service: status-list-server
           sli: request_latency
         annotations:
           summary: "Request latency P95 sustained above 300ms for 6h"
@@ -43,6 +45,7 @@ groups:
         for: 5m
         labels:
           severity: page
+          service: status-list-server
           sli: error_rate
         annotations:
           summary: "5xx error rate burning the error budget fast (>=14.4x over 0.5% budget in both 1h and 6h)"
@@ -54,6 +57,7 @@ groups:
         for: 30m
         labels:
           severity: warn
+          service: status-list-server
           sli: error_rate
         annotations:
           summary: "5xx error rate burning the error budget slowly (>=6x over 0.5% budget for 6h)"
@@ -68,6 +72,7 @@ groups:
         for: 5m
         labels:
           severity: page
+          service: status-list-server
           sli: db_latency
         annotations:
           summary: "DB query latency P95 sustainably above 50ms (>50ms in both 1h and 6h)"
@@ -79,6 +84,7 @@ groups:
         for: 30m
         labels:
           severity: warn
+          service: status-list-server
           sli: db_latency
         annotations:
           summary: "DB query latency P95 sustained above 50ms for 6h"
@@ -93,6 +99,7 @@ groups:
         for: 5m
         labels:
           severity: page
+          service: status-list-server
           sli: token_generation
         annotations:
           summary: "Token-generation failures burning the error budget fast (>=14.4x over 0.5% budget in both 1h and 6h)"
@@ -104,6 +111,7 @@ groups:
         for: 30m
         labels:
           severity: warn
+          service: status-list-server
           sli: token_generation
         annotations:
           summary: "Token-generation failure rate burning the error budget slowly (>=6x over 0.5% budget for 6h)"
@@ -116,6 +124,7 @@ groups:
         for: 15m
         labels:
           severity: warn
+          service: status-list-server
           sli: cache_hit_ratio
         annotations:
           summary: "Status-list cache hit ratio below 85% for 15m (degradation, not outage)"
@@ -133,6 +142,7 @@ groups:
         for: 5m
         labels:
           severity: page
+          service: status-list-server
           sli: error_budget
         annotations:
           summary: "Error budget is below 10% for the 30d window"
@@ -145,6 +155,7 @@ groups:
         for: 5m
         labels:
           severity: page
+          service: status-list-server
           sli: token_gen_error_budget
         annotations:
           summary: "Token generation error budget below 10% for the 30d window"
@@ -152,26 +163,36 @@ groups:
           runbook_url: "https://github.com/adorsys/status-list-server/blob/develop/observability/runbooks/token-generation.md"
 
       # --- Certificate renewal (warn-only operational risk) ------------------
+      # NOTE: certificate renewal is a discrete, low-frequency event (a renewal
+      # cycle every few days, not a continuous stream), so a 5m `rate` is
+      # meaningless here. The 7d window guarantees at least one renewal cycle is
+      # observed, making this rule actually fireable while staying warn-only.
       - alert: CertRenewalFailures
         expr: |
-          sli:cert_renewal_failure_rate:5m >= 0.01
-        for: 15m
+          sli:cert_renewal_failure_rate:7d >= 0.01
+        for: 5m
         labels:
           severity: warn
+          service: status-list-server
           sli: cert_renewal
         annotations:
-          summary: "Certificate renewal failure rate at or above 1% for 15m"
+          summary: "Certificate renewal failure rate at or above 1% over the last 7d"
           runbook_url: "https://github.com/adorsys/status-list-server/blob/develop/observability/runbooks/cert-renewal.md"
 
+      # Page (critical) only when the renewal loop is genuinely broken: >=50% of
+      # renewals failed over the 30d window means the certificate is not being
+      # re-signed and will expire. A single transient failure (e.g. 1 of ~30
+      # renewals) stays warn-only and does not page on-call.
       - alert: CertRenewalErrorBudgetCritical
         expr: |
-          sli:cert_renewal_failure_rate:30d >= 0.01
+          sli:cert_renewal_failure_rate:30d >= 0.5
         for: 5m
         labels:
           severity: page
+          service: status-list-server
           sli: cert_renewal
         annotations:
-          summary: "Certificate renewal failure rate exceeded 1% over 30d"
+          summary: "Certificate renewal failure rate exceeded 50% over 30d"
           description: "Current 30d cert renewal failure rate: {{ $value | humanizePercentage }}"
           runbook_url: "https://github.com/adorsys/status-list-server/blob/develop/observability/runbooks/cert-renewal.md"
 

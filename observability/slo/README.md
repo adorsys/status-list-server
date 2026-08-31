@@ -41,7 +41,7 @@ set keeps cardinality in check.
 | Error rate           | `sum(rate(http_server_requests_total{status_class="5xx"}[...])) / sum(rate(http_server_requests_total[...]))` | ≥ **99.5%** success (≤ 0.5% 5xx) | 30d    | fast page: ≥14.4x (0.072) over 1h **and** 6h; slow warn: ≥6x (0.030) over 6h |
 | Cache hit ratio      | `status_list_cache_hits_total / (hits_total + misses_total)`                                                  | ≥ **85%**                        | 5m     | warn-only (degradation, not outage)                                          |
 | DB latency           | `db_query_duration_seconds` histogram                                                                         | p95 < **50 ms**                  | 30d    | fast page: 1h > 50ms **and** 6h > 50ms; slow warn: 6h > 50ms                 |
-| Cert renewal failure | `cert_renewal_failures_total / cert_renewal_attempts_total`                                                   | < **1%**                         | 30d    | warn-only (op risk; evaluated over 5m and 30d)                               |
+| Cert renewal failure | `cert_renewal_failures_total / cert_renewal_attempts_total`                                                   | < **1%**                         | 30d    | warn: 7d ≥1% (op risk); page: 30d ≥50% (renewal loop broken, cert will expire) |
 | Token-gen failure    | `token_generation_failures_total / token_generation_attempts_total`                                           | < **0.5%**                       | 30d    | fast page: ≥14.4x (0.072) over 1h **and** 6h; slow warn: ≥6x (0.030) over 6h |
 
 ### Why these windows

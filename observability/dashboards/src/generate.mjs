@@ -15,7 +15,10 @@ const sloThresholds = JSON.parse(
 
 const thresholds = (steps, unit) => ({ unit, thresholds: { mode: "absolute", steps } });
 
-// A one-line timeseries panel target (unit + a single threshold at `warnAt`).
+// A one-line timeseries panel target. `warnAt` is the value at which the panel
+// turns red; values below stay green. Use this for "higher = worse" metrics
+// (latency, error/failure rates). For "higher = better" metrics use
+// `timeseriesInverted`, which turns red when the value drops `below`.
 function timeseries(title, expr, legend, unit, warnAt, x, y, w = 12, h = 8) {
   return {
     title,
@@ -27,6 +30,27 @@ function timeseries(title, expr, legend, unit, warnAt, x, y, w = 12, h = 8) {
         [
           { color: "green", value: null },
           { color: "red", value: warnAt },
+        ],
+        unit
+      ),
+    },
+    targets: [{ expr, legendFormat: legend, refId: "A" }],
+  };
+}
+
+// "Higher = better" timeseries: green while the value is at/above `minOk`,
+// red when it drops below.
+function timeseriesInverted(title, expr, legend, unit, minOk, x, y, w = 12, h = 8) {
+  return {
+    title,
+    type: "timeseries",
+    datasource: { type: "prometheus", uid: "prometheus" },
+    gridPos: { h, w, x, y },
+    fieldConfig: {
+      defaults: thresholds(
+        [
+          { color: "red", value: null },
+          { color: "green", value: minOk },
         ],
         unit
       ),
@@ -56,8 +80,8 @@ const dashboard = {
       fieldConfig: {
         defaults: thresholds(
           [
-            { color: "green", value: null },
-            { color: "red", value: 0 },
+            { color: "red", value: null },
+            { color: "green", value: 0.1 },
           ],
           "percentunit"
         ),
@@ -72,15 +96,15 @@ const dashboard = {
       fieldConfig: {
         defaults: thresholds(
           [
-            { color: "green", value: null },
-            { color: "red", value: 0 },
+            { color: "red", value: null },
+            { color: "green", value: 0.1 },
           ],
           "percentunit"
         ),
       },
       targets: [{ expr: "sli:token_gen_error_budget:30d", refId: "A" }],
     },
-    timeseries("Cache hit ratio", "sli:cache_hit_ratio:5m", "hit ratio", "percentunit", sloThresholds.cache_hit_ratio_min, 0, 12),
+    timeseriesInverted("Cache hit ratio", "sli:cache_hit_ratio:5m", "hit ratio", "percentunit", sloThresholds.cache_hit_ratio_min, 0, 12),
     timeseries("DB query latency P95", "sli:db_query_latency:p95:5m", "p95", "s", sloThresholds.db_query_latency_p95_seconds, 12, 12),
     timeseries("Cert renewal failure rate", "sli:cert_renewal_failure_rate:5m", "failure rate", "percentunit", sloThresholds.cert_renewal_failure_rate_max, 0, 20),
     timeseries("Token generation failure rate", "sli:token_gen_failure_rate:5m", "failure rate", "percentunit", sloThresholds.token_gen_failure_rate_max, 12, 20),

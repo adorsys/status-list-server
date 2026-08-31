@@ -5,7 +5,10 @@
 #   - severity=warn -> Slack / Microsoft Teams (degradations and non-page alerts)
 #
 # Credentials and endpoints use <PLACEHOLDER> notation. Operators must replace
-# these with real environment variables or secret store references.
+# these with real environment variables or secret store references BEFORE this
+# file ships to a production Alertmanager. The URLs below are valid-shaped
+# placeholders so the file passes `amtool check-config` out of the box; a real
+# Slack webhook URL will differ but must still start with https://.
 
 global:
   resolve_timeout: 5m
@@ -13,21 +16,15 @@ global:
   pagerduty_url: "https://events.pagerduty.com/v2/enqueue"
 
 route:
-  group_by: ["alertname", "cluster", "service", "namespace"]
+  group_by: ["alertname", "service"]
   group_wait: 30s
   group_interval: 5m
   repeat_interval: 4h
   receiver: "slack-notifications"
   routes:
-    # SLI-based routing for specialized on-call rotations
-    - match_re:
-        sli: (error_rate|request_latency)
-      receiver: "platform-oncall"
-    - match_re:
-        sli: (cert_renewal|token_generation)
-      receiver: "security-oncall"
-
-    # High-priority pages (multi-window fast burn, error budget critical)
+    # High-priority pages (multi-window fast burn, error budget critical).
+    # Kept before the warn route (and `continue: false`) so every severity=page
+    # alert reaches PagerDuty and is never swallowed by a lower-priority route.
     - match:
         severity: page
       receiver: "pagerduty-high-priority"
@@ -45,7 +42,7 @@ inhibit_rules:
       severity: page
     target_match:
       severity: warn
-    equal: ["sli", "namespace"]
+    equal: ["sli", "service"]
 
 receivers:
   - name: "pagerduty-high-priority"
@@ -59,7 +56,7 @@ receivers:
 
   - name: "slack-notifications"
     slack_configs:
-      - api_url: "<SLACK_WEBHOOK_URL>"
+      - api_url: "https://hooks.slack.com/services/REPLACE_ME/REPLACE_ME"
         channel: "#status-list-alerts"
         send_resolved: true
         title: '[{{ .Status | toUpper }}] {{ .CommonLabels.alertname }}'

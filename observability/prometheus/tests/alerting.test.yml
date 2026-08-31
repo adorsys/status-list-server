@@ -28,6 +28,7 @@ tests:
         alertname: ErrorRateFastBurn
         exp_alerts:
           - exp_labels:
+              service: "status-list-server"
               severity: "page"
               sli: "error_rate"
             exp_annotations:
@@ -37,6 +38,7 @@ tests:
         alertname: ErrorRateSlowBurn
         exp_alerts:
           - exp_labels:
+              service: "status-list-server"
               severity: "warn"
               sli: "error_rate"
             exp_annotations:
@@ -123,6 +125,7 @@ tests:
         alertname: RequestLatencyFastBurn
         exp_alerts:
           - exp_labels:
+              service: "status-list-server"
               severity: "page"
               sli: "request_latency"
             exp_annotations:
@@ -132,6 +135,7 @@ tests:
         alertname: RequestLatencySlowBurn
         exp_alerts:
           - exp_labels:
+              service: "status-list-server"
               severity: "warn"
               sli: "request_latency"
             exp_annotations:
@@ -141,6 +145,7 @@ tests:
         alertname: DbLatencyFastBurn
         exp_alerts:
           - exp_labels:
+              service: "status-list-server"
               severity: "page"
               sli: "db_latency"
             exp_annotations:
@@ -150,6 +155,7 @@ tests:
         alertname: DbLatencySlowBurn
         exp_alerts:
           - exp_labels:
+              service: "status-list-server"
               severity: "warn"
               sli: "db_latency"
             exp_annotations:
@@ -159,6 +165,7 @@ tests:
         alertname: TokenGenerationFastBurn
         exp_alerts:
           - exp_labels:
+              service: "status-list-server"
               severity: "page"
               sli: "token_generation"
             exp_annotations:
@@ -168,6 +175,7 @@ tests:
         alertname: TokenGenerationSlowBurn
         exp_alerts:
           - exp_labels:
+              service: "status-list-server"
               severity: "warn"
               sli: "token_generation"
             exp_annotations:
@@ -177,6 +185,7 @@ tests:
         alertname: CacheHitRatioLow
         exp_alerts:
           - exp_labels:
+              service: "status-list-server"
               severity: "warn"
               sli: "cache_hit_ratio"
             exp_annotations:
@@ -187,21 +196,18 @@ tests:
         alertname: CertRenewalFailures
         exp_alerts:
           - exp_labels:
+              service: "status-list-server"
               severity: "warn"
               sli: "cert_renewal"
             exp_annotations:
-              summary: "Certificate renewal failure rate at or above 1% for 15m"
+              summary: "Certificate renewal failure rate at or above 1% over the last 7d"
               runbook_url: "https://github.com/adorsys/status-list-server/blob/develop/observability/runbooks/cert-renewal.md"
+      # 2% is below the 50% page threshold: the 30d "error budget" critical
+      # must NOT fire on a single-transient-failure signature (see dedicated
+      # test below for the >=50% page case).
       - eval_time: 400m
         alertname: CertRenewalErrorBudgetCritical
-        exp_alerts:
-          - exp_labels:
-              severity: "page"
-              sli: "cert_renewal"
-            exp_annotations:
-              summary: "Certificate renewal failure rate exceeded 1% over 30d"
-              description: "Current 30d cert renewal failure rate: 2%"
-              runbook_url: "https://github.com/adorsys/status-list-server/blob/develop/observability/runbooks/cert-renewal.md"
+        exp_alerts: []
 
   # Edge case: no input series at all. Every recording rule evaluates to NaN /
   # no series, and every alert (including the mult-window and ErrorBudgetCritical
@@ -265,6 +271,7 @@ tests:
         alertname: ErrorBudgetCritical
         exp_alerts:
           - exp_labels:
+              service: "status-list-server"
               severity: "page"
               sli: "error_budget"
             exp_annotations:
@@ -286,10 +293,35 @@ tests:
         alertname: TokenGenErrorBudgetCritical
         exp_alerts:
           - exp_labels:
+              service: "status-list-server"
               severity: "page"
               sli: "token_gen_error_budget"
             exp_annotations:
               summary: "Token generation error budget below 10% for the 30d window"
               description: "Remaining token generation error budget: 0%"
               runbook_url: "https://github.com/adorsys/status-list-server/blob/develop/observability/runbooks/token-generation.md"
+
+  # CertRenewalErrorBudgetCritical page fires only when the renewal loop is
+  # genuinely broken (>=50% of renewals failed over 30d). A 6h interval spans
+  # the full 30d window; 50% failures => rate = 0.5 >= 0.5 pages.
+  - interval: 6h
+    input_series:
+      - series: >-
+          cert_renewal_failures_total{otel_scope_name="status-list-server"}
+        values: '0+50x120'
+      - series: >-
+          cert_renewal_attempts_total{otel_scope_name="status-list-server"}
+        values: '0+100x120'
+    alert_rule_test:
+      - eval_time: 30d
+        alertname: CertRenewalErrorBudgetCritical
+        exp_alerts:
+          - exp_labels:
+              service: "status-list-server"
+              severity: "page"
+              sli: "cert_renewal"
+            exp_annotations:
+              summary: "Certificate renewal failure rate exceeded 50% over 30d"
+              description: "Current 30d cert renewal failure rate: 50%"
+              runbook_url: "https://github.com/adorsys/status-list-server/blob/develop/observability/runbooks/cert-renewal.md"
 
