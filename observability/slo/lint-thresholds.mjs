@@ -11,12 +11,54 @@ const thresholds = JSON.parse(
 const alertingRules = readFileSync(join(here, "../prometheus/rules/alerting.rules.yml"), "utf8");
 const recordingRules = readFileSync(join(here, "../prometheus/rules/recording.rules.yml"), "utf8");
 const readme = readFileSync(join(here, "README.md"), "utf8");
+const helmValues = readFileSync(join(here, "../../helm/chart/values.yaml"), "utf8");
 
 let errors = [];
 
 function checkMatch(content, filename, pattern, description) {
   if (!pattern.test(content)) {
     errors.push(`[${filename}] Expected ${description} matching ${pattern}`);
+  }
+}
+
+// Parse the scalar `slo:` block in helm/chart/values.yaml into { key: number }.
+// The block is a flat, 2-space-indented set of `key: <number>` lines, so this
+// avoids pulling a YAML parser into the lint (the CI step has no npm deps).
+function parseHelmSlo() {
+  const match = helmValues.match(/^\s*slo:\s*\n([\s\S]*?)(?=\n\S|\n\z)/m);
+  if (!match) return {};
+  const out = {};
+  for (const line of match[1].split("\n")) {
+    const m = line.match(/^\s{2}([A-Za-z_][A-Za-z0-9_]*):\s*([0-9]*\.?[0-9]+)\s*$/);
+    if (m) out[m[1]] = parseFloat(m[2]);
+  }
+  return out;
+}
+
+const helmSlo = parseHelmSlo();
+
+// The Helm chart's configurable SLO targets are a second consumer of the same
+// source of truth (thresholds.json). Assert the values.yaml `slo.*` defaults
+// stay in lockstep so a Helm deployment cannot diverge from the standalone
+// Prometheus always-on stack.
+const helmSloMap = {
+  errorRateTarget: "error_rate_target_ratio",
+  fastBurnMultiplier: "fast_burn_multiplier",
+  slowBurnMultiplier: "slow_burn_multiplier",
+  requestLatencyP95: "request_latency_p95_seconds",
+  dbLatencyP95: "db_query_latency_p95_seconds",
+  cacheHitRatioMin: "cache_hit_ratio_min",
+  certRenewalFailureMax: "cert_renewal_failure_rate_max",
+  errorBudgetCriticalThreshold: "error_budget_critical_threshold",
+  certRenewalErrorBudgetCriticalThreshold: "cert_renewal_error_budget_critical_threshold",
+};
+for (const [helmKey, thresholdsKey] of Object.entries(helmSloMap)) {
+  const expected = thresholds[thresholdsKey];
+  const actual = helmSlo[helmKey];
+  if (actual === undefined) {
+    errors.push(`[helm/chart/values.yaml] Missing slo.${helmKey} for thresholds.json ${thresholdsKey}`);
+  } else if (Math.abs(actual - expected) > 1e-9) {
+    errors.push(`[helm/chart/values.yaml] slo.${helmKey} = ${actual} but thresholds.json ${thresholdsKey} = ${expected}`);
   }
 }
 
@@ -49,6 +91,28 @@ checkMatch(recordingRules, "recording.rules.yml", tokenErrTargetRegex, `token ge
 checkMatch(alertingRules, "alerting.rules.yml", /sli:token_gen_failure_rate:1h >= 0\.072/, `token gen fast burn ${thresholds.fast_burn_threshold}`);
 checkMatch(alertingRules, "alerting.rules.yml", /sli:token_gen_failure_rate:6h >= 0\.030/, `token gen slow burn ${thresholds.slow_burn_threshold}`);
 checkMatch(readme, "slo/README.md", /0\.5%/, "documented 0.5% token gen failure target");
+
+// 7. Budget-critical gates (0.1 remaining-error-budget, 0.5 cert renewal)
+const errBudgetCritThreshold = thresholds.error_budget_critical_threshold;
+const certCritThreshold = thresholds.cert_renewal_error_budget_critical_threshold;
+checkMatch(
+  alertingRules,
+  "alerting.rules.yml",
+  new RegExp(`sli:error_budget:success:30d < ${errBudgetCritThreshold}`),
+  `error budget critical gate < ${errBudgetCritThreshold}`
+);
+checkMatch(
+  alertingRules,
+  "alerting.rules.yml",
+  new RegExp(`sli:token_gen_error_budget:30d < ${errBudgetCritThreshold}`),
+  `token gen error budget critical gate < ${errBudgetCritThreshold}`
+);
+checkMatch(
+  alertingRules,
+  "alerting.rules.yml",
+  new RegExp(`sli:cert_renewal_failure_rate:30d >= ${certCritThreshold}`),
+  `cert renewal error budget critical gate >= ${certCritThreshold}`
+);
 
 if (errors.length > 0) {
   console.error("❌ SLO threshold lint failed:");

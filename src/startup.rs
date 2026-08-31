@@ -527,6 +527,11 @@ mod tests {
 
     /// The HTTP metrics layer must record the bounded route pattern (not the
     /// raw URI) and the status class for every request that passes through it.
+    // The test serialization lock (metrics_test_lock) guards against the global
+    // meter provider being swapped by a concurrent metrics test while this
+    // test's middleware binds its cached instrument handles, so it must be held
+    // across the router `.await`s below. Deliberate for a test-only std Mutex.
+    #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn http_metrics_middleware_records_route_and_status() {
         use crate::utils::metrics::{metrics_test_lock, setup_metrics};
@@ -549,7 +554,6 @@ mod tests {
                 .build(),
         )
         .expect("metrics setup");
-        drop(_metrics_guard);
 
         async fn ok_handler() -> impl IntoResponse {
             "ok"
@@ -619,6 +623,10 @@ mod tests {
     /// router): the panic is converted to a 500 by CatchPanicLayer first and then
     /// recorded by the metrics middleware. Regresses the bug where panic-induced
     /// 500s silently disappeared from the error-rate SLI.
+    // Same test-only serialization lock rationale as the middleware test above:
+    // the guard must stay held across the `oneshot(...).await` so the panic's
+    // 5xx counter binds to this test's meter provider, not a concurrent one.
+    #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn panicking_handler_records_5xx_metric() {
         use crate::utils::metrics::{metrics_test_lock, setup_metrics};
@@ -642,7 +650,6 @@ mod tests {
                 .build(),
         )
         .expect("metrics setup");
-        drop(_metrics_guard);
 
         async fn boom_handler() -> StatusCode {
             panic!("boom");

@@ -563,6 +563,9 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Setup Helm
+        uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+
       - name: Validate Prometheus recording rules
         run: |
           docker run --rm --entrypoint promtool \
@@ -574,6 +577,26 @@ jobs:
           docker run --rm --entrypoint promtool \
             -v "$PWD/observability/prometheus:/etc/prometheus:ro" \
             prom/prometheus:v3.11.3 check rules /etc/prometheus/rules/alerting.rules.yml
+
+      - name: Validate rendered Helm PrometheusRule (no drift / no template errors)
+        # The Helm chart ships a second copy of the recording+alerting rule set as a
+        # PrometheusRule CRD. It was previously never validated -- a bad mulf/format
+        # or YAML error in the template would ship to production silently. Render the
+        # chart, hoist spec.groups to a top-level rules file, and promtool-check it so
+        # the rendered CR is guaranteed rule-valid, not just an unchecked template.
+        run: |
+          helm template status-list-server helm/chart \
+            --set prometheusRule.enabled=true > /tmp/helm-render.yaml
+          python3 - <<'EOF'
+          import yaml
+          docs = [d for d in yaml.safe_load_all(open('/tmp/helm-render.yaml')) if d]
+          cr = next(d for d in docs if d.get('kind') == 'PrometheusRule')
+          with open('/tmp/helm-rules.yml', 'w') as f:
+              yaml.safe_dump({'groups': cr['spec']['groups']}, f, sort_keys=False)
+          EOF
+          docker run --rm --entrypoint promtool \
+            -v /tmp/helm-rules.yml:/helm-rules.yml:ro \
+            prom/prometheus:v3.11.3 check rules /helm-rules.yml
 
       - name: Validate Prometheus config (dev and production)
         run: |

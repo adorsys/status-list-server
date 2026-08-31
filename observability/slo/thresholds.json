@@ -8,5 +8,7 @@
   "cache_hit_ratio_min": 0.85,
   "db_query_latency_p95_seconds": 0.05,
   "cert_renewal_failure_rate_max": 0.01,
-  "token_gen_failure_rate_max": 0.005
+  "token_gen_failure_rate_max": 0.005,
+  "error_budget_critical_threshold": 0.1,
+  "cert_renewal_error_budget_critical_threshold": 0.5
 }

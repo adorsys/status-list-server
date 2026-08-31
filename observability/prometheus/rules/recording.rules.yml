@@ -12,13 +12,10 @@ groups:
   - name: sli
     rules:
       # --- Request latency (p95, threshold SLO) ------------------------------
-      # 5m: dashboard headline + per-route drill-down.
+      # 5m: dashboard headline.
       - record: sli:request_latency:p95:5m
         expr: |
           histogram_quantile(0.95, sum(rate(http_server_duration_seconds_bucket{otel_scope_name="status-list-server"}[5m])) by (le))
-      - record: sli:request_latency:p95:5m:route
-        expr: |
-          histogram_quantile(0.95, sum(rate(http_server_duration_seconds_bucket{otel_scope_name="status-list-server"}[5m])) by (route, le))
 
       # 1h (fast-burn short window) and 6h (fast-burn long + slow-burn window).
       - record: sli:request_latency:p95:1h
@@ -51,9 +48,6 @@ groups:
       - record: sli:db_query_latency:p95:5m
         expr: |
           histogram_quantile(0.95, sum(rate(db_query_duration_seconds_bucket{otel_scope_name="status-list-server"}[5m])) by (le))
-      - record: sli:db_query_latency:p95:5m:operation
-        expr: |
-          histogram_quantile(0.95, sum(rate(db_query_duration_seconds_bucket{otel_scope_name="status-list-server"}[5m])) by (operation, le))
       - record: sli:db_query_latency:p95:1h
         expr: |
           histogram_quantile(0.95, sum(rate(db_query_duration_seconds_bucket{otel_scope_name="status-list-server"}[1h])) by (le))

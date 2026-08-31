@@ -58,6 +58,23 @@ spec:
 
     - name: status-list-server-slo-alerts
       rules:
+        - alert: Watchdog
+          expr: vector(1)
+          labels:
+            severity: none
+            service: status-list-server
+          annotations:
+            summary: "Prometheus alerting pipeline is healthy (Watchdog)"
+            runbook_url: "https://github.com/adorsys/status-list-server/blob/develop/observability/README.md"
+        - alert: StatusListMetricsAbsent
+          expr: absent(http_server_duration_seconds_bucket{otel_scope_name="status-list-server"})
+          for: 5m
+          labels:
+            severity: page
+            service: status-list-server
+          annotations:
+            summary: "status-list-server metrics absent for 5m (target down or not scraped)"
+            runbook_url: "https://github.com/adorsys/status-list-server/blob/develop/observability/README.md"
         - alert: RequestLatencyFastBurn
           expr: sli:request_latency:p95:1h > {{ .Values.slo.requestLatencyP95 }} and sli:request_latency:p95:6h > {{ .Values.slo.requestLatencyP95 }}
           for: 5m
@@ -150,7 +167,7 @@ spec:
             description: 'Current cache hit ratio: {{ `{{ $value | humanizePercentage }}` }}'
             runbook_url: "https://github.com/adorsys/status-list-server/blob/develop/observability/runbooks/cache-hit-ratio.md"
         - alert: ErrorBudgetCritical
-          expr: sli:error_budget:success:30d < 0.1
+          expr: sli:error_budget:success:30d < {{ .Values.slo.errorBudgetCriticalThreshold }}
           for: 5m
           labels:
             severity: page
@@ -161,7 +178,7 @@ spec:
             description: 'Remaining error budget: {{ `{{ $value | humanizePercentage }}` }}'
             runbook_url: "https://github.com/adorsys/status-list-server/blob/develop/observability/runbooks/error-budget.md"
         - alert: TokenGenErrorBudgetCritical
-          expr: sli:token_gen_error_budget:30d < 0.1
+          expr: sli:token_gen_error_budget:30d < {{ .Values.slo.errorBudgetCriticalThreshold }}
           for: 5m
           labels:
             severity: page
@@ -182,7 +199,7 @@ spec:
             summary: "Certificate renewal failure rate at or above 1% over the last 7d"
             runbook_url: "https://github.com/adorsys/status-list-server/blob/develop/observability/runbooks/cert-renewal.md"
         - alert: CertRenewalErrorBudgetCritical
-          expr: sli:cert_renewal_failure_rate:30d >= 0.5
+          expr: sli:cert_renewal_failure_rate:30d >= {{ .Values.slo.certRenewalErrorBudgetCriticalThreshold }}
           for: 5m
           labels:
             severity: page

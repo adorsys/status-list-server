@@ -211,7 +211,9 @@ tests:
 
   # Edge case: no input series at all. Every recording rule evaluates to NaN /
   # no series, and every alert (including the mult-window and ErrorBudgetCritical
-  # alerts, which depend on windows with no data) must stay silent.
+  # alerts, which depend on windows with no data) must stay silent. The one
+  # purposeful exception is the always-firing Watchdog and the StatusListMetrics
+  # Absent guard, which must page precisely BECAUSE the target has no metrics.
   - interval: 1m
     input_series: []
     alert_rule_test:
@@ -254,6 +256,26 @@ tests:
       - eval_time: 10m
         alertname: ErrorBudgetCritical
         exp_alerts: []
+      # With no series the absent guard pages and the watchdog always fires.
+      - eval_time: 10m
+        alertname: StatusListMetricsAbsent
+        exp_alerts:
+          - exp_labels:
+              service: "status-list-server"
+              severity: "page"
+              otel_scope_name: "status-list-server"
+            exp_annotations:
+              summary: "status-list-server metrics absent for 5m (target down or not scraped)"
+              runbook_url: "https://github.com/adorsys/status-list-server/blob/develop/observability/README.md"
+      - eval_time: 10m
+        alertname: Watchdog
+        exp_alerts:
+          - exp_labels:
+              service: "status-list-server"
+              severity: "none"
+            exp_annotations:
+              summary: "Prometheus alerting pipeline is healthy (Watchdog)"
+              runbook_url: "https://github.com/adorsys/status-list-server/blob/develop/observability/README.md"
 
   # ErrorBudgetCritical positive fire. A 6h interval spans a full 30d so the
   # sli:error_rate:30d window resolves. 50% 5xx => error_rate:30d = 0.5, so the

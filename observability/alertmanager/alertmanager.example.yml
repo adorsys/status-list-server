@@ -52,6 +52,12 @@ receivers:
         description: '{{ .CommonAnnotations.summary }}'
         details:
           runbook_url: '{{ .CommonAnnotations.runbook_url }}'
+          # `{{ template "pagerduty.default.instances" . }}` is defined in the
+          # prometheus-pagerduty example template file, NOT in stock Alertmanager.
+          # If your Alertmanager image does not inject it, template resolution
+          # here fails. Either ship a template file that defines it, or inline a
+          # small custom one, e.g.:
+          #   firing_alerts: '{{ $count := len .Alerts }}{{ $count }} firing alert(s)'
           firing_alerts: '{{ template "pagerduty.default.instances" . }}'
 
   - name: "slack-notifications"

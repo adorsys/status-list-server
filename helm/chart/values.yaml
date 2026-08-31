@@ -228,7 +228,10 @@ prometheusRule:
   # Additional labels required by your Prometheus Operator (e.g. release: kube-prometheus-stack)
   labels: {}
 
-# Configurable SLO target thresholds for PrometheusRule alerting rules
+# Configurable SLO target thresholds for PrometheusRule alerting rules.
+# These must stay in lockstep with observability/slo/thresholds.json (the lint
+# step in CI asserts this) and with the literal values in the standalone
+# observability/prometheus/rules/*.rules.yml.
 slo:
   errorRateTarget: 0.005
   fastBurnMultiplier: 14.4
@@ -237,6 +240,11 @@ slo:
   dbLatencyP95: 0.05
   cacheHitRatioMin: 0.85
   certRenewalFailureMax: 0.01
+  # Remaining-error-budget gate for the ErrorBudget*Critical page alerts.
+  errorBudgetCriticalThreshold: 0.1
+  # Cert-renewal failure-rate gate for the CertRenewalErrorBudgetCritical page
+  # alert (>=50% failures over 30d means the renewal loop is genuinely broken).
+  certRenewalErrorBudgetCriticalThreshold: 0.5
 
 postgres:
   enabled: true

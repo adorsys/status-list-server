@@ -9,6 +9,34 @@ groups:
   # threshold breach over matched windows rather than a ratio burn rate.
   - name: slo-alerts
     rules:
+      # --- Pipeline health (always-firing / absent guards) -------------------
+      # Watchdog: always firing. A healthy alert pipeline routes this to a
+      # dead-man's-switch, so a total collapse of Prometheus or Alertmanager is
+      # itself a detectable, pageable condition rather than a silent outage.
+      - alert: Watchdog
+        expr: vector(1)
+        labels:
+          severity: none
+          service: status-list-server
+        annotations:
+          summary: "Prometheus alerting pipeline is healthy (Watchdog)"
+          runbook_url: "https://github.com/adorsys/status-list-server/blob/develop/observability/README.md"
+
+      # Target-down / absent-SLI guard. If the app stops being scraped (pod
+      # crash, ServiceMonitor mis-scrape, deployment deleted), the raw request
+      # metrics go absent, every sli:* recording rule goes NaN, and every burn
+      # alert above goes silent. `absent()` turns that missing series into an
+      # alertable page so a total outage is not invisible.
+      - alert: StatusListMetricsAbsent
+        expr: absent(http_server_duration_seconds_bucket{otel_scope_name="status-list-server"})
+        for: 5m
+        labels:
+          severity: page
+          service: status-list-server
+        annotations:
+          summary: "status-list-server metrics absent for 5m (target down or not scraped)"
+          runbook_url: "https://github.com/adorsys/status-list-server/blob/develop/observability/README.md"
+
       # --- Request latency (SLO: p95 < 300ms) --------------------------------
       - alert: RequestLatencyFastBurn
         expr: |
