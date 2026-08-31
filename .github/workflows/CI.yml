@@ -679,6 +679,7 @@ jobs:
       - tombi-toml-lint
       - markdown-lint
       - trivy-config
+      - helm-template-local
       - kube-linter
       - yaml-lint
       - otel-config-validation
