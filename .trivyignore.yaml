@@ -6,7 +6,7 @@ misconfigurations:
     statement: >-
       Third-party subchart pod specs (postgres) that the chart cannot override; it exposes no values-level setting for it. The application's own Deployment does set readOnlyRootFilesystem: true, so this does not cover our workload. Revisit if the chart gains the setting.
     paths:
-      - "*/charts/postgres*/**"
+      - "**/charts/postgres*/**"
 
 # Container image scan exceptions. Each needs a statement and an expired_at date so
 # it lapses rather than becoming permanent. Triage process: docs/supply-chain.md.

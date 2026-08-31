@@ -1,4 +1,7 @@
 {{- if .Values.statuslist.enabled }}
+{{- if and .Values.externalSecret.enabled .Values.statuslist.fallbackSecret.enabled }}
+{{- fail "externalSecret.enabled and statuslist.fallbackSecret.enabled cannot both be true: choose either External Secrets Operator or the fallback Secret for secret delivery, not both" }}
+{{- end }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -7,7 +10,9 @@ metadata:
     {{- include "status-list-server-chart.labels" . | nindent 4 }}
   namespace: {{ .Release.Namespace }}
 spec:
+  {{- if not .Values.autoscaling.enabled }}
   replicas: {{ .Values.statuslist.replicaCount }}
+  {{- end }}
   selector:
     matchLabels:
       {{- include "status-list-server-chart.selectorLabels" . | nindent 6 }}
@@ -22,7 +27,13 @@ spec:
         {{- end }}
       labels:
         {{- include "status-list-server-chart.labels" . | nindent 8 }}
+        {{- with .Values.statuslist.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
     spec:
+      {{- if or .Values.serviceAccount.create (ne .Values.serviceAccount.name "") }}
+      serviceAccountName: {{ include "status-list-server-chart.serviceAccountName" . }}
+      {{- end }}
       {{- with .Values.statuslist.initContainers }}
       initContainers:
         {{- range $ic := . }}
@@ -152,9 +163,12 @@ spec:
             - name: {{ $name }}
               value: {{ $value | quote }}
             {{- end }}
-            {{- if .Values.secretStore.enabled }}
+            {{- $appRegion := include "status-list-server-chart.appRegion" . }}
+            {{- if and (eq .Values.secretStore.provider "aws") $appRegion }}
             - name: APP_AWS__REGION
-              value: {{ .Values.secretStore.aws.region | quote }}
+              value: {{ $appRegion | quote }}
+            {{- end }}
+            {{- if .Values.statuslist.aws.mountCredentials }}
             - name: AWS_SHARED_CREDENTIALS_FILE
               value: /home/nobody/.aws/credentials
             - name: AWS_CONFIG_FILE
@@ -163,12 +177,12 @@ spec:
             - name: APP_DATABASE__PASSWORD
               valueFrom:
                 secretKeyRef:
-                  name: {{ if .Values.externalSecret.enabled }}{{ .Values.externalSecret.spec.target.name }}{{ else }}statuslist-secret{{ end }}
+                  name: {{ include "status-list-server-chart.appSecretName" . }}
                   key: postgres-password
           volumeMounts:
             - name: tmp
               mountPath: /tmp
-          {{- if .Values.secretStore.enabled }}
+          {{- if .Values.statuslist.aws.mountCredentials }}
             - name: aws-credentials-volume
               mountPath: /home/nobody/.aws
               readOnly: true
@@ -176,7 +190,7 @@ spec:
       volumes:
         - name: tmp
           emptyDir: {}
-      {{- if .Values.secretStore.enabled }}
+      {{- if .Values.statuslist.aws.mountCredentials }}
         - name: aws-credentials-volume
           secret:
             secretName: aws-credentials-secret

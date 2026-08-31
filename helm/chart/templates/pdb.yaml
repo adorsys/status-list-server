@@ -1,0 +1,37 @@
+{{- if .Values.statuslist.enabled }}
+{{- if .Values.podDisruptionBudget.enabled }}
+{{- /* Presence checks treat a field as set only when its key is present AND its value
+  is not null. An explicit 0 is preserved as a valid PDB setting, while an explicit
+  null (the documented way to leave a field unset) counts as absent. */}}
+{{- $min := index .Values.podDisruptionBudget "minAvailable" }}
+{{- $max := index .Values.podDisruptionBudget "maxUnavailable" }}
+{{- $hasMin := and (hasKey .Values.podDisruptionBudget "minAvailable") (ne $min nil) }}
+{{- $hasMax := and (hasKey .Values.podDisruptionBudget "maxUnavailable") (ne $max nil) }}
+{{- if and $hasMin $hasMax }}
+{{- fail "podDisruptionBudget must set exactly one of minAvailable or maxUnavailable, not both" }}
+{{- end }}
+{{- if not (or $hasMin $hasMax) }}
+{{- fail "podDisruptionBudget must set exactly one of minAvailable or maxUnavailable" }}
+{{- end }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "status-list-server-chart.fullname" . }}
+  labels:
+    {{- include "status-list-server-chart.labels" . | nindent 4 }}
+  namespace: {{ .Release.Namespace }}
+spec:
+  {{- if $hasMin }}
+  minAvailable: {{ .Values.podDisruptionBudget.minAvailable }}
+  {{- end }}
+  {{- if $hasMax }}
+  maxUnavailable: {{ .Values.podDisruptionBudget.maxUnavailable }}
+  {{- end }}
+  # Allow eviction of unhealthy pods so voluntary disruption is not blocked by
+  # unhealthy replicas (kube-linter: pdb-unhealthy-pod-eviction-policy).
+  unhealthyPodEvictionPolicy: AlwaysAllow
+  selector:
+    matchLabels:
+      {{- include "status-list-server-chart.selectorLabels" . | nindent 6 }}
+{{- end }}
+{{- end }}

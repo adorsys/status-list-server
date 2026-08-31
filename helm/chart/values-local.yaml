@@ -4,7 +4,7 @@ global:
 statuslist:
   initContainers:
     - name: wait-for-postgres
-      image: busybox
+      image: busybox:1.38
       command:
         - "sh"
         - "-c"
@@ -16,6 +16,11 @@ statuslist:
           done
           echo "Postgres is up."
 
+  aws:
+    # Local has no External Secrets Operator and no cloud role, so do not mount the
+    # ESO-provisioned aws-credentials-secret (the chart default is mountCredentials=true).
+    mountCredentials: false
+
   image:
     pullPolicy: IfNotPresent
   service:
@@ -25,12 +30,22 @@ statuslist:
     enabled: false
   env:
     RUST_LOG: "debug"
-    APP_ENV: "local"
+    APP_ENV: "development"
+    APP_SERVER__HOST: "0.0.0.0"
+    APP_SERVER__PORT: "8000"
     APP_SERVER__CERT__ACME_DIRECTORY_URL: "https://acme-staging-v02.api.letsencrypt.org/directory"
     # Parsed certificate chain cache TTL in seconds. "0" means no expiry; non-provisioning replicas rely on this TTL for renewed chains.
     # Status-list record cache TTL in seconds. "0" disables this cache.
     APP_CACHE__TTL: "120"
     APP_CACHE__MAX_CAPACITY: "500"
+    APP_STATUS_LIST__TOKEN_EXP_SECS: "900"
+    APP_STATUS_LIST__TOKEN_TTL_SECS: "300"
+    APP_RATE_LIMIT__STRICT_BURST_SIZE: "10"
+    APP_RATE_LIMIT__STRICT_PERIOD_SECS: "60"
+    APP_RATE_LIMIT__PERMISSIVE_BURST_SIZE: "100"
+    APP_RATE_LIMIT__PERMISSIVE_PERIOD_SECS: "60"
+    APP_LIMITS__MAX_BODY_SIZE_BYTES: "2097152"
+    APP_TELEMETRY__ENVIRONMENT: "development"
   resources:
     requests:
       memory: "128Mi"

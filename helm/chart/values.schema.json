@@ -1,0 +1,146 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "properties": {
+    "serviceAccount": {
+      "type": "object",
+      "properties": {
+        "create": { "type": "boolean" },
+        "name": { "type": "string" },
+        "automountServiceAccountToken": { "type": "boolean" },
+        "annotations": { "type": "object" },
+        "labels": { "type": "object" }
+      }
+    },
+    "statuslist": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "replicaCount": { "type": "integer" },
+        "podLabels": { "type": "object", "additionalProperties": { "type": "string" } },
+        "aws": {
+          "type": "object",
+          "properties": {
+            "mountCredentials": { "type": "boolean" },
+            "credentialsSecret": {
+              "type": "object",
+              "properties": {
+                "remoteKey": { "type": "string" },
+                "credentialsProperty": { "type": "string" },
+                "configProperty": { "type": "string" }
+              }
+            },
+            "region": { "type": "string" }
+          }
+        },
+        "fallbackSecret": {
+          "type": "object",
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "stringData": {
+              "type": "object",
+              "additionalProperties": { "type": "string" }
+            }
+          }
+        }
+      }
+    },
+    "externalSecret": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "spec": {
+          "type": "object",
+          "properties": {
+            "secretStoreRef": {
+              "type": "object",
+              "properties": {
+                "name": { "type": "string" },
+                "kind": { "type": "string" }
+              }
+            },
+            "target": {
+              "type": "object",
+              "properties": {
+                "name": { "const": "statuslist-secret" },
+                "creationPolicy": { "type": "string" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "secretStore": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "provider": {
+          "type": "string",
+          "enum": ["aws", "vault", "gcp", "azure", "raw"]
+        },
+        "aws": {
+          "type": "object",
+          "properties": {
+            "service": { "type": "string", "enum": ["SecretsManager", "ParameterStore"] },
+            "region": { "type": "string" }
+          }
+        },
+        "vault": {
+          "type": "object",
+          "properties": {
+            "server": { "type": "string" },
+            "path": { "type": "string" },
+            "auth": { "type": "object" }
+          }
+        },
+        "gcp": {
+          "type": "object",
+          "properties": {
+            "projectID": { "type": "string" },
+            "auth": { "type": "object" }
+          }
+        },
+        "azure": {
+          "type": "object",
+          "properties": {
+            "tenantId": { "type": "string" },
+            "vaultUrl": { "type": "string" },
+            "authType": { "type": "string", "enum": ["", "ServicePrincipal", "ManagedIdentity", "WorkloadIdentity"] },
+            "environmentType": { "type": "string" },
+            "identityId": { "type": "string" },
+            "serviceAccountRef": {
+              "type": "object",
+              "properties": {
+                "name": { "type": "string" },
+                "namespace": { "type": ["string", "null"] }
+              }
+            },
+            "authSecretRef": { "type": "object" }
+          }
+        },
+        "raw": {
+          "type": "object",
+          "description": "Full ESO provider spec passthrough for unsupported providers (secretStore.provider=raw). Holds ONLY the concrete provider body rendered directly under spec.provider (no extra top-level 'provider' key), e.g. { webhook: { url: '...' } }. Render-time validation rejects an empty/raw-only object to avoid emitting an insecure SecretStore."
+        }
+      }
+    },
+    "autoscaling": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "minReplicas": { "type": "integer", "minimum": 1 },
+        "maxReplicas": { "type": "integer", "minimum": 1 },
+        "metrics": { "type": "array" },
+        "behavior": { "type": "object" }
+      }
+    },
+    "podDisruptionBudget": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "minAvailable": { "type": ["integer", "string", "null"] },
+        "maxUnavailable": { "type": ["integer", "string", "null"] }
+      }
+    }
+  }
+}
