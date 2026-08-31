@@ -30,17 +30,18 @@ statuslist:
     #
     # | Tag Suffix | Cargo Features | Description | Primary Use Case |
     # |------------|----------------|-------------|------------------|
-    # | -aws       | postgres,aws-secrets,acme | PostgreSQL with AWS Secrets Manager and Route53 DNS | AWS EKS native deployments |
-    # | -gcp       | postgres,gcp-secrets,acme | PostgreSQL with GCP Secret Manager and Cloud DNS | GCP GKE native deployments |
-    # | -azure     | postgres,azure-kv,acme | PostgreSQL with Azure Key Vault and Azure DNS | Azure AKS native deployments |
-    # | -vault     | postgres,vault,acme | PostgreSQL with HashiCorp Vault / OpenBao token storage | Vault-backed multi-cloud deployments |
-    # | -fscert    | postgres,acme | PostgreSQL with filesystem-mounted certificates | Air-gapped / external secret injection |
+    # | -aws       | postgres,aws-secrets,acme | PostgreSQL database with AWS Secrets Manager and Route53 DNS support | AWS EKS native deployments |
+    # | -gcp       | postgres,gcp-secrets,acme | PostgreSQL database with GCP Secret Manager and Cloud DNS support | GCP GKE native deployments |
+    # | -azure     | postgres,azure-kv,acme | PostgreSQL database with Azure Key Vault and Azure DNS support | Azure AKS native deployments |
+    # | -vault     | postgres,vault,acme | PostgreSQL database with HashiCorp Vault / OpenBao token material storage | Vault-backed on-prem or multi-cloud deployments |
+    # | -fscert    | postgres | PostgreSQL database with filesystem-mounted token signing keys and certificates | Constrained / air-gapped environments using external secret injection |
     #
     # Tag format: <version>-<suffix> (e.g., 1.2.0-aws, 1.2.0-gcp)
     # Latest tags: latest-<suffix> (e.g., latest-aws, latest-gcp)
     #
-    # Empty falls back to appVersion. Defaulting to "latest" would let an upgrade
-    # that changes nothing in this chart still change the running image.
+    # Empty falls back to the chart appVersion, which is the published AWS variant
+    # tag. Defaulting to "latest" would let an upgrade that changes nothing in this
+    # chart still change the running image.
     tag: ""
     # "sha256:...". Takes precedence over tag and pins the exact digest CI scanned.
     # Each variant has its own digest. Use the digest from the variant you select.

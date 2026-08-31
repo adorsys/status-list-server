@@ -44,23 +44,24 @@ jobs:
       contents: read
       packages: write
     strategy:
+      fail-fast: false
       matrix:
         variant:
           - suffix: aws
             features: "postgres,aws-secrets,acme"
-            description: "PostgreSQL with AWS Secrets Manager and Route53 DNS"
+            description: "PostgreSQL database with AWS Secrets Manager and Route53 DNS support"
           - suffix: gcp
             features: "postgres,gcp-secrets,acme"
-            description: "PostgreSQL with GCP Secret Manager and Cloud DNS"
+            description: "PostgreSQL database with GCP Secret Manager and Cloud DNS support"
           - suffix: azure
             features: "postgres,azure-kv,acme"
-            description: "PostgreSQL with Azure Key Vault and Azure DNS"
+            description: "PostgreSQL database with Azure Key Vault and Azure DNS support"
           - suffix: vault
             features: "postgres,vault,acme"
-            description: "PostgreSQL with HashiCorp Vault / OpenBao"
+            description: "PostgreSQL database with HashiCorp Vault / OpenBao token material storage"
           - suffix: fscert
-            features: "postgres,acme"
-            description: "PostgreSQL with filesystem-mounted certificates"
+            features: "postgres"
+            description: "PostgreSQL database with filesystem-mounted token signing keys and certificates"
     outputs:
       deploy_tag: ${{ steps.vars.outputs.DEPLOY_TAG }}
     steps:
@@ -123,6 +124,8 @@ jobs:
           build-args: |
             FEATURES=${{ matrix.variant.features }}
           labels: ${{ steps.meta.outputs.labels }}
+          annotations: |
+            index,manifest:org.opencontainers.image.description=${{ matrix.variant.description }}
 
       - name: Assert a digest was produced
         # An empty digest would silently fall back to tag-based deployment, which is
@@ -138,6 +141,42 @@ jobs:
           fi
           echo "image digest for ${SUFFIX}: $DIGEST"
           echo "IMAGE_REF=${IMAGE_BASE}@${DIGEST}" >> "$GITHUB_OUTPUT"
+          printf '%s\n' "$DIGEST" > "image-digest-${SUFFIX}.txt"
+
+      - name: Verify OCI description annotations
+        env:
+          DESCRIPTION: ${{ matrix.variant.description }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          raw=$(docker buildx imagetools inspect --raw "${IMAGE_BASE}@${DIGEST}")
+          index_description=$(printf '%s' "$raw" | jq -r '.annotations["org.opencontainers.image.description"] // ""')
+          if [ "$index_description" != "$DESCRIPTION" ]; then
+            echo "::error::index OCI description annotation mismatch for ${DIGEST}"
+            echo "expected: $DESCRIPTION"
+            echo "actual:   $index_description"
+            exit 1
+          fi
+
+          for manifest in $(printf '%s' "$raw" | jq -r '.manifests[]
+            | select(.platform.os == "linux" and (.platform.architecture == "amd64" or .platform.architecture == "arm64"))
+            | .digest'); do
+            manifest_description=$(docker buildx imagetools inspect --raw "${IMAGE_BASE}@${manifest}" \
+              | jq -r '.annotations["org.opencontainers.image.description"] // ""')
+            if [ "$manifest_description" != "$DESCRIPTION" ]; then
+              echo "::error::manifest OCI description annotation mismatch for ${manifest}"
+              echo "expected: $DESCRIPTION"
+              echo "actual:   $manifest_description"
+              exit 1
+            fi
+          done
+
+      - name: Upload built digest
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: image-digest-${{ matrix.variant.suffix }}
+          path: image-digest-${{ matrix.variant.suffix }}.txt
+          if-no-files-found: error
 
   scan-image:
     name: Scan Image for Vulnerabilities (${{ matrix.variant.suffix }})
@@ -147,7 +186,9 @@ jobs:
     permissions:
       contents: read
       packages: read
+      actions: read
     strategy:
+      fail-fast: false
       matrix:
         variant:
           - suffix: aws
@@ -176,15 +217,24 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Download built digest
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh run download "$GITHUB_RUN_ID" --name "image-digest-${{ matrix.variant.suffix }}" --dir .
+
       - name: Resolve the architecture manifests to scan
         # `IMAGE_REF` is a multi-platform index. Resolving each child manifest fixes
         # which architectures are scanned by construction, rather than leaving it to
         # Trivy's default and asserting the result afterwards.
         run: |
           set -euo pipefail
-          # Resolve the actual tag from the image reference
-          image_tag="${IMAGE_BASE}:sha-${GITHUB_SHA::7}-${{ matrix.variant.suffix }}"
-          index=$(docker buildx imagetools inspect --raw "$image_tag")
+          index_digest=$(cat "image-digest-${{ matrix.variant.suffix }}.txt")
+          [[ "$index_digest" =~ ^sha256:[a-f0-9]{64}$ ]] || {
+            echo "::error::invalid built image digest for ${{ matrix.variant.suffix }}: ${index_digest}"
+            exit 1
+          }
+          image_ref="${IMAGE_BASE}@${index_digest}"
+          index=$(docker buildx imagetools inspect --raw "$image_ref")
 
           for arch in $SCAN_ARCHES; do
             # env.SCAN_ARCH rather than a --arg variable: `$arch` in a single-quoted
@@ -195,7 +245,7 @@ jobs:
 
             count=$(printf '%s' "$matches" | jq 'length')
             if [ "$count" -ne 1 ]; then
-              echo "::error::expected exactly one linux/${arch} manifest in ${image_tag}, found ${count}."
+              echo "::error::expected exactly one linux/${arch} manifest in ${image_ref}, found ${count}."
               exit 1
             fi
 
@@ -268,13 +318,13 @@ jobs:
         # and a transient imagetools error here must not cost the trivy reports.
         run: |
           set -euo pipefail
-          # Resolve the actual tag from the image reference
-          image_tag="${IMAGE_BASE}:sha-${GITHUB_SHA::7}-${{ matrix.variant.suffix }}"
+          index_digest=$(cat "image-digest-${{ matrix.variant.suffix }}.txt")
+          image_ref="${IMAGE_BASE}@${index_digest}"
           : > sbom-summary.md
           for platform in linux/amd64 linux/arm64; do
             out="sbom-${platform#linux/}.json"
             for attempt in 1 2 3; do
-              if docker buildx imagetools inspect "$image_tag" \
+              if docker buildx imagetools inspect "$image_ref" \
                    --format "{{ json (index .SBOM \"$platform\") }}" > "$out"; then
                 break
               fi
@@ -293,11 +343,12 @@ jobs:
         if: always()
         run: |
           set -eu
-          image_tag="${IMAGE_BASE}:sha-${GITHUB_SHA::7}-${{ matrix.variant.suffix }}"
+          index_digest=$(cat "image-digest-${{ matrix.variant.suffix }}.txt" 2>/dev/null || true)
+          image_ref="${IMAGE_BASE}@${index_digest}"
           {
             echo "## Container image scan (${{ matrix.variant.suffix }})"
             echo
-            echo "Index: \`${image_tag}\`"
+            echo "Index: \`${image_ref}\`"
             echo
             echo "| Platform | Scanned digest | HIGH/CRITICAL |"
             echo "| --- | --- | --- |"
@@ -478,14 +529,21 @@ jobs:
     permissions:
       contents: read
       packages: write
+      actions: read
     strategy:
+      fail-fast: false
       matrix:
         variant:
           - suffix: aws
+            description: "PostgreSQL database with AWS Secrets Manager and Route53 DNS support"
           - suffix: gcp
+            description: "PostgreSQL database with GCP Secret Manager and Cloud DNS support"
           - suffix: azure
+            description: "PostgreSQL database with Azure Key Vault and Azure DNS support"
           - suffix: vault
+            description: "PostgreSQL database with HashiCorp Vault / OpenBao token material storage"
           - suffix: fscert
+            description: "PostgreSQL database with filesystem-mounted token signing keys and certificates"
     env:
       DEPLOY_TAG: ${{ needs.build-and-push.outputs.deploy_tag }}
       SUFFIX: ${{ matrix.variant.suffix }}
@@ -496,6 +554,11 @@ jobs:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Download built digest
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh run download "$GITHUB_RUN_ID" --name "image-digest-${{ matrix.variant.suffix }}" --dir .
 
       - name: Extract release tags
         # `v*.*.*` matches prereleases — the glob absorbs `-rc1` — so `latest` is
@@ -515,9 +578,15 @@ jobs:
         # and the tags resolve to exactly the scanned index.
         env:
           TAGS: ${{ steps.meta.outputs.tags }}
+          DESCRIPTION: ${{ matrix.variant.description }}
         run: |
-          # Reconstruct the image reference from known inputs
-          image_tag="${IMAGE_BASE}:sha-${GITHUB_SHA::7}-${SUFFIX}"
+          set -euo pipefail
+          index_digest=$(cat "image-digest-${SUFFIX}.txt")
+          [[ "$index_digest" =~ ^sha256:[a-f0-9]{64}$ ]] || {
+            echo "::error::invalid built image digest for ${SUFFIX}: ${index_digest}"
+            exit 1
+          }
+          image_ref="${IMAGE_BASE}@${index_digest}"
           args=()
           while IFS= read -r tag; do
             [ -n "$tag" ] || continue
@@ -529,7 +598,9 @@ jobs:
             echo "::error::metadata-action produced no release tags for ${GITHUB_REF_NAME}-${SUFFIX}."
             exit 1
           fi
-          docker buildx imagetools create "${args[@]}" "$image_tag"
+          docker buildx imagetools create \
+            --annotation "index:org.opencontainers.image.description=${DESCRIPTION}" \
+            "${args[@]}" "$image_ref"
 
       - name: Verify attestations survived promotion
         # Attestations are separate unknown/unknown-platform manifests. They should
@@ -538,6 +609,15 @@ jobs:
         run: |
           set -eu
           release_ref="${IMAGE_BASE}:${DEPLOY_TAG}-${SUFFIX}"
+          description="${{ matrix.variant.description }}"
+          actual_description=$(docker buildx imagetools inspect --raw "$release_ref" \
+            | jq -r '.annotations["org.opencontainers.image.description"] // ""')
+          if [ "$actual_description" != "$description" ]; then
+            echo "::error::OCI description annotation missing after tag promotion on $release_ref."
+            echo "expected: $description"
+            echo "actual:   $actual_description"
+            exit 1
+          fi
           for platform in linux/amd64 linux/arm64; do
             for field in SBOM Provenance; do
               if ! docker buildx imagetools inspect "$release_ref" \
@@ -572,6 +652,7 @@ jobs:
     permissions:
       contents: read
       id-token: write
+      packages: read
     env:
       # Routed through env rather than interpolated into the helm command: deploy_tag
       # derives from GITHUB_REF_NAME, which the person pushing the tag controls.
@@ -594,6 +675,13 @@ jobs:
         uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
         with:
           version: v4.2.4
+
+      - name: Login to GHCR
+        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6
@@ -626,18 +714,20 @@ jobs:
           IMAGE_VARIANT="${IMAGE_VARIANT:-aws}"
           FULL_TAG="${DEPLOY_TAG}-${IMAGE_VARIANT}"
 
-          # Resolve the index digest at runtime from the promoted image.
-          # We hash the raw manifest to get the index digest (the digest of the manifest
-          # list itself), not a child platform manifest. Kubernetes needs the index
-          # digest for multi-arch images; a platform-specific digest causes ImagePullBackOff.
-          IMAGE_DIGEST=$(docker buildx imagetools inspect --raw "${IMAGE_BASE}:${FULL_TAG}" \
-            | sha256sum | awk '{print "sha256:" $1}')
-          [[ -n "$IMAGE_DIGEST" ]] || { echo '::error::Could not resolve image digest'; exit 1; }
+          # Resolve the promoted multi-arch index digest. Kubernetes needs the index
+          # digest, not a child platform manifest.
+          IMAGE_DIGEST=$(docker buildx imagetools inspect "${IMAGE_BASE}:${FULL_TAG}" \
+            | sed -nE 's/^Digest:[[:space:]]*(sha256:[a-f0-9]{64})$/\1/p' \
+            | head -1)
+          [[ "$IMAGE_DIGEST" =~ ^sha256:[a-f0-9]{64}$ ]] || {
+            echo "::error::Could not resolve a valid image index digest for ${IMAGE_BASE}:${FULL_TAG}"
+            exit 1
+          }
 
           echo "Deploying ${IMAGE_BASE}:${FULL_TAG}@${IMAGE_DIGEST}"
           helm upgrade --install ${{ env.HELM_RELEASE_NAME }} helm/chart \
             --namespace ${{ env.HELM_NAMESPACE }} \
-            --create-namespace \
+            -f helm/chart/values-production.yaml \
             --wait \
             --rollback-on-failure \
             --timeout 10m \

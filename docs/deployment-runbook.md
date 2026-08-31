@@ -23,7 +23,7 @@ The vulnerability gate blocks on any HIGH or CRITICAL finding that survives the 
 
 ### Image Tags
 
-The release workflow publishes **5 multi-arch image variants** with distinct suffixes for different cloud providers and secret storage models. See the image variant matrix in `values.yaml` for the full description of each variant.
+The release workflow publishes **5 multi-arch image variants** with distinct suffixes for different cloud providers and secret storage models. See the image variant matrix in `values.yaml` for the full description of each variant. The chart's empty-tag default resolves to the published AWS variant, not to an unsuffixed image tag.
 
 | Trigger              | Image Tags                                                                   | Applied                   |
 | -------------------- | ---------------------------------------------------------------------------- | ------------------------- |
@@ -54,7 +54,9 @@ Choose the variant that matches your cloud provider and secret storage model:
 | `-gcp`    | GCP GKE deployments                 | GCP Secret Manager, Cloud DNS              |
 | `-azure`  | Azure AKS deployments               | Azure Key Vault, Azure DNS                 |
 | `-vault`  | Multi-cloud or on-prem              | HashiCorp Vault / OpenBao cluster          |
-| `-fscert` | Air-gapped/constrained environments | Filesystem-mounted certificates and keys   |
+| `-fscert` | Air-gapped/constrained environments | Filesystem-mounted signing keys and certificates |
+
+The `-fscert` image intentionally omits the `acme` Cargo feature so the filesystem-backed certificate provider is compiled in. Configure certificate and signing-key paths through the chart or environment when selecting this variant.
 
 To select a variant, set the image tag with the appropriate suffix in your Helm values or deployment command:
 
@@ -74,14 +76,14 @@ Release tags matching `v*.*.*` deploy to:
 - Helm release: `statuslist`
 - Image tag: semantic version without the leading `v`
 
-For example, tag `v0.5.0` deploys the AWS variant with image tag `0.5.0-aws`. The production deployment uses the `-aws` variant by default; other variants (`-gcp`, `-azure`, `-vault`, `-fscert`) can be selected by setting the `DEPLOY_VARIANT` Actions variable in the `production` environment (e.g., `gcp`, `azure`, `vault`, `fscert`). The default is `aws`.
+For example, tag `v0.5.0` deploys the AWS variant with image tag `0.5.0-aws`. The production deployment uses the `-aws` variant by default; other variants (`-gcp`, `-azure`, `-vault`, `-fscert`) can be selected by setting the `IMAGE_VARIANT` Actions variable in the `production` environment (e.g., `gcp`, `azure`, `vault`, `fscert`). The default is `aws`.
 
 The production deploy command is equivalent to (using the AWS variant):
 
 ```bash
 helm upgrade --install statuslist helm/chart \
   --namespace statuslist-production \
-  --create-namespace \
+  -f helm/chart/values-production.yaml \
   --wait \
   --rollback-on-failure \
   --timeout 10m \

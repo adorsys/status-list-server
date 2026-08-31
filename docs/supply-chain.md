@@ -25,9 +25,9 @@ Provenance and SBOM are also attached to the image itself: `docker buildx imaget
 
 `deploy.yml` triggers on **release tags (`v*.*.*`) and manual dispatch only** — not on pushes to `main`, and not on pull requests. A two-architecture build plus scan costs roughly 40 minutes and publishes to GHCR, which is not worth spending on every merge. The consequence is that the image is scanned **once per release**, and that consequence is load-bearing for several of the [Known Gaps](#known-gaps) below.
 
-`build-and-push` builds the multi-architecture image, pushes it to GHCR under the immutable `sha-<short>` tag only, and attaches an SBOM and SLSA provenance. `scan-image` then inspects that image by digest. `promote-tags` applies the semver and `latest` tags to the same digest after the scan. `deploy` runs last and deploys **the same digest** that was scanned.
+`build-and-push` builds the multi-architecture image variants, pushes them to GHCR under immutable `sha-<short>-<variant>` tags only, records each produced index digest, and attaches SBOM and SLSA provenance metadata. `scan-image` then inspects those images by digest. `promote-tags` applies the semver and `latest` variant tags to the same digests after the scan. `deploy` runs last and deploys **the same promoted digest** that was scanned.
 
-A dispatch run exercises the build, the scan and every assertion without releasing: `promote-tags` and `deploy` both require `github.event_name == 'push'`, so a dispatch promotes nothing and deploys nothing even when aimed at a tag ref. It does still push `sha-<short>` to GHCR — it publishes an image, it just never advertises or ships one.
+A dispatch run exercises the build, the scan and every assertion without releasing: `promote-tags` and `deploy` both require `github.event_name == 'push'`, so a dispatch promotes nothing and deploys nothing even when aimed at a tag ref. It does still push `sha-<short>-<variant>` images to GHCR — it publishes images, it just never advertises or ships them.
 
 The image is pushed before it can be scanned. That is not a tradeoff, it is a constraint: BuildKit attestations can only be produced when pushing directly to a registry, because the local image store cannot hold an image carrying attestations. What the pipeline controls is not whether the artifact exists in GHCR, but what it is *called*. An image that has not passed the scan is reachable only by its commit SHA tag. It never becomes `latest`, never becomes `v1.2.3`, and never reaches production.
 
@@ -95,7 +95,7 @@ Helm and workflow findings are unaffected — `kube-linter` and `zizmor` upload 
 
 ### The Scanned Artifact Is the Deployed Artifact
 
-The scan binds to `...@sha256:<digest>`. `promote-tags` retags that same digest, and the deploy passes it to the chart via `statuslist.image.digest`, which `helm/chart/templates/deployment.yaml` prefers over `statuslist.image.tag`. Tags stay in place for readability but no longer determine what runs.
+The scan binds to `...@sha256:<digest>`. `promote-tags` retags that same digest, and the deploy resolves the promoted variant tag back to its index digest before passing it to the chart via `statuslist.image.digest`, which `helm/chart/templates/deployment.yaml` prefers over `statuslist.image.tag`. Tags stay in place for readability but no longer determine what runs.
 
 This matters because tags are mutable. Binding the scan to a digest and then deploying by tag would leave a window in which a re-run or a manual push could replace the image in between.
 
