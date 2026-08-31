@@ -427,6 +427,47 @@ jobs:
           exit-code: 1
           trivyignores: .trivyignore.yaml
 
+  helm-template-local:
+    name: Helm Template Check (Local Values)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Fetch Repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup Helm
+        uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+
+      - name: Build Helm dependencies
+        run: |
+          helm repo add open-telemetry https://open-telemetry.github.io/opentelemetry-helm-charts
+          helm dependency build helm/chart
+
+      - name: Validate Helm template with local values
+        run: |
+          set -euo pipefail
+          output_file="/tmp/statuslist-local-rendered.yaml"
+          helm template statuslist-local helm/chart -f helm/chart/values-local.yaml --namespace local > "$output_file"
+
+          # Verify APP_ENV is set to "development" as expected for local values
+          # The pattern matches the multi-line YAML structure: - name: APP_ENV followed by value: "development"
+          if ! grep -A1 'name: APP_ENV' "$output_file" | grep -q 'value: "development"'; then
+            echo "ERROR: APP_ENV=development not found in rendered template"
+            exit 1
+          fi
+
+          # Verify init container uses pinned busybox tag
+          if ! grep -q 'image: busybox:1.38' "$output_file"; then
+            echo "ERROR: init container image 'busybox:1.38' not found in rendered template"
+            exit 1
+          fi
+
+          echo "Helm template validation passed: APP_ENV=development and busybox:1.38 init container verified"
+
   kube-linter:
     name: KubeLinter Scan (Helm Chart)
     runs-on: ubuntu-latest
