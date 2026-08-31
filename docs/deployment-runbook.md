@@ -107,6 +107,7 @@ Create the GitHub `production` environment with:
 - `AWS_DEPLOY_ROLE_ARN`: IAM role ARN assumed by the deploy job through GitHub OIDC.
 - `APP_DATABASE_PORT`: database service port passed to Helm as `statuslist.env.APP_DATABASE__PORT` (for example `5432` for PostgreSQL).
 - `IMAGE_VARIANT` (optional): image variant suffix to deploy (`aws`, `gcp`, `azure`, `vault`, `fscert`). Defaults to `aws`.
+  Note: changing this selects a different compiled feature-set image; the deployment target remains AWS EKS.
 - Required reviewers: configure at least one approver.
 - Deployment branches/tags: restrict to release tags matching `v*.*.*`.
 
