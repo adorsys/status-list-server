@@ -23,10 +23,10 @@ groups:
           runbook_url: "https://github.com/adorsys/status-list-server/blob/develop/observability/README.md"
 
       # Target-down / absent-SLI guard. If the app stops being scraped (pod
-      # crash, ServiceMonitor mis-scrape, deployment deleted), the raw request
-      # metrics go absent, every sli:* recording rule goes NaN, and every burn
-      # alert above goes silent. `absent()` turns that missing series into an
-      # alertable page so a total outage is not invisible.
+      # crash, a ServiceMonitor scrape that is removed, deployment deleted), the
+      # raw request metrics go absent, every sli:* recording rule goes NaN, and
+      # every burn alert above goes silent. `absent()` turns that missing series
+      # into an alertable page so a total outage is not invisible.
       - alert: StatusListMetricsAbsent
         expr: absent(http_server_duration_seconds_bucket{otel_scope_name="status-list-server"})
         for: 5m
