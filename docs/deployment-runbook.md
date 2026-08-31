@@ -48,12 +48,12 @@ Release tags are applied by the `promote-tags` job using `docker buildx imagetoo
 
 Choose the variant that matches your cloud provider and secret storage model:
 
-| Variant   | Best For                            | Required Infrastructure                    |
-| --------- | ----------------------------------- | ------------------------------------------ |
-| `-aws`    | AWS EKS deployments                 | AWS Secrets Manager, Route53 DNS           |
-| `-gcp`    | GCP GKE deployments                 | GCP Secret Manager, Cloud DNS              |
-| `-azure`  | Azure AKS deployments               | Azure Key Vault, Azure DNS                 |
-| `-vault`  | Multi-cloud or on-prem              | HashiCorp Vault / OpenBao cluster          |
+| Variant   | Best For                            | Required Infrastructure                          |
+| --------- | ----------------------------------- | ------------------------------------------------ |
+| `-aws`    | AWS EKS deployments                 | AWS Secrets Manager, Route53 DNS                 |
+| `-gcp`    | GCP GKE deployments                 | GCP Secret Manager, Cloud DNS                    |
+| `-azure`  | Azure AKS deployments               | Azure Key Vault, Azure DNS                       |
+| `-vault`  | Multi-cloud or on-prem              | HashiCorp Vault / OpenBao cluster                |
 | `-fscert` | Air-gapped/constrained environments | Filesystem-mounted signing keys and certificates |
 
 The `-fscert` image intentionally omits the `acme` Cargo feature so the filesystem-backed certificate provider is compiled in. Configure certificate and signing-key paths through the chart or environment when selecting this variant.
