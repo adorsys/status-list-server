@@ -99,7 +99,7 @@ The scan binds to `...@sha256:<digest>`. `promote-tags` retags that same digest,
 
 This matters because tags are mutable. Binding the scan to a digest and then deploying by tag would leave a window in which a re-run or a manual push could replace the image in between.
 
-Two `concurrency` groups back that up. The workflow-level group is keyed on the ref, so re-runs of the same tag do not overlap. The `deploy` job declares a second one keyed on `deploy-production`, because two tags pushed in quick succession are *different* refs and the workflow-level group would let both drive `helm upgrade --atomic` against the same release at once. What guarantees production runs the scanned artifact is the digest binding; what the second group prevents is two deploys racing for the Helm release lock.
+Two `concurrency` groups back that up. The workflow-level group is keyed on the ref, so re-runs of the same tag do not overlap. The `deploy` job declares a second one keyed on `deploy-production`, because two tags pushed in quick succession are *different* refs and the workflow-level group would let both drive `helm upgrade --wait --rollback-on-failure` against the same release at once. What guarantees production runs the scanned artifact is the digest binding; what the second group prevents is two deploys racing for the Helm release lock.
 
 ### Which Architectures Are Scanned
 

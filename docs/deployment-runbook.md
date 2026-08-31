@@ -82,8 +82,8 @@ The production deploy command is equivalent to (using the AWS variant):
 helm upgrade --install statuslist helm/chart \
   --namespace statuslist-production \
   --create-namespace \
-  --atomic \
   --wait \
+  --rollback-on-failure \
   --timeout 10m \
   --set-string statuslist.image.repository=ghcr.io/adorsys/status-list-server \
   --set-string statuslist.image.tag=0.5.0-aws \
@@ -96,7 +96,7 @@ The digest is what actually determines the running image. `statuslist.image.dige
 
 Because of that precedence, do not run `helm upgrade --reuse-values` with only a changed tag. The stored digest still wins, so the upgrade reports success and changes nothing. Pass both values, or clear the digest with `--set statuslist.image.digest=null`.
 
-A digest that is not `sha256:` followed by 64 hex characters fails at template time rather than becoming an `ImagePullBackOff` ten minutes into `helm upgrade --atomic --wait`. `deploy` also refuses to run at all without a `sha256:` digest, so a deploy can never silently fall back to the mutable tag.
+A digest that is not `sha256:` followed by 64 hex characters fails at template time rather than becoming an `ImagePullBackOff` ten minutes into `helm upgrade --wait --rollback-on-failure`. `deploy` also refuses to run at all without a `sha256:` digest, so a deploy can never silently fall back to the mutable tag.
 
 Configure the GitHub `production` environment with required reviewers so production deploys pause for approval before AWS credentials are requested.
 
@@ -106,6 +106,7 @@ Create the GitHub `production` environment with:
 
 - `AWS_DEPLOY_ROLE_ARN`: IAM role ARN assumed by the deploy job through GitHub OIDC.
 - `APP_DATABASE_PORT`: database service port passed to Helm as `statuslist.env.APP_DATABASE__PORT` (for example `5432` for PostgreSQL).
+- `IMAGE_VARIANT` (optional): image variant suffix to deploy (`aws`, `gcp`, `azure`, `vault`, `fscert`). Defaults to `aws`.
 - Required reviewers: configure at least one approver.
 - Deployment branches/tags: restrict to release tags matching `v*.*.*`.
 
@@ -147,7 +148,7 @@ If certificate provisioning or AWS-backed storage is enabled, also confirm the a
 
 There are two rollback paths:
 
-- Failed upgrade rollback is automatic. The deploy workflow uses `--atomic --wait --timeout 10m`, so Helm rolls back during the pipeline when an upgrade fails readiness or times out.
+- Failed upgrade rollback is automatic. The deploy workflow uses `--wait --rollback-on-failure --timeout 10m`, so Helm rolls back during the pipeline when an upgrade fails readiness or times out.
 - Successful-but-bad deploy rollback is manual. If a release passes the pipeline but later proves unhealthy or incorrect, an operator must choose a previous Helm revision and run `helm rollback`.
 
 List available revisions:
@@ -184,7 +185,7 @@ Check:
 Symptoms:
 
 - `helm upgrade --install` fails after `--timeout 10m`.
-- Helm reports the release rolled back because `--atomic` is enabled.
+- Helm reports the release rolled back because `--rollback-on-failure` is enabled.
 
 Check:
 

@@ -156,8 +156,6 @@ jobs:
           - suffix: vault
           - suffix: fscert
     env:
-      # Reconstruct the image reference from first principles
-      IMAGE_REF: ${{ env.IMAGE_BASE }}:sha-${{ github.sha }}-${{ matrix.variant.suffix }}
       # Every published architecture is scanned. A shared lockfile does not make the
       # package sets identical: the two images are built by different builder images
       # to different Rust targets, and `cargo auditable` records the graph Cargo
@@ -577,9 +575,10 @@ jobs:
     env:
       # Routed through env rather than interpolated into the helm command: deploy_tag
       # derives from GITHUB_REF_NAME, which the person pushing the tag controls.
-      # Read variant from variable with safe default; allows operators to deploy
-      # non-AWS variants (gcp, azure, vault, fscert) without editing the workflow.
-      DEPLOY_VARIANT: ${{ vars.DEPLOY_VARIANT || 'aws' }}
+      # IMAGE_VARIANT selects which compiled feature-set image to deploy (suffix).
+      # The deployment target is always AWS EKS (see CLUSTER_NAME / AWS_REGION).
+      # Useful for deploying, e.g., the -vault variant to AWS EKS without AWS Secrets Manager.
+      IMAGE_VARIANT: ${{ vars.IMAGE_VARIANT || 'aws' }}
     steps:
       - name: Checkout source code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -624,17 +623,21 @@ jobs:
           set -euo pipefail
           # Derive deploy tag from the release tag
           DEPLOY_TAG="${GITHUB_REF_NAME#v}"
-          DEPLOY_VARIANT="${DEPLOY_VARIANT:-aws}"
-          FULL_TAG="${DEPLOY_TAG}-${DEPLOY_VARIANT}"
+          IMAGE_VARIANT="${IMAGE_VARIANT:-aws}"
+          FULL_TAG="${DEPLOY_TAG}-${IMAGE_VARIANT}"
 
-          # Resolve the digest at runtime from the promoted image
+          # Resolve the index digest at runtime from the promoted image.
+          # We hash the raw manifest to get the index digest (the digest of the manifest
+          # list itself), not a child platform manifest. Kubernetes needs the index
+          # digest for multi-arch images; a platform-specific digest causes ImagePullBackOff.
           IMAGE_DIGEST=$(docker buildx imagetools inspect --raw "${IMAGE_BASE}:${FULL_TAG}" \
-            | jq -r '.manifests[0].digest // empty')
+            | sha256sum | awk '{print "sha256:" $1}')
           [[ -n "$IMAGE_DIGEST" ]] || { echo '::error::Could not resolve image digest'; exit 1; }
 
           echo "Deploying ${IMAGE_BASE}:${FULL_TAG}@${IMAGE_DIGEST}"
           helm upgrade --install ${{ env.HELM_RELEASE_NAME }} helm/chart \
             --namespace ${{ env.HELM_NAMESPACE }} \
+            --create-namespace \
             --wait \
             --rollback-on-failure \
             --timeout 10m \
