@@ -2542,7 +2542,7 @@ mod test {
         )
         .unwrap();
         let issuer = "issuer-contention-mysql";
-        let cred_store = SeaOrmStore::<Credentials>::new(store_a.db.clone());
+        let cred_store = SeaOrmStore::<Credentials>::from_handle(store_a.db.clone());
         cred_store
             .insert_one(Credentials::new(issuer.to_string(), cred_key))
             .await
@@ -2722,7 +2722,8 @@ mod test {
         );
 
         // Verify A's winning snapshot was created.
-        let history_store = SeaOrmStore::<StatusListHistoryRecord>::new(store_verify.db.clone());
+        let history_store =
+            SeaOrmStore::<StatusListHistoryRecord>::from_handle(store_verify.db.clone());
         let winning_snapshot = history_store
             .find_valid_at(list_id, base_timestamp + 1)
             .await
@@ -2734,8 +2735,9 @@ mod test {
             "snap-contention-a"
         );
 
+        let verify_db = store_verify.db.current();
         let loser_snapshot = status_list_history::Entity::find_by_id(b_snapshot_id)
-            .one(&*store_verify.db)
+            .one(&*verify_db)
             .await
             .expect("Loser snapshot lookup should succeed");
         assert!(
@@ -2781,7 +2783,7 @@ mod test {
         // status_lists.issuer is a foreign key onto credentials.issuer, so the
         // credential has to be committed before either writer starts.
         let key: Jwk = serde_json::from_str(crate::test_fixtures::TEST_EC_PUBLIC_JWK).unwrap();
-        SeaOrmStore::<Credentials>::new(store_verify.db.clone())
+        SeaOrmStore::<Credentials>::from_handle(store_verify.db.clone())
             .insert_one(Credentials::new(issuer.to_string(), key))
             .await
             .unwrap();
@@ -2902,8 +2904,9 @@ mod test {
             "B must not have overwritten A's row on {backend}"
         );
 
+        let verify_db = store_verify.db.current();
         let loser_snapshot = status_list_history::Entity::find_by_id("snap-race-b")
-            .one(&*store_verify.db)
+            .one(&*verify_db)
             .await
             .expect("loser snapshot lookup should succeed");
         assert!(
@@ -3033,7 +3036,7 @@ mod test {
             sub: "sub-lockwait-mysql".to_string(),
             updated_at: v,
         };
-        SeaOrmStore::<StatusListRecord>::new(cred_store.db.clone())
+        SeaOrmStore::<StatusListRecord>::from_handle(cred_store.db.clone())
             .insert_one(base.clone())
             .await
             .unwrap();
