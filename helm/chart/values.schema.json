@@ -27,7 +27,8 @@
               "properties": {
                 "remoteKey": { "type": "string" },
                 "credentialsProperty": { "type": "string" },
-                "configProperty": { "type": "string" }
+                "configProperty": { "type": "string" },
+                "targetTemplate": { "type": "object" }
               }
             },
             "region": { "type": "string" }
@@ -41,6 +42,39 @@
               "type": "object",
               "additionalProperties": { "type": "string" }
             }
+          }
+        },
+        "secretMounts": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["name", "secretName", "mountPath"],
+            "properties": {
+              "name": { "type": "string" },
+              "secretName": { "type": "string" },
+              "mountPath": { "type": "string" },
+              "items": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "required": ["key", "path"],
+                  "properties": {
+                    "key": { "type": "string" },
+                    "path": { "type": "string" }
+                  }
+                }
+              },
+              "fileEnv": {
+                "type": "object",
+                "additionalProperties": { "type": "string" }
+              }
+            }
+          }
+        },
+        "watcher": {
+          "type": "object",
+          "properties": {
+            "pollIntervalSecs": { "type": ["string", "integer"] }
           }
         }
       }
@@ -63,7 +97,62 @@
               "type": "object",
               "properties": {
                 "name": { "const": "statuslist-secret" },
-                "creationPolicy": { "type": "string" }
+                "creationPolicy": { "type": "string" },
+                "template": { "type": "object" }
+              }
+            },
+            "data": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "required": ["secretKey", "remoteRef"],
+                "properties": {
+                  "secretKey": { "type": "string" },
+                  "remoteRef": { "type": "object" }
+                }
+              }
+            },
+            "extraExternalSecrets": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "required": ["metadata", "spec"],
+                "properties": {
+                  "metadata": {
+                    "type": "object",
+                    "required": ["name"],
+                    "properties": {
+                      "name": { "type": "string" },
+                      "labels": { "type": "object" },
+                      "annotations": { "type": "object" }
+                    }
+                  },
+                  "spec": {
+                    "type": "object",
+                    "required": ["target"],
+                    "properties": {
+                      "refreshInterval": { "type": "string" },
+                      "secretStoreRef": {
+                        "type": "object",
+                        "properties": {
+                          "name": { "type": "string" },
+                          "kind": { "type": "string" }
+                        }
+                      },
+                      "target": {
+                        "type": "object",
+                        "required": ["name"],
+                        "properties": {
+                          "name": { "type": "string" },
+                          "creationPolicy": { "type": "string" },
+                          "template": { "type": "object" }
+                        }
+                      },
+                      "data": { "type": "array" },
+                      "dataFrom": { "type": "array" }
+                    }
+                  }
+                }
               }
             }
           }
