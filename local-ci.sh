@@ -41,12 +41,10 @@ fi
 # 7. Vulnerability gate wiring (needs no network and no image)
 echo "Checking vulnerability gate wiring..."
 if command -v trivy >/dev/null 2>&1; then
-    if sh scripts/vuln-gate.sh scripts/testdata/gate-selftest-findings.json >/dev/null 2>&1; then
-        echo "  FAILED: gate passed a fixture containing a CRITICAL finding"
-        exit 1
-    fi
-    sh scripts/vuln-gate.sh scripts/testdata/gate-clean-findings.json >/dev/null
-    echo "  gate blocks on findings and passes when clean"
+    # The same script CI runs, so this checks the gate the way the release path and
+    # the scheduled re-scan do -- including that the gate names the ID it was given,
+    # which the previous inline check here did not assert.
+    sh scripts/gate-selftest.sh
 else
     echo "  skipped: trivy not found"
 fi
