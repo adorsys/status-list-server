@@ -94,8 +94,8 @@ use crate::server::AppState;
 use crate::server::health::{AlwaysReady, Readiness};
 use crate::utils::file_watcher::FileWatcher;
 #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mysql"))]
-use crate::utils::rotation_metrics::TARGET_DATABASE;
-use crate::utils::rotation_metrics::{TARGET_TOKEN_SIGNING_KEY, record_rotation};
+use crate::utils::metrics::TARGET_DATABASE;
+use crate::utils::metrics::{TARGET_TOKEN_SIGNING_KEY, record_rotation};
 
 #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mysql"))]
 fn classify_db_connect_error(err: &DbErr) -> &'static str {
@@ -124,7 +124,7 @@ async fn connect_database_pool(config: &AppConfig) -> EyeResult<sea_orm::Databas
     let db_backend = config.database.backend;
     let resolved_db_url = config
         .database
-        .resolved_url_with_password_file()
+        .load_resolved_url()
         .await
         .wrap_err("Invalid database connection configuration")?;
     let db_url = resolved_db_url.expose_secret();
@@ -313,10 +313,7 @@ fn spawn_acme_store_rotation(config: AppConfig, manager: Arc<CertManager>) {
 }
 
 #[cfg(not(feature = "acme"))]
-fn spawn_reloading_certificate_provider_rotation(
-    config: AppConfig,
-    provider: ReloadingCertificateProvider,
-) {
+fn spawn_cert_rotation(config: AppConfig, provider: ReloadingCertificateProvider) {
     let (Some(certificate_path), Some(signing_key_path)) = (
         config.server.cert.store.certificate_path.clone(),
         config.server.cert.store.signing_key_path.clone(),
@@ -557,7 +554,7 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
                 let provider =
                     ReloadingCertificateProvider::from_files(cert_path.clone(), key_path.clone())
                         .await?;
-                spawn_reloading_certificate_provider_rotation(config.clone(), provider.clone());
+                spawn_cert_rotation(config.clone(), provider.clone());
                 Arc::new(provider)
             } else {
                 Arc::new(crate::outbound::cert::StoreCertificateProvider::new(

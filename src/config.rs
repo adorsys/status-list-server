@@ -790,7 +790,7 @@ impl DatabaseConfig {
         )))
     }
 
-    pub async fn resolved_url_with_password_file(&self) -> Result<SecretString, ConfigError> {
+    pub async fn load_resolved_url(&self) -> Result<SecretString, ConfigError> {
         let Some(path) = &self.password_file else {
             return self.resolved_url();
         };
@@ -1401,7 +1401,7 @@ mod tests {
         .expect("Failed to load password-file database config");
         let resolved = tokio::runtime::Runtime::new()
             .expect("runtime")
-            .block_on(password_file_cfg.database.resolved_url_with_password_file())
+            .block_on(password_file_cfg.database.load_resolved_url())
             .expect("password-file database config should resolve");
         assert_eq!(
             resolved.expose_secret(),

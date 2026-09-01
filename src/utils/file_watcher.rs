@@ -5,8 +5,11 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, mpsc as std_mpsc};
 use std::time::Duration;
 use tokio::sync::mpsc;
+use tokio::task::JoinSet;
+use tokio::time::Instant;
 
 const DEBOUNCE: Duration = Duration::from_millis(500);
+const MIN_POLL_INTERVAL: Duration = Duration::from_secs(1);
 
 #[derive(Debug)]
 pub(crate) struct FileWatcher {
@@ -15,18 +18,32 @@ pub(crate) struct FileWatcher {
 }
 
 impl FileWatcher {
+    /// Create a watcher for a set of paths. Duplicate paths are ignored and the
+    /// fallback poll interval is clamped to at least one second.
     pub(crate) fn new(paths: Vec<PathBuf>, poll_interval: Duration) -> Self {
         let mut unique = HashSet::new();
         let paths = paths
             .into_iter()
             .filter(|path| unique.insert(path.clone()))
             .collect();
+        let poll_interval = if poll_interval < MIN_POLL_INTERVAL {
+            tracing::debug!(
+                configured_secs = poll_interval.as_secs_f64(),
+                minimum_secs = MIN_POLL_INTERVAL.as_secs_f64(),
+                "file watcher poll interval below minimum; clamping"
+            );
+            MIN_POLL_INTERVAL
+        } else {
+            poll_interval
+        };
         Self {
             paths: Arc::new(paths),
-            poll_interval: poll_interval.max(Duration::from_secs(1)),
+            poll_interval,
         }
     }
 
+    /// Spawn background watching with 500ms debouncing. The callback runs
+    /// serially, so a later change waits for any in-flight reload to finish.
     pub(crate) fn spawn<F, Fut>(self, target: &'static str, on_change: F)
     where
         F: Fn() -> Fut + Send + Sync + 'static,
@@ -103,6 +120,8 @@ fn spawn_notify_watcher(
             return;
         }
 
+        // Keep the notify watcher in scope for the process lifetime. File
+        // watchers are installed once during startup for long-lived credentials.
         loop {
             std::thread::park();
         }
@@ -119,7 +138,7 @@ fn spawn_poll_watcher(
 ) {
     tokio::spawn(async move {
         let mut fingerprints = fingerprint_all(&paths).await;
-        let mut interval = tokio::time::interval(poll_interval);
+        let mut interval = tokio::time::interval_at(Instant::now() + poll_interval, poll_interval);
         loop {
             interval.tick().await;
             let next = fingerprint_all(&paths).await;
@@ -158,9 +177,7 @@ fn spawn_debouncer<F, Fut>(
             );
             while matches!(tokio::time::timeout(DEBOUNCE, rx.recv()).await, Ok(Some(_))) {}
             let callback = callback.clone();
-            tokio::spawn(async move {
-                callback().await;
-            });
+            callback().await;
         }
     });
 }
@@ -192,16 +209,25 @@ fn path_relevant(changed: &Path, watched: &Path) -> bool {
     changed == watched
         || changed.starts_with(watched)
         || watched.starts_with(changed)
-        || changed.file_name().is_some_and(|name| name == "..data")
-        || changed
-            .parent()
-            .is_some_and(|parent| watched.parent() == Some(parent))
+        || (changed.file_name().is_some_and(|name| name == "..data")
+            && changed.parent() == watched.parent())
 }
 
 async fn fingerprint_all(paths: &[PathBuf]) -> HashMap<PathBuf, Option<u64>> {
-    let mut fingerprints = HashMap::new();
+    let mut tasks = JoinSet::new();
     for path in paths {
-        fingerprints.insert(path.clone(), fingerprint(path).await);
+        let path = path.clone();
+        tasks.spawn(async move {
+            let fingerprint = fingerprint(&path).await;
+            (path, fingerprint)
+        });
+    }
+
+    let mut fingerprints = HashMap::with_capacity(paths.len());
+    while let Some(result) = tasks.join_next().await {
+        if let Ok((path, fingerprint)) = result {
+            fingerprints.insert(path, fingerprint);
+        }
     }
     fingerprints
 }
@@ -242,5 +268,61 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(700)).await;
 
         assert_eq!(rotations.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn debouncer_serializes_callbacks() {
+        let active = Arc::new(AtomicUsize::new(0));
+        let max_active = Arc::new(AtomicUsize::new(0));
+        let completed = Arc::new(AtomicUsize::new(0));
+        let (tx, rx) = mpsc::channel(8);
+        let paths = Arc::new(vec![PathBuf::from("/tmp/secret")]);
+
+        spawn_debouncer(
+            paths,
+            rx,
+            Arc::new({
+                let active = active.clone();
+                let max_active = max_active.clone();
+                let completed = completed.clone();
+                move || {
+                    let active = active.clone();
+                    let max_active = max_active.clone();
+                    let completed = completed.clone();
+                    async move {
+                        let current = active.fetch_add(1, Ordering::SeqCst) + 1;
+                        max_active.fetch_max(current, Ordering::SeqCst);
+                        tokio::time::sleep(Duration::from_millis(200)).await;
+                        active.fetch_sub(1, Ordering::SeqCst);
+                        completed.fetch_add(1, Ordering::SeqCst);
+                    }
+                }
+            }),
+            "test",
+        );
+
+        tx.send(()).await.expect("first event");
+        tokio::time::sleep(DEBOUNCE + Duration::from_millis(50)).await;
+        tx.send(()).await.expect("second event");
+        tokio::time::sleep(DEBOUNCE + Duration::from_millis(500)).await;
+
+        assert_eq!(max_active.load(Ordering::SeqCst), 1);
+        assert_eq!(completed.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn k8s_data_symlink_events_only_match_same_directory() {
+        assert!(path_relevant(
+            Path::new("/var/run/secrets/db/..data"),
+            Path::new("/var/run/secrets/db/password")
+        ));
+        assert!(!path_relevant(
+            Path::new("/var/run/secrets/other/..data"),
+            Path::new("/var/run/secrets/db/password")
+        ));
+        assert!(!path_relevant(
+            Path::new("/var/run/secrets/db/unrelated"),
+            Path::new("/var/run/secrets/db/password")
+        ));
     }
 }

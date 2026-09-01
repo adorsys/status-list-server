@@ -1,5 +1,8 @@
 use color_eyre::eyre::{Context, Result};
-use opentelemetry::metrics::MeterProvider as _;
+use opentelemetry::{
+    KeyValue, global,
+    metrics::{Counter, Gauge, MeterProvider as _},
+};
 use opentelemetry_otlp::{MetricExporter, WithExportConfig};
 use opentelemetry_prometheus::exporter;
 use opentelemetry_sdk::{
@@ -9,7 +12,7 @@ use opentelemetry_sdk::{
 use prometheus::{Encoder, Registry, TextEncoder};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::config::TelemetryConfig;
 
@@ -20,6 +23,17 @@ static METRICS_TEST_LOCK: Mutex<()> = Mutex::new(());
 /// on this so a fresh provider (e.g. every metric test) doesn't keep writing to
 /// a stale, previously-dropped provider.
 static METER_PROVIDER_GENERATION: AtomicU64 = AtomicU64::new(0);
+static ROTATION_METRICS: OnceLock<Mutex<Option<(u64, RotationMetrics)>>> = OnceLock::new();
+
+#[cfg(any(feature = "sqlite", feature = "postgres", feature = "mysql"))]
+pub(crate) const TARGET_DATABASE: &str = "database";
+pub(crate) const TARGET_TOKEN_SIGNING_KEY: &str = "token_signing_key";
+
+#[derive(Clone)]
+struct RotationMetrics {
+    total: Counter<u64>,
+    last_success_timestamp: Gauge<f64>,
+}
 
 /// The current global meter-provider generation.
 pub(crate) fn provider_generation() -> u64 {
@@ -51,6 +65,44 @@ pub(crate) fn metrics_test_lock() -> std::sync::MutexGuard<'static, ()> {
     METRICS_TEST_LOCK
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+fn rotation_metrics() -> RotationMetrics {
+    cached_instruments(&ROTATION_METRICS, || {
+        let meter = global::meter("status-list-server");
+        RotationMetrics {
+            total: meter
+                .u64_counter("credential_rotation_total")
+                .with_description("Credential rotation attempts by target and outcome.")
+                .build(),
+            last_success_timestamp: meter
+                .f64_gauge("credential_rotation_last_success_timestamp")
+                .with_description("Unix timestamp of the last successful credential rotation.")
+                .with_unit("s")
+                .build(),
+        }
+    })
+}
+
+pub(crate) fn record_rotation(target: &'static str, success: bool) {
+    let instruments = rotation_metrics();
+    let outcome = if success { "success" } else { "failure" };
+    let attrs = [
+        KeyValue::new("target", target),
+        KeyValue::new("outcome", outcome),
+    ];
+
+    instruments.total.add(1, &attrs);
+
+    if success {
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|duration| duration.as_secs_f64())
+            .unwrap_or_default();
+        instruments
+            .last_success_timestamp
+            .record(timestamp, &[KeyValue::new("target", target)]);
+    }
 }
 
 /// Initialize the OpenTelemetry metrics pipeline before any instruments are

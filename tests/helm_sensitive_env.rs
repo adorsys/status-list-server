@@ -134,8 +134,8 @@ fn rendered_chart_uses_split_database_credentials() {
         "name: APP_DATABASE__PORT",
         "name: APP_DATABASE__USERNAME",
         "name: APP_DATABASE__PASSWORD_FILE",
-        "value: \"/var/run/status-list-server/secrets/postgres-password\"",
-        "name: app-secrets",
+        "value: \"/var/run/status-list-server/database/password\"",
+        "name: database-credentials",
         "secretName: statuslist-secret",
         "name: APP_DATABASE__NAME",
     ] {

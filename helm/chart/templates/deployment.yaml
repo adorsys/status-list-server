@@ -208,9 +208,6 @@ spec:
             {{- if not (hasKey $env "APP_DATABASE__NAME") }}
               {{- $_ := set $env "APP_DATABASE__NAME" .Values.postgres.auth.database }}
             {{- end }}
-            {{- if not (hasKey $env "APP_DATABASE__PASSWORD_FILE") }}
-              {{- $_ := set $env "APP_DATABASE__PASSWORD_FILE" "/var/run/status-list-server/secrets/postgres-password" }}
-            {{- end }}
             {{- range $name, $_ := $secretFileEnv }}
               {{- if hasKey $env $name }}
                 {{- fail (printf "statuslist.secretMounts fileEnv defines %s, which duplicates a rendered statuslist environment variable; define each environment variable only once" $name) }}
@@ -264,9 +261,6 @@ spec:
           volumeMounts:
             - name: tmp
               mountPath: /tmp
-            - name: app-secrets
-              mountPath: /var/run/status-list-server/secrets
-              readOnly: true
           {{- if .Values.statuslist.aws.mountCredentials }}
             - name: aws-credentials-volume
               mountPath: /home/nobody/.aws
@@ -280,9 +274,6 @@ spec:
       volumes:
         - name: tmp
           emptyDir: {}
-        - name: app-secrets
-          secret:
-            secretName: {{ include "status-list-server-chart.appSecretName" . }}
       {{- if .Values.statuslist.aws.mountCredentials }}
         - name: aws-credentials-volume
           secret:

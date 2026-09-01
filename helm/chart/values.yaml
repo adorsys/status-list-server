@@ -178,7 +178,15 @@ statuslist:
   #   fileEnv:
   #     APP_SERVER__CERT__STORE__CERTIFICATE_PATH: statuslist.crt
   #     APP_SERVER__CERT__STORE__SIGNING_KEY_PATH: statuslist.key
-  secretMounts: []
+  secretMounts:
+    - name: database-credentials
+      secretName: statuslist-secret
+      mountPath: /var/run/status-list-server/database
+      items:
+        - key: postgres-password
+          path: password
+      fileEnv:
+        APP_DATABASE__PASSWORD_FILE: password
 
   # Watcher configuration for file-based credential rotation detection.
   # When pollIntervalSecs is set, APP_WATCHER__POLL_INTERVAL_SECS is injected.
