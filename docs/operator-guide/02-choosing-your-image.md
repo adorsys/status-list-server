@@ -33,30 +33,37 @@ store secrets and what DNS provider you use.
 
 ## 2. Reference a variant
 
-Images are tagged `<version>-<suffix>` under `ghcr.io/adorsys/status-list-server`, for
-example `0.6.0-aws`, `0.6.0-vault`. Set the image in your values:
+Images are published as **multi-arch** variants tagged
+`<version>-<variant>` (for example `1.2.0-aws`, `1.2.0-vault`), plus short-form
+version tags (`1.2-aws`) and `latest-<variant>`. **No unsuffixed image (`latest`,
+`1.2.0`) is published** — you must reference a variant explicitly. Set the image in your
+values:
 
 ```yaml
 statuslist:
   image:
     repository: ghcr.io/adorsys/status-list-server
-    tag: "0.6.0-aws" # or -gcp, -azure, -vault, -fscert
+    tag: "1.2.0-aws" # or -gcp, -azure, -vault, -fscert
 ```
 
 For production, pin by digest (see [03-helm-installation.md](03-helm-installation.md)):
 
 ```bash
 --set-string statuslist.image.repository=ghcr.io/adorsys/status-list-server \
---set-string statuslist.image.tag=0.6.0-vault \
+--set-string statuslist.image.tag=1.2.0-vault \
 --set-string statuslist.image.digest=sha256:<digest>
 ```
 
-### What if I do not see suffix tags for my version?
+> [!TIP]
+> The chart's empty-tag default resolves to the **AWS variant** for compatibility. If your
+> backend is GCP/Azure/Vault/filesystem, set the matching `-<variant>` tag explicitly so
+> the binary links in the correct crypto-material backend.
 
-Multi-variant image publishing is wired into the release pipeline. If a specific suffix
-for your target version is missing from the registry, use the closest variant whose
-backend matches your environment or build locally from `Dockerfile` with the matching
-`FEATURES` build-arg:
+### Building locally for an unpublished variant
+
+All 5 variants are published on release. To test a variant before a release, or to try
+custom feature combinations, build from the `Dockerfile` with the matching `FEATURES`
+build-arg:
 
 ```bash
 docker build --build-arg FEATURES="postgres,vault,acme" \
