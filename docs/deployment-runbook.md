@@ -147,6 +147,16 @@ kubectl describe pod -l app.kubernetes.io/name=status-list-server -n statuslist-
 
 If certificate provisioning or AWS-backed storage is enabled, also confirm the app can reach AWS services by checking application logs for successful Secrets Manager or certificate renewal operations.
 
+## File-Based Secret Rotation
+
+The Helm chart can mount Secrets as files and inject file-path environment variables, but zero-downtime reload depends on running an application image that contains the file watcher and pool/key reload behavior from issue #456. Without that image support, treat the chart values as preparatory and perform a controlled rollout after credential or key changes.
+
+When `APP_DATABASE__PASSWORD_FILE` is configured, the chart gives file-based credentials precedence and does not inject `APP_DATABASE__PASSWORD`. This avoids a pod that mounts a rotated password file while the application silently keeps using an older startup password from an environment variable.
+
+The Deployment `checksum/secret` annotation tracks Helm-rendered ExternalSecret manifests. It rolls pods when the chart template or Helm values change, but it does not change when External Secrets Operator syncs new secret data from Vault, AWS, GCP, or Azure. Data-only rotations rely on Kubernetes Secret volume updates plus the application watcher, or on an explicit `kubectl rollout restart` for images without reload support.
+
+Database credential rotation must be coordinated with the database owner. Create and validate the new credential in PostgreSQL while the old credential remains valid, publish the new value to the external secret store, wait for ESO refresh plus watcher polling plus validation, and revoke the old credential only after every replica is healthy on the new pool. Roll back by restoring the old external secret value before the old database credential is revoked.
+
 ## Rollback
 
 There are two rollback paths:
