@@ -7,6 +7,7 @@ This guide provides instructions for deploying the Status List Server using the 
 - Kubernetes cluster (e.g., AWS EKS)
 - Helm 3 installed
 - `kubectl` configured to connect to your cluster
+- External Secrets Operator (ESO) installed when `externalSecret.enabled=true` (the default). The chart renders `external-secrets.io/v1` `ExternalSecret`, `SecretStore`, and `ClusterSecretStore` references, so the cluster CRDs must serve `external-secrets.io/v1` before installing or upgrading this chart. ESO v0.16 promoted these resources to `v1`; upgrade the ESO controller and CRDs together, and if CRDs are managed separately, apply the matching CRD bundle before upgrading the operator.
 
 ## Chart Dependencies
 
@@ -135,6 +136,8 @@ Replace `<HOSTED_ZONE_ID>`, `<REGION>`, and `<ACCOUNT_ID>` with your values, and
 ## SecretStore Providers
 
 External Secret Operator's `SecretStore` is provider-neutral via `secretStore.provider` (`aws` | `vault` | `gcp` | `azure` | `raw`). The shipped default is `aws`. A `SecretStore` is rendered **only** when `externalSecret.enabled=true` **and** `secretStore.enabled=true` — in the no-ESO fallback mode it is never emitted, so a cluster without ESO CRDs accepts the release.
+
+This chart uses the stable ESO API group/version `external-secrets.io/v1`. Before installing with ESO enabled, verify that the installed CRDs serve `v1` for `externalsecrets.external-secrets.io`, `secretstores.external-secrets.io`, `clustersecretstores.external-secrets.io`, and any cluster-scoped resources you use. Upgrade ESO and its CRDs as one unit; mismatched controller/CRD versions can cause Kubernetes to reject the rendered resources or ESO reconciliation to fail.
 
 ```yaml
 secretStore:

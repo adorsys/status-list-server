@@ -142,6 +142,14 @@ spec:
                 {{- end }}
               {{- end }}
             {{- end }}
+            {{- range $name, $_ := $secretFileEnv }}
+              {{- if eq $name "APP_DATABASE__URL" }}
+                {{- fail "statuslist.secretMounts fileEnv must not define APP_DATABASE__URL because it would expose assembled credentials in pod metadata; use APP_DATABASE__HOST/PORT/USERNAME/NAME/QUERY plus APP_DATABASE__PASSWORD_FILE" }}
+              {{- end }}
+              {{- if eq $name "APP_DATABASE__PASSWORD" }}
+                {{- fail "statuslist.secretMounts fileEnv must not define APP_DATABASE__PASSWORD; use APP_DATABASE__PASSWORD_FILE for mounted database password files" }}
+              {{- end }}
+            {{- end }}
             {{- if hasKey $env "APP_DATABASE__URL" }}
               {{- fail "statuslist.env.APP_DATABASE__URL is not supported by this chart because it exposes assembled credentials in pod metadata; use APP_DATABASE__HOST/PORT/USERNAME/NAME/QUERY plus the chart-managed APP_DATABASE__PASSWORD SecretKeyRef" }}
             {{- end }}
@@ -200,6 +208,35 @@ spec:
             {{- if not (hasKey $env "APP_DATABASE__NAME") }}
               {{- $_ := set $env "APP_DATABASE__NAME" .Values.postgres.auth.database }}
             {{- end }}
+            {{- range $name, $_ := $secretFileEnv }}
+              {{- if hasKey $env $name }}
+                {{- fail (printf "statuslist.secretMounts fileEnv defines %s, which duplicates a rendered statuslist environment variable; define each environment variable only once" $name) }}
+              {{- end }}
+            {{- end }}
+            {{- $chartManagedEnv := dict }}
+            {{- $appRegionForValidation := include "status-list-server-chart.appRegion" . }}
+            {{- $watcherPollInterval := "" }}
+            {{- if .Values.statuslist.watcher }}
+              {{- $watcherPollInterval = trim (toString (.Values.statuslist.watcher.pollIntervalSecs | default "")) }}
+            {{- end }}
+            {{- if and (eq .Values.secretStore.provider "aws") $appRegionForValidation }}
+              {{- $_ := set $chartManagedEnv "APP_AWS__REGION" true }}
+            {{- end }}
+            {{- if .Values.statuslist.aws.mountCredentials }}
+              {{- $_ := set $chartManagedEnv "AWS_SHARED_CREDENTIALS_FILE" true }}
+              {{- $_ := set $chartManagedEnv "AWS_CONFIG_FILE" true }}
+            {{- end }}
+            {{- if ne $watcherPollInterval "" }}
+              {{- $_ := set $chartManagedEnv "APP_WATCHER__POLL_INTERVAL_SECS" true }}
+            {{- end }}
+            {{- if not (or (hasKey $env "APP_DATABASE__PASSWORD_FILE") (hasKey $secretFileEnv "APP_DATABASE__PASSWORD_FILE")) }}
+              {{- $_ := set $chartManagedEnv "APP_DATABASE__PASSWORD" true }}
+            {{- end }}
+            {{- range $name, $_ := $secretFileEnv }}
+              {{- if hasKey $chartManagedEnv $name }}
+                {{- fail (printf "statuslist.secretMounts fileEnv defines %s, which duplicates a chart-managed environment variable; define each environment variable only once" $name) }}
+              {{- end }}
+            {{- end }}
             {{- range $name, $value := $env }}
             - name: {{ $name }}
               value: {{ $value | quote }}
@@ -220,11 +257,9 @@ spec:
               value: {{ $path | quote }}
             {{- end }}
             {{- /* Watcher poll interval for credential rotation detection */}}
-            {{- if and .Values.statuslist.watcher .Values.statuslist.watcher.pollIntervalSecs }}
-            {{- if ne .Values.statuslist.watcher.pollIntervalSecs "" }}
+            {{- if ne $watcherPollInterval "" }}
             - name: APP_WATCHER__POLL_INTERVAL_SECS
-              value: {{ .Values.statuslist.watcher.pollIntervalSecs | quote }}
-            {{- end }}
+              value: {{ $watcherPollInterval | quote }}
             {{- end }}
             {{- if not (or (hasKey $env "APP_DATABASE__PASSWORD_FILE") (hasKey $secretFileEnv "APP_DATABASE__PASSWORD_FILE")) }}
             - name: APP_DATABASE__PASSWORD

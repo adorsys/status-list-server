@@ -37,7 +37,7 @@ externalSecret:
         data:
           postgres-password: "{{ .postgres_password }}"
     data:
-      - secretKey: postgres-password
+      - secretKey: postgres_password
         remoteRef:
           key: secret/data/statuslist/production/database
           property: password
