@@ -20,6 +20,12 @@ Object names below follow the production release (`statuslist` in namespace
 | SecretStore       | `statuslist-secret-store`                         |
 | NetworkPolicy     | `statuslist-status-list-server-network-policy`    |
 
+> **Naming caveat:** Object names above assume release `statuslist` with **no
+> `fullnameOverride`** set. The Deployment (`<fullname>-deployment`) and dependent object names
+> derive from the Helm `fullname` helper, which honors `fullnameOverride`; if you set it, substitute
+> that value for `statuslist-status-list-server` in every command below. The application Secret name
+> is fixed (`statuslist-secret`) and is not configurable.
+
 Application errors are quoted verbatim from the source (see the `Source` line in each entry),
 so they stay grep-able. Kubernetes and External Secrets Operator (ESO) symptoms are platform
 behaviors and are labeled as such.
@@ -83,9 +89,15 @@ password rotation by restarting the rollout and watching this specific message d
 ### `Database backend 'X' configured, but feature flag for it was not compiled in.`
 
 **When you see this:** At startup, when the configured `database.backend` is `Memory` and the
-`memory` feature is absent, or any backend whose compile-time feature was not enabled.
+`memory` feature is absent, or any backend whose compile-time feature was not enabled. There are
+**two distinct messages** depending on which backend is missing; grep for either variant:
 
-*Source: `src/setup.rs:256-259`, `src/setup.rs:184-187`*
+- `Database backend 'memory' configured, but 'memory' feature flag was not compiled in.`
+  (the `Memory` backend when the `memory` feature is absent)
+- `Database backend 'X' configured, but feature flag for it was not compiled in.`
+  (a backend compiled out entirely, no SQL/memory feature present)
+
+*Source: `src/setup.rs:184-187` (memory variant), `src/setup.rs:256-259` (generic variant)*
 
 **Root cause:** Image **variant mismatch** — the container image you pulled was built with a
 different feature set than the configuration expects (e.g. a build without `postgres`/`sqlite`/
@@ -488,16 +500,20 @@ collector, or readiness fails on `database unreachable`, while the services are 
 
 *Source (chart): `helm/chart/templates/network-policy.yaml`*
 
-**Root cause:** When `statuslist.networkPolicy.enabled`, the rendered `NetworkPolicy` allows
-egress **only** to:
+**Root cause:** When `statuslist.networkPolicy.enabled`, the rendered `NetworkPolicy` scopes
+egress as follows:
 
 - the `postgres` pods (selector `app.kubernetes.io/name=postgres`) plus anything appended via
-  `statuslist.networkPolicy.egressInternal`,
-- ports `443` and `53` (TCP/UDP),
+  `statuslist.networkPolicy.egressInternal` — on the database port only;
+- **any destination** on TCP `443` and TCP/UDP `53` (DNS/HTTPS) — this egress rule has no
+  destination selector, so it is not limited to the pod selectors;
 - and, when the `opentelemetry-collector` subchart is enabled, the collector pods on `4317`/`4318`.
 
-Any other egress (a Vault/OpenBao server outside the podSelector, a different DB service name,
-an OTLP collector not selected) is silently dropped.
+Any other egress — a Vault/OpenBao server on a non-443 port, a different DB service name, an OTLP
+collector on a different port, or a `podSelector` that does not match the target labels — is
+silently dropped. Note that a Vault server exposing 443 may actually be reachable (the 443/53 rule
+is open to all destinations); if it is blocked, it is usually on a non-443 port or because egress
+`ipBlock`/`podSelector` coverage is missing.
 
 **Diagnostics:**
 
@@ -606,6 +622,7 @@ For quick grep, the application emits these verbatim (with the primary source fi
 
 - `Failed to connect to database (kind=..., ...)` — `src/setup.rs`
 - `Database backend '...' configured, but feature flag for it was not compiled in.` — `src/setup.rs`
+  (and `Database backend 'memory' configured, but 'memory' feature flag was not compiled in.`) — `src/setup.rs:184-187`
 - `URL scheme does not match configured backend '...'` — `src/setup.rs`
 - `Ambiguous database configuration: use either database.url or split database fields, not both` — `src/config.rs`
 - `Missing required config field: database.password` (and `database.host`, `database.username`, `database.name`, `database.url or split database fields`) — `src/config.rs`
