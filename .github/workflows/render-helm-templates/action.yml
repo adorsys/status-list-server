@@ -20,6 +20,15 @@ runs:
           --set secretStore.provider=gcp \
           --set secretStore.gcp.projectID=my-project-id \
           --output-dir /tmp/rendered/gcp
+        helm template status-list-server helm/chart \
+          --set secretStore.provider=gcp \
+          --set secretStore.gcp.projectID=my-project-id \
+          --set-string 'externalSecret.spec.data[0].secretKey=postgres-password' \
+          --set-string 'externalSecret.spec.data[0].remoteRef.key=statuslist-postgres-password' \
+          --set-string 'externalSecret.spec.data[0].remoteRef.version=latest' \
+          --set-string 'externalSecret.spec.data[0].remoteRef.decodingStrategy=None' \
+          --set-string 'externalSecret.spec.data[0].remoteRef.conversionStrategy=Default' \
+          --output-dir /tmp/rendered/gcp-remote-ref
         # Azure Workload Identity: ESO uses its own ServiceAccount, not the app KSA.
         helm template status-list-server helm/chart \
           --set secretStore.provider=azure \
@@ -83,8 +92,32 @@ runs:
         if ! grep -qE '^\s+gcpsm:' /tmp/rendered/gcp/status-list-server/templates/secret-store.yaml; then
           echo "ERROR: gcp provider SecretStore missing gcpsm block"; exit 1
         fi
+        if ! grep -q 'version: latest' /tmp/rendered/gcp-remote-ref/status-list-server/templates/external-secrets.yaml; then
+          echo "ERROR: ExternalSecret remoteRef.version must be rendered"; exit 1
+        fi
+        if ! grep -q 'decodingStrategy: None' /tmp/rendered/gcp-remote-ref/status-list-server/templates/external-secrets.yaml; then
+          echo "ERROR: ExternalSecret remoteRef.decodingStrategy must be rendered"; exit 1
+        fi
+        if ! grep -q 'conversionStrategy: Default' /tmp/rendered/gcp-remote-ref/status-list-server/templates/external-secrets.yaml; then
+          echo "ERROR: ExternalSecret remoteRef.conversionStrategy must be rendered"; exit 1
+        fi
         if ! grep -qE '^\s+azurekv:' /tmp/rendered/azure/status-list-server/templates/secret-store.yaml; then
           echo "ERROR: azure provider SecretStore missing azurekv block"; exit 1
+        fi
+        # File-based secret env paths are explicit and do not require volume items.
+        # When APP_DATABASE__PASSWORD_FILE is configured, the chart must not also
+        # inject APP_DATABASE__PASSWORD from a startup SecretKeyRef.
+        helm template status-list-server helm/chart \
+          --set-string 'statuslist.secretMounts[0].name=database-credentials' \
+          --set-string 'statuslist.secretMounts[0].secretName=postgres-access' \
+          --set-string 'statuslist.secretMounts[0].mountPath=/etc/secrets/database' \
+          --set-string 'statuslist.secretMounts[0].fileEnv.APP_DATABASE__PASSWORD_FILE=password' \
+          --output-dir /tmp/rendered/file-env-no-items
+        if ! grep -q 'name: APP_DATABASE__PASSWORD_FILE' /tmp/rendered/file-env-no-items/status-list-server/templates/deployment.yaml; then
+          echo "ERROR: fileEnv must render APP_DATABASE__PASSWORD_FILE"; exit 1
+        fi
+        if grep -q 'name: APP_DATABASE__PASSWORD$' /tmp/rendered/file-env-no-items/status-list-server/templates/deployment.yaml; then
+          echo "ERROR: APP_DATABASE__PASSWORD must not render when APP_DATABASE__PASSWORD_FILE is configured"; exit 1
         fi
         helm template status-list-server helm/chart \
           --set externalSecret.enabled=false \

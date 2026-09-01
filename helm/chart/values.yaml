@@ -110,6 +110,9 @@ statuslist:
       credentialsProperty: "CREDENTIALS"
       # Property within remoteKey holding the AWS shared config file.
       configProperty: "CONFIG"
+      # Optional ESO target.template for the dedicated aws-credentials-secret only.
+      # The application ExternalSecret target.template is intentionally not reused here.
+      targetTemplate: {}
     # Plain (non-secret) AWS region. APP_AWS__REGION is rendered only when an effective
     # region is explicitly configured. Leave empty (default) so the application does not
     # override the AWS SDK's instance-metadata region discovery (recommended for
@@ -128,32 +131,40 @@ statuslist:
 
   # File-based secret mounts for production credential/key rotation.
   # Mounts Kubernetes Secrets as files into the container at specified paths.
-  # This enables zero-downtime rotation and is more secure than env vars for sensitive data.
-  # When database secret mount is present, APP_DATABASE__PASSWORD_FILE is injected automatically.
-  # When token key mounts are present, APP_SERVER__CERT__STORE__CERTIFICATE_PATH and
-  # APP_SERVER__CERT__STORE__SIGNING_KEY_PATH are injected automatically.
+  # The current chart support is preparatory for application images that implement
+  # file reload support (see issue #456). Use fileEnv to map a mounted file path
+  # into an application environment variable. Paths are relative to mountPath and
+  # work whether items is present or the whole Secret is mounted.
+  # If APP_DATABASE__PASSWORD_FILE is configured via statuslist.env or fileEnv, the
+  # chart does not inject APP_DATABASE__PASSWORD, so the application cannot silently
+  # keep using a stale startup password from an environment variable.
+  # Example:
+  # - name: database-credentials
+  #   secretName: postgres-access
+  #   mountPath: /etc/secrets/database
+  #   items:
+  #     - key: password
+  #       path: password
+  #   fileEnv:
+  #     APP_DATABASE__PASSWORD_FILE: password
+  # - name: signing-keys
+  #   secretName: statuslist-token-keys
+  #   mountPath: /etc/secrets/token-keys
+  #   items:
+  #     - key: statuslist.crt
+  #       path: statuslist.crt
+  #     - key: statuslist.key
+  #       path: statuslist.key
+  #   fileEnv:
+  #     APP_SERVER__CERT__STORE__CERTIFICATE_PATH: statuslist.crt
+  #     APP_SERVER__CERT__STORE__SIGNING_KEY_PATH: statuslist.key
   secretMounts: []
 
   # Watcher configuration for file-based credential rotation detection.
-  # When pollIntervalSecs is set, APP_WATCHER__POLL_INTERVAL_SECS is automatically injected.
+  # When pollIntervalSecs is set, APP_WATCHER__POLL_INTERVAL_SECS is injected.
+  # This requires an application image that implements the watcher contract from issue #456.
   watcher:
     pollIntervalSecs: ""
-    # Example: Database credentials mounted as files
-    # - name: db-credentials
-    #   secretName: postgres-access
-    #   mountPath: /etc/secrets/database
-    #   items:
-    #     - key: password
-    #       path: password
-    # Example: Token signing keys for certificate rotation
-    # - name: token-signing-keys
-    #   secretName: statuslist-token-keys
-    #   mountPath: /etc/secrets/token-keys
-    #   items:
-    #     - key: statuslist.crt
-    #       path: statuslist.crt
-    #     - key: statuslist.key
-    #       path: statuslist.key
   livenessProbe:
     httpGet:
       path: /health/live
@@ -287,6 +298,11 @@ externalSecret:
         remoteRef:
           key: statuslist-secret
           property: POSTGRES_PASSWORD
+    # Optional additional ExternalSecret resources for separately mounted Secrets,
+    # for example file-based database credentials, token signing keys, or API keys.
+    # Each entry renders as its own ExternalSecret and may override refreshInterval
+    # and secretStoreRef; defaults come from externalSecret.spec.
+    extraExternalSecrets: []
 
 secretStore:
   enabled: true

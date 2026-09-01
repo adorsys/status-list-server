@@ -88,7 +88,7 @@ When `statuslist.aws.mountCredentials=true` (the default) **and** `externalSecre
 - `credentials` ← `remoteKey`/`credentialsProperty` (the AWS shared credentials file, INI format, e.g. `[default]\naws_access_key_id=...\naws_secret_access_key=...`)
 - `config` ← `remoteKey`/`configProperty` (the AWS shared config file)
 
-The chart mounts that Secret at `/home/nobody/.aws` and sets `AWS_SHARED_CREDENTIALS_FILE` / `AWS_CONFIG_FILE`. Because the chart now owns provisioning of `aws-credentials-secret`, a first release never mounts a Secret that nothing created. In the no-ESO fallback mode (`externalSecret.enabled=false`), the mounted path is not wired automatically — operators must create `aws-credentials-secret` themselves or use Workload Identity.
+The chart mounts that Secret at `/home/nobody/.aws` and sets `AWS_SHARED_CREDENTIALS_FILE` / `AWS_CONFIG_FILE`. Because the chart now owns provisioning of `aws-credentials-secret`, a first release never mounts a Secret that nothing created. The application ExternalSecret target template is not reused for this dedicated AWS credentials Secret; use `statuslist.aws.credentialsSecret.targetTemplate` only if the AWS Secret itself needs templating. In the no-ESO fallback mode (`externalSecret.enabled=false`), the mounted path is not wired automatically — operators must create `aws-credentials-secret` themselves or use Workload Identity.
 
 ### Least-privilege IAM policy for the application role
 
@@ -171,6 +171,29 @@ secretStore:
 
 Provider selection is fail-closed: an unsupported `secretStore.provider` value is rejected by the chart's `values.schema.json` and a Helm `fail`, and contradictory mode combinations (ESO disabled while a SecretStore is requested) do not render the ESO CR.
 
+## File-Based Secret Mounts and Rotation
+
+`statuslist.secretMounts` mounts operator-managed Kubernetes Secrets as read-only files. Add `fileEnv` to a mount to expose a file path through the application environment:
+
+```yaml
+statuslist:
+  secretMounts:
+    - name: database-credentials
+      secretName: statuslist-db-credentials
+      mountPath: /etc/secrets/database
+      items:
+        - key: password
+          path: password
+      fileEnv:
+        APP_DATABASE__PASSWORD_FILE: password
+```
+
+`fileEnv` values are relative to `mountPath`, and they work with or without `items`. When `APP_DATABASE__PASSWORD_FILE` is set through either `statuslist.env` or `secretMounts[].fileEnv`, the chart does not inject `APP_DATABASE__PASSWORD`; file-based configuration has precedence and there is no stale startup password environment variable for the application to keep using.
+
+This chart support is preparatory for application images that implement the file-watcher and reload behavior from issue #456. Current images that only read `APP_DATABASE__PASSWORD` at startup still need a rollout after secret changes. The `checksum/secret` annotation only reacts to Helm-rendered ExternalSecret template or value changes; it does not change when External Secrets Operator later syncs new data from Vault, AWS, GCP, or Azure into a Kubernetes Secret.
+
+For mounted Secrets that should be created by ESO, define them under `externalSecret.spec.extraExternalSecrets` and set each `target.name` to the `secretMounts[].secretName` value. If customer-side provisioning is used instead, the prerequisite Kubernetes Secret names and keys must exist before Helm deploys, otherwise Kubernetes cannot mount the volumes.
+
 ## Fallback Kubernetes Secret (no External Secrets Operator)
 
 For clusters that do **not** run External Secret Operator, the chart can render a plain Kubernetes `Secret` that the Deployment references:
@@ -235,7 +258,7 @@ Use `APP_DATABASE__QUERY` for non-secret driver parameters such as `sslmode=veri
 
 Password fields are rendered with `valueFrom.secretKeyRef`, so `kubectl describe pod` shows the referenced Secret name/key rather than a connection string containing credentials. Operators should still restrict RBAC for pod inspection, Secret reads, exec access, ephemeral containers, and workload log access to trusted roles only, because environment variables are visible inside the running container and Secret references identify where credentials live.
 
-For external databases such as RDS, set `APP_DATABASE__HOST`, `APP_DATABASE__PORT`, `APP_DATABASE__BACKEND`, `APP_DATABASE__USERNAME`, `APP_DATABASE__NAME`, and optional `APP_DATABASE__QUERY` through `statuslist.env`. Do not set `APP_DATABASE__PASSWORD` there. The chart always wires `APP_DATABASE__PASSWORD` from a Kubernetes Secret key named `postgres-password`: either the `externalSecret.spec.target.name` Secret when `externalSecret.enabled=true`, or the `statuslist-secret` Secret otherwise. This key name is a hard chart contract even for MySQL or MariaDB backends, so create or sync that exact Secret/key with the external database password before deploying
+For external databases such as RDS, set `APP_DATABASE__HOST`, `APP_DATABASE__PORT`, `APP_DATABASE__BACKEND`, `APP_DATABASE__USERNAME`, `APP_DATABASE__NAME`, and optional `APP_DATABASE__QUERY` through `statuslist.env`. Do not set `APP_DATABASE__PASSWORD` there. Unless `APP_DATABASE__PASSWORD_FILE` is configured, the chart wires `APP_DATABASE__PASSWORD` from a Kubernetes Secret key named `postgres-password`: either the `externalSecret.spec.target.name` Secret when `externalSecret.enabled=true`, or the `statuslist-secret` Secret otherwise. This key name is a hard chart contract even for MySQL or MariaDB backends, so create or sync that exact Secret/key with the external database password before deploying.
 
 `APP_DATABASE__PORT` must be set in `statuslist.env`; the chart does not infer or default it from the PostgreSQL subchart. This keeps the database port an explicit runtime input and avoids silently connecting to the wrong port when operators customize database topology.
 

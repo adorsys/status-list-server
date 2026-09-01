@@ -104,6 +104,27 @@ spec:
             {{- range $name, $value := .Values.statuslist.env }}
             {{- $_ := set $env $name $value }}
             {{- end }}
+            {{- $secretFileEnv := dict }}
+            {{- range $mount := .Values.statuslist.secretMounts }}
+              {{- with $mount.fileEnv }}
+                {{- range $name, $path := . }}
+                  {{- $pathString := trim (toString $path) }}
+                  {{- if eq $pathString "" }}
+                    {{- fail (printf "statuslist.secretMounts[%s].fileEnv.%s must be a non-empty relative file path" $mount.name $name) }}
+                  {{- end }}
+                  {{- if hasPrefix "/" $pathString }}
+                    {{- fail (printf "statuslist.secretMounts[%s].fileEnv.%s must be relative to mountPath, got absolute path %q" $mount.name $name $pathString) }}
+                  {{- end }}
+                  {{- if hasKey $env $name }}
+                    {{- fail (printf "statuslist.secretMounts[%s].fileEnv.%s duplicates statuslist.env.%s; define each environment variable only once" $mount.name $name $name) }}
+                  {{- end }}
+                  {{- if hasKey $secretFileEnv $name }}
+                    {{- fail (printf "statuslist.secretMounts fileEnv defines %s more than once" $name) }}
+                  {{- end }}
+                  {{- $_ := set $secretFileEnv $name (printf "%s/%s" $mount.mountPath $pathString) }}
+                {{- end }}
+              {{- end }}
+            {{- end }}
             {{- if hasKey $env "APP_DATABASE__URL" }}
               {{- fail "statuslist.env.APP_DATABASE__URL is not supported by this chart because it exposes assembled credentials in pod metadata; use APP_DATABASE__HOST/PORT/USERNAME/NAME/QUERY plus the chart-managed APP_DATABASE__PASSWORD SecretKeyRef" }}
             {{- end }}
@@ -177,28 +198,9 @@ spec:
             - name: AWS_CONFIG_FILE
               value: /home/nobody/.aws/config
             {{- end }}
-            {{- /* File-based secret mounts: database credentials */}}
-            {{- range .Values.statuslist.secretMounts }}
-            {{- if eq .name "db-credentials" }}
-            - name: APP_DATABASE__PASSWORD_FILE
-              value: {{ .mountPath }}/{{ (index .items 0).path }}
-            {{- end }}
-            {{- end }}
-            {{- /* File-based secret mounts: token signing keys */}}
-            {{- range .Values.statuslist.secretMounts }}
-            {{- if eq .name "token-signing-keys" }}
-            {{- $mountPath := .mountPath }}
-            {{- range .items }}
-            {{- if eq .key "statuslist.crt" }}
-            - name: APP_SERVER__CERT__STORE__CERTIFICATE_PATH
-              value: {{ $mountPath }}/{{ .path }}
-            {{- end }}
-            {{- if eq .key "statuslist.key" }}
-            - name: APP_SERVER__CERT__STORE__SIGNING_KEY_PATH
-              value: {{ $mountPath }}/{{ .path }}
-            {{- end }}
-            {{- end }}
-            {{- end }}
+            {{- range $name, $path := $secretFileEnv }}
+            - name: {{ $name }}
+              value: {{ $path | quote }}
             {{- end }}
             {{- /* Watcher poll interval for credential rotation detection */}}
             {{- if and .Values.statuslist.watcher .Values.statuslist.watcher.pollIntervalSecs }}
@@ -207,11 +209,13 @@ spec:
               value: {{ .Values.statuslist.watcher.pollIntervalSecs | quote }}
             {{- end }}
             {{- end }}
+            {{- if not (or (hasKey $env "APP_DATABASE__PASSWORD_FILE") (hasKey $secretFileEnv "APP_DATABASE__PASSWORD_FILE")) }}
             - name: APP_DATABASE__PASSWORD
               valueFrom:
                 secretKeyRef:
                   name: {{ include "status-list-server-chart.appSecretName" . }}
                   key: postgres-password
+            {{- end }}
           volumeMounts:
             - name: tmp
               mountPath: /tmp
