@@ -1,4 +1,5 @@
 use std::io::Write as _;
+use std::sync::{Mutex, OnceLock};
 
 use coset::{
     self, CborSerializable, CoseSign1Builder, HeaderBuilder, TaggedCborSerializable,
@@ -7,6 +8,7 @@ use coset::{
 };
 use flate2::{Compression, write::GzEncoder};
 use jsonwebtoken::{EncodingKey, Header};
+use opentelemetry::{KeyValue, global, metrics::Counter};
 use p256::ecdsa::{Signature, signature::Signer};
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
@@ -18,6 +20,45 @@ use super::constants::{
     ACCEPT_STATUS_LISTS_HEADER_CWT, ACCEPT_STATUS_LISTS_HEADER_JWT, CWT_TYPE, EXP, GZIP_HEADER,
     ISSUED_AT, STATUS_LIST, STATUS_LISTS_CWT_TYPE_VALUE, STATUS_LISTS_HEADER_JWT, SUBJECT, TTL,
 };
+
+const TOKEN_ATTEMPTS_METRIC: &str = "token_generation_attempts";
+const TOKEN_FAILURES_METRIC: &str = "token_generation_failures";
+
+/// Token-generation SLI counters. Cached after first use: the first token is
+/// only ever generated after `init_telemetry`/`setup_metrics` has installed the
+/// global meter provider, so the handles are valid (unlike a handle taken at
+/// module init, which would be a permanent no-op).
+#[derive(Clone)]
+struct TokenMetrics {
+    attempts: Counter<u64>,
+    failures: Counter<u64>,
+}
+
+fn token_metrics() -> TokenMetrics {
+    static METRICS: OnceLock<Mutex<Option<(u64, TokenMetrics)>>> = OnceLock::new();
+    crate::utils::metrics::cached_instruments(&METRICS, || {
+        let meter = global::meter("status-list-server");
+        TokenMetrics {
+            attempts: meter
+                .u64_counter(TOKEN_ATTEMPTS_METRIC)
+                .with_description("Total number of status-list token generation attempts")
+                .build(),
+            failures: meter
+                .u64_counter(TOKEN_FAILURES_METRIC)
+                .with_description("Total number of failed status-list token generations")
+                .build(),
+        }
+    })
+}
+
+/// Classify the client's `Accept` header into the bounded `format` label value.
+fn token_format(accept: &str) -> &'static str {
+    if accept == ACCEPT_STATUS_LISTS_HEADER_CWT {
+        "cwt"
+    } else {
+        "jwt"
+    }
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub(crate) struct StatusListClaims {
@@ -44,6 +85,33 @@ pub(crate) struct StatusListToken {
 /// * `validity_window` – `(iat, exp)` pair; defaults to `(now, now + token_exp_secs)`
 /// * `client_accepts_gzip` – whether to gzip-compress JWT output
 pub(crate) async fn build_status_list_token(
+    state: &crate::server::AppState,
+    accept: &str,
+    status_record: &StatusListRecord,
+    validity_window: Option<(i64, i64)>,
+    client_accepts_gzip: bool,
+) -> Result<(Vec<u8>, Option<&'static str>), StatusListError> {
+    let format = token_format(accept);
+    let attributes = [KeyValue::new("format", format)];
+    token_metrics().attempts.add(1, &attributes);
+    match build_status_list_token_inner(
+        state,
+        accept,
+        status_record,
+        validity_window,
+        client_accepts_gzip,
+    )
+    .await
+    {
+        Ok(token) => Ok(token),
+        Err(err) => {
+            token_metrics().failures.add(1, &attributes);
+            Err(err)
+        }
+    }
+}
+
+async fn build_status_list_token_inner(
     state: &crate::server::AppState,
     accept: &str,
     status_record: &StatusListRecord,
