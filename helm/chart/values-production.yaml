@@ -1,22 +1,55 @@
 # Production values for helm/chart. Applied by the production deploy workflow
 # (deploy.yml) on release-tag deploys to the statuslist-production namespace.
 
-# Default secret/credential provisioning is External Secrets Operator (ESO): the
-# chart's default statuslist.aws.mountCredentials=true mounts the ESO-provisioned
-# aws-credentials-secret under /home/nobody/.aws. Production keeps that default, so
-# no Workload Identity ServiceAccount annotation is required and no static AWS
-# credential files are managed by hand — ESO synchronizes them.
-#
-# If you prefer Workload Identity / IRSA instead, opt in by attaching the role
-# annotation below and setting statuslist.aws.mountCredentials=false (see the
-# "ServiceAccount and Workload Identity" section in helm/README.md and
-# docs/deployment-runbook.md).
 serviceAccount:
   create: true
 
 statuslist:
+  replicaCount: 2
+  env:
+    APP_ENV: "production"
+    APP_SERVER__ENABLE_METRICS: "true"
+    APP_TELEMETRY__ENVIRONMENT: "production"
+    RUST_LOG: "warn,status_list_server=info"
   aws:
     # ESO-mounted credentials (the chart default). Set false + IRSA annotation for
     # Workload Identity mode.
     mountCredentials: true
     region: eu-central-1
+  resources:
+    requests:
+      memory: "512Mi"
+      cpu: "500m"
+    limits:
+      memory: "1Gi"
+      cpu: "1000m"
+
+# Horizontal Pod Autoscaling for production workloads.
+autoscaling:
+  enabled: true
+  minReplicas: 2
+  maxReplicas: 10
+  targetCPUUtilizationPercentage: 75
+
+# PodDisruptionBudget ensures safe rolling deploys and node drains.
+podDisruptionBudget:
+  enabled: true
+  maxUnavailable: 1
+
+# Recommended monitoring discovery for kube-prometheus-stack environments.
+serviceMonitor:
+  enabled: true
+  interval: "15s"
+  labels:
+    release: kube-prometheus-stack
+
+# Ship SLI recording and SLO alerting rules into the cluster via PrometheusRule CRD.
+prometheusRule:
+  enabled: true
+  labels:
+    release: kube-prometheus-stack
+
+# OpenTelemetry Collector Production Exporter Setup (Guidance):
+# In production, ensure opentelemetry-collector.config exporters are configured
+# to forward to your enterprise backends (e.g. Tempo for traces, Prometheus Remote Write, Loki for logs)
+# rather than printing debug output to stdout.
