@@ -4,3 +4,5 @@ formatter:
 
 exclude:
   - helm/chart/templates/
+  - helm/chart/values.yaml
+  - helm/chart/values-local.yaml

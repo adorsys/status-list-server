@@ -8,6 +8,7 @@
     "generate-dashboards": "./generate.mjs"
   },
   "scripts": {
-    "generate-dashboards": "node generate.mjs"
+    "generate-dashboards": "node generate.mjs",
+    "lint-thresholds": "node ../../slo/lint-thresholds.mjs"
   }
 }

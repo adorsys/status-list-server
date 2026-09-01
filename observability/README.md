@@ -5,18 +5,22 @@ SLO dashboards, Prometheus recording/alerting rules, and runbooks for
 
 ```text
 observability/
-  slo/README.md                  # SLI/SLO definitions + methodology (Phase 2)
+  slo/thresholds.json            # single source of truth for SLO targets
+  slo/lint-thresholds.mjs        # CI linter verifying target lockstep
+  slo/README.md                  # SLI/SLO definitions + methodology
   prometheus/
-    prometheus.yml               # full scrape + rule_files config
-    rules/recording.rules.yml    # pre-aggregated sli:* series (Phase 3)
-    rules/    alerting.rules.yml     # multi-window multi-burn-rate alerts (Phase 4)
-    generate-alertmanager-config.sh  # renders Alertmanager receivers from env (Phase 4)
-    tests/*.test.yml             # promtool rule tests (Phase 7)
+    prometheus.yml               # dev scrape config (2s scrape interval)
+    prometheus.production.yml    # production scrape config (15s scrape interval)
+    rules/recording.rules.yml    # pre-aggregated sli:* series
+    rules/alerting.rules.yml     # multi-window multi-burn-rate alerts
+    tests/*.test.yml             # promtool rule tests
+  alertmanager/
+    alertmanager.example.yml     # example routing config (severity page -> PagerDuty, warn -> Slack)
   dashboards/
-    src/                         # deterministic generator (Phase 5)
+    src/                         # deterministic generator
     generated/*.json             # committed dashboard Grafana loads
     provisioning/                # Grafana datasource + file provider
-  runbooks/*.md                  # one per alert/SLI (Phase 6)
+  runbooks/*.md                  # one per alert/SLI
 ```
 
 ## Metric sources
@@ -33,14 +37,33 @@ Cert-renewal and cert-chain-cache series already existed.
 ```bash
 # Rules + tests (offline, via Prometheus image)
 promtool check rules observability/prometheus/rules/*.rules.yml
+promtool check config observability/prometheus/prometheus.yml
+promtool check config observability/prometheus/prometheus.production.yml
 promtool test rules observability/prometheus/tests/recording.test.yml
 promtool test rules observability/prometheus/tests/alerting.test.yml
+
+# SLO threshold consistency lint
+node observability/slo/lint-thresholds.mjs
+
+# The DEPLOYED rule copy (the Helm `PrometheusRule`, `prometheusRule.enabled: true`)
+# is rendered and run through the same `promtool test rules` suite in CI, and a
+# drift guard asserts it defines exactly the same rule names as these tested
+# standalone files. See `.github/workflows/CI.yml` -> `prometheus-rules-validation`.
 
 # Full stack
 docker compose up -d   # brings up app + otel-collector + prometheus + grafana
 ```
 
 Dashboard generation is documented in `dashboards/README.md`.
+
+## Datasource UID requirement
+
+Every panel in the committed dashboard (`generated/status-list-slo.json`) pins
+its Prometheus datasource by UID `prometheus` (see
+`dashboards/provisioning/datasources.yml`). Any environment that loads this
+dashboard — including a production/managed Grafana — **must** register its
+Prometheus datasource with exactly that UID, or the panels will not resolve.
+Do not rely on the datasource *name*; Grafana matches the committed UID.
 
 ## Retention requirement
 
@@ -58,18 +81,13 @@ Production Prometheus **must** be configured with:
 ```
 
 (or the equivalent in a managed Prometheus config). Without this, the error
-budget gauge is not trustworthy. The dev `docker-compose.yml` stack is a local
-demo and does not need this set.
+budget gauge is not trustworthy. The dev `docker-compose.yml` stack includes
+this flag to model production behavior.
 
 ## Deployment note
 
-The repo ships standalone Prometheus + Grafana + a local Alertmanager for a dev
-stack. Production wiring to a managed stack is an operator step (no credentials
-or CRDs in this repo). Notifications are **platform-agnostic**: the Alertmanager
-config is rendered at container start by
-`observability/prometheus/generate-alertmanager-config.sh`, which emits the
-native receiver for the platform selected via `ALERTMANAGER_PLATFORM`
-(`slack|discord|teams|mattermost|email|webhook`) using the matching credential
-env var. The same stack therefore works with whichever channel the customer
-uses, with no per-platform repo code. Real tokens stay out of version control —
-they're supplied via `.env` / a secrets manager.
+The repo ships standalone Prometheus + Grafana for a dev stack. For Kubernetes
+environments running `kube-prometheus-stack`, the Helm chart includes optional
+`templates/servicemonitor.yaml` (`serviceMonitor.enabled: true`) and
+`templates/prometheusrule.yaml` (`prometheusRule.enabled: true`). Alert delivery
+routing is documented in `observability/alertmanager/alertmanager.example.yml`.

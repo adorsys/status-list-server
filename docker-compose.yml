@@ -154,42 +154,10 @@ services:
     command:
       - '--config.file=/etc/prometheus/prometheus.yml'
       - '--storage.tsdb.path=/prometheus'
+      - '--storage.tsdb.retention.time=31d'
       - '--web.console.libraries=/usr/share/prometheus/console_libraries'
       - '--web.console.templates=/usr/share/prometheus/consoles'
       - '--web.enable-lifecycle'
-
-  alertmanager:
-    image: prom/alertmanager:v0.28.1
-    container_name: alertmanager
-    restart: unless-stopped
-    ports:
-      - 9093:9093
-    environment:
-      # Platform-agnostic notifications. Select the customer's channel with
-      # ALERTMANAGER_PLATFORM (slack|discord|teams|mattermost|email|webhook)
-      # and supply that platform's credential below. The entrypoint renders
-      # observability/prometheus/generate-alertmanager-config.sh, which emits the
-      # native receiver config, so no repo code is platform-specific.
-      ALERTMANAGER_PLATFORM: ${ALERTMANAGER_PLATFORM:-slack}
-      SLACK_WEBHOOK_URL: ${SLACK_WEBHOOK_URL:-}
-      DISCORD_WEBHOOK_URL: ${DISCORD_WEBHOOK_URL:-}
-      MS_TEAMS_WEBHOOK_URL: ${MS_TEAMS_WEBHOOK_URL:-}
-      MATTERMOST_WEBHOOK_URL: ${MATTERMOST_WEBHOOK_URL:-}
-      ALERTMANAGER_WEBHOOK_URL: ${ALERTMANAGER_WEBHOOK_URL:-}
-      ALERTMANAGER_SMTP_HOST: ${ALERTMANAGER_SMTP_HOST:-}
-      ALERTMANAGER_SMTP_PORT: ${ALERTMANAGER_SMTP_PORT:-587}
-      ALERTMANAGER_SMTP_FROM: ${ALERTMANAGER_SMTP_FROM:-alertmanager@localhost}
-      ALERTMANAGER_EMAIL_TO: ${ALERTMANAGER_EMAIL_TO:-}
-    volumes:
-      - ./observability/prometheus/generate-alertmanager-config.sh:/generate-alertmanager-config.sh:ro
-    networks:
-      - status-list-network
-    entrypoint:
-      - /bin/sh
-      - -ec
-      - |
-        /bin/sh /generate-alertmanager-config.sh
-        exec /bin/alertmanager --config.file=/etc/alertmanager/alertmanager.yml
 
   grafana:
     image: grafana/grafana:12.0.0
@@ -198,7 +166,7 @@ services:
     ports:
       - 3000:3000
     environment:
-      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:?GRAFANA_ADMIN_PASSWORD must be set}
       GF_USERS_ALLOW_SIGN_UP: "false"
     volumes:
       - ./observability/dashboards/provisioning/datasources.yml:/etc/grafana/provisioning/datasources/datasources.yml:ro

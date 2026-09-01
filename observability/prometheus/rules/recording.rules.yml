@@ -1,8 +1,12 @@
 groups:
   # Pre-aggregated SLI series. Dashboards and alerts query these `sli:*` names
   # rather than raw metrics so they share a single number. All are scoped to the
-  # status-list-server instrumentation scope and use `sum ... by (...)` to keep
-  # cardinality bounded.
+  # status-list-server instrumentation scope and use `sum ... by (namespace)`
+  # (histograms `by (namespace, le)`) to keep cardinality bounded WHILE
+  # preserving per-namespace identity. This keeps the `sli:*` series (and the
+  # alerts built on them) collision-free when one Prometheus scrapes this app
+  # from more than one namespace/environment. Under a namespace-less dev scrape
+  # the label is simply empty.
   #
   # Divide-by-zero note: each ratio's numerator is always a subset of its
   # denominator (a "5xx" is a request, a failure is an attempt, a miss is a
@@ -12,87 +16,130 @@ groups:
   - name: sli
     rules:
       # --- Request latency (p95, threshold SLO) ------------------------------
-      # 5m: dashboard headline + per-route drill-down.
+      # 5m: dashboard headline.
       - record: sli:request_latency:p95:5m
         expr: |
-          histogram_quantile(0.95, sum(rate(http_server_duration_seconds_bucket{otel_scope_name="status-list-server"}[5m])) by (le))
-      - record: sli:request_latency:p95:5m:route
-        expr: |
-          histogram_quantile(0.95, sum(rate(http_server_duration_seconds_bucket{otel_scope_name="status-list-server"}[5m])) by (route, le))
+          histogram_quantile(0.95, sum(rate(http_server_duration_seconds_bucket{otel_scope_name="status-list-server"}[5m])) by (namespace, le))
 
-      # 1h (fast-burn short window) and 6h (fast-burn long + slow-burn window).
+      # 1h (fast-burn long window), 30m (slow-burn short confirmation), and
+      # 6h (slow-burn long window).
       - record: sli:request_latency:p95:1h
         expr: |
-          histogram_quantile(0.95, sum(rate(http_server_duration_seconds_bucket{otel_scope_name="status-list-server"}[1h])) by (le))
+          histogram_quantile(0.95, sum(rate(http_server_duration_seconds_bucket{otel_scope_name="status-list-server"}[1h])) by (namespace, le))
+      - record: sli:request_latency:p95:30m
+        expr: |
+          histogram_quantile(0.95, sum(rate(http_server_duration_seconds_bucket{otel_scope_name="status-list-server"}[30m])) by (namespace, le))
       - record: sli:request_latency:p95:6h
         expr: |
-          histogram_quantile(0.95, sum(rate(http_server_duration_seconds_bucket{otel_scope_name="status-list-server"}[6h])) by (le))
+          histogram_quantile(0.95, sum(rate(http_server_duration_seconds_bucket{otel_scope_name="status-list-server"}[6h])) by (namespace, le))
 
       # --- Error rate (ratio, burn-rate SLO) ---------------------------------
       - record: sli:error_rate:5m
         expr: |
-          sum(rate(http_server_requests_total{otel_scope_name="status-list-server",status_class="5xx"}[5m]))
-          / sum(rate(http_server_requests_total{otel_scope_name="status-list-server"}[5m]))
+          sum by (namespace)(rate(http_server_requests_total{otel_scope_name="status-list-server",status_class="5xx"}[5m]))
+          / sum by (namespace)(rate(http_server_requests_total{otel_scope_name="status-list-server"}[5m]))
       - record: sli:error_rate:1h
         expr: |
-          sum(rate(http_server_requests_total{otel_scope_name="status-list-server",status_class="5xx"}[1h]))
-          / sum(rate(http_server_requests_total{otel_scope_name="status-list-server"}[1h]))
+          sum by (namespace)(rate(http_server_requests_total{otel_scope_name="status-list-server",status_class="5xx"}[1h]))
+          / sum by (namespace)(rate(http_server_requests_total{otel_scope_name="status-list-server"}[1h]))
+      # 30m: short confirmation window for the slow-burn (warn) multi-window pair.
+      - record: sli:error_rate:30m
+        expr: |
+          sum by (namespace)(rate(http_server_requests_total{otel_scope_name="status-list-server",status_class="5xx"}[30m]))
+          / sum by (namespace)(rate(http_server_requests_total{otel_scope_name="status-list-server"}[30m]))
       - record: sli:error_rate:6h
         expr: |
-          sum(rate(http_server_requests_total{otel_scope_name="status-list-server",status_class="5xx"}[6h]))
-          / sum(rate(http_server_requests_total{otel_scope_name="status-list-server"}[6h]))
+          sum by (namespace)(rate(http_server_requests_total{otel_scope_name="status-list-server",status_class="5xx"}[6h]))
+          / sum by (namespace)(rate(http_server_requests_total{otel_scope_name="status-list-server"}[6h]))
       # 30d: the true SLO window, used only for the remaining-budget gauge.
       - record: sli:error_rate:30d
         expr: |
-          sum(rate(http_server_requests_total{otel_scope_name="status-list-server",status_class="5xx"}[30d]))
-          / sum(rate(http_server_requests_total{otel_scope_name="status-list-server"}[30d]))
+          sum by (namespace)(rate(http_server_requests_total{otel_scope_name="status-list-server",status_class="5xx"}[30d]))
+          / sum by (namespace)(rate(http_server_requests_total{otel_scope_name="status-list-server"}[30d]))
 
       # --- DB query latency (p95, threshold SLO) ------------------------------
       - record: sli:db_query_latency:p95:5m
         expr: |
-          histogram_quantile(0.95, sum(rate(db_query_duration_seconds_bucket{otel_scope_name="status-list-server"}[5m])) by (le))
-      - record: sli:db_query_latency:p95:5m:operation
-        expr: |
-          histogram_quantile(0.95, sum(rate(db_query_duration_seconds_bucket{otel_scope_name="status-list-server"}[5m])) by (operation, le))
+          histogram_quantile(0.95, sum(rate(db_query_duration_seconds_bucket{otel_scope_name="status-list-server"}[5m])) by (namespace, le))
       - record: sli:db_query_latency:p95:1h
         expr: |
-          histogram_quantile(0.95, sum(rate(db_query_duration_seconds_bucket{otel_scope_name="status-list-server"}[1h])) by (le))
+          histogram_quantile(0.95, sum(rate(db_query_duration_seconds_bucket{otel_scope_name="status-list-server"}[1h])) by (namespace, le))
+      # 30m: short confirmation window for the slow-burn (warn) multi-window pair.
+      - record: sli:db_query_latency:p95:30m
+        expr: |
+          histogram_quantile(0.95, sum(rate(db_query_duration_seconds_bucket{otel_scope_name="status-list-server"}[30m])) by (namespace, le))
       - record: sli:db_query_latency:p95:6h
         expr: |
-          histogram_quantile(0.95, sum(rate(db_query_duration_seconds_bucket{otel_scope_name="status-list-server"}[6h])) by (le))
+          histogram_quantile(0.95, sum(rate(db_query_duration_seconds_bucket{otel_scope_name="status-list-server"}[6h])) by (namespace, le))
 
       # --- Cache hit ratio (ratio, warn-only) --------------------------------
       - record: sli:cache_hit_ratio:5m
         expr: |
-          sum(rate(status_list_cache_hits_total{otel_scope_name="status-list-server"}[5m]))
-          / (sum(rate(status_list_cache_hits_total{otel_scope_name="status-list-server"}[5m]))
-             + sum(rate(status_list_cache_misses_total{otel_scope_name="status-list-server"}[5m])))
+          sum by (namespace)(rate(status_list_cache_hits_total{otel_scope_name="status-list-server"}[5m]))
+          / (sum by (namespace)(rate(status_list_cache_hits_total{otel_scope_name="status-list-server"}[5m]))
+             + sum by (namespace)(rate(status_list_cache_misses_total{otel_scope_name="status-list-server"}[5m])))
+      - record: sli:cache_hit_ratio:7d
+        expr: |
+          sum by (namespace)(rate(status_list_cache_hits_total{otel_scope_name="status-list-server"}[7d]))
+          / (sum by (namespace)(rate(status_list_cache_hits_total{otel_scope_name="status-list-server"}[7d]))
+             + sum by (namespace)(rate(status_list_cache_misses_total{otel_scope_name="status-list-server"}[7d])))
 
       # --- Certificate renewal failure rate (ratio, warn-only) ----------------
       - record: sli:cert_renewal_failure_rate:5m
         expr: |
-          sum(rate(cert_renewal_failures_total{otel_scope_name="status-list-server"}[5m]))
-          / sum(rate(cert_renewal_attempts_total{otel_scope_name="status-list-server"}[5m]))
+          sum by (namespace)(rate(cert_renewal_failures_total{otel_scope_name="status-list-server"}[5m]))
+          / sum by (namespace)(rate(cert_renewal_attempts_total{otel_scope_name="status-list-server"}[5m]))
+      - record: sli:cert_renewal_failure_rate:7d
+        expr: |
+          sum by (namespace)(rate(cert_renewal_failures_total{otel_scope_name="status-list-server"}[7d]))
+          / sum by (namespace)(rate(cert_renewal_attempts_total{otel_scope_name="status-list-server"}[7d]))
+      # 30d: the true SLO window, consistent with sli:error_rate:30d so the
+      # long-term health of every availability SLI is comparable.
+      - record: sli:cert_renewal_failure_rate:30d
+        expr: |
+          sum by (namespace)(rate(cert_renewal_failures_total{otel_scope_name="status-list-server"}[30d]))
+          / sum by (namespace)(rate(cert_renewal_attempts_total{otel_scope_name="status-list-server"}[30d]))
 
       # --- Token-generation failure rate (ratio, burn-rate SLO) ---------------
       - record: sli:token_gen_failure_rate:5m
         expr: |
-          sum(rate(token_generation_failures_total{otel_scope_name="status-list-server"}[5m]))
-          / sum(rate(token_generation_attempts_total{otel_scope_name="status-list-server"}[5m]))
+          sum by (namespace)(rate(token_generation_failures_total{otel_scope_name="status-list-server"}[5m]))
+          / sum by (namespace)(rate(token_generation_attempts_total{otel_scope_name="status-list-server"}[5m]))
       - record: sli:token_gen_failure_rate:1h
         expr: |
-          sum(rate(token_generation_failures_total{otel_scope_name="status-list-server"}[1h]))
-          / sum(rate(token_generation_attempts_total{otel_scope_name="status-list-server"}[1h]))
+          sum by (namespace)(rate(token_generation_failures_total{otel_scope_name="status-list-server"}[1h]))
+          / sum by (namespace)(rate(token_generation_attempts_total{otel_scope_name="status-list-server"}[1h]))
+      # 30m: short confirmation window for the slow-burn (warn) multi-window pair.
+      - record: sli:token_gen_failure_rate:30m
+        expr: |
+          sum by (namespace)(rate(token_generation_failures_total{otel_scope_name="status-list-server"}[30m]))
+          / sum by (namespace)(rate(token_generation_attempts_total{otel_scope_name="status-list-server"}[30m]))
       - record: sli:token_gen_failure_rate:6h
         expr: |
-          sum(rate(token_generation_failures_total{otel_scope_name="status-list-server"}[6h]))
-          / sum(rate(token_generation_attempts_total{otel_scope_name="status-list-server"}[6h]))
+          sum by (namespace)(rate(token_generation_failures_total{otel_scope_name="status-list-server"}[6h]))
+          / sum by (namespace)(rate(token_generation_attempts_total{otel_scope_name="status-list-server"}[6h]))
+      # 30d: the true SLO window, consistent with sli:error_rate:30d.
+      - record: sli:token_gen_failure_rate:30d
+        expr: |
+          sum by (namespace)(rate(token_generation_failures_total{otel_scope_name="status-list-server"}[30d]))
+          / sum by (namespace)(rate(token_generation_attempts_total{otel_scope_name="status-list-server"}[30d]))
 
       # --- Remaining error budget (0 = exhausted, 1 = fully intact) ----------
+      # OPERATOR NOTE: This rule evaluates over a 30d window. Prometheus MUST be started with
+      # --storage.tsdb.retention.time=31d (or longer). The default 15d retention silently
+      # halves the window and makes this gauge read artificially optimistic. No error is raised.
+      # See observability/README.md "Retention requirement" for details.
+      #
       # Computed from the true SLO window (`sli:error_rate:30d`), not a 5m
       # snapshot, and clamped to [0,1] so the gauge cannot go negative or above
-      # 100%. The 0.5% target is hard-coded here AND in slo/README.md together;
-      # change both in lockstep.
+      # 100%. The 0.5% target is hard-coded here (the `0.005` in the denominator)
+      # AND as the "0.5%" row in slo/README.md AND as the warn threshold in the
+      # dashboard generator — change all three in lockstep.
       - record: sli:error_budget:success:30d
         expr: |
           clamp_max(clamp_min(1 - sli:error_rate:30d / 0.005, 0), 1)
+
+      - record: sli:token_gen_error_budget:30d
+        expr: |
+          clamp_max(clamp_min(1 - sli:token_gen_failure_rate:30d / 0.005, 0), 1)
+
