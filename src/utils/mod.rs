@@ -2,6 +2,8 @@ pub mod bits_validation;
 pub(crate) mod cache;
 #[cfg(feature = "acme")]
 pub mod cert_manager;
+pub(crate) mod file_watcher;
 pub mod keygen;
 pub(crate) mod metrics;
+pub(crate) mod rotation_metrics;
 pub mod telemetry;

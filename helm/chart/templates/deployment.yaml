@@ -105,7 +105,7 @@ spec:
               {{- fail "statuslist.env.APP_DATABASE__URL is not supported by this chart because it exposes assembled credentials in pod metadata; use APP_DATABASE__HOST/PORT/USERNAME/NAME/QUERY plus the chart-managed APP_DATABASE__PASSWORD SecretKeyRef" }}
             {{- end }}
             {{- if hasKey $env "APP_DATABASE__PASSWORD" }}
-              {{- fail "statuslist.env.APP_DATABASE__PASSWORD must not be set as a plain env value; provide postgres.auth.existingSecret or externalSecret data for the postgres-password key" }}
+              {{- fail "statuslist.env.APP_DATABASE__PASSWORD must not be set as a plain env value; use the chart-managed APP_DATABASE__PASSWORD_FILE mounted Secret path" }}
             {{- end }}
             {{- if or (not (hasKey $env "APP_DATABASE__PORT")) (eq (trim (toString (get $env "APP_DATABASE__PORT"))) "") }}
               {{- fail "statuslist.env.APP_DATABASE__PORT is required; set it to the database service port" }}
@@ -159,6 +159,9 @@ spec:
             {{- if not (hasKey $env "APP_DATABASE__NAME") }}
               {{- $_ := set $env "APP_DATABASE__NAME" .Values.postgres.auth.database }}
             {{- end }}
+            {{- if not (hasKey $env "APP_DATABASE__PASSWORD_FILE") }}
+              {{- $_ := set $env "APP_DATABASE__PASSWORD_FILE" "/var/run/status-list-server/secrets/postgres-password" }}
+            {{- end }}
             {{- range $name, $value := $env }}
             - name: {{ $name }}
               value: {{ $value | quote }}
@@ -174,14 +177,12 @@ spec:
             - name: AWS_CONFIG_FILE
               value: /home/nobody/.aws/config
             {{- end }}
-            - name: APP_DATABASE__PASSWORD
-              valueFrom:
-                secretKeyRef:
-                  name: {{ include "status-list-server-chart.appSecretName" . }}
-                  key: postgres-password
           volumeMounts:
             - name: tmp
               mountPath: /tmp
+            - name: app-secrets
+              mountPath: /var/run/status-list-server/secrets
+              readOnly: true
           {{- if .Values.statuslist.aws.mountCredentials }}
             - name: aws-credentials-volume
               mountPath: /home/nobody/.aws
@@ -190,6 +191,9 @@ spec:
       volumes:
         - name: tmp
           emptyDir: {}
+        - name: app-secrets
+          secret:
+            secretName: {{ include "status-list-server-chart.appSecretName" . }}
       {{- if .Values.statuslist.aws.mountCredentials }}
         - name: aws-credentials-volume
           secret:

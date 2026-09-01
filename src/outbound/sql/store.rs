@@ -1,3 +1,4 @@
+use arc_swap::ArcSwap;
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, ConnectionTrait, DatabaseBackend, DatabaseConnection,
     DatabaseTransaction, DbErr, EntityTrait, IsolationLevel, QueryFilter, QueryOrder, QuerySelect,
@@ -14,12 +15,36 @@ use super::models::{
 
 #[derive(Clone)]
 pub struct SeaOrmStore<T> {
-    db: Arc<DatabaseConnection>,
+    db: Arc<SwappableDatabaseConnection>,
     _phantom: std::marker::PhantomData<T>,
+}
+
+pub struct SwappableDatabaseConnection {
+    active: ArcSwap<DatabaseConnection>,
+}
+
+impl SwappableDatabaseConnection {
+    pub fn new(db: Arc<DatabaseConnection>) -> Self {
+        Self {
+            active: ArcSwap::from(db),
+        }
+    }
+
+    pub fn current(&self) -> Arc<DatabaseConnection> {
+        self.active.load_full()
+    }
+
+    pub fn swap(&self, db: Arc<DatabaseConnection>) -> Arc<DatabaseConnection> {
+        self.active.swap(db)
+    }
 }
 
 impl<T> SeaOrmStore<T> {
     pub fn new(db: Arc<DatabaseConnection>) -> Self {
+        Self::from_handle(Arc::new(SwappableDatabaseConnection::new(db)))
+    }
+
+    pub fn from_handle(db: Arc<SwappableDatabaseConnection>) -> Self {
         Self {
             db,
             _phantom: std::marker::PhantomData,
@@ -56,13 +81,13 @@ impl<T> SeaOrmStore<T> {
     /// SQLite and the mock backend are excluded: SQLite has no per-transaction
     /// isolation and sea-orm warns on every transaction if a level is supplied.
     async fn begin_read_committed(&self) -> Result<DatabaseTransaction, DbErr> {
-        match self.db.get_database_backend() {
+        let db = self.db.current();
+        match db.get_database_backend() {
             DatabaseBackend::Postgres | DatabaseBackend::MySql => {
-                self.db
-                    .begin_with_config(Some(IsolationLevel::ReadCommitted), None)
+                db.begin_with_config(Some(IsolationLevel::ReadCommitted), None)
                     .await
             }
-            _ => self.db.begin().await,
+            _ => db.begin().await,
         }
     }
 }
@@ -181,8 +206,9 @@ impl SeaOrmStore<StatusListRecord> {
         &self,
         value: &str,
     ) -> Result<Option<StatusListRecord>, RepositoryError> {
+        let db = self.db.current();
         status_lists::Entity::find_by_id(value)
-            .one(&*self.db)
+            .one(&*db)
             .await
             .map_err(find_err)
     }
@@ -192,9 +218,10 @@ impl SeaOrmStore<StatusListRecord> {
         &self,
         issuer: &str,
     ) -> Result<Vec<StatusListRecord>, RepositoryError> {
+        let db = self.db.current();
         status_lists::Entity::find()
             .filter(status_lists::Column::Issuer.eq(issuer))
-            .all(&*self.db)
+            .all(&*db)
             .await
             .map(|tokens| tokens.into_iter().collect())
             .map_err(find_err)
@@ -374,8 +401,9 @@ impl SeaOrmStore<StatusListRecord> {
     }
 
     pub async fn delete_by(&self, value: &str) -> Result<bool, RepositoryError> {
+        let db = self.db.current();
         let result = status_lists::Entity::delete_by_id(value)
-            .exec(&*self.db)
+            .exec(&*db)
             .await
             .map_err(map_delete_err)?;
         Ok(result.rows_affected > 0)
@@ -386,30 +414,33 @@ impl SeaOrmStore<StatusListRecord> {
         &self,
         issuer: &str,
     ) -> Result<Vec<StatusListRecord>, RepositoryError> {
+        let db = self.db.current();
         status_lists::Entity::find()
             .filter(status_lists::Column::Sub.eq(issuer))
-            .all(&*self.db)
+            .all(&*db)
             .await
             .map_err(find_err)
     }
 
     #[tracing::instrument(skip(self), fields(db.system = "sea-orm"))]
     pub async fn find_all(&self) -> Result<Vec<StatusListRecord>, RepositoryError> {
+        let db = self.db.current();
         status_lists::Entity::find()
-            .all(&*self.db)
+            .all(&*db)
             .await
             .map_err(find_err)
     }
 
     #[tracing::instrument(skip(self), fields(db.system = "sea-orm"))]
     pub async fn find_all_status_list_uris(&self) -> Result<Vec<String>, RepositoryError> {
+        let db = self.db.current();
         status_lists::Entity::find()
             .select_only()
             .column(status_lists::Column::Sub)
             .group_by(status_lists::Column::Sub)
             .order_by_asc(status_lists::Column::Sub)
             .into_tuple::<String>()
-            .all(&*self.db)
+            .all(&*db)
             .await
             .map_err(find_err)
     }
@@ -418,9 +449,10 @@ impl SeaOrmStore<StatusListRecord> {
 impl SeaOrmStore<StatusListHistoryRecord> {
     #[tracing::instrument(skip(self, entity), fields(db.system = "sea-orm"))]
     pub async fn insert_one(&self, entity: StatusListHistoryRecord) -> Result<(), RepositoryError> {
+        let db = self.db.current();
         let active: status_list_history::ActiveModel = entity.into();
         status_list_history::Entity::insert(active)
-            .exec_without_returning(&*self.db)
+            .exec_without_returning(&*db)
             .await
             .map_err(map_snapshot_insert_err)?;
         Ok(())
@@ -443,12 +475,13 @@ impl SeaOrmStore<StatusListHistoryRecord> {
         list_id: &str,
         time: i64,
     ) -> Result<Option<StatusListHistoryRecord>, RepositoryError> {
+        let db = self.db.current();
         status_list_history::Entity::find()
             .filter(status_list_history::Column::ListId.eq(list_id))
             .filter(status_list_history::Column::Iat.lte(time))
             .filter(status_list_history::Column::Exp.gt(time))
             .order_by_desc(status_list_history::Column::Iat)
-            .one(&*self.db)
+            .one(&*db)
             .await
             .map_err(find_err)
     }
@@ -474,7 +507,8 @@ impl SeaOrmStore<StatusListHistoryRecord> {
         let mut total_deleted: u64 = 0;
 
         loop {
-            let backend = self.db.get_database_backend();
+            let db = self.db.current();
+            let backend = db.get_database_backend();
             let sql = match backend {
                 DatabaseBackend::Postgres => {
                     "DELETE FROM status_list_history \
@@ -489,7 +523,7 @@ impl SeaOrmStore<StatusListHistoryRecord> {
                 }
             };
 
-            let count = (*self.db)
+            let count = (*db)
                 .execute(Statement::from_sql_and_values(
                     backend,
                     sql,
@@ -540,8 +574,9 @@ impl SeaOrmStore<Credentials> {
     }
 
     pub async fn find_one_by(&self, value: &str) -> Result<Option<Credentials>, RepositoryError> {
+        let db = self.db.current();
         credentials::Entity::find_by_id(value)
-            .one(&*self.db)
+            .one(&*db)
             .await
             .map(|opt| opt.map(Credentials::from))
             .map_err(find_err)
@@ -552,21 +587,23 @@ impl SeaOrmStore<Credentials> {
         issuer: &str,
         entity: Credentials,
     ) -> Result<bool, RepositoryError> {
+        let db = self.db.current();
         let existing = credentials::Entity::find_by_id(issuer)
-            .one(&*self.db)
+            .one(&*db)
             .await
             .map_err(find_err)?;
         if existing.is_none() {
             return Ok(false);
         }
         let active: credentials::ActiveModel = entity.into();
-        active.update(&*self.db).await.map_err(map_update_err)?;
+        active.update(&*db).await.map_err(map_update_err)?;
         Ok(true)
     }
 
     pub async fn delete_by(&self, value: &str) -> Result<bool, RepositoryError> {
+        let db = self.db.current();
         let result = credentials::Entity::delete_by_id(value)
-            .exec(&*self.db)
+            .exec(&*db)
             .await
             .map_err(map_delete_err)?;
         Ok(result.rows_affected > 0)

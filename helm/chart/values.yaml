@@ -70,6 +70,7 @@ statuslist:
     # must come from a secret (see externalSecret below), not from plain env values.
     APP_SERVER__CERT__DNS__PROVIDER: "route53"
     APP_DATABASE__PORT: "5432"
+    APP_WATCHER__POLL_INTERVAL_SECS: "30"
     # Status-list record cache TTL in seconds. "0" disables this cache.
     APP_CACHE__TTL: "300"
     APP_CACHE__MAX_CAPACITY: "1000"

@@ -64,6 +64,8 @@ opt-level = 1
 # Async runtime and utilities
 tokio = { version = "1.5", features = ["full"] }
 async-trait = "0.1"
+arc-swap = "1.7"
+notify = "8.2"
 
 # Web frameworks
 hyper = "1.10"
@@ -187,6 +189,8 @@ version = "0.14"
 features = ["alloc", "ecdsa", "pem", "pkcs8"]
 
 [dev-dependencies]
+rcgen = { version = "0.14", features = ["pem"] }
+tempfile = "3"
 wiremock = "0.6"
 sea-orm = { version = "1.1", features = ["mock"] }
 [dev-dependencies.testcontainers-modules]

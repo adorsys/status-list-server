@@ -87,6 +87,13 @@ pub struct Config {
     pub rate_limit: RateLimitConfig,
     pub limits: LimitsConfig,
     pub telemetry: TelemetryConfig,
+    pub watcher: WatcherConfig,
+}
+
+/// Background file-watcher configuration for rotated mounted secrets.
+#[derive(Debug, Clone, Deserialize)]
+pub struct WatcherConfig {
+    pub poll_interval_secs: u64,
 }
 
 /// Rate-limit configuration with strict (writes) and permissive (reads) tiers.
@@ -578,6 +585,8 @@ pub struct DatabaseConfig {
     #[serde(default)]
     pub password: Option<SecretString>,
     #[serde(default)]
+    pub password_file: Option<PathBuf>,
+    #[serde(default)]
     pub name: Option<String>,
     /// Optional URL query string for driver/TLS settings, for example
     /// `sslmode=verify-full&sslrootcert=/certs/ca.crt`.
@@ -591,6 +600,10 @@ pub struct DatabaseConfig {
 
 fn trim_non_empty(value: Option<&str>) -> Option<&str> {
     value.map(str::trim).filter(|value| !value.is_empty())
+}
+
+fn trim_trailing_newline(value: &str) -> &str {
+    value.trim_end_matches(['\r', '\n'])
 }
 
 fn encode_url_part(value: &str) -> String {
@@ -715,6 +728,10 @@ impl DatabaseConfig {
                 .as_ref()
                 .is_some_and(|value| !value.expose_secret().is_empty())
             || self
+                .password_file
+                .as_ref()
+                .is_some_and(|value| !value.as_os_str().is_empty())
+            || self
                 .name
                 .as_deref()
                 .is_some_and(|value| !value.trim().is_empty())
@@ -758,6 +775,7 @@ impl DatabaseConfig {
         let url_host = format_database_url_host(host);
         let username = required_config_field(self.username.as_deref(), "database.username")?;
         let password = required_secret_field(self.password.as_ref(), "database.password")?;
+        let password = trim_trailing_newline(password);
         let name = required_config_field(self.name.as_deref(), "database.name")?;
         let port = self.port.unwrap_or(default_port);
         let query = trim_non_empty(self.query.as_deref())
@@ -774,6 +792,23 @@ impl DatabaseConfig {
             encode_url_part(password),
             encode_url_part(name)
         )))
+    }
+
+    pub async fn resolved_url_with_password_file(&self) -> Result<SecretString, ConfigError> {
+        let Some(path) = &self.password_file else {
+            return self.resolved_url();
+        };
+        let password = tokio::fs::read_to_string(path).await.map_err(|err| {
+            ConfigError::Message(format!(
+                "Failed to read database.password_file '{}': {err}",
+                path.display()
+            ))
+        })?;
+        let mut config = self.clone();
+        config.password = Some(SecretString::from(
+            trim_trailing_newline(&password).to_string(),
+        ));
+        config.resolved_url()
     }
 
     pub fn redacted_target(&self) -> String {
@@ -1035,6 +1070,7 @@ fn base_builder() -> Result<ConfigBuilder<DefaultState>, ConfigError> {
         .set_default("server.enable_metrics", false)?
         .set_default("server.aggregation_uri", Option::<String>::None)?
         .set_default("database.url", Option::<String>::None)?
+        .set_default("database.password_file", Option::<String>::None)?
         .set_default("database.backend", default_db_backend)?
         .set_default("database.pool.max_connections", 5u32)?
         .set_default("database.pool.min_connections", 1u32)?
@@ -1097,7 +1133,8 @@ fn base_builder() -> Result<ConfigBuilder<DefaultState>, ConfigError> {
         .set_default("telemetry.environment", telemetry_environment)?
         .set_default("telemetry.otlp_endpoint", "http://localhost:4317")?
         .set_default("telemetry.sampler_ratio", 1.0)?
-        .set_default("telemetry.enabled", true)?;
+        .set_default("telemetry.enabled", true)?
+        .set_default("watcher.poll_interval_secs", 30u64)?;
     Ok(builder)
 }
 
@@ -1323,6 +1360,32 @@ mod tests {
             "backend=postgres, host=postgres.statuslist.svc.cluster.local, port=5432, database=status/list"
         );
         assert!(!split_db_cfg.database.redacted_target().contains("secret"));
+
+        let password_dir = tempfile::tempdir().expect("tempdir");
+        let password_path = password_dir.path().join("postgres-password");
+        std::fs::write(&password_path, "file secret\n").expect("write password file");
+        let password_file_cfg = Config::load_from_overrides(&[
+            ("database.backend", "postgres"),
+            ("database.host", "postgres.statuslist.svc.cluster.local"),
+            ("database.port", "5432"),
+            ("database.username", "user"),
+            (
+                "database.password_file",
+                password_path
+                    .to_str()
+                    .expect("password path should be unicode for test"),
+            ),
+            ("database.name", "status-list"),
+        ])
+        .expect("Failed to load password-file database config");
+        let resolved = tokio::runtime::Runtime::new()
+            .expect("runtime")
+            .block_on(password_file_cfg.database.resolved_url_with_password_file())
+            .expect("password-file database config should resolve");
+        assert_eq!(
+            resolved.expose_secret(),
+            "postgres://user:file%20secret@postgres.statuslist.svc.cluster.local:5432/status-list"
+        );
 
         let ipv6_db_cfg = Config::load_from_overrides(&[
             ("database.backend", "postgres"),
