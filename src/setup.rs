@@ -162,7 +162,7 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
     // readiness probe can reach the real adapter (the domain ports only expose
     // the higher-level repositories).
     #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mysql"))]
-    let mut db_arc: Option<Arc<sea_orm::DatabaseConnection>> = None;
+    let db_arc: Option<Arc<sea_orm::DatabaseConnection>>;
 
     let (status_list_repo, credential_repo, status_list_snapshot): (
         Arc<dyn StatusListRepo>,
@@ -171,6 +171,10 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
     ) = match config.database.backend {
         #[cfg(feature = "memory")]
         DatabaseBackend::Memory => {
+            #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mysql"))]
+            {
+                db_arc = None;
+            }
             let memory_snapshot = MemoryStatusListSnapshotRepo::default();
             let memory_lists = MemoryStatusLists::default().with_snapshot(&memory_snapshot);
             (
