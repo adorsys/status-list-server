@@ -93,16 +93,8 @@ jobs:
         run: cargo check --no-default-features --features memory
 
       - name: Release image feature set
-        # The feature set the release image is actually built with. Two gaps make it
-        # worth checking on its own. Nothing validates the `ARG FEATURES` string: it is
-        # a bare string handed to `cargo build` inside the image build, so a value
-        # naming no real feature fails only when someone cuts a release. And
-        # `--all-features` above does not stand in for it -- cargo unifies features
-        # across the graph, so enabling everything builds `sea-orm` with all three
-        # `sqlx` backends where the release set builds it with `sqlx-postgres` alone.
-        #
-        # Read out of the Dockerfile rather than duplicated, so changing FEATURES there
-        # cannot silently stop this from checking what ships.
+        # The Dockerfile default is still the local smoke-build feature set.
+        # Release variants are checked by `release-variant-checks` below.
         run: |
           set -euo pipefail
           features=$(sed -nE 's/^ARG FEATURES="([^"]+)".*/\1/p' Dockerfile)
@@ -119,6 +111,45 @@ jobs:
             echo "ERROR: Infrastructure dependencies or imports found in src/domain/"
             exit 1
           fi
+
+  release-variant-checks:
+    name: Release Variant Check (${{ matrix.variant.suffix }})
+    runs-on: ubuntu-latest
+    needs: cargo-fmt
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        variant:
+          - suffix: aws
+            features: "postgres,aws-secrets,acme"
+          - suffix: gcp
+            features: "postgres,gcp-secrets,acme"
+          - suffix: azure
+            features: "postgres,azure-kv,acme"
+          - suffix: vault
+            features: "postgres,vault,acme"
+          - suffix: fscert
+            features: "postgres"
+
+    steps:
+      - name: Fetch Repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install Rust
+        uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake golang-go
+
+      - name: Cargo check release variant
+        run: cargo check --workspace --features "${FEATURES}"
+        env:
+          FEATURES: ${{ matrix.variant.features }}
 
   docker-build:
     name: Docker Build Smoke
@@ -137,7 +168,9 @@ jobs:
   cargo-clippy:
     name: Cargo Clippy Check
     runs-on: ubuntu-latest
-    needs: cargo-build
+    needs:
+      - cargo-build
+      - release-variant-checks
 
     steps:
       - name: Fetch Repository

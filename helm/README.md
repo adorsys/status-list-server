@@ -27,7 +27,7 @@ The following files are used to configure the deployment:
 ### Key Configuration Options
 
 - **`statuslist.image.repository`**: The Docker image for the application.
-- **`statuslist.image.tag`**: The Docker image tag. Used only when `statuslist.image.digest` is empty. Defaults to empty, which falls back to the chart's `appVersion` — not to `latest`, so an upgrade that changes nothing in the chart cannot change the running image and a rollback stays reproducible. `appVersion` therefore has to track the latest released application version.
+- **`statuslist.image.tag`**: The Docker image tag. Used only when `statuslist.image.digest` is empty. Defaults to empty, which falls back to the chart's `appVersion` — the published AWS variant tag, not `latest`, so an upgrade that changes nothing in the chart cannot change the running image and a rollback stays reproducible. `appVersion` therefore has to track the latest released default image tag.
 - **`statuslist.image.pullPolicy`**: Defaults to empty, which derives the policy from how the image is named: `IfNotPresent` when a digest is set, because a digest is content-addressed and re-pulling it can only fetch the same bytes, and `Always` for a tag, which is mutable. Set it explicitly to override.
 - **`statuslist.image.digest`**: An image digest as `sha256:` plus 64 hex characters; anything else is rejected at template time. When set it takes precedence over `statuslist.image.tag`, and the deployment runs `repository@digest`. Production deploys set this so the running image is the exact artifact CI scanned; tags are mutable and a digest is not. Leave it empty for local and manual installs to get tag-based deployment.
   - **`postgres.persistence.enabled`**: Enable or disable persistent storage for PostgreSQL.
