@@ -170,8 +170,27 @@ pub struct ServerConfig {
     pub domain: String,
     pub port: u16,
     pub cert: CertConfig,
+    /// External signing file configuration. When set, the built-in certificate
+    /// manager (ACME/store) is disabled and no secrets-backend configuration is
+    /// required. Mutually exclusive with the built-in certificate lifecycle.
+    pub signing: Option<SigningConfig>,
     pub enable_metrics: bool,
     pub aggregation_uri: Option<String>,
+}
+
+/// Configuration for loading signing key and certificate chain from files on
+/// disk.
+///
+/// Designed for environments where an external system (e.g. Kubernetes
+/// cert-manager) manages certificate lifecycle and mounts the key material as
+/// files. Files are re-read on each request so rotation is picked up without a
+/// restart.
+#[derive(Debug, Clone, Deserialize)]
+pub struct SigningConfig {
+    /// Path to the PKCS8 PEM-encoded private signing key (e.g. `tls.key`).
+    pub key_file: String,
+    /// Path to the PEM-encoded certificate chain (e.g. `tls.crt`).
+    pub cert_file: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -1659,6 +1678,31 @@ mod tests {
                 .accounts
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn signing_config_defaults_to_none() {
+        let config = Config::load_from_overrides(&[]).expect("Failed to load default config");
+        assert!(
+            config.server.signing.is_none(),
+            "signing should be None by default"
+        );
+    }
+
+    #[test]
+    fn signing_config_loaded_from_overrides() {
+        let config = Config::load_from_overrides(&[
+            ("server.signing.key_file", "/certs/tls.key"),
+            ("server.signing.cert_file", "/certs/tls.crt"),
+        ])
+        .expect("Failed to load config with signing overrides");
+
+        let signing = config
+            .server
+            .signing
+            .expect("signing config should be present");
+        assert_eq!(signing.key_file, "/certs/tls.key");
+        assert_eq!(signing.cert_file, "/certs/tls.crt");
     }
 
     #[test]

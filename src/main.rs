@@ -46,13 +46,15 @@ async fn main() -> Result<()> {
     #[cfg(not(feature = "acme"))]
     let app_state = build_state(&config).await?;
 
-    // Setup certificate renewal scheduler
+    // Setup certificate renewal scheduler (only when ACME manages certs)
     #[cfg(feature = "acme")]
-    setup_cert_renewal_scheduler(
-        cert_manager.clone(),
-        &config.server.cert.renewal_cron_schedule,
-    )
-    .await?;
+    if let Some(ref cert_manager) = cert_manager {
+        setup_cert_renewal_scheduler(
+            cert_manager.clone(),
+            &config.server.cert.renewal_cron_schedule,
+        )
+        .await?;
+    }
 
     // Setup historical snapshot cleanup scheduler (runs daily at midnight UTC)
     // This deletes snapshots older than snapshot_retention_secs to prevent
@@ -62,8 +64,9 @@ async fn main() -> Result<()> {
     let http_server = HttpServer::new(&config, app_state, prometheus_registry).await?;
 
     #[cfg(feature = "acme")]
-    {
-        // Zero-init cert-chain cache counters now that the metrics recorder is installed.
+    if let Some(cert_manager) = cert_manager {
+        // Zero-init cert-chain cache counters now that the metrics recorder
+        // is installed.
         cert_manager.init_cert_chain_cache_counters();
 
         // Zero-init renewal counters so they appear in Prometheus scrapes
