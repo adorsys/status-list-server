@@ -135,6 +135,9 @@ statuslist:
   # file reload support (see issue #456). Use fileEnv to map a mounted file path
   # into an application environment variable. Paths are relative to mountPath and
   # work whether items is present or the whole Secret is mounted.
+  # When items is present, each fileEnv value must exactly match one of the
+  # normalized items[].path values so the chart cannot point the app at a file
+  # Kubernetes will not mount.
   # If APP_DATABASE__PASSWORD_FILE is configured via statuslist.env or fileEnv, the
   # chart does not inject APP_DATABASE__PASSWORD, so the application cannot silently
   # keep using a stale startup password from an environment variable.

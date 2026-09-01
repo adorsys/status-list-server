@@ -10,6 +10,7 @@ runs:
         set -euo pipefail
         mkdir -p /tmp/rendered
         helm template status-list-server helm/chart -f helm/chart/values.yaml --output-dir /tmp/rendered/default
+        helm template status-list-server helm/chart -f helm/chart/values-rotation-example.yaml --output-dir /tmp/rendered/rotation
         helm template status-list-server helm/chart --set serviceAccount.create=false --output-dir /tmp/rendered/no-sa
         helm template status-list-server helm/chart --set statuslist.aws.mountCredentials=true --output-dir /tmp/rendered/legacy-creds
         helm template status-list-server helm/chart \
@@ -58,6 +59,12 @@ runs:
         fi
         if [ -f /tmp/rendered/default/status-list-server/templates/secret.yaml ]; then
           echo "ERROR: default (ESO) render must not emit the fallback Secret"; exit 1
+        fi
+        if ! grep -q 'name: statuslist-db-credentials' /tmp/rendered/rotation/status-list-server/templates/external-secrets.yaml; then
+          echo "ERROR: rotation example must render the statuslist-db-credentials ExternalSecret"; exit 1
+        fi
+        if ! grep -q 'name: statuslist-api-keys' /tmp/rendered/rotation/status-list-server/templates/external-secrets.yaml; then
+          echo "ERROR: rotation example must render the statuslist-api-keys ExternalSecret"; exit 1
         fi
         # serviceAccount.create=false must render no application ServiceAccount.
         if [ -f /tmp/rendered/no-sa/status-list-server/templates/serviceaccount.yaml ]; then
@@ -118,6 +125,19 @@ runs:
         fi
         if grep -q 'name: APP_DATABASE__PASSWORD$' /tmp/rendered/file-env-no-items/status-list-server/templates/deployment.yaml; then
           echo "ERROR: APP_DATABASE__PASSWORD must not render when APP_DATABASE__PASSWORD_FILE is configured"; exit 1
+        fi
+        if helm template status-list-server helm/chart \
+          --set-string 'statuslist.secretMounts[0].name=database-credentials' \
+          --set-string 'statuslist.secretMounts[0].secretName=postgres-access' \
+          --set-string 'statuslist.secretMounts[0].mountPath=/etc/secrets/database' \
+          --set-string 'statuslist.secretMounts[0].items[0].key=password' \
+          --set-string 'statuslist.secretMounts[0].items[0].path=password' \
+          --set-string 'statuslist.secretMounts[0].fileEnv.APP_DATABASE__PASSWORD_FILE=pwd' \
+          >/tmp/rendered/file-env-mismatch.out 2>&1; then
+          echo "ERROR: fileEnv must fail when it does not match a declared items path"; exit 1
+        fi
+        if ! grep -q 'references "pwd", but items mounts only: password' /tmp/rendered/file-env-mismatch.out; then
+          echo "ERROR: fileEnv mismatch failure did not explain the missing items path"; exit 1
         fi
         helm template status-list-server helm/chart \
           --set externalSecret.enabled=false \

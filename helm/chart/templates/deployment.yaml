@@ -106,14 +106,31 @@ spec:
             {{- end }}
             {{- $secretFileEnv := dict }}
             {{- range $mount := .Values.statuslist.secretMounts }}
+              {{- $items := $mount.items | default list }}
+              {{- $itemPaths := dict }}
+              {{- range $item := $items }}
+                {{- $itemPath := trim (toString $item.path) }}
+                {{- $normalizedItemPath := clean $itemPath }}
+                {{- $_ := set $itemPaths $normalizedItemPath true }}
+              {{- end }}
               {{- with $mount.fileEnv }}
                 {{- range $name, $path := . }}
                   {{- $pathString := trim (toString $path) }}
+                  {{- $normalizedPath := clean $pathString }}
                   {{- if eq $pathString "" }}
                     {{- fail (printf "statuslist.secretMounts[%s].fileEnv.%s must be a non-empty relative file path" $mount.name $name) }}
                   {{- end }}
                   {{- if hasPrefix "/" $pathString }}
                     {{- fail (printf "statuslist.secretMounts[%s].fileEnv.%s must be relative to mountPath, got absolute path %q" $mount.name $name $pathString) }}
+                  {{- end }}
+                  {{- if or (eq $normalizedPath ".") (eq $normalizedPath "..") (hasPrefix "../" $normalizedPath) }}
+                    {{- fail (printf "statuslist.secretMounts[%s].fileEnv.%s must resolve inside mountPath, got %q" $mount.name $name $pathString) }}
+                  {{- end }}
+                  {{- if ne $normalizedPath $pathString }}
+                    {{- fail (printf "statuslist.secretMounts[%s].fileEnv.%s must be a normalized relative file path, got %q" $mount.name $name $pathString) }}
+                  {{- end }}
+                  {{- if and (gt (len $items) 0) (not (hasKey $itemPaths $normalizedPath)) }}
+                    {{- fail (printf "statuslist.secretMounts[%s].fileEnv.%s references %q, but items mounts only: %s" $mount.name $name $pathString (keys $itemPaths | sortAlpha | join ", ")) }}
                   {{- end }}
                   {{- if hasKey $env $name }}
                     {{- fail (printf "statuslist.secretMounts[%s].fileEnv.%s duplicates statuslist.env.%s; define each environment variable only once" $mount.name $name $name) }}
@@ -121,7 +138,7 @@ spec:
                   {{- if hasKey $secretFileEnv $name }}
                     {{- fail (printf "statuslist.secretMounts fileEnv defines %s more than once" $name) }}
                   {{- end }}
-                  {{- $_ := set $secretFileEnv $name (printf "%s/%s" $mount.mountPath $pathString) }}
+                  {{- $_ := set $secretFileEnv $name (printf "%s/%s" $mount.mountPath $normalizedPath) }}
                 {{- end }}
               {{- end }}
             {{- end }}
