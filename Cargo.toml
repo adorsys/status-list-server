@@ -64,7 +64,7 @@ opt-level = 1
 # Async runtime and utilities
 tokio = { version = "1.5", features = ["full"] }
 async-trait = "0.1"
-arc-swap = "1.7"
+arc-swap = "1.9"
 notify = { version = "8.2", default-features = false, features = ["macos_fsevent"] }
 
 # Web frameworks
