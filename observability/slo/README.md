@@ -35,13 +35,13 @@ set keeps cardinality in check.
 
 ## Per-SLI table
 
-| SLI                  | Metric source                                                                                                 | Example target                   | Window | Alert windows / burn thresholds                                              |
-| -------------------- | ------------------------------------------------------------------------------------------------------------- | -------------------------------- | ------ | ---------------------------------------------------------------------------- |
-| Request latency      | `http_server_duration_seconds` histogram                                                                      | p95 < **300 ms**                 | 30d    | fast page: 1h > 300ms **and** 5m > 300ms; slow warn: 6h > 300ms **and** 30m > 300ms |
+| SLI                  | Metric source                                                                                                 | Example target                   | Window | Alert windows / burn thresholds                                                      |
+| -------------------- | ------------------------------------------------------------------------------------------------------------- | -------------------------------- | ------ | ----------------------------------------------------------------------------         |
+| Request latency      | `http_server_duration_seconds` histogram                                                                      | p95 < **300 ms**                 | 30d    | fast page: 1h > 300ms **and** 5m > 300ms; slow warn: 6h > 300ms **and** 30m > 300ms  |
 | Error rate           | `sum(rate(http_server_requests_total{status_class="5xx"}[...])) / sum(rate(http_server_requests_total[...]))` | ≥ **99.5%** success (≤ 0.5% 5xx) | 30d    | fast page: ≥14.4x (0.072) on 1h **and** 5m; slow warn: ≥6x (0.030) on 6h **and** 30m |
-| Cache hit ratio      | `status_list_cache_hits_total / (hits_total + misses_total)`                                                  | ≥ **85%**                        | 5m     | warn-only (degradation, not outage)                                          |
-| DB latency           | `db_query_duration_seconds` histogram                                                                         | p95 < **50 ms**                  | 30d    | fast page: 1h > 50ms **and** 5m > 50ms; slow warn: 6h > 50ms **and** 30m > 50ms |
-| Cert expiry          | `cert_time_to_expiry_seconds` gauge                                                                          | renew before expiry              | –      | warn: ≤14d to expiry (op risk); page: ≤7d to expiry (imminent)               |
+| Cache hit ratio      | `status_list_cache_hits_total / (hits_total + misses_total)`                                                  | ≥ **85%**                        | 5m     | warn-only (degradation, not outage)                                                  |
+| DB latency           | `db_query_duration_seconds` histogram                                                                         | p95 < **50 ms**                  | 30d    | fast page: 1h > 50ms **and** 5m > 50ms; slow warn: 6h > 50ms **and** 30m > 50ms      |
+| Cert expiry          | `cert_time_to_expiry_seconds` gauge                                                                           | renew before expiry              | –      | warn: ≤14d to expiry (op risk); page: ≤7d to expiry (imminent)                       |
 | Token-gen failure    | `token_generation_failures_total / token_generation_attempts_total`                                           | < **0.5%**                       | 30d    | fast page: ≥14.4x (0.072) on 1h **and** 5m; slow warn: ≥6x (0.030) on 6h **and** 30m |
 
 ### Why these windows
@@ -146,15 +146,15 @@ Every SLO target in this doc is duplicated as a **literal constant** in more tha
 one file. A change to a target must be applied to **all** of them together, or
 dashboards and alerts drift from the documented objective:
 
-| Target            | Files that hard-code it                                                                                                          |
-| ----------------- | -------------------------------------------------------------------------------------------------------------------------------- |
-| 300 ms latency    | `alerting.rules.yml` (0.3), `dashboards/src/generate.mjs` (0.3), this doc                                                        |
-| 0.5% error budget | `recording.rules.yml` (`0.005` denominator), `alerting.rules.yml` (0.072/0.030), `dashboards/src/generate.mjs` (0.005), this doc |
-| 85% cache hit     | `alerting.rules.yml` (0.85), `dashboards/src/generate.mjs` (0.85), this doc                                                      |
-| 50 ms DB latency  | `alerting.rules.yml` (0.05), `dashboards/src/generate.mjs` (0.05), this doc                                                      |
-| 1% cert renewal   | `dashboards/src/generate.mjs` (0.01, diagnostic reference only); alerting uses expiry thresholds below                            |
+| Target               | Files that hard-code it                                                                                                                                      |
+| -----------------    | --------------------------------------------------------------------------------------------------------------------------------                             |
+| 300 ms latency       | `alerting.rules.yml` (0.3), `dashboards/src/generate.mjs` (0.3), this doc                                                                                    |
+| 0.5% error budget    | `recording.rules.yml` (`0.005` denominator), `alerting.rules.yml` (0.072/0.030), `dashboards/src/generate.mjs` (0.005), this doc                             |
+| 85% cache hit        | `alerting.rules.yml` (0.85), `dashboards/src/generate.mjs` (0.85), this doc                                                                                  |
+| 50 ms DB latency     | `alerting.rules.yml` (0.05), `dashboards/src/generate.mjs` (0.05), this doc                                                                                  |
+| 1% cert renewal      | `dashboards/src/generate.mjs` (0.01, diagnostic reference only); alerting uses expiry thresholds below                                                       |
 | 14d / 7d cert expiry | `alerting.rules.yml` (1209600 / 604800 s), `helm/chart/values.yaml` (`slo.certExpiryWarnSeconds` / `certExpiryCriticalSeconds`), `thresholds.json`, this doc |
-| 0.5% token-gen    | `recording.rules.yml` (0.005), `alerting.rules.yml` (0.072/0.030), this doc                                                      |
+| 0.5% token-gen       | `recording.rules.yml` (0.005), `alerting.rules.yml` (0.072/0.030), this doc                                                                                  |
 
 Because the dashboard JSON is generated, change `dashboards/src/generate.mjs`
 and commit the regenerated `generated/status-list-slo.json` (`npm run
