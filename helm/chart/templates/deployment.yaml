@@ -22,6 +22,9 @@ spec:
         prometheus.io/scrape: "true"
         prometheus.io/port: {{ .Values.statuslist.service.targetPort | quote }}
         prometheus.io/path: "/metrics"
+        {{- if .Values.externalSecret.enabled }}
+        checksum/secret: {{ include (print $.Template.BasePath "/external-secrets.yaml") . | sha256sum }}
+        {{- end }}
         {{- with .Values.podAnnotations }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
@@ -101,6 +104,52 @@ spec:
             {{- range $name, $value := .Values.statuslist.env }}
             {{- $_ := set $env $name $value }}
             {{- end }}
+            {{- $secretFileEnv := dict }}
+            {{- range $mount := .Values.statuslist.secretMounts }}
+              {{- $items := $mount.items | default list }}
+              {{- $itemPaths := dict }}
+              {{- range $item := $items }}
+                {{- $itemPath := trim (toString $item.path) }}
+                {{- $normalizedItemPath := clean $itemPath }}
+                {{- $_ := set $itemPaths $normalizedItemPath true }}
+              {{- end }}
+              {{- with $mount.fileEnv }}
+                {{- range $name, $path := . }}
+                  {{- $pathString := trim (toString $path) }}
+                  {{- $normalizedPath := clean $pathString }}
+                  {{- if eq $pathString "" }}
+                    {{- fail (printf "statuslist.secretMounts[%s].fileEnv.%s must be a non-empty relative file path" $mount.name $name) }}
+                  {{- end }}
+                  {{- if hasPrefix "/" $pathString }}
+                    {{- fail (printf "statuslist.secretMounts[%s].fileEnv.%s must be relative to mountPath, got absolute path %q" $mount.name $name $pathString) }}
+                  {{- end }}
+                  {{- if or (eq $normalizedPath ".") (eq $normalizedPath "..") (hasPrefix "../" $normalizedPath) }}
+                    {{- fail (printf "statuslist.secretMounts[%s].fileEnv.%s must resolve inside mountPath, got %q" $mount.name $name $pathString) }}
+                  {{- end }}
+                  {{- if ne $normalizedPath $pathString }}
+                    {{- fail (printf "statuslist.secretMounts[%s].fileEnv.%s must be a normalized relative file path, got %q" $mount.name $name $pathString) }}
+                  {{- end }}
+                  {{- if and (gt (len $items) 0) (not (hasKey $itemPaths $normalizedPath)) }}
+                    {{- fail (printf "statuslist.secretMounts[%s].fileEnv.%s references %q, but items mounts only: %s" $mount.name $name $pathString (keys $itemPaths | sortAlpha | join ", ")) }}
+                  {{- end }}
+                  {{- if hasKey $env $name }}
+                    {{- fail (printf "statuslist.secretMounts[%s].fileEnv.%s duplicates statuslist.env.%s; define each environment variable only once" $mount.name $name $name) }}
+                  {{- end }}
+                  {{- if hasKey $secretFileEnv $name }}
+                    {{- fail (printf "statuslist.secretMounts fileEnv defines %s more than once" $name) }}
+                  {{- end }}
+                  {{- $_ := set $secretFileEnv $name (printf "%s/%s" $mount.mountPath $normalizedPath) }}
+                {{- end }}
+              {{- end }}
+            {{- end }}
+            {{- range $name, $_ := $secretFileEnv }}
+              {{- if eq $name "APP_DATABASE__URL" }}
+                {{- fail "statuslist.secretMounts fileEnv must not define APP_DATABASE__URL because it would expose assembled credentials in pod metadata; use APP_DATABASE__HOST/PORT/USERNAME/NAME/QUERY plus APP_DATABASE__PASSWORD_FILE" }}
+              {{- end }}
+              {{- if eq $name "APP_DATABASE__PASSWORD" }}
+                {{- fail "statuslist.secretMounts fileEnv must not define APP_DATABASE__PASSWORD; use APP_DATABASE__PASSWORD_FILE for mounted database password files" }}
+              {{- end }}
+            {{- end }}
             {{- if hasKey $env "APP_DATABASE__URL" }}
               {{- fail "statuslist.env.APP_DATABASE__URL is not supported by this chart because it exposes assembled credentials in pod metadata; use APP_DATABASE__HOST/PORT/USERNAME/NAME/QUERY plus the chart-managed APP_DATABASE__PASSWORD SecretKeyRef" }}
             {{- end }}
@@ -159,6 +208,35 @@ spec:
             {{- if not (hasKey $env "APP_DATABASE__NAME") }}
               {{- $_ := set $env "APP_DATABASE__NAME" .Values.postgres.auth.database }}
             {{- end }}
+            {{- range $name, $_ := $secretFileEnv }}
+              {{- if hasKey $env $name }}
+                {{- fail (printf "statuslist.secretMounts fileEnv defines %s, which duplicates a rendered statuslist environment variable; define each environment variable only once" $name) }}
+              {{- end }}
+            {{- end }}
+            {{- $chartManagedEnv := dict }}
+            {{- $appRegionForValidation := include "status-list-server-chart.appRegion" . }}
+            {{- $watcherPollInterval := "" }}
+            {{- if .Values.statuslist.watcher }}
+              {{- $watcherPollInterval = trim (toString (.Values.statuslist.watcher.pollIntervalSecs | default "")) }}
+            {{- end }}
+            {{- if and (eq .Values.secretStore.provider "aws") $appRegionForValidation }}
+              {{- $_ := set $chartManagedEnv "APP_AWS__REGION" true }}
+            {{- end }}
+            {{- if .Values.statuslist.aws.mountCredentials }}
+              {{- $_ := set $chartManagedEnv "AWS_SHARED_CREDENTIALS_FILE" true }}
+              {{- $_ := set $chartManagedEnv "AWS_CONFIG_FILE" true }}
+            {{- end }}
+            {{- if ne $watcherPollInterval "" }}
+              {{- $_ := set $chartManagedEnv "APP_WATCHER__POLL_INTERVAL_SECS" true }}
+            {{- end }}
+            {{- if not (or (hasKey $env "APP_DATABASE__PASSWORD_FILE") (hasKey $secretFileEnv "APP_DATABASE__PASSWORD_FILE")) }}
+              {{- $_ := set $chartManagedEnv "APP_DATABASE__PASSWORD" true }}
+            {{- end }}
+            {{- range $name, $_ := $secretFileEnv }}
+              {{- if hasKey $chartManagedEnv $name }}
+                {{- fail (printf "statuslist.secretMounts fileEnv defines %s, which duplicates a chart-managed environment variable; define each environment variable only once" $name) }}
+              {{- end }}
+            {{- end }}
             {{- range $name, $value := $env }}
             - name: {{ $name }}
               value: {{ $value | quote }}
@@ -174,17 +252,33 @@ spec:
             - name: AWS_CONFIG_FILE
               value: /home/nobody/.aws/config
             {{- end }}
+            {{- range $name, $path := $secretFileEnv }}
+            - name: {{ $name }}
+              value: {{ $path | quote }}
+            {{- end }}
+            {{- /* Watcher poll interval for credential rotation detection */}}
+            {{- if ne $watcherPollInterval "" }}
+            - name: APP_WATCHER__POLL_INTERVAL_SECS
+              value: {{ $watcherPollInterval | quote }}
+            {{- end }}
+            {{- if not (or (hasKey $env "APP_DATABASE__PASSWORD_FILE") (hasKey $secretFileEnv "APP_DATABASE__PASSWORD_FILE")) }}
             - name: APP_DATABASE__PASSWORD
               valueFrom:
                 secretKeyRef:
                   name: {{ include "status-list-server-chart.appSecretName" . }}
                   key: postgres-password
+            {{- end }}
           volumeMounts:
             - name: tmp
               mountPath: /tmp
           {{- if .Values.statuslist.aws.mountCredentials }}
             - name: aws-credentials-volume
               mountPath: /home/nobody/.aws
+              readOnly: true
+          {{- end }}
+          {{- range .Values.statuslist.secretMounts }}
+            - name: {{ .name }}
+              mountPath: {{ .mountPath }}
               readOnly: true
           {{- end }}
       volumes:
@@ -194,5 +288,14 @@ spec:
         - name: aws-credentials-volume
           secret:
             secretName: aws-credentials-secret
+      {{- end }}
+      {{- range .Values.statuslist.secretMounts }}
+        - name: {{ .name }}
+          secret:
+            secretName: {{ .secretName }}
+            {{- with .items }}
+            items:
+              {{- toYaml . | nindent 14 }}
+            {{- end }}
       {{- end }}
 {{- end }}
