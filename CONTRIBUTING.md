@@ -96,16 +96,33 @@ rather than reshuffling an existing list:
    *after* `CI Success` is required — doing it in the other order leaves a window
    where a failing job blocks nothing.
 
-`ci-success` fails if any job it needs reported `failure` or `cancelled`. A `skipped`
-job passes, because `cargo-test-doc` legitimately skips on a workspace with no library
-target. A dedicated CI step asserts that every job in `CI.yml` appears in
-`ci-success.needs`, so a new job cannot silently escape the gate.
+`ci-success` fails if any job it needs reported `failure` or `cancelled`. It also
+fails if any job reported `skipped`, with one allowed exception — `cargo-test-doc`,
+which legitimately skips on a workspace with no library target. Without that check a
+skipped job would pass, since `if: always()` reports it as neither failed nor
+cancelled. A dedicated CI step asserts that every job in `CI.yml` appears in
+`ci-success.needs`, so a new job cannot silently escape the gate either.
+
+**The zizmor gate can be reddened by things outside this repository.** It runs with
+`online-audits: true`, so it queries the GitHub Advisory database and the
+repositories of every action pinned here. That is deliberate — those audits are what
+catch a supply-chain attack on a pinned action — but it means a newly published
+advisory, or an outage of the advisory API, can block every merge with no change to
+this repository. A transient API error is retried once. If a real advisory is
+blocking and the fix cannot land immediately, recovery is a scoped
+`# zizmor: ignore[rule]` on the anchored line, removed once the action is bumped.
 
 ### Dependabot auto-merge
 
 `auto_merge.yml` arms auto-merge for patch and minor updates, and never for
 `github-actions` updates. It does not approve anything: review stays human, and the
 merge fires on its own once the approvals land and the checks are green.
+
+Dependabot applies a **7-day release cooldown** to version updates in every ecosystem
+(`cooldown: default-days: 7` in `.github/dependabot.yml`), so a just-published version
+is not proposed straight away — this is expected, not a broken schedule. Security
+updates are exempt from cooldown. Because the cooldown decides when a bump is opened
+at all, it also decides when the auto-merge path above ever sees a new version.
 
 **This needs the repository setting *Allow auto-merge* to be on** — Settings →
 General → Pull Requests. It is currently off by choice, so nothing is ever armed:
@@ -158,6 +175,21 @@ When the Release PR is merged, release-plz automatically:
 - Publishes a GitHub Release with the changelog as the release body
 - The `v*.*.*` tag push triggers `deploy.yml`, which builds and pushes a Docker image
   tagged with the semver version (e.g., `ghcr.io/adorsys/status-list-server:1.2.0`)
+
+**Tag format.** `deploy.yml`'s `validate-tag` job rejects any tag that matches the
+`v*.*.*` push filter without being semver, because `docker/metadata-action` would
+silently drop every version tag and the release would fall through to the mutable
+`latest`. This matters when hand-pushing a tag rather than letting release-plz cut
+one:
+
+- Accepted: `v1.2.3`, `v1.2.3-rc.1`
+- Rejected: `v2024.01.release`, `v1.2.3.4`, `v01.2.3`, `1.2.3`
+- Rejected: `v1.2.3+meta` — build metadata is valid semver, but `+` is not a legal
+  character in a Docker image tag
+
+The rule is [`scripts/validate-release-tag.sh`](scripts/validate-release-tag.sh),
+covered by
+[`scripts/tests/test_validate_release_tag.py`](scripts/tests/test_validate_release_tag.py).
 
 > **Note:** The EKS deployment step in `deploy.yml` currently deploys using the
 > short-SHA image tag (`sha-<short_sha>`), not the semver tag. Switching the

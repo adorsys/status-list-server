@@ -24,6 +24,21 @@ jobs:
       # release turns every PR red. The action's SHA pins the action, not the scanner.
       ZIZMOR_VERSION: "1.28.0"
 
+      # zizmor's exit codes are severity-encoded: 0 no findings, 1 audit error, 2
+      # argument error, 3 no inputs collected, then 11/12/13/14 for "findings
+      # reported, highest severity is informational/low/medium/high".
+      #
+      # The self-test accepts the whole 11-14 band rather than one value. This gate is
+      # fail-closed at every severity, so any code in the band proves what the
+      # self-test claims -- that the gate evaluated the fixture and reported. Pinning
+      # a single code would instead pin the fixture's current severity classification:
+      # an upstream reclassification, or adding a finding of a different severity to
+      # the fixture, would red every PR with nothing actually wrong.
+      #
+      # Revisit alongside ZIZMOR_VERSION if the exit-code contract changes.
+      ZIZMOR_FINDINGS_EXIT_MIN: "11"
+      ZIZMOR_FINDINGS_EXIT_MAX: "14"
+
     steps:
       - name: Fetch Repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -32,7 +47,22 @@ jobs:
 
       # Fail-closed at every severity. To accept a finding use `# zizmor: ignore[rule]`
       # on the line it anchors to; `ignore-start`/`ignore-end` suppress nothing.
+      #
+      # `online-audits: true` is deliberate and stays on the merge gate. The four
+      # online audits -- known-vulnerable-actions, impostor-commit, ref-confusion and
+      # typosquat-uses -- are the ones that catch a supply-chain attack on the actions
+      # this repository pins by SHA. Offline, a newly disclosed advisory against a
+      # pinned action is invisible until someone happens to bump it. That an advisory
+      # published upstream reds a PR that changed nothing here is the alarm working,
+      # not noise: the workflow really did become vulnerable between the two runs.
+      #
+      # The cost is that zizmor is `fatal` when an online audit's request fails (see
+      # its Troubleshooting docs), so a transient GitHub API error is indistinguishable
+      # from a finding at the job level. The retry below covers exactly that case.
       - name: Run Zizmor
+        id: zizmor
+        # Failure is deferred to the retry, which is the step that gates the job.
+        continue-on-error: true
         uses: zizmorcore/zizmor-action@3dc1ecc9bcb9e94e9b2c709687979e1298497054 # v0.6.2
         with:
           version: ${{ env.ZIZMOR_VERSION }}
@@ -42,6 +72,20 @@ jobs:
           online-audits: true
           # `annotations` and `advanced-security` are mutually exclusive in this action.
           # A fail-closed gate wants findings on the diff, not in a tab that stays empty.
+          advanced-security: false
+          annotations: true
+
+      # Only a transient failure is rescued: a real finding is deterministic and fails
+      # this run too, so the retry cannot turn a red gate green. Not `continue-on-error`,
+      # so this step is the one that fails the job.
+      - name: Run Zizmor (retry)
+        if: ${{ steps.zizmor.outcome == 'failure' }}
+        uses: zizmorcore/zizmor-action@3dc1ecc9bcb9e94e9b2c709687979e1298497054 # v0.6.2
+        with:
+          version: ${{ env.ZIZMOR_VERSION }}
+          inputs: .
+          persona: regular
+          online-audits: true
           advanced-security: false
           annotations: true
 
@@ -67,27 +111,44 @@ jobs:
             -- "$FIXTURE" 2>&1) || rc=$?
           printf '%s\n' "$out"
 
-          # 13 is zizmor's "findings were reported". 3 is "no inputs collected" and 1
-          # is any other error -- both would pass a bare non-zero check.
-          if [ "$rc" -ne 13 ]; then
-            echo "::error::expected exit 13 (findings reported) from the fixture, got ${rc}."
+          # 11-14 is "findings reported", encoded by highest severity -- see the
+          # exit-code note on ZIZMOR_FINDINGS_EXIT_MIN above. The band matters rather
+          # than the exact value: 0 is a clean fixture, 3 is "no inputs collected" and
+          # 1 is any other error, and all three would pass a bare non-zero check.
+          if [ "$rc" -lt "$ZIZMOR_FINDINGS_EXIT_MIN" ] || [ "$rc" -gt "$ZIZMOR_FINDINGS_EXIT_MAX" ]; then
+            echo "::error::expected a findings exit code (${ZIZMOR_FINDINGS_EXIT_MIN}-${ZIZMOR_FINDINGS_EXIT_MAX}) from the fixture, got ${rc}."
             echo "Do not trust what this job reports above: the gate did not evaluate"
             echo "the fixture, so a clean result for this repository proves nothing."
             exit 1
           fi
 
-          if ! printf '%s' "$out" | grep -q 'artipacked'; then
-            echo "::error::the gate failed on the fixture but did not report artipacked."
-            echo "The fixture asserts a checkout without persist-credentials: false."
+          # Every rule the fixture asserts, not just the first: a run that reports one
+          # finding and silently stopped raising the other would still exit in-band.
+          missing=""
+          for rule in artipacked excessive-permissions; do
+            printf '%s' "$out" | grep -q "$rule" || missing="${missing} ${rule}"
+          done
+
+          if [ -n "$missing" ]; then
+            echo "::error::the gate failed on the fixture but did not report:${missing}"
+            echo "The fixture asserts a checkout without persist-credentials: false"
+            echo "(artipacked) and a job broadening permissions to write-all"
+            echo "(excessive-permissions). A rule that stopped firing would let the"
+            echo "corresponding regression through this gate unnoticed."
             exit 1
           fi
 
-          echo "self-test passed: the gate fails, and names the finding, on a known-bad workflow."
+          echo "self-test passed: the gate fails, and names every expected finding, on a known-bad workflow."
 
       # `ci-success.needs` is hand-maintained, so a job missing from it fails without
       # blocking the merge. `docker-build` already did.
       - name: Assert every job is gated by ci-success
         if: ${{ !cancelled() }}
+        # `yq` (mikefarah v4) is part of the documented ubuntu-latest image contract,
+        # alongside `jq`, so it is not an unstated dependency:
+        # https://github.com/actions/runner-images/blob/main/images/ubuntu/Ubuntu2404-Readme.md
+        # It is preferred over `jq` here because it reads CI.yml directly; converting
+        # YAML to JSON first would need a tool from that same contract anyway.
         run: |
           set -euo pipefail
 
@@ -692,6 +753,35 @@ jobs:
         env:
           NEEDS: ${{ toJSON(needs) }}
         run: printf '%s\n' "$NEEDS"
+
+      # `if: always()` makes a *skipped* job report neither failure nor cancellation,
+      # so the check below would pass it. cargo-test-doc is the one job allowed to
+      # skip -- it is gated on check-crate-type's `is_lib` output.
+      #
+      # This closes the transitive case as well: if check-crate-type were ever itself
+      # skipped, its `is_lib` output would be empty, cargo-test-doc's `'' == 'true'`
+      # would skip too, and both would have reported a pass. The in-job non-empty
+      # assert in crate_type.yml only covers the case where that job runs.
+      - name: Fail if a required job was skipped
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: |
+          set -euo pipefail
+          skipped=$(printf '%s' "$NEEDS" | jq -r '
+            to_entries
+            | map(select(.value.result == "skipped" and .key != "cargo-test-doc"))
+            | .[].key')
+
+          if [ -n "$skipped" ]; then
+            echo "::error::these required jobs were skipped, which ci-success would otherwise report as a pass:"
+            printf '  %s\n' $skipped
+            echo "A skipped job has not run its checks. Either it must not be conditional,"
+            echo "or it belongs in the allowlist in this step alongside cargo-test-doc."
+            exit 1
+          fi
+
+          echo "no required job was skipped."
+
       - name: Fail if any job failed or was cancelled
         if: ${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') }}
         run: |

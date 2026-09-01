@@ -61,27 +61,45 @@ jobs:
         env:
           PR_URL: ${{ github.event.pull_request.html_url }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
         run: |
           set -uo pipefail
-          if out=$(gh pr merge --auto --squash "$PR_URL" 2>&1); then
-            printf '%s\n' "$out"
-            exit 0
-          fi
-          printf '%s\n' "$out"
 
           # `Allow auto-merge` being off is a repository setting, not a fault in this
-          # pull request, and it fails every eligible one until it is turned on. A job
-          # that is red on every dependency bump teaches people to ignore red, so this
-          # case warns. Every other failure still fails.
-          if printf '%s' "$out" | grep -qiE 'auto[ -]?merge is not allowed'; then
+          # pull request, and it withholds every eligible one until it is turned on. A
+          # job that is red on every dependency bump teaches people to ignore red, so
+          # that case warns. It is off by choice today (CONTRIBUTING.md, "Dependabot
+          # auto-merge"), which makes this the path every eligible bump takes rather
+          # than a rare fallback.
+          #
+          # Read from the repository object rather than matched against gh's error
+          # text: that wording is not an API and can change across gh versions or
+          # locales, which would silently reclassify this case as a hard failure --
+          # or, worse, reclassify an unrelated failure as this case.
+          #
+          # `allow_auto_merge` is the REST spelling; GraphQL calls it
+          # `autoMergeAllowed`.
+          allowed=$(gh api "repos/${REPO}" --jq '.allow_auto_merge' 2>/dev/null) || allowed=""
+
+          if [ "$allowed" = "false" ]; then
             echo "::warning::auto-merge is disabled for this repository, so nothing was armed."
             echo "Turn it on at Settings -> General -> Pull Requests. See CONTRIBUTING.md,"
             echo "'Dependabot auto-merge'. This pull request was otherwise eligible."
             exit 0
           fi
 
-          echo "::error::could not arm auto-merge on ${PR_URL}."
-          exit 1
+          if [ "$allowed" != "true" ]; then
+            # Neither true nor false: the token could not read the setting. Genuinely
+            # anomalous for a token with push access, so surface it and still try --
+            # a failure below is then reported as a failure rather than swallowed.
+            echo "::warning::could not read allow_auto_merge for ${REPO} (got '${allowed}'); arming anyway."
+          fi
+
+          # The setting is on, so any failure here is a real one.
+          if ! gh pr merge --auto --squash "$PR_URL"; then
+            echo "::error::could not arm auto-merge on ${PR_URL}."
+            exit 1
+          fi
 
       - name: Explain why auto-merge was withheld
         if: steps.gate.outputs.eligible != 'true'

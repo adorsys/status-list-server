@@ -1,13 +1,26 @@
 # Fixture for CI.yml's zizmor self-test -- deliberately vulnerable, do not "fix" it.
-# The missing `persist-credentials: false` below is the assertion. It lives outside
-# .github/ so the gate's own `inputs: .` does not collect it.
+# Each job below is an assertion; CI.yml greps the scan output for the rule name it
+# is meant to raise. It lives outside .github/ so the gate's own `inputs: .` does
+# not collect it.
 name: zizmor selftest fixture
 on: [push]
 
 permissions: {}
 
 jobs:
+  # Asserts `artipacked`: a checkout without `persist-credentials: false`.
   deliberately-vulnerable:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+  # Asserts `excessive-permissions`: a job broadening the workflow's `permissions: {}`
+  # to write-all. Shaped after zizmor's own jobs-broaden-permissions test case, so the
+  # rule fires under the default `regular` persona. This covers the gate's other job:
+  # every other workflow in this repository relies on that audit to keep job tokens
+  # narrow, and without a fixture a regression there would look exactly like a pass.
+  excessively-permissioned:
+    runs-on: ubuntu-latest
+    permissions: write-all
+    steps:
+      - run: echo "this job needs no token at all"

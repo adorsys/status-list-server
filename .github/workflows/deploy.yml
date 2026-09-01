@@ -31,33 +31,27 @@ jobs:
   validate-tag:
     name: Validate release tag
     runs-on: ubuntu-latest
-    permissions: {}
+    # `contents: read` rather than `{}`: this job now checks out the repository to
+    # run the validator script, and an empty token cannot clone a private repo.
+    permissions:
+      contents: read
     steps:
+      - name: Fetch Repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
       # `v*.*.*` is a refspec glob, not semver -- `v2024.01.release` matches. On those,
       # metadata-action drops the semver tags and deploy falls through to `latest`.
+      #
+      # The rule lives in a script rather than inline so it has one definition and
+      # scripts/tests/test_validate_release_tag.py can exercise both directions. A
+      # regex that quietly stops rejecting is indistinguishable from one that works.
       - name: Assert the tag is semver
         env:
           REF_NAME: ${{ github.ref_name }}
           IS_TAG: ${{ startsWith(github.ref, 'refs/tags/v') }}
-        run: |
-          if [ "$IS_TAG" != "true" ]; then
-            echo "Not a tag push -- nothing to validate."
-            exit 0
-          fi
-
-          semver='^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z.-]+)?$'
-          if [[ ! "$REF_NAME" =~ $semver ]]; then
-            echo "::error::Tag '${REF_NAME}' matched the v*.*.* push filter but is not semver."
-            echo "metadata-action would drop every type=semver entry, and the deploy job"
-            echo "would fall through to the mutable 'latest' tag instead of failing."
-            echo "Delete the tag and push one shaped like v1.2.3 or v1.2.3-rc.1."
-            echo
-            echo "Build metadata (a '+' suffix) is rejected too: '+' is not a legal"
-            echo "character in a Docker image tag."
-            exit 1
-          fi
-
-          echo "Tag '${REF_NAME}' is valid semver."
+        run: bash scripts/validate-release-tag.sh "$REF_NAME" "$IS_TAG"
 
   ci:
     name: CI
