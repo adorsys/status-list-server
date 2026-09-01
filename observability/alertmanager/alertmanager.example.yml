@@ -91,32 +91,32 @@ receivers:
         title: '{{ template "discord.default.title" . }}'
         message: '{{ template "discord.default.message" . }}'
 
-  # ---------------------------------------------------------------------------
-  # ALTERNATIVES — swap a receiver above for any of these. Only credentials differ.
-  # ---------------------------------------------------------------------------
-  # - name: "slack-page"
-  #   slack_configs:
-  #     - api_url: "https://hooks.slack.com/services/REPLACE_ME/REPLACE_ME/REPLACE_ME"
-  #       channel: "#status-list-alerts"
-  #       send_resolved: true
-  #       title: '{{ .CommonLabels.alertname }} [{{ .Status | toUpper }}]'
-  #       text: '{{ .CommonAnnotations.summary }} severity={{ .CommonLabels.severity }} runbook={{ .CommonAnnotations.runbook_url }}'
+# ---------------------------------------------------------------------------
+# ALTERNATIVES — swap a receiver above for any of these. Only credentials differ.
+# ---------------------------------------------------------------------------
+# - name: "slack-page"
+#   slack_configs:
+#     - api_url: "https://hooks.slack.com/services/REPLACE_ME/REPLACE_ME/REPLACE_ME"
+#       channel: "#status-list-alerts"
+#       send_resolved: true
+#       title: '{{ .CommonLabels.alertname }} [{{ .Status | toUpper }}]'
+#       text: '{{ .CommonAnnotations.summary }} severity={{ .CommonLabels.severity }} runbook={{ .CommonAnnotations.runbook_url }}'
 
-  # - name: "mattermost-webhook"
-  #   webhook_configs:            # Mattermost has no native receiver; use generic webhook
-  #     - url: "https://mattermost.example.com/hooks/REPLACE_ME"
-  #       send_resolved: true
+# - name: "mattermost-webhook"
+#   webhook_configs:            # Mattermost has no native receiver; use generic webhook
+#     - url: "https://mattermost.example.com/hooks/REPLACE_ME"
+#       send_resolved: true
 
-  # - name: "teams-webhook"
-  #   webhook_configs:            # MS Teams classic inbound webhook accepts a JSON POST
-  #     - url: "https://outlook.office.com/webhook/REPLACE_ME"
-  #       send_resolved: true
+# - name: "teams-webhook"
+#   webhook_configs:            # MS Teams classic inbound webhook accepts a JSON POST
+#     - url: "https://outlook.office.com/webhook/REPLACE_ME"
+#       send_resolved: true
 
-  # - name: "email-warn"
-  #   email_configs:
-  #     - to: "ops@example.com"
-  #       send_resolved: true
-  #       html: '{{ template "email.default.html" . }}'
+# - name: "email-warn"
+#   email_configs:
+#     - to: "ops@example.com"
+#       send_resolved: true
+#       html: '{{ template "email.default.html" . }}'
 
 # Global SMTP block required if you use platform=email:
 # global:

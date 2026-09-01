@@ -3,7 +3,7 @@
 This guide walks you through firing a real alert through the full pipeline and
 confirming it shows up in **three** places:
 
-```
+```text
 Prometheus (alert fires)
    │  forwards fired/resolved alerts
    ▼
@@ -67,13 +67,13 @@ docker compose up -d --build
 
 The stack brings up (among others):
 
-| Service        | Port | Purpose                                          |
-|----------------|------|--------------------------------------------------|
-| `app`          | 8000 | status-list-server (exposes `/metrics`)          |
-| `prometheus`   | 9092 | scrapes `app:8000`, evaluates alert rules        |
-| `alertmanager` | 9093 | receives alerts, sends Discord webhooks          |
-| `grafana`      | 3000 | dashboards (log in `admin` / your `GRAFANA_ADMIN_PASSWORD`) |
-| `otel-collector`| 4317| metrics pipeline                                 |
+| Service          | Port   | Purpose                                     |
+| ---------------- | ------ | ------------------------------------------- |
+| `app`            | 8000   | status-list-server (exposes `/metrics`)     |
+| `prometheus`     | 9092   | scrapes `app:8000`, evaluates alert rules   |
+| `alertmanager`   | 9093   | receives alerts, sends Discord webhooks     |
+| `grafana`        | 3000   | dashboards (login `admin` + password)       |
+| `otel-collector` | 4317   | metrics pipeline                            |
 
 Wait for everything to be healthy, then confirm Alertmanager accepts the
 generated config:
@@ -90,7 +90,7 @@ You should see `Checking ...  SUCCESS`.
 
 ## 3. Confirm Prometheus is talking to Alertmanager
 
-Open the Prometheus UI at **http://localhost:9092** and:
+Open the Prometheus UI at **<http://localhost:9092>** and:
 
 1. Go to **Status → Targets** → the `alertmanager` service must be **UP**.
 2. Go to **Alerts** — you should already see some alert rules, most hand
@@ -132,14 +132,14 @@ Alertmanager.
 
 ## 5. See the alert in Prometheus, Grafana, and Discord
 
-### Prometheus (http://localhost:9092)
+### Prometheus (<http://localhost:9092>)
 - **Alerts** tab: the alert turns **red / "firing"** with its labels, severity,
   summary, and a runbook link.
 - **Graph** tab: query the pushed metric (e.g.
   `cert_time_to_expiry_seconds`) or a recording rule
   (`sli:cert_renewal_failure_rate:5m`) to see the data.
 
-### Grafana (http://localhost:3000)
+### Grafana (<http://localhost:3000>)
 - Log in (`admin` / your `GRAFANA_ADMIN_PASSWORD`).
 - Open the **Status List SLO** dashboard (provisioned automatically).
 - The affected panels (e.g. certificate renewal, request latency, error rate)
@@ -185,14 +185,14 @@ observability/alertmanager/tests/test-alertmanager-config.sh
 The mechanism is identical — change only `ALERTMANAGER_PLATFORM` and the
 matching credential in `.env`:
 
-| System      | `ALERTMANAGER_PLATFORM` | Credential variable     |
-|-------------|--------------------------|-------------------------|
-| Discord     | `discord`                | `DISCORD_WEBHOOK_URL`   |
-| Slack       | `slack`                  | `SLACK_WEBHOOK_URL`     |
-| Microsoft Teams | `teams`               | `MS_TEAMS_WEBHOOK_URL`  |
-| Mattermost  | `mattermost`             | `MATTERMOST_WEBHOOK_URL`|
-| Email       | `email`                  | `ALERTMANAGER_SMTP_HOST`, `ALERTMANAGER_EMAIL_TO` |
-| Generic     | `webhook`                | `ALERTMANAGER_WEBHOOK_URL` |
+| System          | `ALERTMANAGER_PLATFORM`    | Credential variable                               |
+| --------------- | -------------------------- | ------------------------------------------------- |
+| Discord         | `discord`                  | `DISCORD_WEBHOOK_URL`                             |
+| Slack           | `slack`                    | `SLACK_WEBHOOK_URL`                               |
+| Microsoft Teams | `teams`                    | `MS_TEAMS_WEBHOOK_URL`                            |
+| Mattermost      | `mattermost`               | `MATTERMOST_WEBHOOK_URL`                          |
+| Email           | `email`                    | `ALERTMANAGER_SMTP_HOST`, `ALERTMANAGER_EMAIL_TO` |
+| Generic         | `webhook`                  | `ALERTMANAGER_WEBHOOK_URL`                        |
 
 Each is rendered to a native receiver with `send_resolved: true`. Discord and
 Slack use Alertmanager's native embed/message formats; Teams and Mattermost use

@@ -112,4 +112,3 @@ No application code is involved.
   validates every platform's generated config and proves a real Alertmanager
   delivers both `firing` and `resolved` notifications to a mock webhook (run in
   CI).
-
