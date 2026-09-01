@@ -2,7 +2,7 @@ use notify::{Event, RecommendedWatcher, RecursiveMode, Watcher as _};
 use std::collections::{HashMap, HashSet, hash_map::DefaultHasher};
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, mpsc as std_mpsc};
 use std::time::Duration;
 use tokio::sync::mpsc;
 
@@ -36,13 +36,20 @@ impl FileWatcher {
         let paths = self.paths.clone();
         let (tx, rx) = mpsc::channel(32);
 
-        spawn_notify_watcher(paths.clone(), tx.clone(), target);
-        spawn_poll_watcher(paths.clone(), tx, target, self.poll_interval);
+        let native_started = spawn_notify_watcher(paths.clone(), tx.clone(), target);
+        if !native_started {
+            spawn_poll_watcher(paths.clone(), tx, target, self.poll_interval);
+        }
         spawn_debouncer(paths, rx, callback, target);
     }
 }
 
-fn spawn_notify_watcher(paths: Arc<Vec<PathBuf>>, tx: mpsc::Sender<()>, target: &'static str) {
+fn spawn_notify_watcher(
+    paths: Arc<Vec<PathBuf>>,
+    tx: mpsc::Sender<()>,
+    target: &'static str,
+) -> bool {
+    let (started_tx, started_rx) = std_mpsc::sync_channel(1);
     std::thread::spawn(move || {
         let tx_events = tx.clone();
         let event_paths = paths.clone();
@@ -70,28 +77,38 @@ fn spawn_notify_watcher(paths: Arc<Vec<PathBuf>>, tx: mpsc::Sender<()>, target: 
                     event = "file_watcher_fallback_polling",
                     rotation.target = target,
                     error = %err,
-                    "native file watcher could not start; polling remains active"
+                    "native file watcher could not start; falling back to polling"
                 );
+                let _ = started_tx.send(false);
                 return;
             }
         };
 
+        let mut all_watched = true;
         for watched in watch_roots(&paths) {
             if let Err(err) = watcher.watch(&watched, RecursiveMode::NonRecursive) {
+                all_watched = false;
                 tracing::warn!(
                     event = "file_watcher_path_unavailable",
                     rotation.target = target,
                     path = %watched.display(),
                     error = %err,
-                    "file watcher could not watch path; polling remains active"
+                    "file watcher could not watch path; falling back to polling"
                 );
             }
+        }
+
+        let _ = started_tx.send(all_watched);
+        if !all_watched {
+            return;
         }
 
         loop {
             std::thread::park();
         }
     });
+
+    started_rx.recv().unwrap_or(false)
 }
 
 fn spawn_poll_watcher(

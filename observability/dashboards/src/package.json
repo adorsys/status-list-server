@@ -1,0 +1,14 @@
+{
+  "name": "status-list-dashboards",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Deterministic generator for the Status List SLO dashboard JSON",
+  "type": "module",
+  "bin": {
+    "generate-dashboards": "./generate.mjs"
+  },
+  "scripts": {
+    "generate-dashboards": "node generate.mjs",
+    "lint-thresholds": "node ../../slo/lint-thresholds.mjs"
+  }
+}

@@ -5,5 +5,7 @@ pub mod cert_manager;
 pub(crate) mod file_watcher;
 pub mod keygen;
 pub(crate) mod metrics;
+pub(crate) mod metrics_db;
+pub(crate) mod metrics_http;
 pub(crate) mod rotation_metrics;
 pub mod telemetry;

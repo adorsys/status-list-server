@@ -7,13 +7,44 @@ use opentelemetry_sdk::{
     metrics::{PeriodicReader, SdkMeterProvider},
 };
 use prometheus::{Encoder, Registry, TextEncoder};
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use crate::config::TelemetryConfig;
 
 #[cfg(test)]
 static METRICS_TEST_LOCK: Mutex<()> = Mutex::new(());
+/// Bumped each time the global meter provider is (re)installed by
+/// [`setup_metrics`]. Recorders that cache instrument handles key their cache
+/// on this so a fresh provider (e.g. every metric test) doesn't keep writing to
+/// a stale, previously-dropped provider.
+static METER_PROVIDER_GENERATION: AtomicU64 = AtomicU64::new(0);
+
+/// The current global meter-provider generation.
+pub(crate) fn provider_generation() -> u64 {
+    METER_PROVIDER_GENERATION.load(Ordering::Relaxed)
+}
+
+/// Return `T` from a per-provider-generation cache, rebuilding it with `build`
+/// whenever the global meter provider has changed (e.g. after a re-run of
+/// `setup_metrics` in tests).
+pub(crate) fn cached_instruments<T: Clone>(
+    slot: &'static OnceLock<Mutex<Option<(u64, T)>>>,
+    build: impl FnOnce() -> T,
+) -> T {
+    let generation = provider_generation();
+    let cell = slot.get_or_init(|| Mutex::new(None));
+    let mut guard = cell.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    match &*guard {
+        Some((g, value)) if *g == generation => value.clone(),
+        _ => {
+            let value = build();
+            *guard = Some((generation, value.clone()));
+            value
+        }
+    }
+}
 
 #[cfg(test)]
 pub(crate) fn metrics_test_lock() -> std::sync::MutexGuard<'static, ()> {
@@ -53,6 +84,7 @@ pub(crate) fn setup_metrics(
 
     // Install as global so `opentelemetry::global::meter()` works everywhere
     opentelemetry::global::set_meter_provider(provider.clone());
+    METER_PROVIDER_GENERATION.fetch_add(1, Ordering::Relaxed);
     Ok(provider)
 }
 

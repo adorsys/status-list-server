@@ -602,10 +602,6 @@ fn trim_non_empty(value: Option<&str>) -> Option<&str> {
     value.map(str::trim).filter(|value| !value.is_empty())
 }
 
-fn trim_trailing_newline(value: &str) -> &str {
-    value.trim_end_matches(['\r', '\n'])
-}
-
 fn encode_url_part(value: &str) -> String {
     value
         .as_bytes()
@@ -775,7 +771,7 @@ impl DatabaseConfig {
         let url_host = format_database_url_host(host);
         let username = required_config_field(self.username.as_deref(), "database.username")?;
         let password = required_secret_field(self.password.as_ref(), "database.password")?;
-        let password = trim_trailing_newline(password);
+        let password = password.trim();
         let name = required_config_field(self.name.as_deref(), "database.name")?;
         let port = self.port.unwrap_or(default_port);
         let query = trim_non_empty(self.query.as_deref())
@@ -805,9 +801,7 @@ impl DatabaseConfig {
             ))
         })?;
         let mut config = self.clone();
-        config.password = Some(SecretString::from(
-            trim_trailing_newline(&password).to_string(),
-        ));
+        config.password = Some(SecretString::from(password.trim().to_string()));
         config.resolved_url()
     }
 
