@@ -226,7 +226,7 @@ spec:
               {{- $_ := set $chartManagedEnv "AWS_SHARED_CREDENTIALS_FILE" true }}
               {{- $_ := set $chartManagedEnv "AWS_CONFIG_FILE" true }}
             {{- end }}
-            {{- if ne $watcherPollInterval "" }}
+            {{- if and (ne $watcherPollInterval "") (not (hasKey $env "APP_WATCHER__POLL_INTERVAL_SECS")) }}
               {{- $_ := set $chartManagedEnv "APP_WATCHER__POLL_INTERVAL_SECS" true }}
             {{- end }}
             {{- range $name, $_ := $secretFileEnv }}
@@ -254,7 +254,7 @@ spec:
               value: {{ $path | quote }}
             {{- end }}
             {{- /* Watcher poll interval for credential rotation detection */}}
-            {{- if ne $watcherPollInterval "" }}
+            {{- if and (ne $watcherPollInterval "") (not (hasKey $env "APP_WATCHER__POLL_INTERVAL_SECS")) }}
             - name: APP_WATCHER__POLL_INTERVAL_SECS
               value: {{ $watcherPollInterval | quote }}
             {{- end }}
