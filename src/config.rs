@@ -1142,6 +1142,33 @@ fn base_builder() -> Result<ConfigBuilder<DefaultState>, ConfigError> {
 mod tests {
     use super::*;
     use secrecy::ExposeSecret;
+    use std::path::{Path, PathBuf};
+
+    struct TempDir {
+        path: PathBuf,
+    }
+
+    impl TempDir {
+        fn new() -> Self {
+            let path = std::env::temp_dir().join(format!(
+                "status-list-config-test-{}-{}",
+                std::process::id(),
+                time::OffsetDateTime::now_utc().unix_timestamp_nanos()
+            ));
+            std::fs::create_dir_all(&path).expect("create temp dir");
+            Self { path }
+        }
+
+        fn path(&self) -> &Path {
+            &self.path
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.path);
+        }
+    }
 
     #[test]
     fn test_config_loading() {
@@ -1361,7 +1388,7 @@ mod tests {
         );
         assert!(!split_db_cfg.database.redacted_target().contains("secret"));
 
-        let password_dir = tempfile::tempdir().expect("tempdir");
+        let password_dir = TempDir::new();
         let password_path = password_dir.path().join("postgres-password");
         std::fs::write(&password_path, "file secret\n").expect("write password file");
         let password_file_cfg = Config::load_from_overrides(&[

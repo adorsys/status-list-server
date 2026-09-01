@@ -177,6 +177,33 @@ impl CertificateProvider for StoreCertificateProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::{Path, PathBuf};
+
+    struct TempDir {
+        path: PathBuf,
+    }
+
+    impl TempDir {
+        fn new() -> Self {
+            let path = std::env::temp_dir().join(format!(
+                "status-list-cert-test-{}-{}",
+                std::process::id(),
+                time::OffsetDateTime::now_utc().unix_timestamp_nanos()
+            ));
+            std::fs::create_dir_all(&path).expect("create temp dir");
+            Self { path }
+        }
+
+        fn path(&self) -> &Path {
+            &self.path
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.path);
+        }
+    }
 
     fn matching_cert_and_key() -> (String, String) {
         let key = rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256)
@@ -207,7 +234,7 @@ mod tests {
 
     #[tokio::test]
     async fn malformed_reload_keeps_last_known_good_material() {
-        let dir = tempfile::tempdir().expect("tempdir");
+        let dir = TempDir::new();
         let cert_path = dir.path().join("tls.crt");
         let key_path = dir.path().join("tls.key");
         let (cert, key) = matching_cert_and_key();
