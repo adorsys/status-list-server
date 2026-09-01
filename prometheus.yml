@@ -1,15 +1,1 @@
-global:
-  scrape_interval: 2s
-
-scrape_configs:
-  - job_name: 'status_list_server'
-    static_configs:
-      - targets: ['app:8000']
-
-  - job_name: 'pushgateway'
-    static_configs:
-      - targets: ['pushgateway:9091']
-
-  - job_name: 'otel-collector'
-    static_configs:
-      - targets: ['otel-collector:8889']
+# This file is superseded by observability/prometheus/prometheus.yml — see observability/README.md.

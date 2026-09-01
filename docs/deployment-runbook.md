@@ -23,15 +23,49 @@ The vulnerability gate blocks on any HIGH or CRITICAL finding that survives the 
 
 ### Image Tags
 
-| Trigger              | Image Tags                               | Applied               |
-| -------------------- | ---------------------------------------- | --------------------- |
-| Manual dispatch      | `sha-<short_sha>`                        | At build              |
-| Release tag `v*.*.*` | `sha-<short_sha>`                        | At build              |
-| Release tag `v*.*.*` | `<major>.<minor>`, `<version>`, `latest` | After the scan passes |
+The release workflow publishes **5 multi-arch image variants** with distinct suffixes for different cloud providers and secret storage models. See the image variant matrix in `values.yaml` for the full description of each variant. The chart's empty-tag default resolves to the published AWS variant, not to an unsuffixed image tag.
 
-The `latest` tag is only applied to official release tags, never to a dispatch run. This follows standard OCI/Docker distribution conventions where `latest` represents the latest stable release. `latest` is also withheld from prereleases: `v*.*.*` matches `v1.2.3-rc1`, so the tag is guarded on the ref name containing no `-`.
+| Trigger              | Image Tags                                                                   | Applied                   |
+| -------------------- | ---------------------------------------------------------------------------- | ------------------------- |
+| Manual dispatch      | `sha-<short_sha>-<variant>`                                                  | At build                  |
+| Release tag `v*.*.*` | `sha-<short_sha>-<variant>`                                                  | At build                  |
+| Release tag `v*.*.*` | `<version>-<variant>`, `<major>.<minor>-<variant>`, `latest-<variant>`       | After the scan passes     |
+
+Where `<variant>` is one of: `aws`, `gcp`, `azure`, `vault`, `fscert`.
+
+Examples for tag `v1.2.0`:
+- Version tags: `1.2.0-aws`, `1.2.0-gcp`, `1.2.0-azure`, `1.2.0-vault`, `1.2.0-fscert`
+- Short version tags: `1.2-aws`, `1.2-gcp`, `1.2-azure`, `1.2-vault`, `1.2-fscert`
+- Latest tags: `latest-aws`, `latest-gcp`, `latest-azure`, `latest-vault`, `latest-fscert`
+
+The `latest-<variant>` tags are only applied to official release tags, never to a dispatch run. This follows standard OCI/Docker distribution conventions where `latest` represents the latest stable release. `latest` is also withheld from prereleases: `v*.*.*` matches `v1.2.3-rc1`, so the tag is guarded on the ref name containing no `-`.
+
+**Note:** No untagged or default image (e.g., plain `latest`) is published. Every image must be pulled with an explicit variant suffix.
 
 Release tags are applied by the `promote-tags` job using `docker buildx imagetools create`, which copies manifest descriptors by digest. Nothing is rebuilt, and the promoted tags resolve to exactly the index that was scanned, attestations included — which that job asserts rather than assumes.
+
+### Selecting an Image Variant
+
+Choose the variant that matches your cloud provider and secret storage model:
+
+| Variant   | Best For                            | Required Infrastructure                          |
+| --------- | ----------------------------------- | ------------------------------------------------ |
+| `-aws`    | AWS EKS deployments                 | AWS Secrets Manager, Route53 DNS                 |
+| `-gcp`    | GCP GKE deployments                 | GCP Secret Manager, Cloud DNS                    |
+| `-azure`  | Azure AKS deployments               | Azure Key Vault, Azure DNS                       |
+| `-vault`  | Multi-cloud or on-prem              | HashiCorp Vault / OpenBao cluster                |
+| `-fscert` | Air-gapped/constrained environments | Filesystem-mounted signing keys and certificates |
+
+The `-fscert` image intentionally omits the `acme` Cargo feature so the filesystem-backed certificate provider is compiled in. Configure certificate and signing-key paths through the chart or environment when selecting this variant.
+
+To select a variant, set the image tag with the appropriate suffix in your Helm values or deployment command:
+
+```yaml
+# values.yaml override
+statuslist:
+  image:
+    tag: "1.2.0-vault"  # Use Vault variant
+```
 
 ### Production Deploy
 
@@ -42,27 +76,29 @@ Release tags matching `v*.*.*` deploy to:
 - Helm release: `statuslist`
 - Image tag: semantic version without the leading `v`
 
-For example, tag `v0.5.0` deploys image tag `0.5.0`.
+For example, tag `v0.5.0` deploys the AWS variant with image tag `0.5.0-aws`. The production deployment uses the `-aws` variant by default; other variants (`-gcp`, `-azure`, `-vault`, `-fscert`) can be selected by setting the `IMAGE_VARIANT` Actions variable in the `production` environment (e.g., `gcp`, `azure`, `vault`, `fscert`). The default is `aws`.
 
-The production deploy command is equivalent to:
+The production deploy command is equivalent to (using the AWS variant):
 
 ```bash
 helm upgrade --install statuslist helm/chart \
   --namespace statuslist-production \
-  --create-namespace \
-  --atomic \
+  -f helm/chart/values-production.yaml \
   --wait \
+  --rollback-on-failure \
   --timeout 10m \
   --set-string statuslist.image.repository=ghcr.io/adorsys/status-list-server \
-  --set-string statuslist.image.tag=0.5.0 \
+  --set-string statuslist.image.tag=0.5.0-aws \
   --set-string statuslist.image.digest=sha256:<digest>
 ```
+
+To deploy a different variant, change the tag suffix (e.g., `0.5.0-gcp`, `0.5.0-azure`, `0.5.0-vault`, `0.5.0-fscert`).
 
 The digest is what actually determines the running image. `statuslist.image.digest` takes precedence over `statuslist.image.tag` in the chart, so production runs the exact artifact CI scanned. The tag is still passed because it is what humans read in `helm history` and release notes. Leaving `digest` empty falls back to tag-based deployment, which is the default for local and manual installs.
 
 Because of that precedence, do not run `helm upgrade --reuse-values` with only a changed tag. The stored digest still wins, so the upgrade reports success and changes nothing. Pass both values, or clear the digest with `--set statuslist.image.digest=null`.
 
-A digest that is not `sha256:` followed by 64 hex characters fails at template time rather than becoming an `ImagePullBackOff` ten minutes into `helm upgrade --atomic --wait`. `deploy` also refuses to run at all without a `sha256:` digest, so a deploy can never silently fall back to the mutable tag.
+A digest that is not `sha256:` followed by 64 hex characters fails at template time rather than becoming an `ImagePullBackOff` ten minutes into `helm upgrade --wait --rollback-on-failure`. `deploy` also refuses to run at all without a `sha256:` digest, so a deploy can never silently fall back to the mutable tag.
 
 Configure the GitHub `production` environment with required reviewers so production deploys pause for approval before AWS credentials are requested.
 
@@ -72,6 +108,8 @@ Create the GitHub `production` environment with:
 
 - `AWS_DEPLOY_ROLE_ARN`: IAM role ARN assumed by the deploy job through GitHub OIDC.
 - `APP_DATABASE_PORT`: database service port passed to Helm as `statuslist.env.APP_DATABASE__PORT` (for example `5432` for PostgreSQL).
+- `IMAGE_VARIANT` (optional): image variant suffix to deploy (`aws`, `gcp`, `azure`, `vault`, `fscert`). Defaults to `aws`.
+  Note: changing this selects a different compiled feature-set image; the deployment target remains AWS EKS.
 - Required reviewers: configure at least one approver.
 - Deployment branches/tags: restrict to release tags matching `v*.*.*`.
 
@@ -123,7 +161,7 @@ Database credential rotation must be coordinated with the database owner. Create
 
 There are two rollback paths:
 
-- Failed upgrade rollback is automatic. The deploy workflow uses `--atomic --wait --timeout 10m`, so Helm rolls back during the pipeline when an upgrade fails readiness or times out.
+- Failed upgrade rollback is automatic. The deploy workflow uses `--wait --rollback-on-failure --timeout 10m`, so Helm rolls back during the pipeline when an upgrade fails readiness or times out.
 - Successful-but-bad deploy rollback is manual. If a release passes the pipeline but later proves unhealthy or incorrect, an operator must choose a previous Helm revision and run `helm rollback`.
 
 List available revisions:
@@ -160,7 +198,7 @@ Check:
 Symptoms:
 
 - `helm upgrade --install` fails after `--timeout 10m`.
-- Helm reports the release rolled back because `--atomic` is enabled.
+- Helm reports the release rolled back because `--rollback-on-failure` is enabled.
 
 Check:
 
@@ -179,7 +217,8 @@ Symptoms:
 
 Check:
 
-- The workflow pushed the expected GHCR tag with the semver format.
+- The workflow pushed the expected GHCR tag with the semver format and variant suffix (e.g., `0.5.0-aws`, not just `0.5.0`).
+- The tag includes the correct variant suffix for your deployment.
 - The cluster can pull from GHCR.
 
 ### Readiness Failure
@@ -205,7 +244,7 @@ Symptoms:
 
 Check:
 
-- The run artifacts and the job summary. Reports and SBOMs are uploaded before the assertion runs, so a failure here still leaves the full report attached to the run. They arrive as two artifacts: `container-scan-reports` and `container-sboms`.
+- The run artifacts and the job summary. Reports and SBOMs are uploaded before the assertion runs, so a failure here still leaves the full report attached to the run. They arrive as two artifacts per variant: `container-scan-reports-<variant>` and `container-sboms-<variant>` (e.g., `container-scan-reports-aws`, `container-sboms-aws`).
 - For an SBOM failure, whether the builder-stage audit assertion also changed behaviour recently. An empty published SBOM with a passing build assertion points at BuildKit's cataloguer, not at the binary.
 - For a resolution failure, the message names how many `linux/amd64` manifests were found in the index. Zero means the build stopped producing that platform; more than one means the index is not shaped the way this pipeline assumes. Neither is a scanner problem.
 
@@ -239,12 +278,13 @@ Check:
 
 Symptoms:
 
-- `Promote Scanned Digest to Release Tags` fails, and the release exists in GHCR only as `sha-<short_sha>`.
+- `Promote Scanned Digest to Release Tags` fails for one or more variants, and the release exists in GHCR only as `sha-<short_sha>-<variant>`.
 - `Deploy to Production` is skipped because it depends on promotion.
 
 Check:
 
 - Whether `Verify attestations survived promotion` is the failing step. That means the retag succeeded but the SBOM or provenance manifests did not carry through, which would publish a release whose metadata silently vanished.
+- The failing variant's matrix job logs to see which specific suffix (`-aws`, `-gcp`, etc.) failed.
 - Re-running the job is safe: `imagetools create` is idempotent for a given digest and tag set. **Re-run `promote-tags` alone** — `deploy` depends on it, so a successful re-run unblocks production without cutting a new release. A promotion failure is not a reason to re-tag the repository.
 
 ### Builder Audit Assertion Failure
