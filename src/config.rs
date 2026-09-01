@@ -1374,7 +1374,7 @@ mod tests {
                 .resolved_url()
                 .expect("split database config should resolve")
                 .expose_secret(),
-            "postgres://user%40example.com:%20secret%20value%20@postgres.statuslist.svc.cluster.local:5432/status%2Flist?sslmode=verify-full&sslrootcert=/var/run/postgres/ca.crt"
+            "postgres://user%40example.com:secret%20value@postgres.statuslist.svc.cluster.local:5432/status%2Flist?sslmode=verify-full&sslrootcert=/var/run/postgres/ca.crt"
         );
         assert_eq!(
             split_db_cfg.database.redacted_target(),
