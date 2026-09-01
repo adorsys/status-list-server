@@ -584,24 +584,62 @@ jobs:
             prom/prometheus:v3.11.3 check rules /etc/prometheus/rules/alerting.rules.yml
 
       - name: Validate rendered Helm PrometheusRule (no drift / no template errors)
-        # The Helm chart ships a second copy of the recording+alerting rule set as a
-        # PrometheusRule CRD. It was previously never validated -- a bad mulf/format
-        # or YAML error in the template would ship to production silently. Render the
-        # chart, hoist spec.groups to a top-level rules file, and promtool-check it so
-        # the rendered CR is guaranteed rule-valid, not just an unchecked template.
+        # The Helm chart ships the DEPLOYED copy of the recording+alerting rule set
+        # as a PrometheusRule CRD. Assert (a) it renders to rule-valid PromQL, (b) it
+        # is unit-tested with promtool `test rules` -- mirroring the standalone
+        # suite -- so the artifact that actually reaches production is behaviorally
+        # verified, not just syntactically checked, and (c) it defines exactly the
+        # same rule names as the standalone tested rules so neither copy can drift.
         run: |
           helm template status-list-server helm/chart \
+            --namespace ns1 \
             --set prometheusRule.enabled=true > /tmp/helm-render.yaml
           python3 - <<'EOF'
-          import yaml
+          import subprocess, yaml
+
+          # Extract the rendered PrometheusRule groups (the deployed rule copy).
           docs = [d for d in yaml.safe_load_all(open('/tmp/helm-render.yaml')) if d]
           cr = next(d for d in docs if d.get('kind') == 'PrometheusRule')
           with open('/tmp/helm-rules.yml', 'w') as f:
               yaml.safe_dump({'groups': cr['spec']['groups']}, f, sort_keys=False)
+
+          # Drift guard: the deployed copy must define the exact same rule names as
+          # the standalone, promtool-tested rules (thresholds are parameterized via
+          # values, so compare names, not numeric values).
+          def rule_names(path):
+              rules = yaml.safe_load(open(path))['groups']
+              names = set()
+              for g in rules:
+                  for r in g['rules']:
+                      names.add(r.get('record') or r.get('alert'))
+              return names
+          standalone = rule_names('observability/prometheus/rules/recording.rules.yml') | rule_names('observability/prometheus/rules/alerting.rules.yml')
+          deployed = rule_names('/tmp/helm-rules.yml')
+          if standalone != deployed:
+              raise SystemExit(
+                  f"DRIFT: deployed PrometheusRule rule names differ from the tested standalone rules.\n"
+                  f"  only in standalone: {sorted(standalone - deployed)}\n"
+                  f"  only in deployed:   {sorted(deployed - standalone)}"
+              )
+
+          # Unit-test the deployed copy with the same alerting suite used for the
+          # standalone rules, adjusted for the static `namespace` label the template
+          # stamps on Watchdog / StatusListMetricsAbsent (and rule_files).
+          test = yaml.safe_load(open('observability/prometheus/tests/alerting.test.yml'))
+          test['rule_files'] = ['helm-rules.yml']
+          for block in test['tests']:
+              for at in block.get('alert_rule_test', []):
+                  if at['alertname'] in ('Watchdog', 'StatusListMetricsAbsent'):
+                      for alert in at['exp_alerts']:
+                          alert['exp_labels']['namespace'] = 'ns1'
+          with open('/tmp/helm-alerting.test.yml', 'w') as f:
+              yaml.safe_dump(test, f, sort_keys=False)
           EOF
-          docker run --rm --entrypoint promtool \
-            -v /tmp/helm-rules.yml:/helm-rules.yml:ro \
-            prom/prometheus:v3.11.3 check rules /helm-rules.yml
+          docker run --rm -w /tmp \
+            -v /tmp/helm-rules.yml:/tmp/helm-rules.yml:ro \
+            -v /tmp/helm-alerting.test.yml:/tmp/helm-alerting.test.yml:ro \
+            --entrypoint promtool \
+            prom/prometheus:v3.11.3 test rules /tmp/helm-alerting.test.yml
 
       - name: Validate Prometheus config (dev and production)
         run: |

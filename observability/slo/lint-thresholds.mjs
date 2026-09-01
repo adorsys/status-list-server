@@ -50,7 +50,8 @@ const helmSloMap = {
   cacheHitRatioMin: "cache_hit_ratio_min",
   certRenewalFailureMax: "cert_renewal_failure_rate_max",
   errorBudgetCriticalThreshold: "error_budget_critical_threshold",
-  certRenewalErrorBudgetCriticalThreshold: "cert_renewal_error_budget_critical_threshold",
+  certExpiryWarnSeconds: "cert_expiry_warn_seconds",
+  certExpiryCriticalSeconds: "cert_expiry_critical_seconds",
 };
 for (const [helmKey, thresholdsKey] of Object.entries(helmSloMap)) {
   const expected = thresholds[thresholdsKey];
@@ -71,6 +72,8 @@ const errTargetRegex = new RegExp(`sli:error_budget:success:30d[\\s\\S]*?\\/ ${t
 checkMatch(recordingRules, "recording.rules.yml", errTargetRegex, `HTTP error budget denominator ${thresholds.error_rate_target_ratio}`);
 checkMatch(alertingRules, "alerting.rules.yml", />= 0\.072/, `error rate fast burn ${thresholds.fast_burn_threshold}`);
 checkMatch(alertingRules, "alerting.rules.yml", />= 0\.030/, `error rate slow burn ${thresholds.slow_burn_threshold}`);
+checkMatch(alertingRules, "alerting.rules.yml", /sli:error_rate:5m >= 0\.072/, `error rate fast-burn short window (${thresholds.fast_burn_short_window}) at ${thresholds.fast_burn_threshold}`);
+checkMatch(alertingRules, "alerting.rules.yml", /sli:error_rate:30m >= 0\.030/, `error rate slow-burn short window (${thresholds.slow_burn_short_window}) at ${thresholds.slow_burn_threshold}`);
 checkMatch(readme, "slo/README.md", /99\.5%/, "documented 99.5% error budget target");
 
 // 3. DB Latency (0.05s)
@@ -81,20 +84,35 @@ checkMatch(readme, "slo/README.md", /50 ms/, "documented 50 ms DB latency target
 checkMatch(alertingRules, "alerting.rules.yml", /< 0\.85/, `cache hit ratio threshold of ${thresholds.cache_hit_ratio_min}`);
 checkMatch(readme, "slo/README.md", /85%/, "documented 85% cache hit ratio target");
 
-// 5. Cert Renewal Failure Rate (0.01)
-checkMatch(alertingRules, "alerting.rules.yml", />= 0\.01/, `cert renewal failure rate threshold of ${thresholds.cert_renewal_failure_rate_max}`);
-checkMatch(readme, "slo/README.md", /1%/, "documented 1% cert renewal failure rate target");
+// 5. Cert Renewal — expiry-driven (warn <=14d, page <=7d). The old failure-rate
+//    ratio alerts were removed because `rate()` over a fixed window is 0/0 = NaN
+//    when no renewal happened in the window and could never fire; the alertable
+//    signal is the continuous `cert_time_to_expiry_seconds` gauge.
+const certExpiryWarn = thresholds.cert_expiry_warn_seconds;
+const certExpiryCritical = thresholds.cert_expiry_critical_seconds;
+checkMatch(
+  alertingRules, "alerting.rules.yml",
+  new RegExp(`cert_time_to_expiry_seconds\\{otel_scope_name="status-list-server"\\} <= ${certExpiryWarn}`),
+  `cert expiry warn threshold <= ${certExpiryWarn}s (${certExpiryWarn / 86400}d)`
+);
+checkMatch(
+  alertingRules, "alerting.rules.yml",
+  new RegExp(`cert_time_to_expiry_seconds\\{otel_scope_name="status-list-server"\\} <= ${certExpiryCritical}`),
+  `cert expiry critical threshold <= ${certExpiryCritical}s (${certExpiryCritical / 86400}d)`
+);
+checkMatch(readme, "slo/README.md", /14 days/, "documented 14-day cert expiry warn target");
 
 // 6. Token Generation Failure Rate (0.005 budget, 0.072 fast burn, 0.030 slow burn)
 const tokenErrTargetRegex = new RegExp(`sli:token_gen_error_budget:30d[\\s\\S]*?\\/ ${thresholds.token_gen_failure_rate_max}`);
 checkMatch(recordingRules, "recording.rules.yml", tokenErrTargetRegex, `token gen error budget denominator ${thresholds.token_gen_failure_rate_max}`);
 checkMatch(alertingRules, "alerting.rules.yml", /sli:token_gen_failure_rate:1h >= 0\.072/, `token gen fast burn ${thresholds.fast_burn_threshold}`);
+checkMatch(alertingRules, "alerting.rules.yml", /sli:token_gen_failure_rate:5m >= 0\.072/, `token gen fast-burn short window (${thresholds.fast_burn_short_window}) at ${thresholds.fast_burn_threshold}`);
 checkMatch(alertingRules, "alerting.rules.yml", /sli:token_gen_failure_rate:6h >= 0\.030/, `token gen slow burn ${thresholds.slow_burn_threshold}`);
+checkMatch(alertingRules, "alerting.rules.yml", /sli:token_gen_failure_rate:30m >= 0\.030/, `token gen slow-burn short window (${thresholds.slow_burn_short_window}) at ${thresholds.slow_burn_threshold}`);
 checkMatch(readme, "slo/README.md", /0\.5%/, "documented 0.5% token gen failure target");
 
-// 7. Budget-critical gates (0.1 remaining-error-budget, 0.5 cert renewal)
+// 7. Budget-critical gates (0.1 remaining-error-budget)
 const errBudgetCritThreshold = thresholds.error_budget_critical_threshold;
-const certCritThreshold = thresholds.cert_renewal_error_budget_critical_threshold;
 checkMatch(
   alertingRules,
   "alerting.rules.yml",
@@ -106,12 +124,6 @@ checkMatch(
   "alerting.rules.yml",
   new RegExp(`sli:token_gen_error_budget:30d < ${errBudgetCritThreshold}`),
   `token gen error budget critical gate < ${errBudgetCritThreshold}`
-);
-checkMatch(
-  alertingRules,
-  "alerting.rules.yml",
-  new RegExp(`sli:cert_renewal_failure_rate:30d >= ${certCritThreshold}`),
-  `cert renewal error budget critical gate >= ${certCritThreshold}`
 );
 
 if (errors.length > 0) {

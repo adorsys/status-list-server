@@ -338,8 +338,9 @@ last 5–15 minutes), or data will look flat/empty.
 ## 9. Fire each alert end-to-end (optional but recommended for reviewers)
 
 Prometheus evaluates with `scrape_interval: 2s`, `evaluation_interval: 15s`.
-Fast-burn (page) alerts require **both** the 1h and 6h windows to breach, so
-sustain a fault for several minutes. The sections above walk each alert end to
+Fast-burn (page) alerts require **both** the long and short window (1h+5m for
+fast erating, or 6h+30m for slow burn) to breach, so sustain a fault for several
+minutes. The sections above walk each alert end to
 end. A compact cheat-sheet:
 
 | Alert                          | How to trigger                                                                  | Verify                                        |

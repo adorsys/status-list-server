@@ -242,9 +242,12 @@ slo:
   certRenewalFailureMax: 0.01
   # Remaining-error-budget gate for the ErrorBudget*Critical page alerts.
   errorBudgetCriticalThreshold: 0.1
-  # Cert-renewal failure-rate gate for the CertRenewalErrorBudgetCritical page
-  # alert (>=50% failures over 30d means the renewal loop is genuinely broken).
-  certRenewalErrorBudgetCriticalThreshold: 0.5
+  # Certificate expiry gates (seconds remaining until the certificate expires).
+  # Warn at <=14d, page at <=7d: cert renewal is a discrete low-frequency event,
+  # so alerts watch the continuous cert_time_to_expiry_seconds gauge instead of
+  # a rate() over a fixed window (which is 0/0 = NaN between renewals).
+  certExpiryWarnSeconds: 1209600
+  certExpiryCriticalSeconds: 604800
 
 postgres:
   enabled: true

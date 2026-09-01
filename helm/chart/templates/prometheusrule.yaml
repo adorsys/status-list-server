@@ -17,12 +17,16 @@ spec:
           expr: histogram_quantile(0.95, sum(rate(http_server_duration_seconds_bucket{otel_scope_name="status-list-server"}[5m])) by (namespace, le))
         - record: sli:request_latency:p95:1h
           expr: histogram_quantile(0.95, sum(rate(http_server_duration_seconds_bucket{otel_scope_name="status-list-server"}[1h])) by (namespace, le))
+        - record: sli:request_latency:p95:30m
+          expr: histogram_quantile(0.95, sum(rate(http_server_duration_seconds_bucket{otel_scope_name="status-list-server"}[30m])) by (namespace, le))
         - record: sli:request_latency:p95:6h
           expr: histogram_quantile(0.95, sum(rate(http_server_duration_seconds_bucket{otel_scope_name="status-list-server"}[6h])) by (namespace, le))
         - record: sli:error_rate:5m
           expr: sum by (namespace)(rate(http_server_requests_total{otel_scope_name="status-list-server",status_class="5xx"}[5m])) / sum by (namespace)(rate(http_server_requests_total{otel_scope_name="status-list-server"}[5m]))
         - record: sli:error_rate:1h
           expr: sum by (namespace)(rate(http_server_requests_total{otel_scope_name="status-list-server",status_class="5xx"}[1h])) / sum by (namespace)(rate(http_server_requests_total{otel_scope_name="status-list-server"}[1h]))
+        - record: sli:error_rate:30m
+          expr: sum by (namespace)(rate(http_server_requests_total{otel_scope_name="status-list-server",status_class="5xx"}[30m])) / sum by (namespace)(rate(http_server_requests_total{otel_scope_name="status-list-server"}[30m]))
         - record: sli:error_rate:6h
           expr: sum by (namespace)(rate(http_server_requests_total{otel_scope_name="status-list-server",status_class="5xx"}[6h])) / sum by (namespace)(rate(http_server_requests_total{otel_scope_name="status-list-server"}[6h]))
         - record: sli:error_rate:30d
@@ -31,6 +35,8 @@ spec:
           expr: histogram_quantile(0.95, sum(rate(db_query_duration_seconds_bucket{otel_scope_name="status-list-server"}[5m])) by (namespace, le))
         - record: sli:db_query_latency:p95:1h
           expr: histogram_quantile(0.95, sum(rate(db_query_duration_seconds_bucket{otel_scope_name="status-list-server"}[1h])) by (namespace, le))
+        - record: sli:db_query_latency:p95:30m
+          expr: histogram_quantile(0.95, sum(rate(db_query_duration_seconds_bucket{otel_scope_name="status-list-server"}[30m])) by (namespace, le))
         - record: sli:db_query_latency:p95:6h
           expr: histogram_quantile(0.95, sum(rate(db_query_duration_seconds_bucket{otel_scope_name="status-list-server"}[6h])) by (namespace, le))
         - record: sli:cache_hit_ratio:5m
@@ -47,6 +53,8 @@ spec:
           expr: sum by (namespace)(rate(token_generation_failures_total{otel_scope_name="status-list-server"}[5m])) / sum by (namespace)(rate(token_generation_attempts_total{otel_scope_name="status-list-server"}[5m]))
         - record: sli:token_gen_failure_rate:1h
           expr: sum by (namespace)(rate(token_generation_failures_total{otel_scope_name="status-list-server"}[1h])) / sum by (namespace)(rate(token_generation_attempts_total{otel_scope_name="status-list-server"}[1h]))
+        - record: sli:token_gen_failure_rate:30m
+          expr: sum by (namespace)(rate(token_generation_failures_total{otel_scope_name="status-list-server"}[30m])) / sum by (namespace)(rate(token_generation_attempts_total{otel_scope_name="status-list-server"}[30m]))
         - record: sli:token_gen_failure_rate:6h
           expr: sum by (namespace)(rate(token_generation_failures_total{otel_scope_name="status-list-server"}[6h])) / sum by (namespace)(rate(token_generation_attempts_total{otel_scope_name="status-list-server"}[6h]))
         - record: sli:token_gen_failure_rate:30d
@@ -78,7 +86,7 @@ spec:
             summary: "status-list-server metrics absent for 5m (target down or not scraped)"
             runbook_url: "https://github.com/adorsys/status-list-server/blob/develop/observability/README.md"
         - alert: RequestLatencyFastBurn
-          expr: sli:request_latency:p95:1h > {{ .Values.slo.requestLatencyP95 }} and sli:request_latency:p95:6h > {{ .Values.slo.requestLatencyP95 }}
+          expr: sli:request_latency:p95:1h > {{ .Values.slo.requestLatencyP95 }} and sli:request_latency:p95:5m > {{ .Values.slo.requestLatencyP95 }}
           for: 5m
           labels:
             severity: page
@@ -86,10 +94,10 @@ spec:
             namespace: {{ .Release.Namespace | quote }}
             sli: request_latency
           annotations:
-            summary: "Request latency P95 sustainably above 300ms (>300ms in both 1h and 6h)"
+            summary: "Request latency P95 sustainably above 300ms (>300ms on the 1h window)"
             runbook_url: "https://github.com/adorsys/status-list-server/blob/develop/observability/runbooks/request-latency.md"
         - alert: RequestLatencySlowBurn
-          expr: sli:request_latency:p95:6h > {{ .Values.slo.requestLatencyP95 }}
+          expr: sli:request_latency:p95:6h > {{ .Values.slo.requestLatencyP95 }} and sli:request_latency:p95:30m > {{ .Values.slo.requestLatencyP95 }}
           for: 30m
           labels:
             severity: warn
@@ -97,10 +105,10 @@ spec:
             namespace: {{ .Release.Namespace | quote }}
             sli: request_latency
           annotations:
-            summary: "Request latency P95 sustained above 300ms for 6h"
+            summary: "Request latency P95 sustained above 300ms on the 6h window"
             runbook_url: "https://github.com/adorsys/status-list-server/blob/develop/observability/runbooks/request-latency.md"
         - alert: ErrorRateFastBurn
-          expr: sli:error_rate:1h >= {{ mulf .Values.slo.errorRateTarget .Values.slo.fastBurnMultiplier | printf "%.3f" }} and sli:error_rate:6h >= {{ mulf .Values.slo.errorRateTarget .Values.slo.fastBurnMultiplier | printf "%.3f" }}
+          expr: sli:error_rate:1h >= {{ mulf .Values.slo.errorRateTarget .Values.slo.fastBurnMultiplier | printf "%.3f" }} and sli:error_rate:5m >= {{ mulf .Values.slo.errorRateTarget .Values.slo.fastBurnMultiplier | printf "%.3f" }}
           for: 5m
           labels:
             severity: page
@@ -108,10 +116,10 @@ spec:
             namespace: {{ .Release.Namespace | quote }}
             sli: error_rate
           annotations:
-            summary: "5xx error rate burning the error budget fast (>=14.4x over 0.5% budget in both 1h and 6h)"
+            summary: "5xx error rate burning the error budget fast (>=14.4x over 0.5% budget on the 1h window)"
             runbook_url: "https://github.com/adorsys/status-list-server/blob/develop/observability/runbooks/error-rate.md"
         - alert: ErrorRateSlowBurn
-          expr: sli:error_rate:6h >= {{ mulf .Values.slo.errorRateTarget .Values.slo.slowBurnMultiplier | printf "%.3f" }}
+          expr: sli:error_rate:6h >= {{ mulf .Values.slo.errorRateTarget .Values.slo.slowBurnMultiplier | printf "%.3f" }} and sli:error_rate:30m >= {{ mulf .Values.slo.errorRateTarget .Values.slo.slowBurnMultiplier | printf "%.3f" }}
           for: 30m
           labels:
             severity: warn
@@ -119,10 +127,10 @@ spec:
             namespace: {{ .Release.Namespace | quote }}
             sli: error_rate
           annotations:
-            summary: "5xx error rate burning the error budget slowly (>=6x over 0.5% budget for 6h)"
+            summary: "5xx error rate burning the error budget slowly (>=6x over 0.5% budget on the 6h window)"
             runbook_url: "https://github.com/adorsys/status-list-server/blob/develop/observability/runbooks/error-rate.md"
         - alert: DbLatencyFastBurn
-          expr: sli:db_query_latency:p95:1h > {{ .Values.slo.dbLatencyP95 }} and sli:db_query_latency:p95:6h > {{ .Values.slo.dbLatencyP95 }}
+          expr: sli:db_query_latency:p95:1h > {{ .Values.slo.dbLatencyP95 }} and sli:db_query_latency:p95:5m > {{ .Values.slo.dbLatencyP95 }}
           for: 5m
           labels:
             severity: page
@@ -130,10 +138,10 @@ spec:
             namespace: {{ .Release.Namespace | quote }}
             sli: db_latency
           annotations:
-            summary: "DB query latency P95 sustainably above 50ms (>50ms in both 1h and 6h)"
+            summary: "DB query latency P95 sustainably above 50ms (>50ms on the 1h window)"
             runbook_url: "https://github.com/adorsys/status-list-server/blob/develop/observability/runbooks/db-latency.md"
         - alert: DbLatencySlowBurn
-          expr: sli:db_query_latency:p95:6h > {{ .Values.slo.dbLatencyP95 }}
+          expr: sli:db_query_latency:p95:6h > {{ .Values.slo.dbLatencyP95 }} and sli:db_query_latency:p95:30m > {{ .Values.slo.dbLatencyP95 }}
           for: 30m
           labels:
             severity: warn
@@ -141,10 +149,10 @@ spec:
             namespace: {{ .Release.Namespace | quote }}
             sli: db_latency
           annotations:
-            summary: "DB query latency P95 sustained above 50ms for 6h"
+            summary: "DB query latency P95 sustained above 50ms on the 6h window"
             runbook_url: "https://github.com/adorsys/status-list-server/blob/develop/observability/runbooks/db-latency.md"
         - alert: TokenGenerationFastBurn
-          expr: sli:token_gen_failure_rate:1h >= {{ mulf .Values.slo.errorRateTarget .Values.slo.fastBurnMultiplier | printf "%.3f" }} and sli:token_gen_failure_rate:6h >= {{ mulf .Values.slo.errorRateTarget .Values.slo.fastBurnMultiplier | printf "%.3f" }}
+          expr: sli:token_gen_failure_rate:1h >= {{ mulf .Values.slo.errorRateTarget .Values.slo.fastBurnMultiplier | printf "%.3f" }} and sli:token_gen_failure_rate:5m >= {{ mulf .Values.slo.errorRateTarget .Values.slo.fastBurnMultiplier | printf "%.3f" }}
           for: 5m
           labels:
             severity: page
@@ -152,10 +160,10 @@ spec:
             namespace: {{ .Release.Namespace | quote }}
             sli: token_generation
           annotations:
-            summary: "Token-generation failures burning the error budget fast (>=14.4x over 0.5% budget in both 1h and 6h)"
+            summary: "Token-generation failures burning the error budget fast (>=14.4x over 0.5% budget on the 1h window)"
             runbook_url: "https://github.com/adorsys/status-list-server/blob/develop/observability/runbooks/token-generation.md"
         - alert: TokenGenerationSlowBurn
-          expr: sli:token_gen_failure_rate:6h >= {{ mulf .Values.slo.errorRateTarget .Values.slo.slowBurnMultiplier | printf "%.3f" }}
+          expr: sli:token_gen_failure_rate:6h >= {{ mulf .Values.slo.errorRateTarget .Values.slo.slowBurnMultiplier | printf "%.3f" }} and sli:token_gen_failure_rate:30m >= {{ mulf .Values.slo.errorRateTarget .Values.slo.slowBurnMultiplier | printf "%.3f" }}
           for: 30m
           labels:
             severity: warn
@@ -163,7 +171,7 @@ spec:
             namespace: {{ .Release.Namespace | quote }}
             sli: token_generation
           annotations:
-            summary: "Token-generation failure rate burning the error budget slowly (>=6x over 0.5% budget for 6h)"
+            summary: "Token-generation failure rate burning the error budget slowly (>=6x over 0.5% budget on the 6h window)"
             runbook_url: "https://github.com/adorsys/status-list-server/blob/develop/observability/runbooks/token-generation.md"
         - alert: CacheHitRatioLow
           expr: sli:cache_hit_ratio:5m < {{ .Values.slo.cacheHitRatioMin }}
@@ -202,27 +210,28 @@ spec:
             description: 'Remaining token generation error budget: {{ `{{ $value | humanizePercentage }}` }}'
             runbook_url: "https://github.com/adorsys/status-list-server/blob/develop/observability/runbooks/token-generation.md"
         - alert: CertRenewalFailures
-          expr: sli:cert_renewal_failure_rate:7d >= {{ .Values.slo.certRenewalFailureMax }}
-          for: 5m
+          expr: cert_time_to_expiry_seconds{otel_scope_name="status-list-server"} <= {{ .Values.slo.certExpiryWarnSeconds }}
+          for: 30m
           labels:
             severity: warn
             service: status-list-server
             namespace: {{ .Release.Namespace | quote }}
             sli: cert_renewal
           annotations:
-            summary: "Certificate renewal failure rate at or above 1% over the last 7d"
+            summary: "Certificate expires within 14 days (renewal loop not refreshing it)"
+            description: 'Time to expiry: {{ `{{ $value }}` }}s'
             runbook_url: "https://github.com/adorsys/status-list-server/blob/develop/observability/runbooks/cert-renewal.md"
         - alert: CertRenewalErrorBudgetCritical
-          expr: sli:cert_renewal_failure_rate:30d >= {{ .Values.slo.certRenewalErrorBudgetCriticalThreshold }}
-          for: 5m
+          expr: cert_time_to_expiry_seconds{otel_scope_name="status-list-server"} <= {{ .Values.slo.certExpiryCriticalSeconds }}
+          for: 10m
           labels:
             severity: page
             service: status-list-server
             namespace: {{ .Release.Namespace | quote }}
             sli: cert_renewal
           annotations:
-            summary: "Certificate renewal failure rate exceeded 50% over 30d"
-            description: 'Current 30d cert renewal failure rate: {{ `{{ $value | humanizePercentage }}` }}'
+            summary: "Certificate expires within 7 days (imminent expiry)"
+            description: 'Time to expiry: {{ `{{ $value }}` }}s'
             runbook_url: "https://github.com/adorsys/status-list-server/blob/develop/observability/runbooks/cert-renewal.md"
 {{- end }}
 

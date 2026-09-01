@@ -37,12 +37,12 @@ set keeps cardinality in check.
 
 | SLI                  | Metric source                                                                                                 | Example target                   | Window | Alert windows / burn thresholds                                              |
 | -------------------- | ------------------------------------------------------------------------------------------------------------- | -------------------------------- | ------ | ---------------------------------------------------------------------------- |
-| Request latency      | `http_server_duration_seconds` histogram                                                                      | p95 < **300 ms**                 | 30d    | fast page: 1h > 300ms **and** 6h > 300ms; slow warn: 6h > 300ms              |
-| Error rate           | `sum(rate(http_server_requests_total{status_class="5xx"}[...])) / sum(rate(http_server_requests_total[...]))` | ≥ **99.5%** success (≤ 0.5% 5xx) | 30d    | fast page: ≥14.4x (0.072) over 1h **and** 6h; slow warn: ≥6x (0.030) over 6h |
+| Request latency      | `http_server_duration_seconds` histogram                                                                      | p95 < **300 ms**                 | 30d    | fast page: 1h > 300ms **and** 5m > 300ms; slow warn: 6h > 300ms **and** 30m > 300ms |
+| Error rate           | `sum(rate(http_server_requests_total{status_class="5xx"}[...])) / sum(rate(http_server_requests_total[...]))` | ≥ **99.5%** success (≤ 0.5% 5xx) | 30d    | fast page: ≥14.4x (0.072) on 1h **and** 5m; slow warn: ≥6x (0.030) on 6h **and** 30m |
 | Cache hit ratio      | `status_list_cache_hits_total / (hits_total + misses_total)`                                                  | ≥ **85%**                        | 5m     | warn-only (degradation, not outage)                                          |
-| DB latency           | `db_query_duration_seconds` histogram                                                                         | p95 < **50 ms**                  | 30d    | fast page: 1h > 50ms **and** 6h > 50ms; slow warn: 6h > 50ms                 |
-| Cert renewal failure | `cert_renewal_failures_total / cert_renewal_attempts_total`                                                   | < **1%**                         | 30d    | warn: 7d ≥1% (op risk); page: 30d ≥50% (renewal broken)                      |
-| Token-gen failure    | `token_generation_failures_total / token_generation_attempts_total`                                           | < **0.5%**                       | 30d    | fast page: ≥14.4x (0.072) over 1h **and** 6h; slow warn: ≥6x (0.030) over 6h |
+| DB latency           | `db_query_duration_seconds` histogram                                                                         | p95 < **50 ms**                  | 30d    | fast page: 1h > 50ms **and** 5m > 50ms; slow warn: 6h > 50ms **and** 30m > 50ms |
+| Cert expiry          | `cert_time_to_expiry_seconds` gauge                                                                          | renew before expiry              | –      | warn: ≤14d to expiry (op risk); page: ≤7d to expiry (imminent)               |
+| Token-gen failure    | `token_generation_failures_total / token_generation_attempts_total`                                           | < **0.5%**                       | 30d    | fast page: ≥14.4x (0.072) on 1h **and** 5m; slow warn: ≥6x (0.030) on 6h **and** 30m |
 
 ### Why these windows
 - **30d** for latency/error/DB/token/cert: matches the standard Google SRE "monthly
@@ -64,8 +64,12 @@ set keeps cardinality in check.
 - **p95 < 50 ms DB latency**: the in-process cache makes DB reads rare, so the
   DB path tolerates a much tighter latency SLO than the HTTP surface. If cache
   misses spike, this is the canary.
-- **< 1% cert renewal failure** (30d): renewal happens on a cron, so rate is low;
-  1% catches repeated ACME/backend failures over 30d and short spikes over 5m without paging on a single transient failure.
+- **< 1% cert renewal failure** (30d): **no longer used for alerting.** Renewal
+  happens on a sparse clock (every few days to weeks), so a `rate()` over a fixed
+  window is `0/0 = NaN` whenever no renewal occurs and cannot fire. The firing
+  cert alerts are instead **expiry-driven** on the continuous
+  `cert_time_to_expiry_seconds` gauge (warn ≤14d, page ≤7d), which drops
+  monotonically while renewal fails to keep the certificate fresh.
 - **< 0.5% token-gen failure**: token generation failing means clients cannot
   read a status list. 0.5% err budget over 30d keeps this available without
   paging on an isolated signing-key cache miss.
@@ -78,14 +82,25 @@ rate, DB latency, token-gen). See `observability/prometheus/rules/alerting.rules
 
 - **Fast burn (page)**: the burn rate exceeds **14.4x** the 0.5% budget
   (error/token ratio ≥ 0.072) — or the latency P95 breaches its threshold — on
-  **both a short (1h) and a long (6h) window** with `for: 5m`. Requiring two
-  aligned windows means a single spiky 5m burst cannot page on its own.
+  **both a short (5m) and a long (1h) window** with `for: 5m`. The short window
+  is 1/12 of the long window, per the SRE workbook, so a severe incident pages
+  off the fast 1h window (confirmed by 5m) without waiting for a slow trailing
+  average.
 - **Slow burn (warn)**: the burn rate exceeds **6x** the 0.5% budget
-  (error/token ratio ≥ 0.030), or the latency P95 breaches its threshold, on a
-  **long (6h) window** with `for: 30m` — sustained degradation, not a blip.
-- **Cache hit ratio & cert renewal** are **warn-only**: they degrade availability
-  or security but do not immediately fail requests, so they page via a human
-  review instead of an on-call page.
+  (error/token ratio ≥ 0.030), or the latency P95 breaches its threshold, on
+  **both a short (30m) and a long (6h) window** with `for: 30m` — sustained
+  degradation, not a blip. The short window is again 1/12 of the long window.
+- Each pair is an `and` of the long-window burn signal with its short-window
+  confirmation. The long window guarantees the burn is significant; the short
+  window guarantees it is *still happening* (good reset time) and, because a
+  severe incident drives the 1h/5m windows immediately, the **page fires before
+  the warn** instead of arriving hours later.
+- **Cache hit ratio** is **warn-only**: it degrades availability but does not
+  immediately fail requests, so it warns instead of paging.
+- **Certificate expiry** is **warn + page**, but not burn-rate based: it alerts
+  on the continuous `cert_time_to_expiry_seconds` gauge (warn ≤14d, page ≤7d),
+  because renewal is a discrete, low-frequency event where `rate()` over a fixed
+  window is `0/0 = NaN` and cannot fire.
 
 Two windows are required because a single short window makes the SLO a function
 of noise (spiky traffic trips a short window that a longer window clears), and a
@@ -137,7 +152,8 @@ dashboards and alerts drift from the documented objective:
 | 0.5% error budget | `recording.rules.yml` (`0.005` denominator), `alerting.rules.yml` (0.072/0.030), `dashboards/src/generate.mjs` (0.005), this doc |
 | 85% cache hit     | `alerting.rules.yml` (0.85), `dashboards/src/generate.mjs` (0.85), this doc                                                      |
 | 50 ms DB latency  | `alerting.rules.yml` (0.05), `dashboards/src/generate.mjs` (0.05), this doc                                                      |
-| 1% cert renewal   | `alerting.rules.yml` (0.01), `dashboards/src/generate.mjs` (0.01), this doc                                                      |
+| 1% cert renewal   | `dashboards/src/generate.mjs` (0.01, diagnostic reference only); alerting uses expiry thresholds below                            |
+| 14d / 7d cert expiry | `alerting.rules.yml` (1209600 / 604800 s), `helm/chart/values.yaml` (`slo.certExpiryWarnSeconds` / `certExpiryCriticalSeconds`), `thresholds.json`, this doc |
 | 0.5% token-gen    | `recording.rules.yml` (0.005), `alerting.rules.yml` (0.072/0.030), this doc                                                      |
 
 Because the dashboard JSON is generated, change `dashboards/src/generate.mjs`
@@ -148,4 +164,4 @@ generate-dashboards`) together.
 
 Beyond the fast/slow burn pairs, `ErrorBudgetCritical` (`alerting.rules.yml`)
 pages when the 30d remaining budget (`sli:error_budget:success:30d`) falls below
-10%, i.e. when `sli:error_rate:30d` approaches 90% of the 0.5% target. Similarly, `TokenGenErrorBudgetCritical` pages when `sli:token_gen_error_budget:30d` falls below 10%, and `CertRenewalErrorBudgetCritical` alerts when 30d cert renewal failure rate exceeds 1%. See `runbooks/error-budget.md`, `runbooks/token-generation.md`, and `runbooks/cert-renewal.md`.
+10%, i.e. when `sli:error_rate:30d` approaches 90% of the 0.5% target. Similarly, `TokenGenErrorBudgetCritical` pages when `sli:token_gen_error_budget:30d` falls below 10%. Certificate alerts are expiry-driven instead: `CertRenewalFailures` warns at ≤14 days to expiry and `CertRenewalErrorBudgetCritical` pages at ≤7 days. See `runbooks/error-budget.md`, `runbooks/token-generation.md`, and `runbooks/cert-renewal.md`.

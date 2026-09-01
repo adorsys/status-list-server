@@ -21,10 +21,14 @@ groups:
         expr: |
           histogram_quantile(0.95, sum(rate(http_server_duration_seconds_bucket{otel_scope_name="status-list-server"}[5m])) by (namespace, le))
 
-      # 1h (fast-burn short window) and 6h (fast-burn long + slow-burn window).
+      # 1h (fast-burn long window), 30m (slow-burn short confirmation), and
+      # 6h (slow-burn long window).
       - record: sli:request_latency:p95:1h
         expr: |
           histogram_quantile(0.95, sum(rate(http_server_duration_seconds_bucket{otel_scope_name="status-list-server"}[1h])) by (namespace, le))
+      - record: sli:request_latency:p95:30m
+        expr: |
+          histogram_quantile(0.95, sum(rate(http_server_duration_seconds_bucket{otel_scope_name="status-list-server"}[30m])) by (namespace, le))
       - record: sli:request_latency:p95:6h
         expr: |
           histogram_quantile(0.95, sum(rate(http_server_duration_seconds_bucket{otel_scope_name="status-list-server"}[6h])) by (namespace, le))
@@ -38,6 +42,11 @@ groups:
         expr: |
           sum by (namespace)(rate(http_server_requests_total{otel_scope_name="status-list-server",status_class="5xx"}[1h]))
           / sum by (namespace)(rate(http_server_requests_total{otel_scope_name="status-list-server"}[1h]))
+      # 30m: short confirmation window for the slow-burn (warn) multi-window pair.
+      - record: sli:error_rate:30m
+        expr: |
+          sum by (namespace)(rate(http_server_requests_total{otel_scope_name="status-list-server",status_class="5xx"}[30m]))
+          / sum by (namespace)(rate(http_server_requests_total{otel_scope_name="status-list-server"}[30m]))
       - record: sli:error_rate:6h
         expr: |
           sum by (namespace)(rate(http_server_requests_total{otel_scope_name="status-list-server",status_class="5xx"}[6h]))
@@ -55,6 +64,10 @@ groups:
       - record: sli:db_query_latency:p95:1h
         expr: |
           histogram_quantile(0.95, sum(rate(db_query_duration_seconds_bucket{otel_scope_name="status-list-server"}[1h])) by (namespace, le))
+      # 30m: short confirmation window for the slow-burn (warn) multi-window pair.
+      - record: sli:db_query_latency:p95:30m
+        expr: |
+          histogram_quantile(0.95, sum(rate(db_query_duration_seconds_bucket{otel_scope_name="status-list-server"}[30m])) by (namespace, le))
       - record: sli:db_query_latency:p95:6h
         expr: |
           histogram_quantile(0.95, sum(rate(db_query_duration_seconds_bucket{otel_scope_name="status-list-server"}[6h])) by (namespace, le))
@@ -96,6 +109,11 @@ groups:
         expr: |
           sum by (namespace)(rate(token_generation_failures_total{otel_scope_name="status-list-server"}[1h]))
           / sum by (namespace)(rate(token_generation_attempts_total{otel_scope_name="status-list-server"}[1h]))
+      # 30m: short confirmation window for the slow-burn (warn) multi-window pair.
+      - record: sli:token_gen_failure_rate:30m
+        expr: |
+          sum by (namespace)(rate(token_generation_failures_total{otel_scope_name="status-list-server"}[30m]))
+          / sum by (namespace)(rate(token_generation_attempts_total{otel_scope_name="status-list-server"}[30m]))
       - record: sli:token_gen_failure_rate:6h
         expr: |
           sum by (namespace)(rate(token_generation_failures_total{otel_scope_name="status-list-server"}[6h]))

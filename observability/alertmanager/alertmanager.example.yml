@@ -1,8 +1,10 @@
 # Example Alertmanager Configuration for status-list-server
 #
 # Route tree:
+#   - severity=none (Watchdog) -> dead-man's-switch (NOT a human channel)
 #   - severity=page -> PagerDuty (critical outages requiring immediate on-call response)
 #   - severity=warn -> Slack / Microsoft Teams (degradations and non-page alerts)
+#   - unresolved / everything else -> default (no-op) so nothing spams a human channel
 #
 # Credentials and endpoints use <PLACEHOLDER> notation. Operators must replace
 # these with real environment variables or secret store references BEFORE this
@@ -20,19 +22,32 @@ route:
   group_wait: 30s
   group_interval: 5m
   repeat_interval: 4h
-  receiver: "slack-notifications"
+  # Any alert that matches no route below (e.g. the always-firing Watchdog with
+  # severity=none) must NOT be treated as a paging/warn notification. Route the
+  # Watchdog to a dead-man's-switch explicitly and keep the default receiver a
+  # no-op so a healthy-pipeline signal never spams Slack.
+  receiver: "noop"
   routes:
+    # Watchdog (severity=none) -> dead-man's-switch. The Watchdog fires on every
+    # alert-evaluation cycle; it is a liveness probe for the alerting pipeline, not
+    # an incident. Forward it to an external dead-man's-switch that pages only when
+    # it STOPS firing (i.e. the pipeline collapsed). If no DMS is provisioned, leave
+    # this on the noop receiver instead of routing it to a human channel.
+    - matchers:
+        - severity="none"
+      receiver: "watchdog-deadmansswitch"
+
     # High-priority pages (multi-window fast burn, error budget critical).
     # Kept before the warn route (and `continue: false`) so every severity=page
     # alert reaches PagerDuty and is never swallowed by a lower-priority route.
-    - match:
-        severity: page
+    - matchers:
+        - severity="page"
       receiver: "pagerduty-high-priority"
       continue: false
 
-    # Warnings (slow burn, cache hit ratio low, cert renewal failures)
-    - match:
-        severity: warn
+    # Warnings (slow burn, cache hit ratio low, certificate expiry warn)
+    - matchers:
+        - severity="warn"
       receiver: "slack-notifications"
       continue: false
 
@@ -45,6 +60,17 @@ inhibit_rules:
     equal: ["sli", "service"]
 
 receivers:
+  # No-op default: absorbs any alert that does not match an explicit route so a
+  # mislabelled or future alert never lands in Slack/PagerDuty unnoticed.
+  - name: "noop"
+
+  # Dead-man's-switch for the always-firing Watchdog. Replace <DMS_WEBHOOK> with a
+  # real external DMS endpoint that pages on absence, or drop this route to keep the
+  # Watchdog on the noop receiver.
+  - name: "watchdog-deadmansswitch"
+    webhook_configs:
+      - url: "https://deadmansswitch.example.com/<DMS_WEBHOOK>"
+
   - name: "pagerduty-high-priority"
     pagerduty_configs:
       - routing_key: "<PAGERDUTY_INTEGRATION_KEY>"

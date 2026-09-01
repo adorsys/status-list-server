@@ -7,10 +7,10 @@ Alerts:
 
 ## What fired
 
-The p95 request latency over both the 1h and 6h windows exceeded the 300 ms SLO
-(fast burn), or the 6h p95 exceeded 300 ms sustained (slow burn). A page means
-the service's latency target is being breached for a sustained period — either
-a single slow path or a broad degradation.
+The p95 request latency over both the 1h and 5m windows exceeded the 300 ms SLO
+(fast burn), or the 6h p95 exceeded 300 ms sustained, confirmed by the 30m
+window (slow burn). A page means the service's latency target is being breached
+for a sustained period — either a single slow path or a broad degradation.
 
 ## Ranked likely causes
 

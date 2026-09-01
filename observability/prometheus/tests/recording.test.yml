@@ -44,10 +44,20 @@ tests:
         exp_samples:
           - labels: '{__name__="sli:error_rate:1h"}'
             value: 0.05
+      - expr: 'sli:error_rate:30m'
+        eval_time: 70m
+        exp_samples:
+          - labels: '{__name__="sli:error_rate:30m"}'
+            value: 0.05
       - expr: 'sli:token_gen_failure_rate:5m'
         eval_time: 70m
         exp_samples:
           - labels: '{__name__="sli:token_gen_failure_rate:5m"}'
+            value: 0.02
+      - expr: 'sli:token_gen_failure_rate:30m'
+        eval_time: 70m
+        exp_samples:
+          - labels: '{__name__="sli:token_gen_failure_rate:30m"}'
             value: 0.02
       - expr: 'sli:cert_renewal_failure_rate:5m'
         eval_time: 70m

@@ -1,8 +1,11 @@
 groups:
   # Multi-window multi-burn-rate alerts (Google SRE). Each outage SLI has a
-  # fast-burn page pair (short 1h + long 6h window, aligned) and a slow-burn
-  # warn pair on the long window. `severity` (`page`/`warn`) marks alert
-  # importance; `runbook_url` points at the in-repo runbook for the SLI.
+  # fast-burn page pair (fast 1h + short 5m window at 14.4x) and a slow-burn
+  # warn pair (slow 6h + short 30m window at 6x). The short window is 1/12 of
+  # the long window, per the SRE workbook, so a severe incident pages off the
+  # fast 1h window (confirmed by 5m) without waiting for a slow trailing
+  # average. `severity` (`page`/`warn`) marks alert importance; `runbook_url`
+  # points at the in-repo runbook for the SLI.
   #
   # Burn-rate thresholds (0.5% budget -> 14.4x = 0.072 fast, 6x = 0.030 slow).
   # Latency SLOs are threshold-based (p95), so their "burn" is a sustained
@@ -42,53 +45,62 @@ groups:
         expr: |
           sli:request_latency:p95:1h > 0.3
           and
-          sli:request_latency:p95:6h > 0.3
+          sli:request_latency:p95:5m > 0.3
         for: 5m
         labels:
           severity: page
           service: status-list-server
           sli: request_latency
         annotations:
-          summary: "Request latency P95 sustainably above 300ms (>300ms in both 1h and 6h)"
+          summary: "Request latency P95 sustainably above 300ms (>300ms on the 1h window)"
           runbook_url: "https://github.com/adorsys/status-list-server/blob/develop/observability/runbooks/request-latency.md"
 
       - alert: RequestLatencySlowBurn
         expr: |
           sli:request_latency:p95:6h > 0.3
+          and
+          sli:request_latency:p95:30m > 0.3
         for: 30m
         labels:
           severity: warn
           service: status-list-server
           sli: request_latency
         annotations:
-          summary: "Request latency P95 sustained above 300ms for 6h"
+          summary: "Request latency P95 sustained above 300ms on the 6h window"
           runbook_url: "https://github.com/adorsys/status-list-server/blob/develop/observability/runbooks/request-latency.md"
 
       # --- Error rate (SLO: >=99.5% success, 0.5% budget) --------------------
+      # Google SRE multi-window multi-burn-rate: the PAGE (fast burn) fires off
+      # the short 1h window at 14.4x confirmed by the 5m window, so a severe
+      # incident pages promptly without waiting for the slow 6h trailing average.
+      # The WARN (slow burn) fires at 6x on the long 6h window confirmed by the
+      # 30m window. Short = 1/12 of the long window per the SRE workbook.
       - alert: ErrorRateFastBurn
         expr: |
           sli:error_rate:1h >= 0.072
           and
-          sli:error_rate:6h >= 0.072
+          sli:error_rate:5m >= 0.072
         for: 5m
         labels:
           severity: page
           service: status-list-server
           sli: error_rate
         annotations:
-          summary: "5xx error rate burning the error budget fast (>=14.4x over 0.5% budget in both 1h and 6h)"
+          summary: "5xx error rate burning the error budget fast (>=14.4x over 0.5% budget on the 1h window)"
           runbook_url: "https://github.com/adorsys/status-list-server/blob/develop/observability/runbooks/error-rate.md"
 
       - alert: ErrorRateSlowBurn
         expr: |
           sli:error_rate:6h >= 0.030
+          and
+          sli:error_rate:30m >= 0.030
         for: 30m
         labels:
           severity: warn
           service: status-list-server
           sli: error_rate
         annotations:
-          summary: "5xx error rate burning the error budget slowly (>=6x over 0.5% budget for 6h)"
+          summary: "5xx error rate burning the error budget slowly (>=6x over 0.5% budget on the 6h window)"
           runbook_url: "https://github.com/adorsys/status-list-server/blob/develop/observability/runbooks/error-rate.md"
 
       # --- DB latency (SLO: p95 < 50ms) --------------------------------------
@@ -96,26 +108,28 @@ groups:
         expr: |
           sli:db_query_latency:p95:1h > 0.05
           and
-          sli:db_query_latency:p95:6h > 0.05
+          sli:db_query_latency:p95:5m > 0.05
         for: 5m
         labels:
           severity: page
           service: status-list-server
           sli: db_latency
         annotations:
-          summary: "DB query latency P95 sustainably above 50ms (>50ms in both 1h and 6h)"
+          summary: "DB query latency P95 sustainably above 50ms (>50ms on the 1h window)"
           runbook_url: "https://github.com/adorsys/status-list-server/blob/develop/observability/runbooks/db-latency.md"
 
       - alert: DbLatencySlowBurn
         expr: |
           sli:db_query_latency:p95:6h > 0.05
+          and
+          sli:db_query_latency:p95:30m > 0.05
         for: 30m
         labels:
           severity: warn
           service: status-list-server
           sli: db_latency
         annotations:
-          summary: "DB query latency P95 sustained above 50ms for 6h"
+          summary: "DB query latency P95 sustained above 50ms on the 6h window"
           runbook_url: "https://github.com/adorsys/status-list-server/blob/develop/observability/runbooks/db-latency.md"
 
       # --- Token generation (SLO: <0.5% failure, warn-only is not acceptable) -
@@ -123,26 +137,28 @@ groups:
         expr: |
           sli:token_gen_failure_rate:1h >= 0.072
           and
-          sli:token_gen_failure_rate:6h >= 0.072
+          sli:token_gen_failure_rate:5m >= 0.072
         for: 5m
         labels:
           severity: page
           service: status-list-server
           sli: token_generation
         annotations:
-          summary: "Token-generation failures burning the error budget fast (>=14.4x over 0.5% budget in both 1h and 6h)"
+          summary: "Token-generation failures burning the error budget fast (>=14.4x over 0.5% budget on the 1h window)"
           runbook_url: "https://github.com/adorsys/status-list-server/blob/develop/observability/runbooks/token-generation.md"
 
       - alert: TokenGenerationSlowBurn
         expr: |
           sli:token_gen_failure_rate:6h >= 0.030
+          and
+          sli:token_gen_failure_rate:30m >= 0.030
         for: 30m
         labels:
           severity: warn
           service: status-list-server
           sli: token_generation
         annotations:
-          summary: "Token-generation failure rate burning the error budget slowly (>=6x over 0.5% budget for 6h)"
+          summary: "Token-generation failure rate burning the error budget slowly (>=6x over 0.5% budget on the 6h window)"
           runbook_url: "https://github.com/adorsys/status-list-server/blob/develop/observability/runbooks/token-generation.md"
 
       # --- Cache hit ratio (warn-only degradation) ---------------------------
@@ -190,37 +206,41 @@ groups:
           description: "Remaining token generation error budget: {{ $value | humanizePercentage }}"
           runbook_url: "https://github.com/adorsys/status-list-server/blob/develop/observability/runbooks/token-generation.md"
 
-      # --- Certificate renewal (warn-only operational risk) ------------------
-      # NOTE: certificate renewal is a discrete, low-frequency event (a renewal
-      # cycle every few days, not a continuous stream), so a 5m `rate` is
-      # meaningless here. The 7d window guarantees at least one renewal cycle is
-      # observed, making this rule actually fireable while staying warn-only.
+      # --- Certificate renewal (expiry-driven, warn + page) ------------------
+      # Certificate renewal is a discrete, low-frequency event (a renewal cycle
+      # every few days to weeks), so a `rate()` over a fixed window is 0/0 = NaN
+      # whenever no renewal happened in the window and cannot fire reliably. We
+      # therefore alert on the continuous `cert_time_to_expiry_seconds` gauge
+      # (emitted on every renewal/refresh): it drops monotonically toward 0 as
+      # long as renewals fail to keep the certificate fresh, so it fires
+      # deterministically when the renewal loop stops working — the actual risk.
+      #
+      # Warn at <=14 days to expiry: renewal stopped but there is runway to
+      # intervene. Page at <=7 days to expiry: imminent expiry, cert will be
+      # invalid for TLS handshakes unless action is taken immediately.
       - alert: CertRenewalFailures
         expr: |
-          sli:cert_renewal_failure_rate:7d >= 0.01
-        for: 5m
+          cert_time_to_expiry_seconds{otel_scope_name="status-list-server"} <= 1209600
+        for: 30m
         labels:
           severity: warn
           service: status-list-server
           sli: cert_renewal
         annotations:
-          summary: "Certificate renewal failure rate at or above 1% over the last 7d"
+          summary: "Certificate expires within 14 days (renewal loop not refreshing it)"
+          description: "Time to expiry: {{ $value }}s"
           runbook_url: "https://github.com/adorsys/status-list-server/blob/develop/observability/runbooks/cert-renewal.md"
 
-      # Page (critical) only when the renewal loop is genuinely broken: >=50% of
-      # renewals failed over the 30d window means the certificate is not being
-      # re-signed and will expire. A single transient failure (e.g. 1 of ~30
-      # renewals) stays warn-only and does not page on-call.
       - alert: CertRenewalErrorBudgetCritical
         expr: |
-          sli:cert_renewal_failure_rate:30d >= 0.5
-        for: 5m
+          cert_time_to_expiry_seconds{otel_scope_name="status-list-server"} <= 604800
+        for: 10m
         labels:
           severity: page
           service: status-list-server
           sli: cert_renewal
         annotations:
-          summary: "Certificate renewal failure rate exceeded 50% over 30d"
-          description: "Current 30d cert renewal failure rate: {{ $value | humanizePercentage }}"
+          summary: "Certificate expires within 7 days (imminent expiry)"
+          description: "Time to expiry: {{ $value }}s"
           runbook_url: "https://github.com/adorsys/status-list-server/blob/develop/observability/runbooks/cert-renewal.md"
 
