@@ -26,13 +26,49 @@ env:
   IMAGE_BASE: ghcr.io/${{ github.repository_owner }}/status-list-server
   # The same expression deploy.yml resolves the deploy from, so which variant is
   # running is read from one source rather than restated here and left to drift.
+  # Load-bearing, not decorative: the run fails if this variant was not scanned.
   DEPLOYED_VARIANT: ${{ vars.IMAGE_VARIANT || 'aws' }}
   EXPIRY_WARN_DAYS: "30"
   ISSUE_MARKER: "<!-- scheduled-image-scan -->"
+  ISSUE_LABEL: scheduled-image-scan
 
 jobs:
+  # The variant list, once. It used to appear twice in this file -- as the matrix and
+  # again as the set the coverage check asserts -- eleven lines apart, and the drift
+  # was asymmetric: forget the matrix and the cron goes permanently red, forget the
+  # assertion and a variant is silently uncovered. The second is the one that matters,
+  # because it is invisible. This is the same argument the shared scripts rest on.
+  variants:
+    name: Resolve Variant List
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      list: ${{ steps.list.outputs.list }}
+      names: ${{ steps.list.outputs.names }}
+    steps:
+      - name: Publish the variant list
+        id: list
+        env:
+          VARIANTS: aws gcp azure vault fscert
+        run: |
+          set -euo pipefail
+          # Unquoted on purpose: the word splitting is what turns the list into lines.
+          list=$(printf '%s\n' $VARIANTS | jq -Rsc 'split("\n") | map(select(length > 0))')
+
+          [ "$(printf '%s' "$list" | jq 'length')" -gt 0 ] || {
+            echo "::error::the variant list is empty; this run would assert nothing and pass."
+            exit 1
+          }
+
+          {
+            printf 'names=%s\n' "$VARIANTS"
+            printf 'list=%s\n' "$list"
+          } >> "$GITHUB_OUTPUT"
+          echo "variants: ${VARIANTS}"
+
   rescan:
-    name: Re-scan Released Image (${{ matrix.variant.suffix }})
+    name: Re-scan Released Image (${{ matrix.variant }})
+    needs: variants
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
@@ -40,19 +76,16 @@ jobs:
       packages: read
     strategy:
       # One variant's registry trouble must not withhold the other four's findings.
+      # `report` honours this rather than undoing it: a leg that dies becomes a row,
+      # not a reason to withhold everything else.
       fail-fast: false
       matrix:
-        variant:
-          - suffix: aws
-          - suffix: gcp
-          - suffix: azure
-          - suffix: vault
-          - suffix: fscert
+        variant: ${{ fromJSON(needs.variants.outputs.list) }}
     env:
       # Both published architectures, for the reason in deploy.yml: `cargo auditable`
       # records the graph cargo resolved per target, not the lockfile's union.
       SCAN_ARCHES: amd64 arm64
-      VARIANT: ${{ matrix.variant.suffix }}
+      VARIANT: ${{ matrix.variant }}
     steps:
       - name: Fetch Repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -60,10 +93,13 @@ jobs:
           persist-credentials: false
 
       - name: Login to GHCR
+        # `repository_owner`, not `github.actor`: on a schedule event the actor is
+        # whoever last touched the workflow file, which is neither meaningful nor
+        # stable. GHCR authenticates on the token; the username should say what it is.
         uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
         with:
           registry: ${{ env.REGISTRY }}
-          username: ${{ github.actor }}
+          username: ${{ github.repository_owner }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Resolve the released digest
@@ -74,38 +110,51 @@ jobs:
         #
         # Pinned to the digest immediately: a tag is mutable, and re-resolving it later
         # in the job could scan something other than what is reported here.
+        #
+        # Two questions are asked separately rather than collapsed into one retry loop.
+        # "Is the tag reachable" and "can we still extract a digest from it" have
+        # different answers and different owners, and answering both with "may not have
+        # been released yet" is how a resolver that quietly stopped working becomes a
+        # nightly that scans nothing and stays green -- the absence-reads-as-success
+        # failure scripts/gate-selftest.sh exists to prevent, one layer up.
         id: resolve
         run: |
           set -uo pipefail
           ref="${IMAGE_BASE}:latest-${VARIANT}"
 
-          digest=""
+          raw=""
           for attempt in 1 2 3; do
-            if digest=$(docker buildx imagetools inspect "$ref" --format '{{ .Manifest.Digest }}' 2>/dev/null); then
+            if raw=$(docker buildx imagetools inspect --raw "$ref" 2>/dev/null); then
               break
             fi
-            digest=""
+            raw=""
             [ "$attempt" -lt 3 ] || break
             sleep $(( attempt * 5 ))
           done
 
-          # A persistent failure is not classified by matching the error text, which is
-          # not an API and would silently reclassify an unrelated fault. Retries cover
-          # the transient case; what is left is reported as unavailable, and the report
-          # job fails the run if no variant resolved at all.
-          if [ -z "$digest" ]; then
-            echo "::warning::could not resolve ${ref}; it may not have been released yet."
+          # A persistent failure here is not classified by matching the error text,
+          # which is not an API and would silently reclassify an unrelated fault. The
+          # retries cover the transient case; what is left is genuinely unreachable,
+          # and `report` fails the run over it rather than reading it as clean.
+          if [ -z "$raw" ]; then
+            echo "::warning::${ref} is not reachable; this variant is recorded as unscanned."
             echo "resolved=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
-          case "$digest" in
-            sha256:*)
-              ;;
-            *)
-              echo "::error::imagetools returned a non-digest for ${ref}: ${digest}"
-              exit 1 ;;
-          esac
+          digest=$(docker buildx imagetools inspect "$ref" \
+            --format '{{ .Manifest.Digest }}' 2>/dev/null) || digest=""
+
+          # The same strict form deploy.yml validates built digests with, rather than a
+          # `sha256:*` glob that accepts anything after the prefix.
+          if [[ ! "$digest" =~ ^sha256:[a-f0-9]{64}$ ]]; then
+            echo "::error::${ref} is reachable, but no valid index digest could be extracted from it."
+            echo "Got: '${digest}'"
+            echo "This is a failure of the resolver, not of the registry: the tag exists and"
+            echo "\`imagetools inspect --format '{{ .Manifest.Digest }}'\` no longer returns what"
+            echo "this workflow expects. It must not be reported as 'not released yet'."
+            exit 1
+          fi
 
           echo "resolved=true" >> "$GITHUB_OUTPUT"
           echo "index_digest=${digest}" >> "$GITHUB_OUTPUT"
@@ -229,7 +278,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: rescan-${{ matrix.variant.suffix }}
+          name: rescan-${{ matrix.variant }}
           path: |
             scan-summary-*.json
             trivy-image-report-*.json
@@ -241,9 +290,11 @@ jobs:
 
   report:
     name: Report and Track
-    needs: rescan
+    needs:
+      - variants
+      - rescan
     # `always()`: a variant that failed is exactly the case the tracking issue and the
-    # coverage assertion below exist to describe.
+    # coverage accounting below exist to describe.
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -253,7 +304,7 @@ jobs:
       security-events: write
       issues: write
     env:
-      EXPECTED_VARIANTS: aws gcp azure vault fscert
+      EXPECTED_VARIANTS: ${{ needs.variants.outputs.names }}
     steps:
       - name: Fetch Repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -261,31 +312,56 @@ jobs:
           persist-credentials: false
 
       - name: Download scan results
-        # `gh run download` rather than an action, matching deploy.yml.
+        # `gh run download` rather than an action, matching deploy.yml. A total absence
+        # of artifacts is not fatal here -- it is described by the accounting below,
+        # which produces a better message than a download failure would.
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh run download "$GITHUB_RUN_ID" --dir artifacts
+        run: |
+          set -uo pipefail
+          if ! gh run download "$GITHUB_RUN_ID" --dir artifacts; then
+            echo "::warning::no artifacts could be downloaded from this run."
+            mkdir -p artifacts
+          fi
 
-      - name: Assert every variant reported
-        # A missing summary means that leg died before it could say anything, which is
-        # an infrastructure failure. It must not be read downstream as "clean", and it
-        # must not open an issue titled as if a vulnerability were found.
+      - name: Account for variants that never reported
+        # A missing summary means that leg died before it could say anything. That is
+        # an infrastructure failure and it must not read downstream as "clean" -- but
+        # it must not withhold the variants that *did* report either. `fail-fast: false`
+        # was set so one variant's trouble could not do that, and failing the run here
+        # would have undone it eleven lines later.
+        #
+        # So a missing leg becomes a row like any other, and the verdict accounts for
+        # it at the end, next to the findings gate. Information and verdict separate.
         id: coverage
         run: |
           set -euo pipefail
+          [ -n "${EXPECTED_VARIANTS}" ] || {
+            echo "::error::the variant list is empty, so this run cannot know what it was meant to cover."
+            exit 1
+          }
+
+          mkdir -p artifacts/unreported
           missing=""
           for variant in $EXPECTED_VARIANTS; do
-            find artifacts -name "scan-summary-${variant}.json" | grep -q . \
-              || missing="${missing} ${variant}"
+            # `-print -quit` rather than a pipe into `grep -q`: under `pipefail` the
+            # early-exiting reader can SIGPIPE the writer, and a variant whose file
+            # exists would be recorded as missing.
+            if [ -z "$(find artifacts -name "scan-summary-${variant}.json" -print -quit)" ]; then
+              missing="${missing:+${missing} }${variant}"
+              jq -n --arg variant "$variant" \
+                '{variant: $variant, status: "failed", advisories: [],
+                  occurrences: 0, suppressed: 0}' \
+                > "artifacts/unreported/scan-summary-${variant}.json"
+            fi
           done
 
           if [ -n "$missing" ]; then
-            echo "::error::these variants produced no scan summary, so this run does not cover them:${missing}"
-            echo "Nothing is reported as clean and no issue is filed: the scan did not run,"
-            echo "which is a different thing from finding nothing."
-            exit 1
+            echo "::warning::no scan summary from: ${missing} -- recorded as failed, not as clean."
+          else
+            echo "all expected variants reported."
           fi
-          echo "all expected variants reported."
+          printf 'missing=%s\n' "$missing" >> "$GITHUB_OUTPUT"
 
       - name: Aggregate findings
         id: aggregate
@@ -293,10 +369,37 @@ jobs:
           set -euo pipefail
           find artifacts -name 'scan-summary-*.json' -exec cat {} + | jq -s '.' > summaries.json
 
+          if [ "$(jq 'length' summaries.json)" -eq 0 ]; then
+            echo "::error::no scan summaries at all, so this run measured nothing."
+            exit 1
+          fi
+
+          # Advisory IDs are third-party data: they come out of a scanned image and end
+          # up in a job holding `issues: write` and `security-events: write`, in an
+          # issue body, and in a `$GITHUB_OUTPUT` line that is newline-terminated.
+          # Anything outside the shape every advisory scheme actually uses is refused
+          # rather than filtered -- silently dropping one would hide a finding, which is
+          # the opposite of this workflow's job.
+          #
+          # `\A`/`\z` rather than `^`/`$`, measured rather than assumed: in jq 1.7's
+          # regex engine `$` also matches before a trailing newline, so `^[...]+$`
+          # accepts "CVE-1\n" -- the exact value that would write a stray blank line
+          # into `$GITHUB_OUTPUT`. `\z` does not. Both forms reject an embedded
+          # newline; only `\z` rejects a trailing one.
+          bad=$(jq -r '[.[].advisories[] | select(test("\\A[A-Za-z0-9._-]+\\z") | not)] | @json' summaries.json)
+          if [ "$bad" != "[]" ]; then
+            echo "::error::Trivy returned advisory IDs outside the expected character set: ${bad}"
+            echo "Refusing to render them into an issue body or a workflow output."
+            exit 1
+          fi
+
           scanned=$(jq -r '[.[] | select(.status == "scanned")] | length' summaries.json)
           advisories=$(jq -r '[.[].advisories[]] | unique | join(",")' summaries.json)
           count=$(jq -r '[.[].advisories[]] | unique | length' summaries.json)
-          unavailable=$(jq -r '[.[] | select(.status != "scanned") | .variant] | join(" ")' summaries.json)
+          unavailable=$(jq -r '[.[] | select(.status == "unavailable") | .variant] | join(" ")' summaries.json)
+          failed=$(jq -r '[.[] | select(.status == "failed") | .variant] | join(" ")' summaries.json)
+          deployed_status=$(jq -r --arg v "$DEPLOYED_VARIANT" \
+            '[.[] | select(.variant == $v) | .status] | first // "absent"' summaries.json)
 
           # Nothing resolved at all is not a clean result: it means no released image
           # was reachable, so this run measured nothing and must not read as green.
@@ -308,40 +411,88 @@ jobs:
           fi
 
           {
-            echo "scanned=${scanned}"
-            echo "advisory_count=${count}"
-            echo "advisories=${advisories}"
-            echo "unavailable=${unavailable}"
+            printf 'scanned=%s\n' "$scanned"
+            printf 'advisory_count=%s\n' "$count"
+            printf 'unavailable=%s\n' "$unavailable"
+            printf 'failed=%s\n' "$failed"
+            printf 'deployed_status=%s\n' "$deployed_status"
+            # Delimiter form even though the validation above guarantees a single
+            # line: the one that does not depend on the value being well-formed.
+            printf 'advisories<<SCAN_ADVISORIES_EOF\n%s\nSCAN_ADVISORIES_EOF\n' "$advisories"
           } >> "$GITHUB_OUTPUT"
 
           echo "scanned ${scanned} variant(s); ${count} distinct HIGH/CRITICAL advisories after exceptions"
+          echo "deployed variant '${DEPLOYED_VARIANT}': ${deployed_status}"
 
       - name: Merge and upload SARIF
         # One upload: GitHub fails the run when two SARIF files share a tool and
-        # category, so ten per-arch reports are merged into one document's `runs`
+        # category, so the per-arch reports are merged into one document's `runs`
         # (the limit is 20) rather than uploaded separately.
+        #
+        # `always()` so a failure anywhere upstream does not cost the night its durable
+        # sink, which is one of the three things this workflow exists to provide.
         id: sarif
+        if: always()
         run: |
           set -euo pipefail
-          if ! find artifacts -name 'image-*.sarif' | grep -q .; then
+          files=$(find artifacts -name 'image-*.sarif' | sort)
+          if [ -z "$files" ]; then
             echo "no SARIF produced -- nothing was scanned."
             echo "present=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
-          find artifacts -name 'image-*.sarif' -exec cat {} + \
+          mkdir -p tagged
+          while IFS= read -r file; do
+            [ -n "$file" ] || continue
+            base=$(basename "$file" .sarif)   # image-<variant>-<arch>
+            rest=${base#image-}
+            variant=${rest%-*}
+            arch=${rest##*-}
+
+            # Trivy names every run's tool "Trivy", sets no `automationDetails` and no
+            # `partialFingerprints`, and for a `lang-pkgs` result -- which is all a
+            # `FROM scratch` image holding one Rust binary produces -- the location URI
+            # is the target path, unchanged. That path is identical across all five
+            # variants and both architectures, so ten runs uploaded under one category
+            # collapse into one set of alerts, and the only distinction that matters
+            # (which image a finding is in, when one variant is the deployed one) is
+            # precisely the one lost. So it is written into the location and the
+            # message, where the dedup key can see it.
+            jq --arg tag "${variant}/${arch}" '
+              .runs |= map(
+                .results = ((.results // []) | map(
+                  .message.text = ((.message.text // "") + " (" + $tag + ")")
+                  | .locations = ((.locations // []) | map(
+                      .physicalLocation.artifactLocation.uri =
+                        ($tag + "/" + (.physicalLocation.artifactLocation.uri // "image"))
+                    ))
+                ))
+              )' "$file" > "tagged/${variant}-${arch}.sarif"
+          done <<< "$files"
+
+          find tagged -name '*.sarif' -exec cat {} + \
             | jq -s '{version: .[0].version, "$schema": .[0]["$schema"],
                       runs: (map(.runs) | add)}' > merged.sarif
 
+          runs=$(jq '.runs | length' merged.sarif)
+          # GitHub rejects a SARIF document carrying more than 20 runs. Nothing else
+          # would warn before the upload started failing on a sixth variant.
+          if [ "$runs" -gt 20 ]; then
+            echo "::error::merged.sarif holds ${runs} runs; GitHub accepts at most 20 per upload."
+            echo "Split the upload, or stop uploading every variant."
+            exit 1
+          fi
+
           echo "present=true" >> "$GITHUB_OUTPUT"
-          echo "merged $(jq '.runs | length' merged.sarif) run(s) into merged.sarif"
+          echo "merged ${runs} run(s) into merged.sarif"
 
       - name: Upload SARIF to code scanning
         # No `continue-on-error`, unlike CI.yml's kube-linter upload: that allows for
         # fork pull requests withholding write scopes, which a scheduled run does not
         # have. Here a failed upload is a failure of the durable sink this workflow
         # exists to provide.
-        if: steps.sarif.outputs.present == 'true'
+        if: ${{ always() && steps.sarif.outputs.present == 'true' }}
         uses: github/codeql-action/upload-sarif@4187e74d05793876e9989daffde9c3e66b4acd07 # v3.37.3
         with:
           sarif_file: merged.sarif
@@ -349,12 +500,12 @@ jobs:
 
       - name: Check for approaching exception expiry
         # Never fails the run. A date three weeks out is notice, not a fault, and a red
-        # cron for it is how a red cron stops being read.
+        # cron for it is how a red cron stops being read. `always()` for the same reason
+        # the SARIF step has it: this is the only advance warning an `expired_at` gets.
         id: expiry
+        if: always()
         run: |
           set -uo pipefail
-          python3 -c 'import yaml' 2>/dev/null || sudo apt-get install -y python3-yaml
-
           : > expiring.tsv
           status=0
           python3 scripts/check-trivyignore.py .trivyignore.yaml \
@@ -381,14 +532,15 @@ jobs:
         # would render an empty table that reads as a clean result.
         if: ${{ always() && steps.aggregate.outcome == 'success' }}
         env:
-          ADVISORY_COUNT: ${{ steps.aggregate.outputs.advisory_count }}
           UNAVAILABLE: ${{ steps.aggregate.outputs.unavailable }}
+          FAILED: ${{ steps.aggregate.outputs.failed }}
+          DEPLOYED_STATUS: ${{ steps.aggregate.outputs.deployed_status }}
         run: |
           set -eu
           {
             echo "## Scheduled image re-scan"
             echo
-            echo "Deployed variant: \`${DEPLOYED_VARIANT}\` (from \`vars.IMAGE_VARIANT\`)"
+            echo "Deployed variant: \`${DEPLOYED_VARIANT}\` (from \`vars.IMAGE_VARIANT\`) — **${DEPLOYED_STATUS}**"
             echo
             echo "| Variant | Status | Index digest | amd64 manifest | arm64 manifest | Advisories |"
             echo "| --- | --- | --- | --- | --- | --- |"
@@ -406,22 +558,30 @@ jobs:
               done < expiring.tsv
               echo
             fi
+            if [ -n "${FAILED}" ]; then
+              echo "**Never reported** (the scan leg died before it could say anything): \`${FAILED}\`"
+              echo
+            fi
             if [ -n "${UNAVAILABLE}" ]; then
-              echo "Not scanned (no \`latest-<variant>\` image resolved): \`${UNAVAILABLE}\`"
+              echo "**Not scanned** (no \`latest-<variant>\` image resolved): \`${UNAVAILABLE}\`"
               echo
             fi
             echo "Full reports: the \`rescan-<variant>\` artifacts on this run."
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Open or update the tracking issue
-        # One issue, found by marker rather than by label: `gh issue create --label`
-        # fails outright when the label does not exist, and the notification path must
-        # not break on repository configuration. `gh issue list` rather than the search
-        # API, which is eventually consistent and would intermittently file a second.
+        # One issue, found by label. The label is created idempotently first, which is
+        # what removes the objection that sent an earlier version to a body search:
+        # `gh issue create --label` fails outright when the label does not exist, but
+        # `gh label create --force` is a no-op when it does. A label is an exact,
+        # unbounded key; a body search paged at 100 open issues silently starts filing
+        # a second issue every night once the repository crosses that line, which is
+        # the failure the "one issue, not one per run" requirement names.
         #
         # Gated on the aggregation succeeding, which is the Decision that keeps a Trivy
         # database or registry failure from filing an issue titled as if a vulnerability
-        # had been found. An infrastructure failure fails the run and touches nothing.
+        # had been found. The issue is the vulnerability record; the red run is the
+        # infrastructure notification. Those are different channels on purpose.
         if: ${{ always() && steps.aggregate.outcome == 'success' }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -429,6 +589,7 @@ jobs:
           ADVISORIES: ${{ steps.aggregate.outputs.advisories }}
           ADVISORY_COUNT: ${{ steps.aggregate.outputs.advisory_count }}
           UNAVAILABLE: ${{ steps.aggregate.outputs.unavailable }}
+          FAILED: ${{ steps.aggregate.outputs.failed }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           set -euo pipefail
@@ -448,12 +609,26 @@ jobs:
             actionable=true
           fi
 
-          existing=$(gh issue list --repo "$REPO" --state open --limit 100 \
-            --json number,body \
-            --jq "[.[] | select((.body // \"\") | contains(\"${ISSUE_MARKER}\"))] | first // empty")
-          number=$(printf '%s' "$existing" | jq -r '.number // empty')
-          previous=$(printf '%s' "$existing" | jq -r '.body // ""' \
-            | sed -n 's/.*<!-- advisories: \(.*\) -->.*/\1/p' | head -1)
+          gh label create "$ISSUE_LABEL" --repo "$REPO" --force \
+            --color B60205 \
+            --description "Tracking issue for the scheduled image re-scan" > /dev/null
+
+          matches=$(gh issue list --repo "$REPO" --state open --label "$ISSUE_LABEL" \
+            --limit 100 --json number,body)
+
+          # Taking `first` would quietly make one of them the record and orphan the
+          # rest, which is the same "one issue" guarantee failing in a way nobody sees.
+          found=$(printf '%s' "$matches" | jq 'length')
+          if [ "$found" -gt 1 ]; then
+            echo "::error::${found} open issues carry the \`${ISSUE_LABEL}\` label, so there is no single tracking issue."
+            printf '%s' "$matches" | jq -r '.[] | "  #\(.number)"'
+            echo "Close or unlabel all but one, then re-run."
+            exit 1
+          fi
+
+          number=$(printf '%s' "$matches" | jq -r '.[0].number // empty')
+          previous=$(printf '%s' "$matches" | jq -r '.[0].body // ""' \
+            | sed -n '/<!-- advisories: /{s/.*<!-- advisories: \(.*\) -->.*/\1/p;q;}')
 
           if [ "$actionable" = false ] && [ -z "$number" ]; then
             echo "clean, and no tracking issue open. Nothing to do."
@@ -463,6 +638,10 @@ jobs:
           {
             echo "$ISSUE_MARKER"
             echo "<!-- advisories: ${ADVISORIES} -->"
+            echo
+            echo "> This body is rewritten by the nightly scan. The HTML comment above is"
+            echo "> how it remembers the previous advisory set; editing it will produce a"
+            echo "> spurious \"findings changed\" comment. Add notes in a comment instead."
             echo
             if [ "${ADVISORY_COUNT:-0}" -gt 0 ]; then
               echo "\`${ADVISORY_COUNT}\` distinct HIGH/CRITICAL advisories survive \`.trivyignore.yaml\` on released images."
@@ -484,6 +663,10 @@ jobs:
               done < expiring.tsv
               echo
             fi
+            if [ -n "${FAILED}" ]; then
+              echo "Never reported: \`${FAILED}\` — the scan leg died before it could say anything, so this run does not cover those variants."
+              echo
+            fi
             if [ -n "${UNAVAILABLE}" ]; then
               echo "Not scanned: \`${UNAVAILABLE}\` — no \`latest-<variant>\` image resolved."
               echo
@@ -494,12 +677,16 @@ jobs:
           } > issue-body.md
 
           if [ -z "$number" ]; then
-            gh issue create --repo "$REPO" --title "$title" --body-file issue-body.md
+            gh issue create --repo "$REPO" --title "$title" \
+              --label "$ISSUE_LABEL" --body-file issue-body.md
             echo "opened the tracking issue."
             exit 0
           fi
 
-          gh issue edit "$number" --repo "$REPO" --body-file issue-body.md
+          # `--add-label` as well: if someone removed it, the next run would otherwise
+          # not find this issue and would open a second one.
+          gh issue edit "$number" --repo "$REPO" \
+            --add-label "$ISSUE_LABEL" --body-file issue-body.md
 
           # Comment only on a change of state. A findings set that is stable across runs
           # must not produce a notification every morning, or the issue stops being read.
@@ -532,15 +719,68 @@ jobs:
           gh issue comment "$number" --repo "$REPO" --body-file comment.md
           echo "commented on issue #${number}: the advisory set changed."
 
-      - name: Fail if findings survive the ledger
-        # Last, so the SARIF, the summary and the issue are all in place before the run
-        # goes red. The red run is the notification; the issue is the record.
+      - name: Verdict
+        # Last, and `always()`, so the SARIF, the summary and the issue are all in place
+        # before the run goes red. The red run is the notification; the issue is the
+        # record of findings specifically.
+        #
+        # Three ways to be red, reported together rather than one masking the others:
+        # findings survived the ledger, a variant never reported, or a released image
+        # could not be resolved. The last two used to be silent -- a run could go green
+        # having scanned one variant out of five, including a green run on a night the
+        # image actually serving production was never looked at.
+        if: always()
         env:
           ADVISORY_COUNT: ${{ steps.aggregate.outputs.advisory_count }}
+          UNAVAILABLE: ${{ steps.aggregate.outputs.unavailable }}
+          FAILED: ${{ steps.aggregate.outputs.failed }}
+          DEPLOYED_STATUS: ${{ steps.aggregate.outputs.deployed_status }}
+          AGGREGATE_OUTCOME: ${{ steps.aggregate.outcome }}
         run: |
           set -eu
-          if [ "${ADVISORY_COUNT:-0}" -gt 0 ]; then
-            echo "::error::${ADVISORY_COUNT} HIGH/CRITICAL advisories survive .trivyignore.yaml on released images."
+          verdict=0
+
+          if [ "$AGGREGATE_OUTCOME" != "success" ]; then
+            echo "::error::aggregation did not complete, so this run has no verdict to give."
             exit 1
           fi
-          echo "no HIGH or CRITICAL findings after exceptions, on any scanned variant."
+
+          # The deployed variant is the one this workflow is actually about. Any status
+          # other than `scanned` means the claim "the released image is re-scanned
+          # nightly" was not true tonight, whatever the other four did.
+          case "${DEPLOYED_STATUS:-absent}" in
+            scanned)
+              ;;
+            absent)
+              echo "::error::the deployed variant '${DEPLOYED_VARIANT}' is not in the scanned variant list at all."
+              echo "\`vars.IMAGE_VARIANT\` names a variant this workflow does not build a row for."
+              verdict=1 ;;
+            *)
+              echo "::error::the deployed variant '${DEPLOYED_VARIANT}' was not scanned (status: ${DEPLOYED_STATUS})."
+              echo "This run says nothing about the image currently serving production."
+              verdict=1 ;;
+          esac
+
+          if [ -n "${FAILED:-}" ]; then
+            echo "::error::these variants never reported: ${FAILED}"
+            echo "Their scan legs died before writing a summary; they are not covered by this run."
+            verdict=1
+          fi
+
+          if [ -n "${UNAVAILABLE:-}" ]; then
+            echo "::error::no released image resolved for: ${UNAVAILABLE}"
+            echo "\`promote-tags\` applies \`latest-<variant>\` to every variant of a release, so"
+            echo "a partial absence is anomalous. If a variant was just added to the matrix,"
+            echo "it stays red until the next release publishes its tag."
+            verdict=1
+          fi
+
+          if [ "${ADVISORY_COUNT:-0}" -gt 0 ]; then
+            echo "::error::${ADVISORY_COUNT} HIGH/CRITICAL advisories survive .trivyignore.yaml on released images."
+            verdict=1
+          fi
+
+          if [ "$verdict" -eq 0 ]; then
+            echo "every expected variant was scanned, and no HIGH or CRITICAL findings survive exceptions."
+          fi
+          exit "$verdict"
