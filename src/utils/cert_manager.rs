@@ -15,7 +15,7 @@ pub use builder::CertificateManagerBuilder;
 use challenge::CleanupFuture;
 pub use errors::CertError;
 pub use strategy::{
-    AcmeProvisioningStrategy, CertProvisioningStrategy, StoreProvisioningSource,
+    AcmeProvisioningStrategy, CertProvisioningStrategy, MaterialSource, StoreProvisioningSource,
     StoreProvisioningStrategy,
 };
 

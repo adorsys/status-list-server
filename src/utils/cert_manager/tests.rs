@@ -634,6 +634,66 @@ async fn test_store_storage_strategy_accepts_base64_der_material() {
     assert_eq!(manager.signing_key_pem().await.unwrap(), key_pem);
 }
 
+#[tokio::test]
+async fn test_store_mixed_strategy_filesystem_cert_storage_key() {
+    init_crypto();
+
+    let cert_path = "test_data/pebble.pem";
+    let key_pem = include_str!("../../../test_data/ec-private.pem");
+
+    let material_storage = MockStorage::new();
+    material_storage.store("source-key", key_pem).await.unwrap();
+
+    let manager = CertManager::builder()
+        .domains(["example.com"])
+        .crypto_storage(material_storage)
+        .store_strategy(StoreProvisioningStrategy::new(
+            MaterialSource::Filesystem(cert_path.into()),
+            MaterialSource::Storage("source-key".to_string()),
+        ))
+        .build()
+        .unwrap();
+
+    let cert_data = manager.request_certificate().await.unwrap();
+    assert!(
+        cert_data
+            .certificate
+            .contains("-----BEGIN CERTIFICATE-----")
+    );
+    assert_eq!(manager.signing_key_pem().await.unwrap(), key_pem);
+}
+
+#[tokio::test]
+async fn test_store_mixed_strategy_storage_cert_filesystem_key() {
+    init_crypto();
+
+    let source_cert_data: CertificateData =
+        serde_json::from_str(include_str!("../../../test_data/cert_data.json")).unwrap();
+    let cert_pem = source_cert_data.certificate.as_str();
+    let key_path = "test_data/ec-private.pem";
+    let key_pem = include_str!("../../../test_data/ec-private.pem");
+
+    let material_storage = MockStorage::new();
+    material_storage
+        .store("source-cert", cert_pem)
+        .await
+        .unwrap();
+
+    let manager = CertManager::builder()
+        .domains(["example.com"])
+        .crypto_storage(material_storage)
+        .store_strategy(StoreProvisioningStrategy::new(
+            MaterialSource::Storage("source-cert".to_string()),
+            MaterialSource::Filesystem(key_path.into()),
+        ))
+        .build()
+        .unwrap();
+
+    let cert_data = manager.request_certificate().await.unwrap();
+    assert_eq!(cert_data.certificate, cert_pem);
+    assert_eq!(manager.signing_key_pem().await.unwrap(), key_pem);
+}
+
 #[test]
 fn test_tld_plus_one_function() {
     init_crypto();

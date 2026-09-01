@@ -55,7 +55,7 @@ use crate::cert_manager::http_client::DefaultHttpClient;
 use crate::cert_manager::storage::MemoryStorage;
 #[cfg(feature = "acme")]
 use crate::cert_manager::{
-    CertManager, StoreProvisioningStrategy,
+    CertManager, MaterialSource, StoreProvisioningStrategy,
     storage::{CryptoCachePolicy, Storage},
 };
 use crate::config::{Config as AppConfig, DatabaseBackend};
@@ -619,35 +619,62 @@ fn store_certificate_strategy(config: &AppConfig) -> EyeResult<Option<StoreProvi
         ));
     }
 
-    let filesystem = (
-        cert_config.store.certificate_path.as_deref(),
-        cert_config.store.signing_key_path.as_deref(),
-    );
-    let storage = (
-        cert_config.store.certificate_key.as_deref(),
-        cert_config.store.signing_key_key.as_deref(),
-    );
+    let cert_source = match (
+        cert_config
+            .store
+            .certificate_path
+            .as_deref()
+            .filter(|s| !s.trim().is_empty()),
+        cert_config
+            .store
+            .certificate_key
+            .as_deref()
+            .filter(|s| !s.trim().is_empty()),
+    ) {
+        (Some(path), None) => MaterialSource::Filesystem(path.into()),
+        (None, Some(key)) => MaterialSource::Storage(key.into()),
+        (Some(_), Some(_)) => {
+            return Err(eyre!(
+                "store certificate provisioning cannot configure both server.cert.store.certificate_path and server.cert.store.certificate_key"
+            ));
+        }
+        (None, None) => {
+            return Err(eyre!(
+                "store certificate provisioning requires either server.cert.store.certificate_path or server.cert.store.certificate_key"
+            ));
+        }
+    };
 
-    match (filesystem, storage) {
-        ((Some(certificate_path), Some(signing_key_path)), (None, None)) => Ok(Some(
-            StoreProvisioningStrategy::filesystem(certificate_path, signing_key_path),
-        )),
-        ((None, None), (Some(certificate_key), Some(signing_key_key))) => Ok(Some(
-            StoreProvisioningStrategy::storage(certificate_key, signing_key_key),
-        )),
-        ((Some(_), Some(_)), (Some(_), Some(_))) => Err(eyre!(
-            "store provisioning must configure either filesystem paths or material backend keys, not both"
-        )),
-        ((Some(_), None) | (None, Some(_)), _) => Err(eyre!(
-            "filesystem store provisioning requires both server.cert.store.certificate_path and server.cert.store.signing_key_path"
-        )),
-        (_, (Some(_), None) | (None, Some(_))) => Err(eyre!(
-            "storage-backed store provisioning requires both server.cert.store.certificate_key and server.cert.store.signing_key_key"
-        )),
-        ((None, None), (None, None)) => Err(eyre!(
-            "store provisioning requires either filesystem paths or material backend keys"
-        )),
-    }
+    let key_source = match (
+        cert_config
+            .store
+            .signing_key_path
+            .as_deref()
+            .filter(|s| !s.trim().is_empty()),
+        cert_config
+            .store
+            .signing_key_key
+            .as_deref()
+            .filter(|s| !s.trim().is_empty()),
+    ) {
+        (Some(path), None) => MaterialSource::Filesystem(path.into()),
+        (None, Some(key)) => MaterialSource::Storage(key.into()),
+        (Some(_), Some(_)) => {
+            return Err(eyre!(
+                "store certificate provisioning cannot configure both server.cert.store.signing_key_path and server.cert.store.signing_key_key"
+            ));
+        }
+        (None, None) => {
+            return Err(eyre!(
+                "store certificate provisioning requires either server.cert.store.signing_key_path or server.cert.store.signing_key_key"
+            ));
+        }
+    };
+
+    Ok(Some(StoreProvisioningStrategy::new(
+        cert_source,
+        key_source,
+    )))
 }
 
 #[cfg(feature = "acme")]

@@ -253,8 +253,8 @@ pub struct FilesystemCertCheck {
 impl FilesystemCertCheck {
     pub fn new(cert_path: Option<String>, key_path: Option<String>) -> Self {
         Self {
-            cert_path,
-            key_path,
+            cert_path: cert_path.filter(|p| !p.trim().is_empty()),
+            key_path: key_path.filter(|p| !p.trim().is_empty()),
         }
     }
 }

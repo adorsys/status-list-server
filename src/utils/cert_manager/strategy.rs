@@ -47,6 +47,15 @@ impl CertProvisioningStrategy for AcmeProvisioningStrategy {
     }
 }
 
+/// Source of individual cryptographic material (certificate or private key).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MaterialSource {
+    /// Load from a filesystem path.
+    Filesystem(PathBuf),
+    /// Load from the configured cryptographic material storage by key.
+    Storage(String),
+}
+
 /// Source for directly provisioned certificate material.
 #[derive(Debug, Clone)]
 pub enum StoreProvisioningSource {
@@ -60,82 +69,73 @@ pub enum StoreProvisioningSource {
         certificate_key: String,
         signing_key_key: String,
     },
+    /// Load certificate and signing key from independent sources.
+    Mixed {
+        certificate_source: MaterialSource,
+        signing_key_source: MaterialSource,
+    },
 }
 
 /// Store-based provisioning strategy.
 #[derive(Debug, Clone)]
 pub struct StoreProvisioningStrategy {
-    source: StoreProvisioningSource,
+    certificate_source: MaterialSource,
+    signing_key_source: MaterialSource,
 }
 
 impl StoreProvisioningStrategy {
+    /// Build a store strategy with explicit sources for certificate and signing key.
+    pub fn new(certificate_source: MaterialSource, signing_key_source: MaterialSource) -> Self {
+        Self {
+            certificate_source,
+            signing_key_source,
+        }
+    }
+
     /// Build a store strategy that loads certificate material from filesystem paths.
     pub fn filesystem(cert_path: impl Into<PathBuf>, key_path: impl Into<PathBuf>) -> Self {
         Self {
-            source: StoreProvisioningSource::Filesystem {
-                certificate_path: cert_path.into(),
-                signing_key_path: key_path.into(),
-            },
+            certificate_source: MaterialSource::Filesystem(cert_path.into()),
+            signing_key_source: MaterialSource::Filesystem(key_path.into()),
         }
     }
 
     /// Build a store strategy that loads certificate material from the manager's configured storages.
     pub fn storage(certificate_key: impl Into<String>, signing_key_key: impl Into<String>) -> Self {
         Self {
-            source: StoreProvisioningSource::Storage {
-                certificate_key: certificate_key.into(),
-                signing_key_key: signing_key_key.into(),
-            },
+            certificate_source: MaterialSource::Storage(certificate_key.into()),
+            signing_key_source: MaterialSource::Storage(signing_key_key.into()),
+        }
+    }
+
+    async fn load_source(
+        source: &MaterialSource,
+        manager: &CertManager,
+        label: &str,
+    ) -> Result<Vec<u8>, CertError> {
+        match source {
+            MaterialSource::Filesystem(path) => fs::read(path).await.map_err(|e| {
+                CertError::Validation(format!(
+                    "failed to read {label} file '{}': {e}",
+                    path.display()
+                ))
+            }),
+            MaterialSource::Storage(key) => {
+                let material_storage = manager.crypto_storage()?;
+                let secret = material_storage.load_secret(key).await?.ok_or_else(|| {
+                    CertError::Validation(format!("store {label} key '{key}' was not found"))
+                })?;
+                decode_text_material(secret, label)
+            }
         }
     }
 
     async fn load_material(&self, manager: &CertManager) -> Result<(Vec<u8>, Vec<u8>), CertError> {
-        match &self.source {
-            StoreProvisioningSource::Filesystem {
-                certificate_path,
-                signing_key_path,
-            } => {
-                let certificate = fs::read(certificate_path).await.map_err(|e| {
-                    CertError::Validation(format!(
-                        "failed to read certificate file '{}': {e}",
-                        certificate_path.display()
-                    ))
-                })?;
-                let signing_key = fs::read(signing_key_path).await.map_err(|e| {
-                    CertError::Validation(format!(
-                        "failed to read signing key file '{}': {e}",
-                        signing_key_path.display()
-                    ))
-                })?;
-                Ok((certificate, signing_key))
-            }
-            StoreProvisioningSource::Storage {
-                certificate_key,
-                signing_key_key,
-            } => {
-                let material_storage = manager.crypto_storage()?;
-                let certificate = material_storage
-                    .load_secret(certificate_key)
-                    .await?
-                    .ok_or_else(|| {
-                        CertError::Validation(format!(
-                            "store certificate key '{certificate_key}' was not found"
-                        ))
-                    })?;
-                let signing_key = material_storage
-                    .load_secret(signing_key_key)
-                    .await?
-                    .ok_or_else(|| {
-                        CertError::Validation(format!(
-                            "store signing key '{signing_key_key}' was not found"
-                        ))
-                    })?;
-                Ok((
-                    decode_text_material(certificate, "certificate")?,
-                    decode_text_material(signing_key, "signing key")?,
-                ))
-            }
-        }
+        let certificate =
+            Self::load_source(&self.certificate_source, manager, "certificate").await?;
+        let signing_key =
+            Self::load_source(&self.signing_key_source, manager, "signing key").await?;
+        Ok((certificate, signing_key))
     }
 }
 
