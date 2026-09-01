@@ -880,6 +880,7 @@ jobs:
       - trivy-config
       - helm-template-local
       - kube-linter
+      - prometheus-rules-validation
       - yaml-lint
       - otel-config-validation
       - cargo-coverage
