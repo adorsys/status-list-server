@@ -91,3 +91,25 @@ environments running `kube-prometheus-stack`, the Helm chart includes optional
 `templates/servicemonitor.yaml` (`serviceMonitor.enabled: true`) and
 `templates/prometheusrule.yaml` (`prometheusRule.enabled: true`). Alert delivery
 routing is documented in `observability/alertmanager/alertmanager.example.yml`.
+
+## Webhook alert notifications (ticket #446)
+
+Alerts are forwarded to external systems over webhooks through **Alertmanager**
+(Prometheus → Alertmanager → webhook → Discord/Slack/Teams/Mattermost/email).
+No application code is involved.
+
+- **How it works** — `observability/prometheus/prometheus*.yml` declares an
+  `alerting.alertmanagers` target; the docker-compose `alertmanager` service runs
+  `observability/prometheus/generate-alertmanager-config.sh`, which renders a
+  native receiver config from environment variables (`ALERTMANAGER_PLATFORM` +
+  the matching credential) so **no webhook URL is committed**.
+- **Supported platforms** — `discord`, `slack`, `teams`, `mattermost`, `email`,
+  `webhook` (generic). Native receivers are used for Discord/Slack/email; Teams
+  and Mattermost use Alertmanager's generic webhook JSON.
+- **Test with a real channel** — see the step-by-step Discord guide:
+  `runbooks/webhook-notifications.md`.
+- **Automated test** — `alertmanager/tests/test-alertmanager-config.sh`
+  validates every platform's generated config and proves a real Alertmanager
+  delivers both `firing` and `resolved` notifications to a mock webhook (run in
+  CI).
+

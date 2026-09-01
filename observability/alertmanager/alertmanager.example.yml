@@ -1,58 +1,64 @@
-# Example Alertmanager Configuration for status-list-server
+# Example Alertmanager Configuration for status-list-server (webhook + Discord)
+#
+# This is the hand-written example for the webhook notification mechanism
+# (ticket #446). The deployed stack instead GENERATES a similar config from
+# environment variables via observability/prometheus/generate-alertmanager-config.sh,
+# so webhook URLs never live in a committed file. Keep this example's URLs as
+# placeholders; replace them only in your secret store / .env.
 #
 # Route tree:
+#   - severity=page -> page channel (Discord here; swap for Slack/Teams/PD)
+#   - severity=warn -> warn channel (Discord here; swap for Slack/Mattermost/email)
 #   - severity=none (Watchdog) -> dead-man's-switch (NOT a human channel)
-#   - severity=page -> PagerDuty (critical outages requiring immediate on-call response)
-#   - severity=warn -> Slack / Microsoft Teams (degradations and non-page alerts)
-#   - unresolved / everything else -> default (no-op) so nothing spams a human channel
+#   - everything else -> noop (so nothing silently spams a human channel)
 #
-# Credentials and endpoints use <PLACEHOLDER> notation. Operators must replace
-# these with real environment variables or secret store references BEFORE this
-# file ships to a production Alertmanager. The URLs below are valid-shaped
-# placeholders so the file passes `amtool check-config` out of the box; a real
-# Slack webhook URL will differ but must still start with https://.
+# Supported native receivers (Alertmanager image prom/alertmanager:v0.28.1):
+#   discord_configs  (Discord webhook URL)
+#   slack_configs    (Slack incoming-webhook URL)
+#   email_configs    (SMTP)
+# Generic (accepts Alertmanager's standard JSON notification payload):
+#   webhook_configs  (any HTTPS endpoint, incl. MS Teams / Mattermost inbound webhooks)
+#
+# Notification payload (what a webhook receiver receives) — each POST body is the
+# standard Alertmanager JSON and includes ALL of the following, which is what an
+# engineer needs to act on an alert:
+#   status          firing | resolved
+#   alerts[].labels.alertname / severity / service / sli
+#   alerts[].labels.startsAt  (timestamp)
+#   alerts[].annotations.summary / description
+#   alerts[].annotations.runbook_url   (link to runbook)
+#   generatorURL / externalURL          (links to Prometheus / Alertmanager)
+# With send_resolved: true, Discord/Slack also receive the resolved embed.
 
 global:
   resolve_timeout: 5m
-  # PagerDuty integration global key fallback
-  pagerduty_url: "https://events.pagerduty.com/v2/enqueue"
 
 route:
-  group_by: ["alertname", "service"]
+  group_by: ["alertname", "sli"]
   group_wait: 30s
   group_interval: 5m
   repeat_interval: 4h
-  # Any alert that matches no route below (e.g. the always-firing Watchdog with
-  # severity=none) must NOT be treated as a paging/warn notification. Route the
-  # Watchdog to a dead-man's-switch explicitly and keep the default receiver a
-  # no-op so a healthy-pipeline signal never spams Slack.
   receiver: "noop"
   routes:
-    # Watchdog (severity=none) -> dead-man's-switch. The Watchdog fires on every
-    # alert-evaluation cycle; it is a liveness probe for the alerting pipeline, not
-    # an incident. Forward it to an external dead-man's-switch that pages only when
-    # it STOPS firing (i.e. the pipeline collapsed). If no DMS is provisioned, leave
-    # this on the noop receiver instead of routing it to a human channel.
+    # Watchdog (severity=none) -> dead-man's-switch (pages on ABSENCE, not firing).
     - matchers:
         - severity="none"
       receiver: "watchdog-deadmansswitch"
 
-    # High-priority pages (multi-window fast burn, error budget critical).
-    # Kept before the warn route (and `continue: false`) so every severity=page
-    # alert reaches PagerDuty and is never swallowed by a lower-priority route.
+    # Page (someone must look now): route to the page Discord channel.
     - matchers:
         - severity="page"
-      receiver: "pagerduty-high-priority"
+      receiver: "discord-page"
       continue: false
 
-    # Warnings (slow burn, cache hit ratio low, certificate expiry warn)
+    # Warn (degradation): route to the warn Discord channel.
     - matchers:
         - severity="warn"
-      receiver: "slack-notifications"
+      receiver: "discord-warn"
       continue: false
 
 inhibit_rules:
-  # Inhibit warn alerts if a page alert is already firing for the same SLI
+  # Don't page a channel for a warn while a page for the same SLI is firing.
   - source_match:
       severity: page
     target_match:
@@ -60,37 +66,60 @@ inhibit_rules:
     equal: ["sli", "service"]
 
 receivers:
-  # No-op default: absorbs any alert that does not match an explicit route so a
-  # mislabelled or future alert never lands in Slack/PagerDuty unnoticed.
+  # Absorbs anything not explicitly routed, so it never spams a human channel.
   - name: "noop"
 
-  # Dead-man's-switch for the always-firing Watchdog. Replace <DMS_WEBHOOK> with a
-  # real external DMS endpoint that pages on absence, or drop this route to keep the
-  # Watchdog on the noop receiver.
+  # Dead-man's-switch for the always-firing Watchdog (pages on absence).
   - name: "watchdog-deadmansswitch"
     webhook_configs:
       - url: "https://deadmansswitch.example.com/<DMS_WEBHOOK>"
 
-  - name: "pagerduty-high-priority"
-    pagerduty_configs:
-      - routing_key: "<PAGERDUTY_INTEGRATION_KEY>"
-        severity: "critical"
-        description: '{{ .CommonAnnotations.summary }}'
-        details:
-          runbook_url: '{{ .CommonAnnotations.runbook_url }}'
-          # `{{ template "pagerduty.default.instances" . }}` is defined in the
-          # prometheus-pagerduty example template file, NOT in stock Alertmanager.
-          # If your Alertmanager image does not inject it, template resolution
-          # here fails. Either ship a template file that defines it, or inline a
-          # small custom one, e.g.:
-          #   firing_alerts: '{{ $count := len .Alerts }}{{ $count }} firing alert(s)'
-          firing_alerts: '{{ template "pagerduty.default.instances" . }}'
-
-  - name: "slack-notifications"
-    slack_configs:
-      - api_url: "https://hooks.slack.com/services/REPLACE_ME/REPLACE_ME"
-        channel: "#status-list-alerts"
+  # NATIVE DISCORD receiver. webhook_url is the Discord channel webhook
+  # (https://discord.com/api/webhooks/<ID>/<TOKEN>). send_resolved: true so the
+  # resolved notification is also delivered.
+  - name: "discord-page"
+    discord_configs:
+      - webhook_url: "https://discord.com/api/webhooks/REPLACE_ME/REPLACE_ME"
         send_resolved: true
-        title: '[{{ .Status | toUpper }}] {{ .CommonLabels.alertname }}'
-        text: >-
-          *Summary:* {{ .CommonAnnotations.summary }} *Severity:* {{ .CommonLabels.severity }} *Runbook:* {{ .CommonAnnotations.runbook_url }}
+        title: '{{ template "discord.default.title" . }}'
+        message: '{{ template "discord.default.message" . }}'
+
+  - name: "discord-warn"
+    discord_configs:
+      - webhook_url: "https://discord.com/api/webhooks/REPLACE_ME/REPLACE_ME"
+        send_resolved: true
+        title: '{{ template "discord.default.title" . }}'
+        message: '{{ template "discord.default.message" . }}'
+
+  # ---------------------------------------------------------------------------
+  # ALTERNATIVES — swap a receiver above for any of these. Only credentials differ.
+  # ---------------------------------------------------------------------------
+  # - name: "slack-page"
+  #   slack_configs:
+  #     - api_url: "https://hooks.slack.com/services/REPLACE_ME/REPLACE_ME/REPLACE_ME"
+  #       channel: "#status-list-alerts"
+  #       send_resolved: true
+  #       title: '{{ .CommonLabels.alertname }} [{{ .Status | toUpper }}]'
+  #       text: '{{ .CommonAnnotations.summary }} severity={{ .CommonLabels.severity }} runbook={{ .CommonAnnotations.runbook_url }}'
+
+  # - name: "mattermost-webhook"
+  #   webhook_configs:            # Mattermost has no native receiver; use generic webhook
+  #     - url: "https://mattermost.example.com/hooks/REPLACE_ME"
+  #       send_resolved: true
+
+  # - name: "teams-webhook"
+  #   webhook_configs:            # MS Teams classic inbound webhook accepts a JSON POST
+  #     - url: "https://outlook.office.com/webhook/REPLACE_ME"
+  #       send_resolved: true
+
+  # - name: "email-warn"
+  #   email_configs:
+  #     - to: "ops@example.com"
+  #       send_resolved: true
+  #       html: '{{ template "email.default.html" . }}'
+
+# Global SMTP block required if you use platform=email:
+# global:
+#   smtp_smarthost: "smtp.example.com:587"
+#   smtp_from: "alertmanager@example.com"
+#   smtp_require_tls: true

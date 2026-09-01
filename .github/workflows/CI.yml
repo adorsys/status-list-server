@@ -851,6 +851,14 @@ jobs:
             -v "$PWD/observability/prometheus:/etc/prometheus:ro" \
             prom/prometheus:v3.11.3 test rules /etc/prometheus/tests/alerting.test.yml
 
+      - name: Validate Alertmanager config generation + webhook delivery
+        # Proves (a) generate-alertmanager-config.sh emits an amtool-valid config
+        # for every supported platform and (b) a real Alertmanager delivers both
+        # firing and resolved notifications to a (mock) webhook endpoint — the
+        # webhook notification mechanism (ticket #446).
+        run: |
+          bash observability/alertmanager/tests/test-alertmanager-config.sh
+
       - name: Verify dashboard JSON is committed and valid
         run: |
           test -s observability/dashboards/generated/status-list-slo.json

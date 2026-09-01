@@ -64,25 +64,29 @@ EOF
 EOF
       ;;
     teams)
+      # MS Teams exposes a classic inbound webhook that accepts a JSON POST.
+      # There is no native Alertmanager receiver for Teams in the pinned image,
+      # so deliver via a generic webhook_configs (the standard Alertmanager JSON
+      # payload). Most connectors that require the Adaptive Card schema can be
+      # bridged by an intermediary; the JSON still carries full alert context.
       _url="${MS_TEAMS_WEBHOOK_URL:?ALERTMANAGER: MS_TEAMS_WEBHOOK_URL required for platform=teams}"
       cat <<EOF
   - name: '$_name'
     webhook_configs:
       - url: '$_url'
         send_resolved: true
-        http_config:
-          headers:
-            Content-Type: application/json
 EOF
       ;;
     mattermost)
+      # Mattermost exposes an incoming webhook that accepts a JSON POST; there
+      # is no native mattermost receiver in Alertmanager, so use a generic
+      # webhook_configs pointed at the Mattermost inbound webhook.
       _url="${MATTERMOST_WEBHOOK_URL:?ALERTMANAGER: MATTERMOST_WEBHOOK_URL required for platform=mattermost}"
       cat <<EOF
   - name: '$_name'
-    mattermost_configs:
-      - api_url: '$_url'
+    webhook_configs:
+      - url: '$_url'
         send_resolved: true
-        text: '{{ template "mattermost.default.text" . }}'
 EOF
       ;;
     email)
