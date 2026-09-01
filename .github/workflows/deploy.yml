@@ -1,9 +1,7 @@
 name: Build and Deploy to EKS
 on:
-  # Release tags only. A two-architecture build plus scan costs ~40 minutes and
-  # publishes to GHCR, which is not worth spending on every merge. The consequence
-  # is that the image is scanned once per release and nothing re-scans it after
-  # that; see docs/supply-chain.md, "Known Gaps".
+  # Release tags only -- a two-arch build plus scan costs ~40 minutes. Consequence:
+  # the image is scanned once per release and never again; see docs/supply-chain.md.
   push:
     tags:
       - v*.*.*
@@ -11,12 +9,15 @@ on:
   # and `deploy` require `event_name == 'push'`, so dispatch never releases.
   workflow_dispatch:
 
+# A job-level `permissions:` block replaces this default rather than merging with it.
+permissions:
+  contents: read
+
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: false
 
 env:
-  IMAGE_NAME: status-list-server
   CLUSTER_NAME: datev-wallet-cluster
   AWS_REGION: eu-central-1
   REGISTRY: ghcr.io
@@ -26,11 +27,40 @@ env:
   APP_DATABASE_PORT: ${{ vars.APP_DATABASE_PORT }}
 
 jobs:
+  # No `if:` guard -- a skip here would cascade to everything that needs it. The
+  # non-tag case is handled inside the step.
+  validate-tag:
+    name: Validate release tag
+    runs-on: ubuntu-latest
+    # `contents: read` rather than `{}`: this job now checks out the repository to
+    # run the validator script, and an empty token cannot clone a private repo.
+    permissions:
+      contents: read
+    steps:
+      - name: Fetch Repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # `v*.*.*` is a refspec glob, not semver -- `v2024.01.release` matches. On those,
+      # metadata-action drops the semver tags and deploy falls through to `latest`.
+      #
+      # The rule lives in a script rather than inline so it has one definition and
+      # scripts/tests/test_validate_release_tag.py can exercise both directions. A
+      # regex that quietly stops rejecting is indistinguishable from one that works.
+      - name: Assert the tag is semver
+        env:
+          REF_NAME: ${{ github.ref_name }}
+          IS_TAG: ${{ startsWith(github.ref, 'refs/tags/v') }}
+        run: bash scripts/validate-release-tag.sh "$REF_NAME" "$IS_TAG"
+
   ci:
     name: CI
     uses: ./.github/workflows/CI.yml
-    # A called workflow can only narrow the caller's token, so CI.yml's SARIF
-    # uploads need the scope granted here too.
+    # A malformed tag fails in seconds; without this the whole suite runs first.
+    needs: validate-tag
+    # A called workflow can only narrow the caller's token, so CI.yml's kube-linter
+    # job needs its SARIF upload scope granted here too.
     permissions:
       contents: read
       security-events: write
@@ -38,7 +68,7 @@ jobs:
   build-and-push:
     name: Build and Push Docker Image to GHCR (${{ matrix.variant.suffix }})
     runs-on: ubuntu-latest
-    needs: ci
+    needs: [ci, validate-tag]
     timeout-minutes: 60
     permissions:
       contents: read
@@ -63,26 +93,29 @@ jobs:
             features: "postgres"
             description: "PostgreSQL database with filesystem-mounted token signing keys and certificates"
     outputs:
+      # From `vars`, not `meta`: this job publishes only the sha tag, so
+      # `meta.outputs.version` would be that sha rather than the release version.
       deploy_tag: ${{ steps.vars.outputs.DEPLOY_TAG }}
     steps:
       - name: Checkout source code
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           # The build needs the source, not the token. Left persisted it stays in
           # .git/config for every later step, including the Docker build context.
           persist-credentials: false
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
 
       - name: Login to GHCR
-        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4
+        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Resolve deploy tag
+        # Safe to derive by hand: `validate-tag` has already rejected non-semver tags.
         id: vars
         run: |
           if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
@@ -92,11 +125,10 @@ jobs:
           fi
 
       - name: Extract Docker metadata
-        # Only the immutable commit-scoped tag is published here. Semver and `latest`
-        # are applied by `promote-tags` after the scan, so a rejected image never
-        # becomes an advertised release for consumers outside this pipeline.
+        # Only the sha tag here. `promote-tags` applies semver and `latest` after the
+        # scan, so a rejected image never becomes an advertised release.
         id: meta
-        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
         with:
           images: ${{ env.IMAGE_BASE }}
           tags: |
@@ -106,7 +138,7 @@ jobs:
 
       - name: Build and push Docker image
         id: build
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
           context: .
           file: ./Dockerfile
@@ -115,10 +147,11 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
-          # Set explicitly: the action defaults to mode=max on public repos and
-          # mode=min on private ones, so visibility changes would silently degrade
-          # provenance. BuildKit attaches both as in-toto manifests in the pushed
-          # index, which is why the image cannot be scanned before it is pushed.
+          # Explicit: the action defaults to mode=max on public repos and mode=min on
+          # private, so a visibility change would silently degrade provenance.
+          #
+          # BuildKit attaches both as in-toto manifests in the pushed index, which is
+          # why the image cannot be scanned before it is pushed.
           provenance: mode=max
           sbom: true
           build-args: |
@@ -130,6 +163,11 @@ jobs:
       - name: Assert a digest was produced
         # An empty digest would silently fall back to tag-based deployment, which is
         # the failure this pipeline exists to prevent.
+        #
+        # `IMAGE_REF` is assembled here rather than in the job's `outputs:` block so it
+        # is built in shell, where `IMAGE_BASE` is in scope, and only after the digest
+        # is known non-empty. Assembled in `outputs:` it would still be emitted as
+        # `<base>@` with no digest if this check ever stopped holding.
         id: digest
         env:
           DIGEST: ${{ steps.build.outputs.digest }}
@@ -172,7 +210,7 @@ jobs:
           done
 
       - name: Upload built digest
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: image-digest-${{ matrix.variant.suffix }}
           path: image-digest-${{ matrix.variant.suffix }}.txt
@@ -199,7 +237,7 @@ jobs:
     env:
       # Every published architecture is scanned. A shared lockfile does not make the
       # package sets identical: the two images are built by different builder images
-      # to different Rust targets, and `cargo auditable` records the graph Cargo
+      # to different Rust targets, and `cargo auditable` records the graph cargo
       # resolved for that target, not the lockfile's union across targets. Scanning
       # one architecture would let an advisory reaching only the other be promoted
       # and deployed without ever crossing the gate.
@@ -211,7 +249,7 @@ jobs:
           persist-credentials: false
 
       - name: Login to GHCR
-        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4
+        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
@@ -223,9 +261,8 @@ jobs:
         run: gh run download "$GITHUB_RUN_ID" --name "image-digest-${{ matrix.variant.suffix }}" --dir .
 
       - name: Resolve the architecture manifests to scan
-        # `IMAGE_REF` is a multi-platform index. Resolving each child manifest fixes
-        # which architectures are scanned by construction, rather than leaving it to
-        # Trivy's default and asserting the result afterwards.
+        # Resolving each child manifest fixes which arches are scanned by construction,
+        # rather than trusting Trivy's default and checking afterwards.
         run: |
           set -euo pipefail
           index_digest=$(cat "image-digest-${{ matrix.variant.suffix }}.txt")
@@ -257,9 +294,8 @@ jobs:
           done
 
       - name: Scan image (amd64)
-        # One scan per architecture, unfiltered. Every view below is derived from these
-        # by `trivy convert`, so the table a maintainer reads and the set the gate
-        # evaluates are the same data, and each image is pulled once.
+        # Unfiltered; every view below is `trivy convert`ed from these, so the table and
+        # the gate read the same data and each image is pulled once.
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           scan-type: image
@@ -293,9 +329,8 @@ jobs:
 
             trivy convert --format table --output "trivy-image-report-${arch}.txt" "$report"
 
-            # Two HIGH/CRITICAL sets per architecture: before and after the ledger. The
-            # difference is what the exceptions suppressed, reported in the gate summary
-            # so a green gate distinguishes "nothing found" from "everything accepted".
+            # Before and after the ledger: the difference is what the exceptions hid, so
+            # a green gate distinguishes "nothing found" from "everything accepted".
             trivy convert \
               --severity HIGH,CRITICAL \
               --format json --output "trivy-highcrit-all-${arch}.json" \
@@ -337,9 +372,8 @@ jobs:
           done
 
       - name: Publish report to job summary
-        # Deliberately small: what was scanned, how much was found, and where the full
-        # reports are. The complete tables and JSON are uploaded as artifacts below, so
-        # reproducing them here only buries the gate decision underneath them.
+        # Deliberately small -- the full tables and JSON are artifacts below. Inlining
+        # them would bury the gate decision.
         if: always()
         run: |
           set -eu
@@ -372,11 +406,10 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload scan reports
-        # `warn`, not `error`: the artifacts-always-exist guarantee belongs to the
-        # `[ -s ... ]` fallbacks above. Failing here would only add a second red step
-        # when an earlier one already died.
+        # `warn`, not `error`: the `[ -s ... ]` fallbacks above guarantee the files.
+        # Failing here would only add a second red step.
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: container-scan-reports-${{ matrix.variant.suffix }}
           path: |
@@ -390,7 +423,7 @@ jobs:
         # Separate artifact: a lost SBOM must not take down the upload carrying the
         # scan results. Absence is caught by the assertion below instead.
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: container-sboms-${{ matrix.variant.suffix }}
           path: |
@@ -398,18 +431,12 @@ jobs:
             sbom-arm64.json
           if-no-files-found: warn
 
-      # No code-scanning upload: this workflow only runs on `refs/tags/*`, and alerts
-      # filed against a tag ref are not surfaced in the Security tab's branch view.
-      # Uploading would succeed into a place nobody reads. Results live in the
-      # artifacts above; a durable sink needs the scheduled re-scan (#410).
+      # No code-scanning upload: alerts filed against a tag ref never surface in the
+      # Security tab's branch view. A durable sink needs the scheduled re-scan (#410).
 
       - name: Assert published SBOMs list Rust crates
-        # Closes the chain opposite the Dockerfile's .dep-v0 assertion: that covers the
-        # binary, this covers the SBOM BuildKit attached. Runs after the uploads so a
-        # failure still leaves the reports attached for triage.
-        #
-        # `index .SBOM` needs a multi-platform index; a single-platform build fails here
-        # with "can't index item of type imagetools.sbomStub" rather than at the build.
+        # Covers the SBOM BuildKit attached; the Dockerfile's .dep-v0 check covers the
+        # binary. `index .SBOM` needs a multi-platform index or it errors here.
         run: |
           set -eu
           for platform in linux/amd64 linux/arm64; do
@@ -423,13 +450,8 @@ jobs:
           done
 
       - name: Prove the gate can fail
-        # A clean scan is the expected result, which is the problem: a gate that has
-        # never fired is indistinguishable from one that cannot fire. Both directions
-        # are proved against fixtures before a pass is treated as meaningful.
-        #
-        # Exit status alone is not enough evidence — a missing fixture or a `trivy` not
-        # on PATH also exits non-zero — so the failing case must also name the ID it was
-        # given. Only a gate that really evaluated the report can print it back.
+        # A gate that never fired is indistinguishable from one that cannot fire, so
+        # prove both directions. The failing case must name the ID it was given.
         run: |
           set -eu
           fixture=scripts/testdata/gate-selftest-findings.json
@@ -475,9 +497,8 @@ jobs:
         # Thresholds and rationale: docs/supply-chain.md, "The Gate Blocks".
         run: |
           set -eu
-          # Advisories, not rows: one CVE across three crates is three table rows but
-          # one thing to triage. Counted across every scanned architecture, because an
-          # advisory reaching only one of them still blocks the release.
+          # Advisories, not rows: one CVE across three crates is one thing to triage.
+          # Counted across every arch -- a single-arch advisory still blocks.
           advisories=$(jq -s '[.[].Results[]?.Vulnerabilities[]?.VulnerabilityID] | unique | length' trivy-gate-findings-*.json)
           occurrences=$(jq -s '[.[].Results[]?.Vulnerabilities[]?] | length' trivy-gate-findings-*.json)
           total=$(jq -s '[.[].Results[]?.Vulnerabilities[]?.VulnerabilityID] | unique | length' trivy-highcrit-all-*.json)
@@ -504,10 +525,8 @@ jobs:
             fi
           } >> "$GITHUB_STEP_SUMMARY"
 
-          # Rendered from the gate set itself, so the table, the counts and the exit
-          # code are by construction the same data. Every architecture is rendered
-          # before failing, so one run shows the whole blocking set rather than the
-          # first architecture that happened to trip.
+          # Rendered from the gate set itself, so table, counts and exit code cannot
+          # disagree. Every arch renders before failing, so one run shows all of it.
           status=0
           for arch in $SCAN_ARCHES; do
             echo "--- linux/${arch} ---"
@@ -521,9 +540,8 @@ jobs:
     needs:
       - build-and-push
       - scan-image
-    # Gated positively on `push`: workflow_dispatch accepts any ref including tags,
-    # so a ref test alone would not keep dispatch off the release path. Naming the
-    # trigger that may release also keeps future triggers out of it by default.
+    # Positively gated on `push`: workflow_dispatch accepts tag refs too, so a ref
+    # test alone would not keep dispatch off the release path.
     if: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') }}
     timeout-minutes: 15
     permissions:
@@ -549,7 +567,7 @@ jobs:
       SUFFIX: ${{ matrix.variant.suffix }}
     steps:
       - name: Login to GHCR
-        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4
+        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
@@ -561,11 +579,10 @@ jobs:
         run: gh run download "$GITHUB_RUN_ID" --name "image-digest-${{ matrix.variant.suffix }}" --dir .
 
       - name: Extract release tags
-        # `v*.*.*` matches prereleases — the glob absorbs `-rc1` — so `latest` is
-        # withheld from them explicitly. metadata-action already withholds
-        # {{major}}.{{minor}}; raw tags get no such treatment.
+        # The `v*.*.*` glob absorbs prereleases, so `latest` is withheld explicitly.
+        # metadata-action already withholds {{major}}.{{minor}}; raw tags do not.
         id: meta
-        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
         with:
           images: ${{ env.IMAGE_BASE }}
           tags: |
@@ -603,9 +620,8 @@ jobs:
             "${args[@]}" "$image_ref"
 
       - name: Verify attestations survived promotion
-        # Attestations are separate unknown/unknown-platform manifests. They should
-        # survive a descriptor copy, but a silent drop would publish a release whose
-        # SBOM and provenance vanished with nothing failing.
+        # Attestations are separate manifests; a silent drop would publish a release
+        # whose SBOM and provenance vanished with nothing failing.
         run: |
           set -eu
           release_ref="${IMAGE_BASE}:${DEPLOY_TAG}-${SUFFIX}"
@@ -633,9 +649,8 @@ jobs:
   deploy:
     name: Deploy to Production
     runs-on: ubuntu-latest
-    # Depending on promote-tags keeps tags and production consistent: a release is
-    # never deployed without being tagged. Recovery from a promotion failure is a
-    # re-run of that job, not a new release.
+    # Keeps tags and production consistent -- never deploy an untagged release.
+    # Recovery from a promotion failure is a re-run of that job.
     needs:
       - build-and-push
       - scan-image
@@ -643,9 +658,8 @@ jobs:
     if: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') }}
     timeout-minutes: 30
     environment: production
-    # Keyed on the environment, not the ref: two tags pushed in quick succession are
-    # different refs and would otherwise drive `helm upgrade` concurrently against
-    # the same release.
+    # Keyed on the environment, not the ref: two tags pushed in quick succession
+    # would otherwise run `helm upgrade` concurrently against the same release.
     concurrency:
       group: deploy-production
       cancel-in-progress: false
@@ -662,14 +676,16 @@ jobs:
       IMAGE_VARIANT: ${{ vars.IMAGE_VARIANT || 'aws' }}
     steps:
       - name: Checkout source code
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           # Only the Helm chart is needed here; the deploy authenticates to AWS via
           # OIDC, not the checkout token.
           persist-credentials: false
 
       - name: Install kubectl
-        uses: azure/setup-kubectl@829323503d1be3d00ca8346e5391ca0b07a9ab0d # v5.0.1
+        # v5.1.0, not v5.0.1: that SHA is the v5.1.0 tag upstream. Both sides of this
+        # merge pinned the same commit and only disagreed about the comment.
+        uses: azure/setup-kubectl@829323503d1be3d00ca8346e5391ca0b07a9ab0d # v5.1.0
 
       - name: Install Helm
         uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
@@ -677,14 +693,14 @@ jobs:
           version: v4.2.4
 
       - name: Login to GHCR
-        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4
+        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6
+        uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6.2.3
         with:
           role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
           role-session-name: status-list-server-deploy
@@ -706,7 +722,13 @@ jobs:
           helm dependency build helm/chart
 
       - name: Deploy chart
-        # Deploying without a digest would silently fall back to the mutable tag.
+        # The digest is what pins production to the image the scan gate passed; an
+        # empty one silently falls back to the mutable tag. `:?` because helm reports
+        # an empty value as a YAML error pointing nowhere near the cause.
+        #
+        # The tag and digest come from `env:` rather than `${{ }}` because they are
+        # derived from the pushed ref. The release name and namespace are workflow
+        # literals, so interpolating those is safe.
         run: |
           set -euo pipefail
           # Derive deploy tag from the release tag
@@ -725,6 +747,13 @@ jobs:
           }
 
           echo "Deploying ${IMAGE_BASE}:${FULL_TAG}@${IMAGE_DIGEST}"
+
+          # `FULL_TAG`, not `DEPLOY_TAG`: the tag must carry the variant suffix, or
+          # production gets whichever feature set happens to sit on the bare tag.
+          #
+          # `:?` on both -- helm reports an empty value as a YAML error pointing
+          # nowhere near the cause, and an empty digest silently falls back to the
+          # mutable tag, which is the failure this pipeline exists to prevent.
           helm upgrade --install ${{ env.HELM_RELEASE_NAME }} helm/chart \
             --namespace ${{ env.HELM_NAMESPACE }} \
             -f helm/chart/values-production.yaml \
@@ -732,6 +761,6 @@ jobs:
             --rollback-on-failure \
             --timeout 10m \
             --set-string "statuslist.image.repository=${IMAGE_BASE}" \
-            --set-string "statuslist.image.tag=${FULL_TAG}" \
-            --set-string "statuslist.image.digest=${IMAGE_DIGEST}" \
+            --set-string "statuslist.image.tag=${FULL_TAG:?full image tag missing}" \
+            --set-string "statuslist.image.digest=${IMAGE_DIGEST:?image digest missing}" \
             --set-string "statuslist.env.APP_DATABASE__PORT=${APP_DATABASE_PORT}"
