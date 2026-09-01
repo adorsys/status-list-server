@@ -10,6 +10,7 @@ Run: python3 -m unittest discover -s scripts/tests -t .
 
 from __future__ import annotations
 
+import datetime
 import importlib.util
 import pathlib
 import sys
@@ -298,6 +299,111 @@ class CheckTrivyignoreTest(unittest.TestCase):
     def test_missing_file_is_an_error(self):
         errors = checker.check(pathlib.Path("does-not-exist.yaml"))
         self.assertTrue(any("not found" in error for error in errors), errors)
+
+
+class ExpiringEntriesTest(unittest.TestCase):
+    """Tests for `--expiring-within`.
+
+    This is the only thing that gives notice before an exception lapses, and the file
+    it reads is empty of vulnerability entries today. Untested, it would ship as a
+    feature nobody has ever seen fire -- the same problem the gate self-test exists
+    to prevent one layer down.
+    """
+
+    def entries(self, text: str, days: int):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = pathlib.Path(tmp) / ".trivyignore.yaml"
+            path.write_text(text, encoding="utf-8")
+            return checker.expiring_entries(path, days)
+
+    @staticmethod
+    def _in_days(offset: int) -> str:
+        # Relative to today, so these tests do not start failing on a fixed date.
+        return (datetime.date.today() + datetime.timedelta(days=offset)).isoformat()
+
+    def ledger(self, *offsets: int) -> str:
+        body = "vulnerabilities:\n"
+        for index, offset in enumerate(offsets):
+            body += (
+                f"  - id: RUSTSEC-0000-{index:04d}\n"
+                f"    statement: Not reachable.\n"
+                f"    expired_at: {self._in_days(offset)}\n"
+            )
+        return body
+
+    def test_entry_inside_the_window_is_listed(self):
+        found = self.entries(self.ledger(10), 30)
+        self.assertEqual([item[0] for item in found], ["RUSTSEC-0000-0000"])
+        self.assertEqual(found[0][2], 10)
+
+    def test_same_entry_outside_a_narrower_window_is_not(self):
+        self.assertEqual(self.entries(self.ledger(10), 1), [])
+
+    def test_boundary_exactly_at_the_window_is_included(self):
+        # `remaining <= within_days`, so the last day of notice still gives notice.
+        self.assertEqual(len(self.entries(self.ledger(30), 30)), 1)
+
+    def test_expiring_today_is_included_with_zero_remaining(self):
+        found = self.entries(self.ledger(0), 7)
+        self.assertEqual(found[0][2], 0)
+
+    def test_already_lapsed_entry_is_listed_with_negative_remaining(self):
+        # A lapsed entry has stopped suppressing anything, which is worth surfacing
+        # even though check() only warns about it.
+        found = self.entries(self.ledger(-5), 30)
+        self.assertEqual(found[0][2], -5)
+
+    def test_results_are_sorted_soonest_first(self):
+        found = self.entries(self.ledger(20, -1, 5), 30)
+        self.assertEqual([item[2] for item in found], [-1, 5, 20])
+
+    def test_misconfigurations_are_never_listed(self):
+        # They require no expired_at, because they do not rot on a schedule.
+        self.assertEqual(
+            self.entries(
+                f"""
+                misconfigurations:
+                  - id: AVD-KSV-0014
+                    statement: Vendored subchart.
+                    paths: ["*/charts/postgres*/**"]
+                    expired_at: {self._in_days(1)}
+                """,
+                30,
+            ),
+            [],
+        )
+
+    def test_malformed_date_is_skipped_not_guessed(self):
+        # check() rejects it; this must not invent a date for it.
+        self.assertEqual(
+            self.entries(
+                """
+                vulnerabilities:
+                  - id: RUSTSEC-0000-0000
+                    statement: Bad date.
+                    expired_at: "next tuesday"
+                """,
+                30,
+            ),
+            [],
+        )
+
+    def test_empty_and_missing_files_yield_nothing(self):
+        self.assertEqual(self.entries("", 30), [])
+        self.assertEqual(checker.expiring_entries(pathlib.Path("does-not-exist.yaml"), 30), [])
+
+    def test_repository_file_is_accepted(self):
+        # Whatever the ledger holds today, asking must not raise.
+        repo_file = pathlib.Path(__file__).resolve().parents[2] / ".trivyignore.yaml"
+        self.assertIsInstance(checker.expiring_entries(repo_file, 30), list)
+
+    def test_expiry_window_does_not_affect_validation(self):
+        # The pull request path must keep behaving identically; an approaching date is
+        # not a malformed file.
+        with tempfile.TemporaryDirectory() as tmp:
+            path = pathlib.Path(tmp) / ".trivyignore.yaml"
+            path.write_text(self.ledger(1), encoding="utf-8")
+            self.assertEqual(checker.check(path), [])
 
 
 if __name__ == "__main__":
