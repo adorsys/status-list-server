@@ -2,55 +2,105 @@ name: Auto Merge Dependabot
 
 on:
   pull_request:
-  workflow_dispatch:
 
-# zizmor: ignore-start: excessive-permissions
-# This workflow requires write permissions for auto-merge functionality.
-# These are pre-existing permissions that will be reviewed separately.
+# `pull-requests: write` to arm auto-merge; `contents: write` because `--auto` merges
+# immediately when the pull request is already mergeable rather than arming anything.
+# Everything unlisted is `none`.
 permissions:
   contents: write
   pull-requests: write
-# zizmor: ignore-end
 
 jobs:
   dependabot:
     runs-on: ubuntu-latest
-    # `github.event.pull_request.user.login`, not `github.actor`. `github.actor` is
-    # the last actor to touch the triggering context, not the author of the pull
-    # request, so a pull request whose HEAD commit appears to be authored by
-    # Dependabot satisfies it while the branch history remains attacker-controlled.
-    # This job approves and enables auto-merge, so that guard being bypassable means
-    # arbitrary code merges without review. `user.login` is the account that opened
-    # the pull request and cannot be reassigned by later activity.
-    #
-    # Behaviour is unchanged for `workflow_dispatch`: there is no pull request in the
-    # event payload, so this evaluates false exactly as the previous condition did.
-    if: github.event.pull_request.user.login == 'dependabot[bot]'
+    # `user.login`, not `github.actor`: the actor is whoever last touched the pull
+    # request, so it is both spoofable and wrong after a maintainer reopens one.
+    if: >-
+      github.event.pull_request.user.login == 'dependabot[bot]' && github.event.pull_request.head.repo.full_name == github.repository
     steps:
       - name: Dependabot metadata
         id: metadata
-        uses: dependabot/fetch-metadata@25dd0e34f4fe68f24cc83900b1fe3fe149efef98 # v3
+        uses: dependabot/fetch-metadata@25dd0e34f4fe68f24cc83900b1fe3fe149efef98 # v3.1.0
         with:
           github-token: "${{ secrets.GITHUB_TOKEN }}"
-          alert-lookup: true
-          compat-lookup: true
 
-      - name: Approve the PR
-        if: steps.metadata.outputs.package-ecosystem != 'github-actions'
-        run: gh pr review --approve "$PR_URL"
+      # Patch and minor only, never github-actions. Unknown or empty update-type is
+      # ineligible, so this fails closed. Decided once so the steps cannot disagree.
+      - name: Decide whether this PR may auto-merge
+        id: gate
+        env:
+          ECOSYSTEM: ${{ steps.metadata.outputs.package-ecosystem }}
+          UPDATE_TYPE: ${{ steps.metadata.outputs.update-type }}
+        run: |
+          set -euo pipefail
+          eligible=false
+          case "$ECOSYSTEM" in
+            github-actions)
+              reason="github-actions updates always need manual review"
+              ;;
+            *)
+              case "$UPDATE_TYPE" in
+                version-update:semver-patch|version-update:semver-minor)
+                  eligible=true
+                  reason="${UPDATE_TYPE#version-update:}"
+                  ;;
+                "")
+                  reason="fetch-metadata reported no update-type"
+                  ;;
+                *)
+                  reason="${UPDATE_TYPE#version-update:} needs manual review"
+                  ;;
+              esac
+              ;;
+          esac
+          echo "eligible=${eligible}" >> "$GITHUB_OUTPUT"
+          echo "auto-merge eligible: ${eligible} (${reason})"
+
+      - name: Enable auto-merge for Dependabot PRs
+        if: steps.gate.outputs.eligible == 'true'
         env:
           PR_URL: ${{ github.event.pull_request.html_url }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Enable auto-merge for Dependabot PRs
-        if: steps.metadata.outputs.package-ecosystem != 'github-actions'
-        run: gh pr merge --auto --squash "$PR_URL"
-        env:
-          PR_URL: ${{github.event.pull_request.html_url}}
-          GH_TOKEN: ${{secrets.GITHUB_TOKEN}}
-
-      - name: Skip auto-merge for GitHub Actions updates
-        if: steps.metadata.outputs.package-ecosystem == 'github-actions'
+          REPO: ${{ github.repository }}
         run: |
-          echo "GitHub Actions update detected - manual review required for security"
-          echo "Skipped auto-merge for dependency fingerprint"
+          set -uo pipefail
+
+          # `Allow auto-merge` being off is a repository setting, not a fault in this
+          # pull request, and it withholds every eligible one until it is turned on. A
+          # job that is red on every dependency bump teaches people to ignore red, so
+          # that case warns. It is off by choice today (CONTRIBUTING.md, "Dependabot
+          # auto-merge"), which makes this the path every eligible bump takes rather
+          # than a rare fallback.
+          #
+          # Read from the repository object rather than matched against gh's error
+          # text: that wording is not an API and can change across gh versions or
+          # locales, which would silently reclassify this case as a hard failure --
+          # or, worse, reclassify an unrelated failure as this case.
+          #
+          # `allow_auto_merge` is the REST spelling; GraphQL calls it
+          # `autoMergeAllowed`.
+          allowed=$(gh api "repos/${REPO}" --jq '.allow_auto_merge' 2>/dev/null) || allowed=""
+
+          if [ "$allowed" = "false" ]; then
+            echo "::warning::auto-merge is disabled for this repository, so nothing was armed."
+            echo "Turn it on at Settings -> General -> Pull Requests. See CONTRIBUTING.md,"
+            echo "'Dependabot auto-merge'. This pull request was otherwise eligible."
+            exit 0
+          fi
+
+          if [ "$allowed" != "true" ]; then
+            # Neither true nor false: the token could not read the setting. Genuinely
+            # anomalous for a token with push access, so surface it and still try --
+            # a failure below is then reported as a failure rather than swallowed.
+            echo "::warning::could not read allow_auto_merge for ${REPO} (got '${allowed}'); arming anyway."
+          fi
+
+          # The setting is on, so any failure here is a real one.
+          if ! gh pr merge --auto --squash "$PR_URL"; then
+            echo "::error::could not arm auto-merge on ${PR_URL}."
+            exit 1
+          fi
+
+      - name: Explain why auto-merge was withheld
+        if: steps.gate.outputs.eligible != 'true'
+        run: echo "Left for manual review -- see the eligibility decision above."
