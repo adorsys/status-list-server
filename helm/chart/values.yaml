@@ -84,6 +84,7 @@ statuslist:
     APP_LIMITS__MAX_STATUSES_PER_REQUEST: "5000"
     APP_LIMITS__MAX_SERIALIZED_LIST_SIZE: "1048576"
     # Telemetry / OpenTelemetry
+    APP_SERVER__ENABLE_METRICS: "true"
     APP_TELEMETRY__ENVIRONMENT: "production"
     APP_TELEMETRY__SAMPLER_RATIO: "1.0"
   # AWS configuration for the application.
@@ -205,6 +206,48 @@ podDisruptionBudget:
   # null counts as "unset".
   minAvailable: null
   maxUnavailable: 1
+
+# ServiceMonitor for kube-prometheus-stack / Prometheus Operator discovery.
+# Enterprise Prometheus deployments using Prometheus Operator ignore annotation-based pod targets.
+# Enable this to provision a ServiceMonitor CRD.
+serviceMonitor:
+  enabled: false
+  # Additional labels required by your Prometheus Operator (e.g. release: kube-prometheus-stack)
+  labels: {}
+  # Scrape interval override (e.g. "15s")
+  interval: ""
+  # Scrape timeout (e.g. "10s")
+  scrapeTimeout: ""
+  metricRelabelings: []
+  relabelings: []
+
+# PrometheusRule for kube-prometheus-stack / Prometheus Operator rule discovery.
+# Enables shipping SLI recording rules and SLO alerting rules as a PrometheusRule CRD.
+prometheusRule:
+  enabled: false
+  # Additional labels required by your Prometheus Operator (e.g. release: kube-prometheus-stack)
+  labels: {}
+
+# Configurable SLO target thresholds for PrometheusRule alerting rules.
+# These must stay in lockstep with observability/slo/thresholds.json (the lint
+# step in CI asserts this) and with the literal values in the standalone
+# observability/prometheus/rules/*.rules.yml.
+slo:
+  errorRateTarget: 0.005
+  fastBurnMultiplier: 14.4
+  slowBurnMultiplier: 6.0
+  requestLatencyP95: 0.3
+  dbLatencyP95: 0.05
+  cacheHitRatioMin: 0.85
+  certRenewalFailureMax: 0.01
+  # Remaining-error-budget gate for the ErrorBudget*Critical page alerts.
+  errorBudgetCriticalThreshold: 0.1
+  # Certificate expiry gates (seconds remaining until the certificate expires).
+  # Warn at <=14d, page at <=7d: cert renewal is a discrete low-frequency event,
+  # so alerts watch the continuous cert_time_to_expiry_seconds gauge instead of
+  # a rate() over a fixed window (which is 0/0 = NaN between renewals).
+  certExpiryWarnSeconds: 1209600
+  certExpiryCriticalSeconds: 604800
 
 postgres:
   enabled: true
@@ -376,8 +419,26 @@ opentelemetry-collector:
         timeout: 5s
         send_batch_size: 1024
     exporters:
+      # 'debug' is development scaffolding (prints telemetry to stdout).
+      # IMPORTANT: Operators MUST configure production exporters before deploying to production.
       debug:
         verbosity: basic
+      # PRODUCTION EXPORTER EXAMPLES:
+      # Un-comment and configure the appropriate sink for your infrastructure:
+      #
+      # Traces (e.g. Jaeger / Grafana Tempo via OTLP gRPC):
+      # otlp/tempo:
+      #   endpoint: "tempo.monitoring.svc.cluster.local:4317"
+      #   tls:
+      #     insecure: true
+      #
+      # Metrics (e.g. Prometheus Remote Write):
+      # prometheusremotewrite:
+      #   endpoint: "http://prometheus-k8s.monitoring.svc.cluster.local:9090/api/v1/write"
+      #
+      # Logs (e.g. Grafana Loki):
+      # loki:
+      #   endpoint: "http://loki-gateway.monitoring.svc.cluster.local:3100/loki/api/v1/push"
     service:
       pipelines:
         traces:

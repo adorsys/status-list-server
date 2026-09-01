@@ -1,0 +1,116 @@
+rule_files:
+  - ../rules/recording.rules.yml
+evaluation_interval: 1m
+tests:
+  # Verifies the deterministic ratio recording rules produce expected values on
+  # synthetic series (single status_class / format buckets, so sum() collapses to
+  # one series and the ratio is exact). A 70-minute run gives the 5m and 1h
+  # window variants enough data to resolve.
+  - interval: 1m
+    input_series:
+      - series: >-
+          http_server_requests_total{otel_scope_name="status-list-server",method="GET",route="/status-lists/{list_id}",status_class="5xx"}
+        values: '0+5x70'
+      - series: >-
+          http_server_requests_total{otel_scope_name="status-list-server",method="GET",route="/status-lists/{list_id}",status_class="2xx"}
+        values: '0+95x70'
+      - series: >-
+          token_generation_failures_total{otel_scope_name="status-list-server",format="jwt"}
+        values: '0+2x70'
+      - series: >-
+          token_generation_attempts_total{otel_scope_name="status-list-server",format="jwt"}
+        values: '0+100x70'
+      - series: >-
+          cert_renewal_failures_total{otel_scope_name="status-list-server"}
+        values: '0+1x70'
+      - series: >-
+          cert_renewal_attempts_total{otel_scope_name="status-list-server"}
+        values: '0+50x70'
+      - series: >-
+          status_list_cache_hits_total{otel_scope_name="status-list-server",cache="status_list"}
+        values: '0+3x70'
+      - series: >-
+          status_list_cache_misses_total{otel_scope_name="status-list-server",cache="status_list"}
+        values: '0+1x70'
+    promql_expr_test:
+      # 5xx rate = 5/20ths of total 5xx, total = 5xx+2xx = 100/20ths -> ratio 0.05
+      - expr: 'sli:error_rate:5m'
+        eval_time: 70m
+        exp_samples:
+          - labels: '{__name__="sli:error_rate:5m"}'
+            value: 0.05
+      - expr: 'sli:error_rate:1h'
+        eval_time: 70m
+        exp_samples:
+          - labels: '{__name__="sli:error_rate:1h"}'
+            value: 0.05
+      - expr: 'sli:error_rate:30m'
+        eval_time: 70m
+        exp_samples:
+          - labels: '{__name__="sli:error_rate:30m"}'
+            value: 0.05
+      - expr: 'sli:token_gen_failure_rate:5m'
+        eval_time: 70m
+        exp_samples:
+          - labels: '{__name__="sli:token_gen_failure_rate:5m"}'
+            value: 0.02
+      - expr: 'sli:token_gen_failure_rate:30m'
+        eval_time: 70m
+        exp_samples:
+          - labels: '{__name__="sli:token_gen_failure_rate:30m"}'
+            value: 0.02
+      - expr: 'sli:cert_renewal_failure_rate:5m'
+        eval_time: 70m
+        exp_samples:
+          - labels: '{__name__="sli:cert_renewal_failure_rate:5m"}'
+            value: 0.02
+      # hits/(hits+misses) = 3/(3+1) = 0.75 (exactly representable)
+      - expr: 'sli:cache_hit_ratio:5m'
+        eval_time: 70m
+        exp_samples:
+          - labels: '{__name__="sli:cache_hit_ratio:5m"}'
+            value: 0.75
+
+  # The 30d failure-rate recording rules need a full 30d window to resolve, so
+  # they get a dedicated block at a 6h interval (120 samples = 30d).
+  - interval: 6h
+    input_series:
+      - series: >-
+          token_generation_failures_total{otel_scope_name="status-list-server",format="jwt"}
+        values: '0+2x120'
+      - series: >-
+          token_generation_attempts_total{otel_scope_name="status-list-server",format="jwt"}
+        values: '0+100x120'
+      - series: >-
+          cert_renewal_failures_total{otel_scope_name="status-list-server"}
+        values: '0+1x120'
+      - series: >-
+          cert_renewal_attempts_total{otel_scope_name="status-list-server"}
+        values: '0+50x120'
+      - series: >-
+          status_list_cache_hits_total{otel_scope_name="status-list-server"}
+        values: '0+3x120'
+      - series: >-
+          status_list_cache_misses_total{otel_scope_name="status-list-server"}
+        values: '0+1x120'
+    promql_expr_test:
+      - expr: 'sli:token_gen_failure_rate:30d'
+        eval_time: 30d
+        exp_samples:
+          - labels: '{__name__="sli:token_gen_failure_rate:30d"}'
+            value: 0.02
+      - expr: 'sli:cert_renewal_failure_rate:7d'
+        eval_time: 30d
+        exp_samples:
+          - labels: '{__name__="sli:cert_renewal_failure_rate:7d"}'
+            value: 0.02
+      - expr: 'sli:cert_renewal_failure_rate:30d'
+        eval_time: 30d
+        exp_samples:
+          - labels: '{__name__="sli:cert_renewal_failure_rate:30d"}'
+            value: 0.02
+      - expr: 'sli:cache_hit_ratio:7d'
+        eval_time: 30d
+        exp_samples:
+          - labels: '{__name__="sli:cache_hit_ratio:7d"}'
+            value: 0.75
