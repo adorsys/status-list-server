@@ -14,7 +14,7 @@ pub use migrations::Migrator;
 #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mysql"))]
 pub(crate) use migrations::{verify_binlog_format, verify_innodb_engines};
 pub use models::*;
-pub use store::SeaOrmStore;
+pub use store::{SeaOrmStore, SwappableDatabaseConnection};
 
 use async_trait::async_trait;
 

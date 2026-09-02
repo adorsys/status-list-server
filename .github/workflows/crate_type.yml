@@ -8,28 +8,51 @@ on:
       is_bin:
         value: ${{ jobs.check-crate-type.outputs.is_bin }}
 
+# Declared rather than relying on zizmor's `workflow_call` exemption.
+permissions:
+  contents: read
+
 jobs:
   check-crate-type:
     runs-on: ubuntu-latest
     steps:
       - name: Fetch Repository
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Install stable toolchain
-        uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1
-
-      - name: Install jql
-        uses: taiki-e/install-action@c44f6b046f1c29ae5918b1e0bfdbb2f1813836fd # v2
-        with:
-          tool: jql
+        uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1.17.0
 
       - name: Searching for lib
+        # All targets, not `targets[0]`: cargo does not promise an ordering, so keying
+        # on the first one let `is_lib` flip and silently skip cargo-test-doc.
+        #
+        # Every library kind counts, not just "lib". A crate declaring `crate-type =
+        # ["cdylib"]` still has doc tests, and `is_lib: false` skips them silently --
+        # ci-success treats a skipped job as a pass.
         id: searching
         run: |
-          result=$(cargo metadata --format-version=1 --no-deps | jql '"packages"|>"targets"<|[0]|>"kind"' | jql '..' -i);
-          echo "targets=$result" >> "$GITHUB_OUTPUT";
-          echo kind of targets $result;
+          set -euo pipefail
+          kinds=$(cargo metadata --format-version=1 --no-deps \
+            | jq -c '[.packages[].targets[].kind[]] | unique')
+          echo "kinds of targets: ${kinds}"
+
+          # Assigned before being written: a command substitution inside `echo`'s
+          # arguments keeps `echo`'s exit status, so `set -e` would not see jq fail
+          # and the empty value would silently skip cargo-test-doc.
+          is_lib=$(printf '%s' "$kinds" | jq -r \
+            '["lib","rlib","dylib","cdylib","staticlib","proc-macro"] as $lib
+             | any(IN($lib[])) | tostring')
+          is_bin=$(printf '%s' "$kinds" | jq -r 'any(. == "bin") | tostring')
+
+          if [ -z "$is_lib" ] || [ -z "$is_bin" ]; then
+            echo "::error::target-kind detection produced no value (is_lib='${is_lib}' is_bin='${is_bin}')."
+            exit 1
+          fi
+
+          printf 'is_lib=%s\nis_bin=%s\n' "$is_lib" "$is_bin" >> "$GITHUB_OUTPUT"
 
     outputs:
-      is_lib: ${{ contains(steps.searching.outputs.targets, 'lib') }}
-      is_bin: ${{ contains(steps.searching.outputs.targets, 'bin') }}
+      is_lib: ${{ steps.searching.outputs.is_lib }}
+      is_bin: ${{ steps.searching.outputs.is_bin }}

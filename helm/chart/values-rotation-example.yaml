@@ -1,0 +1,320 @@
+# Zero-Downtime Credential and Key Rotation Example
+# This file demonstrates a complete production deployment pattern for:
+# 1. File-based secret rotation (database credentials, signing keys)
+# 2. Helm-driven rolling restarts when ExternalSecret templates or values change
+# 3. External Secrets Operator with ClusterSecretStore
+#
+# This is preparatory chart support for an application image that implements the
+# file watcher and pool/key reload contract from issue #456. With the current
+# server image, file paths may be injected but database pools and key material are
+# still initialized at process startup.
+#
+# How rotation works:
+# 1. Update secrets in your external secret store (Vault, AWS, GCP, Azure)
+# 2. External Secrets Operator syncs changes to Kubernetes Secrets
+# 3. Kubernetes updates mounted Secret volumes
+# 4. An application image with issue #456 detects file changes and swaps credentials
+# 5. The chart checksum annotation rolls Pods only when Helm-rendered ExternalSecret
+#    manifests change; it does not change when ESO syncs new Secret data from Vault
+
+# External Secrets Configuration
+# Use ClusterSecretStore for cluster-wide secret management
+externalSecret:
+  enabled: true
+  metadata:
+    name: statuslist-external-secret
+  spec:
+    refreshInterval: 5m # Poll frequently for rotation
+    secretStoreRef:
+      name: vault-cluster-store
+      kind: ClusterSecretStore
+    target:
+      name: statuslist-secret
+      creationPolicy: Owner
+      # Template to map external secret structure to expected application Secret keys.
+      template:
+        type: Opaque
+        data:
+          postgres-password: "{{ .postgres_password }}"
+    data:
+      - secretKey: postgres_password
+        remoteRef:
+          key: secret/data/statuslist/production/database
+          property: password
+    # Separately mounted Secrets. These target names and keys match
+    # statuslist.secretMounts below, so the rendered Pod can mount them without
+    # customer-side Kubernetes Secret provisioning.
+    extraExternalSecrets:
+      - metadata:
+          name: statuslist-db-credentials
+        spec:
+          target:
+            name: statuslist-db-credentials
+            creationPolicy: Owner
+          data:
+            - secretKey: password
+              remoteRef:
+                key: secret/data/statuslist/production/database
+                property: password
+      - metadata:
+          name: statuslist-token-keys
+        spec:
+          target:
+            name: statuslist-token-keys
+            creationPolicy: Owner
+          data:
+            - secretKey: statuslist.crt
+              remoteRef:
+                key: secret/data/statuslist/production/token-keys
+                property: certificate
+            - secretKey: statuslist.key
+              remoteRef:
+                key: secret/data/statuslist/production/token-keys
+                property: signing_key
+      - metadata:
+          name: statuslist-api-keys
+        spec:
+          target:
+            name: statuslist-api-keys
+            creationPolicy: Owner
+          data:
+            - secretKey: internal-api-key
+              remoteRef:
+                key: secret/data/statuslist/production/api
+                property: internal_api_key
+
+# Disable SecretStore rendering - ClusterSecretStore is managed cluster-wide
+secretStore:
+  enabled: false
+
+# Application Configuration with File-Based Secret Mounts
+statuslist:
+  initContainers: []
+
+  image:
+    # Replace with an application image that includes issue #456.
+    tag: "requires-456-file-rotation"
+
+  aws:
+    # Use Workload Identity / ambient cloud credentials in this vendor-neutral example.
+    # Set true only when you also configure statuslist.aws.credentialsSecret.
+    mountCredentials: false
+
+  # File-based secret mounts enable zero-downtime credential rotation.
+  # Secrets are mounted as files and can be rotated without pod restart
+  # when the application image supports file-based credential reloading.
+  secretMounts:
+    # Database credentials mounted as files for rotation
+    - name: database-credentials
+      secretName: statuslist-db-credentials
+      mountPath: /etc/secrets/database
+      items:
+        - key: password
+          path: password
+      fileEnv:
+        APP_DATABASE__PASSWORD_FILE: password
+
+    # Token signing keys for certificate rotation
+    # Rotate these independently of database credentials
+    - name: signing-keys
+      secretName: statuslist-token-keys
+      mountPath: /etc/secrets/token-keys
+      items:
+        - key: statuslist.crt
+          path: statuslist.crt
+        - key: statuslist.key
+          path: statuslist.key
+      fileEnv:
+        APP_SERVER__CERT__STORE__CERTIFICATE_PATH: statuslist.crt
+        APP_SERVER__CERT__STORE__SIGNING_KEY_PATH: statuslist.key
+
+    # Additional secret mounts for other credentials
+    - name: api-keys
+      secretName: statuslist-api-keys
+      mountPath: /etc/secrets/api
+      items:
+        - key: internal-api-key
+          path: internal-api-key
+
+  # File watcher for credential rotation detection
+  # Application polls these paths and reloads credentials when files change
+  watcher:
+    pollIntervalSecs: "60"
+
+  env:
+    RUST_LOG: "info"
+    APP_ENV: "production"
+    APP_SERVER__HOST: "0.0.0.0"
+    APP_SERVER__PORT: "8000"
+    APP_SERVER__DOMAIN: "statuslist.example.com"
+
+    # Database configuration
+    APP_DATABASE__HOST: "statuslist-postgres.example.internal"
+    APP_DATABASE__PORT: "5432"
+    APP_DATABASE__USERNAME: "statuslist"
+    APP_DATABASE__NAME: "statuslist"
+    APP_DATABASE__BACKEND: "postgres"
+    # Password is read from file. When APP_DATABASE__PASSWORD_FILE is set through
+    # fileEnv above, the chart does not inject APP_DATABASE__PASSWORD.
+
+    # Certificate store configuration
+    # Paths are injected by the signing-keys fileEnv mapping above:
+    # APP_SERVER__CERT__STORE__CERTIFICATE_PATH: /etc/secrets/token-keys/statuslist.crt
+    # APP_SERVER__CERT__STORE__SIGNING_KEY_PATH: /etc/secrets/token-keys/statuslist.key
+
+    # Use file-based store provisioning for external certificates
+    APP_SERVER__CERT__PROVISIONING_STRATEGY: "store"
+
+    # ACME configuration (alternative to file-based certs)
+    # APP_SERVER__CERT__ACME_DIRECTORY_URL: "https://acme-v02.api.letsencrypt.org/directory"
+    # APP_SERVER__CERT__EMAIL: "ops@example.com"
+
+  ingress:
+    enabled: true
+    externalDnsHostname: statuslist.example.com
+    tls:
+      hosts:
+        - "statuslist.example.com"
+      secretName: statuslist-tls
+
+  resources:
+    requests:
+      memory: "512Mi"
+      cpu: "250m"
+    limits:
+      memory: "1Gi"
+      cpu: "1000m"
+
+  # High Availability Configuration
+  # Use multiple replicas for zero-downtime deployments
+  replicaCount: 3
+
+# PostgreSQL Configuration
+# File-based database credential rotation requires the database password accepted
+# by PostgreSQL to rotate with overlap. Use an external managed database or a
+# database operator that supports coordinated password rotation. The bundled
+# PostgreSQL subchart is disabled here because updating a Kubernetes Secret does
+# not itself update an already-created PostgreSQL user's password.
+postgres:
+  enabled: false
+
+autoscaling:
+  enabled: true
+  minReplicas: 3
+  maxReplicas: 10
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
+
+podDisruptionBudget:
+  enabled: true
+  maxUnavailable: 1
+
+# Security Hardening
+serviceAccount:
+  create: true
+  automountServiceAccountToken: false
+  annotations: {}
+  # For EKS IRSA:
+  # eks.amazonaws.com/role-arn: arn:aws:iam::123456789012:role/statuslist
+
+networkPolicy:
+  enabled: true
+  ingress:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: ingress-nginx
+  egressInternal: []
+
+# Observability
+opentelemetry-collector:
+  enabled: true
+  mode: deployment
+  resources:
+    requests:
+      memory: "256Mi"
+      cpu: "100m"
+    limits:
+      memory: "512Mi"
+      cpu: "200m"
+  config:
+    exporters:
+      otlp:
+        endpoint: "https://otel-collector.example.com:4317"
+        tls:
+          insecure: false
+    service:
+      pipelines:
+        traces:
+          receivers: [otlp]
+          exporters: [otlp]
+        metrics:
+          receivers: [otlp]
+          exporters: [otlp]
+
+# ---
+# Rotation Procedure
+# ---
+#
+# 1. Database Credential Rotation:
+#    a. Create the new database credential in PostgreSQL while the old credential
+#       remains valid. The external database owner must guarantee overlap for at
+#       least ESO refreshInterval + APP_WATCHER__POLL_INTERVAL_SECS + validation time.
+#    b. Validate the new credential directly against PostgreSQL before publishing it.
+#    c. Update the external secret store (for example Vault) with the new password.
+#    d. External Secrets Operator syncs to statuslist-db-credentials.
+#    e. An application image with issue #456 detects the mounted file change via
+#       APP_WATCHER__POLL_INTERVAL_SECS and swaps the database pool without restart.
+#    f. Verify new connections succeed and logs show a successful credential reload.
+#    g. Revoke the old database credential only after all replicas are healthy on the
+#       new pool. Roll back by restoring the old value in the external secret store
+#       while the old database credential is still valid.
+#
+# 2. Signing Key Rotation:
+#    a. Generate new key pair: openssl req -x509 -newkey rsa:4096 -keyout new.key -out new.crt
+#    b. Update secret in external store with both old and new keys (for grace period)
+#    c. External Secrets Operator syncs to statuslist-token-keys and Kubernetes
+#       updates the mounted files; no checksum-triggered rollout happens for data-only
+#       changes synced by ESO
+#    d. Application image with issue #456 reloads key material from the files, or an
+#       operator performs kubectl rollout restart if using an older image
+#    e. Verify pods have new keys: kubectl exec <pod> -- ls -la /etc/secrets/token-keys/
+#    f. After grace period, remove old key from external store
+#
+# 3. Emergency Rotation (compromised credentials):
+#    a. Create or revoke credentials in PostgreSQL according to the incident plan.
+#       If old credentials must be revoked immediately, expect existing connections
+#       to fail until every replica reloads or restarts.
+#    b. Update the external secret store immediately.
+#    c. Force rolling restart when running an image without issue #456, or when the
+#       incident requires replacing all in-memory state:
+#       kubectl rollout restart deployment/statuslist-status-list-server-deployment
+#    d. Verify all pods use new credentials.
+#
+# ---
+# Validation Commands
+# ---
+#
+# Check secret mounts in running pod:
+#   kubectl exec <pod> -- ls -la /etc/secrets/
+#
+# Verify file contents (be careful with sensitive data):
+#   kubectl exec <pod> -- cat /etc/secrets/database/password
+#
+# Check ExternalSecret sync status:
+#   kubectl get externalsecret statuslist-external-secret
+#   kubectl describe externalsecret statuslist-external-secret
+#
+# Check ClusterSecretStore connectivity:
+#   kubectl get clustersecretstore vault-cluster-store
+#   kubectl describe clustersecretstore vault-cluster-store
+#
+# Verify Helm-driven rolling restart after template/value changes:
+#   kubectl rollout status deployment/statuslist-status-list-server-deployment
+#
+# Check application logs for credential reloading:
+#   kubectl logs -l app.kubernetes.io/name=status-list-server | grep -i "credential\|secret\|reload"

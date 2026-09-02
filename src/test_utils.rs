@@ -101,16 +101,16 @@ pub(crate) struct TestCertProvider {
 
 #[async_trait]
 impl crate::domain::ports::CertificateProvider for TestCertProvider {
-    async fn certificate_chain(
+    async fn signing_material(
         &self,
-    ) -> Result<Option<Vec<String>>, crate::domain::models::status_list::StatusListError> {
-        Ok(Some(self.cert_chain.clone()))
-    }
-
-    async fn signing_key_pem(
-        &self,
-    ) -> Result<String, crate::domain::models::status_list::StatusListError> {
-        Ok(self.key_pem.clone())
+    ) -> Result<
+        crate::domain::ports::SigningMaterial,
+        crate::domain::models::status_list::StatusListError,
+    > {
+        Ok(crate::domain::ports::SigningMaterial {
+            certificate_chain: Some(self.cert_chain.clone()),
+            signing_key_pem: self.key_pem.clone(),
+        })
     }
 }
 

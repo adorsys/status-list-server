@@ -181,12 +181,12 @@ impl ReadinessCheck for AlwaysReady {
 /// Readiness check for a relational database backend.
 #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mysql"))]
 pub struct DbCheck {
-    db: std::sync::Arc<sea_orm::DatabaseConnection>,
+    db: std::sync::Arc<crate::outbound::sql::SwappableDatabaseConnection>,
 }
 
 #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mysql"))]
 impl DbCheck {
-    pub fn new(db: std::sync::Arc<sea_orm::DatabaseConnection>) -> Self {
+    pub fn new(db: std::sync::Arc<crate::outbound::sql::SwappableDatabaseConnection>) -> Self {
         Self { db }
     }
 }
@@ -199,8 +199,8 @@ impl ReadinessCheck for DbCheck {
     }
 
     async fn check(&self) -> Result<(), String> {
-        self.db
-            .ping()
+        let db = self.db.current();
+        db.ping()
             .await
             .map_err(|e| format!("database unreachable: {e}"))
     }

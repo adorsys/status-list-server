@@ -7,7 +7,9 @@ Alerts:
 
 ## What fired
 
-The p95 DB query latency over the 1h and 6h windows exceeded the 50 ms SLO.
+The p95 query latency over both the 1h and 5m windows exceeded the 50 ms SLO
+(fast burn), or the 6h p95 exceeded 50 ms sustained, confirmed by the 30m window
+(slow burn).
 Because reads are cached, every cache miss pays this directly — a slow DB also
 lowers the cache hit ratio and raises HTTP latency.
 

@@ -1,0 +1,131 @@
+# Example Alertmanager Configuration for status-list-server (webhook + Discord)
+#
+# This is the hand-written example for the webhook notification mechanism
+# (ticket #446). The deployed stack instead GENERATES a similar config from
+# environment variables via observability/prometheus/generate-alertmanager-config.sh,
+# so webhook URLs never live in a committed file. Keep this example's URLs as
+# placeholders; replace them only in your secret store / .env.
+#
+# Route tree:
+#   - severity=page -> page channel (Discord here; swap for Slack/Teams/PD)
+#   - severity=warn -> warn channel (Discord here; swap for Slack/Mattermost/email)
+#   - severity=none (Watchdog) -> dead-man's-switch (NOT a human channel)
+#   - everything else -> noop (so nothing silently spams a human channel)
+#
+# NOTE: the deployed generator (generate-alertmanager-config.sh) collapses page
+# and warn into ONE human channel (one credential per platform), whereas this
+# hand-written example shows per-severity channels as an alternative. Both share
+# the same noop default + severity=none dead-man's-switch + inhibit_rules below;
+# only the number of human target channels differs.
+#
+# Supported native receivers (Alertmanager image prom/alertmanager:v0.28.1):
+#   discord_configs  (Discord webhook URL)
+#   slack_configs    (Slack incoming-webhook URL)
+#   email_configs    (SMTP)
+# Generic (accepts Alertmanager's standard JSON notification payload):
+#   webhook_configs  (any HTTPS endpoint, incl. MS Teams / Mattermost inbound webhooks)
+#
+# Notification payload (what a webhook receiver receives) — each POST body is the
+# standard Alertmanager JSON and includes ALL of the following, which is what an
+# engineer needs to act on an alert:
+#   status          firing | resolved
+#   alerts[].labels.alertname / severity / service / sli
+#   alerts[].labels.startsAt  (timestamp)
+#   alerts[].annotations.summary / description
+#   alerts[].annotations.runbook_url   (link to runbook)
+#   generatorURL / externalURL          (links to Prometheus / Alertmanager)
+# With send_resolved: true, Discord/Slack also receive the resolved embed.
+
+global:
+  resolve_timeout: 5m
+
+route:
+  group_by: ["alertname", "sli"]
+  group_wait: 30s
+  group_interval: 5m
+  repeat_interval: 4h
+  receiver: "noop"
+  routes:
+    # Watchdog (severity=none) -> dead-man's-switch (pages on ABSENCE, not firing).
+    - matchers:
+        - severity="none"
+      receiver: "watchdog-deadmansswitch"
+
+    # Page (someone must look now): route to the page Discord channel.
+    - matchers:
+        - severity="page"
+      receiver: "discord-page"
+      continue: false
+
+    # Warn (degradation): route to the warn Discord channel.
+    - matchers:
+        - severity="warn"
+      receiver: "discord-warn"
+      continue: false
+
+inhibit_rules:
+  # Don't page a channel for a warn while a page for the same SLI is firing.
+  - source_match:
+      severity: page
+    target_match:
+      severity: warn
+    equal: ["sli", "service"]
+
+receivers:
+  # Absorbs anything not explicitly routed, so it never spams a human channel.
+  - name: "noop"
+
+  # Dead-man's-switch for the always-firing Watchdog (pages on absence).
+  - name: "watchdog-deadmansswitch"
+    webhook_configs:
+      - url: "https://deadmansswitch.example.com/<DMS_WEBHOOK>"
+
+  # NATIVE DISCORD receiver. webhook_url is the Discord channel webhook
+  # (https://discord.com/api/webhooks/<ID>/<TOKEN>). send_resolved: true so the
+  # resolved notification is also delivered.
+  - name: "discord-page"
+    discord_configs:
+      - webhook_url: "https://discord.com/api/webhooks/REPLACE_ME/REPLACE_ME"
+        send_resolved: true
+        title: '{{ template "discord.default.title" . }}'
+        message: '{{ template "discord.default.message" . }}'
+
+  - name: "discord-warn"
+    discord_configs:
+      - webhook_url: "https://discord.com/api/webhooks/REPLACE_ME/REPLACE_ME"
+        send_resolved: true
+        title: '{{ template "discord.default.title" . }}'
+        message: '{{ template "discord.default.message" . }}'
+
+# ---------------------------------------------------------------------------
+# ALTERNATIVES — swap a receiver above for any of these. Only credentials differ.
+# ---------------------------------------------------------------------------
+# - name: "slack-page"
+#   slack_configs:
+#     - api_url: "https://hooks.slack.com/services/REPLACE_ME/REPLACE_ME/REPLACE_ME"
+#       channel: "#status-list-alerts"
+#       send_resolved: true
+#       title: '{{ .CommonLabels.alertname }} [{{ .Status | toUpper }}]'
+#       text: '{{ .CommonAnnotations.summary }} severity={{ .CommonLabels.severity }} runbook={{ .CommonAnnotations.runbook_url }}'
+
+# - name: "mattermost-webhook"
+#   webhook_configs:            # Mattermost has no native receiver; use generic webhook
+#     - url: "https://mattermost.example.com/hooks/REPLACE_ME"
+#       send_resolved: true
+
+# - name: "teams-webhook"
+#   webhook_configs:            # MS Teams classic inbound webhook accepts a JSON POST
+#     - url: "https://outlook.office.com/webhook/REPLACE_ME"
+#       send_resolved: true
+
+# - name: "email-warn"
+#   email_configs:
+#     - to: "ops@example.com"
+#       send_resolved: true
+#       html: '{{ template "email.default.html" . }}'
+
+# Global SMTP block required if you use platform=email:
+# global:
+#   smtp_smarthost: "smtp.example.com:587"
+#   smtp_from: "alertmanager@example.com"
+#   smtp_require_tls: true

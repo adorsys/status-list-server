@@ -118,20 +118,16 @@ async fn build_status_list_token_inner(
     validity_window: Option<(i64, i64)>,
     client_accepts_gzip: bool,
 ) -> Result<(Vec<u8>, Option<&'static str>), StatusListError> {
-    let certs_parts = state
+    let signing_material = state
         .service
         .cert_provider()
-        .certificate_chain()
-        .await
-        .map_err(|e| StatusListError::Backend(Box::new(e)))?
-        .ok_or(StatusListError::Unavailable)?;
-
-    let signing_key_pem = state
-        .service
-        .cert_provider()
-        .signing_key_pem()
+        .signing_material()
         .await
         .map_err(|e| StatusListError::Backend(Box::new(e)))?;
+    let certs_parts = signing_material
+        .certificate_chain
+        .ok_or(StatusListError::Unavailable)?;
+    let signing_key_pem = signing_material.signing_key_pem;
 
     let accept = accept.to_string();
     let status_record = status_record.clone();

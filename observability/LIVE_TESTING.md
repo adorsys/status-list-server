@@ -1,8 +1,8 @@
 # SLO Observability — Live Demo Guide
 
 This guide walks a reviewer or operator through validating the SLO stack end to
-end: dashboard panels populate with real data, and Prometheus / Alertmanager
-alerts fire against a running `status-list-server`.
+end: dashboard panels populate with real data, and Prometheus alerts fire
+against a running `status-list-server`.
 
 It is the **hands-on companion** to:
 
@@ -14,7 +14,7 @@ It is the **hands-on companion** to:
 > What "correct" means here: the app **serves** metrics on `/metrics`, Prometheus
 > **scrapes** them and evaluates the `sli:*` recording rules + alert rules, and
 > Grafana **renders** those `sli:*` series on the committed dashboard. The whole
-> pipeline is [app] -> [Prometheus] -> [Grafana/Alertmanager].
+> pipeline is [app] -> [Prometheus] -> [Grafana].
 
 ---
 
@@ -28,7 +28,7 @@ It is the **hands-on companion** to:
 | DB latency (p95)      | `sli:db_query_latency:p95:5m`      | DB p95               | `DbLatencyFastBurn` / `SlowBurn`       |
 | Token-gen failure     | `sli:token_gen_failure_rate:5m`    | Token-gen failure    | `TokenGenerationFastBurn` / `SlowBurn` |
 | Cert renewal failure  | `sli:cert_renewal_failure_rate:5m` | Cert renewal failure | `CertRenewalFailures`                  |
-| Error budget          | `sli:error_budget:success:30d`     | Error budget         | — (derived)                            |
+| Error budget          | `sli:error_budget:success:30d`     | Error budget         | `ErrorBudgetCritical`                  |
 
 The dashboard and alerts both query the `sli:*` recording rules, never raw
 metrics, so a single number drives both.
@@ -67,7 +67,6 @@ Service name / host port (from the resolved `docker compose config`):
 | ------------------------------ | --------------------- | --------- |
 | Prometheus                     | `prometheus:9090`     | `9092`    |
 | Grafana                        | `grafana:3000`        | `3000`    |
-| Alertmanager                   | `alertmanager:9093`   | `9093`    |
 | OTel collector (Prom exporter) | `otel-collector:8889` | `8889`    |
 
 > **Port-conflict gotcha.** Host ports are shared across all running Compose
@@ -176,7 +175,7 @@ docker compose up -d --force-recreate grafana
 Verify:
 
 ```bash
-curl -s -u admin:admin http://localhost:3000/api/datasources | python3 -c 'import sys,json;[print(x["name"],x["uid"]) for x in json.load(sys.stdin)]'
+curl -s -u "admin:${GRAFANA_ADMIN_PASSWORD}" http://localhost:3000/api/datasources | python3 -c 'import sys,json;[print(x["name"],x["uid"]) for x in json.load(sys.stdin)]'
 # -> Prometheus prometheus
 ```
 
@@ -241,7 +240,7 @@ import requests, uuid, time, json
 
 BASE = "http://localhost:8000"
 s = requests.Session()
-data = json.load(open("/home/arthur/Documents/adorsys/status-list-server/artillery-tests/scripts/test-tokens.json"))
+data = json.load(open("artillery-tests/scripts/test-tokens.json"))
 jwk, issuer, tokens = data["publicKeyJwk"], data["issuerId"], data["tokens"]
 
 # 1) Register issuer with a JWK (202 = new, 409 = already exists)
@@ -323,7 +322,7 @@ sli:error_budget:success:30d         1           # full budget
 
 ## 8. View the Grafana dashboard
 
-Open `http://localhost:3000` (admin/admin) -> **Status List SLO**
+Open `http://localhost:3000` (login using `GRAFANA_ADMIN_PASSWORD` configured in `docker-compose.yml`) -> **Status List SLO**
 (direct: `http://localhost:3000/d/status-list-slo/status-list-slo`).
 
 Panels (all query `sli:*` recording rules):
@@ -339,8 +338,9 @@ last 5–15 minutes), or data will look flat/empty.
 ## 9. Fire each alert end-to-end (optional but recommended for reviewers)
 
 Prometheus evaluates with `scrape_interval: 2s`, `evaluation_interval: 15s`.
-Fast-burn (page) alerts require **both** the 1h and 6h windows to breach, so
-sustain a fault for several minutes. The sections above walk each alert end to
+Fast-burn (page) alerts require **both** the long and short window (1h+5m for
+fast erating, or 6h+30m for slow burn) to breach, so sustain a fault for several
+minutes. The sections above walk each alert end to
 end. A compact cheat-sheet:
 
 | Alert                          | How to trigger                                                                  | Verify                                        |
@@ -349,23 +349,17 @@ end. A compact cheat-sheet:
 | `RequestLatencyFastBurn`       | Add latency (e.g. `tc qdisc` delay, or saturate the DB) so p95 > 0.3s for 5m+1h | alert state                                   |
 | `DbLatencyFastBurn`            | Hold a row lock / `pg_sleep` while hammering reads                              | alert state                                   |
 | `TokenGenerationFastBurn`      | Break the signing-key backend while running token flows                         | alert state                                   |
-| `CacheHitRatioLow` (warn)      | Burst many distinct list IDs (cold cache) so hit ratio < 0.85 for 15m           | Alertmanager                                  |
-| `CertRenewalFailures` (warn)   | Stop `pebble` around the renewal cadence                                        | Alertmanager                                  |
+| `CacheHitRatioLow` (warn)      | Burst many distinct list IDs (cold cache) so hit ratio < 0.85 for 15m           | alert state                                   |
+| `CertRenewalFailures` (warn)   | Stop `pebble` around the renewal cadence                                        | alert state                                   |
 
-Check fire + routing:
+Check fire:
 
 ```bash
 curl -s http://localhost:9092/api/v1/alerts | python3 -c 'import sys,json;[print(a["labels"].get("alertname"),a["state"]) for a in json.load(sys.stdin)["data"]["alerts"]]'
-curl -s http://localhost:9093/api/v2/alerts | python3 -m json.tool
 ```
 
-Notifications are **platform-agnostic**: the Alertmanager config is rendered at
-container start by `observability/prometheus/generate-alertmanager-config.sh`
-from `ALERTMANAGER_PLATFORM` + the matching credential env var (see
-`.env.template`). To see an alert land in the customer's channel, set
-`ALERTMANAGER_PLATFORM` (e.g. `slack`/`discord`/`email`) and its credential in
-`.env`, recreate Alertmanager, then trigger an alert above. No credentials are
-committed.
+Alert delivery to an external notification channel (e.g. via Alertmanager
+webhooks) is handled outside of this repository.
 
 ---
 

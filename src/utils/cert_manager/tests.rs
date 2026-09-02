@@ -24,6 +24,17 @@ fn init_crypto() {
     });
 }
 
+fn matching_cert_and_key() -> (String, String) {
+    let key =
+        rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256).expect("generate test key");
+    let cert = rcgen::CertificateParams::new(vec!["example.com".to_string()])
+        .expect("certificate params")
+        .self_signed(&key)
+        .expect("self-signed certificate")
+        .pem();
+    (cert, key.serialize_pem())
+}
+
 #[derive(Clone)]
 struct MockStorage {
     data: Arc<Mutex<HashMap<String, String>>>,
@@ -480,10 +491,7 @@ async fn test_persist_certificate_data_updates_existing_material() {
 async fn test_store_filesystem_strategy_persists_material() {
     init_crypto();
 
-    let source_cert_data: CertificateData =
-        serde_json::from_str(include_str!("../../../test_data/cert_data.json")).unwrap();
-    let cert_pem = source_cert_data.certificate.as_str();
-    let key_pem = include_str!("../../../test_data/ec-private.pem");
+    let (cert_pem, key_pem) = matching_cert_and_key();
     let temp_dir = std::env::temp_dir().join(format!(
         "status-list-server-cert-store-{}",
         uuid::Uuid::new_v4()
@@ -492,8 +500,8 @@ async fn test_store_filesystem_strategy_persists_material() {
     let key_path = temp_dir.join("tls.key");
 
     tokio::fs::create_dir_all(&temp_dir).await.unwrap();
-    tokio::fs::write(&cert_path, cert_pem).await.unwrap();
-    tokio::fs::write(&key_path, key_pem).await.unwrap();
+    tokio::fs::write(&cert_path, &cert_pem).await.unwrap();
+    tokio::fs::write(&key_path, &key_pem).await.unwrap();
 
     let manager = CertManager::builder()
         .domains(["example.com"])
@@ -516,12 +524,9 @@ async fn test_store_filesystem_strategy_persists_material() {
 async fn test_store_filesystem_strategy_accepts_der_material() {
     init_crypto();
 
-    let source_cert_data: CertificateData =
-        serde_json::from_str(include_str!("../../../test_data/cert_data.json")).unwrap();
-    let cert_pem = source_cert_data.certificate.as_str();
+    let (cert_pem, key_pem) = matching_cert_and_key();
     let (_, cert_der) = x509_parser::pem::parse_x509_pem(cert_pem.as_bytes()).unwrap();
-    let key_pem = include_str!("../../../test_data/ec-private.pem");
-    let key_der = Keypair::from_pkcs8_pem(key_pem)
+    let key_der = Keypair::from_pkcs8_pem(&key_pem)
         .unwrap()
         .to_pkcs8_der_bytes()
         .unwrap();
@@ -561,16 +566,16 @@ async fn test_store_storage_strategy_persists_material() {
     init_crypto();
 
     let material_storage = MockStorage::new();
-    let source_cert_data: CertificateData =
-        serde_json::from_str(include_str!("../../../test_data/cert_data.json")).unwrap();
-    let cert_pem = source_cert_data.certificate.as_str();
-    let key_pem = include_str!("../../../test_data/ec-private.pem");
+    let (cert_pem, key_pem) = matching_cert_and_key();
 
     material_storage
-        .store("source-cert", cert_pem)
+        .store("source-cert", &cert_pem)
         .await
         .unwrap();
-    material_storage.store("source-key", key_pem).await.unwrap();
+    material_storage
+        .store("source-key", &key_pem)
+        .await
+        .unwrap();
 
     let manager = CertManager::builder()
         .domains(["example.com"])
@@ -595,12 +600,9 @@ async fn test_store_storage_strategy_accepts_base64_der_material() {
     init_crypto();
 
     let material_storage = MockStorage::new();
-    let source_cert_data: CertificateData =
-        serde_json::from_str(include_str!("../../../test_data/cert_data.json")).unwrap();
-    let cert_pem = source_cert_data.certificate.as_str();
+    let (cert_pem, key_pem) = matching_cert_and_key();
     let (_, cert_der) = x509_parser::pem::parse_x509_pem(cert_pem.as_bytes()).unwrap();
-    let key_pem = include_str!("../../../test_data/ec-private.pem");
-    let key_der = Keypair::from_pkcs8_pem(key_pem)
+    let key_der = Keypair::from_pkcs8_pem(&key_pem)
         .unwrap()
         .to_pkcs8_der_bytes()
         .unwrap();

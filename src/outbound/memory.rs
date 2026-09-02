@@ -257,12 +257,13 @@ mod tests {
 
     #[async_trait]
     impl CertificateProvider for DummyCertProvider {
-        async fn certificate_chain(&self) -> Result<Option<Vec<String>>, StatusListError> {
-            Ok(None)
-        }
-
-        async fn signing_key_pem(&self) -> Result<String, StatusListError> {
-            Ok("".into())
+        async fn signing_material(
+            &self,
+        ) -> Result<crate::domain::ports::SigningMaterial, StatusListError> {
+            Ok(crate::domain::ports::SigningMaterial {
+                certificate_chain: None,
+                signing_key_pem: "".into(),
+            })
         }
     }
 

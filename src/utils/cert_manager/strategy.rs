@@ -5,6 +5,7 @@ use tokio::fs;
 use tracing::info;
 
 use super::{CertError, CertManager, CertificateData};
+use crate::outbound::cert::validate_signing_material;
 use crate::utils::keygen::Keypair;
 
 /// Provisioning strategy used by [`CertManager`].
@@ -158,6 +159,8 @@ impl CertProvisioningStrategy for StoreProvisioningStrategy {
         let signing_key_pem = normalize_pkcs8_key(signing_key)?;
 
         let certificate_data = manager.certificate_data_from_der_or_pem(certificate)?;
+        validate_signing_material(&certificate_data.certificate, &signing_key_pem)
+            .map_err(|err| CertError::Validation(err.to_string()))?;
         let current_certificate = manager.certificate().await?;
         let current_signing_key = manager.signing_key_from_storage().await?;
 

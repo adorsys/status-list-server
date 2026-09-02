@@ -88,8 +88,8 @@ impl HttpServer {
                 TraceLayer::new_for_http()
                     .make_span_with(crate::utils::telemetry::make_http_request_span),
             )
-            .layer(middleware::from_fn(track_http_metrics))
             .layer(CatchPanicLayer::new())
+            .layer(middleware::from_fn(track_http_metrics))
             .layer(cors)
             .layer(RequestBodyLimitLayer::new(max_body_size))
             .layer(DefaultBodyLimit::disable())
@@ -214,6 +214,11 @@ fn api_v1_routes(
 /// Keyed by the bounded route pattern (via [`MatchedPath`]), the HTTP method,
 /// and the response status class. Runs after routing so `MatchedPath` is
 /// populated, giving bounded cardinality regardless of path parameters.
+///
+/// This middleware is layered OUTSIDE `CatchPanicLayer`, so a handler panic is
+/// first converted to a 500 by `CatchPanicLayer` and then observed here as a
+/// normal `Response` — panic-induced 500s are recorded as 5xx and contribute to
+/// the error-rate SLI instead of silently disappearing.
 ///
 /// Health/liveness/readiness and the metrics endpoint are excluded from the SLI
 /// so their traffic neither inflates the error-rate denominator (2xx probes)
@@ -522,6 +527,11 @@ mod tests {
 
     /// The HTTP metrics layer must record the bounded route pattern (not the
     /// raw URI) and the status class for every request that passes through it.
+    // The test serialization lock (metrics_test_lock) guards against the global
+    // meter provider being swapped by a concurrent metrics test while this
+    // test's middleware binds its cached instrument handles, so it must be held
+    // across the router `.await`s below. Deliberate for a test-only std Mutex.
+    #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn http_metrics_middleware_records_route_and_status() {
         use crate::utils::metrics::{metrics_test_lock, setup_metrics};
@@ -544,7 +554,6 @@ mod tests {
                 .build(),
         )
         .expect("metrics setup");
-        drop(_metrics_guard);
 
         async fn ok_handler() -> impl IntoResponse {
             "ok"
@@ -606,6 +615,77 @@ mod tests {
         assert!(
             body.contains("http_server_duration_seconds_count"),
             "expected duration histogram count; body:\n{body}"
+        );
+    }
+
+    /// A handler panic must be observable as a 5xx metric. This only holds when
+    /// `track_http_metrics` is layered OUTSIDE `CatchPanicLayer` (as in the real
+    /// router): the panic is converted to a 500 by CatchPanicLayer first and then
+    /// recorded by the metrics middleware. Regresses the bug where panic-induced
+    /// 500s silently disappeared from the error-rate SLI.
+    // Same test-only serialization lock rationale as the middleware test above:
+    // the guard must stay held across the `oneshot(...).await` so the panic's
+    // 5xx counter binds to this test's meter provider, not a concurrent one.
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn panicking_handler_records_5xx_metric() {
+        use crate::utils::metrics::{metrics_test_lock, setup_metrics};
+        use opentelemetry_sdk::Resource;
+        use prometheus::{Encoder, Registry, TextEncoder};
+        use tower_http::catch_panic::CatchPanicLayer;
+
+        let _metrics_guard = metrics_test_lock();
+        let registry = Registry::new();
+        let config = crate::config::TelemetryConfig {
+            environment: crate::config::TelemetryEnvironment::Development,
+            otlp_endpoint: "http://localhost:4317".to_string(),
+            sampler_ratio: 1.0,
+            enabled: false,
+        };
+        let _meter_provider = setup_metrics(
+            &registry,
+            &config,
+            Resource::builder()
+                .with_service_name("status-list-server-test")
+                .build(),
+        )
+        .expect("metrics setup");
+
+        async fn boom_handler() -> StatusCode {
+            panic!("boom");
+        }
+
+        // Layer order must mirror the production router: CatchPanicLayer inside,
+        // track_http_metrics outside.
+        let router = Router::new()
+            .route("/boom", get(boom_handler))
+            .layer(CatchPanicLayer::new())
+            .layer(middleware::from_fn(track_http_metrics))
+            .with_state(());
+
+        let resp = router
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/boom")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+
+        let mut buffer = Vec::new();
+        TextEncoder::new()
+            .encode(&registry.gather(), &mut buffer)
+            .expect("encode metrics");
+        let body = String::from_utf8(buffer).expect("metrics are valid UTF-8");
+
+        assert!(
+            body.contains(
+                "http_server_requests_total{method=\"GET\",route=\"/boom\",status_class=\"5xx\""
+            ),
+            "expected 5xx counter for a panicking handler; body:\n{body}"
         );
     }
 }

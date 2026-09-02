@@ -56,15 +56,16 @@ expect() {
     echo "ok: $* -> ${want}"
 }
 
-# appVersion is the default image tag when neither tag nor digest is set, so drift from
-# the crate version points default installs at a stale image with nothing failing. First
-# `version = ` line is [package]; later ones are deps.
+# appVersion is the default image tag when neither tag nor digest is set. Release tags
+# are variant-suffixed, so the default install must resolve to the published AWS image.
+# First `version = ` line is [package]; later ones are deps.
 crate_version=$(grep -m1 '^version = ' Cargo.toml | sed -E 's/^version = "([^"]+)".*/\1/')
-if [ "${app_version}" != "${crate_version}" ]; then
-    echo "::error::Chart appVersion (${app_version}) does not match Cargo.toml version (${crate_version}). appVersion is the chart's default image tag, so this points default installs at the wrong image."
+default_tag="${crate_version}-aws"
+if [ "${app_version}" != "${default_tag}" ]; then
+    echo "::error::Chart appVersion (${app_version}) does not match the published default image tag (${default_tag}). appVersion is the chart's default image tag, so this points default installs at the wrong image."
     exit 1
 fi
-echo "appVersion matches crate version: ${crate_version}"
+echo "appVersion matches published default image tag: ${default_tag}"
 
 # A digest is content-addressed, so IfNotPresent; a tag is mutable, so Always.
 expect "${repo}@${digest}|IfNotPresent|" \
@@ -75,7 +76,7 @@ expect "${repo}:test-tag|Always|" \
 expect "${repo}@${digest}|IfNotPresent|" \
     --set-string statuslist.image.tag=test-tag \
     --set-string statuslist.image.digest="${digest}"
-# No tag and no digest falls back to appVersion, never to "latest".
+# No tag and no digest falls back to the published appVersion, never to "latest".
 expect "${repo}:${app_version}|Always|"
 # An explicit pullPolicy still overrides the derived one.
 expect "${repo}@${digest}|Always|" \
