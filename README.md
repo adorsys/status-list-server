@@ -86,17 +86,17 @@ By default, the server will listen on `http://localhost:8000` using in-memory re
 
 The crate uses modular Cargo feature flags to gate optional production backend drivers:
 
-| Feature    | Description                                                                              | Default    |
-| ---------- | ---------------------------------------------------------------------------------------- | ---------- |
-| `memory`   | In-memory repositories, TTL cache, and static certificate loading.                       | ✅ Default |
-| `postgres` | SeaORM PostgreSQL database driver.                                                       | ❌ Opt-in  |
-| `sqlite`   | SeaORM SQLite database driver.                                                           | ❌ Opt-in  |
-| `mysql`    | SeaORM MySQL database driver.                                                            | ❌ Opt-in  |
-| `aws`      | AWS Secrets Manager and Route53 DNS-01 driver (transitively enables `acme`).              | ❌ Opt-in  |
-| `gcp`      | GCP Secret Manager and Cloud DNS driver (transitively enables `acme`).                   | ❌ Opt-in  |
-| `azure`    | Azure Key Vault and Azure DNS driver (transitively enables `acme`).                      | ❌ Opt-in  |
-| `vault`    | HashiCorp Vault / OpenBao driver (transitively enables `acme`).                          | ❌ Opt-in  |
-| `acme`     | ACME DNS-01 certificate manager driver.                                                  | ❌ Opt-in  |
+| Feature    | Description                                                                  | Default    |
+| ---------- | ---------------------------------------------------------------------------- | ---------- |
+| `memory`   | In-memory repositories, TTL cache, and static certificate loading.           | ✅ Default |
+| `postgres` | SeaORM PostgreSQL database driver.                                           | ❌ Opt-in  |
+| `sqlite`   | SeaORM SQLite database driver.                                               | ❌ Opt-in  |
+| `mysql`    | SeaORM MySQL database driver.                                                | ❌ Opt-in  |
+| `aws`      | AWS Secrets Manager and Route53 DNS-01 driver (transitively enables `acme`). | ❌ Opt-in  |
+| `gcp`      | GCP Secret Manager and Cloud DNS driver (transitively enables `acme`).       | ❌ Opt-in  |
+| `azure`    | Azure Key Vault and Azure DNS driver (transitively enables `acme`).          | ❌ Opt-in  |
+| `vault`    | HashiCorp Vault / OpenBao driver (transitively enables `acme`).              | ❌ Opt-in  |
+| `acme`     | ACME DNS-01 certificate manager driver.                                      | ❌ Opt-in  |
 
 To build with specific backend drivers, pass the matching feature flag(s):
 
