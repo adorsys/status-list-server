@@ -56,6 +56,27 @@ for arch in "$@"; do
     fi
 
     manifest=$(printf '%s' "$matches" | jq -r '.[0]')
+
+    # The same strict form the callers validate an index digest with, applied to the
+    # child manifest they never checked. This value is registry-controlled data that
+    # both callers interpolate into `$GITHUB_ENV` as `SCAN_REF_<ARCH>=...`, so a
+    # newline inside it -- which `jq -r` emits literally -- would inject arbitrary
+    # environment variables into every later step of the job.
+    #
+    # Low likelihood, since the registry is our own. Checked anyway because it costs
+    # three lines, and because leaving the one unvalidated path pointing at the more
+    # dangerous sink is how the next person concludes this class of input is trusted.
+    #
+    # `[[ =~ ]]` and not `grep -Eq`: grep matches line by line, so it accepts a value
+    # whose *first* line is a valid digest and whose second is `LD_PRELOAD=...` -- it
+    # would wave through precisely the payload this check exists to stop. Bash matches
+    # the pattern against the whole string, so `$` means end of value, not end of line.
+    if [[ ! "$manifest" =~ ^sha256:[a-f0-9]{64}$ ]]; then
+        echo "::error::linux/${arch} manifest digest in ${image_ref} is not a valid sha256 digest." >&2
+        echo "Got: '${manifest}'" >&2
+        exit 1
+    fi
+
     echo "resolved linux/${arch}: ${manifest}" >&2
     printf '%s %s\n' "$arch" "$manifest"
 done
