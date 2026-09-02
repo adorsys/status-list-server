@@ -300,6 +300,74 @@ class CheckTrivyignoreTest(unittest.TestCase):
         errors = checker.check(pathlib.Path("does-not-exist.yaml"))
         self.assertTrue(any("not found" in error for error in errors), errors)
 
+    # --- id character set -------------------------------------------------
+    #
+    # These ids are written to a tab-separated stream by --expiring-within and read
+    # back by the scheduled re-scan with `IFS=$'\t' read`, then rendered into a GitHub
+    # issue body. A tab or newline desynchronises that parse.
+
+    def test_accepts_the_real_world_id_schemes(self):
+        for identifier in (
+            "CVE-2024-1234",
+            "RUSTSEC-2024-0001",
+            "AVD-KSV-0014",
+            "GHSA-xxxx-yyyy-zzzz",
+            "DLA_1234-1",
+            "openSUSE-SU-2024.1",
+        ):
+            with self.subTest(identifier=identifier):
+                self.assertEqual(
+                    self.check(
+                        f"""
+                        vulnerabilities:
+                          - id: {identifier}
+                            statement: Not reachable.
+                            expired_at: 2999-01-01
+                        """
+                    ),
+                    [],
+                )
+
+    def test_rejects_a_tab_in_an_id(self):
+        self.assertRejects(
+            'vulnerabilities:\n'
+            '  - id: "RUSTSEC-0000-0000\tinjected"\n'
+            '    statement: Tab breaks the TSV contract.\n'
+            '    expired_at: 2999-01-01\n',
+            "must match",
+        )
+
+    def test_rejects_a_newline_in_an_id(self):
+        self.assertRejects(
+            'vulnerabilities:\n'
+            '  - id: "RUSTSEC-0000-0000\\ninjected"\n'
+            '    statement: Newline breaks the TSV contract.\n'
+            '    expired_at: 2999-01-01\n',
+            "must match",
+        )
+
+    def test_rejects_markdown_metacharacters_in_an_id(self):
+        self.assertRejects(
+            """
+            vulnerabilities:
+              - id: "RUSTSEC-0000-0000`whoami`"
+                statement: Renders as formatting in an issue body.
+                expired_at: 2999-01-01
+            """,
+            "must match",
+        )
+
+    def test_rejects_a_space_in_an_id(self):
+        self.assertRejects(
+            """
+            misconfigurations:
+              - id: "AVD KSV 0014"
+                statement: Spaces are not an id.
+                paths: ["*/charts/postgres*/**"]
+            """,
+            "must match",
+        )
+
 
 class ExpiringEntriesTest(unittest.TestCase):
     """Tests for `--expiring-within`.
@@ -404,6 +472,35 @@ class ExpiringEntriesTest(unittest.TestCase):
             path = pathlib.Path(tmp) / ".trivyignore.yaml"
             path.write_text(self.ledger(1), encoding="utf-8")
             self.assertEqual(checker.check(path), [])
+
+
+class ExpiringWindowArgumentTest(unittest.TestCase):
+    """`--expiring-within` must refuse a window that inverts its own meaning."""
+
+    def run_main(self, argv: list[str]) -> int:
+        argv_backup = sys.argv
+        sys.argv = ["check-trivyignore.py", *argv]
+        try:
+            return checker.main()
+        finally:
+            sys.argv = argv_backup
+
+    def test_negative_window_is_rejected(self):
+        # A negative window lists only entries that have already lapsed, which reads
+        # as "nothing is expiring soon" to whoever asked for a warning.
+        with tempfile.TemporaryDirectory() as tmp:
+            path = pathlib.Path(tmp) / ".trivyignore.yaml"
+            path.write_text("vulnerabilities: []\n", encoding="utf-8")
+            with self.assertRaises(SystemExit) as raised:
+                self.run_main([str(path), "--expiring-within", "-1"])
+            self.assertEqual(raised.exception.code, 2)
+
+    def test_zero_window_is_allowed(self):
+        # Zero is a meaningful question: what lapses today or has already lapsed.
+        with tempfile.TemporaryDirectory() as tmp:
+            path = pathlib.Path(tmp) / ".trivyignore.yaml"
+            path.write_text("vulnerabilities: []\n", encoding="utf-8")
+            self.assertEqual(self.run_main([str(path), "--expiring-within", "0"]), 0)
 
 
 if __name__ == "__main__":

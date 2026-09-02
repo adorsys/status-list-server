@@ -39,6 +39,7 @@ from __future__ import annotations
 import argparse
 import datetime
 import pathlib
+import re
 import sys
 
 try:
@@ -79,6 +80,12 @@ SCOPE_KEYS = ("paths", "purls")
 # a build that stops is recoverable in minutes, a silently widened exception is not
 # discovered at all. Do not relax this to a warning -- add the new field.
 KNOWN_ENTRY_KEYS = {"id", "paths", "purls", "statement", "expired_at"}
+
+# The character set every advisory and rule scheme actually uses: CVE-2024-1234,
+# RUSTSEC-2024-0001, AVD-KSV-0014, GHSA-xxxx-xxxx-xxxx. Deliberately the same set the
+# scheduled re-scan enforces on advisory IDs coming back from Trivy, because these ids
+# reach the same places -- a tab-separated stream and a GitHub issue body.
+ID_PATTERN = re.compile(r"[A-Za-z0-9._-]+")
 
 
 def _load_document(path: pathlib.Path) -> tuple[dict | None, list[str]]:
@@ -162,6 +169,19 @@ def check(path: pathlib.Path) -> list[str]:
             identifier = entry.get("id")
             if not identifier or not str(identifier).strip():
                 errors.append(f"{where}: missing 'id'")
+            elif not ID_PATTERN.fullmatch(str(identifier)):
+                # These ids leave this file. `--expiring-within` writes them to stdout
+                # as tab-separated fields, and the scheduled re-scan reads that back
+                # with `while IFS=$'\t' read -r id date days` and renders it into a
+                # GitHub issue body. A tab or newline in an id desynchronises that
+                # parse and corrupts the report; Markdown metacharacters render as
+                # formatting. The workflow already refuses advisory IDs from Trivy that
+                # fall outside this set -- applying a looser rule to our own ledger,
+                # which reaches the same sinks, is the wrong way round.
+                errors.append(
+                    f"{where}: 'id' must match {ID_PATTERN.pattern} -- letters, digits, "
+                    f"dot, underscore and hyphen. Got {identifier!r}."
+                )
             else:
                 where = f"{path}: {section}[{index}] ({identifier})"
 
@@ -294,6 +314,11 @@ def main() -> int:
     )
     args = parser.parse_args()
     path = args.path
+
+    # A negative window silently lists only entries that have already lapsed, which
+    # reads as "nothing is expiring soon" to a caller that asked for a warning.
+    if args.expiring_within is not None and args.expiring_within < 0:
+        parser.error("--expiring-within takes a non-negative number of days")
 
     errors = check(path)
 
