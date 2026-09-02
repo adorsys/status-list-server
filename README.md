@@ -257,11 +257,10 @@ The server can be deployed using a containerization platform such as Docker.
 ### Helm Chart Deployment
 
 To deploy the server on Kubernetes, follow the [Operator Deployment Guide](helm/README.md) —
-start at the [Helm chart page](helm/README.md) and open its linked
-[deployment guide](helm/DEPLOYMENT.md), a single-page, step-by-step brief (prerequisites →
-image choice → secrets → `helm` install → verification) with deeplinks to each step and no
-need to understand the server's internals. The detailed operator documentation and deep-dive
-references are linked from that page.
+a single-page, step-by-step brief (prerequisites → image choice → secrets → signing
+credentials → `helm` install → verification) that requires no understanding of the server's
+internals. The detailed operator documentation and deep-dive references are linked from that
+page.
 
 ### Container Supply Chain
 

@@ -48,7 +48,7 @@ The Status List Server is a Rust-based microservice deployed on AWS EKS. This do
 | Database           | PostgreSQL 18 / MySQL 9     | Persistent storage via SeaORM          |
 | Container          | Docker / BuildKit           | Multi-platform builds (amd64, arm64)   |
 | Orchestration      | Kubernetes (AWS EKS)        | Container orchestration                |
-| Package Manager    | Helm 3                      | Kubernetes resource management         |
+| Package Manager    | Helm 4                      | Kubernetes resource management         |
 | Observability      | OpenTelemetry + Prometheus  | Tracing, metrics, log aggregation      |
 | Secrets            | External Secrets Operator   | AWS Secrets Manager integration        |
 | DNS                | External-DNS + cert-manager | Automated DNS + TLS certificates       |
