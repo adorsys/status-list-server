@@ -36,17 +36,18 @@ hexagonal-architecture walkthrough.
 
 ## Guide map
 
-| Guide                                                              | What it gives you                                                                  |
-| ------------------------------------------------------------------ | ---------------------------------------------------------------------------------- |
-| [01-prerequisites.md](01-prerequisites.md)                         | Cluster, Helm, External Secrets Operator, and registry access requirements         |
-| [02-choosing-your-image.md](02-choosing-your-image.md)             | Decision matrix for the 5 image variants and their feature sets                    |
-| [03-helm-installation.md](03-helm-installation.md)                 | Step-by-step installs: EKS, GKE, AKS, Vault/OpenBao, filesystem credentials, local |
-| [04-configuration-reference.md](04-configuration-reference.md)     | Exhaustive reference of every `APP_*` environment variable and validation rule     |
-| [05-token-signing-credentials.md](05-token-signing-credentials.md) | Status List token signing keys and issuer certificates vs. ingress TLS             |
-| [06-secret-rotation.md](06-secret-rotation.md)                     | Zero-downtime rotation of keys, certificates, and Vault leases                     |
-| [07-scaling-and-availability.md](07-scaling-and-availability.md)   | Connection pools, HPA, PodDisruptionBudgets, resource quotas                       |
-| [08-observability.md](08-observability.md)                         | Prometheus metrics, rotation telemetry, OpenTelemetry, health endpoints            |
-| [09-upgrading.md](09-upgrading.md)                                 | Version migrations, database schema migrations, Helm upgrade procedures            |
+| Guide                                                              | What it gives you                                                                   |
+| ------------------------------------------------------------------ | ----------------------------------------------------------------------------------- |
+| [01-prerequisites.md](01-prerequisites.md)                         | Cluster, Helm, External Secrets Operator, and registry access requirements          |
+| [02-choosing-your-image.md](02-choosing-your-image.md)             | Decision matrix for the 5 image variants and their feature sets                     |
+| [03-helm-installation.md](03-helm-installation.md)                 | Step-by-step installs: EKS, GKE, AKS, Vault/OpenBao, filesystem credentials, local  |
+| [04-configuration-reference.md](04-configuration-reference.md)     | Exhaustive reference of every `APP_*` environment variable and validation rule      |
+| [05-token-signing-credentials.md](05-token-signing-credentials.md) | Status List token signing keys and issuer certificates vs. ingress TLS              |
+| [06-secret-rotation.md](06-secret-rotation.md)                     | Zero-downtime rotation of keys, certificates, and Vault leases                      |
+| [07-scaling-and-availability.md](07-scaling-and-availability.md)   | Connection pools, HPA, PodDisruptionBudgets, resource quotas                        |
+| [08-observability.md](08-observability.md)                         | Prometheus metrics, rotation telemetry, OpenTelemetry, health endpoints             |
+| [09-upgrading.md](09-upgrading.md)                                 | Version migrations, database schema migrations, Helm upgrade procedures             |
+| [10-troubleshooting.md](10-troubleshooting.md)                     | Error-indexed troubleshooting: startup, rotation, ESO/Kubernetes, and upgrade fixes |
 
 ## Quick start (TL;DR)
 
@@ -75,6 +76,10 @@ kubectl logs -l app.kubernetes.io/name=status-list-server -n statuslist --tail=1
 curl -s https://<your-host>/health/live
 curl -s https://<your-host>/health/ready
 ```
+
+If any step fails, jump to the error-indexed
+[10-troubleshooting.md](10-troubleshooting.md) reference — it maps the exact error message
+or symptom to its root cause, diagnostics, and fix.
 
 ## Files you should read before deploying
 
