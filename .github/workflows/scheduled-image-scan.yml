@@ -39,7 +39,12 @@ env:
   # exactly because that check exists; do not remove one without the other.
   DEPLOYED_VARIANT: ${{ vars.IMAGE_VARIANT || 'aws' }}
   EXPIRY_WARN_DAYS: "30"
-  ISSUE_MARKER: "<!-- scheduled-image-scan -->"
+  # The tracking issue is found by this label and nothing else. There was once also a
+  # `<!-- scheduled-image-scan -->` body marker, left over from locating the issue by
+  # body search; that approach was rejected because a search paged at 100 open issues
+  # silently starts filing a second issue every night. The marker outlived it and was
+  # read by nothing, which is worse than useless -- it advertises a lookup key that
+  # does not exist and invites the next person to reimplement the search.
   ISSUE_LABEL: scheduled-image-scan
 
 jobs:
@@ -244,17 +249,24 @@ jobs:
           done
 
       - name: Derive SARIF
-        # From the full report with the gate's severity floor, not from the gate set:
-        # an accepted exception should still file an alert to be dismissed, so the
-        # ledger cannot quietly hide a finding from the Security tab.
+        # Converted from `trivy-highcrit-all-<arch>.json` -- the pre-ledger HIGH/CRITICAL
+        # set derive-trivy-reports.sh already produced -- rather than re-filtering the
+        # full report here.
+        #
+        # Two reasons, and the second is the load-bearing one. It is the set an accepted
+        # exception is still in, so the ledger cannot quietly hide a finding from the
+        # Security tab. And it carries no `--severity` flag of its own: restating
+        # `HIGH,CRITICAL` here would put the severity floor in two places, one of which
+        # is the script that declares itself the gate configuration. Change the floor
+        # there and the alerts would silently keep the old one -- exactly the invisible
+        # drift extracting that script was meant to end.
         if: steps.resolve.outputs.resolved == 'true'
         run: |
           set -eu
           for arch in $SCAN_ARCHES; do
             trivy convert \
-              --severity HIGH,CRITICAL \
               --format sarif --output "image-${VARIANT}-${arch}.sarif" \
-              "trivy-image-report-${arch}.json"
+              "trivy-highcrit-all-${arch}.json"
           done
 
       - name: Prove the gate can fail
@@ -273,8 +285,21 @@ jobs:
           INDEX_DIGEST: ${{ steps.resolve.outputs.index_digest }}
         run: |
           set -eu
+          # scan-summary-<variant>.json is the contract everything downstream reports
+          # from. Three steps write it -- this one, "Record an unresolved variant", and
+          # the coverage accounting in `report` -- and four read it, so the shape is
+          # fixed and worth stating once:
+          #
+          #   variant       string    which image variant this row is about
+          #   status        string    scanned | unavailable | failed
+          #   advisories    [string]  distinct HIGH/CRITICAL IDs surviving the ledger
+          #   suppressed    number    HIGH/CRITICAL IDs the ledger hid; 0 when not scanned
+          #   index_digest  string    only on a "scanned" row
+          #   manifests     object    {amd64, arm64}; only on a "scanned" row
+          #
+          # The last two are absent rather than empty on a row that never got that far.
+          # Consumers default them with `// "-"` rather than assuming they are present.
           advisories=$(jq -s '[.[].Results[]?.Vulnerabilities[]?.VulnerabilityID] | unique' trivy-gate-findings-*.json)
-          occurrences=$(jq -s '[.[].Results[]?.Vulnerabilities[]?] | length' trivy-gate-findings-*.json)
           total=$(jq -s '[.[].Results[]?.Vulnerabilities[]?.VulnerabilityID] | unique | length' trivy-highcrit-all-*.json)
 
           jq -n \
@@ -283,11 +308,10 @@ jobs:
             --arg amd64 "${MANIFEST_AMD64:-}" \
             --arg arm64 "${MANIFEST_ARM64:-}" \
             --argjson advisories "$advisories" \
-            --argjson occurrences "$occurrences" \
             --argjson total "$total" \
             '{variant: $variant, status: "scanned", index_digest: $index,
               manifests: {amd64: $amd64, arm64: $arm64},
-              advisories: $advisories, occurrences: $occurrences,
+              advisories: $advisories,
               suppressed: ($total - ($advisories | length))}' \
             > "scan-summary-${VARIANT}.json"
 
@@ -301,8 +325,7 @@ jobs:
         run: |
           set -eu
           jq -n --arg variant "$VARIANT" \
-            '{variant: $variant, status: "unavailable", advisories: [],
-              occurrences: 0, suppressed: 0}' \
+            '{variant: $variant, status: "unavailable", advisories: [], suppressed: 0}' \
             > "scan-summary-${VARIANT}.json"
 
       - name: Upload scan results
@@ -360,9 +383,9 @@ jobs:
       - name: Account for variants that never reported
         # A missing summary means that leg died before it could say anything. That is
         # an infrastructure failure and it must not read downstream as "clean" -- but
-        # it must not withhold the variants that *did* report either. `fail-fast: false`
-        # was set so one variant's trouble could not do that, and failing the run here
-        # would have undone it eleven lines later.
+        # it must not withhold the variants that *did* report either, which is what
+        # `fail-fast: false` on the matrix exists to guarantee and what failing here
+        # would take back.
         #
         # So a missing leg becomes a row like any other, and the verdict accounts for
         # it at the end, next to the findings gate. Information and verdict separate.
@@ -383,8 +406,7 @@ jobs:
             if [ -z "$(find artifacts -name "scan-summary-${variant}.json" -print -quit)" ]; then
               missing="${missing:+${missing} }${variant}"
               jq -n --arg variant "$variant" \
-                '{variant: $variant, status: "failed", advisories: [],
-                  occurrences: 0, suppressed: 0}' \
+                '{variant: $variant, status: "failed", advisories: [], suppressed: 0}' \
                 > "artifacts/unreported/scan-summary-${variant}.json"
             fi
           done
@@ -591,9 +613,14 @@ jobs:
             echo
             echo "Deployed variant: \`${DEPLOYED_VARIANT}\` (from \`vars.IMAGE_VARIANT\`) — **${DEPLOYED_STATUS}**"
             echo
-            echo "| Variant | Status | Index digest | amd64 manifest | arm64 manifest | Advisories |"
-            echo "| --- | --- | --- | --- | --- | --- |"
-            jq -r '.[] | "| `\(.variant)` | \(.status) | `\(.index_digest // "-")` | `\(.manifests.amd64 // "-")` | `\(.manifests.arm64 // "-")` | \(.advisories | length) |"' summaries.json
+            # `Suppressed` is the count the ledger hid: the difference between the
+            # HIGH/CRITICAL set before .trivyignore.yaml and after it. Rendered rather
+            # than merely recorded, because it is what separates "nothing was found"
+            # from "everything found was accepted" -- a green gate looks identical
+            # either way, and only this column says which one you are looking at.
+            echo "| Variant | Status | Index digest | amd64 manifest | arm64 manifest | Advisories | Suppressed |"
+            echo "| --- | --- | --- | --- | --- | --- | --- |"
+            jq -r '.[] | "| `\(.variant)` | \(.status) | `\(.index_digest // "-")` | `\(.manifests.amd64 // "-")` | `\(.manifests.arm64 // "-")` | \(.advisories | length) | \(.suppressed // 0) |"' summaries.json
             echo
             echo "Index and per-architecture manifest digests differ. \`kubectl get pod -o jsonpath='{..imageID}'\` may report either, so compare against whichever matches."
             echo
@@ -619,13 +646,16 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Open or update the tracking issue
-        # One issue, found by label. The label is created idempotently first, which is
-        # what removes the objection that sent an earlier version to a body search:
-        # `gh issue create --label` fails outright when the label does not exist, but
-        # `gh label create --force` is a no-op when it does. A label is an exact,
-        # unbounded key; a body search paged at 100 open issues silently starts filing
-        # a second issue every night once the repository crosses that line, which is
-        # the failure the "one issue, not one per run" requirement names.
+        # One issue, found by label. The label is created idempotently first, because
+        # `gh issue create --label` fails outright when the label does not exist while
+        # `gh label create --force` is a no-op when it does -- so the notification path
+        # cannot break on repository configuration, for one line.
+        #
+        # A label rather than a marker in the issue body: a label is an exact, unbounded
+        # key, where a body search has to be paged. Paged at 100, it silently stops
+        # finding the tracking issue once the repository holds that many open issues and
+        # opens a fresh one every night -- the exact failure "one issue, not one per
+        # run" names.
         #
         # Gated on the aggregation succeeding, which is the Decision that keeps a Trivy
         # database or registry failure from filing an issue titled as if a vulnerability
@@ -700,7 +730,6 @@ jobs:
           fi
 
           {
-            echo "$ISSUE_MARKER"
             echo "<!-- advisories: ${ADVISORIES} -->"
             echo "<!-- expiring: ${expiring_key} -->"
             echo
