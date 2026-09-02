@@ -140,9 +140,9 @@ jobs:
 
           echo "self-test passed: the gate fails, and names every expected finding, on a known-bad workflow."
 
-      # `ci-success.needs` is hand-maintained, so a job missing from it fails without
-      # blocking the merge. `docker-build` already did.
       - name: Assert every job is gated by ci-success
+        # `ci-success.needs` is hand-maintained, so a job missing from it fails without
+        # blocking the merge. `docker-build` already did.
         if: ${{ !cancelled() }}
         # `yq` (mikefarah v4) is part of the documented ubuntu-latest image contract,
         # alongside `jq`, so it is not an unstated dependency:
@@ -506,6 +506,17 @@ jobs:
           python3 -c 'import yaml' 2>/dev/null || sudo apt-get install -y python3-yaml
           python3 -m unittest discover -s scripts/tests -p 'test_*.py'
           python3 scripts/check-trivyignore.py .trivyignore.yaml
+
+      - name: Assert the image variant lists agree across workflows
+        # GitHub does not expose `env` to `strategy.matrix`, so the variant list is
+        # restated in deploy.yml's three fan-out matrices and again in the scheduled
+        # re-scan. The drift is asymmetric and one half is invisible: a variant added
+        # to deploy.yml but not to the re-scan is built, promoted, deployed and never
+        # re-scanned, with nothing going red.
+        #
+        # Checked here rather than only in the nightly so it fails for whoever adds the
+        # variant, while they are looking at it, rather than at 03:37 the next night.
+        run: python3 scripts/check-variant-parity.py
 
       - name: Setup Helm
         uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
