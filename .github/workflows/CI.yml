@@ -518,6 +518,14 @@ jobs:
         # variant, while they are looking at it, rather than at 03:37 the next night.
         run: python3 scripts/check-variant-parity.py
 
+      - name: Prove the attestation check can fail
+        # Runs on every pull request, unlike scripts/gate-selftest.sh, because this one
+        # needs nothing installed: no network, no registry, no image, and not even a real
+        # gh -- every case is a stubbed gh on PATH. So the drift is caught by whoever
+        # changes the verifier, while they are looking at it, rather than on the last
+        # step before a production deploy.
+        run: bash scripts/attestation-selftest.sh
+
       - name: Setup Helm
         uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
 

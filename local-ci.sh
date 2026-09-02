@@ -52,7 +52,14 @@ else
     echo "  skipped: trivy not found"
 fi
 
-# 8. Image reference resolution (same as CI)
+# 8. Provenance verification wiring (needs no network, no image and no gh)
+# The verifier enforces a gh version floor because `gh attestation verify` exited 0 on a
+# missing attestation until 2.67.0. This proves the verifier still rejects that, along
+# with the four other ways a verification can be absent rather than successful.
+echo "Checking attestation verification wiring..."
+bash scripts/attestation-selftest.sh
+
+# 9. Image reference resolution (same as CI)
 # The digest branch of the chart's image conditionals is only exercised here; a
 # regression means production stops running the digest that was scanned.
 echo "Checking image reference resolution..."
