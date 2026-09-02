@@ -83,22 +83,16 @@ spec:
     # Absorbs anything not explicitly routed.
     - name: noop
 
-    # Dead-man's-switch for the always-firing Watchdog. When dmsWebhookUrl is not
-    # configured this is an empty receiver and the Watchdog is silently absorbed.
+    # Dead-man's-switch for the always-firing Watchdog. When dmsWebhookUrl / dmsEnabled is not
+    # configured, this is an empty receiver and the Watchdog is silently absorbed.
+    # When using existingSecret, set dmsEnabled: true if the secret contains key "dms-webhook-url".
     - name: deadmansswitch
-      {{- if or .Values.alerting.dmsWebhookUrl .Values.alerting.existingSecret }}
+      {{- if or .Values.alerting.dmsWebhookUrl .Values.alerting.dmsEnabled }}
       webhookConfigs:
         - url:
-            {{- if .Values.alerting.existingSecret }}
-            # When using existingSecret, the DMS URL must also live there under key "dms-webhook-url".
             secretKeyRef:
               name: {{ $secretName | quote }}
               key: dms-webhook-url
-            {{- else if .Values.alerting.dmsWebhookUrl }}
-            secretKeyRef:
-              name: {{ $secretName | quote }}
-              key: dms-webhook-url
-            {{- end }}
           sendResolved: false
       {{- end }}
 

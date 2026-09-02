@@ -75,6 +75,7 @@ spec:
           annotations:
             summary: "Prometheus alerting pipeline is healthy (Watchdog)"
             runbook_url: "https://github.com/adorsys/status-list-server/blob/develop/observability/README.md"
+            dashboard_url: "http://localhost:3000/d/status-list-slo"
         - alert: StatusListMetricsAbsent
           expr: absent(http_server_duration_seconds_bucket{otel_scope_name="status-list-server"})
           for: 5m
@@ -85,6 +86,7 @@ spec:
           annotations:
             summary: "status-list-server metrics absent for 5m (target down or not scraped)"
             runbook_url: "https://github.com/adorsys/status-list-server/blob/develop/observability/README.md"
+            dashboard_url: "http://localhost:3000/d/status-list-slo"
         - alert: RequestLatencyFastBurn
           expr: sli:request_latency:p95:1h > {{ .Values.slo.requestLatencyP95 }} and sli:request_latency:p95:5m > {{ .Values.slo.requestLatencyP95 }}
           for: 5m
@@ -96,6 +98,7 @@ spec:
           annotations:
             summary: "Request latency P95 sustainably above 300ms (>300ms on the 1h window)"
             runbook_url: "https://github.com/adorsys/status-list-server/blob/develop/observability/runbooks/request-latency.md"
+            dashboard_url: "http://localhost:3000/d/status-list-slo"
         - alert: RequestLatencySlowBurn
           expr: sli:request_latency:p95:6h > {{ .Values.slo.requestLatencyP95 }} and sli:request_latency:p95:30m > {{ .Values.slo.requestLatencyP95 }}
           for: 30m
@@ -107,6 +110,7 @@ spec:
           annotations:
             summary: "Request latency P95 sustained above 300ms on the 6h window"
             runbook_url: "https://github.com/adorsys/status-list-server/blob/develop/observability/runbooks/request-latency.md"
+            dashboard_url: "http://localhost:3000/d/status-list-slo"
         - alert: ErrorRateFastBurn
           expr: sli:error_rate:1h >= {{ mulf .Values.slo.errorRateTarget .Values.slo.fastBurnMultiplier | printf "%.3f" }} and sli:error_rate:5m >= {{ mulf .Values.slo.errorRateTarget .Values.slo.fastBurnMultiplier | printf "%.3f" }}
           for: 5m
@@ -118,6 +122,7 @@ spec:
           annotations:
             summary: "5xx error rate burning the error budget fast (>=14.4x over 0.5% budget on the 1h window)"
             runbook_url: "https://github.com/adorsys/status-list-server/blob/develop/observability/runbooks/error-rate.md"
+            dashboard_url: "http://localhost:3000/d/status-list-slo"
         - alert: ErrorRateSlowBurn
           expr: sli:error_rate:6h >= {{ mulf .Values.slo.errorRateTarget .Values.slo.slowBurnMultiplier | printf "%.3f" }} and sli:error_rate:30m >= {{ mulf .Values.slo.errorRateTarget .Values.slo.slowBurnMultiplier | printf "%.3f" }}
           for: 30m
@@ -129,6 +134,7 @@ spec:
           annotations:
             summary: "5xx error rate burning the error budget slowly (>=6x over 0.5% budget on the 6h window)"
             runbook_url: "https://github.com/adorsys/status-list-server/blob/develop/observability/runbooks/error-rate.md"
+            dashboard_url: "http://localhost:3000/d/status-list-slo"
         - alert: DbLatencyFastBurn
           expr: sli:db_query_latency:p95:1h > {{ .Values.slo.dbLatencyP95 }} and sli:db_query_latency:p95:5m > {{ .Values.slo.dbLatencyP95 }}
           for: 5m
@@ -140,6 +146,7 @@ spec:
           annotations:
             summary: "DB query latency P95 sustainably above 50ms (>50ms on the 1h window)"
             runbook_url: "https://github.com/adorsys/status-list-server/blob/develop/observability/runbooks/db-latency.md"
+            dashboard_url: "http://localhost:3000/d/status-list-slo"
         - alert: DbLatencySlowBurn
           expr: sli:db_query_latency:p95:6h > {{ .Values.slo.dbLatencyP95 }} and sli:db_query_latency:p95:30m > {{ .Values.slo.dbLatencyP95 }}
           for: 30m
@@ -151,6 +158,7 @@ spec:
           annotations:
             summary: "DB query latency P95 sustained above 50ms on the 6h window"
             runbook_url: "https://github.com/adorsys/status-list-server/blob/develop/observability/runbooks/db-latency.md"
+            dashboard_url: "http://localhost:3000/d/status-list-slo"
         - alert: TokenGenerationFastBurn
           expr: sli:token_gen_failure_rate:1h >= {{ mulf .Values.slo.errorRateTarget .Values.slo.fastBurnMultiplier | printf "%.3f" }} and sli:token_gen_failure_rate:5m >= {{ mulf .Values.slo.errorRateTarget .Values.slo.fastBurnMultiplier | printf "%.3f" }}
           for: 5m
@@ -162,6 +170,7 @@ spec:
           annotations:
             summary: "Token-generation failures burning the error budget fast (>=14.4x over 0.5% budget on the 1h window)"
             runbook_url: "https://github.com/adorsys/status-list-server/blob/develop/observability/runbooks/token-generation.md"
+            dashboard_url: "http://localhost:3000/d/status-list-slo"
         - alert: TokenGenerationSlowBurn
           expr: sli:token_gen_failure_rate:6h >= {{ mulf .Values.slo.errorRateTarget .Values.slo.slowBurnMultiplier | printf "%.3f" }} and sli:token_gen_failure_rate:30m >= {{ mulf .Values.slo.errorRateTarget .Values.slo.slowBurnMultiplier | printf "%.3f" }}
           for: 30m
@@ -173,6 +182,7 @@ spec:
           annotations:
             summary: "Token-generation failure rate burning the error budget slowly (>=6x over 0.5% budget on the 6h window)"
             runbook_url: "https://github.com/adorsys/status-list-server/blob/develop/observability/runbooks/token-generation.md"
+            dashboard_url: "http://localhost:3000/d/status-list-slo"
         - alert: CacheHitRatioLow
           expr: sli:cache_hit_ratio:5m < {{ .Values.slo.cacheHitRatioMin }}
           for: 15m
@@ -185,6 +195,7 @@ spec:
             summary: "Status-list cache hit ratio below 85% for 15m (degradation, not outage)"
             description: 'Current cache hit ratio: {{ `{{ $value | humanizePercentage }}` }}'
             runbook_url: "https://github.com/adorsys/status-list-server/blob/develop/observability/runbooks/cache-hit-ratio.md"
+            dashboard_url: "http://localhost:3000/d/status-list-slo"
         - alert: ErrorBudgetCritical
           expr: sli:error_budget:success:30d < {{ .Values.slo.errorBudgetCriticalThreshold }}
           for: 5m
@@ -197,6 +208,7 @@ spec:
             summary: "Error budget is below 10% for the 30d window"
             description: 'Remaining error budget: {{ `{{ $value | humanizePercentage }}` }}'
             runbook_url: "https://github.com/adorsys/status-list-server/blob/develop/observability/runbooks/error-budget.md"
+            dashboard_url: "http://localhost:3000/d/status-list-slo"
         - alert: TokenGenErrorBudgetCritical
           expr: sli:token_gen_error_budget:30d < {{ .Values.slo.errorBudgetCriticalThreshold }}
           for: 5m
@@ -209,6 +221,7 @@ spec:
             summary: "Token generation error budget below 10% for the 30d window"
             description: 'Remaining token generation error budget: {{ `{{ $value | humanizePercentage }}` }}'
             runbook_url: "https://github.com/adorsys/status-list-server/blob/develop/observability/runbooks/token-generation.md"
+            dashboard_url: "http://localhost:3000/d/status-list-slo"
         - alert: CertRenewalFailures
           expr: cert_time_to_expiry_seconds{otel_scope_name="status-list-server"} <= {{ .Values.slo.certExpiryWarnSeconds }}
           for: 30m
@@ -221,6 +234,7 @@ spec:
             summary: "Certificate expires within 14 days (renewal loop not refreshing it)"
             description: 'Time to expiry: {{ `{{ $value }}` }}s'
             runbook_url: "https://github.com/adorsys/status-list-server/blob/develop/observability/runbooks/cert-renewal.md"
+            dashboard_url: "http://localhost:3000/d/status-list-slo"
         - alert: CertRenewalErrorBudgetCritical
           expr: cert_time_to_expiry_seconds{otel_scope_name="status-list-server"} <= {{ .Values.slo.certExpiryCriticalSeconds }}
           for: 10m
@@ -233,5 +247,6 @@ spec:
             summary: "Certificate expires within 7 days (imminent expiry)"
             description: 'Time to expiry: {{ `{{ $value }}` }}s'
             runbook_url: "https://github.com/adorsys/status-list-server/blob/develop/observability/runbooks/cert-renewal.md"
+            dashboard_url: "http://localhost:3000/d/status-list-slo"
 {{- end }}
 

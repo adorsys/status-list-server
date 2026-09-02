@@ -113,7 +113,9 @@ No application code is involved.
 - **Supported platforms** — `discord`, `slack`, `teams`, `mattermost`, `email`,
   `webhook` (generic). Native receivers are used for Discord/Slack/email; Teams
   and Mattermost use Alertmanager's generic webhook JSON.
-- **Test with a real channel** — see the step-by-step Discord guide:
+- **Alert Payload & Links** — Every notification payload includes contextual labels, summary/description, Git runbook links (`runbook_url`), and Grafana dashboard links (`dashboard_url`: `http://localhost:3000/d/status-list-slo`).
+- **Resilience & Monitoring** — Alertmanager retries transient delivery failures with exponential back-off and emits `alertmanager_notifications_failed_total` metrics to monitor delivery health.
+- **Test with a real channel** — see the step-by-step Discord guide and full JSON payload schema:
   `runbooks/webhook-notifications.md`.
 - **Automated test** — `alertmanager/tests/test-alertmanager-config.sh`
   validates every platform's generated config and proves a real Alertmanager
