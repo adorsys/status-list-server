@@ -563,9 +563,9 @@ egress:
 ## Further Reading
 
 - [Secrets Risk: ESO vs Workload Identity](secrets-risk-eso-vs-workload-identity.md)
-- [Database Backend Guidance](docs/database-backends.md)
-- [Observability Guide](docs/observability.md)
-- [DNS Provider Setup](docs/dns-providers.md)
-- [Secrets Backend Guidance](docs/secrets-backends.md)
-- [Helm Deployment Guide](helm/README.md)
-- [Deployment Runbook](docs/deployment-runbook.md)
+- [Database Backend Guidance](database-backends.md)
+- [Observability Guide](observability.md)
+- [DNS Provider Setup](dns-providers.md)
+- [Secrets Backend Guidance](secrets-backends.md)
+- [Helm Deployment Guide](../helm/README.md)
+- [Deployment Runbook](deployment-runbook.md)

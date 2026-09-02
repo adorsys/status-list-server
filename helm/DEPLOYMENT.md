@@ -160,6 +160,8 @@ In this repository you can consult the curated deep-dive pages for operational b
 
 - [`../docs/deployment-architecture.md`](../docs/deployment-architecture.md) — the full
   Kubernetes/Helm topology and architecture.
+- [`../docs/deployment-runbook.md`](../docs/deployment-runbook.md) — the GitHub Actions
+  release/deploy flow that injects the image and deploys to production.
 - [`../docs/secrets-risk-eso-vs-workload-identity.md`](../docs/secrets-risk-eso-vs-workload-identity.md)
   — risk trade-offs between ESO-mounted credentials (chart default) and Workload Identity;
   read this before choosing in step 3.
