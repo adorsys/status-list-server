@@ -25,6 +25,14 @@ env:
   HELM_RELEASE_NAME: statuslist
   HELM_NAMESPACE: statuslist-production
   APP_DATABASE_PORT: ${{ vars.APP_DATABASE_PORT }}
+  # The same expression the `deploy` job resolves IMAGE_VARIANT from, evaluated here at
+  # workflow level where no environment is in scope. `deploy` runs in `environment:
+  # production`, so an environment-scoped `IMAGE_VARIANT` would win there and be
+  # invisible to anything outside that environment -- including scheduled-image-scan.yml,
+  # whose central assertion is that the variant serving production was re-scanned.
+  # The two values are compared in `deploy` so that divergence fails a deploy rather
+  # than silently pointing the nightly at the wrong image. See "Known Gaps".
+  REPO_IMAGE_VARIANT: ${{ vars.IMAGE_VARIANT || 'aws' }}
 
 jobs:
   # No `if:` guard -- a skip here would cascade to everything that needs it. The
@@ -651,6 +659,41 @@ jobs:
             echo "APP_DATABASE_PORT repository/environment variable is required" >&2
             exit 1
           fi
+
+      - name: Assert the deployed variant is visible outside this environment
+        # `vars.IMAGE_VARIANT` resolves environment-scoped variables first, and this job
+        # runs in `environment: production`. Nothing outside that environment can see an
+        # environment-scoped value -- and scheduled-image-scan.yml is outside it, by
+        # design, because giving a nightly cron a job in `production` would make it wait
+        # on that environment's reviewers.
+        #
+        # So the nightly reads the repository-scoped value and asserts the image serving
+        # production was re-scanned. If an environment-scoped override ever appears, that
+        # assertion silently starts verifying a variant nobody is running: the nightly
+        # goes green having scanned `aws` while production serves `vault`, and nothing
+        # anywhere reports a problem.
+        #
+        # This is the only place both scopes are visible at once, so this is where the
+        # divergence is caught. Failing a deploy is recoverable in minutes; a security
+        # control quietly watching the wrong artifact is not discovered at all.
+        # Both values are already in the shell environment -- `IMAGE_VARIANT` from this
+        # job's `env:` (environment scope) and `REPO_IMAGE_VARIANT` from the workflow's
+        # (repository scope) -- so neither needs re-interpolating into the script.
+        run: |
+          set -eu
+          if [ "${IMAGE_VARIANT:-aws}" != "$REPO_IMAGE_VARIANT" ]; then
+            echo "::error::IMAGE_VARIANT differs between scopes: this environment resolves"
+            echo "'${IMAGE_VARIANT:-aws}', the repository resolves '${REPO_IMAGE_VARIANT}'."
+            echo
+            echo "An environment-scoped IMAGE_VARIANT on 'production' is invisible to"
+            echo "scheduled-image-scan.yml, which would keep re-scanning '${REPO_IMAGE_VARIANT}'"
+            echo "and reporting success while production serves '${IMAGE_VARIANT:-aws}'."
+            echo
+            echo "Set IMAGE_VARIANT at the repository level and remove the environment"
+            echo "override, or teach the nightly to read the same scope before deploying."
+            exit 1
+          fi
+          echo "IMAGE_VARIANT '${IMAGE_VARIANT:-aws}' is visible to the scheduled re-scan."
 
       - name: Build Helm dependencies
         run: |
