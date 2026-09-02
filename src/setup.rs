@@ -1285,6 +1285,7 @@ mod general_tests {
     #[tokio::test]
     async fn postgres_password_file_rotation_failure_retains_old_pool_and_redacts_passwords() {
         use crate::outbound::sql::test_containers::postgres_helpers::postgres_connection;
+        use sea_orm::ConnectionTrait;
 
         let test_db = postgres_connection().await;
         let parsed = url::Url::parse(&test_db.url).expect("postgres test URL");
