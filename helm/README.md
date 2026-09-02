@@ -329,22 +329,27 @@ alerting:
 Two modes are available:
 
 **Inline (development / quick-start only):**
+
 ```yaml
 alerting:
   enabled: true
   platform: discord
   webhookUrl: "https://discord.com/api/webhooks/XXXX/YYYY"  # never commit real tokens
 ```
+
 The chart renders its own `Secret` from the inline value. Suitable for local or staging only.
 
 **Pre-existing Secret (recommended for production):**
+
 ```yaml
 alerting:
   enabled: true
   platform: discord
   existingSecret: statuslist-alerting-credentials  # chart does NOT render its own Secret
 ```
+
 Create or sync the Secret externally (e.g. via ESO):
+
 ```yaml
 # Secret keys per platform:
 #   webhook-based (discord/slack/teams/mattermost/webhook): "webhook-url"
@@ -354,12 +359,12 @@ Create or sync the Secret externally (e.g. via ESO):
 
 ### Route Tree
 
-| Matcher | Receiver | Repeat |
-|---|---|---|
-| `severity=none` | `deadmansswitch` (DMS ping or silent noop) | — |
-| `severity=page` | `human` (your platform) | 4 h |
-| `severity=warn` | `human` (your platform) | 24 h |
-| _(anything else)_ | `noop` (silently absorbed) | — |
+| Matcher           | Receiver                                   | Repeat   |
+| ----------------- | ------------------------------------------ | -------- |
+| `severity=none`   | `deadmansswitch` (DMS ping or silent noop) | —        |
+| `severity=page`   | `human` (your platform)                    | 4 h      |
+| `severity=warn`   | `human` (your platform)                    | 24 h     |
+| _(anything else)_ | `noop` (silently absorbed)                 | —        |
 
 Inhibition rule: a `warn` for the same `sli`+`service` as a firing `page` is suppressed.
 
@@ -373,14 +378,14 @@ silently absorbed and never reaches a human channel.
 
 ### Supported Platforms
 
-| `alerting.platform` | Required Secret key | Notes |
-|---|---|---|
-| `discord` | `webhook-url` | Native `discordConfigs` receiver |
-| `slack` | `webhook-url` | Native `slackConfigs` receiver |
-| `teams` | `webhook-url` | Generic `webhookConfigs` (no native Teams receiver in Alertmanager) |
-| `mattermost` | `webhook-url` | Generic `webhookConfigs` |
-| `webhook` | `webhook-url` | Generic `webhookConfigs` (standard Alertmanager JSON payload) |
-| `email` | `email-to`, `smtp-host`, `smtp-port`, `smtp-from` | Native `emailConfigs` receiver |
+| `alerting.platform` | Required Secret key                                 | Notes                                                                 |
+| ------------------- | --------------------------------------------------- | --------------------------------------------------------------------- |
+| `discord`           | `webhook-url`                                       | Native `discordConfigs` receiver                                      |
+| `slack`             | `webhook-url`                                       | Native `slackConfigs` receiver                                        |
+| `teams`             | `webhook-url`                                       | Generic `webhookConfigs` (no native Teams receiver in Alertmanager)   |
+| `mattermost`        | `webhook-url`                                       | Generic `webhookConfigs`                                              |
+| `webhook`           | `webhook-url`                                       | Generic `webhookConfigs` (standard Alertmanager JSON payload)         |
+| `email`             | `email-to`, `smtp-host`, `smtp-port`, `smtp-from`   | Native `emailConfigs` receiver                                        |
 
 ### Prerequisites
 
