@@ -1,4 +1,4 @@
-#![cfg(feature = "azure-kv")]
+#![cfg(feature = "azure")]
 
 use std::collections::HashMap;
 use std::sync::Arc;
