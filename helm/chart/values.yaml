@@ -77,9 +77,6 @@ statuslist:
     APP_SERVER__CERT__EKU: "1,3,6,1,5,5,7,3,30"
     APP_SERVER__CERT__RENEWAL_CRON_SCHEDULE: "0 0 0 * * *"
     # Parsed certificate chain cache TTL in seconds. "0" means no expiry; non-provisioning replicas rely on this TTL for renewed chains.
-    # File watcher poll interval in seconds for credential rotation detection.
-    # Set to enable automatic reloading of credentials from mounted secret files.
-    # APP_WATCHER__POLL_INTERVAL_SECS: "60"
     # DNS provider for ACME DNS-01 challenges: route53 | cloudflare | gcloud | azure | acmedns
     # (pebble also exists but is a development-only fake, not for deployments)
     # See docs/dns-providers.md for the settings each provider needs.
@@ -177,13 +174,21 @@ statuslist:
   #   fileEnv:
   #     APP_SERVER__CERT__STORE__CERTIFICATE_PATH: statuslist.crt
   #     APP_SERVER__CERT__STORE__SIGNING_KEY_PATH: statuslist.key
-  secretMounts: []
+  secretMounts:
+    - name: database-credentials
+      secretName: statuslist-secret
+      mountPath: /var/run/status-list-server/database
+      items:
+        - key: postgres-password
+          path: password
+      fileEnv:
+        APP_DATABASE__PASSWORD_FILE: password
 
   # Watcher configuration for file-based credential rotation detection.
   # When pollIntervalSecs is set, APP_WATCHER__POLL_INTERVAL_SECS is injected.
   # This requires an application image that implements the watcher contract from issue #456.
   watcher:
-    pollIntervalSecs: ""
+    pollIntervalSecs: "30"
   livenessProbe:
     httpGet:
       path: /health/live

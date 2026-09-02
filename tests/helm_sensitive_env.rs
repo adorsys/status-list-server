@@ -133,9 +133,10 @@ fn rendered_chart_uses_split_database_credentials() {
         "name: APP_DATABASE__HOST",
         "name: APP_DATABASE__PORT",
         "name: APP_DATABASE__USERNAME",
-        "name: APP_DATABASE__PASSWORD",
-        "secretKeyRef:",
-        "key: postgres-password",
+        "name: APP_DATABASE__PASSWORD_FILE",
+        "value: \"/var/run/status-list-server/database/password\"",
+        "name: database-credentials",
+        "secretName: statuslist-secret",
         "name: APP_DATABASE__NAME",
     ] {
         assert!(
@@ -228,5 +229,29 @@ fn rendered_chart_uses_default_database_port() {
     assert!(
         rendered.contains("name: APP_DATABASE__PORT\n              value: \"5432\""),
         "rendered Helm output must use default database port 5432 from values.yaml"
+    );
+}
+
+#[test]
+fn rendered_chart_does_not_duplicate_watcher_poll_interval() {
+    let Some(rendered) = render_helm(&[
+        "--set",
+        "statuslist.env.APP_WATCHER__POLL_INTERVAL_SECS=45",
+        "--set",
+        "statuslist.watcher.pollIntervalSecs=60",
+    ]) else {
+        return;
+    };
+
+    assert_eq!(
+        rendered
+            .matches("name: APP_WATCHER__POLL_INTERVAL_SECS")
+            .count(),
+        1,
+        "rendered Helm output must not duplicate watcher poll interval env vars"
+    );
+    assert!(
+        rendered.contains("name: APP_WATCHER__POLL_INTERVAL_SECS\n              value: \"45\""),
+        "explicit statuslist.env watcher poll interval should take precedence"
     );
 }
