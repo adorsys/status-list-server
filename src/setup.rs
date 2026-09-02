@@ -65,11 +65,7 @@ use crate::domain::{
     not(feature = "azure")
 ))]
 use crate::outbound::aws::AwsSecretsManager;
-#[cfg(all(
-    feature = "azure",
-    not(feature = "vault"),
-    not(feature = "gcp")
-))]
+#[cfg(all(feature = "azure", not(feature = "vault"), not(feature = "gcp")))]
 use crate::outbound::azure_kv::AzureKeyVaultClient;
 use crate::outbound::cache::MokaStatusListCache;
 #[cfg(feature = "acme")]
@@ -741,11 +737,7 @@ async fn build_crypto_storage(_config: &AppConfig) -> EyeResult<Box<dyn Storage>
         ))
     }
 
-    #[cfg(all(
-        feature = "azure",
-        not(feature = "vault"),
-        not(feature = "gcp")
-    ))]
+    #[cfg(all(feature = "azure", not(feature = "vault"), not(feature = "gcp")))]
     {
         tracing::info!("Using Azure Key Vault as secrets backend");
         let vault_url = _config.azure_keyvault.vault_url.clone().ok_or_else(|| {
@@ -786,12 +778,7 @@ async fn build_crypto_storage(_config: &AppConfig) -> EyeResult<Box<dyn Storage>
         ))
     }
 
-    #[cfg(not(any(
-        feature = "vault",
-        feature = "gcp",
-        feature = "azure",
-        feature = "aws"
-    )))]
+    #[cfg(not(any(feature = "vault", feature = "gcp", feature = "azure", feature = "aws")))]
     {
         tracing::info!("Using in-memory cryptographic-material backend");
         Ok(Box::new(MemoryStorage::default()))

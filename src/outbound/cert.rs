@@ -222,7 +222,10 @@ mod tests {
     fn matching_cert_and_key() -> (String, String) {
         let certified_key = rcgen::generate_simple_self_signed(vec!["localhost".to_string()])
             .expect("generate test cert and key");
-        (certified_key.cert.pem(), certified_key.signing_key.serialize_pem())
+        (
+            certified_key.cert.pem(),
+            certified_key.signing_key.serialize_pem(),
+        )
     }
 
     #[test]

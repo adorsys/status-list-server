@@ -27,7 +27,10 @@ fn init_crypto() {
 fn matching_cert_and_key() -> (String, String) {
     let certified_key = rcgen::generate_simple_self_signed(vec!["example.com".to_string()])
         .expect("generate test cert and key");
-    (certified_key.cert.pem(), certified_key.signing_key.serialize_pem())
+    (
+        certified_key.cert.pem(),
+        certified_key.signing_key.serialize_pem(),
+    )
 }
 
 struct TempDir {
@@ -664,7 +667,10 @@ async fn test_store_mixed_strategy_filesystem_cert_storage_key() {
     tokio::fs::write(&cert_path, &cert_pem).await.unwrap();
 
     let material_storage = MockStorage::new();
-    material_storage.store("source-key", &key_pem).await.unwrap();
+    material_storage
+        .store("source-key", &key_pem)
+        .await
+        .unwrap();
 
     let manager = CertManager::builder()
         .domains(["example.com"])
