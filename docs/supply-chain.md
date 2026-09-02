@@ -211,7 +211,7 @@ cargo install --locked --version 0.5.4 rust-audit-info
 rustup target add x86_64-unknown-linux-musl
 cargo auditable build --locked --release \
   --target x86_64-unknown-linux-musl \
-  --features "postgres,aws-secrets,acme"
+  --features "postgres,aws"
 
 rust-audit-info target/x86_64-unknown-linux-musl/release/status-list-server \
   | jq '.packages | length'
@@ -235,7 +235,7 @@ done
 
 The steps are in the [Operator Guide](#operator-guide). Two things that section leaves out:
 
-Read the full report artifact, not just the gate output — the gate applies a severity floor and the exception ledger, and the artifact does not, so a finding can be real and simply below the threshold. And when judging whether an advisory applies, the relevant build is the image's feature set (`postgres,aws-secrets,acme`, the `ARG FEATURES` default in the `Dockerfile`), which is narrower than what `cargo build --all-features` compiles.
+Read the full report artifact, not just the gate output — the gate applies a severity floor and the exception ledger, and the artifact does not, so a finding can be real and simply below the threshold. And when judging whether an advisory applies, the relevant build is the image's feature set (`postgres,aws`, the `ARG FEATURES` default in the `Dockerfile`), which is narrower than what `cargo build --all-features` compiles.
 
 Do not add an exception for a finding you could simply fix. An exception is for a fix that does not exist yet, cannot be taken yet, or a finding that does not apply — and the `statement` should record which of those three it is.
 
@@ -315,11 +315,11 @@ Findings about crates belong to `cargo-audit` and are fixed at the lockfile. Fin
 
 ### The Release Feature Set
 
-Source-level CI compiles two feature sets: `--all-features`, and `--no-default-features --features memory`. The image is built with neither. Its `ARG FEATURES="postgres,aws-secrets,acme"` names a combination that was reachable from no CI job at all.
+Source-level CI compiles two feature sets: `--all-features`, and `--no-default-features --features memory`. The image is built with neither. Its `ARG FEATURES="postgres,aws"` names a combination that was reachable from no CI job at all.
 
-Nothing validated that string. `ARG FEATURES` is a bare string handed to `cargo build` inside the image build, so a value naming no real feature is caught only when someone cuts a release — and it had one. The value was `postgres,aws,acme`, and `Cargo.toml` defines `aws-secrets`, not `aws`, so `cargo` would have rejected it outright.
+Nothing validated that string. `ARG FEATURES` is a bare string handed to `cargo build` inside the image build, so a value naming no real feature is caught only when someone cuts a release.
 
-`--all-features` does not stand in for the real set either. Cargo unifies features across the dependency graph, so enabling every feature of this crate compiles its shared dependencies with the union of theirs: `--all-features` turns on `postgres`, `sqlite`, and `mysql` together and builds `sea-orm` with all three `sqlx` backends, where the release set builds it with `sqlx-postgres` alone. The secret backends behave the same way — `--all-features` compiles `vault`, `gcp-secrets`, `azure-kv`, and `aws-secrets` at once; the image ships `aws-secrets` by itself.
+`--all-features` does not stand in for the real set either. Cargo unifies features across the dependency graph, so enabling every feature of this crate compiles its shared dependencies with the union of theirs: `--all-features` turns on `postgres`, `sqlite`, and `mysql` together and builds `sea-orm` with all three `sqlx` backends, where the release set builds it with `sqlx-postgres` alone. The secret backends behave the same way — `--all-features` compiles `vault`, `gcp`, `azure`, and `aws` at once; the image ships `aws` by itself.
 
 This is the shape worth remembering: **enabling every feature is not a superset of shipping some of them.** Unification builds the graph differently, and `#[cfg(not(...))]` branches exist only in the absence of a feature — so `--all-features` is its own configuration, not an upper bound on the ones you ship.
 
