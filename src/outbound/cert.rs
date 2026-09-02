@@ -1,8 +1,11 @@
 //! ACME / Store Certificate adapter implementing `CertificateProvider`.
 
+#[cfg(not(feature = "acme"))]
 use arc_swap::ArcSwap;
 use async_trait::async_trait;
+#[cfg(not(feature = "acme"))]
 use base64::prelude::{BASE64_STANDARD, Engine as _};
+#[cfg(not(feature = "acme"))]
 use std::sync::Arc;
 
 use crate::domain::{
@@ -36,14 +39,9 @@ impl CertificateProvider for AcmeCertificateProvider {
     }
 }
 
-/// Filesystem-backed certificate provider used when the `acme` feature is **disabled**.
+/// Filesystem-backed certificate provider.
 ///
-/// Loads PEM certificate chain and PKCS#8 private key from filesystem paths,
-/// validates that the certificate and key match, and caches the material in
-/// memory behind an `ArcSwap` for atomic hot-reload without downtime.
-///
-/// Both `cert_path` and `key_path` must be set together — they are always
-/// sourced from the same location type (filesystem).
+/// Loads PEM certificate chain and PKCS#8 private key from filesystem paths.
 #[cfg(not(feature = "acme"))]
 #[derive(Clone)]
 pub struct ReloadingCertificateProvider {
@@ -81,13 +79,7 @@ impl CertificateProvider for ReloadingCertificateProvider {
     }
 }
 
-/// Inline certificate provider used when the `acme` feature is **disabled** and
-/// material is supplied entirely via environment variables (e.g.
-/// `APP_SERVER__CERT__STORE__CERTIFICATE` / `APP_SERVER__CERT__STORE__SIGNING_KEY`).
-///
-/// Both certificate chain and signing key must be provided together as inline PEM
-/// strings — they are always sourced from the same location type (inline).
-/// Material is validated once at construction; a mismatch is a hard startup error.
+/// Inline certificate provider
 #[cfg(not(feature = "acme"))]
 #[derive(Clone)]
 pub struct InlineCertificateProvider {
@@ -118,6 +110,7 @@ impl CertificateProvider for InlineCertificateProvider {
     }
 }
 
+#[cfg(not(feature = "acme"))]
 async fn load_and_validate_signing_material(
     cert_path: &str,
     key_path: &str,
@@ -136,6 +129,7 @@ async fn load_and_validate_signing_material(
     })
 }
 
+#[cfg(not(feature = "acme"))]
 pub(crate) fn pem_chain_to_base64_der(cert_pem: &str) -> Result<Vec<String>, StatusListError> {
     let certs = x509_parser::pem::Pem::iter_from_buffer(cert_pem.as_bytes())
         .map(|cert| {
@@ -193,12 +187,15 @@ pub(crate) fn validate_signing_material(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(not(feature = "acme"))]
     use std::path::{Path, PathBuf};
 
+    #[cfg(not(feature = "acme"))]
     struct TempDir {
         path: PathBuf,
     }
 
+    #[cfg(not(feature = "acme"))]
     impl TempDir {
         fn new() -> Self {
             let path = std::env::temp_dir().join(format!(
@@ -215,6 +212,7 @@ mod tests {
         }
     }
 
+    #[cfg(not(feature = "acme"))]
     impl Drop for TempDir {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.path);
@@ -222,14 +220,9 @@ mod tests {
     }
 
     fn matching_cert_and_key() -> (String, String) {
-        let key = rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256)
-            .expect("generate test key");
-        let cert = rcgen::CertificateParams::new(vec!["localhost".to_string()])
-            .expect("certificate params")
-            .self_signed(&key)
-            .expect("self-signed certificate")
-            .pem();
-        (cert, key.serialize_pem())
+        let certified_key = rcgen::generate_simple_self_signed(vec!["localhost".to_string()])
+            .expect("generate test cert and key");
+        (certified_key.cert.pem(), certified_key.signing_key.serialize_pem())
     }
 
     #[test]
