@@ -343,6 +343,9 @@ alerting:
   # URL so a collapsed Prometheus/Alertmanager pipeline is detected by its ABSENCE. When
   # empty the Watchdog is silently absorbed and never reaches a human channel.
   dmsWebhookUrl: ""
+  # Explicitly enable Dead Man's Switch when using existingSecret (reads key "dms-webhook-url" from existingSecret).
+  # When dmsWebhookUrl is set above, DMS is enabled implicitly.
+  dmsEnabled: false
   # Email settings (required only when platform=email).
   email:
     to: ""

@@ -243,6 +243,7 @@
         "existingSecret": { "type": "string" },
         "webhookUrl": { "type": "string" },
         "dmsWebhookUrl": { "type": "string" },
+        "dmsEnabled": { "type": "boolean" },
         "email": {
           "type": "object",
           "properties": {

@@ -11,6 +11,11 @@
 #
 # Requires: docker (for the prom/alertmanager image), python3.
 #
+# Portability note:
+#   Step [2/2] uses `--network host` so the containerized Alertmanager can POST
+#   to mock Python servers listening on 127.0.0.1. `--network host` requires a
+#   Linux execution environment (standard for CI and Linux developer machines).
+#
 # Run from the repository root:
 #   observability/alertmanager/tests/test-alertmanager-config.sh
 set -euo pipefail
@@ -106,7 +111,7 @@ for PLATFORM in webhook discord slack teams mattermost email; do
     slack)      CREDS=(SLACK_WEBHOOK_URL=https://hooks.slack.com/services/TTT/BBB/SSS) ;;
     teams)      CREDS=(MS_TEAMS_WEBHOOK_URL=https://outlook.office.com/webhook/000/aaa) ;;
     mattermost) CREDS=(MATTERMOST_WEBHOOK_URL=https://mm.example.com/hooks/aaa) ;;
-    email)      CREDS=(ALERTMANAGER_SMTP_HOST=smtp.example.com ALERTMANAGER_EMAIL_TO=ops@example.com) ;;
+    email)      CREDS=(ALERTMANAGER_SMTP_HOST=smtp.example.com ALERTMANAGER_EMAIL_TO=ops@example.com ALERTMANAGER_SMTP_FROM=alerts@example.com) ;;
   esac
   env ALERTMANAGER_PLATFORM="$PLATFORM" ALERTMANAGER_OUT="$OUT" \
     "${CREDS[@]}" /bin/sh "$GENERATOR" >/dev/null \

@@ -135,7 +135,7 @@ EOF
   if [ "$PLATFORM" = "email" ]; then
     _host="${ALERTMANAGER_SMTP_HOST:?ALERTMANAGER: ALERTMANAGER_SMTP_HOST required for platform=email}"
     _port="${ALERTMANAGER_SMTP_PORT:-587}"
-    _from="${ALERTMANAGER_SMTP_FROM:-alertmanager@localhost}"
+    _from="${ALERTMANAGER_SMTP_FROM:?ALERTMANAGER: ALERTMANAGER_SMTP_FROM required for platform=email}"
     cat <<EOF
 global:
   smtp_smarthost: '$_host:$_port'
