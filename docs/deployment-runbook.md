@@ -151,7 +151,7 @@ If certificate provisioning or AWS-backed storage is enabled, also confirm the a
 
 The Helm chart can mount Secrets as files and inject file-path environment variables, but zero-downtime reload depends on running an application image that contains the file watcher and pool/key reload behavior from issue #456. Without that image support, treat the chart values as preparatory and perform a controlled rollout after credential or key changes.
 
-When `APP_DATABASE__PASSWORD_FILE` is configured, the chart gives file-based credentials precedence and does not inject `APP_DATABASE__PASSWORD`. This avoids a pod that mounts a rotated password file while the application silently keeps using an older startup password from an environment variable.
+The chart exposes the database password through `APP_DATABASE__PASSWORD_FILE` by default, using `statuslist.secretMounts` to mount the configured Kubernetes Secret as a file. This avoids a pod that mounts a rotated password file while the application silently keeps using an older startup password from an environment variable.
 
 The Deployment `checksum/secret` annotation tracks Helm-rendered ExternalSecret manifests. It rolls pods when the chart template or Helm values change, but it does not change when External Secrets Operator syncs new secret data from Vault, AWS, GCP, or Azure. Data-only rotations rely on Kubernetes Secret volume updates plus the application watcher, or on an explicit `kubectl rollout restart` for images without reload support.
 
