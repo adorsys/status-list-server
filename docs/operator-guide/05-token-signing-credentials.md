@@ -61,7 +61,10 @@ The server loads **externally managed** signing key and certificate material fro
 
 - **Filesystem paths** — `APP_SERVER__CERT__STORE__CERTIFICATE_PATH` and
   `APP_SERVER__CERT__STORE__SIGNING_KEY_PATH`. This is the `-fscert` path: you (or a
-  provisioning tool) place `PEM`/`DER` files at those paths in the pod.
+  provisioning tool) place `PEM`/`DER` files at those paths in the pod. In Helm, mount
+  them with `statuslist.secretMounts` + `fileEnv` (see
+  [03-helm-installation.md](03-helm-installation.md) §6), which maps the mounted files to
+  those two store paths.
 - **Storage keys** — `APP_SERVER__CERT__STORE__CERTIFICATE_KEY` and
   `APP_SERVER__CERT__STORE__SIGNING_KEY_KEY`, read from the selected backend (the key
   names within Secrets Manager / Secret Manager / Key Vault / Vault).
@@ -71,12 +74,12 @@ or raw DER; private keys must be PKCS#8 PEM or DER.
 
 ## 4. Where each piece of material goes in the chart
 
-| Material                                  | Helm / env                                                                                               |
-| ----------------------------------------- | -------------------------------------------------------------------------------------------------------- |
-| Token signing key/cert (ACME path)        | `statuslist.env.APP_SERVER__CERT__*` + image variant's backend + credentials                             |
-| Token signing key/cert (store path)       | `statuslist.env.APP_SERVER__CERT__PROVISIONING_STRATEGY=store` + filesystem volume, or `...STORE__*_KEY` |
-| Ingress TLS cert (C)                      | `statuslist.ingress.tls` (cert-manager `/ cert-manager.io/cluster-issuer`)                               |
-| Database password (unrelated to identity) | `statuslist-secret` → `postgres-password`                                                                |
+| Material                                  | Helm / env                                                                                                                         |
+| ----------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
+| Token signing key/cert (ACME path)        | `statuslist.env.APP_SERVER__CERT__*` + image variant's backend + credentials                                                       |
+| Token signing key/cert (store path)       | `statuslist.env.APP_SERVER__CERT__PROVISIONING_STRATEGY=store` + `statuslist.secretMounts[].fileEnv` (files), or `...STORE__*_KEY` |
+| Ingress TLS cert (C)                      | `statuslist.ingress.tls` (cert-manager `/ cert-manager.io/cluster-issuer`)                                                         |
+| Database password (unrelated to identity) | `statuslist-secret` → `postgres-password`, or `APP_DATABASE__PASSWORD_FILE` via `secretMounts`                                     |
 
 ## 5. Security guidance
 

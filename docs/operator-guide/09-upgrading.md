@@ -68,6 +68,16 @@ kubectl rollout status deployment/statuslist-status-list-server-deployment -n st
 kubectl logs -l app.kubernetes.io/name=status-list-server -n statuslist --tail=100
 ```
 
+> [!NOTE]
+> **Secret-change rolling.** When using External Secrets Operator, the chart injects a
+> `checksum/secret` pod annotation derived from the rendered `ExternalSecret` manifest.
+> Pods are rolled automatically **only when that manifest changes** (e.g. a changed
+> `extraExternalSecrets[]`, `target.template`, or `secretStoreRef`). Because ESO re-syncing
+> new Secret **data** from your provider (a rotated DB password or key) does not change the
+> rendered manifest, it does **not** trigger a rollout by itself — apply a
+> `kubectl rollout restart` (or `helm upgrade`) to have the new data read at startup, or
+> rely on an issue #456 image + `statuslist.watcher` for in-place reload.
+
 ### Pinning the image by digest
 
 ```bash

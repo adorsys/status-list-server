@@ -349,11 +349,13 @@ helm upgrade --install statuslist helm/chart \
 ### Using a ClusterSecretStore instead
 
 If you prefer a cluster-scoped store (requires cluster-admin to create, but reusable
-across namespaces), create it once:
+across namespaces), create it once. Note the chart now uses apiVersion
+`external-secrets.io/v1` for ESO CRs, and **skips rendering the namespaced `SecretStore`
+when you reference a `ClusterSecretStore`** — so set `secretStore.enabled: false`:
 
 ```yaml
 # clustersecretstore.yaml
-apiVersion: external-secrets.io/v1beta1
+apiVersion: external-secrets.io/v1
 kind: ClusterSecretStore
 metadata:
   name: vault-cluster
@@ -375,15 +377,26 @@ spec:
 kubectl apply -f clustersecretstore.yaml
 ```
 
-Then in the chart values:
+Then in the chart values (the `ClusterSecretStore` must already exist cluster-wide; the
+chart will not create a namespaced SecretStore):
 
 ```yaml
 externalSecret:
+  enabled: true
   spec:
     secretStoreRef:
       name: vault-cluster
       kind: ClusterSecretStore
+secretStore:
+  enabled: false # not rendered when using a ClusterSecretStore
 ```
+
+> [!NOTE]
+> Use `externalSecret.spec.target.template` to transform/combine multiple remote keys into
+> the `statuslist-secret`, and `externalSecret.extraExternalSecrets[]` to sync additional
+> separately-mounted Secrets (e.g. for file-based mounts in section 6). Ready-made
+> reference configurations ship as `helm/chart/values-external-secrets.yaml` and
+> `helm/chart/values-rotation-example.yaml`.
 
 ## 6. Filesystem-mounted token signing credentials (`-fscert`)
 
@@ -416,9 +429,9 @@ kubectl -n statuslist create secret generic signing-credentials \
   --from-file=signing-key=signing-key.pem
 ```
 
-**3. Mount them into the pod** and enable `store` provisioning via extra volume/volumeMount
-values. Because the chart's built-in volumes are for AWS credentials and tmp, add the
-signing material mount with a custom values overlay that appends to the container:
+**3. Mount them into the pod** and enable `store` provisioning using the chart's
+first-class `statuslist.secretMounts` feature (mounts a Secret as files and maps them to
+the store-provider paths via `fileEnv`):
 
 ```yaml
 # values-fscert.yaml
@@ -426,11 +439,20 @@ statuslist:
   image:
     repository: ghcr.io/adorsys/status-list-server
     tag: "0.6.0-fscert"
+  secretMounts:
+    - name: signing-keys
+      secretName: signing-credentials
+      mountPath: /etc/status-list-signing
+      items:
+        - key: certificate
+          path: certificate.pem
+        - key: signing-key
+          path: signing-key.pem
+      fileEnv:
+        APP_SERVER__CERT__STORE__CERTIFICATE_PATH: certificate.pem
+        APP_SERVER__CERT__STORE__SIGNING_KEY_PATH: signing-key.pem
   env:
     APP_SERVER__CERT__PROVISIONING_STRATEGY: "store"
-    APP_SERVER__CERT__STORE__CERTIFICATE_PATH: "/etc/status-list-signing/certificate.pem"
-    APP_SERVER__CERT__STORE__SIGNING_KEY_PATH: "/etc/status-list-signing/signing-key.pem"
-  # see section 6a below for adding the volume + mount
 externalSecret:
   enabled: false
 statuslist:
@@ -440,27 +462,52 @@ statuslist:
       postgres-password: "<db-pass>"
 ```
 
-**6a. Adding the signing volume.** The chart templates a fixed set of volumes, so add the
-signing-key volume by mounting a Secret through an `extraVolumes`/`extraVolumeMounts`
-extension (provide this via a small Helm overlay that the chart supports — check
-`helm/chart/templates` for the exact key name; if not available, use a `values` that sets
-an initContainer to stage the files or extend via Kustomize post-render):
+`fileEnv` values are relative to `mountPath`; the chart validates they are relative,
+normalized, resolve inside the mount, and (when `items` is present) match an
+`items[].path`. It fails at render time otherwise. This replaces the old
+`extraVolumes`/post-render workaround — `secretMounts` is the supported mechanism.
+
+**3a. (Optional) Deliver the secret via ESO.** If you use External Secrets Operator
+instead of the fallback Secret, have your provider sync the signing-keys Secret with
+`externalSecret.extraExternalSecrets`:
+
+```yaml
+externalSecret:
+  enabled: true
+  spec:
+    secretStoreRef:
+      name: vault-cluster-store # or your namespaced SecretStore
+      kind: ClusterSecretStore
+  extraExternalSecrets:
+    - metadata:
+        name: signing-credentials
+      spec:
+        target:
+          name: signing-credentials
+          creationPolicy: Owner
+        data:
+          - secretKey: certificate
+            remoteRef:
+              { key: secret/data/statuslist/token-keys, property: certificate }
+          - secretKey: signing-key
+            remoteRef:
+              { key: secret/data/statuslist/token-keys, property: signing_key }
+```
 
 ```bash
 helm upgrade --install statuslist helm/chart \
   --namespace statuslist \
   --values values-fscert.yaml \
-  --post-renderer ./postrender-signing-volumes.sh \
   --wait --timeout 10m
 ```
 
-If your chart version exposes `statuslist.extraVolumes` / `statuslist.extraVolumeMounts`,
-use those instead — see the chart's `values.schema.json` for the supported extension keys.
-
 > [!WARNING]
-> Filesystem rotation is **not** an inotify watch. The app re-reads the key file on each
-> signing-key read (or per the signing-key cache TTL). Overwriting the file in place (an
-> atomic rename over the same path) is picked up on the next read with no restart. See
+> Filesystem rotation is **not** an inotify watch by default. The app re-reads the key
+> file on each signing-key read (or per the signing-key cache TTL). Overwriting the file
+> in place (an atomic rename over the same path and key) is picked up on the next read
+> with no restart. To enable the chart-side file **watcher**
+> (`APP_WATCHER__POLL_INTERVAL_SECS`), set `statuslist.watcher.pollIntervalSecs` and use an
+> application image that implements the issue #456 reload contract. See
 > [06-secret-rotation.md](06-secret-rotation.md).
 
 ## 7. Local testing with `values-local.yaml`

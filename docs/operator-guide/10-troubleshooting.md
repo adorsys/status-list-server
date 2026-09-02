@@ -12,13 +12,13 @@ organized around the four operational areas that account for most incidents:
 Object names below follow the production release (`statuslist` in namespace
 `statuslist-production`). Substitute your release/namespace for other deployments.
 
-| Standard object   | Kubernetes name                                   |
-| ----------------- | ------------------------------------------------- |
-| Deployment        | `statuslist-status-list-server-deployment`        |
-| Application Secret| `statuslist-secret`                               |
-| ExternalSecret    | `statuslist-external-secret`                      |
-| SecretStore       | `statuslist-secret-store`                         |
-| NetworkPolicy     | `statuslist-status-list-server-network-policy`    |
+| Standard object    | Kubernetes name                                |
+| ------------------ | ---------------------------------------------- |
+| Deployment         | `statuslist-status-list-server-deployment`     |
+| Application Secret | `statuslist-secret`                            |
+| ExternalSecret     | `statuslist-external-secret`                   |
+| SecretStore        | `statuslist-secret-store`                      |
+| NetworkPolicy      | `statuslist-status-list-server-network-policy` |
 
 > **Naming caveat:** Object names above assume release `statuslist` with **no
 > `fullnameOverride`** set. The Deployment (`<fullname>-deployment`) and dependent object names
@@ -44,7 +44,7 @@ small closed set (`connection`, `connection_acquire`, `execution`, `query`, `con
 `last_insert_id`, `missing_primary_key`, `record_not_found`, `attribute_not_set`, `custom`,
 `type`, `json`, `migration`, `record_not_inserted`, `record_not_updated`).
 
-*Source: `src/setup.rs:220-226` (message), `src/setup.rs:101-121` (classifier)*
+_Source: `src/setup.rs:220-226` (message), `src/setup.rs:101-121` (classifier)_
 
 **Root cause:** One of:
 
@@ -97,7 +97,7 @@ password rotation by restarting the rollout and watching this specific message d
 - `Database backend 'X' configured, but feature flag for it was not compiled in.`
   (a backend compiled out entirely, no SQL/memory feature present)
 
-*Source: `src/setup.rs:184-187` (memory variant), `src/setup.rs:256-259` (generic variant)*
+_Source: `src/setup.rs:184-187` (memory variant), `src/setup.rs:256-259` (generic variant)_
 
 **Root cause:** Image **variant mismatch** — the container image you pulled was built with a
 different feature set than the configuration expects (e.g. a build without `postgres`/`sqlite`/
@@ -125,7 +125,7 @@ the image supports. Default backend by feature set is defined in `src/config.rs`
 **When you see this:** At startup, when validating the database connection string against the
 selected `database.backend`.
 
-*Source: `src/setup.rs:196-200`, schemes in `src/config.rs:26-71`*
+_Source: `src/setup.rs:196-200`, schemes in `src/config.rs:26-71`_
 
 **Root cause:** Backend vs scheme mismatch, e.g. `APP_DATABASE__BACKEND=postgres` with a
 `mysql://` URL, or a URL using `postgresql://` where the validator only accepts the exact
@@ -149,10 +149,10 @@ which avoids assembling URLs in pod metadata entirely).
 
 ### `Ambiguous database configuration: use either database.url or split database fields, not both`
 
-**When you see this:** At startup, when both the full `database.url` *and* any split field
+**When you see this:** At startup, when both the full `database.url` _and_ any split field
 (`host`, `username`, `password`, `name`) are set.
 
-*Source: `src/config.rs:734-738`*
+_Source: `src/config.rs:734-738`_
 
 **Root cause:** Mixed configuration — the app refuses to guess which source wins.
 
@@ -171,7 +171,7 @@ credentials in pod metadata) — see the Helm section. Use the split fields on K
 absent/empty. The same pattern applies to `database.host`, `database.username`, `database.name`,
 and to the combined `database.url or split database fields`.
 
-*Source: `src/config.rs:629-642` (`required_config_field` / `required_secret_field`), call sites `src/config.rs:756-761`*
+_Source: `src/config.rs:629-642` (`required_config_field` / `required_secret_field`), call sites `src/config.rs:756-761`_
 
 **Root cause:** A required config value is not present. In the Helm/deployment model this is
 usually a **missing or empty secret mount / env**: the pod has no `APP_DATABASE__PASSWORD`
@@ -202,7 +202,7 @@ confirm `statuslist.fallbackSecret.stringData` contains the key.
 - `Invalid database.query: query parameter keys must be non-empty and contain only ASCII letters, digits, '.', '_' or '-'`
 - `Invalid database.query: credential-like query parameter key '...' is not allowed`
 
-*Source: `src/config.rs:678-702` (host), `src/config.rs:644-676` (query)*
+_Source: `src/config.rs:678-702` (host), `src/config.rs:644-676` (query)_
 
 **Root cause:** `database.host` contained a scheme/port/userinfo/`@`/`?`/`#`/whitespace, or
 trailing/leading `-`/`.`; or `database.query` used a forbidden credential-like key
@@ -231,7 +231,7 @@ Several distinct strings:
 - `failed to read Kubernetes service account token from '...': ...`
 - `Kubernetes service account token in '...' is empty`
 
-*Source: `src/setup.rs:485-505` (config gate), `src/config.rs:854-880` (secret_id resolve), `src/outbound/vault.rs:488-499, 555-576` (login)*
+_Source: `src/setup.rs:485-505` (config gate), `src/config.rs:854-880` (secret_id resolve), `src/outbound/vault.rs:488-499, 555-576` (login)_
 
 **Root cause:**
 
@@ -274,7 +274,7 @@ platform) and keep the K8s role bound to the minimal ServiceAccount.
 **When you see this:** After rotating `postgres-password` and applying the change, requests are
 rejected or the pod reports auth failures, because the running pod still holds the old password.
 
-*Source (deployment model): `helm/chart/templates/deployment.yaml:177-181` (SecretKeyRef env)*
+_Source (deployment model): `helm/chart/templates/deployment.yaml:177-181` (SecretKeyRef env)_
 
 **Root cause:** The pool was created with the old credential at startup. There is no hot reload;
 a blind secret edit does not restart the pod.
@@ -315,7 +315,7 @@ certificate material. Strings include:
 - Store validation: both-paths-and-keys, missing file, or missing key errors from
   `store_certificate_strategy`
 
-*Source: `src/utils/cert_manager/strategy.rs:92-222`, `src/setup.rs:631-650`*
+_Source: `src/utils/cert_manager/strategy.rs:92-222`, `src/setup.rs:631-650`_
 
 **Root cause:** The cert and signing key do not match (a rotated key paired with the old cert), a
 file/key is missing or unreadable, or the stored value is neither PEM nor base64 DER (e.g. a
@@ -355,7 +355,7 @@ strings include:
 - `vault access denied for path '<path>'` (login OK, but the token lacks the KV policy)
 - `vault load failed for path '<path>': HTTP <status>` / `vault store failed ...`
 
-*Source: `src/outbound/vault.rs:586-798` (TokenManager), `vault.rs:843-920` (KV ops)*
+_Source: `src/outbound/vault.rs:586-798` (TokenManager), `vault.rs:843-920` (KV ops)_
 
 **Root cause:** The Vault token or the underlying role no longer has access (403 on read/write),
 the AppRole `secret_id` was revoked/rotated, the Service Account JWT was rotated and Vault no
@@ -464,7 +464,7 @@ present.
 Liveness is deliberately decoupled from downstream dependencies; readiness flips only when a
 critical dependency check fails or times out (5s), with results cached 1s.
 
-*Source: `src/server/health.rs:142-157, 75-121`, checks `health.rs:181-282`*
+_Source: `src/server/health.rs:142-157, 75-121`, checks `health.rs:181-282`_
 
 **Root cause:** One of the registered readiness checks fails. Checks are named `database`
 (`DbCheck`, pings the pool — reason `database unreachable: ...`) and `cert_store`
@@ -498,7 +498,7 @@ key path is missing or unreadable, independent of the key parses as PEM.
 **When you see this:** The app logs timeout/connection errors to Postgres, Vault, or the OTLP
 collector, or readiness fails on `database unreachable`, while the services are verifiably up.
 
-*Source (chart): `helm/chart/templates/network-policy.yaml`*
+_Source (chart): `helm/chart/templates/network-policy.yaml`_
 
 **Root cause:** When `statuslist.networkPolicy.enabled`, the rendered `NetworkPolicy` scopes
 egress as follows:

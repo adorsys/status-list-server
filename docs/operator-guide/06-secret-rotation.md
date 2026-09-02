@@ -8,26 +8,67 @@ downtime. There are three rotation domains, each with different mechanics:
 3. **Database password** (delivered via the `statuslist-secret` Secret).
 
 None of these should cause downtime if done correctly. This page explains the
-in-place **file re-read** behavior, the ACME **renewal cron**, **Vault lease renewal**, the
-role of the **signing-key cache TTL**, and the rollback/failure handling for each.
+in-place **file re-read** behavior, the chart's **file watcher** and **checksum rolling**,
+the ACME **renewal cron**, **Vault lease renewal**, the role of the **signing-key cache
+TTL**, and the rollback/failure handling for each.
 
-## 0. The two rotation primitives
+## 0. The rotation primitives
 
-The server rotates material two ways, and it is important not to confuse them:
+The server/chart rotate material a few ways, and it is important not to confuse them:
 
-| Primitive            | What happens                                                                                                                                  | Downtime                                            | When                                                    |
-| -------------------- | --------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------- | ------------------------------------------------------- |
-| **In-place re-read** | The pod keeps running and the next signing action reads the **new** key/cert from the file or backend (subject to the signing-key cache TTL). | None                                                | `store` keys/certs, backend material                    |
-| **Rolling restart**  | A new ReplicaSet is rolled out (new pod), which re-reads material at startup.                                                                 | Zero (with `replicaCount>1` + rolling update / HPA) | ACME key material, or when a file **path/name** changes |
+| Primitive                                                 | What happens                                                                                                                                                                       | Downtime                            | When                                                                            |
+| --------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------- | ------------------------------------------------------------------------------- |
+| **In-place re-read**                                      | The pod keeps running and the next signing action reads the **new** key/cert from the file or backend (subject to the signing-key cache TTL).                                      | None                                | `store` keys/certs, backend material                                            |
+| **File watcher poll** (`APP_WATCHER__POLL_INTERVAL_SECS`) | The app polls mounted secret files on an interval and swaps credentials in place. Chart-side support is in place; requires an image implementing the reload contract (issue #456). | None                                | File-based rotation of DB password / signing keys                               |
+| **Checksum rolling restart**                              | A new ReplicaSet is rolled out (new pod), which re-reads material at startup. Triggered automatically when Helm-rendered `ExternalSecret` manifests change (checksum annotation).  | Zero (with `replicaCount>1` or HPA) | When the ExternalSecret **definition** changes (not when ESO re-syncs new data) |
+| **Manual/rolling restart**                                | `helm upgrade` or `kubectl rollout restart` re-reads material at startup.                                                                                                          | Zero (with `replicaCount>1`)        | File path/name changes, version upgrades, DB password via env                   |
 
-For the **token signing identity**, prefer **in-place re-read** so verifiers see a
-smooth transition and you never mint a token with the wrong key between restarts.
+For the **token signing identity**, prefer in-place re-read (or the file watcher) so
+verifiers see a smooth transition and you never mint a token with the wrong key between
+restarts.
+
+> [!IMPORTANT]
+> **Chart/application split.** The chart (since #462) provides `statuslist.secretMounts`
+> (mount Secrets as files + map to `APP_*_FILE` env), `statuslist.watcher`
+> (`APP_WATCHER__POLL_INTERVAL_SECS`), and a `checksum/secret` roll annotation. **These are
+> preparatory chart support.** An application image that actually implements the
+> in-process file-watcher and pool/key reload contract from **issue #456** is required for
+> the watcher to swap credentials without a restart; with the current image, mounted
+> files are read at startup (or per signing-key-cache-TTL for the key). Treat the watcher
+> as available only once your image supports it.
 
 ## 1. Filesystem (`-fscert`) token signing key rotation
 
+Use the chart's first-class **`statuslist.secretMounts`** to mount the signing key and
+certificate into the pod and map them to the store-provider paths. This replaces the
+manual "extra volume" workaround. For example:
+
+```yaml
+statuslist:
+  secretMounts:
+    - name: signing-keys
+      secretName: statuslist-token-keys
+      mountPath: /etc/secrets/token-keys
+      items:
+        - key: statuslist.crt
+          path: statuslist.crt
+        - key: statuslist.key
+          path: statuslist.key
+      fileEnv:
+        APP_SERVER__CERT__STORE__CERTIFICATE_PATH: statuslist.crt
+        APP_SERVER__CERT__STORE__SIGNING_KEY_PATH: statuslist.key
+  env:
+    APP_SERVER__CERT__PROVISIONING_STRATEGY: "store"
+```
+
+`fileEnv` values are relative to `mountPath` (the chart enforces this and fails at render
+if a path is absolute, escapes the mount, or references a file not in `items`). With
+ESO, your provider can sync these Secrets via `externalSecret.extraExternalSecrets` so
+the keys mount without customer-side provisioning.
+
 The filesystem store provider **re-reads the file on each signing-key read**. There is
-**no inotify/file-watch**; rotation is picked up on the next read, gated by
-`APP_SERVER__CERT__SIGNING_KEY_CACHE_TTL`.
+**no inotify/file-watch** (unless your image implements issue #456); rotation is picked up
+on the next read, gated by `APP_SERVER__CERT__SIGNING_KEY_CACHE_TTL`.
 
 ### Recommended: atomic in-place replacement (no restart)
 
@@ -41,24 +82,20 @@ openssl req -new -x509 -key new-signing-key.pem -out new-issuer-cert.pem \
   -days 365 -subj "/CN=statuslist.example.com"
 
 # 2. Update the Kubernetes Secret
-kubectl -n statuslist create secret generic signing-credentials \
-  --from-file=certificate=new-issuer-cert.pem \
-  --from-file=signing-key=new-signing-key.pem \
+kubectl -n statuslist create secret generic statuslist-token-keys \
+  --from-file=statuslist.crt=new-issuer-cert.pem \
+  --from-file=statuslist.key=new-signing-key.pem \
   --dry-run=client -o yaml | kubectl apply -f -
-
-# 3. Force the mounted Secret/projected volume to update (K8s < 1.27 needs a restart
-#    of the pod to re-project projected Secrets; see note below).
 ```
 
 > [!NOTE]
-> **Projected/secret volumes** are updated by kubelet, but the application only re-reads
-> the file at its moment of use. To guarantee the pod observes the new bytes **without a
-> custom reload**, either:
+> **Secret volumes** are updated by kubelet, but the application only reads the file at its
+> moment of use. To guarantee the pod observes the new bytes **without a custom reload**:
 >
 > - Set `APP_SERVER__CERT__SIGNING_KEY_CACHE_TTL=0` so every signing key read goes to the
 >   file (maximum freshness, no restart), **and**
-> - Ensure the file path is unchanged (atomic rename onto the same path). If you change
->   the **path/name**, the pod must be restarted to mount the new one.
+> - Keep the file path unchanged (atomic rename/rewrite onto the same path and key). If
+>   you change the `items[].path` or mounts, the pod must restart to mount the new layout.
 
 The `SIGNING_KEY_CACHE_TTL` interplay:
 
@@ -132,9 +169,12 @@ re-authentication and failure counters) — see [08-observability.md](08-observa
 
 ## 4. Database password rotation
 
-The DB password reaches the pod as `APP_DATABASE__PASSWORD` from the `statuslist-secret`
-Secret (key `postgres-password`), and PostgreSQL also references that same Secret. To
-rotate the DB password:
+The DB password reaches the pod either as `APP_DATABASE__PASSWORD` from the
+`statuslist-secret` Secret (key `postgres-password`), or — with file-based rotation — via
+`APP_DATABASE__PASSWORD_FILE` pointing at a mounted password file. PostgreSQL references
+the same secret/credentials.
+
+### Option A — env-based password (default)
 
 1. Update the **secret source**:
    - ESO mode: update the value in the cloud/Vault provider; ESO re-syncs to
@@ -154,6 +194,36 @@ rotate the DB password:
 > Because `APP_DATABASE__PASSWORD` comes from `secretKeyRef` (not an env literal), you
 > update only the Secret — the chart forbids setting it as a plain env value. Keep ESO's
 > `refreshInterval` aligned with your password rotation cadence.
+
+### Option B — file-based password (rotation-friendly)
+
+Mount the DB password as a file with `secretMounts` and set
+`APP_DATABASE__PASSWORD_FILE`. When that variable is configured, the chart **does not**
+inject `APP_DATABASE__PASSWORD`, so the app cannot silently keep a stale startup password:
+
+```yaml
+statuslist:
+  secretMounts:
+    - name: database-credentials
+      secretName: statuslist-db-credentials
+      mountPath: /etc/secrets/database
+      items:
+        - key: password
+          path: password
+      fileEnv:
+        APP_DATABASE__PASSWORD_FILE: password
+  watcher:
+    pollIntervalSecs: "60" # only effective with an issue #456 image
+  env:
+    APP_DATABASE__HOST: "statuslist-postgres.example.internal"
+    APP_DATABASE__PORT: "5432"
+    APP_DATABASE__USERNAME: "statuslist"
+    APP_DATABASE__NAME: "statuslist"
+```
+
+To rotate, update the secret source (ESO re-syncs) and the DB-side password; ESO re-mounts
+the new file into the Secret volume. With an issue #456 image the app reloads it in place;
+otherwise restart the rollout to re-read the file at startup.
 
 ## 5. Ingress TLS certificate rotation
 

@@ -38,6 +38,37 @@ These fail at `helm template`/`upgrade` time (fail-fast), not at runtime:
 | `statuslist.image.digest` ≠ `sha256:<64 hex>`                    | **Rejected.**                                                                                        |
 | `statuslist.image.digest` / flag combos                          | `digest` pins the exact scanned image; empty falls back to `tag` then `appVersion`. Never `latest`.  |
 
+### File-based secret mounts & rotation (`secretMounts`, `watcher`, `*_FILE`)
+
+Since chart #462, the chart mounts Kubernetes Secrets as **files** for rotation-friendly
+credential delivery. The chart-injected env pattern is `<VAR>_FILE` (the env value is a
+path on the pod, so Kubernetes never exposes the raw secret bytes in pod metadata):
+
+| Value / env pattern                                                  | Meaning                                                                                                                                                                          |
+| -------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `statuslist.secretMounts[]`                                          | Mount a Kubernetes Secret as files at `mountPath` (optionally `items[]`).                                                                                                        |
+| `statuslist.secretMounts[].fileEnv`                                  | Map a mounted file to an env var, e.g. `APP_DATABASE__PASSWORD_FILE: password`. Values are relative to `mountPath`.                                                              |
+| `APP_WATCHER__POLL_INTERVAL_SECS`                                    | File-watcher poll interval (seconds) for credential rotation detection; injected when `statuslist.watcher.pollIntervalSecs` is set. Requires an issue #456 image to take effect. |
+| `APP_DATABASE__PASSWORD_FILE`                                        | Path to the mounted DB password file. When set, the chart skips `APP_DATABASE__PASSWORD` injection.                                                                              |
+| `APP_SERVER__CERT__STORE__CERTIFICATE_PATH` / `..._SIGNING_KEY_PATH` | Often supplied via `fileEnv` so the signing key/cert mount at a known path.                                                                                                      |
+
+Additional render-time validation (from `deployment.yaml`):
+
+- `fileEnv` paths must be **non-empty, relative to `mountPath`, normalized**, and resolve
+  inside the mount; when `items` is present, each `fileEnv` path must match an
+  `items[].path`.
+- A `fileEnv` key must not duplicate `statuslist.env` or another chart-managed variable.
+- `fileEnv` must not define `APP_DATABASE__URL` (assembled credentials) or
+  `APP_DATABASE__PASSWORD` (use `APP_DATABASE__PASSWORD_FILE` instead).
+- Chart-managed vars (`APP_AWS__REGION`, `AWS_SHARED_CREDENTIALS_FILE`/`AWS_CONFIG_FILE`,
+  `APP_WATCHER__POLL_INTERVAL_SECS`, `APP_DATABASE__PASSWORD`) cannot be redefined by
+  `fileEnv`.
+
+When `externalSecret.spec.secretStoreRef.kind` is `ClusterSecretStore`, the chart skips
+rendering the namespaced `SecretStore` (it must be created cluster-wide by an admin) and
+the ESO CRs use apiVersion `external-secrets.io/v1`. Additional separately-mounted
+Secrets can be synced via `externalSecret.extraExternalSecrets[]`.
+
 ## Group 1 — Server
 
 | Variable                      | Default       | Allowed / Notes                                                                                              |
@@ -99,16 +130,17 @@ These are **secrets** and should come from `statuslist-secret`/ESO, not plain en
 Prefer **split fields** in Kubernetes so pod metadata never exposes a fully assembled
 credential-bearing URL.
 
-| Variable                 | Default       | Notes                                                                                                         |
-| ------------------------ | ------------- | ------------------------------------------------------------------------------------------------------------- |
-| `APP_DATABASE__BACKEND`  | `postgres`    | `postgres \| mysql \| sqlite`. `mysql` covers MariaDB-compatible servers.                                     |
-| `APP_DATABASE__HOST`     | `db`          | Database host. Chart defaults to the bundled Postgres service.                                                |
-| `APP_DATABASE__PORT`     | `5432`        | Port; `3306` for MySQL. **Required by the chart.**                                                            |
-| `APP_DATABASE__USERNAME` | `postgres`    | Chart defaults to `postgres.auth.username`.                                                                   |
-| `APP_DATABASE__PASSWORD` | —             | **Secret.** Injected from `statuslist-secret` key `postgres-password`. Never a plain env value.               |
-| `APP_DATABASE__NAME`     | `status-list` | Database name. Chart defaults to `postgres.auth.database`.                                                    |
-| `APP_DATABASE__QUERY`    | —             | Optional non-secret driver/TLS query params, e.g. `sslmode=verify-full&sslrootcert=/var/run/postgres/ca.crt`. |
-| `APP_DATABASE__URL`      | —             | Supported for local/custom deployments **but not** by the chart (rejected); do not combine with split fields. |
+| Variable                      | Default       | Notes                                                                                                                                                                   |
+| ----------------------------- | ------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `APP_DATABASE__BACKEND`       | `postgres`    | `postgres \| mysql \| sqlite`. `mysql` covers MariaDB-compatible servers.                                                                                               |
+| `APP_DATABASE__HOST`          | `db`          | Database host. Chart defaults to the bundled Postgres service.                                                                                                          |
+| `APP_DATABASE__PORT`          | `5432`        | Port; `3306` for MySQL. **Required by the chart.**                                                                                                                      |
+| `APP_DATABASE__USERNAME`      | `postgres`    | Chart defaults to `postgres.auth.username`.                                                                                                                             |
+| `APP_DATABASE__PASSWORD`      | —             | **Secret.** Injected from `statuslist-secret` key `postgres-password`. Never a plain env value.                                                                         |
+| `APP_DATABASE__PASSWORD_FILE` | —             | **File-based password.** Path to a mounted password file (via `statuslist.secretMounts` + `fileEnv`). When set, the chart **does not** inject `APP_DATABASE__PASSWORD`. |
+| `APP_DATABASE__NAME`          | `status-list` | Database name. Chart defaults to `postgres.auth.database`.                                                                                                              |
+| `APP_DATABASE__QUERY`         | —             | Optional non-secret driver/TLS query params, e.g. `sslmode=verify-full&sslrootcert=/var/run/postgres/ca.crt`.                                                           |
+| `APP_DATABASE__URL`           | —             | Supported for local/custom deployments **but not** by the chart (rejected); do not combine with split fields.                                                           |
 
 ### Connection pool (Postgres / MySQL)
 
@@ -195,12 +227,16 @@ Helm chart and the running application in Kubernetes.
 
 ## Environment → chart mapping cheat-sheet
 
-| App variable                                  | Helm value                                                   |
-| --------------------------------------------- | ------------------------------------------------------------ |
-| `APP_DATABASE__PASSWORD`                      | always from `statuslist-secret` / `postgres-password`        |
-| `APP_DATABASE__HOST/PORT/USERNAME/NAME/QUERY` | `statuslist.env.*`                                           |
-| `APP_AWS__REGION`                             | `statuslist.aws.region` (or legacy `secretStore.aws.region`) |
-| `APP_SERVER__DOMAIN`                          | `statuslist.ingress.externalDnsHostname`                     |
-| `APP_TELEMETRY__OTLP_ENDPOINT`                | set by chart when `opentelemetry-collector.enabled=true`     |
-| AWS credential files                          | `statuslist.aws.mountCredentials`                            |
-| DNS/cloud secrets                             | ESO `externalSecret`/`secretStore` → `statuslist-secret`     |
+| App variable                                  | Helm value                                                            |
+| --------------------------------------------- | --------------------------------------------------------------------- |
+| `APP_DATABASE__PASSWORD`                      | always from `statuslist-secret` / `postgres-password`                 |
+| `APP_DATABASE__PASSWORD_FILE`                 | `statuslist.secretMounts[].fileEnv` (path to mounted file)            |
+| `APP_DATABASE__HOST/PORT/USERNAME/NAME/QUERY` | `statuslist.env.*`                                                    |
+| `APP_AWS__REGION`                             | `statuslist.aws.region` (or legacy `secretStore.aws.region`)          |
+| `APP_SERVER__DOMAIN`                          | `statuslist.ingress.externalDnsHostname`                              |
+| `APP_SERVER__CERT__STORE__*_PATH`             | `statuslist.secretMounts[].fileEnv` (filesystem signing key)          |
+| `APP_WATCHER__POLL_INTERVAL_SECS`             | `statuslist.watcher.pollIntervalSecs`                                 |
+| `APP_TELEMETRY__OTLP_ENDPOINT`                | set by chart when `opentelemetry-collector.enabled=true`              |
+| AWS credential files                          | `statuslist.aws.mountCredentials`                                     |
+| DNS/cloud secrets                             | ESO `externalSecret`/`secretStore` → `statuslist-secret`              |
+| Separately-mounted Secrets                    | `externalSecret.extraExternalSecrets[]` + `statuslist.secretMounts[]` |

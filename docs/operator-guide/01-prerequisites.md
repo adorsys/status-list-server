@@ -76,9 +76,12 @@ You should see `SecretStore`, `ClusterSecretStore`, `ExternalSecret`, and compan
 > The chart renders a namespaced **`SecretStore`** by default (kind `SecretStore`
 > referenced from `externalSecret.spec.secretStoreRef.kind`). To use a
 > **`ClusterSecretStore`** instead, set `externalSecret.spec.secretStoreRef.kind:
-ClusterSecretStore` and point `name` at a cluster-scoped store you create separately.
+ClusterSecretStore` and point `name` at a cluster-scoped store you create separately —
+> the chart then **skips rendering a namespaced `SecretStore`** (set
+> `secretStore.enabled: false`), so it must exist cluster-wide first.
 > Only operators with cluster-admin can create `ClusterSecretStore` resources; a
-> namespaced `SecretStore` requires no cluster-admin.
+> namespaced `SecretStore` requires no cluster-admin. ESO CRs now use apiVersion
+> `external-secrets.io/v1`.
 
 ### Single app-secret contract
 
