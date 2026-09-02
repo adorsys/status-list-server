@@ -187,14 +187,14 @@ observability/alertmanager/tests/test-alertmanager-config.sh
 The mechanism is identical — change only `ALERTMANAGER_PLATFORM` and the
 matching credential in `.env`:
 
-| System          | `ALERTMANAGER_PLATFORM`    | Credential variable                                                                 |
-| --------------- | -------------------------- | ----------------------------------------------------------------------------------- |
-| Discord         | `discord`                  | `DISCORD_WEBHOOK_URL`                                                               |
-| Slack           | `slack`                    | `SLACK_WEBHOOK_URL`                                                                 |
-| Microsoft Teams | `teams`                    | `MS_TEAMS_WEBHOOK_URL`                                                              |
-| Mattermost      | `mattermost`               | `MATTERMOST_WEBHOOK_URL`                                                            |
-| Email           | `email`                    | `ALERTMANAGER_SMTP_HOST`, `ALERTMANAGER_EMAIL_TO`, `ALERTMANAGER_SMTP_FROM` (required)|
-| Generic         | `webhook`                  | `ALERTMANAGER_WEBHOOK_URL`                                                          |
+| System          | `ALERTMANAGER_PLATFORM` | Credential variable                                                                    |
+| --------------- | ----------------------- | -------------------------------------------------------------------------------------- |
+| Discord         | `discord`               | `DISCORD_WEBHOOK_URL`                                                                  |
+| Slack           | `slack`                 | `SLACK_WEBHOOK_URL`                                                                    |
+| Microsoft Teams | `teams`                 | `MS_TEAMS_WEBHOOK_URL`                                                                 |
+| Mattermost      | `mattermost`            | `MATTERMOST_WEBHOOK_URL`                                                               |
+| Email           | `email`                 | `ALERTMANAGER_SMTP_HOST`, `ALERTMANAGER_EMAIL_TO`, `ALERTMANAGER_SMTP_FROM` (required) |
+| Generic         | `webhook`               | `ALERTMANAGER_WEBHOOK_URL`                                                             |
 
 Each is rendered to a native receiver with `send_resolved: true`. Discord and
 Slack use Alertmanager's native embed/message formats; Teams and Mattermost use
@@ -256,26 +256,26 @@ When delivering notifications via `webhook`, `teams`, `mattermost`, or generic H
 
 ### Payload Field Definitions
 
-| Field Name | Type | Description |
-| ---------- | ---- | ----------- |
-| `status` | string | Overall notification status: `firing` or `resolved`. |
-| `receiver` | string | Name of the Alertmanager receiver target (e.g. `human` or `deadmansswitch`). |
-| `groupLabels` | object | Labels used to group multiple alerts into this notification payload. |
-| `commonLabels` | object | Labels shared across all alerts in this notification batch. |
-| `commonAnnotations` | object | Annotations shared across all alerts in this notification batch. |
-| `alerts[].status` | string | Individual alert state (`firing` or `resolved`). |
-| `alerts[].labels.alertname` | string | Name of the alert rule (e.g., `RequestLatencyFastBurn`, `ErrorRateFastBurn`). |
-| `alerts[].labels.severity` | string | Alert urgency level: `page` (urgent action required), `warn` (degradation/monitoring), or `none` (Watchdog). |
-| `alerts[].labels.service` | string | Name of the affected service (`status-list-server`). |
-| `alerts[].labels.sli` | string | (Optional) Specific Service Level Indicator area (`request_latency`, `error_rate`, `db_latency`, `token_generation`, `cache_hit_ratio`, `cert_renewal`). |
-| `alerts[].annotations.summary` | string | Human-readable summary of the alert condition. |
-| `alerts[].annotations.description` | string | (Optional) Detailed contextual values (e.g., exact metric percentage or time to expiry). |
-| `alerts[].annotations.runbook_url` | string | Direct link to the Git-hosted markdown runbook for step-by-step remediation. |
-| `alerts[].annotations.dashboard_url` | string | Direct link to the Grafana dashboard (`http://localhost:3000/d/status-list-slo`) for real-time telemetry. |
-| `alerts[].startsAt` | string (ISO-8601) | Timestamp when the alert rule first breached its threshold. |
-| `alerts[].endsAt` | string (ISO-8601) | Timestamp when the alert resolved (`0001-01-01T00:00:00Z` while firing). |
-| `alerts[].generatorURL` | string | Permalink back to the Prometheus graph interface for rule evaluation details. |
-| `alerts[].fingerprint` | string | Unique cryptographic hash identifying the specific alert instance. |
+| Field Name                           | Type              | Description                                                                                                                                              |
+| ------------------------------------ | ----------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `status`                             | string            | Overall notification status: `firing` or `resolved`.                                                                                                     |
+| `receiver`                           | string            | Name of the Alertmanager receiver target (e.g. `human` or `deadmansswitch`).                                                                             |
+| `groupLabels`                        | object            | Labels used to group multiple alerts into this notification payload.                                                                                     |
+| `commonLabels`                       | object            | Labels shared across all alerts in this notification batch.                                                                                              |
+| `commonAnnotations`                  | object            | Annotations shared across all alerts in this notification batch.                                                                                         |
+| `alerts[].status`                    | string            | Individual alert state (`firing` or `resolved`).                                                                                                         |
+| `alerts[].labels.alertname`          | string            | Name of the alert rule (e.g., `RequestLatencyFastBurn`, `ErrorRateFastBurn`).                                                                            |
+| `alerts[].labels.severity`           | string            | Alert urgency level: `page` (urgent action required), `warn` (degradation/monitoring), or `none` (Watchdog).                                             |
+| `alerts[].labels.service`            | string            | Name of the affected service (`status-list-server`).                                                                                                     |
+| `alerts[].labels.sli`                | string            | (Optional) Specific Service Level Indicator area (`request_latency`, `error_rate`, `db_latency`, `token_generation`, `cache_hit_ratio`, `cert_renewal`). |
+| `alerts[].annotations.summary`       | string            | Human-readable summary of the alert condition.                                                                                                           |
+| `alerts[].annotations.description`   | string            | (Optional) Detailed contextual values (e.g., exact metric percentage or time to expiry).                                                                 |
+| `alerts[].annotations.runbook_url`   | string            | Direct link to the Git-hosted markdown runbook for step-by-step remediation.                                                                             |
+| `alerts[].annotations.dashboard_url` | string            | Direct link to the Grafana dashboard (`http://localhost:3000/d/status-list-slo`) for real-time telemetry.                                                |
+| `alerts[].startsAt`                  | string (ISO-8601) | Timestamp when the alert rule first breached its threshold.                                                                                              |
+| `alerts[].endsAt`                    | string (ISO-8601) | Timestamp when the alert resolved (`0001-01-01T00:00:00Z` while firing).                                                                                 |
+| `alerts[].generatorURL`              | string            | Permalink back to the Prometheus graph interface for rule evaluation details.                                                                            |
+| `alerts[].fingerprint`               | string            | Unique cryptographic hash identifying the specific alert instance.                                                                                       |
 
 ---
 
@@ -285,12 +285,12 @@ When delivering notifications via `webhook`, `teams`, `mattermost`, or generic H
 
 Alertmanager features built-in delivery resilience. When a webhook endpoint or SMTP server returns an HTTP server error (5xx), network timeout, or connection refusal, Alertmanager retries delivery automatically using exponential back-off:
 
-| Parameter | Default Value | Description |
-| --------- | ------------- | ----------- |
-| `min_backoff` | `10s` | Initial delay before the first retry attempt. |
-| `max_backoff` | `5m` | Maximum delay ceiling between consecutive retries. |
-| `backoff_factor` | `2` | Multiplier applied to back-off interval on each failure. |
-| `max_attempts` | unlimited (within group interval) | Attempts continue until successful or until the next `group_interval` re-evaluates the group. |
+| Parameter        | Default Value                     | Description                                                                                   |
+| ---------------- | --------------------------------- | --------------------------------------------------------------------------------------------- |
+| `min_backoff`    | `10s`                             | Initial delay before the first retry attempt.                                                 |
+| `max_backoff`    | `5m`                              | Maximum delay ceiling between consecutive retries.                                            |
+| `backoff_factor` | `2`                               | Multiplier applied to back-off interval on each failure.                                      |
+| `max_attempts`   | unlimited (within group interval) | Attempts continue until successful or until the next `group_interval` re-evaluates the group. |
 
 ### Customizing Retry Configuration
 
@@ -329,7 +329,7 @@ Alertmanager exposes self-monitoring Prometheus metrics that track webhook and n
    - Query in Prometheus: `rate(alertmanager_notifications_failed_total[5m]) > 0` indicates active notification delivery issues.
 2. **`alertmanager_notifications_total`**: Counter metric tracking total notification attempts.
 3. **Container Logs**: Alertmanager logs all notification failures to stdout with level `warn` or `error`:
+
    ```text
    level=warn ts=2026-09-02T10:00:00.000Z caller=notify.go:732 component=dispatcher msg="Notify attempt failed" attempt=1 integration=discord err="POST https://discord.com/api/webhooks/...: 503 Service Unavailable"
    ```
-
