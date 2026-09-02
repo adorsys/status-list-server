@@ -81,6 +81,16 @@ jobs:
     permissions:
       contents: read
       packages: write
+      # Both first-time grants, not a restoration. `git log -S 'attestations: write' --all`
+      # returns nothing, and this job carried exactly `contents: read` + `packages: write`
+      # on both sides of the supply-chain PR. The `id-token: write` that predates this
+      # change is on the `deploy` job, for AWS OIDC, and is unrelated.
+      #
+      # `id-token: write` mints the OIDC token Fulcio exchanges for a signing certificate.
+      # `attestations: write` persists the signed bundle. `artifact-metadata: write` is
+      # deliberately not granted; see `create-storage-record` on the attest step.
+      id-token: write
+      attestations: write
     strategy:
       fail-fast: false
       matrix:
@@ -188,6 +198,35 @@ jobs:
           echo "image digest for ${SUFFIX}: $DIGEST"
           echo "IMAGE_REF=${IMAGE_BASE}@${DIGEST}" >> "$GITHUB_OUTPUT"
           printf '%s\n' "$DIGEST" > "image-digest-${SUFFIX}.txt"
+
+      - name: Attest build provenance
+        # A second, independent provenance document over the same digest -- not a
+        # signature over the `provenance: mode=max` attestation BuildKit already
+        # attached. BuildKit's is integrity-protected but self-asserted: its `builder.id`
+        # is JSON it wrote, so anyone with push access to the package could publish an
+        # index that inspects identically. This one is signed via Sigstore/Fulcio and
+        # carries an issuer. Both are kept; docs/adr/0001-container-image-provenance.md
+        # is the decision and the argument for it.
+        #
+        # Placed after the digest assertion so the subject can never be an empty string.
+        # Bound to the index digest rather than a tag, which is what lets it survive
+        # `promote-tags`: `imagetools create` only adds names to an unchanged digest.
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          # The repository the digest lives in, with no tag -- the action rejects one.
+          subject-name: ${{ env.IMAGE_BASE }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          # GHCR's Referrers API support is unsettled, and an attestation pushed where
+          # nothing can discover it is coverage-shaped and coverage-free. `gh attestation
+          # verify` reads GitHub's attestation API by default, so this costs nothing
+          # today. docs/supply-chain.md records what would have to be true to flip it.
+          push-to-registry: false
+          # No storage record is written when nothing is pushed to a registry, so this is
+          # explicit rather than load-bearing: it keeps `artifact-metadata: write` -- a
+          # third write scope on the job that pushes the production image -- off this
+          # job, and makes flipping `push-to-registry` a deliberate change that surfaces
+          # the permission question rather than one that silently needs a new scope.
+          create-storage-record: false
 
       - name: Verify OCI description annotations
         env:
@@ -492,6 +531,9 @@ jobs:
       contents: read
       packages: write
       actions: read
+      # Read-only, and only to fetch the bundle back: this job verifies the attestation
+      # `build-and-push` issued, it never mints one.
+      attestations: read
     strategy:
       fail-fast: false
       matrix:
@@ -510,6 +552,13 @@ jobs:
       DEPLOY_TAG: ${{ needs.build-and-push.outputs.deploy_tag }}
       SUFFIX: ${{ matrix.variant.suffix }}
     steps:
+      - name: Fetch Repository
+        # Only for scripts/verify-attestation.sh below. The promotion itself needs no
+        # source, so nothing else in this job reads the working tree.
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
       - name: Login to GHCR
         uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
         with:
@@ -589,6 +638,42 @@ jobs:
             done
           done
           echo "SBOM and provenance present for both platforms on $release_ref"
+
+      - name: Prove the attestation check can fail
+        # The same argument `Prove the gate can fail` makes on the scan job, applied to
+        # provenance: a verifier that has never rejected anything is indistinguishable
+        # from one that cannot, and both print a success line. Needs no network and no
+        # registry -- every case is a stubbed gh on PATH.
+        #
+        # Before the verification below rather than after, so a broken verifier fails as
+        # itself instead of silently blessing whatever the next step is handed.
+        run: bash scripts/attestation-selftest.sh
+
+      - name: Verify signed provenance survived promotion
+        # `Verify attestations survived promotion` proves BuildKit's self-asserted
+        # attestations are still attached. This proves a signed statement from this
+        # repository vouches for the digest the release tag now resolves to -- the
+        # authenticity half, which inspecting the index cannot answer at all.
+        #
+        # The tag is resolved to a digest and the attestation verified against *that*,
+        # rather than against the digest this job already holds. That is the question a
+        # consumer actually asks -- "does the name I pull resolve to something with
+        # verifiable provenance" -- and it is the only form that would catch a release
+        # tag promoted onto a digest nobody attested.
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          release_ref="${IMAGE_BASE}:${DEPLOY_TAG}-${SUFFIX}"
+          promoted_digest=$(docker buildx imagetools inspect "$release_ref" \
+            --format '{{ .Manifest.Digest }}')
+          built_digest=$(cat "image-digest-${SUFFIX}.txt")
+          if [ "$promoted_digest" != "$built_digest" ]; then
+            echo "::error::${release_ref} resolves to ${promoted_digest}, not the built and scanned ${built_digest}."
+            echo "The release tag was applied to something other than the artifact this run gated."
+            exit 1
+          fi
+          bash scripts/verify-attestation.sh "${IMAGE_BASE}@${promoted_digest}" "$GITHUB_REPOSITORY"
 
   deploy:
     name: Deploy to Production
