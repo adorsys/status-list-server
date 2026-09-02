@@ -2,9 +2,13 @@
 
 use arc_swap::ArcSwap;
 use async_trait::async_trait;
+use base64::prelude::{BASE64_STANDARD, Engine as _};
 use std::sync::Arc;
 
-use crate::domain::{models::status_list::StatusListError, ports::CertificateProvider};
+use crate::domain::{
+    models::status_list::StatusListError,
+    ports::{CertificateProvider, SigningMaterial},
+};
 use crate::utils::keygen::Keypair;
 
 /// Adapter bridging ACME `CertManager` to domain `CertificateProvider` port.
@@ -24,17 +28,9 @@ impl AcmeCertificateProvider {
 #[cfg(feature = "acme")]
 #[async_trait]
 impl CertificateProvider for AcmeCertificateProvider {
-    async fn certificate_chain(&self) -> Result<Option<Vec<String>>, StatusListError> {
+    async fn signing_material(&self) -> Result<SigningMaterial, StatusListError> {
         self.manager
-            .cert_chain_parts()
-            .await
-            .map_err(|e| StatusListError::Backend(Box::new(e)))
-            .map(|opt| opt.map(|arc| arc.to_vec()))
-    }
-
-    async fn signing_key_pem(&self) -> Result<String, StatusListError> {
-        self.manager
-            .signing_key_pem()
+            .signing_material()
             .await
             .map_err(|e| StatusListError::Backend(Box::new(e)))
     }
@@ -63,12 +59,6 @@ pub struct ReloadingCertificateProvider {
     active: Arc<ArcSwap<SigningMaterial>>,
 }
 
-#[derive(Debug)]
-struct SigningMaterial {
-    certificate_chain: Option<Vec<String>>,
-    signing_key_pem: String,
-}
-
 impl ReloadingCertificateProvider {
     pub async fn from_files(cert_path: String, key_path: String) -> Result<Self, StatusListError> {
         let material = load_and_validate_signing_material(&cert_path, &key_path).await?;
@@ -90,12 +80,8 @@ impl ReloadingCertificateProvider {
 
 #[async_trait]
 impl CertificateProvider for ReloadingCertificateProvider {
-    async fn certificate_chain(&self) -> Result<Option<Vec<String>>, StatusListError> {
-        Ok(self.active.load_full().certificate_chain.clone())
-    }
-
-    async fn signing_key_pem(&self) -> Result<String, StatusListError> {
-        Ok(self.active.load_full().signing_key_pem.clone())
+    async fn signing_material(&self) -> Result<SigningMaterial, StatusListError> {
+        Ok((*self.active.load_full()).clone())
     }
 }
 
@@ -110,10 +96,32 @@ async fn load_and_validate_signing_material(
         .await
         .map_err(|err| StatusListError::Backend(Box::new(err)))?;
     validate_signing_material(&cert_pem, &signing_key_pem)?;
+    let certificate_chain = pem_chain_to_base64_der(&cert_pem)?;
     Ok(SigningMaterial {
-        certificate_chain: Some(vec![cert_pem]),
+        certificate_chain: Some(certificate_chain),
         signing_key_pem,
     })
+}
+
+pub(crate) fn pem_chain_to_base64_der(cert_pem: &str) -> Result<Vec<String>, StatusListError> {
+    let certs = x509_parser::pem::Pem::iter_from_buffer(cert_pem.as_bytes())
+        .map(|cert| {
+            cert.map(|pem| BASE64_STANDARD.encode(&pem.contents))
+                .map_err(|err| {
+                    StatusListError::Backend(Box::new(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        err.to_string(),
+                    )))
+                })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    if certs.is_empty() {
+        return Err(StatusListError::Backend(Box::new(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "certificate chain is empty",
+        ))));
+    }
+    Ok(certs)
 }
 
 pub(crate) fn validate_signing_material(
@@ -152,25 +160,27 @@ pub(crate) fn validate_signing_material(
 #[cfg(not(feature = "acme"))]
 #[async_trait]
 impl CertificateProvider for StoreCertificateProvider {
-    async fn certificate_chain(&self) -> Result<Option<Vec<String>>, StatusListError> {
-        if let Some(path) = &self.cert_path {
+    async fn signing_material(&self) -> Result<SigningMaterial, StatusListError> {
+        let certificate_chain = if let Some(path) = &self.cert_path {
             let content = tokio::fs::read_to_string(path)
                 .await
                 .map_err(|e| StatusListError::Backend(Box::new(e)))?;
-            Ok(Some(vec![content]))
+            Some(pem_chain_to_base64_der(&content)?)
         } else {
-            Ok(None)
-        }
-    }
+            None
+        };
 
-    async fn signing_key_pem(&self) -> Result<String, StatusListError> {
         let path = self
             .key_path
             .as_deref()
             .unwrap_or("test_data/ec-private.pem");
-        tokio::fs::read_to_string(path)
+        let signing_key_pem = tokio::fs::read_to_string(path)
             .await
-            .map_err(|e| StatusListError::Backend(Box::new(e)))
+            .map_err(|e| StatusListError::Backend(Box::new(e)))?;
+        Ok(SigningMaterial {
+            certificate_chain,
+            signing_key_pem,
+        })
     }
 }
 
@@ -249,7 +259,11 @@ mod tests {
         )
         .await
         .expect("provider");
-        let original = provider.signing_key_pem().await.expect("original key");
+        let original = provider
+            .signing_material()
+            .await
+            .expect("original material")
+            .signing_key_pem;
 
         tokio::fs::write(&key_path, "not a private key")
             .await
@@ -264,8 +278,78 @@ mod tests {
                 .is_err()
         );
         assert_eq!(
-            provider.signing_key_pem().await.expect("retained key"),
+            provider
+                .signing_material()
+                .await
+                .expect("retained material")
+                .signing_key_pem,
             original
         );
+    }
+
+    #[tokio::test]
+    async fn successful_reload_swaps_certificate_and_key_atomically() {
+        let dir = TempDir::new();
+        let cert_path = dir.path().join("tls.crt");
+        let key_path = dir.path().join("tls.key");
+        let (first_cert, first_key) = matching_cert_and_key();
+        let (second_cert, second_key) = matching_cert_and_key();
+        tokio::fs::write(&cert_path, first_cert)
+            .await
+            .expect("write cert");
+        tokio::fs::write(&key_path, first_key)
+            .await
+            .expect("write key");
+
+        let provider = ReloadingCertificateProvider::from_files(
+            cert_path.to_string_lossy().to_string(),
+            key_path.to_string_lossy().to_string(),
+        )
+        .await
+        .expect("provider");
+
+        tokio::fs::write(&cert_path, second_cert.clone())
+            .await
+            .expect("write rotated cert");
+        tokio::fs::write(&key_path, second_key.clone())
+            .await
+            .expect("write rotated key");
+        provider
+            .reload_from_files(
+                cert_path.to_str().expect("cert path"),
+                key_path.to_str().expect("key path"),
+            )
+            .await
+            .expect("reload");
+
+        let material = provider.signing_material().await.expect("material");
+        assert_eq!(material.signing_key_pem, second_key);
+        assert_eq!(
+            material.certificate_chain,
+            Some(pem_chain_to_base64_der(&second_cert).expect("chain"))
+        );
+    }
+
+    #[tokio::test]
+    async fn filesystem_provider_exports_base64_der_chain_parts() {
+        let dir = TempDir::new();
+        let cert_path = dir.path().join("tls.crt");
+        let key_path = dir.path().join("tls.key");
+        let (cert, key) = matching_cert_and_key();
+        tokio::fs::write(&cert_path, cert.clone())
+            .await
+            .expect("write cert");
+        tokio::fs::write(&key_path, key).await.expect("write key");
+
+        let provider = ReloadingCertificateProvider::from_files(
+            cert_path.to_string_lossy().to_string(),
+            key_path.to_string_lossy().to_string(),
+        )
+        .await
+        .expect("provider");
+        let material = provider.signing_material().await.expect("material");
+        let chain = material.certificate_chain.expect("chain");
+        assert_eq!(chain, pem_chain_to_base64_der(&cert).expect("b64 der"));
+        assert!(!chain[0].contains("BEGIN CERTIFICATE"));
     }
 }

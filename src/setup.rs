@@ -48,7 +48,7 @@ use crate::cert_manager::http_client::DefaultHttpClient;
 use crate::cert_manager::storage::MemoryStorage;
 #[cfg(feature = "acme")]
 use crate::cert_manager::{
-    CertManager, CertProvisioningStrategy, StoreProvisioningStrategy,
+    CertManager, StoreProvisioningStrategy,
     storage::{CryptoCachePolicy, Storage},
 };
 use crate::config::{Config as AppConfig, DatabaseBackend};
@@ -282,9 +282,7 @@ fn spawn_acme_store_rotation(config: AppConfig, manager: Arc<CertManager>) {
                 let signing_key = tokio::fs::read_to_string(&signing_key_path).await?;
                 validate_signing_material(&certificate, &signing_key)
                     .map_err(|err| color_eyre::eyre::eyre!("{err}"))?;
-                StoreProvisioningStrategy::filesystem(&certificate_path, &signing_key_path)
-                    .provision(&manager)
-                    .await?;
+                manager.request_certificate().await?;
                 Ok::<(), color_eyre::Report>(())
             }
             .await;
@@ -1196,5 +1194,161 @@ mod general_tests {
             "acquire_timeout did not fire quickly enough, so the acquire queued \
              behind the holder rather than giving up: {elapsed:?}"
         );
+    }
+
+    #[cfg(feature = "postgres-tests")]
+    #[tokio::test]
+    async fn postgres_password_file_rotation_swaps_pool_without_dropping_inflight_query() {
+        use crate::outbound::sql::test_containers::postgres_helpers::postgres_connection;
+        use sea_orm::{ConnectionTrait, DatabaseBackend, Statement};
+
+        let test_db = postgres_connection().await;
+        let parsed = url::Url::parse(&test_db.url).expect("postgres test URL");
+        let host = parsed.host_str().expect("host");
+        let port = parsed.port().expect("port").to_string();
+        let db_name = parsed.path().trim_start_matches('/');
+        let role = format!("rotation_{}", uuid::Uuid::new_v4().simple());
+        let old_password = "old_rotation_password";
+        let new_password = "new_rotation_password";
+
+        test_db
+            .db
+            .execute_unprepared(&format!(
+                "CREATE USER {role} WITH PASSWORD '{old_password}'"
+            ))
+            .await
+            .expect("create rotation user");
+
+        let temp_dir =
+            std::env::temp_dir().join(format!("status-list-db-rotation-{}", uuid::Uuid::new_v4()));
+        let password_path = temp_dir.join("password");
+        tokio::fs::create_dir_all(&temp_dir)
+            .await
+            .expect("create temp dir");
+        tokio::fs::write(&password_path, old_password)
+            .await
+            .expect("write initial password");
+
+        let config = AppConfig::load_from_overrides(&[
+            ("APP_DATABASE__BACKEND", "postgres"),
+            ("APP_DATABASE__HOST", host),
+            ("APP_DATABASE__PORT", &port),
+            ("APP_DATABASE__USERNAME", &role),
+            ("APP_DATABASE__PASSWORD", "ignored-by-password-file"),
+            (
+                "APP_DATABASE__PASSWORD_FILE",
+                password_path.to_str().expect("password path"),
+            ),
+            ("APP_DATABASE__NAME", db_name),
+            ("APP_DATABASE__POOL__MAX_CONNECTIONS", "2"),
+            ("APP_DATABASE__POOL__MIN_CONNECTIONS", "1"),
+        ])
+        .expect("rotation config");
+
+        let initial = Arc::new(connect_database_pool(&config).await.expect("initial pool"));
+        let handle = Arc::new(SwappableDatabaseConnection::new(initial.clone()));
+        let inflight = {
+            let db = handle.current();
+            tokio::spawn(async move {
+                db.query_one(Statement::from_string(
+                    DatabaseBackend::Postgres,
+                    "SELECT pg_sleep(0.25), current_user".to_string(),
+                ))
+                .await
+            })
+        };
+
+        test_db
+            .db
+            .execute_unprepared(&format!("ALTER USER {role} WITH PASSWORD '{new_password}'"))
+            .await
+            .expect("alter rotation user password");
+        tokio::fs::write(&password_path, new_password)
+            .await
+            .expect("write rotated password");
+
+        let rotated = Arc::new(connect_database_pool(&config).await.expect("rotated pool"));
+        rotated.ping().await.expect("rotated pool validates");
+        let old = handle.swap(rotated.clone());
+
+        assert!(Arc::ptr_eq(&old, &initial));
+        assert!(Arc::ptr_eq(&handle.current(), &rotated));
+        inflight
+            .await
+            .expect("in-flight task joined")
+            .expect("in-flight query survived");
+
+        let _ = tokio::fs::remove_dir_all(temp_dir).await;
+    }
+
+    #[cfg(feature = "postgres-tests")]
+    #[tokio::test]
+    async fn postgres_password_file_rotation_failure_retains_old_pool_and_redacts_passwords() {
+        use crate::outbound::sql::test_containers::postgres_helpers::postgres_connection;
+
+        let test_db = postgres_connection().await;
+        let parsed = url::Url::parse(&test_db.url).expect("postgres test URL");
+        let host = parsed.host_str().expect("host");
+        let port = parsed.port().expect("port").to_string();
+        let db_name = parsed.path().trim_start_matches('/');
+        let role = format!("rotation_{}", uuid::Uuid::new_v4().simple());
+        let old_password = "old_rotation_password_secret";
+        let wrong_password = "wrong_rotation_password_secret";
+
+        test_db
+            .db
+            .execute_unprepared(&format!(
+                "CREATE USER {role} WITH PASSWORD '{old_password}'"
+            ))
+            .await
+            .expect("create rotation user");
+
+        let temp_dir = std::env::temp_dir().join(format!(
+            "status-list-db-rotation-failure-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let password_path = temp_dir.join("password");
+        tokio::fs::create_dir_all(&temp_dir)
+            .await
+            .expect("create temp dir");
+        tokio::fs::write(&password_path, old_password)
+            .await
+            .expect("write initial password");
+
+        let config = AppConfig::load_from_overrides(&[
+            ("APP_DATABASE__BACKEND", "postgres"),
+            ("APP_DATABASE__HOST", host),
+            ("APP_DATABASE__PORT", &port),
+            ("APP_DATABASE__USERNAME", &role),
+            ("APP_DATABASE__PASSWORD", "ignored-by-password-file"),
+            (
+                "APP_DATABASE__PASSWORD_FILE",
+                password_path.to_str().expect("password path"),
+            ),
+            ("APP_DATABASE__NAME", db_name),
+            ("APP_DATABASE__POOL__MAX_CONNECTIONS", "1"),
+            ("APP_DATABASE__POOL__MIN_CONNECTIONS", "1"),
+            ("APP_DATABASE__POOL__CONNECT_TIMEOUT_SECS", "1"),
+            ("APP_DATABASE__POOL__ACQUIRE_TIMEOUT_SECS", "1"),
+        ])
+        .expect("rotation config");
+
+        let initial = Arc::new(connect_database_pool(&config).await.expect("initial pool"));
+        let handle = SwappableDatabaseConnection::new(initial.clone());
+        tokio::fs::write(&password_path, wrong_password)
+            .await
+            .expect("write wrong password");
+
+        let err = connect_database_pool(&config)
+            .await
+            .expect_err("wrong password must fail");
+        let rendered = format!("{err:?}");
+
+        assert!(Arc::ptr_eq(&handle.current(), &initial));
+        initial.ping().await.expect("old pool remains usable");
+        assert!(!rendered.contains(old_password));
+        assert!(!rendered.contains(wrong_password));
+
+        let _ = tokio::fs::remove_dir_all(temp_dir).await;
     }
 }

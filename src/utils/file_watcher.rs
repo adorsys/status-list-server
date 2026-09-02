@@ -243,6 +243,29 @@ async fn fingerprint(path: &Path) -> Option<u64> {
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use tokio::time::timeout;
+
+    struct TempDir {
+        path: PathBuf,
+    }
+
+    impl TempDir {
+        fn new() -> Self {
+            let path = std::env::temp_dir().join(format!(
+                "status-list-watcher-test-{}-{}",
+                std::process::id(),
+                time::OffsetDateTime::now_utc().unix_timestamp_nanos()
+            ));
+            std::fs::create_dir_all(&path).expect("create temp dir");
+            Self { path }
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.path);
+        }
+    }
 
     #[tokio::test]
     async fn debouncer_coalesces_bursty_changes() {
@@ -324,5 +347,30 @@ mod tests {
             Path::new("/var/run/secrets/db/unrelated"),
             Path::new("/var/run/secrets/db/password")
         ));
+    }
+
+    #[tokio::test]
+    async fn spawn_dispatches_callback_after_file_write() {
+        let dir = TempDir::new();
+        let path = dir.path.join("secret");
+        tokio::fs::write(&path, "first")
+            .await
+            .expect("write initial");
+
+        let (tx, mut rx) = mpsc::channel(1);
+        FileWatcher::new(vec![path.clone()], Duration::from_secs(1)).spawn("test", move || {
+            let tx = tx.clone();
+            async move {
+                let _ = tx.send(()).await;
+            }
+        });
+
+        tokio::fs::write(&path, "second")
+            .await
+            .expect("write update");
+        timeout(Duration::from_secs(3), rx.recv())
+            .await
+            .expect("watcher callback timed out")
+            .expect("watcher callback");
     }
 }

@@ -40,6 +40,31 @@ impl SwappableDatabaseConnection {
     }
 }
 
+#[cfg(all(test, feature = "sqlite"))]
+mod swappable_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn swap_replaces_active_pool_and_returns_previous_pool() {
+        let first = Arc::new(
+            sea_orm::Database::connect("sqlite::memory:")
+                .await
+                .expect("first sqlite pool"),
+        );
+        let second = Arc::new(
+            sea_orm::Database::connect("sqlite::memory:")
+                .await
+                .expect("second sqlite pool"),
+        );
+        let swappable = SwappableDatabaseConnection::new(first.clone());
+
+        let old = swappable.swap(second.clone());
+
+        assert!(Arc::ptr_eq(&old, &first));
+        assert!(Arc::ptr_eq(&swappable.current(), &second));
+    }
+}
+
 impl<T> SeaOrmStore<T> {
     pub fn new(db: Arc<DatabaseConnection>) -> Self {
         Self::from_handle(Arc::new(SwappableDatabaseConnection::new(db)))

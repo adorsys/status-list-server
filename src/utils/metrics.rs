@@ -376,4 +376,37 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn rotation_metrics_are_exported_with_target_and_outcome_labels() {
+        let _metrics_guard = metrics_test_lock();
+        let registry = Registry::new();
+        let config = TelemetryConfig {
+            environment: TelemetryEnvironment::Development,
+            otlp_endpoint: "http://localhost:4317".to_string(),
+            sampler_ratio: 1.0,
+            enabled: false,
+        };
+
+        let _meter_provider = setup_metrics(
+            &registry,
+            &config,
+            Resource::builder()
+                .with_service_name("status-list-server-test")
+                .build(),
+        )
+        .expect("metrics setup");
+
+        record_rotation(TARGET_TOKEN_SIGNING_KEY, true);
+        record_rotation(TARGET_TOKEN_SIGNING_KEY, false);
+
+        let rendered = tokio::runtime::Runtime::new()
+            .expect("tokio runtime")
+            .block_on(metrics_handler(registry));
+        assert!(rendered.contains("credential_rotation_total"));
+        assert!(rendered.contains("credential_rotation_last_success_timestamp"));
+        assert!(rendered.contains("target=\"token_signing_key\""));
+        assert!(rendered.contains("outcome=\"success\""));
+        assert!(rendered.contains("outcome=\"failure\""));
+    }
 }
