@@ -165,7 +165,18 @@ and follow the same `helm upgrade --install` flow.
 
 ## Further reading
 
+`/health/ready` reflects dependency health (database reachable, certificate material loadable)
+and is the readiness gate for a release. If a pod stays unready or the server does not start, see
+the [troubleshooting reference](../docs/troubleshooting.md).
+
+For local development without a cluster, use [`chart/values-local.yaml`](chart/values-local.yaml)
+and follow the same `helm upgrade --install` flow.
+
+## Further reading
+
 * [`chart/values.yaml`](chart/values.yaml) — the source of truth for every Helm value.
 * [Deployment runbook](../docs/deployment-runbook.md) — how CI/CD deploys to production.
+* [Troubleshooting reference](../docs/troubleshooting.md) — error-indexed fixes for startup, secrets,
+  Kubernetes/ESO, and Helm/upgrade issues.
 * [Container supply chain](../docs/supply-chain.md) — image scanning, SBOM, and SLSA.
 * [Project README](../README.md) — overview and local-development quick start.
