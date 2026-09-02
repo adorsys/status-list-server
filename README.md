@@ -169,8 +169,7 @@ All runtime settings can be configured via environment variables prefixed with `
 |                   | `APP_DATABASE__POOL__MAX_CONNECTIONS`       | `5`                                | Connection pool size limit                                           |
 | **Certificates**  | `APP_SERVER__CERT__PROVISIONING_STRATEGY`   | `store` (`acme` if feature active) | Provisioning mode (`store` or `acme`)                                |
 |                   | `APP_SERVER__CERT__EMAIL`                   | `admin@example.com`                | Contact email for ACME certificate registration                      |
-|                   | `APP_SERVER__CERT__RENEWAL_CRON_SCHEDULE`   | `0 0 0 * * *`                      | 6-field cron expression for cert renewal checks                      |
-|                   | `APP_SERVER__CERT__STORE__CERTIFICATE_PATH` | `None`                             | Path to PEM/DER certificate file (filesystem store)                  |
+|                   | `APP_SERVER__CERT__SIGNING_KEY_CACHE_TTL`   | `0`                                | Private key cache TTL from backend (seconds; `0` disables)           |
 |                   | `APP_SERVER__CERT__STORE__SIGNING_KEY_PATH` | `None`                             | Path to PKCS#8 private key file (filesystem store)                   |
 |                   | `APP_SERVER__CERT__DNS__PROVIDER`           | Auto-resolved                      | DNS provider (route53/cloudflare/gcloud/azure/acmedns/pebble)        |
 | **Cache**         | `APP_CACHE__TTL`                            | `300`                              | Status list item cache TTL (seconds; `0` disables)                   |
@@ -199,7 +198,7 @@ The application validates settings at startup and fails fast if invalid:
 
 - `APP_SERVER__PORT` must be between `1` and `65535`.
 - `APP_SERVER__CERT__RENEWAL_CRON_SCHEDULE` must be a valid 6-field cron expression (with seconds).
-- Database URL schemes must match the selected `APP_DATABASE__BACKEND` (e.g. `postgres://` for `postgres`).
+| [`openapi.yaml`](openapi.yaml)                             | Complete OpenAPI 3.1 REST API specification                                                      |
 - `APP_TELEMETRY__SAMPLER_RATIO` must be a finite number between `0.0` and `1.0`.
 
 ## Documentation Index
@@ -329,7 +328,11 @@ The server implements proper error handling and returns appropriate HTTP status 
 
 For production deployments:
 
-- **Kubernetes**: Refer to the [Helm Chart Guide](helm/README.md).
+Run complete local CI checks using the [`local-ci.sh`](local-ci.sh) script (format, clippy, tests, and dependency checks):
+
+```bash
+# Requires cargo-nextest: cargo install cargo-nextest
+./local-ci.sh
 - **Operations & Runbooks**: Refer to the [Deployment Runbook](docs/deployment-runbook.md) for database migration, backup, and operational guidelines.
 
 ### Container Supply Chain
