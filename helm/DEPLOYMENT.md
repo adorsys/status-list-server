@@ -5,14 +5,15 @@
 > Helm chart. It walks you through an end-to-end deployment **without requiring any
 > understanding of the server's internals**. Each step is a deeplink below:
 
-| Step                                                         | What it covers                                                       |
-| ------------------------------------------------------------ | -------------------------------------------------------------------- |
-| [1. Prerequisites](#1-prerequisites)                         | Cluster, Helm, `kubectl`, External Secrets Operator, registry access |
-| [2. Choose your image variant](#2-choose-your-image-variant) | Which `ghcr.io/adorsys/status-list-server` image to deploy           |
-| [3. Configure your secrets](#3-configure-your-secrets)       | External Secrets Operator vs. fallback Secret                        |
-| [4. Deploy with Helm](#4-deploy-with-helm)                   | The `helm` commands to install the chart                             |
-| [5. Verify the deployment](#5-verify-the-deployment)         | Confirm the server is healthy                                        |
-| [Next steps](#next-steps)                                    | Where to find the detailed documentation                             |
+| Step                                                                 | What it covers                                                       |
+| -------------------------------------------------------------------- | -------------------------------------------------------------------- |
+| [1. Prerequisites](#1-prerequisites)                                 | Cluster, Helm, `kubectl`, External Secrets Operator, registry access |
+| [2. Choose your image variant](#2-choose-your-image-variant)         | Which `ghcr.io/adorsys/status-list-server` image to deploy           |
+| [3. Configure your secrets](#3-configure-your-secrets)               | External Secrets Operator vs. fallback Secret                        |
+| [4. Configure signing credentials](#4-configure-signing-credentials) | The token-signing key + issuer certificate the server needs to start |
+| [5. Deploy with Helm](#5-deploy-with-helm)                           | The `helm` commands to install the chart                             |
+| [6. Verify the deployment](#6-verify-the-deployment)                 | Confirm the server is healthy                                        |
+| [Next steps](#next-steps)                                            | Where to find the detailed documentation                             |
 
 For deep technical detail — architecture, the full environment-variable reference, rotation,
 scaling, observability, and an error-indexed troubleshooting guide — see
@@ -108,7 +109,52 @@ Working value files ship with the chart: `chart/values.yaml` (defaults),
 `chart/values-local.yaml` (local cluster), `chart/values-external-secrets.yaml`, and
 `chart/values-production.yaml`.
 
-## 4. Deploy with Helm
+## 4. Configure signing credentials
+
+Before the server can be ready it needs its **token-signing key and issuer certificate** (its
+signing identity). The chart defaults to ACME (`APP_SERVER__CERT__PROVISIONING_STRATEGY`),
+which requires a DNS provider like Route53 and a publicly reachable domain. For a
+**self-contained deploy with no cloud dependency**, use the `-fscert` image with store
+provisioning of file-based signing material:
+
+```bash
+# Generate a signing key and issuer certificate (PKCS#8 PEM)
+openssl genpkey -algorithm ED25519 -out signing-key.pem
+openssl req -new -x509 -key signing-key.pem -out issuer-cert.pem -days 365 \
+  -subj "/CN=statuslist.example.com"
+
+# Store them in a Kubernetes Secret in the target namespace
+kubectl -n statuslist create secret generic signing-credentials \
+  --from-file=certificate=issuer-cert.pem \
+  --from-file=signing-key=signing-key.pem
+```
+
+```yaml
+statuslist:
+  image:
+    tag: "1.2.0-fscert"
+  secretMounts:
+    - name: signing-keys
+      secretName: signing-credentials
+      mountPath: /etc/status-list-signing
+      items:
+        - key: certificate
+          path: certificate.pem
+        - key: signing-key
+          path: signing-key.pem
+      fileEnv:
+        APP_SERVER__CERT__STORE__CERTIFICATE_PATH: certificate.pem
+        APP_SERVER__CERT__STORE__SIGNING_KEY_PATH: signing-key.pem
+  env:
+    APP_SERVER__CERT__PROVISIONING_STRATEGY: "store"
+    APP_SERVER__DOMAIN: "statuslist.example.com" # your public host; the default is project-specific
+```
+
+With ACME or a cloud secret backend, the signing material is provisioned by that backend and
+`APP_SERVER__DOMAIN` plus the backend credentials must be configured instead — see the detailed
+operator documentation referenced under [Next steps](#next-steps).
+
+## 5. Deploy with Helm
 
 Validate your values, then install. CRD-rendering and value schema errors surface here, not
 as a failed upgrade:
@@ -129,7 +175,7 @@ The chart bundles PostgreSQL and an OpenTelemetry collector as dependencies. To 
 **external database**, disable the bundled PostgreSQL subchart and set the split
 `APP_DATABASE__*` env fields under `statuslist.env`.
 
-## 5. Verify the deployment
+## 6. Verify the deployment
 
 ```bash
 helm status statuslist -n statuslist
