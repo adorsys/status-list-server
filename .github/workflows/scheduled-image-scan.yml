@@ -24,20 +24,38 @@ concurrency:
 env:
   REGISTRY: ghcr.io
   IMAGE_BASE: ghcr.io/${{ github.repository_owner }}/status-list-server
-  # The same expression deploy.yml resolves the deploy from, so which variant is
-  # running is read from one source rather than restated here and left to drift.
+  # Which variant is running, read rather than restated here and left to drift.
   # Load-bearing, not decorative: the run fails if this variant was not scanned.
+  #
+  # The same expression deploy.yml resolves the deploy from, but *not* the same scope:
+  # deploy runs in `environment: production`, where `vars` resolves environment-scoped
+  # values first, and this workflow deliberately declares no environment -- a nightly
+  # cron that waits on production's reviewers would never run. So an environment-scoped
+  # `IMAGE_VARIANT` would be invisible here and this assertion would quietly start
+  # verifying a variant nobody is running.
+  #
+  # deploy.yml compares both scopes and fails the deploy if they ever diverge, which is
+  # the only place both are visible. This is safe to read as the deployed variant
+  # exactly because that check exists; do not remove one without the other.
   DEPLOYED_VARIANT: ${{ vars.IMAGE_VARIANT || 'aws' }}
   EXPIRY_WARN_DAYS: "30"
   ISSUE_MARKER: "<!-- scheduled-image-scan -->"
   ISSUE_LABEL: scheduled-image-scan
 
 jobs:
-  # The variant list, once. It used to appear twice in this file -- as the matrix and
-  # again as the set the coverage check asserts -- eleven lines apart, and the drift
-  # was asymmetric: forget the matrix and the cron goes permanently red, forget the
-  # assertion and a variant is silently uncovered. The second is the one that matters,
-  # because it is invisible. This is the same argument the shared scripts rest on.
+  # The variant list, once *in this file* -- it feeds both the matrix and the set the
+  # coverage check asserts, and the drift between those two was asymmetric: forget the
+  # matrix and the cron goes permanently red, forget the assertion and a variant is
+  # silently uncovered.
+  #
+  # It cannot be once across the repository. GitHub does not expose the `env` context
+  # to `strategy.matrix`, so deploy.yml has to restate the list in each of its three
+  # fan-out matrices and this job has to restate it a fourth time. That cross-file
+  # copy has the same asymmetry and the same invisible half: a variant added to
+  # deploy.yml but not here is built, promoted, deployed and never re-scanned, with
+  # nothing going red. So it is asserted rather than trusted, by the same script pull
+  # request CI runs -- which is where the drift should be caught, by whoever adds the
+  # variant, rather than here at 03:37 the following night.
   variants:
     name: Resolve Variant List
     runs-on: ubuntu-latest
@@ -46,6 +64,21 @@ jobs:
       list: ${{ steps.list.outputs.list }}
       names: ${{ steps.list.outputs.names }}
     steps:
+      - name: Fetch Repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Assert the variant list matches deploy.yml
+        # Before the list is published, so a run that would have silently excluded a
+        # deployed variant fails as itself rather than reporting on a subset.
+        run: |
+          set -eu
+          # apt rather than pip, matching CI.yml: the runner's PyYAML comes from the
+          # distribution, and the guard is here because its presence is not a promise.
+          python3 -c 'import yaml' 2>/dev/null || sudo apt-get install -y python3-yaml
+          python3 scripts/check-variant-parity.py
+
       - name: Publish the variant list
         id: list
         env:
@@ -499,15 +532,27 @@ jobs:
           category: container-image
 
       - name: Check for approaching exception expiry
-        # Never fails the run. A date three weeks out is notice, not a fault, and a red
-        # cron for it is how a red cron stops being read. `always()` for the same reason
-        # the SARIF step has it: this is the only advance warning an `expired_at` gets.
+        # A *finding* here never fails the run: a date three weeks out is notice, not a
+        # fault, and a red cron for it is how a red cron stops being read. A *broken
+        # checker* is the opposite -- it is an infrastructure fault, and one that
+        # presents as "nothing is expiring", so it is reported to the verdict below.
+        # Those are different conditions and conflating them is how this silently
+        # stops being the advance warning it exists to be.
+        #
+        # `always()` for the same reason the SARIF step has it: this is the only notice
+        # an `expired_at` gets before it lands on a release.
         id: expiry
         if: always()
         run: |
           set -uo pipefail
           : > expiring.tsv
           status=0
+
+          # The script exits 1 on a missing PyYAML, which is indistinguishable from
+          # "nothing is expiring" downstream. CI.yml guards the same import for the
+          # same reason: the runner image ships it, but that is not a promise.
+          python3 -c 'import yaml' 2>/dev/null || sudo apt-get install -y python3-yaml
+
           python3 scripts/check-trivyignore.py .trivyignore.yaml \
             --expiring-within "$EXPIRY_WARN_DAYS" > expiring.tsv || status=$?
 
@@ -515,8 +560,12 @@ jobs:
           # already rejects a malformed ledger, so reaching this means something changed
           # underneath it -- say so rather than reporting an empty list.
           if [ "$status" -ne 0 ]; then
-            echo "::warning::check-trivyignore.py exited ${status}; expiry could not be determined from .trivyignore.yaml."
+            echo "::error::check-trivyignore.py exited ${status}; expiry could not be determined from .trivyignore.yaml."
+            echo "This run gives no advance warning on \`expired_at\`, which is one of the three things it exists for."
             : > expiring.tsv
+            echo "checker_failed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "checker_failed=false" >> "$GITHUB_OUTPUT"
           fi
 
           if [ -s expiring.tsv ]; then
@@ -609,6 +658,18 @@ jobs:
             actionable=true
           fi
 
+          # The expiry set is half the change key, not decoration. Keying the comment
+          # on advisories alone made the expiry warning silent in the exact state this
+          # workflow drives itself into: the issue is deliberately left open after
+          # findings clear, so once it exists, an exception entering the 30-day window
+          # on a clean night rewrote the body -- which notifies nobody -- and posted no
+          # comment, on a green run. That is the notice not being given.
+          #
+          # `id@date`, not the day count: the countdown changes every night and would
+          # post a comment every night, which is the alert fatigue this is avoiding.
+          # The set only changes when an entry enters the window or is re-argued.
+          expiring_key=$(cut -f1,2 expiring.tsv | tr '\t' '@' | paste -sd, -)
+
           gh label create "$ISSUE_LABEL" --repo "$REPO" --force \
             --color B60205 \
             --description "Tracking issue for the scheduled image re-scan" > /dev/null
@@ -627,8 +688,11 @@ jobs:
           fi
 
           number=$(printf '%s' "$matches" | jq -r '.[0].number // empty')
-          previous=$(printf '%s' "$matches" | jq -r '.[0].body // ""' \
+          body=$(printf '%s' "$matches" | jq -r '.[0].body // ""')
+          previous=$(printf '%s' "$body" \
             | sed -n '/<!-- advisories: /{s/.*<!-- advisories: \(.*\) -->.*/\1/p;q;}')
+          previous_expiring=$(printf '%s' "$body" \
+            | sed -n '/<!-- expiring: /{s/.*<!-- expiring: \(.*\) -->.*/\1/p;q;}')
 
           if [ "$actionable" = false ] && [ -z "$number" ]; then
             echo "clean, and no tracking issue open. Nothing to do."
@@ -638,10 +702,11 @@ jobs:
           {
             echo "$ISSUE_MARKER"
             echo "<!-- advisories: ${ADVISORIES} -->"
+            echo "<!-- expiring: ${expiring_key} -->"
             echo
-            echo "> This body is rewritten by the nightly scan. The HTML comment above is"
-            echo "> how it remembers the previous advisory set; editing it will produce a"
-            echo "> spurious \"findings changed\" comment. Add notes in a comment instead."
+            echo "> This body is rewritten by the nightly scan. The HTML comments above"
+            echo "> are how it remembers the previous advisory and expiry sets; editing"
+            echo "> them will produce a spurious \"changed\" comment. Notes go in a comment."
             echo
             if [ "${ADVISORY_COUNT:-0}" -gt 0 ]; then
               echo "\`${ADVISORY_COUNT}\` distinct HIGH/CRITICAL advisories survive \`.trivyignore.yaml\` on released images."
@@ -688,10 +753,16 @@ jobs:
           gh issue edit "$number" --repo "$REPO" \
             --add-label "$ISSUE_LABEL" --body-file issue-body.md
 
-          # Comment only on a change of state. A findings set that is stable across runs
-          # must not produce a notification every morning, or the issue stops being read.
-          if [ "$previous" = "$ADVISORIES" ]; then
-            echo "issue #${number} refreshed; advisory set unchanged, so no comment."
+          # Comment only on a change of state, in *either* set. A findings set that is
+          # stable across runs must not produce a notification every morning, or the
+          # issue stops being read -- but a set that moved must produce exactly one.
+          #
+          # Expiry is half of this. Keyed on advisories alone, an exception entering
+          # the window on an otherwise-clean night rewrote the body and notified
+          # nobody, so the only advance warning an `expired_at` gets was delivered by
+          # a silent edit to an issue on a green run.
+          if [ "$previous" = "$ADVISORIES" ] && [ "$previous_expiring" = "$expiring_key" ]; then
+            echo "issue #${number} refreshed; advisory and expiry sets unchanged, so no comment."
             exit 0
           fi
 
@@ -701,34 +772,62 @@ jobs:
           removed=$(comm -23 /tmp/previous-ids /tmp/current-ids | tr '\n' ' ')
 
           {
-            if [ "${ADVISORY_COUNT:-0}" -eq 0 ]; then
-              echo "No longer reproduces as of ${today}. Left open for you to close."
-            else
-              echo "Findings changed on ${today}."
-              if [ -n "$added" ]; then
-                echo "- New: ${added}"
+            if [ "$previous" != "$ADVISORIES" ]; then
+              if [ "${ADVISORY_COUNT:-0}" -eq 0 ]; then
+                echo "No longer reproduces as of ${today}. Left open for you to close."
+              else
+                echo "Findings changed on ${today}."
+                if [ -n "$added" ]; then
+                  echo "- New: ${added}"
+                fi
+                if [ -n "$removed" ]; then
+                  echo "- No longer present: ${removed}"
+                fi
               fi
-              if [ -n "$removed" ]; then
-                echo "- No longer present: ${removed}"
-              fi
+              echo
             fi
-            echo
+
+            # Rendered whenever the expiry set moved, including when the findings did
+            # not. An exception approaching its date is actionable on its own, and it
+            # is the only thing reported here that has a deadline attached.
+            if [ "$previous_expiring" != "$expiring_key" ]; then
+              if [ -s expiring.tsv ]; then
+                echo "Exceptions lapsing within ${EXPIRY_WARN_DAYS} days changed on ${today}:"
+                echo
+                while IFS=$'\t' read -r id date days; do
+                  echo "- \`${id}\` expires ${date} (${days} days remaining)"
+                done < expiring.tsv
+                echo
+                echo "Re-argue or remove these before they lapse. An expired entry stops suppressing anything, so the finding returns and blocks the next release."
+              else
+                echo "No \`.trivyignore.yaml\` exception lapses within ${EXPIRY_WARN_DAYS} days as of ${today}."
+              fi
+              echo
+            fi
             echo "${RUN_URL}"
           } > comment.md
 
           gh issue comment "$number" --repo "$REPO" --body-file comment.md
-          echo "commented on issue #${number}: the advisory set changed."
+          echo "commented on issue #${number}: the advisory or expiry set changed."
 
       - name: Verdict
         # Last, and `always()`, so the SARIF, the summary and the issue are all in place
         # before the run goes red. The red run is the notification; the issue is the
         # record of findings specifically.
         #
-        # Three ways to be red, reported together rather than one masking the others:
-        # findings survived the ledger, a variant never reported, or a released image
-        # could not be resolved. The last two used to be silent -- a run could go green
-        # having scanned one variant out of five, including a green run on a night the
-        # image actually serving production was never looked at.
+        # Red is reserved for what this workflow promises, and the promise is about the
+        # image serving production. Findings surviving the ledger, the deployed variant
+        # not being scanned, and the expiry checker being broken are all failures of
+        # that promise. A *non-deployed* variant being unresolvable is not: it is worth
+        # saying, and it is already a row in the summary and a line in the issue, but
+        # failing the run over it buys nothing and costs the signal.
+        #
+        # That distinction is deliberate and was gotten wrong the first time. Failing on
+        # any unresolved variant meant adding a variant to the matrix produced weeks of
+        # consecutive red nightlies -- until the next release published its tag -- in
+        # the same file that refuses to fail on an approaching expiry because "a red
+        # cron for it is how a red cron stops being read". The principle was right; it
+        # just was not applied here.
         if: always()
         env:
           ADVISORY_COUNT: ${{ steps.aggregate.outputs.advisory_count }}
@@ -736,6 +835,8 @@ jobs:
           FAILED: ${{ steps.aggregate.outputs.failed }}
           DEPLOYED_STATUS: ${{ steps.aggregate.outputs.deployed_status }}
           AGGREGATE_OUTCOME: ${{ steps.aggregate.outcome }}
+          EXPIRING: ${{ steps.expiry.outputs.expiring }}
+          CHECKER_FAILED: ${{ steps.expiry.outputs.checker_failed }}
         run: |
           set -eu
           verdict=0
@@ -747,7 +848,9 @@ jobs:
 
           # The deployed variant is the one this workflow is actually about. Any status
           # other than `scanned` means the claim "the released image is re-scanned
-          # nightly" was not true tonight, whatever the other four did.
+          # nightly" was not true tonight, whatever the other four did. This is also
+          # what catches the deployed variant being unresolved or never reporting, so
+          # the two checks below can stay advisory without opening a hole.
           case "${DEPLOYED_STATUS:-absent}" in
             scanned)
               ;;
@@ -761,17 +864,32 @@ jobs:
               verdict=1 ;;
           esac
 
+          # Warnings, not failures: the deployed variant is covered above, and these
+          # are reported in the summary and the tracking issue either way.
           if [ -n "${FAILED:-}" ]; then
-            echo "::error::these variants never reported: ${FAILED}"
+            echo "::warning::these variants never reported: ${FAILED}"
             echo "Their scan legs died before writing a summary; they are not covered by this run."
-            verdict=1
           fi
 
           if [ -n "${UNAVAILABLE:-}" ]; then
-            echo "::error::no released image resolved for: ${UNAVAILABLE}"
-            echo "\`promote-tags\` applies \`latest-<variant>\` to every variant of a release, so"
-            echo "a partial absence is anomalous. If a variant was just added to the matrix,"
-            echo "it stays red until the next release publishes its tag."
+            echo "::warning::no released image resolved for: ${UNAVAILABLE}"
+            echo "\`promote-tags\` applies \`latest-<variant>\` to every variant of a release, so a"
+            echo "partial absence is anomalous -- unless a variant was just added to the matrix,"
+            echo "in which case it stays unresolved until the next release publishes its tag."
+          fi
+
+          # An approaching expiry never fails the run, but it must not be invisible on a
+          # green one either: the tracking issue comments on it, and this puts it on the
+          # run itself so both surfaces carry it.
+          if [ "${EXPIRING:-false}" = "true" ]; then
+            echo "::warning::.trivyignore.yaml exceptions lapse within ${EXPIRY_WARN_DAYS} days; see the job summary and the tracking issue."
+          fi
+
+          # A checker that could not run is an infrastructure fault, and it presents as
+          # "nothing is expiring" -- so it is red. This is the one advance warning an
+          # `expired_at` gets; it failing silently is how the expiry lands on a release.
+          if [ "${CHECKER_FAILED:-false}" = "true" ]; then
+            echo "::error::the exception expiry check could not run, so this run gave no \`expired_at\` warning."
             verdict=1
           fi
 
@@ -781,6 +899,6 @@ jobs:
           fi
 
           if [ "$verdict" -eq 0 ]; then
-            echo "every expected variant was scanned, and no HIGH or CRITICAL findings survive exceptions."
+            echo "the deployed variant '${DEPLOYED_VARIANT}' was scanned, and no HIGH or CRITICAL findings survive exceptions."
           fi
           exit "$verdict"
