@@ -1,0 +1,391 @@
+# End-to-end alert tests: drives raw series through the recording rules (included
+# below) so the `sli:*` names exist, then asserts which alerts fire.
+#
+# A 400-minute run gives both the 1h and 6h window recording rules enough data
+# to resolve so the multi-window alerts can be exercised.
+#
+# NOTE: annotations on firing alerts must match the rule exactly (promtool
+# compares them literally), so they are duplicated here.
+rule_files:
+  - ../rules/recording.rules.yml
+  - ../rules/alerting.rules.yml
+evaluation_interval: 1m
+tests:
+  # Constant heavy 5xx traffic -> error_rate 0.1 >= 0.072 (fast) and >= 0.030
+  # (slow) on the aligned 1h+6h windows, so BOTH ErrorRateFastBurn (page) and
+  # ErrorRateSlowBurn (warn) fire. No histogram / DB / token / cache data
+  # exists, so those alerts must NOT fire.
+  - interval: 1m
+    input_series:
+      - series: >-
+          http_server_requests_total{otel_scope_name="status-list-server",namespace="ns1",method="GET",route="/x",status_class="5xx"}
+        values: '0+100x400'
+      - series: >-
+          http_server_requests_total{otel_scope_name="status-list-server",namespace="ns1",method="GET",route="/x",status_class="2xx"}
+        values: '0+900x400'
+    alert_rule_test:
+      - eval_time: 400m
+        alertname: ErrorRateFastBurn
+        exp_alerts:
+          - exp_labels:
+              service: "status-list-server"
+              severity: "page"
+              sli: "error_rate"
+              namespace: "ns1"
+            exp_annotations:
+              summary: "5xx error rate burning the error budget fast (>=14.4x over 0.5% budget on the 1h window)"
+              runbook_url: "https://github.com/adorsys/status-list-server/blob/develop/observability/runbooks/error-rate.md"
+      - eval_time: 400m
+        alertname: ErrorRateSlowBurn
+        exp_alerts:
+          - exp_labels:
+              service: "status-list-server"
+              severity: "warn"
+              sli: "error_rate"
+              namespace: "ns1"
+            exp_annotations:
+              summary: "5xx error rate burning the error budget slowly (>=6x over 0.5% budget on the 6h window)"
+              runbook_url: "https://github.com/adorsys/status-list-server/blob/develop/observability/runbooks/error-rate.md"
+      # Alerts that depend on missing series (histograms / token / cache) must not fire.
+      - eval_time: 400m
+        alertname: RequestLatencyFastBurn
+        exp_alerts: []
+      - eval_time: 400m
+        alertname: DbLatencyFastBurn
+        exp_alerts: []
+      - eval_time: 400m
+        alertname: TokenGenerationFastBurn
+        exp_alerts: []
+      - eval_time: 400m
+        alertname: CacheHitRatioLow
+        exp_alerts: []
+
+  # Burn-rate model correctness: a MODERATE sustained error rate (0.05) is above
+  # the slow-burn 6x threshold (0.030) but below the fast-burn 14.4x threshold
+  # (0.072) on every window. It must fire ONLY the slow-burn WARN, and the
+  # fast-burn PAGE must stay silent — otherwise the fast/slow burn-rate
+  # separation is misimplemented and pages would fire for slow degradations.
+  - interval: 1m
+    input_series:
+      - series: >-
+          http_server_requests_total{otel_scope_name="status-list-server",namespace="ns1",method="GET",route="/x",status_class="5xx"}
+        values: '0+5x400'
+      - series: >-
+          http_server_requests_total{otel_scope_name="status-list-server",namespace="ns1",method="GET",route="/x",status_class="2xx"}
+        values: '0+95x400'
+    alert_rule_test:
+      - eval_time: 400m
+        alertname: ErrorRateFastBurn
+        exp_alerts: []
+      - eval_time: 400m
+        alertname: ErrorRateSlowBurn
+        exp_alerts:
+          - exp_labels:
+              service: "status-list-server"
+              severity: "warn"
+              sli: "error_rate"
+              namespace: "ns1"
+            exp_annotations:
+              summary: "5xx error rate burning the error budget slowly (>=6x over 0.5% budget on the 6h window)"
+              runbook_url: "https://github.com/adorsys/status-list-server/blob/develop/observability/runbooks/error-rate.md"
+
+  # Positive-fire coverage for every alert not exercised above. Histogram
+  # buckets are crafted so record-rule p95 lands clearly above the latency
+  # thresholds (request >= 300ms, DB >= 50ms), and the ratio counters are set to
+  # breach the burn-rate / ratio thresholds. A 400-minute run resolves the 1h and
+  # 6h windows and outlasts every `for:` duration.
+  - interval: 1m
+    input_series:
+      # Request latency: cumulative 90/100 by le="0.5", 100/100 by le="1"
+      # -> p95 interpolates to ~0.75s > 0.3s.
+      - series: >-
+          http_server_duration_seconds_bucket{otel_scope_name="status-list-server",namespace="ns1",le="0.1"}
+        values: '0+20x400'
+      - series: >-
+          http_server_duration_seconds_bucket{otel_scope_name="status-list-server",namespace="ns1",le="0.3"}
+        values: '0+80x400'
+      - series: >-
+          http_server_duration_seconds_bucket{otel_scope_name="status-list-server",namespace="ns1",le="0.5"}
+        values: '0+90x400'
+      - series: >-
+          http_server_duration_seconds_bucket{otel_scope_name="status-list-server",namespace="ns1",le="1"}
+        values: '0+100x400'
+      - series: >-
+          http_server_duration_seconds_bucket{otel_scope_name="status-list-server",namespace="ns1",le="+Inf"}
+        values: '0+100x400'
+      # DB query latency: cumulative 90/100 by le="0.1", 100/100 by le="1"
+      # -> p95 interpolates to ~0.55s > 0.05s.
+      - series: >-
+          db_query_duration_seconds_bucket{otel_scope_name="status-list-server",namespace="ns1",le="0.01"}
+        values: '0+20x400'
+      - series: >-
+          db_query_duration_seconds_bucket{otel_scope_name="status-list-server",namespace="ns1",le="0.05"}
+        values: '0+80x400'
+      - series: >-
+          db_query_duration_seconds_bucket{otel_scope_name="status-list-server",namespace="ns1",le="0.1"}
+        values: '0+90x400'
+      - series: >-
+          db_query_duration_seconds_bucket{otel_scope_name="status-list-server",namespace="ns1",le="1"}
+        values: '0+100x400'
+      - series: >-
+          db_query_duration_seconds_bucket{otel_scope_name="status-list-server",namespace="ns1",le="+Inf"}
+        values: '0+100x400'
+      # Token generation: 10 failures / 100 attempts = 0.10 >= 0.072 (both 1h and 6h).
+      - series: >-
+          token_generation_failures_total{otel_scope_name="status-list-server",namespace="ns1",format="jwt"}
+        values: '0+10x400'
+      - series: >-
+          token_generation_attempts_total{otel_scope_name="status-list-server",namespace="ns1",format="jwt"}
+        values: '0+100x400'
+      # Cache hits 3 / (3 + 2) = 0.60 < 0.85.
+      - series: >-
+          status_list_cache_hits_total{otel_scope_name="status-list-server",namespace="ns1",cache="status_list"}
+        values: '0+3x400'
+      - series: >-
+          status_list_cache_misses_total{otel_scope_name="status-list-server",namespace="ns1",cache="status_list"}
+        values: '0+2x400'
+      # Cert expiry gauge: constant ~7d (600000s) remaining. Below the 14d warn
+      # threshold AND the 7d page threshold, so both expiry alerts fire and the
+      # renewal-broken (imminent-expiry) condition is verifiable.
+      - series: >-
+          cert_time_to_expiry_seconds{otel_scope_name="status-list-server",namespace="ns1"}
+        values: '600000x400'
+    alert_rule_test:
+      - eval_time: 400m
+        alertname: RequestLatencyFastBurn
+        exp_alerts:
+          - exp_labels:
+              service: "status-list-server"
+              severity: "page"
+              sli: "request_latency"
+              namespace: "ns1"
+            exp_annotations:
+              summary: "Request latency P95 sustainably above 300ms (>300ms on the 1h window)"
+              runbook_url: "https://github.com/adorsys/status-list-server/blob/develop/observability/runbooks/request-latency.md"
+      - eval_time: 400m
+        alertname: RequestLatencySlowBurn
+        exp_alerts:
+          - exp_labels:
+              service: "status-list-server"
+              severity: "warn"
+              sli: "request_latency"
+              namespace: "ns1"
+            exp_annotations:
+              summary: "Request latency P95 sustained above 300ms on the 6h window"
+              runbook_url: "https://github.com/adorsys/status-list-server/blob/develop/observability/runbooks/request-latency.md"
+      - eval_time: 400m
+        alertname: DbLatencyFastBurn
+        exp_alerts:
+          - exp_labels:
+              service: "status-list-server"
+              severity: "page"
+              sli: "db_latency"
+              namespace: "ns1"
+            exp_annotations:
+              summary: "DB query latency P95 sustainably above 50ms (>50ms on the 1h window)"
+              runbook_url: "https://github.com/adorsys/status-list-server/blob/develop/observability/runbooks/db-latency.md"
+      - eval_time: 400m
+        alertname: DbLatencySlowBurn
+        exp_alerts:
+          - exp_labels:
+              service: "status-list-server"
+              severity: "warn"
+              sli: "db_latency"
+              namespace: "ns1"
+            exp_annotations:
+              summary: "DB query latency P95 sustained above 50ms on the 6h window"
+              runbook_url: "https://github.com/adorsys/status-list-server/blob/develop/observability/runbooks/db-latency.md"
+      - eval_time: 400m
+        alertname: TokenGenerationFastBurn
+        exp_alerts:
+          - exp_labels:
+              service: "status-list-server"
+              severity: "page"
+              sli: "token_generation"
+              namespace: "ns1"
+            exp_annotations:
+              summary: "Token-generation failures burning the error budget fast (>=14.4x over 0.5% budget on the 1h window)"
+              runbook_url: "https://github.com/adorsys/status-list-server/blob/develop/observability/runbooks/token-generation.md"
+      - eval_time: 400m
+        alertname: TokenGenerationSlowBurn
+        exp_alerts:
+          - exp_labels:
+              service: "status-list-server"
+              severity: "warn"
+              sli: "token_generation"
+              namespace: "ns1"
+            exp_annotations:
+              summary: "Token-generation failure rate burning the error budget slowly (>=6x over 0.5% budget on the 6h window)"
+              runbook_url: "https://github.com/adorsys/status-list-server/blob/develop/observability/runbooks/token-generation.md"
+      - eval_time: 400m
+        alertname: CacheHitRatioLow
+        exp_alerts:
+          - exp_labels:
+              service: "status-list-server"
+              severity: "warn"
+              sli: "cache_hit_ratio"
+              namespace: "ns1"
+            exp_annotations:
+              summary: "Status-list cache hit ratio below 85% for 15m (degradation, not outage)"
+              description: "Current cache hit ratio: 60%"
+              runbook_url: "https://github.com/adorsys/status-list-server/blob/develop/observability/runbooks/cache-hit-ratio.md"
+      - eval_time: 400m
+        alertname: CertRenewalFailures
+        exp_alerts:
+          - exp_labels:
+              service: "status-list-server"
+              severity: "warn"
+              sli: "cert_renewal"
+              namespace: "ns1"
+              otel_scope_name: "status-list-server"
+            exp_annotations:
+              summary: "Certificate expires within 14 days (renewal loop not refreshing it)"
+              description: "Time to expiry: 600000s"
+              runbook_url: "https://github.com/adorsys/status-list-server/blob/develop/observability/runbooks/cert-renewal.md"
+      # Same gauge value is also <= 7d, so the imminent-expiry page fires too.
+      - eval_time: 400m
+        alertname: CertRenewalErrorBudgetCritical
+        exp_alerts:
+          - exp_labels:
+              service: "status-list-server"
+              severity: "page"
+              sli: "cert_renewal"
+              namespace: "ns1"
+              otel_scope_name: "status-list-server"
+            exp_annotations:
+              summary: "Certificate expires within 7 days (imminent expiry)"
+              description: "Time to expiry: 600000s"
+              runbook_url: "https://github.com/adorsys/status-list-server/blob/develop/observability/runbooks/cert-renewal.md"
+
+  # Edge case: no input series at all. Every recording rule evaluates to NaN /
+  # no series, and every alert (including the mult-window and ErrorBudgetCritical
+  # alerts, which depend on windows with no data) must stay silent. The one
+  # purposeful exception is the always-firing Watchdog and the StatusListMetrics
+  # Absent guard, which must page precisely BECAUSE the target has no metrics.
+  - interval: 1m
+    input_series: []
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: ErrorRateFastBurn
+        exp_alerts: []
+      - eval_time: 10m
+        alertname: ErrorRateSlowBurn
+        exp_alerts: []
+      - eval_time: 10m
+        alertname: RequestLatencyFastBurn
+        exp_alerts: []
+      - eval_time: 10m
+        alertname: RequestLatencySlowBurn
+        exp_alerts: []
+      - eval_time: 10m
+        alertname: DbLatencyFastBurn
+        exp_alerts: []
+      - eval_time: 10m
+        alertname: DbLatencySlowBurn
+        exp_alerts: []
+      - eval_time: 10m
+        alertname: TokenGenerationFastBurn
+        exp_alerts: []
+      - eval_time: 10m
+        alertname: TokenGenerationSlowBurn
+        exp_alerts: []
+      - eval_time: 10m
+        alertname: CacheHitRatioLow
+        exp_alerts: []
+      - eval_time: 10m
+        alertname: CertRenewalFailures
+        exp_alerts: []
+      - eval_time: 10m
+        alertname: CertRenewalErrorBudgetCritical
+        exp_alerts: []
+      - eval_time: 10m
+        alertname: TokenGenErrorBudgetCritical
+        exp_alerts: []
+      - eval_time: 10m
+        alertname: ErrorBudgetCritical
+        exp_alerts: []
+      # With no series the absent guard pages and the watchdog always fires.
+      - eval_time: 10m
+        alertname: StatusListMetricsAbsent
+        exp_alerts:
+          - exp_labels:
+              service: "status-list-server"
+              severity: "page"
+              otel_scope_name: "status-list-server"
+            exp_annotations:
+              summary: "status-list-server metrics absent for 5m (target down or not scraped)"
+              runbook_url: "https://github.com/adorsys/status-list-server/blob/develop/observability/README.md"
+      - eval_time: 10m
+        alertname: Watchdog
+        exp_alerts:
+          - exp_labels:
+              service: "status-list-server"
+              severity: "none"
+            exp_annotations:
+              summary: "Prometheus alerting pipeline is healthy (Watchdog)"
+              runbook_url: "https://github.com/adorsys/status-list-server/blob/develop/observability/README.md"
+
+  # ErrorBudgetCritical positive fire. A 6h interval spans a full 30d so the
+  # sli:error_rate:30d window resolves. 50% 5xx => error_rate:30d = 0.5, so the
+  # remaining budget clamps to 0 (< 0.1) and the alert pages.
+  - interval: 6h
+    input_series:
+      - series: >-
+          http_server_requests_total{otel_scope_name="status-list-server",namespace="ns1",method="GET",route="/x",status_class="5xx"}
+        values: '0+50x120'
+      - series: >-
+          http_server_requests_total{otel_scope_name="status-list-server",namespace="ns1",method="GET",route="/x",status_class="2xx"}
+        values: '0+50x120'
+    alert_rule_test:
+      - eval_time: 30d
+        alertname: ErrorBudgetCritical
+        exp_alerts:
+          - exp_labels:
+              service: "status-list-server"
+              severity: "page"
+              sli: "error_budget"
+              namespace: "ns1"
+            exp_annotations:
+              summary: "Error budget is below 10% for the 30d window"
+              description: "Remaining error budget: 0%"
+              runbook_url: "https://github.com/adorsys/status-list-server/blob/develop/observability/runbooks/error-budget.md"
+
+  # TokenGenErrorBudgetCritical positive fire over 30d.
+  - interval: 6h
+    input_series:
+      - series: >-
+          token_generation_failures_total{otel_scope_name="status-list-server",namespace="ns1",format="jwt"}
+        values: '0+50x120'
+      - series: >-
+          token_generation_attempts_total{otel_scope_name="status-list-server",namespace="ns1",format="jwt"}
+        values: '0+100x120'
+    alert_rule_test:
+      - eval_time: 30d
+        alertname: TokenGenErrorBudgetCritical
+        exp_alerts:
+          - exp_labels:
+              service: "status-list-server"
+              severity: "page"
+              sli: "token_gen_error_budget"
+              namespace: "ns1"
+            exp_annotations:
+              summary: "Token generation error budget below 10% for the 30d window"
+              description: "Remaining token generation error budget: 0%"
+              runbook_url: "https://github.com/adorsys/status-list-server/blob/develop/observability/runbooks/token-generation.md"
+
+  # Boundary: a healthy certificate with plenty of time left (30d = 2592000s,
+  # above both the 14d warn and 7d page thresholds) must NOT fire either cert
+  # alert. This guards against a spurious page when renewal is working.
+  - interval: 1m
+    input_series:
+      - series: >-
+          cert_time_to_expiry_seconds{otel_scope_name="status-list-server",namespace="ns1"}
+        values: '2592000x400'
+    alert_rule_test:
+      - eval_time: 400m
+        alertname: CertRenewalFailures
+        exp_alerts: []
+      - eval_time: 400m
+        alertname: CertRenewalErrorBudgetCritical
+        exp_alerts: []
+
