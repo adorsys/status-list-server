@@ -24,7 +24,13 @@ aws-secrets = [
   "dep:aws-sdk-route53",
   "dep:aws-sdk-secretsmanager",
 ]
-acme = ["dep:instant-acme", "dep:rcgen"]
+acme = [
+  "dep:azure_core",
+  "dep:azure_identity",
+  "dep:google-cloud-auth",
+  "dep:instant-acme",
+  "dep:rcgen",
+]
 # Opt-in gate for the Postgres container test. `--all-features` enables it in CI.
 postgres-tests = ["postgres"]
 

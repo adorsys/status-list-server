@@ -51,11 +51,12 @@ use crate::cert_manager::{
     CertManager, StoreProvisioningStrategy,
     storage::{CryptoCachePolicy, Storage},
 };
-use crate::config::{Config as AppConfig, DatabaseBackend};
 #[cfg(feature = "acme")]
 use crate::config::{
-    DnsProviderKind, ENV_DEVELOPMENT, ENV_PRODUCTION, GcloudKeySource, ResolvedDnsProvider,
+    AzureDnsAuth, DnsProviderKind, ENV_DEVELOPMENT, ENV_PRODUCTION, GcloudDnsAuth, GcloudKeySource,
+    ResolvedDnsProvider,
 };
+use crate::config::{Config as AppConfig, DatabaseBackend};
 use crate::domain::{
     ports::{CertificateProvider, CredentialRepo, StatusListRepo, StatusListSnapshotRepo},
     service::Service,
@@ -902,24 +903,49 @@ async fn build_dns_challenge_handler(
         ResolvedDnsProvider::Cloudflare(cfg) => {
             Dns01Handler::new(CloudflareDnsProvider::new(cfg.api_token.clone()))
         }
-        ResolvedDnsProvider::Gcloud(key) => {
-            let key_json = match key {
-                GcloudKeySource::Inline(key) => key.expose_secret().to_string(),
-                GcloudKeySource::Path(path) => tokio::fs::read_to_string(path)
-                    .await
-                    .wrap_err_with(|| format!("Failed to read service account key at {path}"))?,
+        ResolvedDnsProvider::Gcloud(auth) => {
+            let provider = match auth {
+                GcloudDnsAuth::ServiceAccount(key) => {
+                    let key_json = match key {
+                        GcloudKeySource::Inline(key) => key.expose_secret().to_string(),
+                        GcloudKeySource::Path(path) => tokio::fs::read_to_string(path)
+                            .await
+                            .wrap_err_with(|| {
+                                format!(
+                                    "Failed to read Google Cloud DNS service account key file at {path}"
+                                )
+                            })?,
+                    };
+                    GoogleCloudDnsProvider::from_service_account_key(&key_json)?
+                }
+                GcloudDnsAuth::Ambient { project_id } => {
+                    GoogleCloudDnsProvider::from_ambient_credentials(project_id)?
+                }
             };
-            Dns01Handler::new(GoogleCloudDnsProvider::new(&key_json)?)
+            Dns01Handler::new(provider)
         }
-        ResolvedDnsProvider::Azure(cfg) => Dns01Handler::new(AzureDnsProvider::new(
-            ServicePrincipal {
-                tenant_id: cfg.tenant_id.clone(),
-                client_id: cfg.client_id.clone(),
-                client_secret: cfg.client_secret.clone(),
-            },
-            &cfg.subscription_id,
-            &cfg.resource_group,
-        )),
+        ResolvedDnsProvider::Azure(auth) => match auth {
+            AzureDnsAuth::ServicePrincipal(cfg) => Dns01Handler::new(AzureDnsProvider::new(
+                ServicePrincipal {
+                    tenant_id: cfg.tenant_id.as_ref().expect("validated tenant_id").clone(),
+                    client_id: cfg.client_id.as_ref().expect("validated client_id").clone(),
+                    client_secret: cfg
+                        .client_secret
+                        .as_ref()
+                        .expect("validated client_secret")
+                        .clone(),
+                },
+                &cfg.subscription_id,
+                &cfg.resource_group,
+            )),
+            AzureDnsAuth::Ambient(cfg) => Dns01Handler::new(
+                AzureDnsProvider::from_ambient_credentials(
+                    &cfg.subscription_id,
+                    &cfg.resource_group,
+                )
+                .wrap_err("Invalid Azure DNS ambient credential configuration")?,
+            ),
+        },
         ResolvedDnsProvider::Acmedns(cfg) => {
             let accounts = cfg
                 .accounts
@@ -994,9 +1020,10 @@ mod tests {
         );
 
         config.server.cert.dns.azure = Some(AzureDnsConfig {
-            tenant_id: "tenant".into(),
-            client_id: "client".into(),
-            client_secret: "secret".into(),
+            auth_mode: None,
+            tenant_id: Some("tenant".into()),
+            client_id: Some("client".into()),
+            client_secret: Some("secret".into()),
             subscription_id: "sub".into(),
             resource_group: "rg".into(),
         });
@@ -1020,6 +1047,8 @@ mod tests {
             "project_id": "test-project",
         });
         config.server.cert.dns.gcloud = Some(GcloudDnsConfig {
+            auth_mode: None,
+            project_id: None,
             service_account_key: Some(key_json.to_string().into()),
             service_account_key_path: None,
         });

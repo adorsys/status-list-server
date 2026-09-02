@@ -48,6 +48,22 @@ serviceAccount:
 
 For GCP or Azure Workload Identity, set the provider-specific annotation instead. Use `serviceAccount.labels` for any additional labels. Set `serviceAccount.automountServiceAccountToken=false` to harden the pod when it has no Kubernetes API access needs.
 
+GKE Workload Identity for Cloud DNS:
+
+```yaml
+statuslist:
+  image:
+    tag: "1.2.0-gcp"
+  env:
+    APP_SERVER__CERT__DNS__PROVIDER: "gcloud"
+    APP_SERVER__CERT__DNS__GCLOUD__AUTH_MODE: "ambient"
+    APP_SERVER__CERT__DNS__GCLOUD__PROJECT_ID: "dns-project-id"
+serviceAccount:
+  create: true
+  annotations:
+    iam.gke.io/gcp-service-account: status-list-server@dns-project-id.iam.gserviceaccount.com
+```
+
 - `serviceAccount.create`: render a ServiceAccount (default `true`). When `false`, the Deployment uses the `default` service account.
 - `serviceAccount.name`: override the ServiceAccount name (default: the chart fullname).
 - `serviceAccount.automountServiceAccountToken`: default `true`; harden to `false` if the API token is not needed.
@@ -58,8 +74,19 @@ Azure Workload Identity requires the pod label `azure.workload.identity/use: "tr
 
 ```yaml
 statuslist:
+  image:
+    tag: "1.2.0-azure"
   podLabels:
     azure.workload.identity/use: "true"
+  env:
+    APP_SERVER__CERT__DNS__PROVIDER: "azure"
+    APP_SERVER__CERT__DNS__AZURE__AUTH_MODE: "ambient"
+    APP_SERVER__CERT__DNS__AZURE__SUBSCRIPTION_ID: "subscription-id"
+    APP_SERVER__CERT__DNS__AZURE__RESOURCE_GROUP: "dns-resource-group"
+serviceAccount:
+  create: true
+  annotations:
+    azure.workload.identity/client-id: "00000000-0000-0000-0000-000000000000"
 ```
 
 The ServiceAccount annotation alone is not sufficient for Azure; both the annotation and this pod label must be present.
