@@ -12,7 +12,8 @@ OpenTelemetry collector, so you do not need to understand how the server works i
 * An ingress controller and [cert-manager](https://cert-manager.io/docs/installation/) if you
   expose the server over HTTPS (see `statuslist.ingress` in [`chart/values.yaml`](chart/values.yaml)).
 * Access to the public images at `ghcr.io/adorsys/status-list-server`.
-* External Secrets Operator (ESO) if you use the default secret delivery described below.
+* [External Secrets Operator (ESO)](https://external-secrets.io/latest/) if you use the default
+  secret delivery described below.
 
 ## Choose your image variant
 
