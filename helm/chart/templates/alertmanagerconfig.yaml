@@ -1,0 +1,178 @@
+{{- if .Values.alerting.enabled }}
+{{- $platform := .Values.alerting.platform | required "alerting.platform is required when alerting.enabled=true" }}
+{{- $validPlatforms := list "slack" "discord" "teams" "mattermost" "email" "webhook" }}
+{{- if not (has $platform $validPlatforms) }}
+  {{- fail (printf "alerting.platform %q is not supported. Must be one of: slack, discord, teams, mattermost, email, webhook" $platform) }}
+{{- end }}
+{{- /* Resolve the Secret name — either the user-provided existing secret or the chart-managed one */ -}}
+{{- $secretName := .Values.alerting.existingSecret | default (printf "%s-alerting" (include "status-list-server-chart.fullname" .)) }}
+# AlertmanagerConfig routes SLO alerts from kube-prometheus-stack's Alertmanager to the
+# configured notification channel. The route tree mirrors the Docker Compose
+# generate-alertmanager-config.sh logic:
+#   severity=none  -> deadmansswitch (Watchdog; pages on ABSENCE, not on firing)
+#   severity=page  -> human channel, repeat every 4h
+#   severity=warn  -> human channel, repeat every 24h
+#   everything else -> noop sink (never spams a human channel)
+#
+# Credentials are read from the Secret rendered by alerting-secret.yaml (or from
+# alerting.existingSecret when operators manage the Secret externally, e.g. via ESO).
+apiVersion: monitoring.coreos.com/v1alpha1
+kind: AlertmanagerConfig
+metadata:
+  name: {{ include "status-list-server-chart.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "status-list-server-chart.labels" . | nindent 4 }}
+    app.kubernetes.io/component: alerting
+    {{- with .Values.alerting.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  route:
+    groupBy:
+      - alertname
+      - sli
+    groupWait: 30s
+    groupInterval: 5m
+    # Default sink: absorbs anything not explicitly routed so nothing silently
+    # spams a human channel.
+    receiver: noop
+    routes:
+      # Watchdog (severity=none) -> dead-man's-switch. When dmsWebhookUrl is not
+      # set, the deadmansswitch receiver is an empty noop — the Watchdog is
+      # silently absorbed and never reaches a human channel.
+      - matchers:
+          - name: severity
+            value: none
+            matchType: "="
+        receiver: deadmansswitch
+
+      # Page (act now): re-notify every 4h while still firing.
+      - matchers:
+          - name: severity
+            value: page
+            matchType: "="
+        receiver: human
+        repeatInterval: 4h
+
+      # Warn (act this week): re-notify every 24h while still firing.
+      - matchers:
+          - name: severity
+            value: warn
+            matchType: "="
+        receiver: human
+        repeatInterval: 24h
+
+  inhibitRules:
+    # Suppress the warn notification for a given SLI+service when the correlated
+    # page alert is already firing (fast-burn page + slow-burn warn fire together
+    # for the same SLI; only the page should reach the channel).
+    - sourceMatch:
+        - name: severity
+          value: page
+          matchType: "="
+      targetMatch:
+        - name: severity
+          value: warn
+          matchType: "="
+      equal:
+        - sli
+        - service
+
+  receivers:
+    # Absorbs anything not explicitly routed.
+    - name: noop
+
+    # Dead-man's-switch for the always-firing Watchdog. When dmsWebhookUrl is not
+    # configured this is an empty receiver and the Watchdog is silently absorbed.
+    - name: deadmansswitch
+      {{- if or .Values.alerting.dmsWebhookUrl .Values.alerting.existingSecret }}
+      webhookConfigs:
+        - url:
+            {{- if .Values.alerting.existingSecret }}
+            # When using existingSecret, the DMS URL must also live there under key "dms-webhook-url".
+            secretKeyRef:
+              name: {{ $secretName | quote }}
+              key: dms-webhook-url
+            {{- else if .Values.alerting.dmsWebhookUrl }}
+            secretKeyRef:
+              name: {{ $secretName | quote }}
+              key: dms-webhook-url
+            {{- end }}
+          sendResolved: false
+      {{- end }}
+
+    # Human notification channel. Platform-specific receiver config is rendered
+    # below based on alerting.platform; credentials are always read from the Secret
+    # so no webhook URL is committed to source control.
+    - name: human
+      {{- if eq $platform "discord" }}
+      discordConfigs:
+        - apiURL:
+            secretKeyRef:
+              name: {{ $secretName | quote }}
+              key: webhook-url
+          sendResolved: true
+          title: |-
+            {{ `{{ template "discord.default.title" . }}` }}
+          message: |-
+            {{ `{{ template "discord.default.message" . }}` }}
+      {{- else if eq $platform "slack" }}
+      slackConfigs:
+        - apiURL:
+            secretKeyRef:
+              name: {{ $secretName | quote }}
+              key: webhook-url
+          channel: "#alerts"
+          sendResolved: true
+          title: |-
+            {{ `{{ template "slack.default.title" . }}` }}
+          text: |-
+            {{ `{{ template "slack.default.text" . }}` }}
+      {{- else if eq $platform "teams" }}
+      # MS Teams classic inbound webhook accepts a generic JSON POST (no native
+      # Alertmanager receiver). Connectors that require Adaptive Cards can be
+      # bridged by an intermediary; the standard Alertmanager JSON carries full
+      # alert context.
+      webhookConfigs:
+        - url:
+            secretKeyRef:
+              name: {{ $secretName | quote }}
+              key: webhook-url
+          sendResolved: true
+      {{- else if eq $platform "mattermost" }}
+      # Mattermost incoming webhook accepts a generic JSON POST.
+      webhookConfigs:
+        - url:
+            secretKeyRef:
+              name: {{ $secretName | quote }}
+              key: webhook-url
+          sendResolved: true
+      {{- else if eq $platform "webhook" }}
+      # Generic endpoint accepting Alertmanager's standard JSON notification payload.
+      webhookConfigs:
+        - url:
+            secretKeyRef:
+              name: {{ $secretName | quote }}
+              key: webhook-url
+          sendResolved: true
+      {{- else if eq $platform "email" }}
+      emailConfigs:
+        - to:
+            secretKeyRef:
+              name: {{ $secretName | quote }}
+              key: email-to
+          sendResolved: true
+          smarthost:
+            secretKeyRef:
+              name: {{ $secretName | quote }}
+              key: smtp-host
+          from:
+            secretKeyRef:
+              name: {{ $secretName | quote }}
+              key: smtp-from
+          requireTLS: {{ .Values.alerting.email.requireTls | default true }}
+          html: |-
+            {{ `{{ template "email.default.html" . }}` }}
+      {{- end }}
+{{- end }}

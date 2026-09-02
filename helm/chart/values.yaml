@@ -289,6 +289,63 @@ prometheusRule:
   # Additional labels required by your Prometheus Operator (e.g. release: kube-prometheus-stack)
   labels: {}
 
+# AlertmanagerConfig for kube-prometheus-stack / Prometheus Operator alert routing.
+# When enabled, renders an AlertmanagerConfig CRD that routes SLO alerts to the
+# configured notification channel. This is the Kubernetes equivalent of the Docker
+# Compose ALERTMANAGER_PLATFORM + generate-alertmanager-config.sh setup — the same
+# six platforms are supported and no webhook URL is committed to source control.
+#
+# Supported platforms (alerting.platform):
+#   discord     -> alerting.webhookUrl  (Discord channel webhook URL)
+#   slack       -> alerting.webhookUrl  (Slack incoming-webhook URL)
+#   teams       -> alerting.webhookUrl  (MS Teams classic inbound webhook)
+#   mattermost  -> alerting.webhookUrl  (Mattermost incoming webhook)
+#   webhook     -> alerting.webhookUrl  (generic endpoint accepting Alertmanager JSON)
+#   email       -> alerting.email.*     (SMTP settings)
+#
+# Credential model:
+#   By default (existingSecret: "") the chart renders its own Secret from the inline
+#   values (webhookUrl / email.*). For production, set existingSecret to the name of
+#   a pre-existing Secret (e.g. managed by ESO or Vault) — the chart then reads from
+#   that Secret and does NOT render its own. The pre-existing Secret must contain the
+#   following keys depending on the platform:
+#     webhook-based platforms: "webhook-url"
+#     email:                   "email-to", "smtp-host", "smtp-port", "smtp-from"
+#     dead-man's-switch:       "dms-webhook-url" (optional)
+#
+# Route tree (mirrors generate-alertmanager-config.sh):
+#   severity=none  -> deadmansswitch receiver (Watchdog — pages on ABSENCE, not firing)
+#   severity=page  -> human receiver, repeat every 4h
+#   severity=warn  -> human receiver, repeat every 24h
+#   everything else -> noop sink (never spams a human channel)
+#
+# Labels: add any extra labels required by your Alertmanager selector, e.g.
+#   labels:
+#     release: kube-prometheus-stack
+alerting:
+  enabled: false
+  # Platform selector — must match one of the supported values above.
+  platform: discord
+  # Additional labels for the AlertmanagerConfig (e.g. release: kube-prometheus-stack).
+  labels: {}
+  # Name of a pre-existing Secret containing credentials. When set, the chart does NOT
+  # render its own Secret. Leave empty to let the chart manage the Secret from inline values.
+  existingSecret: ""
+  # Inline webhook URL (used for discord, slack, teams, mattermost, webhook platforms).
+  # Never commit real tokens — use existingSecret + ESO/Vault in production.
+  webhookUrl: ""
+  # Optional dead-man's-switch URL. The always-firing Watchdog (severity=none) pings this
+  # URL so a collapsed Prometheus/Alertmanager pipeline is detected by its ABSENCE. When
+  # empty the Watchdog is silently absorbed and never reaches a human channel.
+  dmsWebhookUrl: ""
+  # Email settings (required only when platform=email).
+  email:
+    to: ""
+    smtpHost: ""
+    smtpPort: "587"
+    smtpFrom: "alertmanager@localhost"
+    requireTls: true
+
 # Configurable SLO target thresholds for PrometheusRule alerting rules.
 # These must stay in lockstep with observability/slo/thresholds.json (the lint
 # step in CI asserts this) and with the literal values in the standalone

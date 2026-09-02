@@ -103,6 +103,13 @@ No application code is involved.
   `observability/prometheus/generate-alertmanager-config.sh`, which renders a
   native receiver config from environment variables (`ALERTMANAGER_PLATFORM` +
   the matching credential) so **no webhook URL is committed**.
+- **Routing** — page and warn alerts share ONE human channel (the platform
+  credential); the `severity` label stays in the payload for in-channel
+  filtering. The always-firing **Watchdog** (`severity=none`) never hits a
+  human channel: it pings a dead-man's-switch (`ALERTMANAGER_DMS_WEBHOOK_URL`)
+  so a collapsed pipeline is detected by its absence, and is otherwise absorbed
+  silently by a noop sink. Correlated page/warn pairs for the same SLI are
+  inhibited (no duplicate warn while the page fires).
 - **Supported platforms** — `discord`, `slack`, `teams`, `mattermost`, `email`,
   `webhook` (generic). Native receivers are used for Discord/Slack/email; Teams
   and Mattermost use Alertmanager's generic webhook JSON.

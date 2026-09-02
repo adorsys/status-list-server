@@ -7,7 +7,7 @@ confirming it shows up in **three** places:
 Prometheus (alert fires)
    │  forwards fired/resolved alerts
    ▼
-Alertmanager (routes by severity -> Discord)
+Alertmanager (page/warn -> single human channel; Watchdog/severity=none -> dead-man's-switch, not Discord)
    │  POSTs webhook
    ▼
 Discord channel
@@ -98,10 +98,12 @@ Open the Prometheus UI at **<http://localhost:9092>** and:
 
 ## 4. Fire a real alert
 
-The easiest alert to trigger on purpose is the **Watchdog** (`vector(1)`,
-always firing) — but since the default Alertmanager routing sends
-`severity=none` to the `default` receiver (which is also the Discord webhook),
-the Watchdog will already appear in Discord.
+The **Watchdog** (`vector(1)`, always firing) is deliberately **not** routed to
+a human channel: it goes to the dead-man's-switch (`ALERTMANAGER_DMS_WEBHOOK_URL`)
+so a collapsed pipeline is detected by the Watchdog's **absence**, and is
+otherwise absorbed silently. To see a real notification, fire a **page** or
+**warn** alert (e.g. **CertRenewalFailures** below) — those do reach the
+configured human channel.
 
 To trigger a **meaningful, page-like alert** (e.g. **CertRenewalFailures,
 severity=warn** or **RequestLatencyFastBurn, severity=page**), push a fabricated

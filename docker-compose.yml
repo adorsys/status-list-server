@@ -176,8 +176,12 @@ services:
       # which emits the native receiver config, so no repo code is platform
       # specific and no webhook URL is committed. We recommend the generic
       # `webhook` platform for a Discord/Slack-compatible endpoint.
+      # ALERTMANAGER_DMS_WEBHOOK_URL is optional: when set, the always-firing
+      # Watchdog (severity=none) pings a dead-man's-switch instead of a human
+      # channel; when unset it is absorbed silently (never spams a human channel).
       ALERTMANAGER_PLATFORM: ${ALERTMANAGER_PLATFORM:-webhook}
       ALERTMANAGER_WEBHOOK_URL: ${ALERTMANAGER_WEBHOOK_URL:-}
+      ALERTMANAGER_DMS_WEBHOOK_URL: ${ALERTMANAGER_DMS_WEBHOOK_URL:-}
       DISCORD_WEBHOOK_URL: ${DISCORD_WEBHOOK_URL:-}
       SLACK_WEBHOOK_URL: ${SLACK_WEBHOOK_URL:-}
       MS_TEAMS_WEBHOOK_URL: ${MS_TEAMS_WEBHOOK_URL:-}

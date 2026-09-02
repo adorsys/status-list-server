@@ -12,6 +12,12 @@
 #   - severity=none (Watchdog) -> dead-man's-switch (NOT a human channel)
 #   - everything else -> noop (so nothing silently spams a human channel)
 #
+# NOTE: the deployed generator (generate-alertmanager-config.sh) collapses page
+# and warn into ONE human channel (one credential per platform), whereas this
+# hand-written example shows per-severity channels as an alternative. Both share
+# the same noop default + severity=none dead-man's-switch + inhibit_rules below;
+# only the number of human target channels differs.
+#
 # Supported native receivers (Alertmanager image prom/alertmanager:v0.28.1):
 #   discord_configs  (Discord webhook URL)
 #   slack_configs    (Slack incoming-webhook URL)
