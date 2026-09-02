@@ -1,308 +1,168 @@
-# Deployment Guide
+# Status List Server — Operator Deployment Guide
 
-This guide provides instructions for deploying the Status List Server using the provided Helm chart.
+> [!TIP]
+> This is the **single, operator-focused deployment page** for the Status List Server
+> Helm chart. It walks you through an end-to-end deployment **without requiring any
+> understanding of the server's internals**. Each step is a deeplink below:
 
-## Prerequisites
+| Step                                                         | What it covers                                                       |
+| ------------------------------------------------------------ | -------------------------------------------------------------------- |
+| [1. Prerequisites](#1-prerequisites)                         | Cluster, Helm, `kubectl`, External Secrets Operator, registry access |
+| [2. Choose your image variant](#2-choose-your-image-variant) | Which `ghcr.io/adorsys/status-list-server` image to deploy           |
+| [3. Configure your secrets](#3-configure-your-secrets)       | External Secrets Operator vs. fallback Secret                        |
+| [4. Deploy with Helm](#4-deploy-with-helm)                   | The `helm` commands to install the chart                             |
+| [5. Verify the deployment](#5-verify-the-deployment)         | Confirm the server is healthy                                        |
+| [Next steps](#next-steps)                                    | Where to find the detailed documentation                             |
 
-- Kubernetes cluster (e.g., AWS EKS)
-- Helm 3 installed
-- `kubectl` configured to connect to your cluster
-- External Secrets Operator (ESO) installed when `externalSecret.enabled=true` (the default). The chart renders `external-secrets.io/v1` `ExternalSecret`, `SecretStore`, and `ClusterSecretStore` references, so the cluster CRDs must serve `external-secrets.io/v1` before installing or upgrading this chart. ESO v0.16 promoted these resources to `v1`; upgrade the ESO controller and CRDs together, and if CRDs are managed separately, apply the matching CRD bundle before upgrading the operator.
+For deep technical detail — architecture, the full environment-variable reference, rotation,
+scaling, observability, and an error-indexed troubleshooting guide — see
+[Next steps](#next-steps) and the linked Confluence operator documentation. You do **not**
+need any of that to deploy.
 
-## Chart Dependencies
+## 1. Prerequisites
 
-This chart has the following dependencies:
+- A **Kubernetes cluster** (EKS, GKE, AKS, or any standard `apps/v1` cluster), **≥ 1.24**.
+- **Helm 3** and **`kubectl`** on your workstation.
+- An **ingress controller** (e.g. nginx-ingress) and **cert-manager** if you expose the
+  server over HTTPS — see `statuslist.ingress` in [chart/values.yaml](chart/values.yaml).
+- **External Secrets Operator (ESO)** installed when you use the default secret-delivery
+  path (`externalSecret.enabled=true`):
 
-- **PostgreSQL**: A relational database for storing application data.
-- **OpenTelemetry Collector**: Official subchart (`open-telemetry/opentelemetry-collector`) for collecting and routing traces, metrics, and logs.
+  ```bash
+  helm repo add external-secrets https://charts.external-secrets.io
+  helm repo update
+  helm install external-secrets external-secrets/external-secrets \
+    --namespace external-secrets --create-namespace --set installCRDs=true
+  ```
 
-These dependencies are managed by the Helm chart. PostgreSQL is enabled by default.
+  If you prefer a self-contained deploy without ESO, use the
+  [fallback Secret mode](#3-configure-your-secrets) instead.
 
-## Configuration
+- **Registry access** to the public `ghcr.io/adorsys/status-list-server` images.
 
-The following files are used to configure the deployment:
+## 2. Choose your image variant
 
-- [`chart/values.yaml`](chart/values.yaml): Default configuration for production environments.
-- [`chart/values-local.yaml`](chart/values-local.yaml): Configuration for local development.
+The server is published to `ghcr.io/adorsys/status-list-server` as several **image
+variants**, each built for a different way of storing the **token-signing key and issuer
+certificate** (the server's signing identity). Pick the one matching your environment:
 
-### Key Configuration Options
+| Tag suffix | Signing-credential backend                   | Best when                                                         |
+| ---------- | -------------------------------------------- | ----------------------------------------------------------------- |
+| `-aws`     | AWS Secrets Manager + Route53 DNS-01         | You run on EKS / keep secrets in AWS                              |
+| `-gcp`     | GCP Secret Manager + Google Cloud DNS        | You run on GKE / keep secrets in GCP                              |
+| `-azure`   | Azure Key Vault + Azure DNS                  | You run on AKS / keep secrets in Azure                            |
+| `-vault`   | HashiCorp Vault / OpenBao KV v2              | You operate your own Vault / want cloud-agnostic                  |
+| `-fscert`  | Filesystem-mounted signing key + certificate | You deliver the signing key and cert as files; smallest footprint |
 
-- **`statuslist.image.repository`**: The Docker image for the application.
-- **`statuslist.image.tag`**: The Docker image tag. Used only when `statuslist.image.digest` is empty. Defaults to empty, which falls back to the chart's `appVersion` — the published AWS variant tag, not `latest`, so an upgrade that changes nothing in the chart cannot change the running image and a rollback stays reproducible. `appVersion` therefore has to track the latest released default image tag.
-- **`statuslist.image.pullPolicy`**: Defaults to empty, which derives the policy from how the image is named: `IfNotPresent` when a digest is set, because a digest is content-addressed and re-pulling it can only fetch the same bytes, and `Always` for a tag, which is mutable. Set it explicitly to override.
-- **`statuslist.image.digest`**: An image digest as `sha256:` plus 64 hex characters; anything else is rejected at template time. When set it takes precedence over `statuslist.image.tag`, and the deployment runs `repository@digest`. Production deploys set this so the running image is the exact artifact CI scanned; tags are mutable and a digest is not. Leave it empty for local and manual installs to get tag-based deployment.
-  - **`postgres.persistence.enabled`**: Enable or disable persistent storage for PostgreSQL.
+> [!IMPORTANT]
+> No unsuffixed image (`latest`, `1.2.0`) is published — you **must** reference a variant
+> explicitly (e.g. `1.2.0-aws`). The chart's empty-tag default resolves to the `-aws`
+> variant.
 
-## ServiceAccount and Workload Identity
-
-The chart renders a `ServiceAccount` for the application pod by default (`serviceAccount.create=true`) and wires it into the Deployment via `serviceAccountName`. This is required for Kubernetes **Workload Identity** so the pod receives the ambient cloud credentials it needs to reach AWS/GCP/Azure.
-
-Attach Workload Identity / IRSA role annotations through `serviceAccount.annotations`, for example on EKS:
-
-```yaml
-serviceAccount:
-  create: true
-  annotations:
-    eks.amazonaws.com/role-arn: arn:aws:iam::123456789012:role/status-list-server
-```
-
-For GCP or Azure Workload Identity, set the provider-specific annotation instead. Use `serviceAccount.labels` for any additional labels. Set `serviceAccount.automountServiceAccountToken=false` to harden the pod when it has no Kubernetes API access needs.
-
-- `serviceAccount.create`: render a ServiceAccount (default `true`). When `false`, the Deployment uses the `default` service account.
-- `serviceAccount.name`: override the ServiceAccount name (default: the chart fullname).
-- `serviceAccount.automountServiceAccountToken`: default `true`; harden to `false` if the API token is not needed.
-
-### Pod labels and Azure Workload Identity
-
-Azure Workload Identity requires the pod label `azure.workload.identity/use: "true"` in addition to the ServiceAccount annotation. Add it (and any other pod labels) via `statuslist.podLabels`:
-
-```yaml
-statuslist:
-  podLabels:
-    azure.workload.identity/use: "true"
-```
-
-The ServiceAccount annotation alone is not sufficient for Azure; both the annotation and this pod label must be present.
-
-## AWS Configuration and Static Credentials vs. Workload Identity
-
-The default secret/credential provisioning path is **External Secrets Operator (ESO)**. By default the application mounts the ESO-provisioned `aws-credentials-secret` into the pod; Workload Identity is opt-in.
+Set the image in your values:
 
 ```yaml
 statuslist:
-  aws:
-    mountCredentials: true    # default: mount the ESO-provisioned aws-credentials-secret under /home/nobody/.aws
-    region: ""                # plain, non-secret; renders APP_AWS__REGION
-    credentialsSecret:
-      remoteKey: "statuslist-aws-credentials"   # SecretStore key holding both AWS shared files
-      credentialsProperty: "CREDENTIALS"        # property in remoteKey with the credentials file
-      configProperty: "CONFIG"                  # property in remoteKey with the config file
-```
-
-`statuslist.aws.region` is a plain (non-secret) value; `APP_AWS__REGION` is rendered whenever an effective region is set, independent of `secretStore.provider` and `mountCredentials`.
-
-**Workload Identity is opt-in:** to switch to ambient Workload Identity / IRSA, set `statuslist.aws.mountCredentials=false` (no credentials mounted) and attach the cloud role annotation via `serviceAccount.annotations` (e.g. `eks.amazonaws.com/role-arn` for EKS IRSA, or the GCP / Azure WI annotations described above). The application then authenticates using the ambient credentials provided by that role instead of mounted files.
-
-**Upgrade compatibility:** The effective `APP_AWS__REGION` resolves as `statuslist.aws.region`, falling back to the legacy `secretStore.aws.region` and then `eu-central-1`. Installations that previously set only `secretStore.aws.region` keep that region for the application across upgrade.
-
-When `statuslist.aws.mountCredentials=true` (the default) **and** `externalSecret.enabled=true` (the default ESO path), the chart itself renders a second `ExternalSecret` that provisions `aws-credentials-secret` — the exact Secret the Deployment's credential volume references. It synchronizes two keys into that Secret:
-- `credentials` ← `remoteKey`/`credentialsProperty` (the AWS shared credentials file, INI format, e.g. `[default]\naws_access_key_id=...\naws_secret_access_key=...`)
-- `config` ← `remoteKey`/`configProperty` (the AWS shared config file)
-
-The chart mounts that Secret at `/home/nobody/.aws` and sets `AWS_SHARED_CREDENTIALS_FILE` / `AWS_CONFIG_FILE`. Because the chart now owns provisioning of `aws-credentials-secret`, a first release never mounts a Secret that nothing created. The application ExternalSecret target template is not reused for this dedicated AWS credentials Secret; use `statuslist.aws.credentialsSecret.targetTemplate` only if the AWS Secret itself needs templating. In the no-ESO fallback mode (`externalSecret.enabled=false`), the mounted path is not wired automatically — operators must create `aws-credentials-secret` themselves or use Workload Identity.
-
-### Least-privilege IAM policy for the application role
-
-Attach a least-privilege policy to the IRSA role referenced by `serviceAccount.annotations.eks.amazonaws.com/role-arn` (via the trust policy above), scoped to the resources the server actually uses:
-
-```json
-{
-  "Version": "2012-10-17",
-  "Statement": [
-    {
-      "Sid": "Route53DNS01",
-      "Effect": "Allow",
-      "Action": [
-        "route53:ChangeResourceRecordSets",
-        "route53:ListResourceRecordSets",
-        "route53:GetChange"
-      ],
-      "Resource": [
-        "arn:aws:route53:::hostedzone/<HOSTED_ZONE_ID>",
-        "arn:aws:route53:::change/*"
-      ]
-    },
-    {
-      "Sid": "SecretsManager",
-      "Effect": "Allow",
-      "Action": [
-        "secretsmanager:GetSecretValue",
-        "secretsmanager:DescribeSecret"
-      ],
-      "Resource": "arn:aws:secretsmanager:<REGION>:<ACCOUNT_ID>:secret:status-list/*"
-    },
-    {
-      "Sid": "S3StatusList",
-      "Effect": "Allow",
-      "Action": ["s3:GetObject", "s3:PutObject", "s3:DeleteObject"],
-      "Resource": "arn:aws:s3:::status-list-adorsys/*"
-    }
-  ]
-}
-```
-
-Replace `<HOSTED_ZONE_ID>`, `<REGION>`, and `<ACCOUNT_ID>` with your values, and drop any `Sid` the server does not need so the role stays minimal.
-
-## SecretStore Providers
-
-External Secret Operator's `SecretStore` is provider-neutral via `secretStore.provider` (`aws` | `vault` | `gcp` | `azure` | `raw`). The shipped default is `aws`. A `SecretStore` is rendered **only** when `externalSecret.enabled=true` **and** `secretStore.enabled=true` — in the no-ESO fallback mode it is never emitted, so a cluster without ESO CRDs accepts the release.
-
-This chart uses the stable ESO API group/version `external-secrets.io/v1`. Before installing with ESO enabled, verify that the installed CRDs serve `v1` for `externalsecrets.external-secrets.io`, `secretstores.external-secrets.io`, `clustersecretstores.external-secrets.io`, and any cluster-scoped resources you use. Upgrade ESO and its CRDs as one unit; mismatched controller/CRD versions can cause Kubernetes to reject the rendered resources or ESO reconciliation to fail.
-
-```yaml
-secretStore:
-  enabled: true
-  provider: aws
-  aws:
-    service: SecretsManager   # SecretsManager | ParameterStore
-    region: "eu-central-1"    # applies to the AWS SecretStore; APP_AWS__REGION falls back to statuslist.aws.region
-  vault:
-    server: ""
-    path: "secret"
-    auth: {}
-  gcp:
-    projectID: ""
-    auth: {}
-  azure:
-    tenantId: ""
-    vaultUrl: ""
-    authType: ""                  # ServicePrincipal | ManagedIdentity | WorkloadIdentity
-    environmentType: ""           # optional: PublicCloud (default) | USGovernmentCloud | ChinaCloud | GermanCloud
-    identityId: ""                # ManagedIdentity: select one of multiple managed identities
-    serviceAccountRef:
-      name: ""                    # WorkloadIdentity: ESO's own least-privilege identity
-      namespace: ""
-    authSecretRef: {}             # ServicePrincipal: clientId/clientSecret/tenantId secret selectors
-  raw: {}                         # provider body passthrough (rendered directly under spec.provider)
-```
-
-- **aws** (`SecretsManager` or `ParameterStore`): `service` and `region`. `region` falls back to the effective app region when empty.
-- **vault** (Vault / OpenBao-compatible): `server`, `path`, and an optional `auth` block.
-- **gcp**: `projectID` plus an optional `auth` block (use Workload Identity for ambient auth).
-- **azure**: `tenantId`, `vaultUrl`, and an `authType` validated as an enum per the ESO `AzureKVProvider` CRD — `ServicePrincipal | ManagedIdentity | WorkloadIdentity` (there is **no** `ClientSecret` authType). For Workload Identity use `authType: WorkloadIdentity` and bind `serviceAccountRef` to **External Secrets Operator's own identity** (least privilege) — **not** the application ServiceAccount. Managed-identity selection uses `identityId`; ServicePrincipal client credentials go under the `authSecretRef` block. `environmentType` is optional.
-- **raw**: pass the concrete provider body through `secretStore.raw`, **rendered directly under `spec.provider`** for unsupported ESO providers without editing the chart. `secretStore.raw` holds only the provider body (no extra top-level `provider` key); an empty `raw: {}` is **rejected** so this path never silently emits a weakened SecretStore.
-
-Provider selection is fail-closed: an unsupported `secretStore.provider` value is rejected by the chart's `values.schema.json` and a Helm `fail`, and contradictory mode combinations (ESO disabled while a SecretStore is requested) do not render the ESO CR.
-
-## File-Based Secret Mounts and Rotation
-
-`statuslist.secretMounts` mounts operator-managed Kubernetes Secrets as read-only files. Add `fileEnv` to a mount to expose a file path through the application environment:
-
-```yaml
-statuslist:
-  secretMounts:
-    - name: database-credentials
-      secretName: statuslist-db-credentials
-      mountPath: /etc/secrets/database
-      items:
-        - key: password
-          path: password
-      fileEnv:
-        APP_DATABASE__PASSWORD_FILE: password
-```
-
-`fileEnv` values are relative to `mountPath`, and they work with or without `items`. When `APP_DATABASE__PASSWORD_FILE` is set through either `statuslist.env` or `secretMounts[].fileEnv`, the chart does not inject `APP_DATABASE__PASSWORD`; file-based configuration has precedence and there is no stale startup password environment variable for the application to keep using.
-
-This chart support is preparatory for application images that implement the file-watcher and reload behavior from issue #456. Current images that only read `APP_DATABASE__PASSWORD` at startup still need a rollout after secret changes. The `checksum/secret` annotation only reacts to Helm-rendered ExternalSecret template or value changes; it does not change when External Secrets Operator later syncs new data from Vault, AWS, GCP, or Azure into a Kubernetes Secret.
-
-For mounted Secrets that should be created by ESO, define them under `externalSecret.spec.extraExternalSecrets` and set each `target.name` to the `secretMounts[].secretName` value. If customer-side provisioning is used instead, the prerequisite Kubernetes Secret names and keys must exist before Helm deploys, otherwise Kubernetes cannot mount the volumes.
-
-## Fallback Kubernetes Secret (no External Secrets Operator)
-
-For clusters that do **not** run External Secret Operator, the chart can render a plain Kubernetes `Secret` that the Deployment references:
-
-```yaml
-externalSecret:
-  enabled: false
-
-statuslist:
-  fallbackSecret:
+  image:
+    repository: ghcr.io/adorsys/status-list-server
+    tag: "1.2.0-aws" # substitute your variant
+  ingress:
     enabled: true
-    stringData:
-      postgres-password: "change-me"
+    hosts:
+      - statuslist.example.com
+    tls:
+      hosts:
+        - statuslist.example.com
+      secretName: statuslist-tls
 ```
 
-The fallback `Secret` is rendered only when `externalSecret.enabled=false` **and** `statuslist.fallbackSecret.enabled=true`. It uses `stringData`, so plain string values are base64-encoded by the API server. The fallback secret is always named `statuslist-secret` — the single supported name that the Deployment's `POSTGRES_PASSWORD` `secretKeyRef` and `postgres.auth.existingSecret` all reference, so it is not independently configurable.
+For production, pin the exact artifact by **digest** rather than tag. A digest that is not
+`sha256:` followed by 64 hex characters is rejected by the chart at render time.
 
-## Horizontal Autoscaling and Pod Disruption Budget
+## 3. Configure your secrets
 
-Scaling is opt-in and disabled by default. Enable autoscaling and a Pod Disruption Budget together for multi-replica production deployments:
+The chart supports two mutually-exclusive ways to deliver the application Secret
+(always named **`statuslist-secret`**, which holds the database password):
 
-```yaml
-autoscaling:
-  enabled: true
-  minReplicas: 2
-  maxReplicas: 5
-  metrics:
-    - type: Resource
-      resource:
-        name: cpu
-        target:
-          type: Utilization
-          averageUtilization: 75
+- **External Secrets Operator (default)** — ESO syncs `statuslist-secret` from a
+  `SecretStore` (AWS, GCP, Azure, Vault, or raw). Requires ESO plus `secretStore.enabled=true`.
+- **Fallback Secret** — the chart renders a plain Kubernetes `Secret` inline. Use this for
+  a self-contained deploy with no ESO:
 
-podDisruptionBudget:
-  enabled: true
-  # With HPA enabled the Deployment omits `replicas`, so prefer maxUnavailable (or set
-  # minAvailable below autoscaling.minReplicas) to keep the PDB valid.
-  maxUnavailable: 1
+  ```yaml
+  externalSecret:
+    enabled: false
+  statuslist:
+    fallbackSecret:
+      enabled: true
+      stringData:
+        postgres-password: "change-me"
+  ```
+
+The two modes **cannot** both be enabled — the chart fails at render time if you do.
+Additional values you will commonly set under `statuslist.env` (all `APP_*`):
+`APP_DATABASE__HOST/PORT/USERNAME/NAME` (never put the password there — the chart wires it
+from the Secret) and `APP_SERVER__HOST/PORT/DOMAIN`.
+
+Working value files ship with the chart: `chart/values.yaml` (defaults),
+`chart/values-local.yaml` (local cluster), `chart/values-external-secrets.yaml`, and
+`chart/values-production.yaml`.
+
+## 4. Deploy with Helm
+
+Validate your values, then install. CRD-rendering and value schema errors surface here, not
+as a failed upgrade:
+
+```bash
+# Render-and-validate (catches mistakes before touching the cluster)
+helm template statuslist helm/chart --namespace statuslist --values my-values.yaml
+
+# Deploy (create the namespace first time)
+kubectl create namespace statuslist
+helm upgrade --install statuslist helm/chart \
+  --namespace statuslist --create-namespace \
+  --values my-values.yaml \
+  --wait --timeout 10m
 ```
 
-When `autoscaling.enabled=true` the Deployment's `replicas` field is omitted (HPA controls the count). Scaled Pods share the application ServiceAccount; each Pod receives its own short-lived Workload Identity token, so no per-Pod cloud registration is required.
+The chart bundles PostgreSQL and an OpenTelemetry collector as dependencies. To point at an
+**external database**, disable the bundled PostgreSQL subchart and set the split
+`APP_DATABASE__*` env fields under `statuslist.env`.
 
-## Migration: Static Credentials (ESO) to Workload Identity
+## 5. Verify the deployment
 
-The chart now defaults to the ESO-mounted static-credential path (`statuslist.aws.mountCredentials=true`, the `aws-credentials-secret`). Moving to Workload Identity / IRSA is an opt-in migration:
+```bash
+helm status statuslist -n statuslist
+kubectl rollout status deployment/statuslist-status-list-server-deployment -n statuslist
+kubectl get pods -n statuslist
+kubectl logs -l app.kubernetes.io/name=status-list-server -n statuslist --tail=100
 
-1. Ensure the default ESO path works: `externalSecret.enabled=true` — the chart's `statuslist-external-secret-aws-credentials` ExternalSecret provisions `aws-credentials-secret` (holding `credentials` + `config`), which is mounted under `/home/nobody/.aws`.
-2. Configure Workload Identity: attach the role annotation via `serviceAccount.annotations` (e.g. `eks.amazonaws.com/role-arn` for EKS IRSA).
-3. Flip to Workload Identity: set `statuslist.aws.mountCredentials=false`.
-4. After verification, delete the mounted `aws-credentials-secret` and any legacy static AWS GitHub secrets.
+curl -s https://<your-host>/health/live
+curl -s https://<your-host>/health/ready
+```
 
-For production, the deploy workflow applies [`values-production.yaml`](./chart/values-production.yaml), which currently keeps the chart default: **ESO-mounted credentials** (`statuslist.aws.mountCredentials=true`). No Workload Identity / IRSA annotation is required today; the chart's `statuslist-external-secret-aws-credentials` ExternalSecret provisions the `aws-credentials-secret` that is mounted under `/home/nobody/.aws`. Migrating production to Workload Identity / IRSA is the documented opt-in step above — wire the `eks.amazonaws.com/role-arn` annotation and set `statuslist.aws.mountCredentials=false` in `values-production.yaml` **only after** the IRSA role is provisioned, otherwise the next deploy would have no AWS credentials.
+`/health/ready` reflects dependency health (database reachable, certificate material
+loadable); treat it as the release-readiness gate.
 
-## Credential Exposure Model
+For local development without a cluster, see the bundled
+[chart/values-local.yaml](chart/values-local.yaml) and follow the same
+`helm upgrade --install` flow.
 
-The chart intentionally avoids rendering fully assembled SQL database URLs in the Deployment. The application assembles the connection string inside the process from split configuration fields:
+## Next steps
 
-- Database: `APP_DATABASE__HOST`, `APP_DATABASE__PORT`, `APP_DATABASE__USERNAME`, `APP_DATABASE__PASSWORD`, `APP_DATABASE__NAME`, and optional `APP_DATABASE__QUERY`
+The detailed, topic-by-topic operator documentation has been moved to **Confluence**
+(the archived content covers prerequisites, image selection, per-provider installs, the full
+environment-variable reference, token-signing credentials, secret rotation, scaling,
+observability, upgrade/rollback, and an error-indexed troubleshooting reference). Link to it
+from here once published.
 
-Use `APP_DATABASE__QUERY` for non-secret driver parameters such as `sslmode=verify-full&sslrootcert=/var/run/postgres/ca.crt`. Do not put credentials in query parameters.
+In this repository you can consult the curated deep-dive pages for operational background:
 
-Password fields are rendered with `valueFrom.secretKeyRef`, so `kubectl describe pod` shows the referenced Secret name/key rather than a connection string containing credentials. Operators should still restrict RBAC for pod inspection, Secret reads, exec access, ephemeral containers, and workload log access to trusted roles only, because environment variables are visible inside the running container and Secret references identify where credentials live.
-
-For external databases such as RDS, set `APP_DATABASE__HOST`, `APP_DATABASE__PORT`, `APP_DATABASE__BACKEND`, `APP_DATABASE__USERNAME`, `APP_DATABASE__NAME`, and optional `APP_DATABASE__QUERY` through `statuslist.env`. Do not set `APP_DATABASE__PASSWORD` there. Unless `APP_DATABASE__PASSWORD_FILE` is configured, the chart wires `APP_DATABASE__PASSWORD` from a Kubernetes Secret key named `postgres-password`: either the `externalSecret.spec.target.name` Secret when `externalSecret.enabled=true`, or the `statuslist-secret` Secret otherwise. This key name is a hard chart contract even for MySQL or MariaDB backends, so create or sync that exact Secret/key with the external database password before deploying.
-
-`APP_DATABASE__PORT` must be set in `statuslist.env`; the chart does not infer or default it from the PostgreSQL subchart. This keeps the database port an explicit runtime input and avoids silently connecting to the wrong port when operators customize database topology.
-
-`APP_DATABASE__URL` remains supported by the application for local or custom deployments, but the Helm chart rejects it in `statuslist.env` because using it directly in Kubernetes pod specs accepts the tradeoff that users with pod-inspection permissions may see assembled connection strings. Prefer the split fields for Helm-managed deployments. When any split database field is provided, the application rejects a simultaneous custom `database.url` to avoid silent precedence surprises.
-
-The bundled in-cluster PostgreSQL subchart is treated as a cluster-internal connection and this chart does not provision database TLS certificates by default. **In-cluster database traffic is unencrypted by default** and relies on CNI/mesh encryption (if configured in your cluster). For managed or external databases, prefer TLS and set non-secret driver parameters with `APP_DATABASE__QUERY`, for example `sslmode=verify-full&sslrootcert=/var/run/postgres/ca.crt`. The referenced CA path must exist in the container, either from the image trust store or from an operator-provided mount.
-
-To enable TLS for external databases, set `APP_DATABASE__QUERY` to include the appropriate SSL mode, for example: `sslmode=require` for basic TLS or `sslmode=verify-full&sslrootcert=/var/run/postgres/ca.crt` for full certificate verification.
-
-The application no longer provides a built-in `database.url` default. Non-Helm and local deployments must set either `APP_DATABASE__URL` or the split database fields explicitly; SQLite development runs should set `APP_DATABASE__URL=sqlite::memory:?cache=shared` when an in-memory database is intended.
-
-## Production Deployment Instructions
-
-For GitHub Actions deployments to production, see the [Deployment Runbook](../docs/deployment-runbook.md). CI/CD owns production image injection with `statuslist.image.repository`, `statuslist.image.tag` and `statuslist.image.digest`. The digest is what determines the running image; the tag is passed alongside it for readability in `helm history` and release notes. Because of that precedence, do not run `helm upgrade --reuse-values` with only a changed tag: the stored digest still wins, so the upgrade reports success and changes nothing. Pass both, or clear the digest with `--set statuslist.image.digest=null`. A digest that is not `sha256:` followed by 64 hex characters is rejected at template time. Operators should avoid patching live images imperatively because Helm will reconcile the chart state on the next deploy. Failed upgrades roll back automatically through Helm `--atomic`; rollbacks after a successful but bad deploy are manual Helm operations.
-
-1. **Create a namespace:**
-
-   ```bash
-   kubectl create namespace statuslist
-   ```
-
-2. **Deploy the chart:**
-
-   ```bash
-   helm install statuslist ./chart --namespace statuslist -f chart/values.yaml
-   ```
-
-## Local Deployment
-
-For local testing and development, please refer to the [Local Deployment Guide](../docs/LOCAL_DEPLOYMENT.md).
-
-## Verifying the Deployment
-
-1. **Check the status of the pods:**
-
-   ```bash
-   kubectl get pods -n statuslist
-   ```
-
-2. **Check the application logs:**
-
-   ```bash
-   kubectl logs -l app.kubernetes.io/name=status-list-server -n statuslist
-   ```
+- [`../docs/deployment-architecture.md`](../docs/deployment-architecture.md) — the full
+  Kubernetes/Helm topology and architecture.
+- [`../docs/secrets-risk-eso-vs-workload-identity.md`](../docs/secrets-risk-eso-vs-workload-identity.md)
+  — risk trade-offs between ESO-mounted credentials (chart default) and Workload Identity;
+  read this before choosing in step 3.
+- [`chart/values.yaml`](chart/values.yaml) — the single source of truth for every Helm value.
+- [`../docs/supply-chain.md`](../docs/supply-chain.md) — image scanning, SBOM, and SLSA.
+- [`../README.md`](../README.md) — project overview and local-development quick start.
