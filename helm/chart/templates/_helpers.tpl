@@ -36,9 +36,8 @@ Common labels
 {{- define "status-list-server-chart.labels" -}}
 helm.sh/chart: {{ include "status-list-server-chart.chart" . }}
 {{ include "status-list-server-chart.selectorLabels" . }}
-{{- $appVersion := .Values.statuslist.image.tag | default .Chart.AppVersion }}
-{{- if $appVersion }}
-app.kubernetes.io/version: {{ $appVersion | quote }}
+{{- if .Chart.AppVersion }}
+app.kubernetes.io/version: {{ .Chart.AppVersion | quote }}
 {{- end }}
 app.kubernetes.io/managed-by: {{ .Release.Service }}
 {{- end }}

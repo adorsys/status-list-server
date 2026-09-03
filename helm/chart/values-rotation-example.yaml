@@ -94,6 +94,9 @@ global:
 statuslist:
   initContainers: []
 
+  fallbackSecret:
+    enabled: false
+
   image:
     # Replace with an application image that includes issue #456.
     tag: "requires-456-file-rotation"

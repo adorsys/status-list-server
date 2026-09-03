@@ -25,6 +25,8 @@ statuslist:
     # Workload Identity mode.
     mountCredentials: true
     region: eu-central-1
+  fallbackSecret:
+    enabled: false
   resources:
     requests:
       memory: "512Mi"

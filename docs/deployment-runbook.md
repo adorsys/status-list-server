@@ -23,7 +23,7 @@ The vulnerability gate blocks on any HIGH or CRITICAL finding that survives the 
 
 ### Image Tags
 
-The release workflow publishes **5 multi-arch image variants** with distinct suffixes for different cloud providers and secret storage models. See the image variant matrix in `values.yaml` for the full description of each variant. The chart's empty-tag default resolves to the published AWS variant, not to an unsuffixed image tag.
+The release workflow publishes **5 multi-arch image variants** with distinct suffixes for different cloud providers and secret storage models. See the image variant matrix in `values.yaml` for the full description of each variant. The chart's empty-tag default resolves to the provider-neutral filesystem certificate-store variant (`-fscert`), not to an unsuffixed image tag. AWS production deployments select the `-aws` image explicitly through their values and deploy inputs.
 
 | Trigger              | Image Tags                                                             | Applied               |
 | -------------------- | ---------------------------------------------------------------------- | --------------------- |

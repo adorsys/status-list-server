@@ -57,15 +57,16 @@ expect() {
 }
 
 # appVersion is the default image tag when neither tag nor digest is set. Release tags
-# are variant-suffixed, so the default install must resolve to the published AWS image.
+# are variant-suffixed, so the base chart must resolve to the provider-neutral
+# filesystem-certificate variant. AWS production selects -aws explicitly.
 # First `version = ` line is [package]; later ones are deps.
 crate_version=$(grep -m1 '^version = ' Cargo.toml | sed -E 's/^version = "([^"]+)".*/\1/')
-default_tag="${crate_version}-aws"
+default_tag="${crate_version}-fscert"
 if [ "${app_version}" != "${default_tag}" ]; then
-    echo "::error::Chart appVersion (${app_version}) does not match the published default image tag (${default_tag}). appVersion is the chart's default image tag, so this points default installs at the wrong image."
+    echo "::error::Chart appVersion (${app_version}) does not match the provider-neutral default image tag (${default_tag}). appVersion is the chart's default image tag, so this points base installs at the wrong image."
     exit 1
 fi
-echo "appVersion matches published default image tag: ${default_tag}"
+echo "appVersion matches provider-neutral default image tag: ${default_tag}"
 
 # A digest is content-addressed, so IfNotPresent; a tag is mutable, so Always.
 expect "${repo}@${digest}|IfNotPresent|" \

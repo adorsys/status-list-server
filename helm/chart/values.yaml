@@ -44,8 +44,8 @@ statuslist:
     # Tag format: <version>-<suffix> (e.g., 1.2.0-aws, 1.2.0-gcp)
     # Latest tags: latest-<suffix> (e.g., latest-aws, latest-gcp)
     #
-    # Empty falls back to the chart appVersion, which follows the repository's
-    # published default image tag. Defaulting to "latest" would let an upgrade
+    # Empty falls back to the chart appVersion, which is the filesystem
+    # certificate-store variant. Defaulting to "latest" would let an upgrade
     # that changes nothing in this chart still change the running image.
     tag: ""
     # "sha256:...". Takes precedence over tag and pins the exact digest CI scanned.
@@ -140,8 +140,10 @@ statuslist:
   # (postgres.auth.existingSecret) references the same name, so it is deliberately not
   # independently configurable.
   fallbackSecret:
-    enabled: false
+    enabled: true
     stringData:
+      # Empty means the chart generates a random password. Helm upgrades reuse
+      # the existing statuslist-secret password when the cluster is reachable.
       postgres-password: ""
 
   # File-based secret mounts for production credential/key rotation.

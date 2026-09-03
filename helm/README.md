@@ -7,7 +7,7 @@ This guide provides instructions for deploying the Status List Server using the 
 - Kubernetes cluster
 - Helm 3 installed
 - `kubectl` configured to connect to your cluster
-- External Secrets Operator (ESO) installed when `externalSecret.enabled=true` (the default). The chart renders `external-secrets.io/v1` `ExternalSecret`, `SecretStore`, and `ClusterSecretStore` references, so the cluster CRDs must serve `external-secrets.io/v1` before installing or upgrading this chart. ESO v0.16 promoted these resources to `v1`; upgrade the ESO controller and CRDs together, and if CRDs are managed separately, apply the matching CRD bundle before upgrading the operator.
+- External Secrets Operator (ESO) installed when `externalSecret.enabled=true`. The chart renders `external-secrets.io/v1` `ExternalSecret`, `SecretStore`, and `ClusterSecretStore` references, so the cluster CRDs must serve `external-secrets.io/v1` before installing or upgrading this chart. ESO v0.16 promoted these resources to `v1`; upgrade the ESO controller and CRDs together, and if CRDs are managed separately, apply the matching CRD bundle before upgrading the operator.
 
 ## Chart Dependencies
 
@@ -24,7 +24,8 @@ The following files are used to configure the deployment:
 
 - [`chart/values.yaml`](chart/values.yaml): Provider-neutral default configuration.
 - [`chart/values-local.yaml`](chart/values-local.yaml): Configuration for local development.
-- [`chart/values-aws.yaml`](chart/values-aws.yaml): Explicit AWS/EKS example overlay.
+- [`chart/values-aws.yaml`](chart/values-aws.yaml): Explicit AWS/EKS example overlay that keeps ingress as the public entry point.
+- [`chart/values-aws-nlb.yaml`](chart/values-aws-nlb.yaml): Optional AWS/EKS direct Network Load Balancer overlay.
 - [`chart/values-production.yaml`](chart/values-production.yaml): Production overlay used by release deployments.
 
 ### Key Configuration Options
@@ -32,7 +33,7 @@ The following files are used to configure the deployment:
 - **`statuslist.image.repository`**: The Docker image for the application.
 - **`global.domain`**: Chart-wide public DNS suffix. When set, ingress defaults derive `statuslist.<global.domain>` and `*.<global.domain>` from this single value.
 - **`global.storageClass` / `postgres.persistence.storageClass`**: Leave as `""` to use the cluster default StorageClass; set explicitly in environment overlays when needed.
-- **`statuslist.image.tag`**: The Docker image tag. Used only when `statuslist.image.digest` is empty. Defaults to empty, which falls back to the chart's `appVersion` — the repository's published default image tag, not `latest`, so an upgrade that changes nothing in the chart cannot change the running image and a rollback stays reproducible. Cloud-specific Kubernetes settings are selected explicitly in overlays such as `values-aws.yaml`.
+- **`statuslist.image.tag`**: The Docker image tag. Used only when `statuslist.image.digest` is empty. Defaults to empty, which falls back to the chart's provider-neutral `appVersion` (`-fscert`), not `latest`, so an upgrade that changes nothing in the chart cannot change the running image and a rollback stays reproducible. Cloud-specific images and Kubernetes settings are selected explicitly in overlays such as `values-aws.yaml`.
 - **`statuslist.image.pullPolicy`**: Defaults to empty, which derives the policy from how the image is named: `IfNotPresent` when a digest is set, because a digest is content-addressed and re-pulling it can only fetch the same bytes, and `Always` for a tag, which is mutable. Set it explicitly to override.
 - **`statuslist.image.digest`**: An image digest as `sha256:` plus 64 hex characters; anything else is rejected at template time/schema validation. When set it takes precedence over `statuslist.image.tag`, and the deployment runs `repository@digest`. Production deploys set this so the running image is the exact artifact CI scanned; tags are mutable and a digest is not. Leave it empty for local and manual installs to get tag-based deployment.
 - **`postgres.persistence.enabled`**: Enable or disable persistent storage for PostgreSQL.
@@ -76,6 +77,8 @@ The base chart is provider-neutral: `externalSecret.enabled=false`, `secretStore
 statuslist:
   image:
     tag: "1.0.1-aws"
+  fallbackSecret:
+    enabled: false
   aws:
     mountCredentials: true # mount the ESO-provisioned aws-credentials-secret under /home/nobody/.aws
     region: "" # plain, non-secret; renders APP_AWS__REGION
@@ -181,6 +184,22 @@ secretStore:
 
 Provider selection is fail-closed: an unsupported `secretStore.provider` value is rejected by the chart's `values.schema.json` and a Helm `fail`, and contradictory mode combinations (ESO disabled while a SecretStore is requested) do not render the ESO CR.
 
+## AWS Ingress and Direct NLB Exposure
+
+The general AWS overlay keeps `statuslist.service.type=ClusterIP` so the configured Ingress remains the only public HTTP entry point:
+
+```bash
+helm install statuslist ./chart --namespace statuslist -f chart/values-aws.yaml
+```
+
+Use the direct NLB overlay only when the Service itself should be public. It disables the inherited Ingress to avoid exposing the app through a second plaintext path:
+
+```bash
+helm install statuslist ./chart --namespace statuslist \
+  -f chart/values-aws.yaml \
+  -f chart/values-aws-nlb.yaml
+```
+
 ## File-Based Secret Mounts and Rotation
 
 `statuslist.secretMounts` mounts operator-managed Kubernetes Secrets as read-only files. Add `fileEnv` to a mount to expose a file path through the application environment:
@@ -216,10 +235,10 @@ statuslist:
   fallbackSecret:
     enabled: true
     stringData:
-      postgres-password: "change-me"
+      postgres-password: ""
 ```
 
-The fallback `Secret` is rendered only when `externalSecret.enabled=false` **and** `statuslist.fallbackSecret.enabled=true`. It uses `stringData`, so plain string values are base64-encoded by the API server. The fallback secret is always named `statuslist-secret` — the single supported name that the Deployment's `POSTGRES_PASSWORD` `secretKeyRef` and `postgres.auth.existingSecret` all reference, so it is not independently configurable.
+The default chart uses this mode, so a plain `helm install` creates the `statuslist-secret` consumed by both the application Deployment and bundled PostgreSQL. Leave `postgres-password` empty to have Helm generate a random password; on upgrades, Helm reuses the existing cluster Secret when it can read it. Set a concrete value only for local or disposable environments. The fallback `Secret` is rendered only when `externalSecret.enabled=false` **and** `statuslist.fallbackSecret.enabled=true`. It uses `stringData`, so plain string values are base64-encoded by the API server. The fallback secret is always named `statuslist-secret` — the single supported name that the Deployment's `POSTGRES_PASSWORD` `secretKeyRef` and `postgres.auth.existingSecret` all reference, so it is not independently configurable.
 
 ## Horizontal Autoscaling and Pod Disruption Budget
 
@@ -296,6 +315,8 @@ For GitHub Actions deployments to production, see the [Deployment Runbook](../do
    helm install statuslist ./chart --namespace statuslist
    # AWS/EKS example:
    helm install statuslist ./chart --namespace statuslist -f chart/values-aws.yaml
+   # AWS/EKS direct NLB example:
+   helm install statuslist ./chart --namespace statuslist -f chart/values-aws.yaml -f chart/values-aws-nlb.yaml
    ```
 
 ## Local Deployment

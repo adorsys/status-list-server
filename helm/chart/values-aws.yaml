@@ -9,13 +9,9 @@ statuslist:
   image:
     tag: "1.0.1-aws"
   service:
-    # Enable when exposing the service directly through an AWS Network Load Balancer.
-    # Keep ClusterIP when ingress is responsible for external traffic.
-    type: LoadBalancer
-    annotations:
-      service.beta.kubernetes.io/aws-load-balancer-type: "external"
-      service.beta.kubernetes.io/aws-load-balancer-nlb-target-type: "ip"
-      service.beta.kubernetes.io/aws-load-balancer-scheme: "internet-facing"
+    # General AWS overlay keeps traffic behind the Ingress TLS layer.
+    type: ClusterIP
+    annotations: {}
   env:
     APP_SERVER__CERT__EMAIL: "info@adorsys.com"
     APP_SERVER__CERT__ORGANIZATION: "adorsys GmbH & CO KG"
@@ -23,6 +19,8 @@ statuslist:
   aws:
     mountCredentials: true
     region: eu-central-1
+  fallbackSecret:
+    enabled: false
 
 externalSecret:
   enabled: true
