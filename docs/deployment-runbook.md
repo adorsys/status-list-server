@@ -25,15 +25,16 @@ The vulnerability gate blocks on any HIGH or CRITICAL finding that survives the 
 
 The release workflow publishes **5 multi-arch image variants** with distinct suffixes for different cloud providers and secret storage models. See the image variant matrix in `values.yaml` for the full description of each variant. The chart's empty-tag default resolves to the published AWS variant, not to an unsuffixed image tag.
 
-| Trigger              | Image Tags                                                                   | Applied                   |
-| -------------------- | ---------------------------------------------------------------------------- | ------------------------- |
-| Manual dispatch      | `sha-<short_sha>-<variant>`                                                  | At build                  |
-| Release tag `v*.*.*` | `sha-<short_sha>-<variant>`                                                  | At build                  |
-| Release tag `v*.*.*` | `<version>-<variant>`, `<major>.<minor>-<variant>`, `latest-<variant>`       | After the scan passes     |
+| Trigger              | Image Tags                                                             | Applied               |
+| -------------------- | ---------------------------------------------------------------------- | --------------------- |
+| Manual dispatch      | `sha-<short_sha>-<variant>`                                            | At build              |
+| Release tag `v*.*.*` | `sha-<short_sha>-<variant>`                                            | At build              |
+| Release tag `v*.*.*` | `<version>-<variant>`, `<major>.<minor>-<variant>`, `latest-<variant>` | After the scan passes |
 
 Where `<variant>` is one of: `aws`, `gcp`, `azure`, `vault`, `fscert`.
 
 Examples for tag `v1.2.0`:
+
 - Version tags: `1.2.0-aws`, `1.2.0-gcp`, `1.2.0-azure`, `1.2.0-vault`, `1.2.0-fscert`
 - Short version tags: `1.2-aws`, `1.2-gcp`, `1.2-azure`, `1.2-vault`, `1.2-fscert`
 - Latest tags: `latest-aws`, `latest-gcp`, `latest-azure`, `latest-vault`, `latest-fscert`
@@ -64,7 +65,7 @@ To select a variant, set the image tag with the appropriate suffix in your Helm 
 # values.yaml override
 statuslist:
   image:
-    tag: "1.2.0-vault"  # Use Vault variant
+    tag: "1.2.0-vault" # Use Vault variant
 ```
 
 ### Production Deploy
@@ -146,6 +147,16 @@ kubectl describe pod -l app.kubernetes.io/name=status-list-server -n statuslist-
 ```
 
 If certificate provisioning or AWS-backed storage is enabled, also confirm the app can reach AWS services by checking application logs for successful Secrets Manager or certificate renewal operations.
+
+## File-Based Secret Rotation
+
+The Helm chart can mount Secrets as files and inject file-path environment variables, but zero-downtime reload depends on running an application image that contains the file watcher and pool/key reload behavior from issue #456. Without that image support, treat the chart values as preparatory and perform a controlled rollout after credential or key changes.
+
+The chart exposes the database password through `APP_DATABASE__PASSWORD_FILE` by default, using `statuslist.secretMounts` to mount the configured Kubernetes Secret as a file. This avoids a pod that mounts a rotated password file while the application silently keeps using an older startup password from an environment variable.
+
+The Deployment `checksum/secret` annotation tracks Helm-rendered ExternalSecret manifests. It rolls pods when the chart template or Helm values change, but it does not change when External Secrets Operator syncs new secret data from Vault, AWS, GCP, or Azure. Data-only rotations rely on Kubernetes Secret volume updates plus the application watcher, or on an explicit `kubectl rollout restart` for images without reload support.
+
+Database credential rotation must be coordinated with the database owner. Create and validate the new credential in PostgreSQL while the old credential remains valid, publish the new value to the external secret store, wait for ESO refresh plus watcher polling plus validation, and revoke the old credential only after every replica is healthy on the new pool. Roll back by restoring the old external secret value before the old database credential is revoked.
 
 ## Rollback
 

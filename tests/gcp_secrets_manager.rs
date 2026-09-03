@@ -1,4 +1,4 @@
-#![cfg(feature = "gcp-secrets")]
+#![cfg(feature = "gcp")]
 
 use std::time::Duration;
 
