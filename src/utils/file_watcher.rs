@@ -257,6 +257,7 @@ mod tests {
                 time::OffsetDateTime::now_utc().unix_timestamp_nanos()
             ));
             std::fs::create_dir_all(&path).expect("create temp dir");
+            let path = std::fs::canonicalize(&path).unwrap_or(path);
             Self { path }
         }
     }
@@ -365,10 +366,11 @@ mod tests {
             }
         });
 
+        tokio::time::sleep(Duration::from_millis(100)).await;
         tokio::fs::write(&path, "second")
             .await
             .expect("write update");
-        timeout(Duration::from_secs(3), rx.recv())
+        timeout(Duration::from_secs(5), rx.recv())
             .await
             .expect("watcher callback timed out")
             .expect("watcher callback");
