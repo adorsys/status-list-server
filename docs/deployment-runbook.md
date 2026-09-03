@@ -19,6 +19,8 @@ Every workflow run first executes the reusable CI workflow, then builds and push
 
 The scan job blocks both promotion and deployment. A release tag whose image fails an assertion builds and pushes, but the semver and `latest` tags are never applied to it and it never reaches production — so a rejected artifact is reachable only by its commit SHA, never as an advertised release. See [Container Supply Chain](supply-chain.md) for thresholds and triage.
 
+Because GitHub Actions evaluates job dependencies (`needs:`) at the job level, an unmanaged HIGH/CRITICAL vulnerability or build failure in any single variant fails the overall `scan-image` job. This halts tag promotion and production deployment for all variants. Releases are strictly fail-closed transactions: either all variants are validated and released together, or none are.
+
 The vulnerability gate blocks on any HIGH or CRITICAL finding that survives the exception ledger, as do the assertions around it. Each run also proves the gate can still fail, against a fixture, before treating a clean scan as meaningful. See the supply chain guide for thresholds and triage.
 
 ### Image Tags
@@ -77,7 +79,7 @@ Release tags matching `v*.*.*` deploy to:
 - Helm release: `statuslist`
 - Image tag: semantic version without the leading `v`
 
-For example, tag `v0.5.0` deploys the AWS variant with image tag `0.5.0-aws`. The production deployment uses the `-aws` variant by default; other variants (`-gcp`, `-azure`, `-vault`, `-fscert`) can be selected by setting the `IMAGE_VARIANT` Actions variable in the `production` environment (e.g., `gcp`, `azure`, `vault`, `fscert`). The default is `aws`.
+For example, tag `v0.5.0` deploys the AWS variant with image tag `0.5.0-aws`. The production deployment uses the `-aws` variant by default; other variants (`-gcp`, `-azure`, `-vault`, `-fscert`) can be selected by setting the `IMAGE_VARIANT` Actions variable at the repository level (e.g., `gcp`, `azure`, `vault`, `fscert`). The default is `aws`. (Setting this at the repository level ensures that `scheduled-image-scan.yml` automatically re-scans the exact variant active in production).
 
 The production deploy command is equivalent to (using the AWS variant):
 
