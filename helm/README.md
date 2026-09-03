@@ -1,8 +1,7 @@
 # Status List Server — Helm Deployment
 
 This guide shows you how to deploy the Status List Server on Kubernetes with the Helm chart in
-this directory ([`chart/`](chart/)). The chart bundles the application, PostgreSQL, and an
-OpenTelemetry collector, so you do not need to understand how the server works internally.
+this directory ([`chart/`](chart/)).
 
 ## Prerequisites
 
