@@ -8,12 +8,12 @@ The pipeline is `.github/workflows/deploy.yml`. **If a release is blocked and yo
 
 **Where the evidence is.** On the failed run, in artifacts kept for the repository's retention period (90 days by default):
 
-| You want                             | Artifact                 | File                                       |
-| ------------------------------------ | ------------------------ | ------------------------------------------ |
-| The exact blocking set               | `container-scan-reports` | `trivy-gate-findings-<arch>.json`          |
-| Everything HIGH/CRITICAL, pre-ledger | `container-scan-reports` | `trivy-highcrit-all-<arch>.json`           |
-| The full scan, all severities        | `container-scan-reports` | `trivy-image-report-<arch>.json` / `.txt`  |
-| The published SBOM                   | `container-sboms`        | `sbom-<arch>.json`                         |
+| You want                             | Artifact                 | File                                      |
+| ------------------------------------ | ------------------------ | ----------------------------------------- |
+| The exact blocking set               | `container-scan-reports` | `trivy-gate-findings-<arch>.json`         |
+| Everything HIGH/CRITICAL, pre-ledger | `container-scan-reports` | `trivy-highcrit-all-<arch>.json`          |
+| The full scan, all severities        | `container-scan-reports` | `trivy-image-report-<arch>.json` / `.txt` |
+| The published SBOM                   | `container-sboms`        | `sbom-<arch>.json`                        |
 
 Provenance and SBOM are also attached to the image itself: `docker buildx imagetools inspect <ref> --format '{{ json .Provenance }}'`.
 
@@ -29,7 +29,7 @@ Provenance and SBOM are also attached to the image itself: `docker buildx imaget
 
 A dispatch run exercises the build, the scan and every assertion without releasing: `promote-tags` and `deploy` both require `github.event_name == 'push'`, so a dispatch promotes nothing and deploys nothing even when aimed at a tag ref. It does still push `sha-<short>-<variant>` images to GHCR — it publishes images, it just never advertises or ships them.
 
-The image is pushed before it can be scanned. That is not a tradeoff, it is a constraint: BuildKit attestations can only be produced when pushing directly to a registry, because the local image store cannot hold an image carrying attestations. What the pipeline controls is not whether the artifact exists in GHCR, but what it is *called*. An image that has not passed the scan is reachable only by its commit SHA tag. It never becomes `latest`, never becomes `v1.2.3`, and never reaches production.
+The image is pushed before it can be scanned. That is not a tradeoff, it is a constraint: BuildKit attestations can only be produced when pushing directly to a registry, because the local image store cannot hold an image carrying attestations. What the pipeline controls is not whether the artifact exists in GHCR, but what it is _called_. An image that has not passed the scan is reachable only by its commit SHA tag. It never becomes `latest`, never becomes `v1.2.3`, and never reaches production.
 
 That distinction matters more than it first appears. Blocking only the deploy would still leave `latest` and the semver tags resolving to a rejected artifact, so every consumer that is not this pipeline — anything pulling `latest`, any other chart, any developer running `docker pull` — would receive precisely the image the scan refused. Withholding the tags is what makes the refusal mean anything outside this workflow.
 
@@ -48,7 +48,7 @@ That distinction matters more than it first appears. Blocking only the deploy wo
 
 `Derive reports` produces two HIGH/CRITICAL sets per architecture: `trivy-highcrit-all-<arch>.json` before the exception ledger and `trivy-gate-findings-<arch>.json` after it. The gate reports the difference, so a green result distinguishes "nothing was found" from "everything found was accepted".
 
-Three properties of that ordering are deliberate. The scan runs before the SBOM fetch, because registry metadata is a separate failure domain and a transient `imagetools` error must not cost the reports a responder is being told to go and read. Reports and artifacts publish *before* any assertion runs, both under `if: always()`, so a failing assertion still leaves the full report to triage — as two artifacts rather than one, so a lost SBOM cannot take the scan results down with it.
+Three properties of that ordering are deliberate. The scan runs before the SBOM fetch, because registry metadata is a separate failure domain and a transient `imagetools` error must not cost the reports a responder is being told to go and read. Reports and artifacts publish _before_ any assertion runs, both under `if: always()`, so a failing assertion still leaves the full report to triage — as two artifacts rather than one, so a lost SBOM cannot take the scan results down with it.
 
 And every view is derived from that architecture's single scan by `trivy convert` rather than by re-scanning, so the table a maintainer reads and the set the gate evaluates are provably the same data. The gate renders its table from `trivy-gate-findings-<arch>.json` itself rather than re-applying the same filter to the full report, so the count in the summary, the table in the log, and the exit code cannot disagree about what blocks.
 
@@ -70,7 +70,7 @@ A clean scan is the expected result on every run, and that is the problem: a gat
 
 So `scan-image` runs a self-test immediately before the gate, invoking `scripts/vuln-gate.sh` — the same script, flags and `trivy` binary the real gate uses one step later — against two fixtures in `scripts/testdata/`. A fixture holding one CRITICAL **must** fail the gate; a clean one **must** pass, because a gate that blocks unconditionally is equally broken and would otherwise surface mid-release.
 
-Exit status alone is not sufficient evidence. A missing fixture, a `trivy` not on `PATH` and a malformed report all exit non-zero, so checking only the exit code would let a fixture that was never committed read as a *passing* self-test — the absence-reads-as-success failure the step exists to prevent, occurring inside it. The step therefore also asserts the fixture exists, holds at least one finding, and that the gate's output names the vulnerability ID it was given. Only a gate that really evaluated the report can print that ID back.
+Exit status alone is not sufficient evidence. A missing fixture, a `trivy` not on `PATH` and a malformed report all exit non-zero, so checking only the exit code would let a fixture that was never committed read as a _passing_ self-test — the absence-reads-as-success failure the step exists to prevent, occurring inside it. The step therefore also asserts the fixture exists, holds at least one finding, and that the gate's output names the vulnerability ID it was given. Only a gate that really evaluated the report can print that ID back.
 
 The gate is a script rather than an inline step for the same reason. Inline, the self-test and the gate would be two copies of a flag list that must not drift, and the drift would be undetectable: a self-test passing against different flags than the real gate uses tells you nothing about the real gate.
 
@@ -99,13 +99,13 @@ The scan binds to `...@sha256:<digest>`. `promote-tags` retags that same digest,
 
 This matters because tags are mutable. Binding the scan to a digest and then deploying by tag would leave a window in which a re-run or a manual push could replace the image in between.
 
-Two `concurrency` groups back that up. The workflow-level group is keyed on the ref, so re-runs of the same tag do not overlap. The `deploy` job declares a second one keyed on `deploy-production`, because two tags pushed in quick succession are *different* refs and the workflow-level group would let both drive `helm upgrade --wait --rollback-on-failure` against the same release at once. What guarantees production runs the scanned artifact is the digest binding; what the second group prevents is two deploys racing for the Helm release lock.
+Two `concurrency` groups back that up. The workflow-level group is keyed on the ref, so re-runs of the same tag do not overlap. The `deploy` job declares a second one keyed on `deploy-production`, because two tags pushed in quick succession are _different_ refs and the workflow-level group would let both drive `helm upgrade --wait --rollback-on-failure` against the same release at once. What guarantees production runs the scanned artifact is the digest binding; what the second group prevents is two deploys racing for the Helm release lock.
 
 ### Which Architectures Are Scanned
 
-Every architecture the release publishes. The pushed digest names a multi-platform *index*, not an image, so `scan-image` resolves each child manifest with `docker buildx imagetools inspect --raw` and scans `repo@<manifest-digest>` per architecture. Scanning the index directly would leave the choice of platform to Trivy's default — one architecture, silently.
+Every architecture the release publishes. The pushed digest names a multi-platform _index_, not an image, so `scan-image` resolves each child manifest with `docker buildx imagetools inspect --raw` and scans `repo@<manifest-digest>` per architecture. Scanning the index directly would leave the choice of platform to Trivy's default — one architecture, silently.
 
-Scanning one architecture and inferring the other is not sound, though it looks it. The two images share a lockfile, and the runtime stage is `FROM scratch` with no OS packages, so it is tempting to conclude the package sets must match. They are built by different builder images to different Rust targets, and `cargo auditable` records the graph Cargo *resolved for that target* — a lockfile is the union across targets, not the per-target set. An advisory reaching only `linux/arm64` would have been promoted and deployed without ever crossing the gate.
+Scanning one architecture and inferring the other is not sound, though it looks it. The two images share a lockfile, and the runtime stage is `FROM scratch` with no OS packages, so it is tempting to conclude the package sets must match. They are built by different builder images to different Rust targets, and `cargo auditable` records the graph Cargo _resolved for that target_ — a lockfile is the union across targets, not the per-target set. An advisory reaching only `linux/arm64` would have been promoted and deployed without ever crossing the gate.
 
 The resolution step fails if the index does not contain exactly one manifest per requested architecture, which is a real condition with a real cause: the build stopped producing a platform this pipeline claims to scan.
 
@@ -211,7 +211,7 @@ cargo install --locked --version 0.5.4 rust-audit-info
 rustup target add x86_64-unknown-linux-musl
 cargo auditable build --locked --release \
   --target x86_64-unknown-linux-musl \
-  --features "postgres,aws-secrets,acme"
+  --features "postgres,aws"
 
 rust-audit-info target/x86_64-unknown-linux-musl/release/status-list-server \
   | jq '.packages | length'
@@ -235,7 +235,7 @@ done
 
 The steps are in the [Operator Guide](#operator-guide). Two things that section leaves out:
 
-Read the full report artifact, not just the gate output — the gate applies a severity floor and the exception ledger, and the artifact does not, so a finding can be real and simply below the threshold. And when judging whether an advisory applies, the relevant build is the image's feature set (`postgres,aws-secrets,acme`, the `ARG FEATURES` default in the `Dockerfile`), which is narrower than what `cargo build --all-features` compiles.
+Read the full report artifact, not just the gate output — the gate applies a severity floor and the exception ledger, and the artifact does not, so a finding can be real and simply below the threshold. And when judging whether an advisory applies, the relevant build is the image's feature set (`postgres,aws`, the `ARG FEATURES` default in the `Dockerfile`), which is narrower than what `cargo build --all-features` compiles.
 
 Do not add an exception for a finding you could simply fix. An exception is for a fix that does not exist yet, cannot be taken yet, or a finding that does not apply — and the `statement` should record which of those three it is.
 
@@ -258,9 +258,9 @@ The validator has its own tests in `scripts/tests/`, which CI runs before the va
 
 It also rejects **unknown keys inside an entry**, which is the check that matters most and the least obvious. Trivy silently ignores keys it does not recognise, so a one-character typo is a scope change rather than an error: `path:` instead of `paths:` leaves the entry with no path filter, and an entry with no path filter applies everywhere. Measured against this chart, that typo takes `KSV-0014` from 8 remaining findings to 0 — an exception written to cover one vendored subchart silently starts suppressing the rule repository-wide, and both the file and the scan still look correct.
 
-The same widening is reachable by simply **omitting** `paths`, so misconfiguration entries are required to carry a non-empty `paths` or `purls` list. Catching the typo but not the omission would leave the easier route open. Vulnerability entries are exempt from that requirement: a `FROM scratch` image holding one binary has no meaningful path to scope a crate advisory to, so an unscoped entry is the intended form there and demanding `paths: ['**']` would be noise. Where either key *is* present, in any section, it must be a non-empty list of non-empty strings — `paths: []` is unscoped just as surely as no `paths` at all.
+The same widening is reachable by simply **omitting** `paths`, so misconfiguration entries are required to carry a non-empty `paths` or `purls` list. Catching the typo but not the omission would leave the easier route open. Vulnerability entries are exempt from that requirement: a `FROM scratch` image holding one binary has no meaningful path to scope a crate advisory to, so an unscoped entry is the intended form there and demanding `paths: ['**']` would be noise. Where either key _is_ present, in any section, it must be a non-empty list of non-empty strings — `paths: []` is unscoped just as surely as no `paths` at all.
 
-Duplicate IDs are deliberately *not* rejected: the same rule legitimately appears more than once when it is scoped to different `paths`.
+Duplicate IDs are deliberately _not_ rejected: the same rule legitimately appears more than once when it is scoped to different `paths`.
 
 ### Two Ledgers
 
@@ -307,7 +307,7 @@ What it adds today is narrower than that overlap suggests:
 - It detects drift if the image was built from a lockfile that source-level CI never audited.
 - It binds a scan result to an image digest, so what was checked and what runs are the same artifact.
 
-There is one further capability often claimed for a setup like this — catching advisories published *after* merge, with no source change — and this pipeline does **not** deliver it. `deploy.yml` triggers only on release tags and on manual dispatch, so the image scan runs **once per release** and never again for that image. A newly published advisory first surfaces whenever someone next cuts a release, which may be weeks later and is not tied to the advisory at all.
+There is one further capability often claimed for a setup like this — catching advisories published _after_ merge, with no source change — and this pipeline does **not** deliver it. `deploy.yml` triggers only on release tags and on manual dispatch, so the image scan runs **once per release** and never again for that image. A newly published advisory first surfaces whenever someone next cuts a release, which may be weeks later and is not tied to the advisory at all.
 
 The source-level checks are what actually run continuously here: `cargo-audit`, `cargo-deny`, and `cargo-vet` query RustSec on every pull request. They cover the dependency tree rather than the artifact, so they will usually see a crate advisory first — but only when something triggers CI. Neither path notices an advisory published against an already-released image while nobody is pushing code. Closing that needs a scheduled re-scan of the deployed digest, tracked in [#410](https://github.com/adorsys/status-list-server/issues/410).
 
@@ -315,11 +315,11 @@ Findings about crates belong to `cargo-audit` and are fixed at the lockfile. Fin
 
 ### The Release Feature Set
 
-Source-level CI compiles two feature sets: `--all-features`, and `--no-default-features --features memory`. The image is built with neither. Its `ARG FEATURES="postgres,aws-secrets,acme"` names a combination that was reachable from no CI job at all.
+Source-level CI compiles two feature sets: `--all-features`, and `--no-default-features --features memory`. The image is built with neither. Its `ARG FEATURES="postgres,aws"` names a combination that was reachable from no CI job at all.
 
-Nothing validated that string. `ARG FEATURES` is a bare string handed to `cargo build` inside the image build, so a value naming no real feature is caught only when someone cuts a release — and it had one. The value was `postgres,aws,acme`, and `Cargo.toml` defines `aws-secrets`, not `aws`, so `cargo` would have rejected it outright.
+Nothing validated that string. `ARG FEATURES` is a bare string handed to `cargo build` inside the image build, so a value naming no real feature is caught only when someone cuts a release.
 
-`--all-features` does not stand in for the real set either. Cargo unifies features across the dependency graph, so enabling every feature of this crate compiles its shared dependencies with the union of theirs: `--all-features` turns on `postgres`, `sqlite`, and `mysql` together and builds `sea-orm` with all three `sqlx` backends, where the release set builds it with `sqlx-postgres` alone. The secret backends behave the same way — `--all-features` compiles `vault`, `gcp-secrets`, `azure-kv`, and `aws-secrets` at once; the image ships `aws-secrets` by itself.
+`--all-features` does not stand in for the real set either. Cargo unifies features across the dependency graph, so enabling every feature of this crate compiles its shared dependencies with the union of theirs: `--all-features` turns on `postgres`, `sqlite`, and `mysql` together and builds `sea-orm` with all three `sqlx` backends, where the release set builds it with `sqlx-postgres` alone. The secret backends behave the same way — `--all-features` compiles `vault`, `gcp`, `azure`, and `aws` at once; the image ships `aws` by itself.
 
 This is the shape worth remembering: **enabling every feature is not a superset of shipping some of them.** Unification builds the graph differently, and `#[cfg(not(...))]` branches exist only in the absence of a feature — so `--all-features` is its own configuration, not an upper bound on the ones you ship.
 
@@ -335,4 +335,4 @@ This is the shape worth remembering: **enabling every feature is not a superset 
 - **The Trivy vulnerability database is fetched fresh on every run**, unauthenticated, from a third party, at release time. That makes a network blip or a GHCR rate limit into a failed release, and it surfaces as the security gate failing, which reads as "a vulnerability was found". Tracked in [#405](https://github.com/adorsys/status-list-server/issues/405).
 - **The builder-stage audit assertion runs only on the release path.** `deploy.yml` does not run on pull requests, so a change that breaks the auditable build is green on the PR and fails during a release. Tracked against [#316](https://github.com/adorsys/status-list-server/issues/316).
 - **An expired ignore entry is a warning, not a failure.** `scripts/check-trivyignore.py` enforces the required fields but only warns when a date has passed, because an expired entry has already stopped suppressing anything. Whether a lapsed entry should block CI is a policy question that belongs with the scheduled re-scan ([#410](https://github.com/adorsys/status-list-server/issues/410)), since that is what would give advance warning before a release hits it.
-- **There is no break-glass for the gate.** With `ignore-unfixed` off and any HIGH or CRITICAL blocking, a newly published unfixed advisory in a linked crate makes it impossible to cut *any* release, including a security hotfix for something unrelated. The only path is landing a `.trivyignore.yaml` entry through pull request CI — which is the file this document warns hardest against editing under incident pressure. `workflow_dispatch` deliberately cannot release, so it is not an override. A dispatch input gated on the `production` environment's reviewers, recording the justification in the run summary, would close this; it is a policy decision rather than a mechanical one and has not been made.
+- **There is no break-glass for the gate.** With `ignore-unfixed` off and any HIGH or CRITICAL blocking, a newly published unfixed advisory in a linked crate makes it impossible to cut _any_ release, including a security hotfix for something unrelated. The only path is landing a `.trivyignore.yaml` entry through pull request CI — which is the file this document warns hardest against editing under incident pressure. `workflow_dispatch` deliberately cannot release, so it is not an override. A dispatch input gated on the `production` environment's reviewers, recording the justification in the run summary, would close this; it is a policy decision rather than a mechanical one and has not been made.
