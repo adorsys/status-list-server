@@ -44,7 +44,7 @@ small closed set (`connection`, `connection_acquire`, `execution`, `query`, `con
 `last_insert_id`, `missing_primary_key`, `record_not_found`, `attribute_not_set`, `custom`,
 `type`, `json`, `migration`, `record_not_inserted`, `record_not_updated`).
 
-_Source: `src/setup.rs:220-226` (message), `src/setup.rs:101-121` (classifier)_
+_Source: `src/setup.rs:158` (message), `src/setup.rs:101` (classifier)_
 
 **Root cause:** One of:
 
@@ -62,17 +62,19 @@ kubectl logs -l app.kubernetes.io/name=status-list-server -n statuslist-producti
 kubectl describe pod -l app.kubernetes.io/name=status-list-server -n statuslist-production
 # What host/port is the pod actually talking to?
 kubectl get pod -l app.kubernetes.io/name=status-list-server -n statuslist-production -o jsonpath='{.items[*].spec.containers[*].env}'
-# Is the mounted password the one the database accepts?
-kubectl get secret statuslist-secret -n statuslist-production -o jsonpath='{.data.postgres-password}' | base64 -d
+# The password is mounted as a file; confirm the mount and its key names (never the value):
+kubectl get secret statuslist-secret -n statuslist-production \
+  -o go-template='{{range $k,$v := .data}}{{println $k}}{{end}}'
 ```
 
 **Fix:**
 
-- Confirm reachability from inside the pod, not from a laptop:
+- Confirm reachability from inside the pod. The published image is scratch-based (no shell or
+  `nc`), so attach a temporary debug container with a utility image instead of `exec`:
 
   ```bash
-  kubectl exec -it deploy/statuslist-status-list-server-deployment -n statuslist-production -- \
-    sh -c 'command -v nc >/dev/null && nc -vz <db-host> <db-port> || true'
+  kubectl debug -it deploy/statuslist-status-list-server-deployment -n statuslist-production \
+    --image=alpine -- sh -c 'command -v nc || apk add --no-cache netcat-openbsd; nc -vz <db-host> <db-port>'
   ```
 
 - Fix credentials: rotate `postgres-password` in the secret, or correct the database
@@ -83,6 +85,49 @@ kubectl get secret statuslist-secret -n statuslist-production -o jsonpath='{.dat
 **Prevention:** Keep the pool tuning consistent with the database's `max_connections`
 ("pool.max = floor(pg_max / replicas) - 5", see `src/config.rs` `DatabasePoolConfig`). Verify a
 password rotation by restarting the rollout and watching this specific message disappear.
+
+---
+
+### `Failed to connect to database ... pool timed out while waiting for an open connection` while PostgreSQL is reachable and authenticates
+
+**When you see this:** At startup, the pod crash-loops (`CrashLoopBackOff`) with the *pool*
+timeout message rather than an immediate connect/auth error. Raising `APP_DATABASE__POOL__*`
+timeouts (e.g. `ACQUIRE_TIMEOUT_SECS=60`, `CONNECT_TIMEOUT_SECS=60`) does **not** help: the pod
+keeps exiting after roughly the same delay.
+
+**Observed during local k3d testing (two-node cluster):** this is a **distinct** failure from the
+`kind=connection` / `kind=connection_acquire` entry above. The PostgreSQL pod is `Running` and
+ready, DNS resolves, raw TCP to the ClusterIP is open, and a standalone `psql` client
+(`sslmode=disable`) connects and returns `SELECT 1` — yet the application's connection pool still
+times out. Critically, **PostgreSQL logs (e.g. `kubectl logs <postgres-pod>`) show no connection
+activity at all** and the app init container's `wait-for-postgres` `nc -z` probe succeeds. This
+means the pool connectors are not completing a connection to the database.
+
+**Diagnostics:**
+
+```bash
+kubectl get pods -n <namespace> -o wide
+kubectl logs -l app.kubernetes.io/name=status-list-server -n <namespace> --tail=50
+kubectl logs -n <namespace> <postgres-pod> --tail=100   # look for "connection authorized" / auth errors
+# Confirm the target host actually resolves from the app's node:
+kubectl get svc -n <namespace> <release>-postgres -o jsonpath='{.spec.clusterIP}{"/"} {.spec.ports[0].port}{"\n"}'
+kubectl run pgcheck --image=postgres:16.3 --restart=Never --env="PGPASSWORD=<pw>" --command -- \
+  sh -c 'timeout 15 psql "host=<release>-postgres.<ns>.svc.cluster.local port=5432 user=postgres dbname=<db> sslmode=disable connect_timeout=8" -c "SELECT 1;"'
+kubectl delete pod pgcheck --ignore-not-found
+```
+
+`switching sslmode=disable via APP_DATABASE__QUERY and raising the pool timeouts` are both
+confirmed **not** to resolve it here.
+
+**Fix:** Not yet established — a maintainer must confirm whether the application's connection
+pool is failing to initiate the TCP/driver handshake (e.g. driver TLS or a resolution path that
+differs from `psql`) on multi-node clusters. Treat this as **upstream investigation**, not an
+operator misconfiguration. If you only need a local smoke test, a single-node cluster (one server,
+no agent) avoids the cross-node path.
+
+**Prevention:** Keep PostgreSQL and the application on the same node for local/dev testing, and
+verify the database truly received a connection attempt (postgres logs) before assuming an auth or
+pool-tuning problem.
 
 ---
 
@@ -97,7 +142,7 @@ password rotation by restarting the rollout and watching this specific message d
 - `Database backend 'X' configured, but feature flag for it was not compiled in.`
   (a backend compiled out entirely, no SQL/memory feature present)
 
-_Source: `src/setup.rs:184-187` (memory variant), `src/setup.rs:256-259` (generic variant)_
+_Source: `src/setup.rs:431` (memory variant), `src/setup.rs:472` (generic variant)_
 
 **Root cause:** Image **variant mismatch** — the container image you pulled was built with a
 different feature set than the configuration expects (e.g. a build without `postgres`/`sqlite`/
@@ -125,7 +170,7 @@ the image supports. Default backend by feature set is defined in `src/config.rs`
 **When you see this:** At startup, when validating the database connection string against the
 selected `database.backend`.
 
-_Source: `src/setup.rs:196-200`, schemes in `src/config.rs:26-71`_
+_Source: `src/setup.rs:133`, schemes in `src/config.rs`_
 
 **Root cause:** Backend vs scheme mismatch, e.g. `APP_DATABASE__BACKEND=postgres` with a
 `mysql://` URL, or a URL using `postgresql://` where the validator only accepts the exact
@@ -152,13 +197,13 @@ which avoids assembling URLs in pod metadata entirely).
 **When you see this:** At startup, when both the full `database.url` _and_ any split field
 (`host`, `username`, `password`, `name`) are set.
 
-_Source: `src/config.rs:734-738`_
+_Source: `src/config.rs:749`_
 
 **Root cause:** Mixed configuration — the app refuses to guess which source wins.
 
 **Diagnostics / Fix:** Inspect the effective env (`helm get values`, or the pod env as in the
 first entry). Keep exactly one source of truth: either `APP_DATABASE__URL` alone, or the split
-fields with the chart-managed `APP_DATABASE__PASSWORD` SecretKeyRef. Remove the other.
+fields with the chart-managed `APP_DATABASE__PASSWORD_FILE` mount. Remove the other.
 
 **Prevention:** The Helm chart already rejects `APP_DATABASE__URL` (it would expose assembled
 credentials in pod metadata) — see the Helm section. Use the split fields on Kubernetes.
@@ -171,17 +216,19 @@ credentials in pod metadata) — see the Helm section. Use the split fields on K
 absent/empty. The same pattern applies to `database.host`, `database.username`, `database.name`,
 and to the combined `database.url or split database fields`.
 
-_Source: `src/config.rs:629-642` (`required_config_field` / `required_secret_field`), call sites `src/config.rs:756-761`_
+_Source: `src/config.rs:638-650` (`required_config_field` / `required_secret_field`), call sites `src/config.rs:769-775`, combined-message `src/config.rs:742`_
 
 **Root cause:** A required config value is not present. In the Helm/deployment model this is
-usually a **missing or empty secret mount / env**: the pod has no `APP_DATABASE__PASSWORD`
-SecretKeyRef, or `statuslist-secret` is missing the `postgres-password` key.
+usually a **missing or empty secret mount / env**: the pod has no `APP_DATABASE__PASSWORD_FILE`
+pointing at a mounted password, or `statuslist-secret` is missing the `postgres-password` key.
 
 **Diagnostics:**
 
 ```bash
 kubectl logs -l app.kubernetes.io/name=status-list-server -n statuslist-production --tail=50
-kubectl get secret statuslist-secret -n statuslist-production -o jsonpath='{.data}'
+# List the secret's key names (never their values):
+kubectl get secret statuslist-secret -n statuslist-production \
+  -o go-template='{{range $k,$v := .data}}{{println $k}}{{end}}'
 kubectl describe pod -l app.kubernetes.io/name=status-list-server -n statuslist-production
 ```
 
@@ -190,7 +237,9 @@ mode, confirm the ExternalSecret synced it (see the Kubernetes section). In fall
 confirm `statuslist.fallbackSecret.stringData` contains the key.
 
 **Prevention:** Never deliver the password as a plain env value; the chart rejects
-`APP_DATABASE__PASSWORD` as a literal. Use the secret reference so rotation is a single edit.
+`APP_DATABASE__PASSWORD` as a literal and mounts the secret to a file via
+`APP_DATABASE__PASSWORD_FILE` instead. The file mount is what lets the watcher pick up a
+rotation without a pod restart (see the rotation section below).
 
 ---
 
@@ -202,7 +251,7 @@ confirm `statuslist.fallbackSecret.stringData` contains the key.
 - `Invalid database.query: query parameter keys must be non-empty and contain only ASCII letters, digits, '.', '_' or '-'`
 - `Invalid database.query: credential-like query parameter key '...' is not allowed`
 
-_Source: `src/config.rs:678-702` (host), `src/config.rs:644-676` (query)_
+_Source: `src/config.rs:687-707` (host validator, message at `706`), `src/config.rs:653-680` (query validator, messages at `666` and `679`)_
 
 **Root cause:** `database.host` contained a scheme/port/userinfo/`@`/`?`/`#`/whitespace, or
 trailing/leading `-`/`.`; or `database.query` used a forbidden credential-like key
@@ -231,7 +280,7 @@ Several distinct strings:
 - `failed to read Kubernetes service account token from '...': ...`
 - `Kubernetes service account token in '...' is empty`
 
-_Source: `src/setup.rs:485-505` (config gate), `src/config.rs:854-880` (secret_id resolve), `src/outbound/vault.rs:488-499, 555-576` (login)_
+_Source: `src/setup.rs:715, 725` (config gate), `src/config.rs:894-908` (secret_id resolve), `src/outbound/vault.rs:491, 498` (SA token), `src/outbound/vault.rs:563, 574` (login)_
 
 **Root cause:**
 
@@ -245,10 +294,21 @@ _Source: `src/setup.rs:485-505` (config gate), `src/config.rs:854-880` (secret_i
 
 ```bash
 kubectl logs -l app.kubernetes.io/name=status-list-server -n statuslist-production --tail=100
-kubectl get secret statuslist-secret -n statuslist-production -o jsonpath='{.data}'
-# Is the SA token mounted where the app expects it?
-kubectl exec -it deploy/statuslist-status-list-server-deployment -n statuslist-production -- \
-  sh -c 'ls -l /var/run/secrets/kubernetes.io/serviceaccount/token 2>/dev/null || true'
+# List secret key names (never values):
+kubectl get secret statuslist-secret -n statuslist-production \
+  -o go-template='{{range $k,$v := .data}}{{println $k}}{{end}}'
+# Confirm the service-account token volume is mounted and the expected env is present:
+kubectl describe pod -l app.kubernetes.io/name=status-list-server -n statuslist-production
+kubectl get pod -l app.kubernetes.io/name=status-list-server -n statuslist-production \
+  -o jsonpath='{.items[*].spec.containers[*].env}'
+```
+
+The published image is scratch-based (no shell), so to inspect the mounted SA token file at
+`vault.k8s_token_path` attach a temporary debug container instead of `kubectl exec`:
+
+```bash
+kubectl debug -it deploy/statuslist-status-list-server-deployment -n statuslist-production \
+  --image=busybox -- ls -l /var/run/secrets/kubernetes.io/serviceaccount/ 2>/dev/null || true
 ```
 
 **Fix:** Set the missing config (`vault.role_id` / `vault.secret_id` / `vault.secret_id_path`;
@@ -263,43 +323,72 @@ platform) and keep the K8s role bound to the minimal ServiceAccount.
 
 ## Secret & Token Key Rotation Failures
 
-> **Accuracy note:** The application has **no in-process database-pool reload and no symlink /
-> inotify watcher.** Secret rotation takes effect on **pod restart** (the password arrives via a
-> `secretKeyRef` env and the filesystem key via a secret-backed volume mount), and Vault tokens
-> are renewed/re-authenticated in-process by `TokenManager`. Treat "hot reload" references below
-> accordingly.
+> **Accuracy note:** The application reloads the database password **in-process** when it is
+> delivered as a file. `spawn_database_rotation` (`src/setup.rs:166`) watches the path named by
+> `APP_DATABASE__PASSWORD_FILE` (the chart mounts it by default under
+> `/var/run/status-list-server/database/password`) via `FileWatcher`. On change it builds and
+> validates a **new** pool, atomically swaps it into the repositories, then drains the old pool.
+> On validation failure the old pool is retained. This replaces the historical "restart required"
+> model for images with the watcher and a file-mounted password; a restart is still required only
+> when the running image predates the watcher or the password is delivered as an environment
+> variable rather than a file.
+>
+> Vault tokens are renewed/re-authenticated in-process by `TokenManager` (see the Vault entry
+> below). The filesystem token-signing material is also watched and reloaded in-process when the
+> `-fscert`/store strategy is used.
 
-### Database pool reload failure after password rotation
+### Database pool rotation after password-file change
 
-**When you see this:** After rotating `postgres-password` and applying the change, requests are
-rejected or the pod reports auth failures, because the running pod still holds the old password.
+**When you see this:** You rotate `postgres-password` and update the Secret the pod mounts. The
+running pod picks the change up without a restart once the watcher notices the mounted file
+changed.
 
-_Source (deployment model): `helm/chart/templates/deployment.yaml:177-181` (SecretKeyRef env)_
+**How it works (`spawn_database_rotation`, `src/setup.rs:166-222`):**
 
-**Root cause:** The pool was created with the old credential at startup. There is no hot reload;
-a blind secret edit does not restart the pod.
+- The watcher uses the OS file watcher where it is available and falls back to polling every
+  `watcher.poll_interval_secs` (default `30`). With a Kubernetes Secret volume, the kubelet
+  updates the mounted file when the Secret changes; the watcher sees it.
+- On a change it connects a brand-new pool from the current config and `ping()`s it. If the ping
+  succeeds (`rotation_succeeded`), the new pool is swapped in atomically and the old pool is
+  drained and closed in the background. If validation fails (`rotation_failed`), the **old pool
+  is retained** and the app keeps serving on the previous credential.
+- Log markers to watch for: `rotation_started`, `rotation_succeeded`, `rotation_failed` (the
+  latter two also drive `rotation_failed`/`rotation_succeeded` metrics).
 
 **Diagnostics:**
 
 ```bash
 kubectl get events -n statuslist-production --sort-by=.lastTimestamp | tail -40
 kubectl logs -l app.kubernetes.io/name=status-list-server -n statuslist-production --tail=100
-kubectl get secret statuslist-secret -n statuslist-production -o jsonpath='{.data.postgres-password}' | base64 -d | wc -c
+# Confirm the password is delivered as a file the watcher can see:
+kubectl get pod -l app.kubernetes.io/name=status-list-server -n statuslist-production \
+  -o jsonpath='{.items[*].spec.containers[*].env}'
+# Confirm the Secret exists and the key is present (names only):
+kubectl get secret statuslist-secret -n statuslist-production \
+  -o go-template='{{range $k,$v := .data}}{{println $k}}{{end}}'
 ```
 
-**Fix:** Restart the rollout so new pods pick up the new mount/secret:
+**If rotation did not happen / the app still uses the old password:**
 
-```bash
-kubectl rollout restart deployment/statuslist-status-list-server-deployment -n statuslist-production
-kubectl rollout status deployment/statuslist-status-list-server-deployment -n statuslist-production
-```
+- Rotation only runs when `database.password_file` is set (the chart sets it via
+  `APP_DATABASE__PASSWORD_FILE`). If the password is delivered as a literal environment
+  variable or the image predates the watcher, there is nothing to watch and a restart is still
+  required:
 
-When rotation is automated (ESO), the app Secret is rewritten by the controller; confirm the
-`ExternalSecret` synced before restarting.
+  ```bash
+  kubectl rollout restart deployment/statuslist-status-list-server-deployment -n statuslist-production
+  kubectl rollout status deployment/statuslist-status-list-server-deployment -n statuslist-production
+  ```
 
-**Prevention:** Rotate the secret and restart in the same change. Use `helm upgrade` (which
-restarts on spec change) or an explicit `kubectl rollout restart`; do not rely on the secret edit
-alone.
+- Check the pod actually mounts the Secret (a stale mount or a Secret that never changed means
+  the file content is unchanged, so the watcher reports no change).
+- When rotation is automated (ESO), the app Secret is rewritten by the controller; the watcher
+  only fires after the kubelet propagates the new file into the pod volume.
+
+**Prevention:** Deliver the password as a file (`APP_DATABASE__PASSWORD_FILE`, the chart
+default), keep the watcher polling interval aligned with your rotation cadence, and watch for
+`rotation_failed`; the old pool is retained on validation failure, so a failed rotation is
+non-disruptive but leaves the app on the previous credential until the file is valid again.
 
 ---
 
@@ -315,7 +404,7 @@ certificate material. Strings include:
 - Store validation: both-paths-and-keys, missing file, or missing key errors from
   `store_certificate_strategy`
 
-_Source: `src/utils/cert_manager/strategy.rs:92-222`, `src/setup.rs:631-650`_
+_Source: `src/utils/cert_manager/strategy.rs:92-222`, `src/setup.rs:831` (`store_certificate_strategy`), `src/setup.rs:487` (call site)_
 
 **Root cause:** The cert and signing key do not match (a rotated key paired with the old cert), a
 file/key is missing or unreadable, or the stored value is neither PEM nor base64 DER (e.g. a
@@ -325,13 +414,16 @@ secret written as plain text or with a stray newline).
 
 ```bash
 kubectl logs -l app.kubernetes.io/name=status-list-server -n statuslist-production --tail=50
-# If ACME/store storage backend, print the keys and confirm they parse:
-kubectl get secret statuslist-secret -n statuslist-production -o jsonpath='{.data}'  # names only
+# List the secret's key names (never values):
+kubectl get secret statuslist-secret -n statuslist-production \
+  -o go-template='{{range $k,$v := .data}}{{println $k}}{{end}}'
 ```
 
 **Fix:** Replace the material with a **matching** cert + PKCS#8 key pair in the expected encoding
 (PEM containing `-----BEGIN ...`, or standard/base64url DER). Confirm both keys exist and are
-readable at the configured path/store-key. Re-run the store provisioning:
+readable at the configured path/store-key. When the signing material is file-mounted under the
+`store` strategy, `spawn_acme_store_rotation` (`src/setup.rs:246`) reloads it in-process on file
+change; a rollout is only needed to re-read a changed value when it is delivered another way:
 
 ```bash
 kubectl rollout restart deployment/statuslist-status-list-server-deployment -n statuslist-production
@@ -355,7 +447,7 @@ strings include:
 - `vault access denied for path '<path>'` (login OK, but the token lacks the KV policy)
 - `vault load failed for path '<path>': HTTP <status>` / `vault store failed ...`
 
-_Source: `src/outbound/vault.rs:586-798` (TokenManager), `vault.rs:843-920` (KV ops)_
+_Source: `src/outbound/vault.rs:619-780` (TokenManager), `src/outbound/vault.rs:843-920` (KV ops)_
 
 **Root cause:** The Vault token or the underlying role no longer has access (403 on read/write),
 the AppRole `secret_id` was revoked/rotated, the Service Account JWT was rotated and Vault no
@@ -430,7 +522,9 @@ kubectl get secretstore statuslist-secret-store -n statuslist-production
 kubectl describe secretstore statuslist-secret-store -n statuslist-production
 kubectl get externalsecret statuslist-external-secret -n statuslist-production \
   -o jsonpath='{.status.conditions[?(@.type=="Ready")]}'
-kubectl get secret statuslist-secret -n statuslist-production -o jsonpath='{.data}'
+# List app-secret key names (never values):
+kubectl get secret statuslist-secret -n statuslist-production \
+  -o go-template='{{range $k,$v := .data}}{{println $k}}{{end}}'
 ```
 
 Check the `Ready`/`Synced` conditions and the `Message` for the specific provider error. Confirm
@@ -457,6 +551,52 @@ present.
 
 ---
 
+### Pod `Running` but never binds the HTTP port — `connection refused` on the liveness probe (ACME provisioning blocks startup)
+
+**When you see this:** The pod reaches `Running` but stays `NotReady` and keeps restarting; the
+liveness probe fails with `Get "http://<pod-ip>:<port>/health/live": connect: connection refused`,
+and `curl` against the service/NodePort returns `000`/empty reply. The application log stops
+immediately after `telemetry initialized` with no further startup lines — the HTTP server never
+binds its `APP_SERVER__PORT` (e.g. `8000`).
+
+**Root cause:** The container image is built with the `acme` Cargo feature, and under that feature
+the **default `server.cert.provisioning_strategy` is `acme`** (`src/config.rs:1044-1045`). With
+strategy `acme`, the application attempts ACME DNS-01 certificate provisioning at startup, which
+requires a DNS provider and credentials (see `dns-providers.md`). `values-local.yaml` and
+`LOCAL_DEPLOYMENT.md` do not override the cert values, so they inherit the production defaults
+from `values.yaml` — `APP_SERVER__CERT__DNS__PROVIDER=route53`,
+`APP_SERVER__CERT__EMAIL=info@adorsys.com`, `APP_SERVER__DOMAIN=statuslist.eudi-adorsys.com`, and
+the Let's Encrypt directory URL — and block before binding the HTTP server.
+
+**Diagnostics:**
+
+```bash
+kubectl get pod -n <namespace> -o wide
+kubectl describe pod -n <namespace> -l app.kubernetes.io/name=status-list-server | grep -iA3 "liveness probe failed\|connection refused"
+kubectl logs -n <namespace> -l app.kubernetes.io/name=status-list-server --tail=20
+# Confirm the acme strategy is in effect:
+kubectl get deploy -n <namespace> <release>-status-list-server-deployment \
+  -o jsonpath='{.spec.template.spec.containers[0].env}' | grep -i provisioning
+```
+
+**Fix (two options):**
+
+- Point the DNS provider at a local/dev ACME server, e.g. set `APP_SERVER__CERT__DNS__PROVIDER`
+  to `pebble` and `APP_SERVER__CERT__DNS_CHALLENGE_SERVER_URL` at your Pebble instance (dev only),
+  **or**
+- Switch the provisioning strategy to `store` and provide matching certificate + signing-key
+  material, e.g. `--set-string statuslist.env.APP_SERVER__CERT__PROVISIONING_STRATEGY=store` plus
+  `statuslist.secretMounts` provisioning `APP_SERVER__CERT__STORE__CERTIFICATE_PATH` /
+  `APP_SERVER__CERT__STORE__SIGNING_KEY_PATH` from a Secret (see `values.yaml` `secretMounts`
+  example and the `-fscert` variant in the runbook).
+
+**Prevention:** For any local/dev run, decide up front whether you want certificate provisioning
+at all. Disable or retarget ACME *before* installing; the runbook's "Expose the service (Ingress)"
+note already advises this, but neither `values-local.yaml` nor `LOCAL_DEPLOYMENT.md` actually
+turns it off — a gap that should be fixed in the local values.
+
+---
+
 ### Readiness probe failures (`/health/ready`)
 
 **When you see this:** Pods are `Running` but `NotReady`; the Deployment's readiness probe on
@@ -464,7 +604,7 @@ present.
 Liveness is deliberately decoupled from downstream dependencies; readiness flips only when a
 critical dependency check fails or times out (5s), with results cached 1s.
 
-_Source: `src/server/health.rs:142-157, 75-121`, checks `health.rs:181-282`_
+_Source: `src/server/health.rs:149-155` (ready, `readiness check failed`), checks `src/server/health.rs:183-269`_
 
 **Root cause:** One of the registered readiness checks fails. Checks are named `database`
 (`DbCheck`, pings the pool — reason `database unreachable: ...`) and `cert_store`
@@ -524,13 +664,30 @@ kubectl get pods -l app.kubernetes.io/name=postgres -n statuslist-production
 kubectl get pods -l app.kubernetes.io/name=opentelemetry-collector -n statuslist-production
 ```
 
-**Fix:** Add the needed destinations under `statuslist.networkPolicy.egressInternal` (for the DB/
-Vault), or confirm the target pods carry the selector labels the policy expects (`postgres`,
-`opentelemetry-collector`). For Vault/cluster-external endpoints, add an `ipBlock`/`podSelector`
-egress rule.
+**Fix:** Understand the chart's current limitation before changing anything:
+`statuslist.networkPolicy.egressInternal` only appends destination `to` selectors **beneath the
+existing database-port rule** (`network-policy.yaml:33-39`) — it cannot open a new port. There is
+no chart value today for arbitrary extra egress rules. So:
 
-**Prevention:** Enumerate every runtime dependency (DB, Vault/secret backend, OTLP) in the
-NetworkPolicy from the start; add destinations at the same time you add the dependency.
+- A **database** whose pods/labels differ from `app.kubernetes.io/name=postgres` can be reached by
+  adding its selector under `statuslist.networkPolicy.egressInternal` (the port stays the
+  database port).
+- A **Vault/OpenBao or other backend on a non-443 port** (e.g. `8200`) **cannot** be unblocked
+  with `egressInternal`. Realistic options:
+  - expose Vault so the app can reach it on an already-allowed port (e.g. `443` — the `443/53`
+    rule has no destination selector, so it is open to all destinations); or
+  - set `statuslist.networkPolicy.enabled=false` and provide your own `NetworkPolicy` that opens
+    the ports your deployment actually needs; or
+  - extend the chart to render configurable extra egress rules (a chart change, not a values
+    change).
+
+Confirm target pods carry the selector labels the policy expects (`postgres`,
+`opentelemetry-collector`) and that `$otel.enabled` matches the OTLP rule.
+
+**Prevention:** Enumerate every runtime dependency (DB, Vault/secret backend, OTLP) up front and
+make sure each is reachable on an allowed port under the default policy. If you need a port the
+chart does not open (Vault on a non-443 port), plan on providing your own `NetworkPolicy`
+(`statuslist.networkPolicy.enabled=false`) rather than relying on `egressInternal`.
 
 ---
 
@@ -581,6 +738,20 @@ a cluster that later shows `ImagePullBackOff`/`CrashLoopBackOff`.
 
 **When you see this:** Pods report `ErrImagePull` / `ImagePullBackOff` after a release.
 
+**Observed with the default chart install:** the chart's `appVersion` is `1.0.1-aws`
+(`Chart.yaml`), so with `statuslist.image.tag` empty the Deployment resolves the image
+`ghcr.io/adorsys/status-list-server:1.0.1-aws`. That specific tag is **not published**: the GHCR
+package currently carries only unsuffixed tags (`latest`, `main`, `1.0.0`, `1.0.1`, `1.0`, `sha-…`),
+and **no `*-aws`/`*-gcp`/`*-fscert` variant tags exist**. The result is exactly this symptom:
+
+```text
+Failed to pull image "ghcr.io/adorsys/status-list-server:1.0.1-aws":
+rpc error: code = NotFound ... ghcr.io/adorsys/status-list-server:1.0.1-aws: not found
+```
+
+To proceed, pin an image tag that actually exists, e.g.
+`--set statuslist.image.tag=latest` (or `main`, `1.0.1`). See the runbook's "Pinning the image".
+
 **Root cause:** The image reference does not exist or is not pullable — wrong tag, a typo in the
 repository/tag, `pullPolicy` behavior, or variant tags differing across builds. In the chart,
 `statuslist.image.digest` (when set) takes precedence over `statuslist.image.tag`; an empty tag
@@ -611,7 +782,7 @@ helm upgrade statuslist helm/chart -n statuslist-production \
 ```
 
 **Prevention:** Pin `statuslist.image.digest` to the exact scanned artifact (the release workflow
-does this) and keep the tag human-readable in `helm history`. Use `--atomic --wait` so a pull
+does this) and keep the tag human-readable in `helm history`. Use `--rollback-on-failure --wait` so a pull
 failure rolls back instead of wedging the release.
 
 ---
@@ -643,3 +814,8 @@ For quick grep, the application emits these verbatim (with the primary source fi
 Platform-only (no matching application string): `ImagePullBackOff`, `ErrImagePull`,
 `CrashLoopBackOff`, `SecretSyncedError` / `Synced=False`, and all Helm `fail` guards listed in
 the Helm section.
+
+Local-k3d `ErrImagePull` with the default chart install is caused by the unpublished
+`appVersion` variant tag `1.0.1-aws` (pin a real tag such as `latest`); a pod stuck `Running` but
+never binding its HTTP port with `connection refused` on `/health/live` is the ACME
+provisioning-strategy block (see the "Pod Running but never binds the HTTP port" entry above).
