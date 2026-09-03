@@ -87,6 +87,13 @@ pub struct Config {
     pub rate_limit: RateLimitConfig,
     pub limits: LimitsConfig,
     pub telemetry: TelemetryConfig,
+    pub watcher: WatcherConfig,
+}
+
+/// Background file-watcher configuration for rotated mounted secrets.
+#[derive(Debug, Clone, Deserialize)]
+pub struct WatcherConfig {
+    pub poll_interval_secs: u64,
 }
 
 /// Rate-limit configuration with strict (writes) and permissive (reads) tiers.
@@ -176,7 +183,6 @@ pub struct ServerConfig {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct CertConfig {
-    pub provisioning_strategy: String,
     pub email: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub organization: Option<String>,
@@ -196,14 +202,18 @@ pub struct CertConfig {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct CertStoreConfig {
+    /// PEM certificate chain file path.
     #[serde(default)]
     pub certificate_path: Option<String>,
+    /// PKCS#8 PEM private key file path.
     #[serde(default)]
     pub signing_key_path: Option<String>,
+    /// Inline PEM certificate chain.
     #[serde(default)]
-    pub certificate_key: Option<String>,
+    pub certificate: Option<String>,
+    /// Inline PKCS#8 PEM private key.
     #[serde(default)]
-    pub signing_key_key: Option<String>,
+    pub signing_key: Option<String>,
 }
 
 /// DNS provider used to solve ACME DNS-01 challenges
@@ -578,6 +588,8 @@ pub struct DatabaseConfig {
     #[serde(default)]
     pub password: Option<SecretString>,
     #[serde(default)]
+    pub password_file: Option<PathBuf>,
+    #[serde(default)]
     pub name: Option<String>,
     /// Optional URL query string for driver/TLS settings, for example
     /// `sslmode=verify-full&sslrootcert=/certs/ca.crt`.
@@ -715,6 +727,10 @@ impl DatabaseConfig {
                 .as_ref()
                 .is_some_and(|value| !value.expose_secret().is_empty())
             || self
+                .password_file
+                .as_ref()
+                .is_some_and(|value| !value.as_os_str().is_empty())
+            || self
                 .name
                 .as_deref()
                 .is_some_and(|value| !value.trim().is_empty())
@@ -758,6 +774,7 @@ impl DatabaseConfig {
         let url_host = format_database_url_host(host);
         let username = required_config_field(self.username.as_deref(), "database.username")?;
         let password = required_secret_field(self.password.as_ref(), "database.password")?;
+        let password = password.trim();
         let name = required_config_field(self.name.as_deref(), "database.name")?;
         let port = self.port.unwrap_or(default_port);
         let query = trim_non_empty(self.query.as_deref())
@@ -774,6 +791,21 @@ impl DatabaseConfig {
             encode_url_part(password),
             encode_url_part(name)
         )))
+    }
+
+    pub async fn load_resolved_url(&self) -> Result<SecretString, ConfigError> {
+        let Some(path) = &self.password_file else {
+            return self.resolved_url();
+        };
+        let password = tokio::fs::read_to_string(path).await.map_err(|err| {
+            ConfigError::Message(format!(
+                "Failed to read database.password_file '{}': {err}",
+                path.display()
+            ))
+        })?;
+        let mut config = self.clone();
+        config.password = Some(SecretString::from(password.trim().to_string()));
+        config.resolved_url()
     }
 
     pub fn redacted_target(&self) -> String {
@@ -1011,13 +1043,6 @@ fn base_builder() -> Result<ConfigBuilder<DefaultState>, ConfigError> {
     ))]
     let default_db_backend = "memory";
 
-    #[cfg(feature = "acme")]
-    let (default_provisioning_strategy, default_cert_path, default_key_path) =
-        ("acme", Option::<String>::None, Option::<String>::None);
-    #[cfg(not(feature = "acme"))]
-    let (default_provisioning_strategy, default_cert_path, default_key_path) =
-        ("store", Option::<String>::None, Option::<String>::None);
-
     let telemetry_environment = match std::env::var("APP_ENV")
         .unwrap_or_default()
         .trim()
@@ -1035,6 +1060,7 @@ fn base_builder() -> Result<ConfigBuilder<DefaultState>, ConfigError> {
         .set_default("server.enable_metrics", false)?
         .set_default("server.aggregation_uri", Option::<String>::None)?
         .set_default("database.url", Option::<String>::None)?
+        .set_default("database.password_file", Option::<String>::None)?
         .set_default("database.backend", default_db_backend)?
         .set_default("database.pool.max_connections", 5u32)?
         .set_default("database.pool.min_connections", 1u32)?
@@ -1042,10 +1068,6 @@ fn base_builder() -> Result<ConfigBuilder<DefaultState>, ConfigError> {
         .set_default("database.pool.connect_timeout_secs", 10u64)?
         .set_default("database.pool.idle_timeout_secs", 600u64)?
         .set_default("database.pool.max_lifetime_secs", 1800u64)?
-        .set_default(
-            "server.cert.provisioning_strategy",
-            default_provisioning_strategy,
-        )?
         .set_default("server.cert.email", "admin@example.com")?
         .set_default("server.cert.eku", vec![1, 3, 6, 1, 5, 5, 7, 3, 30])?
         .set_default("server.cert.organization", "adorsys GmbH & CO KG")?
@@ -1055,10 +1077,10 @@ fn base_builder() -> Result<ConfigBuilder<DefaultState>, ConfigError> {
         )?
         .set_default("server.cert.signing_key_cache_ttl", 0)?
         .set_default("server.cert.renewal_cron_schedule", "0 0 0 * * *")?
-        .set_default("server.cert.store.certificate_path", default_cert_path)?
-        .set_default("server.cert.store.signing_key_path", default_key_path)?
-        .set_default("server.cert.store.certificate_key", Option::<String>::None)?
-        .set_default("server.cert.store.signing_key_key", Option::<String>::None)?
+        .set_default("server.cert.store.certificate_path", Option::<String>::None)?
+        .set_default("server.cert.store.signing_key_path", Option::<String>::None)?
+        .set_default("server.cert.store.certificate", Option::<String>::None)?
+        .set_default("server.cert.store.signing_key", Option::<String>::None)?
         .set_default("aws.region", "us-east-1")?
         .set_default("vault.auth_method", "approle")?
         .set_default("vault.addr", "http://localhost:8200")?
@@ -1097,7 +1119,8 @@ fn base_builder() -> Result<ConfigBuilder<DefaultState>, ConfigError> {
         .set_default("telemetry.environment", telemetry_environment)?
         .set_default("telemetry.otlp_endpoint", "http://localhost:4317")?
         .set_default("telemetry.sampler_ratio", 1.0)?
-        .set_default("telemetry.enabled", true)?;
+        .set_default("telemetry.enabled", true)?
+        .set_default("watcher.poll_interval_secs", 30u64)?;
     Ok(builder)
 }
 
@@ -1105,6 +1128,33 @@ fn base_builder() -> Result<ConfigBuilder<DefaultState>, ConfigError> {
 mod tests {
     use super::*;
     use secrecy::ExposeSecret;
+    use std::path::{Path, PathBuf};
+
+    struct TempDir {
+        path: PathBuf,
+    }
+
+    impl TempDir {
+        fn new() -> Self {
+            let path = std::env::temp_dir().join(format!(
+                "status-list-config-test-{}-{}",
+                std::process::id(),
+                time::OffsetDateTime::now_utc().unix_timestamp_nanos()
+            ));
+            std::fs::create_dir_all(&path).expect("create temp dir");
+            Self { path }
+        }
+
+        fn path(&self) -> &Path {
+            &self.path
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.path);
+        }
+    }
 
     #[test]
     fn test_config_loading() {
@@ -1148,19 +1198,11 @@ mod tests {
             "database.url should not have a credential-bearing built-in default"
         );
         assert_eq!(config.database.backend, expected_db_backend);
-        #[cfg(feature = "acme")]
-        let (expected_strategy, expected_cert_path, expected_key_path) =
-            ("acme", Option::<String>::None, Option::<String>::None);
-        #[cfg(not(feature = "acme"))]
-        let (expected_strategy, expected_cert_path, expected_key_path) =
-            ("store", Option::<String>::None, Option::<String>::None);
-        assert_eq!(config.server.cert.provisioning_strategy, expected_strategy);
+        assert_eq!(config.server.cert.store.certificate_path, None);
+        assert_eq!(config.server.cert.store.signing_key_path, None);
+        assert_eq!(config.server.cert.store.certificate, None);
+        assert_eq!(config.server.cert.store.signing_key, None);
         assert_eq!(config.server.cert.signing_key_cache_ttl, 0);
-        assert_eq!(
-            config.server.cert.store.certificate_path,
-            expected_cert_path
-        );
-        assert_eq!(config.server.cert.store.signing_key_path, expected_key_path);
 
         assert_eq!(config.rate_limit.strict_burst_size, 10);
         assert_eq!(config.rate_limit.strict_period_secs, 60);
@@ -1214,7 +1256,6 @@ mod tests {
             ),
             ("server.cert.organization", "Test Org"),
             ("server.cert.eku", "1,3,6,1,5,5,7,3,30"),
-            ("server.cert.provisioning_strategy", "store"),
             ("server.cert.signing_key_cache_ttl", "0"),
             ("server.cert.store.certificate_path", "/certs/tls.crt"),
             ("server.cert.store.signing_key_path", "/certs/tls.key"),
@@ -1272,7 +1313,6 @@ mod tests {
             overridden.server.cert.dns_challenge_server_url.as_deref(),
             Some("http://pebble:8055")
         );
-        assert_eq!(overridden.server.cert.provisioning_strategy, "store");
         assert_eq!(overridden.server.cert.signing_key_cache_ttl, 0);
         assert_eq!(
             overridden.server.cert.store.certificate_path.as_deref(),
@@ -1316,13 +1356,39 @@ mod tests {
                 .resolved_url()
                 .expect("split database config should resolve")
                 .expose_secret(),
-            "postgres://user%40example.com:%20secret%20value%20@postgres.statuslist.svc.cluster.local:5432/status%2Flist?sslmode=verify-full&sslrootcert=/var/run/postgres/ca.crt"
+            "postgres://user%40example.com:secret%20value@postgres.statuslist.svc.cluster.local:5432/status%2Flist?sslmode=verify-full&sslrootcert=/var/run/postgres/ca.crt"
         );
         assert_eq!(
             split_db_cfg.database.redacted_target(),
             "backend=postgres, host=postgres.statuslist.svc.cluster.local, port=5432, database=status/list"
         );
         assert!(!split_db_cfg.database.redacted_target().contains("secret"));
+
+        let password_dir = TempDir::new();
+        let password_path = password_dir.path().join("postgres-password");
+        std::fs::write(&password_path, "file secret\n").expect("write password file");
+        let password_file_cfg = Config::load_from_overrides(&[
+            ("database.backend", "postgres"),
+            ("database.host", "postgres.statuslist.svc.cluster.local"),
+            ("database.port", "5432"),
+            ("database.username", "user"),
+            (
+                "database.password_file",
+                password_path
+                    .to_str()
+                    .expect("password path should be unicode for test"),
+            ),
+            ("database.name", "status-list"),
+        ])
+        .expect("Failed to load password-file database config");
+        let resolved = tokio::runtime::Runtime::new()
+            .expect("runtime")
+            .block_on(password_file_cfg.database.load_resolved_url())
+            .expect("password-file database config should resolve");
+        assert_eq!(
+            resolved.expose_secret(),
+            "postgres://user:file%20secret@postgres.statuslist.svc.cluster.local:5432/status-list"
+        );
 
         let ipv6_db_cfg = Config::load_from_overrides(&[
             ("database.backend", "postgres"),
@@ -1913,16 +1979,16 @@ mod tests {
                 "Default config database URL references test_data: {db_url}"
             );
         }
-        if let Some(key) = default_config.server.cert.store.certificate_key.as_deref() {
+        if let Some(cert) = default_config.server.cert.store.certificate.as_deref() {
             assert!(
-                !key.contains("test_data"),
-                "Default config certificate_key references test_data: {key}"
+                !cert.contains("test_data"),
+                "Default config certificate references test_data: {cert}"
             );
         }
-        if let Some(key) = default_config.server.cert.store.signing_key_key.as_deref() {
+        if let Some(key) = default_config.server.cert.store.signing_key.as_deref() {
             assert!(
                 !key.contains("test_data"),
-                "Default config signing_key_key references test_data: {key}"
+                "Default config signing_key references test_data: {key}"
             );
         }
 

@@ -71,12 +71,12 @@ The default secret/credential provisioning path is **External Secrets Operator (
 ```yaml
 statuslist:
   aws:
-    mountCredentials: true    # default: mount the ESO-provisioned aws-credentials-secret under /home/nobody/.aws
-    region: ""                # plain, non-secret; renders APP_AWS__REGION
+    mountCredentials: true # default: mount the ESO-provisioned aws-credentials-secret under /home/nobody/.aws
+    region: "" # plain, non-secret; renders APP_AWS__REGION
     credentialsSecret:
-      remoteKey: "statuslist-aws-credentials"   # SecretStore key holding both AWS shared files
-      credentialsProperty: "CREDENTIALS"        # property in remoteKey with the credentials file
-      configProperty: "CONFIG"                  # property in remoteKey with the config file
+      remoteKey: "statuslist-aws-credentials" # SecretStore key holding both AWS shared files
+      credentialsProperty: "CREDENTIALS" # property in remoteKey with the credentials file
+      configProperty: "CONFIG" # property in remoteKey with the config file
 ```
 
 `statuslist.aws.region` is a plain (non-secret) value; `APP_AWS__REGION` is rendered whenever an effective region is set, independent of `secretStore.provider` and `mountCredentials`.
@@ -86,6 +86,7 @@ statuslist:
 **Upgrade compatibility:** The effective `APP_AWS__REGION` resolves as `statuslist.aws.region`, falling back to the legacy `secretStore.aws.region` and then `eu-central-1`. Installations that previously set only `secretStore.aws.region` keep that region for the application across upgrade.
 
 When `statuslist.aws.mountCredentials=true` (the default) **and** `externalSecret.enabled=true` (the default ESO path), the chart itself renders a second `ExternalSecret` that provisions `aws-credentials-secret` — the exact Secret the Deployment's credential volume references. It synchronizes two keys into that Secret:
+
 - `credentials` ← `remoteKey`/`credentialsProperty` (the AWS shared credentials file, INI format, e.g. `[default]\naws_access_key_id=...\naws_secret_access_key=...`)
 - `config` ← `remoteKey`/`configProperty` (the AWS shared config file)
 
@@ -144,8 +145,8 @@ secretStore:
   enabled: true
   provider: aws
   aws:
-    service: SecretsManager   # SecretsManager | ParameterStore
-    region: "eu-central-1"    # applies to the AWS SecretStore; APP_AWS__REGION falls back to statuslist.aws.region
+    service: SecretsManager # SecretsManager | ParameterStore
+    region: "eu-central-1" # applies to the AWS SecretStore; APP_AWS__REGION falls back to statuslist.aws.region
   vault:
     server: ""
     path: "secret"
@@ -156,14 +157,14 @@ secretStore:
   azure:
     tenantId: ""
     vaultUrl: ""
-    authType: ""                  # ServicePrincipal | ManagedIdentity | WorkloadIdentity
-    environmentType: ""           # optional: PublicCloud (default) | USGovernmentCloud | ChinaCloud | GermanCloud
-    identityId: ""                # ManagedIdentity: select one of multiple managed identities
+    authType: "" # ServicePrincipal | ManagedIdentity | WorkloadIdentity
+    environmentType: "" # optional: PublicCloud (default) | USGovernmentCloud | ChinaCloud | GermanCloud
+    identityId: "" # ManagedIdentity: select one of multiple managed identities
     serviceAccountRef:
-      name: ""                    # WorkloadIdentity: ESO's own least-privilege identity
+      name: "" # WorkloadIdentity: ESO's own least-privilege identity
       namespace: ""
-    authSecretRef: {}             # ServicePrincipal: clientId/clientSecret/tenantId secret selectors
-  raw: {}                         # provider body passthrough (rendered directly under spec.provider)
+    authSecretRef: {} # ServicePrincipal: clientId/clientSecret/tenantId secret selectors
+  raw: {} # provider body passthrough (rendered directly under spec.provider)
 ```
 
 - **aws** (`SecretsManager` or `ParameterStore`): `service` and `region`. `region` falls back to the effective app region when empty.
@@ -191,7 +192,7 @@ statuslist:
         APP_DATABASE__PASSWORD_FILE: password
 ```
 
-`fileEnv` values are relative to `mountPath`, and they work with or without `items`. When `APP_DATABASE__PASSWORD_FILE` is set through either `statuslist.env` or `secretMounts[].fileEnv`, the chart does not inject `APP_DATABASE__PASSWORD`; file-based configuration has precedence and there is no stale startup password environment variable for the application to keep using.
+`fileEnv` values are relative to `mountPath`, and they work with or without `items`. By default, the chart mounts the application Secret's `postgres-password` key at `/var/run/status-list-server/database/password` and exposes that path through `APP_DATABASE__PASSWORD_FILE`. You can override `statuslist.secretMounts` to point at another Secret or mount path.
 
 This chart support is preparatory for application images that implement the file-watcher and reload behavior from issue #456. Current images that only read `APP_DATABASE__PASSWORD` at startup still need a rollout after secret changes. The `checksum/secret` annotation only reacts to Helm-rendered ExternalSecret template or value changes; it does not change when External Secrets Operator later syncs new data from Vault, AWS, GCP, or Azure into a Kubernetes Secret.
 
@@ -255,13 +256,13 @@ For production, the deploy workflow applies [`values-production.yaml`](./chart/v
 
 The chart intentionally avoids rendering fully assembled SQL database URLs in the Deployment. The application assembles the connection string inside the process from split configuration fields:
 
-- Database: `APP_DATABASE__HOST`, `APP_DATABASE__PORT`, `APP_DATABASE__USERNAME`, `APP_DATABASE__PASSWORD`, `APP_DATABASE__NAME`, and optional `APP_DATABASE__QUERY`
+- Database: `APP_DATABASE__HOST`, `APP_DATABASE__PORT`, `APP_DATABASE__USERNAME`, `APP_DATABASE__PASSWORD_FILE`, `APP_DATABASE__NAME`, and optional `APP_DATABASE__QUERY`
 
 Use `APP_DATABASE__QUERY` for non-secret driver parameters such as `sslmode=verify-full&sslrootcert=/var/run/postgres/ca.crt`. Do not put credentials in query parameters.
 
-Password fields are rendered with `valueFrom.secretKeyRef`, so `kubectl describe pod` shows the referenced Secret name/key rather than a connection string containing credentials. Operators should still restrict RBAC for pod inspection, Secret reads, exec access, ephemeral containers, and workload log access to trusted roles only, because environment variables are visible inside the running container and Secret references identify where credentials live.
+Password values are mounted as Secret volume files, so `kubectl describe pod` shows the referenced Secret name/key and file path rather than a connection string containing credentials. Operators should still restrict RBAC for pod inspection, Secret reads, exec access, ephemeral containers, and workload log access to trusted roles only, because Secret references identify where credentials live.
 
-For external databases such as RDS, set `APP_DATABASE__HOST`, `APP_DATABASE__PORT`, `APP_DATABASE__BACKEND`, `APP_DATABASE__USERNAME`, `APP_DATABASE__NAME`, and optional `APP_DATABASE__QUERY` through `statuslist.env`. Do not set `APP_DATABASE__PASSWORD` there. Unless `APP_DATABASE__PASSWORD_FILE` is configured, the chart wires `APP_DATABASE__PASSWORD` from a Kubernetes Secret key named `postgres-password`: either the `externalSecret.spec.target.name` Secret when `externalSecret.enabled=true`, or the `statuslist-secret` Secret otherwise. This key name is a hard chart contract even for MySQL or MariaDB backends, so create or sync that exact Secret/key with the external database password before deploying.
+For external databases such as RDS, set `APP_DATABASE__HOST`, `APP_DATABASE__PORT`, `APP_DATABASE__BACKEND`, `APP_DATABASE__USERNAME`, `APP_DATABASE__NAME`, and optional `APP_DATABASE__QUERY` through `statuslist.env`. Do not set `APP_DATABASE__PASSWORD` there. The chart default reads `APP_DATABASE__PASSWORD_FILE` from the `statuslist-secret` Secret key named `postgres-password`; override `statuslist.secretMounts` when the database password lives in another Secret or key.
 
 `APP_DATABASE__PORT` must be set in `statuslist.env`; the chart does not infer or default it from the PostgreSQL subchart. This keeps the database port an explicit runtime input and avoids silently connecting to the wrong port when operators customize database topology.
 

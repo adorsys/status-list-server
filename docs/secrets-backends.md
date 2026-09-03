@@ -7,12 +7,12 @@ For startup validation and fail-fast behavior specific to secrets backends, see 
 The supported backends include:
 
 - **HashiCorp Vault / OpenBao** (KV v2 engine, feature flag: `vault`)
-- **GCP Secret Manager** (feature flag: `gcp-secrets`)
-- **Azure Key Vault** (feature flag: `azure-kv`)
-- **AWS Secrets Manager** (feature flag: `aws-secrets`)
+- **GCP Secret Manager** (feature flag: `gcp`)
+- **Azure Key Vault** (feature flag: `azure`)
+- **AWS Secrets Manager** (feature flag: `aws`)
 - **In-Memory** (for development and testing)
 
-Backend selection is controlled by enabled Cargo features. Builds with `vault` use Vault/OpenBao. Builds with `aws-secrets` and without `vault` use AWS Secrets Manager. Builds without either backend feature use in-memory storage for local development and tests.
+Backend selection is controlled by enabled Cargo features. Builds with `vault` use Vault/OpenBao. Builds with `aws` and without `vault` use AWS Secrets Manager. Builds without either backend feature use in-memory storage for local development and tests.
 
 ## HashiCorp Vault & OpenBao (KV v2)
 
@@ -228,7 +228,7 @@ To test the Kubernetes authentication workflow against a local Vault dev server:
    APP_VAULT__ADDR=http://127.0.0.1:8200 \
    APP_VAULT__K8S_ROLE=status-list-role \
    APP_VAULT__K8S_TOKEN_PATH=/tmp/k8s-token.jwt \
-   cargo run --features "vault,postgres,acme"
+   cargo run --features "vault,postgres"
    ```
 
 ### Automated Token Lifecycle & Resilience
@@ -251,7 +251,7 @@ Vault authentication and token operations emit OpenTelemetry counters for succes
 
 ## GCP Secret Manager
 
-When compiled with the `gcp-secrets` feature flag, secrets are stored in GCP Secret Manager.
+When compiled with the `gcp` feature flag, secrets are stored in GCP Secret Manager.
 
 ### Configuration Variables
 
@@ -304,7 +304,7 @@ GOOGLE_APPLICATION_CREDENTIALS=/path/to/credentials.json
 
 ## Azure Key Vault
 
-When compiled with the `azure-kv` feature flag, secrets are stored in Azure Key Vault.
+When compiled with the `azure` feature flag, secrets are stored in Azure Key Vault.
 
 ### Configuration Variables
 
@@ -351,7 +351,7 @@ APP_SERVER__CERT__SIGNING_KEY_CACHE_TTL=300
 
 ## AWS Secrets Manager
 
-When compiled with the `aws-secrets` feature flag:
+When compiled with the `aws` feature flag:
 
 ```env
 AWS_ACCESS_KEY_ID=test

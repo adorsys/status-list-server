@@ -63,7 +63,7 @@ its Prometheus datasource by UID `prometheus` (see
 `dashboards/provisioning/datasources.yml`). Any environment that loads this
 dashboard — including a production/managed Grafana — **must** register its
 Prometheus datasource with exactly that UID, or the panels will not resolve.
-Do not rely on the datasource *name*; Grafana matches the committed UID.
+Do not rely on the datasource _name_; Grafana matches the committed UID.
 
 ## Retention requirement
 

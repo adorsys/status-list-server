@@ -151,10 +151,10 @@ spec:
               {{- end }}
             {{- end }}
             {{- if hasKey $env "APP_DATABASE__URL" }}
-              {{- fail "statuslist.env.APP_DATABASE__URL is not supported by this chart because it exposes assembled credentials in pod metadata; use APP_DATABASE__HOST/PORT/USERNAME/NAME/QUERY plus the chart-managed APP_DATABASE__PASSWORD SecretKeyRef" }}
+              {{- fail "statuslist.env.APP_DATABASE__URL is not supported by this chart because it exposes assembled credentials in pod metadata; use APP_DATABASE__HOST/PORT/USERNAME/NAME/QUERY plus APP_DATABASE__PASSWORD_FILE" }}
             {{- end }}
             {{- if hasKey $env "APP_DATABASE__PASSWORD" }}
-              {{- fail "statuslist.env.APP_DATABASE__PASSWORD must not be set as a plain env value; provide postgres.auth.existingSecret or externalSecret data for the postgres-password key" }}
+              {{- fail "statuslist.env.APP_DATABASE__PASSWORD must not be set as a plain env value; use the chart-managed APP_DATABASE__PASSWORD_FILE mounted Secret path" }}
             {{- end }}
             {{- if or (not (hasKey $env "APP_DATABASE__PORT")) (eq (trim (toString (get $env "APP_DATABASE__PORT"))) "") }}
               {{- fail "statuslist.env.APP_DATABASE__PORT is required; set it to the database service port" }}
@@ -226,11 +226,8 @@ spec:
               {{- $_ := set $chartManagedEnv "AWS_SHARED_CREDENTIALS_FILE" true }}
               {{- $_ := set $chartManagedEnv "AWS_CONFIG_FILE" true }}
             {{- end }}
-            {{- if ne $watcherPollInterval "" }}
+            {{- if and (ne $watcherPollInterval "") (not (hasKey $env "APP_WATCHER__POLL_INTERVAL_SECS")) }}
               {{- $_ := set $chartManagedEnv "APP_WATCHER__POLL_INTERVAL_SECS" true }}
-            {{- end }}
-            {{- if not (or (hasKey $env "APP_DATABASE__PASSWORD_FILE") (hasKey $secretFileEnv "APP_DATABASE__PASSWORD_FILE")) }}
-              {{- $_ := set $chartManagedEnv "APP_DATABASE__PASSWORD" true }}
             {{- end }}
             {{- range $name, $_ := $secretFileEnv }}
               {{- if hasKey $chartManagedEnv $name }}
@@ -246,7 +243,7 @@ spec:
             - name: APP_AWS__REGION
               value: {{ $appRegion | quote }}
             {{- end }}
-            {{- if .Values.statuslist.aws.mountCredentials }}
+          {{- if .Values.statuslist.aws.mountCredentials }}
             - name: AWS_SHARED_CREDENTIALS_FILE
               value: /home/nobody/.aws/credentials
             - name: AWS_CONFIG_FILE
@@ -257,16 +254,9 @@ spec:
               value: {{ $path | quote }}
             {{- end }}
             {{- /* Watcher poll interval for credential rotation detection */}}
-            {{- if ne $watcherPollInterval "" }}
+            {{- if and (ne $watcherPollInterval "") (not (hasKey $env "APP_WATCHER__POLL_INTERVAL_SECS")) }}
             - name: APP_WATCHER__POLL_INTERVAL_SECS
               value: {{ $watcherPollInterval | quote }}
-            {{- end }}
-            {{- if not (or (hasKey $env "APP_DATABASE__PASSWORD_FILE") (hasKey $secretFileEnv "APP_DATABASE__PASSWORD_FILE")) }}
-            - name: APP_DATABASE__PASSWORD
-              valueFrom:
-                secretKeyRef:
-                  name: {{ include "status-list-server-chart.appSecretName" . }}
-                  key: postgres-password
             {{- end }}
           volumeMounts:
             - name: tmp

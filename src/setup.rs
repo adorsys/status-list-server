@@ -1,6 +1,6 @@
 //! Composition root assembling outbound infrastructure adapters and creating the AppState container.
 
-#[cfg(feature = "aws-secrets")]
+#[cfg(feature = "aws")]
 use aws_config::{BehaviorVersion, Region};
 #[cfg(any(
     feature = "acme",
@@ -10,8 +10,6 @@ use aws_config::{BehaviorVersion, Region};
 ))]
 use color_eyre::eyre::Context;
 use color_eyre::eyre::Result as EyeResult;
-#[cfg(feature = "acme")]
-use color_eyre::eyre::eyre;
 #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mysql"))]
 use sea_orm::{ConnectOptions, DbErr};
 #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mysql"))]
@@ -25,18 +23,11 @@ use sea_orm_migration::MigratorTrait;
 ))]
 use secrecy::ExposeSecret;
 use std::sync::Arc;
-#[cfg(any(
-    feature = "acme",
-    feature = "vault",
-    feature = "sqlite",
-    feature = "postgres",
-    feature = "mysql"
-))]
 use std::time::Duration;
 #[cfg(feature = "acme")]
 use tracing::warn;
 
-#[cfg(feature = "aws-secrets")]
+#[cfg(feature = "aws")]
 use crate::cert_manager::challenge::AwsRoute53DnsProvider;
 #[cfg(feature = "acme")]
 use crate::cert_manager::challenge::{
@@ -48,14 +39,14 @@ use crate::cert_manager::http_client::DefaultHttpClient;
 #[cfg(all(
     feature = "acme",
     not(feature = "vault"),
-    not(feature = "gcp-secrets"),
-    not(feature = "azure-kv"),
-    not(feature = "aws-secrets")
+    not(feature = "gcp"),
+    not(feature = "azure"),
+    not(feature = "aws")
 ))]
 use crate::cert_manager::storage::MemoryStorage;
 #[cfg(feature = "acme")]
 use crate::cert_manager::{
-    CertManager, StoreProvisioningStrategy,
+    CertManager,
     storage::{CryptoCachePolicy, Storage},
 };
 use crate::config::{Config as AppConfig, DatabaseBackend};
@@ -68,35 +59,48 @@ use crate::domain::{
     service::Service,
 };
 #[cfg(all(
-    feature = "aws-secrets",
+    feature = "aws",
     not(feature = "vault"),
-    not(feature = "gcp-secrets"),
-    not(feature = "azure-kv")
+    not(feature = "gcp"),
+    not(feature = "azure")
 ))]
 use crate::outbound::aws::AwsSecretsManager;
-#[cfg(all(
-    feature = "azure-kv",
-    feature = "acme",
-    not(feature = "vault"),
-    not(feature = "gcp-secrets")
-))]
+#[cfg(all(feature = "azure", not(feature = "vault"), not(feature = "gcp")))]
 use crate::outbound::azure_kv::AzureKeyVaultClient;
 use crate::outbound::cache::MokaStatusListCache;
 #[cfg(feature = "acme")]
 use crate::outbound::cert::AcmeCertificateProvider;
-#[cfg(all(feature = "gcp-secrets", feature = "acme", not(feature = "vault")))]
+#[cfg(not(feature = "acme"))]
+use crate::outbound::cert::ReloadingCertificateProvider;
+#[cfg(all(feature = "gcp", not(feature = "vault")))]
 use crate::outbound::gcp_secret::GcpSecretManagerClient;
 #[cfg(feature = "memory")]
 use crate::outbound::memory::{MemoryCredentials, MemoryStatusListSnapshotRepo, MemoryStatusLists};
 #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mysql"))]
 use crate::outbound::sql::{
     Migrator, SeaOrmStore, SqlCredentialRepo, SqlStatusListRepo, SqlStatusListSnapshotRepo,
-    verify_binlog_format, verify_innodb_engines,
+    SwappableDatabaseConnection, verify_binlog_format, verify_innodb_engines,
 };
 #[cfg(feature = "vault")]
 use crate::outbound::vault::VaultClient;
 use crate::server::AppState;
 use crate::server::health::{AlwaysReady, Readiness};
+#[cfg(any(
+    not(feature = "acme"),
+    any(feature = "sqlite", feature = "postgres", feature = "mysql")
+))]
+use crate::utils::file_watcher::FileWatcher;
+#[cfg(any(feature = "sqlite", feature = "postgres", feature = "mysql"))]
+use crate::utils::metrics::TARGET_DATABASE;
+#[cfg(not(feature = "acme"))]
+use crate::utils::metrics::TARGET_TOKEN_SIGNING_KEY;
+#[cfg(any(
+    feature = "sqlite",
+    feature = "postgres",
+    feature = "mysql",
+    not(feature = "acme")
+))]
+use crate::utils::metrics::record_rotation;
 
 #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mysql"))]
 fn classify_db_connect_error(err: &DbErr) -> &'static str {
@@ -118,6 +122,182 @@ fn classify_db_connect_error(err: &DbErr) -> &'static str {
         DbErr::RecordNotInserted => "record_not_inserted",
         DbErr::RecordNotUpdated => "record_not_updated",
     }
+}
+
+#[cfg(any(feature = "sqlite", feature = "postgres", feature = "mysql"))]
+async fn connect_database_pool(config: &AppConfig) -> EyeResult<sea_orm::DatabaseConnection> {
+    let db_backend = config.database.backend;
+    let resolved_db_url = config
+        .database
+        .load_resolved_url()
+        .await
+        .wrap_err("Invalid database connection configuration")?;
+    let db_url = resolved_db_url.expose_secret();
+    if !db_backend.validate_url_scheme(db_url) {
+        return Err(color_eyre::eyre::eyre!(
+            "URL scheme does not match configured backend '{}'. Expected URL starting with {}",
+            db_backend.as_str(),
+            db_backend.expected_scheme_description()
+        ));
+    }
+
+    let mut opt = ConnectOptions::new(db_url.to_string());
+
+    if db_backend == DatabaseBackend::Sqlite || db_backend == DatabaseBackend::Memory {
+        opt.max_connections(1);
+        #[cfg(feature = "sqlite")]
+        opt.map_sqlx_sqlite_opts(|o| o.foreign_keys(true));
+    } else {
+        let pool = &config.database.pool;
+        opt.max_connections(pool.max_connections)
+            .min_connections(pool.min_connections)
+            .acquire_timeout(Duration::from_secs(pool.acquire_timeout_secs))
+            .connect_timeout(Duration::from_secs(pool.connect_timeout_secs))
+            .idle_timeout(Duration::from_secs(pool.idle_timeout_secs))
+            .max_lifetime(Duration::from_secs(pool.max_lifetime_secs))
+            .sqlx_logging(false);
+    }
+
+    sea_orm::Database::connect(opt).await.map_err(|err| {
+        color_eyre::eyre::eyre!(
+            "Failed to connect to database (kind={}, {})",
+            classify_db_connect_error(&err),
+            config.database.redacted_target()
+        )
+    })
+}
+
+#[cfg(any(feature = "sqlite", feature = "postgres", feature = "mysql"))]
+fn spawn_database_rotation(config: AppConfig, db: Arc<SwappableDatabaseConnection>) {
+    let Some(password_file) = config.database.password_file.clone() else {
+        return;
+    };
+    FileWatcher::new(
+        vec![password_file],
+        Duration::from_secs(config.watcher.poll_interval_secs),
+    )
+    .spawn(TARGET_DATABASE, move || {
+        let config = config.clone();
+        let db = db.clone();
+        async move {
+            tracing::info!(
+                event = "rotation_started",
+                rotation.target = TARGET_DATABASE,
+                target = %config.database.redacted_target(),
+                "database credential rotation started"
+            );
+            match connect_database_pool(&config).await {
+                Ok(new_db) => {
+                    if let Err(err) = new_db.ping().await {
+                        record_rotation(TARGET_DATABASE, false);
+                        tracing::error!(
+                            event = "rotation_failed",
+                            rotation.target = TARGET_DATABASE,
+                            error.kind = %classify_db_connect_error(&err),
+                            target = %config.database.redacted_target(),
+                            "database credential rotation validation failed"
+                        );
+                        return;
+                    }
+                    let old_db = db.swap(Arc::new(new_db));
+                    tokio::spawn(async move {
+                        drain_and_close_database(old_db).await;
+                    });
+                    record_rotation(TARGET_DATABASE, true);
+                    tracing::info!(
+                        event = "rotation_succeeded",
+                        rotation.target = TARGET_DATABASE,
+                        target = %config.database.redacted_target(),
+                        "database credential rotation succeeded"
+                    );
+                }
+                Err(err) => {
+                    record_rotation(TARGET_DATABASE, false);
+                    tracing::error!(
+                        event = "rotation_failed",
+                        rotation.target = TARGET_DATABASE,
+                        target = %config.database.redacted_target(),
+                        error = %err,
+                        "database credential rotation failed"
+                    );
+                }
+            }
+        }
+    });
+}
+
+#[cfg(any(feature = "sqlite", feature = "postgres", feature = "mysql"))]
+async fn drain_and_close_database(mut db: Arc<sea_orm::DatabaseConnection>) {
+    loop {
+        match Arc::try_unwrap(db) {
+            Ok(db) => {
+                if let Err(err) = db.close().await {
+                    tracing::warn!(
+                        event = "database_pool_close_failed",
+                        error = %err,
+                        "previous database pool failed to close after rotation"
+                    );
+                }
+                return;
+            }
+            Err(still_shared) => {
+                db = still_shared;
+                tokio::time::sleep(Duration::from_secs(1)).await;
+            }
+        }
+    }
+}
+
+#[cfg(not(feature = "acme"))]
+fn spawn_cert_rotation(config: AppConfig, provider: ReloadingCertificateProvider) {
+    let (Some(certificate_path), Some(signing_key_path)) = (
+        config.server.cert.store.certificate_path.clone(),
+        config.server.cert.store.signing_key_path.clone(),
+    ) else {
+        return;
+    };
+
+    FileWatcher::new(
+        vec![
+            certificate_path.clone().into(),
+            signing_key_path.clone().into(),
+        ],
+        Duration::from_secs(config.watcher.poll_interval_secs),
+    )
+    .spawn(TARGET_TOKEN_SIGNING_KEY, move || {
+        let provider = provider.clone();
+        let certificate_path = certificate_path.clone();
+        let signing_key_path = signing_key_path.clone();
+        async move {
+            tracing::info!(
+                event = "rotation_started",
+                rotation.target = TARGET_TOKEN_SIGNING_KEY,
+                "token signing material rotation started"
+            );
+            match provider
+                .reload_from_files(&certificate_path, &signing_key_path)
+                .await
+            {
+                Ok(()) => {
+                    record_rotation(TARGET_TOKEN_SIGNING_KEY, true);
+                    tracing::info!(
+                        event = "rotation_succeeded",
+                        rotation.target = TARGET_TOKEN_SIGNING_KEY,
+                        "token signing material rotation succeeded"
+                    );
+                }
+                Err(err) => {
+                    record_rotation(TARGET_TOKEN_SIGNING_KEY, false);
+                    tracing::error!(
+                        event = "rotation_failed",
+                        rotation.target = TARGET_TOKEN_SIGNING_KEY,
+                        error = %err,
+                        "token signing material rotation failed"
+                    );
+                }
+            }
+        }
+    });
 }
 
 /// Assembles application configuration, connects outbound repositories, and builds `AppState`.
@@ -162,7 +342,7 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
     // readiness probe can reach the real adapter (the domain ports only expose
     // the higher-level repositories).
     #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mysql"))]
-    let mut db_arc: Option<Arc<sea_orm::DatabaseConnection>> = None;
+    let db_arc: Option<Arc<SwappableDatabaseConnection>>;
 
     let (status_list_repo, credential_repo, status_list_snapshot): (
         Arc<dyn StatusListRepo>,
@@ -171,6 +351,10 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
     ) = match config.database.backend {
         #[cfg(feature = "memory")]
         DatabaseBackend::Memory => {
+            #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mysql"))]
+            {
+                db_arc = None;
+            }
             let memory_snapshot = MemoryStatusListSnapshotRepo::default();
             let memory_lists = MemoryStatusLists::default().with_snapshot(&memory_snapshot);
             (
@@ -186,44 +370,8 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
             ));
         }
         #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mysql"))]
-        db_backend => {
-            let resolved_db_url = config
-                .database
-                .resolved_url()
-                .wrap_err("Invalid database connection configuration")?;
-            let db_url = resolved_db_url.expose_secret();
-            if !db_backend.validate_url_scheme(db_url) {
-                return Err(color_eyre::eyre::eyre!(
-                    "URL scheme does not match configured backend '{}'. Expected URL starting with {}",
-                    db_backend.as_str(),
-                    db_backend.expected_scheme_description()
-                ));
-            }
-
-            let mut opt = ConnectOptions::new(db_url.to_string());
-
-            if db_backend == DatabaseBackend::Sqlite || db_backend == DatabaseBackend::Memory {
-                opt.max_connections(1);
-                #[cfg(feature = "sqlite")]
-                opt.map_sqlx_sqlite_opts(|o| o.foreign_keys(true));
-            } else {
-                let pool = &config.database.pool;
-                opt.max_connections(pool.max_connections)
-                    .min_connections(pool.min_connections)
-                    .acquire_timeout(Duration::from_secs(pool.acquire_timeout_secs))
-                    .connect_timeout(Duration::from_secs(pool.connect_timeout_secs))
-                    .idle_timeout(Duration::from_secs(pool.idle_timeout_secs))
-                    .max_lifetime(Duration::from_secs(pool.max_lifetime_secs))
-                    .sqlx_logging(false);
-            }
-
-            let db = sea_orm::Database::connect(opt).await.map_err(|err| {
-                color_eyre::eyre::eyre!(
-                    "Failed to connect to database (kind={}, {})",
-                    classify_db_connect_error(&err),
-                    config.database.redacted_target()
-                )
-            })?;
+        _db_backend => {
+            let db = connect_database_pool(config).await?;
 
             Migrator::up(&db, None)
                 .await
@@ -241,13 +389,18 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
                      above for the fix.",
             )?;
 
-            let db_clone = Arc::new(db);
-            db_arc = Some(db_clone.clone());
+            let db_handle = Arc::new(SwappableDatabaseConnection::new(Arc::new(db)));
+            db_arc = Some(db_handle.clone());
+            spawn_database_rotation(config.clone(), db_handle.clone());
             (
-                Arc::new(SqlStatusListRepo::new(SeaOrmStore::new(db_clone.clone()))),
-                Arc::new(SqlCredentialRepo::new(SeaOrmStore::new(db_clone.clone()))),
-                Arc::new(SqlStatusListSnapshotRepo::new(SeaOrmStore::new(
-                    db_clone.clone(),
+                Arc::new(SqlStatusListRepo::new(SeaOrmStore::from_handle(
+                    db_handle.clone(),
+                ))),
+                Arc::new(SqlCredentialRepo::new(SeaOrmStore::from_handle(
+                    db_handle.clone(),
+                ))),
+                Arc::new(SqlStatusListSnapshotRepo::new(SeaOrmStore::from_handle(
+                    db_handle.clone(),
                 ))),
             )
         }
@@ -269,13 +422,6 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
         let cert_domains = [config.server.domain.as_str()];
         let material_storage = build_crypto_storage(config).await?;
 
-        let cert_strategy = store_certificate_strategy(config)?;
-        let uses_acme_strategy = config
-            .server
-            .cert
-            .provisioning_strategy
-            .eq_ignore_ascii_case("acme");
-
         let mut cert_manager_builder = CertManager::builder()
             .domains(cert_domains)
             .email(&config.server.cert.email)
@@ -287,31 +433,23 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
             .crypto_storage(material_storage)
             .eku(&config.server.cert.eku);
 
-        cert_manager_builder = if uses_acme_strategy {
-            let dns_provider = config
-                .server
-                .cert
-                .dns
-                .resolve(&app_env)
-                .wrap_err("Invalid DNS provider configuration")?;
-            if dns_provider.kind() == DnsProviderKind::Pebble && app_env == ENV_PRODUCTION {
-                warn!(
-                    "The 'pebble' DNS provider is a development-only fake DNS server \
-                     but APP_ENV=production; ACME challenges will not succeed against a real CA"
-                );
-            }
-            let challenge_handler =
-                build_dns_challenge_handler(dns_provider, config, &cert_domains).await?;
-            cert_manager_builder
-                .challenge_handler(challenge_handler)
-                .acme_strategy()
-        } else if let Some(cert_strategy) = cert_strategy {
-            cert_manager_builder.store_strategy(cert_strategy)
-        } else {
-            return Err(eyre!(
-                "store certificate provisioning strategy is missing after validation"
-            ));
-        };
+        let dns_provider = config
+            .server
+            .cert
+            .dns
+            .resolve(&app_env)
+            .wrap_err("Invalid DNS provider configuration")?;
+        if dns_provider.kind() == DnsProviderKind::Pebble && app_env == ENV_PRODUCTION {
+            warn!(
+                "The 'pebble' DNS provider is a development-only fake DNS server \
+                 but APP_ENV=production; ACME challenges will not succeed against a real CA"
+            );
+        }
+        let challenge_handler =
+            build_dns_challenge_handler(dns_provider, config, &cert_domains).await?;
+        cert_manager_builder = cert_manager_builder
+            .challenge_handler(challenge_handler)
+            .acme_strategy();
 
         if app_env == ENV_DEVELOPMENT {
             let root_cert = include_bytes!("../test_data/pebble.pem");
@@ -328,13 +466,70 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
     };
 
     #[cfg(not(feature = "acme"))]
-    let (cert_provider, _cert_manager_opt): (Arc<dyn CertificateProvider>, Option<()>) = (
-        Arc::new(crate::outbound::cert::StoreCertificateProvider::new(
-            config.server.cert.store.certificate_path.clone(),
-            config.server.cert.store.signing_key_path.clone(),
-        )),
-        None,
-    );
+    let (cert_provider, _cert_manager_opt): (Arc<dyn CertificateProvider>, Option<()>) = {
+        use crate::outbound::cert::{InlineCertificateProvider, ReloadingCertificateProvider};
+
+        let store = &config.server.cert.store;
+
+        let cert_path = store
+            .certificate_path
+            .as_deref()
+            .filter(|s| !s.trim().is_empty());
+        let key_path = store
+            .signing_key_path
+            .as_deref()
+            .filter(|s| !s.trim().is_empty());
+        let cert_inline = store
+            .certificate
+            .as_deref()
+            .filter(|s| !s.trim().is_empty());
+        let key_inline = store
+            .signing_key
+            .as_deref()
+            .filter(|s| !s.trim().is_empty());
+
+        let has_fs = cert_path.is_some() || key_path.is_some();
+        let has_inline = cert_inline.is_some() || key_inline.is_some();
+
+        let provider: Arc<dyn CertificateProvider> = match (
+            cert_path,
+            key_path,
+            cert_inline,
+            key_inline,
+        ) {
+            // Filesystem mode: both paths → ReloadingCertificateProvider with hot-reload
+            (Some(cp), Some(kp), None, None) => {
+                let p = ReloadingCertificateProvider::from_files(cp.to_owned(), kp.to_owned())
+                    .await
+                    .map_err(|e| color_eyre::eyre::eyre!("{e}"))?;
+                spawn_cert_rotation(config.clone(), p.clone());
+                Arc::new(p)
+            }
+            // Inline mode: both inline PEM values → InlineCertificateProvider (validated at startup)
+            (None, None, Some(ci), Some(ki)) => Arc::new(
+                InlineCertificateProvider::new(ci.to_owned(), ki.to_owned())
+                    .map_err(|e| color_eyre::eyre::eyre!("{e}"))?,
+            ),
+            // Conflict: cannot mix sources
+            _ if has_fs && has_inline => {
+                return Err(color_eyre::eyre::eyre!(
+                    "certificate and signing key must both come from the same source; \
+                     do not mix filesystem paths with inline (env var) values"
+                ));
+            }
+            // Missing: neither source fully configured — fail immediately at startup
+            _ => {
+                return Err(color_eyre::eyre::eyre!(
+                    "static certificate mode requires both certificate and signing key; \
+                     set APP_SERVER__CERT__STORE__CERTIFICATE_PATH + APP_SERVER__CERT__STORE__SIGNING_KEY_PATH \
+                     (filesystem) OR APP_SERVER__CERT__STORE__CERTIFICATE + APP_SERVER__CERT__STORE__SIGNING_KEY \
+                     (inline PEM)"
+                ));
+            }
+        };
+
+        (provider, None)
+    };
 
     let status_list_cache = MokaStatusListCache::new(config.cache.ttl, config.cache.max_capacity);
 
@@ -520,7 +715,7 @@ async fn build_crypto_storage(_config: &AppConfig) -> EyeResult<Box<dyn Storage>
         ))
     }
 
-    #[cfg(all(feature = "gcp-secrets", not(feature = "vault")))]
+    #[cfg(all(feature = "gcp", not(feature = "vault")))]
     {
         tracing::info!("Using GCP Secret Manager as secrets backend");
         Ok(Box::new(
@@ -542,15 +737,11 @@ async fn build_crypto_storage(_config: &AppConfig) -> EyeResult<Box<dyn Storage>
         ))
     }
 
-    #[cfg(all(
-        feature = "azure-kv",
-        not(feature = "vault"),
-        not(feature = "gcp-secrets")
-    ))]
+    #[cfg(all(feature = "azure", not(feature = "vault"), not(feature = "gcp")))]
     {
         tracing::info!("Using Azure Key Vault as secrets backend");
         let vault_url = _config.azure_keyvault.vault_url.clone().ok_or_else(|| {
-            eyre!("Azure Key Vault configuration error: azure_keyvault.vault_url is required when azure-kv is enabled")
+            color_eyre::eyre::eyre!("Azure Key Vault configuration error: azure_keyvault.vault_url is required when azure is enabled")
         })?;
         Ok(Box::new(
             AzureKeyVaultClient::builder(vault_url)
@@ -567,10 +758,10 @@ async fn build_crypto_storage(_config: &AppConfig) -> EyeResult<Box<dyn Storage>
     }
 
     #[cfg(all(
-        feature = "aws-secrets",
+        feature = "aws",
         not(feature = "vault"),
-        not(feature = "gcp-secrets"),
-        not(feature = "azure-kv")
+        not(feature = "gcp"),
+        not(feature = "azure")
     ))]
     {
         tracing::info!("Using AWS Secrets Manager as cryptographic-material backend");
@@ -587,66 +778,10 @@ async fn build_crypto_storage(_config: &AppConfig) -> EyeResult<Box<dyn Storage>
         ))
     }
 
-    #[cfg(not(any(
-        feature = "vault",
-        feature = "gcp-secrets",
-        feature = "azure-kv",
-        feature = "aws-secrets"
-    )))]
+    #[cfg(not(any(feature = "vault", feature = "gcp", feature = "azure", feature = "aws")))]
     {
         tracing::info!("Using in-memory cryptographic-material backend");
         Ok(Box::new(MemoryStorage::default()))
-    }
-}
-
-#[cfg(feature = "acme")]
-fn store_certificate_strategy(config: &AppConfig) -> EyeResult<Option<StoreProvisioningStrategy>> {
-    let cert_config = &config.server.cert;
-    if cert_config
-        .provisioning_strategy
-        .eq_ignore_ascii_case("acme")
-    {
-        return Ok(None);
-    }
-
-    if !cert_config
-        .provisioning_strategy
-        .eq_ignore_ascii_case("store")
-    {
-        return Err(eyre!(
-            "unsupported certificate provisioning strategy '{}'; expected 'acme' or 'store'",
-            cert_config.provisioning_strategy
-        ));
-    }
-
-    let filesystem = (
-        cert_config.store.certificate_path.as_deref(),
-        cert_config.store.signing_key_path.as_deref(),
-    );
-    let storage = (
-        cert_config.store.certificate_key.as_deref(),
-        cert_config.store.signing_key_key.as_deref(),
-    );
-
-    match (filesystem, storage) {
-        ((Some(certificate_path), Some(signing_key_path)), (None, None)) => Ok(Some(
-            StoreProvisioningStrategy::filesystem(certificate_path, signing_key_path),
-        )),
-        ((None, None), (Some(certificate_key), Some(signing_key_key))) => Ok(Some(
-            StoreProvisioningStrategy::storage(certificate_key, signing_key_key),
-        )),
-        ((Some(_), Some(_)), (Some(_), Some(_))) => Err(eyre!(
-            "store provisioning must configure either filesystem paths or material backend keys, not both"
-        )),
-        ((Some(_), None) | (None, Some(_)), _) => Err(eyre!(
-            "filesystem store provisioning requires both server.cert.store.certificate_path and server.cert.store.signing_key_path"
-        )),
-        (_, (Some(_), None) | (None, Some(_))) => Err(eyre!(
-            "storage-backed store provisioning requires both server.cert.store.certificate_key and server.cert.store.signing_key_key"
-        )),
-        ((None, None), (None, None)) => Err(eyre!(
-            "store provisioning requires either filesystem paths or material backend keys"
-        )),
     }
 }
 
@@ -657,7 +792,7 @@ async fn build_dns_challenge_handler(
     cert_domains: &[&str],
 ) -> EyeResult<Dns01Handler> {
     let handler = match provider {
-        #[cfg(feature = "aws-secrets")]
+        #[cfg(feature = "aws")]
         ResolvedDnsProvider::Route53 => {
             let aws_config = aws_config::defaults(BehaviorVersion::latest())
                 .region(Region::new(config.aws.region.clone()))
@@ -665,10 +800,10 @@ async fn build_dns_challenge_handler(
                 .await;
             Dns01Handler::new(AwsRoute53DnsProvider::new(&aws_config))
         }
-        #[cfg(not(feature = "aws-secrets"))]
+        #[cfg(not(feature = "aws"))]
         ResolvedDnsProvider::Route53 => {
-            return Err(eyre!(
-                "Route53 DNS provider requested, but 'aws-secrets' feature is disabled at compile time."
+            return Err(color_eyre::eyre::eyre!(
+                "Route53 DNS provider requested, but 'aws' feature is disabled at compile time."
             ));
         }
         ResolvedDnsProvider::Cloudflare(cfg) => {
@@ -750,7 +885,7 @@ mod tests {
         let domain = config.server.domain.clone();
         let domains = [domain.as_str()];
 
-        #[cfg(feature = "aws-secrets")]
+        #[cfg(feature = "aws")]
         assert!(
             build_dns_challenge_handler(DnsProviderKind::Route53, &mut config, &domains).is_ok()
         );
@@ -830,18 +965,32 @@ mod general_tests {
             server
         };
 
+        #[cfg(not(feature = "acme"))]
+        let (cert_pem, key_pem) = {
+            let certified_key = rcgen::generate_simple_self_signed(vec!["localhost".to_string()])
+                .expect("generate test cert and key");
+            (
+                certified_key.cert.pem(),
+                certified_key.signing_key.serialize_pem(),
+            )
+        };
+
         let config = AppConfig::load_from_overrides(&[
             ("APP_DATABASE__BACKEND", "memory"),
             ("APP_DATABASE__URL", "memory:"),
+            #[cfg(not(feature = "acme"))]
+            ("APP_SERVER__CERT__STORE__CERTIFICATE", &cert_pem),
+            #[cfg(not(feature = "acme"))]
+            ("APP_SERVER__CERT__STORE__SIGNING_KEY", &key_pem),
             #[cfg(feature = "vault")]
             ("APP_VAULT__ADDR", &mock_vault.uri()),
             #[cfg(feature = "vault")]
             ("APP_VAULT__ROLE_ID", "test-role"),
             #[cfg(feature = "vault")]
             ("APP_VAULT__SECRET_ID", "test-secret"),
-            #[cfg(feature = "gcp-secrets")]
+            #[cfg(feature = "gcp")]
             ("APP_GCP_SECRET_MANAGER__PROJECT_ID", "test-project"),
-            #[cfg(feature = "azure-kv")]
+            #[cfg(feature = "azure")]
             (
                 "APP_AZURE_KEYVAULT__VAULT_URL",
                 "https://test.vault.azure.net/",
@@ -852,6 +1001,94 @@ mod general_tests {
         if let Err(ref e) = build_state(&config).await {
             panic!("build_state failed under default configuration: {e:?}");
         }
+    }
+
+    #[cfg(not(feature = "acme"))]
+    #[tokio::test]
+    async fn build_state_succeeds_with_filesystem_cert_and_key() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+
+        let (cert_pem, key_pem) = {
+            let certified_key = rcgen::generate_simple_self_signed(vec!["localhost".to_string()])
+                .expect("generate test cert and key");
+            (
+                certified_key.cert.pem(),
+                certified_key.signing_key.serialize_pem(),
+            )
+        };
+
+        let temp_dir = std::env::temp_dir().join(format!(
+            "setup-fs-test-{}-{}",
+            std::process::id(),
+            time::OffsetDateTime::now_utc().unix_timestamp_nanos()
+        ));
+        std::fs::create_dir_all(&temp_dir).expect("create temp dir");
+        let cert_path = temp_dir.join("tls.crt");
+        let key_path = temp_dir.join("tls.key");
+        std::fs::write(&cert_path, cert_pem).expect("write cert");
+        std::fs::write(&key_path, key_pem).expect("write key");
+
+        let config = AppConfig::load_from_overrides(&[
+            ("APP_DATABASE__BACKEND", "memory"),
+            ("APP_DATABASE__URL", "memory:"),
+            (
+                "APP_SERVER__CERT__STORE__CERTIFICATE_PATH",
+                cert_path.to_str().unwrap(),
+            ),
+            (
+                "APP_SERVER__CERT__STORE__SIGNING_KEY_PATH",
+                key_path.to_str().unwrap(),
+            ),
+        ])
+        .expect("load config");
+
+        let result = build_state(&config).await;
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        assert!(result.is_ok(), "build_state failed: {:?}", result.err());
+    }
+
+    #[cfg(not(feature = "acme"))]
+    #[tokio::test]
+    async fn build_state_fails_when_missing_certificate_material() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+
+        let config = AppConfig::load_from_overrides(&[
+            ("APP_DATABASE__BACKEND", "memory"),
+            ("APP_DATABASE__URL", "memory:"),
+        ])
+        .expect("load config");
+
+        let err = build_state(&config)
+            .await
+            .expect_err("should fail when no cert material provided");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("static certificate mode requires both certificate and signing key"),
+            "unexpected error: {msg}"
+        );
+    }
+
+    #[cfg(not(feature = "acme"))]
+    #[tokio::test]
+    async fn build_state_fails_when_mixing_filesystem_and_inline_material() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+
+        let config = AppConfig::load_from_overrides(&[
+            ("APP_DATABASE__BACKEND", "memory"),
+            ("APP_DATABASE__URL", "memory:"),
+            ("APP_SERVER__CERT__STORE__CERTIFICATE_PATH", "/tmp/cert.pem"),
+            ("APP_SERVER__CERT__STORE__SIGNING_KEY", "inline-key-pem"),
+        ])
+        .expect("load config");
+
+        let err = build_state(&config)
+            .await
+            .expect_err("should fail when mixing sources");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("certificate and signing key must both come from the same source"),
+            "unexpected error: {msg}"
+        );
     }
 
     #[cfg(feature = "postgres")]
@@ -966,5 +1203,162 @@ mod general_tests {
             "acquire_timeout did not fire quickly enough, so the acquire queued \
              behind the holder rather than giving up: {elapsed:?}"
         );
+    }
+
+    #[cfg(feature = "postgres-tests")]
+    #[tokio::test]
+    async fn postgres_password_file_rotation_swaps_pool_without_dropping_inflight_query() {
+        use crate::outbound::sql::test_containers::postgres_helpers::postgres_connection;
+        use sea_orm::{ConnectionTrait, DatabaseBackend, Statement};
+
+        let test_db = postgres_connection().await;
+        let parsed = url::Url::parse(&test_db.url).expect("postgres test URL");
+        let host = parsed.host_str().expect("host");
+        let port = parsed.port().expect("port").to_string();
+        let db_name = parsed.path().trim_start_matches('/');
+        let role = format!("rotation_{}", uuid::Uuid::new_v4().simple());
+        let old_password = "old_rotation_password";
+        let new_password = "new_rotation_password";
+
+        test_db
+            .db
+            .execute_unprepared(&format!(
+                "CREATE USER {role} WITH PASSWORD '{old_password}'"
+            ))
+            .await
+            .expect("create rotation user");
+
+        let temp_dir =
+            std::env::temp_dir().join(format!("status-list-db-rotation-{}", uuid::Uuid::new_v4()));
+        let password_path = temp_dir.join("password");
+        tokio::fs::create_dir_all(&temp_dir)
+            .await
+            .expect("create temp dir");
+        tokio::fs::write(&password_path, old_password)
+            .await
+            .expect("write initial password");
+
+        let config = AppConfig::load_from_overrides(&[
+            ("APP_DATABASE__BACKEND", "postgres"),
+            ("APP_DATABASE__HOST", host),
+            ("APP_DATABASE__PORT", &port),
+            ("APP_DATABASE__USERNAME", &role),
+            ("APP_DATABASE__PASSWORD", "ignored-by-password-file"),
+            (
+                "APP_DATABASE__PASSWORD_FILE",
+                password_path.to_str().expect("password path"),
+            ),
+            ("APP_DATABASE__NAME", db_name),
+            ("APP_DATABASE__POOL__MAX_CONNECTIONS", "2"),
+            ("APP_DATABASE__POOL__MIN_CONNECTIONS", "1"),
+        ])
+        .expect("rotation config");
+
+        let initial = Arc::new(connect_database_pool(&config).await.expect("initial pool"));
+        let handle = Arc::new(SwappableDatabaseConnection::new(initial.clone()));
+        let inflight = {
+            let db = handle.current();
+            tokio::spawn(async move {
+                db.query_one(Statement::from_string(
+                    DatabaseBackend::Postgres,
+                    "SELECT pg_sleep(0.25), current_user".to_string(),
+                ))
+                .await
+            })
+        };
+
+        test_db
+            .db
+            .execute_unprepared(&format!("ALTER USER {role} WITH PASSWORD '{new_password}'"))
+            .await
+            .expect("alter rotation user password");
+        tokio::fs::write(&password_path, new_password)
+            .await
+            .expect("write rotated password");
+
+        let rotated = Arc::new(connect_database_pool(&config).await.expect("rotated pool"));
+        rotated.ping().await.expect("rotated pool validates");
+        let old = handle.swap(rotated.clone());
+
+        assert!(Arc::ptr_eq(&old, &initial));
+        assert!(Arc::ptr_eq(&handle.current(), &rotated));
+        inflight
+            .await
+            .expect("in-flight task joined")
+            .expect("in-flight query survived");
+
+        let _ = tokio::fs::remove_dir_all(temp_dir).await;
+    }
+
+    #[cfg(feature = "postgres-tests")]
+    #[tokio::test]
+    async fn postgres_password_file_rotation_failure_retains_old_pool_and_redacts_passwords() {
+        use crate::outbound::sql::test_containers::postgres_helpers::postgres_connection;
+        use sea_orm::ConnectionTrait;
+
+        let test_db = postgres_connection().await;
+        let parsed = url::Url::parse(&test_db.url).expect("postgres test URL");
+        let host = parsed.host_str().expect("host");
+        let port = parsed.port().expect("port").to_string();
+        let db_name = parsed.path().trim_start_matches('/');
+        let role = format!("rotation_{}", uuid::Uuid::new_v4().simple());
+        let old_password = "old_rotation_password_secret";
+        let wrong_password = "wrong_rotation_password_secret";
+
+        test_db
+            .db
+            .execute_unprepared(&format!(
+                "CREATE USER {role} WITH PASSWORD '{old_password}'"
+            ))
+            .await
+            .expect("create rotation user");
+
+        let temp_dir = std::env::temp_dir().join(format!(
+            "status-list-db-rotation-failure-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let password_path = temp_dir.join("password");
+        tokio::fs::create_dir_all(&temp_dir)
+            .await
+            .expect("create temp dir");
+        tokio::fs::write(&password_path, old_password)
+            .await
+            .expect("write initial password");
+
+        let config = AppConfig::load_from_overrides(&[
+            ("APP_DATABASE__BACKEND", "postgres"),
+            ("APP_DATABASE__HOST", host),
+            ("APP_DATABASE__PORT", &port),
+            ("APP_DATABASE__USERNAME", &role),
+            ("APP_DATABASE__PASSWORD", "ignored-by-password-file"),
+            (
+                "APP_DATABASE__PASSWORD_FILE",
+                password_path.to_str().expect("password path"),
+            ),
+            ("APP_DATABASE__NAME", db_name),
+            ("APP_DATABASE__POOL__MAX_CONNECTIONS", "1"),
+            ("APP_DATABASE__POOL__MIN_CONNECTIONS", "1"),
+            ("APP_DATABASE__POOL__CONNECT_TIMEOUT_SECS", "1"),
+            ("APP_DATABASE__POOL__ACQUIRE_TIMEOUT_SECS", "1"),
+        ])
+        .expect("rotation config");
+
+        let initial = Arc::new(connect_database_pool(&config).await.expect("initial pool"));
+        let handle = SwappableDatabaseConnection::new(initial.clone());
+        tokio::fs::write(&password_path, wrong_password)
+            .await
+            .expect("write wrong password");
+
+        let err = connect_database_pool(&config)
+            .await
+            .expect_err("wrong password must fail");
+        let rendered = format!("{err:?}");
+
+        assert!(Arc::ptr_eq(&handle.current(), &initial));
+        initial.ping().await.expect("old pool remains usable");
+        assert!(!rendered.contains(old_password));
+        assert!(!rendered.contains(wrong_password));
+
+        let _ = tokio::fs::remove_dir_all(temp_dir).await;
     }
 }
