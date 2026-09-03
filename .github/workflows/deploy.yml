@@ -78,16 +78,16 @@ jobs:
       matrix:
         variant:
           - suffix: aws
-            features: "postgres,aws-secrets,acme"
+            features: "postgres,aws"
             description: "PostgreSQL database with AWS Secrets Manager and Route53 DNS support"
           - suffix: gcp
-            features: "postgres,gcp-secrets,acme"
+            features: "postgres,gcp"
             description: "PostgreSQL database with GCP Secret Manager and Cloud DNS support"
           - suffix: azure
-            features: "postgres,azure-kv,acme"
+            features: "postgres,azure"
             description: "PostgreSQL database with Azure Key Vault and Azure DNS support"
           - suffix: vault
-            features: "postgres,vault,acme"
+            features: "postgres,vault"
             description: "PostgreSQL database with HashiCorp Vault / OpenBao token material storage"
           - suffix: fscert
             features: "postgres"

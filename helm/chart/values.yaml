@@ -30,10 +30,10 @@ statuslist:
     #
     # | Tag Suffix | Cargo Features | Description | Primary Use Case |
     # |------------|----------------|-------------|------------------|
-    # | -aws       | postgres,aws-secrets,acme | PostgreSQL database with AWS Secrets Manager and Route53 DNS support | AWS EKS native deployments |
-    # | -gcp       | postgres,gcp-secrets,acme | PostgreSQL database with GCP Secret Manager and Cloud DNS support | GCP GKE native deployments |
-    # | -azure     | postgres,azure-kv,acme | PostgreSQL database with Azure Key Vault and Azure DNS support | Azure AKS native deployments |
-    # | -vault     | postgres,vault,acme | PostgreSQL database with HashiCorp Vault / OpenBao token material storage | Vault-backed on-prem or multi-cloud deployments |
+    # | -aws       | postgres,aws | PostgreSQL database with AWS Secrets Manager and Route53 DNS support | AWS EKS native deployments |
+    # | -gcp       | postgres,gcp | PostgreSQL database with GCP Secret Manager and Cloud DNS support | GCP GKE native deployments |
+    # | -azure     | postgres,azure | PostgreSQL database with Azure Key Vault and Azure DNS support | Azure AKS native deployments |
+    # | -vault     | postgres,vault | PostgreSQL database with HashiCorp Vault / OpenBao token material storage | Vault-backed on-prem or multi-cloud deployments |
     # | -fscert    | postgres | PostgreSQL database with filesystem-mounted token signing keys and certificates | Constrained / air-gapped environments using external secret injection |
     #
     # Tag format: <version>-<suffix> (e.g., 1.2.0-aws, 1.2.0-gcp)

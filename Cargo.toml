@@ -11,14 +11,14 @@ postgres = ["history", "sea-orm?/sqlx-postgres"]
 sqlite = ["history", "sea-orm?/sqlx-sqlite"]
 mysql = ["history", "sea-orm?/sqlx-mysql"]
 vault = ["acme"]
-gcp-secrets = ["acme", "dep:google-cloud-auth", "dep:google-cloud-secretmanager-v1"]
-azure-kv = [
+gcp = ["acme", "dep:google-cloud-auth", "dep:google-cloud-secretmanager-v1"]
+azure = [
   "acme",
   "dep:azure_core",
   "dep:azure_identity",
   "dep:azure_security_keyvault_secrets",
 ]
-aws-secrets = [
+aws = [
   "acme",
   "dep:aws-config",
   "dep:aws-sdk-route53",
