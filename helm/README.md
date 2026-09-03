@@ -37,6 +37,8 @@ The following files are used to configure the deployment:
 
 The chart renders a `ServiceAccount` for the application pod by default (`serviceAccount.create=true`) and wires it into the Deployment via `serviceAccountName`. This is required for Kubernetes **Workload Identity** so the pod receives the ambient cloud credentials it needs to reach AWS/GCP/Azure.
 
+For the startup and readiness behavior operators see when Workload Identity or mounted credentials are misconfigured, see [`../docs/startup-validation.md`](../docs/startup-validation.md#production-startup-and-readiness-matrix).
+
 Attach Workload Identity / IRSA role annotations through `serviceAccount.annotations`, for example on EKS:
 
 ```yaml

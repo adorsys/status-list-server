@@ -2,7 +2,7 @@
 
 The server stores lifecycle-coupled cryptographic material in one backend by default: ACME account keys, the server signing key, and the certificate chain associated with that key.
 
-For startup validation and fail-fast behavior specific to secrets backends, see [`startup-validation.md`](startup-validation.md#2-secrets-backend-validations).
+For startup validation and fail-fast behavior specific to secrets backends, see [`startup-validation.md`](startup-validation.md#production-startup-and-readiness-matrix).
 
 The supported backends include:
 
@@ -345,7 +345,7 @@ The Azure Key Vault must be configured to use the **Azure role-based access cont
 APP_AZURE_KEYVAULT__VAULT_URL=https://prod-vault.vault.azure.net/
 APP_AZURE_KEYVAULT__TENANT_ID=00000000-0000-0000-0000-000000000000
 APP_AZURE_KEYVAULT__CLIENT_ID=11111111-1111-1111-1111-111111111111
-APP_AZURE_KEYVAULT__CLIENT_SECRET=supersecret
+APP_AZURE_KEYVAULT__CLIENT_SECRET=<client-secret-from-secret-manager>
 APP_SERVER__CERT__SIGNING_KEY_CACHE_TTL=300
 ```
 

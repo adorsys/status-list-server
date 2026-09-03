@@ -1,6 +1,6 @@
 # DNS Providers for ACME DNS-01 Challenges
 
-For startup validation and fail-fast behavior specific to DNS providers, see [`startup-validation.md`](startup-validation.md#4-dns-provider-validations-acme-only).
+For startup validation and fail-fast behavior specific to DNS providers, see [`startup-validation.md`](startup-validation.md#production-startup-and-readiness-matrix).
 
 The certificate manager solves ACME DNS-01 challenges by creating a TXT record
 named `_acme-challenge.<domain>` at the configured DNS provider. The provider is
