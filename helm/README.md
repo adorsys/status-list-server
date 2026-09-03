@@ -71,12 +71,12 @@ The default secret/credential provisioning path is **External Secrets Operator (
 ```yaml
 statuslist:
   aws:
-    mountCredentials: true    # default: mount the ESO-provisioned aws-credentials-secret under /home/nobody/.aws
-    region: ""                # plain, non-secret; renders APP_AWS__REGION
+    mountCredentials: true # default: mount the ESO-provisioned aws-credentials-secret under /home/nobody/.aws
+    region: "" # plain, non-secret; renders APP_AWS__REGION
     credentialsSecret:
-      remoteKey: "statuslist-aws-credentials"   # SecretStore key holding both AWS shared files
-      credentialsProperty: "CREDENTIALS"        # property in remoteKey with the credentials file
-      configProperty: "CONFIG"                  # property in remoteKey with the config file
+      remoteKey: "statuslist-aws-credentials" # SecretStore key holding both AWS shared files
+      credentialsProperty: "CREDENTIALS" # property in remoteKey with the credentials file
+      configProperty: "CONFIG" # property in remoteKey with the config file
 ```
 
 `statuslist.aws.region` is a plain (non-secret) value; `APP_AWS__REGION` is rendered whenever an effective region is set, independent of `secretStore.provider` and `mountCredentials`.
@@ -86,6 +86,7 @@ statuslist:
 **Upgrade compatibility:** The effective `APP_AWS__REGION` resolves as `statuslist.aws.region`, falling back to the legacy `secretStore.aws.region` and then `eu-central-1`. Installations that previously set only `secretStore.aws.region` keep that region for the application across upgrade.
 
 When `statuslist.aws.mountCredentials=true` (the default) **and** `externalSecret.enabled=true` (the default ESO path), the chart itself renders a second `ExternalSecret` that provisions `aws-credentials-secret` — the exact Secret the Deployment's credential volume references. It synchronizes two keys into that Secret:
+
 - `credentials` ← `remoteKey`/`credentialsProperty` (the AWS shared credentials file, INI format, e.g. `[default]\naws_access_key_id=...\naws_secret_access_key=...`)
 - `config` ← `remoteKey`/`configProperty` (the AWS shared config file)
 
@@ -144,8 +145,8 @@ secretStore:
   enabled: true
   provider: aws
   aws:
-    service: SecretsManager   # SecretsManager | ParameterStore
-    region: "eu-central-1"    # applies to the AWS SecretStore; APP_AWS__REGION falls back to statuslist.aws.region
+    service: SecretsManager # SecretsManager | ParameterStore
+    region: "eu-central-1" # applies to the AWS SecretStore; APP_AWS__REGION falls back to statuslist.aws.region
   vault:
     server: ""
     path: "secret"
@@ -156,14 +157,14 @@ secretStore:
   azure:
     tenantId: ""
     vaultUrl: ""
-    authType: ""                  # ServicePrincipal | ManagedIdentity | WorkloadIdentity
-    environmentType: ""           # optional: PublicCloud (default) | USGovernmentCloud | ChinaCloud | GermanCloud
-    identityId: ""                # ManagedIdentity: select one of multiple managed identities
+    authType: "" # ServicePrincipal | ManagedIdentity | WorkloadIdentity
+    environmentType: "" # optional: PublicCloud (default) | USGovernmentCloud | ChinaCloud | GermanCloud
+    identityId: "" # ManagedIdentity: select one of multiple managed identities
     serviceAccountRef:
-      name: ""                    # WorkloadIdentity: ESO's own least-privilege identity
+      name: "" # WorkloadIdentity: ESO's own least-privilege identity
       namespace: ""
-    authSecretRef: {}             # ServicePrincipal: clientId/clientSecret/tenantId secret selectors
-  raw: {}                         # provider body passthrough (rendered directly under spec.provider)
+    authSecretRef: {} # ServicePrincipal: clientId/clientSecret/tenantId secret selectors
+  raw: {} # provider body passthrough (rendered directly under spec.provider)
 ```
 
 - **aws** (`SecretsManager` or `ParameterStore`): `service` and `region`. `region` falls back to the effective app region when empty.

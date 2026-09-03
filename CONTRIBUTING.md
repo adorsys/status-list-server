@@ -78,7 +78,7 @@ repository rulesets to require the status check named
 unconventional commit subjects out of protected branches, where they would
 otherwise be ignored by `git-cliff` and `release-plz`.
 
-They must also require **`CI Success`**, and require *only* that check from
+They must also require **`CI Success`**, and require _only_ that check from
 `CI.yml`. The jobs in `CI.yml` form several independent chains — the Rust jobs hang
 off `cargo-build`, the linters and scanners stand alone — deliberately, so that a
 network-dependent scanner is not the root of every Rust job. No single job therefore
@@ -93,7 +93,7 @@ rather than reshuffling an existing list:
 1. Merge the PR that introduces `ci-success`.
 2. Add **`CI Success`** to the required status checks on both rulesets.
 3. If individual `CI.yml` job names are ever added to a ruleset, remove them only
-   *after* `CI Success` is required — doing it in the other order leaves a window
+   _after_ `CI Success` is required — doing it in the other order leaves a window
    where a failing job blocks nothing.
 
 `ci-success` fails if any job it needs reported `failure` or `cancelled`. It also
@@ -124,18 +124,18 @@ is not proposed straight away — this is expected, not a broken schedule. Secur
 updates are exempt from cooldown. Because the cooldown decides when a bump is opened
 at all, it also decides when the auto-merge path above ever sees a new version.
 
-**This needs the repository setting *Allow auto-merge* to be on** — Settings →
+**This needs the repository setting _Allow auto-merge_ to be on** — Settings →
 General → Pull Requests. It is currently off by choice, so nothing is ever armed:
 the job warns and passes rather than failing, because a job that is red on every
-dependency bump only teaches people to ignore red. Any *other* failure to arm still
+dependency bump only teaches people to ignore red. Any _other_ failure to arm still
 fails the job. Turning the setting on does not weaken anything: the `Rules` ruleset
 still requires two approving reviews with `require_last_push_approval` before an
 armed pull request can merge.
 
 The workflow previously ran `gh pr review --approve` as well. That never worked —
 every run since it was added failed with `GitHub Actions is not permitted to approve
-pull requests (addPullRequestReview)`, which is the *Allow GitHub Actions to create
-and approve pull requests* setting rather than the workflow's `permissions:` block.
+pull requests (addPullRequestReview)`, which is the _Allow GitHub Actions to create
+and approve pull requests_ setting rather than the workflow's `permissions:` block.
 Because approve failed, the auto-merge step behind it was skipped every time. The
 step was removed rather than unblocked: a bot approval could not satisfy a two-review
 requirement anyway, and having CI approve its own dependency bumps is the thing the

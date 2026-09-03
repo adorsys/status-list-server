@@ -246,13 +246,13 @@ jobs:
       matrix:
         variant:
           - suffix: aws
-            features: "postgres,aws-secrets,acme"
+            features: "postgres,aws"
           - suffix: gcp
-            features: "postgres,gcp-secrets,acme"
+            features: "postgres,gcp"
           - suffix: azure
-            features: "postgres,azure-kv,acme"
+            features: "postgres,azure"
           - suffix: vault
-            features: "postgres,vault,acme"
+            features: "postgres,vault"
           - suffix: fscert
             features: "postgres"
 

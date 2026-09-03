@@ -25,15 +25,16 @@ The vulnerability gate blocks on any HIGH or CRITICAL finding that survives the 
 
 The release workflow publishes **5 multi-arch image variants** with distinct suffixes for different cloud providers and secret storage models. See the image variant matrix in `values.yaml` for the full description of each variant. The chart's empty-tag default resolves to the published AWS variant, not to an unsuffixed image tag.
 
-| Trigger              | Image Tags                                                                   | Applied                   |
-| -------------------- | ---------------------------------------------------------------------------- | ------------------------- |
-| Manual dispatch      | `sha-<short_sha>-<variant>`                                                  | At build                  |
-| Release tag `v*.*.*` | `sha-<short_sha>-<variant>`                                                  | At build                  |
-| Release tag `v*.*.*` | `<version>-<variant>`, `<major>.<minor>-<variant>`, `latest-<variant>`       | After the scan passes     |
+| Trigger              | Image Tags                                                             | Applied               |
+| -------------------- | ---------------------------------------------------------------------- | --------------------- |
+| Manual dispatch      | `sha-<short_sha>-<variant>`                                            | At build              |
+| Release tag `v*.*.*` | `sha-<short_sha>-<variant>`                                            | At build              |
+| Release tag `v*.*.*` | `<version>-<variant>`, `<major>.<minor>-<variant>`, `latest-<variant>` | After the scan passes |
 
 Where `<variant>` is one of: `aws`, `gcp`, `azure`, `vault`, `fscert`.
 
 Examples for tag `v1.2.0`:
+
 - Version tags: `1.2.0-aws`, `1.2.0-gcp`, `1.2.0-azure`, `1.2.0-vault`, `1.2.0-fscert`
 - Short version tags: `1.2-aws`, `1.2-gcp`, `1.2-azure`, `1.2-vault`, `1.2-fscert`
 - Latest tags: `latest-aws`, `latest-gcp`, `latest-azure`, `latest-vault`, `latest-fscert`
@@ -64,7 +65,7 @@ To select a variant, set the image tag with the appropriate suffix in your Helm 
 # values.yaml override
 statuslist:
   image:
-    tag: "1.2.0-vault"  # Use Vault variant
+    tag: "1.2.0-vault" # Use Vault variant
 ```
 
 ### Production Deploy
