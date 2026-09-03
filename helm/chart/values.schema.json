@@ -3,7 +3,7 @@
   "type": "object",
   "properties": {
     "global": {
-      "type": "object",
+      "type": ["object", "null"],
       "properties": {
         "domain": {
           "type": "string",

@@ -1,5 +1,5 @@
 {{- if .Values.statuslist.ingress.enabled }}
-{{- $globalDomain := trimSuffix "." (.Values.global.domain | default "") }}
+{{- $globalDomain := trimSuffix "." (dig "domain" "" (.Values.global | default dict) | default "") }}
 {{- $ingressHost := .Values.statuslist.ingress.externalDnsHostname | default "" }}
 {{- if and (eq $ingressHost "") $globalDomain }}
 {{- $ingressHost = printf "statuslist.%s" $globalDomain }}
@@ -10,6 +10,8 @@
 {{- $tlsHosts := .Values.statuslist.ingress.tls.hosts | default list }}
 {{- if and (eq (len $tlsHosts) 0) $globalDomain }}
 {{- $tlsHosts = list (printf "*.%s" $globalDomain) }}
+{{- else if and (eq (len $tlsHosts) 0) (ne $ingressHost "localhost") }}
+{{- $tlsHosts = list $ingressHost }}
 {{- end }}
 apiVersion: networking.k8s.io/v1
 kind: Ingress

@@ -160,7 +160,7 @@ spec:
               {{- fail "statuslist.env.APP_DATABASE__PORT is required; set it to the database service port" }}
             {{- end }}
             {{- if not (hasKey $env "APP_SERVER__DOMAIN") }}
-              {{- $globalDomain := trimSuffix "." (.Values.global.domain | default "") }}
+              {{- $globalDomain := trimSuffix "." (dig "domain" "" (.Values.global | default dict) | default "") }}
               {{- if or .Values.statuslist.ingress.externalDnsHostname $globalDomain }}
                 {{- $_ := set $env "APP_SERVER__DOMAIN" (.Values.statuslist.ingress.externalDnsHostname | default (printf "statuslist.%s" $globalDomain)) }}
               {{- else }}
