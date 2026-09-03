@@ -353,7 +353,7 @@ Create or sync the Secret externally (e.g. via ESO):
 ```yaml
 # Secret keys per platform:
 #   webhook-based (discord/slack/teams/mattermost/webhook): "webhook-url"
-#   email: "email-to", "smtp-host", "smtp-port", "smtp-from"
+#   email: "email-to", "smtp-host" (host:port), "smtp-from"
 #   dead-man's-switch (optional for any platform): "dms-webhook-url"
 ```
 
@@ -378,14 +378,14 @@ silently absorbed and never reaches a human channel.
 
 ### Supported Platforms
 
-| `alerting.platform` | Required Secret key                                 | Notes                                                                 |
-| ------------------- | --------------------------------------------------- | --------------------------------------------------------------------- |
-| `discord`           | `webhook-url`                                       | Native `discordConfigs` receiver                                      |
-| `slack`             | `webhook-url`                                       | Native `slackConfigs` receiver                                        |
-| `teams`             | `webhook-url`                                       | Generic `webhookConfigs` (no native Teams receiver in Alertmanager)   |
-| `mattermost`        | `webhook-url`                                       | Generic `webhookConfigs`                                              |
-| `webhook`           | `webhook-url`                                       | Generic `webhookConfigs` (standard Alertmanager JSON payload)         |
-| `email`             | `email-to`, `smtp-host`, `smtp-port`, `smtp-from`   | Native `emailConfigs` receiver                                        |
+| `alerting.platform` | Required Secret key                      | Notes                                                                 |
+| ------------------- | ---------------------------------------- | --------------------------------------------------------------------- |
+| `discord`           | `webhook-url`                            | Native `discordConfigs` receiver                                      |
+| `slack`             | `webhook-url`                            | Native `slackConfigs` receiver (optional `alerting.slack.channel`)    |
+| `teams`             | `webhook-url`                            | Generic `webhookConfigs` (no native Teams receiver in Alertmanager)   |
+| `mattermost`        | `webhook-url`                            | Generic `webhookConfigs`                                              |
+| `webhook`           | `webhook-url`                            | Generic `webhookConfigs` (standard Alertmanager JSON payload)         |
+| `email`             | `email-to`, `smtp-host` (host:port), `smtp-from` | Native `emailConfigs` receiver                               |
 
 ### Prerequisites
 

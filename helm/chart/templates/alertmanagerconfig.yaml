@@ -117,7 +117,9 @@ spec:
             secretKeyRef:
               name: {{ $secretName | quote }}
               key: webhook-url
-          channel: "#alerts"
+          {{- if and .Values.alerting.slack .Values.alerting.slack.channel }}
+          channel: {{ .Values.alerting.slack.channel | quote }}
+          {{- end }}
           sendResolved: true
           title: |-
             {{ `{{ template "slack.default.title" . }}` }}

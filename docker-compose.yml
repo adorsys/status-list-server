@@ -188,7 +188,7 @@ services:
       MATTERMOST_WEBHOOK_URL: ${MATTERMOST_WEBHOOK_URL:-}
       ALERTMANAGER_SMTP_HOST: ${ALERTMANAGER_SMTP_HOST:-}
       ALERTMANAGER_SMTP_PORT: ${ALERTMANAGER_SMTP_PORT:-587}
-      ALERTMANAGER_SMTP_FROM: ${ALERTMANAGER_SMTP_FROM:-alertmanager@localhost}
+      ALERTMANAGER_SMTP_FROM: ${ALERTMANAGER_SMTP_FROM:-}
       ALERTMANAGER_EMAIL_TO: ${ALERTMANAGER_EMAIL_TO:-}
     volumes:
       - ./observability/prometheus/generate-alertmanager-config.sh:/generate-alertmanager-config.sh:ro

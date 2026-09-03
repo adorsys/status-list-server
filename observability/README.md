@@ -113,7 +113,7 @@ No application code is involved.
 - **Supported platforms** — `discord`, `slack`, `teams`, `mattermost`, `email`,
   `webhook` (generic). Native receivers are used for Discord/Slack/email; Teams
   and Mattermost use Alertmanager's generic webhook JSON.
-- **Alert Payload & Links** — Every notification payload includes contextual labels, summary/description, Git runbook links (`runbook_url`), and Grafana dashboard links (`dashboard_url`: `http://localhost:3000/d/status-list-slo`).
+- **Alert Payload & Links** — Every notification payload includes contextual labels, summary/description, Git runbook links (`runbook_url`), and Grafana dashboard links (`dashboard_url`: defaults to `http://localhost:3000/d/status-list-slo`, configurable in Helm via `alerting.dashboardUrl`).
 - **Resilience & Monitoring** — Alertmanager retries transient delivery failures with exponential back-off and emits `alertmanager_notifications_failed_total` metrics to monitor delivery health.
 - **Test with a real channel** — see the step-by-step Discord guide and full JSON payload schema:
   `runbooks/webhook-notifications.md`.

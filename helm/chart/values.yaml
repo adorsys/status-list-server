@@ -315,7 +315,7 @@ prometheusRule:
 #   that Secret and does NOT render its own. The pre-existing Secret must contain the
 #   following keys depending on the platform:
 #     webhook-based platforms: "webhook-url"
-#     email:                   "email-to", "smtp-host", "smtp-port", "smtp-from"
+#     email:                   "email-to", "smtp-host" (host:port), "smtp-from"
 #     dead-man's-switch:       "dms-webhook-url" (optional)
 #
 # Route tree (mirrors generate-alertmanager-config.sh):
@@ -331,6 +331,11 @@ alerting:
   enabled: false
   # Platform selector — must match one of the supported values above.
   platform: discord
+  # Grafana dashboard URL injected into alert annotations (e.g. http://grafana.example.com/d/status-list-slo).
+  dashboardUrl: "http://localhost:3000/d/status-list-slo"
+  # Optional Slack channel override (e.g. "#alerts"). Leave empty to use the webhook default channel.
+  slack:
+    channel: ""
   # Additional labels for the AlertmanagerConfig (e.g. release: kube-prometheus-stack).
   labels: {}
   # Name of a pre-existing Secret containing credentials. When set, the chart does NOT
@@ -351,7 +356,7 @@ alerting:
     to: ""
     smtpHost: ""
     smtpPort: "587"
-    smtpFrom: "alertmanager@localhost"
+    smtpFrom: ""
     requireTls: true
 
 # Configurable SLO target thresholds for PrometheusRule alerting rules.

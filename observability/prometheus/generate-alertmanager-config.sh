@@ -7,18 +7,15 @@
 # Routing (severity -> human / dead-man's-switch / noop, repeat intervals) is
 # static and platform-independent; only the human-channel `receivers:` block is
 # generated per platform. Alerts are channelled into a SINGLE human receiver:
-# the two severities (page = act now, warn = act this week) still carry the
-# `severity` label in the payload so an operator can filter in the channel, but
-# they share one configured endpoint. This matches the platform-agnostic model
-# where exactly one credential per platform is available; previously the page
-# and warn routes pointed at two receivers that emitted the SAME credential,
-# which promised a per-severity separation that did not exist.
+# All human alerts route to a single receiver carrying the severity label in the payload,
+# matching the platform credential model where one destination endpoint is configured.
 #
 # Required env:
 #   ALERTMANAGER_PLATFORM   slack|discord|teams|mattermost|email|webhook
 #
 # Per-platform credentials (set the one for your chosen platform):
-#   slack:      SLACK_WEBHOOK_URL  (a Slack incoming-webhook URL)
+#   slack:      SLACK_WEBHOOK_URL  (a Slack incoming-webhook URL),
+#               SLACK_CHANNEL      (optional channel override, e.g. #alerts)
 #   discord:    DISCORD_WEBHOOK_URL
 #   teams:      MS_TEAMS_WEBHOOK_URL
 #   mattermost: MATTERMOST_WEBHOOK_URL
@@ -57,11 +54,18 @@ emit_receiver() {
   case "$PLATFORM" in
     slack)
       _url="${SLACK_WEBHOOK_URL:?ALERTMANAGER: SLACK_WEBHOOK_URL required for platform=slack}"
+      _channel="${SLACK_CHANNEL:-}"
       cat <<EOF
   - name: '$_name'
     slack_configs:
       - api_url: '$_url'
-        channel: '#alerts'
+EOF
+      if [ -n "$_channel" ]; then
+        cat <<EOF
+        channel: '$_channel'
+EOF
+      fi
+      cat <<EOF
         send_resolved: true
         title: '{{ template "slack.default.title" . }}'
         text: '{{ template "slack.default.text" . }}'
