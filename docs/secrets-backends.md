@@ -4,10 +4,10 @@ The server stores lifecycle-coupled cryptographic material in one backend by def
 
 The supported backends include:
 
-- **HashiCorp Vault / OpenBao** (KV v2 engine, feature flag: `vault`, transitively enables `acme`)
-- **GCP Secret Manager** (feature flag: `gcp`, transitively enables `acme`)
-- **Azure Key Vault** (feature flag: `azure`, transitively enables `acme`)
-- **AWS Secrets Manager** (feature flag: `aws`, transitively enables `acme`)
+- **HashiCorp Vault / OpenBao** (KV v2 engine, feature flag: `vault`)
+- **GCP Secret Manager** (feature flag: `gcp`)
+- **Azure Key Vault** (feature flag: `azure`)
+- **AWS Secrets Manager** (feature flag: `aws`)
 - **In-Memory** (for development and testing)
 
 Backend selection is controlled by enabled Cargo features. Builds with `vault` use Vault/OpenBao. Builds with `aws` and without `vault` use AWS Secrets Manager. Builds without either backend feature use in-memory storage for local development and tests.

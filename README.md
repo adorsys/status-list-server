@@ -92,11 +92,10 @@ The crate uses modular Cargo feature flags to gate optional production backend d
 | `postgres` | SeaORM PostgreSQL database driver.                                           | ❌ Opt-in  |
 | `sqlite`   | SeaORM SQLite database driver.                                               | ❌ Opt-in  |
 | `mysql`    | SeaORM MySQL database driver.                                                | ❌ Opt-in  |
-| `aws`      | AWS Secrets Manager and Route53 DNS-01 driver (transitively enables `acme`). | ❌ Opt-in  |
-| `gcp`      | GCP Secret Manager and Cloud DNS driver (transitively enables `acme`).       | ❌ Opt-in  |
-| `azure`    | Azure Key Vault and Azure DNS driver (transitively enables `acme`).          | ❌ Opt-in  |
-| `vault`    | HashiCorp Vault / OpenBao driver (transitively enables `acme`).              | ❌ Opt-in  |
-| `acme`     | ACME DNS-01 certificate manager driver.                                      | ❌ Opt-in  |
+| `aws`      | AWS Secrets Manager and Route53 DNS-01 driver                                | ❌ Opt-in  |
+| `gcp`      | GCP Secret Manager and Cloud DNS driver                                      | ❌ Opt-in  |
+| `azure`    | Azure Key Vault and Azure DNS driver                                         | ❌ Opt-in  |
+| `vault`    | HashiCorp Vault / OpenBao driver                                             | ❌ Opt-in  |
 
 To build with specific backend drivers, pass the matching feature flag(s):
 
@@ -196,8 +195,8 @@ The Status List Server is provisioned with a cryptographic certificate that is e
 
 **Provisioning Modes:**
 
-- **ACME Provisioning (`acme` feature)**: Requests, validates (via DNS-01 challenge), and automatically renews TLS certificates using Let's Encrypt / ACME directory. Built into cloud-native binary variants.
-- **Static Loading (`fscert` binary)**: Loads pre-existing certificate chain and private key directly into memory, without ACME overhead or DNS challenges.
+- **ACME Provisioning**: Requests, validates (via DNS-01 challenge), and automatically renews TLS certificates using Let's Encrypt / ACME directory. Built into cloud-native binary variants.
+- **Static Loading**: Loads pre-existing certificate chain and private key directly into memory, without ACME overhead or DNS challenges.
 - If neither or only partial static material is provided, server startup immediately fails with a clear validation error.
 
 **Certificate Manager Builder Defaults:**
