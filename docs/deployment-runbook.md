@@ -1,6 +1,6 @@
 # Deployment Runbook
 
-This runbook is for **you**: you have the Status List Server project and want to deploy it on **your own** Kubernetes cluster. It lays out the deployment options available and the steps to follow, regardless of where the cluster runs (EKS, GKE, AKS, or a local cluster such as Minikube or kind).
+This runbook describes how to deploy the Status List Server project on a Kubernetes cluster. It lays out the deployment options available and the steps to follow.
 
 ## Deployment Options at a Glance
 
