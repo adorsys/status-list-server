@@ -25,6 +25,14 @@ env:
   HELM_RELEASE_NAME: statuslist
   HELM_NAMESPACE: statuslist-production
   APP_DATABASE_PORT: ${{ vars.APP_DATABASE_PORT }}
+  # The same expression the `deploy` job resolves IMAGE_VARIANT from, evaluated here at
+  # workflow level where no environment is in scope. `deploy` runs in `environment:
+  # production`, so an environment-scoped `IMAGE_VARIANT` would win there and be
+  # invisible to anything outside that environment -- including scheduled-image-scan.yml,
+  # whose central assertion is that the variant serving production was re-scanned.
+  # The two values are compared in `deploy` so that divergence fails a deploy rather
+  # than silently pointing the nightly at the wrong image. See "Known Gaps".
+  REPO_IMAGE_VARIANT: ${{ vars.IMAGE_VARIANT || 'aws' }}
 
 jobs:
   # No `if:` guard -- a skip here would cascade to everything that needs it. The
@@ -262,36 +270,28 @@ jobs:
 
       - name: Resolve the architecture manifests to scan
         # Resolving each child manifest fixes which arches are scanned by construction,
-        # rather than trusting Trivy's default and checking afterwards.
+        # rather than trusting Trivy's default and checking afterwards. The rule lives
+        # in a script so the scheduled re-scan resolves manifests by the same one.
+        env:
+          SUFFIX: ${{ matrix.variant.suffix }}
         run: |
           set -euo pipefail
-          index_digest=$(cat "image-digest-${{ matrix.variant.suffix }}.txt")
+          index_digest=$(cat "image-digest-${SUFFIX}.txt")
           [[ "$index_digest" =~ ^sha256:[a-f0-9]{64}$ ]] || {
-            echo "::error::invalid built image digest for ${{ matrix.variant.suffix }}: ${index_digest}"
+            echo "::error::invalid built image digest for ${SUFFIX}: ${index_digest}"
             exit 1
           }
-          image_ref="${IMAGE_BASE}@${index_digest}"
-          index=$(docker buildx imagetools inspect --raw "$image_ref")
 
-          for arch in $SCAN_ARCHES; do
-            # env.SCAN_ARCH rather than a --arg variable: `$arch` in a single-quoted
-            # jq program reads as an unexpanded shell variable.
-            matches=$(printf '%s' "$index" | SCAN_ARCH="$arch" jq -c '[.manifests[]
-              | select(.platform.os == "linux" and .platform.architecture == env.SCAN_ARCH)
-              | .digest]')
+          # Captured rather than piped or read from a process substitution: those
+          # discard the script's exit status, so a failed resolution would leave the
+          # loop reading nothing and this step green.
+          resolved=$(bash scripts/resolve-arch-manifests.sh "${IMAGE_BASE}@${index_digest}" $SCAN_ARCHES)
 
-            count=$(printf '%s' "$matches" | jq 'length')
-            if [ "$count" -ne 1 ]; then
-              echo "::error::expected exactly one linux/${arch} manifest in ${image_ref}, found ${count}."
-              exit 1
-            fi
-
-            manifest=$(printf '%s' "$matches" | jq -r '.[0]')
-            # Upper-cased because the scan steps read these back as `env.SCAN_REF_AMD64`
-            # and `env.SCAN_REF_ARM64`, which a `uses:` step cannot build dynamically.
+          # Upper-cased because the scan steps read these back as `env.SCAN_REF_AMD64`
+          # and `env.SCAN_REF_ARM64`, which a `uses:` step cannot build dynamically.
+          while read -r arch manifest; do
             echo "SCAN_REF_$(printf '%s' "$arch" | tr '[:lower:]' '[:upper:]')=${IMAGE_BASE}@${manifest}" >> "$GITHUB_ENV"
-            echo "scanning linux/${arch}: ${manifest}"
-          done
+          done <<< "$resolved"
 
       - name: Scan image (amd64)
         # Unfiltered; every view below is `trivy convert`ed from these, so the table and
@@ -318,34 +318,14 @@ jobs:
           output: trivy-image-report-arm64.json
 
       - name: Derive reports
+        # The severity floor and where the ledger is applied live in the script, so the
+        # scheduled re-scan derives the same views from the same flags. Two copies of
+        # this would drift, and a re-scan filtering differently than the release gate
+        # would not be comparable to it.
         run: |
           set -eu
-          # trivy-action puts the binary on PATH for later steps; fail loudly rather
-          # than silently skipping every derived report if that stops being true.
-          trivy --version > /dev/null
-
           for arch in $SCAN_ARCHES; do
-            report="trivy-image-report-${arch}.json"
-
-            trivy convert --format table --output "trivy-image-report-${arch}.txt" "$report"
-
-            # Before and after the ledger: the difference is what the exceptions hid, so
-            # a green gate distinguishes "nothing found" from "everything accepted".
-            trivy convert \
-              --severity HIGH,CRITICAL \
-              --format json --output "trivy-highcrit-all-${arch}.json" \
-              "$report"
-
-            trivy convert \
-              --severity HIGH,CRITICAL \
-              --ignorefile .trivyignore.yaml \
-              --format json --output "trivy-gate-findings-${arch}.json" \
-              "$report"
-
-            # A clean scan must still produce every artifact.
-            [ -s "trivy-image-report-${arch}.txt" ] || echo "No vulnerabilities reported." > "trivy-image-report-${arch}.txt"
-            [ -s "trivy-gate-findings-${arch}.json" ] || echo '{"Results":[]}' > "trivy-gate-findings-${arch}.json"
-            [ -s "trivy-highcrit-all-${arch}.json" ] || echo '{"Results":[]}' > "trivy-highcrit-all-${arch}.json"
+            sh scripts/derive-trivy-reports.sh "$arch"
           done
 
       - name: Collect published SBOMs
@@ -432,7 +412,8 @@ jobs:
           if-no-files-found: warn
 
       # No code-scanning upload: alerts filed against a tag ref never surface in the
-      # Security tab's branch view. A durable sink needs the scheduled re-scan (#410).
+      # Security tab's branch view. The durable sink is scheduled-image-scan.yml, which
+      # runs on a branch ref and uploads SARIF under `category: container-image`.
 
       - name: Assert published SBOMs list Rust crates
         # Covers the SBOM BuildKit attached; the Dockerfile's .dep-v0 check covers the
@@ -451,46 +432,9 @@ jobs:
 
       - name: Prove the gate can fail
         # A gate that never fired is indistinguishable from one that cannot fire, so
-        # prove both directions. The failing case must name the ID it was given.
-        run: |
-          set -eu
-          fixture=scripts/testdata/gate-selftest-findings.json
-          clean=scripts/testdata/gate-clean-findings.json
-
-          for f in "$fixture" "$clean"; do
-            [ -f "$f" ] || {
-              echo "::error::Gate self-test fixture $f is missing; the gate is unverified."
-              exit 1
-            }
-          done
-
-          expected=$(jq -r '.Results[]?.Vulnerabilities[]?.VulnerabilityID' "$fixture" | head -1)
-          if [ -z "$expected" ]; then
-            echo "::error::Gate self-test fixture $fixture contains no findings; it cannot test anything."
-            exit 1
-          fi
-
-          if output=$(sh scripts/vuln-gate.sh "$fixture" 2>&1); then
-            echo "::error::Gate self-test passed against a fixture containing a CRITICAL finding. The vulnerability gate cannot fail and is not protecting this release."
-            exit 1
-          fi
-
-          case "$output" in
-            *"$expected"*)
-              echo "gate self-test: ${expected} correctly fails the gate" ;;
-            *)
-              echo "::error::Gate self-test exited non-zero but never reported ${expected}, so the gate is erroring rather than blocking. Output follows."
-              echo "$output"
-              exit 1 ;;
-          esac
-
-          # The other direction: a gate that blocks unconditionally is also broken,
-          # and would otherwise only surface during a release.
-          if ! sh scripts/vuln-gate.sh "$clean" > /dev/null 2>&1; then
-            echo "::error::Gate self-test failed against a clean fixture. The gate blocks unconditionally and no release can pass it."
-            exit 1
-          fi
-          echo "gate self-test: clean report correctly passes the gate"
+        # prove both directions immediately before trusting the gate below. Shared with
+        # the scheduled re-scan and local-ci.sh so all three assert the same things.
+        run: sh scripts/gate-selftest.sh
 
       - name: Vulnerability gate
         # Blocks on any HIGH or CRITICAL surviving the ledger, with ignore-unfixed off.
@@ -715,6 +659,41 @@ jobs:
             echo "APP_DATABASE_PORT repository/environment variable is required" >&2
             exit 1
           fi
+
+      - name: Assert the deployed variant is visible outside this environment
+        # `vars.IMAGE_VARIANT` resolves environment-scoped variables first, and this job
+        # runs in `environment: production`. Nothing outside that environment can see an
+        # environment-scoped value -- and scheduled-image-scan.yml is outside it, by
+        # design, because giving a nightly cron a job in `production` would make it wait
+        # on that environment's reviewers.
+        #
+        # So the nightly reads the repository-scoped value and asserts the image serving
+        # production was re-scanned. If an environment-scoped override ever appears, that
+        # assertion silently starts verifying a variant nobody is running: the nightly
+        # goes green having scanned `aws` while production serves `vault`, and nothing
+        # anywhere reports a problem.
+        #
+        # This is the only place both scopes are visible at once, so this is where the
+        # divergence is caught. Failing a deploy is recoverable in minutes; a security
+        # control quietly watching the wrong artifact is not discovered at all.
+        # Both values are already in the shell environment -- `IMAGE_VARIANT` from this
+        # job's `env:` (environment scope) and `REPO_IMAGE_VARIANT` from the workflow's
+        # (repository scope) -- so neither needs re-interpolating into the script.
+        run: |
+          set -eu
+          if [ "${IMAGE_VARIANT:-aws}" != "$REPO_IMAGE_VARIANT" ]; then
+            echo "::error::IMAGE_VARIANT differs between scopes: this environment resolves"
+            echo "'${IMAGE_VARIANT:-aws}', the repository resolves '${REPO_IMAGE_VARIANT}'."
+            echo
+            echo "An environment-scoped IMAGE_VARIANT on 'production' is invisible to"
+            echo "scheduled-image-scan.yml, which would keep re-scanning '${REPO_IMAGE_VARIANT}'"
+            echo "and reporting success while production serves '${IMAGE_VARIANT:-aws}'."
+            echo
+            echo "Set IMAGE_VARIANT at the repository level and remove the environment"
+            echo "override, or teach the nightly to read the same scope before deploying."
+            exit 1
+          fi
+          echo "IMAGE_VARIANT '${IMAGE_VARIANT:-aws}' is visible to the scheduled re-scan."
 
       - name: Build Helm dependencies
         run: |
