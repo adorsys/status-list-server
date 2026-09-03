@@ -6,9 +6,9 @@ This runbook describes how to deploy the Status List Server project on a Kuberne
 
 You have three broad ways to run the Status List Server:
 
-- **Local / development** (Minikube, kind, Docker Desktop) — manual testing and iteration, using [`chart/values-local.yaml`](../helm/chart/values-local.yaml).
-- **Self-managed deploy** (recommended; any cluster you own) — a real, repeatable deployment using `chart/values.yaml` plus your own overrides.
-- **Bundled chart only** — bring your own containers or compose workflows (non-Helm).
+- **Local / development** (Minikube, kind, Docker Desktop): manual testing and iteration, using [`chart/values-local.yaml`](../helm/chart/values-local.yaml).
+- **Self-managed deploy** (recommended; any cluster you own): a real, repeatable deployment using `chart/values.yaml` plus your own overrides.
+- **Bundled chart only**: bring your own containers or compose workflows (non-Helm).
 
 The project ships a Helm chart (`helm/chart`) that is the recommended, supported way to deploy. The chart bundles:
 
@@ -32,9 +32,9 @@ The chart's default `statuslist.image.repository` points at `ghcr.io/adorsys/sta
 - **Build and push to your own registry**, then point `statuslist.image.repository` and `statuslist.image.tag` (or `digest`) at it, or
 - **Load a locally built image** into a local cluster (Minikube `minikube image load`, kind `kind load docker-image`) and use `pullPolicy: IfNotPresent`.
 
-Set `statuslist.image.tag` explicitly. If both `tag` and `digest` are empty, the chart falls back to its `appVersion`. Prefer a `sha256:` `digest` for reproducible production deploys (see [Pinning the image](#pinning-the-image)`).
+Set `statuslist.image.tag` explicitly. If both `tag` and `digest` are empty, the chart falls back to its `appVersion`. Prefer a `sha256:` `digest` for reproducible production deploys (see [Pinning the image](#pinning-the-image)).
 
-## Option 1 — Local / Development Deployment
+## Option 1: Local / Development Deployment
 
 The quickest path to a running instance, using `values-local.yaml`. It disables the Ingress, the External Secrets Operator and SecretStore CRs, and the OpenTelemetry Collector, and uses non-persistent PostgreSQL with lighter resources so it runs on a laptop.
 
@@ -55,11 +55,11 @@ kubectl create secret generic statuslist-secret -n local \
 # 4. Pull chart dependencies and install
 helm dependency update ./helm/chart
 
-# NOTE: the chart's default appVersion tag (currently 1.0.1-aws) is not published on GHCR;
-# pin a real tag such as latest. See troubleshooting.md "Image pull errors on variant tags".
+# NOTE: only variant-suffixed tags are published (e.g. latest-aws, 1.0.1-aws); there is
+# no unsuffixed image. Pin a real tag such as latest-aws. See troubleshooting.md "Image pull errors on variant tags".
 helm install statuslist-local ./helm/chart \
   -n local -f ./helm/chart/values-local.yaml \
-  --set statuslist.image.tag=latest --set statuslist.image.digest=null
+  --set statuslist.image.tag=latest-aws --set statuslist.image.digest=null
 
 # 5. Verify
 kubectl get pods -n local
@@ -80,7 +80,7 @@ curl http://localhost:8081/health/ready
 
 `values-local.yaml` only overrides what differs from the production defaults (disabled Ingress/ESO, NodePort/external reachability, lighter resource requests). If pods fail with `CreateContainerConfigError`, confirm the `statuslist-secret` Secret exists in the namespace. See [LOCAL_DEPLOYMENT.md](LOCAL_DEPLOYMENT.md) for a more detailed local walkthrough.
 
-## Option 2 — Self-Managed Deployment (any cluster)
+## Option 2: Self-Managed Deployment (any cluster)
 
 This is the path to a real deployment on a cluster you own. It uses the production-oriented `values.yaml` defaults, which you override for your environment.
 
@@ -101,8 +101,8 @@ How the Secret is created depends on your [secrets mode](#secrets-delivery): via
 
 The chart's `statuslist.env` holds the application configuration. Set the values your deployment needs:
 
-- **Database port**: `APP_DATABASE__PORT` (e.g. `5432`). This is **not** inferred from the PostgreSQL subchart — set it explicitly.
-- **Certificate provisioning**: by default the chart provisions the token-signing certificate over ACME, so you configure `APP_SERVER__CERT__*` (ACME directory URL and the DNS provider for DNS-01 challenges). See [dns-providers.md](dns-providers.md) for what each provider (`route53`, `cloudflare`, `gcloud`, `azure`, `acmedns`) requires. During ACME challenges, provider credentials must come from a Secret, not plain env values. ACME is not the only path — with the `-fscert` image the certificate and signing key are read from files you mount yourself (see the signing-credentials example in [`helm/README.md`](../helm/README.md)).
+- **Database port**: `APP_DATABASE__PORT` (e.g. `5432`). This is **not** inferred from the PostgreSQL subchart: set it explicitly.
+- **Certificate provisioning**: by default the chart provisions the token-signing certificate over ACME, so you configure `APP_SERVER__CERT__*` (ACME directory URL and the DNS provider for DNS-01 challenges). See [dns-providers.md](dns-providers.md) for what each provider (`route53`, `cloudflare`, `gcloud`, `azure`, `acmedns`) requires. During ACME challenges, provider credentials must come from a Secret, not plain env values. ACME is not the only path: with the `-fscert` image the certificate and signing key are read from files you mount yourself (see the signing-credentials example in [`helm/README.md`](../helm/README.md)).
 - **Region** (`statuslist.aws.region`, renders `APP_AWS__REGION`): only required when you use an AWS-backed secret or DNS backend; omit it for other providers.
 - **Telemetry / limits / rate limiting / cache**: defaults are sensible; over-ride only what your sizing needs.
 
@@ -143,7 +143,7 @@ For a stable, reproducible deploy, pin the exact image:
 statuslist:
   image:
     repository: <your-registry>/status-list-server
-    tag: "1.0.1" # used when digest is empty
+    tag: "1.2.0-aws" # variant-suffixed; used when digest is empty
     digest: "sha256:<64 hex chars>" # takes precedence over tag
 ```
 
@@ -153,18 +153,18 @@ When `digest` is set it takes precedence over `tag`, and Kubernetes runs `reposi
 
 The chart supports two secret-delivery modes, plus a no-secret-manager fallback. Pick the one that matches your cluster. The trade-offs for ESO vs Workload Identity are covered in [`helm/README.md`](../helm/README.md) and the database/secret backend options in [secrets-backends.md](secrets-backends.md).
 
-### Mode A — External Secrets Operator (ESO) [default]
+### Mode A: External Secrets Operator (ESO) [default]
 
 The chart defaults to **External Secrets Operator** to synchronize secrets from a provider instead of storing them as plain Kubernetes Secrets.
 
 - `externalSecret.enabled=true` and `secretStore.enabled=true` (both chart defaults) render ESO CRs:
   - a provider-neutral `SecretStore` (`secretStore.provider` selects `aws`, `vault`, `gcp`, `azure`, or `raw`);
   - an `ExternalSecret` that syncs `postgres-password` into a Kubernetes Secret named `statuslist-secret`;
-  - (when `statuslist.aws.mountCredentials=true`, the default) a second `ExternalSecret` that provisions `aws-credentials-secret` — the AWS shared `credentials`/`config` files Mounted under `/home/nobody/.aws`.
+  - (when `statuslist.aws.mountCredentials=true`, the default) a second `ExternalSecret` that provisions `aws-credentials-secret` (the AWS shared `credentials`/`config` files Mounted under `/home/nobody/.aws`).
 
 **To use ESO** you must install External Secrets Operator in your cluster and configure:
 
-- the provider (`secretStore.provider` and the matching provider block — e.g. AWS region + Secrets Manager/Parameter Store service);
+- the provider (`secretStore.provider` and the matching provider block, e.g. AWS region + Secrets Manager/Parameter Store service);
 - the remote keys your `ExternalSecret` references (e.g. a key holding the `POSTGRES_PASSWORD` property; the `aws-credentials-secret` keys holding `CREDENTIALS`/`CONFIG`).
 
 Verify after install:
@@ -177,7 +177,7 @@ kubectl describe externalsecret <external-secret> -n <namespace>
 
 A ready `ExternalSecret` shows a `SecretSynced` condition. A missing remote key or bad provider credentials appears in the status conditions.
 
-### Mode B — Workload Identity (opt-in)
+### Mode B: Workload Identity (opt-in)
 
 Instead of ESO-mounted static credentials, the application can use **ambient** cloud credentials via Workload Identity (EKS IRSA, GCP WI, Azure WIF):
 
@@ -186,15 +186,15 @@ Instead of ESO-mounted static credentials, the application can use **ambient** c
 
 Attach a least-privilege policy to the role (see the example in the Workload Identity section of [`helm/README.md`](../helm/README.md) for Route53 / Secrets Manager / S3).
 
-### Mode C — Fallback plain Secret (no ESO)
+### Mode C: Fallback plain Secret (no ESO)
 
 If your cluster does **not** run External Secrets Operator, disable ESO and render a plain Kubernetes Secret:
 
 ```yaml
 externalSecret:
   enabled: false
-  secretStore:
-    enabled: false
+secretStore:
+  enabled: false
 
 statuslist:
   fallbackSecret:
@@ -203,7 +203,7 @@ statuslist:
       postgres-password: "change-me"
 ```
 
-The fallback Secret is always named `statuslist-secret`. Because it uses `stringData`, values are base64-encoded by the API server. In this mode the `aws-credentials-secret` is not provisioned automatically — either create it yourself (for `mountCredentials=true`) or switch to Workload Identity.
+The fallback Secret is always named `statuslist-secret`. Because it uses `stringData`, values are base64-encoded by the API server. In this mode the `aws-credentials-secret` is not provisioned automatically: either create it yourself (for `mountCredentials=true`) or switch to Workload Identity.
 
 ## Scaling and Resilience (opt-in)
 
@@ -262,7 +262,7 @@ helm rollback statuslist <revision> -n <namespace> --wait --timeout 10m
 kubectl rollout status deployment/statuslist-status-list-server-deployment -n <namespace>
 ```
 
-Note: pinning by `digest` keeps rollbacks reproducible, since the stored digest — not a mutable tag — determines the running image. When upgrading, pass both `tag` and `digest` explicitly (or clear the digest with `--set statuslist.image.digest=null`); `helm upgrade --reuse-values` with only a changed tag will not move the image because the stored digest still wins.
+Note: pinning by `digest` keeps rollbacks reproducible, since the stored digest (not a mutable tag) determines the running image. When upgrading, pass both `tag` and `digest` explicitly (or clear the digest with `--set statuslist.image.digest=null`); `helm upgrade --reuse-values` with only a changed tag will not move the image because the stored digest still wins.
 
 ## Failure Triage
 
@@ -288,15 +288,15 @@ Note: pinning by `digest` keeps rollbacks reproducible, since the stored digest 
 
 ## External Dependencies
 
-- **External Secrets Operator** — needed for the default ESO secret path; install it in your cluster (or use Mode B / Mode C to avoid it).
-- **Ingress controller + cert-manager** — needed only if you enable the Ingress / TLS path.
-- **Your cloud provider** — for Workload Identity roles and any AWS/GCP/Azure backends the application uses.
+- **External Secrets Operator**: needed for the default ESO secret path; install it in your cluster (or use Mode B / Mode C to avoid it).
+- **Ingress controller + cert-manager**: needed only if you enable the Ingress / TLS path.
+- **Your cloud provider**: for Workload Identity roles and any AWS/GCP/Azure backends the application uses.
 
 ## Next Steps
 
-- [helm/README.md](../helm/README.md) — full chart value reference and configuration guide.
-- [LOCAL_DEPLOYMENT.md](LOCAL_DEPLOYMENT.md) — detailed local quickstart.
-- [dns-providers.md](dns-providers.md) — ACME DNS-01 provider setup per provider.
-- [secrets-backends.md](secrets-backends.md) — database/secret backend options, and the Workload Identity opt-in in [`helm/README.md`](../helm/README.md).
-- [database-backends.md](database-backends.md) — supported database backends.
-- [observability.md](observability.md) — OpenTelemetry / metrics / logs.
+- [helm/README.md](../helm/README.md): full chart value reference and configuration guide.
+- [LOCAL_DEPLOYMENT.md](LOCAL_DEPLOYMENT.md): detailed local quickstart.
+- [dns-providers.md](dns-providers.md): ACME DNS-01 provider setup per provider.
+- [secrets-backends.md](secrets-backends.md): database/secret backend options, and the Workload Identity opt-in in [`helm/README.md`](../helm/README.md).
+- [database-backends.md](database-backends.md): supported database backends.
+- [observability.md](observability.md): OpenTelemetry / metrics / logs.

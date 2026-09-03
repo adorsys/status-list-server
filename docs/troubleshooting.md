@@ -37,7 +37,7 @@ behaviors and are labeled as such.
 ### `Failed to connect to database (kind=connection, backend=postgres, host=..., port=..., database=...)`
 
 **When you see this:** At startup, immediately after config validation. The message carries a
-redacted target (backend, host, port, database) — never the password or URL. `kind` is the
+redacted target (backend, host, port, database), never the password or URL. `kind` is the
 classifier of the underlying driver failure: `connection` (TCP/auth handshake to the server)
 and `connection_acquire` (could not get a pool connection within `acquire_timeout`), among a
 small closed set (`connection`, `connection_acquire`, `execution`, `query`, `conversion`,
@@ -98,7 +98,7 @@ keeps exiting after roughly the same delay.
 **Observed during local k3d testing (two-node cluster):** this is a **distinct** failure from the
 `kind=connection` / `kind=connection_acquire` entry above. The PostgreSQL pod is `Running` and
 ready, DNS resolves, raw TCP to the ClusterIP is open, and a standalone `psql` client
-(`sslmode=disable`) connects and returns `SELECT 1` — yet the application's connection pool still
+(`sslmode=disable`) connects and returns `SELECT 1`, yet the application's connection pool still
 times out. Critically, **PostgreSQL logs (e.g. `kubectl logs <postgres-pod>`) show no connection
 activity at all** and the app init container's `wait-for-postgres` `nc -z` probe succeeds. This
 means the pool connectors are not completing a connection to the database.
@@ -119,7 +119,7 @@ kubectl delete pod pgcheck --ignore-not-found
 `switching sslmode=disable via APP_DATABASE__QUERY and raising the pool timeouts` are both
 confirmed **not** to resolve it here.
 
-**Fix:** Not yet established — a maintainer must confirm whether the application's connection
+**Fix:** Not yet established: a maintainer must confirm whether the application's connection
 pool is failing to initiate the TCP/driver handshake (e.g. driver TLS or a resolution path that
 differs from `psql`) on multi-node clusters. Treat this as **upstream investigation**, not an
 operator misconfiguration. If you only need a local smoke test, a single-node cluster (one server,
@@ -144,7 +144,7 @@ pool-tuning problem.
 
 _Source: `src/setup.rs:369` (memory variant), `src/setup.rs:410` (generic variant)_
 
-**Root cause:** Image **variant mismatch** — the container image you pulled was built with a
+**Root cause:** Image **variant mismatch**: the container image you pulled was built with a
 different feature set than the configuration expects (e.g. a build without `postgres`/`sqlite`/
 `mysql`/`memory` being told to use that backend).
 
@@ -184,7 +184,7 @@ kubectl logs -l app.kubernetes.io/name=status-list-server -n statuslist-producti
 helm get values statuslist -n statuslist-production
 ```
 
-**Fix:** Align `database.backend` with the URL scheme (prefer the split fields — see next entry,
+**Fix:** Align `database.backend` with the URL scheme (prefer the split fields; see next entry,
 which avoids assembling URLs in pod metadata entirely).
 
 **Prevention:** Use split database fields (`APP_DATABASE__HOST/PORT/USERNAME/NAME/QUERY`) with
@@ -199,14 +199,14 @@ which avoids assembling URLs in pod metadata entirely).
 
 _Source: `src/config.rs:752`_
 
-**Root cause:** Mixed configuration — the app refuses to guess which source wins.
+**Root cause:** Mixed configuration: the app refuses to guess which source wins.
 
 **Diagnostics / Fix:** Inspect the effective env (`helm get values`, or the pod env as in the
 first entry). Keep exactly one source of truth: either `APP_DATABASE__URL` alone, or the split
 fields with the chart-managed `APP_DATABASE__PASSWORD_FILE` mount. Remove the other.
 
 **Prevention:** The Helm chart already rejects `APP_DATABASE__URL` (it would expose assembled
-credentials in pod metadata) — see the Helm section. Use the split fields on Kubernetes.
+credentials in pod metadata); see the Helm section. Use the split fields on Kubernetes.
 
 ---
 
@@ -312,7 +312,7 @@ kubectl debug -it deploy/statuslist-status-list-server-deployment -n statuslist-
 ```
 
 **Fix:** Set the missing config (`vault.role_id` / `vault.secret_id` / `vault.secret_id_path`;
-`vault.k8s_role` + `vault.k8s_token_path`). For 403s, fix the Vault role binding — role/secret_id
+`vault.k8s_role` + `vault.k8s_token_path`). For 403s, fix the Vault role binding: role/secret_id
 must match, and the Kubernetes auth role must be bound to the service account the pod runs as.
 Set `vault.namespace` when the mount is tenant-scoped.
 
@@ -464,7 +464,7 @@ vault policy list
 ```
 
 **Fix:** Recreate the AppRole `secret_id` / K8s auth role binding, or restore Vault reachability.
-Because the app re-authenticates automatically, repairing the credential is usually enough — no
+Because the app re-authenticates automatically, repairing the credential is usually enough: no
 restart required unless the KV policy/path prefix is wrong (fix `vault.path_prefix`, `vault.mount`).
 
 **Prevention:** Keep `vault.secret_id` in a secret (not plaintext config), and prefer renewable
@@ -507,7 +507,7 @@ confirm the DB/Secret exist ahead of the rollout.
 
 **When you see this:** The app Secret (`statuslist-secret`) is missing or stale, so the pod
 fails readiness/startup. This is a **platform scenario**: the `ExternalSecret` CR reports a sync
-condition — the term `SecretSyncedError` appears as the `Condition.Reason` on the ExternalSecret,
+condition: the term `SecretSyncedError` appears as the `Condition.Reason` on the ExternalSecret,
 not as an application log line.
 
 **Root cause:** The ESO controller could not reconcile the ExternalSecret to the SecretStore:
@@ -530,7 +530,7 @@ kubectl get secret statuslist-secret -n statuslist-production \
 
 Check the `Ready`/`Synced` conditions and the `Message` for the specific provider error. Confirm
 `spec.secretStoreRef.name` = `statuslist-secret-store` and `kind` = `SecretStore` (they are
-validated at render time — see the Helm section).
+validated at render time; see the Helm section).
 
 **Fix:** Depends on the reported provider error, e.g.:
 
@@ -552,12 +552,12 @@ present.
 
 ---
 
-### Pod `Running` but never binds the HTTP port — `connection refused` on the liveness probe (ACME provisioning blocks startup)
+### Pod `Running` but never binds the HTTP port: `connection refused` on the liveness probe (ACME provisioning blocks startup)
 
 **When you see this:** The pod reaches `Running` but stays `NotReady` and keeps restarting; the
 liveness probe fails with `Get "http://<pod-ip>:<port>/health/live": connect: connection refused`,
 and `curl` against the service/NodePort returns `000`/empty reply. The application log stops
-immediately after `telemetry initialized` with no further startup lines — the HTTP server never
+immediately after `telemetry initialized` with no further startup lines: the HTTP server never
 binds its `APP_SERVER__PORT` (e.g. `8000`).
 
 **Root cause:** The container image is built with the `acme` Cargo feature, and under that feature
@@ -565,9 +565,9 @@ the **default `server.cert.provisioning_strategy` is `acme`** (`src/utils/cert_m
 strategy `acme`, the application attempts ACME DNS-01 certificate provisioning at startup, which
 requires a DNS provider and credentials (see `dns-providers.md`). `values-local.yaml` and
 `LOCAL_DEPLOYMENT.md` do not override the cert values, so they inherit the production defaults
-from `values.yaml` — `APP_SERVER__CERT__DNS__PROVIDER=route53`,
+from `values.yaml`: `APP_SERVER__CERT__DNS__PROVIDER=route53`,
 `APP_SERVER__CERT__EMAIL=info@adorsys.com`, `APP_SERVER__DOMAIN=statuslist.eudi-adorsys.com`, and
-the Let's Encrypt directory URL — and block before binding the HTTP server.
+the Let's Encrypt directory URL, and block before binding the HTTP server.
 
 **Diagnostics:**
 
@@ -594,7 +594,7 @@ kubectl get deploy -n <namespace> <release>-status-list-server-deployment \
 **Prevention:** For any local/dev run, decide up front whether you want certificate provisioning
 at all. Disable or retarget ACME _before_ installing; the runbook's "Expose the service (Ingress)"
 note already advises this, but neither `values-local.yaml` nor `LOCAL_DEPLOYMENT.md` actually
-turns it off — a gap that should be fixed in the local values.
+turns it off, a gap that should be fixed in the local values.
 
 ---
 
@@ -608,7 +608,7 @@ critical dependency check fails or times out (5s), with results cached 1s.
 _Source: `src/server/health.rs:149-155` (ready, `readiness check failed`), checks `src/server/health.rs:183-269`_
 
 **Root cause:** One of the registered readiness checks fails. Checks are named `database`
-(`DbCheck`, pings the pool — reason `database unreachable: ...`) and `cert_store`
+(`DbCheck`, pings the pool; reason `database unreachable: ...`) and `cert_store`
 (`CertStoreCheck` for Vault/secret-store reachability, or `FilesystemCertCheck` for the
 filesystem cert paths).
 
@@ -623,7 +623,7 @@ curl -s http://<pod-ip>:<port>/health/ready
 ```
 
 The detailed failure reasons are logged at `WARN` (`readiness check failed`) rather than
-exposed in the unauthenticated response — read the pod logs.
+exposed in the unauthenticated response: read the pod logs.
 
 **Fix:** Address the failing dependency: DB reachable/auth OK, or the cert store reachable /
 cert files present and readable. In filesystem mode, `FilesystemCertCheck` fails if the cert or
@@ -645,13 +645,13 @@ _Source (chart): `helm/chart/templates/network-policy.yaml`_
 egress as follows:
 
 - the `postgres` pods (selector `app.kubernetes.io/name=postgres`) plus anything appended via
-  `statuslist.networkPolicy.egressInternal` — on the database port only;
-- **any destination** on TCP `443` and TCP/UDP `53` (DNS/HTTPS) — this egress rule has no
+  `statuslist.networkPolicy.egressInternal`, on the database port only;
+- **any destination** on TCP `443` and TCP/UDP `53` (DNS/HTTPS); this egress rule has no
   destination selector, so it is not limited to the pod selectors;
 - and, when the `opentelemetry-collector` subchart is enabled, the collector pods on `4317`/`4318`.
 
-Any other egress — a Vault/OpenBao server on a non-443 port, a different DB service name, an OTLP
-collector on a different port, or a `podSelector` that does not match the target labels — is
+Any other egress, e.g. a Vault/OpenBao server on a non-443 port, a different DB service name, an OTLP
+collector on a different port, or a `podSelector` that does not match the target labels, is
 silently dropped. Note that a Vault server exposing 443 may actually be reachable (the 443/53 rule
 is open to all destinations); if it is blocked, it is usually on a non-443 port or because egress
 `ipBlock`/`podSelector` coverage is missing.
@@ -667,7 +667,7 @@ kubectl get pods -l app.kubernetes.io/name=opentelemetry-collector -n statuslist
 
 **Fix:** Understand the chart's current limitation before changing anything:
 `statuslist.networkPolicy.egressInternal` only appends destination `to` selectors **beneath the
-existing database-port rule** (`network-policy.yaml:33-39`) — it cannot open a new port. There is
+existing database-port rule** (`network-policy.yaml:33-39`): it cannot open a new port. There is
 no chart value today for arbitrary extra egress rules. So:
 
 - A **database** whose pods/labels differ from `app.kubernetes.io/name=postgres` can be reached by
@@ -675,7 +675,7 @@ no chart value today for arbitrary extra egress rules. So:
   database port).
 - A **Vault/OpenBao or other backend on a non-443 port** (e.g. `8200`) **cannot** be unblocked
   with `egressInternal`. Realistic options:
-  - expose Vault so the app can reach it on an already-allowed port (e.g. `443` — the `443/53`
+  - expose Vault so the app can reach it on an already-allowed port (e.g. `443`, the `443/53`
     rule has no destination selector, so it is open to all destinations); or
   - set `statuslist.networkPolicy.enabled=false` and provide your own `NetworkPolicy` that opens
     the ports your deployment actually needs; or
@@ -741,9 +741,11 @@ a cluster that later shows `ImagePullBackOff`/`CrashLoopBackOff`.
 
 **Observed with the default chart install:** the chart's `appVersion` is `1.0.1-aws`
 (`Chart.yaml`), so with `statuslist.image.tag` empty the Deployment resolves the image
-`ghcr.io/adorsys/status-list-server:1.0.1-aws`. That specific tag is **not published**: the GHCR
-package currently carries only unsuffixed tags (`latest`, `main`, `1.0.0`, `1.0.1`, `1.0`, `sha-…`),
-and **no `*-aws`/`*-gcp`/`*-fscert` variant tags exist**. The result is exactly this symptom:
+`ghcr.io/adorsys/status-list-server:1.0.1-aws`. Only **variant-suffixed** tags are published
+(`latest-aws`, `latest-gcp`, `latest-azure`, `latest-vault`, `latest-fscert`, and matching
+`<version>-<variant>` / `sha-…-<variant>` tags); there is no unsuffixed `latest` or `1.0.1`.
+If `1.0.1-aws` gives `ErrImagePull`, that exact `appVersion` may simply not have been promoted for
+the variant yet. The result is this symptom:
 
 ```text
 Failed to pull image "ghcr.io/adorsys/status-list-server:1.0.1-aws":
@@ -751,9 +753,9 @@ rpc error: code = NotFound ... ghcr.io/adorsys/status-list-server:1.0.1-aws: not
 ```
 
 To proceed, pin an image tag that actually exists, e.g.
-`--set statuslist.image.tag=latest` (or `main`, `1.0.1`). See the runbook's "Pinning the image".
+`--set statuslist.image.tag=latest-aws`. See the runbook's "Pinning the image".
 
-**Root cause:** The image reference does not exist or is not pullable — wrong tag, a typo in the
+**Root cause:** The image reference does not exist or is not pullable: wrong tag, a typo in the
 repository/tag, `pullPolicy` behavior, or variant tags differing across builds. In the chart,
 `statuslist.image.digest` (when set) takes precedence over `statuslist.image.tag`; an empty tag
 falls back to `appVersion` (`deployment.yaml:69-82`). A digest not matching `sha256:<64 hex>`
@@ -771,7 +773,7 @@ helm history statuslist -n statuslist-production
 
 **Fix:** Set a valid, present tag/digest. Because digest precedence means a stored digest wins
 over a changed tag, when re-promoting a digest-only change you must pass the new digest (or clear
-it with `--set statuslist.image.digest=null`) — a plain tag change under `--reuse-values` will
+it with `--set statuslist.image.digest=null`); a plain tag change under `--reuse-values` will
 "succeed" and change nothing.
 
 ```bash
@@ -792,31 +794,31 @@ failure rolls back instead of wedging the release.
 
 For quick grep, the application emits these verbatim (with the primary source file):
 
-- `Failed to connect to database (kind=..., ...)` — `src/setup.rs`
-- `Database backend '...' configured, but feature flag for it was not compiled in.` — `src/setup.rs`
-  (and `Database backend 'memory' configured, but 'memory' feature flag was not compiled in.`) — `src/setup.rs:369`
-- `URL scheme does not match configured backend '...'` — `src/setup.rs`
-- `Ambiguous database configuration: use either database.url or split database fields, not both` — `src/config.rs`
-- `Missing required config field: database.password` (and `database.host`, `database.username`, `database.name`, `database.url or split database fields`) — `src/config.rs`
-- `Invalid database.host: expected a hostname or IP address without scheme, port, ...` — `src/config.rs`
-- `Invalid database.query: ...` (two variants) — `src/config.rs`
-- `Vault auth_method=approle requires 'role_id' to be configured` / `...'k8s_role'...` — `src/setup.rs`
-- `Vault configuration missing secret_id: provide 'secret_id' or 'secret_id_path'` — `src/config.rs`
-- `Failed to read Vault secret_id from file '...'` — `src/config.rs`
-- `vault AppRole|Kubernetes login denied (HTTP 403)` / `vault ... login failed: HTTP <status>` — `src/outbound/vault.rs`
-- `failed to read Kubernetes service account token from '...'` / `Kubernetes service account token in '...' is empty` — `src/outbound/vault.rs`
-- `Token renewal failed, re-authenticating: ...` / `token renewal failed: HTTP <status>` / `vault authentication in cooldown backoff after recent failure` — `src/outbound/vault.rs`
-- `vault access denied for path '...'` / `vault load|store|delete failed for path '...': HTTP <status>` — `src/outbound/vault.rs`
-- `... material must be PEM text or base64/base64url-encoded DER` / `signing key PEM is not valid UTF-8: ...` — `src/utils/cert_manager/strategy.rs`
-- `failed to read certificate|signing key file '...'` — `src/utils/cert_manager/strategy.rs`
-- `store certificate key '...' was not found` / `store signing key '...' was not found` — `src/utils/cert_manager/strategy.rs`
-- `readiness check failed` (WARN) — `src/server/health.rs`
+- `Failed to connect to database (kind=..., ...)`: `src/setup.rs`
+- `Database backend '...' configured, but feature flag for it was not compiled in.`: `src/setup.rs`
+  (and `Database backend 'memory' configured, but 'memory' feature flag was not compiled in.`): `src/setup.rs:369`
+- `URL scheme does not match configured backend '...'`: `src/setup.rs`
+- `Ambiguous database configuration: use either database.url or split database fields, not both`: `src/config.rs`
+- `Missing required config field: database.password` (and `database.host`, `database.username`, `database.name`, `database.url or split database fields`): `src/config.rs`
+- `Invalid database.host: expected a hostname or IP address without scheme, port, ...`: `src/config.rs`
+- `Invalid database.query: ...` (two variants): `src/config.rs`
+- `Vault auth_method=approle requires 'role_id' to be configured` / `...'k8s_role'...`: `src/setup.rs`
+- `Vault configuration missing secret_id: provide 'secret_id' or 'secret_id_path'`: `src/config.rs`
+- `Failed to read Vault secret_id from file '...'`: `src/config.rs`
+- `vault AppRole|Kubernetes login denied (HTTP 403)` / `vault ... login failed: HTTP <status>`: `src/outbound/vault.rs`
+- `failed to read Kubernetes service account token from '...'` / `Kubernetes service account token in '...' is empty`: `src/outbound/vault.rs`
+- `Token renewal failed, re-authenticating: ...` / `token renewal failed: HTTP <status>` / `vault authentication in cooldown backoff after recent failure`: `src/outbound/vault.rs`
+- `vault access denied for path '...'` / `vault load|store|delete failed for path '...': HTTP <status>`: `src/outbound/vault.rs`
+- `... material must be PEM text or base64/base64url-encoded DER` / `signing key PEM is not valid UTF-8: ...`: `src/utils/cert_manager/strategy.rs`
+- `failed to read certificate|signing key file '...'`: `src/utils/cert_manager/strategy.rs`
+- `store certificate key '...' was not found` / `store signing key '...' was not found`: `src/utils/cert_manager/strategy.rs`
+- `readiness check failed` (WARN): `src/server/health.rs`
 
 Platform-only (no matching application string): `ImagePullBackOff`, `ErrImagePull`,
 `CrashLoopBackOff`, `SecretSyncedError` / `Synced=False`, and all Helm `fail` guards listed in
 the Helm section.
 
 Local-k3d `ErrImagePull` with the default chart install is caused by the unpublished
-`appVersion` variant tag `1.0.1-aws` (pin a real tag such as `latest`); a pod stuck `Running` but
+`appVersion` variant tag `1.0.1-aws` (pin a real published tag such as `latest-aws`); a pod stuck `Running` but
 never binding its HTTP port with `connection refused` on `/health/live` is the ACME
 provisioning-strategy block (see the "Pod Running but never binds the HTTP port" entry above).
