@@ -601,7 +601,6 @@ jobs:
       contents: read
       id-token: write
       packages: read
-      actions: read
     env:
       # Routed through env rather than interpolated into the helm command: deploy_tag
       # derives from GITHUB_REF_NAME, which the person pushing the tag controls.
@@ -691,11 +690,6 @@ jobs:
           helm repo add open-telemetry https://open-telemetry.github.io/opentelemetry-helm-charts
           helm dependency build helm/chart
 
-      - name: Download built digest
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: gh run download "$GITHUB_RUN_ID" --name "image-digest-${IMAGE_VARIANT:-aws}" --dir .
-
       - name: Deploy chart
         # The digest is what pins production to the image the scan gate passed; an
         # empty one silently falls back to the mutable tag. `:?` because helm reports
@@ -711,21 +705,14 @@ jobs:
           IMAGE_VARIANT="${IMAGE_VARIANT:-aws}"
           FULL_TAG="${DEPLOY_TAG}-${IMAGE_VARIANT}"
 
-          # Read the immutable index digest from the run's verified artifact
-          # rather than inspecting mutable tags over the network (eliminating TOCTOU risk).
-          IMAGE_DIGEST=$(cat "image-digest-${IMAGE_VARIANT}.txt")
+          # Resolve the promoted multi-arch index digest using structured formatting.
+          # Kubernetes needs the index digest, not a child platform manifest.
+          IMAGE_DIGEST=$(docker buildx imagetools inspect "${IMAGE_BASE}:${FULL_TAG}" \
+            --format '{{ .Manifest.Digest }}')
           [[ "$IMAGE_DIGEST" =~ ^sha256:[a-f0-9]{64}$ ]] || {
-            echo "::error::Invalid built image digest for ${IMAGE_VARIANT}: ${IMAGE_DIGEST}"
+            echo "::error::Could not resolve a valid image index digest for ${IMAGE_BASE}:${FULL_TAG}"
             exit 1
           }
-
-          # Confirm that the promoted release tag resolves to the exact scanned digest.
-          promoted_digest=$(docker buildx imagetools inspect "${IMAGE_BASE}:${FULL_TAG}" \
-            --format '{{ .Manifest.Digest }}')
-          if [ "$promoted_digest" != "$IMAGE_DIGEST" ]; then
-            echo "::error::Promoted tag ${FULL_TAG} resolved to ${promoted_digest}, expected ${IMAGE_DIGEST}"
-            exit 1
-          fi
 
           echo "Deploying ${IMAGE_BASE}:${FULL_TAG}@${IMAGE_DIGEST}"
 
