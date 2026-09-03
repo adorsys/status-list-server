@@ -130,10 +130,10 @@ cluster:
 helm template statuslist helm/chart --namespace statuslist --values my-values.yaml
 ```
 
-Then deploy. Create the namespace the first time and let Helm wait until the rollout is ready:
+Then deploy. `--create-namespace` creates the namespace on the first install, so there is no need
+for a separate `kubectl create namespace`, and Helm waits until the rollout is ready:
 
 ```bash
-kubectl create namespace statuslist
 helm upgrade --install statuslist helm/chart \
   --namespace statuslist --create-namespace \
   --values my-values.yaml \
@@ -160,22 +160,13 @@ curl -s https://<your-host>/health/ready
 `/health/ready` reflects dependency health (database reachable, certificate material loadable)
 and is the readiness gate for a release.
 
-For local development without a cluster, use [`chart/values-local.yaml`](chart/values-local.yaml)
-and follow the same `helm upgrade --install` flow.
-
-## Further reading
-
-`/health/ready` reflects dependency health (database reachable, certificate material loadable)
-and is the readiness gate for a release. If a pod stays unready or the server does not start, see
-the [troubleshooting reference](../docs/troubleshooting.md).
-
-For local development without a cluster, use [`chart/values-local.yaml`](chart/values-local.yaml)
+For local development with a local cluster, use [`chart/values-local.yaml`](chart/values-local.yaml)
 and follow the same `helm upgrade --install` flow.
 
 ## Further reading
 
 * [`chart/values.yaml`](chart/values.yaml) — the source of truth for every Helm value.
-* [Deployment runbook](../docs/deployment-runbook.md) — how CI/CD deploys to production.
+* [Deployment runbook](../docs/deployment-runbook.md) — how to deploy and how CI/CD deploys to production.
 * [Troubleshooting reference](../docs/troubleshooting.md) — error-indexed fixes for startup, secrets,
   Kubernetes/ESO, and Helm/upgrade issues.
 * [Container supply chain](../docs/supply-chain.md) — image scanning, SBOM, and SLSA.
