@@ -24,7 +24,9 @@ The non-obvious part, and the reason this was never a one-line change: **`action
 
 **Keep both.** `provenance: mode=max` stays, and `actions/attest-build-provenance` is added alongside it.
 
-The argument that settles this is not that the two documents answer different questions — that is true but soft, and someone will reasonably trade one question away to avoid carrying two documents. The decisive argument is an asymmetry in what a repository-visibility change does to each:
+Before the reasoning, one mechanical fact, because it changes what was being chosen between: **Option 2 was not available as a one-line change either.** `promote-tags` already asserts that BuildKit's SBOM *and provenance* are present for every published platform, and fails the release if either is missing. Setting `provenance: false` would therefore have failed every release at that step until the assertion was deleted too. So the choice was never "flip a flag or carry two documents" — it was "carry two documents, or remove an existing release-blocking check." A later reader evaluating Option 2 should hit that before they weigh anything else.
+
+With that said, the argument that settles the rest is not that the two documents answer different questions — that is true but soft, and someone will reasonably trade one question away to avoid carrying two documents. The decisive argument is an asymmetry in what a repository-visibility change does to each:
 
 > The explicit `provenance: mode=max` pin exists because `docker/build-push-action` defaults to `mode=max` on public repositories and `mode=min` on private ones, so flipping this repository private would **silently degrade** provenance. GitHub artifact attestations are available in public repositories on all plans, but on private and internal repositories they require GitHub Enterprise Cloud. So under "GitHub's provenance only," that same visibility flip does not degrade provenance — it **removes** it. Option 2 is strictly worse against the exact threat that motivated the pin it would undo.
 
@@ -46,7 +48,9 @@ Two further points support keeping `mode=max`, neither of them load-bearing on i
 
 ## Consequences
 
-**The image gains a verifiable issuer.** A consumer can establish that a specific digest was built by a workflow in this repository, which no amount of inspecting BuildKit's attestation could establish. Push access to the GHCR package alone is no longer sufficient to publish an image that presents as ours.
+**The image gains a verifiable issuer.** A consumer can establish that a specific digest was built by **`.github/workflows/deploy.yml` in this repository**, which no amount of inspecting BuildKit's attestation could establish. Push access to the GHCR package alone is no longer sufficient to publish an image that presents as ours.
+
+That the claim is workflow-specific rather than repository-specific is load-bearing, and `scripts/verify-attestation.sh` pins it with `--signer-workflow` rather than relying on `--repo`. `--repo` scopes attestation *lookup*, so on its own it establishes only that some workflow here signed the digest — and the threat this ADR is answering is push access, which is also enough to add a workflow. A repository-scoped verification would have re-created the "who said this" gap one level in, inside the command documented as closing it. **Do not loosen that flag to `--repo` alone**; the self-test asserts it is passed, and would fail.
 
 **Two provenance documents now describe one image, and consumers must be told which to use for what.** This is the cost of the decision, and it is paid in documentation: `docs/supply-chain.md` states which attestation answers which question, and what a consumer should *do* when they disagree.
 

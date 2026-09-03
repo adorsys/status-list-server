@@ -182,6 +182,12 @@ A released image carries **two** provenance documents, and they are not two rend
 
 **Read the BuildKit provenance to answer questions about a build you already trust** — which base image, which build arguments, which Dockerfile produced this digest. The signed v1 statement does not carry that detail.
 
+### A signature is not the gate's verdict
+
+**A verified attestation establishes who built a digest, from which commit, in which workflow — and nothing else.** In particular it is **not** a statement that the image passed the vulnerability gate. The two are produced at different points and answer to different jobs: `build-and-push` attests immediately after the push, which is *before* `scan-image` has run at all. So an image the gate goes on to **reject** still carries a fully valid, correctly signed attestation under its `sha-<commit>` tag, and the verification command below passes clean on it.
+
+That is the intended design rather than a hole in it — provenance answers "who built this", not "is this fit to deploy", and conflating them is the same error this whole section is about, one level up. But it means the two checks have to be read together: **consume by release tag, not by commit SHA tag.** The withheld tag is the gate's verdict; the signature is not. An image that is both attested *and* named `v1.2.3` or `latest-<variant>` has passed both, because [`promote-tags`](#the-scanned-artifact-is-the-deployed-artifact) applies those names only after the scan and then verifies the signature against the digest they resolve to.
+
 ### When they disagree
 
 Disagreement here means one specific thing: the registry content and the signed claim no longer describe the same artifact. That is a compromise signal, not a discrepancy to be reconciled. Concretely, any of these:
@@ -274,7 +280,11 @@ bash scripts/verify-attestation.sh \
   adorsys/status-list-server
 ```
 
-**This needs `gh` 2.67.0 or newer, and the wrapper refuses to run on anything older.** That floor is not tidiness. Until 2.67.0, `gh attestation verify` **exited 0 when it found no attestation at all** ([cli/cli#10418](https://github.com/cli/cli/issues/10418), fixed by [#10421](https://github.com/cli/cli/pull/10421)) — so an older `gh` reports a clean verification for an image carrying no provenance whatsoever, inside the one command documented as the defence against exactly that. The wrapper also asserts the output names the digest it was given, because a non-zero exit and a no-op are otherwise indistinguishable. `scripts/attestation-selftest.sh` proves both directions against a stubbed `gh` and runs on every pull request.
+**The wrapper pins the signing workflow, and that is the reason to use it rather than `gh` directly.** It runs `gh attestation verify` with `--signer-workflow adorsys/status-list-server/.github/workflows/deploy.yml`, not merely `--repo`. The difference is the whole point of the check. `--repo` scopes attestation *lookup*, so on its own it establishes that *some* workflow in this repository signed the digest — and the threat being defended against is push access, where whoever can publish a forged image can also add a workflow that signs it. Verifying with `--repo` alone answers a weaker question while looking like it answered this one. The wrapper composes the workflow path from the repository argument rather than accepting it separately, so the command above and the command `promote-tags` runs cannot drift apart.
+
+**It also needs `gh` 2.67.0 or newer, and refuses to run on anything older.** That floor is not tidiness. Until 2.67.0, `gh attestation verify` **exited 0 when it found no attestation at all** ([cli/cli#10418](https://github.com/cli/cli/issues/10418), fixed by [#10421](https://github.com/cli/cli/pull/10421)) — so an older `gh` reports a clean verification for an image carrying no provenance whatsoever, inside the one command documented as the defence against exactly that. The wrapper also asserts the output names the digest it was given, because a non-zero exit and a no-op are otherwise indistinguishable.
+
+`scripts/attestation-selftest.sh` proves both directions against a stubbed `gh` and runs on every pull request. It also asserts that the verifier really passes `--signer-workflow`, by inspecting the arguments the stub was called with. Deliberately not more than that: whether `gh` *honours* the flag is `gh`'s contract, and a stub rejecting a signature from another workflow would only prove the stub was written to reject it. What is ours to get wrong is whether the flag is sent, so that is what is checked.
 
 Verifying by digest is deliberate. A tag is mutable, so verifying one establishes only that something carrying a valid attestation once answered to that name — and it may resolve to a different digest by the time you pull it. To check a tag, resolve it first and verify what it resolves to, which is what `promote-tags` does:
 

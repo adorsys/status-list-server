@@ -13,7 +13,19 @@
 # Both documents are kept on purpose; docs/adr/0001-container-image-provenance.md is the
 # decision and says which one a consumer should verify for which question.
 #
-# Two failure modes are guarded, and the second is why this is a script.
+# The signer is pinned to a specific workflow, not just to this repository. `--repo`
+# alone scopes attestation *lookup*, so it establishes that *some* workflow in this
+# repository signed the digest. That is a weaker claim than the one this check exists to
+# make, and weaker in exactly the direction that matters: the threat is push access, and
+# whoever has enough access to publish a forged image also has enough to add a workflow
+# that signs it. Verifying with `--repo` alone would answer a question nobody asked while
+# looking like it answered this one -- the same conflation of "was this changed" with
+# "who said this" that the whole design is organised around, reappearing inside the
+# command documented as the defence against it. `--signer-workflow` binds the assertion
+# to the certificate identity of the workflow below, which is the actual claim.
+#
+# Two failure modes in `gh` itself are guarded on top of that, and the second is why this
+# is a script.
 #
 # `gh attestation verify` exited 0 when it found *no* attestation until gh 2.67.0
 # (cli/cli#10418, fixed by #10421). That is the absence-reads-as-success failure this
@@ -41,6 +53,14 @@ set -euo pipefail
 readonly REQUIRED_GH_MAJOR=2
 readonly REQUIRED_GH_MINOR=67
 readonly PREDICATE_TYPE="https://slsa.dev/provenance/v1"
+# The workflow that carries the attest step, relative to the repository passed as $2.
+# Composed from $2 rather than taken as a third argument so the command in
+# docs/supply-chain.md and the command the release path runs stay byte-identical: an
+# argument a consumer has to supply is an argument they can supply differently, and a
+# documented invocation that has drifted from the enforced one tells them nothing about
+# the enforced one. This is the workflow that *signs*, which is deploy.yml itself -- not
+# CI.yml, which deploy.yml calls but which issues no attestation.
+readonly SIGNER_WORKFLOW=".github/workflows/deploy.yml"
 
 image_ref=${1:?usage: verify-attestation.sh <image-ref@sha256:...> <owner/repo>}
 repo=${2:?usage: verify-attestation.sh <image-ref@sha256:...> <owner/repo>}
@@ -86,18 +106,24 @@ if ((gh_major < REQUIRED_GH_MAJOR || (gh_major == REQUIRED_GH_MAJOR && gh_minor 
     exit 1
 fi
 
+signer="${repo}/${SIGNER_WORKFLOW}"
+
 status=0
 output=$(gh attestation verify "oci://${image_ref}" \
     --repo "$repo" \
+    --signer-workflow "$signer" \
     --predicate-type "$PREDICATE_TYPE" 2>&1) || status=$?
 
 if [ "$status" -ne 0 ]; then
-    echo "::error::no verifiable ${PREDICATE_TYPE} provenance from ${repo} for ${digest}."
-    # Deliberately not asserting which of the two it was. An unreachable manifest and a
-    # reachable one with no attestation both land here, they need different responses,
-    # and only gh's output distinguishes them -- so it is printed rather than summarised.
-    echo "Either the image could not be fetched, or nothing signed by a ${repo} workflow vouches for it."
-    echo "gh's output below says which; docs/supply-chain.md 'When they disagree' covers the second case."
+    echo "::error::no verifiable ${PREDICATE_TYPE} provenance from ${signer} for ${digest}."
+    # Deliberately not asserting which of the three it was. An unreachable manifest, a
+    # reachable one with no attestation, and one signed by a different workflow all land
+    # here; they need different responses, and only gh's output distinguishes them -- so
+    # it is printed rather than summarised.
+    echo "Either the image could not be fetched, or nothing signed by ${signer} vouches for it."
+    echo "A signature from another workflow in ${repo} fails here too, and that is deliberate:"
+    echo "push access enough to forge an image is push access enough to add a workflow."
+    echo "gh's output below says which; docs/supply-chain.md 'When they disagree' covers the latter two."
     echo "$output"
     exit 1
 fi
@@ -114,4 +140,4 @@ case "$output" in
 esac
 
 echo "$output"
-echo "verified ${PREDICATE_TYPE} provenance from ${repo} for ${digest}"
+echo "verified ${PREDICATE_TYPE} provenance from ${signer} for ${digest}"
