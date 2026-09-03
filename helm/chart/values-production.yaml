@@ -1,15 +1,24 @@
 # Production values for helm/chart. Applied by the production deploy workflow
 # (deploy.yml) on release-tag deploys to the statuslist-production namespace.
 
+global:
+  domain: eudi-adorsys.com
+  storageClass: high-performance
+
 serviceAccount:
   create: true
 
 statuslist:
   replicaCount: 2
+  image:
+    tag: "1.0.1-aws"
   env:
     APP_ENV: "production"
     APP_SERVER__ENABLE_METRICS: "true"
     APP_TELEMETRY__ENVIRONMENT: "production"
+    APP_SERVER__CERT__EMAIL: "info@adorsys.com"
+    APP_SERVER__CERT__ORGANIZATION: "adorsys GmbH & CO KG"
+    APP_SERVER__CERT__DNS__PROVIDER: "route53"
     RUST_LOG: "warn,status_list_server=info"
   aws:
     # ESO-mounted credentials (the chart default). Set false + IRSA annotation for
@@ -23,6 +32,19 @@ statuslist:
     limits:
       memory: "1Gi"
       cpu: "1000m"
+
+postgres:
+  persistence:
+    storageClass: high-performance
+
+externalSecret:
+  enabled: true
+
+secretStore:
+  enabled: true
+  provider: aws
+  aws:
+    service: SecretsManager
 
 # Horizontal Pod Autoscaling for production workloads.
 autoscaling:

@@ -4,7 +4,7 @@ This guide provides instructions for deploying the Status List Server using the 
 
 ## Prerequisites
 
-- Kubernetes cluster (e.g., AWS EKS)
+- Kubernetes cluster
 - Helm 3 installed
 - `kubectl` configured to connect to your cluster
 - External Secrets Operator (ESO) installed when `externalSecret.enabled=true` (the default). The chart renders `external-secrets.io/v1` `ExternalSecret`, `SecretStore`, and `ClusterSecretStore` references, so the cluster CRDs must serve `external-secrets.io/v1` before installing or upgrading this chart. ESO v0.16 promoted these resources to `v1`; upgrade the ESO controller and CRDs together, and if CRDs are managed separately, apply the matching CRD bundle before upgrading the operator.
@@ -22,16 +22,20 @@ These dependencies are managed by the Helm chart. PostgreSQL is enabled by defau
 
 The following files are used to configure the deployment:
 
-- [`chart/values.yaml`](chart/values.yaml): Default configuration for production environments.
+- [`chart/values.yaml`](chart/values.yaml): Provider-neutral default configuration.
 - [`chart/values-local.yaml`](chart/values-local.yaml): Configuration for local development.
+- [`chart/values-aws.yaml`](chart/values-aws.yaml): Explicit AWS/EKS example overlay.
+- [`chart/values-production.yaml`](chart/values-production.yaml): Production overlay used by release deployments.
 
 ### Key Configuration Options
 
 - **`statuslist.image.repository`**: The Docker image for the application.
-- **`statuslist.image.tag`**: The Docker image tag. Used only when `statuslist.image.digest` is empty. Defaults to empty, which falls back to the chart's `appVersion` — the published AWS variant tag, not `latest`, so an upgrade that changes nothing in the chart cannot change the running image and a rollback stays reproducible. `appVersion` therefore has to track the latest released default image tag.
+- **`global.domain`**: Chart-wide public DNS suffix. When set, ingress defaults derive `statuslist.<global.domain>` and `*.<global.domain>` from this single value.
+- **`global.storageClass` / `postgres.persistence.storageClass`**: Leave as `""` to use the cluster default StorageClass; set explicitly in environment overlays when needed.
+- **`statuslist.image.tag`**: The Docker image tag. Used only when `statuslist.image.digest` is empty. Defaults to empty, which falls back to the chart's `appVersion` — the published filesystem certificate-store variant tag, not `latest`, so an upgrade that changes nothing in the chart cannot change the running image and a rollback stays reproducible. Cloud-specific images are selected explicitly in overlays such as `values-aws.yaml`.
 - **`statuslist.image.pullPolicy`**: Defaults to empty, which derives the policy from how the image is named: `IfNotPresent` when a digest is set, because a digest is content-addressed and re-pulling it can only fetch the same bytes, and `Always` for a tag, which is mutable. Set it explicitly to override.
-- **`statuslist.image.digest`**: An image digest as `sha256:` plus 64 hex characters; anything else is rejected at template time. When set it takes precedence over `statuslist.image.tag`, and the deployment runs `repository@digest`. Production deploys set this so the running image is the exact artifact CI scanned; tags are mutable and a digest is not. Leave it empty for local and manual installs to get tag-based deployment.
-  - **`postgres.persistence.enabled`**: Enable or disable persistent storage for PostgreSQL.
+- **`statuslist.image.digest`**: An image digest as `sha256:` plus 64 hex characters; anything else is rejected at template time/schema validation. When set it takes precedence over `statuslist.image.tag`, and the deployment runs `repository@digest`. Production deploys set this so the running image is the exact artifact CI scanned; tags are mutable and a digest is not. Leave it empty for local and manual installs to get tag-based deployment.
+- **`postgres.persistence.enabled`**: Enable or disable persistent storage for PostgreSQL.
 
 ## ServiceAccount and Workload Identity
 
@@ -50,7 +54,7 @@ For GCP or Azure Workload Identity, set the provider-specific annotation instead
 
 - `serviceAccount.create`: render a ServiceAccount (default `true`). When `false`, the Deployment uses the `default` service account.
 - `serviceAccount.name`: override the ServiceAccount name (default: the chart fullname).
-- `serviceAccount.automountServiceAccountToken`: default `true`; harden to `false` if the API token is not needed.
+- `serviceAccount.automountServiceAccountToken`: default `false`; set to `true` only if the application needs Kubernetes API access.
 
 ### Pod labels and Azure Workload Identity
 
@@ -66,12 +70,14 @@ The ServiceAccount annotation alone is not sufficient for Azure; both the annota
 
 ## AWS Configuration and Static Credentials vs. Workload Identity
 
-The default secret/credential provisioning path is **External Secrets Operator (ESO)**. By default the application mounts the ESO-provisioned `aws-credentials-secret` into the pod; Workload Identity is opt-in.
+The base chart is provider-neutral: `externalSecret.enabled=false`, `secretStore.enabled=false`, and `statuslist.aws.mountCredentials=false`. Enable External Secrets Operator (ESO) and choose a provider explicitly in an environment overlay. The AWS example overlay restores the Secrets Manager/static credential mount path:
 
 ```yaml
 statuslist:
+  image:
+    tag: "1.0.1-aws"
   aws:
-    mountCredentials: true # default: mount the ESO-provisioned aws-credentials-secret under /home/nobody/.aws
+    mountCredentials: true # mount the ESO-provisioned aws-credentials-secret under /home/nobody/.aws
     region: "" # plain, non-secret; renders APP_AWS__REGION
     credentialsSecret:
       remoteKey: "statuslist-aws-credentials" # SecretStore key holding both AWS shared files
@@ -81,11 +87,11 @@ statuslist:
 
 `statuslist.aws.region` is a plain (non-secret) value; `APP_AWS__REGION` is rendered whenever an effective region is set, independent of `secretStore.provider` and `mountCredentials`.
 
-**Workload Identity is opt-in:** to switch to ambient Workload Identity / IRSA, set `statuslist.aws.mountCredentials=false` (no credentials mounted) and attach the cloud role annotation via `serviceAccount.annotations` (e.g. `eks.amazonaws.com/role-arn` for EKS IRSA, or the GCP / Azure WI annotations described above). The application then authenticates using the ambient credentials provided by that role instead of mounted files.
+For ambient Workload Identity / IRSA, keep `statuslist.aws.mountCredentials=false` (no credentials mounted) and attach the cloud role annotation via `serviceAccount.annotations` (e.g. `eks.amazonaws.com/role-arn` for EKS IRSA, or the GCP / Azure WI annotations described above). The application then authenticates using the ambient credentials provided by that role instead of mounted files.
 
-**Upgrade compatibility:** The effective `APP_AWS__REGION` resolves as `statuslist.aws.region`, falling back to the legacy `secretStore.aws.region` and then `eu-central-1`. Installations that previously set only `secretStore.aws.region` keep that region for the application across upgrade.
+**Upgrade compatibility:** The effective `APP_AWS__REGION` resolves as `statuslist.aws.region`, falling back to the legacy `secretStore.aws.region`. Installations that previously set only `secretStore.aws.region` keep that region for the application across upgrade. The AWS ESO `SecretStore` still falls back to `eu-central-1` when no region is configured, but that fallback is not injected into the application pod.
 
-When `statuslist.aws.mountCredentials=true` (the default) **and** `externalSecret.enabled=true` (the default ESO path), the chart itself renders a second `ExternalSecret` that provisions `aws-credentials-secret` — the exact Secret the Deployment's credential volume references. It synchronizes two keys into that Secret:
+When `statuslist.aws.mountCredentials=true` **and** `externalSecret.enabled=true`, the chart itself renders a second `ExternalSecret` that provisions `aws-credentials-secret` — the exact Secret the Deployment's credential volume references. It synchronizes two keys into that Secret:
 
 - `credentials` ← `remoteKey`/`credentialsProperty` (the AWS shared credentials file, INI format, e.g. `[default]\naws_access_key_id=...\naws_secret_access_key=...`)
 - `config` ← `remoteKey`/`configProperty` (the AWS shared config file)
@@ -136,7 +142,7 @@ Replace `<HOSTED_ZONE_ID>`, `<REGION>`, and `<ACCOUNT_ID>` with your values, and
 
 ## SecretStore Providers
 
-External Secret Operator's `SecretStore` is provider-neutral via `secretStore.provider` (`aws` | `vault` | `gcp` | `azure` | `raw`). The shipped default is `aws`. A `SecretStore` is rendered **only** when `externalSecret.enabled=true` **and** `secretStore.enabled=true` — in the no-ESO fallback mode it is never emitted, so a cluster without ESO CRDs accepts the release.
+External Secret Operator's `SecretStore` is provider-neutral via `secretStore.provider` (`aws` | `vault` | `gcp` | `azure` | `raw`). The shipped default leaves the provider empty because `secretStore.enabled=false`. A `SecretStore` is rendered **only** when `externalSecret.enabled=true` **and** `secretStore.enabled=true` — in the no-ESO fallback mode it is never emitted, so a cluster without ESO CRDs accepts the release.
 
 This chart uses the stable ESO API group/version `external-secrets.io/v1`. Before installing with ESO enabled, verify that the installed CRDs serve `v1` for `externalsecrets.external-secrets.io`, `secretstores.external-secrets.io`, `clustersecretstores.external-secrets.io`, and any cluster-scoped resources you use. Upgrade ESO and its CRDs as one unit; mismatched controller/CRD versions can cause Kubernetes to reject the rendered resources or ESO reconciliation to fail.
 
@@ -243,14 +249,14 @@ When `autoscaling.enabled=true` the Deployment's `replicas` field is omitted (HP
 
 ## Migration: Static Credentials (ESO) to Workload Identity
 
-The chart now defaults to the ESO-mounted static-credential path (`statuslist.aws.mountCredentials=true`, the `aws-credentials-secret`). Moving to Workload Identity / IRSA is an opt-in migration:
+The AWS overlay supports both the ESO-mounted static-credential path (`statuslist.aws.mountCredentials=true`, the `aws-credentials-secret`) and Workload Identity / IRSA:
 
 1. Ensure the default ESO path works: `externalSecret.enabled=true` — the chart's `statuslist-external-secret-aws-credentials` ExternalSecret provisions `aws-credentials-secret` (holding `credentials` + `config`), which is mounted under `/home/nobody/.aws`.
 2. Configure Workload Identity: attach the role annotation via `serviceAccount.annotations` (e.g. `eks.amazonaws.com/role-arn` for EKS IRSA).
 3. Flip to Workload Identity: set `statuslist.aws.mountCredentials=false`.
 4. After verification, delete the mounted `aws-credentials-secret` and any legacy static AWS GitHub secrets.
 
-For production, the deploy workflow applies [`values-production.yaml`](./chart/values-production.yaml), which currently keeps the chart default: **ESO-mounted credentials** (`statuslist.aws.mountCredentials=true`). No Workload Identity / IRSA annotation is required today; the chart's `statuslist-external-secret-aws-credentials` ExternalSecret provisions the `aws-credentials-secret` that is mounted under `/home/nobody/.aws`. Migrating production to Workload Identity / IRSA is the documented opt-in step above — wire the `eks.amazonaws.com/role-arn` annotation and set `statuslist.aws.mountCredentials=false` in `values-production.yaml` **only after** the IRSA role is provisioned, otherwise the next deploy would have no AWS credentials.
+For production, the deploy workflow applies [`values-production.yaml`](./chart/values-production.yaml), which explicitly selects the AWS image, `global.domain`, the `high-performance` storage class, AWS Secrets Manager, and ESO-mounted credentials (`statuslist.aws.mountCredentials=true`). Migrating production to Workload Identity / IRSA is the documented step above — wire the `eks.amazonaws.com/role-arn` annotation and set `statuslist.aws.mountCredentials=false` in `values-production.yaml` **only after** the IRSA role is provisioned, otherwise the next deploy would have no AWS credentials.
 
 ## Credential Exposure Model
 
@@ -287,7 +293,9 @@ For GitHub Actions deployments to production, see the [Deployment Runbook](../do
 2. **Deploy the chart:**
 
    ```bash
-   helm install statuslist ./chart --namespace statuslist -f chart/values.yaml
+   helm install statuslist ./chart --namespace statuslist
+   # AWS/EKS example:
+   helm install statuslist ./chart --namespace statuslist -f chart/values-aws.yaml
    ```
 
 ## Local Deployment

@@ -1,0 +1,39 @@
+# AWS/EKS example overlay. Apply this explicitly on AWS deployments:
+# helm upgrade --install statuslist ./helm/chart -f ./helm/chart/values-aws.yaml
+
+global:
+  domain: eudi-adorsys.com
+  storageClass: high-performance
+
+statuslist:
+  image:
+    tag: "1.0.1-aws"
+  service:
+    # Enable when exposing the service directly through an AWS Network Load Balancer.
+    # Keep ClusterIP when ingress is responsible for external traffic.
+    type: LoadBalancer
+    annotations:
+      service.beta.kubernetes.io/aws-load-balancer-type: "external"
+      service.beta.kubernetes.io/aws-load-balancer-nlb-target-type: "ip"
+      service.beta.kubernetes.io/aws-load-balancer-scheme: "internet-facing"
+  env:
+    APP_SERVER__CERT__EMAIL: "info@adorsys.com"
+    APP_SERVER__CERT__ORGANIZATION: "adorsys GmbH & CO KG"
+    APP_SERVER__CERT__DNS__PROVIDER: "route53"
+  aws:
+    mountCredentials: true
+    region: eu-central-1
+
+externalSecret:
+  enabled: true
+
+secretStore:
+  enabled: true
+  provider: aws
+  aws:
+    service: SecretsManager
+    region: eu-central-1
+
+postgres:
+  persistence:
+    storageClass: high-performance

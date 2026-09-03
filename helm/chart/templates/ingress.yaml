@@ -1,4 +1,16 @@
 {{- if .Values.statuslist.ingress.enabled }}
+{{- $globalDomain := trimSuffix "." (.Values.global.domain | default "") }}
+{{- $ingressHost := .Values.statuslist.ingress.externalDnsHostname | default "" }}
+{{- if and (eq $ingressHost "") $globalDomain }}
+{{- $ingressHost = printf "statuslist.%s" $globalDomain }}
+{{- end }}
+{{- if eq $ingressHost "" }}
+{{- $ingressHost = "localhost" }}
+{{- end }}
+{{- $tlsHosts := .Values.statuslist.ingress.tls.hosts | default list }}
+{{- if and (eq (len $tlsHosts) 0) $globalDomain }}
+{{- $tlsHosts = list (printf "*.%s" $globalDomain) }}
+{{- end }}
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
@@ -7,8 +19,8 @@ metadata:
     {{- include "status-list-server-chart.labels" . | nindent 4 }}
   namespace: {{ .Release.Namespace }}
   annotations:
-    {{- if .Values.statuslist.ingress.externalDnsHostname }}
-    external-dns.alpha.kubernetes.io/hostname: {{ .Values.statuslist.ingress.externalDnsHostname }}
+    {{- if ne $ingressHost "localhost" }}
+    external-dns.alpha.kubernetes.io/hostname: {{ $ingressHost }}
     {{- end }}
     {{- if .Values.statuslist.ingress.annotations }}
     {{- toYaml .Values.statuslist.ingress.annotations | nindent 4 }}
@@ -17,11 +29,7 @@ metadata:
 spec:
   ingressClassName: nginx
   rules:
-  {{- if .Values.statuslist.ingress.externalDnsHostname }}
-  - host: {{ .Values.statuslist.ingress.externalDnsHostname }}
-  {{- else }}
-  - host: localhost
-  {{- end }}
+  - host: {{ $ingressHost }}
     http:
       paths:
       - path: {{ .Values.statuslist.ingress.path }}
@@ -31,10 +39,10 @@ spec:
             name: {{ include "status-list-server-chart.fullname" . }}-service
             port:
               number: {{ .Values.statuslist.service.port }}
-  {{- if .Values.statuslist.ingress.tls.secretName }}
+  {{- if and .Values.statuslist.ingress.tls.secretName (gt (len $tlsHosts) 0) }}
   tls:
   - hosts:
-    {{- range .Values.statuslist.ingress.tls.hosts }}
+    {{- range $tlsHosts }}
     - {{ . | quote }}
     {{- end }}
     secretName: {{ .Values.statuslist.ingress.tls.secretName }}

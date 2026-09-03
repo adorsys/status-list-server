@@ -2,6 +2,20 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "type": "object",
   "properties": {
+    "global": {
+      "type": "object",
+      "properties": {
+        "domain": {
+          "type": "string",
+          "description": "Chart-wide public DNS suffix. Leave empty to render localhost/default-neutral hostnames.",
+          "pattern": "^$|^([A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?\\.)+[A-Za-z]{2,63}\\.?$"
+        },
+        "storageClass": {
+          "type": "string",
+          "description": "Default StorageClass override. Empty string uses the cluster default."
+        }
+      }
+    },
     "serviceAccount": {
       "type": "object",
       "properties": {
@@ -17,7 +31,85 @@
       "properties": {
         "enabled": { "type": "boolean" },
         "replicaCount": { "type": "integer" },
+        "initContainers": { "type": "array" },
         "podLabels": { "type": "object", "additionalProperties": { "type": "string" } },
+        "image": {
+          "type": "object",
+          "properties": {
+            "repository": { "type": "string", "minLength": 1 },
+            "pullPolicy": { "type": "string", "enum": ["", "Always", "IfNotPresent", "Never"] },
+            "tag": { "type": "string" },
+            "digest": {
+              "type": ["string", "null"],
+              "pattern": "^$|^sha256:[a-f0-9]{64}$"
+            }
+          }
+        },
+        "service": {
+          "type": "object",
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "type": { "type": "string", "enum": ["ClusterIP", "NodePort", "LoadBalancer", "ExternalName"] },
+            "annotations": {
+              "type": "object",
+              "additionalProperties": { "type": "string" }
+            },
+            "port": { "type": "integer", "minimum": 1, "maximum": 65535 },
+            "targetPort": { "type": ["integer", "string"], "pattern": "^[A-Za-z0-9-]+$|^[0-9]+$" },
+            "nodePort": { "type": ["integer", "null"], "minimum": 30000, "maximum": 32767 }
+          },
+          "allOf": [
+            {
+              "if": {
+                "properties": { "type": { "const": "NodePort" } },
+                "required": ["type"]
+              },
+              "then": {
+                "properties": {
+                  "nodePort": { "type": ["integer", "null"], "minimum": 30000, "maximum": 32767 }
+                }
+              }
+            },
+            {
+              "if": {
+                "properties": { "type": { "not": { "const": "NodePort" } } },
+                "required": ["type"]
+              },
+              "then": {
+                "properties": {
+                  "nodePort": { "type": "null" }
+                }
+              }
+            }
+          ]
+        },
+        "ingress": {
+          "type": "object",
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "path": { "type": "string", "minLength": 1 },
+            "pathType": { "type": "string", "enum": ["Exact", "Prefix", "ImplementationSpecific"] },
+            "annotations": {
+              "type": "object",
+              "additionalProperties": { "type": "string" }
+            },
+            "tls": {
+              "type": "object",
+              "properties": {
+                "hosts": {
+                  "type": "array",
+                  "items": { "type": "string", "minLength": 1 }
+                },
+                "secretName": { "type": "string" }
+              }
+            },
+            "externalDnsHostname": { "type": "string" }
+          }
+        },
+        "env": {
+          "type": "object",
+          "additionalProperties": { "type": "string" }
+        },
         "aws": {
           "type": "object",
           "properties": {
@@ -76,7 +168,11 @@
           "properties": {
             "pollIntervalSecs": { "type": ["string", "integer"] }
           }
-        }
+        },
+        "livenessProbe": { "type": "object" },
+        "readinessProbe": { "type": "object" },
+        "networkPolicy": { "type": "object" },
+        "resources": { "type": "object" }
       }
     },
     "externalSecret": {
@@ -165,7 +261,7 @@
         "enabled": { "type": "boolean" },
         "provider": {
           "type": "string",
-          "enum": ["aws", "vault", "gcp", "azure", "raw"]
+          "enum": ["", "aws", "vault", "gcp", "azure", "raw"]
         },
         "aws": {
           "type": "object",
@@ -211,6 +307,72 @@
           "type": "object",
           "description": "Full ESO provider spec passthrough for unsupported providers (secretStore.provider=raw). Holds ONLY the concrete provider body rendered directly under spec.provider (no extra top-level 'provider' key), e.g. { webhook: { url: '...' } }. Render-time validation rejects an empty/raw-only object to avoid emitting an insecure SecretStore."
         }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": { "enabled": { "const": true } },
+            "required": ["enabled"]
+          },
+          "then": {
+            "properties": {
+              "provider": {
+                "type": "string",
+                "enum": ["aws", "vault", "gcp", "azure", "raw"]
+              }
+            },
+            "required": ["provider"]
+          }
+        },
+        {
+          "if": {
+            "properties": { "provider": { "const": "raw" } },
+            "required": ["provider"]
+          },
+          "then": {
+            "properties": {
+              "raw": {
+                "type": "object",
+                "minProperties": 1
+              }
+            }
+          }
+        }
+      ]
+    },
+    "postgres": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "resources": { "type": "object" },
+        "auth": {
+          "type": "object",
+          "properties": {
+            "username": { "type": "string" },
+            "database": { "type": "string" },
+            "existingSecret": { "type": "string" },
+            "secretKeys": { "type": "object" }
+          }
+        },
+        "persistence": {
+          "type": "object",
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "size": { "type": "string" },
+            "storageClass": {
+              "type": "string",
+              "description": "Empty string uses the cluster default StorageClass."
+            }
+          }
+        },
+        "service": {
+          "type": "object",
+          "properties": {
+            "type": { "type": "string" },
+            "port": { "type": "integer", "minimum": 1, "maximum": 65535 }
+          }
+        },
+        "image": { "type": "object" }
       }
     },
     "autoscaling": {
