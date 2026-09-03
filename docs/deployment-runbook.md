@@ -23,7 +23,7 @@ Everything below assumes you deploy with Helm. The chart is the source of truth 
 ## Prerequisites
 
 - A Kubernetes cluster you can talk to (`kubectl` configured with the right context).
-- `kubectl` and Helm 3 (≥ v3.8) installed.
+- `kubectl` and Helm 4 installed.
 - Network access from the cluster to pull images, and if you use the ACME certificate provisioning, to the certificate authority and your DNS provider.
 - A way to get images: either a registry account you control, or a local image load (Minikube/kind).
 
