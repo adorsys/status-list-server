@@ -44,8 +44,8 @@ statuslist:
     # Tag format: <version>-<suffix> (e.g., 1.2.0-aws, 1.2.0-gcp)
     # Latest tags: latest-<suffix> (e.g., latest-aws, latest-gcp)
     #
-    # Empty falls back to the chart appVersion, which is the published filesystem
-    # certificate-store variant tag. Defaulting to "latest" would let an upgrade
+    # Empty falls back to the chart appVersion, which follows the repository's
+    # published default image tag. Defaulting to "latest" would let an upgrade
     # that changes nothing in this chart still change the running image.
     tag: ""
     # "sha256:...". Takes precedence over tag and pins the exact digest CI scanned.

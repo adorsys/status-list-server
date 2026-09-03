@@ -4,9 +4,10 @@ description: Helm chart for deploying status list server on Kubernetes
 type: application
 version: 0.3.0
 # Default image tag when statuslist.image.tag and .digest are both empty.
-# Release images are always suffixed; the chart default uses the filesystem
-# certificate-store variant so the chart remains cloud-provider neutral.
-appVersion: "1.0.1-fscert"
+# Release images are always suffixed; the release workflow publishes the AWS
+# variant as the default image tag. Provider-specific Kubernetes settings stay
+# in explicit values overlays.
+appVersion: "1.0.1-aws"
 dependencies:
   - name: postgres
     version: 0.8.2
