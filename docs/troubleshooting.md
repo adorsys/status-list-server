@@ -1,6 +1,6 @@
 # Operator Troubleshooting Reference
 
-This guide is an **error-indexed** reference for the Status List Server. Each entry maps an
+This guide is an error-indexed reference for the Status List Server. Each entry maps an
 exact error message or symptom to its root cause, copy-paste diagnostics, and a fix. It is
 organized around the four operational areas that account for most incidents:
 
