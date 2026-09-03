@@ -44,7 +44,7 @@ small closed set (`connection`, `connection_acquire`, `execution`, `query`, `con
 `last_insert_id`, `missing_primary_key`, `record_not_found`, `attribute_not_set`, `custom`,
 `type`, `json`, `migration`, `record_not_inserted`, `record_not_updated`).
 
-_Source: `src/setup.rs:158` (message), `src/setup.rs:101` (classifier)_
+_Source: `src/setup.rs:163` (message), `src/setup.rs:106` (classifier)_
 
 **Root cause:** One of:
 
@@ -90,7 +90,7 @@ password rotation by restarting the rollout and watching this specific message d
 
 ### `Failed to connect to database ... pool timed out while waiting for an open connection` while PostgreSQL is reachable and authenticates
 
-**When you see this:** At startup, the pod crash-loops (`CrashLoopBackOff`) with the *pool*
+**When you see this:** At startup, the pod crash-loops (`CrashLoopBackOff`) with the _pool_
 timeout message rather than an immediate connect/auth error. Raising `APP_DATABASE__POOL__*`
 timeouts (e.g. `ACQUIRE_TIMEOUT_SECS=60`, `CONNECT_TIMEOUT_SECS=60`) does **not** help: the pod
 keeps exiting after roughly the same delay.
@@ -142,7 +142,7 @@ pool-tuning problem.
 - `Database backend 'X' configured, but feature flag for it was not compiled in.`
   (a backend compiled out entirely, no SQL/memory feature present)
 
-_Source: `src/setup.rs:431` (memory variant), `src/setup.rs:472` (generic variant)_
+_Source: `src/setup.rs:369` (memory variant), `src/setup.rs:410` (generic variant)_
 
 **Root cause:** Image **variant mismatch** — the container image you pulled was built with a
 different feature set than the configuration expects (e.g. a build without `postgres`/`sqlite`/
@@ -170,7 +170,7 @@ the image supports. Default backend by feature set is defined in `src/config.rs`
 **When you see this:** At startup, when validating the database connection string against the
 selected `database.backend`.
 
-_Source: `src/setup.rs:133`, schemes in `src/config.rs`_
+_Source: `src/setup.rs:138`, schemes in `src/config.rs`_
 
 **Root cause:** Backend vs scheme mismatch, e.g. `APP_DATABASE__BACKEND=postgres` with a
 `mysql://` URL, or a URL using `postgresql://` where the validator only accepts the exact
@@ -197,7 +197,7 @@ which avoids assembling URLs in pod metadata entirely).
 **When you see this:** At startup, when both the full `database.url` _and_ any split field
 (`host`, `username`, `password`, `name`) are set.
 
-_Source: `src/config.rs:749`_
+_Source: `src/config.rs:752`_
 
 **Root cause:** Mixed configuration — the app refuses to guess which source wins.
 
@@ -216,7 +216,7 @@ credentials in pod metadata) — see the Helm section. Use the split fields on K
 absent/empty. The same pattern applies to `database.host`, `database.username`, `database.name`,
 and to the combined `database.url or split database fields`.
 
-_Source: `src/config.rs:638-650` (`required_config_field` / `required_secret_field`), call sites `src/config.rs:769-775`, combined-message `src/config.rs:742`_
+_Source: `src/config.rs:641, 646` (`required_config_field` / `required_secret_field`), call sites `src/config.rs:772-778`, combined-message `src/config.rs:745`_
 
 **Root cause:** A required config value is not present. In the Helm/deployment model this is
 usually a **missing or empty secret mount / env**: the pod has no `APP_DATABASE__PASSWORD_FILE`
@@ -251,7 +251,7 @@ rotation without a pod restart (see the rotation section below).
 - `Invalid database.query: query parameter keys must be non-empty and contain only ASCII letters, digits, '.', '_' or '-'`
 - `Invalid database.query: credential-like query parameter key '...' is not allowed`
 
-_Source: `src/config.rs:687-707` (host validator, message at `706`), `src/config.rs:653-680` (query validator, messages at `666` and `679`)_
+_Source: `src/config.rs:690-710` (host validator, message at `709`), `src/config.rs:656-683` (query validator, messages at `669` and `682`)_
 
 **Root cause:** `database.host` contained a scheme/port/userinfo/`@`/`?`/`#`/whitespace, or
 trailing/leading `-`/`.`; or `database.query` used a forbidden credential-like key
@@ -280,7 +280,7 @@ Several distinct strings:
 - `failed to read Kubernetes service account token from '...': ...`
 - `Kubernetes service account token in '...' is empty`
 
-_Source: `src/setup.rs:715, 725` (config gate), `src/config.rs:894-908` (secret_id resolve), `src/outbound/vault.rs:491, 498` (SA token), `src/outbound/vault.rs:563, 574` (login)_
+_Source: `src/setup.rs:682, 692` (config gate), `src/config.rs:896-909` (secret_id resolve), `src/outbound/vault.rs:491, 498` (SA token), `src/outbound/vault.rs:563, 574` (login)_
 
 **Root cause:**
 
@@ -324,7 +324,7 @@ platform) and keep the K8s role bound to the minimal ServiceAccount.
 ## Secret & Token Key Rotation Failures
 
 > **Accuracy note:** The application reloads the database password **in-process** when it is
-> delivered as a file. `spawn_database_rotation` (`src/setup.rs:166`) watches the path named by
+> delivered as a file. `spawn_database_rotation` (`src/setup.rs:171`) watches the path named by
 > `APP_DATABASE__PASSWORD_FILE` (the chart mounts it by default under
 > `/var/run/status-list-server/database/password`) via `FileWatcher`. On change it builds and
 > validates a **new** pool, atomically swaps it into the repositories, then drains the old pool.
@@ -343,7 +343,7 @@ platform) and keep the K8s role bound to the minimal ServiceAccount.
 running pod picks the change up without a restart once the watcher notices the mounted file
 changed.
 
-**How it works (`spawn_database_rotation`, `src/setup.rs:166-222`):**
+**How it works (`spawn_database_rotation`, `src/setup.rs:171-222`):**
 
 - The watcher uses the OS file watcher where it is available and falls back to polling every
   `watcher.poll_interval_secs` (default `30`). With a Kubernetes Secret volume, the kubelet
@@ -401,10 +401,10 @@ certificate material. Strings include:
 - `signing key PEM is not valid UTF-8: ...`
 - `failed to read certificate file '...': ...` / `failed to read signing key file '...': ...`
 - `store certificate key '...' was not found` / `store signing key '...' was not found`
-- Store validation: both-paths-and-keys, missing file, or missing key errors from
-  `store_certificate_strategy`
+- Store validation: both-paths-and-keys, missing file, or missing key errors from the
+  `StoreProvisioningStrategy` builder
 
-_Source: `src/utils/cert_manager/strategy.rs:92-222`, `src/setup.rs:831` (`store_certificate_strategy`), `src/setup.rs:487` (call site)_
+_Source: `src/utils/cert_manager/strategy.rs:92-222`, `src/utils/cert_manager/builder.rs:171`, `src/setup.rs:494-505` (`store` provider selection and `spawn_cert_rotation`)_
 
 **Root cause:** The cert and signing key do not match (a rotated key paired with the old cert), a
 file/key is missing or unreadable, or the stored value is neither PEM nor base64 DER (e.g. a
@@ -422,8 +422,9 @@ kubectl get secret statuslist-secret -n statuslist-production \
 **Fix:** Replace the material with a **matching** cert + PKCS#8 key pair in the expected encoding
 (PEM containing `-----BEGIN ...`, or standard/base64url DER). Confirm both keys exist and are
 readable at the configured path/store-key. When the signing material is file-mounted under the
-`store` strategy, `spawn_acme_store_rotation` (`src/setup.rs:246`) reloads it in-process on file
-change; a rollout is only needed to re-read a changed value when it is delivered another way:
+`store` strategy, `spawn_cert_rotation` (`src/setup.rs:252`, called at `:505`) reloads it in-process
+on file change; a rollout is only needed to re-read a changed value when it is delivered another
+way:
 
 ```bash
 kubectl rollout restart deployment/statuslist-status-list-server-deployment -n statuslist-production
@@ -560,7 +561,7 @@ immediately after `telemetry initialized` with no further startup lines — the 
 binds its `APP_SERVER__PORT` (e.g. `8000`).
 
 **Root cause:** The container image is built with the `acme` Cargo feature, and under that feature
-the **default `server.cert.provisioning_strategy` is `acme`** (`src/config.rs:1044-1045`). With
+the **default `server.cert.provisioning_strategy` is `acme`** (`src/utils/cert_manager/builder.rs:189-190`). With
 strategy `acme`, the application attempts ACME DNS-01 certificate provisioning at startup, which
 requires a DNS provider and credentials (see `dns-providers.md`). `values-local.yaml` and
 `LOCAL_DEPLOYMENT.md` do not override the cert values, so they inherit the production defaults
@@ -591,7 +592,7 @@ kubectl get deploy -n <namespace> <release>-status-list-server-deployment \
   example and the `-fscert` variant in the runbook).
 
 **Prevention:** For any local/dev run, decide up front whether you want certificate provisioning
-at all. Disable or retarget ACME *before* installing; the runbook's "Expose the service (Ingress)"
+at all. Disable or retarget ACME _before_ installing; the runbook's "Expose the service (Ingress)"
 note already advises this, but neither `values-local.yaml` nor `LOCAL_DEPLOYMENT.md` actually
 turns it off — a gap that should be fixed in the local values.
 
@@ -793,7 +794,7 @@ For quick grep, the application emits these verbatim (with the primary source fi
 
 - `Failed to connect to database (kind=..., ...)` — `src/setup.rs`
 - `Database backend '...' configured, but feature flag for it was not compiled in.` — `src/setup.rs`
-  (and `Database backend 'memory' configured, but 'memory' feature flag was not compiled in.`) — `src/setup.rs:184-187`
+  (and `Database backend 'memory' configured, but 'memory' feature flag was not compiled in.`) — `src/setup.rs:369`
 - `URL scheme does not match configured backend '...'` — `src/setup.rs`
 - `Ambiguous database configuration: use either database.url or split database fields, not both` — `src/config.rs`
 - `Missing required config field: database.password` (and `database.host`, `database.username`, `database.name`, `database.url or split database fields`) — `src/config.rs`
