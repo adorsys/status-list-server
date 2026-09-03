@@ -2,6 +2,8 @@
 
 The server validates the configured database backend at startup and supports the following runtime choices:
 
+For startup validation and fail-fast behavior specific to database backends, see [`startup-validation.md`](startup-validation.md#production-startup-and-readiness-matrix).
+
 - `postgres`
 - `mysql`
 - `sqlite`
