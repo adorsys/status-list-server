@@ -375,7 +375,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -uo pipefail
-          if ! gh run download "$GITHUB_RUN_ID" --dir artifacts; then
+          if ! gh run download "$GITHUB_RUN_ID" -R "$GITHUB_REPOSITORY" --dir artifacts; then
             echo "::warning::no artifacts could be downloaded from this run."
             mkdir -p artifacts
           fi
