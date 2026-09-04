@@ -7,7 +7,7 @@ version: 0.4.0
 # Release images are always suffixed; the chart default uses the filesystem
 # certificate-store variant so base installs are provider-neutral. Cloud-specific
 # variants are selected in explicit values overlays.
-appVersion: "1.1.1-fscert"
+appVersion: "1.1.2-fscert"
 dependencies:
   - name: postgres
     version: 0.8.2

@@ -3,6 +3,13 @@
 All notable changes to this project will be documented in this file.
 <!-- markdownlint-disable line-length no-bare-urls ul-style emphasis-style -->
 
+## [1.1.2] - 2026-09-04
+
+### Bug Fixes
+
+- *(ci)* Fetch repo and pass repository flag for digest artifact download by @Hermann-Core
+
+
 ## [1.1.1] - 2026-09-04
 
 ### Bug Fixes
