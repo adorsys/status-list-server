@@ -1,15 +1,20 @@
 mod acme_dns;
+#[cfg(feature = "azure")]
 mod azure;
 mod cloudflare;
+#[cfg(feature = "gcp")]
 mod gcloud;
 mod pebble;
 #[cfg(feature = "aws")]
 mod route53;
+#[cfg(any(feature = "azure", feature = "gcp"))]
 mod token;
 
 pub use acme_dns::{AcmeDnsCredentials, AcmeDnsProvider};
+#[cfg(feature = "azure")]
 pub use azure::{AzureDnsProvider, ServicePrincipal};
 pub use cloudflare::CloudflareDnsProvider;
+#[cfg(feature = "gcp")]
 pub use gcloud::GoogleCloudDnsProvider;
 pub use pebble::PebbleDnsProvider;
 #[cfg(feature = "aws")]

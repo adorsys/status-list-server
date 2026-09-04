@@ -3,19 +3,20 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use azure_core::credentials::{AccessToken, TokenCredential, TokenRequestOptions};
-use azure_identity::{
-    DeveloperToolsCredential, ManagedIdentityCredential, WorkloadIdentityCredential,
-};
+use azure_core::credentials::TokenCredential;
+#[cfg(test)]
+use azure_core::credentials::{AccessToken, TokenRequestOptions};
 use color_eyre::eyre::{Report, eyre};
 use reqwest::{Client, StatusCode};
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
+use time::OffsetDateTime;
 use tokio::sync::RwLock;
 use tracing::info;
 
 use super::{DnsProvider, ZoneInfo, find_best_match, http_client, token::TokenCache};
 use crate::cert_manager::challenge::ChallengeError;
+use crate::outbound::azure_identity::DefaultAzureCredential;
 
 const PROVIDER: &str = "azure";
 const DEFAULT_LOGIN_BASE: &str = "https://login.microsoftonline.com";
@@ -67,13 +68,9 @@ struct ServicePrincipalTokenSource {
     token_cache: TokenCache,
 }
 
-#[derive(Debug)]
-struct AmbientAzureCredential {
-    sources: Vec<(&'static str, Arc<dyn TokenCredential>)>,
-}
-
 struct AmbientTokenSource {
     credential: Arc<dyn TokenCredential>,
+    token_cache: TokenCache,
 }
 
 #[derive(Deserialize)]
@@ -163,7 +160,7 @@ impl AzureDnsProvider {
         subscription_id: impl Into<String>,
         resource_group: impl Into<String>,
     ) -> Result<Self, ChallengeError> {
-        let credential = AmbientAzureCredential::new().map_err(|e| {
+        let credential = DefaultAzureCredential::new().map_err(|e| {
             dns_err(eyre!(
                 "Failed to initialize Azure DNS ambient credential chain. \
                  Configure AKS Workload Identity, managed identity, or Azure CLI auth. \
@@ -171,7 +168,10 @@ impl AzureDnsProvider {
             ))
         })?;
         Ok(Self::from_token_provider(
-            Box::new(AmbientTokenSource { credential }),
+            Box::new(AmbientTokenSource {
+                credential,
+                token_cache: TokenCache::new(),
+            }),
             subscription_id,
             resource_group,
         ))
@@ -268,58 +268,6 @@ impl AzureAccessTokenProvider for ServicePrincipalTokenSource {
     }
 }
 
-impl AmbientAzureCredential {
-    fn new() -> Result<Arc<Self>, azure_core::Error> {
-        let mut sources: Vec<(&'static str, Arc<dyn TokenCredential>)> = Vec::new();
-
-        if let Ok(cred) = WorkloadIdentityCredential::new(None) {
-            sources.push(("WorkloadIdentityCredential", cred));
-        }
-        if let Ok(cred) = ManagedIdentityCredential::new(None) {
-            sources.push(("ManagedIdentityCredential", cred));
-        }
-        if let Ok(cred) = DeveloperToolsCredential::new(None) {
-            sources.push(("DeveloperToolsCredential", cred));
-        }
-
-        if sources.is_empty() {
-            return Err(azure_core::Error::with_message(
-                azure_core::error::ErrorKind::Other,
-                "no Azure credential sources could be constructed",
-            ));
-        }
-
-        Ok(Arc::new(Self { sources }))
-    }
-}
-
-#[async_trait]
-impl TokenCredential for AmbientAzureCredential {
-    async fn get_token(
-        &self,
-        scopes: &[&str],
-        options: Option<TokenRequestOptions<'_>>,
-    ) -> azure_core::Result<AccessToken> {
-        let mut last_error = None;
-        for (name, cred) in &self.sources {
-            match cred.get_token(scopes, options.clone()).await {
-                Ok(token) => return Ok(token),
-                Err(err) => {
-                    tracing::debug!("{name} could not obtain Azure DNS token: {err}");
-                    last_error = Some(err);
-                }
-            }
-        }
-
-        Err(last_error.unwrap_or_else(|| {
-            azure_core::Error::with_message(
-                azure_core::error::ErrorKind::Other,
-                "all Azure DNS ambient credentials failed to acquire a token",
-            )
-        }))
-    }
-}
-
 #[async_trait]
 impl AzureAccessTokenProvider for AmbientTokenSource {
     async fn access_token(
@@ -329,17 +277,25 @@ impl AzureAccessTokenProvider for AmbientTokenSource {
         api_base: &str,
     ) -> Result<SecretString, ChallengeError> {
         let scope = format!("{}/.default", api_base);
-        self.credential
-            .get_token(&[scope.as_str()], None)
-            .await
-            .map(|token| token.token.secret().to_string().into())
-            .map_err(|e| {
-                dns_err(eyre!(
-                    "Failed to acquire Azure DNS ambient access token. Verify AKS \
-                     Workload Identity, managed identity endpoint, or Azure CLI login. \
-                     Details: {e}"
-                ))
+        self.token_cache
+            .get_or_mint(|| async {
+                let token = self
+                    .credential
+                    .get_token(&[scope.as_str()], None)
+                    .await
+                    .map_err(|e| {
+                        dns_err(eyre!(
+                            "Failed to acquire Azure DNS ambient access token. Verify AKS \
+                             Workload Identity, managed identity endpoint, or Azure CLI login. \
+                             Details: {e}"
+                        ))
+                    })?;
+                let expires_in = (token.expires_on - OffsetDateTime::now_utc())
+                    .try_into()
+                    .unwrap_or(Duration::ZERO);
+                Ok((token.token.secret().to_string().into(), expires_in))
             })
+            .await
     }
 }
 
@@ -625,6 +581,7 @@ mod tests {
     use azure_core::credentials::Secret as AzureSecret;
     use color_eyre::eyre::eyre;
     use serde_json::json;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use time::OffsetDateTime;
     use wiremock::matchers::{body_partial_json, header, method, path, query_param};
     use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -661,6 +618,43 @@ mod tests {
             Ok(AccessToken::new(
                 AzureSecret::new("ambient-azure-token"),
                 OffsetDateTime::now_utc() + Duration::from_secs(3600),
+            ))
+        }
+    }
+
+    #[derive(Debug)]
+    struct CountingAzureCredential {
+        calls: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl TokenCredential for CountingAzureCredential {
+        async fn get_token(
+            &self,
+            _scopes: &[&str],
+            _options: Option<TokenRequestOptions<'_>>,
+        ) -> azure_core::Result<AccessToken> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok(AccessToken::new(
+                AzureSecret::new("cached-ambient-azure-token"),
+                OffsetDateTime::now_utc() + Duration::from_secs(3600),
+            ))
+        }
+    }
+
+    #[derive(Debug)]
+    struct FailingAzureCredential;
+
+    #[async_trait]
+    impl TokenCredential for FailingAzureCredential {
+        async fn get_token(
+            &self,
+            _scopes: &[&str],
+            _options: Option<TokenRequestOptions<'_>>,
+        ) -> azure_core::Result<AccessToken> {
+            Err(azure_core::Error::with_message(
+                azure_core::error::ErrorKind::Credential,
+                "identity endpoint unavailable",
             ))
         }
     }
@@ -777,12 +771,59 @@ mod tests {
     async fn azure_token_credential_can_back_ambient_source() {
         let token = AmbientTokenSource {
             credential: Arc::new(StaticAzureCredential),
+            token_cache: TokenCache::new(),
         }
         .access_token(&http_client(), DEFAULT_LOGIN_BASE, DEFAULT_API_BASE)
         .await
         .unwrap();
 
         assert_eq!(token.expose_secret(), "ambient-azure-token");
+    }
+
+    #[tokio::test]
+    async fn ambient_token_source_caches_acquired_tokens() {
+        let credential = Arc::new(CountingAzureCredential {
+            calls: AtomicUsize::new(0),
+        });
+        let token_source = AmbientTokenSource {
+            credential: credential.clone(),
+            token_cache: TokenCache::new(),
+        };
+
+        for _ in 0..3 {
+            let token = token_source
+                .access_token(&http_client(), DEFAULT_LOGIN_BASE, DEFAULT_API_BASE)
+                .await
+                .unwrap();
+            assert_eq!(token.expose_secret(), "cached-ambient-azure-token");
+        }
+
+        assert_eq!(credential.calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn ambient_token_source_fetch_failure_is_redacted_and_actionable() {
+        let err = AmbientTokenSource {
+            credential: Arc::new(FailingAzureCredential),
+            token_cache: TokenCache::new(),
+        }
+        .access_token(&http_client(), DEFAULT_LOGIN_BASE, DEFAULT_API_BASE)
+        .await
+        .unwrap_err();
+
+        match err {
+            ChallengeError::Dns { provider, source } => {
+                assert_eq!(provider, "azure");
+                let msg = source.to_string();
+                assert!(msg.contains("Failed to acquire Azure DNS ambient access token"));
+                assert!(msg.contains("Workload Identity"));
+                assert!(msg.contains("managed identity"));
+                assert!(msg.contains("identity endpoint unavailable"));
+                assert!(!msg.contains("client_secret"));
+                assert!(!msg.contains("password"));
+            }
+            other => panic!("Unexpected error: {other:?}"),
+        }
     }
 
     #[tokio::test]
@@ -798,6 +839,8 @@ mod tests {
                 let msg = source.to_string();
                 assert!(msg.contains("ambient token failure"));
                 assert!(msg.contains("identity endpoint unavailable"));
+                assert!(!msg.contains("client_secret"));
+                assert!(!msg.contains("password"));
             }
             other => panic!("Unexpected error: {other:?}"),
         }

@@ -596,6 +596,11 @@ impl DnsConfig {
                         })?),
                     ),
                     GcloudDnsAuthMode::Ambient => {
+                        if key.is_some() {
+                            tracing::debug!(
+                                "Google Cloud DNS auth_mode=ambient ignores configured service_account_key/service_account_key_path; remove stale static credentials or set auth_mode=service_account"
+                            );
+                        }
                         let project_id = non_empty(&gcloud.project_id).ok_or_else(|| {
                             ConfigError::Message(
                                 "Google Cloud DNS ambient auth requires \
@@ -626,6 +631,11 @@ impl DnsConfig {
                         ResolvedDnsProvider::Azure(AzureDnsAuth::ServicePrincipal(azure))
                     }
                     AzureDnsAuthMode::Ambient => {
+                        if has_static_fields {
+                            tracing::debug!(
+                                "Azure DNS auth_mode=ambient ignores configured tenant_id/client_id/client_secret; remove stale static credentials or set auth_mode=service_principal"
+                            );
+                        }
                         azure.validate()?;
                         ResolvedDnsProvider::Azure(AzureDnsAuth::Ambient(azure))
                     }
@@ -2124,7 +2134,7 @@ mod tests {
             let db_url = db_url.expose_secret();
             assert!(
                 !db_url.contains("test_data"),
-                "Default config database URL references test_data: {db_url}"
+                "Default config database URL must not reference test_data"
             );
         }
         if let Some(cert) = default_config.server.cert.store.certificate.as_deref() {

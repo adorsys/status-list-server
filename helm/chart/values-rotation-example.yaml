@@ -88,8 +88,14 @@ secretStore:
   enabled: false
 
 # Application Configuration with File-Based Secret Mounts
+global:
+  domain: example.com
+
 statuslist:
   initContainers: []
+
+  fallbackSecret:
+    enabled: false
 
   image:
     # Replace with an application image that includes issue #456.
@@ -162,19 +168,18 @@ statuslist:
     # APP_SERVER__CERT__STORE__CERTIFICATE_PATH: /etc/secrets/token-keys/statuslist.crt
     # APP_SERVER__CERT__STORE__SIGNING_KEY_PATH: /etc/secrets/token-keys/statuslist.key
 
-    # Use file-based store provisioning for external certificates
-    APP_SERVER__CERT__PROVISIONING_STRATEGY: "store"
-
-    # ACME configuration (alternative to file-based certs)
+    # ACME-enabled image variants use DNS-01 issuance instead of these static
+    # certificate files.
     # APP_SERVER__CERT__ACME_DIRECTORY_URL: "https://acme-v02.api.letsencrypt.org/directory"
     # APP_SERVER__CERT__EMAIL: "ops@example.com"
 
   ingress:
     enabled: true
-    externalDnsHostname: statuslist.example.com
+    # Defaults to statuslist.<global.domain>.
+    externalDnsHostname: ""
     tls:
-      hosts:
-        - "statuslist.example.com"
+      # Defaults to *.<global.domain>.
+      hosts: []
       secretName: statuslist-tls
 
   resources:

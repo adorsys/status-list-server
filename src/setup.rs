@@ -15,7 +15,7 @@ use sea_orm::{ConnectOptions, DbErr};
 #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mysql"))]
 use sea_orm_migration::MigratorTrait;
 #[cfg(any(
-    feature = "acme",
+    feature = "gcp",
     feature = "vault",
     feature = "sqlite",
     feature = "postgres",
@@ -29,11 +29,14 @@ use tracing::warn;
 
 #[cfg(feature = "aws")]
 use crate::cert_manager::challenge::AwsRoute53DnsProvider;
+#[cfg(all(feature = "acme", feature = "gcp"))]
+use crate::cert_manager::challenge::GoogleCloudDnsProvider;
 #[cfg(feature = "acme")]
 use crate::cert_manager::challenge::{
-    AcmeDnsCredentials, AcmeDnsProvider, AzureDnsProvider, CloudflareDnsProvider, Dns01Handler,
-    GoogleCloudDnsProvider, PebbleDnsProvider, ServicePrincipal,
+    AcmeDnsCredentials, AcmeDnsProvider, CloudflareDnsProvider, Dns01Handler, PebbleDnsProvider,
 };
+#[cfg(all(feature = "acme", feature = "azure"))]
+use crate::cert_manager::challenge::{AzureDnsProvider, ServicePrincipal};
 #[cfg(feature = "acme")]
 use crate::cert_manager::http_client::DefaultHttpClient;
 #[cfg(all(
@@ -49,12 +52,13 @@ use crate::cert_manager::{
     CertManager,
     storage::{CryptoCachePolicy, Storage},
 };
-#[cfg(feature = "acme")]
-use crate::config::{
-    AzureDnsAuth, DnsProviderKind, ENV_DEVELOPMENT, ENV_PRODUCTION, GcloudDnsAuth, GcloudKeySource,
-    ResolvedDnsProvider,
-};
+#[cfg(all(feature = "acme", feature = "azure"))]
+use crate::config::AzureDnsAuth;
 use crate::config::{Config as AppConfig, DatabaseBackend};
+#[cfg(feature = "acme")]
+use crate::config::{DnsProviderKind, ENV_DEVELOPMENT, ENV_PRODUCTION, ResolvedDnsProvider};
+#[cfg(all(feature = "acme", feature = "gcp"))]
+use crate::config::{GcloudDnsAuth, GcloudKeySource};
 use crate::domain::{
     ports::{CertificateProvider, CredentialRepo, StatusListRepo, StatusListSnapshotRepo},
     service::Service,
@@ -810,6 +814,7 @@ async fn build_dns_challenge_handler(
         ResolvedDnsProvider::Cloudflare(cfg) => {
             Dns01Handler::new(CloudflareDnsProvider::new(cfg.api_token.clone()))
         }
+        #[cfg(feature = "gcp")]
         ResolvedDnsProvider::Gcloud(auth) => {
             let provider = match auth {
                 GcloudDnsAuth::ServiceAccount(key) => {
@@ -831,6 +836,13 @@ async fn build_dns_challenge_handler(
             };
             Dns01Handler::new(provider)
         }
+        #[cfg(not(feature = "gcp"))]
+        ResolvedDnsProvider::Gcloud(_) => {
+            return Err(color_eyre::eyre::eyre!(
+                "Google Cloud DNS provider requested, but 'gcp' feature is disabled at compile time."
+            ));
+        }
+        #[cfg(feature = "azure")]
         ResolvedDnsProvider::Azure(auth) => match auth {
             AzureDnsAuth::ServicePrincipal(cfg) => Dns01Handler::new(AzureDnsProvider::new(
                 ServicePrincipal {
@@ -853,6 +865,12 @@ async fn build_dns_challenge_handler(
                 .wrap_err("Invalid Azure DNS ambient credential configuration")?,
             ),
         },
+        #[cfg(not(feature = "azure"))]
+        ResolvedDnsProvider::Azure(_) => {
+            return Err(color_eyre::eyre::eyre!(
+                "Azure DNS provider requested, but 'azure' feature is disabled at compile time."
+            ));
+        }
         ResolvedDnsProvider::Acmedns(cfg) => {
             let accounts = cfg
                 .accounts

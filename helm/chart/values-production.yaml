@@ -1,5 +1,6 @@
-# Production values for helm/chart. Applied by the production deploy workflow
-# (deploy.yml) on release-tag deploys to the statuslist-production namespace.
+# Production values for helm/chart. Applied after values-aws.yaml by the
+# production deploy workflow (deploy.yml) on release-tag deploys to the
+# statuslist-production namespace.
 
 serviceAccount:
   create: true
@@ -11,11 +12,6 @@ statuslist:
     APP_SERVER__ENABLE_METRICS: "true"
     APP_TELEMETRY__ENVIRONMENT: "production"
     RUST_LOG: "warn,status_list_server=info"
-  aws:
-    # ESO-mounted credentials (the chart default). Set false + IRSA annotation for
-    # Workload Identity mode.
-    mountCredentials: true
-    region: eu-central-1
   resources:
     requests:
       memory: "512Mi"
