@@ -36,10 +36,10 @@ helm dependency update ./helm/chart
 helm install statuslist-local ./helm/chart -n local -f ./helm/chart/values-local.yaml
 ```
 
-> **Certificates:** the default `-fscert` image is provider-neutral and expects file-backed signing
-> material when using the `store` provisioning strategy. Where `--set-string` flags cannot fully
-> express the file mounts, use a values override file (see `docs/troubleshooting.md` -> "Pod Running
-> but never binds the HTTP port").
+> **Certificates:** the default `-fscert` image is provider-neutral and requires certificate and
+> signing-key files mounted into the pod. `values-local.yaml` includes disposable local sample
+> material and mounts it through `statuslist.secretMounts`. For non-local runs, provide your own
+> Secret-backed files or use an image variant tailored to your environment.
 
 ## 5. Verify Pods
 

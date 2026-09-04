@@ -17,6 +17,7 @@ runs:
         helm lint helm/chart -f helm/chart/values-external-secrets.yaml
         helm lint helm/chart -f helm/chart/values-aws.yaml -f helm/chart/values-production.yaml
         helm template status-list-server helm/chart -f helm/chart/values.yaml --output-dir /tmp/rendered/default
+        helm template status-list-server helm/chart -f helm/chart/values-local.yaml --output-dir /tmp/rendered/local
         helm template status-list-server helm/chart -f helm/chart/values-external-secrets.yaml --output-dir /tmp/rendered/external-secrets
         helm template status-list-server helm/chart -f helm/chart/values-rotation-example.yaml --output-dir /tmp/rendered/rotation
         helm template status-list-server helm/chart --set serviceAccount.create=false --output-dir /tmp/rendered/no-sa
@@ -122,8 +123,24 @@ runs:
         if grep -q '^  tls:' /tmp/rendered/default/status-list-server/templates/ingress.yaml; then
           echo "ERROR: default localhost Ingress must not render a tls block"; exit 1
         fi
+        helm template status-list-server helm/chart --set-string statuslist.ingress.tls.secretName=statuslist-tls --output-dir /tmp/rendered/tls-secret-default-host
+        if ! grep -q '^  tls:' /tmp/rendered/tls-secret-default-host/status-list-server/templates/ingress.yaml; then
+          echo "ERROR: explicit ingress TLS secretName must render a tls block even when tls.hosts is empty"; exit 1
+        fi
+        if ! grep -q '    - "localhost"' /tmp/rendered/tls-secret-default-host/status-list-server/templates/ingress.yaml; then
+          echo "ERROR: explicit ingress TLS secretName must default tls.hosts to the rendered ingress host"; exit 1
+        fi
         if grep -qE 'APP_SERVER__CERT__(EMAIL|ORGANIZATION)' /tmp/rendered/default/status-list-server/templates/deployment.yaml; then
           echo "ERROR: default render must not inject blank certificate identity env vars"; exit 1
+        fi
+        if ! grep -q 'name: local-signing-material' /tmp/rendered/local/status-list-server/templates/deployment.yaml; then
+          echo "ERROR: values-local.yaml must mount local signing material for the default fscert image"; exit 1
+        fi
+        if ! grep -q 'APP_SERVER__CERT__STORE__CERTIFICATE_PATH' /tmp/rendered/local/status-list-server/templates/deployment.yaml; then
+          echo "ERROR: values-local.yaml must set APP_SERVER__CERT__STORE__CERTIFICATE_PATH"; exit 1
+        fi
+        if ! grep -q 'APP_SERVER__CERT__STORE__SIGNING_KEY_PATH' /tmp/rendered/local/status-list-server/templates/deployment.yaml; then
+          echo "ERROR: values-local.yaml must set APP_SERVER__CERT__STORE__SIGNING_KEY_PATH"; exit 1
         fi
         if grep -q 'storageClassName:' /tmp/rendered/default/status-list-server/charts/postgres/templates/statefulset.yaml; then
           echo "ERROR: default render must use the cluster default StorageClass"; exit 1

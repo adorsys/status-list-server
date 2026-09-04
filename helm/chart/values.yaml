@@ -67,9 +67,12 @@ statuslist:
     annotations:
       nginx.ingress.kubernetes.io/proxy-body-size: "10m"
     tls:
-      # Defaults to ["*.<global.domain>"] when global.domain is set.
+      # Defaults to ["*.<global.domain>"] when global.domain is set, or to the
+      # rendered ingress host when secretName is set explicitly.
       hosts: []
-      secretName: statuslist-tls
+      # Empty keeps the neutral default render HTTP-only. Set this in overlays
+      # that provide TLS material or cert-manager ingress-shim annotations.
+      secretName: ""
     # Defaults to statuslist.<global.domain> when global.domain is set, otherwise localhost.
     externalDnsHostname: ""
   env:
@@ -80,7 +83,7 @@ statuslist:
     APP_SERVER__CERT__ACME_DIRECTORY_URL: "https://acme-v02.api.letsencrypt.org/directory"
     APP_SERVER__CERT__EKU: "1,3,6,1,5,5,7,3,30"
     APP_SERVER__CERT__RENEWAL_CRON_SCHEDULE: "0 0 0 * * *"
-    # Parsed certificate chain cache TTL in seconds. "0" means no expiry; non-provisioning replicas rely on this TTL for renewed chains.
+    # Parsed certificate chain cache TTL in seconds. "0" means no expiry.
     # DNS provider for ACME DNS-01 challenges: route53 | cloudflare | gcloud | azure | acmedns
     # (pebble also exists but is a development-only fake, not for deployments)
     # See docs/dns-providers.md for the settings each provider needs.
@@ -138,9 +141,26 @@ statuslist:
   # independently configurable.
   fallbackSecret:
     enabled: true
+    generatedCertificate:
+      # Local/dev helper for the fscert image. When enabled, the fallback Secret
+      # includes a self-signed certificate and signing key under the keys below.
+      # GitOps deployments should not use generated material because helm template
+      # runs without cluster lookup and can regenerate values on each sync.
+      enabled: false
+      commonName: localhost
+      dnsNames:
+        - localhost
+      ipAddresses:
+        - 127.0.0.1
+      certificateKey: statuslist.crt
+      signingKey: statuslist.key
     stringData:
       # Empty means the chart generates a random password. Helm upgrades reuse
       # the existing statuslist-secret password when the cluster is reachable.
+      # GitOps tools such as Argo CD and Flux run helm template without cluster
+      # lookup access, so an empty value generates a new password on each
+      # reconciliation. For GitOps, provide an explicit password from your
+      # secret-management flow or set fallbackSecret.enabled=false and use ESO.
       postgres-password: ""
 
   # File-based secret mounts for production credential/key rotation.

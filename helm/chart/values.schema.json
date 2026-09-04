@@ -127,6 +127,23 @@
           "type": "object",
           "properties": {
             "enabled": { "type": "boolean" },
+            "generatedCertificate": {
+              "type": "object",
+              "properties": {
+                "enabled": { "type": "boolean" },
+                "commonName": { "type": "string", "minLength": 1 },
+                "dnsNames": {
+                  "type": "array",
+                  "items": { "type": "string", "minLength": 1 }
+                },
+                "ipAddresses": {
+                  "type": "array",
+                  "items": { "type": "string", "minLength": 1 }
+                },
+                "certificateKey": { "type": "string", "minLength": 1 },
+                "signingKey": { "type": "string", "minLength": 1 }
+              }
+            },
             "stringData": {
               "type": "object",
               "additionalProperties": { "type": "string" }

@@ -64,11 +64,11 @@ curl http://localhost:8081/health/live
 curl http://localhost:8081/health/ready
 ```
 
-> **Certificate caveat for local runs:** the provider-neutral `-fscert` image expects certificate
-> and signing-key files when certificate provisioning strategy is `store`. For a local run, mount
-> self-signed material via `statuslist.secretMounts` or choose an image/provider configuration that
-> matches your test environment. See the entry "Pod `Running` but never binds the HTTP port" in
-> `troubleshooting.md`.
+> **Certificate caveat for local runs:** the provider-neutral `-fscert` image requires certificate
+> and signing-key files mounted into the pod. `values-local.yaml` includes disposable local sample
+> material and mounts it through `statuslist.secretMounts`; for non-local runs, provide your own
+> Secret-backed files or choose an image/provider configuration that matches your environment.
+> See the entry "Pod `Running` but never binds the HTTP port" in `troubleshooting.md`.
 
 `values-local.yaml` only overrides what differs from the neutral defaults (disabled Ingress/ESO, NodePort/external reachability, lighter resource requests). The chart renders `statuslist-secret` by default through `statuslist.fallbackSecret.enabled=true`. If pods fail with `CreateContainerConfigError`, confirm that either the fallback Secret rendered or your ESO/existing-Secret mode creates `statuslist-secret` in the namespace. See [LOCAL_DEPLOYMENT.md](LOCAL_DEPLOYMENT.md) for a more detailed local walkthrough.
 
@@ -94,7 +94,7 @@ How the Secret is created depends on your [secrets mode](#secrets-delivery): via
 The chart's `statuslist.env` holds the application configuration. Set the values your deployment needs:
 
 - **Database port**: `APP_DATABASE__PORT` (e.g. `5432`). This is **not** inferred from the PostgreSQL subchart: set it explicitly.
-- **Certificate provisioning**: by default the chart provisions the token-signing certificate over ACME, so you configure `APP_SERVER__CERT__*` (ACME directory URL and the DNS provider for DNS-01 challenges). See [dns-providers.md](dns-providers.md) for what each provider (`route53`, `cloudflare`, `gcloud`, `azure`, `acmedns`) requires. During ACME challenges, provider credentials must come from a Secret, not plain env values. ACME is not the only path: with the `-fscert` image the certificate and signing key are read from files you mount yourself (see the signing-credentials example in [`helm/README.md`](../helm/README.md)).
+- **Certificate files or ACME**: the default `-fscert` image reads the certificate and signing key from files mounted into the pod. ACME-enabled image variants perform DNS-01 certificate issuance at startup, so configure `APP_SERVER__CERT__*` values for the DNS provider and deliver provider credentials from a Secret, not plain env values. See [dns-providers.md](dns-providers.md) for what each provider (`route53`, `cloudflare`, `gcloud`, `azure`, `acmedns`) requires.
 - **Region** (`statuslist.aws.region`, renders `APP_AWS__REGION`): only required when you use an AWS-backed secret or DNS backend; omit it for other providers.
 - **Telemetry / limits / rate limiting / cache**: defaults are sensible; over-ride only what your sizing needs.
 

@@ -16,6 +16,8 @@ statuslist:
       cert-manager.io/cluster-issuer: letsencrypt-prod
       nginx.ingress.kubernetes.io/ssl-redirect: "true"
       nginx.ingress.kubernetes.io/force-ssl-redirect: "true"
+    tls:
+      secretName: statuslist-tls
   env:
     APP_SERVER__CERT__EMAIL: "info@adorsys.com"
     APP_SERVER__CERT__ORGANIZATION: "adorsys GmbH & CO KG"

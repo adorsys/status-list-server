@@ -143,7 +143,6 @@ statuslist:
         APP_SERVER__CERT__STORE__CERTIFICATE_PATH: certificate.pem
         APP_SERVER__CERT__STORE__SIGNING_KEY_PATH: signing-key.pem
   env:
-    APP_SERVER__CERT__PROVISIONING_STRATEGY: "store"
     APP_SERVER__DOMAIN: "statuslist.example.com"
 ```
 

@@ -168,10 +168,8 @@ statuslist:
     # APP_SERVER__CERT__STORE__CERTIFICATE_PATH: /etc/secrets/token-keys/statuslist.crt
     # APP_SERVER__CERT__STORE__SIGNING_KEY_PATH: /etc/secrets/token-keys/statuslist.key
 
-    # Use file-based store provisioning for external certificates
-    APP_SERVER__CERT__PROVISIONING_STRATEGY: "store"
-
-    # ACME configuration (alternative to file-based certs)
+    # ACME-enabled image variants use DNS-01 issuance instead of these static
+    # certificate files.
     # APP_SERVER__CERT__ACME_DIRECTORY_URL: "https://acme-v02.api.letsencrypt.org/directory"
     # APP_SERVER__CERT__EMAIL: "ops@example.com"
 

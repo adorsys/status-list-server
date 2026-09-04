@@ -13,7 +13,7 @@
 {{- end }}
 {{- if and (eq (len $tlsHosts) 0) $globalDomain }}
 {{- $tlsHosts = list (printf "*.%s" $globalDomain) }}
-{{- else if and (eq (len $tlsHosts) 0) (ne $ingressHost "localhost") }}
+{{- else if and (eq (len $tlsHosts) 0) .Values.statuslist.ingress.tls.secretName }}
 {{- $tlsHosts = list $ingressHost }}
 {{- end }}
 apiVersion: networking.k8s.io/v1
