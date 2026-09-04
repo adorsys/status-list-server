@@ -165,7 +165,7 @@ and follow the same `helm upgrade --install` flow.
 
 ## Further reading
 
-2. **Deploy the chart:**
+1. **Deploy the chart:**
 
    ```bash
    helm install statuslist ./chart --namespace statuslist -f chart/values.yaml
