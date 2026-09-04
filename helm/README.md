@@ -59,6 +59,8 @@ statuslist:
 
 The default chart uses this mode, so a plain `helm install` creates `statuslist-secret`. Leave `postgres-password` empty to have Helm generate a random password; on upgrades, Helm reuses the existing cluster Secret when it can read it. Set a concrete value only for local or disposable environments.
 
+GitOps caveat: tools such as Argo CD and Flux render charts with `helm template`, where Helm's live `lookup` function cannot read the existing Secret. If `postgres-password` is left empty, each render generates a new password while PostgreSQL may keep the old password in its PVC. GitOps deployments should set an explicit fallback password from their secret-management flow or use ESO mode instead. The fallback Secret is annotated with `helm.sh/resource-policy: keep` so Helm does not delete it on uninstall.
+
 **External Secrets Operator.** ESO syncs `statuslist-secret` from a configured `SecretStore` or pre-existing `ClusterSecretStore`. Enable ESO mode explicitly:
 
 ```yaml

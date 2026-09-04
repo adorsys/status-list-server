@@ -9,7 +9,12 @@ runs:
       run: |
         set -euo pipefail
         mkdir -p /tmp/rendered
+        helm lint helm/chart
+        helm lint helm/chart -f helm/chart/values-aws.yaml
+        helm lint helm/chart -f helm/chart/values-external-secrets.yaml
+        helm lint helm/chart -f helm/chart/values-production.yaml
         helm template status-list-server helm/chart -f helm/chart/values.yaml --output-dir /tmp/rendered/default
+        helm template status-list-server helm/chart -f helm/chart/values-external-secrets.yaml --output-dir /tmp/rendered/external-secrets
         helm template status-list-server helm/chart -f helm/chart/values-rotation-example.yaml --output-dir /tmp/rendered/rotation
         helm template status-list-server helm/chart --set serviceAccount.create=false --output-dir /tmp/rendered/no-sa
         helm template status-list-server helm/chart \
@@ -80,6 +85,12 @@ runs:
         fi
         if ! grep -q '^  tls:' /tmp/rendered/aws/status-list-server/templates/ingress.yaml; then
           echo "ERROR: AWS ingress overlay must render a tls block for cert-manager ingress-shim"; exit 1
+        fi
+        if [ ! -f /tmp/rendered/external-secrets/status-list-server/templates/external-secrets.yaml ]; then
+          echo "ERROR: values-external-secrets.yaml must render ExternalSecret resources"; exit 1
+        fi
+        if [ -f /tmp/rendered/external-secrets/status-list-server/templates/secret.yaml ]; then
+          echo "ERROR: values-external-secrets.yaml must disable fallback Secret"; exit 1
         fi
         helm template status-list-server helm/chart -f helm/chart/values-aws.yaml -f helm/chart/values-aws-nlb.yaml --output-dir /tmp/rendered/aws-nlb
         if ! grep -q 'service.beta.kubernetes.io/aws-load-balancer-type' /tmp/rendered/aws-nlb/status-list-server/templates/service.yaml; then
