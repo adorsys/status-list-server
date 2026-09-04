@@ -1,7 +1,9 @@
+use std::fmt;
 use std::time::Duration;
 
 use async_trait::async_trait;
 use color_eyre::eyre::{Report, eyre};
+use google_cloud_auth::credentials::{AccessTokenCredentials, Builder as AdcBuilder};
 use jsonwebtoken::{Algorithm, EncodingKey, Header};
 use reqwest::{Client, StatusCode};
 use secrecy::{ExposeSecret, SecretString};
@@ -23,13 +25,34 @@ const OAUTH_SCOPE: &str = "https://www.googleapis.com/auth/ndev.clouddns.readwri
 /// is served by all of the zone's authoritative name servers.
 pub struct GoogleCloudDnsProvider {
     client: Client,
+    token_source: Box<dyn GcloudAccessTokenProvider>,
+    project_id: String,
+    api_base: String,
+    zones: RwLock<Option<Vec<ZoneInfo>>>,
+}
+
+#[async_trait]
+trait GcloudAccessTokenProvider: Send + Sync {
+    async fn access_token(&self, client: &Client) -> Result<SecretString, ChallengeError>;
+}
+
+impl fmt::Debug for dyn GcloudAccessTokenProvider {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("<gcloud_access_token_provider>")
+    }
+}
+
+/// Service-account JWT token source used for the legacy static-key mode.
+struct ServiceAccountTokenSource {
     client_email: String,
     token_uri: String,
-    project_id: String,
     encoding_key: EncodingKey,
-    api_base: String,
     token_cache: TokenCache,
-    zones: RwLock<Option<Vec<ZoneInfo>>>,
+}
+
+/// ADC token source used by GKE Workload Identity and other ambient GCP environments.
+struct AmbientTokenSource {
+    credentials: AccessTokenCredentials,
 }
 
 /// Relevant fields of a Google service account key JSON. Only parsed
@@ -112,20 +135,66 @@ impl GoogleCloudDnsProvider {
 
     /// Create a provider from the service account key JSON
     pub fn new(service_account_key_json: &str) -> Result<Self, ChallengeError> {
+        Self::from_service_account_key(service_account_key_json)
+    }
+
+    /// Create a provider from the legacy static service-account key JSON.
+    pub fn from_service_account_key(
+        service_account_key_json: &str,
+    ) -> Result<Self, ChallengeError> {
         let key: ServiceAccountKey = serde_json::from_str(service_account_key_json)
             .map_err(|e| dns_err(eyre!("Invalid service account key JSON: {e}")))?;
         let encoding_key = EncodingKey::from_rsa_pem(key.private_key.as_bytes())
             .map_err(|e| dns_err(eyre!("Invalid service account private key: {e}")))?;
         Ok(Self {
             client: http_client(),
-            client_email: key.client_email,
-            token_uri: key.token_uri,
             project_id: key.project_id,
-            encoding_key,
+            token_source: Box::new(ServiceAccountTokenSource {
+                client_email: key.client_email,
+                token_uri: key.token_uri,
+                encoding_key,
+                token_cache: TokenCache::new(),
+            }),
             api_base: DEFAULT_API_BASE.to_string(),
-            token_cache: TokenCache::new(),
             zones: RwLock::new(None),
         })
+    }
+
+    /// Create a provider from Application Default Credentials.
+    pub fn from_ambient_credentials(project_id: impl Into<String>) -> Result<Self, ChallengeError> {
+        let project_id = project_id.into();
+        if project_id.trim().is_empty() {
+            return Err(dns_err(eyre!(
+                "Google Cloud DNS ambient auth requires a non-empty project_id"
+            )));
+        }
+        let credentials = AdcBuilder::default()
+            .with_scopes([OAUTH_SCOPE])
+            .build_access_token_credentials()
+            .map_err(|e| {
+                dns_err(eyre!(
+                    "Failed to initialize Google Cloud Application Default Credentials \
+                     for DNS provider. Configure GKE Workload Identity or set \
+                     GOOGLE_APPLICATION_CREDENTIALS to a valid ADC file. Details: {e}"
+                ))
+            })?;
+        Ok(Self::from_access_token_provider(
+            project_id,
+            Box::new(AmbientTokenSource { credentials }),
+        ))
+    }
+
+    fn from_access_token_provider(
+        project_id: impl Into<String>,
+        token_source: Box<dyn GcloudAccessTokenProvider>,
+    ) -> Self {
+        Self {
+            client: http_client(),
+            token_source,
+            project_id: project_id.into(),
+            api_base: DEFAULT_API_BASE.to_string(),
+            zones: RwLock::new(None),
+        }
     }
 
     /// Override the API base URL (used in tests)
@@ -135,6 +204,17 @@ impl GoogleCloudDnsProvider {
     }
 
     async fn access_token(&self) -> Result<SecretString, ChallengeError> {
+        self.token_source.access_token(&self.client).await
+    }
+
+    fn project_url(&self) -> String {
+        format!("{}/projects/{}", self.api_base, self.project_id)
+    }
+}
+
+#[async_trait]
+impl GcloudAccessTokenProvider for ServiceAccountTokenSource {
+    async fn access_token(&self, client: &Client) -> Result<SecretString, ChallengeError> {
         self.token_cache
             .get_or_mint(|| async {
                 let iat = time::OffsetDateTime::now_utc().unix_timestamp();
@@ -143,7 +223,7 @@ impl GoogleCloudDnsProvider {
                     scope: OAUTH_SCOPE,
                     aud: &self.token_uri,
                     iat,
-                    exp: iat + Self::TOKEN_LIFETIME.as_secs() as i64,
+                    exp: iat + GoogleCloudDnsProvider::TOKEN_LIFETIME.as_secs() as i64,
                 };
                 let assertion = jsonwebtoken::encode(
                     &Header::new(Algorithm::RS256),
@@ -152,8 +232,7 @@ impl GoogleCloudDnsProvider {
                 )
                 .map_err(|e| dns_err(eyre!("Failed to sign token request: {e}")))?;
 
-                let response = self
-                    .client
+                let response = client
                     .post(&self.token_uri)
                     .form(&[
                         ("grant_type", "urn:ietf:params:oauth:grant-type:jwt-bearer"),
@@ -166,7 +245,8 @@ impl GoogleCloudDnsProvider {
                 if !status.is_success() {
                     let body = response.text().await.unwrap_or_default();
                     return Err(dns_err(eyre!(
-                        "Token exchange failed (status {status}): {body}"
+                        "Google Cloud service-account token exchange failed \
+                         (status {status}): {body}"
                     )));
                 }
                 let token: TokenResponse = response
@@ -180,11 +260,26 @@ impl GoogleCloudDnsProvider {
             })
             .await
     }
+}
 
-    fn project_url(&self) -> String {
-        format!("{}/projects/{}", self.api_base, self.project_id)
+#[async_trait]
+impl GcloudAccessTokenProvider for AmbientTokenSource {
+    async fn access_token(&self, _client: &Client) -> Result<SecretString, ChallengeError> {
+        self.credentials
+            .access_token()
+            .await
+            .map(|t| t.token.into())
+            .map_err(|e| {
+                dns_err(eyre!(
+                    "Failed to acquire Google Cloud DNS ambient access token via \
+                 Application Default Credentials. Verify GKE Workload Identity, \
+                 metadata server access, or GOOGLE_APPLICATION_CREDENTIALS. Details: {e}"
+                ))
+            })
     }
+}
 
+impl GoogleCloudDnsProvider {
     // Find the managed zone for the given domain and return its name
     async fn find_zone(&self, domain: &str) -> Result<String, ChallengeError> {
         self.try_cache_zones().await?;
@@ -428,6 +523,7 @@ impl DnsProvider for GoogleCloudDnsProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use color_eyre::eyre::eyre;
     use wiremock::matchers::{
         body_partial_json, method, path, query_param, query_param_is_missing,
     };
@@ -436,6 +532,17 @@ mod tests {
     // A throwaway RSA key generated only for these tests; it grants access to
     // nothing and is deliberately named .dummy.pem for secret scanners.
     const TEST_KEY_PEM: &str = include_str!("../../../../../test_data/gcloud_test_key.dummy.pem");
+
+    struct FakeTokenSource(Result<SecretString, &'static str>);
+
+    #[async_trait]
+    impl GcloudAccessTokenProvider for FakeTokenSource {
+        async fn access_token(&self, _client: &Client) -> Result<SecretString, ChallengeError> {
+            self.0
+                .clone()
+                .map_err(|msg| dns_err(eyre!("fake ambient token failure: {msg}")))
+        }
+    }
 
     fn provider(server: &MockServer) -> GoogleCloudDnsProvider {
         let key = json!({
@@ -447,6 +554,17 @@ mod tests {
         GoogleCloudDnsProvider::new(&key.to_string())
             .unwrap()
             .with_api_base(server.uri())
+    }
+
+    fn ambient_provider(
+        server: &MockServer,
+        token: Result<SecretString, &'static str>,
+    ) -> GoogleCloudDnsProvider {
+        GoogleCloudDnsProvider::from_access_token_provider(
+            "test-project",
+            Box::new(FakeTokenSource(token)),
+        )
+        .with_api_base(server.uri())
     }
 
     async fn mount_token_mock(server: &MockServer, expected_mints: u64) {
@@ -515,6 +633,54 @@ mod tests {
             .create_txt_record("status.example.com", "digest-value")
             .await
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn ambient_token_source_drives_dns_requests() {
+        let server = MockServer::start().await;
+        mount_zone_mock(&server).await;
+        Mock::given(method("GET"))
+            .and(path(
+                "/projects/test-project/managedZones/example-zone/rrsets",
+            ))
+            .and(query_param("type", "TXT"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"rrsets": []})))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path(
+                "/projects/test-project/managedZones/example-zone/changes",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "id": "c1",
+                "status": "done",
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        ambient_provider(&server, Ok("ambient-gcp-token".into()))
+            .create_txt_record("status.example.com", "digest-value")
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn ambient_token_failure_is_redacted_and_actionable() {
+        let server = MockServer::start().await;
+        let err = ambient_provider(&server, Err("metadata unavailable"))
+            .create_txt_record("status.example.com", "digest-value")
+            .await
+            .unwrap_err();
+        match err {
+            ChallengeError::Dns { provider, source } => {
+                assert_eq!(provider, "gcloud");
+                let msg = source.to_string();
+                assert!(msg.contains("ambient token failure"));
+                assert!(msg.contains("metadata unavailable"));
+            }
+            other => panic!("Unexpected error: {other:?}"),
+        }
     }
 
     #[tokio::test]

@@ -235,11 +235,24 @@ pub enum ResolvedDnsProvider<'a> {
     /// Uses the ambient AWS credentials; no provider-specific settings
     Route53,
     Cloudflare(&'a CloudflareDnsConfig),
-    Gcloud(GcloudKeySource<'a>),
-    Azure(&'a AzureDnsConfig),
+    Gcloud(GcloudDnsAuth<'a>),
+    Azure(AzureDnsAuth<'a>),
     Acmedns(&'a AcmeDnsConfig),
     /// Development-only; its challenge server URL lives outside [`DnsConfig`]
     Pebble,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GcloudDnsAuthMode {
+    ServiceAccount,
+    Ambient,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum GcloudDnsAuth<'a> {
+    ServiceAccount(GcloudKeySource<'a>),
+    Ambient { project_id: &'a str },
 }
 
 /// The Google Cloud service account key source, with empty values counting
@@ -250,6 +263,19 @@ pub enum GcloudKeySource<'a> {
     Inline(&'a SecretString),
     /// Path to the key JSON file
     Path(&'a str),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AzureDnsAuthMode {
+    ServicePrincipal,
+    Ambient,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum AzureDnsAuth<'a> {
+    ServicePrincipal(&'a AzureDnsConfig),
+    Ambient(&'a AzureDnsConfig),
 }
 
 impl ResolvedDnsProvider<'_> {
@@ -280,6 +306,10 @@ pub struct DnsConfig {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct GcloudDnsConfig {
+    /// Auth mode: `service_account` for static JSON keys or `ambient` for ADC / GKE Workload Identity.
+    pub auth_mode: Option<GcloudDnsAuthMode>,
+    /// GCP project ID used by ambient credentials. Static service-account mode reads it from the key.
+    pub project_id: Option<String>,
     /// Service account key JSON, inline
     pub service_account_key: Option<SecretString>,
     /// Path to the service account key JSON file
@@ -288,9 +318,11 @@ pub struct GcloudDnsConfig {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct AzureDnsConfig {
-    pub tenant_id: String,
-    pub client_id: String,
-    pub client_secret: SecretString,
+    /// Auth mode: `service_principal` for client secrets or `ambient` for managed/workload identity.
+    pub auth_mode: Option<AzureDnsAuthMode>,
+    pub tenant_id: Option<String>,
+    pub client_id: Option<String>,
+    pub client_secret: Option<SecretString>,
     pub subscription_id: String,
     /// Resource group holding the DNS zones
     pub resource_group: String,
@@ -457,12 +489,6 @@ impl AzureDnsConfig {
     /// instead of surfacing as opaque API errors at the first renewal
     fn validate(&self) -> Result<(), ConfigError> {
         let empty: Vec<&str> = [
-            ("tenant_id", self.tenant_id.trim().is_empty()),
-            ("client_id", self.client_id.trim().is_empty()),
-            (
-                "client_secret",
-                self.client_secret.expose_secret().trim().is_empty(),
-            ),
             ("subscription_id", self.subscription_id.trim().is_empty()),
             ("resource_group", self.resource_group.trim().is_empty()),
         ]
@@ -472,6 +498,31 @@ impl AzureDnsConfig {
         if !empty.is_empty() {
             return Err(ConfigError::Message(format!(
                 "Azure DNS settings have empty required fields: {}",
+                empty.join(", ")
+            )));
+        }
+        Ok(())
+    }
+
+    fn validate_service_principal(&self) -> Result<(), ConfigError> {
+        let empty: Vec<&str> = [
+            ("tenant_id", non_empty(&self.tenant_id).is_none()),
+            ("client_id", non_empty(&self.client_id).is_none()),
+            (
+                "client_secret",
+                self.client_secret
+                    .as_ref()
+                    .is_none_or(|s| s.expose_secret().trim().is_empty()),
+            ),
+            ("subscription_id", self.subscription_id.trim().is_empty()),
+            ("resource_group", self.resource_group.trim().is_empty()),
+        ]
+        .into_iter()
+        .filter_map(|(name, is_empty)| is_empty.then_some(name))
+        .collect();
+        if !empty.is_empty() {
+            return Err(ConfigError::Message(format!(
+                "Azure DNS service_principal auth has empty required fields: {}",
                 empty.join(", ")
             )));
         }
@@ -518,22 +569,77 @@ impl DnsConfig {
                 ResolvedDnsProvider::Cloudflare(cloudflare)
             }
             DnsProviderKind::Gcloud => {
-                let key = self.gcloud.as_ref().and_then(|g| {
-                    g.service_account_key
-                        .as_ref()
-                        .filter(|k| !k.expose_secret().trim().is_empty())
-                        .map(GcloudKeySource::Inline)
-                        .or_else(|| {
-                            non_empty(&g.service_account_key_path)
-                                .map(|path| GcloudKeySource::Path(path))
-                        })
+                let gcloud = self.gcloud.as_ref().ok_or_else(|| missing("dns.gcloud"))?;
+                let key = gcloud
+                    .service_account_key
+                    .as_ref()
+                    .filter(|k| !k.expose_secret().trim().is_empty())
+                    .map(GcloudKeySource::Inline)
+                    .or_else(|| {
+                        non_empty(&gcloud.service_account_key_path)
+                            .map(|path| GcloudKeySource::Path(path))
+                    });
+                let mode = gcloud.auth_mode.unwrap_or(if key.is_some() {
+                    GcloudDnsAuthMode::ServiceAccount
+                } else {
+                    GcloudDnsAuthMode::Ambient
                 });
-                ResolvedDnsProvider::Gcloud(key.ok_or_else(|| missing("dns.gcloud"))?)
+                match mode {
+                    GcloudDnsAuthMode::ServiceAccount => ResolvedDnsProvider::Gcloud(
+                        GcloudDnsAuth::ServiceAccount(key.ok_or_else(|| {
+                            ConfigError::Message(
+                                "Google Cloud DNS service_account auth requires \
+                                 server.cert.dns.gcloud.service_account_key or \
+                                 service_account_key_path"
+                                    .to_string(),
+                            )
+                        })?),
+                    ),
+                    GcloudDnsAuthMode::Ambient => {
+                        if key.is_some() {
+                            tracing::debug!(
+                                "Google Cloud DNS auth_mode=ambient ignores configured service_account_key/service_account_key_path; remove stale static credentials or set auth_mode=service_account"
+                            );
+                        }
+                        let project_id = non_empty(&gcloud.project_id).ok_or_else(|| {
+                            ConfigError::Message(
+                                "Google Cloud DNS ambient auth requires \
+                                 server.cert.dns.gcloud.project_id"
+                                    .to_string(),
+                            )
+                        })?;
+                        ResolvedDnsProvider::Gcloud(GcloudDnsAuth::Ambient { project_id })
+                    }
+                }
             }
             DnsProviderKind::Azure => {
                 let azure = self.azure.as_ref().ok_or_else(|| missing("dns.azure"))?;
-                azure.validate()?;
-                ResolvedDnsProvider::Azure(azure)
+                let has_static_fields = non_empty(&azure.tenant_id).is_some()
+                    || non_empty(&azure.client_id).is_some()
+                    || azure
+                        .client_secret
+                        .as_ref()
+                        .is_some_and(|s| !s.expose_secret().trim().is_empty());
+                let mode = azure.auth_mode.unwrap_or(if has_static_fields {
+                    AzureDnsAuthMode::ServicePrincipal
+                } else {
+                    AzureDnsAuthMode::Ambient
+                });
+                match mode {
+                    AzureDnsAuthMode::ServicePrincipal => {
+                        azure.validate_service_principal()?;
+                        ResolvedDnsProvider::Azure(AzureDnsAuth::ServicePrincipal(azure))
+                    }
+                    AzureDnsAuthMode::Ambient => {
+                        if has_static_fields {
+                            tracing::debug!(
+                                "Azure DNS auth_mode=ambient ignores configured tenant_id/client_id/client_secret; remove stale static credentials or set auth_mode=service_principal"
+                            );
+                        }
+                        azure.validate()?;
+                        ResolvedDnsProvider::Azure(AzureDnsAuth::Ambient(azure))
+                    }
+                }
             }
             DnsProviderKind::Acmedns => {
                 let acmedns = self
@@ -1630,9 +1736,10 @@ mod tests {
         let azure_dns = DnsConfig {
             provider: Some(DnsProviderKind::Azure),
             azure: Some(AzureDnsConfig {
-                tenant_id: "tenant".into(),
-                client_id: "client".into(),
-                client_secret: "secret".into(),
+                auth_mode: None,
+                tenant_id: Some("tenant".into()),
+                client_id: Some("client".into()),
+                client_secret: Some("secret".into()),
                 subscription_id: "sub".into(),
                 resource_group: "rg".into(),
             }),
@@ -1646,6 +1753,8 @@ mod tests {
         let gcloud_path_dns = DnsConfig {
             provider: Some(DnsProviderKind::Gcloud),
             gcloud: Some(GcloudDnsConfig {
+                auth_mode: None,
+                project_id: None,
                 service_account_key: None,
                 service_account_key_path: Some("/etc/gcloud/key.json".into()),
             }),
@@ -1660,13 +1769,17 @@ mod tests {
         let gcloud_inline_and_path = DnsConfig {
             provider: Some(DnsProviderKind::Gcloud),
             gcloud: Some(GcloudDnsConfig {
+                auth_mode: None,
+                project_id: None,
                 service_account_key: Some("inline-key-json".into()),
                 service_account_key_path: Some("/etc/gcloud/key.json".into()),
             }),
             ..Default::default()
         };
         match gcloud_inline_and_path.resolve("production").unwrap() {
-            ResolvedDnsProvider::Gcloud(GcloudKeySource::Inline(key)) => {
+            ResolvedDnsProvider::Gcloud(GcloudDnsAuth::ServiceAccount(
+                GcloudKeySource::Inline(key),
+            )) => {
                 assert_eq!(key.expose_secret(), "inline-key-json");
             }
             other => panic!("Expected an inline key source, got {other:?}"),
@@ -1675,13 +1788,17 @@ mod tests {
         let gcloud_empty_inline_uses_path = DnsConfig {
             provider: Some(DnsProviderKind::Gcloud),
             gcloud: Some(GcloudDnsConfig {
+                auth_mode: None,
+                project_id: None,
                 service_account_key: Some("".into()),
                 service_account_key_path: Some("/etc/gcloud/key.json".into()),
             }),
             ..Default::default()
         };
         match gcloud_empty_inline_uses_path.resolve("production").unwrap() {
-            ResolvedDnsProvider::Gcloud(GcloudKeySource::Path(path)) => {
+            ResolvedDnsProvider::Gcloud(GcloudDnsAuth::ServiceAccount(GcloudKeySource::Path(
+                path,
+            ))) => {
                 assert_eq!(path, "/etc/gcloud/key.json");
             }
             other => panic!("Expected a path key source, got {other:?}"),
@@ -1893,6 +2010,8 @@ mod tests {
         let missing_gcloud_key = DnsConfig {
             provider: Some(DnsProviderKind::Gcloud),
             gcloud: Some(GcloudDnsConfig {
+                auth_mode: Some(GcloudDnsAuthMode::ServiceAccount),
+                project_id: None,
                 service_account_key: None,
                 service_account_key_path: None,
             }),
@@ -1903,12 +2022,14 @@ mod tests {
                 .resolve("production")
                 .unwrap_err()
                 .to_string()
-                .contains("dns.gcloud")
+                .contains("service_account auth requires")
         );
 
         let empty_gcloud_keys = DnsConfig {
             provider: Some(DnsProviderKind::Gcloud),
             gcloud: Some(GcloudDnsConfig {
+                auth_mode: Some(GcloudDnsAuthMode::ServiceAccount),
+                project_id: None,
                 service_account_key: Some("".into()),
                 service_account_key_path: Some(" ".into()),
             }),
@@ -1919,15 +2040,33 @@ mod tests {
                 .resolve("production")
                 .unwrap_err()
                 .to_string()
-                .contains("dns.gcloud")
+                .contains("service_account auth requires")
         );
+
+        let gcloud_ambient = DnsConfig {
+            provider: Some(DnsProviderKind::Gcloud),
+            gcloud: Some(GcloudDnsConfig {
+                auth_mode: Some(GcloudDnsAuthMode::Ambient),
+                project_id: Some("dns-project".into()),
+                service_account_key: None,
+                service_account_key_path: None,
+            }),
+            ..Default::default()
+        };
+        match gcloud_ambient.resolve("production").unwrap() {
+            ResolvedDnsProvider::Gcloud(GcloudDnsAuth::Ambient { project_id }) => {
+                assert_eq!(project_id, "dns-project");
+            }
+            other => panic!("Expected ambient GCloud auth, got {other:?}"),
+        }
 
         let azure_helper = |tenant_id: &str, subscription_id: &str| DnsConfig {
             provider: Some(DnsProviderKind::Azure),
             azure: Some(AzureDnsConfig {
-                tenant_id: tenant_id.into(),
-                client_id: "client".into(),
-                client_secret: "secret".into(),
+                auth_mode: Some(AzureDnsAuthMode::ServicePrincipal),
+                tenant_id: Some(tenant_id.into()),
+                client_id: Some("client".into()),
+                client_secret: Some("secret".into()),
                 subscription_id: subscription_id.into(),
                 resource_group: "rg".into(),
             }),
@@ -1940,6 +2079,25 @@ mod tests {
         assert!(azure_err.contains("tenant_id"));
         assert!(azure_err.contains("subscription_id"));
         assert!(!azure_err.contains("client_id"));
+
+        let azure_ambient = DnsConfig {
+            provider: Some(DnsProviderKind::Azure),
+            azure: Some(AzureDnsConfig {
+                auth_mode: Some(AzureDnsAuthMode::Ambient),
+                tenant_id: None,
+                client_id: None,
+                client_secret: None,
+                subscription_id: "sub".into(),
+                resource_group: "rg".into(),
+            }),
+            ..Default::default()
+        };
+        match azure_ambient.resolve("production").unwrap() {
+            ResolvedDnsProvider::Azure(AzureDnsAuth::Ambient(cfg)) => {
+                assert_eq!(cfg.subscription_id, "sub");
+            }
+            other => panic!("Expected ambient Azure auth, got {other:?}"),
+        }
 
         // Malformed ACME-DNS accounts JSON rejection
         assert!(

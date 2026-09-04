@@ -3,10 +3,14 @@ mod http01;
 
 #[cfg(feature = "aws")]
 pub use dns01::AwsRoute53DnsProvider;
+#[cfg(feature = "gcp")]
+pub use dns01::GoogleCloudDnsProvider;
 pub use dns01::{
-    AcmeDnsCredentials, AcmeDnsProvider, AzureDnsProvider, CloudflareDnsProvider, Dns01Handler,
-    DnsProvider, GoogleCloudDnsProvider, PebbleDnsProvider, ServicePrincipal,
+    AcmeDnsCredentials, AcmeDnsProvider, CloudflareDnsProvider, Dns01Handler, DnsProvider,
+    PebbleDnsProvider,
 };
+#[cfg(feature = "azure")]
+pub use dns01::{AzureDnsProvider, ServicePrincipal};
 pub use http01::Http01Handler;
 
 use std::{future::Future, pin::Pin};

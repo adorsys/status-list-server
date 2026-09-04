@@ -87,6 +87,15 @@ statuslist:
     # DNS provider for ACME DNS-01 challenges: route53 | cloudflare | gcloud | azure | acmedns
     # (pebble also exists but is a development-only fake, not for deployments)
     # See docs/dns-providers.md for the settings each provider needs.
+    # GKE Workload Identity example:
+    #   APP_SERVER__CERT__DNS__PROVIDER: "gcloud"
+    #   APP_SERVER__CERT__DNS__GCLOUD__AUTH_MODE: "ambient"
+    #   APP_SERVER__CERT__DNS__GCLOUD__PROJECT_ID: "dns-project-id"
+    # AKS Workload Identity / managed identity example:
+    #   APP_SERVER__CERT__DNS__PROVIDER: "azure"
+    #   APP_SERVER__CERT__DNS__AZURE__AUTH_MODE: "ambient"
+    #   APP_SERVER__CERT__DNS__AZURE__SUBSCRIPTION_ID: "subscription-id"
+    #   APP_SERVER__CERT__DNS__AZURE__RESOURCE_GROUP: "dns-resource-group"
     # Provider credentials (e.g. APP_SERVER__CERT__DNS__CLOUDFLARE__API_TOKEN, or the
     # APP_SERVER__CERT__DNS__ACMEDNS__ACCOUNTS JSON, which holds every account password)
     # must come from a secret (see externalSecret below), not from plain env values.
@@ -266,7 +275,13 @@ serviceAccount:
   # This does NOT break Workload Identity — IRSA / GCP WI / Azure WI use projected OIDC
   # tokens injected by the cloud admission webhook, independent of this setting.
   automountServiceAccountToken: false
-  annotations: {} # e.g. eks.amazonaws.com/role-arn for EKS IRSA
+  annotations: {}
+  # EKS IRSA:
+  #   eks.amazonaws.com/role-arn: arn:aws:iam::123456789012:role/status-list-server
+  # GKE Workload Identity:
+  #   iam.gke.io/gcp-service-account: status-list-server@dns-project-id.iam.gserviceaccount.com
+  # AKS Workload Identity:
+  #   azure.workload.identity/client-id: "00000000-0000-0000-0000-000000000000"
   labels: {}
 
 # HorizontalPodAutoscaler (autoscaling/v2). When enabled, the Deployment's `replicas`

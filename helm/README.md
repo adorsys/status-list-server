@@ -46,6 +46,194 @@ The application Secret is always named `statuslist-secret` and holds the databas
 
 There are two secret delivery modes, and the chart rejects enabling both at once.
 
+Attach Workload Identity / IRSA role annotations through `serviceAccount.annotations`, for example on EKS:
+
+```yaml
+serviceAccount:
+  create: true
+  annotations:
+    eks.amazonaws.com/role-arn: arn:aws:iam::123456789012:role/status-list-server
+```
+
+For GCP or Azure Workload Identity, set the provider-specific annotation instead. Use `serviceAccount.labels` for any additional labels. Set `serviceAccount.automountServiceAccountToken=false` to harden the pod when it has no Kubernetes API access needs.
+
+GKE Workload Identity for Cloud DNS:
+
+```yaml
+statuslist:
+  image:
+    tag: "1.2.0-gcp"
+  env:
+    APP_SERVER__CERT__DNS__PROVIDER: "gcloud"
+    APP_SERVER__CERT__DNS__GCLOUD__AUTH_MODE: "ambient"
+    APP_SERVER__CERT__DNS__GCLOUD__PROJECT_ID: "dns-project-id"
+serviceAccount:
+  create: true
+  annotations:
+    iam.gke.io/gcp-service-account: status-list-server@dns-project-id.iam.gserviceaccount.com
+```
+
+* `serviceAccount.create`: render a ServiceAccount (default `true`). When `false`, the Deployment uses the `default` service account.
+* `serviceAccount.name`: override the ServiceAccount name (default: the chart fullname).
+* `serviceAccount.automountServiceAccountToken`: default `true`; harden to `false` if the API token is not needed.
+
+### Pod labels and Azure Workload Identity
+
+Azure Workload Identity requires the pod label `azure.workload.identity/use: "true"` in addition to the ServiceAccount annotation. Add it (and any other pod labels) via `statuslist.podLabels`:
+
+```yaml
+statuslist:
+  image:
+    tag: "1.2.0-azure"
+  podLabels:
+    azure.workload.identity/use: "true"
+  env:
+    APP_SERVER__CERT__DNS__PROVIDER: "azure"
+    APP_SERVER__CERT__DNS__AZURE__AUTH_MODE: "ambient"
+    APP_SERVER__CERT__DNS__AZURE__SUBSCRIPTION_ID: "subscription-id"
+    APP_SERVER__CERT__DNS__AZURE__RESOURCE_GROUP: "dns-resource-group"
+serviceAccount:
+  create: true
+  annotations:
+    azure.workload.identity/client-id: "00000000-0000-0000-0000-000000000000"
+```
+
+The ServiceAccount annotation alone is not sufficient for Azure; both the annotation and this pod label must be present.
+
+## AWS Configuration and Static Credentials vs. Workload Identity
+
+The default secret/credential provisioning path is **External Secrets Operator (ESO)**. By default the application mounts the ESO-provisioned `aws-credentials-secret` into the pod; Workload Identity is opt-in.
+
+```yaml
+statuslist:
+  aws:
+    mountCredentials: true # default: mount the ESO-provisioned aws-credentials-secret under /home/nobody/.aws
+    region: "" # plain, non-secret; renders APP_AWS__REGION
+    credentialsSecret:
+      remoteKey: "statuslist-aws-credentials" # SecretStore key holding both AWS shared files
+      credentialsProperty: "CREDENTIALS" # property in remoteKey with the credentials file
+      configProperty: "CONFIG" # property in remoteKey with the config file
+```
+
+`statuslist.aws.region` is a plain (non-secret) value; `APP_AWS__REGION` is rendered whenever an effective region is set, independent of `secretStore.provider` and `mountCredentials`.
+
+**Workload Identity is opt-in:** to switch to ambient Workload Identity / IRSA, set `statuslist.aws.mountCredentials=false` (no credentials mounted) and attach the cloud role annotation via `serviceAccount.annotations` (e.g. `eks.amazonaws.com/role-arn` for EKS IRSA, or the GCP / Azure WI annotations described above). The application then authenticates using the ambient credentials provided by that role instead of mounted files.
+
+**Upgrade compatibility:** The effective `APP_AWS__REGION` resolves as `statuslist.aws.region`, falling back to the legacy `secretStore.aws.region` and then `eu-central-1`. Installations that previously set only `secretStore.aws.region` keep that region for the application across upgrade.
+
+When `statuslist.aws.mountCredentials=true` (the default) **and** `externalSecret.enabled=true` (the default ESO path), the chart itself renders a second `ExternalSecret` that provisions `aws-credentials-secret` — the exact Secret the Deployment's credential volume references. It synchronizes two keys into that Secret:
+
+* `credentials` ← `remoteKey`/`credentialsProperty` (the AWS shared credentials file, INI format, e.g. `[default]\naws_access_key_id=...\naws_secret_access_key=...`)
+* `config` ← `remoteKey`/`configProperty` (the AWS shared config file)
+
+The chart mounts that Secret at `/home/nobody/.aws` and sets `AWS_SHARED_CREDENTIALS_FILE` / `AWS_CONFIG_FILE`. Because the chart now owns provisioning of `aws-credentials-secret`, a first release never mounts a Secret that nothing created. The application ExternalSecret target template is not reused for this dedicated AWS credentials Secret; use `statuslist.aws.credentialsSecret.targetTemplate` only if the AWS Secret itself needs templating. In the no-ESO fallback mode (`externalSecret.enabled=false`), the mounted path is not wired automatically — operators must create `aws-credentials-secret` themselves or use Workload Identity.
+
+### Least-privilege IAM policy for the application role
+
+Attach a least-privilege policy to the IRSA role referenced by `serviceAccount.annotations.eks.amazonaws.com/role-arn` (via the trust policy above), scoped to the resources the server actually uses:
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "Route53DNS01",
+      "Effect": "Allow",
+      "Action": [
+        "route53:ChangeResourceRecordSets",
+        "route53:ListResourceRecordSets",
+        "route53:GetChange"
+      ],
+      "Resource": [
+        "arn:aws:route53:::hostedzone/<HOSTED_ZONE_ID>",
+        "arn:aws:route53:::change/*"
+      ]
+    },
+    {
+      "Sid": "SecretsManager",
+      "Effect": "Allow",
+      "Action": [
+        "secretsmanager:GetSecretValue",
+        "secretsmanager:DescribeSecret"
+      ],
+      "Resource": "arn:aws:secretsmanager:<REGION>:<ACCOUNT_ID>:secret:status-list/*"
+    },
+    {
+      "Sid": "S3StatusList",
+      "Effect": "Allow",
+      "Action": ["s3:GetObject", "s3:PutObject", "s3:DeleteObject"],
+      "Resource": "arn:aws:s3:::status-list-adorsys/*"
+    }
+  ]
+}
+```
+
+Replace `<HOSTED_ZONE_ID>`, `<REGION>`, and `<ACCOUNT_ID>` with your values, and drop any `Sid` the server does not need so the role stays minimal.
+
+## SecretStore Providers
+
+External Secret Operator's `SecretStore` is provider-neutral via `secretStore.provider` (`aws` | `vault` | `gcp` | `azure` | `raw`). The shipped default is `aws`. A `SecretStore` is rendered **only** when `externalSecret.enabled=true` **and** `secretStore.enabled=true` — in the no-ESO fallback mode it is never emitted, so a cluster without ESO CRDs accepts the release.
+
+This chart uses the stable ESO API group/version `external-secrets.io/v1`. Before installing with ESO enabled, verify that the installed CRDs serve `v1` for `externalsecrets.external-secrets.io`, `secretstores.external-secrets.io`, `clustersecretstores.external-secrets.io`, and any cluster-scoped resources you use. Upgrade ESO and its CRDs as one unit; mismatched controller/CRD versions can cause Kubernetes to reject the rendered resources or ESO reconciliation to fail.
+
+```yaml
+secretStore:
+  enabled: true
+  provider: aws
+  aws:
+    service: SecretsManager # SecretsManager | ParameterStore
+    region: "eu-central-1" # applies to the AWS SecretStore; APP_AWS__REGION falls back to statuslist.aws.region
+  vault:
+    server: ""
+    path: "secret"
+    auth: {}
+  gcp:
+    projectID: ""
+    auth: {}
+  azure:
+    tenantId: ""
+    vaultUrl: ""
+    authType: "" # ServicePrincipal | ManagedIdentity | WorkloadIdentity
+    environmentType: "" # optional: PublicCloud (default) | USGovernmentCloud | ChinaCloud | GermanCloud
+    identityId: "" # ManagedIdentity: select one of multiple managed identities
+    serviceAccountRef:
+      name: "" # WorkloadIdentity: ESO's own least-privilege identity
+      namespace: ""
+    authSecretRef: {} # ServicePrincipal: clientId/clientSecret/tenantId secret selectors
+  raw: {} # provider body passthrough (rendered directly under spec.provider)
+```
+
+* **aws** (`SecretsManager` or `ParameterStore`): `service` and `region`. `region` falls back to the effective app region when empty.
+* **vault** (Vault / OpenBao-compatible): `server`, `path`, and an optional `auth` block.
+* **gcp**: `projectID` plus an optional `auth` block (use Workload Identity for ambient auth).
+* **azure**: `tenantId`, `vaultUrl`, and an `authType` validated as an enum per the ESO `AzureKVProvider` CRD — `ServicePrincipal | ManagedIdentity | WorkloadIdentity` (there is **no** `ClientSecret` authType). For Workload Identity use `authType: WorkloadIdentity` and bind `serviceAccountRef` to **External Secrets Operator's own identity** (least privilege) — **not** the application ServiceAccount. Managed-identity selection uses `identityId`; ServicePrincipal client credentials go under the `authSecretRef` block. `environmentType` is optional.
+* **raw**: pass the concrete provider body through `secretStore.raw`, **rendered directly under `spec.provider`** for unsupported ESO providers without editing the chart. `secretStore.raw` holds only the provider body (no extra top-level `provider` key); an empty `raw: {}` is **rejected** so this path never silently emits a weakened SecretStore.
+
+Provider selection is fail-closed: an unsupported `secretStore.provider` value is rejected by the chart's `values.schema.json` and a Helm `fail`, and contradictory mode combinations (ESO disabled while a SecretStore is requested) do not render the ESO CR.
+
+## File-Based Secret Mounts and Rotation
+
+`statuslist.secretMounts` mounts operator-managed Kubernetes Secrets as read-only files. Add `fileEnv` to a mount to expose a file path through the application environment:
+
+```yaml
+statuslist:
+  secretMounts:
+    - name: database-credentials
+      secretName: statuslist-db-credentials
+      mountPath: /etc/secrets/database
+      items:
+        - key: password
+          path: password
+      fileEnv:
+        APP_DATABASE__PASSWORD_FILE: password
+```
+
+`fileEnv` values are relative to `mountPath`, and they work with or without `items`. By default, the chart mounts the application Secret's `postgres-password` key at `/var/run/status-list-server/database/password` and exposes that path through `APP_DATABASE__PASSWORD_FILE`. You can override `statuslist.secretMounts` to point at another Secret or mount path.
+
+This chart support is preparatory for application images that implement the file-watcher and reload behavior from issue #456. Current images that only read `APP_DATABASE__PASSWORD` at startup still need a rollout after secret changes. The `checksum/secret` annotation only reacts to Helm-rendered ExternalSecret template or value changes; it does not change when External Secrets Operator later syncs new data from Vault, AWS, GCP, or Azure into a Kubernetes Secret.
+
+For mounted Secrets that should be created by ESO, define them under `externalSecret.spec.extraExternalSecrets` and set each `target.name` to the `secretMounts[].secretName` value. If customer-side provisioning is used instead, the prerequisite Kubernetes Secret names and keys must exist before Helm deploys, otherwise Kubernetes cannot mount the volumes.
+
 **Fallback Secret (default).** Without ESO, the chart renders a plain Kubernetes Secret inline:
 
 ```yaml
