@@ -3,6 +3,18 @@
 All notable changes to this project will be documented in this file.
 <!-- markdownlint-disable line-length no-bare-urls ul-style emphasis-style -->
 
+## [1.1.2] - 2026-09-04
+
+### Bug Fixes
+
+- [9d46ee4](
+https://github.com/adorsys/status-list-server/commit/9d46ee448321ad5b89be9bc9d1832692e71cf696) *(ci)* Fetch repo and pass repository flag for digest artifact download by @Hermann-Core in [#493](
+https://github.com/adorsys/status-list-server/pull/493)
+
+**Full Changelog**: https://github.com/adorsys/status-list-server/compare/v1.1.1...v1.1.2
+
+
+
 ## [1.1.1] - 2026-09-04
 
 ### Bug Fixes
