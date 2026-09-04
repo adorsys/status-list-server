@@ -41,22 +41,13 @@ services:
     networks:
       - status-list-network
 
-  redis:
-    image: redis:8.6
-    container_name: redis
-    profiles: ["redis"]
-    ports:
-      - 6379:6379
-    networks:
-      - status-list-network
-
   localstack:
     container_name: localstack
     image: localstack/localstack:4.14
     ports:
       - 4566:4566
     environment:
-      - SERVICES=s3,secretsmanager
+      - SERVICES=secretsmanager
     healthcheck:
       test: ["CMD-SHELL", "curl -f http://localhost:4566/"]
       interval: 5s
@@ -92,7 +83,7 @@ services:
       context: .
       dockerfile: Dockerfile
       args:
-        FEATURES: ${FEATURES:-postgres,aws-secrets,acme}
+        FEATURES: ${FEATURES:-postgres,aws}
     container_name: status-list-server
     env_file:
       - path: .env.template
@@ -102,14 +93,12 @@ services:
     environment:
       APP_ENV: ${APP_ENV:-development}
       APP_SERVER__ENABLE_METRICS: ${APP_SERVER__ENABLE_METRICS:-true}
-      APP_AWS__S3_BUCKET: ${APP_AWS__S3_BUCKET:-status-list-adorsys}
       APP_STATUS_LIST__TOKEN_EXP_SECS: ${APP_STATUS_LIST__TOKEN_EXP_SECS:-900}
       APP_STATUS_LIST__TOKEN_TTL_SECS: ${APP_STATUS_LIST__TOKEN_TTL_SECS:-300}
       APP_TELEMETRY__ENVIRONMENT: ${APP_TELEMETRY__ENVIRONMENT:-development}
       APP_TELEMETRY__OTLP_ENDPOINT: "http://otel-collector:4317"
       APP_TELEMETRY__ENABLED: ${APP_TELEMETRY__ENABLED:-true}
       APP_TELEMETRY__SAMPLER_RATIO: ${APP_TELEMETRY__SAMPLER_RATIO:-1.0}
-      APP_REDIS__URI: ${APP_REDIS__URI:-}
     ports:
       - 8000:8000
     depends_on:
@@ -155,17 +144,39 @@ services:
     image: prom/prometheus:v3.11.3
     container_name: prometheus
     ports:
-      - 9090:9090
+      - 9092:9090
     volumes:
-      - ./prometheus.yml:/etc/prometheus/prometheus.yml
+      - ./observability/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml
+      - ./observability/prometheus/rules:/etc/prometheus/rules
     networks:
       - status-list-network
     # Only scrape metrics if endpoint is exposed
     command:
       - '--config.file=/etc/prometheus/prometheus.yml'
       - '--storage.tsdb.path=/prometheus'
+      - '--storage.tsdb.retention.time=31d'
       - '--web.console.libraries=/usr/share/prometheus/console_libraries'
       - '--web.console.templates=/usr/share/prometheus/consoles'
+      - '--web.enable-lifecycle'
+
+  grafana:
+    image: grafana/grafana:12.0.0
+    container_name: grafana
+    restart: unless-stopped
+    ports:
+      - 3000:3000
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:?GRAFANA_ADMIN_PASSWORD must be set}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - ./observability/dashboards/provisioning/datasources.yml:/etc/grafana/provisioning/datasources/datasources.yml:ro
+      - ./observability/dashboards/provisioning/dashboards.yml:/etc/grafana/provisioning/dashboards/dashboards.yml:ro
+      - ./observability/dashboards/generated:/var/lib/grafana/dashboards:ro
+    depends_on:
+      prometheus:
+        condition: service_started
+    networks:
+      - status-list-network
 
   pushgateway:
     image: prom/pushgateway:v1.11.2

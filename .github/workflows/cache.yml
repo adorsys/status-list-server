@@ -1,12 +1,9 @@
 # Workflow to clean the cache in case of issues
 name: Clean Cache
 
-# zizmor: ignore-start: excessive-permissions
-# This workflow requires actions:write permission to delete cache entries.
-# This is a pre-existing permission requirement.
+# `actions: write` is what `gh cache delete` needs; everything unlisted is `none`.
 permissions:
   actions: write
-# zizmor: ignore-end
 
 on:
   workflow_dispatch:
@@ -14,8 +11,10 @@ on:
 jobs:
   clean-cache:
     runs-on: ubuntu-latest
+    # No checkout, so `gh` has no git remote to infer the repo from. It never reads
+    # GITHUB_REPOSITORY, hence GH_REPO.
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - run: gh cache delete --all
         env:
           GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}

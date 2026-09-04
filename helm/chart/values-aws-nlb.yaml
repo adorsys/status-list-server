@@ -1,0 +1,13 @@
+# AWS/EKS direct Network Load Balancer exposure overlay.
+# Use this only when the Service itself is the public entry point; the inherited
+# Ingress is disabled so traffic does not bypass the intended exposure mode.
+
+statuslist:
+  ingress:
+    enabled: false
+  service:
+    type: LoadBalancer
+    annotations:
+      service.beta.kubernetes.io/aws-load-balancer-type: "external"
+      service.beta.kubernetes.io/aws-load-balancer-nlb-target-type: "ip"
+      service.beta.kubernetes.io/aws-load-balancer-scheme: "internet-facing"

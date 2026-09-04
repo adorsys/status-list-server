@@ -21,12 +21,16 @@ jobs:
     runs-on: ubuntu-latest
     if: ${{ github.repository == 'adorsys/status-list-server' }}
     steps:
+      # Without a `permission-*` input the token silently inherits every scope the App
+      # installation holds.
       - name: Generate GitHub App Token
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         id: app-token
         with:
           client-id: ${{ vars.RELEASE_BOT_CLIENT_ID }}
           private-key: ${{ secrets.RELEASE_BOT_PRIVATE_KEY }}
+          # An App token ignores the job's `permissions:` block, so narrow it here.
+          permission-contents: write
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -34,7 +38,7 @@ jobs:
           token: ${{ steps.app-token.outputs.token }}
           persist-credentials: false
       - name: Install Rust toolchain
-        uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1
+        uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1.17.0
         with:
           toolchain: stable
           rustflags: ''
@@ -43,6 +47,8 @@ jobs:
         with:
           command: release
         env:
+          # Must be an App token: tags created by GITHUB_TOKEN do not trigger other
+          # workflows, so deploy.yml would never run. https://release-plz.dev/docs/github/output#workflow-not-triggered
           GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
 
   # Create a PR with the new versions and changelog, preparing the next release.
@@ -57,12 +63,16 @@ jobs:
       group: release-plz-pr-${{ github.ref }}
       cancel-in-progress: false
     steps:
+      # Scoped as above; `release-pr` pushes the release branch and opens the PR.
       - name: Generate GitHub App Token
         id: app-token
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         with:
           client-id: ${{ vars.RELEASE_BOT_CLIENT_ID }}
           private-key: ${{ secrets.RELEASE_BOT_PRIVATE_KEY }}
+          # As above; `release-pr` also opens the PR, hence pull-requests.
+          permission-contents: write
+          permission-pull-requests: write
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -70,7 +80,7 @@ jobs:
           token: ${{ steps.app-token.outputs.token }}
           persist-credentials: false
       - name: Install Rust toolchain
-        uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1
+        uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1.17.0
         with:
           toolchain: stable
           rustflags: ''

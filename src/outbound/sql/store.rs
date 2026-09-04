@@ -1,3 +1,4 @@
+use arc_swap::ArcSwap;
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, ConnectionTrait, DatabaseBackend, DatabaseConnection,
     DatabaseTransaction, DbErr, EntityTrait, IsolationLevel, QueryFilter, QueryOrder, QuerySelect,
@@ -11,15 +12,65 @@ use super::models::{
     Credentials, StatusListHistoryRecord, StatusListRecord, credentials, status_list_history,
     status_lists,
 };
+use crate::utils::metrics_db::time_query;
 
 #[derive(Clone)]
 pub struct SeaOrmStore<T> {
-    db: Arc<DatabaseConnection>,
+    db: Arc<SwappableDatabaseConnection>,
     _phantom: std::marker::PhantomData<T>,
+}
+
+pub struct SwappableDatabaseConnection {
+    active: ArcSwap<DatabaseConnection>,
+}
+
+impl SwappableDatabaseConnection {
+    pub fn new(db: Arc<DatabaseConnection>) -> Self {
+        Self {
+            active: ArcSwap::from(db),
+        }
+    }
+
+    pub fn current(&self) -> Arc<DatabaseConnection> {
+        self.active.load_full()
+    }
+
+    pub fn swap(&self, db: Arc<DatabaseConnection>) -> Arc<DatabaseConnection> {
+        self.active.swap(db)
+    }
+}
+
+#[cfg(all(test, feature = "sqlite"))]
+mod swappable_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn swap_replaces_active_pool_and_returns_previous_pool() {
+        let first = Arc::new(
+            sea_orm::Database::connect("sqlite::memory:")
+                .await
+                .expect("first sqlite pool"),
+        );
+        let second = Arc::new(
+            sea_orm::Database::connect("sqlite::memory:")
+                .await
+                .expect("second sqlite pool"),
+        );
+        let swappable = SwappableDatabaseConnection::new(first.clone());
+
+        let old = swappable.swap(second.clone());
+
+        assert!(Arc::ptr_eq(&old, &first));
+        assert!(Arc::ptr_eq(&swappable.current(), &second));
+    }
 }
 
 impl<T> SeaOrmStore<T> {
     pub fn new(db: Arc<DatabaseConnection>) -> Self {
+        Self::from_handle(Arc::new(SwappableDatabaseConnection::new(db)))
+    }
+
+    pub fn from_handle(db: Arc<SwappableDatabaseConnection>) -> Self {
         Self {
             db,
             _phantom: std::marker::PhantomData,
@@ -56,13 +107,13 @@ impl<T> SeaOrmStore<T> {
     /// SQLite and the mock backend are excluded: SQLite has no per-transaction
     /// isolation and sea-orm warns on every transaction if a level is supplied.
     async fn begin_read_committed(&self) -> Result<DatabaseTransaction, DbErr> {
-        match self.db.get_database_backend() {
+        let db = self.db.current();
+        match db.get_database_backend() {
             DatabaseBackend::Postgres | DatabaseBackend::MySql => {
-                self.db
-                    .begin_with_config(Some(IsolationLevel::ReadCommitted), None)
+                db.begin_with_config(Some(IsolationLevel::ReadCommitted), None)
                     .await
             }
-            _ => self.db.begin().await,
+            _ => db.begin().await,
         }
     }
 }
@@ -72,28 +123,31 @@ impl SeaOrmStore<StatusListRecord> {
     /// same error whichever path `history_retention_secs` selects.
     #[tracing::instrument(skip(self, entity), fields(db.system = "sea-orm"))]
     pub async fn insert_one(&self, entity: StatusListRecord) -> Result<(), RepositoryError> {
-        let active = status_lists::ActiveModel {
-            list_id: Set(entity.list_id),
-            issuer: Set(entity.issuer),
-            status_list: Set(entity.status_list),
-            sub: Set(entity.sub),
-            updated_at: Set(entity.updated_at),
-        };
-        let txn = self.begin_read_committed().await.map_err(map_insert_err)?;
-        if let Err(insert_err) = status_lists::Entity::insert(active)
-            .exec_without_returning(&txn)
-            .await
-        {
-            txn.rollback().await.map_err(|rollback_err| {
-                RepositoryError::InsertError(format!(
-                    "status list insert failed ({insert_err}); \
-                     rolling the transaction back also failed: {rollback_err}"
-                ))
-            })?;
-            return Err(map_insert_err(insert_err));
-        }
-        txn.commit().await.map_err(map_insert_err)?;
-        Ok(())
+        time_query("insert", "status_list", async {
+            let active = status_lists::ActiveModel {
+                list_id: Set(entity.list_id),
+                issuer: Set(entity.issuer),
+                status_list: Set(entity.status_list),
+                sub: Set(entity.sub),
+                updated_at: Set(entity.updated_at),
+            };
+            let txn = self.begin_read_committed().await.map_err(map_insert_err)?;
+            if let Err(insert_err) = status_lists::Entity::insert(active)
+                .exec_without_returning(&txn)
+                .await
+            {
+                txn.rollback().await.map_err(|rollback_err| {
+                    RepositoryError::InsertError(format!(
+                        "status list insert failed ({insert_err}); \
+                         rolling the transaction back also failed: {rollback_err}"
+                    ))
+                })?;
+                return Err(map_insert_err(insert_err));
+            }
+            txn.commit().await.map_err(map_insert_err)?;
+            Ok(())
+        })
+        .await
     }
 
     /// Like [`insert_one`](Self::insert_one), but the row `INSERT` and the
@@ -112,79 +166,86 @@ impl SeaOrmStore<StatusListRecord> {
         entity: StatusListRecord,
         snapshot: StatusListHistoryRecord,
     ) -> Result<(), RepositoryError> {
-        #[cfg(test)]
-        let probed_list_id = entity.list_id.clone();
+        time_query("insert_with_snapshot", "status_list", async {
+            #[cfg(test)]
+            let probed_list_id = entity.list_id.clone();
 
-        if snapshot.list_id != entity.list_id {
-            return Err(RepositoryError::InsertError(format!(
-                "snapshot list_id ({}) does not match entity list_id ({})",
-                snapshot.list_id, entity.list_id
-            )));
-        }
+            if snapshot.list_id != entity.list_id {
+                return Err(RepositoryError::InsertError(format!(
+                    "snapshot list_id ({}) does not match entity list_id ({})",
+                    snapshot.list_id, entity.list_id
+                )));
+            }
 
-        let txn = self.begin_read_committed().await.map_err(map_insert_err)?;
+            let txn = self.begin_read_committed().await.map_err(map_insert_err)?;
 
-        let active = status_lists::ActiveModel {
-            list_id: Set(entity.list_id),
-            issuer: Set(entity.issuer),
-            status_list: Set(entity.status_list),
-            sub: Set(entity.sub),
-            updated_at: Set(entity.updated_at),
-        };
-        if let Err(insert_err) = status_lists::Entity::insert(active)
-            .exec_without_returning(&txn)
-            .await
-        {
-            // `insert_err` is classified after the rollback, not from it: on
-            // Postgres the failed statement poisons the transaction (`25P02`),
-            // so reading the rollback's own error would degrade a duplicate to a
-            // 500. Verified by `assert_duplicate_list_id_is_conflict`.
-            //
-            // Explicit rather than left to `Drop`: MySQL's 1205 rolls back only
-            // the statement (`innodb_rollback_on_timeout` is `OFF`).
-            //
-            // A failed rollback drops the classification and returns 500 — no
-            // 409 can promise "nothing landed" when the write may still land.
-            txn.rollback().await.map_err(|rollback_err| {
-                RepositoryError::InsertError(format!(
-                    "status list insert failed ({insert_err}); \
-                     rolling the transaction back also failed: {rollback_err}"
-                ))
-            })?;
-            return Err(map_insert_err(insert_err));
-        }
+            let active = status_lists::ActiveModel {
+                list_id: Set(entity.list_id),
+                issuer: Set(entity.issuer),
+                status_list: Set(entity.status_list),
+                sub: Set(entity.sub),
+                updated_at: Set(entity.updated_at),
+            };
+            if let Err(insert_err) = status_lists::Entity::insert(active)
+                .exec_without_returning(&txn)
+                .await
+            {
+                // `insert_err` is classified after the rollback, not from it: on
+                // Postgres the failed statement poisons the transaction (`25P02`),
+                // so reading the rollback's own error would degrade a duplicate to a
+                // 500. Verified by `assert_duplicate_list_id_is_conflict`.
+                //
+                // Explicit rather than left to `Drop`: MySQL's 1205 rolls back only
+                // the statement (`innodb_rollback_on_timeout` is `OFF`).
+                //
+                // A failed rollback drops the classification and returns 500 — no
+                // 409 can promise "nothing landed" when the write may still land.
+                txn.rollback().await.map_err(|rollback_err| {
+                    RepositoryError::InsertError(format!(
+                        "status list insert failed ({insert_err}); \
+                         rolling the transaction back also failed: {rollback_err}"
+                    ))
+                })?;
+                return Err(map_insert_err(insert_err));
+            }
 
-        let history_active: status_list_history::ActiveModel = snapshot.into();
-        if let Err(insert_err) = status_list_history::Entity::insert(history_active)
-            .exec_without_returning(&txn)
-            .await
-        {
-            txn.rollback().await.map_err(|rollback_err| {
-                RepositoryError::InsertError(format!(
-                    "history snapshot insert failed ({insert_err}); \
-                     rolling back the status list insert also failed: {rollback_err}"
-                ))
-            })?;
-            return Err(map_snapshot_insert_err(insert_err));
-        }
+            let history_active: status_list_history::ActiveModel = snapshot.into();
+            if let Err(insert_err) = status_list_history::Entity::insert(history_active)
+                .exec_without_returning(&txn)
+                .await
+            {
+                txn.rollback().await.map_err(|rollback_err| {
+                    RepositoryError::InsertError(format!(
+                        "history snapshot insert failed ({insert_err}); \
+                         rolling back the status list insert also failed: {rollback_err}"
+                    ))
+                })?;
+                return Err(map_snapshot_insert_err(insert_err));
+            }
 
-        #[cfg(test)]
-        snapshot_txn_test_hook::INSERT_BEFORE_COMMIT
-            .pause(&probed_list_id)
-            .await;
+            #[cfg(test)]
+            snapshot_txn_test_hook::INSERT_BEFORE_COMMIT
+                .pause(&probed_list_id)
+                .await;
 
-        txn.commit().await.map_err(map_insert_err)?;
-        Ok(())
+            txn.commit().await.map_err(map_insert_err)?;
+            Ok(())
+        })
+        .await
     }
 
     pub async fn find_one_by(
         &self,
         value: &str,
     ) -> Result<Option<StatusListRecord>, RepositoryError> {
-        status_lists::Entity::find_by_id(value)
-            .one(&*self.db)
-            .await
-            .map_err(find_err)
+        time_query("find_one", "status_list", async {
+            let db = self.db.current();
+            status_lists::Entity::find_by_id(value)
+                .one(&*db)
+                .await
+                .map_err(find_err)
+        })
+        .await
     }
 
     #[tracing::instrument(skip(self), fields(issuer))]
@@ -192,12 +253,16 @@ impl SeaOrmStore<StatusListRecord> {
         &self,
         issuer: &str,
     ) -> Result<Vec<StatusListRecord>, RepositoryError> {
-        status_lists::Entity::find()
-            .filter(status_lists::Column::Issuer.eq(issuer))
-            .all(&*self.db)
-            .await
-            .map(|tokens| tokens.into_iter().collect())
-            .map_err(find_err)
+        time_query("find_all", "status_list", async {
+            let db = self.db.current();
+            status_lists::Entity::find()
+                .filter(status_lists::Column::Issuer.eq(issuer))
+                .all(&*db)
+                .await
+                .map(|tokens| tokens.into_iter().collect())
+                .map_err(find_err)
+        })
+        .await
     }
 
     /// Optimistic-concurrency update guarded on `updated_at`:
@@ -236,42 +301,45 @@ impl SeaOrmStore<StatusListRecord> {
                 entity.updated_at, expected_updated_at
             )));
         }
-        let txn = self.begin_read_committed().await.map_err(map_update_err)?;
+        time_query("update", "status_list", async {
+            let txn = self.begin_read_committed().await.map_err(map_update_err)?;
 
-        let result = status_lists::Entity::update_many()
-            .col_expr(status_lists::Column::Issuer, Expr::value(entity.issuer))
-            .col_expr(
-                status_lists::Column::StatusList,
-                Expr::value(entity.status_list),
-            )
-            .col_expr(status_lists::Column::Sub, Expr::value(entity.sub))
-            .col_expr(
-                status_lists::Column::UpdatedAt,
-                Expr::value(entity.updated_at),
-            )
-            .filter(status_lists::Column::ListId.eq(list_id))
-            .filter(status_lists::Column::UpdatedAt.eq(expected_updated_at))
-            .exec(&txn)
-            .await;
+            let result = status_lists::Entity::update_many()
+                .col_expr(status_lists::Column::Issuer, Expr::value(entity.issuer))
+                .col_expr(
+                    status_lists::Column::StatusList,
+                    Expr::value(entity.status_list),
+                )
+                .col_expr(status_lists::Column::Sub, Expr::value(entity.sub))
+                .col_expr(
+                    status_lists::Column::UpdatedAt,
+                    Expr::value(entity.updated_at),
+                )
+                .filter(status_lists::Column::ListId.eq(list_id))
+                .filter(status_lists::Column::UpdatedAt.eq(expected_updated_at))
+                .exec(&txn)
+                .await;
 
-        let result = match result {
-            Ok(result) => result,
-            Err(update_err) => {
-                // Classified after the rollback, and the classification dropped
-                // if the rollback fails — see `insert_one_with_snapshot` for why
-                // a transaction that will not roll back must not become a 409.
-                txn.rollback().await.map_err(|rollback_err| {
-                    RepositoryError::UpdateError(format!(
-                        "guarded update failed ({update_err}); \
-                         rolling the transaction back also failed: {rollback_err}"
-                    ))
-                })?;
-                return Err(map_update_err(update_err));
-            }
-        };
+            let result = match result {
+                Ok(result) => result,
+                Err(update_err) => {
+                    // Classified after the rollback, and the classification dropped
+                    // if the rollback fails — see `insert_one_with_snapshot` for why
+                    // a transaction that will not roll back must not become a 409.
+                    txn.rollback().await.map_err(|rollback_err| {
+                        RepositoryError::UpdateError(format!(
+                            "guarded update failed ({update_err}); \
+                             rolling the transaction back also failed: {rollback_err}"
+                        ))
+                    })?;
+                    return Err(map_update_err(update_err));
+                }
+            };
 
-        txn.commit().await.map_err(map_update_err)?;
-        Ok(result.rows_affected > 0)
+            txn.commit().await.map_err(map_update_err)?;
+            Ok(result.rows_affected > 0)
+        })
+        .await
     }
 
     /// Like [`update_one`](Self::update_one), but the guarded `UPDATE` and the
@@ -312,73 +380,80 @@ impl SeaOrmStore<StatusListRecord> {
             )));
         }
 
-        let txn = self.begin_read_committed().await.map_err(map_update_err)?;
+        time_query("update_with_snapshot", "status_list", async {
+            let txn = self.begin_read_committed().await.map_err(map_update_err)?;
 
-        let result = status_lists::Entity::update_many()
-            .col_expr(status_lists::Column::Issuer, Expr::value(entity.issuer))
-            .col_expr(
-                status_lists::Column::StatusList,
-                Expr::value(entity.status_list),
-            )
-            .col_expr(status_lists::Column::Sub, Expr::value(entity.sub))
-            .col_expr(
-                status_lists::Column::UpdatedAt,
-                Expr::value(entity.updated_at),
-            )
-            .filter(status_lists::Column::ListId.eq(list_id))
-            .filter(status_lists::Column::UpdatedAt.eq(expected_updated_at))
-            .exec(&txn)
-            .await;
+            let result = status_lists::Entity::update_many()
+                .col_expr(status_lists::Column::Issuer, Expr::value(entity.issuer))
+                .col_expr(
+                    status_lists::Column::StatusList,
+                    Expr::value(entity.status_list),
+                )
+                .col_expr(status_lists::Column::Sub, Expr::value(entity.sub))
+                .col_expr(
+                    status_lists::Column::UpdatedAt,
+                    Expr::value(entity.updated_at),
+                )
+                .filter(status_lists::Column::ListId.eq(list_id))
+                .filter(status_lists::Column::UpdatedAt.eq(expected_updated_at))
+                .exec(&txn)
+                .await;
 
-        let result = match result {
-            Ok(result) => result,
-            Err(update_err) => {
+            let result = match result {
+                Ok(result) => result,
+                Err(update_err) => {
+                    txn.rollback().await.map_err(|rollback_err| {
+                        RepositoryError::UpdateError(format!(
+                            "guarded update failed ({update_err}); \
+                             rolling the transaction back also failed: {rollback_err}"
+                        ))
+                    })?;
+                    return Err(map_update_err(update_err));
+                }
+            };
+
+            if result.rows_affected == 0 {
+                if let Err(e) = txn.rollback().await {
+                    tracing::warn!(error = ?e, "rollback of empty conflict transaction failed");
+                }
+                return Ok(false);
+            }
+
+            let history_active: status_list_history::ActiveModel = snapshot.into();
+            if let Err(insert_err) = status_list_history::Entity::insert(history_active)
+                .exec_without_returning(&txn)
+                .await
+            {
                 txn.rollback().await.map_err(|rollback_err| {
-                    RepositoryError::UpdateError(format!(
-                        "guarded update failed ({update_err}); \
-                         rolling the transaction back also failed: {rollback_err}"
+                    RepositoryError::InsertError(format!(
+                        "history snapshot insert failed ({insert_err}); \
+                         rolling back the row update also failed: {rollback_err}"
                     ))
                 })?;
-                return Err(map_update_err(update_err));
+                return Err(map_snapshot_insert_err(insert_err));
             }
-        };
 
-        if result.rows_affected == 0 {
-            if let Err(e) = txn.rollback().await {
-                tracing::warn!(error = ?e, "rollback of empty conflict transaction failed");
-            }
-            return Ok(false);
-        }
+            #[cfg(test)]
+            snapshot_txn_test_hook::UPDATE_BEFORE_COMMIT
+                .pause(list_id)
+                .await;
 
-        let history_active: status_list_history::ActiveModel = snapshot.into();
-        if let Err(insert_err) = status_list_history::Entity::insert(history_active)
-            .exec_without_returning(&txn)
-            .await
-        {
-            txn.rollback().await.map_err(|rollback_err| {
-                RepositoryError::InsertError(format!(
-                    "history snapshot insert failed ({insert_err}); \
-                     rolling back the row update also failed: {rollback_err}"
-                ))
-            })?;
-            return Err(map_snapshot_insert_err(insert_err));
-        }
-
-        #[cfg(test)]
-        snapshot_txn_test_hook::UPDATE_BEFORE_COMMIT
-            .pause(list_id)
-            .await;
-
-        txn.commit().await.map_err(map_update_err)?;
-        Ok(true)
+            txn.commit().await.map_err(map_update_err)?;
+            Ok(true)
+        })
+        .await
     }
 
     pub async fn delete_by(&self, value: &str) -> Result<bool, RepositoryError> {
-        let result = status_lists::Entity::delete_by_id(value)
-            .exec(&*self.db)
-            .await
-            .map_err(map_delete_err)?;
-        Ok(result.rows_affected > 0)
+        time_query("delete", "status_list", async {
+            let db = self.db.current();
+            let result = status_lists::Entity::delete_by_id(value)
+                .exec(&*db)
+                .await
+                .map_err(map_delete_err)?;
+            Ok(result.rows_affected > 0)
+        })
+        .await
     }
 
     #[tracing::instrument(skip(self), fields(db.system = "sea-orm"))]
@@ -386,44 +461,60 @@ impl SeaOrmStore<StatusListRecord> {
         &self,
         issuer: &str,
     ) -> Result<Vec<StatusListRecord>, RepositoryError> {
-        status_lists::Entity::find()
-            .filter(status_lists::Column::Sub.eq(issuer))
-            .all(&*self.db)
-            .await
-            .map_err(find_err)
+        time_query("find_by_issuer", "status_list", async {
+            let db = self.db.current();
+            status_lists::Entity::find()
+                .filter(status_lists::Column::Sub.eq(issuer))
+                .all(&*db)
+                .await
+                .map_err(find_err)
+        })
+        .await
     }
 
     #[tracing::instrument(skip(self), fields(db.system = "sea-orm"))]
     pub async fn find_all(&self) -> Result<Vec<StatusListRecord>, RepositoryError> {
-        status_lists::Entity::find()
-            .all(&*self.db)
-            .await
-            .map_err(find_err)
+        time_query("find_all", "status_list", async {
+            let db = self.db.current();
+            status_lists::Entity::find()
+                .all(&*db)
+                .await
+                .map_err(find_err)
+        })
+        .await
     }
 
     #[tracing::instrument(skip(self), fields(db.system = "sea-orm"))]
     pub async fn find_all_status_list_uris(&self) -> Result<Vec<String>, RepositoryError> {
-        status_lists::Entity::find()
-            .select_only()
-            .column(status_lists::Column::Sub)
-            .group_by(status_lists::Column::Sub)
-            .order_by_asc(status_lists::Column::Sub)
-            .into_tuple::<String>()
-            .all(&*self.db)
-            .await
-            .map_err(find_err)
+        time_query("list_uris", "status_list", async {
+            let db = self.db.current();
+            status_lists::Entity::find()
+                .select_only()
+                .column(status_lists::Column::Sub)
+                .group_by(status_lists::Column::Sub)
+                .order_by_asc(status_lists::Column::Sub)
+                .into_tuple::<String>()
+                .all(&*db)
+                .await
+                .map_err(find_err)
+        })
+        .await
     }
 }
 
 impl SeaOrmStore<StatusListHistoryRecord> {
     #[tracing::instrument(skip(self, entity), fields(db.system = "sea-orm"))]
     pub async fn insert_one(&self, entity: StatusListHistoryRecord) -> Result<(), RepositoryError> {
-        let active: status_list_history::ActiveModel = entity.into();
-        status_list_history::Entity::insert(active)
-            .exec_without_returning(&*self.db)
-            .await
-            .map_err(map_snapshot_insert_err)?;
-        Ok(())
+        time_query("insert", "snapshot", async {
+            let db = self.db.current();
+            let active: status_list_history::ActiveModel = entity.into();
+            status_list_history::Entity::insert(active)
+                .exec_without_returning(&*db)
+                .await
+                .map_err(map_snapshot_insert_err)?;
+            Ok(())
+        })
+        .await
     }
 
     /// Finds the snapshot whose half-open validity interval contains `time`.
@@ -443,14 +534,18 @@ impl SeaOrmStore<StatusListHistoryRecord> {
         list_id: &str,
         time: i64,
     ) -> Result<Option<StatusListHistoryRecord>, RepositoryError> {
-        status_list_history::Entity::find()
-            .filter(status_list_history::Column::ListId.eq(list_id))
-            .filter(status_list_history::Column::Iat.lte(time))
-            .filter(status_list_history::Column::Exp.gt(time))
-            .order_by_desc(status_list_history::Column::Iat)
-            .one(&*self.db)
-            .await
-            .map_err(find_err)
+        time_query("find_valid_at", "snapshot", async {
+            let db = self.db.current();
+            status_list_history::Entity::find()
+                .filter(status_list_history::Column::ListId.eq(list_id))
+                .filter(status_list_history::Column::Iat.lte(time))
+                .filter(status_list_history::Column::Exp.gt(time))
+                .order_by_desc(status_list_history::Column::Iat)
+                .one(&*db)
+                .await
+                .map_err(find_err)
+        })
+        .await
     }
 
     /// Deletes snapshots older than the given cutoff timestamp.
@@ -470,50 +565,56 @@ impl SeaOrmStore<StatusListHistoryRecord> {
     /// any remaining rows.
     #[tracing::instrument(skip(self), fields(db.system = "sea-orm"))]
     pub async fn delete_older_than(&self, cutoff: i64) -> Result<u64, RepositoryError> {
-        const BATCH_SIZE: u64 = 500;
-        let mut total_deleted: u64 = 0;
+        time_query("delete_older_than", "snapshot", async {
+            const BATCH_SIZE: u64 = 500;
+            let mut total_deleted: u64 = 0;
 
-        loop {
-            let backend = self.db.get_database_backend();
-            let sql = match backend {
-                DatabaseBackend::Postgres => {
-                    "DELETE FROM status_list_history \
-                     WHERE snapshot_id IN \
-                     (SELECT snapshot_id FROM status_list_history WHERE exp < $1 LIMIT $2)"
+            loop {
+                let db = self.db.current();
+                let backend = db.get_database_backend();
+                let sql = match backend {
+                    DatabaseBackend::Postgres => {
+                        "DELETE FROM status_list_history \
+                         WHERE snapshot_id IN \
+                         (SELECT snapshot_id FROM status_list_history WHERE exp < $1 LIMIT $2)"
+                    }
+                    DatabaseBackend::MySql => {
+                        "DELETE FROM status_list_history WHERE exp < ? LIMIT ?"
+                    }
+                    _ => {
+                        "DELETE FROM status_list_history \
+                         WHERE snapshot_id IN \
+                         (SELECT snapshot_id FROM status_list_history WHERE exp < ? LIMIT ?)"
+                    }
+                };
+
+                let count = (*db)
+                    .execute(Statement::from_sql_and_values(
+                        backend,
+                        sql,
+                        vec![Value::from(cutoff), Value::from(BATCH_SIZE)],
+                    ))
+                    .await
+                    .map_err(map_delete_err)?
+                    .rows_affected();
+
+                total_deleted += count;
+
+                if count < BATCH_SIZE {
+                    break;
                 }
-                DatabaseBackend::MySql => "DELETE FROM status_list_history WHERE exp < ? LIMIT ?",
-                _ => {
-                    "DELETE FROM status_list_history \
-                     WHERE snapshot_id IN \
-                     (SELECT snapshot_id FROM status_list_history WHERE exp < ? LIMIT ?)"
-                }
-            };
-
-            let count = (*self.db)
-                .execute(Statement::from_sql_and_values(
-                    backend,
-                    sql,
-                    vec![Value::from(cutoff), Value::from(BATCH_SIZE)],
-                ))
-                .await
-                .map_err(map_delete_err)?
-                .rows_affected();
-
-            total_deleted += count;
-
-            if count < BATCH_SIZE {
-                break;
             }
-        }
 
-        if total_deleted > 0 {
-            warn!(
-                deleted = total_deleted,
-                cutoff, "Deleted expired status list history snapshots"
-            );
-        }
+            if total_deleted > 0 {
+                warn!(
+                    deleted = total_deleted,
+                    cutoff, "Deleted expired status list history snapshots"
+                );
+            }
 
-        Ok(total_deleted)
+            Ok(total_deleted)
+        })
+        .await
     }
 }
 
@@ -521,30 +622,37 @@ impl SeaOrmStore<Credentials> {
     /// Pinned so registration cannot inherit a raised server default and turn a
     /// duplicate issuer into a serialization failure.
     pub async fn insert_one(&self, entity: Credentials) -> Result<(), RepositoryError> {
-        let active: credentials::ActiveModel = entity.into();
-        let txn = self.begin_read_committed().await.map_err(map_insert_err)?;
-        if let Err(insert_err) = credentials::Entity::insert(active)
-            .exec_without_returning(&txn)
-            .await
-        {
-            txn.rollback().await.map_err(|rollback_err| {
-                RepositoryError::InsertError(format!(
-                    "credential insert failed ({insert_err}); \
-                     rolling the transaction back also failed: {rollback_err}"
-                ))
-            })?;
-            return Err(map_insert_err(insert_err));
-        }
-        txn.commit().await.map_err(map_insert_err)?;
-        Ok(())
+        time_query("insert", "credential", async {
+            let active: credentials::ActiveModel = entity.into();
+            let txn = self.begin_read_committed().await.map_err(map_insert_err)?;
+            if let Err(insert_err) = credentials::Entity::insert(active)
+                .exec_without_returning(&txn)
+                .await
+            {
+                txn.rollback().await.map_err(|rollback_err| {
+                    RepositoryError::InsertError(format!(
+                        "credential insert failed ({insert_err}); \
+                         rolling the transaction back also failed: {rollback_err}"
+                    ))
+                })?;
+                return Err(map_insert_err(insert_err));
+            }
+            txn.commit().await.map_err(map_insert_err)?;
+            Ok(())
+        })
+        .await
     }
 
     pub async fn find_one_by(&self, value: &str) -> Result<Option<Credentials>, RepositoryError> {
-        credentials::Entity::find_by_id(value)
-            .one(&*self.db)
-            .await
-            .map(|opt| opt.map(Credentials::from))
-            .map_err(find_err)
+        time_query("find_one", "credential", async {
+            let db = self.db.current();
+            credentials::Entity::find_by_id(value)
+                .one(&*db)
+                .await
+                .map(|opt| opt.map(Credentials::from))
+                .map_err(find_err)
+        })
+        .await
     }
 
     pub async fn update_one(
@@ -552,24 +660,32 @@ impl SeaOrmStore<Credentials> {
         issuer: &str,
         entity: Credentials,
     ) -> Result<bool, RepositoryError> {
-        let existing = credentials::Entity::find_by_id(issuer)
-            .one(&*self.db)
-            .await
-            .map_err(find_err)?;
-        if existing.is_none() {
-            return Ok(false);
-        }
-        let active: credentials::ActiveModel = entity.into();
-        active.update(&*self.db).await.map_err(map_update_err)?;
-        Ok(true)
+        time_query("update", "credential", async {
+            let db = self.db.current();
+            let existing = credentials::Entity::find_by_id(issuer)
+                .one(&*db)
+                .await
+                .map_err(find_err)?;
+            if existing.is_none() {
+                return Ok(false);
+            }
+            let active: credentials::ActiveModel = entity.into();
+            active.update(&*db).await.map_err(map_update_err)?;
+            Ok(true)
+        })
+        .await
     }
 
     pub async fn delete_by(&self, value: &str) -> Result<bool, RepositoryError> {
-        let result = credentials::Entity::delete_by_id(value)
-            .exec(&*self.db)
-            .await
-            .map_err(map_delete_err)?;
-        Ok(result.rows_affected > 0)
+        time_query("delete", "credential", async {
+            let db = self.db.current();
+            let result = credentials::Entity::delete_by_id(value)
+                .exec(&*db)
+                .await
+                .map_err(map_delete_err)?;
+            Ok(result.rows_affected > 0)
+        })
+        .await
     }
 }
 
@@ -663,14 +779,12 @@ mod snapshot_txn_test_hook {
             self.slot.get_or_init(|| Mutex::new(None))
         }
 
-        /// Only the container tests install probes, so under any other feature
-        /// set this is dead code and `-D warnings` rejects it.
         #[cfg(any(feature = "mysql", feature = "postgres-tests"))]
         pub(super) async fn install(&self, probe_to_install: Probe) {
             let mut guard = self.slot().lock().await;
             assert!(
                 guard.is_none(),
-                "a contention probe is already installed at this pause site"
+                "only one contention probe can be installed at a time"
             );
             *guard = Some(probe_to_install);
         }
@@ -2507,7 +2621,7 @@ mod test {
         )
         .unwrap();
         let issuer = "issuer-contention-mysql";
-        let cred_store = SeaOrmStore::<Credentials>::new(store_a.db.clone());
+        let cred_store = SeaOrmStore::<Credentials>::from_handle(store_a.db.clone());
         cred_store
             .insert_one(Credentials::new(issuer.to_string(), cred_key))
             .await
@@ -2687,7 +2801,8 @@ mod test {
         );
 
         // Verify A's winning snapshot was created.
-        let history_store = SeaOrmStore::<StatusListHistoryRecord>::new(store_verify.db.clone());
+        let history_store =
+            SeaOrmStore::<StatusListHistoryRecord>::from_handle(store_verify.db.clone());
         let winning_snapshot = history_store
             .find_valid_at(list_id, base_timestamp + 1)
             .await
@@ -2699,8 +2814,9 @@ mod test {
             "snap-contention-a"
         );
 
+        let verify_db = store_verify.db.current();
         let loser_snapshot = status_list_history::Entity::find_by_id(b_snapshot_id)
-            .one(&*store_verify.db)
+            .one(&*verify_db)
             .await
             .expect("Loser snapshot lookup should succeed");
         assert!(
@@ -2746,7 +2862,7 @@ mod test {
         // status_lists.issuer is a foreign key onto credentials.issuer, so the
         // credential has to be committed before either writer starts.
         let key: Jwk = serde_json::from_str(crate::test_fixtures::TEST_EC_PUBLIC_JWK).unwrap();
-        SeaOrmStore::<Credentials>::new(store_verify.db.clone())
+        SeaOrmStore::<Credentials>::from_handle(store_verify.db.clone())
             .insert_one(Credentials::new(issuer.to_string(), key))
             .await
             .unwrap();
@@ -2867,8 +2983,9 @@ mod test {
             "B must not have overwritten A's row on {backend}"
         );
 
+        let verify_db = store_verify.db.current();
         let loser_snapshot = status_list_history::Entity::find_by_id("snap-race-b")
-            .one(&*store_verify.db)
+            .one(&*verify_db)
             .await
             .expect("loser snapshot lookup should succeed");
         assert!(
@@ -2998,7 +3115,7 @@ mod test {
             sub: "sub-lockwait-mysql".to_string(),
             updated_at: v,
         };
-        SeaOrmStore::<StatusListRecord>::new(cred_store.db.clone())
+        SeaOrmStore::<StatusListRecord>::from_handle(cred_store.db.clone())
             .insert_one(base.clone())
             .await
             .unwrap();

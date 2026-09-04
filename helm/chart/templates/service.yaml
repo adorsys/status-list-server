@@ -6,6 +6,10 @@ metadata:
   labels:
     {{- include "status-list-server-chart.labels" . | nindent 4 }}
   namespace: {{ .Release.Namespace }}
+  {{- with .Values.statuslist.service.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
 spec:
   type: {{ .Values.statuslist.service.type }}
   ports:

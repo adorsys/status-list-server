@@ -37,7 +37,10 @@ impl MemoryStatusLists {
 #[async_trait]
 impl StatusListRepo for MemoryStatusLists {
     async fn find(&self, id: &str) -> Result<Option<StatusListRecord>, StatusListError> {
-        Ok(self.values.read().await.get(id).cloned())
+        crate::utils::metrics_db::time_query("find", "status_list", async {
+            Ok(self.values.read().await.get(id).cloned())
+        })
+        .await
     }
 
     async fn insert(&self, record: StatusListRecord) -> Result<(), StatusListError> {
@@ -188,13 +191,16 @@ impl StatusListSnapshotRepo for MemoryStatusListSnapshotRepo {
         list_id: &str,
         time: i64,
     ) -> Result<Option<StatusListSnapshot>, StatusListError> {
-        let values = self.values.read().await;
-        let result = values
-            .values()
-            .filter(|r| r.list_id == list_id && r.iat <= time && r.exp > time)
-            .max_by_key(|r| r.iat)
-            .cloned();
-        Ok(result)
+        crate::utils::metrics_db::time_query("find_valid_at", "snapshot", async {
+            let values = self.values.read().await;
+            let result = values
+                .values()
+                .filter(|r| r.list_id == list_id && r.iat <= time && r.exp > time)
+                .max_by_key(|r| r.iat)
+                .cloned();
+            Ok(result)
+        })
+        .await
     }
 
     async fn delete_older_than(&self, cutoff: i64) -> Result<u64, StatusListError> {
@@ -251,12 +257,13 @@ mod tests {
 
     #[async_trait]
     impl CertificateProvider for DummyCertProvider {
-        async fn certificate_chain(&self) -> Result<Option<Vec<String>>, StatusListError> {
-            Ok(None)
-        }
-
-        async fn signing_key_pem(&self) -> Result<String, StatusListError> {
-            Ok("".into())
+        async fn signing_material(
+            &self,
+        ) -> Result<crate::domain::ports::SigningMaterial, StatusListError> {
+            Ok(crate::domain::ports::SigningMaterial {
+                certificate_chain: None,
+                signing_key_pem: "".into(),
+            })
         }
     }
 

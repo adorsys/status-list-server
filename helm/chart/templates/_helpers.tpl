@@ -63,24 +63,36 @@ Create the name of the service account to use
 {{- end }}
 
 {{/*
-Resolve the Redis connection URI based on chart values.
+Effective name of the Kubernetes Secret the application reads (postgres password).
+Single supported name: "statuslist-secret" in both ESO mode (ExternalSecret target) and
+fallback mode. The Deployment, PostgreSQL (postgres.auth.existingSecret), and the fallback
+Secret all reference this same name, so it is not independently configurable. ESO mode
+validates externalSecret.spec.target.name against it at render time.
 */}}
-{{- define "status-list-server-chart.redisUri" -}}
-{{- $redisHA := index .Values "redis-ha" | default dict -}}
-{{- $redisCfg := index $redisHA "redis" | default dict -}}
-{{- $haproxy := index $redisHA "haproxy" | default dict -}}
-{{- $haproxyEnabled := default true (index $haproxy "enabled") -}}
-{{- $haproxyTls := index $haproxy "tls" | default dict -}}
-{{- $tlsEnabled := and $haproxyEnabled (eq (default false (index $haproxyTls "enabled")) true) -}}
-{{- $externalHostname := default "" (index $redisHA "externalDnsHostname") -}}
-{{- $port := default 6379 (index $redisCfg "port") -}}
-{{- $scheme := ternary "rediss" "redis" $tlsEnabled -}}
-{{- $host := printf "%s-redis-ha-haproxy.%s.svc.cluster.local" .Release.Name .Release.Namespace -}}
-{{- if not $haproxyEnabled }}
-  {{- $host = printf "%s-redis-ha.%s.svc.cluster.local" .Release.Name .Release.Namespace -}}
+{{- define "status-list-server-chart.appSecretName" -}}
+{{- "statuslist-secret" }}
 {{- end }}
-{{- if and $tlsEnabled (ne $externalHostname "") }}
-  {{- $host = $externalHostname -}}
+
+{{/*
+Effective AWS region for the application (renders APP_AWS__REGION for the AWS secretStore
+provider). Preference: explicit statuslist.aws.region, then the legacy secretStore.aws.region
+(upgrade-compatible fallback). Returns empty when neither is set, so APP_AWS__REGION is opt-in
+(explicitly configured) rather than injected unconditionally for non-AWS providers.
+*/}}
+{{- define "status-list-server-chart.appRegion" -}}
+{{- $r := .Values.statuslist.aws.region }}
+{{- if not $r }}
+{{- $r = .Values.secretStore.aws.region }}
 {{- end }}
-{{- printf "%s://:$(REDIS_PASSWORD)@%s:%v" $scheme $host $port -}}
+{{- $r }}
+{{- end }}
+
+{{/*
+Database port helper: returns the configured database port from env.
+Note: APP_DATABASE__PORT is required by deployment.yaml; this helper
+assumes the value exists and does not provide a default.
+*/}}
+{{- define "status-list-server-chart.dbPort" -}}
+{{- $env := .Values.statuslist.env | default dict }}
+{{- get $env "APP_DATABASE__PORT" }}
 {{- end }}

@@ -1,4 +1,4 @@
-#![cfg(feature = "aws-secrets")]
+#![cfg(feature = "aws")]
 
 //! Integration tests for the ACME certificate provisioning flow.
 //!
@@ -256,7 +256,7 @@ async fn build_vault_storage(
     secret_id: SecretString,
 ) -> VaultClient {
     let vault_url = format!("http://127.0.0.1:{vault_port}");
-    VaultClient::builder(vault_url, role_id, secret_id)
+    VaultClient::builder_approle(vault_url, role_id, secret_id)
         .mount("secret")
         .path_prefix("status-list")
         .secrets_cache_ttl(Duration::ZERO)
