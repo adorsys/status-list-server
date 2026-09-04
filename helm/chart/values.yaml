@@ -3,8 +3,6 @@ global:
   # statuslist.<domain> and the default TLS host becomes *.<domain>.
   # Leave empty for provider-neutral defaults.
   domain: ""
-  # Empty string lets Kubernetes use the cluster default StorageClass.
-  storageClass: ""
 
 statuslist:
   enabled: true
@@ -63,9 +61,6 @@ statuslist:
     path: /
     pathType: Prefix
     annotations:
-      cert-manager.io/cluster-issuer: letsencrypt-prod
-      nginx.ingress.kubernetes.io/ssl-redirect: "true"
-      nginx.ingress.kubernetes.io/force-ssl-redirect: "true"
       nginx.ingress.kubernetes.io/proxy-body-size: "10m"
     tls:
       # Defaults to ["*.<global.domain>"] when global.domain is set.
@@ -78,8 +73,6 @@ statuslist:
     APP_ENV: "production"
     APP_SERVER__HOST: "0.0.0.0"
     APP_SERVER__PORT: "8000"
-    APP_SERVER__CERT__EMAIL: ""
-    APP_SERVER__CERT__ORGANIZATION: ""
     APP_SERVER__CERT__ACME_DIRECTORY_URL: "https://acme-v02.api.letsencrypt.org/directory"
     APP_SERVER__CERT__EKU: "1,3,6,1,5,5,7,3,30"
     APP_SERVER__CERT__RENEWAL_CRON_SCHEDULE: "0 0 0 * * *"

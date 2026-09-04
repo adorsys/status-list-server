@@ -71,6 +71,16 @@ runs:
         if ! grep -qE '^\s{4}webhook:' /tmp/rendered/raw/status-list-server/templates/secret-store.yaml; then
           echo "ERROR: raw render missing webhook provider from secretStore.raw"; exit 1
         fi
+        helm template status-list-server helm/chart -f helm/chart/values-aws.yaml --output-dir /tmp/rendered/aws
+        if grep -q 'service.beta.kubernetes.io/aws-load-balancer' /tmp/rendered/aws/status-list-server/templates/service.yaml; then
+          echo "ERROR: AWS ingress overlay must not render direct AWS load balancer annotations"; exit 1
+        fi
+        if [ ! -f /tmp/rendered/aws/status-list-server/templates/ingress.yaml ]; then
+          echo "ERROR: AWS ingress overlay must render Ingress"; exit 1
+        fi
+        if ! grep -q '^  tls:' /tmp/rendered/aws/status-list-server/templates/ingress.yaml; then
+          echo "ERROR: AWS ingress overlay must render a tls block for cert-manager ingress-shim"; exit 1
+        fi
         helm template status-list-server helm/chart -f helm/chart/values-aws.yaml -f helm/chart/values-aws-nlb.yaml --output-dir /tmp/rendered/aws-nlb
         if ! grep -q 'service.beta.kubernetes.io/aws-load-balancer-type' /tmp/rendered/aws-nlb/status-list-server/templates/service.yaml; then
           echo "ERROR: AWS NLB overlay must render AWS load balancer annotations"; exit 1
@@ -88,6 +98,15 @@ runs:
         fi
         if grep -q 'service.beta.kubernetes.io/aws-load-balancer' /tmp/rendered/default/status-list-server/templates/service.yaml; then
           echo "ERROR: default render must not include AWS Service annotations"; exit 1
+        fi
+        if grep -qE 'cert-manager.io/cluster-issuer|nginx.ingress.kubernetes.io/(force-)?ssl-redirect' /tmp/rendered/default/status-list-server/templates/ingress.yaml; then
+          echo "ERROR: default localhost Ingress must not force TLS or request cert-manager without tls hosts"; exit 1
+        fi
+        if grep -q '^  tls:' /tmp/rendered/default/status-list-server/templates/ingress.yaml; then
+          echo "ERROR: default localhost Ingress must not render a tls block"; exit 1
+        fi
+        if grep -qE 'APP_SERVER__CERT__(EMAIL|ORGANIZATION)' /tmp/rendered/default/status-list-server/templates/deployment.yaml; then
+          echo "ERROR: default render must not inject blank certificate identity env vars"; exit 1
         fi
         if grep -q 'storageClassName:' /tmp/rendered/default/status-list-server/charts/postgres/templates/statefulset.yaml; then
           echo "ERROR: default render must use the cluster default StorageClass"; exit 1
@@ -216,16 +235,16 @@ runs:
         if ! grep -q 'serviceAccountName: statuslist-app-sa' /tmp/rendered/wl-app/status-list-server/templates/deployment.yaml; then
           echo "ERROR: Deployment must reference application ServiceAccount statuslist-app-sa"; exit 1
         fi
-        # Production path: values-production.yaml (used by deploy.yml) keeps the ESO-mounted
-        # credential default (statuslist.aws.mountCredentials=true) and renders no Workload
+        # Production path: values-production.yaml (used by deploy.yml) explicitly keeps the
+        # ESO-mounted credential path and renders no Workload
         # Identity IRSA annotation.
         helm template status-list-server helm/chart -f helm/chart/values-production.yaml \
           --output-dir /tmp/rendered/wl-prod
         if grep -q 'eks.amazonaws.com/role-arn:' /tmp/rendered/wl-prod/status-list-server/templates/serviceaccount.yaml; then
-          echo "ERROR: values-production.yaml must not render an IRSA role annotation (ESO-mounted default)"; exit 1
+          echo "ERROR: values-production.yaml must not render an IRSA role annotation (ESO-mounted production path)"; exit 1
         fi
         if ! grep -qE 'AWS_SHARED_CREDENTIALS_FILE|aws-credentials-volume' /tmp/rendered/wl-prod/status-list-server/templates/deployment.yaml; then
-          echo "ERROR: values-production.yaml must mount the ESO-provisioned AWS credentials (mountCredentials=true default)"; exit 1
+          echo "ERROR: values-production.yaml must mount the ESO-provisioned AWS credentials (mountCredentials=true production path)"; exit 1
         fi
         # Azure Workload Identity primary path: application pod label + application KSA distinct
         # from the External Secrets Operator identity.

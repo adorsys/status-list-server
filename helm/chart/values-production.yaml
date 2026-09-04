@@ -3,7 +3,6 @@
 
 global:
   domain: eudi-adorsys.com
-  storageClass: high-performance
 
 serviceAccount:
   create: true
@@ -12,6 +11,11 @@ statuslist:
   replicaCount: 2
   image:
     tag: "1.0.1-aws"
+  ingress:
+    annotations:
+      cert-manager.io/cluster-issuer: letsencrypt-prod
+      nginx.ingress.kubernetes.io/ssl-redirect: "true"
+      nginx.ingress.kubernetes.io/force-ssl-redirect: "true"
   env:
     APP_ENV: "production"
     APP_SERVER__ENABLE_METRICS: "true"
@@ -21,7 +25,7 @@ statuslist:
     APP_SERVER__CERT__DNS__PROVIDER: "route53"
     RUST_LOG: "warn,status_list_server=info"
   aws:
-    # ESO-mounted credentials (the chart default). Set false + IRSA annotation for
+    # ESO-mounted credentials for the production AWS overlay. Set false + IRSA annotation for
     # Workload Identity mode.
     mountCredentials: true
     region: eu-central-1

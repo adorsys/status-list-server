@@ -1,6 +1,3 @@
-global:
-  storageClass: "standard"
-
 statuslist:
   initContainers:
     - name: wait-for-postgres
@@ -18,7 +15,7 @@ statuslist:
 
   aws:
     # Local has no External Secrets Operator and no cloud role, so do not mount the
-    # ESO-provisioned aws-credentials-secret (the chart default is mountCredentials=true).
+    # ESO-provisioned aws-credentials-secret.
     mountCredentials: false
 
   image:

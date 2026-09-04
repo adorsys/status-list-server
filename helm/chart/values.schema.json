@@ -9,10 +9,6 @@
           "type": "string",
           "description": "Chart-wide public DNS suffix. Leave empty to render localhost/default-neutral hostnames.",
           "pattern": "^$|^([a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?\\.)+[a-z]{2,63}\\.?$"
-        },
-        "storageClass": {
-          "type": "string",
-          "description": "Default StorageClass override. Empty string uses the cluster default."
         }
       }
     },
