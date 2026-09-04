@@ -32,7 +32,7 @@ The chart's default `statuslist.image.repository` points at `ghcr.io/adorsys/sta
 - **Build and push to your own registry**, then point `statuslist.image.repository` and `statuslist.image.tag` (or `digest`) at it, or
 - **Load a locally built image** into a local cluster (Minikube `minikube image load`, kind `kind load docker-image`) and use `pullPolicy: IfNotPresent`.
 
-Set `statuslist.image.tag` explicitly. If both `tag` and `digest` are empty, the chart falls back to its provider-neutral `appVersion` (`-fscert`). AWS production deployments select the `-aws` image explicitly through their values and deploy inputs. Prefer a `sha256:` `digest` for reproducible production deploys (see [Pinning the image](#pinning-the-image)).
+Set `statuslist.image.tag` explicitly for ad hoc tags, or set `statuslist.image.variant` and leave `tag` empty to derive the matching variant tag from the chart `appVersion`. If both `tag` and `digest` are empty, the base chart uses the provider-neutral `fscert` variant. AWS production deployments select the `aws` variant explicitly through their values and deploy inputs. Prefer a `sha256:` `digest` for reproducible production deploys (see [Pinning the image](#pinning-the-image)).
 
 ## Option 1: Local / Development Deployment
 

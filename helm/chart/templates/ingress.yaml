@@ -1,13 +1,16 @@
 {{- if .Values.statuslist.ingress.enabled }}
-{{- $globalDomain := trimSuffix "." (dig "domain" "" (.Values.global | default dict) | default "") }}
-{{- $ingressHost := .Values.statuslist.ingress.externalDnsHostname | default "" }}
+{{- $globalDomain := trimSuffix "." (dig "domain" "" (.Values.global | default dict) | default "" | lower) }}
+{{- $ingressHost := .Values.statuslist.ingress.externalDnsHostname | default "" | lower }}
 {{- if and (eq $ingressHost "") $globalDomain }}
 {{- $ingressHost = printf "statuslist.%s" $globalDomain }}
 {{- end }}
 {{- if eq $ingressHost "" }}
 {{- $ingressHost = "localhost" }}
 {{- end }}
-{{- $tlsHosts := .Values.statuslist.ingress.tls.hosts | default list }}
+{{- $tlsHosts := list }}
+{{- range (.Values.statuslist.ingress.tls.hosts | default list) }}
+{{- $tlsHosts = append $tlsHosts (. | lower) }}
+{{- end }}
 {{- if and (eq (len $tlsHosts) 0) $globalDomain }}
 {{- $tlsHosts = list (printf "*.%s" $globalDomain) }}
 {{- else if and (eq (len $tlsHosts) 0) (ne $ingressHost "localhost") }}

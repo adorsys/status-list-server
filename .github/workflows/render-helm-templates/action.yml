@@ -9,10 +9,13 @@ runs:
       run: |
         set -euo pipefail
         mkdir -p /tmp/rendered
+        CHART_APP_VERSION=$(helm show chart helm/chart | sed -nE 's/^appVersion:[[:space:]]*"?([^"]+)"?[[:space:]]*$/\1/p')
+        CHART_BASE_VERSION="${CHART_APP_VERSION%-fscert}"
+        EXPECTED_AWS_TAG="${CHART_BASE_VERSION}-aws"
         helm lint helm/chart
         helm lint helm/chart -f helm/chart/values-aws.yaml
         helm lint helm/chart -f helm/chart/values-external-secrets.yaml
-        helm lint helm/chart -f helm/chart/values-production.yaml
+        helm lint helm/chart -f helm/chart/values-aws.yaml -f helm/chart/values-production.yaml
         helm template status-list-server helm/chart -f helm/chart/values.yaml --output-dir /tmp/rendered/default
         helm template status-list-server helm/chart -f helm/chart/values-external-secrets.yaml --output-dir /tmp/rendered/external-secrets
         helm template status-list-server helm/chart -f helm/chart/values-rotation-example.yaml --output-dir /tmp/rendered/rotation
@@ -77,6 +80,9 @@ runs:
           echo "ERROR: raw render missing webhook provider from secretStore.raw"; exit 1
         fi
         helm template status-list-server helm/chart -f helm/chart/values-aws.yaml --output-dir /tmp/rendered/aws
+        if ! grep -q "image: \"ghcr.io/adorsys/status-list-server:${EXPECTED_AWS_TAG}\"" /tmp/rendered/aws/status-list-server/templates/deployment.yaml; then
+          echo "ERROR: AWS overlay must derive the AWS image variant from chart appVersion"; exit 1
+        fi
         if grep -q 'service.beta.kubernetes.io/aws-load-balancer' /tmp/rendered/aws/status-list-server/templates/service.yaml; then
           echo "ERROR: AWS ingress overlay must not render direct AWS load balancer annotations"; exit 1
         fi
@@ -246,16 +252,16 @@ runs:
         if ! grep -q 'serviceAccountName: statuslist-app-sa' /tmp/rendered/wl-app/status-list-server/templates/deployment.yaml; then
           echo "ERROR: Deployment must reference application ServiceAccount statuslist-app-sa"; exit 1
         fi
-        # Production path: values-production.yaml (used by deploy.yml) explicitly keeps the
-        # ESO-mounted credential path and renders no Workload
+        # Production path: deploy.yml applies values-aws.yaml then values-production.yaml.
+        # It explicitly keeps the ESO-mounted credential path and renders no Workload
         # Identity IRSA annotation.
-        helm template status-list-server helm/chart -f helm/chart/values-production.yaml \
+        helm template status-list-server helm/chart -f helm/chart/values-aws.yaml -f helm/chart/values-production.yaml \
           --output-dir /tmp/rendered/wl-prod
-        if grep -q 'eks.amazonaws.com/role-arn:' /tmp/rendered/wl-prod/status-list-server/templates/serviceaccount.yaml; then
-          echo "ERROR: values-production.yaml must not render an IRSA role annotation (ESO-mounted production path)"; exit 1
+        if [ -f /tmp/rendered/wl-prod/status-list-server/templates/serviceaccount.yaml ] && grep -q 'eks.amazonaws.com/role-arn:' /tmp/rendered/wl-prod/status-list-server/templates/serviceaccount.yaml; then
+          echo "ERROR: production AWS render must not render an IRSA role annotation (ESO-mounted production path)"; exit 1
         fi
         if ! grep -qE 'AWS_SHARED_CREDENTIALS_FILE|aws-credentials-volume' /tmp/rendered/wl-prod/status-list-server/templates/deployment.yaml; then
-          echo "ERROR: values-production.yaml must mount the ESO-provisioned AWS credentials (mountCredentials=true production path)"; exit 1
+          echo "ERROR: production AWS render must mount the ESO-provisioned AWS credentials (mountCredentials=true production path)"; exit 1
         fi
         # Azure Workload Identity primary path: application pod label + application KSA distinct
         # from the External Secrets Operator identity.
@@ -339,8 +345,12 @@ runs:
         if helm template status-list-server helm/chart --set statuslist.service.type=ExternalName >/dev/null 2>&1; then
           echo "ERROR: statuslist.service.type=ExternalName should fail because the chart does not render ExternalName Services"; exit 1
         fi
-        if helm template status-list-server helm/chart --set-string global.domain=Example.COM >/dev/null 2>&1; then
-          echo "ERROR: uppercase global.domain should fail schema validation"; exit 1
+        helm template status-list-server helm/chart --set-string global.domain=Example.COM --output-dir /tmp/rendered/uppercase-domain
+        if ! grep -q 'host: statuslist.example.com' /tmp/rendered/uppercase-domain/status-list-server/templates/ingress.yaml; then
+          echo "ERROR: mixed-case global.domain must render as a lowercase Ingress host"; exit 1
+        fi
+        if grep -q 'Example.COM' /tmp/rendered/uppercase-domain/status-list-server/templates/ingress.yaml; then
+          echo "ERROR: mixed-case global.domain must not render uppercase hostnames"; exit 1
         fi
         # Fail-closed provider fields: mandatory fields must be provided, not empty defaults.
         if helm template status-list-server helm/chart \

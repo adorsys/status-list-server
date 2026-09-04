@@ -7,8 +7,8 @@
       "properties": {
         "domain": {
           "type": "string",
-          "description": "Chart-wide public DNS suffix. Leave empty to render localhost/default-neutral hostnames.",
-          "pattern": "^$|^([a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?\\.)+[a-z]{2,63}\\.?$"
+          "description": "Chart-wide public DNS suffix. Leave empty to render localhost/default-neutral hostnames. Rendered hostnames are normalized to lowercase.",
+          "pattern": "^$|^([A-Za-z0-9]([-A-Za-z0-9]{0,61}[A-Za-z0-9])?\\.)+[A-Za-z]{2,63}\\.?$"
         }
       }
     },
@@ -34,6 +34,7 @@
           "properties": {
             "repository": { "type": "string", "minLength": 1 },
             "pullPolicy": { "type": "string", "enum": ["", "Always", "IfNotPresent", "Never"] },
+            "variant": { "type": "string", "enum": ["fscert", "aws", "gcp", "azure", "vault"] },
             "tag": { "type": "string" },
             "digest": {
               "type": ["string", "null"],

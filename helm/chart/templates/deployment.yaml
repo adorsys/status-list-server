@@ -78,10 +78,13 @@ spec:
           {{- fail (printf "statuslist.image.digest must be sha256:<64 hex chars>, got %q" $digest) }}
           {{- end }}
           {{- $pinned := ne $digest "" }}
-          {{- /* Digest pins the exact scanned artifact; tag falls back to appVersion,
-                 never to "latest". An empty pullPolicy derives from which one is in use:
-                 a digest is content-addressed, a tag is mutable. */}}
-          image: "{{ $image.repository }}{{ if $pinned }}@{{ $digest }}{{ else }}:{{ $image.tag | default $.Chart.AppVersion }}{{ end }}"
+          {{- $variant := $image.variant | default "fscert" }}
+          {{- $baseAppVersion := regexReplaceAll "-(aws|gcp|azure|vault|fscert)$" $.Chart.AppVersion "" }}
+          {{- $effectiveTag := $image.tag | default (printf "%s-%s" $baseAppVersion $variant) }}
+          {{- /* Digest pins the exact scanned artifact; tag falls back to appVersion plus
+                 the selected variant, never to "latest". An empty pullPolicy derives from
+                 which one is in use: a digest is content-addressed, a tag is mutable. */}}
+          image: "{{ $image.repository }}{{ if $pinned }}@{{ $digest }}{{ else }}:{{ $effectiveTag }}{{ end }}"
           imagePullPolicy: {{ $image.pullPolicy | default (ternary "IfNotPresent" "Always" $pinned) }}
           ports:
             - name: http
@@ -160,9 +163,9 @@ spec:
               {{- fail "statuslist.env.APP_DATABASE__PORT is required; set it to the database service port" }}
             {{- end }}
             {{- if not (hasKey $env "APP_SERVER__DOMAIN") }}
-              {{- $globalDomain := trimSuffix "." (dig "domain" "" (.Values.global | default dict) | default "") }}
+              {{- $globalDomain := trimSuffix "." (dig "domain" "" (.Values.global | default dict) | default "" | lower) }}
               {{- if or .Values.statuslist.ingress.externalDnsHostname $globalDomain }}
-                {{- $_ := set $env "APP_SERVER__DOMAIN" (.Values.statuslist.ingress.externalDnsHostname | default (printf "statuslist.%s" $globalDomain)) }}
+                {{- $_ := set $env "APP_SERVER__DOMAIN" (.Values.statuslist.ingress.externalDnsHostname | default (printf "statuslist.%s" $globalDomain) | lower) }}
               {{- else }}
                 {{- $_ := set $env "APP_SERVER__DOMAIN" "localhost" }}
               {{- end }}

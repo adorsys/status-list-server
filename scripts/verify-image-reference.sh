@@ -56,14 +56,15 @@ expect() {
     echo "ok: $* -> ${want}"
 }
 
-# appVersion is the default image tag when neither tag nor digest is set. Release tags
-# are variant-suffixed, so the base chart must resolve to the provider-neutral
-# filesystem-certificate variant. AWS production selects -aws explicitly.
+# appVersion is the provider-neutral default image tag basis. Release tags are
+# variant-suffixed, so the base chart must resolve to the filesystem-certificate
+# variant while AWS overlays derive the matching AWS tag without hardcoding the
+# release version.
 # First `version = ` line is [package]; later ones are deps.
 crate_version=$(grep -m1 '^version = ' Cargo.toml | sed -E 's/^version = "([^"]+)".*/\1/')
 default_tag="${crate_version}-fscert"
 if [ "${app_version}" != "${default_tag}" ]; then
-    echo "::error::Chart appVersion (${app_version}) does not match the provider-neutral default image tag (${default_tag}). appVersion is the chart's default image tag, so this points base installs at the wrong image."
+    echo "::error::Chart appVersion (${app_version}) does not match the provider-neutral default image tag (${default_tag}). Base installs would point at the wrong image variant."
     exit 1
 fi
 echo "appVersion matches provider-neutral default image tag: ${default_tag}"
@@ -79,6 +80,9 @@ expect "${repo}@${digest}|IfNotPresent|" \
     --set-string statuslist.image.digest="${digest}"
 # No tag and no digest falls back to the published appVersion, never to "latest".
 expect "${repo}:${app_version}|Always|"
+# Variant derives a suffixed tag from the chart appVersion without duplicating the release version.
+expect "${repo}:${crate_version}-aws|Always|" \
+    --set-string statuslist.image.variant=aws
 # An explicit pullPolicy still overrides the derived one.
 expect "${repo}@${digest}|Always|" \
     --set-string statuslist.image.digest="${digest}" \

@@ -24,7 +24,7 @@ The server is published as several image variants, each built for a different wa
 
 No unsuffixed image (`latest`, `1.2.0`) is published. Use a variant-suffixed tag, for example `1.2.0-aws`.
 
-If `statuslist.image.tag` and `statuslist.image.digest` are both empty, the chart falls back to its provider-neutral `appVersion` (`-fscert`). Cloud-specific variants, including `-aws`, are selected explicitly through values overlays such as [`chart/values-aws.yaml`](chart/values-aws.yaml) and [`chart/values-production.yaml`](chart/values-production.yaml).
+If `statuslist.image.tag` and `statuslist.image.digest` are both empty, the chart derives `<appVersion-without-suffix>-<statuslist.image.variant>`. The default variant is `fscert`, so base installs stay provider-neutral. Cloud-specific variants, including `aws`, are selected explicitly through values overlays such as [`chart/values-aws.yaml`](chart/values-aws.yaml) and [`chart/values-production.yaml`](chart/values-production.yaml).
 
 For production, pin the exact artifact by digest rather than tag. A digest is validated as `sha256:` followed by 64 hex characters.
 
@@ -34,9 +34,10 @@ For production, pin the exact artifact by digest rather than tag. A digest is va
 * [`chart/values-local.yaml`](chart/values-local.yaml): local development overrides.
 * [`chart/values-aws.yaml`](chart/values-aws.yaml): AWS/EKS overlay that keeps Ingress as the public entry point.
 * [`chart/values-aws-nlb.yaml`](chart/values-aws-nlb.yaml): optional AWS/EKS direct Network Load Balancer overlay.
-* [`chart/values-production.yaml`](chart/values-production.yaml): production overlay used by release deployments.
-* `global.domain`: chart-wide public DNS suffix. When set, Ingress defaults derive `statuslist.<global.domain>` and `*.<global.domain>` from this single value.
+* [`chart/values-production.yaml`](chart/values-production.yaml): production delta applied after `values-aws.yaml` by release deployments.
+* `global.domain`: chart-wide public DNS suffix. When set, Ingress defaults derive `statuslist.<global.domain>` and `*.<global.domain>` from this single value. Rendered hostnames are normalized to lowercase.
 * `postgres.persistence.storageClass`: leave as `""` to use the cluster default StorageClass; set explicitly in environment overlays when needed.
+* `statuslist.image.variant`: selected image variant when no explicit `tag` or `digest` is set (`fscert`, `aws`, `gcp`, `azure`, or `vault`).
 * `statuslist.image.digest`: takes precedence over `statuslist.image.tag` and renders `repository@digest`.
 
 ## Configure Your Secrets

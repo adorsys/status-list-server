@@ -29,6 +29,10 @@ statuslist:
     # Empty derives from how the image is named: IfNotPresent for a digest, Always
     # for a mutable tag. Set explicitly to override.
     pullPolicy: ""
+    # Used only when tag and digest are empty. The chart derives
+    # <appVersion-without-suffix>-<variant>, so overlays can select a cloud
+    # variant without hardcoding the release version.
+    variant: fscert
     # Image tag with variant suffix. The release workflow publishes 5 multi-arch variants:
     #
     # | Tag Suffix | Cargo Features | Description | Primary Use Case |
@@ -42,9 +46,9 @@ statuslist:
     # Tag format: <version>-<suffix> (e.g., 1.2.0-aws, 1.2.0-gcp)
     # Latest tags: latest-<suffix> (e.g., latest-aws, latest-gcp)
     #
-    # Empty falls back to the chart appVersion, which is the filesystem
-    # certificate-store variant. Defaulting to "latest" would let an upgrade
-    # that changes nothing in this chart still change the running image.
+    # Empty derives from the chart appVersion plus statuslist.image.variant.
+    # Defaulting to "latest" would let an upgrade that changes nothing in this
+    # chart still change the running image.
     tag: ""
     # "sha256:...". Takes precedence over tag and pins the exact digest CI scanned.
     # Each variant has its own digest. Use the digest from the variant you select.
