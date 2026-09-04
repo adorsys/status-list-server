@@ -100,10 +100,6 @@ jobs:
           - suffix: fscert
             features: "postgres"
             description: "PostgreSQL database with filesystem-mounted token signing keys and certificates"
-    outputs:
-      # From `vars`, not `meta`: this job publishes only the sha tag, so
-      # `meta.outputs.version` would be that sha rather than the release version.
-      deploy_tag: ${{ steps.vars.outputs.DEPLOY_TAG }}
     steps:
       - name: Checkout source code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -121,16 +117,6 @@ jobs:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Resolve deploy tag
-        # Safe to derive by hand: `validate-tag` has already rejected non-semver tags.
-        id: vars
-        run: |
-          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
-            echo "DEPLOY_TAG=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
-          else
-            echo "DEPLOY_TAG=sha-${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
-          fi
 
       - name: Extract Docker metadata
         # Only the sha tag here. `promote-tags` applies semver and `latest` after the
@@ -153,8 +139,8 @@ jobs:
           push: true
           platforms: linux/amd64,linux/arm64
           tags: ${{ steps.meta.outputs.tags }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-from: type=gha,scope=build-${{ matrix.variant.suffix }}
+          cache-to: type=gha,mode=max,scope=build-${{ matrix.variant.suffix }}
           # Explicit: the action defaults to mode=max on public repos and mode=min on
           # private, so a visibility change would silently degrade provenance.
           #
@@ -250,6 +236,10 @@ jobs:
       # one architecture would let an advisory reaching only the other be promoted
       # and deployed without ever crossing the gate.
       SCAN_ARCHES: amd64 arm64
+      # Statically declared with defaults so GitHub Actions static analysis validates them;
+      # populated dynamically with the resolved architecture digests at runtime.
+      SCAN_REF_AMD64: ""
+      SCAN_REF_ARM64: ""
     steps:
       - name: Fetch Repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -507,7 +497,6 @@ jobs:
           - suffix: fscert
             description: "PostgreSQL database with filesystem-mounted token signing keys and certificates"
     env:
-      DEPLOY_TAG: ${{ needs.build-and-push.outputs.deploy_tag }}
       SUFFIX: ${{ matrix.variant.suffix }}
     steps:
       - name: Login to GHCR
@@ -568,6 +557,7 @@ jobs:
         # whose SBOM and provenance vanished with nothing failing.
         run: |
           set -eu
+          DEPLOY_TAG="${GITHUB_REF_NAME#v}"
           release_ref="${IMAGE_BASE}:${DEPLOY_TAG}-${SUFFIX}"
           description="${{ matrix.variant.description }}"
           actual_description=$(docker buildx imagetools inspect --raw "$release_ref" \
@@ -715,11 +705,10 @@ jobs:
           IMAGE_VARIANT="${IMAGE_VARIANT:-aws}"
           FULL_TAG="${DEPLOY_TAG}-${IMAGE_VARIANT}"
 
-          # Resolve the promoted multi-arch index digest. Kubernetes needs the index
-          # digest, not a child platform manifest.
+          # Resolve the promoted multi-arch index digest using structured formatting.
+          # Kubernetes needs the index digest, not a child platform manifest.
           IMAGE_DIGEST=$(docker buildx imagetools inspect "${IMAGE_BASE}:${FULL_TAG}" \
-            | sed -nE 's/^Digest:[[:space:]]*(sha256:[a-f0-9]{64})$/\1/p' \
-            | head -1)
+            --format '{{ .Manifest.Digest }}')
           [[ "$IMAGE_DIGEST" =~ ^sha256:[a-f0-9]{64}$ ]] || {
             echo "::error::Could not resolve a valid image index digest for ${IMAGE_BASE}:${FULL_TAG}"
             exit 1
@@ -743,3 +732,9 @@ jobs:
             --set-string "statuslist.image.tag=${FULL_TAG:?full image tag missing}" \
             --set-string "statuslist.image.digest=${IMAGE_DIGEST:?image digest missing}" \
             --set-string "statuslist.env.APP_DATABASE__PORT=${APP_DATABASE_PORT}"
+
+      - name: Verify application rollout
+        run: |
+          kubectl rollout status deployment/${{ env.HELM_RELEASE_NAME }}-status-list-server-deployment \
+            -n ${{ env.HELM_NAMESPACE }} \
+            --timeout 2m

@@ -8,12 +8,13 @@ The pipeline is `.github/workflows/deploy.yml`. **If a release is blocked and yo
 
 **Where the evidence is.** On the failed run, in artifacts kept for the repository's retention period (90 days by default):
 
-| You want                             | Artifact                 | File                                      |
-| ------------------------------------ | ------------------------ | ----------------------------------------- |
-| The exact blocking set               | `container-scan-reports` | `trivy-gate-findings-<arch>.json`         |
-| Everything HIGH/CRITICAL, pre-ledger | `container-scan-reports` | `trivy-highcrit-all-<arch>.json`          |
-| The full scan, all severities        | `container-scan-reports` | `trivy-image-report-<arch>.json` / `.txt` |
-| The published SBOM                   | `container-sboms`        | `sbom-<arch>.json`                        |
+| You want                             | Artifact                                   | File                                      |
+| ------------------------------------ | ------------------------------------------ | ----------------------------------------- |
+| The exact blocking set               | `container-scan-reports-<variant>`         | `trivy-gate-findings-<arch>.json`         |
+| Everything HIGH/CRITICAL, pre-ledger | `container-scan-reports-<variant>`         | `trivy-highcrit-all-<arch>.json`          |
+| The full scan, all severities        | `container-scan-reports-<variant>`         | `trivy-image-report-<arch>.json` / `.txt` |
+| The published SBOM                   | `container-sboms-<variant>`                | `sbom-<arch>.json`                        |
+| The built image index digest         | `image-digest-<variant>`                   | `image-digest-<variant>.txt`              |
 
 Provenance and SBOM are also attached to the image itself: `docker buildx imagetools inspect <ref> --format '{{ json .Provenance }}'`.
 
@@ -25,7 +26,7 @@ Provenance and SBOM are also attached to the image itself: `docker buildx imaget
 
 `deploy.yml` triggers on **release tags (`v*.*.*`) and manual dispatch only** — not on pushes to `main`, and not on pull requests. A two-architecture build plus scan costs roughly 40 minutes and publishes to GHCR, which is not worth spending on every merge. The consequence is that `deploy.yml` scans each image **once**, at the moment it is built. What covers the image after that is [`scheduled-image-scan.yml`](#the-scheduled-re-scan), which re-scans the released images nightly.
 
-`build-and-push` builds the multi-architecture image variants, pushes them to GHCR under immutable `sha-<short>-<variant>` tags only, records each produced index digest, and attaches SBOM and SLSA provenance metadata. `scan-image` then inspects those images by digest. `promote-tags` applies the semver and `latest` variant tags to the same digests after the scan. `deploy` runs last and deploys **the same promoted digest** that was scanned.
+`build-and-push` builds the multi-architecture image variants, pushes them to GHCR under immutable `sha-<short>-<variant>` tags only, records each produced index digest, and attaches SBOM and SLSA provenance metadata. `scan-image` then inspects those images by digest. `promote-tags` applies the semver and `latest` variant tags with OCI description annotations (which re-serializes the multi-arch index into a promoted index digest). `deploy` runs last and resolves the promoted variant tag to its index digest before deploying to Helm.
 
 A dispatch run exercises the build, the scan and every assertion without releasing: `promote-tags` and `deploy` both require `github.event_name == 'push'`, so a dispatch promotes nothing and deploys nothing even when aimed at a tag ref. It does still push `sha-<short>-<variant>` images to GHCR — it publishes images, it just never advertises or ships them.
 
@@ -79,7 +80,7 @@ The gate is a script rather than an inline step for the same reason. Inline, the
 Results land in two places, with different lifetimes:
 
 - **The job summary**, for the run you are looking at. Deliberately brief — what was scanned, per-architecture counts, and the gate decision. The full tables are not reproduced there; burying the decision under them is how a summary stops being read.
-- **Run artifacts**, in two parts: `container-scan-reports` (the unfiltered JSON, the tables, and both gate sets, per architecture) and `container-sboms`. Both expire with the repository's artifact retention (90 days by default).
+- **Run artifacts**, in three parts: `container-scan-reports-<variant>` (the unfiltered JSON, the tables, and both gate sets, per architecture), `container-sboms-<variant>`, and `image-digest-<variant>`. All expire with the repository's artifact retention (90 days by default).
 
 **`deploy.yml` itself files no code scanning alerts.** That is a consequence of its trigger, not an oversight: it runs only on `refs/tags/*`, and code scanning files an analysis against a ref, so alerts for a tag are not surfaced in the Security tab's branch view. An upload would succeed into a place nobody reads, which looks like coverage without being any — the failure mode the rest of this pipeline exists to eliminate. Emitting a SARIF nothing consumes would be the same thing one step earlier, so `scan-image` does not produce one at all.
 
@@ -133,7 +134,7 @@ When findings clear, the issue is updated to say so and **left open** — closin
 
 ### The Scanned Artifact Is the Deployed Artifact
 
-The scan binds to `...@sha256:<digest>`. `promote-tags` retags that same digest, and the deploy resolves the promoted variant tag back to its index digest before passing it to the chart via `statuslist.image.digest`, which `helm/chart/templates/deployment.yaml` prefers over `statuslist.image.tag`. Tags stay in place for readability but no longer determine what runs.
+The scan binds to the built index digest `...@sha256:<digest>` and scans each architecture child manifest under it. `promote-tags` applies release tags with OCI description annotations, which re-serializes the multi-arch index descriptors. The `deploy` job resolves the promoted variant tag (`<tag>-<variant>`) to its promoted index digest via structured inspection (`docker buildx imagetools inspect <ref> --format '{{ .Manifest.Digest }}'`) before passing it to the chart via `statuslist.image.digest`, which `helm/chart/templates/deployment.yaml` prefers over `statuslist.image.tag`. Tags stay in place for readability but no longer determine what runs.
 
 This matters because tags are mutable. Binding the scan to a digest and then deploying by tag would leave a window in which a re-run or a manual push could replace the image in between.
 

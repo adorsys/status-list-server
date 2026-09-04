@@ -19,6 +19,8 @@ Every workflow run first executes the reusable CI workflow, then builds and push
 
 The scan job blocks both promotion and deployment. A release tag whose image fails an assertion builds and pushes, but the semver and `latest` tags are never applied to it and it never reaches production — so a rejected artifact is reachable only by its commit SHA, never as an advertised release. See [Container Supply Chain](supply-chain.md) for thresholds and triage.
 
+Because GitHub Actions evaluates job dependencies (`needs:`) at the job level, an unmanaged HIGH/CRITICAL vulnerability or build failure in any single variant fails the overall `scan-image` job, blocking tag promotion and production deployment. Note that because `promote-tags` runs with `fail-fast: false`, if a failure occurs during the tag promotion job itself, successfully promoted sibling tags remain published on the registry while production deployment is halted. Production deployment is atomic; tag promotion across registry targets is not.
+
 The vulnerability gate blocks on any HIGH or CRITICAL finding that survives the exception ledger, as do the assertions around it. Each run also proves the gate can still fail, against a fixture, before treating a clean scan as meaningful. See the supply chain guide for thresholds and triage.
 
 ### Image Tags
@@ -77,7 +79,10 @@ Release tags matching `v*.*.*` deploy to:
 - Helm release: `statuslist`
 - Image tag: semantic version without the leading `v`
 
-For example, tag `v0.5.0` deploys the AWS variant with image tag `0.5.0-aws`. The production deployment uses the `-aws` variant by default; other variants (`-gcp`, `-azure`, `-vault`, `-fscert`) can be selected by setting the `IMAGE_VARIANT` Actions variable in the `production` environment (e.g., `gcp`, `azure`, `vault`, `fscert`). The default is `aws`.
+For example, tag `v0.5.0` deploys the AWS variant with image tag `0.5.0-aws`. The production deployment uses the `-aws` variant by default; other variants (`-gcp`, `-azure`, `-vault`, `-fscert`) can be selected by setting the `IMAGE_VARIANT` Actions variable at the repository level (e.g., `gcp`, `azure`, `vault`, `fscert`). The default is `aws`.
+
+> [!WARNING]
+> Do not set `IMAGE_VARIANT` as an environment-scoped variable on the `production` environment. The `scheduled-image-scan.yml` workflow runs outside that environment and cannot see environment-scoped variables, which would cause the scheduled re-scan to monitor the wrong variant. The `deploy` job explicitly validates this and will fail if it detects a mismatch between repository-level and environment-level values.
 
 The production deploy command is equivalent to (using the AWS variant):
 
