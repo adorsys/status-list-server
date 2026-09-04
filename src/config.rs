@@ -1974,10 +1974,7 @@ mod tests {
         }
         if let Some(db_url) = default_config.database.url.as_ref() {
             let db_url = db_url.expose_secret();
-            assert!(
-                !db_url.contains("test_data"),
-                "Default config database URL references test_data: {db_url}"
-            );
+            assert!(!db_url.contains("test_data"));
         }
         if let Some(cert) = default_config.server.cert.store.certificate.as_deref() {
             assert!(
