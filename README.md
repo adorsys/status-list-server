@@ -14,7 +14,7 @@ It allows issuers to register, publish, and update status lists, and verifiers t
 This service implements the [Token Status List specification](https://datatracker.ietf.org/doc/draft-ietf-oauth-status-list/).  
 It supports both **JWT** and **CWT** formats, with cryptographic signing using multiple algorithms (ECDSA, EdDSA, RSA with SHA-256, SHA-384, SHA-512 digest algorithms).
 
-For a detailed explanation of the architecture, see the [hexagonal architecture documentation](docs/hexagonal-architecture.md).
+For a detailed explanation of the architecture and component design, see the [architecture documentation](docs/architecture.md).
 
 ## Feature Implementation Status
 
@@ -33,81 +33,99 @@ For a detailed explanation of the architecture, see the [hexagonal architecture 
 
 ## Quick Start
 
-### Prerequisites
+### Deployment & Runtime Prerequisites
 
-Before running the server, ensure you have the following tools installed:
+Prerequisites depend on how you run the server:
 
-- [Rust & Cargo](https://www.rust-lang.org/tools/install) (Latest stable).
-- A supported database backend: PostgreSQL, MySQL, or SQLite for persistent deployments. The default local mode uses in-memory repositories.
-- [Docker](https://www.docker.com/get-started/) (optional, for local testing).
+- **Local Development (Zero-Infrastructure Default):**
+  - [Rust & Cargo](https://www.rust-lang.org/tools/install) (Latest stable).
+  - No external services required! By default, the server runs completely in-memory using Moka for caching and store-based certificate mode. External databases and cloud service accounts are **not** needed.
+- **Docker Compose Setup:**
+  - [Docker](https://www.docker.com/get-started/) & Docker Compose plugin.
+- **Production Deployment (Optional Integrations):**
+  - Persistent database: PostgreSQL or MySQL (or single-node SQLite).
+  - Secret Management Backend: HashiCorp Vault / OpenBao, AWS Secrets Manager, GCP Secret Manager, or Azure Key Vault.
+  - ACME DNS-01 Provider: AWS Route53, Cloudflare, Google Cloud DNS, Azure DNS, or ACME-DNS.
+  - Telemetry: OpenTelemetry Collector (OTLP gRPC).
 
-### Run locally
+### Default Runtime Mode
 
-**Clone the Repository:**
+By default, executing `cargo run` boots the server in a lightweight, infrastructure-free local mode:
+
+- **Storage**: In-memory repositories (`memory` Cargo feature & `APP_DATABASE__BACKEND=memory`).
+- **Caching**: In-process TTL caching via Moka (`APP_CACHE__*`).
+- **Certificates**: Store-based certificate strategy (`APP_SERVER__CERT__PROVISIONING_STRATEGY=store`).
+
+### Run Locally
+
+**1. Clone the Repository:**
 
 ```bash
 git clone https://github.com/adorsys/status-list-server.git
 cd status-list-server
 ```
 
-**Environment Variables:**
+**2. Environment Variables (Optional):**
 
-Create a `.env` file in the root directory. Take a look at the [.env.template](.env.template) file for an example of the required variables.
+Create a `.env` file in the root directory. Refer to [.env.template](.env.template) for an example of all configurable variables.
 
-#### Running with Docker Compose
+**3. Running Manually (Lightweight / In-Memory Mode):**
 
-The simplest way to run the project is with [docker compose](https://docs.docker.com/compose/):
-
-- Execute the command below at the root of the project:
-
-```sh
-docker compose up --build
-```
-
-This command will pull all required images and start the server compiled with default compose features (`postgres,aws`).
-
-To pass custom Cargo feature flags during build, specify the `FEATURES` environment variable:
-
-```sh
-FEATURES="mysql,aws" docker compose --profile mysql up --build
-```
-
-#### Running Manually
-
-To start the server in zero-infrastructure default in-memory mode, execute:
+To start the server in zero-infrastructure default mode:
 
 ```bash
 cargo run
 ```
 
-By default, the server will listen on `http://localhost:8000` using in-memory repositories, Moka cache, and store-based certificate management. No external databases or cloud services are required for development.
+By default, the server listens on `http://localhost:8000`.
+
+**4. Running with Docker Compose:**
+
+To launch the full containerized environment (PostgreSQL, LocalStack for AWS Secrets Manager, Pebble ACME server, OpenTelemetry collector, Jaeger, and Prometheus):
+
+```bash
+docker compose up --build
+```
+
+To run with custom feature flags in Docker Compose (e.g. MySQL backend):
+
+```bash
+FEATURES="mysql,aws-secrets,acme" docker compose --profile mysql up --build
+```
 
 ## Cargo Feature Matrix
 
-The crate uses modular Cargo feature flags to gate optional production backend drivers:
+The crate uses modular Cargo feature flags to compile optional production backend drivers and secret managers:
 
-| Feature    | Description                                                                  | Default    |
-| ---------- | ---------------------------------------------------------------------------- | ---------- |
-| `memory`   | In-memory repositories, TTL cache, and static certificate loading.           | ✅ Default |
-| `postgres` | SeaORM PostgreSQL database driver.                                           | ❌ Opt-in  |
-| `sqlite`   | SeaORM SQLite database driver.                                               | ❌ Opt-in  |
-| `mysql`    | SeaORM MySQL database driver.                                                | ❌ Opt-in  |
-| `aws`      | AWS Secrets Manager and Route53 DNS-01 driver                                | ❌ Opt-in  |
-| `gcp`      | GCP Secret Manager and Cloud DNS driver                                      | ❌ Opt-in  |
-| `azure`    | Azure Key Vault and Azure DNS driver                                         | ❌ Opt-in  |
-| `vault`    | HashiCorp Vault / OpenBao driver                                             | ❌ Opt-in  |
+| Feature       | Description                                                                    | Default    |
+| ------------- | ------------------------------------------------------------------------------ | ---------- |
+| `memory`      | In-memory repositories, TTL cache (Moka), and store-based certificate storage. | ✅ Default |
+| `postgres`    | SeaORM PostgreSQL database driver.                                             | ❌ Opt-in  |
+| `sqlite`      | SeaORM SQLite database driver.                                                 | ❌ Opt-in  |
+| `mysql`       | SeaORM MySQL database driver.                                                  | ❌ Opt-in  |
+| `acme`        | ACME DNS-01 certificate manager driver (`instant-acme`, `rcgen`).              | ❌ Opt-in  |
+| `aws-secrets` | Route53 DNS-01 challenge driver and AWS Secrets Manager integration.           | ❌ Opt-in  |
+| `vault`       | HashiCorp Vault / OpenBao secrets backend integration.                         | ❌ Opt-in  |
+| `gcp-secrets` | GCP Secret Manager secrets driver and Google Cloud DNS integration.            | ❌ Opt-in  |
+| `azure-kv`    | Azure Key Vault secrets driver and Azure DNS integration.                      | ❌ Opt-in  |
 
-To build with specific backend drivers, pass the matching feature flag(s):
+To build or run with specific backend drivers, pass the matching feature flag(s):
 
 ```bash
-# Run with PostgreSQL support available
+# Run with PostgreSQL database support
 cargo run --features postgres
 
-# Run with AWS native integration (automatically enables ACME)
-cargo run --features postgres,aws
+# Run with SQLite database support
+cargo run --features sqlite
+
+# Run with AWS and ACME production integrations
+cargo run --features postgres,aws-secrets,acme
+
+# Run with HashiCorp Vault integration
+cargo run --features postgres,vault
 ```
 
-For deployment guidance and backend tradeoffs, see [`docs/database-backends.md`](docs/database-backends.md).
+For detailed tradeoffs and operational recommendations, see [`docs/database-backends.md`](docs/database-backends.md) and [`docs/secrets-backends.md`](docs/secrets-backends.md).
 
 ## API Documentation
 
@@ -135,16 +153,72 @@ When the optional `APP_SERVER__AGGREGATION_URI` configuration is set, every emit
 
 ## Configuration
 
-All runtime behavior is controlled via environment variables prefixed with `APP_` and using `__` as a nested separator (e.g. `APP_SERVER__PORT=8000`). Sensible defaults are built in, so only non-default values need to be set. See [`.env.template`](.env.template) for a complete example.
+All runtime settings can be configured via environment variables prefixed with `APP_` using `__` as a nested delimiter (e.g. `APP_SERVER__PORT=8000`). Sensible defaults are built-in for all options.
 
-For deployment guidance and backend tradeoffs, see [`docs/database-backends.md`](docs/database-backends.md).
+### Key Configuration Settings
 
-### Validation
+| Prefix / Category | Key Setting                                 | Default                                  | Description                                                          |
+| ----------------- | ------------------------------------------- | ---------------------------------------- | -------------------------------------------------------------------- |
+| **Server**        | `APP_SERVER__HOST`                          | `localhost`                              | Server bind host address                                             |
+|                   | `APP_SERVER__PORT`                          | `8000`                                   | Server HTTP port                                                     |
+|                   | `APP_SERVER__DOMAIN`                        | `localhost`                              | Primary server domain                                                |
+|                   | `APP_SERVER__ENABLE_METRICS`                | `false`                                  | Expose `/metrics` Prometheus endpoint                                |
+|                   | `APP_SERVER__AGGREGATION_URI`               | `None`                                   | Optional public aggregation URI emitted in tokens                    |
+| **Database**      | `APP_DATABASE__BACKEND`                     | `memory`                                 | Backend type (`memory`, `postgres`, `mysql`, `sqlite`)               |
+|                   | `APP_DATABASE__URL`                         | `memory:`                                | Connection string or URI                                             |
+|                   | `APP_DATABASE__POOL__MAX_CONNECTIONS`       | `5`                                      | Connection pool size limit                                           |
+| **Certificates**  | `APP_SERVER__CERT__PROVISIONING_STRATEGY`   | `store` (or `acme` when feature enabled) | Provisioning mode (`store` or `acme`)                                |
+|                   | `APP_SERVER__CERT__EMAIL`                   | `admin@example.com`                      | Contact email for ACME certificate registration                      |
+|                   | `APP_SERVER__CERT__RENEWAL_CRON_SCHEDULE`   | `0 0 0 * * *`                            | 6-field cron expression for cert renewal checks                      |
+|                   | `APP_SERVER__CERT__SIGNING_KEY_CACHE_TTL`   | `0`                                      | Private key cache TTL from backend (seconds; `0` disables)           |
+|                   | `APP_SERVER__CERT__STORE__CERTIFICATE_PATH` | `None`                                   | Path to PEM/DER certificate file (filesystem store)                  |
+|                   | `APP_SERVER__CERT__STORE__SIGNING_KEY_PATH` | `None`                                   | Path to PKCS#8 private key file (filesystem store)                   |
+|                   | `APP_SERVER__CERT__DNS__PROVIDER`           | Auto-resolved                            | DNS provider (route53/cloudflare/gcloud/azure/acmedns/pebble)        |
+| **Cache**         | `APP_CACHE__TTL`                            | `300`                                    | Status list item cache TTL (seconds; `0` disables)                   |
+|                   | `APP_CACHE__MAX_CAPACITY`                   | `100`                                    | Maximum cached status list entries                                   |
+| **Status List**   | `APP_STATUS_LIST__TOKEN_EXP_SECS`           | `900`                                    | Token expiration duration (seconds)                                  |
+|                   | `APP_STATUS_LIST__TOKEN_TTL_SECS`           | `300`                                    | Token time-to-live duration (seconds)                                |
+|                   | `APP_STATUS_LIST__SNAPSHOT_RETENTION_SECS`  | `7776000`                                | Snapshot retention period (seconds; 90 days)                         |
+| **Telemetry**     | `APP_TELEMETRY__ENVIRONMENT`                | `development`                            | Mode (`development` for stdout, `production` for OTLP)               |
+|                   | `APP_TELEMETRY__OTLP_ENDPOINT`              | `http://localhost:4317`                  | OTLP collector gRPC endpoint                                         |
+|                   | `APP_TELEMETRY__ENABLED`                    | `true`                                   | Enable OpenTelemetry tracing pipeline                                |
+|                   | `APP_TELEMETRY__SAMPLER_RATIO`              | `1.0`                                    | Sampling ratio (`0.0` to `1.0`)                                      |
+| **Rate Limit**    | `APP_RATE_LIMIT__STRICT_BURST_SIZE`         | `10`                                     | Burst size for write endpoints (strict tier)                         |
+|                   | `APP_RATE_LIMIT__STRICT_PERIOD_SECS`        | `60`                                     | Time window for strict tier (seconds)                                |
+|                   | `APP_RATE_LIMIT__PERMISSIVE_BURST_SIZE`     | `100`                                    | Burst size for read endpoints (permissive tier)                      |
+|                   | `APP_RATE_LIMIT__PERMISSIVE_PERIOD_SECS`    | `60`                                     | Time window for permissive tier (seconds)                            |
+| **Limits**        | `APP_LIMITS__MAX_BODY_SIZE_BYTES`           | `2097152`                                | Maximum request body size (2 MiB)                                    |
+|                   | `APP_LIMITS__MAX_STATUS_INDEX`              | `100000`                                 | Maximum status list index value                                      |
+|                   | `APP_LIMITS__MAX_STATUSES_PER_REQUEST`      | `5000`                                   | Maximum statuses per update request                                  |
+|                   | `APP_LIMITS__MAX_SERIALIZED_LIST_SIZE`      | `1048576`                                | Maximum serialized list size (1 MiB)                                 |
 
-The following constraints are validated at startup and will cause the server to fail fast if violated:
+A complete sample configuration is available in [.env.template](.env.template).
 
-- `server.port` must be between 1 and 65535 (the `u16` type enforces the upper bound)
-- `server.cert.renewal_cron_schedule` must be a valid 6-field cron expression (seconds required)
+### Validation Constraints
+
+The application validates settings at startup and fails fast if invalid:
+
+- `APP_SERVER__PORT` must be between `1` and `65535`.
+- `APP_SERVER__CERT__RENEWAL_CRON_SCHEDULE` must be a valid 6-field cron expression (with seconds).
+- Database URL schemes must match the selected `APP_DATABASE__BACKEND` (e.g. `postgres://` for `postgres`).
+- `APP_TELEMETRY__SAMPLER_RATIO` must be a finite number between `0.0` and `1.0`.
+
+## Documentation Index
+
+Detailed documentation for architecture, storage backends, secret management, DNS providers, and deployment operations is available in the [`docs/`](docs/) directory and [`helm/`](helm/) folder:
+
+| Document                                                   | Topic & Scope                                                                                    |
+| ---------------------------------------------------------- | ------------------------------------------------------------------------------------------------ |
+| [`docs/architecture.md`](docs/architecture.md)             | High-level system architecture, component overview, and token workflows                          |
+| [`docs/database-backends.md`](docs/database-backends.md)   | Database backends (PostgreSQL, MySQL, SQLite), pool tuning, and transaction isolation            |
+| [`docs/secrets-backends.md`](docs/secrets-backends.md)     | Secret backends (HashiCorp Vault, AWS Secrets Manager, GCP Secret Manager, Azure Key Vault)      |
+| [`docs/dns-providers.md`](docs/dns-providers.md)           | ACME DNS-01 provider configurations (Route53, Cloudflare, Google Cloud DNS, Azure DNS, ACME-DNS) |
+| [`docs/observability.md`](docs/observability.md)           | OpenTelemetry integration, tracing, OTLP collector setup, Prometheus metrics, and Jaeger         |
+| [`docs/deployment-runbook.md`](docs/deployment-runbook.md) | Operations, database migrations, backup/restore procedures, and zero-downtime upgrades           |
+| [`docs/LOCAL_DEPLOYMENT.md`](docs/LOCAL_DEPLOYMENT.md)     | Local testing setups and Docker Compose instructions                                             |
+| [`docs/compliance_matrix.md`](docs/compliance_matrix.md)   | Spec compliance matrix for OAuth Token Status List draft-21                                      |
+| [`docs/openapi.yaml`](docs/openapi.yaml)                   | Complete OpenAPI 3.1 REST API specification                                                      |
+| [`helm/README.md`](helm/README.md)                         | Kubernetes deployment using the official Helm chart                                              |
 
 ## Security
 
@@ -251,29 +325,40 @@ The server implements proper error handling and returns appropriate HTTP status 
 
 ## Deployment
 
-The server can be deployed using a containerization platform such as Docker.
+For production deployments:
 
-### Helm Chart Deployment
-
-A Helm chart is provided for easy deployment on Kubernetes. For detailed instructions, see the [Helm Deployment Guide](helm/README.md).
+- **Kubernetes**: Refer to the [Helm Chart Guide](helm/README.md).
+- **Operations & Runbooks**: Refer to the [Deployment Runbook](docs/deployment-runbook.md) for database migration, backup, and operational guidelines.
 
 ### Container Supply Chain
 
 Release images are scanned by digest and carry an SBOM and SLSA provenance, and release tags are applied only after the scan. See the [Container Supply Chain guide](docs/supply-chain.md) for thresholds, verification commands, and how to triage findings.
 
-## Testing
+## Testing & Local Quality Checks
 
-You can run the tests using the following command:
+Run unit and integration tests:
 
 ```bash
 cargo test
 ```
 
-To verify the infrastructure-free application composition (domain models, domain ports,
-service container, and in-memory outbound adapters only), run:
+Verify zero-infrastructure / in-memory composition:
 
 ```bash
 cargo check --no-default-features --features memory
+```
+
+Run complete local CI checks using the [`local-ci.sh`](local-ci.sh) script (format, clippy, tests, and dependency checks):
+
+```bash
+# Requires cargo-nextest: cargo install cargo-nextest
+./local-ci.sh
+```
+
+Run markdown linting:
+
+```bash
+npx --yes markdownlint-cli2 README.md
 ```
 
 ## Contributing
