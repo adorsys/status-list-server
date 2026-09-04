@@ -9,19 +9,43 @@ runs:
       run: |
         set -euo pipefail
         mkdir -p /tmp/rendered
+        CHART_APP_VERSION=$(helm show chart helm/chart | sed -nE 's/^appVersion:[[:space:]]*"?([^"]+)"?[[:space:]]*$/\1/p')
+        CHART_BASE_VERSION="${CHART_APP_VERSION%-fscert}"
+        EXPECTED_AWS_TAG="${CHART_BASE_VERSION}-aws"
+        helm lint helm/chart
+        helm lint helm/chart -f helm/chart/values-aws.yaml
+        helm lint helm/chart -f helm/chart/values-external-secrets.yaml
+        helm lint helm/chart -f helm/chart/values-aws.yaml -f helm/chart/values-production.yaml
         helm template status-list-server helm/chart -f helm/chart/values.yaml --output-dir /tmp/rendered/default
+        helm template status-list-server helm/chart -f helm/chart/values-local.yaml --output-dir /tmp/rendered/local
+        helm template status-list-server helm/chart -f helm/chart/values-external-secrets.yaml --output-dir /tmp/rendered/external-secrets
         helm template status-list-server helm/chart -f helm/chart/values-rotation-example.yaml --output-dir /tmp/rendered/rotation
         helm template status-list-server helm/chart --set serviceAccount.create=false --output-dir /tmp/rendered/no-sa
-        helm template status-list-server helm/chart --set statuslist.aws.mountCredentials=true --output-dir /tmp/rendered/legacy-creds
         helm template status-list-server helm/chart \
+          --set externalSecret.enabled=true \
+          --set statuslist.fallbackSecret.enabled=false \
+          --set secretStore.enabled=true \
+          --set secretStore.provider=aws \
+          --set statuslist.aws.mountCredentials=true \
+          --output-dir /tmp/rendered/legacy-creds
+        helm template status-list-server helm/chart \
+          --set externalSecret.enabled=true \
+          --set statuslist.fallbackSecret.enabled=false \
+          --set secretStore.enabled=true \
           --set secretStore.provider=vault \
           --set secretStore.vault.server=https://vault.example.com \
           --output-dir /tmp/rendered/vault
         helm template status-list-server helm/chart \
+          --set externalSecret.enabled=true \
+          --set statuslist.fallbackSecret.enabled=false \
+          --set secretStore.enabled=true \
           --set secretStore.provider=gcp \
           --set secretStore.gcp.projectID=my-project-id \
           --output-dir /tmp/rendered/gcp
         helm template status-list-server helm/chart \
+          --set externalSecret.enabled=true \
+          --set statuslist.fallbackSecret.enabled=false \
+          --set secretStore.enabled=true \
           --set secretStore.provider=gcp \
           --set secretStore.gcp.projectID=my-project-id \
           --set-string 'externalSecret.spec.data[0].secretKey=postgres-password' \
@@ -32,6 +56,9 @@ runs:
           --output-dir /tmp/rendered/gcp-remote-ref
         # Azure Workload Identity: ESO uses its own ServiceAccount, not the app KSA.
         helm template status-list-server helm/chart \
+          --set externalSecret.enabled=true \
+          --set statuslist.fallbackSecret.enabled=false \
+          --set secretStore.enabled=true \
           --set secretStore.provider=azure \
           --set secretStore.azure.authType=WorkloadIdentity \
           --set secretStore.azure.serviceAccountRef.name=eso-controller-sa \
@@ -39,6 +66,9 @@ runs:
           --set secretStore.azure.vaultUrl=https://example.vault.azure.net \
           --output-dir /tmp/rendered/azure
         helm template status-list-server helm/chart \
+          --set externalSecret.enabled=true \
+          --set statuslist.fallbackSecret.enabled=false \
+          --set secretStore.enabled=true \
           --set secretStore.provider=raw \
           --set-string 'secretStore.raw.webhook.severity=high' \
           --output-dir /tmp/rendered/raw
@@ -50,15 +80,82 @@ runs:
         if ! grep -qE '^\s{4}webhook:' /tmp/rendered/raw/status-list-server/templates/secret-store.yaml; then
           echo "ERROR: raw render missing webhook provider from secretStore.raw"; exit 1
         fi
-        # Default (ESO) mode must render the SecretStore + ExternalSecret and no fallback Secret.
-        if [ ! -f /tmp/rendered/default/status-list-server/templates/secret-store.yaml ]; then
-          echo "ERROR: default render must produce a SecretStore"; exit 1
+        helm template status-list-server helm/chart -f helm/chart/values-aws.yaml --output-dir /tmp/rendered/aws
+        if ! grep -q "image: \"ghcr.io/adorsys/status-list-server:${EXPECTED_AWS_TAG}\"" /tmp/rendered/aws/status-list-server/templates/deployment.yaml; then
+          echo "ERROR: AWS overlay must derive the AWS image variant from chart appVersion"; exit 1
         fi
-        if [ ! -f /tmp/rendered/default/status-list-server/templates/external-secrets.yaml ]; then
-          echo "ERROR: default render must produce an ExternalSecret"; exit 1
+        if grep -q 'service.beta.kubernetes.io/aws-load-balancer' /tmp/rendered/aws/status-list-server/templates/service.yaml; then
+          echo "ERROR: AWS ingress overlay must not render direct AWS load balancer annotations"; exit 1
         fi
-        if [ -f /tmp/rendered/default/status-list-server/templates/secret.yaml ]; then
-          echo "ERROR: default (ESO) render must not emit the fallback Secret"; exit 1
+        if [ ! -f /tmp/rendered/aws/status-list-server/templates/ingress.yaml ]; then
+          echo "ERROR: AWS ingress overlay must render Ingress"; exit 1
+        fi
+        if ! grep -q '^  tls:' /tmp/rendered/aws/status-list-server/templates/ingress.yaml; then
+          echo "ERROR: AWS ingress overlay must render a tls block for cert-manager ingress-shim"; exit 1
+        fi
+        if [ ! -f /tmp/rendered/external-secrets/status-list-server/templates/external-secrets.yaml ]; then
+          echo "ERROR: values-external-secrets.yaml must render ExternalSecret resources"; exit 1
+        fi
+        if [ -f /tmp/rendered/external-secrets/status-list-server/templates/secret.yaml ]; then
+          echo "ERROR: values-external-secrets.yaml must disable fallback Secret"; exit 1
+        fi
+        helm template status-list-server helm/chart -f helm/chart/values-aws.yaml -f helm/chart/values-aws-nlb.yaml --output-dir /tmp/rendered/aws-nlb
+        if ! grep -q 'service.beta.kubernetes.io/aws-load-balancer-type' /tmp/rendered/aws-nlb/status-list-server/templates/service.yaml; then
+          echo "ERROR: AWS NLB overlay must render AWS load balancer annotations"; exit 1
+        fi
+        if [ -f /tmp/rendered/aws-nlb/status-list-server/templates/ingress.yaml ]; then
+          echo "ERROR: AWS NLB overlay must disable Ingress to avoid parallel public exposure"; exit 1
+        fi
+        # Default mode is provider-neutral and self-contained: no SecretStore/ExternalSecret,
+        # but it does render the fallback statuslist-secret used by the app and PostgreSQL.
+        if [ -f /tmp/rendered/default/status-list-server/templates/secret-store.yaml ]; then
+          echo "ERROR: default render must not produce a SecretStore"; exit 1
+        fi
+        if [ -f /tmp/rendered/default/status-list-server/templates/external-secrets.yaml ]; then
+          echo "ERROR: default render must not produce an ExternalSecret"; exit 1
+        fi
+        if grep -q 'service.beta.kubernetes.io/aws-load-balancer' /tmp/rendered/default/status-list-server/templates/service.yaml; then
+          echo "ERROR: default render must not include AWS Service annotations"; exit 1
+        fi
+        if grep -qE 'cert-manager.io/cluster-issuer|nginx.ingress.kubernetes.io/(force-)?ssl-redirect' /tmp/rendered/default/status-list-server/templates/ingress.yaml; then
+          echo "ERROR: default localhost Ingress must not force TLS or request cert-manager without tls hosts"; exit 1
+        fi
+        if grep -q '^  tls:' /tmp/rendered/default/status-list-server/templates/ingress.yaml; then
+          echo "ERROR: default localhost Ingress must not render a tls block"; exit 1
+        fi
+        helm template status-list-server helm/chart --set-string statuslist.ingress.tls.secretName=statuslist-tls --output-dir /tmp/rendered/tls-secret-default-host
+        if ! grep -q '^  tls:' /tmp/rendered/tls-secret-default-host/status-list-server/templates/ingress.yaml; then
+          echo "ERROR: explicit ingress TLS secretName must render a tls block even when tls.hosts is empty"; exit 1
+        fi
+        if ! grep -q '    - "localhost"' /tmp/rendered/tls-secret-default-host/status-list-server/templates/ingress.yaml; then
+          echo "ERROR: explicit ingress TLS secretName must default tls.hosts to the rendered ingress host"; exit 1
+        fi
+        if grep -qE 'APP_SERVER__CERT__(EMAIL|ORGANIZATION)' /tmp/rendered/default/status-list-server/templates/deployment.yaml; then
+          echo "ERROR: default render must not inject blank certificate identity env vars"; exit 1
+        fi
+        if ! grep -q 'name: local-signing-material' /tmp/rendered/local/status-list-server/templates/deployment.yaml; then
+          echo "ERROR: values-local.yaml must mount local signing material for the default fscert image"; exit 1
+        fi
+        if ! grep -q 'APP_SERVER__CERT__STORE__CERTIFICATE_PATH' /tmp/rendered/local/status-list-server/templates/deployment.yaml; then
+          echo "ERROR: values-local.yaml must set APP_SERVER__CERT__STORE__CERTIFICATE_PATH"; exit 1
+        fi
+        if ! grep -q 'APP_SERVER__CERT__STORE__SIGNING_KEY_PATH' /tmp/rendered/local/status-list-server/templates/deployment.yaml; then
+          echo "ERROR: values-local.yaml must set APP_SERVER__CERT__STORE__SIGNING_KEY_PATH"; exit 1
+        fi
+        if grep -q 'storageClassName:' /tmp/rendered/default/status-list-server/charts/postgres/templates/statefulset.yaml; then
+          echo "ERROR: default render must use the cluster default StorageClass"; exit 1
+        fi
+        if [ ! -f /tmp/rendered/default/status-list-server/templates/secret.yaml ]; then
+          echo "ERROR: default render must emit fallback statuslist-secret"; exit 1
+        fi
+        if ! grep -q 'name: statuslist-secret' /tmp/rendered/default/status-list-server/templates/secret.yaml; then
+          echo "ERROR: default fallback Secret must be named statuslist-secret"; exit 1
+        fi
+        if ! grep -q 'secretName: statuslist-secret' /tmp/rendered/default/status-list-server/templates/deployment.yaml; then
+          echo "ERROR: default Deployment Secret volume must reference rendered statuslist-secret"; exit 1
+        fi
+        if ! grep -A3 'name: POSTGRES_PASSWORD' /tmp/rendered/default/status-list-server/charts/postgres/templates/statefulset.yaml | grep -q 'name: statuslist-secret'; then
+          echo "ERROR: default PostgreSQL POSTGRES_PASSWORD secretKeyRef must reference rendered statuslist-secret"; exit 1
         fi
         if ! grep -q 'name: statuslist-db-credentials' /tmp/rendered/rotation/status-list-server/templates/external-secrets.yaml; then
           echo "ERROR: rotation example must render the statuslist-db-credentials ExternalSecret"; exit 1
@@ -172,22 +269,25 @@ runs:
         if ! grep -q 'serviceAccountName: statuslist-app-sa' /tmp/rendered/wl-app/status-list-server/templates/deployment.yaml; then
           echo "ERROR: Deployment must reference application ServiceAccount statuslist-app-sa"; exit 1
         fi
-        # Production path: values-production.yaml (used by deploy.yml) keeps the ESO-mounted
-        # credential default (statuslist.aws.mountCredentials=true) and renders no Workload
+        # Production path: deploy.yml applies values-aws.yaml then values-production.yaml.
+        # It explicitly keeps the ESO-mounted credential path and renders no Workload
         # Identity IRSA annotation.
-        helm template status-list-server helm/chart -f helm/chart/values-production.yaml \
+        helm template status-list-server helm/chart -f helm/chart/values-aws.yaml -f helm/chart/values-production.yaml \
           --output-dir /tmp/rendered/wl-prod
-        if grep -q 'eks.amazonaws.com/role-arn:' /tmp/rendered/wl-prod/status-list-server/templates/serviceaccount.yaml; then
-          echo "ERROR: values-production.yaml must not render an IRSA role annotation (ESO-mounted default)"; exit 1
+        if [ -f /tmp/rendered/wl-prod/status-list-server/templates/serviceaccount.yaml ] && grep -q 'eks.amazonaws.com/role-arn:' /tmp/rendered/wl-prod/status-list-server/templates/serviceaccount.yaml; then
+          echo "ERROR: production AWS render must not render an IRSA role annotation (ESO-mounted production path)"; exit 1
         fi
         if ! grep -qE 'AWS_SHARED_CREDENTIALS_FILE|aws-credentials-volume' /tmp/rendered/wl-prod/status-list-server/templates/deployment.yaml; then
-          echo "ERROR: values-production.yaml must mount the ESO-provisioned AWS credentials (mountCredentials=true default)"; exit 1
+          echo "ERROR: production AWS render must mount the ESO-provisioned AWS credentials (mountCredentials=true production path)"; exit 1
         fi
         # Azure Workload Identity primary path: application pod label + application KSA distinct
         # from the External Secrets Operator identity.
         helm template status-list-server helm/chart \
           --set serviceAccount.name=azure-app-sa \
           --set 'serviceAccount.annotations.azure\.workload\.identity/client-id=11111111-2222-3333-4444-555555555555' \
+          --set externalSecret.enabled=true \
+          --set statuslist.fallbackSecret.enabled=false \
+          --set secretStore.enabled=true \
           --set secretStore.provider=azure \
           --set secretStore.azure.authType=WorkloadIdentity \
           --set secretStore.azure.serviceAccountRef.name=eso-controller-sa \
@@ -210,6 +310,9 @@ runs:
         fi
         # Azure ManagedIdentity path: renders identityId + authType, no serviceAccountRef.
         helm template status-list-server helm/chart \
+          --set externalSecret.enabled=true \
+          --set statuslist.fallbackSecret.enabled=false \
+          --set secretStore.enabled=true \
           --set secretStore.provider=azure \
           --set secretStore.azure.authType=ManagedIdentity \
           --set secretStore.azure.identityId=00000000-0000-0000-0000-000000000000 \
@@ -227,6 +330,9 @@ runs:
         fi
         # Azure ServicePrincipal path: renders authType + authSecretRef, no serviceAccountRef.
         helm template status-list-server helm/chart \
+          --set externalSecret.enabled=true \
+          --set statuslist.fallbackSecret.enabled=false \
+          --set secretStore.enabled=true \
           --set secretStore.provider=azure \
           --set secretStore.azure.authType=ServicePrincipal \
           --set secretStore.azure.tenantId=00000000-0000-0000-0000-000000000000 \
@@ -253,20 +359,44 @@ runs:
         if helm template status-list-server helm/chart --set secretStore.provider=raw >/dev/null 2>&1; then
           echo "ERROR: provider=raw with empty secretStore.raw should fail"; exit 1
         fi
+        if helm template status-list-server helm/chart --set statuslist.service.type=ExternalName >/dev/null 2>&1; then
+          echo "ERROR: statuslist.service.type=ExternalName should fail because the chart does not render ExternalName Services"; exit 1
+        fi
+        helm template status-list-server helm/chart --set-string global.domain=Example.COM --output-dir /tmp/rendered/uppercase-domain
+        if ! grep -q 'host: statuslist.example.com' /tmp/rendered/uppercase-domain/status-list-server/templates/ingress.yaml; then
+          echo "ERROR: mixed-case global.domain must render as a lowercase Ingress host"; exit 1
+        fi
+        if grep -q 'Example.COM' /tmp/rendered/uppercase-domain/status-list-server/templates/ingress.yaml; then
+          echo "ERROR: mixed-case global.domain must not render uppercase hostnames"; exit 1
+        fi
         # Fail-closed provider fields: mandatory fields must be provided, not empty defaults.
-        if helm template status-list-server helm/chart --set secretStore.provider=vault >/dev/null 2>&1; then
+        if helm template status-list-server helm/chart \
+            --set externalSecret.enabled=true \
+            --set statuslist.fallbackSecret.enabled=false \
+            --set secretStore.enabled=true \
+            --set secretStore.provider=vault >/dev/null 2>&1; then
           echo "ERROR: provider=vault with empty secretStore.vault.server should fail"; exit 1
         fi
-        if helm template status-list-server helm/chart --set secretStore.provider=gcp >/dev/null 2>&1; then
+        if helm template status-list-server helm/chart \
+            --set externalSecret.enabled=true \
+            --set statuslist.fallbackSecret.enabled=false \
+            --set secretStore.enabled=true \
+            --set secretStore.provider=gcp >/dev/null 2>&1; then
           echo "ERROR: provider=gcp with empty secretStore.gcp.projectID should fail"; exit 1
         fi
         if helm template status-list-server helm/chart \
+            --set externalSecret.enabled=true \
+            --set statuslist.fallbackSecret.enabled=false \
+            --set secretStore.enabled=true \
             --set secretStore.provider=azure \
             --set secretStore.azure.authType=WorkloadIdentity \
             --set secretStore.azure.vaultUrl=https://example.vault.azure.net >/dev/null 2>&1; then
           echo "ERROR: provider=azure WorkloadIdentity without serviceAccountRef.name should fail"; exit 1
         fi
         if helm template status-list-server helm/chart \
+            --set externalSecret.enabled=true \
+            --set statuslist.fallbackSecret.enabled=false \
+            --set secretStore.enabled=true \
             --set secretStore.provider=azure \
             --set secretStore.azure.tenantId=00000000-0000-0000-0000-000000000000 \
             --set secretStore.azure.vaultUrl=https://example.vault.azure.net >/dev/null 2>&1; then
@@ -274,6 +404,9 @@ runs:
         fi
         # authType is an enum per the ESO AzureKVProvider CRD; an invalid value must fail.
         if helm template status-list-server helm/chart \
+            --set externalSecret.enabled=true \
+            --set statuslist.fallbackSecret.enabled=false \
+            --set secretStore.enabled=true \
             --set secretStore.provider=azure \
             --set secretStore.azure.authType=ClientSecret \
             --set secretStore.azure.tenantId=t \
@@ -289,6 +422,7 @@ runs:
         # Inverse: an ExternalSecret must not render without a SecretStore (dangling secretStoreRef).
         if helm template status-list-server helm/chart \
             --set externalSecret.enabled=true \
+            --set statuslist.fallbackSecret.enabled=false \
             --set secretStore.enabled=false >/dev/null 2>&1; then
           echo "ERROR: externalSecret.enabled with secretStore.enabled=false should fail (dangling secretStoreRef)"; exit 1
         fi
@@ -332,7 +466,9 @@ runs:
         fi
 
         # Upgrade render test: legacy secretStore.aws.region must be preserved for APP_AWS__REGION.
-        REGION=$(helm template status-list-server helm/chart --set secretStore.aws.region=us-west-2 \
+        REGION=$(helm template status-list-server helm/chart \
+          --set secretStore.provider=aws \
+          --set secretStore.aws.region=us-west-2 \
           | grep -A1 'name: APP_AWS__REGION' | grep 'value:' | sed -E 's/.*value: "?([^"]*)"?.*/\1/' || true)
         if [ "$REGION" != "us-west-2" ]; then
           echo "ERROR: APP_AWS__REGION should fall back to legacy secretStore.aws.region, got '$REGION'"; exit 1
@@ -351,11 +487,19 @@ runs:
         # ESO one-name invariant: every consumer shares the single name statuslist-secret, so a
         # custom externalSecret.spec.target.name must fail at render time.
         if helm template status-list-server helm/chart \
+            --set externalSecret.enabled=true \
+            --set statuslist.fallbackSecret.enabled=false \
+            --set secretStore.enabled=true \
+            --set secretStore.provider=aws \
             --set externalSecret.spec.target.name=custom-eso-secret >/dev/null 2>&1; then
           echo "ERROR: externalSecret.spec.target.name other than statuslist-secret should fail"; exit 1
         fi
         # In ESO mode the ExternalSecret target name must equal the app/PostgreSQL secret name.
-        if ! helm template status-list-server helm/chart 2>/dev/null | grep -A1 '^  target:' | grep 'name: statuslist-secret' >/dev/null; then
+        if ! helm template status-list-server helm/chart \
+            --set externalSecret.enabled=true \
+            --set statuslist.fallbackSecret.enabled=false \
+            --set secretStore.enabled=true \
+            --set secretStore.provider=aws 2>/dev/null | grep -A1 '^  target:' | grep 'name: statuslist-secret' >/dev/null; then
           echo "ERROR: ExternalSecret target.name must be statuslist-secret"; exit 1
         fi
         # NetworkPolicy is opt-in: the default must NOT render a NetworkPolicy (an open

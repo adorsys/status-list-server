@@ -724,6 +724,7 @@ jobs:
           # mutable tag, which is the failure this pipeline exists to prevent.
           helm upgrade --install ${{ env.HELM_RELEASE_NAME }} helm/chart \
             --namespace ${{ env.HELM_NAMESPACE }} \
+            -f helm/chart/values-aws.yaml \
             -f helm/chart/values-production.yaml \
             --wait \
             --rollback-on-failure \
