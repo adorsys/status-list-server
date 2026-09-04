@@ -119,11 +119,22 @@ The deploy job requires:
 - IAM trust for `token.actions.githubusercontent.com`
 - AWS permission to describe the EKS cluster and perform the Kubernetes operations needed by Helm
 
-Recommended OIDC trust subject for production:
+**Required** OIDC trust subject for production — this is a security boundary, not a convention:
 
 ```text
 repo:adorsys/status-list-server:environment:production
 ```
+
+`build-and-push` also holds `id-token: write`, because `actions/attest-build-provenance` needs an OIDC token to exchange with Fulcio for a signing certificate. That job is outside `environment: production` and builds from the source tree. So a trust policy conditioned on `repo:adorsys/status-list-server:*` — or on a branch or tag rather than the environment — would let the **build** job assume the production deploy role, handing back exactly the privilege that putting `deploy` behind `environment: production` and its required reviewers exists to gate.
+
+Verify it directly rather than assuming it, and re-check it whenever `id-token: write` is added to any job:
+
+```bash
+aws iam get-role --role-name <deploy-role-name> \
+  --query 'Role.AssumeRolePolicyDocument' --output json
+```
+
+Every statement trusting `token.actions.githubusercontent.com` must constrain `token.actions.githubusercontent.com:sub` to the exact string above. A `StringLike` condition ending in `:*`, or the absence of any `sub` condition, is the failure — see [ADR 0001](adr/0001-container-image-provenance.md) "Permissions".
 
 When a GitHub Actions job uses an environment, GitHub's default OIDC `sub` claim references the environment name. For repositories using immutable OIDC subject claims, adjust the `repo:` prefix to the immutable owner and repository ID format shown by GitHub.
 
@@ -180,7 +191,7 @@ Check:
 
 - The GitHub environment name matches the IAM trust subject.
 - `AWS_DEPLOY_ROLE_ARN` exists in the selected environment.
-- The role trust references this repository and the correct branch or environment.
+- The role trust references this repository and the `environment:production` subject specifically. Do not "fix" an assume-role failure by widening the `sub` condition to `:*`; that would let `build-and-push` assume this role. See Required GitHub and AWS Setup above.
 - OIDC IAM role has been created and applied (see issue #236).
 
 ### Helm Timeout
