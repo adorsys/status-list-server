@@ -165,9 +165,113 @@ and follow the same `helm upgrade --install` flow.
 
 ## Further reading
 
-* [`chart/values.yaml`](chart/values.yaml): the source of truth for every Helm value.
-* [Deployment runbook](../docs/deployment-runbook.md): how to deploy and how CI/CD deploys to production.
-* [Troubleshooting reference](../docs/troubleshooting.md): error-indexed fixes for startup, secrets,
-  Kubernetes/ESO, and Helm/upgrade issues.
-* [Container supply chain](../docs/supply-chain.md): image scanning, SBOM, and SLSA.
-* [Project README](../README.md): overview and local-development quick start.
+1. **Deploy the chart:**
+
+   ```bash
+   helm install statuslist ./chart --namespace statuslist -f chart/values.yaml
+   ```
+
+## Local Deployment
+
+For local testing and development, please refer to the [Local Deployment Guide](../docs/LOCAL_DEPLOYMENT.md).
+
+## Verifying the Deployment
+
+1. **Check the status of the pods:**
+
+   ```bash
+   kubectl get pods -n statuslist
+   ```
+
+2. **Check the application logs:**
+
+   ```bash
+   kubectl logs -l app.kubernetes.io/name=status-list-server -n statuslist
+   ```
+
+## Alerting
+
+The chart ships an `AlertmanagerConfig` CRD (`monitoring.coreos.com/v1alpha1`) that wires
+SLO alerts into **kube-prometheus-stack**'s Alertmanager. This is the Kubernetes equivalent
+of the Docker Compose `ALERTMANAGER_PLATFORM` + `generate-alertmanager-config.sh` setup — the
+same six platforms are supported and no webhook URL is committed to source control.
+
+Enable it in `values.yaml` (or `values-production.yaml`):
+
+```yaml
+alerting:
+  enabled: true
+  platform: discord   # slack | discord | teams | mattermost | webhook | email
+  labels:
+    release: kube-prometheus-stack  # must match your Prometheus Operator's labelSelector
+```
+
+### Credential Model
+
+Two modes are available:
+
+**Inline (development / quick-start only):**
+
+```yaml
+alerting:
+  enabled: true
+  platform: discord
+  webhookUrl: "https://discord.com/api/webhooks/XXXX/YYYY"  # never commit real tokens
+```
+
+The chart renders its own `Secret` from the inline value. Suitable for local or staging only.
+
+**Pre-existing Secret (recommended for production):**
+
+```yaml
+alerting:
+  enabled: true
+  platform: discord
+  existingSecret: statuslist-alerting-credentials  # chart does NOT render its own Secret
+```
+
+Create or sync the Secret externally (e.g. via ESO):
+
+```yaml
+# Secret keys per platform:
+#   webhook-based (discord/slack/teams/mattermost/webhook): "webhook-url"
+#   email: "email-to", "smtp-host" (host:port), "smtp-from"
+#   dead-man's-switch (optional for any platform): "dms-webhook-url"
+```
+
+### Route Tree
+
+| Matcher           | Receiver                                   | Repeat   |
+| ----------------- | ------------------------------------------ | -------- |
+| `severity=none`   | `deadmansswitch` (DMS ping or silent noop) | —        |
+| `severity=page`   | `human` (your platform)                    | 4 h      |
+| `severity=warn`   | `human` (your platform)                    | 24 h     |
+| _(anything else)_ | `noop` (silently absorbed)                 | —        |
+
+Inhibition rule: a `warn` for the same `sli`+`service` as a firing `page` is suppressed.
+
+### Dead-Man's-Switch (Watchdog)
+
+The always-firing `Watchdog` alert (`severity=none`) routes to the `deadmansswitch` receiver.
+Set `alerting.dmsWebhookUrl` (inline) or include a `dms-webhook-url` key in `existingSecret`
+to point it at a hosted dead-man's-switch (e.g. [Healthchecks.io](https://healthchecks.io) or
+[Dead Man's Snitch](https://deadmanssnitch.com/)). When the URL is not set, the Watchdog is
+silently absorbed and never reaches a human channel.
+
+### Supported Platforms
+
+| `alerting.platform` | Required Secret key                              | Notes                                                                 |
+| ------------------- | ------------------------------------------------ | --------------------------------------------------------------------- |
+| `discord`           | `webhook-url`                                    | Native `discordConfigs` receiver                                      |
+| `slack`             | `webhook-url`                                    | Native `slackConfigs` receiver (optional `alerting.slack.channel`)    |
+| `teams`             | `webhook-url`                                    | Generic `webhookConfigs` (no native Teams receiver in Alertmanager)   |
+| `mattermost`        | `webhook-url`                                    | Generic `webhookConfigs`                                              |
+| `webhook`           | `webhook-url`                                    | Generic `webhookConfigs` (standard Alertmanager JSON payload)         |
+| `email`             | `email-to`, `smtp-host` (host:port), `smtp-from` | Native `emailConfigs` receiver                                        |
+
+### Prerequisites
+
+The `AlertmanagerConfig` CRD must be installed in the cluster. It is provided by
+`kube-prometheus-stack` or the standalone Prometheus Operator. The `alerting.labels`
+must match the `alertmanagerConfigSelector` configured on your Alertmanager instance
+(typically `release: kube-prometheus-stack`).

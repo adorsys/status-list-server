@@ -11,6 +11,16 @@ rule_files:
   - /etc/prometheus/rules/recording.rules.yml
   - /etc/prometheus/rules/alerting.rules.yml
 
+# Forward fired/resolved alerts to Alertmanager for webhook-based
+# notifications (ticket #446). In the docker-compose dev stack the compose
+# service is named `alertmanager` on the same network; change this target if
+# you run Alertmanager elsewhere.
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets: ['alertmanager:9093']
+      timeout: 10s
+
 scrape_configs:
   - job_name: 'status_list_server'
     # The app runs as the compose service 'app' on port 8000, so it is scraped

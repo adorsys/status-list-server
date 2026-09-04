@@ -230,6 +230,31 @@
         "minAvailable": { "type": ["integer", "string", "null"] },
         "maxUnavailable": { "type": ["integer", "string", "null"] }
       }
+    },
+    "alerting": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "platform": {
+          "type": "string",
+          "enum": ["slack", "discord", "teams", "mattermost", "email", "webhook", ""]
+        },
+        "labels": { "type": "object" },
+        "existingSecret": { "type": "string" },
+        "webhookUrl": { "type": "string" },
+        "dmsWebhookUrl": { "type": "string" },
+        "dmsEnabled": { "type": "boolean" },
+        "email": {
+          "type": "object",
+          "properties": {
+            "to": { "type": "string" },
+            "smtpHost": { "type": "string" },
+            "smtpPort": { "type": "string" },
+            "smtpFrom": { "type": "string" },
+            "requireTls": { "type": "boolean" }
+          }
+        }
+      }
     }
   }
 }

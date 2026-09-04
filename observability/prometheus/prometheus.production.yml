@@ -14,6 +14,17 @@ rule_files:
   - /etc/prometheus/rules/recording.rules.yml
   - /etc/prometheus/rules/alerting.rules.yml
 
+# Forward fired/resolved alerts to Alertmanager for webhook-based
+# notifications (ticket #446). Under kube-prometheus-stack / managed
+# Prometheus this block is provided by the operator; for standalone
+# production Prometheus, point this at your Alertmanager service and
+# keep the default timeout (10s, 5 retries).
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets: ['alertmanager:9093']
+      timeout: 10s
+
 scrape_configs:
   - job_name: 'status_list_server'
     static_configs:

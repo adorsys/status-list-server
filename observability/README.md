@@ -91,3 +91,33 @@ environments running `kube-prometheus-stack`, the Helm chart includes optional
 `templates/servicemonitor.yaml` (`serviceMonitor.enabled: true`) and
 `templates/prometheusrule.yaml` (`prometheusRule.enabled: true`). Alert delivery
 routing is documented in `observability/alertmanager/alertmanager.example.yml`.
+
+## Webhook alert notifications (ticket #446)
+
+Alerts are forwarded to external systems over webhooks through **Alertmanager**
+(Prometheus → Alertmanager → webhook → Discord/Slack/Teams/Mattermost/email).
+No application code is involved.
+
+- **How it works** — `observability/prometheus/prometheus*.yml` declares an
+  `alerting.alertmanagers` target; the docker-compose `alertmanager` service runs
+  `observability/prometheus/generate-alertmanager-config.sh`, which renders a
+  native receiver config from environment variables (`ALERTMANAGER_PLATFORM` +
+  the matching credential) so **no webhook URL is committed**.
+- **Routing** — page and warn alerts share ONE human channel (the platform
+  credential); the `severity` label stays in the payload for in-channel
+  filtering. The always-firing **Watchdog** (`severity=none`) never hits a
+  human channel: it pings a dead-man's-switch (`ALERTMANAGER_DMS_WEBHOOK_URL`)
+  so a collapsed pipeline is detected by its absence, and is otherwise absorbed
+  silently by a noop sink. Correlated page/warn pairs for the same SLI are
+  inhibited (no duplicate warn while the page fires).
+- **Supported platforms** — `discord`, `slack`, `teams`, `mattermost`, `email`,
+  `webhook` (generic). Native receivers are used for Discord/Slack/email; Teams
+  and Mattermost use Alertmanager's generic webhook JSON.
+- **Alert Payload & Links** — Every notification payload includes contextual labels, summary/description, Git runbook links (`runbook_url`), and Grafana dashboard links (`dashboard_url`: defaults to `http://localhost:3000/d/status-list-slo`, configurable in Helm via `alerting.dashboardUrl`).
+- **Resilience & Monitoring** — Alertmanager retries transient delivery failures with exponential back-off and emits `alertmanager_notifications_failed_total` metrics to monitor delivery health.
+- **Test with a real channel** — see the step-by-step Discord guide and full JSON payload schema:
+  `runbooks/webhook-notifications.md`.
+- **Automated test** — `alertmanager/tests/test-alertmanager-config.sh`
+  validates every platform's generated config and proves a real Alertmanager
+  delivers both `firing` and `resolved` notifications to a mock webhook (run in
+  CI).
