@@ -1,6 +1,6 @@
 [package]
 name = "status-list-server"
-version = "1.1.0"
+version = "1.1.1"
 edition = "2024"
 
 [features]
@@ -192,6 +192,7 @@ features = ["alloc", "ecdsa", "pem", "pkcs8"]
 rcgen = { version = "0.14", features = ["pem"] }
 wiremock = "0.6"
 sea-orm = { version = "1.1", features = ["mock"] }
+
 [dev-dependencies.testcontainers-modules]
 version = "0.15"
 features = ["hashicorp_vault", "localstack", "mysql", "postgres"]
