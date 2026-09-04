@@ -81,14 +81,19 @@ jobs:
     permissions:
       contents: read
       packages: write
-      # Both first-time grants, not a restoration. `git log -S 'attestations: write' --all`
-      # returns nothing, and this job carried exactly `contents: read` + `packages: write`
-      # on both sides of the supply-chain PR. The `id-token: write` that predates this
-      # change is on the `deploy` job, for AWS OIDC, and is unrelated.
-      #
       # `id-token: write` mints the OIDC token Fulcio exchanges for a signing certificate.
       # `attestations: write` persists the signed bundle. `artifact-metadata: write` is
       # deliberately not granted; see `create-storage-record` on the attest step.
+      #
+      # `id-token: write` is not free: it lets any step in this job mint an OIDC token
+      # asserting this repository's identity, and this job builds from the source tree.
+      # The blast radius is therefore whatever trusts that identity, which here is the
+      # AWS role `deploy` assumes. That role's trust policy must condition `sub` on
+      # `repo:<owner>/<repo>:environment:production`, not on `repo:<owner>/<repo>:*` --
+      # under the looser condition this grant would let the build job assume the
+      # production deploy role, which is the privilege `environment: production` exists
+      # to gate. Recorded in docs/adr/0001-container-image-provenance.md and checked in
+      # docs/deployment-runbook.md.
       id-token: write
       attestations: write
     strategy:
@@ -517,12 +522,102 @@ jobs:
           done
           exit "$status"
 
+  verify-provenance:
+    name: Verify Signed Provenance (${{ matrix.variant.suffix }})
+    runs-on: ubuntu-latest
+    needs: build-and-push
+    timeout-minutes: 10
+    # Deliberately *not* gated on `push`. Two reasons, and the second is the important
+    # one.
+    #
+    # It gates promotion: `promote-tags` needs this job, so a digest whose signed
+    # provenance does not verify never receives a release tag. Checking after promotion
+    # would mean `latest-<variant>` is public and pullable before anything has asked who
+    # built it.
+    #
+    # And it is the only place the real `gh attestation verify` runs anywhere near a
+    # non-release path. `scripts/attestation-selftest.sh` proves the verifier's logic
+    # against a stub, but a stub accepts any flags -- it cannot show that this flag
+    # combination is one gh accepts, that the token carries the right scope, or that the
+    # certificate identity is the one we predicted. Without this job the first execution
+    # of the real command would be during a release, on the last step before a deploy.
+    # Running it on `workflow_dispatch` too means that first execution is a debug run.
+    permissions:
+      contents: read
+      packages: read
+      actions: read
+      # Read-only, and only to fetch the bundle back: this job verifies the attestation
+      # `build-and-push` issued, it never mints one.
+      attestations: read
+    strategy:
+      fail-fast: false
+      matrix:
+        variant:
+          - suffix: aws
+          - suffix: gcp
+          - suffix: azure
+          - suffix: vault
+          - suffix: fscert
+    env:
+      SUFFIX: ${{ matrix.variant.suffix }}
+    steps:
+      - name: Fetch Repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          # Only the scripts and the workflow the self-test asserts against; the rest of
+          # the tree is not read here.
+          sparse-checkout: |
+            scripts
+            .github/workflows
+
+      - name: Prove the attestation check can fail
+        # One leg, not five: the self-test is hermetic and identical on every variant, and
+        # it has already run on the pull request. This is the release path's own copy of
+        # the assertion, kept because a release must not trust a verifier it has not seen
+        # reject anything -- the same argument `Prove the gate can fail` makes for the
+        # vulnerability gate.
+        #
+        # Before the verification below rather than after, so a broken verifier fails as
+        # itself instead of silently blessing whatever the next step is handed.
+        if: matrix.variant.suffix == 'aws'
+        run: bash scripts/attestation-selftest.sh
+
+      - name: Download built digest
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh run download "$GITHUB_RUN_ID" --name "image-digest-${{ matrix.variant.suffix }}" --dir .
+
+      - name: Verify signed provenance for the built digest
+        # `provenance: mode=max` gives BuildKit's own attestation, which is
+        # integrity-protected but self-asserted. This is the authenticity half: a
+        # Sigstore-signed statement, from this workflow, from this ref, over this digest.
+        # See docs/adr/0001-container-image-provenance.md.
+        #
+        # `$GITHUB_REF` is passed so the signing identity is pinned exactly rather than by
+        # prefix. Without it `gh` would accept a signature produced by this workflow from
+        # any ref -- and `build-and-push` runs on `workflow_dispatch`, so producing one
+        # needs only repository write access. The header of scripts/verify-attestation.sh
+        # has the full argument.
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          index_digest=$(cat "image-digest-${SUFFIX}.txt")
+          [[ "$index_digest" =~ ^sha256:[a-f0-9]{64}$ ]] || {
+            echo "::error::invalid built image digest for ${SUFFIX}: ${index_digest}"
+            exit 1
+          }
+          bash scripts/verify-attestation.sh \
+            "${IMAGE_BASE}@${index_digest}" "$GITHUB_REPOSITORY" "$GITHUB_REF"
+
   promote-tags:
     name: Promote Scanned Digest to Release Tags (${{ matrix.variant.suffix }})
     runs-on: ubuntu-latest
     needs:
       - build-and-push
       - scan-image
+      - verify-provenance
     # Positively gated on `push`: workflow_dispatch accepts tag refs too, so a ref
     # test alone would not keep dispatch off the release path.
     if: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') }}
@@ -558,6 +653,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          sparse-checkout: scripts
 
       - name: Login to GHCR
         uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
@@ -639,27 +735,21 @@ jobs:
           done
           echo "SBOM and provenance present for both platforms on $release_ref"
 
-      - name: Prove the attestation check can fail
-        # The same argument `Prove the gate can fail` makes on the scan job, applied to
-        # provenance: a verifier that has never rejected anything is indistinguishable
-        # from one that cannot, and both print a success line. Needs no network and no
-        # registry -- every case is a stubbed gh on PATH.
-        #
-        # Before the verification below rather than after, so a broken verifier fails as
-        # itself instead of silently blessing whatever the next step is handed.
-        run: bash scripts/attestation-selftest.sh
-
       - name: Verify signed provenance survived promotion
         # `Verify attestations survived promotion` proves BuildKit's self-asserted
         # attestations are still attached. This proves a signed statement from this
-        # repository vouches for the digest the release tag now resolves to -- the
-        # authenticity half, which inspecting the index cannot answer at all.
+        # workflow, from this ref, vouches for the digest the release tag now resolves to
+        # -- the authenticity half, which inspecting the index cannot answer at all.
         #
-        # The tag is resolved to a digest and the attestation verified against *that*,
-        # rather than against the digest this job already holds. That is the question a
-        # consumer actually asks -- "does the name I pull resolve to something with
-        # verifiable provenance" -- and it is the only form that would catch a release
-        # tag promoted onto a digest nobody attested.
+        # `verify-provenance` already verified the built digest, which is what gates
+        # promotion. This is the tag-side question a consumer actually asks: "does the
+        # name I pull resolve to something with verifiable provenance". So the tag is
+        # resolved first and the resolved digest verified on its own terms; the equality
+        # assertion against the built digest comes after, as a separate claim about the
+        # promotion rather than as the thing that makes the verification meaningful.
+        # Ordered that way deliberately: asserting equality first would make the
+        # verification below a re-check of a digest already known equal, which is a
+        # tautology that reads like a second layer of defence.
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -667,13 +757,22 @@ jobs:
           release_ref="${IMAGE_BASE}:${DEPLOY_TAG}-${SUFFIX}"
           promoted_digest=$(docker buildx imagetools inspect "$release_ref" \
             --format '{{ .Manifest.Digest }}')
+          [[ "$promoted_digest" =~ ^sha256:[a-f0-9]{64}$ ]] || {
+            echo "::error::${release_ref} did not resolve to a digest: '${promoted_digest}'"
+            exit 1
+          }
+
+          bash scripts/verify-attestation.sh \
+            "${IMAGE_BASE}@${promoted_digest}" "$GITHUB_REPOSITORY" "$GITHUB_REF"
+
           built_digest=$(cat "image-digest-${SUFFIX}.txt")
           if [ "$promoted_digest" != "$built_digest" ]; then
             echo "::error::${release_ref} resolves to ${promoted_digest}, not the built and scanned ${built_digest}."
             echo "The release tag was applied to something other than the artifact this run gated."
+            echo "Note that the digest it does resolve to carries valid provenance from this run, so this"
+            echo "is a promotion fault rather than a signing one."
             exit 1
           fi
-          bash scripts/verify-attestation.sh "${IMAGE_BASE}@${promoted_digest}" "$GITHUB_REPOSITORY"
 
   deploy:
     name: Deploy to Production
@@ -696,6 +795,11 @@ jobs:
       contents: read
       id-token: write
       packages: read
+      # This job re-resolves the release tag to a digest of its own accord, so it is the
+      # last place the digest production will actually run is known. Verifying it here
+      # closes the window between `promote-tags` checking the tag and this job reading
+      # it; read-only, and it mints nothing.
+      attestations: read
     env:
       # Routed through env rather than interpolated into the helm command: deploy_tag
       # derives from GITHUB_REF_NAME, which the person pushing the tag controls.
@@ -793,6 +897,9 @@ jobs:
         # The tag and digest come from `env:` rather than `${{ }}` because they are
         # derived from the pushed ref. The release name and namespace are workflow
         # literals, so interpolating those is safe.
+        env:
+          # For scripts/verify-attestation.sh, which reads GitHub's attestation API.
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           # Derive deploy tag from the release tag
@@ -811,6 +918,14 @@ jobs:
           }
 
           echo "Deploying ${IMAGE_BASE}:${FULL_TAG}@${IMAGE_DIGEST}"
+
+          # The digest this job resolved, not the one promote-tags checked. Those are the
+          # same value in every run that is not under attack, and the point is the run
+          # that is: the tag is mutable, promote-tags read it earlier, and this is the
+          # value that reaches the cluster. Verifying anything else would be verifying an
+          # artifact production is not about to run.
+          bash scripts/verify-attestation.sh \
+            "${IMAGE_BASE}@${IMAGE_DIGEST}" "$GITHUB_REPOSITORY" "$GITHUB_REF"
 
           # `FULL_TAG`, not `DEPLOY_TAG`: the tag must carry the variant suffix, or
           # production gets whichever feature set happens to sit on the bare tag.
