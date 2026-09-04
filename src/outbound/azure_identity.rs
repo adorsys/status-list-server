@@ -29,15 +29,13 @@ impl DefaultAzureCredential {
             std::env::var("AZURE_TENANT_ID"),
             std::env::var("AZURE_CLIENT_ID"),
             std::env::var("AZURE_CLIENT_SECRET"),
+        ) && let Ok(cred) = ClientSecretCredential::new(
+            tenant_id.as_str(),
+            client_id,
+            AzureSecret::new(client_secret),
+            None,
         ) {
-            if let Ok(cred) = ClientSecretCredential::new(
-                tenant_id.as_str(),
-                client_id,
-                AzureSecret::new(client_secret),
-                None,
-            ) {
-                sources.push(("EnvironmentClientSecretCredential", cred));
-            }
+            sources.push(("EnvironmentClientSecretCredential", cred));
         }
         if let Ok(cred) = WorkloadIdentityCredential::new(None) {
             sources.push(("WorkloadIdentityCredential", cred));
