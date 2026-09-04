@@ -1,17 +1,18 @@
 apiVersion: v2
 name: status-list-server
-description: Helm chart for deploying status list server on AWS EKS
+description: Helm chart for deploying status list server on Kubernetes
 type: application
-version: 0.1.0
-appVersion: "1.0.0"
+version: 0.4.0
+# Default image tag when statuslist.image.tag and .digest are both empty.
+# Release images are always suffixed; the chart default uses the filesystem
+# certificate-store variant so base installs are provider-neutral. Cloud-specific
+# variants are selected in explicit values overlays.
+appVersion: "1.0.0-fscert"
 dependencies:
   - name: postgres
     version: 0.8.2
     repository: oci://registry-1.docker.io/cloudpirates
-  - name: redis-ha
-    version: 4.35.0
-    repository: https://dandydeveloper.github.io/charts
-    condition: redis-ha.enabled
+    condition: postgres.enabled
   - name: opentelemetry-collector
     version: 0.169.0
     repository: https://open-telemetry.github.io/opentelemetry-helm-charts

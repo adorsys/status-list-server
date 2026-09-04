@@ -1,25 +1,16 @@
 use async_trait::async_trait;
 use color_eyre::eyre::Error as Report;
 use moka::future::Cache;
-#[cfg(feature = "redis")]
-use redis::RedisError;
 use std::time::Duration;
 use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum StorageError {
-    #[error("Redis error: {0}")]
-    #[cfg(feature = "redis")]
-    Redis(#[from] RedisError),
-
     #[error("storage backend error: {0}")]
     Backend(#[source] Report),
 
     #[error("The data is invalid: {0}")]
     InvalidData(String),
-
-    #[error("Bucket {0} is unavailable")]
-    BucketUnavailable(String),
 }
 
 /// Abstract interface for storage backends used by the certificate manager.

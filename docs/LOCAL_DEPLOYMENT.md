@@ -15,22 +15,31 @@ minikube start
 kubectl config use-context minikube
 ```
 
-## 3. Prepare Secrets
+## 3. Prepare Namespace
 
-Passwords can be any non-empty string; reuse for convenience.
+The chart renders the fallback `statuslist-secret` by default. Create the namespace before installing so rendered resources land in the expected place.
 
 ```bash
 kubectl create namespace local
-kubectl create secret generic statuslist-secret -n local \
-  --from-literal=postgres-password=postgres
 ```
 
 ## 4. Deploy
+
+> **Image tag:** the chart's default `appVersion` (`1.0.1-fscert`) is a provider-neutral variant tag.
+> The release pipeline publishes only variant-suffixed tags (`latest-aws`, `latest-gcp`,
+> `latest-azure`, `latest-vault`, `latest-fscert`, and matching version/sha tags); there is no
+> unsuffixed `latest` or `1.0.1`. Override the tag only when you need a specific cloud variant or a
+> locally loaded image. See `docs/troubleshooting.md` -> "Image pull errors on variant tags".
 
 ```bash
 helm dependency update ./helm/chart
 helm install statuslist-local ./helm/chart -n local -f ./helm/chart/values-local.yaml
 ```
+
+> **Certificates:** the default `-fscert` image is provider-neutral and requires certificate and
+> signing-key files mounted into the pod. `values-local.yaml` includes disposable local sample
+> material and mounts it through `statuslist.secretMounts`. For non-local runs, provide your own
+> Secret-backed files or use an image variant tailored to your environment.
 
 ## 5. Verify Pods
 
@@ -61,10 +70,6 @@ minikube stop
 
 ## Notes
 
-- `values-local.yaml` only overrides what differs from production defaults (NodePorts, disabled ingress/secret-store, lighter resources).
-- Redis, Redis TLS, and AWS-specific resources remain disabled; no additional setup required.
-- If pods fail with `CreateContainerConfigError`, check that `statuslist-secret` exists in the `local` namespace.
-
-## Optional Redis Cache
-
-Redis is only useful here if you want to exercise the distributed certificate-material cache path. Add `--set redis-ha.enabled=true`, add `redis-password` to `statuslist-secret`, and run an application image built with the `redis` feature plus `APP_REDIS__URI` configured. The default local chart intentionally avoids that dependency.
+- `values-local.yaml` only overrides what differs from neutral defaults (NodePorts, disabled ingress/secret-store, lighter resources).
+- AWS-specific resources remain disabled; no additional setup required.
+- If pods fail with `CreateContainerConfigError`, check that the rendered fallback `statuslist-secret` exists in the `local` namespace.

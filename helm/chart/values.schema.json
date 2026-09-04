@@ -1,0 +1,411 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "properties": {
+    "global": {
+      "type": ["object", "null"],
+      "properties": {
+        "domain": {
+          "type": "string",
+          "description": "Chart-wide public DNS suffix. Leave empty to render localhost/default-neutral hostnames. Rendered hostnames are normalized to lowercase.",
+          "pattern": "^$|^([A-Za-z0-9]([-A-Za-z0-9]{0,61}[A-Za-z0-9])?\\.)+[A-Za-z]{2,63}\\.?$"
+        }
+      }
+    },
+    "serviceAccount": {
+      "type": "object",
+      "properties": {
+        "create": { "type": "boolean" },
+        "name": { "type": "string" },
+        "automountServiceAccountToken": { "type": "boolean" },
+        "annotations": { "type": "object" },
+        "labels": { "type": "object" }
+      }
+    },
+    "statuslist": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "replicaCount": { "type": "integer" },
+        "initContainers": { "type": "array" },
+        "podLabels": { "type": "object", "additionalProperties": { "type": "string" } },
+        "image": {
+          "type": "object",
+          "properties": {
+            "repository": { "type": "string", "minLength": 1 },
+            "pullPolicy": { "type": "string", "enum": ["", "Always", "IfNotPresent", "Never"] },
+            "variant": { "type": "string", "enum": ["fscert", "aws", "gcp", "azure", "vault"] },
+            "tag": { "type": "string" },
+            "digest": {
+              "type": ["string", "null"],
+              "pattern": "^$|^sha256:[a-f0-9]{64}$"
+            }
+          }
+        },
+        "service": {
+          "type": "object",
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "type": { "type": "string", "enum": ["ClusterIP", "NodePort", "LoadBalancer"] },
+            "annotations": {
+              "type": "object",
+              "additionalProperties": { "type": "string" }
+            },
+            "port": { "type": "integer", "minimum": 1, "maximum": 65535 },
+            "targetPort": { "type": ["integer", "string"], "pattern": "^[A-Za-z0-9-]+$|^[0-9]+$" },
+            "nodePort": { "type": ["integer", "null"], "minimum": 30000, "maximum": 32767 }
+          },
+          "allOf": [
+            {
+              "if": {
+                "properties": { "type": { "const": "NodePort" } },
+                "required": ["type"]
+              },
+              "then": {
+                "properties": {
+                  "nodePort": { "type": ["integer", "null"], "minimum": 30000, "maximum": 32767 }
+                }
+              }
+            },
+            {
+              "if": {
+                "properties": { "type": { "not": { "const": "NodePort" } } },
+                "required": ["type"]
+              },
+              "then": {
+                "properties": {
+                  "nodePort": { "type": "null" }
+                }
+              }
+            }
+          ]
+        },
+        "ingress": {
+          "type": "object",
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "path": { "type": "string", "minLength": 1 },
+            "pathType": { "type": "string", "enum": ["Exact", "Prefix", "ImplementationSpecific"] },
+            "annotations": {
+              "type": "object",
+              "additionalProperties": { "type": "string" }
+            },
+            "tls": {
+              "type": "object",
+              "properties": {
+                "hosts": {
+                  "type": "array",
+                  "items": { "type": "string", "minLength": 1 }
+                },
+                "secretName": { "type": "string" }
+              }
+            },
+            "externalDnsHostname": { "type": "string" }
+          }
+        },
+        "env": {
+          "type": "object",
+          "additionalProperties": { "type": "string" }
+        },
+        "aws": {
+          "type": "object",
+          "properties": {
+            "mountCredentials": { "type": "boolean" },
+            "credentialsSecret": {
+              "type": "object",
+              "properties": {
+                "remoteKey": { "type": "string" },
+                "credentialsProperty": { "type": "string" },
+                "configProperty": { "type": "string" },
+                "targetTemplate": { "type": "object" }
+              }
+            },
+            "region": { "type": "string" }
+          }
+        },
+        "fallbackSecret": {
+          "type": "object",
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "generatedCertificate": {
+              "type": "object",
+              "properties": {
+                "enabled": { "type": "boolean" },
+                "commonName": { "type": "string", "minLength": 1 },
+                "dnsNames": {
+                  "type": "array",
+                  "items": { "type": "string", "minLength": 1 }
+                },
+                "ipAddresses": {
+                  "type": "array",
+                  "items": { "type": "string", "minLength": 1 }
+                },
+                "certificateKey": { "type": "string", "minLength": 1 },
+                "signingKey": { "type": "string", "minLength": 1 }
+              }
+            },
+            "stringData": {
+              "type": "object",
+              "additionalProperties": { "type": "string" }
+            }
+          }
+        },
+        "secretMounts": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["name", "secretName", "mountPath"],
+            "properties": {
+              "name": { "type": "string" },
+              "secretName": { "type": "string" },
+              "mountPath": { "type": "string" },
+              "items": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "required": ["key", "path"],
+                  "properties": {
+                    "key": { "type": "string" },
+                    "path": { "type": "string" }
+                  }
+                }
+              },
+              "fileEnv": {
+                "type": "object",
+                "additionalProperties": { "type": "string" }
+              }
+            }
+          }
+        },
+        "watcher": {
+          "type": "object",
+          "properties": {
+            "pollIntervalSecs": { "type": ["string", "integer"] }
+          }
+        },
+        "livenessProbe": { "type": "object" },
+        "readinessProbe": { "type": "object" },
+        "networkPolicy": { "type": "object" },
+        "resources": { "type": "object" }
+      }
+    },
+    "externalSecret": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "spec": {
+          "type": "object",
+          "properties": {
+            "secretStoreRef": {
+              "type": "object",
+              "properties": {
+                "name": { "type": "string" },
+                "kind": { "type": "string" }
+              }
+            },
+            "target": {
+              "type": "object",
+              "properties": {
+                "name": { "const": "statuslist-secret" },
+                "creationPolicy": { "type": "string" },
+                "template": { "type": "object" }
+              }
+            },
+            "data": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "required": ["secretKey", "remoteRef"],
+                "properties": {
+                  "secretKey": { "type": "string" },
+                  "remoteRef": { "type": "object" }
+                }
+              }
+            },
+            "extraExternalSecrets": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "required": ["metadata", "spec"],
+                "properties": {
+                  "metadata": {
+                    "type": "object",
+                    "required": ["name"],
+                    "properties": {
+                      "name": { "type": "string" },
+                      "labels": { "type": "object" },
+                      "annotations": { "type": "object" }
+                    }
+                  },
+                  "spec": {
+                    "type": "object",
+                    "required": ["target"],
+                    "properties": {
+                      "refreshInterval": { "type": "string" },
+                      "secretStoreRef": {
+                        "type": "object",
+                        "properties": {
+                          "name": { "type": "string" },
+                          "kind": { "type": "string" }
+                        }
+                      },
+                      "target": {
+                        "type": "object",
+                        "required": ["name"],
+                        "properties": {
+                          "name": { "type": "string" },
+                          "creationPolicy": { "type": "string" },
+                          "template": { "type": "object" }
+                        }
+                      },
+                      "data": { "type": "array" },
+                      "dataFrom": { "type": "array" }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "secretStore": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "provider": {
+          "type": "string",
+          "enum": ["", "aws", "vault", "gcp", "azure", "raw"]
+        },
+        "aws": {
+          "type": "object",
+          "properties": {
+            "service": { "type": "string", "enum": ["SecretsManager", "ParameterStore"] },
+            "region": { "type": "string" }
+          }
+        },
+        "vault": {
+          "type": "object",
+          "properties": {
+            "server": { "type": "string" },
+            "path": { "type": "string" },
+            "auth": { "type": "object" }
+          }
+        },
+        "gcp": {
+          "type": "object",
+          "properties": {
+            "projectID": { "type": "string" },
+            "auth": { "type": "object" }
+          }
+        },
+        "azure": {
+          "type": "object",
+          "properties": {
+            "tenantId": { "type": "string" },
+            "vaultUrl": { "type": "string" },
+            "authType": { "type": "string", "enum": ["", "ServicePrincipal", "ManagedIdentity", "WorkloadIdentity"] },
+            "environmentType": { "type": "string" },
+            "identityId": { "type": "string" },
+            "serviceAccountRef": {
+              "type": "object",
+              "properties": {
+                "name": { "type": "string" },
+                "namespace": { "type": ["string", "null"] }
+              }
+            },
+            "authSecretRef": { "type": "object" }
+          }
+        },
+        "raw": {
+          "type": "object",
+          "description": "Full ESO provider spec passthrough for unsupported providers (secretStore.provider=raw). Holds ONLY the concrete provider body rendered directly under spec.provider (no extra top-level 'provider' key), e.g. { webhook: { url: '...' } }. Render-time validation rejects an empty/raw-only object to avoid emitting an insecure SecretStore."
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": { "enabled": { "const": true } },
+            "required": ["enabled"]
+          },
+          "then": {
+            "properties": {
+              "provider": {
+                "type": "string",
+                "enum": ["aws", "vault", "gcp", "azure", "raw"]
+              }
+            },
+            "required": ["provider"]
+          }
+        },
+        {
+          "if": {
+            "properties": { "provider": { "const": "raw" } },
+            "required": ["provider"]
+          },
+          "then": {
+            "properties": {
+              "raw": {
+                "type": "object",
+                "minProperties": 1
+              }
+            }
+          }
+        }
+      ]
+    },
+    "postgres": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "resources": { "type": "object" },
+        "auth": {
+          "type": "object",
+          "properties": {
+            "username": { "type": "string" },
+            "database": { "type": "string" },
+            "existingSecret": { "type": "string" },
+            "secretKeys": { "type": "object" }
+          }
+        },
+        "persistence": {
+          "type": "object",
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "size": { "type": "string" },
+            "storageClass": {
+              "type": "string",
+              "description": "Empty string uses the cluster default StorageClass."
+            }
+          }
+        },
+        "service": {
+          "type": "object",
+          "properties": {
+            "type": { "type": "string" },
+            "port": { "type": "integer", "minimum": 1, "maximum": 65535 }
+          }
+        },
+        "image": { "type": "object" }
+      }
+    },
+    "autoscaling": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "minReplicas": { "type": "integer", "minimum": 1 },
+        "maxReplicas": { "type": "integer", "minimum": 1 },
+        "metrics": { "type": "array" },
+        "behavior": { "type": "object" }
+      }
+    },
+    "podDisruptionBudget": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "minAvailable": { "type": ["integer", "string", "null"] },
+        "maxUnavailable": { "type": ["integer", "string", "null"] }
+      }
+    }
+  }
+}

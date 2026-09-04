@@ -1,106 +1,741 @@
 name: Build and Deploy to EKS
 on:
+  # Release tags only -- a two-arch build plus scan costs ~40 minutes. Consequence:
+  # the image is scanned once per release and never again; see docs/supply-chain.md.
   push:
     tags:
       - v*.*.*
+  # Exercises build, scan and assertions without cutting a release. `promote-tags`
+  # and `deploy` require `event_name == 'push'`, so dispatch never releases.
   workflow_dispatch:
+
+# A job-level `permissions:` block replaces this default rather than merging with it.
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
 env:
-  IMAGE_NAME: status-list-server
   CLUSTER_NAME: datev-wallet-cluster
   AWS_REGION: eu-central-1
   REGISTRY: ghcr.io
+  IMAGE_BASE: ghcr.io/${{ github.repository_owner }}/status-list-server
   HELM_RELEASE_NAME: statuslist
   HELM_NAMESPACE: statuslist-production
+  APP_DATABASE_PORT: ${{ vars.APP_DATABASE_PORT }}
+  # The same expression the `deploy` job resolves IMAGE_VARIANT from, evaluated here at
+  # workflow level where no environment is in scope. `deploy` runs in `environment:
+  # production`, so an environment-scoped `IMAGE_VARIANT` would win there and be
+  # invisible to anything outside that environment -- including scheduled-image-scan.yml,
+  # whose central assertion is that the variant serving production was re-scanned.
+  # The two values are compared in `deploy` so that divergence fails a deploy rather
+  # than silently pointing the nightly at the wrong image. See "Known Gaps".
+  REPO_IMAGE_VARIANT: ${{ vars.IMAGE_VARIANT || 'aws' }}
+
 jobs:
+  # No `if:` guard -- a skip here would cascade to everything that needs it. The
+  # non-tag case is handled inside the step.
+  validate-tag:
+    name: Validate release tag
+    runs-on: ubuntu-latest
+    # `contents: read` rather than `{}`: this job now checks out the repository to
+    # run the validator script, and an empty token cannot clone a private repo.
+    permissions:
+      contents: read
+    steps:
+      - name: Fetch Repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # `v*.*.*` is a refspec glob, not semver -- `v2024.01.release` matches. On those,
+      # metadata-action drops the semver tags and deploy falls through to `latest`.
+      #
+      # The rule lives in a script rather than inline so it has one definition and
+      # scripts/tests/test_validate_release_tag.py can exercise both directions. A
+      # regex that quietly stops rejecting is indistinguishable from one that works.
+      - name: Assert the tag is semver
+        env:
+          REF_NAME: ${{ github.ref_name }}
+          IS_TAG: ${{ startsWith(github.ref, 'refs/tags/v') }}
+        run: bash scripts/validate-release-tag.sh "$REF_NAME" "$IS_TAG"
+
   ci:
     name: CI
     uses: ./.github/workflows/CI.yml
+    # A malformed tag fails in seconds; without this the whole suite runs first.
+    needs: validate-tag
+    # A called workflow can only narrow the caller's token, so CI.yml's kube-linter
+    # job needs its SARIF upload scope granted here too.
+    permissions:
+      contents: read
+      security-events: write
 
   build-and-push:
-    name: Build and Push Docker Image to GHCR
+    name: Build and Push Docker Image to GHCR (${{ matrix.variant.suffix }})
     runs-on: ubuntu-latest
-    needs: ci
+    needs: [ci, validate-tag]
+    timeout-minutes: 60
     permissions:
       contents: read
       packages: write
-    outputs:
-      deploy_tag: ${{ steps.vars.outputs.DEPLOY_TAG }}
+    strategy:
+      fail-fast: false
+      matrix:
+        variant:
+          - suffix: aws
+            features: "postgres,aws"
+            description: "PostgreSQL database with AWS Secrets Manager and Route53 DNS support"
+          - suffix: gcp
+            features: "postgres,gcp"
+            description: "PostgreSQL database with GCP Secret Manager and Cloud DNS support"
+          - suffix: azure
+            features: "postgres,azure"
+            description: "PostgreSQL database with Azure Key Vault and Azure DNS support"
+          - suffix: vault
+            features: "postgres,vault"
+            description: "PostgreSQL database with HashiCorp Vault / OpenBao token material storage"
+          - suffix: fscert
+            features: "postgres"
+            description: "PostgreSQL database with filesystem-mounted token signing keys and certificates"
     steps:
       - name: Checkout source code
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # The build needs the source, not the token. Left persisted it stays in
+          # .git/config for every later step, including the Docker build context.
+          persist-credentials: false
+
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+
       - name: Login to GHCR
-        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4
+        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Get short commit SHA
-        id: vars
-        run: |
-          SHORT_SHA="${GITHUB_SHA::7}"
-          echo "SHORT_SHA=${SHORT_SHA}" >> "$GITHUB_OUTPUT"
-          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
-            echo "DEPLOY_TAG=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
-          else
-            echo "DEPLOY_TAG=sha-${SHORT_SHA}" >> "$GITHUB_OUTPUT"
-          fi
+
       - name: Extract Docker metadata
+        # Only the sha tag here. `promote-tags` applies semver and `latest` after the
+        # scan, so a rejected image never becomes an advertised release.
         id: meta
-        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
         with:
-          images: ${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}
+          images: ${{ env.IMAGE_BASE }}
           tags: |
-            type=semver,pattern={{version}},enable=${{ startsWith(github.ref, 'refs/tags/v') }}
-            type=semver,pattern={{major}}.{{minor}},enable=${{ startsWith(github.ref, 'refs/tags/v') }}
-            type=sha,format=short,prefix=sha-
-            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
+            type=sha,format=short,prefix=sha-,suffix=-${{ matrix.variant.suffix }}
+          labels: |
+            org.opencontainers.image.description=${{ matrix.variant.description }}
+
       - name: Build and push Docker image
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7
+        id: build
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
           context: .
           file: ./Dockerfile
           push: true
           platforms: linux/amd64,linux/arm64
           tags: ${{ steps.meta.outputs.tags }}
+          cache-from: type=gha,scope=build-${{ matrix.variant.suffix }}
+          cache-to: type=gha,mode=max,scope=build-${{ matrix.variant.suffix }}
+          # Explicit: the action defaults to mode=max on public repos and mode=min on
+          # private, so a visibility change would silently degrade provenance.
+          #
+          # BuildKit attaches both as in-toto manifests in the pushed index, which is
+          # why the image cannot be scanned before it is pushed.
+          provenance: mode=max
+          sbom: true
+          build-args: |
+            FEATURES=${{ matrix.variant.features }}
+          labels: ${{ steps.meta.outputs.labels }}
+          annotations: |
+            index,manifest:org.opencontainers.image.description=${{ matrix.variant.description }}
+
+      - name: Assert a digest was produced
+        # An empty digest would silently fall back to tag-based deployment, which is
+        # the failure this pipeline exists to prevent.
+        #
+        # `IMAGE_REF` is assembled here rather than in the job's `outputs:` block so it
+        # is built in shell, where `IMAGE_BASE` is in scope, and only after the digest
+        # is known non-empty. Assembled in `outputs:` it would still be emitted as
+        # `<base>@` with no digest if this check ever stopped holding.
+        id: digest
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+          SUFFIX: ${{ matrix.variant.suffix }}
+        run: |
+          if [ -z "$DIGEST" ]; then
+            echo "::error::build-push-action produced no image digest for variant ${SUFFIX}."
+            exit 1
+          fi
+          echo "image digest for ${SUFFIX}: $DIGEST"
+          echo "IMAGE_REF=${IMAGE_BASE}@${DIGEST}" >> "$GITHUB_OUTPUT"
+          printf '%s\n' "$DIGEST" > "image-digest-${SUFFIX}.txt"
+
+      - name: Verify OCI description annotations
+        env:
+          DESCRIPTION: ${{ matrix.variant.description }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          raw=$(docker buildx imagetools inspect --raw "${IMAGE_BASE}@${DIGEST}")
+          index_description=$(printf '%s' "$raw" | jq -r '.annotations["org.opencontainers.image.description"] // ""')
+          if [ "$index_description" != "$DESCRIPTION" ]; then
+            echo "::error::index OCI description annotation mismatch for ${DIGEST}"
+            echo "expected: $DESCRIPTION"
+            echo "actual:   $index_description"
+            exit 1
+          fi
+
+          for manifest in $(printf '%s' "$raw" | jq -r '.manifests[]
+            | select(.platform.os == "linux" and (.platform.architecture == "amd64" or .platform.architecture == "arm64"))
+            | .digest'); do
+            manifest_description=$(docker buildx imagetools inspect --raw "${IMAGE_BASE}@${manifest}" \
+              | jq -r '.annotations["org.opencontainers.image.description"] // ""')
+            if [ "$manifest_description" != "$DESCRIPTION" ]; then
+              echo "::error::manifest OCI description annotation mismatch for ${manifest}"
+              echo "expected: $DESCRIPTION"
+              echo "actual:   $manifest_description"
+              exit 1
+            fi
+          done
+
+      - name: Upload built digest
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: image-digest-${{ matrix.variant.suffix }}
+          path: image-digest-${{ matrix.variant.suffix }}.txt
+          if-no-files-found: error
+
+  scan-image:
+    name: Scan Image for Vulnerabilities (${{ matrix.variant.suffix }})
+    runs-on: ubuntu-latest
+    needs: build-and-push
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      packages: read
+      actions: read
+    strategy:
+      fail-fast: false
+      matrix:
+        variant:
+          - suffix: aws
+          - suffix: gcp
+          - suffix: azure
+          - suffix: vault
+          - suffix: fscert
+    env:
+      # Every published architecture is scanned. A shared lockfile does not make the
+      # package sets identical: the two images are built by different builder images
+      # to different Rust targets, and `cargo auditable` records the graph cargo
+      # resolved for that target, not the lockfile's union across targets. Scanning
+      # one architecture would let an advisory reaching only the other be promoted
+      # and deployed without ever crossing the gate.
+      SCAN_ARCHES: amd64 arm64
+      # Statically declared with defaults so GitHub Actions static analysis validates them;
+      # populated dynamically with the resolved architecture digests at runtime.
+      SCAN_REF_AMD64: ""
+      SCAN_REF_ARM64: ""
+    steps:
+      - name: Fetch Repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Login to GHCR
+        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Download built digest
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh run download "$GITHUB_RUN_ID" --name "image-digest-${{ matrix.variant.suffix }}" --dir .
+
+      - name: Resolve the architecture manifests to scan
+        # Resolving each child manifest fixes which arches are scanned by construction,
+        # rather than trusting Trivy's default and checking afterwards. The rule lives
+        # in a script so the scheduled re-scan resolves manifests by the same one.
+        env:
+          SUFFIX: ${{ matrix.variant.suffix }}
+        run: |
+          set -euo pipefail
+          index_digest=$(cat "image-digest-${SUFFIX}.txt")
+          [[ "$index_digest" =~ ^sha256:[a-f0-9]{64}$ ]] || {
+            echo "::error::invalid built image digest for ${SUFFIX}: ${index_digest}"
+            exit 1
+          }
+
+          # Captured rather than piped or read from a process substitution: those
+          # discard the script's exit status, so a failed resolution would leave the
+          # loop reading nothing and this step green.
+          resolved=$(bash scripts/resolve-arch-manifests.sh "${IMAGE_BASE}@${index_digest}" $SCAN_ARCHES)
+
+          # Upper-cased because the scan steps read these back as `env.SCAN_REF_AMD64`
+          # and `env.SCAN_REF_ARM64`, which a `uses:` step cannot build dynamically.
+          while read -r arch manifest; do
+            echo "SCAN_REF_$(printf '%s' "$arch" | tr '[:lower:]' '[:upper:]')=${IMAGE_BASE}@${manifest}" >> "$GITHUB_ENV"
+          done <<< "$resolved"
+
+      - name: Scan image (amd64)
+        # Unfiltered; every view below is `trivy convert`ed from these, so the table and
+        # the gate read the same data and each image is pulled once.
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: image
+          image-ref: ${{ env.SCAN_REF_AMD64 }}
+          severity: UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL
+          ignore-unfixed: false
+          exit-code: 0
+          format: json
+          output: trivy-image-report-amd64.json
+
+      - name: Scan image (arm64)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: image
+          image-ref: ${{ env.SCAN_REF_ARM64 }}
+          severity: UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL
+          ignore-unfixed: false
+          exit-code: 0
+          format: json
+          output: trivy-image-report-arm64.json
+
+      - name: Derive reports
+        # The severity floor and where the ledger is applied live in the script, so the
+        # scheduled re-scan derives the same views from the same flags. Two copies of
+        # this would drift, and a re-scan filtering differently than the release gate
+        # would not be comparable to it.
+        run: |
+          set -eu
+          for arch in $SCAN_ARCHES; do
+            sh scripts/derive-trivy-reports.sh "$arch"
+          done
+
+      - name: Collect published SBOMs
+        # After the scan, not before: registry metadata is a separate failure domain,
+        # and a transient imagetools error here must not cost the trivy reports.
+        run: |
+          set -euo pipefail
+          index_digest=$(cat "image-digest-${{ matrix.variant.suffix }}.txt")
+          image_ref="${IMAGE_BASE}@${index_digest}"
+          : > sbom-summary.md
+          for platform in linux/amd64 linux/arm64; do
+            out="sbom-${platform#linux/}.json"
+            for attempt in 1 2 3; do
+              if docker buildx imagetools inspect "$image_ref" \
+                   --format "{{ json (index .SBOM \"$platform\") }}" > "$out"; then
+                break
+              fi
+              [ "$attempt" -lt 3 ] || { echo "::error::could not fetch SBOM for $platform"; exit 1; }
+              sleep $(( attempt * 5 ))
+            done
+            crates=$(sh scripts/count-sbom-crates.sh "$out")
+            echo "$platform: $crates distinct cargo packages"
+            echo "- \`$platform\`: $crates distinct cargo packages" >> sbom-summary.md
+          done
+
+      - name: Publish report to job summary
+        # Deliberately small -- the full tables and JSON are artifacts below. Inlining
+        # them would bury the gate decision.
+        if: always()
+        run: |
+          set -eu
+          index_digest=$(cat "image-digest-${{ matrix.variant.suffix }}.txt" 2>/dev/null || true)
+          image_ref="${IMAGE_BASE}@${index_digest}"
+          {
+            echo "## Container image scan (${{ matrix.variant.suffix }})"
+            echo
+            echo "Index: \`${image_ref}\`"
+            echo
+            echo "| Platform | Scanned digest | HIGH/CRITICAL |"
+            echo "| --- | --- | --- |"
+            for arch in $SCAN_ARCHES; do
+              var="SCAN_REF_$(printf '%s' "$arch" | tr '[:lower:]' '[:upper:]')"
+              ref="${!var:-}"
+              findings="trivy-highcrit-all-${arch}.json"
+              if [ -s "$findings" ]; then
+                count=$(jq '[.Results[]?.Vulnerabilities[]?.VulnerabilityID] | unique | length' "$findings")
+              else
+                count="not scanned"
+              fi
+              echo "| \`linux/${arch}\` | \`${ref##*@}\` | ${count} |"
+            done
+            echo
+            echo "### Published SBOM"
+            echo
+            cat sbom-summary.md 2>/dev/null || echo "_SBOM collection did not complete._"
+            echo
+            echo "Full tables and JSON: the \`container-scan-reports-${{ matrix.variant.suffix }}\` artifact on this run."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload scan reports
+        # `warn`, not `error`: the `[ -s ... ]` fallbacks above guarantee the files.
+        # Failing here would only add a second red step.
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: container-scan-reports-${{ matrix.variant.suffix }}
+          path: |
+            trivy-image-report-*.json
+            trivy-image-report-*.txt
+            trivy-highcrit-all-*.json
+            trivy-gate-findings-*.json
+          if-no-files-found: warn
+
+      - name: Upload published SBOMs
+        # Separate artifact: a lost SBOM must not take down the upload carrying the
+        # scan results. Absence is caught by the assertion below instead.
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: container-sboms-${{ matrix.variant.suffix }}
+          path: |
+            sbom-amd64.json
+            sbom-arm64.json
+          if-no-files-found: warn
+
+      # No code-scanning upload: alerts filed against a tag ref never surface in the
+      # Security tab's branch view. The durable sink is scheduled-image-scan.yml, which
+      # runs on a branch ref and uploads SARIF under `category: container-image`.
+
+      - name: Assert published SBOMs list Rust crates
+        # Covers the SBOM BuildKit attached; the Dockerfile's .dep-v0 check covers the
+        # binary. `index .SBOM` needs a multi-platform index or it errors here.
+        run: |
+          set -eu
+          for platform in linux/amd64 linux/arm64; do
+            out="sbom-${platform#linux/}.json"
+            crates=$(sh scripts/count-sbom-crates.sh "$out")
+            if [ "$crates" -eq 0 ]; then
+              echo "::error::Published SBOM for $platform lists no pkg:cargo/ packages. The image ships without usable dependency metadata."
+              exit 1
+            fi
+            echo "$platform: $crates distinct cargo packages"
+          done
+
+      - name: Prove the gate can fail
+        # A gate that never fired is indistinguishable from one that cannot fire, so
+        # prove both directions immediately before trusting the gate below. Shared with
+        # the scheduled re-scan and local-ci.sh so all three assert the same things.
+        run: sh scripts/gate-selftest.sh
+
+      - name: Vulnerability gate
+        # Blocks on any HIGH or CRITICAL surviving the ledger, with ignore-unfixed off.
+        # Thresholds and rationale: docs/supply-chain.md, "The Gate Blocks".
+        run: |
+          set -eu
+          # Advisories, not rows: one CVE across three crates is one thing to triage.
+          # Counted across every arch -- a single-arch advisory still blocks.
+          advisories=$(jq -s '[.[].Results[]?.Vulnerabilities[]?.VulnerabilityID] | unique | length' trivy-gate-findings-*.json)
+          occurrences=$(jq -s '[.[].Results[]?.Vulnerabilities[]?] | length' trivy-gate-findings-*.json)
+          total=$(jq -s '[.[].Results[]?.Vulnerabilities[]?.VulnerabilityID] | unique | length' trivy-highcrit-all-*.json)
+          suppressed=$(( total - advisories ))
+
+          echo "HIGH/CRITICAL after exceptions: ${advisories} advisories across ${occurrences} package occurrences (${suppressed} suppressed by .trivyignore.yaml)"
+          {
+            echo
+            echo "### Vulnerability gate"
+            echo
+            if [ "${advisories}" -eq 0 ]; then
+              echo "No HIGH or CRITICAL findings after exceptions, on any scanned architecture."
+            else
+              echo "\`${advisories}\` distinct HIGH/CRITICAL advisories (\`${occurrences}\` package occurrences) block this release."
+              echo
+              echo "Triage steps and the exception format are in \`docs/supply-chain.md\`."
+              echo "The exact blocking set is \`trivy-gate-findings-<arch>.json\` in the \`container-scan-reports-${{ matrix.variant.suffix }}\` artifact."
+            fi
+            echo
+            if [ "${suppressed}" -gt 0 ]; then
+              echo "\`${suppressed}\` HIGH/CRITICAL advisories were suppressed by \`.trivyignore.yaml\`. The unsuppressed set is \`trivy-highcrit-all-<arch>.json\`."
+            else
+              echo "No findings were suppressed by \`.trivyignore.yaml\`."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          # Rendered from the gate set itself, so table, counts and exit code cannot
+          # disagree. Every arch renders before failing, so one run shows all of it.
+          status=0
+          for arch in $SCAN_ARCHES; do
+            echo "--- linux/${arch} ---"
+            sh scripts/vuln-gate.sh "trivy-gate-findings-${arch}.json" || status=1
+          done
+          exit "$status"
+
+  promote-tags:
+    name: Promote Scanned Digest to Release Tags (${{ matrix.variant.suffix }})
+    runs-on: ubuntu-latest
+    needs:
+      - build-and-push
+      - scan-image
+    # Positively gated on `push`: workflow_dispatch accepts tag refs too, so a ref
+    # test alone would not keep dispatch off the release path.
+    if: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') }}
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      packages: write
+      actions: read
+    strategy:
+      fail-fast: false
+      matrix:
+        variant:
+          - suffix: aws
+            description: "PostgreSQL database with AWS Secrets Manager and Route53 DNS support"
+          - suffix: gcp
+            description: "PostgreSQL database with GCP Secret Manager and Cloud DNS support"
+          - suffix: azure
+            description: "PostgreSQL database with Azure Key Vault and Azure DNS support"
+          - suffix: vault
+            description: "PostgreSQL database with HashiCorp Vault / OpenBao token material storage"
+          - suffix: fscert
+            description: "PostgreSQL database with filesystem-mounted token signing keys and certificates"
+    env:
+      SUFFIX: ${{ matrix.variant.suffix }}
+    steps:
+      - name: Login to GHCR
+        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Download built digest
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh run download "$GITHUB_RUN_ID" --name "image-digest-${{ matrix.variant.suffix }}" --dir .
+
+      - name: Extract release tags
+        # The `v*.*.*` glob absorbs prereleases, so `latest` is withheld explicitly.
+        # metadata-action already withholds {{major}}.{{minor}}; raw tags do not.
+        id: meta
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
+        with:
+          images: ${{ env.IMAGE_BASE }}
+          tags: |
+            type=semver,pattern={{version}},suffix=-${{ matrix.variant.suffix }}
+            type=semver,pattern={{major}}.{{minor}},suffix=-${{ matrix.variant.suffix }}
+            type=raw,value=latest,suffix=-${{ matrix.variant.suffix }},enable=${{ !contains(github.ref_name, '-') }}
+
+      - name: Promote digest to release tags
+        # `imagetools create` copies manifest descriptors by digest: nothing is rebuilt
+        # and the tags resolve to exactly the scanned index.
+        env:
+          TAGS: ${{ steps.meta.outputs.tags }}
+          DESCRIPTION: ${{ matrix.variant.description }}
+        run: |
+          set -euo pipefail
+          index_digest=$(cat "image-digest-${SUFFIX}.txt")
+          [[ "$index_digest" =~ ^sha256:[a-f0-9]{64}$ ]] || {
+            echo "::error::invalid built image digest for ${SUFFIX}: ${index_digest}"
+            exit 1
+          }
+          image_ref="${IMAGE_BASE}@${index_digest}"
+          args=()
+          while IFS= read -r tag; do
+            [ -n "$tag" ] || continue
+            args+=(--tag "$tag")
+          done <<< "$TAGS"
+          # An empty tag list would degrade to `imagetools create <source>`, which
+          # promotes nothing. This job must not have a silent no-op form.
+          if [ "${#args[@]}" -eq 0 ]; then
+            echo "::error::metadata-action produced no release tags for ${GITHUB_REF_NAME}-${SUFFIX}."
+            exit 1
+          fi
+          docker buildx imagetools create \
+            --annotation "index:org.opencontainers.image.description=${DESCRIPTION}" \
+            "${args[@]}" "$image_ref"
+
+      - name: Verify attestations survived promotion
+        # Attestations are separate manifests; a silent drop would publish a release
+        # whose SBOM and provenance vanished with nothing failing.
+        run: |
+          set -eu
+          DEPLOY_TAG="${GITHUB_REF_NAME#v}"
+          release_ref="${IMAGE_BASE}:${DEPLOY_TAG}-${SUFFIX}"
+          description="${{ matrix.variant.description }}"
+          actual_description=$(docker buildx imagetools inspect --raw "$release_ref" \
+            | jq -r '.annotations["org.opencontainers.image.description"] // ""')
+          if [ "$actual_description" != "$description" ]; then
+            echo "::error::OCI description annotation missing after tag promotion on $release_ref."
+            echo "expected: $description"
+            echo "actual:   $actual_description"
+            exit 1
+          fi
+          for platform in linux/amd64 linux/arm64; do
+            for field in SBOM Provenance; do
+              if ! docker buildx imagetools inspect "$release_ref" \
+                --format "{{ json (index .$field \"$platform\") }}" \
+                | jq -e '(type == "object") and (length > 0)' > /dev/null; then
+                echo "::error::$field missing for $platform on $release_ref after tag promotion."
+                exit 1
+              fi
+            done
+          done
+          echo "SBOM and provenance present for both platforms on $release_ref"
 
   deploy:
     name: Deploy to Production
     runs-on: ubuntu-latest
-    needs: build-and-push
-    if: ${{ startsWith(github.ref, 'refs/tags/v') }}
+    # Keeps tags and production consistent -- never deploy an untagged release.
+    # Recovery from a promotion failure is a re-run of that job.
+    needs:
+      - build-and-push
+      - scan-image
+      - promote-tags
+    if: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') }}
+    timeout-minutes: 30
     environment: production
+    # Keyed on the environment, not the ref: two tags pushed in quick succession
+    # would otherwise run `helm upgrade` concurrently against the same release.
+    concurrency:
+      group: deploy-production
+      cancel-in-progress: false
     permissions:
       contents: read
       id-token: write
+      packages: read
+    env:
+      # Routed through env rather than interpolated into the helm command: deploy_tag
+      # derives from GITHUB_REF_NAME, which the person pushing the tag controls.
+      # IMAGE_VARIANT selects which compiled feature-set image to deploy (suffix).
+      # The deployment target is always AWS EKS (see CLUSTER_NAME / AWS_REGION).
+      # Useful for deploying, e.g., the -vault variant to AWS EKS without AWS Secrets Manager.
+      IMAGE_VARIANT: ${{ vars.IMAGE_VARIANT || 'aws' }}
     steps:
       - name: Checkout source code
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Only the Helm chart is needed here; the deploy authenticates to AWS via
+          # OIDC, not the checkout token.
+          persist-credentials: false
+
       - name: Install kubectl
-        uses: azure/setup-kubectl@829323503d1be3d00ca8346e5391ca0b07a9ab0d # v5.0.1
+        # v5.1.0, not v5.0.1: that SHA is the v5.1.0 tag upstream. Both sides of this
+        # merge pinned the same commit and only disagreed about the comment.
+        uses: azure/setup-kubectl@829323503d1be3d00ca8346e5391ca0b07a9ab0d # v5.1.0
+
       - name: Install Helm
         uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+        with:
+          version: v4.2.4
+
+      - name: Login to GHCR
+        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
       - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6
+        uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6.2.3
         with:
           role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
           role-session-name: status-list-server-deploy
           aws-region: ${{ env.AWS_REGION }}
+
       - name: Update kubeconfig for EKS
         run: aws eks update-kubeconfig --name ${{ env.CLUSTER_NAME }} --region ${{ env.AWS_REGION }}
+
+      - name: Validate deployment configuration
+        run: |
+          if [[ -z "${APP_DATABASE_PORT}" ]]; then
+            echo "APP_DATABASE_PORT repository/environment variable is required" >&2
+            exit 1
+          fi
+
+      - name: Assert the deployed variant is visible outside this environment
+        # `vars.IMAGE_VARIANT` resolves environment-scoped variables first, and this job
+        # runs in `environment: production`. Nothing outside that environment can see an
+        # environment-scoped value -- and scheduled-image-scan.yml is outside it, by
+        # design, because giving a nightly cron a job in `production` would make it wait
+        # on that environment's reviewers.
+        #
+        # So the nightly reads the repository-scoped value and asserts the image serving
+        # production was re-scanned. If an environment-scoped override ever appears, that
+        # assertion silently starts verifying a variant nobody is running: the nightly
+        # goes green having scanned `aws` while production serves `vault`, and nothing
+        # anywhere reports a problem.
+        #
+        # This is the only place both scopes are visible at once, so this is where the
+        # divergence is caught. Failing a deploy is recoverable in minutes; a security
+        # control quietly watching the wrong artifact is not discovered at all.
+        # Both values are already in the shell environment -- `IMAGE_VARIANT` from this
+        # job's `env:` (environment scope) and `REPO_IMAGE_VARIANT` from the workflow's
+        # (repository scope) -- so neither needs re-interpolating into the script.
+        run: |
+          set -eu
+          if [ "${IMAGE_VARIANT:-aws}" != "$REPO_IMAGE_VARIANT" ]; then
+            echo "::error::IMAGE_VARIANT differs between scopes: this environment resolves"
+            echo "'${IMAGE_VARIANT:-aws}', the repository resolves '${REPO_IMAGE_VARIANT}'."
+            echo
+            echo "An environment-scoped IMAGE_VARIANT on 'production' is invisible to"
+            echo "scheduled-image-scan.yml, which would keep re-scanning '${REPO_IMAGE_VARIANT}'"
+            echo "and reporting success while production serves '${IMAGE_VARIANT:-aws}'."
+            echo
+            echo "Set IMAGE_VARIANT at the repository level and remove the environment"
+            echo "override, or teach the nightly to read the same scope before deploying."
+            exit 1
+          fi
+          echo "IMAGE_VARIANT '${IMAGE_VARIANT:-aws}' is visible to the scheduled re-scan."
+
       - name: Build Helm dependencies
         run: |
-          helm repo add dandydeveloper https://dandydeveloper.github.io/charts
           helm repo add open-telemetry https://open-telemetry.github.io/opentelemetry-helm-charts
           helm dependency build helm/chart
+
       - name: Deploy chart
+        # The digest is what pins production to the image the scan gate passed; an
+        # empty one silently falls back to the mutable tag. `:?` because helm reports
+        # an empty value as a YAML error pointing nowhere near the cause.
+        #
+        # The tag and digest come from `env:` rather than `${{ }}` because they are
+        # derived from the pushed ref. The release name and namespace are workflow
+        # literals, so interpolating those is safe.
         run: |
+          set -euo pipefail
+          # Derive deploy tag from the release tag
+          DEPLOY_TAG="${GITHUB_REF_NAME#v}"
+          IMAGE_VARIANT="${IMAGE_VARIANT:-aws}"
+          FULL_TAG="${DEPLOY_TAG}-${IMAGE_VARIANT}"
+
+          # Resolve the promoted multi-arch index digest using structured formatting.
+          # Kubernetes needs the index digest, not a child platform manifest.
+          IMAGE_DIGEST=$(docker buildx imagetools inspect "${IMAGE_BASE}:${FULL_TAG}" \
+            --format '{{ .Manifest.Digest }}')
+          [[ "$IMAGE_DIGEST" =~ ^sha256:[a-f0-9]{64}$ ]] || {
+            echo "::error::Could not resolve a valid image index digest for ${IMAGE_BASE}:${FULL_TAG}"
+            exit 1
+          }
+
+          echo "Deploying ${IMAGE_BASE}:${FULL_TAG}@${IMAGE_DIGEST}"
+
+          # `FULL_TAG`, not `DEPLOY_TAG`: the tag must carry the variant suffix, or
+          # production gets whichever feature set happens to sit on the bare tag.
+          #
+          # `:?` on both -- helm reports an empty value as a YAML error pointing
+          # nowhere near the cause, and an empty digest silently falls back to the
+          # mutable tag, which is the failure this pipeline exists to prevent.
           helm upgrade --install ${{ env.HELM_RELEASE_NAME }} helm/chart \
             --namespace ${{ env.HELM_NAMESPACE }} \
-            --create-namespace \
-            --atomic \
+            -f helm/chart/values-aws.yaml \
+            -f helm/chart/values-production.yaml \
             --wait \
+            --rollback-on-failure \
             --timeout 10m \
-            --set-string statuslist.image.repository=${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ env.IMAGE_NAME }} \
-            --set-string statuslist.image.tag=${{ needs.build-and-push.outputs.deploy_tag }}
+            --set-string "statuslist.image.repository=${IMAGE_BASE}" \
+            --set-string "statuslist.image.tag=${FULL_TAG:?full image tag missing}" \
+            --set-string "statuslist.image.digest=${IMAGE_DIGEST:?image digest missing}" \
+            --set-string "statuslist.env.APP_DATABASE__PORT=${APP_DATABASE_PORT}"
+
+      - name: Verify application rollout
+        run: |
+          kubectl rollout status deployment/${{ env.HELM_RELEASE_NAME }}-status-list-server-deployment \
+            -n ${{ env.HELM_NAMESPACE }} \
+            --timeout 2m

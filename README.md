@@ -39,7 +39,6 @@ Before running the server, ensure you have the following tools installed:
 
 - [Rust & Cargo](https://www.rust-lang.org/tools/install) (Latest stable).
 - A supported database backend: PostgreSQL, MySQL, or SQLite for persistent deployments. The default local mode uses in-memory repositories.
-- [Redis](https://redis.io/download) is optional and only needed when you enable the distributed certificate-material cache.
 - [Docker](https://www.docker.com/get-started/) (optional, for local testing).
 
 ### Run locally
@@ -65,18 +64,12 @@ The simplest way to run the project is with [docker compose](https://docs.docker
 docker compose up --build
 ```
 
-This command will pull all required images and start the server compiled with default compose features (`postgres,aws-secrets,acme`). Redis is not part of the default path.
+This command will pull all required images and start the server compiled with default compose features (`postgres,aws`).
 
 To pass custom Cargo feature flags during build, specify the `FEATURES` environment variable:
 
 ```sh
-FEATURES="mysql,aws-secrets,acme" docker compose --profile mysql up --build
-```
-
-To test the optional Redis certificate-material cache locally, enable the Redis profile, compile the Redis feature, and provide a Redis URI:
-
-```sh
-FEATURES="postgres,redis,aws-secrets,acme" APP_REDIS__URI="redis://redis:6379" docker compose --profile redis up --build
+FEATURES="mysql,aws" docker compose --profile mysql up --build
 ```
 
 #### Running Manually
@@ -87,37 +80,32 @@ To start the server in zero-infrastructure default in-memory mode, execute:
 cargo run
 ```
 
-By default, the server will listen on `http://localhost:8000` using in-memory repositories, Moka cache, and store-based certificate management. No external databases, Redis, or cloud services are required for development.
+By default, the server will listen on `http://localhost:8000` using in-memory repositories, Moka cache, and store-based certificate management. No external databases or cloud services are required for development.
 
 ## Cargo Feature Matrix
 
 The crate uses modular Cargo feature flags to gate optional production backend drivers:
 
-| Feature       | Description                                                             | Default    |
-| ------------- | ----------------------------------------------------------------------- | ---------- |
-| `memory`      | In-memory repositories, TTL cache, and store-based certificate storage. | ✅ Default |
-| `postgres`    | SeaORM PostgreSQL database driver.                                      | ❌ Opt-in  |
-| `sqlite`      | SeaORM SQLite database driver.                                          | ❌ Opt-in  |
-| `mysql`       | SeaORM MySQL database driver.                                           | ❌ Opt-in  |
-| `redis`       | Redis storage driver for explicit cache/storage integrations.           | ❌ Opt-in  |
-| `aws-secrets` | Route53 DNS-01, and AWS Secrets Manager drivers.                        | ❌ Opt-in  |
-| `acme`        | ACME DNS-01 certificate manager driver.                                 | ❌ Opt-in  |
+| Feature    | Description                                                                  | Default    |
+| ---------- | ---------------------------------------------------------------------------- | ---------- |
+| `memory`   | In-memory repositories, TTL cache, and static certificate loading.           | ✅ Default |
+| `postgres` | SeaORM PostgreSQL database driver.                                           | ❌ Opt-in  |
+| `sqlite`   | SeaORM SQLite database driver.                                               | ❌ Opt-in  |
+| `mysql`    | SeaORM MySQL database driver.                                                | ❌ Opt-in  |
+| `aws`      | AWS Secrets Manager and Route53 DNS-01 driver                                | ❌ Opt-in  |
+| `gcp`      | GCP Secret Manager and Cloud DNS driver                                      | ❌ Opt-in  |
+| `azure`    | Azure Key Vault and Azure DNS driver                                         | ❌ Opt-in  |
+| `vault`    | HashiCorp Vault / OpenBao driver                                             | ❌ Opt-in  |
 
 To build with specific backend drivers, pass the matching feature flag(s):
 
 ```bash
-# Run with PostgreSQL and Redis support available
-cargo run --features postgres,redis
+# Run with PostgreSQL support available
+cargo run --features postgres
 
-# Run with AWS and ACME production integrations
-cargo run --features postgres,aws-secrets,acme
+# Run with AWS native integration (automatically enables ACME)
+cargo run --features postgres,aws
 ```
-
-## Redis Role
-
-Redis is optional. The server does not use Redis for status-list persistence or status-list reads; those use the configured repository backend and the in-process status-list cache. Certificate and signing-key material are managed together by the selected cryptographic material backend; prefer the built-in material read-cache TTLs before adding Redis.
-
-For single-replica deployments, local development, tests, or deployments where certificate material reads are inexpensive, leave `APP_REDIS__URI` unset and omit the `redis` Cargo feature.
 
 For deployment guidance and backend tradeoffs, see [`docs/database-backends.md`](docs/database-backends.md).
 
@@ -157,7 +145,6 @@ The following constraints are validated at startup and will cause the server to 
 
 - `server.port` must be between 1 and 65535 (the `u16` type enforces the upper bound)
 - `server.cert.renewal_cron_schedule` must be a valid 6-field cron expression (seconds required)
-- `aws.s3_bucket` must not be empty
 
 ## Security
 
@@ -202,18 +189,15 @@ The Status List Server is provisioned with a cryptographic certificate that is e
 - Certificate issuance and renewal are managed according to the configured renewal strategy.
 - Every day, a cron job checks whether the certificate should be renewed based on this strategy.
 - If the certificate is still considered valid according to the configured strategy, no renewal occurs; renewal is only triggered when necessary.
-- The server signing key and certificate chain are stored in one cryptographic-material backend selected by enabled Cargo features (`vault`, `aws-secrets`, or in-memory fallback).
+- The server signing key and certificate chain are stored in one cryptographic-material backend selected by enabled Cargo features (`vault`, `aws`, `gcp`, `azure`, or in-memory fallback).
 - Certificate material stays cached until provisioning or renewal invalidates it. Signing-key reads can be cached with `APP_SERVER__CERT__SIGNING_KEY_CACHE_TTL`; set it to `0` to force private-key reads to bypass the material cache.
 - Parsed certificate chains stay cached in memory until certificate provisioning or renewal replaces them.
 
 **Provisioning Modes:**
 
-- `server.cert.provisioning_strategy = "acme"` requests and renews certificates through ACME.
-- `server.cert.provisioning_strategy = "store"` loads externally managed certificate material and persists it into the configured cryptographic-material backend.
-- Store provisioning infers filesystem loading when `server.cert.store.certificate_path` and `signing_key_path` are configured.
-- Store provisioning infers storage-backed loading when `server.cert.store.certificate_key` and `signing_key_key` are configured; those keys are read from the feature-selected cryptographic-material backend.
-- Filesystem store inputs may be PEM text or raw DER. Storage-backed store inputs may be PEM text or base64/base64url-encoded DER. Private keys must be PKCS#8 in PEM or DER form.
-- The renewal cron schedule is configured with `server.cert.renewal_cron_schedule`. For store provisioning, each scheduled run reloads the configured source and refreshes persisted material only when it changed.
+- **ACME Provisioning**: Requests, validates (via DNS-01 challenge), and automatically renews TLS certificates using Let's Encrypt / ACME directory. Built into cloud-native binary variants.
+- **Static Loading**: Loads pre-existing certificate chain and private key directly into memory, without ACME overhead or DNS challenges.
+- If neither or only partial static material is provided, server startup immediately fails with a clear validation error.
 
 **Certificate Manager Builder Defaults:**
 
@@ -272,6 +256,10 @@ The server can be deployed using a containerization platform such as Docker.
 ### Helm Chart Deployment
 
 A Helm chart is provided for easy deployment on Kubernetes. For detailed instructions, see the [Helm Deployment Guide](helm/README.md).
+
+### Container Supply Chain
+
+Release images are scanned by digest and carry an SBOM and SLSA provenance, and release tags are applied only after the scan. See the [Container Supply Chain guide](docs/supply-chain.md) for thresholds, verification commands, and how to triage findings.
 
 ## Testing
 

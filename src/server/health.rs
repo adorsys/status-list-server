@@ -181,12 +181,12 @@ impl ReadinessCheck for AlwaysReady {
 /// Readiness check for a relational database backend.
 #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mysql"))]
 pub struct DbCheck {
-    db: std::sync::Arc<sea_orm::DatabaseConnection>,
+    db: std::sync::Arc<crate::outbound::sql::SwappableDatabaseConnection>,
 }
 
 #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mysql"))]
 impl DbCheck {
-    pub fn new(db: std::sync::Arc<sea_orm::DatabaseConnection>) -> Self {
+    pub fn new(db: std::sync::Arc<crate::outbound::sql::SwappableDatabaseConnection>) -> Self {
         Self { db }
     }
 }
@@ -199,8 +199,8 @@ impl ReadinessCheck for DbCheck {
     }
 
     async fn check(&self) -> Result<(), String> {
-        self.db
-            .ping()
+        let db = self.db.current();
+        db.ping()
             .await
             .map_err(|e| format!("database unreachable: {e}"))
     }
@@ -253,8 +253,8 @@ pub struct FilesystemCertCheck {
 impl FilesystemCertCheck {
     pub fn new(cert_path: Option<String>, key_path: Option<String>) -> Self {
         Self {
-            cert_path,
-            key_path,
+            cert_path: cert_path.filter(|p| !p.trim().is_empty()),
+            key_path: key_path.filter(|p| !p.trim().is_empty()),
         }
     }
 }
@@ -470,19 +470,6 @@ mod tests {
             );
             assert_eq!(response_body(resp).await, "NOT_READY");
         }
-    }
-
-    #[tokio::test]
-    async fn redis_cache_failure_does_not_gate_readiness() {
-        let state = app_state_with_checks(vec![
-            Arc::new(AlwaysReady::new("database")),
-            Arc::new(AlwaysReady::new("cert_store")),
-        ])
-        .await;
-
-        let resp = call_handler(state, "/health/ready").await;
-
-        assert_eq!(resp.status(), StatusCode::OK);
     }
 
     #[cfg(feature = "acme")]

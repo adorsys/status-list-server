@@ -6,6 +6,11 @@ on:
   workflow_call:
   pull_request:
 
+# A scope added here must also be granted by deploy.yml's `ci` job, which calls this
+# workflow: a called workflow can only narrow the caller's token.
+permissions:
+  contents: read
+
 concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
@@ -14,30 +19,166 @@ jobs:
   zizmor-security:
     name: Zizmor Security Check
     runs-on: ubuntu-latest
+    env:
+      # The action's `version` defaults to `latest`, so without this an upstream zizmor
+      # release turns every PR red. The action's SHA pins the action, not the scanner.
+      ZIZMOR_VERSION: "1.28.0"
+
+      # zizmor's exit codes are severity-encoded: 0 no findings, 1 audit error, 2
+      # argument error, 3 no inputs collected, then 11/12/13/14 for "findings
+      # reported, highest severity is informational/low/medium/high".
+      #
+      # The self-test accepts the whole 11-14 band rather than one value. This gate is
+      # fail-closed at every severity, so any code in the band proves what the
+      # self-test claims -- that the gate evaluated the fixture and reported. Pinning
+      # a single code would instead pin the fixture's current severity classification:
+      # an upstream reclassification, or adding a finding of a different severity to
+      # the fixture, would red every PR with nothing actually wrong.
+      #
+      # Revisit alongside ZIZMOR_VERSION if the exit-code contract changes.
+      ZIZMOR_FINDINGS_EXIT_MIN: "11"
+      ZIZMOR_FINDINGS_EXIT_MAX: "14"
 
     steps:
       - name: Fetch Repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-      - name: Install Zizmor
-        uses: taiki-e/install-action@c44f6b046f1c29ae5918b1e0bfdbb2f1813836fd # v2
         with:
-          tool: zizmor@1.28.0
+          persist-credentials: false
 
+      # Fail-closed at every severity. To accept a finding use `# zizmor: ignore[rule]`
+      # on the line it anchors to; `ignore-start`/`ignore-end` suppress nothing.
+      #
+      # `online-audits: true` is deliberate and stays on the merge gate. The four
+      # online audits -- known-vulnerable-actions, impostor-commit, ref-confusion and
+      # typosquat-uses -- are the ones that catch a supply-chain attack on the actions
+      # this repository pins by SHA. Offline, a newly disclosed advisory against a
+      # pinned action is invisible until someone happens to bump it. That an advisory
+      # published upstream reds a PR that changed nothing here is the alarm working,
+      # not noise: the workflow really did become vulnerable between the two runs.
+      #
+      # The cost is that zizmor is `fatal` when an online audit's request fails (see
+      # its Troubleshooting docs), so a transient GitHub API error is indistinguishable
+      # from a finding at the job level. The retry below covers exactly that case.
       - name: Run Zizmor
-        run: zizmor .github/workflows/ || true
+        id: zizmor
+        # Failure is deferred to the retry, which is the step that gates the job.
+        continue-on-error: true
+        uses: zizmorcore/zizmor-action@3dc1ecc9bcb9e94e9b2c709687979e1298497054 # v0.6.2
+        with:
+          version: ${{ env.ZIZMOR_VERSION }}
+          # `.` also picks up .github/dependabot.yml.
+          inputs: .
+          persona: regular
+          online-audits: true
+          # `annotations` and `advanced-security` are mutually exclusive in this action.
+          # A fail-closed gate wants findings on the diff, not in a tab that stays empty.
+          advanced-security: false
+          annotations: true
+
+      # Only a transient failure is rescued: a real finding is deterministic and fails
+      # this run too, so the retry cannot turn a red gate green. Not `continue-on-error`,
+      # so this step is the one that fails the job.
+      - name: Run Zizmor (retry)
+        if: ${{ steps.zizmor.outcome == 'failure' }}
+        uses: zizmorcore/zizmor-action@3dc1ecc9bcb9e94e9b2c709687979e1298497054 # v0.6.2
+        with:
+          version: ${{ env.ZIZMOR_VERSION }}
+          inputs: .
+          persona: regular
+          online-audits: true
+          advanced-security: false
+          annotations: true
+
+      - name: Assert the gate fails on a known-bad fixture
+        if: ${{ !cancelled() }}
+        env:
+          FIXTURE: scripts/testdata/zizmor-selftest-workflow.yml
+          ZIZMOR_IMAGE: ghcr.io/zizmorcore/zizmor:1.28.0@sha256:8e6b3e4fb74d1aa5d23e83ea369f386c66eced0d1fb944d32cd8b2aac100b00d
+        run: |
+          set -uo pipefail
+
+          test -f "$FIXTURE" || {
+            echo "::error::self-test fixture is missing: ${FIXTURE}"
+            exit 1
+          }
+
+          rc=0
+          out=$(docker run --rm \
+            --volume "${GITHUB_WORKSPACE}:/workspace:ro" \
+            --workdir /workspace \
+            "$ZIZMOR_IMAGE" \
+            --persona=regular --no-online-audits --color=never --format=plain \
+            -- "$FIXTURE" 2>&1) || rc=$?
+          printf '%s\n' "$out"
+
+          # 11-14 is "findings reported", encoded by highest severity -- see the
+          # exit-code note on ZIZMOR_FINDINGS_EXIT_MIN above. The band matters rather
+          # than the exact value: 0 is a clean fixture, 3 is "no inputs collected" and
+          # 1 is any other error, and all three would pass a bare non-zero check.
+          if [ "$rc" -lt "$ZIZMOR_FINDINGS_EXIT_MIN" ] || [ "$rc" -gt "$ZIZMOR_FINDINGS_EXIT_MAX" ]; then
+            echo "::error::expected a findings exit code (${ZIZMOR_FINDINGS_EXIT_MIN}-${ZIZMOR_FINDINGS_EXIT_MAX}) from the fixture, got ${rc}."
+            echo "Do not trust what this job reports above: the gate did not evaluate"
+            echo "the fixture, so a clean result for this repository proves nothing."
+            exit 1
+          fi
+
+          # Every rule the fixture asserts, not just the first: a run that reports one
+          # finding and silently stopped raising the other would still exit in-band.
+          missing=""
+          for rule in artipacked excessive-permissions; do
+            printf '%s' "$out" | grep -q "$rule" || missing="${missing} ${rule}"
+          done
+
+          if [ -n "$missing" ]; then
+            echo "::error::the gate failed on the fixture but did not report:${missing}"
+            echo "The fixture asserts a checkout without persist-credentials: false"
+            echo "(artipacked) and a job broadening permissions to write-all"
+            echo "(excessive-permissions). A rule that stopped firing would let the"
+            echo "corresponding regression through this gate unnoticed."
+            exit 1
+          fi
+
+          echo "self-test passed: the gate fails, and names every expected finding, on a known-bad workflow."
+
+      - name: Assert every job is gated by ci-success
+        # `ci-success.needs` is hand-maintained, so a job missing from it fails without
+        # blocking the merge. `docker-build` already did.
+        if: ${{ !cancelled() }}
+        # `yq` (mikefarah v4) is part of the documented ubuntu-latest image contract,
+        # alongside `jq`, so it is not an unstated dependency:
+        # https://github.com/actions/runner-images/blob/main/images/ubuntu/Ubuntu2404-Readme.md
+        # It is preferred over `jq` here because it reads CI.yml directly; converting
+        # YAML to JSON first would need a tool from that same contract anyway.
+        run: |
+          set -euo pipefail
+
+          yq -r '.jobs | keys | .[] | select(. != "ci-success")' \
+            .github/workflows/CI.yml | sort > /tmp/ci-jobs
+          yq -r '.jobs.ci-success.needs[]' \
+            .github/workflows/CI.yml | sort > /tmp/ci-gated
+
+          missing=$(comm -23 /tmp/ci-jobs /tmp/ci-gated)
+
+          if [ -n "$missing" ]; then
+            echo "::error::these CI.yml jobs are not in ci-success.needs, so they do not block merges:"
+            printf '  %s\n' $missing
+            exit 1
+          fi
+
+          echo "every CI.yml job is gated by ci-success."
 
   cargo-fmt:
     name: Cargo Format Check
     runs-on: ubuntu-latest
-    needs: zizmor-security
 
     steps:
       - name: Fetch Repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Install stable toolchain
-        uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1
+        uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1.17.0
         with:
           components: rustfmt
 
@@ -53,9 +194,11 @@ jobs:
     steps:
       - name: Fetch Repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Install Rust
-        uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1
+        uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1.17.0
 
       - name: Install build dependencies
         run: |
@@ -68,24 +211,105 @@ jobs:
       - name: Memory-only Build
         run: cargo check --no-default-features --features memory
 
+      - name: Release image feature set
+        # The Dockerfile default is still the local smoke-build feature set.
+        # Release variants are checked by `release-variant-checks` below.
+        #
+        # Still read from the Dockerfile rather than restated here, so this check
+        # cannot drift from the value it is meant to compile.
+        run: |
+          set -euo pipefail
+          features=$(sed -nE 's/^ARG FEATURES="([^"]+)".*/\1/p' Dockerfile)
+          if [ -z "${features}" ]; then
+            echo "::error::could not read ARG FEATURES from Dockerfile"
+            exit 1
+          fi
+          echo "release image features: ${features}"
+          cargo check --workspace --features "${features}"
+
       - name: Verify domain layer purity
         run: |
-          if grep -rn -E "(sea_orm|axum|aws_sdk|redis|reqwest|moka|crate::server|crate::outbound)" src/domain/; then
+          if grep -rn -E "(sea_orm|axum|aws_sdk|reqwest|moka|crate::server|crate::outbound)" src/domain/; then
             echo "ERROR: Infrastructure dependencies or imports found in src/domain/"
             exit 1
           fi
 
-  cargo-clippy:
-    name: Cargo Clippy Check
+  release-variant-checks:
+    name: Release Variant Check (${{ matrix.variant.suffix }})
     runs-on: ubuntu-latest
-    needs: cargo-build
+    needs: cargo-fmt
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        variant:
+          - suffix: aws
+            features: "postgres,aws"
+          - suffix: gcp
+            features: "postgres,gcp"
+          - suffix: azure
+            features: "postgres,azure"
+          - suffix: vault
+            features: "postgres,vault"
+          - suffix: fscert
+            features: "postgres"
 
     steps:
       - name: Fetch Repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Install Rust
-        uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1
+        uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1.17.0
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake golang-go
+
+      - name: Cargo check release variant
+        run: cargo check --workspace --features "${FEATURES}"
+        env:
+          FEATURES: ${{ matrix.variant.features }}
+
+  docker-build:
+    name: Docker Build Smoke
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Fetch Repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Docker build (production features)
+        # No FEATURES build-arg: the Dockerfile default is already the release set, and
+        # a second copy would drift.
+        #
+        # No gha cache: CI.yml has no `push:` trigger, so nothing ever writes the base
+        # branch's cache scope and `cache-from` cannot hit. `cache-to` would still
+        # write GBs per pull request into per-branch scopes, evicting the cargo caches
+        # the other jobs do hit.
+        run: docker build .
+
+  cargo-clippy:
+    name: Cargo Clippy Check
+    runs-on: ubuntu-latest
+    needs:
+      - cargo-build
+      - release-variant-checks
+
+    steps:
+      - name: Fetch Repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install Rust
+        uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1.17.0
         with:
           components: clippy
 
@@ -100,14 +324,20 @@ jobs:
     steps:
       - name: Fetch Repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Install Rust
-        uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1
+        uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1.17.0
+
+      - name: Install Helm
+        uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
 
       - name: Install cargo-nextest
-        uses: taiki-e/install-action@c44f6b046f1c29ae5918b1e0bfdbb2f1813836fd # v2
+        uses: taiki-e/install-action@c44f6b046f1c29ae5918b1e0bfdbb2f1813836fd # v2.84.1
         with:
-          tool: nextest
+          # Same pin as the coverage job below, so both run the same test harness.
+          tool: nextest@0.9.101
 
       - name: Run Cargo Tests
         run: cargo nextest run --workspace --all-targets --all-features
@@ -120,9 +350,11 @@ jobs:
     steps:
       - name: Fetch Repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Install Rust
-        uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1
+        uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1.17.0
 
       - name: Generate Documentation
         run: cargo doc --workspace --all-features --no-deps --document-private-items
@@ -142,9 +374,11 @@ jobs:
     steps:
       - name: Fetch Repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Install stable toolchain
-        uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1
+        uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1.17.0
 
       - name: Install build dependencies
         run: |
@@ -162,14 +396,16 @@ jobs:
     steps:
       - name: Fetch Repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Install Rust
-        uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1
+        uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1.17.0
 
       - name: Install cargo-machete
-        uses: taiki-e/install-action@c44f6b046f1c29ae5918b1e0bfdbb2f1813836fd # v2
+        uses: taiki-e/install-action@c44f6b046f1c29ae5918b1e0bfdbb2f1813836fd # v2.84.1
         with:
-          tool: cargo-machete
+          tool: cargo-machete@0.9.2
 
       - name: Check for unused dependencies
         run: cargo machete --with-metadata
@@ -182,12 +418,14 @@ jobs:
     steps:
       - name: Fetch Repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Install Rust
-        uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1
+        uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1.17.0
 
       - name: Install cargo-vet
-        uses: taiki-e/install-action@c44f6b046f1c29ae5918b1e0bfdbb2f1813836fd # v2
+        uses: taiki-e/install-action@c44f6b046f1c29ae5918b1e0bfdbb2f1813836fd # v2.84.1
         with:
           tool: cargo-vet@0.10.2
 
@@ -204,11 +442,13 @@ jobs:
     steps:
       - name: Fetch Repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Install Typos
-        uses: taiki-e/install-action@c44f6b046f1c29ae5918b1e0bfdbb2f1813836fd # v2
+        uses: taiki-e/install-action@c44f6b046f1c29ae5918b1e0bfdbb2f1813836fd # v2.84.1
         with:
-          tool: typos-cli
+          tool: typos-cli@1.49.0
 
       - name: run typos
         run: typos
@@ -220,9 +460,11 @@ jobs:
     steps:
       - name: Fetch Repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Install Taplo
-        uses: tombi-toml/setup-tombi@f2ae7247d62521245eb2793d653b9df472b9e090 # v1
+        uses: tombi-toml/setup-tombi@f2ae7247d62521245eb2793d653b9df472b9e090 # v1.2.4
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -236,9 +478,11 @@ jobs:
     steps:
       - name: Fetch Repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Markdown Lint
-        uses: DavidAnson/markdownlint-cli2-action@6bf21b07787794f89a243495939cd651942aeabe # v24
+        uses: DavidAnson/markdownlint-cli2-action@6bf21b07787794f89a243495939cd651942aeabe # v24.1.0
         with:
           globs: "**/*.md"
 
@@ -249,22 +493,48 @@ jobs:
     steps:
       - name: Fetch Repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Validate .trivyignore.yaml
+        # Before the scan that consumes the file, so a malformed entry fails in seconds
+        # as itself rather than later as a scanner error on an unrelated change.
+        run: |
+          set -eu
+          # apt rather than pip: the runner's PyYAML comes from the distribution, so
+          # this pulls no unpinned dependency into every pull request.
+          python3 -c 'import yaml' 2>/dev/null || sudo apt-get install -y python3-yaml
+          python3 -m unittest discover -s scripts/tests -p 'test_*.py'
+          python3 scripts/check-trivyignore.py .trivyignore.yaml
+
+      - name: Assert the image variant lists agree across workflows
+        # GitHub does not expose `env` to `strategy.matrix`, so the variant list is
+        # restated in deploy.yml's three fan-out matrices and again in the scheduled
+        # re-scan. The drift is asymmetric and one half is invisible: a variant added
+        # to deploy.yml but not to the re-scan is built, promoted, deployed and never
+        # re-scanned, with nothing going red.
+        #
+        # Checked here rather than only in the nightly so it fails for whoever adds the
+        # variant, while they are looking at it, rather than at 03:37 the next night.
+        run: python3 scripts/check-variant-parity.py
 
       - name: Setup Helm
         uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
 
       - name: Build Helm dependencies
         run: |
-          helm repo add dandydeveloper https://dandydeveloper.github.io/charts
           # Upstream chart default values:
           # https://github.com/open-telemetry/opentelemetry-helm-charts/blob/main/charts/opentelemetry-collector/values.yaml
           helm repo add open-telemetry https://open-telemetry.github.io/opentelemetry-helm-charts
           helm dependency build helm/chart
 
-      - name: Render Helm template
-        run: |
-          mkdir -p /tmp/rendered
-          helm template status-list-server helm/chart -f helm/chart/values.yaml --output-dir /tmp/rendered
+      - name: Render Helm templates
+        uses: ./.github/workflows/render-helm-templates
+
+      - name: Verify image reference resolution
+        # Runs here rather than in its own workflow because it asserts against the
+        # rendered chart this job already built.
+        run: bash scripts/verify-image-reference.sh
 
       - name: Run Trivy config scan
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
@@ -275,27 +545,72 @@ jobs:
           exit-code: 1
           trivyignores: .trivyignore.yaml
 
-  kube-linter:
-    name: KubeLinter Scan (Helm Chart)
+  helm-template-local:
+    name: Helm Template Check (Local Values)
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
 
     steps:
       - name: Fetch Repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Setup Helm
         uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
 
       - name: Build Helm dependencies
         run: |
-          helm repo add dandydeveloper https://dandydeveloper.github.io/charts
           helm repo add open-telemetry https://open-telemetry.github.io/opentelemetry-helm-charts
           helm dependency build helm/chart
 
-      - name: Render Helm template
+      - name: Validate Helm template with local values
         run: |
-          mkdir -p /tmp/rendered
-          helm template status-list-server helm/chart -f helm/chart/values.yaml --output-dir /tmp/rendered
+          set -euo pipefail
+          output_file="/tmp/statuslist-local-rendered.yaml"
+          helm template statuslist-local helm/chart -f helm/chart/values-local.yaml --namespace local > "$output_file"
+
+          # Verify APP_ENV is set to "development" as expected for local values
+          # The pattern matches the multi-line YAML structure: - name: APP_ENV followed by value: "development"
+          if ! grep -A1 'name: APP_ENV' "$output_file" | grep -q 'value: "development"'; then
+            echo "ERROR: APP_ENV=development not found in rendered template"
+            exit 1
+          fi
+
+          # Verify init container uses pinned busybox tag
+          if ! grep -q 'image: busybox:1.38' "$output_file"; then
+            echo "ERROR: init container image 'busybox:1.38' not found in rendered template"
+            exit 1
+          fi
+
+          echo "Helm template validation passed: APP_ENV=development and busybox:1.38 init container verified"
+
+  kube-linter:
+    name: KubeLinter Scan (Helm Chart)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # For the SARIF upload below. deploy.yml's `ci` job must grant this too -- a
+      # called workflow can only narrow the caller's token.
+      security-events: write
+
+    steps:
+      - name: Fetch Repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup Helm
+        uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+
+      - name: Build Helm dependencies
+        run: |
+          helm repo add open-telemetry https://open-telemetry.github.io/opentelemetry-helm-charts
+          helm dependency build helm/chart
+
+      - name: Render Helm templates
+        uses: ./.github/workflows/render-helm-templates
 
       - name: Run KubeLinter
         uses: stackrox/kube-linter-action@87802a2f4e01abebb3ee3c67a3002fea71f6eae5 # v1.0.7
@@ -304,6 +619,30 @@ jobs:
           format: sarif
           config: .kube-linter.yaml
           output-file: kube-linter-results.sarif
+          # Pin the kube-linter binary instead of floating on 'latest' so lint
+          # results are reproducible across runs. The value must be the release
+          # tag (with the leading 'v'), as the action fetches releases/tags/<v>.
+          version: "v0.8.3"
+
+      - name: Upload KubeLinter SARIF to code scanning
+        # `always()` so the SARIF survives the failing run it matters for.
+        # `continue-on-error` because fork PRs withhold write scopes.
+        if: always()
+        continue-on-error: true
+        uses: github/codeql-action/upload-sarif@4187e74d05793876e9989daffde9c3e66b4acd07 # v3.37.3
+        with:
+          sarif_file: kube-linter-results.sarif
+          category: kube-linter
+
+      - name: Upload KubeLinter SARIF artifact
+        # Kept alongside the code-scanning upload rather than instead of it: alerts on
+        # a fork pull request go nowhere, and this is the only copy that run keeps.
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: kube-linter-results
+          path: kube-linter-results.sarif
+          if-no-files-found: warn
 
   yaml-lint:
     name: YAML Lint and Format Check
@@ -312,9 +651,11 @@ jobs:
     steps:
       - name: Fetch Repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: YAML Lint
-        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
         with:
           go-version: stable
           cache: false
@@ -332,9 +673,16 @@ jobs:
     steps:
       - name: Fetch Repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Validate Docker Compose model
+        # docker-compose.yml requires GRAFANA_ADMIN_PASSWORD (no insecure admin
+        # default); supply a placeholder here because this step only validates the
+        # compose model, not the real credential.
         run: docker compose config
+        env:
+          GRAFANA_ADMIN_PASSWORD: placeholder-not-a-real-credential
 
       - name: Verify Jaeger image tag exists
         run: docker manifest inspect jaegertracing/jaeger:2.20.0 >/dev/null
@@ -356,12 +704,17 @@ jobs:
 
       - name: Build Helm dependencies
         run: |
-          helm repo add dandydeveloper https://dandydeveloper.github.io/charts
           helm repo add open-telemetry https://open-telemetry.github.io/opentelemetry-helm-charts
           helm dependency build helm/chart
 
       - name: Render Helm chart
-        run: helm template statuslist helm/chart --namespace statuslist > /tmp/statuslist-rendered.yaml
+        env:
+          APP_DATABASE_PORT: "5432"
+        run: |
+          helm template statuslist helm/chart \
+            --namespace statuslist \
+            --set-string statuslist.env.APP_DATABASE__PORT="${APP_DATABASE_PORT}" \
+            > /tmp/statuslist-rendered.yaml
 
       - name: Extract rendered Helm Collector config
         run: |
@@ -394,6 +747,139 @@ jobs:
             otel/opentelemetry-collector-contrib:0.158.0 \
             validate --config /etc/otelcol/config.yaml
 
+  prometheus-rules-validation:
+    name: Prometheus Rules & Dashboard Validation
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Fetch Repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup Helm
+        uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+
+      - name: Build Helm dependencies
+        run: |
+          helm repo add open-telemetry https://open-telemetry.github.io/opentelemetry-helm-charts
+          helm dependency build helm/chart
+
+      - name: Validate Prometheus recording rules
+        run: |
+          docker run --rm --entrypoint promtool \
+            -v "$PWD/observability/prometheus:/etc/prometheus:ro" \
+            prom/prometheus:v3.11.3 check rules /etc/prometheus/rules/recording.rules.yml
+
+      - name: Validate Prometheus alerting rules
+        run: |
+          docker run --rm --entrypoint promtool \
+            -v "$PWD/observability/prometheus:/etc/prometheus:ro" \
+            prom/prometheus:v3.11.3 check rules /etc/prometheus/rules/alerting.rules.yml
+
+      - name: Validate rendered Helm PrometheusRule (no drift / no template errors)
+        # The Helm chart ships the DEPLOYED copy of the recording+alerting rule set
+        # as a PrometheusRule CRD. Assert (a) it renders to rule-valid PromQL, (b) it
+        # is unit-tested with promtool `test rules` -- mirroring the standalone
+        # suite -- so the artifact that actually reaches production is behaviorally
+        # verified, not just syntactically checked, and (c) it defines exactly the
+        # same rule names as the standalone tested rules so neither copy can drift.
+        run: |
+          helm template status-list-server helm/chart \
+            --namespace ns1 \
+            --set prometheusRule.enabled=true > /tmp/helm-render.yaml
+          python3 - <<'EOF'
+          import subprocess, yaml
+
+          # Extract the rendered PrometheusRule groups (the deployed rule copy).
+          docs = [d for d in yaml.safe_load_all(open('/tmp/helm-render.yaml')) if d]
+          cr = next(d for d in docs if d.get('kind') == 'PrometheusRule')
+          with open('/tmp/helm-rules.yml', 'w') as f:
+              yaml.safe_dump({'groups': cr['spec']['groups']}, f, sort_keys=False)
+
+          # Drift guard: the deployed copy must define the exact same rule names as
+          # the standalone, promtool-tested rules (thresholds are parameterized via
+          # values, so compare names, not numeric values).
+          def rule_names(path):
+              rules = yaml.safe_load(open(path))['groups']
+              names = set()
+              for g in rules:
+                  for r in g['rules']:
+                      names.add(r.get('record') or r.get('alert'))
+              return names
+          standalone = rule_names('observability/prometheus/rules/recording.rules.yml') | rule_names('observability/prometheus/rules/alerting.rules.yml')
+          deployed = rule_names('/tmp/helm-rules.yml')
+          if standalone != deployed:
+              raise SystemExit(
+                  f"DRIFT: deployed PrometheusRule rule names differ from the tested standalone rules.\n"
+                  f"  only in standalone: {sorted(standalone - deployed)}\n"
+                  f"  only in deployed:   {sorted(deployed - standalone)}"
+              )
+
+          # Unit-test the deployed copy with the same alerting suite used for the
+          # standalone rules, adjusted for the static `namespace` label the template
+          # stamps on Watchdog / StatusListMetricsAbsent (and rule_files).
+          test = yaml.safe_load(open('observability/prometheus/tests/alerting.test.yml'))
+          test['rule_files'] = ['helm-rules.yml']
+          for block in test['tests']:
+              for at in block.get('alert_rule_test', []):
+                  if at['alertname'] in ('Watchdog', 'StatusListMetricsAbsent'):
+                      for alert in at['exp_alerts']:
+                          alert['exp_labels']['namespace'] = 'ns1'
+          with open('/tmp/helm-alerting.test.yml', 'w') as f:
+              yaml.safe_dump(test, f, sort_keys=False)
+          EOF
+          docker run --rm -w /tmp \
+            -v /tmp/helm-rules.yml:/tmp/helm-rules.yml:ro \
+            -v /tmp/helm-alerting.test.yml:/tmp/helm-alerting.test.yml:ro \
+            --entrypoint promtool \
+            prom/prometheus:v3.11.3 test rules /tmp/helm-alerting.test.yml
+
+      - name: Validate Prometheus config (dev and production)
+        run: |
+          docker run --rm --entrypoint promtool \
+            -v "$PWD/observability/prometheus:/etc/prometheus:ro" \
+            prom/prometheus:v3.11.3 check config /etc/prometheus/prometheus.yml
+          docker run --rm --entrypoint promtool \
+            -v "$PWD/observability/prometheus:/etc/prometheus:ro" \
+            prom/prometheus:v3.11.3 check config /etc/prometheus/prometheus.production.yml
+
+      - name: Lint SLO thresholds consistency
+        run: |
+          node observability/slo/lint-thresholds.mjs
+
+      - name: Run promtool recording rule tests
+        run: |
+          docker run --rm --entrypoint promtool \
+            -v "$PWD/observability/prometheus:/etc/prometheus:ro" \
+            prom/prometheus:v3.11.3 test rules /etc/prometheus/tests/recording.test.yml
+
+      - name: Run promtool alerting rule tests
+        run: |
+          docker run --rm --entrypoint promtool \
+            -v "$PWD/observability/prometheus:/etc/prometheus:ro" \
+            prom/prometheus:v3.11.3 test rules /etc/prometheus/tests/alerting.test.yml
+
+      - name: Verify dashboard JSON is committed and valid
+        run: |
+          test -s observability/dashboards/generated/status-list-slo.json
+          python3 -c "import json; json.load(open('observability/dashboards/generated/status-list-slo.json'))"
+
+      - name: Verify dashboard matches generator (no drift)
+        # Regenerates the committed JSON and fails if it differs from what the
+        # generator produces, so a panel-intent change without a regenerated
+        # artifact cannot land silently.
+        run: |
+          cd observability/dashboards/src
+          npm install --no-audit --no-fund
+          npm run generate-dashboards
+          git diff --exit-code ../generated/status-list-slo.json
+        env:
+          # The generator has no side effects beyond writing ../generated.
+          NODE_ENV: production
+
   cargo-coverage:
     name: Cargo Coverage (llvm-cov)
     runs-on: ubuntu-latest
@@ -401,23 +887,100 @@ jobs:
     steps:
       - name: Fetch Repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Install stable toolchain
-        uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1
+        uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1.17.0
         with:
           components: llvm-tools-preview
 
       - name: Install cargo-llvm-cov and cargo-nextest
-        uses: taiki-e/install-action@c44f6b046f1c29ae5918b1e0bfdbb2f1813836fd # v2
+        uses: taiki-e/install-action@c44f6b046f1c29ae5918b1e0bfdbb2f1813836fd # v2.84.1
         with:
-          tool: cargo-llvm-cov@0.6.16,nextest@0.9.101 # or an version that is working now because of our sha pin 
+          # Both pinned: cargo-llvm-cov and nextest have to agree on the test-runner
+          # interface, so they are bumped together rather than floating independently.
+          tool: cargo-llvm-cov@0.6.16,nextest@0.9.101
 
       - name: Generate code coverage
         run: cargo llvm-cov nextest --workspace --all-features --html --output-dir target/llvm-cov/html
 
       - name: Upload coverage artifact
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: coverage-report
           path: target/llvm-cov/html
           if-no-files-found: error
+
+  # The single required status check. The jobs above form several independent chains
+  # rather than one, so no individual job represents the suite. Rollout order:
+  # CONTRIBUTING.md, "Branch Protection".
+  ci-success:
+    name: CI Success
+    if: always()
+    needs:
+      - zizmor-security
+      - cargo-fmt
+      - cargo-build
+      - release-variant-checks
+      - docker-build
+      - cargo-clippy
+      - cargo-nextest
+      - cargo-doc
+      - check-crate-type
+      - cargo-test-doc
+      - cargo-machete
+      - cargo-vet
+      - cargo-deny
+      - typos-cli
+      - tombi-toml-lint
+      - markdown-lint
+      - trivy-config
+      - helm-template-local
+      - kube-linter
+      - prometheus-rules-validation
+      - yaml-lint
+      - otel-config-validation
+      - cargo-coverage
+    runs-on: ubuntu-latest
+    permissions: {}
+    steps:
+      # Printed so a failure shows which job caused it without expanding the UI.
+      - name: Summarise job results
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: printf '%s\n' "$NEEDS"
+
+      # `if: always()` makes a *skipped* job report neither failure nor cancellation,
+      # so the check below would pass it. cargo-test-doc is the one job allowed to
+      # skip -- it is gated on check-crate-type's `is_lib` output.
+      #
+      # This closes the transitive case as well: if check-crate-type were ever itself
+      # skipped, its `is_lib` output would be empty, cargo-test-doc's `'' == 'true'`
+      # would skip too, and both would have reported a pass. The in-job non-empty
+      # assert in crate_type.yml only covers the case where that job runs.
+      - name: Fail if a required job was skipped
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: |
+          set -euo pipefail
+          skipped=$(printf '%s' "$NEEDS" | jq -r '
+            to_entries
+            | map(select(.value.result == "skipped" and .key != "cargo-test-doc"))
+            | .[].key')
+
+          if [ -n "$skipped" ]; then
+            echo "::error::these required jobs were skipped, which ci-success would otherwise report as a pass:"
+            printf '  %s\n' $skipped
+            echo "A skipped job has not run its checks. Either it must not be conditional,"
+            echo "or it belongs in the allowlist in this step alongside cargo-test-doc."
+            exit 1
+          fi
+
+          echo "no required job was skipped."
+
+      - name: Fail if any job failed or was cancelled
+        if: ${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') }}
+        run: |
+          echo "One or more required jobs did not succeed -- see the results above."
+          exit 1

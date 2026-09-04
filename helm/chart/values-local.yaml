@@ -1,36 +1,77 @@
-global:
-  storageClass: "standard"
-
 statuslist:
   initContainers:
     - name: wait-for-postgres
-      image: busybox
+      image: busybox:1.38
       command:
         - "sh"
         - "-c"
         - |
           echo "Waiting for postgres..."
-          until nc -z {{ .Release.Name }}-postgres.{{ .Release.Namespace }}.svc.cluster.local 5432; do
+          until nc -z {{ .Release.Name }}-postgres.{{ .Release.Namespace }}.svc.cluster.local {{ include "status-list-server-chart.dbPort" . }}; do
             echo "postgres not ready. Retrying in 2s...";
             sleep 2;
           done
           echo "Postgres is up."
 
+  aws:
+    # Local has no External Secrets Operator and no cloud role, so do not mount the
+    # ESO-provisioned aws-credentials-secret.
+    mountCredentials: false
+
+  fallbackSecret:
+    enabled: true
+    generatedCertificate:
+      enabled: true
+
   image:
     pullPolicy: IfNotPresent
+
+  secretMounts:
+    - name: database-credentials
+      secretName: statuslist-secret
+      mountPath: /var/run/status-list-server/database
+      items:
+        - key: postgres-password
+          path: password
+      fileEnv:
+        APP_DATABASE__PASSWORD_FILE: password
+    - name: local-signing-material
+      secretName: statuslist-secret
+      mountPath: /var/run/status-list-server/cert
+      items:
+        - key: statuslist.crt
+          path: statuslist.crt
+        - key: statuslist.key
+          path: statuslist.key
+      fileEnv:
+        APP_SERVER__CERT__STORE__CERTIFICATE_PATH: statuslist.crt
+        APP_SERVER__CERT__STORE__SIGNING_KEY_PATH: statuslist.key
+
   service:
     type: NodePort
     nodePort: 32081
+
   ingress:
     enabled: false
+
   env:
     RUST_LOG: "debug"
-    APP_ENV: "local"
-    APP_SERVER__CERT__ACME_DIRECTORY_URL: "https://acme-staging-v02.api.letsencrypt.org/directory"
-    # Parsed certificate chain cache TTL in seconds. "0" means no expiry; non-provisioning replicas rely on this TTL for renewed chains.
+    APP_ENV: "development"
+    APP_SERVER__HOST: "0.0.0.0"
+    APP_SERVER__PORT: "8000"
+    # Parsed certificate chain cache TTL in seconds. "0" means no expiry.
     # Status-list record cache TTL in seconds. "0" disables this cache.
     APP_CACHE__TTL: "120"
     APP_CACHE__MAX_CAPACITY: "500"
+    APP_STATUS_LIST__TOKEN_EXP_SECS: "900"
+    APP_STATUS_LIST__TOKEN_TTL_SECS: "300"
+    APP_RATE_LIMIT__STRICT_BURST_SIZE: "10"
+    APP_RATE_LIMIT__STRICT_PERIOD_SECS: "60"
+    APP_RATE_LIMIT__PERMISSIVE_BURST_SIZE: "100"
+    APP_RATE_LIMIT__PERMISSIVE_PERIOD_SECS: "60"
+    APP_LIMITS__MAX_BODY_SIZE_BYTES: "2097152"
+    APP_TELEMETRY__ENVIRONMENT: "development"
+
   resources:
     requests:
       memory: "128Mi"

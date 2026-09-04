@@ -1,5 +1,8 @@
 global:
-  storageClass: "high-performance"
+  # Chart-wide public DNS suffix. When set, the default ingress host becomes
+  # statuslist.<domain> and the default TLS host becomes *.<domain>.
+  # Leave empty for provider-neutral defaults.
+  domain: ""
 
 statuslist:
   enabled: true
@@ -11,20 +14,49 @@ statuslist:
         - "-c"
         - |
           echo "Waiting for postgres..."
-          until nc -z {{ .Release.Name }}-postgres.{{ .Release.Namespace }}.svc.cluster.local 5432; do
+          until nc -z {{ .Release.Name }}-postgres.{{ .Release.Namespace }}.svc.cluster.local {{ include "status-list-server-chart.dbPort" . }}; do
             echo "postgres not ready. Retrying in 2s...";
             sleep 2;
           done
           echo "Postgres is up."
 
   replicaCount: 1
+  # Extra labels merged onto the Pod template metadata. Required for e.g. Azure Workload
+  # Identity: azure.workload.identity/use: "true".
+  podLabels: {}
   image:
     repository: ghcr.io/adorsys/status-list-server
-    pullPolicy: Always
-    tag: "latest"
+    # Empty derives from how the image is named: IfNotPresent for a digest, Always
+    # for a mutable tag. Set explicitly to override.
+    pullPolicy: ""
+    # Used only when tag and digest are empty. The chart derives
+    # <appVersion-without-suffix>-<variant>, so overlays can select a cloud
+    # variant without hardcoding the release version.
+    variant: fscert
+    # Image tag with variant suffix. The release workflow publishes 5 multi-arch variants:
+    #
+    # | Tag Suffix | Cargo Features | Description | Primary Use Case |
+    # |------------|----------------|-------------|------------------|
+    # | -aws       | postgres,aws | PostgreSQL database with AWS Secrets Manager and Route53 DNS support | AWS EKS native deployments |
+    # | -gcp       | postgres,gcp | PostgreSQL database with GCP Secret Manager and Cloud DNS support | GCP GKE native deployments |
+    # | -azure     | postgres,azure | PostgreSQL database with Azure Key Vault and Azure DNS support | Azure AKS native deployments |
+    # | -vault     | postgres,vault | PostgreSQL database with HashiCorp Vault / OpenBao token material storage | Vault-backed on-prem or multi-cloud deployments |
+    # | -fscert    | postgres | PostgreSQL database with filesystem-mounted token signing keys and certificates | Constrained / air-gapped environments using external secret injection |
+    #
+    # Tag format: <version>-<suffix> (e.g., 1.2.0-aws, 1.2.0-gcp)
+    # Latest tags: latest-<suffix> (e.g., latest-aws, latest-gcp)
+    #
+    # Empty derives from the chart appVersion plus statuslist.image.variant.
+    # Defaulting to "latest" would let an upgrade that changes nothing in this
+    # chart still change the running image.
+    tag: ""
+    # "sha256:...". Takes precedence over tag and pins the exact digest CI scanned.
+    # Each variant has its own digest. Use the digest from the variant you select.
+    digest: ""
   service:
     enabled: true
     type: ClusterIP
+    annotations: {}
     port: 8081
     targetPort: 8000
     nodePort: null
@@ -33,36 +65,32 @@ statuslist:
     path: /
     pathType: Prefix
     annotations:
-      cert-manager.io/cluster-issuer: letsencrypt-prod
-      nginx.ingress.kubernetes.io/ssl-redirect: "true"
-      nginx.ingress.kubernetes.io/force-ssl-redirect: "true"
       nginx.ingress.kubernetes.io/proxy-body-size: "10m"
     tls:
-      hosts:
-        - "*.eudi-adorsys.com"
-      secretName: statuslist-tls
-    externalDnsHostname: statuslist.eudi-adorsys.com
+      # Defaults to ["*.<global.domain>"] when global.domain is set, or to the
+      # rendered ingress host when secretName is set explicitly.
+      hosts: []
+      # Empty keeps the neutral default render HTTP-only. Set this in overlays
+      # that provide TLS material or cert-manager ingress-shim annotations.
+      secretName: ""
+    # Defaults to statuslist.<global.domain> when global.domain is set, otherwise localhost.
+    externalDnsHostname: ""
   env:
     RUST_LOG: "info"
-    POSTGRES_USER: "postgres"
     APP_ENV: "production"
     APP_SERVER__HOST: "0.0.0.0"
     APP_SERVER__PORT: "8000"
-    APP_SERVER__CERT__EMAIL: "info@adorsys.com"
-    APP_SERVER__CERT__ORGANIZATION: "adorsys GmbH & CO KG"
     APP_SERVER__CERT__ACME_DIRECTORY_URL: "https://acme-v02.api.letsencrypt.org/directory"
     APP_SERVER__CERT__EKU: "1,3,6,1,5,5,7,3,30"
     APP_SERVER__CERT__RENEWAL_CRON_SCHEDULE: "0 0 0 * * *"
-    # Parsed certificate chain cache TTL in seconds. "0" means no expiry; non-provisioning replicas rely on this TTL for renewed chains.
+    # Parsed certificate chain cache TTL in seconds. "0" means no expiry.
     # DNS provider for ACME DNS-01 challenges: route53 | cloudflare | gcloud | azure | acmedns
     # (pebble also exists but is a development-only fake, not for deployments)
     # See docs/dns-providers.md for the settings each provider needs.
     # Provider credentials (e.g. APP_SERVER__CERT__DNS__CLOUDFLARE__API_TOKEN, or the
     # APP_SERVER__CERT__DNS__ACMEDNS__ACCOUNTS JSON, which holds every account password)
     # must come from a secret (see externalSecret below), not from plain env values.
-    APP_SERVER__CERT__DNS__PROVIDER: "route53"
-    APP_AWS__S3_BUCKET: "status-list-adorsys"
-    APP_AWS__S3_KEY_PREFIX: ""
+    APP_DATABASE__PORT: "5432"
     # Status-list record cache TTL in seconds. "0" disables this cache.
     APP_CACHE__TTL: "300"
     APP_CACHE__MAX_CAPACITY: "1000"
@@ -77,8 +105,111 @@ statuslist:
     APP_LIMITS__MAX_STATUSES_PER_REQUEST: "5000"
     APP_LIMITS__MAX_SERIALIZED_LIST_SIZE: "1048576"
     # Telemetry / OpenTelemetry
+    APP_SERVER__ENABLE_METRICS: "true"
     APP_TELEMETRY__ENVIRONMENT: "production"
     APP_TELEMETRY__SAMPLER_RATIO: "1.0"
+  # Optional AWS configuration for the application.
+  aws:
+    # Mount AWS credential files from aws-credentials-secret into the pod.
+    # Disabled by default so the base chart stays provider-neutral.
+    mountCredentials: false
+    # When mountCredentials=true and externalSecret.enabled, the chart also
+    # renders a second ExternalSecret that provisions "aws-credentials-secret" — the exact Secret
+    # the Deployment's credential volume references (see deployment.yaml). Without it the Pod could
+    # never mount that volume and would stay unready. The remote source holds the AWS shared
+    # "credentials" and "config" file contents.
+    credentialsSecret:
+      # Remote key in the configured SecretStore that holds both AWS shared files.
+      remoteKey: "statuslist-aws-credentials"
+      # Property within remoteKey holding the AWS shared credentials file (INI: [default] ...).
+      credentialsProperty: "CREDENTIALS"
+      # Property within remoteKey holding the AWS shared config file.
+      configProperty: "CONFIG"
+      # Optional ESO target.template for the dedicated aws-credentials-secret only.
+      # The application ExternalSecret target.template is intentionally not reused here.
+      targetTemplate: {}
+    # Plain (non-secret) AWS region. APP_AWS__REGION is rendered only when an effective
+    # region is explicitly configured. Leave empty (default) so the application does not
+    # override the AWS SDK's instance-metadata region discovery (recommended for
+    # pure-IRSA / Workload Identity).
+    region: ""
+  # Fallback Kubernetes Secret for clusters that do not run External Secrets Operator.
+  # Only rendered when externalSecret.enabled=false AND statuslist.fallbackSecret.enabled=true.
+  # Values are plain strings; the API server base64-encodes them (stringData).
+  # The secret is always named "statuslist-secret" (single supported name). PostgreSQL
+  # (postgres.auth.existingSecret) references the same name, so it is deliberately not
+  # independently configurable.
+  fallbackSecret:
+    enabled: true
+    generatedCertificate:
+      # Local/dev helper for the fscert image. When enabled, the fallback Secret
+      # includes a self-signed certificate and signing key under the keys below.
+      # GitOps deployments should not use generated material because helm template
+      # runs without cluster lookup and can regenerate values on each sync.
+      enabled: false
+      commonName: localhost
+      dnsNames:
+        - localhost
+      ipAddresses:
+        - 127.0.0.1
+      certificateKey: statuslist.crt
+      signingKey: statuslist.key
+    stringData:
+      # Empty means the chart generates a random password. Helm upgrades reuse
+      # the existing statuslist-secret password when the cluster is reachable.
+      # GitOps tools such as Argo CD and Flux run helm template without cluster
+      # lookup access, so an empty value generates a new password on each
+      # reconciliation. For GitOps, provide an explicit password from your
+      # secret-management flow or set fallbackSecret.enabled=false and use ESO.
+      postgres-password: ""
+
+  # File-based secret mounts for production credential/key rotation.
+  # Mounts Kubernetes Secrets as files into the container at specified paths.
+  # The current chart support is preparatory for application images that implement
+  # file reload support (see issue #456). Use fileEnv to map a mounted file path
+  # into an application environment variable. Paths are relative to mountPath and
+  # work whether items is present or the whole Secret is mounted.
+  # When items is present, each fileEnv value must exactly match one of the
+  # normalized items[].path values so the chart cannot point the app at a file
+  # Kubernetes will not mount.
+  # If APP_DATABASE__PASSWORD_FILE is configured via statuslist.env or fileEnv, the
+  # chart does not inject APP_DATABASE__PASSWORD, so the application cannot silently
+  # keep using a stale startup password from an environment variable.
+  # Example:
+  # - name: database-credentials
+  #   secretName: postgres-access
+  #   mountPath: /etc/secrets/database
+  #   items:
+  #     - key: password
+  #       path: password
+  #   fileEnv:
+  #     APP_DATABASE__PASSWORD_FILE: password
+  # - name: signing-keys
+  #   secretName: statuslist-token-keys
+  #   mountPath: /etc/secrets/token-keys
+  #   items:
+  #     - key: statuslist.crt
+  #       path: statuslist.crt
+  #     - key: statuslist.key
+  #       path: statuslist.key
+  #   fileEnv:
+  #     APP_SERVER__CERT__STORE__CERTIFICATE_PATH: statuslist.crt
+  #     APP_SERVER__CERT__STORE__SIGNING_KEY_PATH: statuslist.key
+  secretMounts:
+    - name: database-credentials
+      secretName: statuslist-secret
+      mountPath: /var/run/status-list-server/database
+      items:
+        - key: postgres-password
+          path: password
+      fileEnv:
+        APP_DATABASE__PASSWORD_FILE: password
+
+  # Watcher configuration for file-based credential rotation detection.
+  # When pollIntervalSecs is set, APP_WATCHER__POLL_INTERVAL_SECS is injected.
+  # This requires an application image that implements the watcher contract from issue #456.
+  watcher:
+    pollIntervalSecs: "30"
   livenessProbe:
     httpGet:
       path: /health/live
@@ -96,12 +227,21 @@ statuslist:
     timeoutSeconds: 5
     failureThreshold: 3
   networkPolicy:
-    enabled: true
-    # When ingress is empty [], ANY source can reach the service port (port-only restriction).
+    # WARNING: default OFF. Enabling this renders a Kubernetes NetworkPolicy, and with an
+    # empty `ingress` the service-port ingress rule allows ANY source in the cluster (a
+    # port-only rule with no `from` is equivalent to no ingress restriction). If you enable
+    # it, you MUST restrict ingress to your ingress controller, e.g.:
+    #   ingress:
+    #     - namespaceSelector:
+    #         matchLabels:
+    #           kubernetes.io/metadata.name: ingress-nginx
+    enabled: false
+    # When ingress is empty [] (and enabled=true), ANY source can reach the service port.
     # Add podSelector/namespaceSelector/ipBlock entries to restrict sources.
     ingress: []
-    # Restrict egress for internal ports to specific destinations.
-    # PostgreSQL (5432) is always included; Redis ports (6379, 6380) are included only when redis-ha.enabled=true.
+    # Additional internal egress destinations beyond the built-in PostgreSQL / OTel
+    # pod selectors (which are scoped to the target pods by default). Each entry is a
+    # `to:` NetworkPolicy selector.
     # External ports (443, 53) are always allowed without destination restriction.
     egressInternal: []
   resources:
@@ -111,6 +251,90 @@ statuslist:
     limits:
       memory: "512Mi"
       cpu: "500m"
+
+# ServiceAccount for the application pods. Used to attach Workload Identity role annotations
+# (EKS IRSA: eks.amazonaws.com/role-arn, GCP WI, Azure WI) for ambient cloud credentials.
+serviceAccount:
+  # create=true renders the ServiceAccount and injects serviceAccountName (default: chart
+  # fullname, or the value of `name`). create=false with an empty `name` injects NO
+  # serviceAccountName, so the pod runs as the namespace default ServiceAccount (which may
+  # carry its own cloud role); set `name` explicitly when disabling chart SA creation.
+  create: true
+  name: "" # default: fullname (via _helpers.tpl)
+  # Default false: the application does not need to call the Kubernetes API, so do not
+  # mount the SA bearer token (NSA/CISA Kubernetes hardening, CIS Benchmark 5.1.6).
+  # This does NOT break Workload Identity — IRSA / GCP WI / Azure WI use projected OIDC
+  # tokens injected by the cloud admission webhook, independent of this setting.
+  automountServiceAccountToken: false
+  annotations: {} # e.g. eks.amazonaws.com/role-arn for EKS IRSA
+  labels: {}
+
+# HorizontalPodAutoscaler (autoscaling/v2). When enabled, the Deployment's `replicas`
+# is omitted so HPA controls the replica count. Scaled Pods share the application
+# ServiceAccount; each Pod receives its own short-lived Workload Identity token, so no
+# per-Pod cloud registration is required.
+autoscaling:
+  enabled: false
+  minReplicas: 1
+  maxReplicas: 5
+  metrics: []
+  # behavior: {}
+
+# PodDisruptionBudget (policy/v1). Use with replicaCount > 1 / HPA so disruption events
+# (node drains, voluntary evictions) keep the minimum number of replicas available.
+podDisruptionBudget:
+  enabled: false
+  # Set exactly one of minAvailable / maxUnavailable (int, percentage string, or null).
+  # WARNING: minAvailable must be < replicaCount (or < autoscaling.minReplicas when HPA
+  # is enabled); setting it equal to or greater than the replica count blocks ALL voluntary
+  # pod evictions (node drains, cluster upgrades) indefinitely. The SAFE DEFAULT is
+  # maxUnavailable: 1, which allows one voluntary eviction regardless of replica count.
+  # An explicit 0 is preserved (valid: prevents voluntary disruptions); only an explicit
+  # null counts as "unset".
+  minAvailable: null
+  maxUnavailable: 1
+
+# ServiceMonitor for kube-prometheus-stack / Prometheus Operator discovery.
+# Enterprise Prometheus deployments using Prometheus Operator ignore annotation-based pod targets.
+# Enable this to provision a ServiceMonitor CRD.
+serviceMonitor:
+  enabled: false
+  # Additional labels required by your Prometheus Operator (e.g. release: kube-prometheus-stack)
+  labels: {}
+  # Scrape interval override (e.g. "15s")
+  interval: ""
+  # Scrape timeout (e.g. "10s")
+  scrapeTimeout: ""
+  metricRelabelings: []
+  relabelings: []
+
+# PrometheusRule for kube-prometheus-stack / Prometheus Operator rule discovery.
+# Enables shipping SLI recording rules and SLO alerting rules as a PrometheusRule CRD.
+prometheusRule:
+  enabled: false
+  # Additional labels required by your Prometheus Operator (e.g. release: kube-prometheus-stack)
+  labels: {}
+
+# Configurable SLO target thresholds for PrometheusRule alerting rules.
+# These must stay in lockstep with observability/slo/thresholds.json (the lint
+# step in CI asserts this) and with the literal values in the standalone
+# observability/prometheus/rules/*.rules.yml.
+slo:
+  errorRateTarget: 0.005
+  fastBurnMultiplier: 14.4
+  slowBurnMultiplier: 6.0
+  requestLatencyP95: 0.3
+  dbLatencyP95: 0.05
+  cacheHitRatioMin: 0.85
+  certRenewalFailureMax: 0.01
+  # Remaining-error-budget gate for the ErrorBudget*Critical page alerts.
+  errorBudgetCriticalThreshold: 0.1
+  # Certificate expiry gates (seconds remaining until the certificate expires).
+  # Warn at <=14d, page at <=7d: cert renewal is a discrete low-frequency event,
+  # so alerts watch the continuous cert_time_to_expiry_seconds gauge instead of
+  # a rate() over a fixed window (which is 0/0 = NaN between renewals).
+  certExpiryWarnSeconds: 1209600
+  certExpiryCriticalSeconds: 604800
 
 postgres:
   enabled: true
@@ -124,13 +348,17 @@ postgres:
   auth:
     username: postgres
     database: status-list
+    # Must reference the same secret the application reads (see _helpers.tpl
+    # "status-list-server-chart.appSecretName"). In fallback (no-ESO) mode the chart
+    # renders a Secret named "statuslist-secret" (single supported name), so this stays
+    # fixed. In ESO mode keep it in sync with externalSecret.spec.target.name.
     existingSecret: statuslist-secret
     secretKeys:
       passwordKey: postgres-password
   persistence:
     enabled: true
     size: 10Gi
-    storageClass: high-performance
+    storageClass: ""
   service:
     type: ClusterIP
     port: 5432
@@ -138,7 +366,7 @@ postgres:
     tag: "18.0"
 
 externalSecret:
-  enabled: true
+  enabled: false
   metadata:
     name: statuslist-external-secret
   spec:
@@ -147,6 +375,9 @@ externalSecret:
       name: statuslist-secret-store
       kind: SecretStore
     target:
+      # Single supported application-secret name (statuslist-secret), shared with the
+      # Deployment, PostgreSQL (postgres.auth.existingSecret), and the fallback Secret.
+      # A custom value fails at render time; this field is intentionally not configurable.
       name: statuslist-secret
       creationPolicy: Owner
     data:
@@ -154,73 +385,56 @@ externalSecret:
         remoteRef:
           key: statuslist-secret
           property: POSTGRES_PASSWORD
-      - secretKey: redis-password
-        remoteRef:
-          key: statuslist-secret
-          property: REDIS_PASSWORD
+    # Optional additional ExternalSecret resources for separately mounted Secrets,
+    # for example file-based database credentials, token signing keys, or API keys.
+    # Each entry renders as its own ExternalSecret and may override refreshInterval
+    # and secretStoreRef; defaults come from externalSecret.spec.
+    extraExternalSecrets: []
 
 secretStore:
-  enabled: true
-  aws:
-    region: eu-central-1
-
-redis-ha:
   enabled: false
-  externalDnsHostname: redis.eudi-adorsys.com
-  resources:
-    requests:
-      cpu: 100m
-      memory: 200Mi
-    limits:
-      cpu: 500m
-      memory: 700Mi
-  image:
-    repository: docker.io/redis
-    tag: 8.2
-  redis:
-    port: 6379
-    tlsPort: 6380
-    tlsReplication: true
-    authClients: "no"
-    config:
-      tls-port: 6380
-      tls-cert-file: /tls-certs/tls.crt
-      tls-key-file: /tls-certs/tls.key
-      tls-auth-clients: "no"
-  replicas: 1
-  auth: true
-  existingSecret: statuslist-secret
-  authKey: redis-password
-  persistentVolume:
-    enabled: true
-    storageClass: high-performance
-    accessModes:
-      - ReadWriteOnce
-    size: 10Gi
-  tls:
-    secretName: statuslist-tls
-    certFile: tls.crt
-    keyFile: tls.key
-  haproxy:
-    enabled: true
-    replicas: 1
-    resources:
-      requests:
-        cpu: 100m
-        memory: 128Mi
-      limits:
-        cpu: 200m
-        memory: 256Mi
-    tls:
-      enabled: true
-      secretName: statuslist-haproxy-tls
-      keyName: redis.pem
-    service:
-      type: LoadBalancer
-      annotations:
-        service.beta.kubernetes.io/aws-load-balancer-type: "nlb"
-        external-dns.alpha.kubernetes.io/hostname: redis.eudi-adorsys.com
-        external-dns.alpha.kubernetes.io/delete: "true"
+  # Provider selector: aws | vault | gcp | azure | raw
+  provider: ""
+  aws:
+    service: SecretsManager # SecretsManager | ParameterStore
+    # Empty by default: APP_AWS__REGION is only injected into the pod when a region is
+    # explicitly configured (via statuslist.aws.region, or the legacy secretStore.aws.region
+    # upgrade fallback). For pure-IRSA / Workload Identity installs that rely on the AWS SDK
+    # discovering the region from instance metadata, leave both empty so no APP_AWS__REGION
+    # overrides the SDK. The ESO AWS SecretStore still needs a region; it independently falls
+    # back to eu-central-1 at the CR level (not injected into the pod).
+    region: ""
+  vault:
+    server: ""
+    path: "secret"
+    auth: {}
+  gcp:
+    projectID: ""
+    auth: {}
+  azure:
+    tenantId: ""
+    vaultUrl: ""
+    # Azure authType per the External Secrets Operator AzureKVProvider CRD:
+    # ServicePrincipal | ManagedIdentity | WorkloadIdentity. Managed identity
+    # selection uses identityId; ServicePrincipal client credentials go under
+    # authSecretRef. (authType "ClientSecret" is not a valid CRD value.)
+    authType: ""
+    environmentType: ""
+    identityId: ""
+    serviceAccountRef:
+      name: "" # e.g. eso-controller-sa (WorkloadIdentity) bound to the ESO identity
+      # namespace: should match the External Secrets Operator controller namespace.
+      # Leave empty when ESO is deployed in the same namespace as this release (the default).
+      namespace: ""
+    authSecretRef: {}
+  # Full ESO provider spec passthrough for unsupported providers (when provider=raw).
+  # secretStore.raw holds ONLY the concrete provider body rendered directly under
+  # spec.provider (no extra top-level 'provider' key), e.g.:
+  #   raw:
+  #     webhook:
+  #       url: ...
+  # 'raw: {}' is rejected to avoid silently emitting an empty/insecure SecretStore.
+  raw: {}
 
 opentelemetry-collector:
   enabled: true
@@ -297,8 +511,26 @@ opentelemetry-collector:
         timeout: 5s
         send_batch_size: 1024
     exporters:
+      # 'debug' is development scaffolding (prints telemetry to stdout).
+      # IMPORTANT: Operators MUST configure production exporters before deploying to production.
       debug:
         verbosity: basic
+      # PRODUCTION EXPORTER EXAMPLES:
+      # Un-comment and configure the appropriate sink for your infrastructure:
+      #
+      # Traces (e.g. Jaeger / Grafana Tempo via OTLP gRPC):
+      # otlp/tempo:
+      #   endpoint: "tempo.monitoring.svc.cluster.local:4317"
+      #   tls:
+      #     insecure: true
+      #
+      # Metrics (e.g. Prometheus Remote Write):
+      # prometheusremotewrite:
+      #   endpoint: "http://prometheus-k8s.monitoring.svc.cluster.local:9090/api/v1/write"
+      #
+      # Logs (e.g. Grafana Loki):
+      # loki:
+      #   endpoint: "http://loki-gateway.monitoring.svc.cluster.local:3100/loki/api/v1/push"
     service:
       pipelines:
         traces:
