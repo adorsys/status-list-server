@@ -234,7 +234,6 @@ Best practice: treat webhook URLs strictly as secrets, rotate them only via the
 Secret (never in chart values), and keep an audit/allowlist on the receiving
 side so revoked tokens are rejected promptly during rotation.
 
-
 ---
 
 ## Alert Payload Format (JSON)

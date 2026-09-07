@@ -235,4 +235,3 @@ is only supported on **Linux** (standard for Linux dev machines and CI runners).
 On macOS or Windows (Docker Desktop / Lima), the delivery step cannot run as-is;
 run the suite inside a Linux container or on a Linux CI pipeline instead. The
 config-generation step (`[1/2]`) is portable across platforms.
-
