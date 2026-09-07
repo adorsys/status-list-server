@@ -75,19 +75,13 @@ pub(crate) mod mysql_helpers {
                     // retry the container boot rather than fail the whole run.
                     let mut last_err = None;
                     for attempt in 1..=3 {
-                        match MysqlImage::default()
-                            .with_tag("26.7")
-                            .start()
-                            .await
-                        {
+                        match MysqlImage::default().with_tag("26.7").start().await {
                             Ok(node) => return node,
                             Err(err) => {
                                 last_err = Some(err);
                                 if attempt < 3 {
-                                    tokio::time::sleep(
-                                        std::time::Duration::from_secs(1) * attempt,
-                                    )
-                                    .await;
+                                    tokio::time::sleep(std::time::Duration::from_secs(1) * attempt)
+                                        .await;
                                 }
                             }
                         }
@@ -223,10 +217,8 @@ pub(crate) mod postgres_helpers {
                         Err(err) => {
                             last_err = Some(err);
                             if attempt < 3 {
-                                tokio::time::sleep(
-                                    std::time::Duration::from_secs(1) * attempt,
-                                )
-                                .await;
+                                tokio::time::sleep(std::time::Duration::from_secs(1) * attempt)
+                                    .await;
                             }
                         }
                     }
