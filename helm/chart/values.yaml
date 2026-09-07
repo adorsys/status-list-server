@@ -324,7 +324,9 @@ prometheusRule:
 # Supported platforms (alerting.platform):
 #   discord     -> alerting.webhookUrl  (Discord channel webhook URL)
 #   slack       -> alerting.webhookUrl  (Slack incoming-webhook URL)
-#   teams       -> alerting.webhookUrl  (MS Teams classic inbound webhook)
+#   teams       -> alerting.webhookUrl  (MS Teams classic inbound webhook; posts Alertmanager's
+#                 generic JSON, not an Adaptive Card — see observability/runbooks/webhook-notifications.md
+#                 for the rendering limitation and bridge options)
 #   mattermost  -> alerting.webhookUrl  (Mattermost incoming webhook)
 #   webhook     -> alerting.webhookUrl  (generic endpoint accepting Alertmanager JSON)
 #   email       -> alerting.email.*     (SMTP settings)
@@ -361,6 +363,15 @@ alerting:
   labels: {}
   # Name of a pre-existing Secret containing credentials. When set, the chart does NOT
   # render its own Secret. Leave empty to let the chart manage the Secret from inline values.
+  #
+  # IMPORTANT: The referenced Secret MUST already exist in the namespace before install/upgrade
+  # (e.g. provisioned by ESO, Vault, or your GitOps flow). Kubernetes does not hot-reload Secret
+  # consumers on content changes: updating a webhook URL inside the Secret requires the
+  # Alertmanager pod to reload the referenced secretKeyRef. kube-prometheus-stack / the Prometheus
+  # Operator watches Secret changes and triggers an Alertmanager reload automatically, so in most
+  # installs a URL rotation takes effect without manual intervention (restart the Alertmanager
+  # StatefulSet if your operator version does not auto-reload). Always create the Secret before
+  # deploying the chart to avoid a failing AlertmanagerConfig / pending pod.
   existingSecret: ""
   # Inline webhook URL (used for discord, slack, teams, mattermost, webhook platforms).
   # Never commit real tokens — use existingSecret + ESO/Vault in production.
@@ -369,9 +380,30 @@ alerting:
   # URL so a collapsed Prometheus/Alertmanager pipeline is detected by its ABSENCE. When
   # empty the Watchdog is silently absorbed and never reaches a human channel.
   dmsWebhookUrl: ""
-  # Explicitly enable Dead Man's Switch when using existingSecret (reads key "dms-webhook-url" from existingSecret).
-  # When dmsWebhookUrl is set above, DMS is enabled implicitly.
+  # Explicitly enable Dead Man's Switch when using existingSecret (reads key "dms-webhook-url"
+  # from existingSecret). When dmsWebhookUrl is set above, DMS is enabled implicitly.
+  #
+  # When DMS is enabled with existingSecret, the "dms-webhook-url" key MUST be present in that
+  # Secret. The chart cannot verify the key exists at render time (it is not readable without a
+  # cluster lookup), so an absent key surfaces as a failing/runtime error in the Alertmanager
+  # webhook. Keep this key present and correct in the provisioning path that manages the Secret.
   dmsEnabled: false
+  # Per-request timeout for webhook/Teams/Mattermost receivers (Alertmanager default is 10s).
+  # Applies to the generic `webhook`, `teams`, and `mattermost` platforms and to the
+  # dead-man's-switch receiver. Set to a Go duration string (e.g. "10s", "2m").
+  webhookTimeout: ""
+  # Retry/backoff behavior for webhook-based receivers (global.http_config in the
+  # AlertmanagerConfig). Optional; when empty, Alertmanager built-in defaults are used
+  # (min_backoff 10s, max_backoff 5m, backoff_factor 2, unlimited attempts within group_interval).
+  # Example:
+  #   retry:
+  #     minBackoff: "10s"
+  #     maxBackoff: "5m"
+  #     maxRetries: 10
+  retry:
+    minBackoff: ""
+    maxBackoff: ""
+    maxRetries: 0
   # Email settings (required only when platform=email).
   email:
     to: ""
@@ -379,6 +411,12 @@ alerting:
     smtpPort: "587"
     smtpFrom: ""
     requireTls: true
+    # Optional SMTP TLS verification options (certificate handling). Rendered into the
+    # emailConfig tlsConfig when set. Empty disables custom TLS settings.
+    # Example:
+    #   tlsConfig:
+    #     insecureSkipVerify: false
+    tlsConfig: {}
 
 # Configurable SLO target thresholds for PrometheusRule alerting rules.
 # These must stay in lockstep with observability/slo/thresholds.json (the lint

@@ -204,6 +204,37 @@ Slack use Alertmanager's native embed/message formats; Teams and Mattermost use
 Alertmanager's generic webhook JSON (they expose inbound webhooks that accept
 it).
 
+> [!NOTE]
+> **Microsoft Teams rendering**: the chart's `teams` platform posts
+> Alertmanager's generic JSON payload to the classic inbound webhook, not a
+> native Adaptive Card. Most Teams connectors accept and render this JSON, but
+> it will not appear as a rich Adaptive Card. If you need Adaptive Card
+> formatting, point the `teams` platform (or a generic `webhook` receiver) at an
+> intermediary that transforms Alertmanager's JSON into an Adaptive Card before
+> forwarding to Teams.
+
+### Rotating webhook credentials (existingSecret)
+
+Webhook URLs are resolved at runtime from the referenced Secret. To rotate a
+URL without downtime:
+
+1. Update the value of `webhook-url` (and/or `dms-webhook-url`) in the existing
+   Secret — e.g. `kubectl patch secret <name> -p '{"stringData":{"webhook-url":"<new-url>"}}'`.
+   If you manage the Secret with External Secrets Operator / Vault, update the
+   remote secret and let ESO reconcile.
+2. Alertmanager must pick up the new value. The Prometheus Operator watches the
+   referenced Secret and triggers an Alertmanager reload automatically, so in
+   most installs the new URL is used without restart. If your operator version
+   does not auto-reload on Secret changes, restart the Alertmanager
+   StatefulSet: `kubectl rollout restart statefulset/alertmanager -n <namespace>`.
+3. Verify delivery with `alerthistory` / Alertmanager logs or a test firing; the
+   webhook target should reflect the new URL.
+
+Best practice: treat webhook URLs strictly as secrets, rotate them only via the
+Secret (never in chart values), and keep an audit/allowlist on the receiving
+side so revoked tokens are rejected promptly during rotation.
+
+
 ---
 
 ## Alert Payload Format (JSON)
