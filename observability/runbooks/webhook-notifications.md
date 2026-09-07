@@ -1,4 +1,4 @@
-# Webhook / Discord Alert Testing Guide (ticket #446)
+# Webhook / Discord Alert Testing Guide
 
 This guide walks you through firing a real alert through the full pipeline and
 confirming it shows up in **three** places:
@@ -18,8 +18,6 @@ and confirms you can also see the alert/metrics in **Prometheus** and **Grafana*
 The same setup also works for `slack`, `teams`, `mattermost`, `email`, or a
 generic `webhook` — the only thing that changes is the credential you set.
 
----
-
 ## Prerequisites
 
 - Docker + Docker Compose (the repo's dev stack).
@@ -29,8 +27,6 @@ generic `webhook` — the only thing that changes is the credential you set.
   3. **Copy Webhook URL**. It looks like:
      `https://discord.com/api/webhooks/<ID>/<TOKEN>`
   - Treat this URL as a secret — never commit it.
-
----
 
 ## 1. Configure the Discord webhook (secrets only)
 
@@ -183,8 +179,6 @@ observability/alertmanager/tests/test-alertmanager-config.sh
 > [!NOTE]
 > **Portability Requirement**: Step 2 of `test-alertmanager-config.sh` uses Docker `--network host` to connect Alertmanager to the mock Python receivers on `127.0.0.1`. Host networking requires a **Linux execution environment** (standard for Linux dev setups and CI runner environments). On macOS or Windows (Docker Desktop / Lima), host networking behaves differently; to run step 2 cross-platform, execute the test suite in a Linux container or CI pipeline.
 
----
-
 ## Using Slack / Teams / Mattermost / Email / generic webhook instead
 
 The mechanism is identical — change only `ALERTMANAGER_PLATFORM` and the
@@ -233,8 +227,6 @@ URL without downtime:
 Best practice: treat webhook URLs strictly as secrets, rotate them only via the
 Secret (never in chart values), and keep an audit/allowlist on the receiving
 side so revoked tokens are rejected promptly during rotation.
-
----
 
 ## Alert Payload Format (JSON)
 
@@ -309,8 +301,6 @@ When delivering notifications via `webhook`, `teams`, `mattermost`, or generic H
 | `alerts[].endsAt`                    | string (ISO-8601) | Timestamp when the alert resolved (`0001-01-01T00:00:00Z` while firing).                                                                                 |
 | `alerts[].generatorURL`              | string            | Permalink back to the Prometheus graph interface for rule evaluation details.                                                                            |
 | `alerts[].fingerprint`               | string            | Unique cryptographic hash identifying the specific alert instance.                                                                                       |
-
----
 
 ## Failure / Retry Behavior
 

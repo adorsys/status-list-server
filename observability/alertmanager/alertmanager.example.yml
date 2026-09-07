@@ -1,7 +1,6 @@
 # Example Alertmanager Configuration for status-list-server (webhook + Discord)
 #
-# This is the hand-written example for the webhook notification mechanism
-# (ticket #446). The deployed stack instead GENERATES a similar config from
+# This is the hand-written example for the webhook notification mechanism. The deployed stack instead generates a similar config from
 # environment variables via observability/prometheus/generate-alertmanager-config.sh,
 # so webhook URLs never live in a committed file. Keep this example's URLs as
 # placeholders; replace them only in your secret store / .env.
@@ -98,7 +97,7 @@ receivers:
         message: '{{ template "discord.default.message" . }}'
 
 # ---------------------------------------------------------------------------
-# ALTERNATIVES — swap a receiver above for any of these. Only credentials differ.
+# ALTERNATIVES: swap a receiver above for any of these. Only credentials differ.
 # ---------------------------------------------------------------------------
 # - name: "slack-page"
 #   slack_configs:

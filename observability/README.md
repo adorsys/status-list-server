@@ -92,7 +92,7 @@ environments running `kube-prometheus-stack`, the Helm chart includes optional
 `templates/prometheusrule.yaml` (`prometheusRule.enabled: true`). Alert delivery
 routing is documented in `observability/alertmanager/alertmanager.example.yml`.
 
-## Webhook alert notifications (ticket #446)
+## Webhook alert notifications
 
 Alerts are forwarded to external systems over webhooks through **Alertmanager**
 (Prometheus → Alertmanager → webhook → Discord/Slack/Teams/Mattermost/email).

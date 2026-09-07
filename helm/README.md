@@ -9,6 +9,7 @@ This guide shows you how to deploy the Status List Server on Kubernetes with the
 * An ingress controller and [cert-manager](https://cert-manager.io/docs/installation/) if you expose the server over HTTPS.
 * Access to the public images at `ghcr.io/adorsys/status-list-server`.
 * [External Secrets Operator (ESO)](https://external-secrets.io/latest/) if you enable `externalSecret.enabled=true`. With ESO enabled, the cluster CRDs must serve `external-secrets.io/v1` for `ExternalSecret`, `SecretStore`, and any `ClusterSecretStore` references before installing or upgrading this chart.
+* (Optional) The `AlertmanagerConfig` CRD if you use alert configuration. It is provided by [kube-prometheus-stack](https://github.com/prometheus-community/helm-charts/tree/main/charts/kube-prometheus-stack) or the [standalone Prometheus Operator](https://github.com/prometheus-operator/prometheus-operator).
 
 ## Choose Your Image Variant
 
@@ -268,9 +269,9 @@ silently absorbed and never reaches a human channel.
 
 ### Prerequisites
 
-The `AlertmanagerConfig` CRD must be installed in the cluster. It is provided by
-`kube-prometheus-stack` or the standalone Prometheus Operator. The `alerting.labels`
-must match the `alertmanagerConfigSelector` configured on your Alertmanager instance
+The `AlertmanagerConfig` CRD must be installed in the cluster (see the top-level
+[Prerequisites](#prerequisites)). The `alerting.labels` must match the
+`alertmanagerConfigSelector` configured on your Alertmanager instance
 (typically `release: kube-prometheus-stack`).
 
 ## Further Reading
