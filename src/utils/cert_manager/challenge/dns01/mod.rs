@@ -7,7 +7,7 @@ mod gcloud;
 mod pebble;
 #[cfg(feature = "aws")]
 mod route53;
-#[cfg(any(feature = "azure", feature = "gcp"))]
+#[cfg(feature = "azure")]
 mod token;
 
 pub use acme_dns::{AcmeDnsCredentials, AcmeDnsProvider};

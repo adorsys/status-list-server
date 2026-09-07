@@ -106,7 +106,7 @@ impl GoogleCloudDnsProvider {
             })?;
         Ok(Self {
             client: http_client(),
-            project_id: project_id.into(),
+            project_id,
             #[cfg(not(test))]
             credentials,
             #[cfg(test)]
