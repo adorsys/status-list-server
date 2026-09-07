@@ -335,7 +335,7 @@ platform) and keep the K8s role bound to the minimal ServiceAccount.
 >
 > Vault tokens are renewed/re-authenticated in-process by `TokenManager` (see the Vault entry
 > below). The filesystem token-signing material is also watched and reloaded in-process when the
-> `-fscert`/store strategy is used.
+> `-fscert` image reads static certificate files from mounted Secrets.
 
 ### Database pool rotation after password-file change
 
@@ -394,8 +394,8 @@ non-disruptive but leaves the app on the previous credential until the file is v
 
 ### Token signing key / certificate mismatch or invalid PEM encoding
 
-**When you see this:** At startup, when the store provisioning strategy loads and parses
-certificate material. Strings include:
+**When you see this:** At startup, when the `-fscert` image loads and parses static certificate
+material. Strings include:
 
 - `{certificate|signing key} material must be PEM text or base64/base64url-encoded DER`
 - `signing key PEM is not valid UTF-8: ...`
@@ -560,14 +560,12 @@ and `curl` against the service/NodePort returns `000`/empty reply. The applicati
 immediately after `telemetry initialized` with no further startup lines: the HTTP server never
 binds its `APP_SERVER__PORT` (e.g. `8000`).
 
-**Root cause:** The container image is built with the `acme` Cargo feature, and under that feature
-the **default `server.cert.provisioning_strategy` is `acme`** (`src/utils/cert_manager/builder.rs:189-190`). With
-strategy `acme`, the application attempts ACME DNS-01 certificate provisioning at startup, which
-requires a DNS provider and credentials (see `dns-providers.md`). `values-local.yaml` and
-`LOCAL_DEPLOYMENT.md` do not override the cert values, so they inherit the production defaults
-from `values.yaml`: `APP_SERVER__CERT__DNS__PROVIDER=route53`,
-`APP_SERVER__CERT__EMAIL=info@adorsys.com`, `APP_SERVER__DOMAIN=statuslist.eudi-adorsys.com`, and
-the Let's Encrypt directory URL, and block before binding the HTTP server.
+**Root cause:** ACME-enabled image variants perform automated DNS-01 certificate issuance at
+startup. That requires a DNS provider and valid credentials (see `dns-providers.md`). Without
+those credentials, the container can block before binding the HTTP port. The base chart defaults
+to the provider-neutral `-fscert` image, which is compiled without ACME and expects static
+certificate and signing-key files mounted into the container; AWS Route53 values are present only
+when an AWS overlay or custom values file selects them explicitly.
 
 **Diagnostics:**
 
@@ -575,9 +573,9 @@ the Let's Encrypt directory URL, and block before binding the HTTP server.
 kubectl get pod -n <namespace> -o wide
 kubectl describe pod -n <namespace> -l app.kubernetes.io/name=status-list-server | grep -iA3 "liveness probe failed\|connection refused"
 kubectl logs -n <namespace> -l app.kubernetes.io/name=status-list-server --tail=20
-# Confirm the acme strategy is in effect:
+# Check whether a DNS provider was configured for an ACME-enabled variant:
 kubectl get deploy -n <namespace> <release>-status-list-server-deployment \
-  -o jsonpath='{.spec.template.spec.containers[0].env}' | grep -i provisioning
+  -o jsonpath='{.spec.template.spec.containers[0].env}' | grep 'APP_SERVER__CERT__DNS__PROVIDER'
 ```
 
 **Fix (two options):**
@@ -585,16 +583,14 @@ kubectl get deploy -n <namespace> <release>-status-list-server-deployment \
 - Point the DNS provider at a local/dev ACME server, e.g. set `APP_SERVER__CERT__DNS__PROVIDER`
   to `pebble` and `APP_SERVER__CERT__DNS_CHALLENGE_SERVER_URL` at your Pebble instance (dev only),
   **or**
-- Switch the provisioning strategy to `store` and provide matching certificate + signing-key
-  material, e.g. `--set-string statuslist.env.APP_SERVER__CERT__PROVISIONING_STRATEGY=store` plus
-  `statuslist.secretMounts` provisioning `APP_SERVER__CERT__STORE__CERTIFICATE_PATH` /
-  `APP_SERVER__CERT__STORE__SIGNING_KEY_PATH` from a Secret (see `values.yaml` `secretMounts`
-  example and the `-fscert` variant in the runbook).
+- Use the `-fscert` image and provide matching certificate + signing-key files through
+  `statuslist.secretMounts`, setting `APP_SERVER__CERT__STORE__CERTIFICATE_PATH` and
+  `APP_SERVER__CERT__STORE__SIGNING_KEY_PATH` from that mounted Secret. See `values-local.yaml`
+  for a ready-to-run local example and `values.yaml` for the generic `secretMounts` shape.
 
-**Prevention:** For any local/dev run, decide up front whether you want certificate provisioning
-at all. Disable or retarget ACME _before_ installing; the runbook's "Expose the service (Ingress)"
-note already advises this, but neither `values-local.yaml` nor `LOCAL_DEPLOYMENT.md` actually
-turns it off, a gap that should be fixed in the local values.
+**Prevention:** For any local/dev run, decide up front whether you want automated ACME issuance
+or static certificate files. Use an ACME-enabled image only when DNS credentials are configured;
+otherwise use `-fscert` with certificate and signing-key files mounted into the pod.
 
 ---
 
@@ -739,21 +735,22 @@ a cluster that later shows `ImagePullBackOff`/`CrashLoopBackOff`.
 
 **When you see this:** Pods report `ErrImagePull` / `ImagePullBackOff` after a release.
 
-**Observed with the default chart install:** the chart's `appVersion` is `1.0.1-aws`
-(`Chart.yaml`), so with `statuslist.image.tag` empty the Deployment resolves the image
-`ghcr.io/adorsys/status-list-server:1.0.1-aws`. Only **variant-suffixed** tags are published
+**Observed with the default chart install:** the chart's `appVersion` is the provider-neutral
+`1.0.1-fscert` variant (`Chart.yaml`), so with `statuslist.image.tag` empty the Deployment
+resolves the image `ghcr.io/adorsys/status-list-server:1.0.1-fscert`. Only **variant-suffixed** tags are published
 (`latest-aws`, `latest-gcp`, `latest-azure`, `latest-vault`, `latest-fscert`, and matching
 `<version>-<variant>` / `sha-…-<variant>` tags); there is no unsuffixed `latest` or `1.0.1`.
-If `1.0.1-aws` gives `ErrImagePull`, that exact `appVersion` may simply not have been promoted for
-the variant yet. The result is this symptom:
+If `1.0.1-fscert` gives `ErrImagePull`, that exact `appVersion` may simply not have been promoted
+for the variant yet. The result is this symptom:
 
 ```text
-Failed to pull image "ghcr.io/adorsys/status-list-server:1.0.1-aws":
-rpc error: code = NotFound ... ghcr.io/adorsys/status-list-server:1.0.1-aws: not found
+Failed to pull image "ghcr.io/adorsys/status-list-server:1.0.1-fscert":
+rpc error: code = NotFound ... ghcr.io/adorsys/status-list-server:1.0.1-fscert: not found
 ```
 
 To proceed, pin an image tag that actually exists, e.g.
-`--set statuslist.image.tag=latest-aws`. See the runbook's "Pinning the image".
+`--set statuslist.image.tag=latest-fscert` or the cloud variant you intentionally selected. See
+the runbook's "Pinning the image".
 
 **Root cause:** The image reference does not exist or is not pullable: wrong tag, a typo in the
 repository/tag, `pullPolicy` behavior, or variant tags differing across builds. In the chart,
@@ -818,7 +815,9 @@ Platform-only (no matching application string): `ImagePullBackOff`, `ErrImagePul
 `CrashLoopBackOff`, `SecretSyncedError` / `Synced=False`, and all Helm `fail` guards listed in
 the Helm section.
 
-Local-k3d `ErrImagePull` with the default chart install is caused by the unpublished
-`appVersion` variant tag `1.0.1-aws` (pin a real published tag such as `latest-aws`); a pod stuck `Running` but
-never binding its HTTP port with `connection refused` on `/health/live` is the ACME
-provisioning-strategy block (see the "Pod Running but never binds the HTTP port" entry above).
+Local-k3d `ErrImagePull` with the default chart install is caused by an unpublished
+`appVersion` variant tag such as `1.0.1-fscert` (pin a real published tag such as
+`latest-fscert`, or the cloud variant you intentionally selected); a pod stuck `Running` but never
+binding its HTTP port with `connection refused` on `/health/live` is usually a certificate startup
+block: either an ACME-enabled image is waiting on DNS-01 credentials, or the `-fscert` image is
+missing mounted certificate/signing-key files.

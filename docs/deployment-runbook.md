@@ -32,7 +32,7 @@ The chart's default `statuslist.image.repository` points at `ghcr.io/adorsys/sta
 - **Build and push to your own registry**, then point `statuslist.image.repository` and `statuslist.image.tag` (or `digest`) at it, or
 - **Load a locally built image** into a local cluster (Minikube `minikube image load`, kind `kind load docker-image`) and use `pullPolicy: IfNotPresent`.
 
-Set `statuslist.image.tag` explicitly. If both `tag` and `digest` are empty, the chart falls back to its `appVersion`. Prefer a `sha256:` `digest` for reproducible production deploys (see [Pinning the image](#pinning-the-image)).
+Set `statuslist.image.tag` explicitly for ad hoc tags, or set `statuslist.image.variant` and leave `tag` empty to derive the matching variant tag from the chart `appVersion`. If both `tag` and `digest` are empty, the base chart uses the provider-neutral `fscert` variant. AWS production deployments select the `aws` variant explicitly through their values and deploy inputs. Prefer a `sha256:` `digest` for reproducible production deploys (see [Pinning the image](#pinning-the-image)).
 
 ## Option 1: Local / Development Deployment
 
@@ -48,37 +48,29 @@ kubectl config use-context minikube
 # 2. Namespace
 kubectl create namespace local
 
-# 3. Seed the fallback database password Secret (any non-empty value)
-kubectl create secret generic statuslist-secret -n local \
-  --from-literal=postgres-password=postgres
-
-# 4. Pull chart dependencies and install
+# 3. Pull chart dependencies and install
 helm dependency update ./helm/chart
 
-# NOTE: only variant-suffixed tags are published (e.g. latest-aws, 1.0.1-aws); there is
-# no unsuffixed image. Pin a real tag such as latest-aws. See troubleshooting.md "Image pull errors on variant tags".
+# NOTE: only variant-suffixed tags are published. With an empty tag, the chart
+# uses its provider-neutral appVersion (-fscert). Override the tag only when
+# you want a specific cloud variant or a locally loaded image.
 helm install statuslist-local ./helm/chart \
-  -n local -f ./helm/chart/values-local.yaml \
-  --set statuslist.image.tag=latest-aws --set statuslist.image.digest=null
+  -n local -f ./helm/chart/values-local.yaml
 
-# 5. Verify
+# 4. Verify
 kubectl get pods -n local
 kubectl port-forward -n local svc/statuslist-local-status-list-server-service 8081:8081
 curl http://localhost:8081/health/live
 curl http://localhost:8081/health/ready
 ```
 
-> **Certificate caveat for local runs:** the published images are built with the `acme` feature, so
-> the application's default `server.cert.provisioning_strategy` is `acme` and it attempts ACME
-> DNS-01 at startup. `values-local.yaml` leaves the production cert env (`route53` DNS provider,
-> Let's Encrypt URL, `statuslist.eudi-adorsys.com` domain) in place, which blocks the HTTP server
-> from binding. For a local run, disable or retarget certificate provisioning (e.g. strategy
-> `store` with a self-signed cert/key mounted via `statuslist.secretMounts`), see the entry "Pod
-> `Running` but never binds the HTTP port" in `troubleshooting.md`. If the pod crash-loops with a
-> database pool timeout while PostgreSQL is healthy, see the "pool timed out while waiting for an
-> open connection ... while PostgreSQL is reachable" entry in `troubleshooting.md`.
+> **Certificate caveat for local runs:** the provider-neutral `-fscert` image requires certificate
+> and signing-key files mounted into the pod. `values-local.yaml` includes disposable local sample
+> material and mounts it through `statuslist.secretMounts`; for non-local runs, provide your own
+> Secret-backed files or choose an image/provider configuration that matches your environment.
+> See the entry "Pod `Running` but never binds the HTTP port" in `troubleshooting.md`.
 
-`values-local.yaml` only overrides what differs from the production defaults (disabled Ingress/ESO, NodePort/external reachability, lighter resource requests). If pods fail with `CreateContainerConfigError`, confirm the `statuslist-secret` Secret exists in the namespace. See [LOCAL_DEPLOYMENT.md](LOCAL_DEPLOYMENT.md) for a more detailed local walkthrough.
+`values-local.yaml` only overrides what differs from the neutral defaults (disabled Ingress/ESO, NodePort/external reachability, lighter resource requests). The chart renders `statuslist-secret` by default through `statuslist.fallbackSecret.enabled=true`. If pods fail with `CreateContainerConfigError`, confirm that either the fallback Secret rendered or your ESO/existing-Secret mode creates `statuslist-secret` in the namespace. See [LOCAL_DEPLOYMENT.md](LOCAL_DEPLOYMENT.md) for a more detailed local walkthrough.
 
 ## Option 2: Self-Managed Deployment (any cluster)
 
@@ -102,7 +94,7 @@ How the Secret is created depends on your [secrets mode](#secrets-delivery): via
 The chart's `statuslist.env` holds the application configuration. Set the values your deployment needs:
 
 - **Database port**: `APP_DATABASE__PORT` (e.g. `5432`). This is **not** inferred from the PostgreSQL subchart: set it explicitly.
-- **Certificate provisioning**: by default the chart provisions the token-signing certificate over ACME, so you configure `APP_SERVER__CERT__*` (ACME directory URL and the DNS provider for DNS-01 challenges). See [dns-providers.md](dns-providers.md) for what each provider (`route53`, `cloudflare`, `gcloud`, `azure`, `acmedns`) requires. During ACME challenges, provider credentials must come from a Secret, not plain env values. ACME is not the only path: with the `-fscert` image the certificate and signing key are read from files you mount yourself (see the signing-credentials example in [`helm/README.md`](../helm/README.md)).
+- **Certificate files or ACME**: the default `-fscert` image reads the certificate and signing key from files mounted into the pod. ACME-enabled image variants perform DNS-01 certificate issuance at startup, so configure `APP_SERVER__CERT__*` values for the DNS provider and deliver provider credentials from a Secret, not plain env values. See [dns-providers.md](dns-providers.md) for what each provider (`route53`, `cloudflare`, `gcloud`, `azure`, `acmedns`) requires.
 - **Region** (`statuslist.aws.region`, renders `APP_AWS__REGION`): only required when you use an AWS-backed secret or DNS backend; omit it for other providers.
 - **Telemetry / limits / rate limiting / cache**: defaults are sensible; over-ride only what your sizing needs.
 
@@ -127,13 +119,13 @@ Use `helm upgrade --install` rather than `helm install` so the same command both
 
 ### Expose the service (Ingress)
 
-`values.yaml` ships with the Ingress enabled and nginx + cert-manager annotations, but they reference adorsys's domain (`*.eudi-adorsys.com`, `statuslist.eudi-adorsys.com`). For your own deployment:
+`values.yaml` ships with Ingress enabled, a neutral `localhost` host, and no TLS/cert-manager redirect annotations. For your own public deployment:
 
-- Set `statuslist.ingress.externalDnsHostname` (the rule host and external-dns hostname) and `statuslist.ingress.tls.secretName` to your domain, and list that same host under `statuslist.ingress.tls.hosts` so the rule and certificate hosts stay consistent.
-- Ensure your Ingress controller (e.g. ingress-nginx) and certificate issuer (e.g. cert-manager) actually exist in your cluster, and adjust the `cert-manager.io/cluster-issuer` annotation to an issuer you own.
+- Set `global.domain` to derive `statuslist.<global.domain>` and `*.<global.domain>` from one chart-wide value, or set `statuslist.ingress.externalDnsHostname` and `statuslist.ingress.tls.hosts` explicitly.
+- Ensure your Ingress controller (e.g. ingress-nginx) and certificate issuer (e.g. cert-manager) actually exist in your cluster, then add TLS/cert-manager annotations such as `cert-manager.io/cluster-issuer` and nginx SSL redirects in your environment overlay.
 - Or set `statuslist.ingress.enabled=false` and expose the `ClusterIP` Service another way (NodePort, port-forward, or a LoadBalancer).
 
-Because a default DNS-01 certificate provider is usually wired in, decide whether you want certificate provisioning at all. If you do not, disable it and terminate TLS at your ingress/load balancer instead (see [dns-providers.md](dns-providers.md) and the signing-credentials section of [`helm/README.md`](../helm/README.md)).
+The AWS overlay shows the Ingress + cert-manager path explicitly. Direct AWS NLB exposure lives in `values-aws-nlb.yaml` and disables Ingress so the two public paths are not active at the same time.
 
 ### Pinning the image
 
@@ -151,16 +143,34 @@ When `digest` is set it takes precedence over `tag`, and Kubernetes runs `reposi
 
 ## Secrets Delivery
 
-The chart supports two secret-delivery modes, plus a no-secret-manager fallback. Pick the one that matches your cluster. The trade-offs for ESO vs Workload Identity are covered in [`helm/README.md`](../helm/README.md) and the database/secret backend options in [secrets-backends.md](secrets-backends.md).
+The chart supports fallback Secret, ESO, and Workload Identity paths. Pick the one that matches your cluster. The trade-offs for ESO vs Workload Identity are covered in [`helm/README.md`](../helm/README.md) and the database/secret backend options in [secrets-backends.md](secrets-backends.md).
 
-### Mode A: External Secrets Operator (ESO) [default]
+### Mode A: Fallback plain Secret (default)
 
-The chart defaults to **External Secrets Operator** to synchronize secrets from a provider instead of storing them as plain Kubernetes Secrets.
+By default, the chart renders a plain Kubernetes Secret named `statuslist-secret`:
 
-- `externalSecret.enabled=true` and `secretStore.enabled=true` (both chart defaults) render ESO CRs:
+```yaml
+externalSecret:
+  enabled: false
+secretStore:
+  enabled: false
+statuslist:
+  fallbackSecret:
+    enabled: true
+    stringData:
+      postgres-password: ""
+```
+
+Leave `postgres-password` empty to generate a password; Helm reuses the existing cluster Secret on upgrades when it can read it.
+
+### Mode B: External Secrets Operator (ESO)
+
+Use ESO to synchronize secrets from a provider instead of storing them as Helm-rendered plain Kubernetes Secrets.
+
+- `externalSecret.enabled=true`, `secretStore.enabled=true`, and `statuslist.fallbackSecret.enabled=false` render ESO CRs:
   - a provider-neutral `SecretStore` (`secretStore.provider` selects `aws`, `vault`, `gcp`, `azure`, or `raw`);
   - an `ExternalSecret` that syncs `postgres-password` into a Kubernetes Secret named `statuslist-secret`;
-  - (when `statuslist.aws.mountCredentials=true`, the default) a second `ExternalSecret` that provisions `aws-credentials-secret` (the AWS shared `credentials`/`config` files Mounted under `/home/nobody/.aws`).
+  - when `statuslist.aws.mountCredentials=true`, a second `ExternalSecret` that provisions `aws-credentials-secret` (the AWS shared `credentials`/`config` files mounted under `/home/nobody/.aws`).
 
 **To use ESO** you must install External Secrets Operator in your cluster and configure:
 
@@ -177,7 +187,7 @@ kubectl describe externalsecret <external-secret> -n <namespace>
 
 A ready `ExternalSecret` shows a `SecretSynced` condition. A missing remote key or bad provider credentials appears in the status conditions.
 
-### Mode B: Workload Identity (opt-in)
+### Mode C: Workload Identity (opt-in)
 
 Instead of ESO-mounted static credentials, the application can use **ambient** cloud credentials via Workload Identity (EKS IRSA, GCP WI, Azure WIF):
 
@@ -186,24 +196,7 @@ Instead of ESO-mounted static credentials, the application can use **ambient** c
 
 Attach a least-privilege policy to the role (see the example in the Workload Identity section of [`helm/README.md`](../helm/README.md) for Route53 / Secrets Manager / S3).
 
-### Mode C: Fallback plain Secret (no ESO)
-
-If your cluster does **not** run External Secrets Operator, disable ESO and render a plain Kubernetes Secret:
-
-```yaml
-externalSecret:
-  enabled: false
-secretStore:
-  enabled: false
-
-statuslist:
-  fallbackSecret:
-    enabled: true
-    stringData:
-      postgres-password: "change-me"
-```
-
-The fallback Secret is always named `statuslist-secret`. Because it uses `stringData`, values are base64-encoded by the API server. In this mode the `aws-credentials-secret` is not provisioned automatically: either create it yourself (for `mountCredentials=true`) or switch to Workload Identity.
+In fallback mode, `aws-credentials-secret` is not provisioned automatically: either create it yourself when `mountCredentials=true`, switch to ESO, or use Workload Identity.
 
 ## Scaling and Resilience (opt-in)
 
@@ -288,7 +281,7 @@ Note: pinning by `digest` keeps rollbacks reproducible, since the stored digest 
 
 ## External Dependencies
 
-- **External Secrets Operator**: needed for the default ESO secret path; install it in your cluster (or use Mode B / Mode C to avoid it).
+- **External Secrets Operator**: needed only when you choose ESO secret delivery; the default fallback Secret path does not require ESO CRDs.
 - **Ingress controller + cert-manager**: needed only if you enable the Ingress / TLS path.
 - **Your cloud provider**: for Workload Identity roles and any AWS/GCP/Azure backends the application uses.
 
