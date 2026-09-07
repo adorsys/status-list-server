@@ -180,6 +180,9 @@ a mock webhook:
 observability/alertmanager/tests/test-alertmanager-config.sh
 ```
 
+> [!NOTE]
+> **Portability Requirement**: Step 2 of `test-alertmanager-config.sh` uses Docker `--network host` to connect Alertmanager to the mock Python receivers on `127.0.0.1`. Host networking requires a **Linux execution environment** (standard for Linux dev setups and CI runner environments). On macOS or Windows (Docker Desktop / Lima), host networking behaves differently; to run step 2 cross-platform, execute the test suite in a Linux container or CI pipeline.
+
 ---
 
 ## Using Slack / Teams / Mattermost / Email / generic webhook instead

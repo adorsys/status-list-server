@@ -25,12 +25,21 @@ schedule. Forcing a date on the latter produces churn without new information.
 Exit status is 0 when the file is valid, 1 when it is not. Expired entries are
 reported as warnings, not failures: an expired entry has already stopped suppressing
 anything, so it is dead configuration rather than a broken gate.
+
+`--expiring-within DAYS` additionally lists entries that lapse within that window, on
+stdout, as `id<TAB>expired_at<TAB>days_remaining`. It does not change the exit status.
+Validity and imminence are different questions: validity is checked on every pull
+request, where a date three weeks out is not yet news, while imminence is asked by the
+scheduled re-scan, which is the only thing that can give notice before an expiry lands
+on a release instead of ahead of one.
 """
 
 from __future__ import annotations
 
+import argparse
 import datetime
 import pathlib
+import re
 import sys
 
 try:
@@ -72,25 +81,66 @@ SCOPE_KEYS = ("paths", "purls")
 # discovered at all. Do not relax this to a warning -- add the new field.
 KNOWN_ENTRY_KEYS = {"id", "paths", "purls", "statement", "expired_at"}
 
+# The character set every advisory and rule scheme actually uses: CVE-2024-1234,
+# RUSTSEC-2024-0001, AVD-KSV-0014, GHSA-xxxx-xxxx-xxxx. Deliberately the same set the
+# scheduled re-scan enforces on advisory IDs coming back from Trivy, because these ids
+# reach the same places -- a tab-separated stream and a GitHub issue body.
+ID_PATTERN = re.compile(r"[A-Za-z0-9._-]+")
+
+
+def _load_document(path: pathlib.Path) -> tuple[dict | None, list[str]]:
+    """Read and parse the ignore file.
+
+    Returns `(doc, errors)`. `doc` is None when there is nothing to walk -- either
+    because loading failed, in which case `errors` says why, or because the file is
+    legitimately empty, in which case `errors` is empty too.
+    """
+    try:
+        text = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return None, [f"{path}: not found"]
+
+    try:
+        doc = yaml.safe_load(text)
+    except yaml.YAMLError as exc:
+        return None, [f"{path}: not valid YAML: {exc}"]
+
+    if doc is None:
+        return None, []  # An empty ignore file is legitimate.
+    if not isinstance(doc, dict):
+        return None, [f"{path}: top level must be a mapping, found {type(doc).__name__}"]
+
+    return doc, []
+
+
+def _parse_expiry(value: object) -> tuple[datetime.date | None, str | None]:
+    """Coerce an `expired_at` value to a date, or explain why it is not one.
+
+    PyYAML parses an unquoted YYYY-MM-DD into a date; a quoted one stays a string.
+    Trivy accepts both, so both are handled here. `datetime` is checked before `date`
+    because it is a subclass of it.
+    """
+    if isinstance(value, datetime.datetime):
+        return value.date(), None
+    if isinstance(value, str):
+        try:
+            return datetime.date.fromisoformat(value.strip()), None
+        except ValueError:
+            return None, f"'expired_at' is not a YYYY-MM-DD date: {value!r}"
+    if isinstance(value, datetime.date):
+        return value, None
+    return None, f"'expired_at' is not a date: {value!r}"
+
 
 def check(path: pathlib.Path) -> list[str]:
     errors: list[str] = []
     warnings: list[str] = []
 
-    try:
-        text = path.read_text(encoding="utf-8")
-    except FileNotFoundError:
-        return [f"{path}: not found"]
-
-    try:
-        doc = yaml.safe_load(text)
-    except yaml.YAMLError as exc:
-        return [f"{path}: not valid YAML: {exc}"]
-
+    doc, load_errors = _load_document(path)
+    if load_errors:
+        return load_errors
     if doc is None:
-        return []  # An empty ignore file is legitimate.
-    if not isinstance(doc, dict):
-        return [f"{path}: top level must be a mapping, found {type(doc).__name__}"]
+        return []
 
     for section in sorted(set(doc) - KNOWN_SECTIONS):
         errors.append(
@@ -119,6 +169,19 @@ def check(path: pathlib.Path) -> list[str]:
             identifier = entry.get("id")
             if not identifier or not str(identifier).strip():
                 errors.append(f"{where}: missing 'id'")
+            elif not ID_PATTERN.fullmatch(str(identifier)):
+                # These ids leave this file. `--expiring-within` writes them to stdout
+                # as tab-separated fields, and the scheduled re-scan reads that back
+                # with `while IFS=$'\t' read -r id date days` and renders it into a
+                # GitHub issue body. A tab or newline in an id desynchronises that
+                # parse and corrupts the report; Markdown metacharacters render as
+                # formatting. The workflow already refuses advisory IDs from Trivy that
+                # fall outside this set -- applying a looser rule to our own ledger,
+                # which reaches the same sinks, is the wrong way round.
+                errors.append(
+                    f"{where}: 'id' must match {ID_PATTERN.pattern} -- letters, digits, "
+                    f"dot, underscore and hyphen. Got {identifier!r}."
+                )
             else:
                 where = f"{path}: {section}[{index}] ({identifier})"
 
@@ -170,18 +233,9 @@ def check(path: pathlib.Path) -> list[str]:
                 )
                 continue
 
-            # PyYAML parses an unquoted YYYY-MM-DD into a date; a quoted one stays a
-            # string. Trivy accepts both, so both are validated here.
-            if isinstance(expires, datetime.datetime):
-                expires = expires.date()
-            elif isinstance(expires, str):
-                try:
-                    expires = datetime.date.fromisoformat(expires.strip())
-                except ValueError:
-                    errors.append(f"{where}: 'expired_at' is not a YYYY-MM-DD date: {expires!r}")
-                    continue
-            elif not isinstance(expires, datetime.date):
-                errors.append(f"{where}: 'expired_at' is not a date: {expires!r}")
+            expires, problem = _parse_expiry(expires)
+            if problem is not None:
+                errors.append(f"{where}: {problem}")
                 continue
 
             if expires <= today:
@@ -196,8 +250,76 @@ def check(path: pathlib.Path) -> list[str]:
     return errors
 
 
+def expiring_entries(
+    path: pathlib.Path, within_days: int
+) -> list[tuple[str, datetime.date, int]]:
+    """Vulnerability exceptions that lapse within `within_days` days, or already have.
+
+    Returns `(id, expired_at, days_remaining)`, soonest first. `days_remaining` is
+    negative for an entry that has already lapsed.
+
+    Only `vulnerabilities` are considered, for the same reason only they require an
+    `expired_at`: a misconfiguration exception is a claim about a structural fact and
+    does not rot on a schedule.
+
+    Malformed dates are skipped rather than guessed at. `check()` already rejects
+    them, and this function's answer is only meaningful for a file that passed it.
+    """
+    doc, _ = _load_document(path)
+    if doc is None:
+        return []
+
+    today = datetime.date.today()
+    found: list[tuple[str, datetime.date, int]] = []
+
+    for section in sorted(set(doc) & EXPIRY_REQUIRED_IN):
+        entries = doc[section]
+        if not isinstance(entries, list):
+            continue
+
+        for entry in entries:
+            if not isinstance(entry, dict) or "expired_at" not in entry:
+                continue
+
+            expires, problem = _parse_expiry(entry["expired_at"])
+            if problem is not None:
+                continue
+
+            remaining = (expires - today).days
+            if remaining <= within_days:
+                found.append((str(entry.get("id") or "<no id>"), expires, remaining))
+
+    return sorted(found, key=lambda item: item[1])
+
+
 def main() -> int:
-    path = pathlib.Path(sys.argv[1] if len(sys.argv) > 1 else ".trivyignore.yaml")
+    parser = argparse.ArgumentParser(
+        description="Validate .trivyignore.yaml before Trivy ever reads it."
+    )
+    parser.add_argument(
+        "path",
+        nargs="?",
+        default=".trivyignore.yaml",
+        type=pathlib.Path,
+        help="the ignore file to validate (default: .trivyignore.yaml)",
+    )
+    parser.add_argument(
+        "--expiring-within",
+        type=int,
+        metavar="DAYS",
+        help=(
+            "also list vulnerability exceptions lapsing within DAYS days, on stdout, "
+            "as id<TAB>expired_at<TAB>days_remaining. Does not affect exit status."
+        ),
+    )
+    args = parser.parse_args()
+    path = args.path
+
+    # A negative window silently lists only entries that have already lapsed, which
+    # reads as "nothing is expiring soon" to a caller that asked for a warning.
+    if args.expiring_within is not None and args.expiring_within < 0:
+        parser.error("--expiring-within takes a non-negative number of days")
+
     errors = check(path)
 
     for error in errors:
@@ -211,7 +333,23 @@ def main() -> int:
         )
         return 1
 
-    print(f"{path}: ok")
+    # Under --expiring-within, stdout is the machine-readable channel, so the human
+    # line moves aside rather than landing in the middle of the table.
+    print(f"{path}: ok", file=sys.stderr if args.expiring_within is not None else sys.stdout)
+
+    if args.expiring_within is not None:
+        for identifier, expires, remaining in expiring_entries(path, args.expiring_within):
+            print(f"{identifier}\t{expires.isoformat()}\t{remaining}")
+            # Already-lapsed entries are warned about by check(); this covers the ones
+            # that still suppress today and would otherwise first be noticed by
+            # blocking a release.
+            if remaining >= 0:
+                print(
+                    f"warning: {path}: {identifier}: 'expired_at' {expires} is "
+                    f"{remaining} day(s) away; re-argue it before it lapses.",
+                    file=sys.stderr,
+                )
+
     return 0
 
 

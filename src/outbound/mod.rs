@@ -1,10 +1,10 @@
-#[cfg(feature = "aws-secrets")]
+#[cfg(feature = "aws")]
 pub mod aws;
-#[cfg(feature = "azure-kv")]
+#[cfg(feature = "azure")]
 pub mod azure_kv;
 pub mod cache;
 pub mod cert;
-#[cfg(feature = "gcp-secrets")]
+#[cfg(feature = "gcp")]
 pub mod gcp_secret;
 #[cfg(feature = "memory")]
 pub mod memory;

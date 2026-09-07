@@ -8,8 +8,8 @@ Alerts:
 
 The 30d error budget (`sli:error_budget:success:30d`) dropped below 10% remaining.
 This means the trailing 30-day 5xx rate is close to consuming the full 0.5%
-budget. Unlike the fast/slow burn alerts (which fire on a *current* burn rate),
-this fires on the *cumulative* window: the budget has largely been spent, so any
+budget. Unlike the fast/slow burn alerts (which fire on a _current_ burn rate),
+this fires on the _cumulative_ window: the budget has largely been spent, so any
 further degradation risks breaching the SLO for the month.
 
 ## Ranked likely causes

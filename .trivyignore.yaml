@@ -15,7 +15,9 @@ misconfigurations:
 #     statement: Why this is not exploitable here, and what would change that.
 #     expired_at: 2026-01-01
 #
-# Read by the trivy-config job on every pull request and by the image scan on every
-# release, so a malformed entry breaks CI repository-wide.
+# Read by three consumers on different cadences: the trivy-config job on every pull
+# request, the image scan on every release, and the nightly re-scan -- which also
+# warns 30 days before an expired_at lapses, so an expiry is notice rather than a
+# blocked release. A malformed entry breaks CI repository-wide.
 # scripts/check-trivyignore.py validates this file before Trivy reads it.
 vulnerabilities: []

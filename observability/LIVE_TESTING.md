@@ -158,7 +158,7 @@ cannot resolve the datasource.
 ```yaml
 datasources:
   - name: Prometheus
-    uid: prometheus            # <-- must match the dashboard panels
+    uid: prometheus # <-- must match the dashboard panels
     type: prometheus
     access: proxy
     url: http://prometheus:9090

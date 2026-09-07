@@ -374,3 +374,66 @@ runs:
           | grep -E '^\s+- podSelector:\s*$' >/dev/null; then
           echo "ERROR: NetworkPolicy egress internal rule must have a to:/podSelector (not any pod)"; exit 1
         fi
+
+        # Fail-closed alerting render tests:
+        # 1. alerting.enabled=true with unsupported platform fails.
+        if helm template status-list-server helm/chart \
+            --set alerting.enabled=true \
+            --set alerting.platform=unsupported >/dev/null 2>&1; then
+          echo "ERROR: alerting.enabled=true with unsupported platform should fail"; exit 1
+        fi
+        # 2. alerting.enabled=true with missing webhookUrl fails for webhook platforms.
+        if helm template status-list-server helm/chart \
+            --set alerting.enabled=true \
+            --set alerting.platform=slack >/dev/null 2>&1; then
+          echo "ERROR: alerting.enabled=true with platform=slack and missing webhookUrl should fail"; exit 1
+        fi
+        # 3. alerting.enabled=true with platform=email and missing email.to, smtpHost or smtpFrom fails.
+        if helm template status-list-server helm/chart \
+            --set alerting.enabled=true \
+            --set alerting.platform=email \
+            --set alerting.email.smtpHost=smtp.example.com \
+            --set alerting.email.smtpFrom=alerts@example.com >/dev/null 2>&1; then
+          echo "ERROR: alerting.platform=email with missing email.to should fail"; exit 1
+        fi
+        if helm template status-list-server helm/chart \
+            --set alerting.enabled=true \
+            --set alerting.platform=email \
+            --set alerting.email.to=ops@example.com \
+            --set alerting.email.smtpFrom=alerts@example.com >/dev/null 2>&1; then
+          echo "ERROR: alerting.platform=email with missing email.smtpHost should fail"; exit 1
+        fi
+        if helm template status-list-server helm/chart \
+            --set alerting.enabled=true \
+            --set alerting.platform=email \
+            --set alerting.email.to=ops@example.com \
+            --set alerting.email.smtpHost=smtp.example.com >/dev/null 2>&1; then
+          echo "ERROR: alerting.platform=email with missing email.smtpFrom should fail"; exit 1
+        fi
+
+        # Positive alerting render tests:
+        # Webhook platform renders AlertmanagerConfig and Secret.
+        helm template status-list-server helm/chart \
+          --set alerting.enabled=true \
+          --set alerting.platform=slack \
+          --set alerting.webhookUrl=https://hooks.slack.com/services/XXX \
+          --output-dir /tmp/rendered/alerting-slack
+        if [ ! -f /tmp/rendered/alerting-slack/status-list-server/templates/alertmanagerconfig.yaml ]; then
+          echo "ERROR: alerting.enabled=true must render AlertmanagerConfig"; exit 1
+        fi
+        if [ ! -f /tmp/rendered/alerting-slack/status-list-server/templates/alerting-secret.yaml ]; then
+          echo "ERROR: alerting.enabled=true without existingSecret must render Secret"; exit 1
+        fi
+
+        # Email platform renders combined smtp-host (host:port).
+        helm template status-list-server helm/chart \
+          --set alerting.enabled=true \
+          --set alerting.platform=email \
+          --set alerting.email.to=ops@example.com \
+          --set alerting.email.smtpHost=smtp.example.com \
+          --set-string alerting.email.smtpPort=587 \
+          --set alerting.email.smtpFrom=alerts@example.com \
+          --output-dir /tmp/rendered/alerting-email
+        if ! grep -q 'smtp-host: "smtp.example.com:587"' /tmp/rendered/alerting-email/status-list-server/templates/alerting-secret.yaml; then
+          echo "ERROR: alerting.platform=email Secret must format smtp-host as host:port"; exit 1
+        fi

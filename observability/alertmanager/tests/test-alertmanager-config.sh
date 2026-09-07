@@ -25,11 +25,14 @@ GENERATOR="$REPO_ROOT/observability/prometheus/generate-alertmanager-config.sh"
 MOCK="$REPO_ROOT/observability/alertmanager/tests/mock_webhook.py"
 AM_IMAGE="prom/alertmanager:v0.28.1"
 TMP="$(mktemp -d)"
-MOCK_PID=""
+HUMAN_PID=""
+DMS_PID=""
 cleanup() {
   docker rm -f alertmanager-test >/dev/null 2>&1 || true
-  [ -n "$MOCK_PID" ] && kill "$MOCK_PID" 2>/dev/null || true
-  [ -n "$MOCK_PID" ] && wait "$MOCK_PID" 2>/dev/null || true
+  [ -n "${HUMAN_PID:-}" ] && kill "$HUMAN_PID" 2>/dev/null || true
+  [ -n "${DMS_PID:-}" ] && kill "$DMS_PID" 2>/dev/null || true
+  [ -n "${HUMAN_PID:-}" ] && wait "$HUMAN_PID" 2>/dev/null || true
+  [ -n "${DMS_PID:-}" ] && wait "$DMS_PID" 2>/dev/null || true
   rm -rf "$TMP"
 }
 trap cleanup EXIT
@@ -218,10 +221,16 @@ pass "generated config: warn->human (firing+resolved), watchdog->dead-man's-swit
 
 # Stop Alertmanager, then the mocks (which write + close their sinks).
 docker rm -f alertmanager-test >/dev/null 2>&1 || true
-kill "$HUMAN_PID" 2>/dev/null || true
-kill "$DMS_PID" 2>/dev/null || true
-wait "$HUMAN_PID" 2>/dev/null || true
-wait "$DMS_PID" 2>/dev/null || true
+if [ -n "${HUMAN_PID:-}" ]; then
+  kill "$HUMAN_PID" 2>/dev/null || true
+  wait "$HUMAN_PID" 2>/dev/null || true
+  HUMAN_PID=""
+fi
+if [ -n "${DMS_PID:-}" ]; then
+  kill "$DMS_PID" 2>/dev/null || true
+  wait "$DMS_PID" 2>/dev/null || true
+  DMS_PID=""
+fi
 
 echo
 echo "All Alertmanager webhook tests passed."

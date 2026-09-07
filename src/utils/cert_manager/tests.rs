@@ -25,14 +25,35 @@ fn init_crypto() {
 }
 
 fn matching_cert_and_key() -> (String, String) {
-    let key =
-        rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256).expect("generate test key");
-    let cert = rcgen::CertificateParams::new(vec!["example.com".to_string()])
-        .expect("certificate params")
-        .self_signed(&key)
-        .expect("self-signed certificate")
-        .pem();
-    (cert, key.serialize_pem())
+    let certified_key = rcgen::generate_simple_self_signed(vec!["example.com".to_string()])
+        .expect("generate test cert and key");
+    (
+        certified_key.cert.pem(),
+        certified_key.signing_key.serialize_pem(),
+    )
+}
+
+struct TempDir {
+    path: std::path::PathBuf,
+}
+
+impl TempDir {
+    fn new() -> Self {
+        let path = std::env::temp_dir().join(format!(
+            "status-list-cert-mgr-test-{}-{}",
+            std::process::id(),
+            time::OffsetDateTime::now_utc().unix_timestamp_nanos()
+        ));
+        std::fs::create_dir_all(&path).expect("create temp dir");
+        let path = std::fs::canonicalize(&path).unwrap_or(path);
+        Self { path }
+    }
+}
+
+impl Drop for TempDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.path);
+    }
 }
 
 #[derive(Clone)]
@@ -633,6 +654,70 @@ async fn test_store_storage_strategy_accepts_base64_der_material() {
             .certificate
             .contains("-----BEGIN CERTIFICATE-----")
     );
+    assert_eq!(manager.signing_key_pem().await.unwrap(), key_pem);
+}
+
+#[tokio::test]
+async fn test_store_mixed_strategy_filesystem_cert_storage_key() {
+    init_crypto();
+
+    let (cert_pem, key_pem) = matching_cert_and_key();
+    let dir = TempDir::new();
+    let cert_path = dir.path.join("cert.pem");
+    tokio::fs::write(&cert_path, &cert_pem).await.unwrap();
+
+    let material_storage = MockStorage::new();
+    material_storage
+        .store("source-key", &key_pem)
+        .await
+        .unwrap();
+
+    let manager = CertManager::builder()
+        .domains(["example.com"])
+        .crypto_storage(material_storage)
+        .store_strategy(StoreProvisioningStrategy::new(
+            MaterialSource::Filesystem(cert_path.to_str().unwrap().into()),
+            MaterialSource::Storage("source-key".to_string()),
+        ))
+        .build()
+        .unwrap();
+
+    let cert_data = manager.request_certificate().await.unwrap();
+    assert!(
+        cert_data
+            .certificate
+            .contains("-----BEGIN CERTIFICATE-----")
+    );
+    assert_eq!(manager.signing_key_pem().await.unwrap(), key_pem);
+}
+
+#[tokio::test]
+async fn test_store_mixed_strategy_storage_cert_filesystem_key() {
+    init_crypto();
+
+    let (cert_pem, key_pem) = matching_cert_and_key();
+    let dir = TempDir::new();
+    let key_path = dir.path.join("key.pem");
+    tokio::fs::write(&key_path, &key_pem).await.unwrap();
+
+    let material_storage = MockStorage::new();
+    material_storage
+        .store("source-cert", &cert_pem)
+        .await
+        .unwrap();
+
+    let manager = CertManager::builder()
+        .domains(["example.com"])
+        .crypto_storage(material_storage)
+        .store_strategy(StoreProvisioningStrategy::new(
+            MaterialSource::Storage("source-cert".to_string()),
+            MaterialSource::Filesystem(key_path.to_str().unwrap().into()),
+        ))
+        .build()
+        .unwrap();
+
+    let cert_data = manager.request_certificate().await.unwrap();
+    assert_eq!(cert_data.certificate, cert_pem);
     assert_eq!(manager.signing_key_pem().await.unwrap(), key_pem);
 }
 

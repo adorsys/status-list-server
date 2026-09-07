@@ -1,8 +1,11 @@
 //! ACME / Store Certificate adapter implementing `CertificateProvider`.
 
+#[cfg(not(feature = "acme"))]
 use arc_swap::ArcSwap;
 use async_trait::async_trait;
+#[cfg(not(feature = "acme"))]
 use base64::prelude::{BASE64_STANDARD, Engine as _};
+#[cfg(not(feature = "acme"))]
 use std::sync::Arc;
 
 use crate::domain::{
@@ -36,30 +39,19 @@ impl CertificateProvider for AcmeCertificateProvider {
     }
 }
 
-/// Fallback adapter reading filesystem certificate and signing key when ACME feature is disabled.
+/// Filesystem-backed certificate provider.
+///
+/// Loads PEM certificate chain and PKCS#8 private key from filesystem paths.
 #[cfg(not(feature = "acme"))]
-#[derive(Clone)]
-pub struct StoreCertificateProvider {
-    cert_path: Option<String>,
-    key_path: Option<String>,
-}
-
-#[cfg(not(feature = "acme"))]
-impl StoreCertificateProvider {
-    pub fn new(cert_path: Option<String>, key_path: Option<String>) -> Self {
-        Self {
-            cert_path,
-            key_path,
-        }
-    }
-}
-
 #[derive(Clone)]
 pub struct ReloadingCertificateProvider {
     active: Arc<ArcSwap<SigningMaterial>>,
 }
 
+#[cfg(not(feature = "acme"))]
 impl ReloadingCertificateProvider {
+    /// Load and validate initial material from disk.  Fails immediately if files
+    /// are missing, unreadable, or the certificate and signing key do not match.
     pub async fn from_files(cert_path: String, key_path: String) -> Result<Self, StatusListError> {
         let material = load_and_validate_signing_material(&cert_path, &key_path).await?;
         Ok(Self {
@@ -67,6 +59,7 @@ impl ReloadingCertificateProvider {
         })
     }
 
+    /// Atomically reload material from disk; retains previous material on failure.
     pub async fn reload_from_files(
         &self,
         cert_path: &str,
@@ -78,6 +71,7 @@ impl ReloadingCertificateProvider {
     }
 }
 
+#[cfg(not(feature = "acme"))]
 #[async_trait]
 impl CertificateProvider for ReloadingCertificateProvider {
     async fn signing_material(&self) -> Result<SigningMaterial, StatusListError> {
@@ -85,6 +79,38 @@ impl CertificateProvider for ReloadingCertificateProvider {
     }
 }
 
+/// Inline certificate provider
+#[cfg(not(feature = "acme"))]
+#[derive(Clone)]
+pub struct InlineCertificateProvider {
+    material: Arc<SigningMaterial>,
+}
+
+#[cfg(not(feature = "acme"))]
+impl InlineCertificateProvider {
+    /// Validate and construct an inline provider.  Fails immediately if the
+    /// certificate and signing key do not match or are malformed.
+    pub fn new(cert_pem: String, signing_key_pem: String) -> Result<Self, StatusListError> {
+        validate_signing_material(&cert_pem, &signing_key_pem)?;
+        let certificate_chain = pem_chain_to_base64_der(&cert_pem)?;
+        Ok(Self {
+            material: Arc::new(SigningMaterial {
+                certificate_chain: Some(certificate_chain),
+                signing_key_pem,
+            }),
+        })
+    }
+}
+
+#[cfg(not(feature = "acme"))]
+#[async_trait]
+impl CertificateProvider for InlineCertificateProvider {
+    async fn signing_material(&self) -> Result<SigningMaterial, StatusListError> {
+        Ok((*self.material).clone())
+    }
+}
+
+#[cfg(not(feature = "acme"))]
 async fn load_and_validate_signing_material(
     cert_path: &str,
     key_path: &str,
@@ -103,6 +129,7 @@ async fn load_and_validate_signing_material(
     })
 }
 
+#[cfg(not(feature = "acme"))]
 pub(crate) fn pem_chain_to_base64_der(cert_pem: &str) -> Result<Vec<String>, StatusListError> {
     let certs = x509_parser::pem::Pem::iter_from_buffer(cert_pem.as_bytes())
         .map(|cert| {
@@ -157,42 +184,18 @@ pub(crate) fn validate_signing_material(
     Ok(())
 }
 
-#[cfg(not(feature = "acme"))]
-#[async_trait]
-impl CertificateProvider for StoreCertificateProvider {
-    async fn signing_material(&self) -> Result<SigningMaterial, StatusListError> {
-        let certificate_chain = if let Some(path) = &self.cert_path {
-            let content = tokio::fs::read_to_string(path)
-                .await
-                .map_err(|e| StatusListError::Backend(Box::new(e)))?;
-            Some(pem_chain_to_base64_der(&content)?)
-        } else {
-            None
-        };
-
-        let path = self
-            .key_path
-            .as_deref()
-            .unwrap_or("test_data/ec-private.pem");
-        let signing_key_pem = tokio::fs::read_to_string(path)
-            .await
-            .map_err(|e| StatusListError::Backend(Box::new(e)))?;
-        Ok(SigningMaterial {
-            certificate_chain,
-            signing_key_pem,
-        })
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(not(feature = "acme"))]
     use std::path::{Path, PathBuf};
 
+    #[cfg(not(feature = "acme"))]
     struct TempDir {
         path: PathBuf,
     }
 
+    #[cfg(not(feature = "acme"))]
     impl TempDir {
         fn new() -> Self {
             let path = std::env::temp_dir().join(format!(
@@ -209,6 +212,7 @@ mod tests {
         }
     }
 
+    #[cfg(not(feature = "acme"))]
     impl Drop for TempDir {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.path);
@@ -216,14 +220,12 @@ mod tests {
     }
 
     fn matching_cert_and_key() -> (String, String) {
-        let key = rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256)
-            .expect("generate test key");
-        let cert = rcgen::CertificateParams::new(vec!["localhost".to_string()])
-            .expect("certificate params")
-            .self_signed(&key)
-            .expect("self-signed certificate")
-            .pem();
-        (cert, key.serialize_pem())
+        let certified_key = rcgen::generate_simple_self_signed(vec!["localhost".to_string()])
+            .expect("generate test cert and key");
+        (
+            certified_key.cert.pem(),
+            certified_key.signing_key.serialize_pem(),
+        )
     }
 
     #[test]
@@ -242,6 +244,7 @@ mod tests {
         assert!(!err.to_string().contains("PRIVATE KEY"));
     }
 
+    #[cfg(not(feature = "acme"))]
     #[tokio::test]
     async fn malformed_reload_keeps_last_known_good_material() {
         let dir = TempDir::new();
@@ -287,6 +290,7 @@ mod tests {
         );
     }
 
+    #[cfg(not(feature = "acme"))]
     #[tokio::test]
     async fn successful_reload_swaps_certificate_and_key_atomically() {
         let dir = TempDir::new();
@@ -330,6 +334,7 @@ mod tests {
         );
     }
 
+    #[cfg(not(feature = "acme"))]
     #[tokio::test]
     async fn filesystem_provider_exports_base64_der_chain_parts() {
         let dir = TempDir::new();
@@ -351,5 +356,30 @@ mod tests {
         let chain = material.certificate_chain.expect("chain");
         assert_eq!(chain, pem_chain_to_base64_der(&cert).expect("b64 der"));
         assert!(!chain[0].contains("BEGIN CERTIFICATE"));
+    }
+
+    #[cfg(not(feature = "acme"))]
+    #[test]
+    fn inline_provider_validates_at_construction() {
+        let (cert, key) = matching_cert_and_key();
+        assert!(InlineCertificateProvider::new(cert, key).is_ok());
+    }
+
+    #[cfg(not(feature = "acme"))]
+    #[test]
+    fn inline_provider_rejects_mismatched_cert_and_key() {
+        let (cert, _) = matching_cert_and_key();
+        let (_, other_key) = matching_cert_and_key();
+        assert!(InlineCertificateProvider::new(cert, other_key).is_err());
+    }
+
+    #[cfg(not(feature = "acme"))]
+    #[tokio::test]
+    async fn inline_provider_returns_base64_der_chain() {
+        let (cert, key) = matching_cert_and_key();
+        let provider = InlineCertificateProvider::new(cert.clone(), key).expect("provider");
+        let material = provider.signing_material().await.expect("material");
+        let chain = material.certificate_chain.expect("chain");
+        assert_eq!(chain, pem_chain_to_base64_der(&cert).expect("b64 der"));
     }
 }

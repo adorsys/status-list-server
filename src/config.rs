@@ -183,7 +183,6 @@ pub struct ServerConfig {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct CertConfig {
-    pub provisioning_strategy: String,
     pub email: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub organization: Option<String>,
@@ -203,14 +202,18 @@ pub struct CertConfig {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct CertStoreConfig {
+    /// PEM certificate chain file path.
     #[serde(default)]
     pub certificate_path: Option<String>,
+    /// PKCS#8 PEM private key file path.
     #[serde(default)]
     pub signing_key_path: Option<String>,
+    /// Inline PEM certificate chain.
     #[serde(default)]
-    pub certificate_key: Option<String>,
+    pub certificate: Option<String>,
+    /// Inline PKCS#8 PEM private key.
     #[serde(default)]
-    pub signing_key_key: Option<String>,
+    pub signing_key: Option<String>,
 }
 
 /// DNS provider used to solve ACME DNS-01 challenges
@@ -1040,13 +1043,6 @@ fn base_builder() -> Result<ConfigBuilder<DefaultState>, ConfigError> {
     ))]
     let default_db_backend = "memory";
 
-    #[cfg(feature = "acme")]
-    let (default_provisioning_strategy, default_cert_path, default_key_path) =
-        ("acme", Option::<String>::None, Option::<String>::None);
-    #[cfg(not(feature = "acme"))]
-    let (default_provisioning_strategy, default_cert_path, default_key_path) =
-        ("store", Option::<String>::None, Option::<String>::None);
-
     let telemetry_environment = match std::env::var("APP_ENV")
         .unwrap_or_default()
         .trim()
@@ -1072,10 +1068,6 @@ fn base_builder() -> Result<ConfigBuilder<DefaultState>, ConfigError> {
         .set_default("database.pool.connect_timeout_secs", 10u64)?
         .set_default("database.pool.idle_timeout_secs", 600u64)?
         .set_default("database.pool.max_lifetime_secs", 1800u64)?
-        .set_default(
-            "server.cert.provisioning_strategy",
-            default_provisioning_strategy,
-        )?
         .set_default("server.cert.email", "admin@example.com")?
         .set_default("server.cert.eku", vec![1, 3, 6, 1, 5, 5, 7, 3, 30])?
         .set_default("server.cert.organization", "adorsys GmbH & CO KG")?
@@ -1085,10 +1077,10 @@ fn base_builder() -> Result<ConfigBuilder<DefaultState>, ConfigError> {
         )?
         .set_default("server.cert.signing_key_cache_ttl", 0)?
         .set_default("server.cert.renewal_cron_schedule", "0 0 0 * * *")?
-        .set_default("server.cert.store.certificate_path", default_cert_path)?
-        .set_default("server.cert.store.signing_key_path", default_key_path)?
-        .set_default("server.cert.store.certificate_key", Option::<String>::None)?
-        .set_default("server.cert.store.signing_key_key", Option::<String>::None)?
+        .set_default("server.cert.store.certificate_path", Option::<String>::None)?
+        .set_default("server.cert.store.signing_key_path", Option::<String>::None)?
+        .set_default("server.cert.store.certificate", Option::<String>::None)?
+        .set_default("server.cert.store.signing_key", Option::<String>::None)?
         .set_default("aws.region", "us-east-1")?
         .set_default("vault.auth_method", "approle")?
         .set_default("vault.addr", "http://localhost:8200")?
@@ -1206,19 +1198,11 @@ mod tests {
             "database.url should not have a credential-bearing built-in default"
         );
         assert_eq!(config.database.backend, expected_db_backend);
-        #[cfg(feature = "acme")]
-        let (expected_strategy, expected_cert_path, expected_key_path) =
-            ("acme", Option::<String>::None, Option::<String>::None);
-        #[cfg(not(feature = "acme"))]
-        let (expected_strategy, expected_cert_path, expected_key_path) =
-            ("store", Option::<String>::None, Option::<String>::None);
-        assert_eq!(config.server.cert.provisioning_strategy, expected_strategy);
+        assert_eq!(config.server.cert.store.certificate_path, None);
+        assert_eq!(config.server.cert.store.signing_key_path, None);
+        assert_eq!(config.server.cert.store.certificate, None);
+        assert_eq!(config.server.cert.store.signing_key, None);
         assert_eq!(config.server.cert.signing_key_cache_ttl, 0);
-        assert_eq!(
-            config.server.cert.store.certificate_path,
-            expected_cert_path
-        );
-        assert_eq!(config.server.cert.store.signing_key_path, expected_key_path);
 
         assert_eq!(config.rate_limit.strict_burst_size, 10);
         assert_eq!(config.rate_limit.strict_period_secs, 60);
@@ -1272,7 +1256,6 @@ mod tests {
             ),
             ("server.cert.organization", "Test Org"),
             ("server.cert.eku", "1,3,6,1,5,5,7,3,30"),
-            ("server.cert.provisioning_strategy", "store"),
             ("server.cert.signing_key_cache_ttl", "0"),
             ("server.cert.store.certificate_path", "/certs/tls.crt"),
             ("server.cert.store.signing_key_path", "/certs/tls.key"),
@@ -1330,7 +1313,6 @@ mod tests {
             overridden.server.cert.dns_challenge_server_url.as_deref(),
             Some("http://pebble:8055")
         );
-        assert_eq!(overridden.server.cert.provisioning_strategy, "store");
         assert_eq!(overridden.server.cert.signing_key_cache_ttl, 0);
         assert_eq!(
             overridden.server.cert.store.certificate_path.as_deref(),
@@ -1997,16 +1979,16 @@ mod tests {
                 "Default config database URL references test_data: {db_url}"
             );
         }
-        if let Some(key) = default_config.server.cert.store.certificate_key.as_deref() {
+        if let Some(cert) = default_config.server.cert.store.certificate.as_deref() {
             assert!(
-                !key.contains("test_data"),
-                "Default config certificate_key references test_data: {key}"
+                !cert.contains("test_data"),
+                "Default config certificate references test_data: {cert}"
             );
         }
-        if let Some(key) = default_config.server.cert.store.signing_key_key.as_deref() {
+        if let Some(key) = default_config.server.cert.store.signing_key.as_deref() {
             assert!(
                 !key.contains("test_data"),
-                "Default config signing_key_key references test_data: {key}"
+                "Default config signing_key references test_data: {key}"
             );
         }
 

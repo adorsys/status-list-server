@@ -26,7 +26,7 @@ RUN --mount=type=cache,target=/root/.cargo/registry,id=registry-cache-${TARGETPL
     cargo install --locked --root /usr/local cargo-auditable@${CARGO_AUDITABLE_VERSION}; \
     cargo install --locked --root /usr/local rust-audit-info@${RUST_AUDIT_INFO_VERSION}
 
-ARG FEATURES="postgres,aws-secrets,acme"
+ARG FEATURES="postgres,aws"
 
 # The release profile sets strip, lto and codegen-units = 1, each of which can drop
 # .dep-v0. A missing section yields a passing scan and an empty SBOM, so this must

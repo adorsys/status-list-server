@@ -1,4 +1,4 @@
-#![cfg(feature = "aws-secrets")]
+#![cfg(feature = "aws")]
 
 //! Integration tests for the ACME certificate provisioning flow.
 //!
