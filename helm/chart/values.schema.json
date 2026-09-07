@@ -415,11 +415,19 @@
           "type": "string",
           "enum": ["slack", "discord", "teams", "mattermost", "email", "webhook", ""]
         },
+        "dashboardUrl": { "type": "string" },
+        "slack": {
+          "type": "object",
+          "properties": {
+            "channel": { "type": "string" }
+          }
+        },
         "labels": { "type": "object" },
         "existingSecret": { "type": "string" },
         "webhookUrl": { "type": "string" },
         "dmsWebhookUrl": { "type": "string" },
         "dmsEnabled": { "type": "boolean" },
+        "webhookTimeout": { "type": "string" },
         "email": {
           "type": "object",
           "properties": {
@@ -427,7 +435,9 @@
             "smtpHost": { "type": "string" },
             "smtpPort": { "type": "string" },
             "smtpFrom": { "type": "string" },
-            "requireTls": { "type": "boolean" }
+            "smtpPassword": { "type": "string" },
+            "requireTls": { "type": "boolean" },
+            "tlsConfig": { "type": "object" }
           }
         }
       }

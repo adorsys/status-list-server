@@ -153,7 +153,7 @@ EOF
 # Routing is platform-independent; receivers are platform-specific.
 
 route:
-  group_by: ['alertname', 'sli']
+  group_by: ['alertname', 'sli', 'service']
 EOF
   printf "  group_wait: %s\n  group_interval: %s\n" "$GROUP_WAIT" "$GROUP_INTERVAL"
   cat <<'EOF'

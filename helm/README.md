@@ -184,7 +184,7 @@ For local development with a local cluster, use [`chart/values-local.yaml`](char
 
 ## Alerting
 
-The chart ships an `AlertmanagerConfig` CRD (`monitoring.coreos.com/v1alpha1`) that wires
+The chart ships an `AlertmanagerConfig` CRD (`monitoring.coreos.com/v1beta1`) that wires
 SLO alerts into **kube-prometheus-stack**'s Alertmanager. This is the Kubernetes equivalent
 of the Docker Compose `ALERTMANAGER_PLATFORM` + `generate-alertmanager-config.sh` setup — the
 same six platforms are supported and no webhook URL is committed to source control.
@@ -228,8 +228,12 @@ Create or sync the Secret externally (e.g. via ESO):
 ```yaml
 # Secret keys per platform:
 #   webhook-based (discord/slack/teams/mattermost/webhook): "webhook-url"
-#   email: "email-to", "smtp-host" (host:port), "smtp-from"
+#   email SMTP auth (optional): "smtp-password"
 #   dead-man's-switch (optional for any platform): "dms-webhook-url"
+#
+# Email `to`, `smtpHost`, and `smtpFrom` are plain CRD string fields and are set
+# from `alerting.email.*` values, NOT from the Secret. Only the optional SMTP
+# password is read from the Secret (key "smtp-password") for SMTP AUTH.
 ```
 
 ### Route Tree
@@ -253,14 +257,14 @@ silently absorbed and never reaches a human channel.
 
 ### Supported Platforms
 
-| `alerting.platform` | Required Secret key                              | Notes                                                                 |
-| ------------------- | ------------------------------------------------ | --------------------------------------------------------------------- |
-| `discord`           | `webhook-url`                                    | Native `discordConfigs` receiver                                      |
-| `slack`             | `webhook-url`                                    | Native `slackConfigs` receiver (optional `alerting.slack.channel`)    |
-| `teams`             | `webhook-url`                                    | Generic `webhookConfigs` (no native Teams receiver in Alertmanager)   |
-| `mattermost`        | `webhook-url`                                    | Generic `webhookConfigs`                                              |
-| `webhook`           | `webhook-url`                                    | Generic `webhookConfigs` (standard Alertmanager JSON payload)         |
-| `email`             | `email-to`, `smtp-host` (host:port), `smtp-from` | Native `emailConfigs` receiver                                        |
+| `alerting.platform` | Required Secret key                                  | Notes                                                                                |
+| ------------------- | ---------------------------------------------------- | ------------------------------------------------------------------------------------ |
+| `discord`           | `webhook-url`                                        | Native `discordConfigs` receiver                                                     |
+| `slack`             | `webhook-url`                                        | Native `slackConfigs` receiver (optional `alerting.slack.channel`)                   |
+| `teams`             | `webhook-url`                                        | Generic `webhookConfigs` (no native Teams receiver in Alertmanager)                  |
+| `mattermost`        | `webhook-url`                                        | Generic `webhookConfigs`                                                             |
+| `webhook`           | `webhook-url`                                        | Generic `webhookConfigs` (standard Alertmanager JSON payload)                        |
+| `email`             | `smtp-password` (optional, SMTP AUTH)                | Native `emailConfigs` receiver; `to`/`smtpHost`/`smtpFrom` are plain values          |
 
 ### Prerequisites
 

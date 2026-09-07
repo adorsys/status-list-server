@@ -90,38 +90,25 @@ spec:
     - name: deadmansswitch
       {{- if or .Values.alerting.dmsWebhookUrl .Values.alerting.dmsEnabled }}
       webhookConfigs:
-        - url:
-            secretKeyRef:
-              name: {{ $secretName | quote }}
-              key: dms-webhook-url
+        - urlSecret:
+            name: {{ $secretName | quote }}
+            key: dms-webhook-url
           {{- if .Values.alerting.webhookTimeout }}
           timeout: {{ .Values.alerting.webhookTimeout | quote }}
-          {{- end }}
-          {{- if or .Values.alerting.retry.minBackoff .Values.alerting.retry.maxBackoff .Values.alerting.retry.maxRetries }}
-          httpConfig:
-            {{- if .Values.alerting.retry.minBackoff }}
-            minBackoff: {{ .Values.alerting.retry.minBackoff | quote }}
-            {{- end }}
-            {{- if .Values.alerting.retry.maxBackoff }}
-            maxBackoff: {{ .Values.alerting.retry.maxBackoff | quote }}
-            {{- end }}
-            {{- if .Values.alerting.retry.maxRetries }}
-            maxRetries: {{ .Values.alerting.retry.maxRetries }}
-            {{- end }}
           {{- end }}
           sendResolved: false
       {{- end }}
 
     # Human notification channel. Platform-specific receiver config is rendered
-    # below based on alerting.platform; credentials are always read from the Secret
-    # so no webhook URL is committed to source control.
+    # below based on alerting.platform; webhook/discord/slack credentials are
+    # read from the Secret; email endpoint details are plain values because the
+    # EmailConfig CRD defines to/smarthost/from as strings.
     - name: human
       {{- if eq $platform "discord" }}
       discordConfigs:
         - apiURL:
-            secretKeyRef:
-              name: {{ $secretName | quote }}
-              key: webhook-url
+            name: {{ $secretName | quote }}
+            key: webhook-url
           sendResolved: true
           title: |-
             {{ `{{ template "discord.default.title" . }}` }}
@@ -130,9 +117,8 @@ spec:
       {{- else if eq $platform "slack" }}
       slackConfigs:
         - apiURL:
-            secretKeyRef:
-              name: {{ $secretName | quote }}
-              key: webhook-url
+            name: {{ $secretName | quote }}
+            key: webhook-url
           {{- if and .Values.alerting.slack .Values.alerting.slack.channel }}
           channel: {{ .Values.alerting.slack.channel | quote }}
           {{- end }}
@@ -147,88 +133,45 @@ spec:
       # bridged by an intermediary; the standard Alertmanager JSON carries full
       # alert context.
       webhookConfigs:
-        - url:
-            secretKeyRef:
-              name: {{ $secretName | quote }}
-              key: webhook-url
+        - urlSecret:
+            name: {{ $secretName | quote }}
+            key: webhook-url
           {{- if .Values.alerting.webhookTimeout }}
           timeout: {{ .Values.alerting.webhookTimeout | quote }}
-          {{- end }}
-          {{- if or .Values.alerting.retry.minBackoff .Values.alerting.retry.maxBackoff .Values.alerting.retry.maxRetries }}
-          httpConfig:
-            {{- if .Values.alerting.retry.minBackoff }}
-            minBackoff: {{ .Values.alerting.retry.minBackoff | quote }}
-            {{- end }}
-            {{- if .Values.alerting.retry.maxBackoff }}
-            maxBackoff: {{ .Values.alerting.retry.maxBackoff | quote }}
-            {{- end }}
-            {{- if .Values.alerting.retry.maxRetries }}
-            maxRetries: {{ .Values.alerting.retry.maxRetries }}
-            {{- end }}
           {{- end }}
           sendResolved: true
       {{- else if eq $platform "mattermost" }}
       # Mattermost incoming webhook accepts a generic JSON POST.
       webhookConfigs:
-        - url:
-            secretKeyRef:
-              name: {{ $secretName | quote }}
-              key: webhook-url
+        - urlSecret:
+            name: {{ $secretName | quote }}
+            key: webhook-url
           {{- if .Values.alerting.webhookTimeout }}
           timeout: {{ .Values.alerting.webhookTimeout | quote }}
-          {{- end }}
-          {{- if or .Values.alerting.retry.minBackoff .Values.alerting.retry.maxBackoff .Values.alerting.retry.maxRetries }}
-          httpConfig:
-            {{- if .Values.alerting.retry.minBackoff }}
-            minBackoff: {{ .Values.alerting.retry.minBackoff | quote }}
-            {{- end }}
-            {{- if .Values.alerting.retry.maxBackoff }}
-            maxBackoff: {{ .Values.alerting.retry.maxBackoff | quote }}
-            {{- end }}
-            {{- if .Values.alerting.retry.maxRetries }}
-            maxRetries: {{ .Values.alerting.retry.maxRetries }}
-            {{- end }}
           {{- end }}
           sendResolved: true
       {{- else if eq $platform "webhook" }}
       # Generic endpoint accepting Alertmanager's standard JSON notification payload.
       webhookConfigs:
-        - url:
-            secretKeyRef:
-              name: {{ $secretName | quote }}
-              key: webhook-url
+        - urlSecret:
+            name: {{ $secretName | quote }}
+            key: webhook-url
           {{- if .Values.alerting.webhookTimeout }}
           timeout: {{ .Values.alerting.webhookTimeout | quote }}
-          {{- end }}
-          {{- if or .Values.alerting.retry.minBackoff .Values.alerting.retry.maxBackoff .Values.alerting.retry.maxRetries }}
-          httpConfig:
-            {{- if .Values.alerting.retry.minBackoff }}
-            minBackoff: {{ .Values.alerting.retry.minBackoff | quote }}
-            {{- end }}
-            {{- if .Values.alerting.retry.maxBackoff }}
-            maxBackoff: {{ .Values.alerting.retry.maxBackoff | quote }}
-            {{- end }}
-            {{- if .Values.alerting.retry.maxRetries }}
-            maxRetries: {{ .Values.alerting.retry.maxRetries }}
-            {{- end }}
           {{- end }}
           sendResolved: true
       {{- else if eq $platform "email" }}
       emailConfigs:
-        - to:
-            secretKeyRef:
-              name: {{ $secretName | quote }}
-              key: email-to
+        - to: {{ .Values.alerting.email.to | quote }}
+          from: {{ .Values.alerting.email.smtpFrom | quote }}
+          smarthost: {{ printf "%s:%s" .Values.alerting.email.smtpHost (.Values.alerting.email.smtpPort | default "587" | toString) | quote }}
           sendResolved: true
-          smarthost:
-            secretKeyRef:
-              name: {{ $secretName | quote }}
-              key: smtp-host
-          from:
-            secretKeyRef:
-              name: {{ $secretName | quote }}
-              key: smtp-from
           requireTLS: {{ .Values.alerting.email.requireTls | default true }}
+          {{- if .Values.alerting.email.smtpPassword }}
+          authPassword:
+            name: {{ $secretName | quote }}
+            key: smtp-password
+          {{- end }}
           {{- if .Values.alerting.email.tlsConfig }}
           tlsConfig:
             {{- toYaml .Values.alerting.email.tlsConfig | nindent 12 }}
