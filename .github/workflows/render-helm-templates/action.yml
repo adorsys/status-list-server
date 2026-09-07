@@ -569,7 +569,7 @@ runs:
           echo "ERROR: alerting.enabled=true without existingSecret must render Secret"; exit 1
         fi
 
-        # Email platform renders combined smtp-host (host:port).
+        # Email platform renders to/from/smarthost as plain CRD strings (host:port).
         helm template status-list-server helm/chart \
           --set alerting.enabled=true \
           --set alerting.platform=email \
@@ -578,6 +578,12 @@ runs:
           --set-string alerting.email.smtpPort=587 \
           --set alerting.email.smtpFrom=alerts@example.com \
           --output-dir /tmp/rendered/alerting-email
-        if ! grep -q 'smtp-host: "smtp.example.com:587"' /tmp/rendered/alerting-email/status-list-server/templates/alerting-secret.yaml; then
-          echo "ERROR: alerting.platform=email Secret must format smtp-host as host:port"; exit 1
+        if ! grep -q 'smarthost: "smtp.example.com:587"' /tmp/rendered/alerting-email/status-list-server/templates/alertmanagerconfig.yaml; then
+          echo "ERROR: alerting.platform=email must render smarthost as host:port in AlertmanagerConfig"; exit 1
+        fi
+        if ! grep -q 'to: "ops@example.com"' /tmp/rendered/alerting-email/status-list-server/templates/alertmanagerconfig.yaml; then
+          echo "ERROR: alerting.platform=email must render `to` as a plain string in AlertmanagerConfig"; exit 1
+        fi
+        if grep -Eq 'email-to|smtp-host|smtp-from' /tmp/rendered/alerting-email/status-list-server/templates/alerting-secret.yaml; then
+          echo "ERROR: email to/smarthost/from must NOT be stored in the Secret (they are plain CRD strings)"; exit 1
         fi
