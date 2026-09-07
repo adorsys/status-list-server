@@ -299,10 +299,10 @@ jobs:
         # No FEATURES build-arg: the Dockerfile default is already the release set, and
         # a second copy would drift.
         #
-        # No gha cache: CI.yml has no `push:` trigger, so nothing ever writes the base
-        # branch's cache scope and `cache-from` cannot hit. `cache-to` would still
-        # write GBs per pull request into per-branch scopes, evicting the cargo caches
-        # the other jobs do hit.
+        # No gha cache: Docker layer caching is intentionally disabled to avoid cache
+        # bloat. The cargo build cache is shared across jobs; Docker layer caching
+        # would add ~2GB per run without significant benefit for this smoke build,
+        # evicting the cargo caches the other jobs rely on.
         run: docker build .
 
   cargo-clippy:
