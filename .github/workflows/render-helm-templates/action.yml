@@ -569,7 +569,8 @@ runs:
           echo "ERROR: alerting.enabled=true without existingSecret must render Secret"; exit 1
         fi
 
-        # Email platform renders to/from/smarthost as plain CRD strings (host:port).
+        # Email platform renders to/from/smarthost as plain CRD strings (host:port),
+        # stores only the optional SMTP password in the Secret.
         helm template status-list-server helm/chart \
           --set alerting.enabled=true \
           --set alerting.platform=email \
@@ -577,6 +578,7 @@ runs:
           --set alerting.email.smtpHost=smtp.example.com \
           --set-string alerting.email.smtpPort=587 \
           --set alerting.email.smtpFrom=alerts@example.com \
+          --set alerting.email.smtpPassword=secretpw \
           --output-dir /tmp/rendered/alerting-email
         if ! grep -q 'smarthost: "smtp.example.com:587"' /tmp/rendered/alerting-email/status-list-server/templates/alertmanagerconfig.yaml; then
           echo "ERROR: alerting.platform=email must render smarthost as host:port in AlertmanagerConfig"; exit 1
@@ -584,6 +586,26 @@ runs:
         if ! grep -q 'to: "ops@example.com"' /tmp/rendered/alerting-email/status-list-server/templates/alertmanagerconfig.yaml; then
           echo "ERROR: alerting.platform=email must render `to` as a plain string in AlertmanagerConfig"; exit 1
         fi
+        if ! grep -q 'smtp-password: "secretpw"' /tmp/rendered/alerting-email/status-list-server/templates/alerting-secret.yaml; then
+          echo "ERROR: alerting.platform=email must store the SMTP password in the Secret"; exit 1
+        fi
         if grep -Eq 'email-to|smtp-host|smtp-from' /tmp/rendered/alerting-email/status-list-server/templates/alerting-secret.yaml; then
           echo "ERROR: email to/smarthost/from must NOT be stored in the Secret (they are plain CRD strings)"; exit 1
+        fi
+        # Email without smtpPassword/dmsWebhookUrl must NOT render an empty Secret.
+        if helm template status-list-server helm/chart \
+            --set alerting.enabled=true \
+            --set alerting.platform=email \
+            --set alerting.email.to=ops@example.com \
+            --set alerting.email.smtpHost=smtp.example.com \
+            --set alerting.email.smtpFrom=alerts@example.com \
+          | grep -q 'kind: Secret' && \
+            helm template status-list-server helm/chart \
+            --set alerting.enabled=true \
+            --set alerting.platform=email \
+            --set alerting.email.to=ops@example.com \
+            --set alerting.email.smtpHost=smtp.example.com \
+            --set alerting.email.smtpFrom=alerts@example.com \
+          | grep -q -- '-alerting'; then
+          echo "ERROR: email without smtpPassword/dmsWebhookUrl must not render an empty alerting Secret"; exit 1
         fi
