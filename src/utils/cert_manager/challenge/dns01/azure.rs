@@ -1,4 +1,3 @@
-use std::fmt;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -19,64 +18,25 @@ use crate::cert_manager::challenge::ChallengeError;
 use crate::outbound::azure_identity::DefaultAzureCredential;
 
 const PROVIDER: &str = "azure";
-const DEFAULT_LOGIN_BASE: &str = "https://login.microsoftonline.com";
 const DEFAULT_API_BASE: &str = "https://management.azure.com";
 const API_VERSION: &str = "2018-05-01";
 
-/// A DNS provider for Azure DNS, authenticated with a service principal.
+/// A DNS provider for Azure DNS, authenticated with DefaultAzureCredential.
 ///
-/// The service principal needs the `DNS Zone Contributor` role on the
-/// resource group holding the zones. Azure documents that record changes
+/// The resolved identity needs the `DNS Zone Contributor` role on the resource
+/// group holding the zones. Azure documents that record changes
 /// reach its authoritative name servers typically within 60 seconds and
 /// offers no change-status API to poll, so `create_txt_record` waits a
 /// fixed settle delay after a successful change.
 pub struct AzureDnsProvider {
     client: Client,
-    token_source: Box<dyn AzureAccessTokenProvider>,
+    credential: Arc<dyn TokenCredential>,
+    token_cache: TokenCache,
     subscription_id: String,
     resource_group: String,
-    login_base: String,
     api_base: String,
     propagation_delay: Duration,
     zones: RwLock<Option<Vec<ZoneInfo>>>,
-}
-
-pub struct ServicePrincipal {
-    pub tenant_id: String,
-    pub client_id: String,
-    pub client_secret: SecretString,
-}
-
-#[async_trait]
-trait AzureAccessTokenProvider: Send + Sync {
-    async fn access_token(
-        &self,
-        client: &Client,
-        login_base: &str,
-        api_base: &str,
-    ) -> Result<SecretString, ChallengeError>;
-}
-
-impl fmt::Debug for dyn AzureAccessTokenProvider {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("<azure_access_token_provider>")
-    }
-}
-
-struct ServicePrincipalTokenSource {
-    credentials: ServicePrincipal,
-    token_cache: TokenCache,
-}
-
-struct AmbientTokenSource {
-    credential: Arc<dyn TokenCredential>,
-    token_cache: TokenCache,
-}
-
-#[derive(Deserialize)]
-struct TokenResponse {
-    access_token: String,
-    expires_in: u64,
 }
 
 #[derive(Deserialize)]
@@ -136,71 +96,62 @@ impl AzureDnsProvider {
     const CONFLICT_RETRIES: u32 = 3;
 
     pub fn new(
-        credentials: ServicePrincipal,
-        subscription_id: impl Into<String>,
-        resource_group: impl Into<String>,
-    ) -> Self {
-        Self {
-            client: http_client(),
-            token_source: Box::new(ServicePrincipalTokenSource {
-                credentials,
-                token_cache: TokenCache::new(),
-            }),
-            subscription_id: subscription_id.into(),
-            resource_group: resource_group.into(),
-            login_base: DEFAULT_LOGIN_BASE.to_string(),
-            api_base: DEFAULT_API_BASE.to_string(),
-            propagation_delay: Self::PROPAGATION_DELAY,
-            zones: RwLock::new(None),
-        }
-    }
-
-    /// Create a provider from Azure managed identity / workload identity federation.
-    pub fn from_ambient_credentials(
         subscription_id: impl Into<String>,
         resource_group: impl Into<String>,
     ) -> Result<Self, ChallengeError> {
         let credential = DefaultAzureCredential::new().map_err(|e| {
             dns_err(eyre!(
-                "Failed to initialize Azure DNS ambient credential chain. \
-                 Configure AKS Workload Identity, managed identity, or Azure CLI auth. \
+                "Failed to initialize Azure DNS credential chain. \
+                 Configure AZURE_TENANT_ID/AZURE_CLIENT_ID/AZURE_CLIENT_SECRET, \
+                 AKS Workload Identity, managed identity, or Azure CLI auth. \
                  Details: {e}"
             ))
         })?;
         Ok(Self::from_token_provider(
-            Box::new(AmbientTokenSource {
-                credential,
-                token_cache: TokenCache::new(),
-            }),
+            credential,
             subscription_id,
             resource_group,
         ))
     }
 
+    #[cfg(test)]
     fn from_token_provider(
-        token_source: Box<dyn AzureAccessTokenProvider>,
+        credential: Arc<dyn TokenCredential>,
         subscription_id: impl Into<String>,
         resource_group: impl Into<String>,
     ) -> Self {
         Self {
             client: http_client(),
-            token_source,
+            credential,
+            token_cache: TokenCache::new(),
             subscription_id: subscription_id.into(),
             resource_group: resource_group.into(),
-            login_base: DEFAULT_LOGIN_BASE.to_string(),
             api_base: DEFAULT_API_BASE.to_string(),
             propagation_delay: Self::PROPAGATION_DELAY,
             zones: RwLock::new(None),
         }
     }
 
-    /// Override the login and API base URLs (used in tests)
-    pub fn with_base_urls(
-        mut self,
-        login_base: impl Into<String>,
-        api_base: impl Into<String>,
+    #[cfg(not(test))]
+    fn from_token_provider(
+        credential: Arc<dyn TokenCredential>,
+        subscription_id: impl Into<String>,
+        resource_group: impl Into<String>,
     ) -> Self {
-        self.login_base = login_base.into().trim_end_matches('/').to_string();
+        Self {
+            client: http_client(),
+            credential,
+            token_cache: TokenCache::new(),
+            subscription_id: subscription_id.into(),
+            resource_group: resource_group.into(),
+            api_base: DEFAULT_API_BASE.to_string(),
+            propagation_delay: Self::PROPAGATION_DELAY,
+            zones: RwLock::new(None),
+        }
+    }
+
+    /// Override the API base URL (used in tests)
+    pub fn with_api_base(mut self, api_base: impl Into<String>) -> Self {
         self.api_base = api_base.into().trim_end_matches('/').to_string();
         self
     }
@@ -212,71 +163,7 @@ impl AzureDnsProvider {
     }
 
     async fn access_token(&self) -> Result<SecretString, ChallengeError> {
-        self.token_source
-            .access_token(&self.client, &self.login_base, &self.api_base)
-            .await
-    }
-}
-
-#[async_trait]
-impl AzureAccessTokenProvider for ServicePrincipalTokenSource {
-    async fn access_token(
-        &self,
-        client: &Client,
-        login_base: &str,
-        api_base: &str,
-    ) -> Result<SecretString, ChallengeError> {
-        self.token_cache
-            .get_or_mint(|| async {
-                let url = format!(
-                    "{}/{}/oauth2/v2.0/token",
-                    login_base, self.credentials.tenant_id
-                );
-                let scope = format!("{}/.default", api_base);
-                let response = client
-                    .post(&url)
-                    .form(&[
-                        ("grant_type", "client_credentials"),
-                        ("client_id", &self.credentials.client_id),
-                        (
-                            "client_secret",
-                            self.credentials.client_secret.expose_secret(),
-                        ),
-                        ("scope", &scope),
-                    ])
-                    .send()
-                    .await
-                    .map_err(dns_err)?;
-                let status = response.status();
-                if !status.is_success() {
-                    let body = response.text().await.unwrap_or_default();
-                    return Err(dns_err(eyre!(
-                        "Azure DNS service-principal token request failed \
-                         (status {status}): {body}"
-                    )));
-                }
-                let token: TokenResponse = response
-                    .json()
-                    .await
-                    .map_err(|e| dns_err(eyre!("Invalid token response: {e}")))?;
-                Ok((
-                    token.access_token.into(),
-                    Duration::from_secs(token.expires_in),
-                ))
-            })
-            .await
-    }
-}
-
-#[async_trait]
-impl AzureAccessTokenProvider for AmbientTokenSource {
-    async fn access_token(
-        &self,
-        _client: &Client,
-        _login_base: &str,
-        api_base: &str,
-    ) -> Result<SecretString, ChallengeError> {
-        let scope = format!("{}/.default", api_base);
+        let scope = format!("{}/.default", self.api_base);
         self.token_cache
             .get_or_mint(|| async {
                 let token = self
@@ -285,8 +172,9 @@ impl AzureAccessTokenProvider for AmbientTokenSource {
                     .await
                     .map_err(|e| {
                         dns_err(eyre!(
-                            "Failed to acquire Azure DNS ambient access token. Verify AKS \
-                             Workload Identity, managed identity endpoint, or Azure CLI login. \
+                            "Failed to acquire Azure DNS access token. Verify AZURE_* \
+                             environment credentials, AKS Workload Identity, managed identity \
+                             endpoint, or Azure CLI login. \
                              Details: {e}"
                         ))
                     })?;
@@ -579,7 +467,6 @@ impl DnsProvider for AzureDnsProvider {
 mod tests {
     use super::*;
     use azure_core::credentials::Secret as AzureSecret;
-    use color_eyre::eyre::eyre;
     use serde_json::json;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use time::OffsetDateTime;
@@ -588,22 +475,6 @@ mod tests {
 
     const ZONES_PATH: &str =
         "/subscriptions/sub-1/resourceGroups/rg-1/providers/Microsoft.Network/dnsZones";
-
-    struct FakeAzureTokenSource(Result<SecretString, &'static str>);
-
-    #[async_trait]
-    impl AzureAccessTokenProvider for FakeAzureTokenSource {
-        async fn access_token(
-            &self,
-            _client: &Client,
-            _login_base: &str,
-            _api_base: &str,
-        ) -> Result<SecretString, ChallengeError> {
-            self.0
-                .clone()
-                .map_err(|msg| dns_err(eyre!("fake ambient token failure: {msg}")))
-        }
-    }
 
     #[derive(Debug)]
     struct StaticAzureCredential;
@@ -660,42 +531,9 @@ mod tests {
     }
 
     fn provider(server: &MockServer) -> AzureDnsProvider {
-        AzureDnsProvider::new(
-            ServicePrincipal {
-                tenant_id: "tenant-1".into(),
-                client_id: "client-1".into(),
-                client_secret: "secret".into(),
-            },
-            "sub-1",
-            "rg-1",
-        )
-        .with_base_urls(server.uri(), server.uri())
-        .with_propagation_delay(Duration::ZERO)
-    }
-
-    fn ambient_provider(
-        server: &MockServer,
-        token: Result<SecretString, &'static str>,
-    ) -> AzureDnsProvider {
-        AzureDnsProvider::from_token_provider(
-            Box::new(FakeAzureTokenSource(token)),
-            "sub-1",
-            "rg-1",
-        )
-        .with_base_urls(server.uri(), server.uri())
-        .with_propagation_delay(Duration::ZERO)
-    }
-
-    async fn mount_token_mock(server: &MockServer, expected_mints: u64) {
-        Mock::given(method("POST"))
-            .and(path("/tenant-1/oauth2/v2.0/token"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                "access_token": "azure-token",
-                "expires_in": 3600,
-            })))
-            .expect(expected_mints)
-            .mount(server)
-            .await;
+        AzureDnsProvider::from_token_provider(Arc::new(StaticAzureCredential), "sub-1", "rg-1")
+            .with_api_base(server.uri())
+            .with_propagation_delay(Duration::ZERO)
     }
 
     async fn mount_zone_mock(server: &MockServer) {
@@ -712,7 +550,6 @@ mod tests {
     #[tokio::test]
     async fn creates_record_merging_existing_values() {
         let server = MockServer::start().await;
-        mount_token_mock(&server, 1).await;
         mount_zone_mock(&server).await;
         let record_path = format!("{ZONES_PATH}/example.com/TXT/_acme-challenge.status");
         Mock::given(method("GET"))
@@ -742,7 +579,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn ambient_token_source_drives_dns_requests() {
+    async fn default_credential_token_drives_dns_requests() {
         let server = MockServer::start().await;
         mount_zone_mock(&server).await;
         let record_path = format!("{ZONES_PATH}/example.com/TXT/_acme-challenge.status");
@@ -761,40 +598,32 @@ mod tests {
             .mount(&server)
             .await;
 
-        ambient_provider(&server, Ok("ambient-azure-token".into()))
+        provider(&server)
             .create_txt_record("status.example.com", "digest-value")
             .await
             .unwrap();
     }
 
     #[tokio::test]
-    async fn azure_token_credential_can_back_ambient_source() {
-        let token = AmbientTokenSource {
-            credential: Arc::new(StaticAzureCredential),
-            token_cache: TokenCache::new(),
-        }
-        .access_token(&http_client(), DEFAULT_LOGIN_BASE, DEFAULT_API_BASE)
-        .await
-        .unwrap();
+    async fn azure_token_credential_can_back_provider() {
+        let token =
+            AzureDnsProvider::from_token_provider(Arc::new(StaticAzureCredential), "sub-1", "rg-1")
+                .access_token()
+                .await
+                .unwrap();
 
         assert_eq!(token.expose_secret(), "ambient-azure-token");
     }
 
     #[tokio::test]
-    async fn ambient_token_source_caches_acquired_tokens() {
+    async fn token_cache_reuses_default_credential_tokens() {
         let credential = Arc::new(CountingAzureCredential {
             calls: AtomicUsize::new(0),
         });
-        let token_source = AmbientTokenSource {
-            credential: credential.clone(),
-            token_cache: TokenCache::new(),
-        };
+        let provider = AzureDnsProvider::from_token_provider(credential.clone(), "sub-1", "rg-1");
 
         for _ in 0..3 {
-            let token = token_source
-                .access_token(&http_client(), DEFAULT_LOGIN_BASE, DEFAULT_API_BASE)
-                .await
-                .unwrap();
+            let token = provider.access_token().await.unwrap();
             assert_eq!(token.expose_secret(), "cached-ambient-azure-token");
         }
 
@@ -802,12 +631,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn ambient_token_source_fetch_failure_is_redacted_and_actionable() {
-        let err = AmbientTokenSource {
-            credential: Arc::new(FailingAzureCredential),
-            token_cache: TokenCache::new(),
-        }
-        .access_token(&http_client(), DEFAULT_LOGIN_BASE, DEFAULT_API_BASE)
+    async fn default_credential_failure_is_redacted_and_actionable() {
+        let err = AzureDnsProvider::from_token_provider(
+            Arc::new(FailingAzureCredential),
+            "sub-1",
+            "rg-1",
+        )
+        .access_token()
         .await
         .unwrap_err();
 
@@ -815,7 +645,7 @@ mod tests {
             ChallengeError::Dns { provider, source } => {
                 assert_eq!(provider, "azure");
                 let msg = source.to_string();
-                assert!(msg.contains("Failed to acquire Azure DNS ambient access token"));
+                assert!(msg.contains("Failed to acquire Azure DNS access token"));
                 assert!(msg.contains("Workload Identity"));
                 assert!(msg.contains("managed identity"));
                 assert!(msg.contains("identity endpoint unavailable"));
@@ -827,29 +657,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn ambient_token_failure_is_redacted_and_actionable() {
-        let server = MockServer::start().await;
-        let err = ambient_provider(&server, Err("identity endpoint unavailable"))
-            .create_txt_record("status.example.com", "digest-value")
-            .await
-            .unwrap_err();
-        match err {
-            ChallengeError::Dns { provider, source } => {
-                assert_eq!(provider, "azure");
-                let msg = source.to_string();
-                assert!(msg.contains("ambient token failure"));
-                assert!(msg.contains("identity endpoint unavailable"));
-                assert!(!msg.contains("client_secret"));
-                assert!(!msg.contains("password"));
-            }
-            other => panic!("Unexpected error: {other:?}"),
-        }
-    }
-
-    #[tokio::test]
     async fn creates_record_when_none_exists() {
         let server = MockServer::start().await;
-        mount_token_mock(&server, 1).await;
         mount_zone_mock(&server).await;
         let record_path = format!("{ZONES_PATH}/example.com/TXT/_acme-challenge.status");
         Mock::given(method("GET"))
@@ -878,7 +687,6 @@ mod tests {
     #[tokio::test]
     async fn delete_removes_record_set_when_last_value() {
         let server = MockServer::start().await;
-        mount_token_mock(&server, 1).await;
         mount_zone_mock(&server).await;
         let record_path = format!("{ZONES_PATH}/example.com/TXT/_acme-challenge.status");
         Mock::given(method("GET"))
@@ -904,7 +712,6 @@ mod tests {
     #[tokio::test]
     async fn delete_is_a_no_op_when_record_absent() {
         let server = MockServer::start().await;
-        mount_token_mock(&server, 1).await;
         mount_zone_mock(&server).await;
         let record_path = format!("{ZONES_PATH}/example.com/TXT/_acme-challenge.status");
         Mock::given(method("GET"))
@@ -925,7 +732,6 @@ mod tests {
     #[tokio::test]
     async fn retries_on_etag_conflict() {
         let server = MockServer::start().await;
-        mount_token_mock(&server, 1).await;
         mount_zone_mock(&server).await;
         let record_path = format!("{ZONES_PATH}/example.com/TXT/_acme-challenge.status");
         Mock::given(method("GET"))
@@ -965,7 +771,6 @@ mod tests {
     #[tokio::test]
     async fn lists_zones_across_pages() {
         let server = MockServer::start().await;
-        mount_token_mock(&server, 1).await;
         Mock::given(method("GET"))
             .and(path(ZONES_PATH))
             .and(query_param("api-version", API_VERSION))
@@ -1002,23 +807,18 @@ mod tests {
 
     #[tokio::test]
     async fn surfaces_api_errors_with_provider_name() {
-        let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(path("/tenant-1/oauth2/v2.0/token"))
-            .respond_with(ResponseTemplate::new(401).set_body_json(json!({
-                "error": "invalid_client",
-            })))
-            .mount(&server)
-            .await;
-
-        let err = provider(&server)
-            .create_txt_record("status.example.com", "digest-value")
-            .await
-            .unwrap_err();
+        let err = AzureDnsProvider::from_token_provider(
+            Arc::new(FailingAzureCredential),
+            "sub-1",
+            "rg-1",
+        )
+        .create_txt_record("status.example.com", "digest-value")
+        .await
+        .unwrap_err();
         match err {
             ChallengeError::Dns { provider, source } => {
                 assert_eq!(provider, "azure");
-                assert!(source.to_string().contains("invalid_client"));
+                assert!(source.to_string().contains("identity endpoint unavailable"));
             }
             other => panic!("Unexpected error: {other:?}"),
         }

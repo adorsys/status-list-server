@@ -14,13 +14,7 @@ use color_eyre::eyre::Result as EyeResult;
 use sea_orm::{ConnectOptions, DbErr};
 #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mysql"))]
 use sea_orm_migration::MigratorTrait;
-#[cfg(any(
-    feature = "gcp",
-    feature = "vault",
-    feature = "sqlite",
-    feature = "postgres",
-    feature = "mysql"
-))]
+#[cfg(any(feature = "sqlite", feature = "postgres", feature = "mysql"))]
 use secrecy::ExposeSecret;
 use std::sync::Arc;
 use std::time::Duration;
@@ -29,14 +23,14 @@ use tracing::warn;
 
 #[cfg(feature = "aws")]
 use crate::cert_manager::challenge::AwsRoute53DnsProvider;
+#[cfg(all(feature = "acme", feature = "azure"))]
+use crate::cert_manager::challenge::AzureDnsProvider;
 #[cfg(all(feature = "acme", feature = "gcp"))]
 use crate::cert_manager::challenge::GoogleCloudDnsProvider;
 #[cfg(feature = "acme")]
 use crate::cert_manager::challenge::{
     AcmeDnsCredentials, AcmeDnsProvider, CloudflareDnsProvider, Dns01Handler, PebbleDnsProvider,
 };
-#[cfg(all(feature = "acme", feature = "azure"))]
-use crate::cert_manager::challenge::{AzureDnsProvider, ServicePrincipal};
 #[cfg(feature = "acme")]
 use crate::cert_manager::http_client::DefaultHttpClient;
 #[cfg(all(
@@ -52,13 +46,9 @@ use crate::cert_manager::{
     CertManager,
     storage::{CryptoCachePolicy, Storage},
 };
-#[cfg(all(feature = "acme", feature = "azure"))]
-use crate::config::AzureDnsAuth;
 use crate::config::{Config as AppConfig, DatabaseBackend};
 #[cfg(feature = "acme")]
 use crate::config::{DnsProviderKind, ENV_DEVELOPMENT, ENV_PRODUCTION, ResolvedDnsProvider};
-#[cfg(all(feature = "acme", feature = "gcp"))]
-use crate::config::{GcloudDnsAuth, GcloudKeySource};
 use crate::domain::{
     ports::{CertificateProvider, CredentialRepo, StatusListRepo, StatusListSnapshotRepo},
     service::Service,
@@ -815,25 +805,8 @@ async fn build_dns_challenge_handler(
             Dns01Handler::new(CloudflareDnsProvider::new(cfg.api_token.clone()))
         }
         #[cfg(feature = "gcp")]
-        ResolvedDnsProvider::Gcloud(auth) => {
-            let provider = match auth {
-                GcloudDnsAuth::ServiceAccount(key) => {
-                    let key_json = match key {
-                        GcloudKeySource::Inline(key) => key.expose_secret().to_string(),
-                        GcloudKeySource::Path(path) => tokio::fs::read_to_string(path)
-                            .await
-                            .wrap_err_with(|| {
-                                format!(
-                                    "Failed to read Google Cloud DNS service account key file at {path}"
-                                )
-                            })?,
-                    };
-                    GoogleCloudDnsProvider::from_service_account_key(&key_json)?
-                }
-                GcloudDnsAuth::Ambient { project_id } => {
-                    GoogleCloudDnsProvider::from_ambient_credentials(project_id)?
-                }
-            };
+        ResolvedDnsProvider::Gcloud(cfg) => {
+            let provider = GoogleCloudDnsProvider::new(&cfg.project_id)?;
             Dns01Handler::new(provider)
         }
         #[cfg(not(feature = "gcp"))]
@@ -843,28 +816,11 @@ async fn build_dns_challenge_handler(
             ));
         }
         #[cfg(feature = "azure")]
-        ResolvedDnsProvider::Azure(auth) => match auth {
-            AzureDnsAuth::ServicePrincipal(cfg) => Dns01Handler::new(AzureDnsProvider::new(
-                ServicePrincipal {
-                    tenant_id: cfg.tenant_id.as_ref().expect("validated tenant_id").clone(),
-                    client_id: cfg.client_id.as_ref().expect("validated client_id").clone(),
-                    client_secret: cfg
-                        .client_secret
-                        .as_ref()
-                        .expect("validated client_secret")
-                        .clone(),
-                },
-                &cfg.subscription_id,
-                &cfg.resource_group,
-            )),
-            AzureDnsAuth::Ambient(cfg) => Dns01Handler::new(
-                AzureDnsProvider::from_ambient_credentials(
-                    &cfg.subscription_id,
-                    &cfg.resource_group,
-                )
-                .wrap_err("Invalid Azure DNS ambient credential configuration")?,
-            ),
-        },
+        ResolvedDnsProvider::Azure(cfg) => {
+            let provider = AzureDnsProvider::new(&cfg.subscription_id, &cfg.resource_group)
+                .wrap_err("Invalid Azure DNS credential configuration")?;
+            Dns01Handler::new(provider)
+        }
         #[cfg(not(feature = "azure"))]
         ResolvedDnsProvider::Azure(_) => {
             return Err(color_eyre::eyre::eyre!(
@@ -945,10 +901,6 @@ mod tests {
         );
 
         config.server.cert.dns.azure = Some(AzureDnsConfig {
-            auth_mode: None,
-            tenant_id: Some("tenant".into()),
-            client_id: Some("client".into()),
-            client_secret: Some("secret".into()),
             subscription_id: "sub".into(),
             resource_group: "rg".into(),
         });
@@ -965,17 +917,8 @@ mod tests {
             build_dns_challenge_handler(DnsProviderKind::Acmedns, &mut config, &domains).is_ok()
         );
 
-        let key_json = serde_json::json!({
-            "client_email": "acme@test-project.iam.gserviceaccount.com",
-            "private_key": include_str!("../test_data/gcloud_test_key.dummy.pem"),
-            "token_uri": "https://oauth2.googleapis.com/token",
-            "project_id": "test-project",
-        });
         config.server.cert.dns.gcloud = Some(GcloudDnsConfig {
-            auth_mode: None,
-            project_id: None,
-            service_account_key: Some(key_json.to_string().into()),
-            service_account_key_path: None,
+            project_id: "test-project".into(),
         });
         assert!(
             build_dns_challenge_handler(DnsProviderKind::Gcloud, &mut config, &domains).is_ok()

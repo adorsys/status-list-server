@@ -65,7 +65,6 @@ statuslist:
     tag: "1.2.0-gcp"
   env:
     APP_SERVER__CERT__DNS__PROVIDER: "gcloud"
-    APP_SERVER__CERT__DNS__GCLOUD__AUTH_MODE: "ambient"
     APP_SERVER__CERT__DNS__GCLOUD__PROJECT_ID: "dns-project-id"
 serviceAccount:
   create: true
@@ -89,7 +88,6 @@ statuslist:
     azure.workload.identity/use: "true"
   env:
     APP_SERVER__CERT__DNS__PROVIDER: "azure"
-    APP_SERVER__CERT__DNS__AZURE__AUTH_MODE: "ambient"
     APP_SERVER__CERT__DNS__AZURE__SUBSCRIPTION_ID: "subscription-id"
     APP_SERVER__CERT__DNS__AZURE__RESOURCE_GROUP: "dns-resource-group"
 serviceAccount:

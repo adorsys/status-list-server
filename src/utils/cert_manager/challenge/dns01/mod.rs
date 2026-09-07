@@ -12,7 +12,7 @@ mod token;
 
 pub use acme_dns::{AcmeDnsCredentials, AcmeDnsProvider};
 #[cfg(feature = "azure")]
-pub use azure::{AzureDnsProvider, ServicePrincipal};
+pub use azure::AzureDnsProvider;
 pub use cloudflare::CloudflareDnsProvider;
 #[cfg(feature = "gcp")]
 pub use gcloud::GoogleCloudDnsProvider;

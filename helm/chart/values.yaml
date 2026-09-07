@@ -89,11 +89,9 @@ statuslist:
     # See docs/dns-providers.md for the settings each provider needs.
     # GKE Workload Identity example:
     #   APP_SERVER__CERT__DNS__PROVIDER: "gcloud"
-    #   APP_SERVER__CERT__DNS__GCLOUD__AUTH_MODE: "ambient"
     #   APP_SERVER__CERT__DNS__GCLOUD__PROJECT_ID: "dns-project-id"
     # AKS Workload Identity / managed identity example:
     #   APP_SERVER__CERT__DNS__PROVIDER: "azure"
-    #   APP_SERVER__CERT__DNS__AZURE__AUTH_MODE: "ambient"
     #   APP_SERVER__CERT__DNS__AZURE__SUBSCRIPTION_ID: "subscription-id"
     #   APP_SERVER__CERT__DNS__AZURE__RESOURCE_GROUP: "dns-resource-group"
     # Provider credentials (e.g. APP_SERVER__CERT__DNS__CLOUDFLARE__API_TOKEN, or the

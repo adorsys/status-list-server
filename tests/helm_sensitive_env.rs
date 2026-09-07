@@ -264,8 +264,6 @@ fn rendered_chart_supports_gke_workload_identity_dns_example() {
         "--set",
         "statuslist.env.APP_SERVER__CERT__DNS__PROVIDER=gcloud",
         "--set",
-        "statuslist.env.APP_SERVER__CERT__DNS__GCLOUD__AUTH_MODE=ambient",
-        "--set",
         "statuslist.env.APP_SERVER__CERT__DNS__GCLOUD__PROJECT_ID=dns-project-id",
         "--set",
         "serviceAccount.annotations.iam\\.gke\\.io/gcp-service-account=status-list-server@dns-project-id.iam.gserviceaccount.com",
@@ -277,7 +275,6 @@ fn rendered_chart_supports_gke_workload_identity_dns_example() {
         "image: \"ghcr.io/adorsys/status-list-server:1.2.0-gcp\"",
         "iam.gke.io/gcp-service-account: status-list-server@dns-project-id.iam.gserviceaccount.com",
         "name: APP_SERVER__CERT__DNS__PROVIDER\n              value: \"gcloud\"",
-        "name: APP_SERVER__CERT__DNS__GCLOUD__AUTH_MODE\n              value: \"ambient\"",
         "name: APP_SERVER__CERT__DNS__GCLOUD__PROJECT_ID\n              value: \"dns-project-id\"",
     ] {
         assert!(
@@ -297,8 +294,6 @@ fn rendered_chart_supports_aks_workload_identity_dns_example() {
         "--set",
         "statuslist.env.APP_SERVER__CERT__DNS__PROVIDER=azure",
         "--set",
-        "statuslist.env.APP_SERVER__CERT__DNS__AZURE__AUTH_MODE=ambient",
-        "--set",
         "statuslist.env.APP_SERVER__CERT__DNS__AZURE__SUBSCRIPTION_ID=subscription-id",
         "--set",
         "statuslist.env.APP_SERVER__CERT__DNS__AZURE__RESOURCE_GROUP=dns-resource-group",
@@ -313,7 +308,6 @@ fn rendered_chart_supports_aks_workload_identity_dns_example() {
         "azure.workload.identity/use: \"true\"",
         "azure.workload.identity/client-id: 00000000-0000-0000-0000-000000000000",
         "name: APP_SERVER__CERT__DNS__PROVIDER\n              value: \"azure\"",
-        "name: APP_SERVER__CERT__DNS__AZURE__AUTH_MODE\n              value: \"ambient\"",
         "name: APP_SERVER__CERT__DNS__AZURE__SUBSCRIPTION_ID\n              value: \"subscription-id\"",
         "name: APP_SERVER__CERT__DNS__AZURE__RESOURCE_GROUP\n              value: \"dns-resource-group\"",
     ] {
