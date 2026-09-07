@@ -1,5 +1,8 @@
 global:
-  storageClass: "high-performance"
+  # Chart-wide public DNS suffix. When set, the default ingress host becomes
+  # statuslist.<domain> and the default TLS host becomes *.<domain>.
+  # Leave empty for provider-neutral defaults.
+  domain: ""
 
 statuslist:
   enabled: true
@@ -26,6 +29,10 @@ statuslist:
     # Empty derives from how the image is named: IfNotPresent for a digest, Always
     # for a mutable tag. Set explicitly to override.
     pullPolicy: ""
+    # Used only when tag and digest are empty. The chart derives
+    # <appVersion-without-suffix>-<variant>, so overlays can select a cloud
+    # variant without hardcoding the release version.
+    variant: fscert
     # Image tag with variant suffix. The release workflow publishes 5 multi-arch variants:
     #
     # | Tag Suffix | Cargo Features | Description | Primary Use Case |
@@ -39,8 +46,8 @@ statuslist:
     # Tag format: <version>-<suffix> (e.g., 1.2.0-aws, 1.2.0-gcp)
     # Latest tags: latest-<suffix> (e.g., latest-aws, latest-gcp)
     #
-    # Empty falls back to the chart appVersion, which is the published AWS variant
-    # tag. Defaulting to "latest" would let an upgrade that changes nothing in this
+    # Empty derives from the chart appVersion plus statuslist.image.variant.
+    # Defaulting to "latest" would let an upgrade that changes nothing in this
     # chart still change the running image.
     tag: ""
     # "sha256:...". Takes precedence over tag and pins the exact digest CI scanned.
@@ -49,6 +56,7 @@ statuslist:
   service:
     enabled: true
     type: ClusterIP
+    annotations: {}
     port: 8081
     targetPort: 8000
     nodePort: null
@@ -57,33 +65,31 @@ statuslist:
     path: /
     pathType: Prefix
     annotations:
-      cert-manager.io/cluster-issuer: letsencrypt-prod
-      nginx.ingress.kubernetes.io/ssl-redirect: "true"
-      nginx.ingress.kubernetes.io/force-ssl-redirect: "true"
       nginx.ingress.kubernetes.io/proxy-body-size: "10m"
     tls:
-      hosts:
-        - "*.eudi-adorsys.com"
-      secretName: statuslist-tls
-    externalDnsHostname: statuslist.eudi-adorsys.com
+      # Defaults to ["*.<global.domain>"] when global.domain is set, or to the
+      # rendered ingress host when secretName is set explicitly.
+      hosts: []
+      # Empty keeps the neutral default render HTTP-only. Set this in overlays
+      # that provide TLS material or cert-manager ingress-shim annotations.
+      secretName: ""
+    # Defaults to statuslist.<global.domain> when global.domain is set, otherwise localhost.
+    externalDnsHostname: ""
   env:
     RUST_LOG: "info"
     APP_ENV: "production"
     APP_SERVER__HOST: "0.0.0.0"
     APP_SERVER__PORT: "8000"
-    APP_SERVER__CERT__EMAIL: "info@adorsys.com"
-    APP_SERVER__CERT__ORGANIZATION: "adorsys GmbH & CO KG"
     APP_SERVER__CERT__ACME_DIRECTORY_URL: "https://acme-v02.api.letsencrypt.org/directory"
     APP_SERVER__CERT__EKU: "1,3,6,1,5,5,7,3,30"
     APP_SERVER__CERT__RENEWAL_CRON_SCHEDULE: "0 0 0 * * *"
-    # Parsed certificate chain cache TTL in seconds. "0" means no expiry; non-provisioning replicas rely on this TTL for renewed chains.
+    # Parsed certificate chain cache TTL in seconds. "0" means no expiry.
     # DNS provider for ACME DNS-01 challenges: route53 | cloudflare | gcloud | azure | acmedns
     # (pebble also exists but is a development-only fake, not for deployments)
     # See docs/dns-providers.md for the settings each provider needs.
     # Provider credentials (e.g. APP_SERVER__CERT__DNS__CLOUDFLARE__API_TOKEN, or the
     # APP_SERVER__CERT__DNS__ACMEDNS__ACCOUNTS JSON, which holds every account password)
     # must come from a secret (see externalSecret below), not from plain env values.
-    APP_SERVER__CERT__DNS__PROVIDER: "route53"
     APP_DATABASE__PORT: "5432"
     # Status-list record cache TTL in seconds. "0" disables this cache.
     APP_CACHE__TTL: "300"
@@ -102,16 +108,12 @@ statuslist:
     APP_SERVER__ENABLE_METRICS: "true"
     APP_TELEMETRY__ENVIRONMENT: "production"
     APP_TELEMETRY__SAMPLER_RATIO: "1.0"
-  # AWS configuration for the application.
+  # Optional AWS configuration for the application.
   aws:
-    # Mount the AWS credential files (aws-credentials-secret) into the pod. This is the default
-    # (true) so that External Secrets Operator (externalSecret.enabled, the default secret-delivery
-    # path) can provision the application's AWS credentials as a Kubernetes Secret that is mounted
-    # at /home/nobody/.aws. Workload Identity mode (EKS IRSA / GCP / Azure WI) is opt-in: set this
-    # to false and attach the cloud role annotation via serviceAccount.annotations, then the app
-    # uses ambient credentials instead of mounted files.
-    mountCredentials: true
-    # When mountCredentials=true and externalSecret.enabled (the default ESO path), the chart also
+    # Mount AWS credential files from aws-credentials-secret into the pod.
+    # Disabled by default so the base chart stays provider-neutral.
+    mountCredentials: false
+    # When mountCredentials=true and externalSecret.enabled, the chart also
     # renders a second ExternalSecret that provisions "aws-credentials-secret" — the exact Secret
     # the Deployment's credential volume references (see deployment.yaml). Without it the Pod could
     # never mount that volume and would stay unready. The remote source holds the AWS shared
@@ -138,8 +140,27 @@ statuslist:
   # (postgres.auth.existingSecret) references the same name, so it is deliberately not
   # independently configurable.
   fallbackSecret:
-    enabled: false
+    enabled: true
+    generatedCertificate:
+      # Local/dev helper for the fscert image. When enabled, the fallback Secret
+      # includes a self-signed certificate and signing key under the keys below.
+      # GitOps deployments should not use generated material because helm template
+      # runs without cluster lookup and can regenerate values on each sync.
+      enabled: false
+      commonName: localhost
+      dnsNames:
+        - localhost
+      ipAddresses:
+        - 127.0.0.1
+      certificateKey: statuslist.crt
+      signingKey: statuslist.key
     stringData:
+      # Empty means the chart generates a random password. Helm upgrades reuse
+      # the existing statuslist-secret password when the cluster is reachable.
+      # GitOps tools such as Argo CD and Flux run helm template without cluster
+      # lookup access, so an empty value generates a new password on each
+      # reconciliation. For GitOps, provide an explicit password from your
+      # secret-management flow or set fallbackSecret.enabled=false and use ESO.
       postgres-password: ""
 
   # File-based secret mounts for production credential/key rotation.
@@ -337,7 +358,7 @@ postgres:
   persistence:
     enabled: true
     size: 10Gi
-    storageClass: high-performance
+    storageClass: ""
   service:
     type: ClusterIP
     port: 5432
@@ -345,7 +366,7 @@ postgres:
     tag: "18.0"
 
 externalSecret:
-  enabled: true
+  enabled: false
   metadata:
     name: statuslist-external-secret
   spec:
@@ -371,9 +392,9 @@ externalSecret:
     extraExternalSecrets: []
 
 secretStore:
-  enabled: true
+  enabled: false
   # Provider selector: aws | vault | gcp | azure | raw
-  provider: aws
+  provider: ""
   aws:
     service: SecretsManager # SecretsManager | ParameterStore
     # Empty by default: APP_AWS__REGION is only injected into the pod when a region is
