@@ -315,6 +315,108 @@ prometheusRule:
   # Additional labels required by your Prometheus Operator (e.g. release: kube-prometheus-stack)
   labels: {}
 
+# AlertmanagerConfig for kube-prometheus-stack / Prometheus Operator alert routing.
+# When enabled, renders an AlertmanagerConfig CRD that routes SLO alerts to the
+# configured notification channel. This is the Kubernetes equivalent of the Docker
+# Compose ALERTMANAGER_PLATFORM + generate-alertmanager-config.sh setup — the same
+# six platforms are supported and no webhook URL is committed to source control.
+#
+# Supported platforms (alerting.platform):
+#   discord     -> alerting.webhookUrl  (Discord channel webhook URL)
+#   slack       -> alerting.webhookUrl  (Slack incoming-webhook URL)
+#   teams       -> alerting.webhookUrl  (MS Teams classic inbound webhook; posts Alertmanager's
+#                 generic JSON, not an Adaptive Card — see observability/runbooks/webhook-notifications.md
+#                 for the rendering limitation and bridge options)
+#   mattermost  -> alerting.webhookUrl  (Mattermost incoming webhook)
+#   webhook     -> alerting.webhookUrl  (generic endpoint accepting Alertmanager JSON)
+#   email       -> alerting.email.*     (SMTP settings)
+#
+# Credential model:
+#   By default (existingSecret: "") the chart renders its own Secret from the inline
+#   values (webhookUrl). For production, set existingSecret to the name of
+#   a pre-existing Secret (e.g. managed by ESO or Vault) — the chart then reads from
+#   that Secret and does NOT render its own. The pre-existing Secret must contain the
+#   following keys depending on the platform:
+#     webhook-based platforms: "webhook-url"
+#     dead-man's-switch:       "dms-webhook-url" (optional)
+#     email SMTP auth:         "smtp-password" (optional, only when alerting.email.smtpPassword is set)
+#   Email `to`/`smtpFrom`/`smtpHost` are rendered as plain string values (the
+#   EmailConfig CRD types them as strings, not Secret selectors) and are therefore
+#   NOT read from the Secret.
+#
+# Route tree (mirrors generate-alertmanager-config.sh):
+#   severity=none  -> deadmansswitch receiver (Watchdog — pages on ABSENCE, not firing)
+#   severity=page  -> human receiver, repeat every 4h
+#   severity=warn  -> human receiver, repeat every 24h
+#   everything else -> noop sink (never spams a human channel)
+#
+# Labels: add any extra labels required by your Alertmanager selector, e.g.
+#   labels:
+#     release: kube-prometheus-stack
+alerting:
+  enabled: false
+  # Platform selector — must match one of the supported values above.
+  platform: discord
+  # Grafana dashboard URL injected into alert annotations (e.g. http://grafana.example.com/d/status-list-slo).
+  dashboardUrl: "http://localhost:3000/d/status-list-slo"
+  # Optional Slack channel override (e.g. "#alerts"). Leave empty to use the webhook default channel.
+  slack:
+    channel: ""
+  # Additional labels for the AlertmanagerConfig (e.g. release: kube-prometheus-stack).
+  labels: {}
+  # Name of a pre-existing Secret containing credentials. When set, the chart does NOT
+  # render its own Secret. Leave empty to let the chart manage the Secret from inline values.
+  #
+  # IMPORTANT: The referenced Secret MUST already exist in the namespace before install/upgrade
+  # (e.g. provisioned by ESO, Vault, or your GitOps flow). Kubernetes does not hot-reload Secret
+  # consumers on content changes: updating a webhook URL inside the Secret requires the
+  # Alertmanager pod to reload the referenced secretKeyRef. kube-prometheus-stack / the Prometheus
+  # Operator watches Secret changes and triggers an Alertmanager reload automatically, so in most
+  # installs a URL rotation takes effect without manual intervention (restart the Alertmanager
+  # StatefulSet if your operator version does not auto-reload). Always create the Secret before
+  # deploying the chart to avoid a failing AlertmanagerConfig / pending pod.
+  existingSecret: ""
+  # Inline webhook URL (used for discord, slack, teams, mattermost, webhook platforms).
+  # Never commit real tokens — use existingSecret + ESO/Vault in production.
+  webhookUrl: ""
+  # Optional dead-man's-switch URL. The always-firing Watchdog (severity=none) pings this
+  # URL so a collapsed Prometheus/Alertmanager pipeline is detected by its ABSENCE. When
+  # empty the Watchdog is silently absorbed and never reaches a human channel.
+  dmsWebhookUrl: ""
+  # Explicitly enable Dead Man's Switch when using existingSecret (reads key "dms-webhook-url"
+  # from existingSecret). When dmsWebhookUrl is set above, DMS is enabled implicitly.
+  #
+  # When DMS is enabled with existingSecret, the "dms-webhook-url" key MUST be present in that
+  # Secret. The chart cannot verify the key exists at render time (it is not readable without a
+  # cluster lookup), so an absent key surfaces as a failing/runtime error in the Alertmanager
+  # webhook. Keep this key present and correct in the provisioning path that manages the Secret.
+  dmsEnabled: false
+  # Per-request timeout for webhook/Teams/Mattermost receivers (Alertmanager default is 10s).
+  # Applies to the generic `webhook`, `teams`, and `mattermost` platforms and to the
+  # dead-man's-switch receiver. Set to a Go duration string (e.g. "10s", "2m").
+  webhookTimeout: ""
+  # Email settings (required only when platform=email).
+  # NOTE: The AlertmanagerConfig EmailConfig CRD defines `to`, `smarthost`, and `from` as plain
+  # strings (not Secret selectors), so these are rendered directly from values — they are NOT read
+  # from the Secret. Only the SMTP password (when set) is read from the Secret via `smtp-password`.
+  email:
+    to: ""
+    smtpHost: ""
+    smtpPort: "587"
+    smtpFrom: ""
+    # Optional SMTP AUTH password. When set, it is stored in the alerting Secret under the key
+    # "smtp-password" (chart-managed Secret) or must be present as "smtp-password" in
+    # alerting.existingSecret, and is referenced via EmailConfig.authPassword. Leave empty to
+    # disable SMTP AUTH.
+    smtpPassword: ""
+    requireTls: true
+    # Optional SMTP TLS verification options (certificate handling). Rendered into the
+    # emailConfig tlsConfig when set. Empty disables custom TLS settings.
+    # Example:
+    #   tlsConfig:
+    #     insecureSkipVerify: false
+    tlsConfig: {}
+
 # Configurable SLO target thresholds for PrometheusRule alerting rules.
 # These must stay in lockstep with observability/slo/thresholds.json (the lint
 # step in CI asserts this) and with the literal values in the standalone
