@@ -5,10 +5,7 @@ use axum::{
     response::IntoResponse,
 };
 
-use crate::{
-    domain::models::credential::Issuer,
-    server::{AppState, error::ApiError},
-};
+use crate::server::{AppState, auth::AuthenticatedIssuer, error::ApiError};
 
 use super::utils::request::StatusesRequest;
 
@@ -19,10 +16,10 @@ use super::utils::request::StatusesRequest;
 /// `err(level = "info")` for the reason on `update_status`: the default ERROR
 /// level would page on write contention and on a racing publish, both 409s the
 /// response layer already logs at the right severity.
-#[tracing::instrument(skip_all, fields(list_id = %list_id, issuer = %issuer), err(level = "info", Debug))]
+#[tracing::instrument(skip_all, fields(list_id = %list_id, issuer = %principal), err(level = "info", Debug))]
 pub async fn publish_status(
     State(appstate): State<AppState>,
-    Extension(issuer): Extension<String>,
+    Extension(principal): Extension<AuthenticatedIssuer>,
     Path(list_id): Path<String>,
     Json(payload): Json<StatusesRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
@@ -48,7 +45,7 @@ pub async fn publish_status(
         .service
         .publish_status_list(
             list_id,
-            Issuer(issuer),
+            principal.into_issuer(),
             sub,
             statuses,
             appstate.token_exp_secs,
@@ -64,10 +61,15 @@ pub async fn publish_status(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::models::credential::Issuer;
     use crate::server::handlers::status_list::utils::request::{
         Status as RequestStatus, StatusEntry as RequestStatusEntry,
     };
     use crate::test_utils::test_app_state;
+
+    fn authenticated_issuer(issuer: impl Into<String>) -> AuthenticatedIssuer {
+        AuthenticatedIssuer::new(Issuer(issuer.into()))
+    }
 
     #[tokio::test]
     async fn test_publish_token_status_invalid_list_id() {
@@ -77,7 +79,7 @@ mod tests {
 
         let result = publish_status(
             State(appstate),
-            Extension(issuer),
+            Extension(authenticated_issuer(&issuer)),
             Path("not-a-uuid".to_string()),
             Json(payload),
         )
@@ -97,7 +99,7 @@ mod tests {
 
         let response = publish_status(
             State(app_state.clone()),
-            Extension("issuer".to_string()),
+            Extension(authenticated_issuer("issuer".to_string())),
             Path(token_id.clone()),
             Json(StatusesRequest { statuses: vec![] }),
         )
@@ -118,7 +120,7 @@ mod tests {
 
         let res1 = publish_status(
             State(app_state.clone()),
-            Extension("issuer".to_string()),
+            Extension(authenticated_issuer("issuer".to_string())),
             Path(token_id.clone()),
             Json(StatusesRequest { statuses: vec![] }),
         )
@@ -129,7 +131,7 @@ mod tests {
 
         let res2 = publish_status(
             State(app_state.clone()),
-            Extension("issuer".to_string()),
+            Extension(authenticated_issuer("issuer".to_string())),
             Path(token_id.clone()),
             Json(StatusesRequest { statuses: vec![] }),
         )
@@ -140,6 +142,44 @@ mod tests {
             Err(e) => e,
         };
         assert_eq!(err.status, StatusCode::CONFLICT);
+    }
+
+    #[tokio::test]
+    async fn test_publish_status_rejects_wrong_issuer_republish() {
+        let token_id = uuid::Uuid::new_v4().to_string();
+        let app_state = test_app_state(None).await;
+
+        publish_status(
+            State(app_state.clone()),
+            Extension(authenticated_issuer("issuer1")),
+            Path(token_id.clone()),
+            Json(StatusesRequest { statuses: vec![] }),
+        )
+        .await
+        .unwrap();
+
+        let result = publish_status(
+            State(app_state.clone()),
+            Extension(authenticated_issuer("issuer2")),
+            Path(token_id.clone()),
+            Json(StatusesRequest {
+                statuses: vec![RequestStatusEntry {
+                    index: 0,
+                    status: RequestStatus::INVALID,
+                }],
+            }),
+        )
+        .await;
+
+        let err = match result {
+            Ok(_) => panic!("expected different issuer to be rejected for existing list_id"),
+            Err(e) => e,
+        };
+        assert_eq!(err.status, StatusCode::CONFLICT);
+        assert_eq!(err.error, "status_list_already_exists");
+
+        let record = app_state.service.get_status_list(&token_id).await.unwrap();
+        assert_eq!(record.issuer, Issuer("issuer1".into()));
     }
 
     /// The losing publisher of a `list_id` race gets 409, not 500 — end to end,
@@ -193,7 +233,7 @@ mod tests {
             async move {
                 publish_status(
                     State(state),
-                    Extension(issuer.to_string()),
+                    Extension(authenticated_issuer(issuer)),
                     Path(list_id),
                     Json(StatusesRequest {
                         statuses: vec![RequestStatusEntry {
@@ -303,7 +343,7 @@ mod tests {
             async move {
                 publish_status(
                     State(state),
-                    Extension(issuer.to_string()),
+                    Extension(authenticated_issuer(issuer)),
                     Path(list_id),
                     Json(StatusesRequest {
                         statuses: vec![RequestStatusEntry {
@@ -385,7 +425,7 @@ mod tests {
 
         let result = publish_status(
             State(app_state),
-            Extension("issuer".to_string()),
+            Extension(authenticated_issuer("issuer".to_string())),
             Path(token_id),
             Json(StatusesRequest {
                 statuses: status_entries,
@@ -413,7 +453,7 @@ mod tests {
 
         let result = publish_status(
             State(app_state),
-            Extension("issuer".to_string()),
+            Extension(authenticated_issuer("issuer".to_string())),
             Path(token_id),
             Json(StatusesRequest {
                 statuses: status_entries,
@@ -444,7 +484,7 @@ mod tests {
 
         let result = publish_status(
             State(app_state),
-            Extension("issuer".to_string()),
+            Extension(authenticated_issuer("issuer".to_string())),
             Path(token_id),
             Json(StatusesRequest {
                 statuses: status_entries,

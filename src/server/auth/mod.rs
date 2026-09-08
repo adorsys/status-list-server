@@ -13,12 +13,42 @@ use hyper::header;
 use jsonwebtoken::{DecodingKey, Validation};
 use serde::{Deserialize, Serialize};
 
+use crate::domain::models::credential::Issuer;
 use crate::server::AppState;
 
 #[derive(Debug, Serialize, Deserialize)]
 struct Claims {
     iss: String,
     exp: usize,
+}
+
+/// Authenticated management principal derived from a validated issuer JWT.
+///
+/// Handlers should depend on this typed principal instead of extracting a raw
+/// issuer string from request extensions.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AuthenticatedIssuer {
+    issuer: Issuer,
+}
+
+impl AuthenticatedIssuer {
+    pub fn new(issuer: Issuer) -> Self {
+        Self { issuer }
+    }
+
+    pub fn issuer(&self) -> &Issuer {
+        &self.issuer
+    }
+
+    pub fn into_issuer(self) -> Issuer {
+        self.issuer
+    }
+}
+
+impl std::fmt::Display for AuthenticatedIssuer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.issuer.0.fmt(f)
+    }
 }
 
 /// Authentication middleware acting as a safeguard for unauthorized issuers
@@ -58,14 +88,15 @@ pub async fn auth(
 
     let token_data = jsonwebtoken::decode::<Claims>(token, &decoding_key, &validation)?;
 
-    request.extensions_mut().insert(token_data.claims.iss);
+    request
+        .extensions_mut()
+        .insert(AuthenticatedIssuer::new(Issuer(token_data.claims.iss)));
     Ok(next.run(request).await)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::models::credential::Issuer;
     use crate::test_utils::test_app_state;
     use axum::{
         Extension, Router,
@@ -300,9 +331,11 @@ mod tests {
             .await
             .unwrap();
 
-        async fn extension_test_handler(Extension(issuer): Extension<String>) -> String {
-            assert_eq!(issuer, "test-issuer");
-            issuer
+        async fn extension_test_handler(
+            Extension(principal): Extension<AuthenticatedIssuer>,
+        ) -> String {
+            assert_eq!(principal.issuer(), &Issuer("test-issuer".into()));
+            principal.into_issuer().0
         }
 
         let app = Router::new()
