@@ -2,7 +2,6 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use color_eyre::eyre::{Report, eyre};
-#[cfg(not(test))]
 use google_cloud_auth::credentials::{AccessTokenCredentials, Builder as AdcBuilder};
 use reqwest::{Client, StatusCode};
 use secrecy::{ExposeSecret, SecretString};
@@ -16,7 +15,6 @@ use crate::cert_manager::challenge::ChallengeError;
 
 const PROVIDER: &str = "gcloud";
 const DEFAULT_API_BASE: &str = "https://dns.googleapis.com/dns/v1";
-#[cfg(not(test))]
 const OAUTH_SCOPE: &str = "https://www.googleapis.com/auth/ndev.clouddns.readwrite";
 
 /// A DNS provider for Google Cloud DNS, authenticated with Application Default Credentials.
@@ -25,10 +23,7 @@ const OAUTH_SCOPE: &str = "https://www.googleapis.com/auth/ndev.clouddns.readwri
 /// is served by all of the zone's authoritative name servers.
 pub struct GoogleCloudDnsProvider {
     client: Client,
-    #[cfg(not(test))]
     credentials: AccessTokenCredentials,
-    #[cfg(test)]
-    test_access_token: Option<SecretString>,
     project_id: String,
     api_base: String,
     zones: RwLock<Option<Vec<ZoneInfo>>>,
@@ -93,7 +88,6 @@ impl GoogleCloudDnsProvider {
                 "Google Cloud DNS requires a non-empty project_id"
             )));
         }
-        #[cfg(not(test))]
         let credentials = AdcBuilder::default()
             .with_scopes([OAUTH_SCOPE])
             .build_access_token_credentials()
@@ -107,10 +101,7 @@ impl GoogleCloudDnsProvider {
         Ok(Self {
             client: http_client(),
             project_id,
-            #[cfg(not(test))]
             credentials,
-            #[cfg(test)]
-            test_access_token: None,
             api_base: DEFAULT_API_BASE.to_string(),
             zones: RwLock::new(None),
         })
@@ -122,34 +113,18 @@ impl GoogleCloudDnsProvider {
         self
     }
 
-    #[cfg(test)]
-    fn with_test_access_token(mut self, token: SecretString) -> Self {
-        self.test_access_token = Some(token);
-        self
-    }
-
     async fn access_token(&self) -> Result<SecretString, ChallengeError> {
-        #[cfg(test)]
-        {
-            if let Some(token) = &self.test_access_token {
-                return Ok(token.clone());
-            }
-            panic!("Google Cloud DNS tests must provide a test access token")
-        }
-        #[cfg(not(test))]
-        {
-            self.credentials
-                .access_token()
-                .await
-                .map(|t| t.token.into())
-                .map_err(|e| {
-                    dns_err(eyre!(
-                        "Failed to acquire Google Cloud DNS ambient access token via \
-                     Application Default Credentials. Verify GKE Workload Identity, \
-                     metadata server access, or GOOGLE_APPLICATION_CREDENTIALS. Details: {e}"
-                    ))
-                })
-        }
+        self.credentials
+            .access_token()
+            .await
+            .map(|t| t.token.into())
+            .map_err(|e| {
+                dns_err(eyre!(
+                    "Failed to acquire Google Cloud DNS ambient access token via \
+                 Application Default Credentials. Verify GKE Workload Identity, \
+                 metadata server access, or GOOGLE_APPLICATION_CREDENTIALS. Details: {e}"
+                ))
+            })
     }
 
     fn project_url(&self) -> String {
@@ -401,10 +376,45 @@ impl DnsProvider for GoogleCloudDnsProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::http::{Extensions, HeaderMap};
+    use google_cloud_auth::credentials::{
+        AccessToken, AccessTokenCredentialsProvider, CacheableResource, CredentialsProvider,
+        EntityTag,
+    };
+    use google_cloud_auth::errors::CredentialsError;
     use wiremock::matchers::{
         body_partial_json, method, path, query_param, query_param_is_missing,
     };
     use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    #[derive(Debug)]
+    struct FixedAccessTokenCredentials {
+        token: String,
+    }
+
+    impl CredentialsProvider for FixedAccessTokenCredentials {
+        async fn headers(
+            &self,
+            _extensions: Extensions,
+        ) -> Result<CacheableResource<HeaderMap>, CredentialsError> {
+            Ok(CacheableResource::New {
+                entity_tag: EntityTag::new(),
+                data: HeaderMap::new(),
+            })
+        }
+
+        async fn universe_domain(&self) -> Option<String> {
+            None
+        }
+    }
+
+    impl AccessTokenCredentialsProvider for FixedAccessTokenCredentials {
+        async fn access_token(&self) -> Result<AccessToken, CredentialsError> {
+            Ok(AccessToken {
+                token: self.token.clone(),
+            })
+        }
+    }
 
     fn provider(server: &MockServer) -> GoogleCloudDnsProvider {
         test_provider(server, "gcp-token")
@@ -413,12 +423,13 @@ mod tests {
     fn test_provider(server: &MockServer, token: &str) -> GoogleCloudDnsProvider {
         GoogleCloudDnsProvider {
             client: http_client(),
-            test_access_token: None,
+            credentials: AccessTokenCredentials::from(FixedAccessTokenCredentials {
+                token: token.to_string(),
+            }),
             project_id: "test-project".into(),
             api_base: DEFAULT_API_BASE.to_string(),
             zones: RwLock::new(None),
         }
-        .with_test_access_token(token.to_string().into())
         .with_api_base(server.uri())
     }
 
