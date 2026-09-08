@@ -40,32 +40,83 @@ scoped to the zones holding your domains.
 
 ## Google Cloud DNS (`gcloud`)
 
+### Credentials
+
 ```bash
 APP_SERVER__CERT__DNS__PROVIDER=gcloud
-# Either the key JSON inline:
-APP_SERVER__CERT__DNS__GCLOUD__SERVICE_ACCOUNT_KEY=<json>
-# Or a path to the key file (e.g. a mounted Kubernetes secret):
-APP_SERVER__CERT__DNS__GCLOUD__SERVICE_ACCOUNT_KEY_PATH=/etc/gcloud/key.json
+APP_SERVER__CERT__DNS__GCLOUD__PROJECT_ID=<project holding managed zones>
 ```
 
-Create a service account with the `roles/dns.admin` role (or a custom role with
-`dns.managedZones.list`, `dns.resourceRecordSets.*` and `dns.changes.*`) in the
-project holding the managed zones, then create a JSON key for it. The project
-ID is read from the key file.
+Google Cloud DNS uses Application Default Credentials (ADC), matching the
+ambient model used by Route53. On GKE, bind the Kubernetes ServiceAccount to a
+Google service account with `roles/dns.admin` or a custom role containing
+`dns.managedZones.list`, `dns.resourceRecordSets.*` and `dns.changes.*`. For
+service-account key files or local testing, set standard ADC inputs such as
+`GOOGLE_APPLICATION_CREDENTIALS=/path/to/key.json` or use
+`gcloud auth application-default login`.
+
+Helm example:
+
+```yaml
+statuslist:
+  image:
+    tag: "1.2.0-gcp"
+  env:
+    APP_SERVER__CERT__DNS__PROVIDER: "gcloud"
+    APP_SERVER__CERT__DNS__GCLOUD__PROJECT_ID: "dns-project-id"
+serviceAccount:
+  create: true
+  annotations:
+    iam.gke.io/gcp-service-account: status-list-server@dns-project-id.iam.gserviceaccount.com
+```
+
+If ADC is unavailable, startup/token acquisition fails closed with a redacted
+error that points operators to GKE Workload Identity or
+`GOOGLE_APPLICATION_CREDENTIALS`.
 
 ## Azure DNS (`azure`)
 
+### Credentials
+
 ```bash
 APP_SERVER__CERT__DNS__PROVIDER=azure
-APP_SERVER__CERT__DNS__AZURE__TENANT_ID=<tenant>
-APP_SERVER__CERT__DNS__AZURE__CLIENT_ID=<app id>
-APP_SERVER__CERT__DNS__AZURE__CLIENT_SECRET=<secret>
 APP_SERVER__CERT__DNS__AZURE__SUBSCRIPTION_ID=<subscription>
 APP_SERVER__CERT__DNS__AZURE__RESOURCE_GROUP=<resource group>
 ```
 
-Create a service principal and grant it the `DNS Zone Contributor` role on the
-resource group holding the DNS zones:
+Azure DNS uses `DefaultAzureCredential`, matching the ambient model used by
+Route53. It discovers credentials from standard Azure environment variables
+(`AZURE_TENANT_ID`, `AZURE_CLIENT_ID`, `AZURE_CLIENT_SECRET`), AKS Workload
+Identity Federation (`AZURE_FEDERATED_TOKEN_FILE`), managed identity, or
+developer-tool credentials. Grant the resolved identity the
+`DNS Zone Contributor` role on the resource group holding the DNS zones.
+
+Helm example for AKS Workload Identity Federation:
+
+```yaml
+statuslist:
+  image:
+    tag: "1.2.0-azure"
+  podLabels:
+    azure.workload.identity/use: "true"
+  env:
+    APP_SERVER__CERT__DNS__PROVIDER: "azure"
+    APP_SERVER__CERT__DNS__AZURE__SUBSCRIPTION_ID: "subscription-id"
+    APP_SERVER__CERT__DNS__AZURE__RESOURCE_GROUP: "dns-resource-group"
+serviceAccount:
+  create: true
+  annotations:
+    azure.workload.identity/client-id: "00000000-0000-0000-0000-000000000000"
+```
+
+If no ambient Azure credential can be initialized or acquire a token, the
+provider fails closed with a redacted error that points to AKS Workload
+Identity, managed identity, Azure environment credentials, or Azure CLI
+authentication.
+
+To use a service principal without putting secrets in application
+configuration, create one and provide its credentials through the standard
+`AZURE_*` environment variables:
 
 ```bash
 az ad sp create-for-rbac --name status-list-acme \
