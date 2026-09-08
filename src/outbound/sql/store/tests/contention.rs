@@ -1,5 +1,5 @@
 #[cfg(any(feature = "mysql", feature = "postgres-tests"))]
-mod imp {
+mod database_implementation {
     use std::sync::Arc;
 
     use jsonwebtoken::jwk::Jwk;
