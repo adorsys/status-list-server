@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use color_eyre::eyre::{Report, eyre};
-use jsonwebtoken::{Algorithm, EncodingKey, Header};
+use google_cloud_auth::credentials::{AccessTokenCredentials, Builder as AdcBuilder};
 use reqwest::{Client, StatusCode};
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
@@ -10,52 +10,23 @@ use serde_json::json;
 use tokio::sync::RwLock;
 use tracing::info;
 
-use super::{DnsProvider, ZoneInfo, find_best_match, http_client, token::TokenCache};
+use super::{DnsProvider, ZoneInfo, find_best_match, http_client};
 use crate::cert_manager::challenge::ChallengeError;
 
 const PROVIDER: &str = "gcloud";
 const DEFAULT_API_BASE: &str = "https://dns.googleapis.com/dns/v1";
 const OAUTH_SCOPE: &str = "https://www.googleapis.com/auth/ndev.clouddns.readwrite";
 
-/// A DNS provider for Google Cloud DNS, authenticated with a service account key.
+/// A DNS provider for Google Cloud DNS, authenticated with Application Default Credentials.
 ///
 /// Waits for each change to reach the `done` status, which means the record
 /// is served by all of the zone's authoritative name servers.
 pub struct GoogleCloudDnsProvider {
     client: Client,
-    client_email: String,
-    token_uri: String,
+    credentials: AccessTokenCredentials,
     project_id: String,
-    encoding_key: EncodingKey,
     api_base: String,
-    token_cache: TokenCache,
     zones: RwLock<Option<Vec<ZoneInfo>>>,
-}
-
-/// Relevant fields of a Google service account key JSON. Only parsed
-/// transiently in `new`, so the plaintext private key is not retained;
-/// the signing material lives on in the `EncodingKey`.
-#[derive(Deserialize)]
-struct ServiceAccountKey {
-    client_email: String,
-    private_key: String,
-    token_uri: String,
-    project_id: String,
-}
-
-#[derive(Serialize)]
-struct TokenClaims<'a> {
-    iss: &'a str,
-    scope: &'a str,
-    aud: &'a str,
-    iat: i64,
-    exp: i64,
-}
-
-#[derive(Deserialize)]
-struct TokenResponse {
-    access_token: String,
-    expires_in: u64,
 }
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
@@ -105,25 +76,33 @@ fn dns_err(source: impl Into<Report>) -> ChallengeError {
 
 impl GoogleCloudDnsProvider {
     const TXT_TTL: u32 = 60;
-    const TOKEN_LIFETIME: Duration = Duration::from_secs(3600);
     const CONFLICT_RETRIES: u32 = 3;
     const PROPAGATION_INITIAL_DELAY: Duration = Duration::from_secs(2);
     const PROPAGATION_TIMEOUT: Duration = Duration::from_secs(60 * 5);
 
-    /// Create a provider from the service account key JSON
-    pub fn new(service_account_key_json: &str) -> Result<Self, ChallengeError> {
-        let key: ServiceAccountKey = serde_json::from_str(service_account_key_json)
-            .map_err(|e| dns_err(eyre!("Invalid service account key JSON: {e}")))?;
-        let encoding_key = EncodingKey::from_rsa_pem(key.private_key.as_bytes())
-            .map_err(|e| dns_err(eyre!("Invalid service account private key: {e}")))?;
+    /// Create a provider from Application Default Credentials.
+    pub fn new(project_id: impl Into<String>) -> Result<Self, ChallengeError> {
+        let project_id = project_id.into();
+        if project_id.trim().is_empty() {
+            return Err(dns_err(eyre!(
+                "Google Cloud DNS requires a non-empty project_id"
+            )));
+        }
+        let credentials = AdcBuilder::default()
+            .with_scopes([OAUTH_SCOPE])
+            .build_access_token_credentials()
+            .map_err(|e| {
+                dns_err(eyre!(
+                    "Failed to initialize Google Cloud Application Default Credentials \
+                         for DNS provider. Configure GKE Workload Identity or set \
+                         GOOGLE_APPLICATION_CREDENTIALS to a valid ADC file. Details: {e}"
+                ))
+            })?;
         Ok(Self {
             client: http_client(),
-            client_email: key.client_email,
-            token_uri: key.token_uri,
-            project_id: key.project_id,
-            encoding_key,
+            project_id,
+            credentials,
             api_base: DEFAULT_API_BASE.to_string(),
-            token_cache: TokenCache::new(),
             zones: RwLock::new(None),
         })
     }
@@ -135,56 +114,25 @@ impl GoogleCloudDnsProvider {
     }
 
     async fn access_token(&self) -> Result<SecretString, ChallengeError> {
-        self.token_cache
-            .get_or_mint(|| async {
-                let iat = time::OffsetDateTime::now_utc().unix_timestamp();
-                let claims = TokenClaims {
-                    iss: &self.client_email,
-                    scope: OAUTH_SCOPE,
-                    aud: &self.token_uri,
-                    iat,
-                    exp: iat + Self::TOKEN_LIFETIME.as_secs() as i64,
-                };
-                let assertion = jsonwebtoken::encode(
-                    &Header::new(Algorithm::RS256),
-                    &claims,
-                    &self.encoding_key,
-                )
-                .map_err(|e| dns_err(eyre!("Failed to sign token request: {e}")))?;
-
-                let response = self
-                    .client
-                    .post(&self.token_uri)
-                    .form(&[
-                        ("grant_type", "urn:ietf:params:oauth:grant-type:jwt-bearer"),
-                        ("assertion", &assertion),
-                    ])
-                    .send()
-                    .await
-                    .map_err(dns_err)?;
-                let status = response.status();
-                if !status.is_success() {
-                    let body = response.text().await.unwrap_or_default();
-                    return Err(dns_err(eyre!(
-                        "Token exchange failed (status {status}): {body}"
-                    )));
-                }
-                let token: TokenResponse = response
-                    .json()
-                    .await
-                    .map_err(|e| dns_err(eyre!("Invalid token response: {e}")))?;
-                Ok((
-                    token.access_token.into(),
-                    Duration::from_secs(token.expires_in),
+        self.credentials
+            .access_token()
+            .await
+            .map(|t| t.token.into())
+            .map_err(|e| {
+                dns_err(eyre!(
+                    "Failed to acquire Google Cloud DNS ambient access token via \
+                 Application Default Credentials. Verify GKE Workload Identity, \
+                 metadata server access, or GOOGLE_APPLICATION_CREDENTIALS. Details: {e}"
                 ))
             })
-            .await
     }
 
     fn project_url(&self) -> String {
         format!("{}/projects/{}", self.api_base, self.project_id)
     }
+}
 
+impl GoogleCloudDnsProvider {
     // Find the managed zone for the given domain and return its name
     async fn find_zone(&self, domain: &str) -> Result<String, ChallengeError> {
         self.try_cache_zones().await?;
@@ -428,37 +376,61 @@ impl DnsProvider for GoogleCloudDnsProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::http::{Extensions, HeaderMap};
+    use google_cloud_auth::credentials::{
+        AccessToken, AccessTokenCredentialsProvider, CacheableResource, CredentialsProvider,
+        EntityTag,
+    };
+    use google_cloud_auth::errors::CredentialsError;
     use wiremock::matchers::{
         body_partial_json, method, path, query_param, query_param_is_missing,
     };
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
-    // A throwaway RSA key generated only for these tests; it grants access to
-    // nothing and is deliberately named .dummy.pem for secret scanners.
-    const TEST_KEY_PEM: &str = include_str!("../../../../../test_data/gcloud_test_key.dummy.pem");
-
-    fn provider(server: &MockServer) -> GoogleCloudDnsProvider {
-        let key = json!({
-            "client_email": "acme@test-project.iam.gserviceaccount.com",
-            "private_key": TEST_KEY_PEM,
-            "token_uri": format!("{}/token", server.uri()),
-            "project_id": "test-project",
-        });
-        GoogleCloudDnsProvider::new(&key.to_string())
-            .unwrap()
-            .with_api_base(server.uri())
+    #[derive(Debug)]
+    struct FixedAccessTokenCredentials {
+        token: String,
     }
 
-    async fn mount_token_mock(server: &MockServer, expected_mints: u64) {
-        Mock::given(method("POST"))
-            .and(path("/token"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                "access_token": "gcp-token",
-                "expires_in": 3600,
-            })))
-            .expect(expected_mints)
-            .mount(server)
-            .await;
+    impl CredentialsProvider for FixedAccessTokenCredentials {
+        async fn headers(
+            &self,
+            _extensions: Extensions,
+        ) -> Result<CacheableResource<HeaderMap>, CredentialsError> {
+            Ok(CacheableResource::New {
+                entity_tag: EntityTag::new(),
+                data: HeaderMap::new(),
+            })
+        }
+
+        async fn universe_domain(&self) -> Option<String> {
+            None
+        }
+    }
+
+    impl AccessTokenCredentialsProvider for FixedAccessTokenCredentials {
+        async fn access_token(&self) -> Result<AccessToken, CredentialsError> {
+            Ok(AccessToken {
+                token: self.token.clone(),
+            })
+        }
+    }
+
+    fn provider(server: &MockServer) -> GoogleCloudDnsProvider {
+        test_provider(server, "gcp-token")
+    }
+
+    fn test_provider(server: &MockServer, token: &str) -> GoogleCloudDnsProvider {
+        GoogleCloudDnsProvider {
+            client: http_client(),
+            credentials: AccessTokenCredentials::from(FixedAccessTokenCredentials {
+                token: token.to_string(),
+            }),
+            project_id: "test-project".into(),
+            api_base: DEFAULT_API_BASE.to_string(),
+            zones: RwLock::new(None),
+        }
+        .with_api_base(server.uri())
     }
 
     async fn mount_zone_mock(server: &MockServer) {
@@ -485,7 +457,6 @@ mod tests {
     #[tokio::test]
     async fn creates_record_merging_existing_values() {
         let server = MockServer::start().await;
-        mount_token_mock(&server, 1).await;
         mount_zone_mock(&server).await;
         Mock::given(method("GET"))
             .and(path(
@@ -518,9 +489,42 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn adc_token_drives_dns_requests() {
+        let server = MockServer::start().await;
+        mount_zone_mock(&server).await;
+        Mock::given(method("GET"))
+            .and(path(
+                "/projects/test-project/managedZones/example-zone/rrsets",
+            ))
+            .and(query_param("type", "TXT"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"rrsets": []})))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path(
+                "/projects/test-project/managedZones/example-zone/changes",
+            ))
+            .and(wiremock::matchers::header(
+                "authorization",
+                "Bearer ambient-gcp-token",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "id": "c1",
+                "status": "done",
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        test_provider(&server, "ambient-gcp-token")
+            .create_txt_record("status.example.com", "digest-value")
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
     async fn retries_on_change_conflict() {
         let server = MockServer::start().await;
-        mount_token_mock(&server, 1).await;
         mount_zone_mock(&server).await;
         Mock::given(method("GET"))
             .and(path(
@@ -561,7 +565,6 @@ mod tests {
     #[tokio::test]
     async fn waits_until_change_is_done() {
         let server = MockServer::start().await;
-        mount_token_mock(&server, 1).await;
         mount_zone_mock(&server).await;
         Mock::given(method("GET"))
             .and(path(
@@ -601,7 +604,6 @@ mod tests {
     #[tokio::test]
     async fn delete_is_a_no_op_when_record_absent() {
         let server = MockServer::start().await;
-        mount_token_mock(&server, 1).await;
         mount_zone_mock(&server).await;
         Mock::given(method("GET"))
             .and(path(
@@ -621,7 +623,6 @@ mod tests {
     #[tokio::test]
     async fn create_is_a_no_op_when_value_already_present() {
         let server = MockServer::start().await;
-        mount_token_mock(&server, 1).await;
         mount_zone_mock(&server).await;
         Mock::given(method("GET"))
             .and(path(
@@ -641,7 +642,6 @@ mod tests {
     #[tokio::test]
     async fn lists_zones_across_pages() {
         let server = MockServer::start().await;
-        mount_token_mock(&server, 1).await;
         Mock::given(method("GET"))
             .and(path("/projects/test-project/managedZones"))
             .and(query_param_is_missing("pageToken"))
@@ -679,7 +679,6 @@ mod tests {
     #[tokio::test]
     async fn delete_removes_only_the_given_value() {
         let server = MockServer::start().await;
-        mount_token_mock(&server, 1).await;
         mount_zone_mock(&server).await;
         Mock::given(method("GET"))
             .and(path(
