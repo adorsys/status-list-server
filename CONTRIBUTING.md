@@ -224,3 +224,14 @@ Automatic on merge:
 ## Development Setup
 
 See the [README](README.md) and [Local Deployment Guide](docs/LOCAL_DEPLOYMENT.md) for instructions on building and running the project locally.
+
+### Observability / Alertmanager test suite
+
+The webhook-delivery integration test at
+`observability/alertmanager/tests/test-alertmanager-config.sh` requires Docker.
+Its delivery step (`[2/2]`) uses Docker `--network host` so the containerized
+Alertmanager can reach the mock Python receivers on `127.0.0.1`. Host networking
+is only supported on **Linux** (standard for Linux dev machines and CI runners).
+On macOS or Windows (Docker Desktop / Lima), the delivery step cannot run as-is;
+run the suite inside a Linux container or on a Linux CI pipeline instead. The
+config-generation step (`[1/2]`) is portable across platforms.
