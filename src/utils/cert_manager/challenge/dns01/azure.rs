@@ -114,25 +114,6 @@ impl AzureDnsProvider {
         ))
     }
 
-    #[cfg(test)]
-    fn from_token_provider(
-        credential: Arc<dyn TokenCredential>,
-        subscription_id: impl Into<String>,
-        resource_group: impl Into<String>,
-    ) -> Self {
-        Self {
-            client: http_client(),
-            credential,
-            token_cache: TokenCache::new(),
-            subscription_id: subscription_id.into(),
-            resource_group: resource_group.into(),
-            api_base: DEFAULT_API_BASE.to_string(),
-            propagation_delay: Self::PROPAGATION_DELAY,
-            zones: RwLock::new(None),
-        }
-    }
-
-    #[cfg(not(test))]
     fn from_token_provider(
         credential: Arc<dyn TokenCredential>,
         subscription_id: impl Into<String>,
