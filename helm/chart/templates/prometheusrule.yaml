@@ -14,55 +14,55 @@ spec:
     - name: status-list-server-sli
       rules:
         - record: sli:request_latency:p95:5m
-          expr: histogram_quantile(0.95, sum(rate(http_server_duration_seconds_bucket{otel_scope_name="status-list-server"}[5m])) by (namespace, le))
+          expr: histogram_quantile(0.95, sum(rate(http_server_duration_seconds_bucket{otel_scope_name="status-list-server",namespace="{{ .Release.Namespace }}"}[5m])) by (namespace, le))
         - record: sli:request_latency:p95:1h
-          expr: histogram_quantile(0.95, sum(rate(http_server_duration_seconds_bucket{otel_scope_name="status-list-server"}[1h])) by (namespace, le))
+          expr: histogram_quantile(0.95, sum(rate(http_server_duration_seconds_bucket{otel_scope_name="status-list-server",namespace="{{ .Release.Namespace }}"}[1h])) by (namespace, le))
         - record: sli:request_latency:p95:30m
-          expr: histogram_quantile(0.95, sum(rate(http_server_duration_seconds_bucket{otel_scope_name="status-list-server"}[30m])) by (namespace, le))
+          expr: histogram_quantile(0.95, sum(rate(http_server_duration_seconds_bucket{otel_scope_name="status-list-server",namespace="{{ .Release.Namespace }}"}[30m])) by (namespace, le))
         - record: sli:request_latency:p95:6h
-          expr: histogram_quantile(0.95, sum(rate(http_server_duration_seconds_bucket{otel_scope_name="status-list-server"}[6h])) by (namespace, le))
+          expr: histogram_quantile(0.95, sum(rate(http_server_duration_seconds_bucket{otel_scope_name="status-list-server",namespace="{{ .Release.Namespace }}"}[6h])) by (namespace, le))
         - record: sli:error_rate:5m
-          expr: sum by (namespace)(rate(http_server_requests_total{otel_scope_name="status-list-server",status_class="5xx"}[5m])) / sum by (namespace)(rate(http_server_requests_total{otel_scope_name="status-list-server"}[5m]))
+          expr: sum by (namespace)(rate(http_server_requests_total{otel_scope_name="status-list-server",namespace="{{ .Release.Namespace }}",status_class="5xx"}[5m])) / sum by (namespace)(rate(http_server_requests_total{otel_scope_name="status-list-server",namespace="{{ .Release.Namespace }}"}[5m]))
         - record: sli:error_rate:1h
-          expr: sum by (namespace)(rate(http_server_requests_total{otel_scope_name="status-list-server",status_class="5xx"}[1h])) / sum by (namespace)(rate(http_server_requests_total{otel_scope_name="status-list-server"}[1h]))
+          expr: sum by (namespace)(rate(http_server_requests_total{otel_scope_name="status-list-server",namespace="{{ .Release.Namespace }}",status_class="5xx"}[1h])) / sum by (namespace)(rate(http_server_requests_total{otel_scope_name="status-list-server",namespace="{{ .Release.Namespace }}"}[1h]))
         - record: sli:error_rate:30m
-          expr: sum by (namespace)(rate(http_server_requests_total{otel_scope_name="status-list-server",status_class="5xx"}[30m])) / sum by (namespace)(rate(http_server_requests_total{otel_scope_name="status-list-server"}[30m]))
+          expr: sum by (namespace)(rate(http_server_requests_total{otel_scope_name="status-list-server",namespace="{{ .Release.Namespace }}",status_class="5xx"}[30m])) / sum by (namespace)(rate(http_server_requests_total{otel_scope_name="status-list-server",namespace="{{ .Release.Namespace }}"}[30m]))
         - record: sli:error_rate:6h
-          expr: sum by (namespace)(rate(http_server_requests_total{otel_scope_name="status-list-server",status_class="5xx"}[6h])) / sum by (namespace)(rate(http_server_requests_total{otel_scope_name="status-list-server"}[6h]))
+          expr: sum by (namespace)(rate(http_server_requests_total{otel_scope_name="status-list-server",namespace="{{ .Release.Namespace }}",status_class="5xx"}[6h])) / sum by (namespace)(rate(http_server_requests_total{otel_scope_name="status-list-server",namespace="{{ .Release.Namespace }}"}[6h]))
         - record: sli:error_rate:30d
-          expr: sum by (namespace)(rate(http_server_requests_total{otel_scope_name="status-list-server",status_class="5xx"}[30d])) / sum by (namespace)(rate(http_server_requests_total{otel_scope_name="status-list-server"}[30d]))
+          expr: sum by (namespace)(rate(http_server_requests_total{otel_scope_name="status-list-server",namespace="{{ .Release.Namespace }}",status_class="5xx"}[30d])) / sum by (namespace)(rate(http_server_requests_total{otel_scope_name="status-list-server",namespace="{{ .Release.Namespace }}"}[30d]))
         - record: sli:db_query_latency:p95:5m
-          expr: histogram_quantile(0.95, sum(rate(db_query_duration_seconds_bucket{otel_scope_name="status-list-server"}[5m])) by (namespace, le))
+          expr: histogram_quantile(0.95, sum(rate(db_query_duration_seconds_bucket{otel_scope_name="status-list-server",namespace="{{ .Release.Namespace }}"}[5m])) by (namespace, le))
         - record: sli:db_query_latency:p95:1h
-          expr: histogram_quantile(0.95, sum(rate(db_query_duration_seconds_bucket{otel_scope_name="status-list-server"}[1h])) by (namespace, le))
+          expr: histogram_quantile(0.95, sum(rate(db_query_duration_seconds_bucket{otel_scope_name="status-list-server",namespace="{{ .Release.Namespace }}"}[1h])) by (namespace, le))
         - record: sli:db_query_latency:p95:30m
-          expr: histogram_quantile(0.95, sum(rate(db_query_duration_seconds_bucket{otel_scope_name="status-list-server"}[30m])) by (namespace, le))
+          expr: histogram_quantile(0.95, sum(rate(db_query_duration_seconds_bucket{otel_scope_name="status-list-server",namespace="{{ .Release.Namespace }}"}[30m])) by (namespace, le))
         - record: sli:db_query_latency:p95:6h
-          expr: histogram_quantile(0.95, sum(rate(db_query_duration_seconds_bucket{otel_scope_name="status-list-server"}[6h])) by (namespace, le))
+          expr: histogram_quantile(0.95, sum(rate(db_query_duration_seconds_bucket{otel_scope_name="status-list-server",namespace="{{ .Release.Namespace }}"}[6h])) by (namespace, le))
         - record: sli:cache_hit_ratio:5m
-          expr: sum by (namespace)(rate(status_list_cache_hits_total{otel_scope_name="status-list-server"}[5m])) / (sum by (namespace)(rate(status_list_cache_hits_total{otel_scope_name="status-list-server"}[5m])) + sum by (namespace)(rate(status_list_cache_misses_total{otel_scope_name="status-list-server"}[5m])))
+          expr: sum by (namespace)(rate(status_list_cache_hits_total{otel_scope_name="status-list-server",namespace="{{ .Release.Namespace }}"}[5m])) / (sum by (namespace)(rate(status_list_cache_hits_total{otel_scope_name="status-list-server",namespace="{{ .Release.Namespace }}"}[5m])) + sum by (namespace)(rate(status_list_cache_misses_total{otel_scope_name="status-list-server",namespace="{{ .Release.Namespace }}"}[5m])))
         - record: sli:cache_hit_ratio:7d
-          expr: sum by (namespace)(rate(status_list_cache_hits_total{otel_scope_name="status-list-server"}[7d])) / (sum by (namespace)(rate(status_list_cache_hits_total{otel_scope_name="status-list-server"}[7d])) + sum by (namespace)(rate(status_list_cache_misses_total{otel_scope_name="status-list-server"}[7d])))
+          expr: sum by (namespace)(rate(status_list_cache_hits_total{otel_scope_name="status-list-server",namespace="{{ .Release.Namespace }}"}[7d])) / (sum by (namespace)(rate(status_list_cache_hits_total{otel_scope_name="status-list-server",namespace="{{ .Release.Namespace }}"}[7d])) + sum by (namespace)(rate(status_list_cache_misses_total{otel_scope_name="status-list-server",namespace="{{ .Release.Namespace }}"}[7d])))
         - record: sli:cert_renewal_failure_rate:5m
-          expr: sum by (namespace)(rate(cert_renewal_failures_total{otel_scope_name="status-list-server"}[5m])) / sum by (namespace)(rate(cert_renewal_attempts_total{otel_scope_name="status-list-server"}[5m]))
+          expr: sum by (namespace)(rate(cert_renewal_failures_total{otel_scope_name="status-list-server",namespace="{{ .Release.Namespace }}"}[5m])) / sum by (namespace)(rate(cert_renewal_attempts_total{otel_scope_name="status-list-server",namespace="{{ .Release.Namespace }}"}[5m]))
         - record: sli:cert_renewal_failure_rate:7d
-          expr: sum by (namespace)(rate(cert_renewal_failures_total{otel_scope_name="status-list-server"}[7d])) / sum by (namespace)(rate(cert_renewal_attempts_total{otel_scope_name="status-list-server"}[7d]))
+          expr: sum by (namespace)(rate(cert_renewal_failures_total{otel_scope_name="status-list-server",namespace="{{ .Release.Namespace }}"}[7d])) / sum by (namespace)(rate(cert_renewal_attempts_total{otel_scope_name="status-list-server",namespace="{{ .Release.Namespace }}"}[7d]))
         - record: sli:cert_renewal_failure_rate:30d
-          expr: sum by (namespace)(rate(cert_renewal_failures_total{otel_scope_name="status-list-server"}[30d])) / sum by (namespace)(rate(cert_renewal_attempts_total{otel_scope_name="status-list-server"}[30d]))
+          expr: sum by (namespace)(rate(cert_renewal_failures_total{otel_scope_name="status-list-server",namespace="{{ .Release.Namespace }}"}[30d])) / sum by (namespace)(rate(cert_renewal_attempts_total{otel_scope_name="status-list-server",namespace="{{ .Release.Namespace }}"}[30d]))
         - record: sli:token_gen_failure_rate:5m
-          expr: sum by (namespace)(rate(token_generation_failures_total{otel_scope_name="status-list-server"}[5m])) / sum by (namespace)(rate(token_generation_attempts_total{otel_scope_name="status-list-server"}[5m]))
+          expr: sum by (namespace)(rate(token_generation_failures_total{otel_scope_name="status-list-server",namespace="{{ .Release.Namespace }}"}[5m])) / sum by (namespace)(rate(token_generation_attempts_total{otel_scope_name="status-list-server",namespace="{{ .Release.Namespace }}"}[5m]))
         - record: sli:token_gen_failure_rate:1h
-          expr: sum by (namespace)(rate(token_generation_failures_total{otel_scope_name="status-list-server"}[1h])) / sum by (namespace)(rate(token_generation_attempts_total{otel_scope_name="status-list-server"}[1h]))
+          expr: sum by (namespace)(rate(token_generation_failures_total{otel_scope_name="status-list-server",namespace="{{ .Release.Namespace }}"}[1h])) / sum by (namespace)(rate(token_generation_attempts_total{otel_scope_name="status-list-server",namespace="{{ .Release.Namespace }}"}[1h]))
         - record: sli:token_gen_failure_rate:30m
-          expr: sum by (namespace)(rate(token_generation_failures_total{otel_scope_name="status-list-server"}[30m])) / sum by (namespace)(rate(token_generation_attempts_total{otel_scope_name="status-list-server"}[30m]))
+          expr: sum by (namespace)(rate(token_generation_failures_total{otel_scope_name="status-list-server",namespace="{{ .Release.Namespace }}"}[30m])) / sum by (namespace)(rate(token_generation_attempts_total{otel_scope_name="status-list-server",namespace="{{ .Release.Namespace }}"}[30m]))
         - record: sli:token_gen_failure_rate:6h
-          expr: sum by (namespace)(rate(token_generation_failures_total{otel_scope_name="status-list-server"}[6h])) / sum by (namespace)(rate(token_generation_attempts_total{otel_scope_name="status-list-server"}[6h]))
+          expr: sum by (namespace)(rate(token_generation_failures_total{otel_scope_name="status-list-server",namespace="{{ .Release.Namespace }}"}[6h])) / sum by (namespace)(rate(token_generation_attempts_total{otel_scope_name="status-list-server",namespace="{{ .Release.Namespace }}"}[6h]))
         - record: sli:token_gen_failure_rate:30d
-          expr: sum by (namespace)(rate(token_generation_failures_total{otel_scope_name="status-list-server"}[30d])) / sum by (namespace)(rate(token_generation_attempts_total{otel_scope_name="status-list-server"}[30d]))
+          expr: sum by (namespace)(rate(token_generation_failures_total{otel_scope_name="status-list-server",namespace="{{ .Release.Namespace }}"}[30d])) / sum by (namespace)(rate(token_generation_attempts_total{otel_scope_name="status-list-server",namespace="{{ .Release.Namespace }}"}[30d]))
         - record: sli:token_gen_error_budget:30d
-          expr: clamp_max(clamp_min(1 - sli:token_gen_failure_rate:30d / {{ .Values.slo.errorRateTarget }}, 0), 1)
+          expr: clamp_max(clamp_min(1 - sli:token_gen_failure_rate:30d{namespace="{{ .Release.Namespace }}"} / {{ .Values.slo.errorRateTarget }}, 0), 1)
         - record: sli:error_budget:success:30d
-          expr: clamp_max(clamp_min(1 - sli:error_rate:30d / {{ .Values.slo.errorRateTarget }}, 0), 1)
+          expr: clamp_max(clamp_min(1 - sli:error_rate:30d{namespace="{{ .Release.Namespace }}"} / {{ .Values.slo.errorRateTarget }}, 0), 1)
 
     - name: status-list-server-slo-alerts
       rules:
@@ -76,7 +76,7 @@ spec:
             summary: "Prometheus alerting pipeline is healthy (Watchdog)"
             runbook_url: "https://github.com/adorsys/status-list-server/blob/develop/observability/README.md"
         - alert: StatusListMetricsAbsent
-          expr: absent(http_server_duration_seconds_bucket{otel_scope_name="status-list-server"})
+          expr: absent(http_server_duration_seconds_bucket{otel_scope_name="status-list-server",namespace="{{ .Release.Namespace }}"})
           for: 5m
           labels:
             severity: page
@@ -86,7 +86,7 @@ spec:
             summary: "status-list-server metrics absent for 5m (target down or not scraped)"
             runbook_url: "https://github.com/adorsys/status-list-server/blob/develop/observability/README.md"
         - alert: RequestLatencyFastBurn
-          expr: sli:request_latency:p95:1h > {{ .Values.slo.requestLatencyP95 }} and sli:request_latency:p95:5m > {{ .Values.slo.requestLatencyP95 }}
+          expr: sli:request_latency:p95:1h{namespace="{{ .Release.Namespace }}"} > {{ .Values.slo.requestLatencyP95 }} and sli:request_latency:p95:5m{namespace="{{ .Release.Namespace }}"} > {{ .Values.slo.requestLatencyP95 }}
           for: 5m
           labels:
             severity: page
@@ -97,7 +97,7 @@ spec:
             summary: "Request latency P95 sustainably above 300ms (>300ms on the 1h window)"
             runbook_url: "https://github.com/adorsys/status-list-server/blob/develop/observability/runbooks/request-latency.md"
         - alert: RequestLatencySlowBurn
-          expr: sli:request_latency:p95:6h > {{ .Values.slo.requestLatencyP95 }} and sli:request_latency:p95:30m > {{ .Values.slo.requestLatencyP95 }}
+          expr: sli:request_latency:p95:6h{namespace="{{ .Release.Namespace }}"} > {{ .Values.slo.requestLatencyP95 }} and sli:request_latency:p95:30m{namespace="{{ .Release.Namespace }}"} > {{ .Values.slo.requestLatencyP95 }}
           for: 30m
           labels:
             severity: warn
@@ -108,7 +108,7 @@ spec:
             summary: "Request latency P95 sustained above 300ms on the 6h window"
             runbook_url: "https://github.com/adorsys/status-list-server/blob/develop/observability/runbooks/request-latency.md"
         - alert: ErrorRateFastBurn
-          expr: sli:error_rate:1h >= {{ mulf .Values.slo.errorRateTarget .Values.slo.fastBurnMultiplier | printf "%.3f" }} and sli:error_rate:5m >= {{ mulf .Values.slo.errorRateTarget .Values.slo.fastBurnMultiplier | printf "%.3f" }}
+          expr: sli:error_rate:1h{namespace="{{ .Release.Namespace }}"} >= {{ mulf .Values.slo.errorRateTarget .Values.slo.fastBurnMultiplier | printf "%.3f" }} and sli:error_rate:5m{namespace="{{ .Release.Namespace }}"} >= {{ mulf .Values.slo.errorRateTarget .Values.slo.fastBurnMultiplier | printf "%.3f" }}
           for: 5m
           labels:
             severity: page
@@ -119,7 +119,7 @@ spec:
             summary: "5xx error rate burning the error budget fast (>=14.4x over 0.5% budget on the 1h window)"
             runbook_url: "https://github.com/adorsys/status-list-server/blob/develop/observability/runbooks/error-rate.md"
         - alert: ErrorRateSlowBurn
-          expr: sli:error_rate:6h >= {{ mulf .Values.slo.errorRateTarget .Values.slo.slowBurnMultiplier | printf "%.3f" }} and sli:error_rate:30m >= {{ mulf .Values.slo.errorRateTarget .Values.slo.slowBurnMultiplier | printf "%.3f" }}
+          expr: sli:error_rate:6h{namespace="{{ .Release.Namespace }}"} >= {{ mulf .Values.slo.errorRateTarget .Values.slo.slowBurnMultiplier | printf "%.3f" }} and sli:error_rate:30m{namespace="{{ .Release.Namespace }}"} >= {{ mulf .Values.slo.errorRateTarget .Values.slo.slowBurnMultiplier | printf "%.3f" }}
           for: 30m
           labels:
             severity: warn
@@ -130,7 +130,7 @@ spec:
             summary: "5xx error rate burning the error budget slowly (>=6x over 0.5% budget on the 6h window)"
             runbook_url: "https://github.com/adorsys/status-list-server/blob/develop/observability/runbooks/error-rate.md"
         - alert: DbLatencyFastBurn
-          expr: sli:db_query_latency:p95:1h > {{ .Values.slo.dbLatencyP95 }} and sli:db_query_latency:p95:5m > {{ .Values.slo.dbLatencyP95 }}
+          expr: sli:db_query_latency:p95:1h{namespace="{{ .Release.Namespace }}"} > {{ .Values.slo.dbLatencyP95 }} and sli:db_query_latency:p95:5m{namespace="{{ .Release.Namespace }}"} > {{ .Values.slo.dbLatencyP95 }}
           for: 5m
           labels:
             severity: page
@@ -141,7 +141,7 @@ spec:
             summary: "DB query latency P95 sustainably above 50ms (>50ms on the 1h window)"
             runbook_url: "https://github.com/adorsys/status-list-server/blob/develop/observability/runbooks/db-latency.md"
         - alert: DbLatencySlowBurn
-          expr: sli:db_query_latency:p95:6h > {{ .Values.slo.dbLatencyP95 }} and sli:db_query_latency:p95:30m > {{ .Values.slo.dbLatencyP95 }}
+          expr: sli:db_query_latency:p95:6h{namespace="{{ .Release.Namespace }}"} > {{ .Values.slo.dbLatencyP95 }} and sli:db_query_latency:p95:30m{namespace="{{ .Release.Namespace }}"} > {{ .Values.slo.dbLatencyP95 }}
           for: 30m
           labels:
             severity: warn
@@ -152,7 +152,7 @@ spec:
             summary: "DB query latency P95 sustained above 50ms on the 6h window"
             runbook_url: "https://github.com/adorsys/status-list-server/blob/develop/observability/runbooks/db-latency.md"
         - alert: TokenGenerationFastBurn
-          expr: sli:token_gen_failure_rate:1h >= {{ mulf .Values.slo.errorRateTarget .Values.slo.fastBurnMultiplier | printf "%.3f" }} and sli:token_gen_failure_rate:5m >= {{ mulf .Values.slo.errorRateTarget .Values.slo.fastBurnMultiplier | printf "%.3f" }}
+          expr: sli:token_gen_failure_rate:1h{namespace="{{ .Release.Namespace }}"} >= {{ mulf .Values.slo.errorRateTarget .Values.slo.fastBurnMultiplier | printf "%.3f" }} and sli:token_gen_failure_rate:5m{namespace="{{ .Release.Namespace }}"} >= {{ mulf .Values.slo.errorRateTarget .Values.slo.fastBurnMultiplier | printf "%.3f" }}
           for: 5m
           labels:
             severity: page
@@ -163,7 +163,7 @@ spec:
             summary: "Token-generation failures burning the error budget fast (>=14.4x over 0.5% budget on the 1h window)"
             runbook_url: "https://github.com/adorsys/status-list-server/blob/develop/observability/runbooks/token-generation.md"
         - alert: TokenGenerationSlowBurn
-          expr: sli:token_gen_failure_rate:6h >= {{ mulf .Values.slo.errorRateTarget .Values.slo.slowBurnMultiplier | printf "%.3f" }} and sli:token_gen_failure_rate:30m >= {{ mulf .Values.slo.errorRateTarget .Values.slo.slowBurnMultiplier | printf "%.3f" }}
+          expr: sli:token_gen_failure_rate:6h{namespace="{{ .Release.Namespace }}"} >= {{ mulf .Values.slo.errorRateTarget .Values.slo.slowBurnMultiplier | printf "%.3f" }} and sli:token_gen_failure_rate:30m{namespace="{{ .Release.Namespace }}"} >= {{ mulf .Values.slo.errorRateTarget .Values.slo.slowBurnMultiplier | printf "%.3f" }}
           for: 30m
           labels:
             severity: warn
@@ -174,7 +174,7 @@ spec:
             summary: "Token-generation failure rate burning the error budget slowly (>=6x over 0.5% budget on the 6h window)"
             runbook_url: "https://github.com/adorsys/status-list-server/blob/develop/observability/runbooks/token-generation.md"
         - alert: CacheHitRatioLow
-          expr: sli:cache_hit_ratio:5m < {{ .Values.slo.cacheHitRatioMin }}
+          expr: sli:cache_hit_ratio:5m{namespace="{{ .Release.Namespace }}"} < {{ .Values.slo.cacheHitRatioMin }}
           for: 15m
           labels:
             severity: warn
@@ -186,7 +186,7 @@ spec:
             description: 'Current cache hit ratio: {{ `{{ $value | humanizePercentage }}` }}'
             runbook_url: "https://github.com/adorsys/status-list-server/blob/develop/observability/runbooks/cache-hit-ratio.md"
         - alert: ErrorBudgetCritical
-          expr: sli:error_budget:success:30d < {{ .Values.slo.errorBudgetCriticalThreshold }}
+          expr: sli:error_budget:success:30d{namespace="{{ .Release.Namespace }}"} < {{ .Values.slo.errorBudgetCriticalThreshold }}
           for: 5m
           labels:
             severity: page
@@ -198,7 +198,7 @@ spec:
             description: 'Remaining error budget: {{ `{{ $value | humanizePercentage }}` }}'
             runbook_url: "https://github.com/adorsys/status-list-server/blob/develop/observability/runbooks/error-budget.md"
         - alert: TokenGenErrorBudgetCritical
-          expr: sli:token_gen_error_budget:30d < {{ .Values.slo.errorBudgetCriticalThreshold }}
+          expr: sli:token_gen_error_budget:30d{namespace="{{ .Release.Namespace }}"} < {{ .Values.slo.errorBudgetCriticalThreshold }}
           for: 5m
           labels:
             severity: page
@@ -210,7 +210,7 @@ spec:
             description: 'Remaining token generation error budget: {{ `{{ $value | humanizePercentage }}` }}'
             runbook_url: "https://github.com/adorsys/status-list-server/blob/develop/observability/runbooks/token-generation.md"
         - alert: CertRenewalFailures
-          expr: cert_time_to_expiry_seconds{otel_scope_name="status-list-server"} <= {{ .Values.slo.certExpiryWarnSeconds }}
+          expr: cert_time_to_expiry_seconds{otel_scope_name="status-list-server",namespace="{{ .Release.Namespace }}"} <= {{ .Values.slo.certExpiryWarnSeconds }}
           for: 30m
           labels:
             severity: warn
@@ -222,7 +222,7 @@ spec:
             description: 'Time to expiry: {{ `{{ $value }}` }}s'
             runbook_url: "https://github.com/adorsys/status-list-server/blob/develop/observability/runbooks/cert-renewal.md"
         - alert: CertRenewalErrorBudgetCritical
-          expr: cert_time_to_expiry_seconds{otel_scope_name="status-list-server"} <= {{ .Values.slo.certExpiryCriticalSeconds }}
+          expr: cert_time_to_expiry_seconds{otel_scope_name="status-list-server",namespace="{{ .Release.Namespace }}"} <= {{ .Values.slo.certExpiryCriticalSeconds }}
           for: 10m
           labels:
             severity: page
