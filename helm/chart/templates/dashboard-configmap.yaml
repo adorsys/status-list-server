@@ -1,0 +1,26 @@
+{{- if and .Values.statuslist.enabled .Values.grafanaDashboard.enabled }}
+{{- /*
+  Publishes the generated SLO dashboard as a ConfigMap so the central Grafana
+  sidecar (kube-prometheus-stack configures `sidecar.dashboards.searchNamespace`
+  + `label: grafana_dashboard / labelValue: "1"`) auto-provisions it.
+
+  Source of truth: observability/dashboards/generated/status-list-slo.json,
+  regenerated from src/generate.mjs (see observability/dashboards/README.md).
+  The chart-local copy under helm/chart/observability/ is kept in sync so Helm
+  can embed it via .Files.Get (Helm only reads files inside the chart tree).
+*/}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "status-list-server-chart.fullname" . }}-dashboard
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "status-list-server-chart.labels" . | nindent 4 }}
+    app.kubernetes.io/component: dashboard
+    {{- with .Values.grafanaDashboard.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+data:
+  status-list-slo.json: |-
+    {{- .Files.Get "observability/dashboards/generated/status-list-slo.json" | nindent 4 }}
+{{- end }}
