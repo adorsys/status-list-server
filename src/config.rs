@@ -235,21 +235,11 @@ pub enum ResolvedDnsProvider<'a> {
     /// Uses the ambient AWS credentials; no provider-specific settings
     Route53,
     Cloudflare(&'a CloudflareDnsConfig),
-    Gcloud(GcloudKeySource<'a>),
+    Gcloud(&'a GcloudDnsConfig),
     Azure(&'a AzureDnsConfig),
     Acmedns(&'a AcmeDnsConfig),
     /// Development-only; its challenge server URL lives outside [`DnsConfig`]
     Pebble,
-}
-
-/// The Google Cloud service account key source, with empty values counting
-/// as unset and the inline key winning when both are configured
-#[derive(Debug, Clone, Copy)]
-pub enum GcloudKeySource<'a> {
-    /// The key JSON itself
-    Inline(&'a SecretString),
-    /// Path to the key JSON file
-    Path(&'a str),
 }
 
 impl ResolvedDnsProvider<'_> {
@@ -280,17 +270,13 @@ pub struct DnsConfig {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct GcloudDnsConfig {
-    /// Service account key JSON, inline
-    pub service_account_key: Option<SecretString>,
-    /// Path to the service account key JSON file
-    pub service_account_key_path: Option<String>,
+    /// GCP project ID holding the Cloud DNS managed zones
+    pub project_id: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct AzureDnsConfig {
-    pub tenant_id: String,
-    pub client_id: String,
-    pub client_secret: SecretString,
+    /// Azure subscription ID holding the DNS zones
     pub subscription_id: String,
     /// Resource group holding the DNS zones
     pub resource_group: String,
@@ -457,12 +443,6 @@ impl AzureDnsConfig {
     /// instead of surfacing as opaque API errors at the first renewal
     fn validate(&self) -> Result<(), ConfigError> {
         let empty: Vec<&str> = [
-            ("tenant_id", self.tenant_id.trim().is_empty()),
-            ("client_id", self.client_id.trim().is_empty()),
-            (
-                "client_secret",
-                self.client_secret.expose_secret().trim().is_empty(),
-            ),
             ("subscription_id", self.subscription_id.trim().is_empty()),
             ("resource_group", self.resource_group.trim().is_empty()),
         ]
@@ -474,6 +454,18 @@ impl AzureDnsConfig {
                 "Azure DNS settings have empty required fields: {}",
                 empty.join(", ")
             )));
+        }
+        Ok(())
+    }
+}
+
+impl GcloudDnsConfig {
+    /// Reject an empty project ID so misconfigurations fail at startup.
+    fn validate(&self) -> Result<(), ConfigError> {
+        if self.project_id.trim().is_empty() {
+            return Err(ConfigError::Message(
+                "Google Cloud DNS settings have an empty project_id".to_string(),
+            ));
         }
         Ok(())
     }
@@ -518,17 +510,9 @@ impl DnsConfig {
                 ResolvedDnsProvider::Cloudflare(cloudflare)
             }
             DnsProviderKind::Gcloud => {
-                let key = self.gcloud.as_ref().and_then(|g| {
-                    g.service_account_key
-                        .as_ref()
-                        .filter(|k| !k.expose_secret().trim().is_empty())
-                        .map(GcloudKeySource::Inline)
-                        .or_else(|| {
-                            non_empty(&g.service_account_key_path)
-                                .map(|path| GcloudKeySource::Path(path))
-                        })
-                });
-                ResolvedDnsProvider::Gcloud(key.ok_or_else(|| missing("dns.gcloud"))?)
+                let gcloud = self.gcloud.as_ref().ok_or_else(|| missing("dns.gcloud"))?;
+                gcloud.validate()?;
+                ResolvedDnsProvider::Gcloud(gcloud)
             }
             DnsProviderKind::Azure => {
                 let azure = self.azure.as_ref().ok_or_else(|| missing("dns.azure"))?;
@@ -1630,9 +1614,6 @@ mod tests {
         let azure_dns = DnsConfig {
             provider: Some(DnsProviderKind::Azure),
             azure: Some(AzureDnsConfig {
-                tenant_id: "tenant".into(),
-                client_id: "client".into(),
-                client_secret: "secret".into(),
                 subscription_id: "sub".into(),
                 resource_group: "rg".into(),
             }),
@@ -1646,8 +1627,7 @@ mod tests {
         let gcloud_path_dns = DnsConfig {
             provider: Some(DnsProviderKind::Gcloud),
             gcloud: Some(GcloudDnsConfig {
-                service_account_key: None,
-                service_account_key_path: Some("/etc/gcloud/key.json".into()),
+                project_id: "dns-project".into(),
             }),
             ..Default::default()
         };
@@ -1655,37 +1635,6 @@ mod tests {
             gcloud_path_dns.resolve("production").unwrap().kind(),
             DnsProviderKind::Gcloud
         );
-
-        // GCloud key source precedence (Inline key vs Path)
-        let gcloud_inline_and_path = DnsConfig {
-            provider: Some(DnsProviderKind::Gcloud),
-            gcloud: Some(GcloudDnsConfig {
-                service_account_key: Some("inline-key-json".into()),
-                service_account_key_path: Some("/etc/gcloud/key.json".into()),
-            }),
-            ..Default::default()
-        };
-        match gcloud_inline_and_path.resolve("production").unwrap() {
-            ResolvedDnsProvider::Gcloud(GcloudKeySource::Inline(key)) => {
-                assert_eq!(key.expose_secret(), "inline-key-json");
-            }
-            other => panic!("Expected an inline key source, got {other:?}"),
-        }
-
-        let gcloud_empty_inline_uses_path = DnsConfig {
-            provider: Some(DnsProviderKind::Gcloud),
-            gcloud: Some(GcloudDnsConfig {
-                service_account_key: Some("".into()),
-                service_account_key_path: Some("/etc/gcloud/key.json".into()),
-            }),
-            ..Default::default()
-        };
-        match gcloud_empty_inline_uses_path.resolve("production").unwrap() {
-            ResolvedDnsProvider::Gcloud(GcloudKeySource::Path(path)) => {
-                assert_eq!(path, "/etc/gcloud/key.json");
-            }
-            other => panic!("Expected a path key source, got {other:?}"),
-        }
 
         // ACME-DNS accounts JSON parsing from environment overrides
         let server_url = "https://auth.example.org";
@@ -1890,46 +1839,40 @@ mod tests {
             );
         }
 
-        let missing_gcloud_key = DnsConfig {
+        let empty_gcloud_project = DnsConfig {
             provider: Some(DnsProviderKind::Gcloud),
             gcloud: Some(GcloudDnsConfig {
-                service_account_key: None,
-                service_account_key_path: None,
+                project_id: " ".into(),
             }),
             ..Default::default()
         };
         assert!(
-            missing_gcloud_key
+            empty_gcloud_project
                 .resolve("production")
                 .unwrap_err()
                 .to_string()
-                .contains("dns.gcloud")
+                .contains("project_id")
         );
 
-        let empty_gcloud_keys = DnsConfig {
+        let gcloud_dns = DnsConfig {
             provider: Some(DnsProviderKind::Gcloud),
             gcloud: Some(GcloudDnsConfig {
-                service_account_key: Some("".into()),
-                service_account_key_path: Some(" ".into()),
+                project_id: "dns-project".into(),
             }),
             ..Default::default()
         };
-        assert!(
-            empty_gcloud_keys
-                .resolve("production")
-                .unwrap_err()
-                .to_string()
-                .contains("dns.gcloud")
-        );
+        match gcloud_dns.resolve("production").unwrap() {
+            ResolvedDnsProvider::Gcloud(cfg) => {
+                assert_eq!(cfg.project_id, "dns-project");
+            }
+            other => panic!("Expected GCloud DNS config, got {other:?}"),
+        }
 
-        let azure_helper = |tenant_id: &str, subscription_id: &str| DnsConfig {
+        let azure_helper = |subscription_id: &str, resource_group: &str| DnsConfig {
             provider: Some(DnsProviderKind::Azure),
             azure: Some(AzureDnsConfig {
-                tenant_id: tenant_id.into(),
-                client_id: "client".into(),
-                client_secret: "secret".into(),
                 subscription_id: subscription_id.into(),
-                resource_group: "rg".into(),
+                resource_group: resource_group.into(),
             }),
             ..Default::default()
         };
@@ -1937,9 +1880,23 @@ mod tests {
             .resolve("production")
             .unwrap_err()
             .to_string();
-        assert!(azure_err.contains("tenant_id"));
         assert!(azure_err.contains("subscription_id"));
-        assert!(!azure_err.contains("client_id"));
+        assert!(azure_err.contains("resource_group"));
+
+        let azure_dns = DnsConfig {
+            provider: Some(DnsProviderKind::Azure),
+            azure: Some(AzureDnsConfig {
+                subscription_id: "sub".into(),
+                resource_group: "rg".into(),
+            }),
+            ..Default::default()
+        };
+        match azure_dns.resolve("production").unwrap() {
+            ResolvedDnsProvider::Azure(cfg) => {
+                assert_eq!(cfg.subscription_id, "sub");
+            }
+            other => panic!("Expected Azure DNS config, got {other:?}"),
+        }
 
         // Malformed ACME-DNS accounts JSON rejection
         assert!(
