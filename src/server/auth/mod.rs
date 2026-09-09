@@ -4,17 +4,19 @@ pub mod errors;
 
 use axum::{
     body::Body,
-    extract::{Request, State},
+    extract::{FromRequestParts, Request, State},
+    http::request::Parts,
     middleware::Next,
     response::IntoResponse,
 };
 use errors::AuthenticationError;
-use hyper::header;
+use hyper::{StatusCode, header};
 use jsonwebtoken::{DecodingKey, Validation};
 use serde::{Deserialize, Serialize};
+use std::future::Future;
 
 use crate::domain::models::credential::Issuer;
-use crate::server::AppState;
+use crate::server::{AppState, error::ApiError};
 
 #[derive(Debug, Serialize, Deserialize)]
 struct Claims {
@@ -32,19 +34,65 @@ pub struct AuthenticatedIssuer {
 }
 
 impl AuthenticatedIssuer {
-    pub fn new(issuer: Issuer) -> Self {
+    /// Build an authenticated issuer principal from a verified issuer identity.
+    pub(crate) fn new(issuer: Issuer) -> Self {
         Self { issuer }
     }
 
+    /// Borrow the verified issuer identity associated with this principal.
     pub fn issuer(&self) -> &Issuer {
         &self.issuer
     }
 
+    /// Consume the principal and return the verified issuer identity.
     pub fn into_issuer(self) -> Issuer {
         self.issuer
     }
 }
 
+impl From<AuthenticatedIssuer> for Issuer {
+    fn from(principal: AuthenticatedIssuer) -> Self {
+        principal.issuer
+    }
+}
+
+impl AsRef<Issuer> for AuthenticatedIssuer {
+    fn as_ref(&self) -> &Issuer {
+        self.issuer()
+    }
+}
+
+impl AsRef<str> for AuthenticatedIssuer {
+    fn as_ref(&self) -> &str {
+        &self.issuer.0
+    }
+}
+
+impl<S> FromRequestParts<S> for AuthenticatedIssuer
+where
+    S: Send + Sync,
+{
+    type Rejection = ApiError;
+
+    fn from_request_parts(
+        parts: &mut Parts,
+        _state: &S,
+    ) -> impl Future<Output = Result<Self, Self::Rejection>> + Send {
+        let principal = parts.extensions.get::<AuthenticatedIssuer>().cloned();
+        async move {
+            principal.ok_or_else(|| {
+                ApiError::new(
+                    StatusCode::UNAUTHORIZED,
+                    "missing_auth_context",
+                    Some("Authenticated issuer context is missing".into()),
+                )
+            })
+        }
+    }
+}
+
+/// Formats the underlying issuer identifier, preserving the canonical string
+/// representation used by tracing fields.
 impl std::fmt::Display for AuthenticatedIssuer {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         self.issuer.0.fmt(f)
@@ -99,7 +147,7 @@ mod tests {
     use super::*;
     use crate::test_utils::test_app_state;
     use axum::{
-        Extension, Router,
+        Router,
         body::{Body, to_bytes},
         extract::Request,
         http::{StatusCode, header},
@@ -318,7 +366,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_request_extension_contains_issuer() {
+    async fn test_authenticated_issuer_extractor_returns_principal() {
         let private_pem = test_ec_private_pem();
         let state = test_app_state(None).await;
 
@@ -331,9 +379,7 @@ mod tests {
             .await
             .unwrap();
 
-        async fn extension_test_handler(
-            Extension(principal): Extension<AuthenticatedIssuer>,
-        ) -> String {
+        async fn extension_test_handler(principal: AuthenticatedIssuer) -> String {
             assert_eq!(principal.issuer(), &Issuer("test-issuer".into()));
             principal.into_issuer().0
         }
@@ -358,5 +404,27 @@ mod tests {
         let bytes = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
         let body = String::from_utf8(bytes.to_vec()).unwrap();
         assert_eq!(body, "test-issuer");
+    }
+
+    #[tokio::test]
+    async fn test_authenticated_issuer_extractor_returns_401_when_context_missing() {
+        let state = test_app_state(None).await;
+
+        async fn principal_handler(_principal: AuthenticatedIssuer) -> &'static str {
+            "Ok"
+        }
+
+        let app = Router::new()
+            .route("/test", get(principal_handler))
+            .with_state(state);
+
+        let request = Request::builder().uri("/test").body(Body::empty()).unwrap();
+
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+        let bytes = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(json["error"], "missing_auth_context");
     }
 }

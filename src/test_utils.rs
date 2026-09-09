@@ -15,6 +15,7 @@ use crate::outbound::sql::{
     SeaOrmStore, SqlCredentialRepo, SqlStatusListRepo, SqlStatusListSnapshotRepo,
 };
 use crate::server::AppState;
+use crate::server::auth::AuthenticatedIssuer;
 use crate::server::health::Readiness;
 #[cfg(feature = "acme")]
 use crate::{cert_manager::storage::StorageError, utils::cert_manager::storage::Storage};
@@ -22,6 +23,10 @@ use async_trait::async_trait;
 #[cfg(feature = "acme")]
 use std::collections::HashMap;
 use std::sync::Arc;
+
+pub(crate) fn authenticated_issuer(issuer: impl Into<String>) -> AuthenticatedIssuer {
+    AuthenticatedIssuer::new(crate::domain::models::credential::Issuer(issuer.into()))
+}
 
 #[cfg(feature = "acme")]
 #[allow(dead_code)]

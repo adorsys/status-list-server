@@ -1,5 +1,4 @@
 use axum::{
-    Extension,
     extract::{Json, Path, State},
     http::StatusCode,
     response::IntoResponse,
@@ -19,7 +18,7 @@ use super::utils::request::StatusesRequest;
 #[tracing::instrument(skip_all, fields(list_id = %list_id, issuer = %principal), err(level = "info", Debug))]
 pub async fn publish_status(
     State(appstate): State<AppState>,
-    Extension(principal): Extension<AuthenticatedIssuer>,
+    principal: AuthenticatedIssuer,
     Path(list_id): Path<String>,
     Json(payload): Json<StatusesRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
@@ -45,7 +44,7 @@ pub async fn publish_status(
         .service
         .publish_status_list(
             list_id,
-            principal.into_issuer(),
+            principal.into(),
             sub,
             statuses,
             appstate.token_exp_secs,
@@ -65,11 +64,7 @@ mod tests {
     use crate::server::handlers::status_list::utils::request::{
         Status as RequestStatus, StatusEntry as RequestStatusEntry,
     };
-    use crate::test_utils::test_app_state;
-
-    fn authenticated_issuer(issuer: impl Into<String>) -> AuthenticatedIssuer {
-        AuthenticatedIssuer::new(Issuer(issuer.into()))
-    }
+    use crate::test_utils::{authenticated_issuer, test_app_state};
 
     #[tokio::test]
     async fn test_publish_token_status_invalid_list_id() {
@@ -79,7 +74,7 @@ mod tests {
 
         let result = publish_status(
             State(appstate),
-            Extension(authenticated_issuer(&issuer)),
+            authenticated_issuer(issuer),
             Path("not-a-uuid".to_string()),
             Json(payload),
         )
@@ -99,7 +94,7 @@ mod tests {
 
         let response = publish_status(
             State(app_state.clone()),
-            Extension(authenticated_issuer("issuer".to_string())),
+            authenticated_issuer("issuer"),
             Path(token_id.clone()),
             Json(StatusesRequest { statuses: vec![] }),
         )
@@ -120,7 +115,7 @@ mod tests {
 
         let res1 = publish_status(
             State(app_state.clone()),
-            Extension(authenticated_issuer("issuer".to_string())),
+            authenticated_issuer("issuer"),
             Path(token_id.clone()),
             Json(StatusesRequest { statuses: vec![] }),
         )
@@ -131,7 +126,7 @@ mod tests {
 
         let res2 = publish_status(
             State(app_state.clone()),
-            Extension(authenticated_issuer("issuer".to_string())),
+            authenticated_issuer("issuer"),
             Path(token_id.clone()),
             Json(StatusesRequest { statuses: vec![] }),
         )
@@ -144,6 +139,9 @@ mod tests {
         assert_eq!(err.status, StatusCode::CONFLICT);
     }
 
+    /// Publish is insert-only for a list ID: once `issuer1` creates a list,
+    /// another authenticated issuer cannot overwrite or hijack it with PUT.
+    /// The original issuer's record must remain intact.
     #[tokio::test]
     async fn test_publish_status_rejects_wrong_issuer_republish() {
         let token_id = uuid::Uuid::new_v4().to_string();
@@ -151,7 +149,7 @@ mod tests {
 
         publish_status(
             State(app_state.clone()),
-            Extension(authenticated_issuer("issuer1")),
+            authenticated_issuer("issuer1"),
             Path(token_id.clone()),
             Json(StatusesRequest { statuses: vec![] }),
         )
@@ -160,7 +158,7 @@ mod tests {
 
         let result = publish_status(
             State(app_state.clone()),
-            Extension(authenticated_issuer("issuer2")),
+            authenticated_issuer("issuer2"),
             Path(token_id.clone()),
             Json(StatusesRequest {
                 statuses: vec![RequestStatusEntry {
@@ -233,7 +231,7 @@ mod tests {
             async move {
                 publish_status(
                     State(state),
-                    Extension(authenticated_issuer(issuer)),
+                    authenticated_issuer(issuer),
                     Path(list_id),
                     Json(StatusesRequest {
                         statuses: vec![RequestStatusEntry {
@@ -343,7 +341,7 @@ mod tests {
             async move {
                 publish_status(
                     State(state),
-                    Extension(authenticated_issuer(issuer)),
+                    authenticated_issuer(issuer),
                     Path(list_id),
                     Json(StatusesRequest {
                         statuses: vec![RequestStatusEntry {
@@ -425,7 +423,7 @@ mod tests {
 
         let result = publish_status(
             State(app_state),
-            Extension(authenticated_issuer("issuer".to_string())),
+            authenticated_issuer("issuer"),
             Path(token_id),
             Json(StatusesRequest {
                 statuses: status_entries,
@@ -453,7 +451,7 @@ mod tests {
 
         let result = publish_status(
             State(app_state),
-            Extension(authenticated_issuer("issuer".to_string())),
+            authenticated_issuer("issuer"),
             Path(token_id),
             Json(StatusesRequest {
                 statuses: status_entries,
@@ -484,7 +482,7 @@ mod tests {
 
         let result = publish_status(
             State(app_state),
-            Extension(authenticated_issuer("issuer".to_string())),
+            authenticated_issuer("issuer"),
             Path(token_id),
             Json(StatusesRequest {
                 statuses: status_entries,
