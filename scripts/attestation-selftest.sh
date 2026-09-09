@@ -260,7 +260,7 @@ reset_case
 STUB_VERSION="gh version unknown"
 STUB_OUTPUT="Verification succeeded!"
 STUB_JSON=$(verified_json "$digest_hex")
-expect_rejected "a gh reporting an unparseable version" "$image_ref" "$repo"
+expect_rejected "a gh reporting an unparsable version" "$image_ref" "$repo"
 
 # ---------------------------------------------------------------------------------
 # Rejected because the result is absent rather than successful. These are the cases the

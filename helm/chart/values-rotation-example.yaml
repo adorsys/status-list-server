@@ -161,17 +161,17 @@ statuslist:
     APP_DATABASE__NAME: "statuslist"
     APP_DATABASE__BACKEND: "postgres"
     # Password is read from file. When APP_DATABASE__PASSWORD_FILE is set through
-    # fileEnv above, the chart does not inject APP_DATABASE__PASSWORD.
+  # fileEnv above, the chart does not inject APP_DATABASE__PASSWORD.
 
-    # Certificate store configuration
-    # Paths are injected by the signing-keys fileEnv mapping above:
-    # APP_SERVER__CERT__STORE__CERTIFICATE_PATH: /etc/secrets/token-keys/statuslist.crt
-    # APP_SERVER__CERT__STORE__SIGNING_KEY_PATH: /etc/secrets/token-keys/statuslist.key
+  # Certificate store configuration
+  # Paths are injected by the signing-keys fileEnv mapping above:
+  # APP_SERVER__CERT__STORE__CERTIFICATE_PATH: /etc/secrets/token-keys/statuslist.crt
+  # APP_SERVER__CERT__STORE__SIGNING_KEY_PATH: /etc/secrets/token-keys/statuslist.key
 
-    # ACME-enabled image variants use DNS-01 issuance instead of these static
-    # certificate files.
-    # APP_SERVER__CERT__ACME_DIRECTORY_URL: "https://acme-v02.api.letsencrypt.org/directory"
-    # APP_SERVER__CERT__EMAIL: "ops@example.com"
+  # ACME-enabled image variants use DNS-01 issuance instead of these static
+  # certificate files.
+  # APP_SERVER__CERT__ACME_DIRECTORY_URL: "https://acme-v02.api.letsencrypt.org/directory"
+  # APP_SERVER__CERT__EMAIL: "ops@example.com"
 
   ingress:
     enabled: true
@@ -225,7 +225,7 @@ serviceAccount:
   automountServiceAccountToken: false
   annotations: {}
   # For EKS IRSA:
-  # eks.amazonaws.com/role-arn: arn:aws:iam::123456789012:role/statuslist
+# eks.amazonaws.com/role-arn: arn:aws:iam::123456789012:role/statuslist
 
 networkPolicy:
   enabled: true

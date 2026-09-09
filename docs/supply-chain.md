@@ -185,9 +185,9 @@ A released image carries **two** provenance documents, and they are not two rend
 
 ### A signature is not the gate's verdict
 
-**A verified attestation establishes who built a digest, from which commit, in which workflow — and nothing else.** In particular it is **not** a statement that the image passed the vulnerability gate. The two are produced at different points and answer to different jobs: `build-and-push` attests immediately after the push, which is *before* `scan-image` has run at all. So an image the gate goes on to **reject** still carries a fully valid, correctly signed attestation under its `sha-<commit>` tag, and the verification command below passes clean on it.
+**A verified attestation establishes who built a digest, from which commit, in which workflow — and nothing else.** In particular it is **not** a statement that the image passed the vulnerability gate. The two are produced at different points and answer to different jobs: `build-and-push` attests immediately after the push, which is _before_ `scan-image` has run at all. So an image the gate goes on to **reject** still carries a fully valid, correctly signed attestation under its `sha-<commit>` tag, and the verification command below passes clean on it.
 
-That is the intended design rather than a hole in it — provenance answers "who built this", not "is this fit to deploy", and conflating them is the same error this whole section is about, one level up. But it means the two checks have to be read together: **consume by release tag, not by commit SHA tag.** The withheld tag is the gate's verdict; the signature is not. An image that is both attested *and* named `v1.2.3` or `latest-<variant>` has passed both, because [`promote-tags`](#the-scanned-artifact-is-the-deployed-artifact) applies those names only after the scan and then verifies the signature against the digest they resolve to.
+That is the intended design rather than a hole in it — provenance answers "who built this", not "is this fit to deploy", and conflating them is the same error this whole section is about, one level up. But it means the two checks have to be read together: **consume by release tag, not by commit SHA tag.** The withheld tag is the gate's verdict; the signature is not. An image that is both attested _and_ named `v1.2.3` or `latest-<variant>` has passed both, because [`promote-tags`](#the-scanned-artifact-is-the-deployed-artifact) applies those names only after the scan and then verifies the signature against the digest they resolve to.
 
 ### When they disagree
 
@@ -202,10 +202,10 @@ On the release path the same disagreement surfaces at whichever of three points 
 **Do this, in order:**
 
 1. **Do not roll back yet, and do not delete the image.** The pushed artifact is the evidence. Deleting it destroys the only copy of what was published, and a rollback that races an attacker's next push tells you nothing.
-2. **Stop the bleeding at the pull, not the registry.** Pin the running deployment to the last digest that *does* verify — `helm upgrade` with `statuslist.image.digest` set to it. The chart prefers a digest over any tag, so this is proof against the tag being repointed again.
+2. **Stop the bleeding at the pull, not the registry.** Pin the running deployment to the last digest that _does_ verify — `helm upgrade` with `statuslist.image.digest` set to it. The chart prefers a digest over any tag, so this is proof against the tag being repointed again.
 3. **Notify the repository owners and treat GHCR package push access as compromised** until shown otherwise. This is the access that makes the failure possible; the image is the symptom.
 
-   **Scope it by which way the check failed, because the two are different incidents.** An image whose signature is *absent or invalid* needs only package push access. An image carrying a signature that *verifies against a ref or workflow you did not expect* needs repository write access — the certificate identity is minted by Actions, so producing one means running a workflow here. The second is the larger blast radius and pulls in every other secret this repository can reach.
+   **Scope it by which way the check failed, because the two are different incidents.** An image whose signature is _absent or invalid_ needs only package push access. An image carrying a signature that _verifies against a ref or workflow you did not expect_ needs repository write access — the certificate identity is minted by Actions, so producing one means running a workflow here. The second is the larger blast radius and pulls in every other secret this repository can reach.
 4. **Record the digest, the tag, and the `gh attestation verify` output** before doing anything that changes registry state. Rekor is append-only, so a genuine build's entry is still there and is the reference point for what should have been published.
 5. Only then decide about the tag. Re-promoting over a suspect tag before step 3 is complete just publishes a second claim from the same compromised position.
 
@@ -277,7 +277,7 @@ docker buildx imagetools inspect ghcr.io/adorsys/status-list-server:<tag> \
   --format '{{ json (index .Provenance "linux/amd64") }}'
 ```
 
-Verify the signed provenance — the check that answers *who built this*, and the one to use when deciding whether to trust an image. Use the wrapper rather than `gh` directly; it is the same script the release path runs, so a local pass means what the pipeline means by it:
+Verify the signed provenance — the check that answers _who built this_, and the one to use when deciding whether to trust an image. Use the wrapper rather than `gh` directly; it is the same script the release path runs, so a local pass means what the pipeline means by it:
 
 ```bash
 bash scripts/verify-attestation.sh \
@@ -301,23 +301,23 @@ bash scripts/verify-attestation.sh \
 --deny-self-hosted-runners
 ```
 
-and without one it substitutes a `--cert-identity-regex` anchored at *both* ends that accepts only a release-tag ref. Neither is `--repo`, and — less obviously — neither is `--signer-workflow`:
+and without one it substitutes a `--cert-identity-regex` anchored at _both_ ends that accepts only a release-tag ref. Neither is `--repo`, and — less obviously — neither is `--signer-workflow`:
 
-- `--repo` scopes attestation *lookup*, so on its own it establishes only that *some* workflow in this repository signed the digest. The threat is push access, and whoever can publish a forged image can also add a workflow that signs it.
-- `--signer-workflow` looks like the answer and is not. `gh` compiles it to `"^" + regexp.QuoteMeta("https://<host>/<owner>/<repo>/<path>")` — anchored at the **start only**. The `@<ref>` suffix is unconstrained, so a signature produced by this workflow from *any* branch satisfies it. `build-and-push` runs on `workflow_dispatch`, so obtaining one needs only repository write access; dispatching the workflow that already exists is easier than adding a new one. The prefix also admits sibling paths like `deploy.yml-staging.yml`.
+- `--repo` scopes attestation _lookup_, so on its own it establishes only that _some_ workflow in this repository signed the digest. The threat is push access, and whoever can publish a forged image can also add a workflow that signs it.
+- `--signer-workflow` looks like the answer and is not. `gh` compiles it to `"^" + regexp.QuoteMeta("https://<host>/<owner>/<repo>/<path>")` — anchored at the **start only**. The `@<ref>` suffix is unconstrained, so a signature produced by this workflow from _any_ branch satisfies it. `build-and-push` runs on `workflow_dispatch`, so obtaining one needs only repository write access; dispatching the workflow that already exists is easier than adding a new one. The prefix also admits sibling paths like `deploy.yml-staging.yml`.
 - The two are not additive. `gh` resolves `SAN`/`SANRegex` before `SignerWorkflow` and returns early, so passing both would leave `--signer-workflow` silently ignored while looking like a second layer.
 
 The wrapper composes the workflow path from the repository argument rather than accepting it separately, so the command above and the command the pipeline runs cannot drift apart.
 
 **It also needs `gh` 2.67.0 or newer, and refuses to run on anything older.** That floor is not tidiness. Until 2.67.0, `gh attestation verify` **exited 0 when it found no attestation at all** ([cli/cli#10418](https://github.com/cli/cli/issues/10418), fixed by [#10421](https://github.com/cli/cli/pull/10421)) — so an older `gh` reports a clean verification for an image carrying no provenance whatsoever, inside the one command documented as the defence against exactly that.
 
-**And it asserts the result, from `--format json` rather than from `gh`'s output text.** The tempting text assertion — "the output names the digest we asked about" — is worthless here, and worth understanding before anyone reintroduces it: `gh` prints `Loaded digest <digest> for <artifact>` *before* it fetches anything, echoing back the digest it was handed. That substring is therefore present on every run, including one that found nothing. The wrapper instead requires a non-empty result array whose verified subject digest is the one asked about, and fails closed if that document cannot be read at all, because a schema change must block a release rather than quietly weaken the check.
+**And it asserts the result, from `--format json` rather than from `gh`'s output text.** The tempting text assertion — "the output names the digest we asked about" — is worthless here, and worth understanding before anyone reintroduces it: `gh` prints `Loaded digest <digest> for <artifact>` _before_ it fetches anything, echoing back the digest it was handed. That substring is therefore present on every run, including one that found nothing. The wrapper instead requires a non-empty result array whose verified subject digest is the one asked about, and fails closed if that document cannot be read at all, because a schema change must block a release rather than quietly weaken the check.
 
 Verification is also retried three times. GitHub's attestation API and Sigstore's trust root are separate failure domains from the registry, and a transient blip should not fail a release on the last step before a deploy.
 
 `scripts/attestation-selftest.sh` proves both directions against a stubbed `gh` and runs on every pull request, in `local-ci.sh`, and once on the release path. Fourteen cases: eleven that must be rejected, three that must pass, plus assertions on the arguments the stub was called with. The stub's output is a faithful reproduction of real `gh` — `Loaded digest` line included — so a verifier that regressed to a text assertion is rejected there rather than in a release.
 
-The argument assertions are deliberately about argv and not outcome: whether `gh` *honours* a flag is `gh`'s contract, and a stub rejecting a signature from another workflow would only prove the stub was written to reject it. What is ours to get wrong is which flags are sent — including, in the `--signer-workflow` case, sending one that would be silently ignored, whose *absence* is therefore asserted too.
+The argument assertions are deliberately about argv and not outcome: whether `gh` _honours_ a flag is `gh`'s contract, and a stub rejecting a signature from another workflow would only prove the stub was written to reject it. What is ours to get wrong is which flags are sent — including, in the `--signer-workflow` case, sending one that would be silently ignored, whose _absence_ is therefore asserted too.
 
 Verifying by digest is deliberate. A tag is mutable, so verifying one establishes only that something carrying a valid attestation once answered to that name — and it may resolve to a different digest by the time you pull it. To check a tag, resolve it first and verify what it resolves to, which is what `promote-tags` does:
 
