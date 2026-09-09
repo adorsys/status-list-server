@@ -3,6 +3,12 @@ name: "CI"
 on:
   merge_group:
   workflow_dispatch:
+    inputs:
+      cli_version:
+        description: Optional exact BoringCache CLI release
+        required: false
+        default: ""
+        type: string
   workflow_call:
   pull_request:
   push:
@@ -193,6 +199,9 @@ jobs:
   cargo-build:
     name: Cargo Build
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
     needs: cargo-fmt
     timeout-minutes: 45
 
@@ -202,10 +211,24 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: BoringCache Cargo
+        uses: boringcache/one@a610ec5a564efd9b360925056dbade04deb5def6 # v1.30.0
+        with:
+          cli-version: ${{ inputs.cli_version }}
+          mode: archive
+          cache-profiles: dependencies
+          trust-policy: ${{ (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && 'auto' || 'restore' }}
+          fail-on-cache-error: true
+
+      - name: Install sccache
+        uses: taiki-e/install-action@c44f6b046f1c29ae5918b1e0bfdbb2f1813836fd # v2.84.1
+        with:
+          tool: sccache@0.17.0
+
       - name: Install Rust
         uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1.17.0
         with:
-          cache-shared-key: "workspace"
+          cache: false
 
       - name: Install build dependencies
         run: |
@@ -213,10 +236,12 @@ jobs:
           sudo apt-get install -y cmake golang-go
 
       - name: Cargo Build
-        run: cargo build --workspace --all-targets --all-features
+        run: |
+          boringcache cargo --${{ (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && 'write' || 'read-only' }} --skip-save build --workspace --all-targets --all-features
 
       - name: Memory-only Build
-        run: cargo check --no-default-features --features memory
+        run: |
+          boringcache cargo --${{ (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && 'write' || 'read-only' }} --skip-restore --skip-save check --no-default-features --features memory
 
       - name: Release image feature set
         # The Dockerfile default is still the local smoke-build feature set.
@@ -232,7 +257,7 @@ jobs:
             exit 1
           fi
           echo "release image features: ${features}"
-          cargo check --workspace --features "${features}"
+          boringcache cargo --${{ (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && 'write' || 'read-only' }} --skip-restore check --workspace --features "${features}"
 
       - name: Verify domain layer purity
         run: |
@@ -248,6 +273,7 @@ jobs:
     timeout-minutes: 30
     permissions:
       contents: read
+      id-token: write
     strategy:
       fail-fast: false
       matrix:
@@ -269,11 +295,24 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: BoringCache Cargo
+        uses: boringcache/one@a610ec5a564efd9b360925056dbade04deb5def6 # v1.30.0
+        with:
+          cli-version: ${{ inputs.cli_version }}
+          mode: archive
+          cache-profiles: dependencies
+          trust-policy: ${{ (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && 'auto' || 'restore' }}
+          fail-on-cache-error: true
+
+      - name: Install sccache
+        uses: taiki-e/install-action@c44f6b046f1c29ae5918b1e0bfdbb2f1813836fd # v2.84.1
+        with:
+          tool: sccache@0.17.0
+
       - name: Install Rust
         uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1.17.0
         with:
-          cache-shared-key: "workspace"
-          cache-save-if: "false"
+          cache: false
 
       - name: Install build dependencies
         run: |
@@ -281,13 +320,17 @@ jobs:
           sudo apt-get install -y cmake golang-go
 
       - name: Cargo check release variant
-        run: cargo check --workspace --features "${FEATURES}"
+        run: |
+          boringcache cargo --${{ (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && 'write' || 'read-only' }} --skip-save check --workspace --features "${FEATURES}"
         env:
           FEATURES: ${{ matrix.variant.features }}
 
   docker-build:
     name: Docker Build Smoke
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
 
     steps:
       - name: Fetch Repository
@@ -295,19 +338,23 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Docker build (production features)
-        # No FEATURES build-arg: the Dockerfile default is already the release set, and
-        # a second copy would drift.
-        #
-        # No gha cache: Docker layer caching is intentionally disabled to avoid cache
-        # bloat. The cargo build cache is shared across jobs; Docker layer caching
-        # would add ~2GB per run without significant benefit for this smoke build,
-        # evicting the cargo caches the other jobs rely on.
-        run: docker build .
+      - name: Prepare Docker output
+        run: mkdir -p target
+
+      - name: BoringCache Docker
+        uses: boringcache/one@a610ec5a564efd9b360925056dbade04deb5def6 # v1.30.0
+        with:
+          cli-version: ${{ inputs.cli_version }}
+          mode: docker
+          trust-policy: ${{ (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && 'auto' || 'restore' }}
+          fail-on-cache-error: true
 
   cargo-clippy:
     name: Cargo Clippy Check
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
     needs:
       - cargo-build
       - release-variant-checks
@@ -318,19 +365,36 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: BoringCache Cargo
+        uses: boringcache/one@a610ec5a564efd9b360925056dbade04deb5def6 # v1.30.0
+        with:
+          cli-version: ${{ inputs.cli_version }}
+          mode: archive
+          cache-profiles: dependencies
+          trust-policy: ${{ (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && 'auto' || 'restore' }}
+          fail-on-cache-error: true
+
+      - name: Install sccache
+        uses: taiki-e/install-action@c44f6b046f1c29ae5918b1e0bfdbb2f1813836fd # v2.84.1
+        with:
+          tool: sccache@0.17.0
+
       - name: Install Rust
         uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1.17.0
         with:
+          cache: false
           components: clippy
-          cache-shared-key: "workspace"
-          cache-save-if: "false"
 
       - name: Clippy Check
-        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+        run: |
+          boringcache cargo --${{ (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && 'write' || 'read-only' }} --skip-save clippy --workspace --all-targets --all-features -- -D warnings
 
   cargo-nextest:
     name: Cargo Nextest
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
     needs: cargo-build
 
     steps:
@@ -339,11 +403,24 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: BoringCache Cargo
+        uses: boringcache/one@a610ec5a564efd9b360925056dbade04deb5def6 # v1.30.0
+        with:
+          cli-version: ${{ inputs.cli_version }}
+          mode: archive
+          cache-profiles: dependencies
+          trust-policy: ${{ (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && 'auto' || 'restore' }}
+          fail-on-cache-error: true
+
+      - name: Install sccache
+        uses: taiki-e/install-action@c44f6b046f1c29ae5918b1e0bfdbb2f1813836fd # v2.84.1
+        with:
+          tool: sccache@0.17.0
+
       - name: Install Rust
         uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1.17.0
         with:
-          cache-shared-key: "workspace"
-          cache-save-if: "false"
+          cache: false
 
       - name: Install Helm
         uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
@@ -355,11 +432,15 @@ jobs:
           tool: nextest@0.9.101
 
       - name: Run Cargo Tests
-        run: cargo nextest run --workspace --all-targets --all-features
+        run: |
+          boringcache cargo --${{ (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && 'write' || 'read-only' }} --skip-save nextest run --workspace --all-targets --all-features
 
   cargo-doc:
     name: Cargo Documentation
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
     needs: cargo-build
 
     steps:
@@ -368,14 +449,28 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: BoringCache Cargo
+        uses: boringcache/one@a610ec5a564efd9b360925056dbade04deb5def6 # v1.30.0
+        with:
+          cli-version: ${{ inputs.cli_version }}
+          mode: archive
+          cache-profiles: dependencies
+          trust-policy: ${{ (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && 'auto' || 'restore' }}
+          fail-on-cache-error: true
+
+      - name: Install sccache
+        uses: taiki-e/install-action@c44f6b046f1c29ae5918b1e0bfdbb2f1813836fd # v2.84.1
+        with:
+          tool: sccache@0.17.0
+
       - name: Install Rust
         uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1.17.0
         with:
-          cache-shared-key: "workspace"
-          cache-save-if: "false"
+          cache: false
 
       - name: Generate Documentation
-        run: cargo doc --workspace --all-features --no-deps --document-private-items
+        run: |
+          boringcache cargo --${{ (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && 'write' || 'read-only' }} --skip-save doc --workspace --all-features --no-deps --document-private-items
         env:
           RUSTDOCFLAGS: -D warnings
 
@@ -389,6 +484,9 @@ jobs:
     if: ${{ needs.check-crate-type.outputs.is_lib == 'true' }}
     name: Cargo test doc
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
     timeout-minutes: 45
 
     steps:
@@ -397,11 +495,24 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: BoringCache Cargo
+        uses: boringcache/one@a610ec5a564efd9b360925056dbade04deb5def6 # v1.30.0
+        with:
+          cli-version: ${{ inputs.cli_version }}
+          mode: archive
+          cache-profiles: dependencies
+          trust-policy: ${{ (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && 'auto' || 'restore' }}
+          fail-on-cache-error: true
+
+      - name: Install sccache
+        uses: taiki-e/install-action@c44f6b046f1c29ae5918b1e0bfdbb2f1813836fd # v2.84.1
+        with:
+          tool: sccache@0.17.0
+
       - name: Install stable toolchain
         uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1.17.0
         with:
-          cache-shared-key: "workspace"
-          cache-save-if: "false"
+          cache: false
 
       - name: Install build dependencies
         run: |
@@ -409,7 +520,8 @@ jobs:
           sudo apt-get install -y cmake golang-go
 
       - name: Cargo test doc
-        run: cargo test --doc --workspace --all-features
+        run: |
+          boringcache cargo --${{ (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && 'write' || 'read-only' }} --skip-save test --doc --workspace --all-features
 
   cargo-machete:
     name: Cargo Machete Check
@@ -918,6 +1030,9 @@ jobs:
   cargo-coverage:
     name: Cargo Coverage (llvm-cov)
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
     needs: cargo-build
     steps:
       - name: Fetch Repository
@@ -925,11 +1040,25 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: BoringCache Cargo
+        uses: boringcache/one@a610ec5a564efd9b360925056dbade04deb5def6 # v1.30.0
+        with:
+          cli-version: ${{ inputs.cli_version }}
+          mode: archive
+          cache-profiles: dependencies
+          trust-policy: ${{ (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && 'auto' || 'restore' }}
+          fail-on-cache-error: true
+
+      - name: Install sccache
+        uses: taiki-e/install-action@c44f6b046f1c29ae5918b1e0bfdbb2f1813836fd # v2.84.1
+        with:
+          tool: sccache@0.17.0
+
       - name: Install stable toolchain
         uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1.17.0
         with:
+          cache: false
           components: llvm-tools-preview
-          cache-shared-key: "coverage"
 
       - name: Install cargo-llvm-cov and cargo-nextest
         uses: taiki-e/install-action@c44f6b046f1c29ae5918b1e0bfdbb2f1813836fd # v2.84.1
@@ -939,7 +1068,8 @@ jobs:
           tool: cargo-llvm-cov@0.6.16,nextest@0.9.101
 
       - name: Generate code coverage
-        run: cargo llvm-cov nextest --workspace --all-features --html --output-dir target/llvm-cov/html
+        run: |
+          boringcache cargo --${{ (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && 'write' || 'read-only' }} --profile coverage llvm-cov nextest --workspace --all-features --html --output-dir target/llvm-cov/html
 
       - name: Upload coverage artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
