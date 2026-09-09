@@ -460,8 +460,15 @@ components:
         - `iat`: issued-at timestamp
         - `exp`: expiration timestamp
 
-        The server validates the signature using the registered JWK and verifies
-        that the `iss` claim matches the registered issuer.
+        The optional `nbf` claim is honored when present. The optional `aud`
+        claim is accepted only when it matches one of the configured
+        `management_auth.audiences` values; tokens without `aud` are accepted
+        when no audience is configured.
+
+        The server validates the signature using the registered JWK, verifies
+        that the `iss` claim matches the registered issuer, rejects future
+        `iat`/`nbf` values outside the configured leeway, and rejects tokens
+        whose lifetime (`exp - iat`) exceeds the configured maximum.
 
         Mutual TLS (mTLS) for issuer authentication is not implemented in the
         current release; this security scheme may be added in a future version.
@@ -665,6 +672,7 @@ components:
             - index_too_large
             # 401 — emitted by the authentication middleware
             - invalid_auth_header
+            - invalid_token
             - jwt_error
             - unsupported_algorithm
             - issuer_not_found

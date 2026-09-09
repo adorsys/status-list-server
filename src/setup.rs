@@ -582,6 +582,11 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
         max_statuses_per_request: config.limits.max_statuses_per_request,
         max_serialized_list_size: config.limits.max_serialized_list_size,
         snapshot_retention_secs: config.status_list.snapshot_retention_secs,
+        management_auth: crate::server::ManagementAuthConfig {
+            leeway_secs: config.management_auth.leeway_secs,
+            max_token_lifetime_secs: config.management_auth.max_token_lifetime_secs,
+            audiences: config.management_auth.audiences.clone(),
+        },
         readiness,
     };
 

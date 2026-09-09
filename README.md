@@ -162,7 +162,11 @@ The server uses JWT-based authentication with the following requirements:
 3. The JWT token must:
    - Be signed with the private key corresponding to the registered public key
    - Have `iss` (issuer) claim matching the registered issuer
-   - Have valid `exp` (expiration) and `iat` (issued at) claims
+   - Have numeric `iat` (issued at) and `exp` (expiration) claims
+   - Have `exp` later than `iat`, with `exp - iat` no greater than `management_auth.max_token_lifetime_secs` (default: 3600 seconds)
+   - Not have an `iat` in the future beyond `management_auth.leeway_secs` (default: 60 seconds)
+   - If present, have `nbf` (not before) no later than the current time plus `management_auth.leeway_secs`
+   - If present, have `aud` matching one of `management_auth.audiences`; leave `management_auth.audiences` empty to accept tokens without `aud`
 
 Example JWT token header:
 
@@ -178,7 +182,8 @@ Example JWT token claims:
 {
   "iss": "test-issuer",
   "exp": 1752515200,
-  "iat": 1752515200
+  "iat": 1752511600,
+  "nbf": 1752511600
 }
 ```
 
