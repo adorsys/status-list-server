@@ -20,21 +20,8 @@ mod database_implementation {
     #[cfg(feature = "postgres-tests")]
     use crate::outbound::sql::test_containers::postgres_helpers;
 
-    /// Multi-connection contention test: proves the block-then-lose behavior
-    /// for the transactional guarded update + snapshot path.
-    ///
-    /// This test opens two real connections to the same MySQL database and
-    /// verifies that:
-    /// 1. Connection A calls the production `update_one_with_snapshot` path,
-    ///    which performs a guarded UPDATE plus history INSERT in one
-    ///    transaction.
-    /// 2. Connection B calls `update_one_with_snapshot` on the same row and
-    ///    blocks behind A's row lock.
-    /// 3. Once A releases the lock, B returns false (lost the guard) and records
-    ///    no loser snapshot.
-    ///
-    /// This verifies the lock-hold behavior described in the optimistic
-    /// concurrency guard documentation.
+    /// A's guarded update + snapshot wins; B's concurrent guarded update blocks
+    /// on A's row lock, loses the guard, and records no loser snapshot.
     #[cfg(feature = "mysql")]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_mysql_concurrent_update_loses_guarded_update() {
@@ -257,24 +244,10 @@ mod database_implementation {
         );
     }
 
-    /// The publish race itself, on two real connections.
-    ///
-    /// `assert_duplicate_list_id_is_conflict` collides with a row that is
-    /// already **committed**, which is the common case but not the one the
-    /// issue describes. This collides with a row that is still **uncommitted**:
-    /// writer A holds the primary-key entry inside an open transaction while
-    /// writer B arrives, so B blocks in the engine and only learns the outcome
-    /// when A commits. That is a different code path — the driver surfaces the
-    /// violation at a different point — and it is the one a real racing publish
-    /// takes.
-    ///
-    /// Asserts three things:
-    ///
-    /// 1. B genuinely blocked (it cannot finish before A starts committing),
-    ///    which is what makes this a race test rather than a sequential one.
-    /// 2. B's failure still classifies as `DuplicateEntry` → 409, not a generic
-    ///    backend error → 500. This is the property the issue is about.
-    /// 3. The loser left nothing behind: no snapshot, and A's row intact.
+    /// The real publish race on two connections: writer B collides with writer
+    /// A's still-uncommitted primary key, blocks until A commits, and must get
+    /// `DuplicateEntry` (409), not a generic error (500), leaving no snapshot
+    /// behind.
     #[cfg(any(feature = "mysql", feature = "postgres-tests"))]
     async fn assert_concurrent_publish_loser_gets_conflict(
         pool_a: DatabaseConnection,
@@ -498,17 +471,9 @@ mod database_implementation {
         }
     }
 
-    /// Forces a real MySQL `1205` (`ER_LOCK_WAIT_TIMEOUT`). The only way to
-    /// exercise the `SqlxMySqlError` downcast, since the driver error type
-    /// cannot be constructed outside its own crate.
-    ///
-    /// Distinct from `test_mysql_concurrent_update_loses_guarded_update`: there
-    /// the blocked writer acquires the lock and reports `Ok(false)`; here it
-    /// never acquires it at all.
-    ///
-    /// Holds the lock with raw SQL rather than the `update_snapshot_test_hook`
-    /// probe, which is a process-global singleton that asserts single
-    /// installation and would race the other test.
+    /// Forces a real MySQL `1205` (`ER_LOCK_WAIT_TIMEOUT`) to exercise the
+    /// `SqlxMySqlError` downcast, since that error type cannot be constructed
+    /// outside its own crate.
     #[cfg(feature = "mysql")]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_mysql_lock_wait_timeout_maps_to_contention() {
@@ -629,28 +594,10 @@ mod database_implementation {
         txn_a.rollback().await.expect("failed to release A's lock");
     }
 
-    /// Forces a real Postgres `40P01` (`deadlock_detected`). The only way to
-    /// exercise the `SqlxPostgresError` downcast, since the driver error type
-    /// cannot be constructed outside its own crate.
-    ///
-    /// `40P01` rather than `40001` because a serialization failure needs a
-    /// transaction above READ COMMITTED, which no pinned write can be.
-    ///
-    /// The cycle:
-    ///
-    /// ```text
-    /// A: INSERT history 'snap-deadlock'          -- holds the unique key
-    /// B: UPDATE status_lists (repo)              -- holds the row lock
-    /// B: INSERT history 'snap-deadlock'          -- waits on A's key
-    /// A: UPDATE status_lists (same row)          -- waits on B's row lock
-    /// ```
-    ///
-    /// Postgres runs `CheckDeadLock` in a waiter when that waiter's
-    /// `deadlock_timeout` fires, and a waiter finding no cycle does not
-    /// re-check. B necessarily waits first, so without intervention A would be
-    /// the victim and the repository call would pass straight through. Setting
-    /// B's timeout to 2s and A's to 30s makes B check after the cycle closes,
-    /// so B is the victim.
+    /// Forces a real Postgres `40P01` (`deadlock_detected`), the only way to
+    /// exercise the `SqlxPostgresError` downcast. B is chosen as the deadlock
+    /// victim by giving it a shorter `deadlock_timeout` than A; A's narrower
+    /// window is closed by committing B's rollback that releases the row lock.
     #[cfg(feature = "postgres-tests")]
     #[tokio::test(flavor = "multi_thread", worker_threads = 3)]
     async fn test_postgres_deadlock_maps_to_contention() {
@@ -769,16 +716,10 @@ mod database_implementation {
         );
     }
 
-    /// Raises the session default to REPEATABLE READ and commits a racing write
-    /// underneath an in-flight guarded update. Without the pin the update
-    /// inherits REPEATABLE READ and fails with `40001`; with it the race
-    /// degrades to a guard miss, `Ok(false)`, which the service layer turns into
-    /// `409 update_conflict`. Fails if the pin is removed.
-    ///
-    /// Both write paths are covered because `update_one` was unpinned until
-    /// recently: a deployment with `history_retention_secs = 0` reported
-    /// `write_contention` where one with history reported `update_conflict` for
-    /// the same race. This asserts they now agree.
+    /// Verifies both write paths (`update_one` and `update_one_with_snapshot`)
+    /// pin to READ COMMITTED: a racing write committed underneath an in-flight
+    /// guarded update degrades to a clean guard miss (`Ok(false)`), never a
+    /// `40001` serialization failure.
     #[cfg(feature = "postgres-tests")]
     #[tokio::test(flavor = "multi_thread", worker_threads = 3)]
     async fn test_postgres_pinned_isolation_downgrades_serialization_failure() {

@@ -40,6 +40,9 @@ impl SwappableDatabaseConnection {
     }
 }
 
+#[cfg(test)]
+mod tests;
+
 #[cfg(all(test, feature = "sqlite"))]
 mod swappable_tests {
     use super::*;
@@ -820,6 +823,3 @@ mod snapshot_txn_test_hook {
     /// row INSERT still holds its uncommitted primary-key entry.
     pub(super) static INSERT_BEFORE_COMMIT: PauseSite = PauseSite::new();
 }
-
-#[cfg(test)]
-mod tests;

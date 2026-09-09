@@ -224,10 +224,9 @@ async fn test_mysql_update_one_optimistic_guard_rejects_stale_write() {
     assert_guarded_update_rejects_stale_write(db, "issuer-guard-mysql", "list-guard-mysql").await;
 }
 
-/// A client that loses the optimistic guard should be able to follow the
-/// contract exposed at the HTTP layer: observe 409, re-read, and retry with
-/// the fresh `updated_at`. If the guard ever becomes permanently
-/// unmatchable, this test fails on the retry.
+/// A client that loses the optimistic guard must be able to observe 409,
+/// re-read, and retry with the fresh `updated_at`; if the guard were ever
+/// permanently unmatchable, this test would fail on the retry.
 #[cfg(feature = "sqlite")]
 #[tokio::test]
 async fn test_update_one_conflict_loser_can_reread_and_retry() {
@@ -464,8 +463,9 @@ async fn test_update_one_with_snapshot_transaction_log_shape() {
     );
 }
 
-/// failure rollback (no partial snapshot), and the conflict path — against
-/// real SQLite, since `MockDatabase` cannot model rollback.
+/// The update + snapshot pair is atomic: a colliding snapshot INSERT rolls the
+/// row UPDATE back (no partial snapshot), against real SQLite since
+/// `MockDatabase` cannot model rollback.
 #[cfg(feature = "sqlite")]
 #[tokio::test]
 async fn test_sqlite_update_with_snapshot_is_atomic() {
@@ -621,12 +621,9 @@ async fn test_sqlite_update_with_snapshot_is_atomic() {
     );
 }
 
-/// The publish counterpart of the atomicity proof: the row INSERT and the
-/// snapshot covering its initial state succeed or fail as a unit. A hole
-/// here is worse than on the update path — no later write repairs a missing
-/// opening snapshot, so §8.4 lookups over that window would 404 forever.
-/// Also pins that a duplicate `list_id` still classifies as `DuplicateEntry`
-/// (409), not a generic insert failure (500).
+/// The row INSERT and its opening snapshot must commit atomically — a missing
+/// opening snapshot can never be repaired by a later write. Also pins that a
+/// duplicate `list_id` classifies as `DuplicateEntry` (409), not a 500.
 #[cfg(feature = "sqlite")]
 #[tokio::test]
 async fn test_sqlite_insert_with_snapshot_is_atomic() {
@@ -731,14 +728,9 @@ async fn test_sqlite_insert_with_snapshot_is_atomic() {
     assert_eq!(surviving.snapshot_id, "snap-ok");
 }
 
-/// Cross-backend proof: a duplicate `list_id` raised *inside* the open
-/// transaction must still classify as `DuplicateEntry` on MySQL. The
-/// non-transactional `insert_one` is already covered by
-/// `test_mysql_duplicate_insert_maps_to_duplicate_entry`; what is untested
-/// there is that `insert_one_with_snapshot` — which rolls back first and
-/// classifies afterwards (`map_insert_err` on the error captured *before*
-/// the rollback) — does not lose the classification along the way. Losing it
-/// turns every racing publish into a 500 instead of a 409.
+/// A duplicate `list_id` raised inside the open transaction of
+/// `insert_one_with_snapshot` must still classify as `DuplicateEntry` on
+/// MySQL — the rollback-first-then-classify path must not lose it.
 #[cfg(feature = "mysql")]
 #[tokio::test]
 async fn test_mysql_insert_with_snapshot_duplicate_maps_to_duplicate_entry() {
@@ -752,11 +744,9 @@ async fn test_mysql_insert_with_snapshot_duplicate_maps_to_duplicate_entry() {
     .await;
 }
 
-/// The same proof on Postgres, the production backend. Postgres is the
-/// backend where this could plausibly diverge: a failed statement poisons
-/// the transaction (`25P02`), so if the classification were ever read from
-/// the rollback rather than from the original `23505`, it would degrade to a
-/// generic insert error here and nowhere else.
+/// The same proof on Postgres, the production backend where a failed
+/// statement poisons the transaction (`25P02`); the classification must come
+/// from the original `23505`, not the rollback.
 #[cfg(feature = "postgres-tests")]
 #[tokio::test]
 async fn test_postgres_insert_with_snapshot_duplicate_maps_to_duplicate_entry() {
@@ -770,12 +760,9 @@ async fn test_postgres_insert_with_snapshot_duplicate_maps_to_duplicate_entry() 
     .await;
 }
 
-/// The same proof on SQLite. Redundant with the two container tests above on
-/// the classification question itself — but it is the only one of the three
-/// that runs under a plain `cargo test`, with no Docker and no
-/// `--all-features`. A regression in `insert_one_with_snapshot`'s error
-/// mapping therefore fails in milliseconds locally instead of waiting for
-/// the container job.
+/// The same proof on SQLite so a regression in the error mapping fails in
+/// milliseconds under a plain `cargo test`, without Docker or
+/// `--all-features`.
 #[cfg(feature = "sqlite")]
 #[tokio::test]
 async fn test_sqlite_insert_with_snapshot_duplicate_maps_to_duplicate_entry() {
@@ -789,24 +776,13 @@ async fn test_sqlite_insert_with_snapshot_duplicate_maps_to_duplicate_entry() {
     .await;
 }
 
-/// Publishes `list_id` once, then republishes it with a *different*
-/// `snapshot_id`, and asserts the failure is the duplicate `list_id`
-/// classified as `DuplicateEntry` — on both publish paths, transactional
-/// (`insert_one_with_snapshot`) and not (`insert_one`).
-///
-/// The distinct `snapshot_id` keeps the assertion aimed at one constraint.
-/// A duplicate `snapshot_id` deliberately stays a plain `InsertError` rather
-/// than a `DuplicateEntry` (pinned by
-/// `test_sqlite_insert_with_snapshot_is_atomic`), so reusing the committed
-/// one would couple this test to statement *ordering*: today the row INSERT
-/// fails first and short-circuits, but if that order ever flipped, the
-/// snapshot would collide first and this test would fail for a reason that
-/// has nothing to do with the property under test. A fresh `snapshot_id`
-/// leaves the duplicate `list_id` as the only thing that can fail.
-///
-/// Seeds its own issuer because `status_lists.issuer` is a foreign key onto
-/// `credentials.issuer`; callers pass a per-backend `issuer`/`list_id` pair
-/// so a shared database would still keep them apart.
+/// Publishes `list_id`, then republishes it under a different `snapshot_id`,
+/// asserting the failure is the duplicate `list_id` classified as
+/// `DuplicateEntry`, on both the transactional and non-transactional publish
+/// paths. The distinct `snapshot_id` keeps the assertion aimed at one
+/// constraint — a duplicate `snapshot_id` is intentionally a plain
+/// `InsertError`, and reusing the committed one would couple this test to
+/// statement ordering.
 #[cfg(any(feature = "sqlite", feature = "mysql", feature = "postgres-tests"))]
 async fn assert_duplicate_list_id_is_conflict(
     db: Arc<DatabaseConnection>,
