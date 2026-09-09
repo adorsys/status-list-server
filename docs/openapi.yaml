@@ -460,10 +460,10 @@ components:
         - `iat`: issued-at timestamp
         - `exp`: expiration timestamp
 
-        The optional `nbf` claim is honored when present. The optional `aud`
-        claim is accepted only when it matches one of the configured
-        `management_auth.audiences` values; tokens without `aud` are accepted
-        when no audience is configured.
+        The optional `nbf` claim is honored when present. When
+        `management_auth.audiences` is configured, the token must contain an
+        `aud` claim matching one of the configured values. When
+        `management_auth.audiences` is empty, `aud` is not validated.
 
         The server validates the signature using the registered JWK, verifies
         that the `iss` claim matches the registered issuer, rejects future

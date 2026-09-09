@@ -17,6 +17,26 @@ pub struct ManagementAuthConfig {
     pub audiences: Vec<String>,
 }
 
+impl Default for ManagementAuthConfig {
+    fn default() -> Self {
+        Self {
+            leeway_secs: 60,
+            max_token_lifetime_secs: 3600,
+            audiences: Vec::new(),
+        }
+    }
+}
+
+impl From<&crate::config::ManagementAuthConfig> for ManagementAuthConfig {
+    fn from(config: &crate::config::ManagementAuthConfig) -> Self {
+        Self {
+            leeway_secs: config.leeway_secs,
+            max_token_lifetime_secs: config.max_token_lifetime_secs,
+            audiences: config.audiences.clone(),
+        }
+    }
+}
+
 /// Shared application state injected into web handlers.
 #[derive(Debug, Clone)]
 pub struct AppState {

@@ -90,11 +90,7 @@ pub(crate) async fn test_app_state_without_snapshots() -> AppState {
         max_statuses_per_request: 5_000,
         max_serialized_list_size: 1_048_576,
         snapshot_retention_secs: 0,
-        management_auth: crate::server::ManagementAuthConfig {
-            leeway_secs: 60,
-            max_token_lifetime_secs: 3600,
-            audiences: Vec::new(),
-        },
+        management_auth: crate::server::ManagementAuthConfig::default(),
         readiness: crate::server::health::Readiness::new(Vec::new()),
     }
 }
@@ -185,11 +181,7 @@ async fn build_test_app_state(
         max_statuses_per_request: 5_000,
         max_serialized_list_size,
         snapshot_retention_secs: 7776000,
-        management_auth: crate::server::ManagementAuthConfig {
-            leeway_secs: 60,
-            max_token_lifetime_secs: 3600,
-            audiences: Vec::new(),
-        },
+        management_auth: crate::server::ManagementAuthConfig::default(),
         readiness: Readiness::default(),
     }
 }

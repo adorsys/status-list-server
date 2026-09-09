@@ -166,7 +166,7 @@ The server uses JWT-based authentication with the following requirements:
    - Have `exp` later than `iat`, with `exp - iat` no greater than `management_auth.max_token_lifetime_secs` (default: 3600 seconds)
    - Not have an `iat` in the future beyond `management_auth.leeway_secs` (default: 60 seconds)
    - If present, have `nbf` (not before) no later than the current time plus `management_auth.leeway_secs`
-   - If present, have `aud` matching one of `management_auth.audiences`; leave `management_auth.audiences` empty to accept tokens without `aud`
+   - When `management_auth.audiences` is configured, contain an `aud` claim matching one of the configured values; when `management_auth.audiences` is empty, `aud` is not validated
 
 Example JWT token header:
 

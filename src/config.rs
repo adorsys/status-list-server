@@ -123,8 +123,32 @@ pub struct ManagementAuthConfig {
     /// Maximum accepted lifetime in seconds, computed as `exp - iat`.
     pub max_token_lifetime_secs: u64,
     /// Accepted management-token audiences. Empty means the `aud` claim is not required.
-    #[serde(deserialize_with = "deserialize_vec_from_string_or_vec")]
+    #[serde(deserialize_with = "deserialize_audience_list")]
     pub audiences: Vec<String>,
+}
+
+impl ManagementAuthConfig {
+    fn validate(&self) -> Result<(), ConfigError> {
+        if self.max_token_lifetime_secs == 0 {
+            return Err(ConfigError::Message(
+                "management_auth.max_token_lifetime_secs must be greater than 0".to_string(),
+            ));
+        }
+
+        Ok(())
+    }
+}
+
+fn deserialize_audience_list<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let values = deserialize_vec_from_string_or_vec(deserializer)?;
+    Ok(values
+        .into_iter()
+        .map(|value: String| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .collect())
 }
 
 /// Telemetry configuration controlling tracing and metrics export.
@@ -1017,6 +1041,7 @@ impl Config {
         if let Some(query) = trim_non_empty(config.database.query.as_deref()) {
             validate_database_query(query)?;
         }
+        config.management_auth.validate()?;
         Ok(config)
     }
 }
@@ -1707,6 +1732,34 @@ mod tests {
                 .unwrap()
                 .accounts
                 .is_empty()
+        );
+    }
+
+    #[test]
+    fn test_management_auth_validations() {
+        let zero_lifetime =
+            Config::load_from_overrides(&[("management_auth.max_token_lifetime_secs", "0")]);
+        assert!(
+            zero_lifetime.is_err(),
+            "zero management token lifetime should fail config loading"
+        );
+
+        let empty_audiences =
+            Config::load_from_overrides(&[("APP_MANAGEMENT_AUTH__AUDIENCES", "")])
+                .expect("empty audience env value should load");
+        assert!(empty_audiences.management_auth.audiences.is_empty());
+
+        let trimmed_audiences = Config::load_from_overrides(&[(
+            "APP_MANAGEMENT_AUTH__AUDIENCES",
+            "status-list-server-management, internal-management, ",
+        )])
+        .expect("comma-separated audiences should load");
+        assert_eq!(
+            trimmed_audiences.management_auth.audiences,
+            vec![
+                "status-list-server-management".to_string(),
+                "internal-management".to_string()
+            ]
         );
     }
 

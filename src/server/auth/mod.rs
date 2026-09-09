@@ -17,6 +17,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use crate::server::AppState;
 
 const JWT_REQUIRED_SPEC_CLAIMS: &[&str] = &["iss", "exp"];
+const JWT_REQUIRED_SPEC_CLAIMS_WITH_AUDIENCE: &[&str] = &["iss", "exp", "aud"];
 
 #[derive(Debug, Serialize, Deserialize)]
 struct UnverifiedIssuerClaims {
@@ -42,24 +43,32 @@ impl ManagementClaims {
         max_token_lifetime_secs: u64,
     ) -> Result<(), AuthenticationError> {
         if self.exp <= self.iat {
+            tracing::error!("Management JWT rejected: exp must be later than iat");
             return Err(AuthenticationError::InvalidClaims);
         }
 
         if self.iat > now.saturating_add(leeway_secs) {
+            tracing::error!(
+                "Management JWT rejected: iat is in the future beyond configured leeway"
+            );
             return Err(AuthenticationError::InvalidClaims);
         }
 
         if let Some(nbf) = self.nbf
             && nbf > now.saturating_add(leeway_secs)
         {
+            tracing::error!(
+                "Management JWT rejected: nbf is in the future beyond configured leeway"
+            );
             return Err(AuthenticationError::InvalidClaims);
         }
 
-        let lifetime = self
-            .exp
-            .checked_sub(self.iat)
-            .ok_or(AuthenticationError::InvalidClaims)?;
+        let lifetime = self.exp.checked_sub(self.iat).ok_or_else(|| {
+            tracing::error!("Management JWT rejected: exp must be later than iat");
+            AuthenticationError::InvalidClaims
+        })?;
         if lifetime > max_token_lifetime_secs {
+            tracing::error!("Management JWT rejected: token lifetime exceeds configured maximum");
             return Err(AuthenticationError::InvalidClaims);
         }
 
@@ -74,7 +83,7 @@ struct TestClaims {
     iat: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     nbf: Option<u64>,
-    exp: usize,
+    exp: u64,
 }
 
 /// Authentication middleware acting as a safeguard for unauthorized issuers
@@ -92,8 +101,19 @@ pub async fn auth(
         .and_then(|auth| auth.strip_prefix("Bearer "))
         .ok_or(AuthenticationError::InvalidAuthorizationHeader)?;
 
-    let alg = jsonwebtoken::decode_header(token)?.alg;
-    let issuer = insecure_decode::<UnverifiedIssuerClaims>(token)?.claims.iss;
+    let alg = jsonwebtoken::decode_header(token)
+        .map_err(|e| {
+            tracing::error!("Failed to decode management JWT header: {e:?}");
+            AuthenticationError::JwtError(e)
+        })?
+        .alg;
+    let issuer = insecure_decode::<UnverifiedIssuerClaims>(token)
+        .map_err(|e| {
+            tracing::error!("Failed to decode management JWT issuer claim: {e:?}");
+            AuthenticationError::JwtError(e)
+        })?
+        .claims
+        .iss;
 
     let credential = state
         .service
@@ -112,15 +132,22 @@ pub async fn auth(
     let mut validation = Validation::new(alg);
     validation.leeway = state.management_auth.leeway_secs;
     validation.validate_nbf = true;
-    // jsonwebtoken can require registered claims like `iss` and `exp`; `iat`
-    // is required by deserializing into `ManagementClaims`.
-    validation.set_required_spec_claims(JWT_REQUIRED_SPEC_CLAIMS);
     validation.set_issuer(&[&credential.issuer.0]);
     if !state.management_auth.audiences.is_empty() {
+        validation.set_required_spec_claims(JWT_REQUIRED_SPEC_CLAIMS_WITH_AUDIENCE);
         validation.set_audience(&state.management_auth.audiences);
+    } else {
+        // jsonwebtoken can require registered claims like `iss` and `exp`;
+        // `iat` is required by deserializing into `ManagementClaims`.
+        validation.set_required_spec_claims(JWT_REQUIRED_SPEC_CLAIMS);
+        validation.validate_aud = false;
     }
 
-    let token_data = jsonwebtoken::decode::<ManagementClaims>(token, &decoding_key, &validation)?;
+    let token_data = jsonwebtoken::decode::<ManagementClaims>(token, &decoding_key, &validation)
+        .map_err(|e| {
+            tracing::error!("Failed to decode management JWT: {e:?}");
+            AuthenticationError::JwtError(e)
+        })?;
     let now = current_unix_timestamp()?;
     token_data.claims.validate_policy(
         now,
@@ -196,7 +223,7 @@ mod tests {
             iss: issuer.to_string(),
             iat: now,
             nbf: None,
-            exp: (now + 3600) as usize,
+            exp: now + 3600,
         };
 
         let header = Header::new(alg);
@@ -346,7 +373,7 @@ mod tests {
             iss: "test-issuer".to_string(),
             iat: now - 7200,
             nbf: None,
-            exp: (now - 3600) as usize,
+            exp: now - 3600,
         };
 
         let encoding_key = EncodingKey::from_ec_pem(private_pem.as_bytes()).unwrap();
@@ -501,6 +528,73 @@ mod tests {
                 "iss": "test-issuer",
                 "iat": now,
                 "aud": "other-service",
+                "exp": now + 3600
+            }),
+            &encoding_key,
+        );
+
+        let response = call_with_token(app, token).await;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn test_audience_claim_is_ignored_when_no_audience_is_configured() {
+        let private_pem = test_ec_private_pem();
+        let state = test_state_with_registered_issuer().await;
+        let app = create_test_router(state);
+        let now = now();
+
+        let encoding_key = EncodingKey::from_ec_pem(private_pem.as_bytes()).unwrap();
+        let token = sign_claims(
+            serde_json::json!({
+                "iss": "test-issuer",
+                "iat": now,
+                "aud": "other-service",
+                "exp": now + 3600
+            }),
+            &encoding_key,
+        );
+
+        let response = call_with_token(app, token).await;
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_matching_audience_claim_succeeds_when_audience_is_configured() {
+        let private_pem = test_ec_private_pem();
+        let mut state = test_state_with_registered_issuer().await;
+        state.management_auth.audiences = vec!["status-list-server-management".to_string()];
+        let app = create_test_router(state);
+        let now = now();
+
+        let encoding_key = EncodingKey::from_ec_pem(private_pem.as_bytes()).unwrap();
+        let token = sign_claims(
+            serde_json::json!({
+                "iss": "test-issuer",
+                "iat": now,
+                "aud": "status-list-server-management",
+                "exp": now + 3600
+            }),
+            &encoding_key,
+        );
+
+        let response = call_with_token(app, token).await;
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_missing_audience_claim_is_rejected_when_audience_is_configured() {
+        let private_pem = test_ec_private_pem();
+        let mut state = test_state_with_registered_issuer().await;
+        state.management_auth.audiences = vec!["status-list-server-management".to_string()];
+        let app = create_test_router(state);
+        let now = now();
+
+        let encoding_key = EncodingKey::from_ec_pem(private_pem.as_bytes()).unwrap();
+        let token = sign_claims(
+            serde_json::json!({
+                "iss": "test-issuer",
+                "iat": now,
                 "exp": now + 3600
             }),
             &encoding_key,
