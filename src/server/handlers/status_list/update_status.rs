@@ -1,14 +1,10 @@
 use axum::{
-    Extension,
     extract::{Json, Path, State},
     response::IntoResponse,
 };
 use hyper::StatusCode;
 
-use crate::{
-    domain::models::credential::Issuer,
-    server::{AppState, error::ApiError},
-};
+use crate::server::{AppState, auth::AuthenticatedIssuer, error::ApiError};
 
 use super::utils::request::StatusesRequest;
 
@@ -20,10 +16,10 @@ use super::utils::request::StatusesRequest;
 /// which would page on routine write contention and on optimistic-concurrency
 /// conflicts. Severity belongs to [`ApiError`]'s `IntoResponse`, which
 /// discriminates on status; this event only adds span context.
-#[tracing::instrument(skip_all, fields(list_id = %list_id, issuer = %issuer), err(level = "info", Debug))]
+#[tracing::instrument(skip_all, fields(list_id = %list_id, issuer = %principal), err(level = "info", Debug))]
 pub async fn update_status(
     State(appstate): State<AppState>,
-    Extension(issuer): Extension<String>,
+    principal: AuthenticatedIssuer,
     Path(list_id): Path<String>,
     Json(payload): Json<StatusesRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
@@ -43,7 +39,7 @@ pub async fn update_status(
     appstate
         .service
         .update_statuses(
-            &Issuer(issuer),
+            principal.as_ref(),
             &list_id,
             statuses,
             appstate.token_exp_secs,
@@ -63,7 +59,7 @@ mod tests {
     use crate::server::handlers::status_list::utils::request::{
         Status as RequestStatus, StatusEntry as RequestStatusEntry,
     };
-    use crate::test_utils::test_app_state;
+    use crate::test_utils::{authenticated_issuer, test_app_state};
 
     #[tokio::test]
     async fn test_update_token_status_invalid_list_id() {
@@ -73,7 +69,7 @@ mod tests {
 
         let result = update_status(
             State(appstate),
-            Extension(issuer),
+            authenticated_issuer(issuer),
             Path("not-a-uuid".to_string()),
             Json(payload),
         )
@@ -90,7 +86,7 @@ mod tests {
         // First publish
         publish_status(
             State(app_state.clone()),
-            Extension("issuer1".to_string()),
+            authenticated_issuer("issuer1"),
             Path(token_id.clone()),
             Json(StatusesRequest { statuses: vec![] }),
         )
@@ -100,7 +96,7 @@ mod tests {
         // Then update
         let update_res = update_status(
             State(app_state.clone()),
-            Extension("issuer1".to_string()),
+            authenticated_issuer("issuer1"),
             Path(token_id.clone()),
             Json(StatusesRequest {
                 statuses: vec![RequestStatusEntry {
@@ -126,7 +122,7 @@ mod tests {
 
         publish_status(
             State(app_state.clone()),
-            Extension("issuer1".to_string()),
+            authenticated_issuer("issuer1"),
             Path(token_id.clone()),
             Json(StatusesRequest { statuses: vec![] }),
         )
@@ -135,7 +131,7 @@ mod tests {
 
         let update_res = update_status(
             State(app_state.clone()),
-            Extension("issuer2".to_string()),
+            authenticated_issuer("issuer2"),
             Path(token_id.clone()),
             Json(StatusesRequest {
                 statuses: vec![RequestStatusEntry {
@@ -146,7 +142,15 @@ mod tests {
         )
         .await;
 
-        assert!(update_res.is_err());
+        let err = match update_res {
+            Ok(_) => panic!("expected wrong issuer update to be rejected"),
+            Err(e) => e,
+        };
+        assert_eq!(err.status, StatusCode::FORBIDDEN);
+        assert_eq!(err.error, "issuer_mismatch");
+
+        let record = app_state.service.get_status_list(&token_id).await.unwrap();
+        assert!(record.status_list.lst.is_empty());
     }
 
     #[tokio::test]
@@ -156,7 +160,7 @@ mod tests {
 
         publish_status(
             State(app_state.clone()),
-            Extension("issuer1".to_string()),
+            authenticated_issuer("issuer1"),
             Path(token_id.clone()),
             Json(StatusesRequest { statuses: vec![] }),
         )
@@ -167,7 +171,7 @@ mod tests {
 
         let update_res = update_status(
             State(app_state.clone()),
-            Extension("issuer1".to_string()),
+            authenticated_issuer("issuer1"),
             Path(token_id.clone()),
             Json(StatusesRequest {
                 statuses: vec![
@@ -194,7 +198,7 @@ mod tests {
 
         publish_status(
             State(app_state.clone()),
-            Extension("issuer1".to_string()),
+            authenticated_issuer("issuer1"),
             Path(token_id.clone()),
             Json(StatusesRequest { statuses: vec![] }),
         )
@@ -205,7 +209,7 @@ mod tests {
 
         let update_res = update_status(
             State(app_state.clone()),
-            Extension("issuer1".to_string()),
+            authenticated_issuer("issuer1"),
             Path(token_id.clone()),
             Json(StatusesRequest {
                 statuses: vec![RequestStatusEntry {
@@ -226,7 +230,7 @@ mod tests {
 
         let result = update_status(
             State(app_state),
-            Extension("issuer1".to_string()),
+            authenticated_issuer("issuer1"),
             Path(nonexistent_id),
             Json(StatusesRequest {
                 statuses: vec![RequestStatusEntry {
@@ -248,7 +252,7 @@ mod tests {
         // Publish initial status list
         publish_status(
             State(app_state.clone()),
-            Extension("issuer1".to_string()),
+            authenticated_issuer("issuer1"),
             Path(token_id.clone()),
             Json(StatusesRequest {
                 statuses: vec![RequestStatusEntry {
@@ -267,7 +271,7 @@ mod tests {
         // Perform an update to advance updated_at
         update_status(
             State(app_state.clone()),
-            Extension("issuer1".to_string()),
+            authenticated_issuer("issuer1"),
             Path(token_id.clone()),
             Json(StatusesRequest {
                 statuses: vec![RequestStatusEntry {
@@ -285,7 +289,7 @@ mod tests {
         // enforce optimistic locking. The SQL backends enforce it via updated_at checks.
         let result = update_status(
             State(app_state.clone()),
-            Extension("issuer1".to_string()),
+            authenticated_issuer("issuer1"),
             Path(token_id.clone()),
             Json(StatusesRequest {
                 statuses: vec![RequestStatusEntry {
@@ -309,7 +313,7 @@ mod tests {
 
         publish_status(
             State(app_state.clone()),
-            Extension("issuer1".to_string()),
+            authenticated_issuer("issuer1"),
             Path(token_id.clone()),
             Json(StatusesRequest { statuses: vec![] }),
         )
@@ -321,7 +325,7 @@ mod tests {
 
         let update_res = update_status(
             State(app_state.clone()),
-            Extension("issuer1".to_string()),
+            authenticated_issuer("issuer1"),
             Path(token_id.clone()),
             Json(StatusesRequest {
                 statuses: vec![RequestStatusEntry {
