@@ -1,5 +1,6 @@
-# Production values for helm/chart. Applied by the production deploy workflow
-# (deploy.yml) on release-tag deploys to the statuslist-production namespace.
+# Production values for helm/chart. Applied after values-aws.yaml by the
+# production deploy workflow (deploy.yml) on release-tag deploys to the
+# statuslist-production namespace.
 
 serviceAccount:
   create: true
@@ -11,11 +12,6 @@ statuslist:
     APP_SERVER__ENABLE_METRICS: "true"
     APP_TELEMETRY__ENVIRONMENT: "production"
     RUST_LOG: "warn,status_list_server=info"
-  aws:
-    # ESO-mounted credentials (the chart default). Set false + IRSA annotation for
-    # Workload Identity mode.
-    mountCredentials: true
-    region: eu-central-1
   resources:
     requests:
       memory: "512Mi"
@@ -53,3 +49,22 @@ prometheusRule:
 # In production, ensure opentelemetry-collector.config exporters are configured
 # to forward to your enterprise backends (e.g. Tempo for traces, Prometheus Remote Write, Loki for logs)
 # rather than printing debug output to stdout.
+
+# Alert routing via kube-prometheus-stack's Alertmanager (AlertmanagerConfig CRD).
+# Enable this block and set alerting.platform + credentials to receive SLO alert
+# notifications. In production, always use existingSecret so no webhook URL is
+# stored in this file or in Helm history.
+#
+# Example (Discord, credentials in ESO-managed Secret):
+#   1. Create / sync a Secret named "statuslist-alerting-credentials" with key "webhook-url"
+#      set to your Discord channel webhook URL (and optionally "dms-webhook-url").
+#   2. Uncomment the block below and set existingSecret to match the Secret name.
+#
+# alerting:
+#   enabled: true
+#   platform: discord    # slack | discord | teams | mattermost | webhook | email
+#   labels:
+#     release: kube-prometheus-stack
+#   existingSecret: statuslist-alerting-credentials   # pre-existing Secret; chart does not render its own
+#   # dmsWebhookUrl: ""  # set via existingSecret key "dms-webhook-url" instead
+

@@ -26,7 +26,7 @@ APP_DATABASE__QUERY=sslmode=verify-full&sslrootcert=/var/run/postgres/ca.crt
 
 `APP_DATABASE__URL` remains supported for local and custom deployments. Do not combine it with any split database field; startup rejects that ambiguous configuration.
 
-When deploying the Helm chart, `APP_DATABASE__PASSWORD` is not accepted as a plain `statuslist.env` value. The chart injects it from a Kubernetes Secret key named `postgres-password`. For external databases, point the split host/port/backend/name/user fields at the external database and create or sync the expected Secret/key with that database password. The key name is a hard chart contract even when `APP_DATABASE__BACKEND=mysql` is used for MySQL or MariaDB.
+When deploying the Helm chart, `APP_DATABASE__PASSWORD` is not accepted as a plain `statuslist.env` value. The chart exposes `APP_DATABASE__PASSWORD_FILE` through `statuslist.secretMounts` by default, reading the `postgres-password` key from `statuslist-secret`. For external databases, point the split host/port/backend/name/user fields at the external database and create or sync the configured Secret/key with that database password.
 
 The bundled in-cluster PostgreSQL chart is used without chart-managed database TLS material. For managed or external databases, prefer TLS by setting non-secret query parameters such as `APP_DATABASE__QUERY=sslmode=verify-full&sslrootcert=/var/run/postgres/ca.crt`. The application passes these parameters through after validating that query keys are not credential-like; the referenced CA path must already exist in the container.
 
@@ -94,10 +94,10 @@ SET GLOBAL binlog_format = 'ROW';  -- then restart the server
 
 ## Compose Profiles
 
-`docker compose up` starts PostgreSQL by default and builds the container with `postgres,aws-secrets,acme` features enabled. To run the MySQL service instead:
+`docker compose up` starts PostgreSQL by default and builds the container with `postgres,aws` features enabled. To run the MySQL service instead:
 
 ```bash
-FEATURES="mysql,aws-secrets,acme" docker compose --profile mysql up --build
+FEATURES="mysql,aws" docker compose --profile mysql up --build
 ```
 
 There is no separate MariaDB service because MariaDB uses the same MySQL-driver path. Connect to a MariaDB host by setting `APP_DATABASE__BACKEND=mysql`, `APP_DATABASE__HOST`, `APP_DATABASE__PORT`, `APP_DATABASE__USERNAME`, `APP_DATABASE__PASSWORD`, and `APP_DATABASE__NAME`. For local/custom deployments, a `mysql://` `APP_DATABASE__URL` is still supported when no split database fields are set.

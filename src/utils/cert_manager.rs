@@ -11,11 +11,12 @@ pub mod storage;
 use crate::utils::cache::{CertChainCache, CertificateChain};
 use crate::utils::cert_manager::storage::{CryptoStorage, Storage};
 use crate::utils::keygen::Keypair;
+use arc_swap::ArcSwapOption;
 pub use builder::CertificateManagerBuilder;
 use challenge::CleanupFuture;
 pub use errors::CertError;
 pub use strategy::{
-    AcmeProvisioningStrategy, CertProvisioningStrategy, StoreProvisioningSource,
+    AcmeProvisioningStrategy, CertProvisioningStrategy, MaterialSource, StoreProvisioningSource,
     StoreProvisioningStrategy,
 };
 
@@ -37,6 +38,7 @@ use tracing::{error, info, instrument, warn};
 use x509_parser::pem::Pem as X509Pem;
 
 use crate::cert_manager::{challenge::ChallengeHandler, http_client::DefaultHttpClient};
+use crate::domain::ports::SigningMaterial;
 
 use opentelemetry::{
     global,
@@ -128,6 +130,10 @@ pub struct CertManager {
     renewal_strategy: RenewalStrategy,
     // Parsed certificate chain cache
     cert_chain_cache: CertChainCache,
+    // Active token-signing material exposed to request handlers.
+    active_signing_material: ArcSwapOption<SigningMaterial>,
+    // Serializes explicit reloads and renewal cron provisioning.
+    provisioning_lock: Mutex<()>,
     // The subject alternative names
     domains: Vec<String>,
     // The company email
@@ -171,6 +177,8 @@ impl CertManager {
             provisioning_strategy: Box::new(AcmeProvisioningStrategy),
             renewal_strategy,
             cert_chain_cache,
+            active_signing_material: ArcSwapOption::empty(),
+            provisioning_lock: Mutex::new(()),
             domains,
             email: email.into(),
             organization: organization.map(|o| o.into()),
@@ -275,6 +283,7 @@ impl CertManager {
         )
     )]
     pub async fn request_certificate(&self) -> Result<CertificateData, CertError> {
+        let _guard = self.provisioning_lock.lock().await;
         self.provisioning_strategy.provision(self).await
     }
 
@@ -344,6 +353,8 @@ impl CertManager {
         // Store the certificate
         self.persist_certificate_data(&cert_data).await?;
         self.cache_provisioned_chain(&cert_data.certificate).await?;
+        self.store_active_signing_material(&cert_data.certificate, &server_key_pem)
+            .await?;
 
         info!(
             "Certificate obtained successfully. Valid from {} to {}",
@@ -464,6 +475,31 @@ impl CertManager {
             return Ok(Some(certs));
         }
         Ok(None)
+    }
+
+    /// Return certificate chain and signing key from one active snapshot.
+    pub async fn signing_material(&self) -> Result<SigningMaterial, CertError> {
+        if let Some(material) = self.active_signing_material.load_full() {
+            return Ok((*material).clone());
+        }
+
+        let _guard = self.provisioning_lock.lock().await;
+        if let Some(material) = self.active_signing_material.load_full() {
+            return Ok((*material).clone());
+        }
+
+        let signing_key_pem = self.signing_key_pem().await?;
+        let certificate_chain = self
+            .cert_chain_parts()
+            .await?
+            .map(|chain| chain.as_ref().to_vec());
+        let material = SigningMaterial {
+            certificate_chain,
+            signing_key_pem,
+        };
+        self.active_signing_material
+            .store(Some(Arc::new(material.clone())));
+        Ok(material)
     }
 
     /// Renew the certificate if needed
@@ -740,7 +776,23 @@ impl CertManager {
     ) -> Result<(), CertError> {
         self.persist_certificate_data(cert_data).await?;
         self.persist_signing_key(signing_key).await?;
-        self.cache_provisioned_chain(&cert_data.certificate).await
+        self.cache_provisioned_chain(&cert_data.certificate).await?;
+        self.store_active_signing_material(&cert_data.certificate, signing_key)
+            .await
+    }
+
+    async fn store_active_signing_material(
+        &self,
+        cert_pem: &str,
+        signing_key_pem: &str,
+    ) -> Result<(), CertError> {
+        let certs = self.parse_cert_chain_parts(cert_pem)?;
+        let material = SigningMaterial {
+            certificate_chain: Some(certs.as_ref().to_vec()),
+            signing_key_pem: signing_key_pem.to_string(),
+        };
+        self.active_signing_material.store(Some(Arc::new(material)));
+        Ok(())
     }
 
     fn parse_cert_chain_parts(&self, cert_pem: &str) -> Result<CertificateChain, CertError> {

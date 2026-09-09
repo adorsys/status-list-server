@@ -133,9 +133,10 @@ fn rendered_chart_uses_split_database_credentials() {
         "name: APP_DATABASE__HOST",
         "name: APP_DATABASE__PORT",
         "name: APP_DATABASE__USERNAME",
-        "name: APP_DATABASE__PASSWORD",
-        "secretKeyRef:",
-        "key: postgres-password",
+        "name: APP_DATABASE__PASSWORD_FILE",
+        "value: \"/var/run/status-list-server/database/password\"",
+        "name: database-credentials",
+        "secretName: statuslist-secret",
         "name: APP_DATABASE__NAME",
     ] {
         assert!(
@@ -229,4 +230,90 @@ fn rendered_chart_uses_default_database_port() {
         rendered.contains("name: APP_DATABASE__PORT\n              value: \"5432\""),
         "rendered Helm output must use default database port 5432 from values.yaml"
     );
+}
+
+#[test]
+fn rendered_chart_does_not_duplicate_watcher_poll_interval() {
+    let Some(rendered) = render_helm(&[
+        "--set",
+        "statuslist.env.APP_WATCHER__POLL_INTERVAL_SECS=45",
+        "--set",
+        "statuslist.watcher.pollIntervalSecs=60",
+    ]) else {
+        return;
+    };
+
+    assert_eq!(
+        rendered
+            .matches("name: APP_WATCHER__POLL_INTERVAL_SECS")
+            .count(),
+        1,
+        "rendered Helm output must not duplicate watcher poll interval env vars"
+    );
+    assert!(
+        rendered.contains("name: APP_WATCHER__POLL_INTERVAL_SECS\n              value: \"45\""),
+        "explicit statuslist.env watcher poll interval should take precedence"
+    );
+}
+
+#[test]
+fn rendered_chart_supports_gke_workload_identity_dns_example() {
+    let Some(rendered) = render_helm(&[
+        "--set",
+        "statuslist.image.tag=1.2.0-gcp",
+        "--set",
+        "statuslist.env.APP_SERVER__CERT__DNS__PROVIDER=gcloud",
+        "--set",
+        "statuslist.env.APP_SERVER__CERT__DNS__GCLOUD__PROJECT_ID=dns-project-id",
+        "--set",
+        "serviceAccount.annotations.iam\\.gke\\.io/gcp-service-account=status-list-server@dns-project-id.iam.gserviceaccount.com",
+    ]) else {
+        return;
+    };
+
+    for expected in [
+        "image: \"ghcr.io/adorsys/status-list-server:1.2.0-gcp\"",
+        "iam.gke.io/gcp-service-account: status-list-server@dns-project-id.iam.gserviceaccount.com",
+        "name: APP_SERVER__CERT__DNS__PROVIDER\n              value: \"gcloud\"",
+        "name: APP_SERVER__CERT__DNS__GCLOUD__PROJECT_ID\n              value: \"dns-project-id\"",
+    ] {
+        assert!(
+            rendered.contains(expected),
+            "rendered Helm output is missing GKE Workload Identity field {expected}"
+        );
+    }
+}
+
+#[test]
+fn rendered_chart_supports_aks_workload_identity_dns_example() {
+    let Some(rendered) = render_helm(&[
+        "--set",
+        "statuslist.image.tag=1.2.0-azure",
+        "--set-string",
+        "statuslist.podLabels.azure\\.workload\\.identity/use=true",
+        "--set",
+        "statuslist.env.APP_SERVER__CERT__DNS__PROVIDER=azure",
+        "--set",
+        "statuslist.env.APP_SERVER__CERT__DNS__AZURE__SUBSCRIPTION_ID=subscription-id",
+        "--set",
+        "statuslist.env.APP_SERVER__CERT__DNS__AZURE__RESOURCE_GROUP=dns-resource-group",
+        "--set",
+        "serviceAccount.annotations.azure\\.workload\\.identity/client-id=00000000-0000-0000-0000-000000000000",
+    ]) else {
+        return;
+    };
+
+    for expected in [
+        "image: \"ghcr.io/adorsys/status-list-server:1.2.0-azure\"",
+        "azure.workload.identity/use: \"true\"",
+        "azure.workload.identity/client-id: 00000000-0000-0000-0000-000000000000",
+        "name: APP_SERVER__CERT__DNS__PROVIDER\n              value: \"azure\"",
+        "name: APP_SERVER__CERT__DNS__AZURE__SUBSCRIPTION_ID\n              value: \"subscription-id\"",
+        "name: APP_SERVER__CERT__DNS__AZURE__RESOURCE_GROUP\n              value: \"dns-resource-group\"",
+    ] {
+        assert!(
+            rendered.contains(expected),
+            "rendered Helm output is missing AKS Workload Identity field {expected}"
+        );
+    }
 }

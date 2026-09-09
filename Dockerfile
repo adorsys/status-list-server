@@ -21,12 +21,14 @@ WORKDIR /app
 # Declared above ARG FEATURES so a feature-set change does not invalidate this layer.
 ARG CARGO_AUDITABLE_VERSION=0.7.5
 ARG RUST_AUDIT_INFO_VERSION=0.5.4
+# Unset CARGO_BUILD_TARGET so cargo compiles the build tools natively for the builder host
+# (e.g. x86_64) rather than cross-compiling them for TARGETARCH.
 RUN --mount=type=cache,target=/root/.cargo/registry,id=registry-cache-${TARGETPLATFORM} \
     set -eu; \
-    cargo install --locked --root /usr/local cargo-auditable@${CARGO_AUDITABLE_VERSION}; \
-    cargo install --locked --root /usr/local rust-audit-info@${RUST_AUDIT_INFO_VERSION}
+    env -u CARGO_BUILD_TARGET cargo install --locked --root /usr/local cargo-auditable@${CARGO_AUDITABLE_VERSION}; \
+    env -u CARGO_BUILD_TARGET cargo install --locked --root /usr/local rust-audit-info@${RUST_AUDIT_INFO_VERSION}
 
-ARG FEATURES="postgres,aws-secrets,acme"
+ARG FEATURES="postgres,aws"
 
 # The release profile sets strip, lto and codegen-units = 1, each of which can drop
 # .dep-v0. A missing section yields a passing scan and an empty SBOM, so this must

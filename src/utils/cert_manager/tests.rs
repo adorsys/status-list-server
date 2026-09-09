@@ -24,6 +24,38 @@ fn init_crypto() {
     });
 }
 
+fn matching_cert_and_key() -> (String, String) {
+    let certified_key = rcgen::generate_simple_self_signed(vec!["example.com".to_string()])
+        .expect("generate test cert and key");
+    (
+        certified_key.cert.pem(),
+        certified_key.signing_key.serialize_pem(),
+    )
+}
+
+struct TempDir {
+    path: std::path::PathBuf,
+}
+
+impl TempDir {
+    fn new() -> Self {
+        let path = std::env::temp_dir().join(format!(
+            "status-list-cert-mgr-test-{}-{}",
+            std::process::id(),
+            time::OffsetDateTime::now_utc().unix_timestamp_nanos()
+        ));
+        std::fs::create_dir_all(&path).expect("create temp dir");
+        let path = std::fs::canonicalize(&path).unwrap_or(path);
+        Self { path }
+    }
+}
+
+impl Drop for TempDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.path);
+    }
+}
+
 #[derive(Clone)]
 struct MockStorage {
     data: Arc<Mutex<HashMap<String, String>>>,
@@ -480,10 +512,7 @@ async fn test_persist_certificate_data_updates_existing_material() {
 async fn test_store_filesystem_strategy_persists_material() {
     init_crypto();
 
-    let source_cert_data: CertificateData =
-        serde_json::from_str(include_str!("../../../test_data/cert_data.json")).unwrap();
-    let cert_pem = source_cert_data.certificate.as_str();
-    let key_pem = include_str!("../../../test_data/ec-private.pem");
+    let (cert_pem, key_pem) = matching_cert_and_key();
     let temp_dir = std::env::temp_dir().join(format!(
         "status-list-server-cert-store-{}",
         uuid::Uuid::new_v4()
@@ -492,8 +521,8 @@ async fn test_store_filesystem_strategy_persists_material() {
     let key_path = temp_dir.join("tls.key");
 
     tokio::fs::create_dir_all(&temp_dir).await.unwrap();
-    tokio::fs::write(&cert_path, cert_pem).await.unwrap();
-    tokio::fs::write(&key_path, key_pem).await.unwrap();
+    tokio::fs::write(&cert_path, &cert_pem).await.unwrap();
+    tokio::fs::write(&key_path, &key_pem).await.unwrap();
 
     let manager = CertManager::builder()
         .domains(["example.com"])
@@ -516,12 +545,9 @@ async fn test_store_filesystem_strategy_persists_material() {
 async fn test_store_filesystem_strategy_accepts_der_material() {
     init_crypto();
 
-    let source_cert_data: CertificateData =
-        serde_json::from_str(include_str!("../../../test_data/cert_data.json")).unwrap();
-    let cert_pem = source_cert_data.certificate.as_str();
+    let (cert_pem, key_pem) = matching_cert_and_key();
     let (_, cert_der) = x509_parser::pem::parse_x509_pem(cert_pem.as_bytes()).unwrap();
-    let key_pem = include_str!("../../../test_data/ec-private.pem");
-    let key_der = Keypair::from_pkcs8_pem(key_pem)
+    let key_der = Keypair::from_pkcs8_pem(&key_pem)
         .unwrap()
         .to_pkcs8_der_bytes()
         .unwrap();
@@ -561,16 +587,16 @@ async fn test_store_storage_strategy_persists_material() {
     init_crypto();
 
     let material_storage = MockStorage::new();
-    let source_cert_data: CertificateData =
-        serde_json::from_str(include_str!("../../../test_data/cert_data.json")).unwrap();
-    let cert_pem = source_cert_data.certificate.as_str();
-    let key_pem = include_str!("../../../test_data/ec-private.pem");
+    let (cert_pem, key_pem) = matching_cert_and_key();
 
     material_storage
-        .store("source-cert", cert_pem)
+        .store("source-cert", &cert_pem)
         .await
         .unwrap();
-    material_storage.store("source-key", key_pem).await.unwrap();
+    material_storage
+        .store("source-key", &key_pem)
+        .await
+        .unwrap();
 
     let manager = CertManager::builder()
         .domains(["example.com"])
@@ -595,12 +621,9 @@ async fn test_store_storage_strategy_accepts_base64_der_material() {
     init_crypto();
 
     let material_storage = MockStorage::new();
-    let source_cert_data: CertificateData =
-        serde_json::from_str(include_str!("../../../test_data/cert_data.json")).unwrap();
-    let cert_pem = source_cert_data.certificate.as_str();
+    let (cert_pem, key_pem) = matching_cert_and_key();
     let (_, cert_der) = x509_parser::pem::parse_x509_pem(cert_pem.as_bytes()).unwrap();
-    let key_pem = include_str!("../../../test_data/ec-private.pem");
-    let key_der = Keypair::from_pkcs8_pem(key_pem)
+    let key_der = Keypair::from_pkcs8_pem(&key_pem)
         .unwrap()
         .to_pkcs8_der_bytes()
         .unwrap();
@@ -631,6 +654,70 @@ async fn test_store_storage_strategy_accepts_base64_der_material() {
             .certificate
             .contains("-----BEGIN CERTIFICATE-----")
     );
+    assert_eq!(manager.signing_key_pem().await.unwrap(), key_pem);
+}
+
+#[tokio::test]
+async fn test_store_mixed_strategy_filesystem_cert_storage_key() {
+    init_crypto();
+
+    let (cert_pem, key_pem) = matching_cert_and_key();
+    let dir = TempDir::new();
+    let cert_path = dir.path.join("cert.pem");
+    tokio::fs::write(&cert_path, &cert_pem).await.unwrap();
+
+    let material_storage = MockStorage::new();
+    material_storage
+        .store("source-key", &key_pem)
+        .await
+        .unwrap();
+
+    let manager = CertManager::builder()
+        .domains(["example.com"])
+        .crypto_storage(material_storage)
+        .store_strategy(StoreProvisioningStrategy::new(
+            MaterialSource::Filesystem(cert_path.to_str().unwrap().into()),
+            MaterialSource::Storage("source-key".to_string()),
+        ))
+        .build()
+        .unwrap();
+
+    let cert_data = manager.request_certificate().await.unwrap();
+    assert!(
+        cert_data
+            .certificate
+            .contains("-----BEGIN CERTIFICATE-----")
+    );
+    assert_eq!(manager.signing_key_pem().await.unwrap(), key_pem);
+}
+
+#[tokio::test]
+async fn test_store_mixed_strategy_storage_cert_filesystem_key() {
+    init_crypto();
+
+    let (cert_pem, key_pem) = matching_cert_and_key();
+    let dir = TempDir::new();
+    let key_path = dir.path.join("key.pem");
+    tokio::fs::write(&key_path, &key_pem).await.unwrap();
+
+    let material_storage = MockStorage::new();
+    material_storage
+        .store("source-cert", &cert_pem)
+        .await
+        .unwrap();
+
+    let manager = CertManager::builder()
+        .domains(["example.com"])
+        .crypto_storage(material_storage)
+        .store_strategy(StoreProvisioningStrategy::new(
+            MaterialSource::Storage("source-cert".to_string()),
+            MaterialSource::Filesystem(key_path.to_str().unwrap().into()),
+        ))
+        .build()
+        .unwrap();
+
+    let cert_data = manager.request_certificate().await.unwrap();
+    assert_eq!(cert_data.certificate, cert_pem);
     assert_eq!(manager.signing_key_pem().await.unwrap(), key_pem);
 }
 

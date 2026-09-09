@@ -1,5 +1,8 @@
 global:
-  storageClass: "high-performance"
+  # Chart-wide public DNS suffix. When set, the default ingress host becomes
+  # statuslist.<domain> and the default TLS host becomes *.<domain>.
+  # Leave empty for provider-neutral defaults.
+  domain: ""
 
 statuslist:
   enabled: true
@@ -26,21 +29,25 @@ statuslist:
     # Empty derives from how the image is named: IfNotPresent for a digest, Always
     # for a mutable tag. Set explicitly to override.
     pullPolicy: ""
+    # Used only when tag and digest are empty. The chart derives
+    # <appVersion-without-suffix>-<variant>, so overlays can select a cloud
+    # variant without hardcoding the release version.
+    variant: fscert
     # Image tag with variant suffix. The release workflow publishes 5 multi-arch variants:
     #
     # | Tag Suffix | Cargo Features | Description | Primary Use Case |
     # |------------|----------------|-------------|------------------|
-    # | -aws       | postgres,aws-secrets,acme | PostgreSQL database with AWS Secrets Manager and Route53 DNS support | AWS EKS native deployments |
-    # | -gcp       | postgres,gcp-secrets,acme | PostgreSQL database with GCP Secret Manager and Cloud DNS support | GCP GKE native deployments |
-    # | -azure     | postgres,azure-kv,acme | PostgreSQL database with Azure Key Vault and Azure DNS support | Azure AKS native deployments |
-    # | -vault     | postgres,vault,acme | PostgreSQL database with HashiCorp Vault / OpenBao token material storage | Vault-backed on-prem or multi-cloud deployments |
+    # | -aws       | postgres,aws | PostgreSQL database with AWS Secrets Manager and Route53 DNS support | AWS EKS native deployments |
+    # | -gcp       | postgres,gcp | PostgreSQL database with GCP Secret Manager and Cloud DNS support | GCP GKE native deployments |
+    # | -azure     | postgres,azure | PostgreSQL database with Azure Key Vault and Azure DNS support | Azure AKS native deployments |
+    # | -vault     | postgres,vault | PostgreSQL database with HashiCorp Vault / OpenBao token material storage | Vault-backed on-prem or multi-cloud deployments |
     # | -fscert    | postgres | PostgreSQL database with filesystem-mounted token signing keys and certificates | Constrained / air-gapped environments using external secret injection |
     #
     # Tag format: <version>-<suffix> (e.g., 1.2.0-aws, 1.2.0-gcp)
     # Latest tags: latest-<suffix> (e.g., latest-aws, latest-gcp)
     #
-    # Empty falls back to the chart appVersion, which is the published AWS variant
-    # tag. Defaulting to "latest" would let an upgrade that changes nothing in this
+    # Empty derives from the chart appVersion plus statuslist.image.variant.
+    # Defaulting to "latest" would let an upgrade that changes nothing in this
     # chart still change the running image.
     tag: ""
     # "sha256:...". Takes precedence over tag and pins the exact digest CI scanned.
@@ -49,6 +56,7 @@ statuslist:
   service:
     enabled: true
     type: ClusterIP
+    annotations: {}
     port: 8081
     targetPort: 8000
     nodePort: null
@@ -57,33 +65,38 @@ statuslist:
     path: /
     pathType: Prefix
     annotations:
-      cert-manager.io/cluster-issuer: letsencrypt-prod
-      nginx.ingress.kubernetes.io/ssl-redirect: "true"
-      nginx.ingress.kubernetes.io/force-ssl-redirect: "true"
       nginx.ingress.kubernetes.io/proxy-body-size: "10m"
     tls:
-      hosts:
-        - "*.eudi-adorsys.com"
-      secretName: statuslist-tls
-    externalDnsHostname: statuslist.eudi-adorsys.com
+      # Defaults to ["*.<global.domain>"] when global.domain is set, or to the
+      # rendered ingress host when secretName is set explicitly.
+      hosts: []
+      # Empty keeps the neutral default render HTTP-only. Set this in overlays
+      # that provide TLS material or cert-manager ingress-shim annotations.
+      secretName: ""
+    # Defaults to statuslist.<global.domain> when global.domain is set, otherwise localhost.
+    externalDnsHostname: ""
   env:
     RUST_LOG: "info"
     APP_ENV: "production"
     APP_SERVER__HOST: "0.0.0.0"
     APP_SERVER__PORT: "8000"
-    APP_SERVER__CERT__EMAIL: "info@adorsys.com"
-    APP_SERVER__CERT__ORGANIZATION: "adorsys GmbH & CO KG"
     APP_SERVER__CERT__ACME_DIRECTORY_URL: "https://acme-v02.api.letsencrypt.org/directory"
     APP_SERVER__CERT__EKU: "1,3,6,1,5,5,7,3,30"
     APP_SERVER__CERT__RENEWAL_CRON_SCHEDULE: "0 0 0 * * *"
-    # Parsed certificate chain cache TTL in seconds. "0" means no expiry; non-provisioning replicas rely on this TTL for renewed chains.
+    # Parsed certificate chain cache TTL in seconds. "0" means no expiry.
     # DNS provider for ACME DNS-01 challenges: route53 | cloudflare | gcloud | azure | acmedns
     # (pebble also exists but is a development-only fake, not for deployments)
     # See docs/dns-providers.md for the settings each provider needs.
+    # GKE Workload Identity example:
+    #   APP_SERVER__CERT__DNS__PROVIDER: "gcloud"
+    #   APP_SERVER__CERT__DNS__GCLOUD__PROJECT_ID: "dns-project-id"
+    # AKS Workload Identity / managed identity example:
+    #   APP_SERVER__CERT__DNS__PROVIDER: "azure"
+    #   APP_SERVER__CERT__DNS__AZURE__SUBSCRIPTION_ID: "subscription-id"
+    #   APP_SERVER__CERT__DNS__AZURE__RESOURCE_GROUP: "dns-resource-group"
     # Provider credentials (e.g. APP_SERVER__CERT__DNS__CLOUDFLARE__API_TOKEN, or the
     # APP_SERVER__CERT__DNS__ACMEDNS__ACCOUNTS JSON, which holds every account password)
     # must come from a secret (see externalSecret below), not from plain env values.
-    APP_SERVER__CERT__DNS__PROVIDER: "route53"
     APP_DATABASE__PORT: "5432"
     # Status-list record cache TTL in seconds. "0" disables this cache.
     APP_CACHE__TTL: "300"
@@ -102,16 +115,12 @@ statuslist:
     APP_SERVER__ENABLE_METRICS: "true"
     APP_TELEMETRY__ENVIRONMENT: "production"
     APP_TELEMETRY__SAMPLER_RATIO: "1.0"
-  # AWS configuration for the application.
+  # Optional AWS configuration for the application.
   aws:
-    # Mount the AWS credential files (aws-credentials-secret) into the pod. This is the default
-    # (true) so that External Secrets Operator (externalSecret.enabled, the default secret-delivery
-    # path) can provision the application's AWS credentials as a Kubernetes Secret that is mounted
-    # at /home/nobody/.aws. Workload Identity mode (EKS IRSA / GCP / Azure WI) is opt-in: set this
-    # to false and attach the cloud role annotation via serviceAccount.annotations, then the app
-    # uses ambient credentials instead of mounted files.
-    mountCredentials: true
-    # When mountCredentials=true and externalSecret.enabled (the default ESO path), the chart also
+    # Mount AWS credential files from aws-credentials-secret into the pod.
+    # Disabled by default so the base chart stays provider-neutral.
+    mountCredentials: false
+    # When mountCredentials=true and externalSecret.enabled, the chart also
     # renders a second ExternalSecret that provisions "aws-credentials-secret" — the exact Secret
     # the Deployment's credential volume references (see deployment.yaml). Without it the Pod could
     # never mount that volume and would stay unready. The remote source holds the AWS shared
@@ -123,6 +132,9 @@ statuslist:
       credentialsProperty: "CREDENTIALS"
       # Property within remoteKey holding the AWS shared config file.
       configProperty: "CONFIG"
+      # Optional ESO target.template for the dedicated aws-credentials-secret only.
+      # The application ExternalSecret target.template is intentionally not reused here.
+      targetTemplate: {}
     # Plain (non-secret) AWS region. APP_AWS__REGION is rendered only when an effective
     # region is explicitly configured. Leave empty (default) so the application does not
     # override the AWS SDK's instance-metadata region discovery (recommended for
@@ -135,9 +147,76 @@ statuslist:
   # (postgres.auth.existingSecret) references the same name, so it is deliberately not
   # independently configurable.
   fallbackSecret:
-    enabled: false
+    enabled: true
+    generatedCertificate:
+      # Local/dev helper for the fscert image. When enabled, the fallback Secret
+      # includes a self-signed certificate and signing key under the keys below.
+      # GitOps deployments should not use generated material because helm template
+      # runs without cluster lookup and can regenerate values on each sync.
+      enabled: false
+      commonName: localhost
+      dnsNames:
+        - localhost
+      ipAddresses:
+        - 127.0.0.1
+      certificateKey: statuslist.crt
+      signingKey: statuslist.key
     stringData:
+      # Empty means the chart generates a random password. Helm upgrades reuse
+      # the existing statuslist-secret password when the cluster is reachable.
+      # GitOps tools such as Argo CD and Flux run helm template without cluster
+      # lookup access, so an empty value generates a new password on each
+      # reconciliation. For GitOps, provide an explicit password from your
+      # secret-management flow or set fallbackSecret.enabled=false and use ESO.
       postgres-password: ""
+
+  # File-based secret mounts for production credential/key rotation.
+  # Mounts Kubernetes Secrets as files into the container at specified paths.
+  # The current chart support is preparatory for application images that implement
+  # file reload support (see issue #456). Use fileEnv to map a mounted file path
+  # into an application environment variable. Paths are relative to mountPath and
+  # work whether items is present or the whole Secret is mounted.
+  # When items is present, each fileEnv value must exactly match one of the
+  # normalized items[].path values so the chart cannot point the app at a file
+  # Kubernetes will not mount.
+  # If APP_DATABASE__PASSWORD_FILE is configured via statuslist.env or fileEnv, the
+  # chart does not inject APP_DATABASE__PASSWORD, so the application cannot silently
+  # keep using a stale startup password from an environment variable.
+  # Example:
+  # - name: database-credentials
+  #   secretName: postgres-access
+  #   mountPath: /etc/secrets/database
+  #   items:
+  #     - key: password
+  #       path: password
+  #   fileEnv:
+  #     APP_DATABASE__PASSWORD_FILE: password
+  # - name: signing-keys
+  #   secretName: statuslist-token-keys
+  #   mountPath: /etc/secrets/token-keys
+  #   items:
+  #     - key: statuslist.crt
+  #       path: statuslist.crt
+  #     - key: statuslist.key
+  #       path: statuslist.key
+  #   fileEnv:
+  #     APP_SERVER__CERT__STORE__CERTIFICATE_PATH: statuslist.crt
+  #     APP_SERVER__CERT__STORE__SIGNING_KEY_PATH: statuslist.key
+  secretMounts:
+    - name: database-credentials
+      secretName: statuslist-secret
+      mountPath: /var/run/status-list-server/database
+      items:
+        - key: postgres-password
+          path: password
+      fileEnv:
+        APP_DATABASE__PASSWORD_FILE: password
+
+  # Watcher configuration for file-based credential rotation detection.
+  # When pollIntervalSecs is set, APP_WATCHER__POLL_INTERVAL_SECS is injected.
+  # This requires an application image that implements the watcher contract from issue #456.
+  watcher:
+    pollIntervalSecs: "30"
   livenessProbe:
     httpGet:
       path: /health/live
@@ -194,7 +273,13 @@ serviceAccount:
   # This does NOT break Workload Identity — IRSA / GCP WI / Azure WI use projected OIDC
   # tokens injected by the cloud admission webhook, independent of this setting.
   automountServiceAccountToken: false
-  annotations: {} # e.g. eks.amazonaws.com/role-arn for EKS IRSA
+  annotations: {}
+  # EKS IRSA:
+  #   eks.amazonaws.com/role-arn: arn:aws:iam::123456789012:role/status-list-server
+  # GKE Workload Identity:
+  #   iam.gke.io/gcp-service-account: status-list-server@dns-project-id.iam.gserviceaccount.com
+  # AKS Workload Identity:
+  #   azure.workload.identity/client-id: "00000000-0000-0000-0000-000000000000"
   labels: {}
 
 # HorizontalPodAutoscaler (autoscaling/v2). When enabled, the Deployment's `replicas`
@@ -243,6 +328,108 @@ prometheusRule:
   # Additional labels required by your Prometheus Operator (e.g. release: kube-prometheus-stack)
   labels: {}
 
+# AlertmanagerConfig for kube-prometheus-stack / Prometheus Operator alert routing.
+# When enabled, renders an AlertmanagerConfig CRD that routes SLO alerts to the
+# configured notification channel. This is the Kubernetes equivalent of the Docker
+# Compose ALERTMANAGER_PLATFORM + generate-alertmanager-config.sh setup — the same
+# six platforms are supported and no webhook URL is committed to source control.
+#
+# Supported platforms (alerting.platform):
+#   discord     -> alerting.webhookUrl  (Discord channel webhook URL)
+#   slack       -> alerting.webhookUrl  (Slack incoming-webhook URL)
+#   teams       -> alerting.webhookUrl  (MS Teams classic inbound webhook; posts Alertmanager's
+#                 generic JSON, not an Adaptive Card — see observability/runbooks/webhook-notifications.md
+#                 for the rendering limitation and bridge options)
+#   mattermost  -> alerting.webhookUrl  (Mattermost incoming webhook)
+#   webhook     -> alerting.webhookUrl  (generic endpoint accepting Alertmanager JSON)
+#   email       -> alerting.email.*     (SMTP settings)
+#
+# Credential model:
+#   By default (existingSecret: "") the chart renders its own Secret from the inline
+#   values (webhookUrl). For production, set existingSecret to the name of
+#   a pre-existing Secret (e.g. managed by ESO or Vault) — the chart then reads from
+#   that Secret and does NOT render its own. The pre-existing Secret must contain the
+#   following keys depending on the platform:
+#     webhook-based platforms: "webhook-url"
+#     dead-man's-switch:       "dms-webhook-url" (optional)
+#     email SMTP auth:         "smtp-password" (optional, only when alerting.email.smtpPassword is set)
+#   Email `to`/`smtpFrom`/`smtpHost` are rendered as plain string values (the
+#   EmailConfig CRD types them as strings, not Secret selectors) and are therefore
+#   NOT read from the Secret.
+#
+# Route tree (mirrors generate-alertmanager-config.sh):
+#   severity=none  -> deadmansswitch receiver (Watchdog — pages on ABSENCE, not firing)
+#   severity=page  -> human receiver, repeat every 4h
+#   severity=warn  -> human receiver, repeat every 24h
+#   everything else -> noop sink (never spams a human channel)
+#
+# Labels: add any extra labels required by your Alertmanager selector, e.g.
+#   labels:
+#     release: kube-prometheus-stack
+alerting:
+  enabled: false
+  # Platform selector — must match one of the supported values above.
+  platform: discord
+  # Grafana dashboard URL injected into alert annotations (e.g. http://grafana.example.com/d/status-list-slo).
+  dashboardUrl: "http://localhost:3000/d/status-list-slo"
+  # Optional Slack channel override (e.g. "#alerts"). Leave empty to use the webhook default channel.
+  slack:
+    channel: ""
+  # Additional labels for the AlertmanagerConfig (e.g. release: kube-prometheus-stack).
+  labels: {}
+  # Name of a pre-existing Secret containing credentials. When set, the chart does NOT
+  # render its own Secret. Leave empty to let the chart manage the Secret from inline values.
+  #
+  # IMPORTANT: The referenced Secret MUST already exist in the namespace before install/upgrade
+  # (e.g. provisioned by ESO, Vault, or your GitOps flow). Kubernetes does not hot-reload Secret
+  # consumers on content changes: updating a webhook URL inside the Secret requires the
+  # Alertmanager pod to reload the referenced secretKeyRef. kube-prometheus-stack / the Prometheus
+  # Operator watches Secret changes and triggers an Alertmanager reload automatically, so in most
+  # installs a URL rotation takes effect without manual intervention (restart the Alertmanager
+  # StatefulSet if your operator version does not auto-reload). Always create the Secret before
+  # deploying the chart to avoid a failing AlertmanagerConfig / pending pod.
+  existingSecret: ""
+  # Inline webhook URL (used for discord, slack, teams, mattermost, webhook platforms).
+  # Never commit real tokens — use existingSecret + ESO/Vault in production.
+  webhookUrl: ""
+  # Optional dead-man's-switch URL. The always-firing Watchdog (severity=none) pings this
+  # URL so a collapsed Prometheus/Alertmanager pipeline is detected by its ABSENCE. When
+  # empty the Watchdog is silently absorbed and never reaches a human channel.
+  dmsWebhookUrl: ""
+  # Explicitly enable Dead Man's Switch when using existingSecret (reads key "dms-webhook-url"
+  # from existingSecret). When dmsWebhookUrl is set above, DMS is enabled implicitly.
+  #
+  # When DMS is enabled with existingSecret, the "dms-webhook-url" key MUST be present in that
+  # Secret. The chart cannot verify the key exists at render time (it is not readable without a
+  # cluster lookup), so an absent key surfaces as a failing/runtime error in the Alertmanager
+  # webhook. Keep this key present and correct in the provisioning path that manages the Secret.
+  dmsEnabled: false
+  # Per-request timeout for webhook/Teams/Mattermost receivers (Alertmanager default is 10s).
+  # Applies to the generic `webhook`, `teams`, and `mattermost` platforms and to the
+  # dead-man's-switch receiver. Set to a Go duration string (e.g. "10s", "2m").
+  webhookTimeout: ""
+  # Email settings (required only when platform=email).
+  # NOTE: The AlertmanagerConfig EmailConfig CRD defines `to`, `smarthost`, and `from` as plain
+  # strings (not Secret selectors), so these are rendered directly from values — they are NOT read
+  # from the Secret. Only the SMTP password (when set) is read from the Secret via `smtp-password`.
+  email:
+    to: ""
+    smtpHost: ""
+    smtpPort: "587"
+    smtpFrom: ""
+    # Optional SMTP AUTH password. When set, it is stored in the alerting Secret under the key
+    # "smtp-password" (chart-managed Secret) or must be present as "smtp-password" in
+    # alerting.existingSecret, and is referenced via EmailConfig.authPassword. Leave empty to
+    # disable SMTP AUTH.
+    smtpPassword: ""
+    requireTls: true
+    # Optional SMTP TLS verification options (certificate handling). Rendered into the
+    # emailConfig tlsConfig when set. Empty disables custom TLS settings.
+    # Example:
+    #   tlsConfig:
+    #     insecureSkipVerify: false
+    tlsConfig: {}
+
 # Configurable SLO target thresholds for PrometheusRule alerting rules.
 # These must stay in lockstep with observability/slo/thresholds.json (the lint
 # step in CI asserts this) and with the literal values in the standalone
@@ -286,7 +473,7 @@ postgres:
   persistence:
     enabled: true
     size: 10Gi
-    storageClass: high-performance
+    storageClass: ""
   service:
     type: ClusterIP
     port: 5432
@@ -294,7 +481,7 @@ postgres:
     tag: "18.0"
 
 externalSecret:
-  enabled: true
+  enabled: false
   metadata:
     name: statuslist-external-secret
   spec:
@@ -313,11 +500,16 @@ externalSecret:
         remoteRef:
           key: statuslist-secret
           property: POSTGRES_PASSWORD
+    # Optional additional ExternalSecret resources for separately mounted Secrets,
+    # for example file-based database credentials, token signing keys, or API keys.
+    # Each entry renders as its own ExternalSecret and may override refreshInterval
+    # and secretStoreRef; defaults come from externalSecret.spec.
+    extraExternalSecrets: []
 
 secretStore:
-  enabled: true
+  enabled: false
   # Provider selector: aws | vault | gcp | azure | raw
-  provider: aws
+  provider: ""
   aws:
     service: SecretsManager # SecretsManager | ParameterStore
     # Empty by default: APP_AWS__REGION is only injected into the pod when a region is

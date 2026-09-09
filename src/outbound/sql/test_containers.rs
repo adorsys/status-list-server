@@ -70,11 +70,23 @@ pub(crate) mod mysql_helpers {
         pub(crate) async fn start() -> Self {
             let node = MYSQL_CONTAINER
                 .get_or_init(|| async {
-                    MysqlImage::default()
-                        .with_tag("26.7")
-                        .start()
-                        .await
-                        .expect("Failed to start MySQL container")
+                    // Pulling the image can transiently fail over a flaky
+                    // network (`PullImage`/IO "bytes remaining on stream"), so
+                    // retry the container boot rather than fail the whole run.
+                    let mut last_err = None;
+                    for attempt in 1..=3 {
+                        match MysqlImage::default().with_tag("26.7").start().await {
+                            Ok(node) => return node,
+                            Err(err) => {
+                                last_err = Some(err);
+                                if attempt < 3 {
+                                    tokio::time::sleep(std::time::Duration::from_secs(1) * attempt)
+                                        .await;
+                                }
+                            }
+                        }
+                    }
+                    panic!("Failed to start MySQL container after 3 attempts: {last_err:?}");
                 })
                 .await;
 
@@ -195,10 +207,23 @@ pub(crate) mod postgres_helpers {
     pub(crate) async fn postgres_connection() -> PostgresTestDb {
         let node = POSTGRES_CONTAINER
             .get_or_init(|| async {
-                PostgresImage::default()
-                    .start()
-                    .await
-                    .expect("Failed to start Postgres container")
+                // Pulling the image can transiently fail over a flaky network
+                // (`PullImage`/IO "bytes remaining on stream"), so retry the
+                // container boot rather than fail the whole run.
+                let mut last_err = None;
+                for attempt in 1..=3 {
+                    match PostgresImage::default().start().await {
+                        Ok(node) => return node,
+                        Err(err) => {
+                            last_err = Some(err);
+                            if attempt < 3 {
+                                tokio::time::sleep(std::time::Duration::from_secs(1) * attempt)
+                                    .await;
+                            }
+                        }
+                    }
+                }
+                panic!("Failed to start Postgres container after 3 attempts: {last_err:?}");
             })
             .await;
         let host = node

@@ -232,6 +232,8 @@ impl CertificateManagerBuilder {
             provisioning_strategy: strategy,
             renewal_strategy: self.renewal_strategy,
             cert_chain_cache,
+            active_signing_material: arc_swap::ArcSwapOption::empty(),
+            provisioning_lock: Mutex::new(()),
             domains: self.domains,
             email: self.email.unwrap_or_default(),
             organization: self.organization,

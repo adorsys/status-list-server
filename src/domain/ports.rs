@@ -79,12 +79,20 @@ pub trait StatusListSnapshotRepo: Send + Sync + 'static {
     async fn delete_older_than(&self, cutoff: i64) -> Result<u64, StatusListError>;
 }
 
+/// Certificate chain and signing key captured from one provider snapshot.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SigningMaterial {
+    /// Base64 DER-encoded x509 certificate chain parts for JWT `x5c` and CWT
+    /// `x5chain`.
+    pub certificate_chain: Option<Vec<String>>,
+    /// PKCS#8 PEM-encoded signing key.
+    pub signing_key_pem: String,
+}
+
 /// Provider interface for certificate chains and signing keys used for VC/token signatures.
 #[async_trait]
 pub trait CertificateProvider: Send + Sync + 'static {
-    /// Retrieve the current PEM-encoded x509 certificate chain.
-    async fn certificate_chain(&self) -> Result<Option<Vec<String>>, StatusListError>;
-
-    /// Retrieve the current PKCS#8 PEM-encoded signing key.
-    async fn signing_key_pem(&self) -> Result<String, StatusListError>;
+    /// Retrieve the current certificate chain and signing key from one
+    /// internally consistent snapshot.
+    async fn signing_material(&self) -> Result<SigningMaterial, StatusListError>;
 }
