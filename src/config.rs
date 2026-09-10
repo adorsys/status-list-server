@@ -84,6 +84,7 @@ pub struct Config {
     pub azure_keyvault: AzureKeyVaultConfig,
     pub cache: CacheConfig,
     pub status_list: StatusListConfig,
+    pub management_auth: ManagementAuthConfig,
     pub rate_limit: RateLimitConfig,
     pub limits: LimitsConfig,
     pub telemetry: TelemetryConfig,
@@ -112,6 +113,42 @@ pub struct LimitsConfig {
     pub max_status_index: i32,
     pub max_statuses_per_request: usize,
     pub max_serialized_list_size: usize,
+}
+
+/// JWT validation policy for protected management endpoints.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ManagementAuthConfig {
+    /// Clock skew leeway in seconds for `exp`, `iat`, and `nbf`.
+    pub leeway_secs: u64,
+    /// Maximum accepted lifetime in seconds, computed as `exp - iat`.
+    pub max_token_lifetime_secs: u64,
+    /// Accepted management-token audiences. Empty means the `aud` claim is not required.
+    #[serde(deserialize_with = "deserialize_audience_list")]
+    pub audiences: Vec<String>,
+}
+
+impl ManagementAuthConfig {
+    fn validate(&self) -> Result<(), ConfigError> {
+        if self.max_token_lifetime_secs == 0 {
+            return Err(ConfigError::Message(
+                "management_auth.max_token_lifetime_secs must be greater than 0".to_string(),
+            ));
+        }
+
+        Ok(())
+    }
+}
+
+fn deserialize_audience_list<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let values = deserialize_vec_from_string_or_vec(deserializer)?;
+    Ok(values
+        .into_iter()
+        .map(|value: String| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .collect())
 }
 
 /// Telemetry configuration controlling tracing and metrics export.
@@ -1004,6 +1041,7 @@ impl Config {
         if let Some(query) = trim_non_empty(config.database.query.as_deref()) {
             validate_database_query(query)?;
         }
+        config.management_auth.validate()?;
         Ok(config)
     }
 }
@@ -1092,6 +1130,9 @@ fn base_builder() -> Result<ConfigBuilder<DefaultState>, ConfigError> {
         .set_default("status_list.token_exp_secs", 900)?
         .set_default("status_list.token_ttl_secs", 300)?
         .set_default("status_list.snapshot_retention_secs", 7776000)?
+        .set_default("management_auth.leeway_secs", 60)?
+        .set_default("management_auth.max_token_lifetime_secs", 3600)?
+        .set_default("management_auth.audiences", Vec::<String>::new())?
         .set_default("rate_limit.strict_burst_size", 10)?
         .set_default("rate_limit.strict_period_secs", 60)?
         .set_default("rate_limit.permissive_burst_size", 100)?
@@ -1159,6 +1200,9 @@ mod tests {
         assert_eq!(config.azure_keyvault.secrets_cache_ttl, 300);
         assert_eq!(config.status_list.token_exp_secs, 900);
         assert_eq!(config.status_list.token_ttl_secs, 300);
+        assert_eq!(config.management_auth.leeway_secs, 60);
+        assert_eq!(config.management_auth.max_token_lifetime_secs, 3600);
+        assert!(config.management_auth.audiences.is_empty());
         assert_eq!(config.server.cert.renewal_cron_schedule, "0 0 0 * * *");
         assert_eq!(config.server.cert.dns_challenge_server_url, None);
         assert_eq!(config.server.aggregation_uri, None);
@@ -1250,6 +1294,12 @@ mod tests {
             ("cache.max_capacity", "2000"),
             ("status_list.token_exp_secs", "1800"),
             ("status_list.token_ttl_secs", "600"),
+            ("management_auth.leeway_secs", "30"),
+            ("management_auth.max_token_lifetime_secs", "900"),
+            (
+                "management_auth.audiences",
+                "status-list-server-management,internal-management",
+            ),
             ("rate_limit.strict_burst_size", "3"),
             ("rate_limit.strict_period_secs", "120"),
             ("rate_limit.permissive_burst_size", "500"),
@@ -1292,6 +1342,15 @@ mod tests {
         assert_eq!(overridden.cache.max_capacity, 2000);
         assert_eq!(overridden.status_list.token_exp_secs, 1800);
         assert_eq!(overridden.status_list.token_ttl_secs, 600);
+        assert_eq!(overridden.management_auth.leeway_secs, 30);
+        assert_eq!(overridden.management_auth.max_token_lifetime_secs, 900);
+        assert_eq!(
+            overridden.management_auth.audiences,
+            vec![
+                "status-list-server-management".to_string(),
+                "internal-management".to_string()
+            ]
+        );
         assert_eq!(overridden.server.cert.renewal_cron_schedule, "0 0 12 * * *");
         assert_eq!(
             overridden.server.cert.dns_challenge_server_url.as_deref(),
@@ -1673,6 +1732,34 @@ mod tests {
                 .unwrap()
                 .accounts
                 .is_empty()
+        );
+    }
+
+    #[test]
+    fn test_management_auth_validations() {
+        let zero_lifetime =
+            Config::load_from_overrides(&[("management_auth.max_token_lifetime_secs", "0")]);
+        assert!(
+            zero_lifetime.is_err(),
+            "zero management token lifetime should fail config loading"
+        );
+
+        let empty_audiences =
+            Config::load_from_overrides(&[("APP_MANAGEMENT_AUTH__AUDIENCES", "")])
+                .expect("empty audience env value should load");
+        assert!(empty_audiences.management_auth.audiences.is_empty());
+
+        let trimmed_audiences = Config::load_from_overrides(&[(
+            "APP_MANAGEMENT_AUTH__AUDIENCES",
+            "status-list-server-management, internal-management, ",
+        )])
+        .expect("comma-separated audiences should load");
+        assert_eq!(
+            trimmed_audiences.management_auth.audiences,
+            vec![
+                "status-list-server-management".to_string(),
+                "internal-management".to_string()
+            ]
         );
     }
 
