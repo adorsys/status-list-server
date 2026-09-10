@@ -1,3 +1,6 @@
+#[cfg(test)]
+mod tests;
+
 use arc_swap::ArcSwap;
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, ConnectionTrait, DatabaseBackend, DatabaseConnection,
@@ -39,9 +42,6 @@ impl SwappableDatabaseConnection {
         self.active.swap(db)
     }
 }
-
-#[cfg(test)]
-mod tests;
 
 #[cfg(all(test, feature = "sqlite"))]
 mod swappable_tests {
