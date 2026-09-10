@@ -342,6 +342,22 @@ Check:
 - This means the binary no longer carries readable `.dep-v0` audit data, usually because the floating stable toolchain drifted away from the pinned `cargo-auditable` version. Bump `CARGO_AUDITABLE_VERSION` and `RUST_AUDIT_INFO_VERSION` in the `Dockerfile`.
 - The assertion is deliberate. Without it the build would succeed and publish an empty SBOM.
 
+### Attestation Verification Failure
+
+Symptoms:
+
+- `Verify Signed Provenance` fails for one or more variants, and `Promote Scanned Digest to Release Tags` is skipped because it depends on `verify-provenance`.
+- The image exists in GHCR under its `sha-<short_sha>-<variant>` tag, but no release tags are applied and `Deploy to Production` never runs.
+
+Check:
+
+- `gh` version floor: the verification wrapper (`scripts/verify-attestation.sh`) requires `gh >= 2.67.0`. Until 2.67.0, `gh attestation verify` exited 0 when no attestation was found at all ([cli/cli#10418](https://github.com/cli/cli/issues/10418)). The runner image must provide a new enough `gh`; if it does not, the step will pass incorrectly and the failure will surface later as a missing signature on the promoted tag.
+- Certificate identity mismatch: the wrapper pins the exact SubjectAlternativeName (workflow path **and** ref) via `--cert-identity` and `--source-ref`. A signature from a different ref, a different workflow, or a different repository will fail verification even if the digest is correct. The error message names the expected and actual identities.
+- Transient API errors vs genuine absence: the wrapper retries three times. A failure after retries means either GitHub's attestation API is unavailable, Sigstore's trust root cannot be fetched, or no signed provenance exists for the digest. Check the step logs for `gh`'s JSON output to distinguish.
+- `gh attestation verify` output: the wrapper parses `--format json` and requires a non-empty result array whose verified subject digest matches the one asked about. An empty result array means no attestation was found for that digest in this repository.
+
+Do not bypass this gate. It is the only check that establishes a signed statement from this workflow, from this ref, over the digest that will be promoted. A digest that passes the vulnerability gate but fails provenance verification is an artifact whose builder identity cannot be confirmed — promoting it would publish a release with no verifiable origin.
+
 ## External Dependencies
 
 - **External Secrets Operator**: needed only when you choose ESO secret delivery; the default fallback Secret path does not require ESO CRDs.

@@ -78,6 +78,9 @@ jobs:
     runs-on: ubuntu-latest
     needs: [ci, validate-tag]
     timeout-minutes: 60
+    # zizmor: ignore[excessive-permissions]
+    # Required by actions/attest-build-provenance for Sigstore/Fulcio signing.
+    # Justification in docs/adr/0001-container-image-provenance.md §Permissions.
     permissions:
       contents: read
       packages: write
@@ -576,7 +579,7 @@ jobs:
       - name: Download built digest
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh run download "$GITHUB_RUN_ID" --name "image-digest-${{ matrix.variant.suffix }}" --dir .
+        run: gh run download "$GITHUB_RUN_ID" -R "$GITHUB_REPOSITORY" --name "image-digest-${{ matrix.variant.suffix }}" --dir .
 
       - name: Verify signed provenance for the built digest
         # `provenance: mode=max` gives BuildKit's own attestation, which is
@@ -744,6 +747,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
+          DEPLOY_TAG="${GITHUB_REF_NAME#v}"
           release_ref="${IMAGE_BASE}:${DEPLOY_TAG}-${SUFFIX}"
           promoted_digest=$(docker buildx imagetools inspect "$release_ref" \
             --format '{{ .Manifest.Digest }}')
