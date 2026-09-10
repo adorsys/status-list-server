@@ -513,6 +513,27 @@ jobs:
         with:
           globs: "**/*.md"
 
+  attestation-selftest:
+    name: Attestation Verifier Self-Test
+    runs-on: ubuntu-latest
+    # Its own job rather than a step on trivy-config: that job is a Trivy config scan and
+    # this has nothing to do with Trivy, so a failure there would name the wrong thing in
+    # the checks list.
+    #
+    # Runs on every pull request, unlike scripts/gate-selftest.sh, because this needs
+    # nothing installed: no network, no registry, no image, and not even a real gh --
+    # every case is a stubbed gh on PATH. So drift is caught by whoever changes the
+    # verifier, while they are looking at it, rather than on the last step before a
+    # production deploy.
+    steps:
+      - name: Fetch Repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Prove the attestation check can fail
+        run: bash scripts/attestation-selftest.sh
+
   trivy-config:
     name: Trivy Config Scan (Helm Chart)
     runs-on: ubuntu-latest
@@ -971,6 +992,7 @@ jobs:
       - typos-cli
       - tombi-toml-lint
       - markdown-lint
+      - attestation-selftest
       - trivy-config
       - helm-template-local
       - kube-linter
