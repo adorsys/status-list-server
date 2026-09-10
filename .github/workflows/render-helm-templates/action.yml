@@ -519,6 +519,56 @@ runs:
           echo "ERROR: NetworkPolicy egress internal rule must have a to:/podSelector (not any pod)"; exit 1
         fi
 
+        # --- Cluster-wide kube-prometheus-stack alignment (issue 460) ---
+        # 1. PromQL must be namespace-scoped: every raw selector carries
+        #    namespace="<release namespace>" and the absence alert is namespace
+        #    scoped (never cluster-global). Render in a non-default namespace to be
+        #    sure the matcher reflects the actual release namespace, not a hardcoded one.
+        helm template status-list-server helm/chart \
+          --namespace statuslist-prod \
+          --set externalSecret.enabled=false \
+          --set statuslist.fallbackSecret.enabled=true \
+          --set-string statuslist.fallbackSecret.stringData.postgres-password=x \
+          --set prometheusRule.enabled=true \
+          --output-dir /tmp/rendered/scoped-rules
+        RULES=/tmp/rendered/scoped-rules/status-list-server/templates/prometheusrule.yaml
+        if ! grep -q 'otel_scope_name="status-list-server",namespace="statuslist-prod"' "$RULES"; then
+          echo "ERROR: PrometheusRule raw selectors must be namespace-scoped"; exit 1
+        fi
+        if ! grep -q 'absent(http_server_duration_seconds_bucket{otel_scope_name="status-list-server",namespace="statuslist-prod"})' "$RULES"; then
+          echo "ERROR: StatusListMetricsAbsent must be namespace-scoped, not cluster-global"; exit 1
+        fi
+        if ! grep -q 'sli:error_budget:success:30d{namespace="statuslist-prod"}' "$RULES"; then
+          echo "ERROR: recording-series reads in alert rules must be namespace-scoped"; exit 1
+        fi
+        # 2. Grafana dashboard ConfigMap is opt-in (default off) and labelled for the
+        #    central Grafana sidecar when enabled.
+        if helm template status-list-server helm/chart 2>/dev/null | grep -q 'kind: ConfigMap' \
+            && helm template status-list-server helm/chart 2>/dev/null | grep -q 'grafana_dashboard'; then
+          echo "ERROR: default render must NOT emit the Grafana dashboard ConfigMap"; exit 1
+        fi
+        helm template status-list-server helm/chart \
+          --set grafanaDashboard.enabled=true \
+          --output-dir /tmp/rendered/dashboard
+        if [ ! -f /tmp/rendered/dashboard/status-list-server/templates/dashboard-configmap.yaml ]; then
+          echo "ERROR: grafanaDashboard.enabled=true must render dashboard-configmap.yaml"; exit 1
+        fi
+        if ! grep -q 'grafana_dashboard: "1"' /tmp/rendered/dashboard/status-list-server/templates/dashboard-configmap.yaml; then
+          echo "ERROR: dashboard ConfigMap must be labelled grafana_dashboard: \"1\""; exit 1
+        fi
+        if ! grep -q '"uid": "status-list-slo"' /tmp/rendered/dashboard/status-list-server/templates/dashboard-configmap.yaml; then
+          echo "ERROR: dashboard ConfigMap must embed the generated SLO dashboard JSON"; exit 1
+        fi
+        # 3. prometheus.io/* Pod annotations are opt-in (ServiceMonitor is the
+        #    authoritative discovery method in kube-prometheus-stack, not annotations).
+        if helm template status-list-server helm/chart 2>/dev/null | grep -q 'prometheus.io/scrape'; then
+          echo "ERROR: default render must NOT emit prometheus.io/scrape Pod annotations"; exit 1
+        fi
+        helm template status-list-server helm/chart \
+          --set statuslist.prometheusAnnotations=true 2>/dev/null \
+          | grep -q 'prometheus.io/scrape: "true"' \
+          || { echo "ERROR: statuslist.prometheusAnnotations=true must render prometheus.io/scrape"; exit 1; }
+
         # Fail-closed alerting render tests:
         # 1. alerting.enabled=true with unsupported platform fails.
         if helm template status-list-server helm/chart \

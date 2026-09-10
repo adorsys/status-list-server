@@ -53,6 +53,13 @@ statuslist:
     # "sha256:...". Takes precedence over tag and pins the exact digest CI scanned.
     # Each variant has its own digest. Use the digest from the variant you select.
     digest: ""
+  # Add prometheus.io/scrape + port + path Pod annotations.
+  # Defaults to false on purpose: kube-prometheus-stack does NOT scrape arbitrary
+  # annotation-marked Pods — the ServiceMonitor above is the authoritative discovery
+  # method. Enable only for compatibility with a separately configured scraper that
+  # relies on these annotations; otherwise leaving them off avoids implying that
+  # annotations alone are sufficient.
+  prometheusAnnotations: false
   service:
     enabled: true
     type: ClusterIP
@@ -323,11 +330,47 @@ serviceMonitor:
 
 # PrometheusRule for kube-prometheus-stack / Prometheus Operator rule discovery.
 # Enables shipping SLI recording rules and SLO alerting rules as a PrometheusRule CRD.
+#
+# PromQL release-scoping: every expression in this chart pins `namespace="<release
+# namespace>"`. Do not remove that matcher: without it a rule copy installed in one
+# namespace could evaluate another deployment's data, and the always-fired absence
+# alert would stay silent while ANY Status List deployment anywhere still produces
+# metrics. The `release` label below is what the shared Prometheus uses to select this
+# rule; the in-expression `namespace` matcher is what keeps evaluation isolated.
 prometheusRule:
   enabled: false
   # Additional labels required by your Prometheus Operator (e.g. release: kube-prometheus-stack)
   labels: {}
 
+# Grafana dashboard provisioning for the central (shared) Grafana.
+# When enabled, renders the generated SLO dashboard as a ConfigMap labelled
+# `grafana_dashboard: "1"` (override via grafanaDashboard.labels). The central Grafana
+# sidecar configured by wallet-eks-env (`sidecar.dashboards.searchNamespace: ALL` +
+# `label: grafana_dashboard`) auto-discovers it and provisions the dashboard.
+grafanaDashboard:
+  enabled: false
+  # Additional labels required by your Grafana dashboards sidecar (e.g.
+  # `grafana_dashboard: "1"` + `release: kube-prometheus-stack`).
+  labels:
+    grafana_dashboard: "1"
+
+# Cluster dependency notes for the shared kube-prometheus-stack integration
+# (managed centrally by wallet-eks-env, not by this chart):
+#
+# 1. CRD install order: the ServiceMonitor, PrometheusRule (and any
+#    AlertmanagerConfig / Grafana dashboard) objects below assume the
+#    kube-prometheus-stack CRDs already exist in the cluster. On a fresh
+#    cluster, install the monitoring stack (which installs the CRDs) BEFORE this
+#    Helm release, otherwise the API server rejects those objects. Use bounded
+#    readiness gates / a staged pipeline; an upgrade on a cluster where the CRDs
+#    already exist does not prove first-install ordering.
+# 2. Retention: the SLO rules here use 30d windows (sli:error_rate:30d,
+#    sli:token_gen_failure_rate:30d, error-budget gates). The shared Prometheus
+#    must retain >30 days (with enough storage that the retention-size limit does
+#    not truncate history sooner) or these 30d windows are not representable.
+# 3. Discovery label: production sets ServiceMonitor/PrometheusRule `labels.release:
+#    kube-prometheus-stack`, which is exactly what the shared Prometheus requires to
+#    select these objects cluster-wide (label opt-in). Keep it.
 # AlertmanagerConfig for kube-prometheus-stack / Prometheus Operator alert routing.
 # When enabled, renders an AlertmanagerConfig CRD that routes SLO alerts to the
 # configured notification channel. This is the Kubernetes equivalent of the Docker

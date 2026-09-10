@@ -45,6 +45,14 @@ prometheusRule:
   labels:
     release: kube-prometheus-stack
 
+# Auto-provision the SLO dashboard in the shared Grafana via a labelled ConfigMap
+# (grafana_dashboard: "1") that the central Grafana sidecar discovers.
+grafanaDashboard:
+  enabled: true
+  labels:
+    release: kube-prometheus-stack
+    grafana_dashboard: "1"
+
 # OpenTelemetry Collector Production Exporter Setup (Guidance):
 # In production, ensure opentelemetry-collector.config exporters are configured
 # to forward to your enterprise backends (e.g. Tempo for traces, Prometheus Remote Write, Loki for logs)
