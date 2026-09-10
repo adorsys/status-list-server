@@ -5,21 +5,21 @@
   "scripts": {
     "generate-tokens": "node ./scripts/token-generator.js",
     "test:load": "artillery run ./tests/load-test.yml",
-    "test:stress": "artillery run artillery-tests/stress-test.yml",
-    "test:spike": "artillery run artillery-tests/spike-test.yml",
-    "test:auth": "artillery run artillery-tests/auth-test.yml",
+    "test:stress": "artillery run ./tests/stress-test.yml",
+    "test:spike": "artillery run ./tests/spike-test.yml",
+    "test:auth": "artillery run ./tests/auth-test.yml",
     "test:all": "npm run test:load && npm run test:stress && npm run test:spike && npm run test:auth",
-    "test:load:report": "artillery run --output artillery-tests/results/load-test.json artillery-tests/load-test.yml && artillery report artillery-tests/results/load-test.json",
-    "test:stress:report": "artillery run --output artillery-tests/results/stress-test.json artillery-tests/stress-test.yml && artillery report artillery-tests/results/stress-test.json",
-    "test:spike:report": "artillery run --output artillery-tests/results/spike-test.json artillery-tests/spike-test.yml && artillery report artillery-tests/results/spike-test.json",
-    "test:auth:report": "artillery run --output artillery-tests/results/auth-test.json artillery-tests/auth-test.yml && artillery report artillery-tests/results/auth-test.json"
+    "test:load:report": "mkdir -p results && artillery run --output results/load-test.json ./tests/load-test.yml && artillery report results/load-test.json",
+    "test:stress:report": "mkdir -p results && artillery run --output results/stress-test.json ./tests/stress-test.yml && artillery report results/stress-test.json",
+    "test:spike:report": "mkdir -p results && artillery run --output results/spike-test.json ./tests/spike-test.yml && artillery report results/spike-test.json",
+    "test:auth:report": "mkdir -p results && artillery run --output results/auth-test.json ./tests/auth-test.yml && artillery report results/auth-test.json"
   },
   "devDependencies": {
-    "artillery": "^2.0.27",
-    "artillery-plugin-metrics-by-endpoint": "^1.21.0",
+    "artillery": "^2.0.34",
+    "artillery-plugin-metrics-by-endpoint": "^1.27.0",
     "artillery-plugin-statsd": "^2.2.1"
   },
   "dependencies": {
-    "jsonwebtoken": "^9.0.2"
+    "jsonwebtoken": "^9.0.3"
   }
 }
