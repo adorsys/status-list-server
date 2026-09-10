@@ -96,7 +96,6 @@ The server compiles with modular feature flags to gate database drivers and clou
 Examples:
 
 ```bash
-# Build with PostgreSQL support and filesystem key + certificate chain loading
 cargo run --features postgres
 
 # Build with PostgreSQL and AWS integration
@@ -112,7 +111,6 @@ The server reads configuration from environment variables (or an optional `.env`
 - **Defaults**: Every setting includes a default value. The server starts in zero-infrastructure in-memory mode without any custom variables.
 
 Refer to [`.env.template`](.env.template) for the complete configuration dictionary, data types, and default values. For backend-specific configuration, see [Database Backends](docs/database-backends.md), [Secret Backends](docs/secrets-backends.md), and [DNS Providers](docs/dns-providers.md).
-
 
 ## Deployment
 
