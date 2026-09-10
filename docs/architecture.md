@@ -166,9 +166,7 @@ each tier keyed and tuned independently:
 
 The writes tier is applied **before** the `auth` middleware (rate limiting by IP
 happens first, then authentication rejects unauthenticated requests with `401`).
-When a bucket is exhausted the server returns `429 Too Many Requests` with a
-plain-text body `Too Many Requests! Wait for <n>s` (emitted by the governor
-middleware; it is not RFC 7807 problem+json).
+When a bucket is exhausted the server returns `429 Too Many Requests`.
 
 > **Note:** Governor state is held in-memory per-replica. In a horizontally
 > scaled deployment each instance maintains its own token bucket, so the
@@ -211,10 +209,9 @@ defaults, not guarantees.
 | `500`  | Internal server error                                                 |
 | `503`  | Service temporarily unavailable                                       |
 
-Authentication errors use RFC 7807 `application/problem+json`; the body
+Authentication and handler-level errors use the shared JSON error shape
+`{"error": "<code>", "error_description": "<human-readable text>"}`. The body
 carries `Cache-Control: no-store, max-age=0` so error states are not cached.
-Handler-level status-list errors (`StatusListError`) return plain-text bodies
-(see tracking issue #156 for RFC 7807 adoption).
 
 ## Developer Integration
 

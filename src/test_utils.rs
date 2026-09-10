@@ -15,6 +15,7 @@ use crate::outbound::sql::{
     SeaOrmStore, SqlCredentialRepo, SqlStatusListRepo, SqlStatusListSnapshotRepo,
 };
 use crate::server::AppState;
+use crate::server::auth::AuthenticatedIssuer;
 use crate::server::health::Readiness;
 #[cfg(feature = "acme")]
 use crate::{cert_manager::storage::StorageError, utils::cert_manager::storage::Storage};
@@ -22,6 +23,10 @@ use async_trait::async_trait;
 #[cfg(feature = "acme")]
 use std::collections::HashMap;
 use std::sync::Arc;
+
+pub(crate) fn authenticated_issuer(issuer: impl Into<String>) -> AuthenticatedIssuer {
+    AuthenticatedIssuer::new(crate::domain::models::credential::Issuer(issuer.into()))
+}
 
 #[cfg(feature = "acme")]
 #[allow(dead_code)]
@@ -90,6 +95,7 @@ pub(crate) async fn test_app_state_without_snapshots() -> AppState {
         max_statuses_per_request: 5_000,
         max_serialized_list_size: 1_048_576,
         snapshot_retention_secs: 0,
+        management_auth: crate::server::ManagementAuthConfig::default(),
         readiness: crate::server::health::Readiness::new(Vec::new()),
     }
 }
@@ -180,6 +186,7 @@ async fn build_test_app_state(
         max_statuses_per_request: 5_000,
         max_serialized_list_size,
         snapshot_retention_secs: 7776000,
+        management_auth: crate::server::ManagementAuthConfig::default(),
         readiness: Readiness::default(),
     }
 }

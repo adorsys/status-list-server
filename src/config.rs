@@ -84,6 +84,7 @@ pub struct Config {
     pub azure_keyvault: AzureKeyVaultConfig,
     pub cache: CacheConfig,
     pub status_list: StatusListConfig,
+    pub management_auth: ManagementAuthConfig,
     pub rate_limit: RateLimitConfig,
     pub limits: LimitsConfig,
     pub telemetry: TelemetryConfig,
@@ -112,6 +113,42 @@ pub struct LimitsConfig {
     pub max_status_index: i32,
     pub max_statuses_per_request: usize,
     pub max_serialized_list_size: usize,
+}
+
+/// JWT validation policy for protected management endpoints.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ManagementAuthConfig {
+    /// Clock skew leeway in seconds for `exp`, `iat`, and `nbf`.
+    pub leeway_secs: u64,
+    /// Maximum accepted lifetime in seconds, computed as `exp - iat`.
+    pub max_token_lifetime_secs: u64,
+    /// Accepted management-token audiences. Empty means the `aud` claim is not required.
+    #[serde(deserialize_with = "deserialize_audience_list")]
+    pub audiences: Vec<String>,
+}
+
+impl ManagementAuthConfig {
+    fn validate(&self) -> Result<(), ConfigError> {
+        if self.max_token_lifetime_secs == 0 {
+            return Err(ConfigError::Message(
+                "management_auth.max_token_lifetime_secs must be greater than 0".to_string(),
+            ));
+        }
+
+        Ok(())
+    }
+}
+
+fn deserialize_audience_list<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let values = deserialize_vec_from_string_or_vec(deserializer)?;
+    Ok(values
+        .into_iter()
+        .map(|value: String| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .collect())
 }
 
 /// Telemetry configuration controlling tracing and metrics export.
@@ -235,21 +272,11 @@ pub enum ResolvedDnsProvider<'a> {
     /// Uses the ambient AWS credentials; no provider-specific settings
     Route53,
     Cloudflare(&'a CloudflareDnsConfig),
-    Gcloud(GcloudKeySource<'a>),
+    Gcloud(&'a GcloudDnsConfig),
     Azure(&'a AzureDnsConfig),
     Acmedns(&'a AcmeDnsConfig),
     /// Development-only; its challenge server URL lives outside [`DnsConfig`]
     Pebble,
-}
-
-/// The Google Cloud service account key source, with empty values counting
-/// as unset and the inline key winning when both are configured
-#[derive(Debug, Clone, Copy)]
-pub enum GcloudKeySource<'a> {
-    /// The key JSON itself
-    Inline(&'a SecretString),
-    /// Path to the key JSON file
-    Path(&'a str),
 }
 
 impl ResolvedDnsProvider<'_> {
@@ -280,17 +307,13 @@ pub struct DnsConfig {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct GcloudDnsConfig {
-    /// Service account key JSON, inline
-    pub service_account_key: Option<SecretString>,
-    /// Path to the service account key JSON file
-    pub service_account_key_path: Option<String>,
+    /// GCP project ID holding the Cloud DNS managed zones
+    pub project_id: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct AzureDnsConfig {
-    pub tenant_id: String,
-    pub client_id: String,
-    pub client_secret: SecretString,
+    /// Azure subscription ID holding the DNS zones
     pub subscription_id: String,
     /// Resource group holding the DNS zones
     pub resource_group: String,
@@ -457,12 +480,6 @@ impl AzureDnsConfig {
     /// instead of surfacing as opaque API errors at the first renewal
     fn validate(&self) -> Result<(), ConfigError> {
         let empty: Vec<&str> = [
-            ("tenant_id", self.tenant_id.trim().is_empty()),
-            ("client_id", self.client_id.trim().is_empty()),
-            (
-                "client_secret",
-                self.client_secret.expose_secret().trim().is_empty(),
-            ),
             ("subscription_id", self.subscription_id.trim().is_empty()),
             ("resource_group", self.resource_group.trim().is_empty()),
         ]
@@ -474,6 +491,18 @@ impl AzureDnsConfig {
                 "Azure DNS settings have empty required fields: {}",
                 empty.join(", ")
             )));
+        }
+        Ok(())
+    }
+}
+
+impl GcloudDnsConfig {
+    /// Reject an empty project ID so misconfigurations fail at startup.
+    fn validate(&self) -> Result<(), ConfigError> {
+        if self.project_id.trim().is_empty() {
+            return Err(ConfigError::Message(
+                "Google Cloud DNS settings have an empty project_id".to_string(),
+            ));
         }
         Ok(())
     }
@@ -518,17 +547,9 @@ impl DnsConfig {
                 ResolvedDnsProvider::Cloudflare(cloudflare)
             }
             DnsProviderKind::Gcloud => {
-                let key = self.gcloud.as_ref().and_then(|g| {
-                    g.service_account_key
-                        .as_ref()
-                        .filter(|k| !k.expose_secret().trim().is_empty())
-                        .map(GcloudKeySource::Inline)
-                        .or_else(|| {
-                            non_empty(&g.service_account_key_path)
-                                .map(|path| GcloudKeySource::Path(path))
-                        })
-                });
-                ResolvedDnsProvider::Gcloud(key.ok_or_else(|| missing("dns.gcloud"))?)
+                let gcloud = self.gcloud.as_ref().ok_or_else(|| missing("dns.gcloud"))?;
+                gcloud.validate()?;
+                ResolvedDnsProvider::Gcloud(gcloud)
             }
             DnsProviderKind::Azure => {
                 let azure = self.azure.as_ref().ok_or_else(|| missing("dns.azure"))?;
@@ -1020,6 +1041,7 @@ impl Config {
         if let Some(query) = trim_non_empty(config.database.query.as_deref()) {
             validate_database_query(query)?;
         }
+        config.management_auth.validate()?;
         Ok(config)
     }
 }
@@ -1108,6 +1130,9 @@ fn base_builder() -> Result<ConfigBuilder<DefaultState>, ConfigError> {
         .set_default("status_list.token_exp_secs", 900)?
         .set_default("status_list.token_ttl_secs", 300)?
         .set_default("status_list.snapshot_retention_secs", 7776000)?
+        .set_default("management_auth.leeway_secs", 60)?
+        .set_default("management_auth.max_token_lifetime_secs", 3600)?
+        .set_default("management_auth.audiences", Vec::<String>::new())?
         .set_default("rate_limit.strict_burst_size", 10)?
         .set_default("rate_limit.strict_period_secs", 60)?
         .set_default("rate_limit.permissive_burst_size", 100)?
@@ -1175,6 +1200,9 @@ mod tests {
         assert_eq!(config.azure_keyvault.secrets_cache_ttl, 300);
         assert_eq!(config.status_list.token_exp_secs, 900);
         assert_eq!(config.status_list.token_ttl_secs, 300);
+        assert_eq!(config.management_auth.leeway_secs, 60);
+        assert_eq!(config.management_auth.max_token_lifetime_secs, 3600);
+        assert!(config.management_auth.audiences.is_empty());
         assert_eq!(config.server.cert.renewal_cron_schedule, "0 0 0 * * *");
         assert_eq!(config.server.cert.dns_challenge_server_url, None);
         assert_eq!(config.server.aggregation_uri, None);
@@ -1266,6 +1294,12 @@ mod tests {
             ("cache.max_capacity", "2000"),
             ("status_list.token_exp_secs", "1800"),
             ("status_list.token_ttl_secs", "600"),
+            ("management_auth.leeway_secs", "30"),
+            ("management_auth.max_token_lifetime_secs", "900"),
+            (
+                "management_auth.audiences",
+                "status-list-server-management,internal-management",
+            ),
             ("rate_limit.strict_burst_size", "3"),
             ("rate_limit.strict_period_secs", "120"),
             ("rate_limit.permissive_burst_size", "500"),
@@ -1308,6 +1342,15 @@ mod tests {
         assert_eq!(overridden.cache.max_capacity, 2000);
         assert_eq!(overridden.status_list.token_exp_secs, 1800);
         assert_eq!(overridden.status_list.token_ttl_secs, 600);
+        assert_eq!(overridden.management_auth.leeway_secs, 30);
+        assert_eq!(overridden.management_auth.max_token_lifetime_secs, 900);
+        assert_eq!(
+            overridden.management_auth.audiences,
+            vec![
+                "status-list-server-management".to_string(),
+                "internal-management".to_string()
+            ]
+        );
         assert_eq!(overridden.server.cert.renewal_cron_schedule, "0 0 12 * * *");
         assert_eq!(
             overridden.server.cert.dns_challenge_server_url.as_deref(),
@@ -1630,9 +1673,6 @@ mod tests {
         let azure_dns = DnsConfig {
             provider: Some(DnsProviderKind::Azure),
             azure: Some(AzureDnsConfig {
-                tenant_id: "tenant".into(),
-                client_id: "client".into(),
-                client_secret: "secret".into(),
                 subscription_id: "sub".into(),
                 resource_group: "rg".into(),
             }),
@@ -1646,8 +1686,7 @@ mod tests {
         let gcloud_path_dns = DnsConfig {
             provider: Some(DnsProviderKind::Gcloud),
             gcloud: Some(GcloudDnsConfig {
-                service_account_key: None,
-                service_account_key_path: Some("/etc/gcloud/key.json".into()),
+                project_id: "dns-project".into(),
             }),
             ..Default::default()
         };
@@ -1655,37 +1694,6 @@ mod tests {
             gcloud_path_dns.resolve("production").unwrap().kind(),
             DnsProviderKind::Gcloud
         );
-
-        // GCloud key source precedence (Inline key vs Path)
-        let gcloud_inline_and_path = DnsConfig {
-            provider: Some(DnsProviderKind::Gcloud),
-            gcloud: Some(GcloudDnsConfig {
-                service_account_key: Some("inline-key-json".into()),
-                service_account_key_path: Some("/etc/gcloud/key.json".into()),
-            }),
-            ..Default::default()
-        };
-        match gcloud_inline_and_path.resolve("production").unwrap() {
-            ResolvedDnsProvider::Gcloud(GcloudKeySource::Inline(key)) => {
-                assert_eq!(key.expose_secret(), "inline-key-json");
-            }
-            other => panic!("Expected an inline key source, got {other:?}"),
-        }
-
-        let gcloud_empty_inline_uses_path = DnsConfig {
-            provider: Some(DnsProviderKind::Gcloud),
-            gcloud: Some(GcloudDnsConfig {
-                service_account_key: Some("".into()),
-                service_account_key_path: Some("/etc/gcloud/key.json".into()),
-            }),
-            ..Default::default()
-        };
-        match gcloud_empty_inline_uses_path.resolve("production").unwrap() {
-            ResolvedDnsProvider::Gcloud(GcloudKeySource::Path(path)) => {
-                assert_eq!(path, "/etc/gcloud/key.json");
-            }
-            other => panic!("Expected a path key source, got {other:?}"),
-        }
 
         // ACME-DNS accounts JSON parsing from environment overrides
         let server_url = "https://auth.example.org";
@@ -1724,6 +1732,34 @@ mod tests {
                 .unwrap()
                 .accounts
                 .is_empty()
+        );
+    }
+
+    #[test]
+    fn test_management_auth_validations() {
+        let zero_lifetime =
+            Config::load_from_overrides(&[("management_auth.max_token_lifetime_secs", "0")]);
+        assert!(
+            zero_lifetime.is_err(),
+            "zero management token lifetime should fail config loading"
+        );
+
+        let empty_audiences =
+            Config::load_from_overrides(&[("APP_MANAGEMENT_AUTH__AUDIENCES", "")])
+                .expect("empty audience env value should load");
+        assert!(empty_audiences.management_auth.audiences.is_empty());
+
+        let trimmed_audiences = Config::load_from_overrides(&[(
+            "APP_MANAGEMENT_AUTH__AUDIENCES",
+            "status-list-server-management, internal-management, ",
+        )])
+        .expect("comma-separated audiences should load");
+        assert_eq!(
+            trimmed_audiences.management_auth.audiences,
+            vec![
+                "status-list-server-management".to_string(),
+                "internal-management".to_string()
+            ]
         );
     }
 
@@ -1890,46 +1926,40 @@ mod tests {
             );
         }
 
-        let missing_gcloud_key = DnsConfig {
+        let empty_gcloud_project = DnsConfig {
             provider: Some(DnsProviderKind::Gcloud),
             gcloud: Some(GcloudDnsConfig {
-                service_account_key: None,
-                service_account_key_path: None,
+                project_id: " ".into(),
             }),
             ..Default::default()
         };
         assert!(
-            missing_gcloud_key
+            empty_gcloud_project
                 .resolve("production")
                 .unwrap_err()
                 .to_string()
-                .contains("dns.gcloud")
+                .contains("project_id")
         );
 
-        let empty_gcloud_keys = DnsConfig {
+        let gcloud_dns = DnsConfig {
             provider: Some(DnsProviderKind::Gcloud),
             gcloud: Some(GcloudDnsConfig {
-                service_account_key: Some("".into()),
-                service_account_key_path: Some(" ".into()),
+                project_id: "dns-project".into(),
             }),
             ..Default::default()
         };
-        assert!(
-            empty_gcloud_keys
-                .resolve("production")
-                .unwrap_err()
-                .to_string()
-                .contains("dns.gcloud")
-        );
+        match gcloud_dns.resolve("production").unwrap() {
+            ResolvedDnsProvider::Gcloud(cfg) => {
+                assert_eq!(cfg.project_id, "dns-project");
+            }
+            other => panic!("Expected GCloud DNS config, got {other:?}"),
+        }
 
-        let azure_helper = |tenant_id: &str, subscription_id: &str| DnsConfig {
+        let azure_helper = |subscription_id: &str, resource_group: &str| DnsConfig {
             provider: Some(DnsProviderKind::Azure),
             azure: Some(AzureDnsConfig {
-                tenant_id: tenant_id.into(),
-                client_id: "client".into(),
-                client_secret: "secret".into(),
                 subscription_id: subscription_id.into(),
-                resource_group: "rg".into(),
+                resource_group: resource_group.into(),
             }),
             ..Default::default()
         };
@@ -1937,9 +1967,23 @@ mod tests {
             .resolve("production")
             .unwrap_err()
             .to_string();
-        assert!(azure_err.contains("tenant_id"));
         assert!(azure_err.contains("subscription_id"));
-        assert!(!azure_err.contains("client_id"));
+        assert!(azure_err.contains("resource_group"));
+
+        let azure_dns = DnsConfig {
+            provider: Some(DnsProviderKind::Azure),
+            azure: Some(AzureDnsConfig {
+                subscription_id: "sub".into(),
+                resource_group: "rg".into(),
+            }),
+            ..Default::default()
+        };
+        match azure_dns.resolve("production").unwrap() {
+            ResolvedDnsProvider::Azure(cfg) => {
+                assert_eq!(cfg.subscription_id, "sub");
+            }
+            other => panic!("Expected Azure DNS config, got {other:?}"),
+        }
 
         // Malformed ACME-DNS accounts JSON rejection
         assert!(
