@@ -67,7 +67,7 @@ jobs:
         id: zizmor
         # Failure is deferred to the retry, which is the step that gates the job.
         continue-on-error: true
-        uses: zizmorcore/zizmor-action@3dc1ecc9bcb9e94e9b2c709687979e1298497054 # v0.6.2
+        uses: zizmorcore/zizmor-action@70fb788f84895a7701f5643d103d587e460b5c99 # v0.6.3
         with:
           version: ${{ env.ZIZMOR_VERSION }}
           # `.` also picks up .github/dependabot.yml.
@@ -84,7 +84,7 @@ jobs:
       # so this step is the one that fails the job.
       - name: Run Zizmor (retry)
         if: ${{ steps.zizmor.outcome == 'failure' }}
-        uses: zizmorcore/zizmor-action@3dc1ecc9bcb9e94e9b2c709687979e1298497054 # v0.6.2
+        uses: zizmorcore/zizmor-action@70fb788f84895a7701f5643d103d587e460b5c99 # v0.6.3
         with:
           version: ${{ env.ZIZMOR_VERSION }}
           inputs: .
@@ -349,7 +349,7 @@ jobs:
         uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
 
       - name: Install cargo-nextest
-        uses: taiki-e/install-action@c44f6b046f1c29ae5918b1e0bfdbb2f1813836fd # v2.84.1
+        uses: taiki-e/install-action@0758d235715de2f3551eacc980d9ae8fce9342c3 # v2.87.3
         with:
           # Same pin as the coverage job below, so both run the same test harness.
           tool: nextest@0.9.101
@@ -428,7 +428,7 @@ jobs:
           cache: false
 
       - name: Install cargo-machete
-        uses: taiki-e/install-action@c44f6b046f1c29ae5918b1e0bfdbb2f1813836fd # v2.84.1
+        uses: taiki-e/install-action@0758d235715de2f3551eacc980d9ae8fce9342c3 # v2.87.3
         with:
           tool: cargo-machete@0.9.2
 
@@ -452,7 +452,7 @@ jobs:
           cache: false
 
       - name: Install cargo-vet
-        uses: taiki-e/install-action@c44f6b046f1c29ae5918b1e0bfdbb2f1813836fd # v2.84.1
+        uses: taiki-e/install-action@0758d235715de2f3551eacc980d9ae8fce9342c3 # v2.87.3
         with:
           tool: cargo-vet@0.10.2
 
@@ -473,7 +473,7 @@ jobs:
           persist-credentials: false
 
       - name: Install Typos
-        uses: taiki-e/install-action@c44f6b046f1c29ae5918b1e0bfdbb2f1813836fd # v2.84.1
+        uses: taiki-e/install-action@0758d235715de2f3551eacc980d9ae8fce9342c3 # v2.87.3
         with:
           tool: typos-cli@1.49.0
 
@@ -491,7 +491,7 @@ jobs:
           persist-credentials: false
 
       - name: Install Taplo
-        uses: tombi-toml/setup-tombi@f2ae7247d62521245eb2793d653b9df472b9e090 # v1.2.4
+        uses: tombi-toml/setup-tombi@49d9f39ceec27db37419b2cab65b5092dd75a547 # v1.5.0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -509,7 +509,7 @@ jobs:
           persist-credentials: false
 
       - name: Markdown Lint
-        uses: DavidAnson/markdownlint-cli2-action@6bf21b07787794f89a243495939cd651942aeabe # v24.1.0
+        uses: DavidAnson/markdownlint-cli2-action@21c1be1b93ad9ed58fa840aacc3f279cde2a72ff # v24.2.0
         with:
           globs: "**/*.md"
 
@@ -656,7 +656,7 @@ jobs:
         # `continue-on-error` because fork PRs withhold write scopes.
         if: always()
         continue-on-error: true
-        uses: github/codeql-action/upload-sarif@4187e74d05793876e9989daffde9c3e66b4acd07 # v3.37.3
+        uses: github/codeql-action/upload-sarif@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4.37.9
         with:
           sarif_file: kube-linter-results.sarif
           category: kube-linter
@@ -682,7 +682,7 @@ jobs:
           persist-credentials: false
 
       - name: YAML Lint
-        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: stable
           cache: false
@@ -932,7 +932,7 @@ jobs:
           cache-shared-key: "coverage"
 
       - name: Install cargo-llvm-cov and cargo-nextest
-        uses: taiki-e/install-action@c44f6b046f1c29ae5918b1e0bfdbb2f1813836fd # v2.84.1
+        uses: taiki-e/install-action@0758d235715de2f3551eacc980d9ae8fce9342c3 # v2.87.3
         with:
           # Both pinned: cargo-llvm-cov and nextest have to agree on the test-runner
           # interface, so they are bumped together rather than floating independently.
