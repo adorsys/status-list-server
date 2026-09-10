@@ -110,7 +110,7 @@ fn render_helm_failure(args: &[&str]) -> Option<Output> {
 
 #[test]
 fn rendered_chart_uses_split_database_credentials() {
-    let Some(rendered) = render_helm(&["--set", "statuslist.env.APP_DATABASE__PORT=5432"]) else {
+    let Some(rendered) = render_helm(&[]) else {
         return;
     };
 
@@ -137,6 +137,7 @@ fn rendered_chart_uses_split_database_credentials() {
         "value: \"/var/run/status-list-server/database/password\"",
         "name: database-credentials",
         "secretName: statuslist-secret",
+        "key: database-password",
         "name: APP_DATABASE__NAME",
     ] {
         assert!(
@@ -147,20 +148,72 @@ fn rendered_chart_uses_split_database_credentials() {
 }
 
 #[test]
-fn rendered_chart_respects_database_backend_override() {
+fn rendered_chart_templates_mysql_backend_defaults() {
     let Some(rendered) = render_helm(&[
         "--set",
         "statuslist.env.APP_DATABASE__BACKEND=mysql",
         "--set",
-        "statuslist.env.APP_DATABASE__PORT=3306",
+        "statuslist.networkPolicy.enabled=true",
     ]) else {
         return;
     };
 
-    assert!(
-        rendered.contains("name: APP_DATABASE__BACKEND\n              value: \"mysql\""),
-        "rendered Helm output must preserve operator-provided database backend"
-    );
+    for expected in [
+        "name: wait-for-db",
+        "until nc -z status-list-server-mysql.statuslist.svc.cluster.local 3306; do",
+        "name: APP_DATABASE__BACKEND\n              value: \"mysql\"",
+        "name: APP_DATABASE__HOST\n              value: \"status-list-server-mysql.statuslist.svc.cluster.local\"",
+        "name: APP_DATABASE__PORT\n              value: \"3306\"",
+        "name: APP_DATABASE__USERNAME\n              value: \"mysql\"",
+        "name: APP_DATABASE__NAME\n              value: \"status-list\"",
+        "key: database-password",
+        "app.kubernetes.io/name: mysql",
+    ] {
+        assert!(
+            rendered.contains(expected),
+            "rendered Helm output is missing MySQL backend field {expected}"
+        );
+    }
+}
+
+#[test]
+fn rendered_chart_fallback_secret_publishes_database_and_legacy_password_keys() {
+    let Some(rendered) = render_helm(&[
+        "--set",
+        "statuslist.fallbackSecret.stringData.database-password=fixed-password",
+    ]) else {
+        return;
+    };
+
+    for expected in [
+        "database-password: \"fixed-password\"",
+        "postgres-password: \"fixed-password\"",
+    ] {
+        assert!(
+            rendered.contains(expected),
+            "rendered fallback Secret is missing compatible password key {expected}"
+        );
+    }
+}
+
+#[test]
+fn rendered_chart_fallback_secret_accepts_legacy_postgres_password_key() {
+    let Some(rendered) = render_helm(&[
+        "--set",
+        "statuslist.fallbackSecret.stringData.postgres-password=legacy-password",
+    ]) else {
+        return;
+    };
+
+    for expected in [
+        "database-password: \"legacy-password\"",
+        "postgres-password: \"legacy-password\"",
+    ] {
+        assert!(
+            rendered.contains(expected),
+            "rendered fallback Secret did not preserve legacy password compatibility for {expected}"
+        );
+    }
 }
 
 #[test]
@@ -220,8 +273,8 @@ fn rendered_chart_rejects_plain_database_password_env() {
 
 #[test]
 fn rendered_chart_uses_default_database_port() {
-    // With APP_DATABASE__PORT now defaulting to "5432" in values.yaml,
-    // the chart should render successfully without explicit --set
+    // With APP_DATABASE__BACKEND defaulting to "postgres", the chart derives 5432
+    // without requiring APP_DATABASE__PORT in values.yaml.
     let Some(rendered) = render_helm(&[]) else {
         return;
     };

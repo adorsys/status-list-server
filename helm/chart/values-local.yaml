@@ -1,17 +1,17 @@
 statuslist:
   initContainers:
-    - name: wait-for-postgres
+    - name: wait-for-db
       image: busybox:1.38
       command:
         - "sh"
         - "-c"
         - |
-          echo "Waiting for postgres..."
-          until nc -z {{ .Release.Name }}-postgres.{{ .Release.Namespace }}.svc.cluster.local {{ include "status-list-server-chart.dbPort" . }}; do
-            echo "postgres not ready. Retrying in 2s...";
+          echo "Waiting for database..."
+          until nc -z {{ include "status-list-server-chart.dbHost" . }} {{ include "status-list-server-chart.dbPort" . }}; do
+            echo "database not ready. Retrying in 2s...";
             sleep 2;
           done
-          echo "Postgres is up."
+          echo "Database is up."
 
   aws:
     # Local has no External Secrets Operator and no cloud role, so do not mount the
@@ -31,7 +31,7 @@ statuslist:
       secretName: statuslist-secret
       mountPath: /var/run/status-list-server/database
       items:
-        - key: postgres-password
+        - key: database-password
           path: password
       fileEnv:
         APP_DATABASE__PASSWORD_FILE: password
@@ -88,7 +88,13 @@ postgres:
   image:
     registry: docker.io
     repository: postgres
-    tag: "16.3"
+    tag: "18.6"
+
+mysql:
+  image:
+    registry: docker.io
+    repository: mysql
+    tag: "8.4.12"
 
 externalSecret:
   enabled: false

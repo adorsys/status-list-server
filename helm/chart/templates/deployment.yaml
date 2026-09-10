@@ -159,9 +159,6 @@ spec:
             {{- if hasKey $env "APP_DATABASE__PASSWORD" }}
               {{- fail "statuslist.env.APP_DATABASE__PASSWORD must not be set as a plain env value; use the chart-managed APP_DATABASE__PASSWORD_FILE mounted Secret path" }}
             {{- end }}
-            {{- if or (not (hasKey $env "APP_DATABASE__PORT")) (eq (trim (toString (get $env "APP_DATABASE__PORT"))) "") }}
-              {{- fail "statuslist.env.APP_DATABASE__PORT is required; set it to the database service port" }}
-            {{- end }}
             {{- if not (hasKey $env "APP_SERVER__DOMAIN") }}
               {{- $globalDomain := trimSuffix "." (dig "domain" "" (.Values.global | default dict) | default "" | lower) }}
               {{- if or .Values.statuslist.ingress.externalDnsHostname $globalDomain }}
@@ -203,14 +200,21 @@ spec:
             {{- if not (hasKey $env "APP_DATABASE__BACKEND") }}
               {{- $_ := set $env "APP_DATABASE__BACKEND" "postgres" }}
             {{- end }}
+            {{- $backend := include "status-list-server-chart.dbBackend" . }}
+            {{- if and (ne $backend "postgres") (ne $backend "mysql") }}
+              {{- fail (printf "statuslist.env.APP_DATABASE__BACKEND must be either postgres or mysql for this chart, got %q" $backend) }}
+            {{- end }}
             {{- if not (hasKey $env "APP_DATABASE__HOST") }}
-              {{- $_ := set $env "APP_DATABASE__HOST" (printf "%s-postgres.%s.svc.cluster.local" .Release.Name .Release.Namespace) }}
+              {{- $_ := set $env "APP_DATABASE__HOST" (include "status-list-server-chart.dbHost" .) }}
+            {{- end }}
+            {{- if or (not (hasKey $env "APP_DATABASE__PORT")) (eq (trim (toString (get $env "APP_DATABASE__PORT"))) "") }}
+              {{- $_ := set $env "APP_DATABASE__PORT" (include "status-list-server-chart.dbPort" .) }}
             {{- end }}
             {{- if not (hasKey $env "APP_DATABASE__USERNAME") }}
-              {{- $_ := set $env "APP_DATABASE__USERNAME" .Values.postgres.auth.username }}
+              {{- $_ := set $env "APP_DATABASE__USERNAME" (include "status-list-server-chart.dbUsername" .) }}
             {{- end }}
             {{- if not (hasKey $env "APP_DATABASE__NAME") }}
-              {{- $_ := set $env "APP_DATABASE__NAME" .Values.postgres.auth.database }}
+              {{- $_ := set $env "APP_DATABASE__NAME" (include "status-list-server-chart.dbName" .) }}
             {{- end }}
             {{- range $name, $_ := $secretFileEnv }}
               {{- if hasKey $env $name }}

@@ -26,7 +26,9 @@ APP_DATABASE__QUERY=sslmode=verify-full&sslrootcert=/var/run/postgres/ca.crt
 
 `APP_DATABASE__URL` remains supported for local and custom deployments. Do not combine it with any split database field; startup rejects that ambiguous configuration.
 
-When deploying the Helm chart, `APP_DATABASE__PASSWORD` is not accepted as a plain `statuslist.env` value. The chart exposes `APP_DATABASE__PASSWORD_FILE` through `statuslist.secretMounts` by default, reading the `postgres-password` key from `statuslist-secret`. For external databases, point the split host/port/backend/name/user fields at the external database and create or sync the configured Secret/key with that database password.
+When deploying the Helm chart, `APP_DATABASE__PASSWORD` is not accepted as a plain `statuslist.env` value. The chart exposes `APP_DATABASE__PASSWORD_FILE` through `statuslist.secretMounts` by default, reading the `database-password` key from `statuslist-secret`. For external databases, point the split host/port/backend/name/user fields at the external database and create or sync the configured Secret/key with that database password.
+
+The Helm chart's default database password key is `database-password`. For compatibility with existing PostgreSQL deployments, chart-managed fallback and External Secrets Operator examples also keep `postgres-password` populated with the same value.
 
 The bundled in-cluster PostgreSQL chart is used without chart-managed database TLS material. For managed or external databases, prefer TLS by setting non-secret query parameters such as `APP_DATABASE__QUERY=sslmode=verify-full&sslrootcert=/var/run/postgres/ca.crt`. The application passes these parameters through after validating that query keys are not credential-like; the referenced CA path must already exist in the container.
 
@@ -43,9 +45,13 @@ Best default for production deployments. PostgreSQL is the safest choice when yo
 - strong transactional guarantees
 - straightforward backup and restore workflows
 
+The Helm chart defaults the bundled PostgreSQL image tag to PostgreSQL `18.6`.
+
 ### MySQL
 
 Good fit when your infrastructure already standardizes on MySQL-compatible services or when you want a production database with familiar operational patterns. For MariaDB, use this same backend setting because the driver path is shared.
+
+The Helm chart provides native MySQL defaults under `mysql:` and uses MySQL `8.4.12` LTS for that block.
 
 ### SQLite
 
@@ -94,10 +100,10 @@ SET GLOBAL binlog_format = 'ROW';  -- then restart the server
 
 ## Compose Profiles
 
-`docker compose up` starts PostgreSQL by default and builds the container with `postgres,aws` features enabled. To run the MySQL service instead:
+`docker compose up` starts PostgreSQL by default and builds the container with `postgres,mysql,aws` features enabled. To run the MySQL service instead:
 
 ```bash
-FEATURES="mysql,aws" docker compose --profile mysql up --build
+docker compose --profile mysql up --build
 ```
 
 There is no separate MariaDB service because MariaDB uses the same MySQL-driver path. Connect to a MariaDB host by setting `APP_DATABASE__BACKEND=mysql`, `APP_DATABASE__HOST`, `APP_DATABASE__PORT`, `APP_DATABASE__USERNAME`, `APP_DATABASE__PASSWORD`, and `APP_DATABASE__NAME`. For local/custom deployments, a `mysql://` `APP_DATABASE__URL` is still supported when no split database fields are set.

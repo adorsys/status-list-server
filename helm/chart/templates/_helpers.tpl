@@ -63,7 +63,7 @@ Create the name of the service account to use
 {{- end }}
 
 {{/*
-Effective name of the Kubernetes Secret the application reads (postgres password).
+Effective name of the Kubernetes Secret the application reads (database password).
 Single supported name: "statuslist-secret" in both ESO mode (ExternalSecret target) and
 fallback mode. The Deployment, PostgreSQL (postgres.auth.existingSecret), and the fallback
 Secret all reference this same name, so it is not independently configurable. ESO mode
@@ -88,11 +88,85 @@ provider). Preference: explicit statuslist.aws.region, then the legacy secretSto
 {{- end }}
 
 {{/*
-Database port helper: returns the configured database port from env.
-Note: APP_DATABASE__PORT is required by deployment.yaml; this helper
-assumes the value exists and does not provide a default.
+Effective database backend for chart-managed defaults.
+*/}}
+{{- define "status-list-server-chart.dbBackend" -}}
+{{- $env := .Values.statuslist.env | default dict }}
+{{- get $env "APP_DATABASE__BACKEND" | default "postgres" | lower }}
+{{- end }}
+
+{{/*
+Database host helper: returns the configured host, or the default in-cluster
+service name for the active backend.
+*/}}
+{{- define "status-list-server-chart.dbHost" -}}
+{{- $env := .Values.statuslist.env | default dict }}
+{{- $backend := include "status-list-server-chart.dbBackend" . }}
+{{- if get $env "APP_DATABASE__HOST" }}
+{{- get $env "APP_DATABASE__HOST" }}
+{{- else if eq $backend "mysql" }}
+{{- printf "%s-mysql.%s.svc.cluster.local" .Release.Name .Release.Namespace }}
+{{- else if eq $backend "postgres" }}
+{{- printf "%s-postgres.%s.svc.cluster.local" .Release.Name .Release.Namespace }}
+{{- else }}
+{{- fail (printf "statuslist.env.APP_DATABASE__BACKEND must be either postgres or mysql for this chart, got %q" $backend) }}
+{{- end }}
+{{- end }}
+
+{{/*
+Database port helper: returns the configured port, or the active backend default.
 */}}
 {{- define "status-list-server-chart.dbPort" -}}
 {{- $env := .Values.statuslist.env | default dict }}
+{{- $backend := include "status-list-server-chart.dbBackend" . }}
+{{- if get $env "APP_DATABASE__PORT" }}
 {{- get $env "APP_DATABASE__PORT" }}
+{{- else if eq $backend "mysql" }}
+{{- .Values.mysql.service.port | toString }}
+{{- else if eq $backend "postgres" }}
+{{- .Values.postgres.service.port | toString }}
+{{- else }}
+{{- fail (printf "statuslist.env.APP_DATABASE__BACKEND must be either postgres or mysql for this chart, got %q" $backend) }}
+{{- end }}
+{{- end }}
+
+{{/*
+Database username helper: returns the configured username, or the active backend default.
+*/}}
+{{- define "status-list-server-chart.dbUsername" -}}
+{{- $env := .Values.statuslist.env | default dict }}
+{{- $backend := include "status-list-server-chart.dbBackend" . }}
+{{- if get $env "APP_DATABASE__USERNAME" }}
+{{- get $env "APP_DATABASE__USERNAME" }}
+{{- else if eq $backend "mysql" }}
+{{- .Values.mysql.auth.username }}
+{{- else if eq $backend "postgres" }}
+{{- .Values.postgres.auth.username }}
+{{- else }}
+{{- fail (printf "statuslist.env.APP_DATABASE__BACKEND must be either postgres or mysql for this chart, got %q" $backend) }}
+{{- end }}
+{{- end }}
+
+{{/*
+Database name helper: returns the configured database name, or the active backend default.
+*/}}
+{{- define "status-list-server-chart.dbName" -}}
+{{- $env := .Values.statuslist.env | default dict }}
+{{- $backend := include "status-list-server-chart.dbBackend" . }}
+{{- if get $env "APP_DATABASE__NAME" }}
+{{- get $env "APP_DATABASE__NAME" }}
+{{- else if eq $backend "mysql" }}
+{{- .Values.mysql.auth.database }}
+{{- else if eq $backend "postgres" }}
+{{- .Values.postgres.auth.database }}
+{{- else }}
+{{- fail (printf "statuslist.env.APP_DATABASE__BACKEND must be either postgres or mysql for this chart, got %q" $backend) }}
+{{- end }}
+{{- end }}
+
+{{/*
+Database pod label value for the chart-managed NetworkPolicy egress selector.
+*/}}
+{{- define "status-list-server-chart.dbPodSelectorName" -}}
+{{- include "status-list-server-chart.dbBackend" . }}
 {{- end }}

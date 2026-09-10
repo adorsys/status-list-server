@@ -86,20 +86,20 @@ jobs:
       matrix:
         variant:
           - suffix: aws
-            features: "postgres,aws"
-            description: "PostgreSQL database with AWS Secrets Manager and Route53 DNS support"
+            features: "postgres,mysql,aws"
+            description: "PostgreSQL/MySQL database with AWS Secrets Manager and Route53 DNS support"
           - suffix: gcp
-            features: "postgres,gcp"
-            description: "PostgreSQL database with GCP Secret Manager and Cloud DNS support"
+            features: "postgres,mysql,gcp"
+            description: "PostgreSQL/MySQL database with GCP Secret Manager and Cloud DNS support"
           - suffix: azure
-            features: "postgres,azure"
-            description: "PostgreSQL database with Azure Key Vault and Azure DNS support"
+            features: "postgres,mysql,azure"
+            description: "PostgreSQL/MySQL database with Azure Key Vault and Azure DNS support"
           - suffix: vault
-            features: "postgres,vault"
-            description: "PostgreSQL database with HashiCorp Vault / OpenBao token material storage"
+            features: "postgres,mysql,vault"
+            description: "PostgreSQL/MySQL database with HashiCorp Vault / OpenBao token material storage"
           - suffix: fscert
-            features: "postgres"
-            description: "PostgreSQL database with filesystem-mounted token signing keys and certificates"
+            features: "postgres,mysql"
+            description: "PostgreSQL/MySQL database with filesystem-mounted token signing keys and certificates"
     steps:
       - name: Checkout source code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -487,15 +487,15 @@ jobs:
       matrix:
         variant:
           - suffix: aws
-            description: "PostgreSQL database with AWS Secrets Manager and Route53 DNS support"
+            description: "PostgreSQL/MySQL database with AWS Secrets Manager and Route53 DNS support"
           - suffix: gcp
-            description: "PostgreSQL database with GCP Secret Manager and Cloud DNS support"
+            description: "PostgreSQL/MySQL database with GCP Secret Manager and Cloud DNS support"
           - suffix: azure
-            description: "PostgreSQL database with Azure Key Vault and Azure DNS support"
+            description: "PostgreSQL/MySQL database with Azure Key Vault and Azure DNS support"
           - suffix: vault
-            description: "PostgreSQL database with HashiCorp Vault / OpenBao token material storage"
+            description: "PostgreSQL/MySQL database with HashiCorp Vault / OpenBao token material storage"
           - suffix: fscert
-            description: "PostgreSQL database with filesystem-mounted token signing keys and certificates"
+            description: "PostgreSQL/MySQL database with filesystem-mounted token signing keys and certificates"
     env:
       SUFFIX: ${{ matrix.variant.suffix }}
     steps:
