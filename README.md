@@ -113,34 +113,6 @@ The server reads configuration from environment variables (or an optional `.env`
 
 Refer to [`.env.template`](.env.template) for the complete configuration dictionary, data types, and default values. For backend-specific configuration, see [Database Backends](docs/database-backends.md), [Secret Backends](docs/secrets-backends.md), and [DNS Providers](docs/dns-providers.md).
 
-### Validation
-
-Startup validation fails fast for invalid operator configuration, including invalid certificate renewal cron expressions and non-positive management JWT max lifetimes.
-
-## Security
-
-### Authentication
-
-Protected management endpoints use JWT bearer authentication. Issuers must first register a public key with `/api/v1/credentials`; subsequent management tokens must:
-
-- Be signed with the private key corresponding to the registered public key.
-- Have `iss` matching the registered issuer.
-- Have numeric `iat` and `exp` claims.
-- Have `exp` later than `iat`, with `exp - iat` no greater than `management_auth.max_token_lifetime_secs` (default: 3600 seconds).
-- Not have an `iat` in the future beyond `management_auth.leeway_secs` (default: 60 seconds).
-- If present, have `nbf` no later than the current time plus `management_auth.leeway_secs`.
-- When `management_auth.audiences` is configured, contain an `aud` claim matching one of the configured values; when `management_auth.audiences` is empty, `aud` is not validated.
-
-Example claims:
-
-```json
-{
-  "iss": "test-issuer",
-  "exp": 1752515200,
-  "iat": 1752511600,
-  "nbf": 1752511600
-}
-```
 
 ## Deployment
 
