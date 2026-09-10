@@ -11,6 +11,23 @@ ARG TARGETPLATFORM
 ARG TARGETARCH
 WORKDIR /app
 
+ARG SCCACHE_VERSION=0.17.0
+RUN set -eu; \
+    case "$(uname -m)" in \
+        x86_64) checksum=67c4a96dd237c1f518f6b36083f270f9976d516f1e57fce891755ea782e50006 ;; \
+        aarch64) checksum=821a86343191aa1cbab74bd42f9e93c9a63bf85e4742945f40d3ae84193c1c77 ;; \
+        *) echo "Unsupported build architecture"; exit 1 ;; \
+    esac; \
+    archive="sccache-v${SCCACHE_VERSION}-$(uname -m)-unknown-linux-musl"; \
+    curl --fail --location --silent --show-error \
+        "https://github.com/mozilla/sccache/releases/download/v${SCCACHE_VERSION}/${archive}.tar.gz" \
+        --output /tmp/sccache.tar.gz; \
+    printf '%s  /tmp/sccache.tar.gz\n' "$checksum" | sha256sum --check -; \
+    tar -xzf /tmp/sccache.tar.gz -C /tmp; \
+    install -m 755 "/tmp/${archive}/sccache" /usr/local/bin/sccache; \
+    rm -rf /tmp/sccache.tar.gz "/tmp/${archive}"; \
+    sccache --version
+
 # cargo-auditable records the dependency graph in a .dep-v0 linker section. Without
 # it the scratch runtime image carries one static binary and no package metadata, so
 # scanners enumerate zero packages and the published SBOM is empty.
@@ -38,10 +55,12 @@ ARG FEATURES="postgres,aws"
 # dependency graph exits zero, so an exit-status check alone would pass on exactly the
 # empty-but-present artifact it exists to catch. The decode is captured before it is
 # counted so a rust-audit-info crash fails as itself rather than as a count of 0.
-RUN --mount=type=bind,source=src,target=src \
-    --mount=type=bind,source=test_data,target=test_data \
-    --mount=type=bind,source=Cargo.toml,target=Cargo.toml \
-    --mount=type=bind,source=Cargo.lock,target=Cargo.lock \
+# BoringCache repairs source timestamps when restoring the Cargo target mount.
+# BuildKit discards writes to these bind mounts after this RUN.
+RUN --mount=type=bind,source=src,target=src,rw \
+    --mount=type=bind,source=test_data,target=test_data,rw \
+    --mount=type=bind,source=Cargo.toml,target=Cargo.toml,rw \
+    --mount=type=bind,source=Cargo.lock,target=Cargo.lock,rw \
     --mount=type=cache,target=/app/target,id=target-cache-${TARGETPLATFORM} \
     --mount=type=cache,target=/root/.cargo/registry,id=registry-cache-${TARGETPLATFORM} \
     set -eu; \
