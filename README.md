@@ -96,6 +96,7 @@ The server compiles with modular feature flags to gate database drivers and clou
 Examples:
 
 ```bash
+# Build with PostgreSQL support and filesystem key + certificate chain loading 
 cargo run --features postgres
 
 # Build with PostgreSQL and AWS integration
