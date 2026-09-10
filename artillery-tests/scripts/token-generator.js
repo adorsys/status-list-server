@@ -1,6 +1,9 @@
 const jwt = require('jsonwebtoken');
 const fs = require('fs');
 const crypto = require('crypto');
+const path = require('path');
+
+const scriptsDir = __dirname;
 
 // Generate EC key pair
 const { publicKey, privateKey } = crypto.generateKeyPairSync('ec', {
@@ -19,10 +22,10 @@ const { publicKey, privateKey } = crypto.generateKeyPairSync('ec', {
 const jwk = crypto.createPublicKey(publicKey).export({ format: 'jwk' });
 
 // Save keys
-fs.writeFileSync('artillery-tests/scripts/ec-private-key.pem', privateKey);
-fs.writeFileSync('artillery-tests/scripts/ec-public-key.jwk', JSON.stringify(jwk, null, 2));
+fs.writeFileSync(path.join(scriptsDir, 'ec-private-key.pem'), privateKey);
+fs.writeFileSync(path.join(scriptsDir, 'ec-public-key.jwk'), JSON.stringify(jwk, null, 2));
 
-const issuerId = `test-issuer-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+const issuerId = `test-issuer-${Date.now()}-${Math.random().toString(36).substring(2, 11)}`;
 
 console.log('Generating tokens...');
 console.log('Issuer ID:', issuerId);
@@ -60,7 +63,7 @@ const testData = {
   generatedAt: new Date().toISOString()
 };
 
-fs.writeFileSync('artillery-tests/scripts/test-tokens.json', JSON.stringify(testData, null, 2));
+fs.writeFileSync(path.join(scriptsDir, 'test-tokens.json'), JSON.stringify(testData, null, 2));
 
 console.log(`✓ Generated ${tokens.length} valid tokens`);
 console.log('✓ Saved to test-tokens.json');
