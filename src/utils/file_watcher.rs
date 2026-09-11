@@ -74,11 +74,8 @@ fn spawn_notify_watcher(
         let mut watcher = match RecommendedWatcher::new(
             move |event: notify::Result<Event>| match event {
                 Ok(event) => {
-                    // Only react to real content changes. The notify crate's
-                    // default inotify mask includes IN_OPEN, so the app's own
-                    // reads of the watched file would otherwise emit events and
-                    // create a self-sustaining rotation loop. Ignore access/open
-                    // and pure-metadata events (e.g. atime updates).
+                    // Only react to real content changes; the app's own reads
+                    // emit IN_OPEN events that would otherwise loop rotation.
                     if !is_content_change(&event.kind) {
                         return;
                     }
@@ -177,11 +174,8 @@ fn spawn_debouncer<F, Fut>(
     Fut: std::future::Future<Output = ()> + Send + 'static,
 {
     tokio::spawn(async move {
-        // Baseline content fingerprint. The callback is only dispatched when the
-        // watched file's content actually changes. This is the final safety net
-        // on top of the event-kind filter: even if a spurious event (e.g. a
-        // misclassified `Modify(Any)` or a kubelet `..data` touch) slips through,
-        // it cannot trigger a rotation unless the file content really changed.
+        // Only dispatch when content actually changed; guards against spurious
+        // events that slip past the event-kind filter.
         let mut last_fingerprints = fingerprint_all(&paths).await;
 
         while rx.recv().await.is_some() {
@@ -242,13 +236,8 @@ fn path_relevant(changed: &Path, watched: &Path) -> bool {
             && changed.parent() == watched.parent())
 }
 
-/// Whether an event kind represents an actual content change worth reacting to.
-///
-/// The `notify` crate's default inotify mask includes `IN_OPEN`/`IN_ACCESS`, so
-/// the application's own reads of a watched file emit events. Reacting to those
-/// would create a self-sustaining rotation loop (read -> event -> rotate ->
-/// read -> ...). Only `Create`/`Remove`/`Rename` and `Modify(Data)` indicate a
-/// real change; `Access` and `Modify(Metadata)` (e.g. atime updates) do not.
+/// True for real content changes (Create/Remove/Rename/Modify(Data)); false
+/// for Access/Open and metadata events that the app's own reads emit.
 fn is_content_change(kind: &EventKind) -> bool {
     matches!(
         kind,
@@ -428,8 +417,7 @@ mod tests {
         // Let the debouncer establish its baseline fingerprint.
         tokio::time::sleep(Duration::from_millis(100)).await;
 
-        // A spurious event (e.g. the app reading the file) with unchanged content
-        // must NOT trigger the callback.
+        // A spurious event with unchanged content must NOT trigger the callback.
         tx.send(()).await.expect("send spurious event");
         tokio::time::sleep(Duration::from_millis(1200)).await;
 
