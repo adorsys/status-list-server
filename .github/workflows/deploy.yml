@@ -307,7 +307,7 @@ jobs:
         # loud warning (and step-summary entry) if the cached DB is within the
         # 24h staleness bound. Hard-fails only if no DB exists at all.
         run: bash scripts/ensure-trivy-db.sh ~/.cache/trivy 24
-        
+
       - name: Save Trivy vulnerability database cache
         if: github.event_name == 'push'
         uses: actions/cache/save@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
