@@ -1,4 +1,5 @@
-use notify::{Event, RecommendedWatcher, RecursiveMode, Watcher as _};
+use notify::event::ModifyKind;
+use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher as _};
 use std::collections::{HashMap, HashSet, hash_map::DefaultHasher};
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
@@ -73,6 +74,14 @@ fn spawn_notify_watcher(
         let mut watcher = match RecommendedWatcher::new(
             move |event: notify::Result<Event>| match event {
                 Ok(event) => {
+                    // Only react to real content changes. The notify crate's
+                    // default inotify mask includes IN_OPEN, so the app's own
+                    // reads of the watched file would otherwise emit events and
+                    // create a self-sustaining rotation loop. Ignore access/open
+                    // and pure-metadata events (e.g. atime updates).
+                    if !is_content_change(&event.kind) {
+                        return;
+                    }
                     if event_matches(&event, &event_paths) {
                         let _ = tx_events.blocking_send(());
                     }
@@ -168,6 +177,13 @@ fn spawn_debouncer<F, Fut>(
     Fut: std::future::Future<Output = ()> + Send + 'static,
 {
     tokio::spawn(async move {
+        // Baseline content fingerprint. The callback is only dispatched when the
+        // watched file's content actually changes. This is the final safety net
+        // on top of the event-kind filter: even if a spurious event (e.g. a
+        // misclassified `Modify(Any)` or a kubelet `..data` touch) slips through,
+        // it cannot trigger a rotation unless the file content really changed.
+        let mut last_fingerprints = fingerprint_all(&paths).await;
+
         while rx.recv().await.is_some() {
             tracing::info!(
                 event = "file_change_detected",
@@ -176,6 +192,19 @@ fn spawn_debouncer<F, Fut>(
                 "watched secret file changed"
             );
             while matches!(tokio::time::timeout(DEBOUNCE, rx.recv()).await, Ok(Some(_))) {}
+
+            let current = fingerprint_all(&paths).await;
+            if current == last_fingerprints {
+                tracing::debug!(
+                    event = "file_change_ignored",
+                    rotation.target = target,
+                    paths = ?paths,
+                    "file change event did not alter content; skipping rotation"
+                );
+                continue;
+            }
+            last_fingerprints = current;
+
             let callback = callback.clone();
             callback().await;
         }
@@ -211,6 +240,24 @@ fn path_relevant(changed: &Path, watched: &Path) -> bool {
         || watched.starts_with(changed)
         || (changed.file_name().is_some_and(|name| name == "..data")
             && changed.parent() == watched.parent())
+}
+
+/// Whether an event kind represents an actual content change worth reacting to.
+///
+/// The `notify` crate's default inotify mask includes `IN_OPEN`/`IN_ACCESS`, so
+/// the application's own reads of a watched file emit events. Reacting to those
+/// would create a self-sustaining rotation loop (read -> event -> rotate ->
+/// read -> ...). Only `Create`/`Remove`/`Rename` and `Modify(Data)` indicate a
+/// real change; `Access` and `Modify(Metadata)` (e.g. atime updates) do not.
+fn is_content_change(kind: &EventKind) -> bool {
+    matches!(
+        kind,
+        EventKind::Create(_)
+            | EventKind::Remove(_)
+            | EventKind::Modify(ModifyKind::Data(_))
+            | EventKind::Modify(ModifyKind::Name(_))
+            | EventKind::Modify(ModifyKind::Any)
+    )
 }
 
 async fn fingerprint_all(paths: &[PathBuf]) -> HashMap<PathBuf, Option<u64>> {
@@ -270,10 +317,14 @@ mod tests {
 
     #[tokio::test]
     async fn debouncer_coalesces_bursty_changes() {
+        let dir = TempDir::new();
+        let path = dir.path.join("secret");
+        tokio::fs::write(&path, "v1").await.expect("write initial");
+
         let rotations = Arc::new(AtomicUsize::new(0));
         let seen = rotations.clone();
         let (tx, rx) = mpsc::channel(8);
-        let paths = Arc::new(vec![PathBuf::from("/tmp/secret")]);
+        let paths = Arc::new(vec![path.clone()]);
 
         spawn_debouncer(
             paths,
@@ -287,6 +338,11 @@ mod tests {
             "test",
         );
 
+        // Let the debouncer establish its baseline fingerprint.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // One content change followed by a burst of events coalesces into one callback.
+        tokio::fs::write(&path, "v2").await.expect("write update");
         tx.send(()).await.expect("first event");
         tx.send(()).await.expect("second event");
         tokio::time::sleep(Duration::from_millis(700)).await;
@@ -296,11 +352,15 @@ mod tests {
 
     #[tokio::test]
     async fn debouncer_serializes_callbacks() {
+        let dir = TempDir::new();
+        let path = dir.path.join("secret");
+        tokio::fs::write(&path, "v1").await.expect("write initial");
+
         let active = Arc::new(AtomicUsize::new(0));
         let max_active = Arc::new(AtomicUsize::new(0));
         let completed = Arc::new(AtomicUsize::new(0));
         let (tx, rx) = mpsc::channel(8);
-        let paths = Arc::new(vec![PathBuf::from("/tmp/secret")]);
+        let paths = Arc::new(vec![path.clone()]);
 
         spawn_debouncer(
             paths,
@@ -325,13 +385,121 @@ mod tests {
             "test",
         );
 
+        // Let the debouncer establish its baseline fingerprint.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // First content change + event.
+        tokio::fs::write(&path, "v2").await.expect("write update 1");
         tx.send(()).await.expect("first event");
         tokio::time::sleep(DEBOUNCE + Duration::from_millis(50)).await;
+
+        // Second content change + event.
+        tokio::fs::write(&path, "v3").await.expect("write update 2");
         tx.send(()).await.expect("second event");
         tokio::time::sleep(DEBOUNCE + Duration::from_millis(500)).await;
 
         assert_eq!(max_active.load(Ordering::SeqCst), 1);
         assert_eq!(completed.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn debouncer_skips_callback_when_content_unchanged() {
+        let dir = TempDir::new();
+        let path = dir.path.join("secret");
+        tokio::fs::write(&path, "stable").await.expect("write");
+
+        let rotations = Arc::new(AtomicUsize::new(0));
+        let seen = rotations.clone();
+        let (tx, rx) = mpsc::channel(8);
+        let paths = Arc::new(vec![path.clone()]);
+
+        spawn_debouncer(
+            paths,
+            rx,
+            Arc::new(move || {
+                let seen = seen.clone();
+                async move {
+                    seen.fetch_add(1, Ordering::SeqCst);
+                }
+            }),
+            "test",
+        );
+
+        // Let the debouncer establish its baseline fingerprint.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // A spurious event (e.g. the app reading the file) with unchanged content
+        // must NOT trigger the callback.
+        tx.send(()).await.expect("send spurious event");
+        tokio::time::sleep(Duration::from_millis(1200)).await;
+
+        assert_eq!(rotations.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn debouncer_runs_callback_when_content_changed() {
+        let dir = TempDir::new();
+        let path = dir.path.join("secret");
+        tokio::fs::write(&path, "old").await.expect("write initial");
+
+        let rotations = Arc::new(AtomicUsize::new(0));
+        let seen = rotations.clone();
+        let (tx, rx) = mpsc::channel(8);
+        let paths = Arc::new(vec![path.clone()]);
+
+        spawn_debouncer(
+            paths,
+            rx,
+            Arc::new(move || {
+                let seen = seen.clone();
+                async move {
+                    seen.fetch_add(1, Ordering::SeqCst);
+                }
+            }),
+            "test",
+        );
+
+        // Let the debouncer establish its baseline fingerprint.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // A real content change must trigger the callback.
+        tokio::fs::write(&path, "new").await.expect("write update");
+        tx.send(()).await.expect("send event");
+        tokio::time::sleep(Duration::from_millis(1200)).await;
+
+        assert_eq!(rotations.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn access_and_metadata_events_are_not_content_changes() {
+        use notify::event::{
+            AccessKind, AccessMode, CreateKind, DataChange, MetadataKind, RemoveKind, RenameMode,
+        };
+
+        // The app's own reads emit these; they must NOT trigger rotation.
+        assert!(!is_content_change(&EventKind::Access(AccessKind::Open(
+            AccessMode::Read
+        ))));
+        assert!(!is_content_change(&EventKind::Access(AccessKind::Read)));
+        assert!(!is_content_change(&EventKind::Access(AccessKind::Close(
+            AccessMode::Read
+        ))));
+        assert!(!is_content_change(&EventKind::Modify(
+            ModifyKind::Metadata(MetadataKind::AccessTime)
+        )));
+        assert!(!is_content_change(&EventKind::Modify(
+            ModifyKind::Metadata(MetadataKind::Any)
+        )));
+
+        // Real content changes MUST trigger rotation.
+        assert!(is_content_change(&EventKind::Create(CreateKind::File)));
+        assert!(is_content_change(&EventKind::Remove(RemoveKind::File)));
+        assert!(is_content_change(&EventKind::Modify(ModifyKind::Data(
+            DataChange::Content
+        ))));
+        assert!(is_content_change(&EventKind::Modify(ModifyKind::Name(
+            RenameMode::To
+        ))));
     }
 
     #[test]
