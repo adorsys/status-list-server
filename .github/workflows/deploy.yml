@@ -218,7 +218,7 @@ jobs:
     permissions:
       contents: read
       packages: read
-      actions: read
+      actions: write
     strategy:
       fail-fast: false
       matrix:
@@ -283,6 +283,38 @@ jobs:
             echo "SCAN_REF_$(printf '%s' "$arch" | tr '[:lower:]' '[:upper:]')=${IMAGE_BASE}@${manifest}" >> "$GITHUB_ENV"
           done <<< "$resolved"
 
+      - name: Install Trivy
+        # Pinned to the same version trivy-action v0.36.0 uses internally.
+        uses: aquasecurity/setup-trivy@3fb12ec12f41e471780db15c232d5dd185dcb514 # v0.2.6
+        with:
+          version: v0.70.0
+          cache: false
+
+      - name: Restore Trivy vulnerability database cache
+        # The DB is global (variant- and arch-independent), so a single cache key
+        # shared across all matrix legs is correct. `restore-keys` provides a
+        # fallback to the most recent cached DB on a miss.
+        uses: actions/cache/restore@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        id: trivy-cache
+        with:
+          path: ~/.cache/trivy
+          key: trivy-db-${{ runner.os }}-${{ github.run_id }}
+          restore-keys: |
+            trivy-db-${{ runner.os }}-
+
+      - name: Ensure Trivy vulnerability database
+        # Refreshes the DB; on fetch failure, falls back to the cached DB with a
+        # loud warning (and step-summary entry) if the cached DB is within the
+        # 24h staleness bound. Hard-fails only if no DB exists at all.
+        run: bash scripts/ensure-trivy-db.sh ~/.cache/trivy 24
+
+      - name: Save Trivy vulnerability database cache
+        if: github.event_name == 'push'
+        uses: actions/cache/save@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        with:
+          path: ~/.cache/trivy
+          key: trivy-db-${{ runner.os }}-${{ github.run_id }}
+
       - name: Scan image (amd64)
         # Unfiltered; every view below is `trivy convert`ed from these, so the table and
         # the gate read the same data and each image is pulled once.
@@ -295,6 +327,10 @@ jobs:
           exit-code: 0
           format: json
           output: trivy-image-report-amd64.json
+          cache: false
+          cache-dir: ~/.cache/trivy
+          skip-setup-trivy: true
+          trivy-config: .trivy.yaml
 
       - name: Scan image (arm64)
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
@@ -306,6 +342,10 @@ jobs:
           exit-code: 0
           format: json
           output: trivy-image-report-arm64.json
+          cache: false
+          cache-dir: ~/.cache/trivy
+          skip-setup-trivy: true
+          trivy-config: .trivy.yaml
 
       - name: Derive reports
         # The severity floor and where the ledger is applied live in the script, so the
