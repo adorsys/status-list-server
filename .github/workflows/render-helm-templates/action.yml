@@ -48,8 +48,8 @@ runs:
           --set secretStore.enabled=true \
           --set secretStore.provider=gcp \
           --set secretStore.gcp.projectID=my-project-id \
-          --set-string 'externalSecret.spec.data[0].secretKey=postgres-password' \
-          --set-string 'externalSecret.spec.data[0].remoteRef.key=statuslist-postgres-password' \
+          --set-string 'externalSecret.spec.data[0].secretKey=database-password' \
+          --set-string 'externalSecret.spec.data[0].remoteRef.key=statuslist-database-password' \
           --set-string 'externalSecret.spec.data[0].remoteRef.version=latest' \
           --set-string 'externalSecret.spec.data[0].remoteRef.decodingStrategy=None' \
           --set-string 'externalSecret.spec.data[0].remoteRef.conversionStrategy=Default' \

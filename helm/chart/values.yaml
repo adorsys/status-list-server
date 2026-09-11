@@ -7,18 +7,18 @@ global:
 statuslist:
   enabled: true
   initContainers:
-    - name: wait-for-postgres
+    - name: wait-for-db
       image: busybox:1.37
       command:
         - "sh"
         - "-c"
         - |
-          echo "Waiting for postgres..."
-          until nc -z {{ .Release.Name }}-postgres.{{ .Release.Namespace }}.svc.cluster.local {{ include "status-list-server-chart.dbPort" . }}; do
-            echo "postgres not ready. Retrying in 2s...";
+          echo "Waiting for database..."
+          until nc -z {{ include "status-list-server-chart.dbHost" . }} {{ include "status-list-server-chart.dbPort" . }}; do
+            echo "database not ready. Retrying in 2s...";
             sleep 2;
           done
-          echo "Postgres is up."
+          echo "Database is up."
 
   replicaCount: 1
   # Extra labels merged onto the Pod template metadata. Required for e.g. Azure Workload
@@ -97,7 +97,9 @@ statuslist:
     # Provider credentials (e.g. APP_SERVER__CERT__DNS__CLOUDFLARE__API_TOKEN, or the
     # APP_SERVER__CERT__DNS__ACMEDNS__ACCOUNTS JSON, which holds every account password)
     # must come from a secret (see externalSecret below), not from plain env values.
-    APP_DATABASE__PORT: "5432"
+    # APP_DATABASE__BACKEND defaults to "postgres". When APP_DATABASE__HOST, PORT,
+    # USERNAME, or NAME are omitted, deployment.yaml derives them from the active
+    # backend's native values below (postgres/mysql).
     # Status-list record cache TTL in seconds. "0" disables this cache.
     APP_CACHE__TTL: "300"
     APP_CACHE__MAX_CAPACITY: "1000"
@@ -168,7 +170,7 @@ statuslist:
       # lookup access, so an empty value generates a new password on each
       # reconciliation. For GitOps, provide an explicit password from your
       # secret-management flow or set fallbackSecret.enabled=false and use ESO.
-      postgres-password: ""
+      database-password: ""
 
   # File-based secret mounts for production credential/key rotation.
   # Mounts Kubernetes Secrets as files into the container at specified paths.
@@ -207,7 +209,7 @@ statuslist:
       secretName: statuslist-secret
       mountPath: /var/run/status-list-server/database
       items:
-        - key: postgres-password
+        - key: database-password
           path: password
       fileEnv:
         APP_DATABASE__PASSWORD_FILE: password
@@ -480,6 +482,27 @@ postgres:
   image:
     tag: "18.0"
 
+mysql:
+  # Native MySQL defaults used by deployment.yaml, initContainers, and NetworkPolicy
+  # when APP_DATABASE__BACKEND=mysql. This chart does not vendor a MySQL subchart;
+  # provide the service through your platform/operator or a values overlay.
+  enabled: false
+  auth:
+    username: mysql
+    database: status-list
+    # Keep this aligned with status-list-server-chart.appSecretName if you wire
+    # these values into a MySQL subchart or operator-managed Secret reference.
+    existingSecret: statuslist-secret
+    secretKeys:
+      passwordKey: database-password
+  service:
+    type: ClusterIP
+    port: 3306
+  image:
+    registry: docker.io
+    repository: mysql
+    tag: "8.4.12"
+
 externalSecret:
   enabled: false
   metadata:
@@ -496,6 +519,10 @@ externalSecret:
       name: statuslist-secret
       creationPolicy: Owner
     data:
+      - secretKey: database-password
+        remoteRef:
+          key: statuslist-secret
+          property: POSTGRES_PASSWORD
       - secretKey: postgres-password
         remoteRef:
           key: statuslist-secret

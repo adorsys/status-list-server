@@ -27,13 +27,13 @@ spec:
     - ports:
         - port: {{ include "status-list-server-chart.dbPort" . | int }}
           protocol: TCP
-      # Scope internal egress to the target pods, not "any pod in the cluster".
-      # PostgreSQL is always a dependency. Additional destinations can be appended via
+      # Scope internal egress to the target database pods, not "any pod in the cluster".
+      # Additional destinations can be appended via
       # statuslist.networkPolicy.egressInternal.
       to:
         - podSelector:
             matchLabels:
-              app.kubernetes.io/name: postgres
+              app.kubernetes.io/name: {{ include "status-list-server-chart.dbPodSelectorName" . }}
         {{- with .Values.statuslist.networkPolicy.egressInternal }}
         {{- toYaml . | nindent 8 }}
         {{- end }}

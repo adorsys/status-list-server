@@ -38,12 +38,13 @@ For production, pin the exact artifact by digest rather than tag. A digest is va
 * [`chart/values-production.yaml`](chart/values-production.yaml): production delta applied after `values-aws.yaml` by release deployments.
 * `global.domain`: chart-wide public DNS suffix. When set, Ingress defaults derive `statuslist.<global.domain>` and `*.<global.domain>` from this single value. Rendered hostnames are normalized to lowercase.
 * `postgres.persistence.storageClass`: leave as `""` to use the cluster default StorageClass; set explicitly in environment overlays when needed.
+* `mysql.image.tag`: defaults to MySQL `8.4.12` LTS for MySQL-compatible deployments.
 * `statuslist.image.variant`: selected image variant when no explicit `tag` or `digest` is set (`fscert`, `aws`, `gcp`, `azure`, or `vault`).
 * `statuslist.image.digest`: takes precedence over `statuslist.image.tag` and renders `repository@digest`.
 
 ## Configure Your Secrets
 
-The application Secret is always named `statuslist-secret` and holds the database password under `postgres-password`. The application Deployment and bundled PostgreSQL both consume that same Secret name.
+The application Secret is always named `statuslist-secret` and holds the database password under `database-password`. For backward compatibility with existing clusters and the bundled PostgreSQL chart, the chart-managed fallback Secret and default ExternalSecret also publish the same value under `postgres-password`.
 
 There are two secret delivery modes, and the chart rejects enabling both at once.
 
@@ -227,7 +228,7 @@ statuslist:
         APP_DATABASE__PASSWORD_FILE: password
 ```
 
-`fileEnv` values are relative to `mountPath`, and they work with or without `items`. By default, the chart mounts the application Secret's `postgres-password` key at `/var/run/status-list-server/database/password` and exposes that path through `APP_DATABASE__PASSWORD_FILE`. You can override `statuslist.secretMounts` to point at another Secret or mount path.
+`fileEnv` values are relative to `mountPath`, and they work with or without `items`. By default, the chart mounts the application Secret's `database-password` key at `/var/run/status-list-server/database/password` and exposes that path through `APP_DATABASE__PASSWORD_FILE`. You can override `statuslist.secretMounts` to point at another Secret or mount path. Existing fallback Secrets that only contain `postgres-password` are read during Helm upgrade and rendered back with both keys.
 
 This chart support is preparatory for application images that implement the file-watcher and reload behavior from issue #456. Current images that only read `APP_DATABASE__PASSWORD` at startup still need a rollout after secret changes. The `checksum/secret` annotation only reacts to Helm-rendered ExternalSecret template or value changes; it does not change when External Secrets Operator later syncs new data from Vault, AWS, GCP, or Azure into a Kubernetes Secret.
 
@@ -242,12 +243,12 @@ statuslist:
   fallbackSecret:
     enabled: true
     stringData:
-      postgres-password: ""
+      database-password: ""
 ```
 
-The default chart uses this mode, so a plain `helm install` creates `statuslist-secret`. Leave `postgres-password` empty to have Helm generate a random password; on upgrades, Helm reuses the existing cluster Secret when it can read it. Set a concrete value only for local or disposable environments.
+The default chart uses this mode, so a plain `helm install` creates `statuslist-secret`. Leave `database-password` empty to have Helm generate a random password; on upgrades, Helm reuses an existing `database-password` value, or falls back to an existing legacy `postgres-password` value when it can read the cluster Secret. The rendered Secret always contains both keys with the same value. Set a concrete value only for local or disposable environments.
 
-GitOps caveat: tools such as Argo CD and Flux render charts with `helm template`, where Helm's live `lookup` function cannot read the existing Secret. If `postgres-password` is left empty, each render generates a new password while PostgreSQL may keep the old password in its PVC. GitOps deployments should set an explicit fallback password from their secret-management flow or use ESO mode instead. The fallback Secret is annotated with `helm.sh/resource-policy: keep` so Helm does not delete it on uninstall.
+GitOps caveat: tools such as Argo CD and Flux render charts with `helm template`, where Helm's live `lookup` function cannot read the existing Secret. If `database-password` is left empty, each render generates a new password while PostgreSQL may keep the old password in its PVC. GitOps deployments should set an explicit fallback password from their secret-management flow or use ESO mode instead. The fallback Secret is annotated with `helm.sh/resource-policy: keep` so Helm does not delete it on uninstall.
 
 **External Secrets Operator.** ESO syncs `statuslist-secret` from a configured `SecretStore` or pre-existing `ClusterSecretStore`. Enable ESO mode explicitly:
 
@@ -264,7 +265,7 @@ statuslist:
 
 Provider selection is fail-closed through `values.schema.json` and render-time checks. Unsupported providers, empty `raw: {}`, ESO without a SecretStore, and custom `externalSecret.spec.target.name` values fail before Kubernetes receives manifests.
 
-Common non-secret values under `statuslist.env` are the split database fields (`APP_DATABASE__HOST`, `APP_DATABASE__PORT`, `APP_DATABASE__USERNAME`, `APP_DATABASE__NAME`) and server values (`APP_SERVER__HOST`, `APP_SERVER__PORT`, `APP_SERVER__DOMAIN`). Do not set `APP_DATABASE__PASSWORD` in Helm values; the chart wires the password from the Secret as `APP_DATABASE__PASSWORD_FILE`.
+Common non-secret values under `statuslist.env` are the split database fields (`APP_DATABASE__BACKEND`, `APP_DATABASE__HOST`, `APP_DATABASE__PORT`, `APP_DATABASE__USERNAME`, `APP_DATABASE__NAME`) and server values (`APP_SERVER__HOST`, `APP_SERVER__PORT`, `APP_SERVER__DOMAIN`). Do not set `APP_DATABASE__PASSWORD` in Helm values; the chart wires the password from the Secret as `APP_DATABASE__PASSWORD_FILE`.
 
 ## Use Workload Identity Instead of Mounted Credentials
 
@@ -352,7 +353,7 @@ helm upgrade --install statuslist helm/chart \
   --wait --timeout 10m
 ```
 
-The chart bundles PostgreSQL and an OpenTelemetry collector. To point at an external database, disable the bundled PostgreSQL subchart and set the split `APP_DATABASE__*` fields under `statuslist.env`.
+The chart bundles PostgreSQL and an OpenTelemetry collector. To point at an external database, disable the bundled PostgreSQL subchart and set the split `APP_DATABASE__*` fields under `statuslist.env`. For MySQL, set `postgres.enabled=false`, `mysql.enabled=true`, and `statuslist.env.APP_DATABASE__BACKEND=mysql`; if host, port, username, or database name are omitted, the chart defaults them from the `mysql:` values block (`<release>-mysql.<namespace>.svc.cluster.local`, port `3306`, `mysql.auth.username`, and `mysql.auth.database`). The database backend flags are mutually exclusive. This chart does not currently vendor a MySQL subchart, so provide that MySQL Service through your platform, operator, or an overlay.
 
 ## Verify the Deployment
 

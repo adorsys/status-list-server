@@ -85,7 +85,7 @@ This is the path to a real deployment on a cluster you own. It uses the producti
 
 ### Prepare the database password Secret
 
-The application reads the database password from a Kubernetes Secret named `statuslist-secret` (key `postgres-password`), and the bundled PostgreSQL subchart references the same Secret. The chart mounts that Secret as a file (default `mountPath: /var/run/status-list-server/database`, item `postgres-password` → `password`) and exposes it through `APP_DATABASE__PASSWORD_FILE`. It deliberately does **not** inject `APP_DATABASE__PASSWORD` as a literal environment variable, and rejects it if you try.
+The application reads the database password from a Kubernetes Secret named `statuslist-secret` (key `database-password`). The bundled PostgreSQL subchart references the same Secret name and continues to read the legacy `postgres-password` key. The chart-managed fallback Secret renders both keys with the same value, and on upgrade it can reuse an existing legacy `postgres-password` value. The chart mounts `database-password` as a file (default `mountPath: /var/run/status-list-server/database`, item `database-password` -> `password`) and exposes it through `APP_DATABASE__PASSWORD_FILE`. It deliberately does **not** inject `APP_DATABASE__PASSWORD` as a literal environment variable, and rejects it if you try.
 
 How the Secret is created depends on your [secrets mode](#secrets-delivery): via an ExternalSecret (ESO) or a plain fallback Secret the chart renders for you.
 
@@ -93,7 +93,7 @@ How the Secret is created depends on your [secrets mode](#secrets-delivery): via
 
 The chart's `statuslist.env` holds the application configuration. Set the values your deployment needs:
 
-- **Database port**: `APP_DATABASE__PORT` (e.g. `5432`). This is **not** inferred from the PostgreSQL subchart: set it explicitly.
+- **Database port**: `APP_DATABASE__PORT` (e.g. `5432` for PostgreSQL, `3306` for MySQL). If omitted, the chart derives it from `APP_DATABASE__BACKEND`.
 - **Certificate files or ACME**: the default `-fscert` image reads the certificate and signing key from files mounted into the pod. ACME-enabled image variants perform DNS-01 certificate issuance at startup, so configure `APP_SERVER__CERT__*` values for the DNS provider and deliver provider credentials from a Secret, not plain env values. See [dns-providers.md](dns-providers.md) for what each provider (`route53`, `cloudflare`, `gcloud`, `azure`, `acmedns`) requires.
 - **Region** (`statuslist.aws.region`, renders `APP_AWS__REGION`): only required when you use an AWS-backed secret or DNS backend; omit it for other providers.
 - **Telemetry / limits / rate limiting / cache**: defaults are sensible; over-ride only what your sizing needs.
@@ -158,10 +158,10 @@ statuslist:
   fallbackSecret:
     enabled: true
     stringData:
-      postgres-password: ""
+      database-password: ""
 ```
 
-Leave `postgres-password` empty to generate a password; Helm reuses the existing cluster Secret on upgrades when it can read it.
+Leave `database-password` empty to generate a password; Helm reuses an existing `database-password` or legacy `postgres-password` from the cluster Secret on upgrades when it can read it.
 
 ### Mode B: External Secrets Operator (ESO)
 
@@ -169,7 +169,7 @@ Use ESO to synchronize secrets from a provider instead of storing them as Helm-r
 
 - `externalSecret.enabled=true`, `secretStore.enabled=true`, and `statuslist.fallbackSecret.enabled=false` render ESO CRs:
   - a provider-neutral `SecretStore` (`secretStore.provider` selects `aws`, `vault`, `gcp`, `azure`, or `raw`);
-  - an `ExternalSecret` that syncs `postgres-password` into a Kubernetes Secret named `statuslist-secret`;
+  - an `ExternalSecret` that syncs `database-password` and `postgres-password` into a Kubernetes Secret named `statuslist-secret`;
   - when `statuslist.aws.mountCredentials=true`, a second `ExternalSecret` that provisions `aws-credentials-secret` (the AWS shared `credentials`/`config` files mounted under `/home/nobody/.aws`).
 
 **To use ESO** you must install External Secrets Operator in your cluster and configure:
