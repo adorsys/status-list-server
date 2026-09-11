@@ -1,12 +1,11 @@
 use notify::event::ModifyKind;
 use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher as _};
-use std::collections::{HashMap, HashSet, hash_map::DefaultHasher};
-use std::hash::{Hash, Hasher};
+use sha2::{Digest, Sha256};
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, mpsc as std_mpsc};
 use std::time::Duration;
 use tokio::sync::mpsc;
-use tokio::task::JoinSet;
 use tokio::time::Instant;
 
 const DEBOUNCE: Duration = Duration::from_millis(500);
@@ -19,12 +18,21 @@ pub(crate) struct FileWatcher {
 }
 
 impl FileWatcher {
-    /// Create a watcher for a set of paths. Duplicate paths are ignored and the
-    /// fallback poll interval is clamped to at least one second.
+    /// Create a watcher for a set of paths. Relative paths are made absolute
+    /// (without resolving symlinks) so native inotify watch roots work; duplicates
+    /// are ignored and the fallback poll interval is clamped to at least one second.
     pub(crate) fn new(paths: Vec<PathBuf>, poll_interval: Duration) -> Self {
+        let cwd = std::env::current_dir().unwrap_or_default();
         let mut unique = HashSet::new();
         let paths = paths
             .into_iter()
+            .map(|path| {
+                if path.is_absolute() {
+                    path
+                } else {
+                    cwd.join(&path)
+                }
+            })
             .filter(|path| unique.insert(path.clone()))
             .collect();
         let poll_interval = if poll_interval < MIN_POLL_INTERVAL {
@@ -179,12 +187,6 @@ fn spawn_debouncer<F, Fut>(
         let mut last_fingerprints = fingerprint_all(&paths).await;
 
         while rx.recv().await.is_some() {
-            tracing::info!(
-                event = "file_change_detected",
-                rotation.target = target,
-                paths = ?paths,
-                "watched secret file changed"
-            );
             while matches!(tokio::time::timeout(DEBOUNCE, rx.recv()).await, Ok(Some(_))) {}
 
             let current = fingerprint_all(&paths).await;
@@ -199,6 +201,12 @@ fn spawn_debouncer<F, Fut>(
             }
             last_fingerprints = current;
 
+            tracing::info!(
+                event = "file_change_detected",
+                rotation.target = target,
+                paths = ?paths,
+                "watched secret file changed"
+            );
             let callback = callback.clone();
             callback().await;
         }
@@ -249,30 +257,17 @@ fn is_content_change(kind: &EventKind) -> bool {
     )
 }
 
-async fn fingerprint_all(paths: &[PathBuf]) -> HashMap<PathBuf, Option<u64>> {
-    let mut tasks = JoinSet::new();
+async fn fingerprint_all(paths: &[PathBuf]) -> Vec<Option<[u8; 32]>> {
+    let mut fingerprints = Vec::with_capacity(paths.len());
     for path in paths {
-        let path = path.clone();
-        tasks.spawn(async move {
-            let fingerprint = fingerprint(&path).await;
-            (path, fingerprint)
-        });
-    }
-
-    let mut fingerprints = HashMap::with_capacity(paths.len());
-    while let Some(result) = tasks.join_next().await {
-        if let Ok((path, fingerprint)) = result {
-            fingerprints.insert(path, fingerprint);
-        }
+        fingerprints.push(fingerprint(path).await);
     }
     fingerprints
 }
 
-async fn fingerprint(path: &Path) -> Option<u64> {
+async fn fingerprint(path: &Path) -> Option<[u8; 32]> {
     let bytes = tokio::fs::read(path).await.ok()?;
-    let mut hasher = DefaultHasher::new();
-    bytes.hash(&mut hasher);
-    Some(hasher.finish())
+    Some(Sha256::digest(bytes).into())
 }
 
 #[cfg(test)]
@@ -504,6 +499,42 @@ mod tests {
             Path::new("/var/run/secrets/db/unrelated"),
             Path::new("/var/run/secrets/db/password")
         ));
+    }
+
+    #[tokio::test]
+    async fn fingerprint_tracks_content_through_atomic_symlink_swap() {
+        use std::os::unix::fs::symlink;
+
+        let dir = TempDir::new();
+        let data = dir.path.join("..data");
+
+        let dir1 = dir.path.join("..2024_01_01");
+        let dir2 = dir.path.join("..2024_02_01");
+        std::fs::create_dir_all(&dir1).unwrap();
+        std::fs::create_dir_all(&dir2).unwrap();
+        std::fs::write(dir1.join("password"), "same").unwrap();
+        std::fs::write(dir2.join("password"), "same").unwrap();
+
+        symlink(&dir1, &data).unwrap();
+        let watched = data.join("password");
+        let before = fingerprint(&watched).await.unwrap();
+
+        // Atomic symlink swap (..data -> dir2) with identical content: fingerprint unchanged.
+        let tmp = dir.path.join("..data_tmp");
+        symlink(&dir2, &tmp).unwrap();
+        std::fs::remove_file(&data).unwrap();
+        std::fs::rename(&tmp, &data).unwrap();
+        let unchanged = fingerprint(&watched).await.unwrap();
+        assert_eq!(before, unchanged);
+
+        // Swap target to content that changed: fingerprint must differ.
+        std::fs::write(dir2.join("password"), "new").unwrap();
+        let tmp = dir.path.join("..data_tmp2");
+        symlink(&dir2, &tmp).unwrap();
+        std::fs::remove_file(&data).unwrap();
+        std::fs::rename(&tmp, &data).unwrap();
+        let changed = fingerprint(&watched).await.unwrap();
+        assert_ne!(before, changed);
     }
 
     #[tokio::test]
