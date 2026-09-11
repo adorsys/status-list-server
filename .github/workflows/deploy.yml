@@ -294,7 +294,7 @@ jobs:
         # The DB is global (variant- and arch-independent), so a single cache key
         # shared across all matrix legs is correct. `restore-keys` provides a
         # fallback to the most recent cached DB on a miss.
-        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        uses: actions/cache/restore@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
         id: trivy-cache
         with:
           path: ~/.cache/trivy
@@ -307,6 +307,13 @@ jobs:
         # loud warning (and step-summary entry) if the cached DB is within the
         # 24h staleness bound. Hard-fails only if no DB exists at all.
         run: bash scripts/ensure-trivy-db.sh ~/.cache/trivy 24
+        
+      - name: Save Trivy vulnerability database cache
+        if: github.event_name == 'push'
+        uses: actions/cache/save@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        with:
+          path: ~/.cache/trivy
+          key: trivy-db-${{ runner.os }}-${{ github.run_id }}
 
       - name: Scan image (amd64)
         # Unfiltered; every view below is `trivy convert`ed from these, so the table and
