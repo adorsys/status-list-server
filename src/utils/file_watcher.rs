@@ -502,6 +502,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(unix)]
     async fn fingerprint_tracks_content_through_atomic_symlink_swap() {
         use std::os::unix::fs::symlink;
 
