@@ -45,13 +45,13 @@ Best default for production deployments. PostgreSQL is the safest choice when yo
 - strong transactional guarantees
 - straightforward backup and restore workflows
 
-The Helm chart defaults the bundled PostgreSQL image tag to PostgreSQL `18.6`.
-
 ### MySQL
 
 Good fit when your infrastructure already standardizes on MySQL-compatible services or when you want a production database with familiar operational patterns. For MariaDB, use this same backend setting because the driver path is shared.
 
 The Helm chart provides native MySQL defaults under `mysql:` and uses MySQL `8.4.12` LTS for that block.
+
+For Helm-based MySQL deployments, set `postgres.enabled=false`, `mysql.enabled=true`, and `statuslist.env.APP_DATABASE__BACKEND=mysql`. The chart rejects configurations that enable both database backends or that enable one bundled backend while configuring the application to use the other.
 
 ### SQLite
 
@@ -100,10 +100,10 @@ SET GLOBAL binlog_format = 'ROW';  -- then restart the server
 
 ## Compose Profiles
 
-`docker compose up` starts PostgreSQL by default and builds the container with `postgres,mysql,aws` features enabled. To run the MySQL service instead:
+`docker compose up` starts PostgreSQL by default and builds the container with `postgres,aws` features enabled. To run the MySQL service instead:
 
 ```bash
-docker compose --profile mysql up --build
+FEATURES="mysql,aws" docker compose --profile mysql up --build
 ```
 
 There is no separate MariaDB service because MariaDB uses the same MySQL-driver path. Connect to a MariaDB host by setting `APP_DATABASE__BACKEND=mysql`, `APP_DATABASE__HOST`, `APP_DATABASE__PORT`, `APP_DATABASE__USERNAME`, `APP_DATABASE__PASSWORD`, and `APP_DATABASE__NAME`. For local/custom deployments, a `mysql://` `APP_DATABASE__URL` is still supported when no split database fields are set.

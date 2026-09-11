@@ -2,6 +2,16 @@
 {{- if and .Values.externalSecret.enabled .Values.statuslist.fallbackSecret.enabled }}
 {{- fail "externalSecret.enabled and statuslist.fallbackSecret.enabled cannot both be true: choose either External Secrets Operator or the fallback Secret for secret delivery, not both" }}
 {{- end }}
+{{- $databaseBackend := include "status-list-server-chart.dbBackend" . }}
+{{- if and .Values.postgres.enabled .Values.mysql.enabled }}
+{{- fail "postgres.enabled and mysql.enabled cannot both be true: choose a single database backend" }}
+{{- end }}
+{{- if and .Values.postgres.enabled (ne $databaseBackend "postgres") }}
+{{- fail (printf "postgres.enabled=true requires statuslist.env.APP_DATABASE__BACKEND=postgres, got %q" $databaseBackend) }}
+{{- end }}
+{{- if and .Values.mysql.enabled (ne $databaseBackend "mysql") }}
+{{- fail (printf "mysql.enabled=true requires statuslist.env.APP_DATABASE__BACKEND=mysql, got %q" $databaseBackend) }}
+{{- end }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:

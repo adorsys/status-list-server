@@ -38,7 +38,6 @@ For production, pin the exact artifact by digest rather than tag. A digest is va
 * [`chart/values-production.yaml`](chart/values-production.yaml): production delta applied after `values-aws.yaml` by release deployments.
 * `global.domain`: chart-wide public DNS suffix. When set, Ingress defaults derive `statuslist.<global.domain>` and `*.<global.domain>` from this single value. Rendered hostnames are normalized to lowercase.
 * `postgres.persistence.storageClass`: leave as `""` to use the cluster default StorageClass; set explicitly in environment overlays when needed.
-* `postgres.image.tag`: defaults to PostgreSQL `18.6`, the current supported release line used by this chart.
 * `mysql.image.tag`: defaults to MySQL `8.4.12` LTS for MySQL-compatible deployments.
 * `statuslist.image.variant`: selected image variant when no explicit `tag` or `digest` is set (`fscert`, `aws`, `gcp`, `azure`, or `vault`).
 * `statuslist.image.digest`: takes precedence over `statuslist.image.tag` and renders `repository@digest`.
@@ -354,7 +353,7 @@ helm upgrade --install statuslist helm/chart \
   --wait --timeout 10m
 ```
 
-The chart bundles PostgreSQL and an OpenTelemetry collector. To point at an external database, disable the bundled PostgreSQL subchart and set the split `APP_DATABASE__*` fields under `statuslist.env`. For MySQL, set `statuslist.env.APP_DATABASE__BACKEND=mysql`; if host, port, username, or database name are omitted, the chart defaults them from the `mysql:` values block (`<release>-mysql.<namespace>.svc.cluster.local`, port `3306`, `mysql.auth.username`, and `mysql.auth.database`). This chart does not currently vendor a MySQL subchart, so provide that MySQL Service through your platform, operator, or an overlay.
+The chart bundles PostgreSQL and an OpenTelemetry collector. To point at an external database, disable the bundled PostgreSQL subchart and set the split `APP_DATABASE__*` fields under `statuslist.env`. For MySQL, set `postgres.enabled=false`, `mysql.enabled=true`, and `statuslist.env.APP_DATABASE__BACKEND=mysql`; if host, port, username, or database name are omitted, the chart defaults them from the `mysql:` values block (`<release>-mysql.<namespace>.svc.cluster.local`, port `3306`, `mysql.auth.username`, and `mysql.auth.database`). The database backend flags are mutually exclusive. This chart does not currently vendor a MySQL subchart, so provide that MySQL Service through your platform, operator, or an overlay.
 
 ## Verify the Deployment
 

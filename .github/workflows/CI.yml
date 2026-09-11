@@ -253,15 +253,15 @@ jobs:
       matrix:
         variant:
           - suffix: aws
-            features: "postgres,mysql,aws"
+            features: "postgres,aws"
           - suffix: gcp
-            features: "postgres,mysql,gcp"
+            features: "postgres,gcp"
           - suffix: azure
-            features: "postgres,mysql,azure"
+            features: "postgres,azure"
           - suffix: vault
-            features: "postgres,mysql,vault"
+            features: "postgres,vault"
           - suffix: fscert
-            features: "postgres,mysql"
+            features: "postgres"
 
     steps:
       - name: Fetch Repository

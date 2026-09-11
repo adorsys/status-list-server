@@ -37,11 +37,11 @@ statuslist:
     #
     # | Tag Suffix | Cargo Features | Description | Primary Use Case |
     # |------------|----------------|-------------|------------------|
-    # | -aws       | postgres,mysql,aws | PostgreSQL/MySQL database with AWS Secrets Manager and Route53 DNS support | AWS EKS native deployments |
-    # | -gcp       | postgres,mysql,gcp | PostgreSQL/MySQL database with GCP Secret Manager and Cloud DNS support | GCP GKE native deployments |
-    # | -azure     | postgres,mysql,azure | PostgreSQL/MySQL database with Azure Key Vault and Azure DNS support | Azure AKS native deployments |
-    # | -vault     | postgres,mysql,vault | PostgreSQL/MySQL database with HashiCorp Vault / OpenBao token material storage | Vault-backed on-prem or multi-cloud deployments |
-    # | -fscert    | postgres,mysql | PostgreSQL/MySQL database with filesystem-mounted token signing keys and certificates | Constrained / air-gapped environments using external secret injection |
+    # | -aws       | postgres,aws | PostgreSQL database with AWS Secrets Manager and Route53 DNS support | AWS EKS native deployments |
+    # | -gcp       | postgres,gcp | PostgreSQL database with GCP Secret Manager and Cloud DNS support | GCP GKE native deployments |
+    # | -azure     | postgres,azure | PostgreSQL database with Azure Key Vault and Azure DNS support | Azure AKS native deployments |
+    # | -vault     | postgres,vault | PostgreSQL database with HashiCorp Vault / OpenBao token material storage | Vault-backed on-prem or multi-cloud deployments |
+    # | -fscert    | postgres | PostgreSQL database with filesystem-mounted token signing keys and certificates | Constrained / air-gapped environments using external secret injection |
     #
     # Tag format: <version>-<suffix> (e.g., 1.2.0-aws, 1.2.0-gcp)
     # Latest tags: latest-<suffix> (e.g., latest-aws, latest-gcp)
@@ -480,7 +480,7 @@ postgres:
     type: ClusterIP
     port: 5432
   image:
-    tag: "18.6"
+    tag: "18.0"
 
 mysql:
   # Native MySQL defaults used by deployment.yaml, initContainers, and NetworkPolicy

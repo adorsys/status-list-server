@@ -153,6 +153,8 @@ fn rendered_chart_templates_mysql_backend_defaults() {
         "--set",
         "statuslist.env.APP_DATABASE__BACKEND=mysql",
         "--set",
+        "mysql.enabled=true",
+        "--set",
         "statuslist.networkPolicy.enabled=true",
     ]) else {
         return;
@@ -174,6 +176,45 @@ fn rendered_chart_templates_mysql_backend_defaults() {
             "rendered Helm output is missing MySQL backend field {expected}"
         );
     }
+}
+
+#[test]
+fn rendered_chart_rejects_multiple_enabled_database_backends() {
+    let Some(output) = render_helm_failure(&[
+        "--set",
+        "postgres.enabled=true",
+        "--set",
+        "mysql.enabled=true",
+        "--set",
+        "statuslist.env.APP_DATABASE__BACKEND=mysql",
+    ]) else {
+        return;
+    };
+
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("postgres.enabled and mysql.enabled cannot both be true"),
+        "helm template should reject enabling multiple database backends"
+    );
+}
+
+#[test]
+fn rendered_chart_rejects_enabled_postgres_with_mysql_backend() {
+    let Some(output) = render_helm_failure(&[
+        "--set",
+        "postgres.enabled=true",
+        "--set",
+        "statuslist.env.APP_DATABASE__BACKEND=mysql",
+    ]) else {
+        return;
+    };
+
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains(
+            "postgres.enabled=true requires statuslist.env.APP_DATABASE__BACKEND=postgres"
+        ),
+        "helm template should reject an enabled PostgreSQL backend with MySQL app config"
+    );
 }
 
 #[test]
