@@ -13,6 +13,8 @@ pub enum AuthenticationError {
     InternalServer,
     #[error("Missing or invalid Authorization header")]
     InvalidAuthorizationHeader,
+    #[error("Invalid authentication token")]
+    InvalidClaims,
     #[error("{0}")]
     JwtError(#[from] JwtError),
     #[error("Unsupported algorithm")]
@@ -32,13 +34,17 @@ impl AuthenticationError {
             AuthenticationError::IssuerNotFound => Cow::Borrowed("issuer_not_found"),
             AuthenticationError::InternalServer => Cow::Borrowed("internal_error"),
             AuthenticationError::InvalidAuthorizationHeader => Cow::Borrowed("invalid_auth_header"),
+            AuthenticationError::InvalidClaims => Cow::Borrowed("invalid_token"),
             AuthenticationError::JwtError(_) => Cow::Borrowed("jwt_error"),
             AuthenticationError::UnsupportedAlgorithm => Cow::Borrowed("unsupported_algorithm"),
         }
     }
 
     pub fn get_error_message(&self) -> String {
-        self.to_string()
+        match self {
+            AuthenticationError::JwtError(_) => "Invalid authentication token".to_string(),
+            _ => self.to_string(),
+        }
     }
 }
 
