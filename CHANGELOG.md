@@ -3,6 +3,31 @@
 All notable changes to this project will be documented in this file.
 <!-- markdownlint-disable line-length no-bare-urls ul-style emphasis-style -->
 
+## [1.2.0] - 2026-09-14
+
+### Features
+
+- *(auth)* Enhance JWT management claims validation and configuration by @Ngha-Boris
+
+- *(auth)* Introduce AuthenticatedIssuer struct for better issuer management by @Ngha-Boris
+
+- *(docs)* Refresh readme to match current implementation and configuration by @Blindspot22
+
+- *(dns)* Add support for GKE and AKS Workload Identity in DNS provider configuration by @Ngha-Boris
+
+- *(observability)* Add webhook based alert notifications for observability alerts by @ndefokou
+
+### Bug Fixes
+
+- *(docs)* Update error response formats to use JSON instead of plain text by @Ngha-Boris
+
+- *(watcher)* Only rotate on real content changes, not read/open events by @Christiantyemele
+
+### Performance
+
+- *(ci)* Optimize cargo build caching and eliminate cold starts by @Hermann-Core
+
+
 ## [1.1.2] - 2026-09-04
 
 ### Bug Fixes
