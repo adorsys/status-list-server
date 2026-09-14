@@ -1,4 +1,5 @@
 node_modules
+results/
 /scripts/ec-private-key.pem
 /scripts/ec-public-key.jwk
 /scripts/test-tokens.json

@@ -224,13 +224,15 @@ RUST_LOG=info \
 ```bash
 cd artillery-tests
 npm install
-# run from the REPO ROOT (the script uses repo-root-relative paths; running
-# `npm run generate-tokens` from inside artillery-tests/ fails with ENOENT):
-cd ..
-node artillery-tests/scripts/token-generator.js
+# token-generator.js resolves paths via __dirname, so it can run from anywhere;
+# here it is launched from inside artillery-tests:
+npm run generate-tokens
 ```
 
 This writes `artillery-tests/scripts/{test-tokens.json,ec-public-key.jwk,ec-private-key.pem}`.
+`test-tokens.json` holds the public JWK and the signed JWTs (the private key is
+never written to it), and the run scripts read the key from `test-tokens.json`,
+so the key always matches the tokens.
 
 ### 7c. Run the simulation
 

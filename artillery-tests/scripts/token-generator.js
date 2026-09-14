@@ -21,10 +21,6 @@ const { publicKey, privateKey } = crypto.generateKeyPairSync('ec', {
 // Convert public key to JWK format
 const jwk = crypto.createPublicKey(publicKey).export({ format: 'jwk' });
 
-// Save keys
-fs.writeFileSync(path.join(scriptsDir, 'ec-private-key.pem'), privateKey);
-fs.writeFileSync(path.join(scriptsDir, 'ec-public-key.jwk'), JSON.stringify(jwk, null, 2));
-
 const issuerId = `test-issuer-${Date.now()}-${Math.random().toString(36).substring(2, 11)}`;
 
 console.log('Generating tokens...');
@@ -58,12 +54,23 @@ for (let i = 0; i < 100; i++) {
 const testData = {
   issuerId,
   publicKeyJwk: jwk,
-  privateKey,
   tokens,
   generatedAt: new Date().toISOString()
 };
 
-fs.writeFileSync(path.join(scriptsDir, 'test-tokens.json'), JSON.stringify(testData, null, 2));
+// Write the private key, JWK, and tokens together so a crash mid-write cannot
+// leave a key that disagrees with the tokens. Each file is written to a temp
+// path first and then renamed, so readers only ever see a complete file.
+const atomicWrite = (filename, data) => {
+  const dest = path.join(scriptsDir, filename);
+  const tmp = path.join(scriptsDir, `${filename}.tmp-${process.pid}`);
+  fs.writeFileSync(tmp, data);
+  fs.renameSync(tmp, dest);
+};
+
+atomicWrite('ec-private-key.pem', privateKey);
+atomicWrite('ec-public-key.jwk', JSON.stringify(jwk, null, 2));
+atomicWrite('test-tokens.json', JSON.stringify(testData, null, 2));
 
 console.log(`✓ Generated ${tokens.length} valid tokens`);
 console.log('✓ Saved to test-tokens.json');

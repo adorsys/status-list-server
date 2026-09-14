@@ -9,10 +9,10 @@
     "test:spike": "artillery run ./tests/spike-test.yml",
     "test:auth": "artillery run ./tests/auth-test.yml",
     "test:all": "npm run test:load && npm run test:stress && npm run test:spike && npm run test:auth",
-    "test:load:report": "mkdir -p results && artillery run --output results/load-test.json ./tests/load-test.yml && artillery report results/load-test.json",
-    "test:stress:report": "mkdir -p results && artillery run --output results/stress-test.json ./tests/stress-test.yml && artillery report results/stress-test.json",
-    "test:spike:report": "mkdir -p results && artillery run --output results/spike-test.json ./tests/spike-test.yml && artillery report results/spike-test.json",
-    "test:auth:report": "mkdir -p results && artillery run --output results/auth-test.json ./tests/auth-test.yml && artillery report results/auth-test.json"
+    "test:load:report": "node -e \"require('fs').mkdirSync('results',{recursive:true})\" && artillery run --output results/load-test.json ./tests/load-test.yml",
+    "test:stress:report": "node -e \"require('fs').mkdirSync('results',{recursive:true})\" && artillery run --output results/stress-test.json ./tests/stress-test.yml",
+    "test:spike:report": "node -e \"require('fs').mkdirSync('results',{recursive:true})\" && artillery run --output results/spike-test.json ./tests/spike-test.yml",
+    "test:auth:report": "node -e \"require('fs').mkdirSync('results',{recursive:true})\" && artillery run --output results/auth-test.json ./tests/auth-test.yml"
   },
   "devDependencies": {
     "artillery": "^2.0.34",

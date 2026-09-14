@@ -8,6 +8,7 @@ config:
           - "test_id:status_list_load"
     expect: {}
     metrics-by-endpoint: {}
+    ensure: {}
   phases:
     - duration: 60
       arrivalRate: 5
@@ -96,7 +97,7 @@ scenarios:
           json:
             statuses:
               - index: 1
-                status: "VALID"
+                status: 0
           expect:
             - statusCode: 201
       # Then update
@@ -108,9 +109,9 @@ scenarios:
           json:
             statuses:
               - index: 1
-                status: "INVALID"
+                status: 1
               - index: 2
-                status: "VALID"
+                status: 0
           expect:
             - statusCode: 200
           afterResponse: "handleUpdateResponse"

@@ -1,5 +1,4 @@
 const crypto = require('crypto');
-const path = require('path');
 const fs = require('fs');
 
 // Load test tokens
@@ -12,15 +11,9 @@ try {
   console.error('Error:', error.message);
 }
 
-// Public key for credential registration
-let TEST_PUBLIC_KEY_JWK = null;
-try {
-  const jwkPath = path.resolve(__dirname, '../scripts/ec-public-key.jwk');
-  TEST_PUBLIC_KEY_JWK = JSON.parse(fs.readFileSync(jwkPath, 'utf8'));
-} catch (error) {
-  console.error('⚠️ Could not load ec-public-key.jwk. Make sure it exists!');
-  console.error('Error:', error.message);
-}
+// Public key for credential registration - read from the same file as the
+// tokens so the key can never disagree with the signed JWTs.
+let TEST_PUBLIC_KEY_JWK = testTokens ? testTokens.publicKeyJwk : null;
 
 // Counters for debugging
 let successCount = 0;
