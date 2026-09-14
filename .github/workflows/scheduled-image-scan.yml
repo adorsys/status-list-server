@@ -506,15 +506,24 @@ jobs:
             variant=${rest%-*}
             arch=${rest##*-}
 
+            # Two inputs for one image would overwrite each other here, and the run lost
+            # that way never reaches the category check below.
+            if [ -e "tagged/${variant}-${arch}.sarif" ]; then
+              echo "::error::more than one SARIF for ${variant}/${arch}: ${file}"
+              exit 1
+            fi
+
             # Trivy names every run's tool "Trivy", sets no `automationDetails` and no
             # `partialFingerprints`, and for a `lang-pkgs` result -- which is all a
             # `FROM scratch` image holding one Rust binary produces -- the location URI
             # is the target path, unchanged. That path is identical across all five
-            # variants and both architectures, so ten runs uploaded under one category
-            # collapse into one set of alerts, and the only distinction that matters
-            # (which image a finding is in, when one variant is the deployed one) is
-            # precisely the one lost. So it is written into the location and the
-            # message, where the dedup key can see it.
+            # variants and both architectures. Code scanning merges alerts by rule and
+            # location *across* categories, so giving each image its own category does
+            # not keep them apart: without the prefix, one advisory in the binary is one
+            # alert for all ten images, and the only distinction that matters (which
+            # image a finding is in, when one variant is the deployed one) is precisely
+            # the one lost. So it is written into the location and the message, where
+            # that merge key can see it.
             #
             # The trailing `/` is load-bearing: code scanning takes the category as
             # everything before the last `/`, so without it amd64 and arm64 collapse
@@ -546,9 +555,15 @@ jobs:
           fi
 
           # The Action only catches duplicate ids; ids that differ but share a category
-          # get past it and fail at GitHub. Check categories, as GitHub derives them.
-          dupes=$(jq -r '[.runs[].automationDetails.id // "" | sub("/[^/]*$"; "")]
-                         | group_by(.) | map(select(length > 1) | .[0]) | join(" ")' merged.sarif)
+          # get past it and fail at GitHub. Check categories, as GitHub derives them:
+          # everything before the last `/`, or empty when the id has no `/` at all. An
+          # empty category is named, or its collision would join to "" and read as none.
+          # `.runs[] | .id // ""` rather than `.runs[].id // ""`: `//` over the whole
+          # stream drops every missing id, so runs without one were never counted.
+          dupes=$(jq -r '[.runs[] | .automationDetails.id // ""
+                          | if test("/") then sub("/[^/]*$"; "") else "" end]
+                         | group_by(.) | map(select(length > 1) | .[0] | if . == "" then "(empty)" else . end)
+                         | join(" ")' merged.sarif)
           if [ -n "$dupes" ]; then
             echo "::error::merged.sarif has more than one run in category: ${dupes}"
             exit 1
