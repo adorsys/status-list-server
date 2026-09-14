@@ -85,7 +85,7 @@ This is the path to a real deployment on a cluster you own. It uses the producti
 
 ### Prepare the database password Secret
 
-The application reads the database password from a Kubernetes Secret named `statuslist-secret` (key `database-password`). The bundled PostgreSQL subchart references the same Secret name and continues to read the legacy `postgres-password` key. The chart-managed fallback Secret renders both keys with the same value, and on upgrade it can reuse an existing legacy `postgres-password` value. The chart mounts `database-password` as a file (default `mountPath: /var/run/status-list-server/database`, item `database-password` -> `password`) and exposes it through `APP_DATABASE__PASSWORD_FILE`. It deliberately does **not** inject `APP_DATABASE__PASSWORD` as a literal environment variable, and rejects it if you try.
+The application reads the database password from a Kubernetes Secret named `statuslist-secret`. The chart-managed fallback Secret renders both `database-password` and legacy `postgres-password` with the same value, and on upgrade it can reuse an existing legacy `postgres-password` value. For upgrade safety with customer-managed Secrets and custom ESO mappings, the default chart still mounts `postgres-password` as `/var/run/status-list-server/database/password`; switch `statuslist.secretMounts[0].items[0].key` to `database-password` only after that key is guaranteed to exist. The chart deliberately does **not** inject `APP_DATABASE__PASSWORD` as a literal environment variable, and rejects it if you try.
 
 How the Secret is created depends on your [secrets mode](#secrets-delivery): via an ExternalSecret (ESO) or a plain fallback Secret the chart renders for you.
 

@@ -92,7 +92,7 @@ Effective database backend for chart-managed defaults.
 */}}
 {{- define "status-list-server-chart.dbBackend" -}}
 {{- $env := .Values.statuslist.env | default dict }}
-{{- get $env "APP_DATABASE__BACKEND" | default "postgres" | lower }}
+{{- get $env "APP_DATABASE__BACKEND" | default "postgres" }}
 {{- end }}
 
 {{/*

@@ -77,7 +77,8 @@ kubectl get secret statuslist-secret -n statuslist-production \
     --image=alpine -- sh -c 'command -v nc || apk add --no-cache netcat-openbsd; nc -vz <db-host> <db-port>'
   ```
 
-- Fix credentials: rotate `database-password` in the secret, or correct the database
+- Fix credentials: rotate the database password key mounted by the chart (`postgres-password`
+  by default for upgrade safety, or `database-password` after migration), or correct the database
   `username`/`name`. See the Kubernetes section below when a `CrashLoopBackOff` wraps this.
 - If the error is `kind=connection_acquire`, raise `database.pool.max_connections` headroom or
   the `acquire_timeout_secs` in your values (`APP_DATABASE__POOL__*`).
@@ -220,7 +221,8 @@ _Source: `src/config.rs:641, 646` (`required_config_field` / `required_secret_fi
 
 **Root cause:** A required config value is not present. In the Helm/deployment model this is
 usually a **missing or empty secret mount / env**: the pod has no `APP_DATABASE__PASSWORD_FILE`
-pointing at a mounted password, or `statuslist-secret` is missing the `database-password` key.
+pointing at a mounted password, or `statuslist-secret` is missing the configured mounted key
+(`postgres-password` by default, or `database-password` after migration).
 
 **Diagnostics:**
 
@@ -232,7 +234,7 @@ kubectl get secret statuslist-secret -n statuslist-production \
 kubectl describe pod -l app.kubernetes.io/name=status-list-server -n statuslist-production
 ```
 
-**Fix:** Ensure the secret with the `database-password` key exists and is referenced. In ESO
+**Fix:** Ensure the secret with the configured mounted key exists and is referenced. In ESO
 mode, confirm the ExternalSecret synced it (see the Kubernetes section). In fallback mode,
 confirm `statuslist.fallbackSecret.stringData` contains the key. PostgreSQL deployments should
 also keep the compatibility `postgres-password` key for the bundled PostgreSQL chart.
@@ -340,7 +342,7 @@ platform) and keep the K8s role bound to the minimal ServiceAccount.
 
 ### Database pool rotation after password-file change
 
-**When you see this:** You rotate `database-password` and update the Secret the pod mounts. The
+**When you see this:** You rotate the configured database password key and update the Secret the pod mounts. The
 running pod picks the change up without a restart once the watcher notices the mounted file
 changed.
 
@@ -739,7 +741,7 @@ a cluster that later shows `ImagePullBackOff`/`CrashLoopBackOff`.
 **Observed with the default chart install:** the chart's `appVersion` is the provider-neutral
 `1.0.1-fscert` variant (`Chart.yaml`), so with `statuslist.image.tag` empty the Deployment
 resolves the image `ghcr.io/adorsys/status-list-server:1.0.1-fscert`. Only **variant-suffixed** tags are published
-(`latest-aws`, `latest-gcp`, `latest-azure`, `latest-vault`, `latest-fscert`, and matching
+(`latest-aws`, `latest-gcp`, `latest-azure`, `latest-vault`, `latest-fscert`, matching `latest-mysql-*` tags, and matching
 `<version>-<variant>` / `sha-…-<variant>` tags); there is no unsuffixed `latest` or `1.0.1`.
 If `1.0.1-fscert` gives `ErrImagePull`, that exact `appVersion` may simply not have been promoted
 for the variant yet. The result is this symptom:

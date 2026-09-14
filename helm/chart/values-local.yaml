@@ -31,7 +31,7 @@ statuslist:
       secretName: statuslist-secret
       mountPath: /var/run/status-list-server/database
       items:
-        - key: database-password
+        - key: postgres-password
           path: password
       fileEnv:
         APP_DATABASE__PASSWORD_FILE: password
@@ -94,7 +94,7 @@ mysql:
   image:
     registry: docker.io
     repository: mysql
-    tag: "8.4.12"
+    tag: "8.4.11"
 
 externalSecret:
   enabled: false

@@ -13,19 +13,24 @@ This guide shows you how to deploy the Status List Server on Kubernetes with the
 
 ## Choose Your Image Variant
 
-The server is published as several image variants, each built for a different way of storing the token-signing key and issuer certificate that make up the server's signing identity.
+The server is published as several image variants, each built for one database backend and one way of storing the token-signing key and issuer certificate that make up the server's signing identity.
 
-| Image suffix | Signing-credential backend             | Best for                             |
-| ------------ | -------------------------------------- | ------------------------------------ |
-| `-aws`       | AWS Secrets Manager + Route53 DNS-01   | Running on EKS / using AWS           |
-| `-gcp`       | GCP Secret Manager + Google Cloud DNS  | Running on GKE / using GCP           |
-| `-azure`     | Azure Key Vault + Azure DNS            | Running on AKS / using Azure         |
-| `-vault`     | HashiCorp Vault / OpenBao KV v2        | Operating your own Vault             |
-| `-fscert`    | File-based signing key and certificate | Delivering signing material as files |
+| Image suffix | Database   | Signing-credential backend             | Best for                             |
+| ------------ | ---------- | -------------------------------------- | ------------------------------------ |
+| `-aws`       | PostgreSQL | AWS Secrets Manager + Route53 DNS-01   | Running on EKS / using AWS           |
+| `-gcp`       | PostgreSQL | GCP Secret Manager + Google Cloud DNS  | Running on GKE / using GCP           |
+| `-azure`     | PostgreSQL | Azure Key Vault + Azure DNS            | Running on AKS / using Azure         |
+| `-vault`     | PostgreSQL | HashiCorp Vault / OpenBao KV v2        | Operating your own Vault             |
+| `-fscert`    | PostgreSQL | File-based signing key and certificate | Delivering signing material as files |
+| `-mysql-aws` | MySQL      | AWS Secrets Manager + Route53 DNS-01   | Running on EKS / using AWS           |
+| `-mysql-gcp` | MySQL      | GCP Secret Manager + Google Cloud DNS  | Running on GKE / using GCP           |
+| `-mysql-azure` | MySQL    | Azure Key Vault + Azure DNS            | Running on AKS / using Azure         |
+| `-mysql-vault` | MySQL    | HashiCorp Vault / OpenBao KV v2        | Operating your own Vault             |
+| `-mysql-fscert` | MySQL   | File-based signing key and certificate | Delivering signing material as files |
 
 No unsuffixed image (`latest`, `1.2.0`) is published. Use a variant-suffixed tag, for example `1.2.0-aws`.
 
-If `statuslist.image.tag` and `statuslist.image.digest` are both empty, the chart derives `<appVersion-without-suffix>-<statuslist.image.variant>`. The default variant is `fscert`, so base installs stay provider-neutral. Cloud-specific variants, including `aws`, are selected explicitly through values overlays such as [`chart/values-aws.yaml`](chart/values-aws.yaml) and [`chart/values-production.yaml`](chart/values-production.yaml).
+If `statuslist.image.tag` and `statuslist.image.digest` are both empty, the chart derives a tag from the chart appVersion, `statuslist.image.variant`, and the active database backend. PostgreSQL keeps the historical shape (`<version>-fscert`); MySQL derives `<version>-mysql-fscert`. Cloud-specific variants, including `aws`, are selected explicitly through values overlays such as [`chart/values-aws.yaml`](chart/values-aws.yaml) and [`chart/values-production.yaml`](chart/values-production.yaml).
 
 For production, pin the exact artifact by digest rather than tag. A digest is validated as `sha256:` followed by 64 hex characters.
 
@@ -38,13 +43,13 @@ For production, pin the exact artifact by digest rather than tag. A digest is va
 * [`chart/values-production.yaml`](chart/values-production.yaml): production delta applied after `values-aws.yaml` by release deployments.
 * `global.domain`: chart-wide public DNS suffix. When set, Ingress defaults derive `statuslist.<global.domain>` and `*.<global.domain>` from this single value. Rendered hostnames are normalized to lowercase.
 * `postgres.persistence.storageClass`: leave as `""` to use the cluster default StorageClass; set explicitly in environment overlays when needed.
-* `mysql.image.tag`: defaults to MySQL `8.4.12` LTS for MySQL-compatible deployments.
+* `mysql.image.tag`: defaults to MySQL `8.4.11` LTS for MySQL-compatible deployments.
 * `statuslist.image.variant`: selected image variant when no explicit `tag` or `digest` is set (`fscert`, `aws`, `gcp`, `azure`, or `vault`).
 * `statuslist.image.digest`: takes precedence over `statuslist.image.tag` and renders `repository@digest`.
 
 ## Configure Your Secrets
 
-The application Secret is always named `statuslist-secret` and holds the database password under `database-password`. For backward compatibility with existing clusters and the bundled PostgreSQL chart, the chart-managed fallback Secret and default ExternalSecret also publish the same value under `postgres-password`.
+The application Secret is always named `statuslist-secret`. The chart-managed fallback Secret and default ExternalSecret publish the database password under both `database-password` and the legacy `postgres-password` key.
 
 There are two secret delivery modes, and the chart rejects enabling both at once.
 
@@ -228,7 +233,7 @@ statuslist:
         APP_DATABASE__PASSWORD_FILE: password
 ```
 
-`fileEnv` values are relative to `mountPath`, and they work with or without `items`. By default, the chart mounts the application Secret's `database-password` key at `/var/run/status-list-server/database/password` and exposes that path through `APP_DATABASE__PASSWORD_FILE`. You can override `statuslist.secretMounts` to point at another Secret or mount path. Existing fallback Secrets that only contain `postgres-password` are read during Helm upgrade and rendered back with both keys.
+`fileEnv` values are relative to `mountPath`, and they work with or without `items`. For upgrade safety, the default mount still reads the legacy `postgres-password` key from `statuslist-secret` at `/var/run/status-list-server/database/password` and exposes that path through `APP_DATABASE__PASSWORD_FILE`. This avoids breaking customer-managed Secrets or custom ESO mappings that have not yet added `database-password`, because Kubernetes refuses to mount a listed Secret key that does not exist. After your secret-delivery path guarantees `database-password` exists, switch `statuslist.secretMounts[0].items[0].key` to `database-password`. Existing fallback Secrets that only contain `postgres-password` are read during Helm upgrade and rendered back with both keys.
 
 This chart support is preparatory for application images that implement the file-watcher and reload behavior from issue #456. Current images that only read `APP_DATABASE__PASSWORD` at startup still need a rollout after secret changes. The `checksum/secret` annotation only reacts to Helm-rendered ExternalSecret template or value changes; it does not change when External Secrets Operator later syncs new data from Vault, AWS, GCP, or Azure into a Kubernetes Secret.
 
@@ -353,7 +358,7 @@ helm upgrade --install statuslist helm/chart \
   --wait --timeout 10m
 ```
 
-The chart bundles PostgreSQL and an OpenTelemetry collector. To point at an external database, disable the bundled PostgreSQL subchart and set the split `APP_DATABASE__*` fields under `statuslist.env`. For MySQL, set `postgres.enabled=false`, `mysql.enabled=true`, and `statuslist.env.APP_DATABASE__BACKEND=mysql`; if host, port, username, or database name are omitted, the chart defaults them from the `mysql:` values block (`<release>-mysql.<namespace>.svc.cluster.local`, port `3306`, `mysql.auth.username`, and `mysql.auth.database`). The database backend flags are mutually exclusive. This chart does not currently vendor a MySQL subchart, so provide that MySQL Service through your platform, operator, or an overlay.
+The chart bundles PostgreSQL and an OpenTelemetry collector. To point at an external database, disable the bundled PostgreSQL subchart and set the split `APP_DATABASE__*` fields under `statuslist.env`. For MySQL, set `postgres.enabled=false`, `mysql.enabled=true`, and `statuslist.env.APP_DATABASE__BACKEND=mysql`; if host, port, username, or database name are omitted, the chart defaults them from the `mysql:` values block (`<release>-mysql.<namespace>.svc.cluster.local`, port `3306`, `mysql.auth.username`, and `mysql.auth.database`). The database backend flags are mutually exclusive. With no explicit `statuslist.image.tag` or digest, this also selects the matching `mysql-<variant>` image tag so the binary includes the MySQL driver. This chart does not currently vendor a MySQL subchart, so provide that MySQL Service through your platform, operator, or an overlay.
 
 ## Verify the Deployment
 

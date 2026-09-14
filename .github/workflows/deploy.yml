@@ -88,18 +88,33 @@ jobs:
           - suffix: aws
             features: "postgres,aws"
             description: "PostgreSQL database with AWS Secrets Manager and Route53 DNS support"
+          - suffix: mysql-aws
+            features: "mysql,aws"
+            description: "MySQL database with AWS Secrets Manager and Route53 DNS support"
           - suffix: gcp
             features: "postgres,gcp"
             description: "PostgreSQL database with GCP Secret Manager and Cloud DNS support"
+          - suffix: mysql-gcp
+            features: "mysql,gcp"
+            description: "MySQL database with GCP Secret Manager and Cloud DNS support"
           - suffix: azure
             features: "postgres,azure"
             description: "PostgreSQL database with Azure Key Vault and Azure DNS support"
+          - suffix: mysql-azure
+            features: "mysql,azure"
+            description: "MySQL database with Azure Key Vault and Azure DNS support"
           - suffix: vault
             features: "postgres,vault"
             description: "PostgreSQL database with HashiCorp Vault / OpenBao token material storage"
+          - suffix: mysql-vault
+            features: "mysql,vault"
+            description: "MySQL database with HashiCorp Vault / OpenBao token material storage"
           - suffix: fscert
             features: "postgres"
             description: "PostgreSQL database with filesystem-mounted token signing keys and certificates"
+          - suffix: mysql-fscert
+            features: "mysql"
+            description: "MySQL database with filesystem-mounted token signing keys and certificates"
     steps:
       - name: Checkout source code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -224,10 +239,15 @@ jobs:
       matrix:
         variant:
           - suffix: aws
+          - suffix: mysql-aws
           - suffix: gcp
+          - suffix: mysql-gcp
           - suffix: azure
+          - suffix: mysql-azure
           - suffix: vault
+          - suffix: mysql-vault
           - suffix: fscert
+          - suffix: mysql-fscert
     env:
       # Every published architecture is scanned. A shared lockfile does not make the
       # package sets identical: the two images are built by different builder images
@@ -488,14 +508,24 @@ jobs:
         variant:
           - suffix: aws
             description: "PostgreSQL database with AWS Secrets Manager and Route53 DNS support"
+          - suffix: mysql-aws
+            description: "MySQL database with AWS Secrets Manager and Route53 DNS support"
           - suffix: gcp
             description: "PostgreSQL database with GCP Secret Manager and Cloud DNS support"
+          - suffix: mysql-gcp
+            description: "MySQL database with GCP Secret Manager and Cloud DNS support"
           - suffix: azure
             description: "PostgreSQL database with Azure Key Vault and Azure DNS support"
+          - suffix: mysql-azure
+            description: "MySQL database with Azure Key Vault and Azure DNS support"
           - suffix: vault
             description: "PostgreSQL database with HashiCorp Vault / OpenBao token material storage"
+          - suffix: mysql-vault
+            description: "MySQL database with HashiCorp Vault / OpenBao token material storage"
           - suffix: fscert
             description: "PostgreSQL database with filesystem-mounted token signing keys and certificates"
+          - suffix: mysql-fscert
+            description: "MySQL database with filesystem-mounted token signing keys and certificates"
     env:
       SUFFIX: ${{ matrix.variant.suffix }}
     steps:

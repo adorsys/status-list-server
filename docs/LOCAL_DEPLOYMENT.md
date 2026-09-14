@@ -27,7 +27,7 @@ kubectl create namespace local
 
 > **Image tag:** the chart's default `appVersion` (`1.0.1-fscert`) is a provider-neutral variant tag.
 > The release pipeline publishes only variant-suffixed tags (`latest-aws`, `latest-gcp`,
-> `latest-azure`, `latest-vault`, `latest-fscert`, and matching version/sha tags); there is no
+> `latest-azure`, `latest-vault`, `latest-fscert`, matching `latest-mysql-*` tags, and matching version/sha tags); there is no
 > unsuffixed `latest` or `1.0.1`. Override the tag only when you need a specific cloud variant or a
 > locally loaded image. See `docs/troubleshooting.md` -> "Image pull errors on variant tags".
 

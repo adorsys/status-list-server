@@ -87,7 +87,7 @@ jobs:
       - name: Publish the variant list
         id: list
         env:
-          VARIANTS: aws gcp azure vault fscert
+          VARIANTS: aws mysql-aws gcp mysql-gcp azure mysql-azure vault mysql-vault fscert mysql-fscert
         run: |
           set -euo pipefail
           # Unquoted on purpose: the word splitting is what turns the list into lines.
@@ -113,7 +113,7 @@ jobs:
       contents: read
       packages: read
     strategy:
-      # One variant's registry trouble must not withhold the other four's findings.
+      # One variant's registry trouble must not withhold the other variants' findings.
       # `report` honours this rather than undoing it: a leg that dies becomes a row,
       # not a reason to withhold everything else.
       fail-fast: false
@@ -279,7 +279,7 @@ jobs:
       - name: Evaluate the gate
         # Renders the table but does not decide the run. One verdict is aggregated in
         # `report`, so the counts, the tracking issue and the exit code cannot disagree
-        # about what was found across five variants.
+        # about what was found across the released variants.
         if: steps.resolve.outputs.resolved == 'true'
         env:
           INDEX_DIGEST: ${{ steps.resolve.outputs.index_digest }}
@@ -287,7 +287,7 @@ jobs:
           set -eu
           # scan-summary-<variant>.json is the contract everything downstream reports
           # from. Three steps write it -- this one, "Record an unresolved variant", and
-          # the coverage accounting in `report` -- and four read it, so the shape is
+          # the coverage accounting in `report` -- and several consumers read it, so the shape is
           # fixed and worth stating once:
           #
           #   variant       string    which image variant this row is about
@@ -508,8 +508,8 @@ jobs:
             # Trivy names every run's tool "Trivy", sets no `automationDetails` and no
             # `partialFingerprints`, and for a `lang-pkgs` result -- which is all a
             # `FROM scratch` image holding one Rust binary produces -- the location URI
-            # is the target path, unchanged. That path is identical across all five
-            # variants and both architectures, so ten runs uploaded under one category
+            # is the target path, unchanged. That path is identical across all
+            # variants and both architectures, so runs uploaded under one category
             # collapse into one set of alerts, and the only distinction that matters
             # (which image a finding is in, when one variant is the deployed one) is
             # precisely the one lost. So it is written into the location and the
@@ -877,7 +877,7 @@ jobs:
 
           # The deployed variant is the one this workflow is actually about. Any status
           # other than `scanned` means the claim "the released image is re-scanned
-          # nightly" was not true tonight, whatever the other four did. This is also
+          # nightly" was not true tonight, whatever the other variants did. This is also
           # what catches the deployed variant being unresolved or never reporting, so
           # the two checks below can stay advisory without opening a hole.
           case "${DEPLOYED_STATUS:-absent}" in

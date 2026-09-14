@@ -83,6 +83,15 @@ expect "${repo}:${app_version}|Always|"
 # Variant derives a suffixed tag from the chart appVersion without duplicating the release version.
 expect "${repo}:${crate_version}-aws|Always|" \
     --set-string statuslist.image.variant=aws
+expect "${repo}:${crate_version}-mysql-fscert|Always|" \
+    --set postgres.enabled=false \
+    --set mysql.enabled=true \
+    --set-string statuslist.env.APP_DATABASE__BACKEND=mysql
+expect "${repo}:${crate_version}-mysql-aws|Always|" \
+    --set postgres.enabled=false \
+    --set mysql.enabled=true \
+    --set-string statuslist.env.APP_DATABASE__BACKEND=mysql \
+    --set-string statuslist.image.variant=aws
 # An explicit pullPolicy still overrides the derived one.
 expect "${repo}@${digest}|Always|" \
     --set-string statuslist.image.digest="${digest}" \

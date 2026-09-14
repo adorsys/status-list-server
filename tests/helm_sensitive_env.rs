@@ -137,7 +137,7 @@ fn rendered_chart_uses_split_database_credentials() {
         "value: \"/var/run/status-list-server/database/password\"",
         "name: database-credentials",
         "secretName: statuslist-secret",
-        "key: database-password",
+        "key: postgres-password",
         "name: APP_DATABASE__NAME",
     ] {
         assert!(
@@ -168,7 +168,8 @@ fn rendered_chart_templates_mysql_backend_defaults() {
         "name: APP_DATABASE__PORT\n              value: \"3306\"",
         "name: APP_DATABASE__USERNAME\n              value: \"mysql\"",
         "name: APP_DATABASE__NAME\n              value: \"status-list\"",
-        "key: database-password",
+        "image: \"ghcr.io/adorsys/status-list-server:1.0.0-mysql-fscert\"",
+        "key: postgres-password",
         "app.kubernetes.io/name: mysql",
     ] {
         assert!(
@@ -214,6 +215,74 @@ fn rendered_chart_rejects_enabled_postgres_with_mysql_backend() {
             "postgres.enabled=true requires statuslist.env.APP_DATABASE__BACKEND=postgres"
         ),
         "helm template should reject an enabled PostgreSQL backend with MySQL app config"
+    );
+}
+
+#[test]
+fn rendered_chart_supports_database_password_mount_after_secret_migration() {
+    let Some(rendered) = render_helm(&[
+        "--set",
+        "statuslist.secretMounts[0].items[0].key=database-password",
+    ]) else {
+        return;
+    };
+
+    assert!(
+        rendered.contains("key: database-password"),
+        "operators must be able to switch the mounted password key after their Secret contains database-password"
+    );
+}
+
+#[test]
+fn rendered_chart_default_mount_is_safe_for_legacy_external_secret() {
+    let Some(rendered) = render_helm(&[
+        "--set",
+        "statuslist.fallbackSecret.enabled=false",
+        "--set",
+        "externalSecret.enabled=false",
+    ]) else {
+        return;
+    };
+
+    assert!(
+        !rendered.contains("kind: Secret\nmetadata:\n  # Single supported fallback secret name"),
+        "fallback Secret should not render in externally managed Secret mode"
+    );
+    assert!(
+        rendered.contains("secretName: statuslist-secret")
+            && rendered.contains("key: postgres-password")
+            && rendered.contains("path: password"),
+        "default mount must remain compatible with externally managed Secrets that only contain postgres-password"
+    );
+}
+
+#[test]
+fn rendered_chart_rejects_uppercase_database_backend() {
+    let Some(output) =
+        render_helm_failure(&["--set", "statuslist.env.APP_DATABASE__BACKEND=MYSQL"])
+    else {
+        return;
+    };
+
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("statuslist.env.APP_DATABASE__BACKEND must be either postgres or mysql"),
+        "helm template should reject backend values that the application enum would reject"
+    );
+}
+
+#[test]
+fn release_matrix_builds_mysql_fscert_with_mysql_feature_only() {
+    let deploy_workflow = fs::read_to_string(".github/workflows/deploy.yml")
+        .expect("deploy workflow should be readable");
+
+    assert!(
+        deploy_workflow.contains("suffix: mysql-fscert\n            features: \"mysql\""),
+        "deploy workflow must publish a MySQL-capable fscert image"
+    );
+    assert!(
+        !deploy_workflow.contains("suffix: mysql-fscert\n            features: \"postgres,mysql\""),
+        "database-specific image variants must keep SQL backend features mutually exclusive"
     );
 }
 

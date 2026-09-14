@@ -254,14 +254,24 @@ jobs:
         variant:
           - suffix: aws
             features: "postgres,aws"
+          - suffix: mysql-aws
+            features: "mysql,aws"
           - suffix: gcp
             features: "postgres,gcp"
+          - suffix: mysql-gcp
+            features: "mysql,gcp"
           - suffix: azure
             features: "postgres,azure"
+          - suffix: mysql-azure
+            features: "mysql,azure"
           - suffix: vault
             features: "postgres,vault"
+          - suffix: mysql-vault
+            features: "mysql,vault"
           - suffix: fscert
             features: "postgres"
+          - suffix: mysql-fscert
+            features: "mysql"
 
     steps:
       - name: Fetch Repository

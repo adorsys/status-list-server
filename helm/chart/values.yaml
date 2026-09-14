@@ -29,24 +29,31 @@ statuslist:
     # Empty derives from how the image is named: IfNotPresent for a digest, Always
     # for a mutable tag. Set explicitly to override.
     pullPolicy: ""
-    # Used only when tag and digest are empty. The chart derives
-    # <appVersion-without-suffix>-<variant>, so overlays can select a cloud
-    # variant without hardcoding the release version.
+    # Used only when tag and digest are empty. The chart derives the
+    # database-specific release tag from appVersion and this provider variant, so
+    # overlays can select a cloud variant without hardcoding the release version.
     variant: fscert
-    # Image tag with variant suffix. The release workflow publishes 5 multi-arch variants:
+    # Image tag with variant suffix. The release workflow publishes these multi-arch variants:
     #
-    # | Tag Suffix | Cargo Features | Description | Primary Use Case |
-    # |------------|----------------|-------------|------------------|
-    # | -aws       | postgres,aws | PostgreSQL database with AWS Secrets Manager and Route53 DNS support | AWS EKS native deployments |
-    # | -gcp       | postgres,gcp | PostgreSQL database with GCP Secret Manager and Cloud DNS support | GCP GKE native deployments |
-    # | -azure     | postgres,azure | PostgreSQL database with Azure Key Vault and Azure DNS support | Azure AKS native deployments |
-    # | -vault     | postgres,vault | PostgreSQL database with HashiCorp Vault / OpenBao token material storage | Vault-backed on-prem or multi-cloud deployments |
-    # | -fscert    | postgres | PostgreSQL database with filesystem-mounted token signing keys and certificates | Constrained / air-gapped environments using external secret injection |
+    # | Tag Suffix       | Cargo Features | Description | Primary Use Case |
+    # |------------------|----------------|-------------|------------------|
+    # | -aws             | postgres,aws | PostgreSQL database with AWS Secrets Manager and Route53 DNS support | AWS EKS native deployments |
+    # | -gcp             | postgres,gcp | PostgreSQL database with GCP Secret Manager and Cloud DNS support | GCP GKE native deployments |
+    # | -azure           | postgres,azure | PostgreSQL database with Azure Key Vault and Azure DNS support | Azure AKS native deployments |
+    # | -vault           | postgres,vault | PostgreSQL database with HashiCorp Vault / OpenBao token material storage | Vault-backed on-prem or multi-cloud deployments |
+    # | -fscert          | postgres | PostgreSQL database with filesystem-mounted token signing keys and certificates | Constrained / air-gapped environments using external secret injection |
+    # | -mysql-aws       | mysql,aws | MySQL database with AWS Secrets Manager and Route53 DNS support | AWS EKS native deployments |
+    # | -mysql-gcp       | mysql,gcp | MySQL database with GCP Secret Manager and Cloud DNS support | GCP GKE native deployments |
+    # | -mysql-azure     | mysql,azure | MySQL database with Azure Key Vault and Azure DNS support | Azure AKS native deployments |
+    # | -mysql-vault     | mysql,vault | MySQL database with HashiCorp Vault / OpenBao token material storage | Vault-backed on-prem or multi-cloud deployments |
+    # | -mysql-fscert    | mysql | MySQL database with filesystem-mounted token signing keys and certificates | Constrained / air-gapped environments using external secret injection |
     #
     # Tag format: <version>-<suffix> (e.g., 1.2.0-aws, 1.2.0-gcp)
     # Latest tags: latest-<suffix> (e.g., latest-aws, latest-gcp)
     #
-    # Empty derives from the chart appVersion plus statuslist.image.variant.
+    # Empty derives from the chart appVersion plus statuslist.image.variant and
+    # the active database backend. PostgreSQL keeps the historical tag shape
+    # (<version>-fscert); MySQL derives <version>-mysql-fscert.
     # Defaulting to "latest" would let an upgrade that changes nothing in this
     # chart still change the running image.
     tag: ""
@@ -209,7 +216,12 @@ statuslist:
       secretName: statuslist-secret
       mountPath: /var/run/status-list-server/database
       items:
-        - key: database-password
+        # Default to the legacy key so upgrades keep working when statuslist-secret
+        # is customer-managed or a custom ESO mapping still emits only postgres-password.
+        # The chart-managed fallback Secret and default ExternalSecret emit both
+        # postgres-password and database-password; switch this key to database-password
+        # once your secret-delivery path guarantees that key exists.
+        - key: postgres-password
           path: password
       fileEnv:
         APP_DATABASE__PASSWORD_FILE: password
@@ -501,7 +513,7 @@ mysql:
   image:
     registry: docker.io
     repository: mysql
-    tag: "8.4.12"
+    tag: "8.4.11"
 
 externalSecret:
   enabled: false
