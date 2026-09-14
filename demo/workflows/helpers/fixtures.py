@@ -66,13 +66,32 @@ def get_scott_holdings_issuer():
     return issuer_data
 
 
-def create_bearer_jwt_token(issuer: dict, lifespan: int = 86400) -> str:
+def get_public_jwk(issuer: dict) -> dict:
+    """
+    Derives the issuer's public JWK (RFC 7517) from its PEM public key.
+
+    Args:
+        issuer (dict): Issuer dictionary containing label and keypair.
+
+    Returns:
+        dict: Public JWK carrying the issuer's signing algorithm.
+    """
+    alg = issuer["keypair"]["alg"]
+    algorithm = jwt.get_algorithm_by_name(alg)
+    public_key = algorithm.prepare_key(issuer["keypair"]["public_key"])
+
+    # Binds the key to a single algorithm (RFC 8725 §3.1).
+    return {**algorithm.to_jwk(public_key, as_dict=True), "alg": alg}
+
+
+def create_bearer_jwt_token(issuer: dict, lifespan: int = 3600) -> str:
     """
     Creates a JWT using the issuer's keypair and a default payload.
 
     Args:
         issuer (dict): Issuer dictionary containing label and keypair.
-        lifespan (int): Lifetime of the token in seconds (default is 1 day).
+        lifespan (int): Lifetime of the token in seconds (default is 1 hour,
+            the server's default maximum).
 
     Returns:
         str: Encoded JWT.
@@ -84,6 +103,7 @@ def create_bearer_jwt_token(issuer: dict, lifespan: int = 86400) -> str:
 
     current_time = int(time.time())
     payload = {
+        "iss": issuer["label"],
         "iat": current_time,
         "exp": current_time + lifespan
     }

@@ -1,3 +1,4 @@
+from enum import IntEnum
 from pathlib import Path
 from dotenv import dotenv_values
 import unittest
@@ -9,45 +10,46 @@ import base64
 # Handy handle for test-like assertions
 tc = unittest.TestCase()
 
+# RFC 9052 §4.2
+COSE_SIGN1_TAG = 18
+
+
+class Status(IntEnum):
+    """Token status values as sent to the server."""
+    VALID = 0
+    INVALID = 1
+
 
 def get_base_url():
     """
     Discovers the base URL for the server based on a .env file at the project root.
 
-    If a PORT variable is found in the .env file, it returns "http://localhost:PORT".
+    If APP_SERVER__PORT is set in the .env file, it returns "http://localhost:APP_SERVER__PORT".
     Otherwise, it defaults to "http://localhost:8000".
 
     Returns:
         str: The determined base URL (e.g., "http://localhost:8000").
     """
-    # Navigate to the project root
-    workflows_dir = Path(__file__).parent.parent
-    project_root = workflows_dir.parent.parent
+    project_root = Path(__file__).resolve().parents[3]
+    dotenv_vars = dotenv_values(project_root / ".env")
+    port = dotenv_vars.get("APP_SERVER__PORT") or 8000
 
-    # Path to the .env file at the root
-    dotenv_path = project_root / '.env'
-
-    # Load the .env file - will load if it exists at the specified path
-    dotenv_vars = dotenv_values(dotenv_path)
-
-    # Get the PORT variable from the loaded env vars
-    port = dotenv_vars.get("PORT", 8000)
-
-    # Construct the base URL
-    base_url = f"http://localhost:{port}"
-
-    return base_url
+    return f"http://localhost:{port}"
 
 
 def is_valid_cwt(cwt_data: bytes) -> bool:
     """
-    Verifies if provided bytes represent a valid CWT (possibly COSE_Sign1-wrapped).
+    Verifies if provided bytes represent a valid CWT wrapped in a COSE_Sign1 structure.
     """
     try:
         decoded = cbor2.loads(cwt_data)
 
+        if isinstance(decoded, cbor2.CBORTag) and decoded.tag == COSE_SIGN1_TAG:
+            decoded = decoded.value
+
         # Check if COSE_Sign1 structure
-        if isinstance(decoded, list) and len(decoded) == 4:
+        # cbor2 decodes arrays nested in a tag as tuples.
+        if isinstance(decoded, (list, tuple)) and len(decoded) == 4:
             protected, unprotected, payload, signature = decoded
 
             if not isinstance(payload, bytes):
