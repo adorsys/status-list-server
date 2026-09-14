@@ -15,18 +15,18 @@ This guide shows you how to deploy the Status List Server on Kubernetes with the
 
 The server is published as several image variants, each built for one database backend and one way of storing the token-signing key and issuer certificate that make up the server's signing identity.
 
-| Image suffix | Database   | Signing-credential backend             | Best for                             |
-| ------------ | ---------- | -------------------------------------- | ------------------------------------ |
-| `-aws`       | PostgreSQL | AWS Secrets Manager + Route53 DNS-01   | Running on EKS / using AWS           |
-| `-gcp`       | PostgreSQL | GCP Secret Manager + Google Cloud DNS  | Running on GKE / using GCP           |
-| `-azure`     | PostgreSQL | Azure Key Vault + Azure DNS            | Running on AKS / using Azure         |
-| `-vault`     | PostgreSQL | HashiCorp Vault / OpenBao KV v2        | Operating your own Vault             |
-| `-fscert`    | PostgreSQL | File-based signing key and certificate | Delivering signing material as files |
-| `-mysql-aws` | MySQL      | AWS Secrets Manager + Route53 DNS-01   | Running on EKS / using AWS           |
-| `-mysql-gcp` | MySQL      | GCP Secret Manager + Google Cloud DNS  | Running on GKE / using GCP           |
-| `-mysql-azure` | MySQL    | Azure Key Vault + Azure DNS            | Running on AKS / using Azure         |
-| `-mysql-vault` | MySQL    | HashiCorp Vault / OpenBao KV v2        | Operating your own Vault             |
-| `-mysql-fscert` | MySQL   | File-based signing key and certificate | Delivering signing material as files |
+| Image suffix      | Database   | Signing-credential backend             | Best for                             |
+| ----------------- | ---------- | -------------------------------------- | ------------------------------------ |
+| `-aws`            | PostgreSQL | AWS Secrets Manager + Route53 DNS-01   | Running on EKS / using AWS           |
+| `-gcp`            | PostgreSQL | GCP Secret Manager + Google Cloud DNS  | Running on GKE / using GCP           |
+| `-azure`          | PostgreSQL | Azure Key Vault + Azure DNS            | Running on AKS / using Azure         |
+| `-vault`          | PostgreSQL | HashiCorp Vault / OpenBao KV v2        | Operating your own Vault             |
+| `-fscert`         | PostgreSQL | File-based signing key and certificate | Delivering signing material as files |
+| `-mysql-aws`      | MySQL      | AWS Secrets Manager + Route53 DNS-01   | Running on EKS / using AWS           |
+| `-mysql-gcp`      | MySQL      | GCP Secret Manager + Google Cloud DNS  | Running on GKE / using GCP           |
+| `-mysql-azure`    | MySQL      | Azure Key Vault + Azure DNS            | Running on AKS / using Azure         |
+| `-mysql-vault`    | MySQL      | HashiCorp Vault / OpenBao KV v2        | Operating your own Vault             |
+| `-mysql-fscert`   | MySQL      | File-based signing key and certificate | Delivering signing material as files |
 
 No unsuffixed image (`latest`, `1.2.0`) is published. Use a variant-suffixed tag, for example `1.2.0-aws`.
 
