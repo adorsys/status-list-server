@@ -19,8 +19,11 @@ npm run generate-dashboards   # rewrites ../generated/status-list-slo.json
 ```
 
 The output is byte-for-byte stable, so a reviewable diff appears in the committed
-JSON whenever a panel's intent changes. **Commit both** the generator change and
-the regenerated JSON together.
+JSON whenever a panel's intent changes. The generator writes **both** the
+canonical `generated/status-list-slo.json` and the chart-local copy under
+`helm/chart/observability/dashboards/generated/` (which the Helm chart embeds via
+`.Files.Get`); CI asserts they are byte-for-byte identical. **Commit all three**
+(the generator change and both regenerated JSON artifacts) together.
 
 ## Panels
 

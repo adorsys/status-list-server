@@ -357,13 +357,18 @@ grafanaDashboard:
 # Cluster dependency notes for the shared kube-prometheus-stack integration
 # (managed centrally by wallet-eks-env, not by this chart):
 #
-# 1. CRD install order: the ServiceMonitor, PrometheusRule (and any
-#    AlertmanagerConfig / Grafana dashboard) objects below assume the
-#    kube-prometheus-stack CRDs already exist in the cluster. On a fresh
-#    cluster, install the monitoring stack (which installs the CRDs) BEFORE this
-#    Helm release, otherwise the API server rejects those objects. Use bounded
-#    readiness gates / a staged pipeline; an upgrade on a cluster where the CRDs
-#    already exist does not prove first-install ordering.
+# 1. CRD install order: the resources below differ in what the API server
+#    requires. ServiceMonitor, PrometheusRule, and AlertmanagerConfig are CRDs
+#    owned by the kube-prometheus-stack operator, so they can only be created
+#    AFTER those CRDs exist. On a fresh cluster, install the monitoring stack
+#    (which installs the CRDs) BEFORE this Helm release, otherwise the API server
+#    rejects those objects. The Grafana dashboard, by contrast, is a core/v1
+#    ConfigMap: the API server accepts it without kube-prometheus-stack; it only
+#    becomes *operational* once the Grafana sidecar is present. So the overall
+#    order is still stack first, then this application, but only the
+#    operator-owned CRD objects are hard dependencies for first install. Use
+#    bounded readiness gates / a staged pipeline; an upgrade on a cluster where
+#    the CRDs already exist does not prove first-install ordering.
 # 2. Retention: the SLO rules here use 30d windows (sli:error_rate:30d,
 #    sli:token_gen_failure_rate:30d, error-budget gates). The shared Prometheus
 #    must retain >30 days (with enough storage that the retention-size limit does
@@ -371,6 +376,15 @@ grafanaDashboard:
 # 3. Discovery label: production sets ServiceMonitor/PrometheusRule `labels.release:
 #    kube-prometheus-stack`, which is exactly what the shared Prometheus requires to
 #    select these objects cluster-wide (label opt-in). Keep it.
+# 4. Single metrics path for this EKS integration: the application's /metrics
+#    endpoint, discovered by the ServiceMonitor and scraped by the shared
+#    Prometheus, is the authoritative source of SLI metrics here. The application
+#    exports the same instruments through BOTH its pull (Prometheus) reader and
+#    its OTLP reader, so an OTLP metrics export that would lead back into this
+#    same Prometheus (e.g. via Remote Write) would ingest the same series twice.
+#    Point OTLP metrics at a DIFFERENT backend if desired, but do NOT remote-write
+#    them back into this Prometheus. Traces and logs are independent of these
+#    SLI metrics and may flow through the OTLP collector as configured.
 # AlertmanagerConfig for kube-prometheus-stack / Prometheus Operator alert routing.
 # When enabled, renders an AlertmanagerConfig CRD that routes SLO alerts to the
 # configured notification channel. This is the Kubernetes equivalent of the Docker

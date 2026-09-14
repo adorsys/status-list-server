@@ -6,8 +6,9 @@
 
   Source of truth: observability/dashboards/generated/status-list-slo.json,
   regenerated from src/generate.mjs (see observability/dashboards/README.md).
-  The chart-local copy under helm/chart/observability/ is kept in sync so Helm
-  can embed it via .Files.Get (Helm only reads files inside the chart tree).
+  The chart-local copy under helm/chart/observability/ is written BY THE SAME
+  generator run and CI asserts both are byte-for-byte identical, so the Helm
+  ConfigMap (via .Files.Get) can never drift from the reviewed artifact.
 */}}
 apiVersion: v1
 kind: ConfigMap

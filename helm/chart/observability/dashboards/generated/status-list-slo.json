@@ -13,6 +13,29 @@
     "from": "now-1h",
     "to": "now"
   },
+  "templating": {
+    "list": [
+      {
+        "name": "namespace",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "prometheus"
+        },
+        "definition": "label_values(sli:request_latency:p95:5m, namespace)",
+        "query": {
+          "query": "label_values(sli:request_latency:p95:5m, namespace)",
+          "refId": "namespace-variable"
+        },
+        "refresh": 1,
+        "includeAll": true,
+        "allValue": ".*",
+        "multi": false,
+        "label": "Namespace",
+        "hide": 0
+      }
+    ]
+  },
   "panels": [
     {
       "title": "Request latency P95",
@@ -47,8 +70,8 @@
       },
       "targets": [
         {
-          "expr": "sli:request_latency:p95:5m",
-          "legendFormat": "p95",
+          "expr": "sli:request_latency:p95:5m{namespace=~\"$namespace\"}",
+          "legendFormat": "{{namespace}} p95",
           "refId": "A"
         }
       ]
@@ -86,8 +109,8 @@
       },
       "targets": [
         {
-          "expr": "sli:error_rate:5m",
-          "legendFormat": "5xx ratio",
+          "expr": "sli:error_rate:5m{namespace=~\"$namespace\"}",
+          "legendFormat": "{{namespace}} 5xx ratio",
           "refId": "A"
         }
       ]
@@ -125,7 +148,7 @@
       },
       "targets": [
         {
-          "expr": "sli:error_budget:success:30d",
+          "expr": "sli:error_budget:success:30d{namespace=~\"$namespace\"}",
           "refId": "A"
         }
       ]
@@ -163,7 +186,7 @@
       },
       "targets": [
         {
-          "expr": "sli:token_gen_error_budget:30d",
+          "expr": "sli:token_gen_error_budget:30d{namespace=~\"$namespace\"}",
           "refId": "A"
         }
       ]
@@ -201,8 +224,8 @@
       },
       "targets": [
         {
-          "expr": "sli:cache_hit_ratio:5m",
-          "legendFormat": "hit ratio",
+          "expr": "sli:cache_hit_ratio:5m{namespace=~\"$namespace\"}",
+          "legendFormat": "{{namespace}} hit ratio",
           "refId": "A"
         }
       ]
@@ -240,8 +263,8 @@
       },
       "targets": [
         {
-          "expr": "sli:db_query_latency:p95:5m",
-          "legendFormat": "p95",
+          "expr": "sli:db_query_latency:p95:5m{namespace=~\"$namespace\"}",
+          "legendFormat": "{{namespace}} p95",
           "refId": "A"
         }
       ]
@@ -279,8 +302,8 @@
       },
       "targets": [
         {
-          "expr": "sli:cert_renewal_failure_rate:5m",
-          "legendFormat": "failure rate",
+          "expr": "sli:cert_renewal_failure_rate:5m{namespace=~\"$namespace\"}",
+          "legendFormat": "{{namespace}} failure rate",
           "refId": "A"
         }
       ]
@@ -318,8 +341,8 @@
       },
       "targets": [
         {
-          "expr": "sli:token_gen_failure_rate:5m",
-          "legendFormat": "failure rate",
+          "expr": "sli:token_gen_failure_rate:5m{namespace=~\"$namespace\"}",
+          "legendFormat": "{{namespace}} failure rate",
           "refId": "A"
         }
       ]

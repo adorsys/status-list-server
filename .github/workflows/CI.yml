@@ -846,15 +846,75 @@ jobs:
               )
 
           # Unit-test the deployed copy with the same alerting suite used for the
-          # standalone rules, adjusted for the static `namespace` label the template
-          # stamps on Watchdog / StatusListMetricsAbsent (and rule_files).
+          # standalone rules, adjusted for the differences introduced by the Helm
+          # template -- and rule_files. The deployed copy differs from the
+          # standalone rules in exactly these ways:
+          #   1. Every alert carries a static `namespace: ns1` label (it is
+          #      namespaced to the release), so Watchdog / StatusListMetricsAbsent
+          #      expectations gain `namespace: ns1`.
+          #   2. StatusListMetricsAbsent is based on the scrape-generated `up`
+          #      series selected by `service` (the rendered ServiceMonitor
+          #      Service), not `otel_scope_name`, so its expected label set has no
+          #      `otel_scope_name` and its description namespaces the message.
+          #
+          # Rather than maintaining a second copy of the suite for the deployed
+          # rules, we rewrite the fixture to match the deployed semantics: any
+          # `up{otel_scope_name="status-list-server"}` input series becomes the
+          # deployed `up{namespace="ns1",service="status-list-server-service"}`
+          # selector, and the StatusListMetricsAbsent expectations are normalized.
           test = yaml.safe_load(open('observability/prometheus/tests/alerting.test.yml'))
           test['rule_files'] = ['helm-rules.yml']
+          deployed_up = 'up{namespace="ns1",service="status-list-server-service"}'
           for block in test['tests']:
+              for series in block.get('input_series', []):
+                  if isinstance(series, dict) and 'up{' in str(series.get('series', '')):
+                      series['series'] = series['series'].replace(
+                          'up{otel_scope_name="status-list-server"}', deployed_up)
               for at in block.get('alert_rule_test', []):
-                  if at['alertname'] in ('Watchdog', 'StatusListMetricsAbsent'):
-                      for alert in at['exp_alerts']:
+                  for alert in at.get('exp_alerts', []):
+                      if at['alertname'] == 'StatusListMetricsAbsent':
+                          alert['exp_labels'].pop('otel_scope_name', None)
                           alert['exp_labels']['namespace'] = 'ns1'
+                          d = alert.get('exp_annotations', {}).get('description', '')
+                          alert['exp_annotations']['description'] = d.replace(
+                              'namespace : ', 'namespace ns1: ', 1)
+                      elif at['alertname'] == 'Watchdog':
+                          alert['exp_labels']['namespace'] = 'ns1'
+
+          # Behavioral cross-namespace isolation (the reviewer-requested outcome
+          # test, not just substring greps). The ns1 rule copy must never consume
+          # ns2 series, and loss of the expected ns1 scrape target must not be
+          # masked by a healthy ns2 target. Feed ONLY ns2 data (firing 5xx series
+          # and a healthy ns2 `up`) and assert (a) ns1 SLO alerts stay silent and
+          # (b) ns1's own absence still pages despite ns2 being healthy.
+          ns2_up = 'up{namespace="ns2",service="status-list-server-service"}'
+          test['tests'].append({
+              'interval': '1m',
+              'input_series': [
+                  {'series': 'http_server_requests_total{otel_scope_name="status-list-server",namespace="ns2",method="GET",route="/x",status_class="5xx"}',
+                   'values': '0+100x400'},
+                  {'series': 'http_server_requests_total{otel_scope_name="status-list-server",namespace="ns2",method="GET",route="/x",status_class="2xx"}',
+                   'values': '0+900x400'},
+                  {'series': ns2_up, 'values': '1x410'},
+              ],
+              'alert_rule_test': [
+                  {'eval_time': '400m', 'alertname': 'ErrorRateFastBurn',
+                   'exp_alerts': []},
+                  {'eval_time': '400m', 'alertname': 'ErrorRateSlowBurn',
+                   'exp_alerts': []},
+                  {'eval_time': '10m', 'alertname': 'StatusListMetricsAbsent',
+                   'exp_alerts': [{'exp_labels': {
+                                   'service': 'status-list-server',
+                                   'severity': 'page',
+                                   'team': 'statuslist',
+                                   'namespace': 'ns1'},
+                                   'exp_annotations': {
+                                   'summary': 'status-list-server metrics absent for 5m (target down or not scraped)',
+                                   'description': 'namespace ns1: Status List /metrics target is unreachable or absent (up == 0 or no up series for 5m)',
+                                   'runbook_url': 'https://github.com/adorsys/status-list-server/blob/develop/observability/README.md',
+                                   'dashboard_url': 'http://localhost:3000/d/status-list-slo'}}]},
+              ],
+          })
           with open('/tmp/helm-alerting.test.yml', 'w') as f:
               yaml.safe_dump(test, f, sort_keys=False)
           EOF
@@ -903,16 +963,20 @@ jobs:
           python3 -c "import json; json.load(open('observability/dashboards/generated/status-list-slo.json'))"
 
       - name: Verify dashboard matches generator (no drift)
-        # Regenerates the committed JSON and fails if it differs from what the
-        # generator produces, so a panel-intent change without a regenerated
-        # artifact cannot land silently.
+        # Regenerates both committed artifacts and fails if either differs from
+        # what the generator produces, so a panel-intent change without a
+        # regenerated artifact cannot land silently. The generator writes the
+        # canonical JSON AND the chart-local copy the Helm ConfigMap embeds; a
+        # byte-for-byte comparison of both guards against a deployed dashboard
+        # that drifts from the reviewed source.
         run: |
           cd observability/dashboards/src
           npm install --no-audit --no-fund
           npm run generate-dashboards
           git diff --exit-code ../generated/status-list-slo.json
+          cmp ../generated/status-list-slo.json ../../helm/chart/observability/dashboards/generated/status-list-slo.json
         env:
-          # The generator has no side effects beyond writing ../generated.
+          # The generator has no side effects beyond writing this directory.
           NODE_ENV: production
 
   cargo-coverage:

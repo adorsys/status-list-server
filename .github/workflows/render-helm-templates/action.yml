@@ -535,11 +535,17 @@ runs:
         if ! grep -q 'otel_scope_name="status-list-server",namespace="statuslist-prod"' "$RULES"; then
           echo "ERROR: PrometheusRule raw selectors must be namespace-scoped"; exit 1
         fi
-        if ! grep -q 'absent(http_server_duration_seconds_bucket{otel_scope_name="status-list-server",namespace="statuslist-prod"})' "$RULES"; then
-          echo "ERROR: StatusListMetricsAbsent must be namespace-scoped, not cluster-global"; exit 1
+        if ! grep -q 'absent(up{namespace="statuslist-prod",service="status-list-server-service"})' "$RULES"; then
+          echo "ERROR: StatusListMetricsAbsent must be namespace-scoped and select the rendered Service, not cluster-global"; exit 1
         fi
         if ! grep -q 'sli:error_budget:success:30d{namespace="statuslist-prod"}' "$RULES"; then
           echo "ERROR: recording-series reads in alert rules must be namespace-scoped"; exit 1
+        fi
+        # Every alert must carry team routing ownership (shared Alertmanager contract).
+        ALERTS=$(grep -c -- '- alert:' "$RULES")
+        TEAMS=$(grep -c 'team: statuslist' "$RULES")
+        if [ "$ALERTS" -ne "$TEAMS" ]; then
+          echo "ERROR: every alert must have team: statuslist ($TEAMS of $ALERTS alerts have it)"; exit 1
         fi
         # 2. Grafana dashboard ConfigMap is opt-in (default off) and labelled for the
         #    central Grafana sidecar when enabled.
