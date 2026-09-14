@@ -271,8 +271,7 @@ mod tests {
     use super::*;
     use crate::server::handlers::status_list::publish_status::publish_status;
     use crate::server::handlers::status_list::utils::request::StatusesRequest;
-    use crate::test_utils::test_app_state;
-    use axum::Extension;
+    use crate::test_utils::{authenticated_issuer, test_app_state};
     use axum::extract::Json;
     use axum::http::HeaderMap;
 
@@ -387,7 +386,7 @@ mod tests {
         // Publish first
         publish_status(
             State(app_state.clone()),
-            Extension("issuer1".to_string()),
+            authenticated_issuer("issuer1"),
             Path(token_id.clone()),
             Json(StatusesRequest { statuses: vec![] }),
         )
@@ -427,7 +426,7 @@ mod tests {
 
         publish_status(
             State(app_state.clone()),
-            Extension("issuer1".to_string()),
+            authenticated_issuer("issuer1"),
             Path(token_id.clone()),
             Json(StatusesRequest { statuses: vec![] }),
         )
@@ -464,7 +463,7 @@ mod tests {
 
         publish_status(
             State(app_state.clone()),
-            Extension("issuer1".to_string()),
+            authenticated_issuer("issuer1"),
             Path(token_id.clone()),
             Json(StatusesRequest { statuses: vec![] }),
         )
@@ -504,7 +503,7 @@ mod tests {
 
         publish_status(
             State(app_state.clone()),
-            Extension("issuer1".to_string()),
+            authenticated_issuer("issuer1"),
             Path(token_id.clone()),
             Json(StatusesRequest { statuses: vec![] }),
         )
@@ -538,7 +537,7 @@ mod tests {
 
         publish_status(
             State(app_state.clone()),
-            Extension("issuer1".to_string()),
+            authenticated_issuer("issuer1"),
             Path(token_id.clone()),
             Json(StatusesRequest { statuses: vec![] }),
         )
@@ -571,7 +570,7 @@ mod tests {
 
         publish_status(
             State(app_state.clone()),
-            Extension("issuer1".to_string()),
+            authenticated_issuer("issuer1"),
             Path(token_id.clone()),
             Json(StatusesRequest { statuses: vec![] }),
         )
@@ -637,7 +636,7 @@ mod tests {
 
         publish_status(
             State(app_state.clone()),
-            Extension("issuer1".to_string()),
+            authenticated_issuer("issuer1"),
             Path(token_id.clone()),
             Json(StatusesRequest { statuses: vec![] }),
         )
