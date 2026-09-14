@@ -218,7 +218,7 @@ jobs:
     permissions:
       contents: read
       packages: read
-      actions: write
+      actions: read
     strategy:
       fail-fast: false
       matrix:
@@ -294,10 +294,13 @@ jobs:
         # The DB is global (variant- and arch-independent), so a single cache key
         # shared across all matrix legs is correct. `restore-keys` provides a
         # fallback to the most recent cached DB on a miss.
+        #
+        # An absolute path under `runner.temp`, not `~/.cache/trivy`: trivy-action
+        # hands `cache-dir` to Trivy verbatim as TRIVY_CACHE_DIR, and neither expands
+        # `~`, so the scans would read an empty `./~/.cache/trivy` and fail.
         uses: actions/cache/restore@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
-        id: trivy-cache
         with:
-          path: ~/.cache/trivy
+          path: ${{ runner.temp }}/trivy
           key: trivy-db-${{ runner.os }}-${{ github.run_id }}
           restore-keys: |
             trivy-db-${{ runner.os }}-
@@ -305,20 +308,31 @@ jobs:
       - name: Ensure Trivy vulnerability database
         # Refreshes the DB; on fetch failure, falls back to the cached DB with a
         # loud warning (and step-summary entry) if the cached DB is within the
-        # 24h staleness bound. Hard-fails only if no DB exists at all.
-        run: bash scripts/ensure-trivy-db.sh ~/.cache/trivy 24
+        # 24h staleness bound. Fails if the cached DB is older, or there is none.
+        run: bash scripts/ensure-trivy-db.sh "$RUNNER_TEMP/trivy" 24
 
       - name: Save Trivy vulnerability database cache
-        if: github.event_name == 'push'
+        # One leg saves: all five share this run's key, so the other four would only
+        # re-upload the same DB and fail to reserve it. Not gated on `push`, so a
+        # dispatched run refreshes the cache too. A tag run's cache is scoped to that
+        # tag and seen only by its own re-runs; the nightly on the default branch is
+        # what new tags restore from.
+        if: strategy.job-index == 0
         uses: actions/cache/save@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
         with:
-          path: ~/.cache/trivy
+          path: ${{ runner.temp }}/trivy
           key: trivy-db-${{ runner.os }}-${{ github.run_id }}
 
       - name: Scan image (amd64)
         # Unfiltered; every view below is `trivy convert`ed from these, so the table and
         # the gate read the same data and each image is pulled once.
+        #
+        # TRIVY_SKIP_DB_UPDATE: freshness was decided by the step above; the scan must
+        # not re-fetch. trivy-action has no input for it, and a step env keeps it out
+        # of local `trivy` runs, which a repository config file would not.
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        env:
+          TRIVY_SKIP_DB_UPDATE: "true"
         with:
           scan-type: image
           image-ref: ${{ env.SCAN_REF_AMD64 }}
@@ -328,12 +342,13 @@ jobs:
           format: json
           output: trivy-image-report-amd64.json
           cache: false
-          cache-dir: ~/.cache/trivy
+          cache-dir: ${{ runner.temp }}/trivy
           skip-setup-trivy: true
-          trivy-config: .trivy.yaml
 
       - name: Scan image (arm64)
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        env:
+          TRIVY_SKIP_DB_UPDATE: "true"
         with:
           scan-type: image
           image-ref: ${{ env.SCAN_REF_ARM64 }}
@@ -343,9 +358,8 @@ jobs:
           format: json
           output: trivy-image-report-arm64.json
           cache: false
-          cache-dir: ~/.cache/trivy
+          cache-dir: ${{ runner.temp }}/trivy
           skip-setup-trivy: true
-          trivy-config: .trivy.yaml
 
       - name: Derive reports
         # The severity floor and where the ledger is applied live in the script, so the

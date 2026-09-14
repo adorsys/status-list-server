@@ -112,7 +112,6 @@ jobs:
     permissions:
       contents: read
       packages: read
-      actions: write
     strategy:
       # One variant's registry trouble must not withhold the other four's findings.
       # `report` honours this rather than undoing it: a leg that dies becomes a row,
@@ -223,13 +222,12 @@ jobs:
           cache: false
 
       - name: Restore Trivy vulnerability database cache
-        # The DB is global (variant- and arch-independent), so a single cache key
-        # shared across all matrix legs is correct. `restore-keys` provides a
-        # fallback to the most recent cached DB on a miss.
-        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
-        id: trivy-cache
+        # The same cache and path deploy.yml uses; see the comments there. Not gated on
+        # `resolved`, so the leg that saves below does so whether or not its own
+        # variant has been released.
+        uses: actions/cache/restore@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
         with:
-          path: ~/.cache/trivy
+          path: ${{ runner.temp }}/trivy
           key: trivy-db-${{ runner.os }}-${{ github.run_id }}
           restore-keys: |
             trivy-db-${{ runner.os }}-
@@ -237,12 +235,24 @@ jobs:
       - name: Ensure Trivy vulnerability database
         # Refreshes the DB; on fetch failure, falls back to the cached DB with a
         # loud warning (and step-summary entry) if the cached DB is within the
-        # 24h staleness bound. Hard-fails only if no DB exists at all.
-        run: bash scripts/ensure-trivy-db.sh ~/.cache/trivy 24
+        # 24h staleness bound. Fails if the cached DB is older, or there is none.
+        run: bash scripts/ensure-trivy-db.sh "$RUNNER_TEMP/trivy" 24
+
+      - name: Save Trivy vulnerability database cache
+        # One leg saves, for the reason in deploy.yml. This run is on the default
+        # branch, so its entry is the one release tags restore from.
+        if: strategy.job-index == 0
+        uses: actions/cache/save@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        with:
+          path: ${{ runner.temp }}/trivy
+          key: trivy-db-${{ runner.os }}-${{ github.run_id }}
 
       - name: Scan image (amd64)
         if: steps.resolve.outputs.resolved == 'true'
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        env:
+          # Freshness was decided above; see deploy.yml.
+          TRIVY_SKIP_DB_UPDATE: "true"
         with:
           scan-type: image
           image-ref: ${{ env.SCAN_REF_AMD64 }}
@@ -252,13 +262,14 @@ jobs:
           format: json
           output: trivy-image-report-amd64.json
           cache: false
-          cache-dir: ~/.cache/trivy
+          cache-dir: ${{ runner.temp }}/trivy
           skip-setup-trivy: true
-          trivy-config: .trivy.yaml
 
       - name: Scan image (arm64)
         if: steps.resolve.outputs.resolved == 'true'
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        env:
+          TRIVY_SKIP_DB_UPDATE: "true"
         with:
           scan-type: image
           image-ref: ${{ env.SCAN_REF_ARM64 }}
@@ -268,9 +279,8 @@ jobs:
           format: json
           output: trivy-image-report-arm64.json
           cache: false
-          cache-dir: ~/.cache/trivy
+          cache-dir: ${{ runner.temp }}/trivy
           skip-setup-trivy: true
-          trivy-config: .trivy.yaml
 
       - name: Derive reports
         # The same script deploy.yml runs, so the nightly result and the release result

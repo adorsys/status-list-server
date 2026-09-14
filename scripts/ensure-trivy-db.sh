@@ -9,13 +9,13 @@
 # Usage: ensure-trivy-db.sh <cache-dir> <staleness-bound-hours>
 #
 # The cache directory is the Trivy cache dir (TRIVY_CACHE_DIR) that
-# actions/cache restores/saves. The staleness bound is the maximum age
-# of a cached DB before a fetch failure becomes fatal instead of a
-# loud warning + stale scan. 24h matches Trivy's own up-to-date threshold.
+# actions/cache restores/saves. It must be absolute: Trivy does not expand
+# `~`. The staleness bound is the maximum age of a cached DB before a fetch
+# failure becomes fatal instead of a loud warning + stale scan.
 #
 # Exit codes:
 #   0 = DB refreshed, or stale DB accepted with warning
-#   1 = no DB available and fetch failed (hard failure)
+#   1 = fetch failed and no cached DB within the bound (hard failure)
 
 set -euo pipefail
 
@@ -27,73 +27,70 @@ if [ -z "${CACHE_DIR}" ]; then
   exit 1
 fi
 
-if [ ! -d "${CACHE_DIR}" ]; then
-  mkdir -p "${CACHE_DIR}"
-fi
+case "${STALE_HOURS}" in
+  '' | *[!0-9]*)
+    echo "::error::ensure-trivy-db.sh: staleness bound must be a whole number of hours, got '${STALE_HOURS}'"
+    exit 1
+    ;;
+esac
 
-DB_DIR="${CACHE_DIR}/db"
+mkdir -p "${CACHE_DIR}"
 
-# Attempt to download/update the vulnerability DB.
-# trivy image --download-db-only pulls the DB into the cache dir without scanning.
-# It returns 0 on success, non-zero on failure.
-echo "Refreshing Trivy vulnerability database..."
-if trivy image --download-db-only --cache-dir "${CACHE_DIR}" 2>&1; then
-  # Success: DB is fresh. Report freshness in the summary.
+# Trivy keeps exactly one DB per cache dir: <cache-dir>/db/trivy.db, with
+# metadata.json beside it. A scan with --skip-db-update refuses to run if
+# either is missing, so both are required for the cached DB to count.
+DB_FILE="${CACHE_DIR}/db/trivy.db"
+META_FILE="${CACHE_DIR}/db/metadata.json"
+
+summary() {
   {
     echo "### Trivy vulnerability database"
     echo
-    echo "Database refreshed successfully."
+    printf '%s\n' "$@"
   } >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
+}
+
+# Trivy downloads into a temp dir before touching the cache dir, so a failed
+# fetch leaves any cached DB intact for the fallback below.
+echo "Refreshing Trivy vulnerability database..."
+if trivy image --download-db-only --cache-dir "${CACHE_DIR}" 2>&1; then
+  summary "Database refreshed successfully."
   exit 0
 fi
 
-# Fetch failed. Check whether we have a usable cached DB.
 echo "::warning::Failed to refresh Trivy vulnerability database; checking for cached DB..."
 
-# The vulnerability DB lives in ${DB_DIR}/<schema>/trivy.db (or similar).
-# We look for any trivy.db file under the cache dir.
-if [ -d "${DB_DIR}" ] && find "${DB_DIR}" -name 'trivy.db' -type f | grep -q .; then
-  # Found a cached DB. Compute its age.
-  # We take the newest trivy.db as the effective DB.
-  newest_db=$(find "${DB_DIR}" -name 'trivy.db' -type f -printf '%T@ %p\n' | sort -nr | head -1 | cut -d' ' -f2-)
-  if [ -n "${newest_db}" ]; then
-    db_mtime=$(stat -c '%Y' "${newest_db}")
-    now=$(date +%s)
-    age_seconds=$((now - db_mtime))
-    age_hours=$((age_seconds / 3600))
-
-    echo "Found cached Trivy DB (age: ${age_hours}h)."
-
-    if [ "${age_hours}" -le "${STALE_HOURS}" ]; then
-      # Within staleness bound: warn but proceed.
-      echo "::warning::Using cached Trivy vulnerability database (${age_hours} hours old, within ${STALE_HOURS}h bound)."
-      {
-        echo "### Trivy vulnerability database"
-        echo
-        echo "**Warning:** Using cached vulnerability database (${age_hours} hours old)."
-        echo "Database refresh failed; proceeding with stale DB."
-      } >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
-      exit 0
-    else
-      # Beyond staleness bound: hard fail.
-      echo "::error::Cached Trivy DB is ${age_hours} hours old, exceeding the ${STALE_HOURS}h staleness bound."
-      {
-        echo "### Trivy vulnerability database"
-        echo
-        echo "**Error:** Cached vulnerability database is ${age_hours} hours old, exceeding the ${STALE_HOURS}h bound."
-        echo "No fresh DB could be fetched and the cached DB is too stale to trust."
-      } >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
-      exit 1
-    fi
-  fi
+if [ ! -f "${DB_FILE}" ] || [ ! -f "${META_FILE}" ]; then
+  echo "::error::No Trivy vulnerability database available and download failed."
+  summary "**Error:** No vulnerability database available and download failed." \
+    "The scan cannot proceed without a database."
+  exit 1
 fi
 
-# No cached DB at all and fetch failed: hard failure.
-echo "::error::No Trivy vulnerability database available and download failed."
-{
-  echo "### Trivy vulnerability database"
-  echo
-  echo "**Error:** No vulnerability database available and download failed."
-  echo "The scan cannot proceed without a database."
-} >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
+# GNU stat takes -c '%Y'; BSD/macOS stat takes -f '%m'. `-printf` on find is
+# GNU-only too, which is why the DB path is fixed rather than searched for.
+if db_mtime=$(stat -c '%Y' "${DB_FILE}" 2>/dev/null); then
+  :
+else
+  db_mtime=$(stat -f '%m' "${DB_FILE}")
+fi
+
+now=$(date +%s)
+age_seconds=$((now - db_mtime))
+age_hours=$((age_seconds / 3600))
+
+echo "Found cached Trivy DB (age: ${age_hours}h)."
+
+# Compared in seconds: truncated hours would accept a DB up to 59 minutes past
+# the bound.
+if [ "${age_seconds}" -le $((STALE_HOURS * 3600)) ]; then
+  echo "::warning::Using cached Trivy vulnerability database (${age_hours} hours old, within ${STALE_HOURS}h bound)."
+  summary "**Warning:** Using cached vulnerability database (${age_hours} hours old)." \
+    "Database refresh failed; proceeding with stale DB."
+  exit 0
+fi
+
+echo "::error::Cached Trivy DB is ${age_hours} hours old, exceeding the ${STALE_HOURS}h staleness bound."
+summary "**Error:** Cached vulnerability database is ${age_hours} hours old, exceeding the ${STALE_HOURS}h bound." \
+  "No fresh DB could be fetched and the cached DB is too stale to trust."
 exit 1
