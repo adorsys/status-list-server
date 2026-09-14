@@ -974,7 +974,7 @@ jobs:
           npm install --no-audit --no-fund
           npm run generate-dashboards
           git diff --exit-code ../generated/status-list-slo.json
-          cmp ../generated/status-list-slo.json ../../helm/chart/observability/dashboards/generated/status-list-slo.json
+          cmp ../generated/status-list-slo.json ../../../helm/chart/observability/dashboards/generated/status-list-slo.json
         env:
           # The generator has no side effects beyond writing this directory.
           NODE_ENV: production
