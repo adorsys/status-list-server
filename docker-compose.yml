@@ -148,6 +148,9 @@ services:
     volumes:
       - ./observability/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml
       - ./observability/prometheus/rules:/etc/prometheus/rules
+    depends_on:
+      alertmanager:
+        condition: service_started
     networks:
       - status-list-network
     # Only scrape metrics if endpoint is exposed
@@ -158,6 +161,45 @@ services:
       - '--web.console.libraries=/usr/share/prometheus/console_libraries'
       - '--web.console.templates=/usr/share/prometheus/consoles'
       - '--web.enable-lifecycle'
+
+  alertmanager:
+    image: prom/alertmanager:v0.28.1
+    container_name: alertmanager
+    restart: unless-stopped
+    ports:
+      - 9093:9093
+    environment:
+      # Webhook-based alert notifications (ticket #446). Select the target
+      # channel with ALERTMANAGER_PLATFORM (webhook|discord|slack|teams|
+      # mattermost|email) and supply that platform's credential below. The
+      # entrypoint renders observability/prometheus/generate-alertmanager-config.sh,
+      # which emits the native receiver config, so no repo code is platform
+      # specific and no webhook URL is committed. We recommend the generic
+      # `webhook` platform for a Discord/Slack-compatible endpoint.
+      # ALERTMANAGER_DMS_WEBHOOK_URL is optional: when set, the always-firing
+      # Watchdog (severity=none) pings a dead-man's-switch instead of a human
+      # channel; when unset it is absorbed silently (never spams a human channel).
+      ALERTMANAGER_PLATFORM: ${ALERTMANAGER_PLATFORM:-webhook}
+      ALERTMANAGER_WEBHOOK_URL: ${ALERTMANAGER_WEBHOOK_URL:-}
+      ALERTMANAGER_DMS_WEBHOOK_URL: ${ALERTMANAGER_DMS_WEBHOOK_URL:-}
+      DISCORD_WEBHOOK_URL: ${DISCORD_WEBHOOK_URL:-}
+      SLACK_WEBHOOK_URL: ${SLACK_WEBHOOK_URL:-}
+      MS_TEAMS_WEBHOOK_URL: ${MS_TEAMS_WEBHOOK_URL:-}
+      MATTERMOST_WEBHOOK_URL: ${MATTERMOST_WEBHOOK_URL:-}
+      ALERTMANAGER_SMTP_HOST: ${ALERTMANAGER_SMTP_HOST:-}
+      ALERTMANAGER_SMTP_PORT: ${ALERTMANAGER_SMTP_PORT:-587}
+      ALERTMANAGER_SMTP_FROM: ${ALERTMANAGER_SMTP_FROM:-}
+      ALERTMANAGER_EMAIL_TO: ${ALERTMANAGER_EMAIL_TO:-}
+    volumes:
+      - ./observability/prometheus/generate-alertmanager-config.sh:/generate-alertmanager-config.sh:ro
+    networks:
+      - status-list-network
+    entrypoint:
+      - /bin/sh
+      - -ec
+      - |
+        /bin/sh /generate-alertmanager-config.sh
+        exec /bin/alertmanager --config.file=/etc/alertmanager/alertmanager.yml
 
   grafana:
     image: grafana/grafana:12.0.0
