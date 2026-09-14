@@ -54,7 +54,6 @@ Go to `localhost:9090` to access the prometheus dashboard. After that, search fo
 process_resident_memory_bytes{job="status_list_server"} / 1024 / 1024
 ```
 
-
 **CPU usage**:
 
 ```text
