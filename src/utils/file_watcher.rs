@@ -1,11 +1,11 @@
-use notify::{Event, RecommendedWatcher, RecursiveMode, Watcher as _};
-use std::collections::{HashMap, HashSet, hash_map::DefaultHasher};
-use std::hash::{Hash, Hasher};
+use notify::event::ModifyKind;
+use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher as _};
+use sha2::{Digest, Sha256};
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, mpsc as std_mpsc};
 use std::time::Duration;
 use tokio::sync::mpsc;
-use tokio::task::JoinSet;
 use tokio::time::Instant;
 
 const DEBOUNCE: Duration = Duration::from_millis(500);
@@ -18,12 +18,21 @@ pub(crate) struct FileWatcher {
 }
 
 impl FileWatcher {
-    /// Create a watcher for a set of paths. Duplicate paths are ignored and the
-    /// fallback poll interval is clamped to at least one second.
+    /// Create a watcher for a set of paths. Relative paths are made absolute
+    /// (without resolving symlinks) so native inotify watch roots work; duplicates
+    /// are ignored and the fallback poll interval is clamped to at least one second.
     pub(crate) fn new(paths: Vec<PathBuf>, poll_interval: Duration) -> Self {
+        let cwd = std::env::current_dir().unwrap_or_default();
         let mut unique = HashSet::new();
         let paths = paths
             .into_iter()
+            .map(|path| {
+                if path.is_absolute() {
+                    path
+                } else {
+                    cwd.join(&path)
+                }
+            })
             .filter(|path| unique.insert(path.clone()))
             .collect();
         let poll_interval = if poll_interval < MIN_POLL_INTERVAL {
@@ -73,6 +82,11 @@ fn spawn_notify_watcher(
         let mut watcher = match RecommendedWatcher::new(
             move |event: notify::Result<Event>| match event {
                 Ok(event) => {
+                    // Only react to real content changes; the app's own reads
+                    // emit IN_OPEN events that would otherwise loop rotation.
+                    if !is_content_change(&event.kind) {
+                        return;
+                    }
                     if event_matches(&event, &event_paths) {
                         let _ = tx_events.blocking_send(());
                     }
@@ -168,14 +182,31 @@ fn spawn_debouncer<F, Fut>(
     Fut: std::future::Future<Output = ()> + Send + 'static,
 {
     tokio::spawn(async move {
+        // Only dispatch when content actually changed; guards against spurious
+        // events that slip past the event-kind filter.
+        let mut last_fingerprints = fingerprint_all(&paths).await;
+
         while rx.recv().await.is_some() {
+            while matches!(tokio::time::timeout(DEBOUNCE, rx.recv()).await, Ok(Some(_))) {}
+
+            let current = fingerprint_all(&paths).await;
+            if current == last_fingerprints {
+                tracing::debug!(
+                    event = "file_change_ignored",
+                    rotation.target = target,
+                    paths = ?paths,
+                    "file change event did not alter content; skipping rotation"
+                );
+                continue;
+            }
+            last_fingerprints = current;
+
             tracing::info!(
                 event = "file_change_detected",
                 rotation.target = target,
                 paths = ?paths,
                 "watched secret file changed"
             );
-            while matches!(tokio::time::timeout(DEBOUNCE, rx.recv()).await, Ok(Some(_))) {}
             let callback = callback.clone();
             callback().await;
         }
@@ -213,30 +244,30 @@ fn path_relevant(changed: &Path, watched: &Path) -> bool {
             && changed.parent() == watched.parent())
 }
 
-async fn fingerprint_all(paths: &[PathBuf]) -> HashMap<PathBuf, Option<u64>> {
-    let mut tasks = JoinSet::new();
-    for path in paths {
-        let path = path.clone();
-        tasks.spawn(async move {
-            let fingerprint = fingerprint(&path).await;
-            (path, fingerprint)
-        });
-    }
+/// True for real content changes (Create/Remove/Rename/Modify(Data)); false
+/// for Access/Open and metadata events that the app's own reads emit.
+fn is_content_change(kind: &EventKind) -> bool {
+    matches!(
+        kind,
+        EventKind::Create(_)
+            | EventKind::Remove(_)
+            | EventKind::Modify(ModifyKind::Data(_))
+            | EventKind::Modify(ModifyKind::Name(_))
+            | EventKind::Modify(ModifyKind::Any)
+    )
+}
 
-    let mut fingerprints = HashMap::with_capacity(paths.len());
-    while let Some(result) = tasks.join_next().await {
-        if let Ok((path, fingerprint)) = result {
-            fingerprints.insert(path, fingerprint);
-        }
+async fn fingerprint_all(paths: &[PathBuf]) -> Vec<Option<[u8; 32]>> {
+    let mut fingerprints = Vec::with_capacity(paths.len());
+    for path in paths {
+        fingerprints.push(fingerprint(path).await);
     }
     fingerprints
 }
 
-async fn fingerprint(path: &Path) -> Option<u64> {
+async fn fingerprint(path: &Path) -> Option<[u8; 32]> {
     let bytes = tokio::fs::read(path).await.ok()?;
-    let mut hasher = DefaultHasher::new();
-    bytes.hash(&mut hasher);
-    Some(hasher.finish())
+    Some(Sha256::digest(bytes).into())
 }
 
 #[cfg(test)]
@@ -270,10 +301,14 @@ mod tests {
 
     #[tokio::test]
     async fn debouncer_coalesces_bursty_changes() {
+        let dir = TempDir::new();
+        let path = dir.path.join("secret");
+        tokio::fs::write(&path, "v1").await.expect("write initial");
+
         let rotations = Arc::new(AtomicUsize::new(0));
         let seen = rotations.clone();
         let (tx, rx) = mpsc::channel(8);
-        let paths = Arc::new(vec![PathBuf::from("/tmp/secret")]);
+        let paths = Arc::new(vec![path.clone()]);
 
         spawn_debouncer(
             paths,
@@ -287,6 +322,11 @@ mod tests {
             "test",
         );
 
+        // Let the debouncer establish its baseline fingerprint.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // One content change followed by a burst of events coalesces into one callback.
+        tokio::fs::write(&path, "v2").await.expect("write update");
         tx.send(()).await.expect("first event");
         tx.send(()).await.expect("second event");
         tokio::time::sleep(Duration::from_millis(700)).await;
@@ -296,11 +336,15 @@ mod tests {
 
     #[tokio::test]
     async fn debouncer_serializes_callbacks() {
+        let dir = TempDir::new();
+        let path = dir.path.join("secret");
+        tokio::fs::write(&path, "v1").await.expect("write initial");
+
         let active = Arc::new(AtomicUsize::new(0));
         let max_active = Arc::new(AtomicUsize::new(0));
         let completed = Arc::new(AtomicUsize::new(0));
         let (tx, rx) = mpsc::channel(8);
-        let paths = Arc::new(vec![PathBuf::from("/tmp/secret")]);
+        let paths = Arc::new(vec![path.clone()]);
 
         spawn_debouncer(
             paths,
@@ -325,13 +369,120 @@ mod tests {
             "test",
         );
 
+        // Let the debouncer establish its baseline fingerprint.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // First content change + event.
+        tokio::fs::write(&path, "v2").await.expect("write update 1");
         tx.send(()).await.expect("first event");
         tokio::time::sleep(DEBOUNCE + Duration::from_millis(50)).await;
+
+        // Second content change + event.
+        tokio::fs::write(&path, "v3").await.expect("write update 2");
         tx.send(()).await.expect("second event");
         tokio::time::sleep(DEBOUNCE + Duration::from_millis(500)).await;
 
         assert_eq!(max_active.load(Ordering::SeqCst), 1);
         assert_eq!(completed.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn debouncer_skips_callback_when_content_unchanged() {
+        let dir = TempDir::new();
+        let path = dir.path.join("secret");
+        tokio::fs::write(&path, "stable").await.expect("write");
+
+        let rotations = Arc::new(AtomicUsize::new(0));
+        let seen = rotations.clone();
+        let (tx, rx) = mpsc::channel(8);
+        let paths = Arc::new(vec![path.clone()]);
+
+        spawn_debouncer(
+            paths,
+            rx,
+            Arc::new(move || {
+                let seen = seen.clone();
+                async move {
+                    seen.fetch_add(1, Ordering::SeqCst);
+                }
+            }),
+            "test",
+        );
+
+        // Let the debouncer establish its baseline fingerprint.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // A spurious event with unchanged content must NOT trigger the callback.
+        tx.send(()).await.expect("send spurious event");
+        tokio::time::sleep(Duration::from_millis(1200)).await;
+
+        assert_eq!(rotations.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn debouncer_runs_callback_when_content_changed() {
+        let dir = TempDir::new();
+        let path = dir.path.join("secret");
+        tokio::fs::write(&path, "old").await.expect("write initial");
+
+        let rotations = Arc::new(AtomicUsize::new(0));
+        let seen = rotations.clone();
+        let (tx, rx) = mpsc::channel(8);
+        let paths = Arc::new(vec![path.clone()]);
+
+        spawn_debouncer(
+            paths,
+            rx,
+            Arc::new(move || {
+                let seen = seen.clone();
+                async move {
+                    seen.fetch_add(1, Ordering::SeqCst);
+                }
+            }),
+            "test",
+        );
+
+        // Let the debouncer establish its baseline fingerprint.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // A real content change must trigger the callback.
+        tokio::fs::write(&path, "new").await.expect("write update");
+        tx.send(()).await.expect("send event");
+        tokio::time::sleep(Duration::from_millis(1200)).await;
+
+        assert_eq!(rotations.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn access_and_metadata_events_are_not_content_changes() {
+        use notify::event::{
+            AccessKind, AccessMode, CreateKind, DataChange, MetadataKind, RemoveKind, RenameMode,
+        };
+
+        // The app's own reads emit these; they must NOT trigger rotation.
+        assert!(!is_content_change(&EventKind::Access(AccessKind::Open(
+            AccessMode::Read
+        ))));
+        assert!(!is_content_change(&EventKind::Access(AccessKind::Read)));
+        assert!(!is_content_change(&EventKind::Access(AccessKind::Close(
+            AccessMode::Read
+        ))));
+        assert!(!is_content_change(&EventKind::Modify(
+            ModifyKind::Metadata(MetadataKind::AccessTime)
+        )));
+        assert!(!is_content_change(&EventKind::Modify(
+            ModifyKind::Metadata(MetadataKind::Any)
+        )));
+
+        // Real content changes MUST trigger rotation.
+        assert!(is_content_change(&EventKind::Create(CreateKind::File)));
+        assert!(is_content_change(&EventKind::Remove(RemoveKind::File)));
+        assert!(is_content_change(&EventKind::Modify(ModifyKind::Data(
+            DataChange::Content
+        ))));
+        assert!(is_content_change(&EventKind::Modify(ModifyKind::Name(
+            RenameMode::To
+        ))));
     }
 
     #[test]
@@ -348,6 +499,43 @@ mod tests {
             Path::new("/var/run/secrets/db/unrelated"),
             Path::new("/var/run/secrets/db/password")
         ));
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn fingerprint_tracks_content_through_atomic_symlink_swap() {
+        use std::os::unix::fs::symlink;
+
+        let dir = TempDir::new();
+        let data = dir.path.join("..data");
+
+        let dir1 = dir.path.join("..2024_01_01");
+        let dir2 = dir.path.join("..2024_02_01");
+        std::fs::create_dir_all(&dir1).unwrap();
+        std::fs::create_dir_all(&dir2).unwrap();
+        std::fs::write(dir1.join("password"), "same").unwrap();
+        std::fs::write(dir2.join("password"), "same").unwrap();
+
+        symlink(&dir1, &data).unwrap();
+        let watched = data.join("password");
+        let before = fingerprint(&watched).await.unwrap();
+
+        // Atomic symlink swap (..data -> dir2) with identical content: fingerprint unchanged.
+        let tmp = dir.path.join("..data_tmp");
+        symlink(&dir2, &tmp).unwrap();
+        std::fs::remove_file(&data).unwrap();
+        std::fs::rename(&tmp, &data).unwrap();
+        let unchanged = fingerprint(&watched).await.unwrap();
+        assert_eq!(before, unchanged);
+
+        // Swap target to content that changed: fingerprint must differ.
+        std::fs::write(dir2.join("password"), "new").unwrap();
+        let tmp = dir.path.join("..data_tmp2");
+        symlink(&dir2, &tmp).unwrap();
+        std::fs::remove_file(&data).unwrap();
+        std::fs::rename(&tmp, &data).unwrap();
+        let changed = fingerprint(&watched).await.unwrap();
+        assert_ne!(before, changed);
     }
 
     #[tokio::test]

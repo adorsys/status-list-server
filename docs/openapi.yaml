@@ -19,14 +19,6 @@ info:
     `update_conflict`. `error_description` is for humans and its wording is not
     part of the contract.
 
-    Two endpoints predate this shape and still return plain text: see the
-    `UnprocessableEntity` and `TooManyRequests` responses below.
-
-    > **Note:** RFC 7807 problem details (`application/problem+json`) are the
-    > intended long-term format for the whole API. Adoption is tracked in issue
-    > #156; until it lands, the schema documented here is what the server
-    > actually sends.
-
     Status list tokens are signed by the server and delivered as
     `application/statuslist+jwt` or `application/statuslist+cwt`. JWT-format
     tokens are gzip-compressed only when the client requests it via
@@ -52,9 +44,7 @@ info:
         Tunables: `permissive_burst_size`, `permissive_period_secs`
         (defaults: 100 / 60s).
 
-    When a quota is exhausted the server returns `429 Too Many Requests` with
-    a plain-text body of the form `Too Many Requests! Wait for <n>s` (emitted by
-    the `tower-governor` middleware; it is not RFC 7807 problem+json).
+    When a quota is exhausted the server returns `429 Too Many Requests`.
 
     ## Request bounds
 
@@ -470,8 +460,15 @@ components:
         - `iat`: issued-at timestamp
         - `exp`: expiration timestamp
 
-        The server validates the signature using the registered JWK and verifies
-        that the `iss` claim matches the registered issuer.
+        The optional `nbf` claim is honored when present. When
+        `management_auth.audiences` is configured, the token must contain an
+        `aud` claim matching one of the configured values. When
+        `management_auth.audiences` is empty, `aud` is not validated.
+
+        The server validates the signature using the registered JWK, verifies
+        that the `iss` claim matches the registered issuer, rejects future
+        `iat`/`nbf` values outside the configured leeway, and rejects tokens
+        whose lifetime (`exp - iat`) exceeds the configured maximum.
 
         Mutual TLS (mTLS) for issuer authentication is not implemented in the
         current release; this security scheme may be added in a future version.
@@ -653,8 +650,8 @@ components:
         The error body returned by every JSON error response. Serialized from
         `server::error::ErrorResponse`.
 
-        RFC 7807 problem details are the intended long-term replacement
-        (issue #156); this schema documents the current wire format.
+        This shape follows the `cloud-identity-wallet` house pattern used for
+        cross-project consistency across ADORSYS identity services.
       required:
         - error
       properties:
@@ -675,6 +672,7 @@ components:
             - index_too_large
             # 401 — emitted by the authentication middleware
             - invalid_auth_header
+            - invalid_token
             - jwt_error
             - unsupported_algorithm
             - issuer_not_found
@@ -690,8 +688,12 @@ components:
             - credentials_already_exist
             - update_conflict
             - write_contention
+            # 413
+            - payload_too_large
             # 422
             - status_too_large
+            # 429
+            - too_many_requests
             # 500 / 503
             - internal_error
             - service_unavailable
@@ -845,10 +847,12 @@ components:
         `limits.max_body_size_bytes` (default 2 MiB). Rejected by the
         `RequestBodyLimitLayer` before the handler runs.
       content:
-        text/plain:
+        application/json:
           schema:
-            type: string
-          example: "length limit reached"
+            $ref: "#/components/schemas/ErrorResponse"
+          example:
+            error: "payload_too_large"
+            error_description: "The request body exceeds the configured maximum size"
 
     UnprocessableEntity:
       description: |
@@ -856,27 +860,26 @@ components:
         exceeds the operator-configurable `limits.max_serialized_list_size`
         (default 1 MiB), or (for `POST /api/v1/credentials`) the supplied
         public key could not be parsed into a JWK.
-
-        > **Note:** This error currently returns a plain-text body.  RFC 7807
-        > `application/problem+json` adoption is tracked in issue #156.
       content:
-        text/plain:
+        application/json:
           schema:
-            type: string
-          example: "Serialized status list size exceeds the configured maximum"
+            $ref: "#/components/schemas/ErrorResponse"
+          example:
+            error: "status_too_large"
+            error_description: "Serialized status list size exceeds the configured maximum"
 
     TooManyRequests:
       description: |
         The client has exceeded the configured rate-limit quota for the route
         tier (strict, per-issuer, or permissive — see the Rate limiting section
-        in the API description). Emitted by the `tower-governor` middleware as a
-        plain-text body of the form `Too Many Requests! Wait for <n>s`; it is
-        not RFC 7807 problem+json.
+        in the API description).
       content:
-        text/plain:
+        application/json:
           schema:
-            type: string
-          example: "Too Many Requests! Wait for 42s"
+            $ref: "#/components/schemas/ErrorResponse"
+          example:
+            error: "too_many_requests"
+            error_description: "Too many requests"
 
     UpdateConflict:
       description: |
