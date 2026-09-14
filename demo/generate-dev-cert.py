@@ -45,12 +45,18 @@ def build_certificate(key: ec.EllipticCurvePrivateKey) -> x509.Certificate:
     )
 
 
-def write_private_file(path: pathlib.Path, data: bytes) -> None:
-    # Recreate rather than truncate so the owner-only mode also applies when replacing a file.
-    path.unlink(missing_ok=True)
+def write_temp_file(path: pathlib.Path, data: bytes, mode: int) -> pathlib.Path:
+    """Write data to a fresh temporary file next to path and return the temporary path.
+
+    The file is created with the given mode, which os.replace keeps when it moves the
+    file into place. The mode takes effect on POSIX only; Windows applies inherited ACLs.
+    """
+    temp_path = path.with_name(f".{path.name}.tmp")
+    temp_path.unlink(missing_ok=True)
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0)
-    with os.fdopen(os.open(path, flags, 0o600), "wb") as file:
+    with os.fdopen(os.open(temp_path, flags, mode), "wb") as file:
         file.write(data)
+    return temp_path
 
 
 def main() -> int:
@@ -86,9 +92,19 @@ def main() -> int:
         serialization.PrivateFormat.PKCS8,
         serialization.NoEncryption(),
     )
+    cert_pem = build_certificate(key).public_bytes(serialization.Encoding.PEM)
 
-    write_private_file(key_path, key_pem)
-    cert_path.write_bytes(build_certificate(key).public_bytes(serialization.Encoding.PEM))
+    # Both files are fully written before either replaces an existing one, so a failed
+    # write leaves the previous pair intact instead of a new key next to an old certificate.
+    temp_paths = []
+    try:
+        temp_paths.append(write_temp_file(key_path, key_pem, 0o600))
+        temp_paths.append(write_temp_file(cert_path, cert_pem, 0o644))
+        os.replace(temp_paths[0], key_path)
+        os.replace(temp_paths[1], cert_path)
+    finally:
+        for temp_path in temp_paths:
+            temp_path.unlink(missing_ok=True)
 
     print(f"wrote {cert_path}")
     print(f"wrote {key_path}")

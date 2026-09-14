@@ -46,19 +46,25 @@ uv sync
 ```
 
 If your network uses a TLS-intercepting proxy, uv can fail with certificate
-errors. Set `UV_NATIVE_TLS=1` so uv trusts the operating system's certificate
-store (newer uv releases also accept `UV_SYSTEM_CERTS=1`):
+errors. Set `UV_SYSTEM_CERTS=1` so uv trusts the operating system's certificate
+store:
 
-| Shell      | Command                    |
-| ---------- | -------------------------- |
-| bash / zsh | `export UV_NATIVE_TLS=1`   |
-| PowerShell | `$env:UV_NATIVE_TLS = "1"` |
-| cmd        | `set UV_NATIVE_TLS=1`      |
+| Shell      | Command                      |
+| ---------- | ---------------------------- |
+| bash / zsh | `export UV_SYSTEM_CERTS=1`   |
+| PowerShell | `$env:UV_SYSTEM_CERTS = "1"` |
+| cmd        | `set UV_SYSTEM_CERTS=1`      |
+
+If `uv help sync` does not list `UV_SYSTEM_CERTS`, your uv release predates it;
+set `UV_NATIVE_TLS=1` the same way instead. Newer releases still accept
+`UV_NATIVE_TLS`.
 
 ### Option 2: pip
 
-Python 3.10 or newer is required. Create and activate a virtual environment,
-then install the dependencies.
+Python 3.10, 3.11, or 3.12 is required. Create and activate a virtual
+environment, then install the dependencies. If your default interpreter is
+newer, name a supported one explicitly, for example `python3.12` instead of
+`python3`, or `py -3.12` instead of `py`.
 
 macOS or Linux (bash / zsh):
 
@@ -110,11 +116,18 @@ ignored by Git. Existing files are kept unless you pass `--force`.
 Then start the server with in-memory storage from the root of the repository;
 no `.env` file or database is needed.
 
+The server rate-limits credential registration and status list writes per
+client IP address. By default each allows 10 requests and then gets back one
+request per minute, which is less than the notebooks need when run back to back.
+The commands below raise the limit to 100 for this local server, enough for
+several full runs of all four notebooks.
+
 macOS or Linux (bash / zsh):
 
 ```bash
 APP_SERVER__CERT__STORE__CERTIFICATE_PATH=tls.crt \
 APP_SERVER__CERT__STORE__SIGNING_KEY_PATH=tls.key \
+APP_RATE_LIMIT__STRICT_BURST_SIZE=100 \
 cargo run
 ```
 
@@ -123,6 +136,7 @@ Windows (PowerShell):
 ```powershell
 $env:APP_SERVER__CERT__STORE__CERTIFICATE_PATH = "tls.crt"
 $env:APP_SERVER__CERT__STORE__SIGNING_KEY_PATH = "tls.key"
+$env:APP_RATE_LIMIT__STRICT_BURST_SIZE = "100"
 cargo run
 ```
 
@@ -131,16 +145,17 @@ Windows (cmd):
 ```bat
 set APP_SERVER__CERT__STORE__CERTIFICATE_PATH=tls.crt
 set APP_SERVER__CERT__STORE__SIGNING_KEY_PATH=tls.key
+set APP_RATE_LIMIT__STRICT_BURST_SIZE=100
 cargo run
 ```
 
-The notebooks connect to `http://localhost:8000` by default. If a `.env` file at
-the root of the repository sets `APP_SERVER__PORT`, the notebooks use that port
-instead.
+If a cell still fails with HTTP `429`, restart the server. The limit refills
+slowly, so waiting a minute only allows one more request, and requests rejected
+for missing or invalid authentication count against it too.
 
-The server rate-limits management requests per client. Each notebook stays
-within the limit on its own, but running several in quick succession can exceed
-it. If a cell fails with HTTP `429`, wait a minute or restart the server.
+The notebooks connect to `http://localhost:8000` by default. If
+`APP_SERVER__PORT` is set in the environment of the notebook kernel, or in a
+`.env` file at the root of the repository, the notebooks use that port instead.
 
 ## Run the notebooks
 

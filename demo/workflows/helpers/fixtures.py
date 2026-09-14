@@ -80,8 +80,14 @@ def get_public_jwk(issuer: dict) -> dict:
     algorithm = jwt.get_algorithm_by_name(alg)
     public_key = algorithm.prepare_key(issuer["keypair"]["public_key"])
 
-    # Binds the key to a single algorithm (RFC 8725 §3.1).
-    return {**algorithm.to_jwk(public_key, as_dict=True), "alg": alg}
+    jwk = algorithm.to_jwk(public_key, as_dict=True)
+    # PyJWT adds key_ops to RSA keys only; drop it so every key type has the same shape.
+    jwk.pop("key_ops", None)
+
+    # Declares the intended algorithm for readers of the stored key. It is advisory:
+    # the server takes the algorithm from the token header and only checks that it
+    # suits the key type, so it does not bind the key to this algorithm.
+    return {**jwk, "alg": alg}
 
 
 def create_bearer_jwt_token(issuer: dict, lifespan: int = 3600) -> str:
@@ -96,13 +102,9 @@ def create_bearer_jwt_token(issuer: dict, lifespan: int = 3600) -> str:
     Returns:
         str: Encoded JWT.
     """
-    headers = {
-        "alg": issuer["keypair"]["alg"],
-        "kid": issuer["label"]
-    }
-
     current_time = int(time.time())
     payload = {
+        # The server looks up the issuer's registered key by this claim.
         "iss": issuer["label"],
         "iat": current_time,
         "exp": current_time + lifespan
@@ -111,6 +113,5 @@ def create_bearer_jwt_token(issuer: dict, lifespan: int = 3600) -> str:
     return jwt.encode(
         payload,
         issuer['keypair']['private_key'],
-        algorithm=headers["alg"],
-        headers=headers
+        algorithm=issuer["keypair"]["alg"]
     )
