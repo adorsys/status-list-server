@@ -1,59 +1,147 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
   "type": "object",
+  "title": "status-list-server Helm chart values",
+  "description": "Configuration values for the status-list-server Helm chart. All top-level blocks are optional; when omitted the chart uses the defaults in values.yaml. The base chart is provider-neutral; cloud-specific behavior (Workload Identity, per-cloud DNS/SecretStore) is enabled through the AWS/GCP/Azure fields documented below.",
   "properties": {
     "global": {
       "type": ["object", "null"],
+      "title": "Chart-wide settings",
       "properties": {
         "domain": {
           "type": "string",
-          "description": "Chart-wide public DNS suffix. Leave empty to render localhost/default-neutral hostnames. Rendered hostnames are normalized to lowercase.",
+          "title": "Public DNS suffix",
+          "description": "Chart-wide public DNS suffix. Leave empty to render localhost/default-neutral hostnames. When set, the default ingress host becomes statuslist.<domain> and the default TLS host becomes *.<domain>. Rendered hostnames are normalized to lowercase.",
           "pattern": "^$|^([A-Za-z0-9]([-A-Za-z0-9]{0,61}[A-Za-z0-9])?\\.)+[A-Za-z]{2,63}\\.?$"
         }
       }
     },
     "serviceAccount": {
       "type": "object",
+      "title": "Application ServiceAccount",
+      "description": "ServiceAccount for the application pods. Attach Workload Identity role annotations here (AWS EKS IRSA eks.amazonaws.com/role-arn, GCP GKE iam.gke.io/gcp-service-account, or Azure AKS azure.workload.identity/client-id) for ambient cloud credentials. Create either chart-managed via create=true or reference an existing one via name.",
       "properties": {
-        "create": { "type": "boolean" },
-        "name": { "type": "string" },
-        "automountServiceAccountToken": { "type": "boolean" },
-        "annotations": { "type": "object" },
-        "labels": { "type": "object" }
+        "create": {
+          "type": "boolean",
+          "title": "Create the ServiceAccount",
+          "description": "create=true renders the ServiceAccount and injects serviceAccountName (chart fullname, or the value of name). create=false with an empty name injects no serviceAccountName, so the pod runs as the namespace default ServiceAccount; set name explicitly when disabling chart SA creation."
+        },
+        "name": {
+          "type": "string",
+          "title": "ServiceAccount name",
+          "description": "ServiceAccount name override. Defaults to the chart fullname when create=true (via _helpers.tpl), or to 'default' when create=false with an empty name."
+        },
+        "automountServiceAccountToken": {
+          "type": "boolean",
+          "title": "Mount the Kubernetes API token",
+          "description": "Default false: the application does not need the Kubernetes API, so do not mount the SA bearer token (NSA/CISA hardening, CIS Benchmark 5.1.6). This does NOT break Workload Identity — IRSA / GCP WI / Azure WI use projected OIDC tokens injected by the cloud admission webhook, independent of this setting."
+        },
+        "annotations": {
+          "type": "object",
+          "title": "ServiceAccount annotations",
+          "description": "Workload Identity role annotations, e.g. eks.amazonaws.com/role-arn (EKS IRSA), iam.gke.io/gcp-service-account (GKE WI), or azure.workload.identity/client-id (AKS WI)."
+        },
+        "labels": {
+          "type": "object",
+          "title": "ServiceAccount labels"
+        }
       }
     },
     "statuslist": {
       "type": "object",
+      "title": "Application core",
+      "description": "Configuration for the status-list-server Deployment, pods, image, Service, Ingress, runtime environment, secrets, and scaling. The base values are provider-neutral; cloud variants are selected through the image variant and the overlays in helm/README.md.",
       "properties": {
-        "enabled": { "type": "boolean" },
-        "replicaCount": { "type": "integer" },
-        "initContainers": { "type": "array" },
-        "podLabels": { "type": "object", "additionalProperties": { "type": "string" } },
+        "enabled": {
+          "type": "boolean",
+          "title": "Deploy the application",
+          "description": "Whether to render the application Deployment and its associated resources."
+        },
+        "replicaCount": {
+          "type": "integer",
+          "title": "Replica count",
+          "description": "Number of application replicas. Omitted when autoscaling.enabled=true so the HPA controls the replica count."
+        },
+        "initContainers": {
+          "type": "array",
+          "title": "Init containers",
+          "description": "Additional init containers. Each is hardened (drop-all capabilities, non-root, read-only rootfs, /tmp emptyDir) and given small fixed CPU/memory requests, so only the image and command need to be supplied. The default waits for the bundled PostgreSQL service."
+        },
+        "podLabels": {
+          "type": "object",
+          "title": "Pod labels",
+          "description": "Extra labels merged onto the Pod template metadata. Values are rendered as strings; required e.g. for Azure Workload Identity: azure.workload.identity/use: 'true'.",
+          "additionalProperties": { "type": "string" }
+        },
         "image": {
           "type": "object",
+          "title": "Application image",
+          "description": "Image reference and selection. Resolution precedence: digest (immutable, repository@digest, pullPolicy IfNotPresent) > tag (mutable, repository:tag, pullPolicy Always) > derived <baseAppVersion>-<variant> (never 'latest'). An empty pullPolicy derives from which resolution is in use.",
           "properties": {
-            "repository": { "type": "string", "minLength": 1 },
-            "pullPolicy": { "type": "string", "enum": ["", "Always", "IfNotPresent", "Never"] },
-            "variant": { "type": "string", "enum": ["fscert", "aws", "gcp", "azure", "vault"] },
-            "tag": { "type": "string" },
+            "repository": {
+              "type": "string",
+              "title": "Image repository",
+              "minLength": 1
+            },
+            "pullPolicy": {
+              "type": "string",
+              "title": "Image pull policy",
+              "description": "IfNotPresent for a digest, Always for a mutable tag. Empty derives from whether a digest is pinned.",
+              "enum": ["", "Always", "IfNotPresent", "Never"]
+            },
+            "variant": {
+              "type": "string",
+              "title": "Image variant suffix",
+              "description": "Cloud/credential variant suffix applied to the derived tag when neither tag nor digest is set. Selects the credential backend: fscert (filesystem keys/certs), aws, gcp, azure, vault.",
+              "enum": ["fscert", "aws", "gcp", "azure", "vault"]
+            },
+            "tag": {
+              "type": "string",
+              "title": "Image tag",
+              "description": "Image tag with variant suffix (e.g. 1.2.0-aws). Empty derives <appVersion-without-suffix>-<variant>; never 'latest'."
+            },
             "digest": {
               "type": ["string", "null"],
+              "title": "Image digest",
+              "description": "sha256:<64 hex chars>. Takes precedence over tag, pins the exact digest CI scanned, and defaults pullPolicy to IfNotPresent. Each variant has its own digest; use the digest matching the selected variant.",
               "pattern": "^$|^sha256:[a-f0-9]{64}$"
             }
           }
         },
         "service": {
           "type": "object",
+          "title": "Application Service",
           "properties": {
-            "enabled": { "type": "boolean" },
-            "type": { "type": "string", "enum": ["ClusterIP", "NodePort", "LoadBalancer"] },
+            "enabled": { "type": "boolean", "title": "Render the Service" },
+            "type": {
+              "type": "string",
+              "title": "Service type",
+              "description": "ClusterIP by default. The chart renders ClusterIP, NodePort, or LoadBalancer; ExternalName is rejected at render time.",
+              "enum": ["ClusterIP", "NodePort", "LoadBalancer"]
+            },
             "annotations": {
               "type": "object",
+              "title": "Service annotations",
+              "description": "Annotations on the Service, e.g. AWS NLB annotations (see values-aws-nlb.yaml).",
               "additionalProperties": { "type": "string" }
             },
-            "port": { "type": "integer", "minimum": 1, "maximum": 65535 },
-            "targetPort": { "type": ["integer", "string"], "pattern": "^[A-Za-z0-9-]+$|^[0-9]+$" },
-            "nodePort": { "type": ["integer", "null"], "minimum": 30000, "maximum": 32767 }
+            "port": {
+              "type": "integer",
+              "title": "Service port",
+              "minimum": 1,
+              "maximum": 65535
+            },
+            "targetPort": {
+              "type": ["integer", "string"],
+              "title": "Container target port",
+              "pattern": "^[A-Za-z0-9-]+$|^[0-9]+$"
+            },
+            "nodePort": {
+              "type": ["integer", "null"],
+              "title": "Node port (NodePort only)",
+              "minimum": 30000,
+              "maximum": 32767
+            }
           },
           "allOf": [
             {
@@ -82,96 +170,134 @@
         },
         "ingress": {
           "type": "object",
+          "title": "Ingress",
+          "description": "NGINX Ingress exposing the application. The host defaults to statuslist.<global.domain> when set, otherwise localhost. TLS hosts default to *.<global.domain> when global.domain is set, or to the rendered ingress host when secretName is set explicitly.",
           "properties": {
-            "enabled": { "type": "boolean" },
-            "path": { "type": "string", "minLength": 1 },
-            "pathType": { "type": "string", "enum": ["Exact", "Prefix", "ImplementationSpecific"] },
+            "enabled": { "type": "boolean", "title": "Render the Ingress" },
+            "path": { "type": "string", "title": "Ingress path", "minLength": 1 },
+            "pathType": {
+              "type": "string",
+              "title": "Ingress path type",
+              "enum": ["Exact", "Prefix", "ImplementationSpecific"]
+            },
             "annotations": {
               "type": "object",
+              "title": "Ingress annotations",
+              "description": "NGINX/cert-manager annotations, e.g. cert-manager.io/cluster-issuer and nginx.ingress.kubernetes.io/ssl-redirect.",
               "additionalProperties": { "type": "string" }
             },
             "tls": {
               "type": "object",
+              "title": "Ingress TLS",
               "properties": {
                 "hosts": {
                   "type": "array",
+                  "title": "TLS hosts",
+                  "description": "Explicit TLS hostnames. Empty defaults to *.<global.domain>, or to the rendered ingress host when secretName is set.",
                   "items": { "type": "string", "minLength": 1 }
                 },
-                "secretName": { "type": "string" }
+                "secretName": {
+                  "type": "string",
+                  "title": "TLS secret name",
+                  "description": "Empty keeps the neutral default render HTTP-only. Set in overlays that provide TLS material or cert-manager ingress-shim annotations."
+                }
               }
             },
-            "externalDnsHostname": { "type": "string" }
+            "externalDnsHostname": {
+              "type": "string",
+              "title": "Explicit ingress hostname",
+              "description": "Defaults to statuslist.<global.domain> when global.domain is set, otherwise localhost. Rendered lowercase and emitted as an external-dns hostname annotation."
+            }
           }
         },
         "env": {
           "type": "object",
+          "title": "Application environment variables",
+          "description": "RUNTIME environment for the status-list-server container. APP_DATABASE__PORT is required (the chart fails without it). Do not set APP_DATABASE__URL or APP_DATABASE__PASSWORD here — the chart rejects them (see statuslist.secretMounts and statuslist.fallbackSecret for credential delivery). DNS/Workload Identity settings for ACME DNS-01 are documented in the values.yaml env block and docs/dns-providers.md.",
           "additionalProperties": { "type": "string" }
         },
         "aws": {
           "type": "object",
+          "title": "AWS application configuration",
+          "description": "Optional AWS configuration for the application. Defaults to Workload Identity (IRSA) — the AWS SDK discovers the role from the projected OIDC token and instance metadata, so no files are mounted. Enable mountCredentials only for the legacy static shared-credential-file path.",
           "properties": {
-            "mountCredentials": { "type": "boolean" },
+            "mountCredentials": {
+              "type": "boolean",
+              "title": "Mount static AWS credential files",
+              "description": "Mounts the resolved aws-credentials-secret into the pod and sets AWS_SHARED_CREDENTIALS_FILE / AWS_CONFIG_FILE. In ESO mode the chart also renders the ExternalSecret that provisions that Secret. Off by default so the base chart stays provider-neutral."
+            },
             "credentialsSecret": {
               "type": "object",
+              "title": "AWS credentials secret source",
+              "description": "Remote-source layout of the dedicated aws-credentials-secret when mountCredentials=true and externalSecret.enabled.",
               "properties": {
-                "remoteKey": { "type": "string" },
-                "credentialsProperty": { "type": "string" },
-                "configProperty": { "type": "string" },
-                "targetTemplate": { "type": "object" }
+                "remoteKey": { "type": "string", "title": "Remote key" },
+                "credentialsProperty": { "type": "string", "title": "Credentials property" },
+                "configProperty": { "type": "string", "title": "Config property" },
+                "targetTemplate": { "type": "object", "title": "ESO target template" }
               }
             },
-            "region": { "type": "string" }
+            "region": {
+              "type": "string",
+              "title": "AWS region",
+              "description": "Plain (non-secret) AWS region. Applies to the ESO AWS SecretStore and renders APP_AWS__REGION only when explicitly set. Leave empty for pure-IRSA / Workload Identity so the SDK discovers the region from instance metadata."
+            }
           }
         },
         "fallbackSecret": {
           "type": "object",
+          "title": "Fallback Secret",
+          "description": "Fallback Kubernetes Secret for clusters that do not run External Secrets Operator. Only rendered when externalSecret.enabled=false AND fallbackSecret.enabled=true (the chart fails if both delivery modes are enabled). Always named statuslist-secret; PostgreSQL (postgres.auth.existingSecret) references the same name, so it is deliberately not configurable.",
           "properties": {
-            "enabled": { "type": "boolean" },
+            "enabled": { "type": "boolean", "title": "Render the fallback Secret" },
             "generatedCertificate": {
               "type": "object",
+              "title": "Generated self-signed certificate",
+              "description": "Local/dev helper for the fscert image that includes a self-signed certificate and signing key. GitOps deployments should not use generated material because helm template runs without cluster lookup and can regenerate values on each sync.",
               "properties": {
-                "enabled": { "type": "boolean" },
-                "commonName": { "type": "string", "minLength": 1 },
-                "dnsNames": {
-                  "type": "array",
-                  "items": { "type": "string", "minLength": 1 }
-                },
-                "ipAddresses": {
-                  "type": "array",
-                  "items": { "type": "string", "minLength": 1 }
-                },
-                "certificateKey": { "type": "string", "minLength": 1 },
-                "signingKey": { "type": "string", "minLength": 1 }
+                "enabled": { "type": "boolean", "title": "Generate a certificate" },
+                "commonName": { "type": "string", "minLength": 1, "title": "Certificate common name" },
+                "dnsNames": { "type": "array", "items": { "type": "string", "minLength": 1 }, "title": "Certificate DNS names" },
+                "ipAddresses": { "type": "array", "items": { "type": "string", "minLength": 1 }, "title": "Certificate IP addresses" },
+                "certificateKey": { "type": "string", "minLength": 1, "title": "Certificate secret key" },
+                "signingKey": { "type": "string", "minLength": 1, "title": "Signing key secret key" }
               }
             },
             "stringData": {
               "type": "object",
+              "title": "Secret string data",
+              "description": "Plain-string Secret values (the API server base64-encodes them). Empty postgres-password means the chart generates a random password and reuses an existing one on upgrades when the cluster is reachable; GitOps tools run helm template without cluster lookup, so provide an explicit password or use ESO.",
               "additionalProperties": { "type": "string" }
             }
           }
         },
         "secretMounts": {
           "type": "array",
+          "title": "File-based secret mounts",
+          "description": "Mount Kubernetes Secrets as files into the container (production credential/key rotation, issue #456). fileEnv maps a mounted file path into an application env var; paths are relative to mountPath and must match the mounted items. When APP_DATABASE__PASSWORD_FILE is configured via statuslist.env or fileEnv, the chart does not inject APP_DATABASE__PASSWORD, so the app cannot silently keep a stale startup password.",
           "items": {
             "type": "object",
             "required": ["name", "secretName", "mountPath"],
             "properties": {
-              "name": { "type": "string" },
-              "secretName": { "type": "string" },
-              "mountPath": { "type": "string" },
+              "name": { "type": "string", "title": "Volume name" },
+              "secretName": { "type": "string", "title": "Source Secret name" },
+              "mountPath": { "type": "string", "title": "Container mount path" },
               "items": {
                 "type": "array",
+                "title": "Selected secret keys",
                 "items": {
                   "type": "object",
                   "required": ["key", "path"],
                   "properties": {
-                    "key": { "type": "string" },
-                    "path": { "type": "string" }
+                    "key": { "type": "string", "title": "Secret key" },
+                    "path": { "type": "string", "title": "Mounted file path (relative to mountPath)" }
                   }
                 }
               },
               "fileEnv": {
                 "type": "object",
+                "title": "Environment variable to mounted file mapping",
+                "description": "Map an env var name to a file path relative to mountPath. Each value must match a mounted items path, be relative, normalized, and resolve inside mountPath (the chart fails otherwise).",
                 "additionalProperties": { "type": "string" }
               }
             }
@@ -179,51 +305,107 @@
         },
         "watcher": {
           "type": "object",
+          "title": "Credential rotation watcher",
+          "description": "Watcher configuration for file-based credential rotation detection. When pollIntervalSecs is set, APP_WATCHER__POLL_INTERVAL_SECS is injected. Requires an application image implementing the watcher contract (issue #456).",
           "properties": {
-            "pollIntervalSecs": { "type": ["string", "integer"] }
+            "pollIntervalSecs": {
+              "type": ["string", "integer"],
+              "title": "Poll interval",
+              "description": "Seconds between file-reload polls; injected as APP_WATCHER__POLL_INTERVAL_SECS."
+            }
           }
         },
-        "livenessProbe": { "type": "object" },
-        "readinessProbe": { "type": "object" },
-        "networkPolicy": { "type": "object" },
-        "resources": { "type": "object" }
+        "livenessProbe": {
+          "type": "object",
+          "title": "Liveness probe",
+          "description": "httpGet on /health/live (port http). Override the whole block to customize."
+        },
+        "readinessProbe": {
+          "type": "object",
+          "title": "Readiness probe",
+          "description": "httpGet on /health/ready (port http). Override the whole block to customize."
+        },
+        "networkPolicy": {
+          "type": "object",
+          "title": "NetworkPolicy",
+          "description": "Opt-in NetworkPolicy (default OFF). When enabled and ingress is empty, a port-only rule allows ANY source in the cluster — you MUST restrict ingress to your ingress controller. Egress always allows 443/53 and scopes PostgreSQL/OTel to their target pods.",
+          "properties": {
+            "enabled": { "type": "boolean", "title": "Render the NetworkPolicy" },
+            "ingress": { "type": "array", "title": "Ingress from selectors" },
+            "egressInternal": { "type": "array", "title": "Additional internal egress to selectors" }
+          }
+        },
+        "resources": {
+          "type": "object",
+          "title": "Container resources",
+          "description": "Requests/limits for the application container."
+        }
       }
     },
     "externalSecret": {
       "type": "object",
+      "title": "External Secrets Operator mode",
+      "description": "ESO delivery mode, mutually exclusive with statuslist.fallbackSecret (the chart fails if both are enabled). When enabled the chart renders an ExternalSecret syncs the application Secret (always named 'statuslist-secret', holder of the database password) from the secret manager referenced by secretStore. Cloud credentials resolve via Workload Identity / IRSA / ManagedIdentity. The ExternalSecret target name is intentionally not configurable and fails at render time if changed.",
       "properties": {
-        "enabled": { "type": "boolean" },
-        "spec": {
+        "enabled": { "type": "boolean", "title": "Enable the ExternalSecret" },
+        "metadata": {
           "type": "object",
           "properties": {
+            "name": { "type": "string", "title": "ExternalSecret resource name" }
+          }
+        },
+        "spec": {
+          "type": "object",
+          "title": "ExternalSecret spec",
+          "properties": {
+            "refreshInterval": { "type": "string", "title": "Refresh interval" },
             "secretStoreRef": {
               "type": "object",
+              "title": "SecretStore reference",
+              "description": "References a namespace SecretStore (rendered by this chart) or a pre-existing cluster-scoped ClusterSecretStore (not rendered here).",
               "properties": {
-                "name": { "type": "string" },
-                "kind": { "type": "string" }
+                "name": { "type": "string", "title": "SecretStore name" },
+                "kind": {
+                  "type": "string",
+                  "title": "SecretStore kind",
+                  "enum": ["SecretStore", "ClusterSecretStore"]
+                }
               }
             },
             "target": {
               "type": "object",
+              "title": "Target secret",
               "properties": {
-                "name": { "const": "statuslist-secret" },
-                "creationPolicy": { "type": "string" },
-                "template": { "type": "object" }
+                "name": {
+                  "const": "statuslist-secret",
+                  "title": "Target secret name",
+                  "description": "Single supported application-secret name shared with the Deployment, PostgreSQL, and the fallback Secret. Any other value fails at render time; intentionally not configurable."
+                },
+                "creationPolicy": {
+                  "type": "string",
+                  "title": "Creation policy",
+                  "enum": ["Owner", "Merge", "None"]
+                },
+                "template": { "type": "object", "title": "ESO target template" }
               }
             },
             "data": {
               "type": "array",
+              "title": "Remote secret data",
+              "description": "Mappings of secretKey (local) to remoteRef (remote key/property). The default maps postgres-password from the POSTGRES_PASSWORD property of the 'statuslist-secret' remote key.",
               "items": {
                 "type": "object",
                 "required": ["secretKey", "remoteRef"],
                 "properties": {
-                  "secretKey": { "type": "string" },
-                  "remoteRef": { "type": "object" }
+                  "secretKey": { "type": "string", "title": "Local secret key" },
+                  "remoteRef": { "type": "object", "title": "Remote reference" }
                 }
               }
             },
             "extraExternalSecrets": {
               "type": "array",
+              "title": "Additional ExternalSecrets",
+              "description": "Optional additional ExternalSecret resources for separately mounted Secrets (file-based database credentials, token signing keys, API keys). Each renders its own ExternalSecret and may override refreshInterval and secretStoreRef; defaults come from externalSecret.spec.",
               "items": {
                 "type": "object",
                 "required": ["metadata", "spec"],
@@ -232,34 +414,34 @@
                     "type": "object",
                     "required": ["name"],
                     "properties": {
-                      "name": { "type": "string" },
-                      "labels": { "type": "object" },
-                      "annotations": { "type": "object" }
+                      "name": { "type": "string", "title": "Resource name" },
+                      "labels": { "type": "object", "title": "Labels" },
+                      "annotations": { "type": "object", "title": "Annotations" }
                     }
                   },
                   "spec": {
                     "type": "object",
                     "required": ["target"],
                     "properties": {
-                      "refreshInterval": { "type": "string" },
+                      "refreshInterval": { "type": "string", "title": "Refresh interval" },
                       "secretStoreRef": {
                         "type": "object",
                         "properties": {
-                          "name": { "type": "string" },
-                          "kind": { "type": "string" }
+                          "name": { "type": "string", "title": "SecretStore name" },
+                          "kind": { "type": "string", "title": "SecretStore kind" }
                         }
                       },
                       "target": {
                         "type": "object",
                         "required": ["name"],
                         "properties": {
-                          "name": { "type": "string" },
-                          "creationPolicy": { "type": "string" },
-                          "template": { "type": "object" }
+                          "name": { "type": "string", "title": "Target secret name" },
+                          "creationPolicy": { "type": "string", "title": "Creation policy" },
+                          "template": { "type": "object", "title": "ESO target template" }
                         }
                       },
-                      "data": { "type": "array" },
-                      "dataFrom": { "type": "array" }
+                      "data": { "type": "array", "title": "Remote secret data" },
+                      "dataFrom": { "type": "array", "title": "Remote dataFrom directives" }
                     }
                   }
                 }
@@ -271,54 +453,78 @@
     },
     "secretStore": {
       "type": "object",
+      "title": "ESO SecretStore / ClusterSecretStore",
+      "description": "SecretStore reference that externalSecret syncs from, selecting the cloud or on-prem secret manager. Rendered only when externalSecret.enabled AND secretStore.enabled, and only for a namespace-scoped SecretStore; a ClusterSecretStore kind is expected to pre-exist cluster-wide and is not rendered. Provider auth is decoupled from the application's own Workload Identity where noted.",
       "properties": {
-        "enabled": { "type": "boolean" },
+        "enabled": { "type": "boolean", "title": "Render the SecretStore" },
         "provider": {
           "type": "string",
+          "title": "Provider selector",
+          "description": "Secret provider: aws (Secrets Manager / Parameter Store), vault (HashiCorp Vault / OpenBao), gcp (GCPSM), azure (Azure Key Vault), raw (full ESO provider body passthrough). Required when enabled=true.",
           "enum": ["", "aws", "vault", "gcp", "azure", "raw"]
         },
         "aws": {
           "type": "object",
+          "title": "AWS provider",
           "properties": {
-            "service": { "type": "string", "enum": ["SecretsManager", "ParameterStore"] },
-            "region": { "type": "string" }
+            "service": {
+              "type": "string",
+              "title": "AWS service",
+              "enum": ["SecretsManager", "ParameterStore"]
+            },
+            "region": {
+              "type": "string",
+              "title": "AWS region",
+              "description": "Region for the ESO AWS SecretStore. Leaves APP_AWS__REGION opt-in (not injected) so pure-IRSA / Workload Identity installs keep SDK region discovery; the CR independently falls back to eu-central-1."
+            }
           }
         },
         "vault": {
           "type": "object",
+          "title": "Vault provider",
           "properties": {
-            "server": { "type": "string" },
-            "path": { "type": "string" },
-            "auth": { "type": "object" }
+            "server": { "type": "string", "title": "Vault/OpenBao server URL" },
+            "path": { "type": "string", "title": "Vault KV path" },
+            "auth": { "type": "object", "title": "Vault auth block" }
           }
         },
         "gcp": {
           "type": "object",
+          "title": "GCP provider",
           "properties": {
-            "projectID": { "type": "string" },
-            "auth": { "type": "object" }
+            "projectID": { "type": "string", "title": "Google Cloud project ID" },
+            "auth": { "type": "object", "title": "GCP auth block" }
           }
         },
         "azure": {
           "type": "object",
+          "title": "Azure provider",
           "properties": {
-            "tenantId": { "type": "string" },
-            "vaultUrl": { "type": "string" },
-            "authType": { "type": "string", "enum": ["", "ServicePrincipal", "ManagedIdentity", "WorkloadIdentity"] },
-            "environmentType": { "type": "string" },
-            "identityId": { "type": "string" },
+            "tenantId": { "type": "string", "title": "Azure tenant ID" },
+            "vaultUrl": { "type": "string", "title": "Azure Key Vault URL" },
+            "authType": {
+              "type": "string",
+              "title": "Azure auth type",
+              "description": "Per the External Secrets Operator AzureKVProvider CRD: ServicePrincipal | ManagedIdentity | WorkloadIdentity. ManagedIdentity uses identityId; ServicePrincipal client credentials go under authSecretRef. 'ClientSecret' is not a valid CRD value and is rejected.",
+              "enum": ["", "ServicePrincipal", "ManagedIdentity", "WorkloadIdentity"]
+            },
+            "environmentType": { "type": "string", "title": "Azure environment type" },
+            "identityId": { "type": "string", "title": "Managed identity ID" },
             "serviceAccountRef": {
               "type": "object",
+              "title": "ESO ServiceAccount reference",
+              "description": "References the External Secrets Operator controller's own ServiceAccount (least privilege), not the application ServiceAccount. namespace should match the ESO controller namespace; leave empty when ESO is in this release namespace.",
               "properties": {
-                "name": { "type": "string" },
-                "namespace": { "type": ["string", "null"] }
+                "name": { "type": "string", "title": "ServiceAccount name" },
+                "namespace": { "type": ["string", "null"], "title": "ServiceAccount namespace" }
               }
             },
-            "authSecretRef": { "type": "object" }
+            "authSecretRef": { "type": "object", "title": "ServicePrincipal client-credentials secret reference" }
           }
         },
         "raw": {
           "type": "object",
+          "title": "Raw ESO provider passthrough",
           "description": "Full ESO provider spec passthrough for unsupported providers (secretStore.provider=raw). Holds ONLY the concrete provider body rendered directly under spec.provider (no extra top-level 'provider' key), e.g. { webhook: { url: '...' } }. Render-time validation rejects an empty/raw-only object to avoid emitting an insecure SecretStore."
         }
       },
@@ -356,90 +562,179 @@
     },
     "postgres": {
       "type": "object",
+      "title": "Bundled PostgreSQL",
+      "description": "Bundled in-cluster PostgreSQL (accepted values of the CloudPirates chart). One possible backend: the application is database-agnostic and selects its backend at runtime via APP_DATABASE__* env vars. Set enabled=false and point APP_DATABASE__* at an external database (including MySQL, see docs/database-backends.md) to use a different backend.",
       "properties": {
-        "enabled": { "type": "boolean" },
-        "resources": { "type": "object" },
+        "enabled": { "type": "boolean", "title": "Render the PostgreSQL subchart" },
+        "resources": { "type": "object", "title": "PostgreSQL resources" },
         "auth": {
           "type": "object",
+          "title": "PostgreSQL auth",
           "properties": {
-            "username": { "type": "string" },
-            "database": { "type": "string" },
-            "existingSecret": { "type": "string" },
-            "secretKeys": { "type": "object" }
+            "username": { "type": "string", "title": "Database username" },
+            "database": { "type": "string", "title": "Database name" },
+            "existingSecret": {
+              "type": "string",
+              "title": "Existing secret name",
+              "description": "Must reference the same secret the application reads (statuslist-secret, see the status-list-server-chart.appSecretName helper). Fixed in fallback mode; in ESO mode keep it in sync with externalSecret.spec.target.name."
+            },
+            "secretKeys": { "type": "object", "title": "Secret key names" }
           }
         },
         "persistence": {
           "type": "object",
+          "title": "PostgreSQL persistence",
           "properties": {
-            "enabled": { "type": "boolean" },
-            "size": { "type": "string" },
+            "enabled": { "type": "boolean", "title": "Enable persistent storage" },
+            "size": { "type": "string", "title": "Persistent volume size" },
             "storageClass": {
               "type": "string",
+              "title": "Storage class",
               "description": "Empty string uses the cluster default StorageClass."
             }
           }
         },
         "service": {
           "type": "object",
+          "title": "PostgreSQL Service",
           "properties": {
-            "type": { "type": "string" },
-            "port": { "type": "integer", "minimum": 1, "maximum": 65535 }
+            "type": { "type": "string", "title": "Service type" },
+            "port": { "type": "integer", "minimum": 1, "maximum": 65535, "title": "Service port" }
           }
         },
-        "image": { "type": "object" }
+        "image": { "type": "object", "title": "PostgreSQL image" }
       }
     },
     "autoscaling": {
       "type": "object",
+      "title": "HorizontalPodAutoscaler",
+      "description": "HPA (autoscaling/v2). When enabled the Deployment omits replicas so the HPA controls the count. Scaled pods share the application ServiceAccount; each gets its own short-lived Workload Identity token, so no per-pod cloud registration is required. minReplicas > maxReplicas is rejected at render time.",
       "properties": {
-        "enabled": { "type": "boolean" },
-        "minReplicas": { "type": "integer", "minimum": 1 },
-        "maxReplicas": { "type": "integer", "minimum": 1 },
-        "metrics": { "type": "array" },
-        "behavior": { "type": "object" }
+        "enabled": { "type": "boolean", "title": "Enable the HPA" },
+        "minReplicas": { "type": "integer", "minimum": 1, "title": "Minimum replicas" },
+        "maxReplicas": { "type": "integer", "minimum": 1, "title": "Maximum replicas" },
+        "metrics": { "type": "array", "title": "HPA metrics" },
+        "behavior": { "type": "object", "title": "HPA scaling behavior" }
       }
     },
     "podDisruptionBudget": {
       "type": "object",
+      "title": "PodDisruptionBudget",
+      "description": "PDB (policy/v1). Use with replicaCount > 1 / HPA so disruption events keep the minimum replicas available. Set exactly one of minAvailable / maxUnavailable; the chart rejects both set or neither set. minAvailable must be < replica count (or autoscaling.minReplicas) or voluntary evictions are blocked; the safe default is maxUnavailable: 1. An explicit 0 is preserved.",
       "properties": {
-        "enabled": { "type": "boolean" },
-        "minAvailable": { "type": ["integer", "string", "null"] },
-        "maxUnavailable": { "type": ["integer", "string", "null"] }
+        "enabled": { "type": "boolean", "title": "Enable the PDB" },
+        "minAvailable": { "type": ["integer", "string", "null"], "title": "Minimum available" },
+        "maxUnavailable": { "type": ["integer", "string", "null"], "title": "Maximum unavailable" }
+      }
+    },
+    "serviceMonitor": {
+      "type": "object",
+      "title": "ServiceMonitor",
+      "description": "ServiceMonitor (monitoring.coreos.com/v1) for kube-prometheus-stack / Prometheus Operator discovery. Prometheus deployments driven by the Operator discover scrape targets through ServiceMonitor CRs rather than prometheus.io/* annotations; enable to define the /metrics endpoint on the application Service.",
+      "properties": {
+        "enabled": { "type": "boolean", "title": "Enable the ServiceMonitor" },
+        "labels": {
+          "type": "object",
+          "title": "ServiceMonitor labels",
+          "description": "Selector labels required by your Prometheus ServiceMonitorSelector, e.g. release: kube-prometheus-stack."
+        },
+        "interval": { "type": "string", "title": "Scrape interval", "description": "e.g. '15s'. Empty uses the Operator default." },
+        "scrapeTimeout": { "type": "string", "title": "Scrape timeout", "description": "e.g. '10s'. Empty uses the Operator default." },
+        "metricRelabelings": { "type": "array", "title": "Metric relabelings" },
+        "relabelings": { "type": "array", "title": "Target relabelings" }
+      }
+    },
+    "prometheusRule": {
+      "type": "object",
+      "title": "PrometheusRule",
+      "description": "PrometheusRule (monitoring.coreos.com/v1) shipping the SLI recording rules and SLO burn-rate / error-budget alerting rules as a single CRD. Alert thresholds come from the slo block; both must stay in lockstep with observability/slo/thresholds.json (enforced by CI) and the standalone observability/prometheus/rules/*.rules.yml.",
+      "properties": {
+        "enabled": { "type": "boolean", "title": "Enable the PrometheusRule" },
+        "labels": {
+          "type": "object",
+          "title": "PrometheusRule labels",
+          "description": "Selector labels required by your Prometheus RuleSelector, e.g. release: kube-prometheus-stack."
+        }
+      }
+    },
+    "slo": {
+      "type": "object",
+      "title": "SLO thresholds",
+      "description": "SLO target thresholds consumed by the prometheusrule template to build SLI recording rules and SLO burn-rate alerting rules. Each value renders verbatim into alert expressions. Must stay in lockstep with observability/slo/thresholds.json (CI-enforced) and the standalone observability/prometheus/rules/*.rules.yml.",
+      "properties": {
+        "errorRateTarget": { "type": "number", "title": "Error-rate SLO target", "description": "Acceptable ratio of 5xx to all requests over the SLO window (0.005 = 0.5%). Denominator of burn-rate multipliers and error-budget success ratio." },
+        "fastBurnMultiplier": { "type": "number", "title": "Fast-burn multiplier", "description": "Fast-burn alert triggers when observed error rate exceeds errorRateTarget * this (14.4x) on both the 1h and 5m windows for 5m. Pages." },
+        "slowBurnMultiplier": { "type": "number", "title": "Slow-burn multiplier", "description": "Slow-burn alert triggers when observed error rate exceeds errorRateTarget * this (6.0x) on the 6h and 30m windows for 30m. Warns." },
+        "requestLatencyP95": { "type": "number", "title": "Request latency P95 target (s)", "description": "P95 request latency target in seconds (0.3 = 300ms). Exceeding on the fast or slow burn windows fires an alert." },
+        "dbLatencyP95": { "type": "number", "title": "DB latency P95 target (s)", "description": "P95 database query latency target in seconds (0.05 = 50ms). Same fast/slow burn semantics." },
+        "cacheHitRatioMin": { "type": "number", "title": "Minimum cache hit ratio", "description": "Minimum acceptable status-list cache hit ratio (0.85 = 85%); below this for 15m fires a warn." },
+        "certRenewalFailureMax": { "type": "number", "title": "Max certificate-renewal failure ratio", "description": "Maximum acceptable certificate-renewal failure ratio (0.01 = 1%). Parity with the standalone rules." },
+        "errorBudgetCriticalThreshold": { "type": "number", "title": "Error-budget critical threshold", "description": "Remaining-error-budget gate for the ErrorBudget*Critical page alerts; below this fraction of the 30d budget remaining pages." },
+        "certExpiryWarnSeconds": { "type": "number", "title": "Certificate expiry warn seconds", "description": "Seconds remaining that trigger a warn (1209600 = 14d). Cert renewal is a discrete low-frequency event, so alerts watch the continuous cert_time_to_expiry_seconds gauge." },
+        "certExpiryCriticalSeconds": { "type": "number", "title": "Certificate expiry critical seconds", "description": "Seconds remaining that trigger a page (604800 = 7d)." }
       }
     },
     "alerting": {
       "type": "object",
+      "title": "AlertmanagerConfig alerting",
+      "description": "AlertmanagerConfig (monitoring.coreos.com/v1beta1) routing SLO alerts to a notification channel — the Kubernetes equivalent of the Docker Compose ALERTMANAGER_PLATFORM + generate-alertmanager-config.sh setup. Supported platforms: discord, slack, teams, mattermost, webhook (via alerting.webhookUrl) and email (via alerting.email.*). Route tree: severity=none -> deadmansswitch, severity=page -> human (repeat 4h), severity=warn -> human (repeat 24h), everything else -> noop.",
       "properties": {
-        "enabled": { "type": "boolean" },
+        "enabled": { "type": "boolean", "title": "Enable alert routing" },
         "platform": {
           "type": "string",
+          "title": "Notification platform",
+          "description": "Platform selector, must match one of the supported values above.",
           "enum": ["slack", "discord", "teams", "mattermost", "email", "webhook", ""]
         },
-        "dashboardUrl": { "type": "string" },
+        "dashboardUrl": { "type": "string", "title": "Dashboard URL", "description": "Grafana dashboard URL injected into alert annotations." },
         "slack": {
           "type": "object",
+          "title": "Slack channel override",
+          "description": "Optional Slack channel override (e.g. '#alerts'). Leave empty to use the webhook default channel.",
           "properties": {
-            "channel": { "type": "string" }
+            "channel": { "type": "string", "title": "Slack channel" }
           }
         },
-        "labels": { "type": "object" },
-        "existingSecret": { "type": "string" },
-        "webhookUrl": { "type": "string" },
-        "dmsWebhookUrl": { "type": "string" },
-        "dmsEnabled": { "type": "boolean" },
-        "webhookTimeout": { "type": "string" },
+        "labels": { "type": "object", "title": "AlertmanagerConfig labels", "description": "Additional labels required by your Alertmanager selector (e.g. release)." },
+        "existingSecret": {
+          "type": "string",
+          "title": "Pre-existing credentials secret",
+          "description": "Name of a pre-existing Secret containing credentials. When set the chart does NOT render its own Secret (recommended for production); the Secret must already exist and contain the platform keys (webhook-url, optional dms-webhook-url / smtp-password)."
+        },
+        "webhookUrl": { "type": "string", "title": "Webhook URL", "description": "Inline webhook URL for discord/slack/teams/mattermost/webhook. Never commit real tokens — use existingSecret + ESO/Vault in production." },
+        "dmsWebhookUrl": { "type": "string", "title": "Dead-man's-switch URL", "description": "The always-firing Watchdog pings this so a collapsed pipeline is detected by its ABSENCE. Empty absorbs the Watchdog." },
+        "dmsEnabled": { "type": "boolean", "title": "Enable Dead Man's Switch", "description": "Enable DMS when using existingSecret (reads key dms-webhook-url). When dmsWebhookUrl is set, DMS is enabled implicitly." },
+        "webhookTimeout": { "type": "string", "title": "Webhook timeout", "description": "Per-request timeout for webhook/Teams/Mattermost/DMS receivers as a Go duration string (e.g. '10s')." },
         "email": {
           "type": "object",
+          "title": "Email settings",
+          "description": "Email settings (required only when platform=email). to/from/smarthost render as plain CRD strings; only the optional SMTP password is read from the Secret (smtp-password).",
           "properties": {
-            "to": { "type": "string" },
-            "smtpHost": { "type": "string" },
-            "smtpPort": { "type": "string" },
-            "smtpFrom": { "type": "string" },
-            "smtpPassword": { "type": "string" },
-            "requireTls": { "type": "boolean" },
-            "tlsConfig": { "type": "object" }
+            "to": { "type": "string", "title": "Recipient email" },
+            "smtpHost": { "type": "string", "title": "SMTP host" },
+            "smtpPort": { "type": "string", "title": "SMTP port" },
+            "smtpFrom": { "type": "string", "title": "Sender email" },
+            "smtpPassword": { "type": "string", "title": "SMTP AUTH password", "description": "Stored in the alerting Secret as smtp-password (or read from existingSecret) and referenced via authPassword. Empty disables SMTP AUTH." },
+            "requireTls": { "type": "boolean", "title": "Require TLS" },
+            "tlsConfig": { "type": "object", "title": "Email TLS config", "description": "EmailConfig tlsConfig overrides (certificate handling). Empty disables custom TLS settings." }
           }
         }
+      }
+    },
+    "opentelemetry-collector": {
+      "type": "object",
+      "title": "OpenTelemetry Collector subchart",
+      "description": "OpenTelemetry Collector subchart (opentelemetry-collector dependency). When enabled the Deployment injects APP_TELEMETRY__ENABLED=true and APP_TELEMETRY__OTLP_ENDPOINT pointing at the collector Service, and network-policy.yaml opens OTLP egress. The default config uses the dev-only debug exporter; configure production exporters in config.exporters.",
+      "properties": {
+        "enabled": { "type": "boolean", "title": "Enable the collector" },
+        "mode": { "type": "string", "title": "Deployment mode" },
+        "image": { "type": "object", "title": "Collector image" },
+        "podSecurityContext": { "type": "object", "title": "Pod security context" },
+        "securityContext": { "type": "object", "title": "Container security context" },
+        "resources": { "type": "object", "title": "Collector resources" },
+        "serviceAccount": { "type": "object", "title": "Collector ServiceAccount" },
+        "ports": { "type": "object", "title": "Collector ports" },
+        "config": { "type": "object", "title": "Collector config" }
       }
     }
   }

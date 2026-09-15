@@ -67,7 +67,10 @@ Effective name of the Kubernetes Secret the application reads (postgres password
 Single supported name: "statuslist-secret" in both ESO mode (ExternalSecret target) and
 fallback mode. The Deployment, PostgreSQL (postgres.auth.existingSecret), and the fallback
 Secret all reference this same name, so it is not independently configurable. ESO mode
-validates externalSecret.spec.target.name against it at render time.
+validates externalSecret.spec.target.name against it at render time (external-secrets.yaml),
+failing the release if changed. The file-based database-credentials entry under
+statuslist.secretMounts is merely the default example mount referencing this name; secretMounts
+is dynamic and may mount arbitrary secret names.
 */}}
 {{- define "status-list-server-chart.appSecretName" -}}
 {{- "statuslist-secret" }}
@@ -77,7 +80,9 @@ validates externalSecret.spec.target.name against it at render time.
 Effective AWS region for the application (renders APP_AWS__REGION for the AWS secretStore
 provider). Preference: explicit statuslist.aws.region, then the legacy secretStore.aws.region
 (upgrade-compatible fallback). Returns empty when neither is set, so APP_AWS__REGION is opt-in
-(explicitly configured) rather than injected unconditionally for non-AWS providers.
+(explicitly configured) rather than injected unconditionally for non-AWS providers. It is also
+used as the ESO AWS SecretStore region fallback (secret-store.yaml), which independently
+defaults to eu-central-1 at the CR level for pure-IRSA / Workload Identity installs.
 */}}
 {{- define "status-list-server-chart.appRegion" -}}
 {{- $r := .Values.statuslist.aws.region }}
@@ -89,8 +94,10 @@ provider). Preference: explicit statuslist.aws.region, then the legacy secretSto
 
 {{/*
 Database port helper: returns the configured database port from env.
-Note: APP_DATABASE__PORT is required by deployment.yaml; this helper
-assumes the value exists and does not provide a default.
+Used by the wait-for-postgres init container and by the NetworkPolicy
+egress rule to scope internal egress to the database port.
+Note: APP_DATABASE__PORT is required by deployment.yaml (deployment fails without it); this
+helper assumes the value exists and does not provide a default.
 */}}
 {{- define "status-list-server-chart.dbPort" -}}
 {{- $env := .Values.statuslist.env | default dict }}
