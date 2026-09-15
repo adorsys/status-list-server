@@ -114,7 +114,7 @@ expect "${repo}:test-tag|Always|" \
     --set statuslist.image.digest=null
 
 # A malformed digest must fail at template time with the digest validation error.
-expect_failure "Does not match pattern" \
+expect_failure "sha256:\\[a-f0-9\\]{64}" \
     --set-string statuslist.image.digest=not-a-digest
 
 expect_failure "statuslist.image.tag or statuslist.image.digest" \
