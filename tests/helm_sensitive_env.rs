@@ -1,5 +1,5 @@
 use std::{
-    fs,
+    env, fs,
     path::{Path, PathBuf},
     process::{Command, Output},
 };
@@ -55,13 +55,16 @@ appVersion: "1.0.0"
 
 fn helm_available() -> bool {
     Command::new("helm")
-        .args(["version", "--client"])
+        .arg("version")
         .output()
         .is_ok_and(|output| output.status.success())
 }
 
 fn helm_template(args: &[&str]) -> Option<Output> {
     if !helm_available() {
+        if env::var_os("CI").is_some() {
+            panic!("helm is required for helm_sensitive_env tests in CI");
+        }
         eprintln!("skipping Helm render assertions because helm is not installed");
         return None;
     }

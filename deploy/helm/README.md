@@ -466,4 +466,4 @@ The `AlertmanagerConfig` CRD must be installed in the cluster (see the top-level
 * [Deployment runbook](../../docs/deployment-runbook.md): how to deploy and how CI/CD deploys to production.
 * [Troubleshooting reference](../../docs/troubleshooting.md): error-indexed fixes for startup, secrets, Kubernetes/ESO, and Helm/upgrade issues.
 * [Container supply chain](../../docs/supply-chain.md): image scanning, SBOM, and SLSA.
-* [Project README](../README.md): overview and local-development quick start.
+* [Project README](../../README.md): overview and local-development quick start.

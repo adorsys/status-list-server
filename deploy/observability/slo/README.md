@@ -155,7 +155,7 @@ dashboards and alerts drift from the documented objective:
 | 85% cache hit        | `alerting.rules.yml` (0.85), `dashboards/src/generate.mjs` (0.85), this doc                                                                                        |
 | 50 ms DB latency     | `alerting.rules.yml` (0.05), `dashboards/src/generate.mjs` (0.05), this doc                                                                                        |
 | 1% cert renewal      | `dashboards/src/generate.mjs` (0.01, diagnostic reference only); alerting uses expiry thresholds below                                                             |
-| 14d / 7d cert expiry | `alerting.rules.yml` (1209600 / 604800 s), `../../helm/chart/values.yaml` (`slo.certExpiryWarnSeconds` / `certExpiryCriticalSeconds`), `thresholds.json`, this doc |
+| 14d / 7d cert expiry | `alerting.rules.yml` (1209600/604800s), `deploy/helm/chart/values.yaml` (`slo.certExpiryWarnSeconds` / `certExpiryCriticalSeconds`), `thresholds.json`, this doc   |
 | 0.5% token-gen       | `recording.rules.yml` (0.005), `alerting.rules.yml` (0.072/0.030), this doc                                                                                        |
 
 Because the dashboard JSON is generated, change `dashboards/src/generate.mjs`

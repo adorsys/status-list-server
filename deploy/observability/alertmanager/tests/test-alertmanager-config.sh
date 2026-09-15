@@ -20,7 +20,7 @@
 #   deploy/observability/alertmanager/tests/test-alertmanager-config.sh
 set -euo pipefail
 
-REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
+REPO_ROOT="$(git -C "$(dirname "${BASH_SOURCE[0]}")" rev-parse --show-toplevel)"
 GENERATOR="$REPO_ROOT/deploy/observability/prometheus/generate-alertmanager-config.sh"
 MOCK="$REPO_ROOT/deploy/observability/alertmanager/tests/mock_webhook.py"
 AM_IMAGE="prom/alertmanager:v0.28.1"

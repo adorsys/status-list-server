@@ -19,6 +19,9 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
+env:
+  CHART_DIR: deploy/helm/chart
+
 jobs:
   zizmor-security:
     name: Zizmor Security Check
@@ -347,6 +350,8 @@ jobs:
 
       - name: Install Helm
         uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+        with:
+          version: v4.2.4
 
       - name: Install cargo-nextest
         uses: taiki-e/install-action@c44f6b046f1c29ae5918b1e0bfdbb2f1813836fd # v2.84.1
@@ -574,7 +579,7 @@ jobs:
           # Upstream chart default values:
           # https://github.com/open-telemetry/opentelemetry-helm-charts/blob/main/charts/opentelemetry-collector/values.yaml
           helm repo add open-telemetry https://open-telemetry.github.io/opentelemetry-helm-charts
-          helm dependency build deploy/helm/chart
+          helm dependency build "$CHART_DIR"
 
       - name: Render Helm templates
         uses: ./.github/workflows/render-helm-templates
@@ -611,13 +616,13 @@ jobs:
       - name: Build Helm dependencies
         run: |
           helm repo add open-telemetry https://open-telemetry.github.io/opentelemetry-helm-charts
-          helm dependency build deploy/helm/chart
+          helm dependency build "$CHART_DIR"
 
       - name: Validate Helm template with local values
         run: |
           set -euo pipefail
           output_file="/tmp/statuslist-local-rendered.yaml"
-          helm template statuslist-local deploy/helm/chart -f deploy/helm/chart/values-local.yaml --namespace local > "$output_file"
+          helm template statuslist-local "$CHART_DIR" -f "$CHART_DIR"/values-local.yaml --namespace local > "$output_file"
 
           # Verify APP_ENV is set to "development" as expected for local values
           # The pattern matches the multi-line YAML structure: - name: APP_ENV followed by value: "development"
@@ -655,7 +660,7 @@ jobs:
       - name: Build Helm dependencies
         run: |
           helm repo add open-telemetry https://open-telemetry.github.io/opentelemetry-helm-charts
-          helm dependency build deploy/helm/chart
+          helm dependency build "$CHART_DIR"
 
       - name: Render Helm templates
         uses: ./.github/workflows/render-helm-templates
@@ -769,13 +774,13 @@ jobs:
       - name: Build Helm dependencies
         run: |
           helm repo add open-telemetry https://open-telemetry.github.io/opentelemetry-helm-charts
-          helm dependency build deploy/helm/chart
+          helm dependency build "$CHART_DIR"
 
       - name: Render Helm chart
         env:
           APP_DATABASE_PORT: "5432"
         run: |
-          helm template statuslist deploy/helm/chart \
+          helm template statuslist "$CHART_DIR" \
             --namespace statuslist \
             --set-string statuslist.env.APP_DATABASE__PORT="${APP_DATABASE_PORT}" \
             > /tmp/statuslist-rendered.yaml
@@ -829,7 +834,7 @@ jobs:
       - name: Build Helm dependencies
         run: |
           helm repo add open-telemetry https://open-telemetry.github.io/opentelemetry-helm-charts
-          helm dependency build deploy/helm/chart
+          helm dependency build "$CHART_DIR"
 
       - name: Validate Prometheus recording rules
         run: |
@@ -851,7 +856,7 @@ jobs:
         # verified, not just syntactically checked, and (c) it defines exactly the
         # same rule names as the standalone tested rules so neither copy can drift.
         run: |
-          helm template status-list-server deploy/helm/chart \
+          helm template status-list-server "$CHART_DIR" \
             --namespace ns1 \
             --set prometheusRule.enabled=true > /tmp/helm-render.yaml
           python3 - <<'EOF'

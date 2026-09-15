@@ -5,17 +5,22 @@ SLO dashboards, Prometheus recording/alerting rules, and runbooks for
 
 ```text
 deploy/observability/
+  README.md                     # overview, validation commands, and conventions
+  LIVE_TESTING.md               # manual live-testing scenarios for the local stack
+  otel-collector.yaml           # Docker Compose collector config; Helm uses chart values
   slo/thresholds.json            # single source of truth for SLO targets
   slo/lint-thresholds.mjs        # CI linter verifying target lockstep
   slo/README.md                  # SLI/SLO definitions + methodology
   prometheus/
     prometheus.yml               # dev scrape config (2s scrape interval)
     prometheus.production.yml    # production scrape config (15s scrape interval)
+    generate-alertmanager-config.sh # renders local Alertmanager config from env vars
     rules/recording.rules.yml    # pre-aggregated sli:* series
     rules/alerting.rules.yml     # multi-window multi-burn-rate alerts
     tests/*.test.yml             # promtool rule tests
   alertmanager/
     alertmanager.example.yml     # example routing config (severity page -> PagerDuty, warn -> Slack)
+    tests/                       # generator and webhook delivery test suite
   dashboards/
     src/                         # deterministic generator
     generated/*.json             # committed dashboard Grafana loads

@@ -8,41 +8,42 @@ runs:
       shell: bash
       run: |
         set -euo pipefail
+        CHART_DIR="deploy/helm/chart"
         mkdir -p /tmp/rendered
-        CHART_APP_VERSION=$(helm show chart deploy/helm/chart | sed -nE 's/^appVersion:[[:space:]]*"?([^"]+)"?[[:space:]]*$/\1/p')
+        CHART_APP_VERSION=$(helm show chart "$CHART_DIR" | sed -nE 's/^appVersion:[[:space:]]*"?([^"]+)"?[[:space:]]*$/\1/p')
         CHART_BASE_VERSION="${CHART_APP_VERSION%-fscert}"
         EXPECTED_AWS_TAG="${CHART_BASE_VERSION}-aws"
-        helm lint deploy/helm/chart
-        helm lint deploy/helm/chart -f deploy/helm/chart/values-aws.yaml
-        helm lint deploy/helm/chart -f deploy/helm/chart/values-external-secrets.yaml
-        helm lint deploy/helm/chart -f deploy/helm/chart/values-aws.yaml -f deploy/helm/chart/values-production.yaml
-        helm template status-list-server deploy/helm/chart -f deploy/helm/chart/values.yaml --output-dir /tmp/rendered/default
-        helm template status-list-server deploy/helm/chart -f deploy/helm/chart/values-local.yaml --output-dir /tmp/rendered/local
-        helm template status-list-server deploy/helm/chart -f deploy/helm/chart/values-external-secrets.yaml --output-dir /tmp/rendered/external-secrets
-        helm template status-list-server deploy/helm/chart -f deploy/helm/chart/values-rotation-example.yaml --output-dir /tmp/rendered/rotation
-        helm template status-list-server deploy/helm/chart --set serviceAccount.create=false --output-dir /tmp/rendered/no-sa
-        helm template status-list-server deploy/helm/chart \
+        helm lint "$CHART_DIR"
+        helm lint "$CHART_DIR" -f "$CHART_DIR"/values-aws.yaml
+        helm lint "$CHART_DIR" -f "$CHART_DIR"/values-external-secrets.yaml
+        helm lint "$CHART_DIR" -f "$CHART_DIR"/values-aws.yaml -f "$CHART_DIR"/values-production.yaml
+        helm template status-list-server "$CHART_DIR" -f "$CHART_DIR"/values.yaml --output-dir /tmp/rendered/default
+        helm template status-list-server "$CHART_DIR" -f "$CHART_DIR"/values-local.yaml --output-dir /tmp/rendered/local
+        helm template status-list-server "$CHART_DIR" -f "$CHART_DIR"/values-external-secrets.yaml --output-dir /tmp/rendered/external-secrets
+        helm template status-list-server "$CHART_DIR" -f "$CHART_DIR"/values-rotation-example.yaml --output-dir /tmp/rendered/rotation
+        helm template status-list-server "$CHART_DIR" --set serviceAccount.create=false --output-dir /tmp/rendered/no-sa
+        helm template status-list-server "$CHART_DIR" \
           --set externalSecret.enabled=true \
           --set statuslist.fallbackSecret.enabled=false \
           --set secretStore.enabled=true \
           --set secretStore.provider=aws \
           --set statuslist.aws.mountCredentials=true \
           --output-dir /tmp/rendered/legacy-creds
-        helm template status-list-server deploy/helm/chart \
+        helm template status-list-server "$CHART_DIR" \
           --set externalSecret.enabled=true \
           --set statuslist.fallbackSecret.enabled=false \
           --set secretStore.enabled=true \
           --set secretStore.provider=vault \
           --set secretStore.vault.server=https://vault.example.com \
           --output-dir /tmp/rendered/vault
-        helm template status-list-server deploy/helm/chart \
+        helm template status-list-server "$CHART_DIR" \
           --set externalSecret.enabled=true \
           --set statuslist.fallbackSecret.enabled=false \
           --set secretStore.enabled=true \
           --set secretStore.provider=gcp \
           --set secretStore.gcp.projectID=my-project-id \
           --output-dir /tmp/rendered/gcp
-        helm template status-list-server deploy/helm/chart \
+        helm template status-list-server "$CHART_DIR" \
           --set externalSecret.enabled=true \
           --set statuslist.fallbackSecret.enabled=false \
           --set secretStore.enabled=true \
@@ -55,7 +56,7 @@ runs:
           --set-string 'externalSecret.spec.data[0].remoteRef.conversionStrategy=Default' \
           --output-dir /tmp/rendered/gcp-remote-ref
         # Azure Workload Identity: ESO uses its own ServiceAccount, not the app KSA.
-        helm template status-list-server deploy/helm/chart \
+        helm template status-list-server "$CHART_DIR" \
           --set externalSecret.enabled=true \
           --set statuslist.fallbackSecret.enabled=false \
           --set secretStore.enabled=true \
@@ -65,7 +66,7 @@ runs:
           --set secretStore.azure.tenantId=00000000-0000-0000-0000-000000000000 \
           --set secretStore.azure.vaultUrl=https://example.vault.azure.net \
           --output-dir /tmp/rendered/azure
-        helm template status-list-server deploy/helm/chart \
+        helm template status-list-server "$CHART_DIR" \
           --set externalSecret.enabled=true \
           --set statuslist.fallbackSecret.enabled=false \
           --set secretStore.enabled=true \
@@ -80,7 +81,7 @@ runs:
         if ! grep -qE '^\s{4}webhook:' /tmp/rendered/raw/status-list-server/templates/secret-store.yaml; then
           echo "ERROR: raw render missing webhook provider from secretStore.raw"; exit 1
         fi
-        helm template status-list-server deploy/helm/chart -f deploy/helm/chart/values-aws.yaml --output-dir /tmp/rendered/aws
+        helm template status-list-server "$CHART_DIR" -f "$CHART_DIR"/values-aws.yaml --output-dir /tmp/rendered/aws
         if ! grep -q "image: \"ghcr.io/adorsys/status-list-server:${EXPECTED_AWS_TAG}\"" /tmp/rendered/aws/status-list-server/templates/deployment.yaml; then
           echo "ERROR: AWS overlay must derive the AWS image variant from chart appVersion"; exit 1
         fi
@@ -99,7 +100,7 @@ runs:
         if [ -f /tmp/rendered/external-secrets/status-list-server/templates/secret.yaml ]; then
           echo "ERROR: values-external-secrets.yaml must disable fallback Secret"; exit 1
         fi
-        helm template status-list-server deploy/helm/chart -f deploy/helm/chart/values-aws.yaml -f deploy/helm/chart/values-aws-nlb.yaml --output-dir /tmp/rendered/aws-nlb
+        helm template status-list-server "$CHART_DIR" -f "$CHART_DIR"/values-aws.yaml -f "$CHART_DIR"/values-aws-nlb.yaml --output-dir /tmp/rendered/aws-nlb
         if ! grep -q 'service.beta.kubernetes.io/aws-load-balancer-type' /tmp/rendered/aws-nlb/status-list-server/templates/service.yaml; then
           echo "ERROR: AWS NLB overlay must render AWS load balancer annotations"; exit 1
         fi
@@ -123,7 +124,7 @@ runs:
         if grep -q '^  tls:' /tmp/rendered/default/status-list-server/templates/ingress.yaml; then
           echo "ERROR: default localhost Ingress must not render a tls block"; exit 1
         fi
-        helm template status-list-server deploy/helm/chart --set-string statuslist.ingress.tls.secretName=statuslist-tls --output-dir /tmp/rendered/tls-secret-default-host
+        helm template status-list-server "$CHART_DIR" --set-string statuslist.ingress.tls.secretName=statuslist-tls --output-dir /tmp/rendered/tls-secret-default-host
         if ! grep -q '^  tls:' /tmp/rendered/tls-secret-default-host/status-list-server/templates/ingress.yaml; then
           echo "ERROR: explicit ingress TLS secretName must render a tls block even when tls.hosts is empty"; exit 1
         fi
@@ -211,7 +212,7 @@ runs:
         # File-based secret env paths are explicit and do not require volume items.
         # When APP_DATABASE__PASSWORD_FILE is configured, the chart must not also
         # inject APP_DATABASE__PASSWORD from a startup SecretKeyRef.
-        helm template status-list-server deploy/helm/chart \
+        helm template status-list-server "$CHART_DIR" \
           --set-string 'statuslist.secretMounts[0].name=database-credentials' \
           --set-string 'statuslist.secretMounts[0].secretName=postgres-access' \
           --set-string 'statuslist.secretMounts[0].mountPath=/etc/secrets/database' \
@@ -223,7 +224,7 @@ runs:
         if grep -q 'name: APP_DATABASE__PASSWORD$' /tmp/rendered/file-env-no-items/status-list-server/templates/deployment.yaml; then
           echo "ERROR: APP_DATABASE__PASSWORD must not render when APP_DATABASE__PASSWORD_FILE is configured"; exit 1
         fi
-        if helm template status-list-server deploy/helm/chart \
+        if helm template status-list-server "$CHART_DIR" \
           --set-string 'statuslist.secretMounts[0].name=database-credentials' \
           --set-string 'statuslist.secretMounts[0].secretName=postgres-access' \
           --set-string 'statuslist.secretMounts[0].mountPath=/etc/secrets/database' \
@@ -236,7 +237,7 @@ runs:
         if ! grep -q 'references "pwd", but items mounts only: password' /tmp/rendered/file-env-mismatch.out; then
           echo "ERROR: fileEnv mismatch failure did not explain the missing items path"; exit 1
         fi
-        helm template status-list-server deploy/helm/chart \
+        helm template status-list-server "$CHART_DIR" \
           --set externalSecret.enabled=false \
           --set statuslist.fallbackSecret.enabled=true \
           --set-string statuslist.fallbackSecret.stringData.postgres-password=x \
@@ -244,7 +245,7 @@ runs:
         # Scaling readiness: opt-in HPA + PDB. In HPA mode the Deployment omits
         # `replicas`, so use maxUnavailable (not minAvailable) to satisfy
         # kube-linter's pdb-min-available check (minAvailable must be < replicas).
-        helm template status-list-server deploy/helm/chart \
+        helm template status-list-server "$CHART_DIR" \
           --set autoscaling.enabled=true \
           --set podDisruptionBudget.enabled=true \
           --set podDisruptionBudget.maxUnavailable=1 \
@@ -253,7 +254,7 @@ runs:
         # Primary Workload Identity path: a non-default application ServiceAccount with a
         # cloud role binding (EKS IRSA annotation). Assert the SA + annotation are rendered
         # and the Deployment references the custom SA, not the default.
-        helm template status-list-server deploy/helm/chart \
+        helm template status-list-server "$CHART_DIR" \
           --set serviceAccount.name=statuslist-app-sa \
           --set-string 'serviceAccount.annotations.eks\.amazonaws\.com/role-arn=arn:aws:iam::123456789012:role/statuslist-irsa' \
           --set externalSecret.enabled=false \
@@ -272,7 +273,7 @@ runs:
         # Production path: deploy.yml applies values-aws.yaml then values-production.yaml.
         # It explicitly keeps the ESO-mounted credential path and renders no Workload
         # Identity IRSA annotation.
-        helm template status-list-server deploy/helm/chart -f deploy/helm/chart/values-aws.yaml -f deploy/helm/chart/values-production.yaml \
+        helm template status-list-server "$CHART_DIR" -f "$CHART_DIR"/values-aws.yaml -f "$CHART_DIR"/values-production.yaml \
           --output-dir /tmp/rendered/wl-prod
         if [ -f /tmp/rendered/wl-prod/status-list-server/templates/serviceaccount.yaml ] && grep -q 'eks.amazonaws.com/role-arn:' /tmp/rendered/wl-prod/status-list-server/templates/serviceaccount.yaml; then
           echo "ERROR: production AWS render must not render an IRSA role annotation (ESO-mounted production path)"; exit 1
@@ -282,7 +283,7 @@ runs:
         fi
         # Azure Workload Identity primary path: application pod label + application KSA distinct
         # from the External Secrets Operator identity.
-        helm template status-list-server deploy/helm/chart \
+        helm template status-list-server "$CHART_DIR" \
           --set serviceAccount.name=azure-app-sa \
           --set 'serviceAccount.annotations.azure\.workload\.identity/client-id=11111111-2222-3333-4444-555555555555' \
           --set externalSecret.enabled=true \
@@ -309,7 +310,7 @@ runs:
           echo "ERROR: ESO serviceAccountRef must be distinct from the application ServiceAccount"; exit 1
         fi
         # Azure ManagedIdentity path: renders identityId + authType, no serviceAccountRef.
-        helm template status-list-server deploy/helm/chart \
+        helm template status-list-server "$CHART_DIR" \
           --set externalSecret.enabled=true \
           --set statuslist.fallbackSecret.enabled=false \
           --set secretStore.enabled=true \
@@ -329,7 +330,7 @@ runs:
           echo "ERROR: Azure ManagedIdentity render must not include serviceAccountRef"; exit 1
         fi
         # Azure ServicePrincipal path: renders authType + authSecretRef, no serviceAccountRef.
-        helm template status-list-server deploy/helm/chart \
+        helm template status-list-server "$CHART_DIR" \
           --set externalSecret.enabled=true \
           --set statuslist.fallbackSecret.enabled=false \
           --set secretStore.enabled=true \
@@ -353,16 +354,16 @@ runs:
         fi
 
         # Negative render tests: invalid provider and empty raw:{} must fail closed.
-        if helm template status-list-server deploy/helm/chart --set secretStore.provider=invalid >/dev/null 2>&1; then
+        if helm template status-list-server "$CHART_DIR" --set secretStore.provider=invalid >/dev/null 2>&1; then
           echo "ERROR: provider=invalid should fail"; exit 1
         fi
-        if helm template status-list-server deploy/helm/chart --set secretStore.provider=raw >/dev/null 2>&1; then
+        if helm template status-list-server "$CHART_DIR" --set secretStore.provider=raw >/dev/null 2>&1; then
           echo "ERROR: provider=raw with empty secretStore.raw should fail"; exit 1
         fi
-        if helm template status-list-server deploy/helm/chart --set statuslist.service.type=ExternalName >/dev/null 2>&1; then
+        if helm template status-list-server "$CHART_DIR" --set statuslist.service.type=ExternalName >/dev/null 2>&1; then
           echo "ERROR: statuslist.service.type=ExternalName should fail because the chart does not render ExternalName Services"; exit 1
         fi
-        helm template status-list-server deploy/helm/chart --set-string global.domain=Example.COM --output-dir /tmp/rendered/uppercase-domain
+        helm template status-list-server "$CHART_DIR" --set-string global.domain=Example.COM --output-dir /tmp/rendered/uppercase-domain
         if ! grep -q 'host: statuslist.example.com' /tmp/rendered/uppercase-domain/status-list-server/templates/ingress.yaml; then
           echo "ERROR: mixed-case global.domain must render as a lowercase Ingress host"; exit 1
         fi
@@ -370,21 +371,21 @@ runs:
           echo "ERROR: mixed-case global.domain must not render uppercase hostnames"; exit 1
         fi
         # Fail-closed provider fields: mandatory fields must be provided, not empty defaults.
-        if helm template status-list-server deploy/helm/chart \
+        if helm template status-list-server "$CHART_DIR" \
             --set externalSecret.enabled=true \
             --set statuslist.fallbackSecret.enabled=false \
             --set secretStore.enabled=true \
             --set secretStore.provider=vault >/dev/null 2>&1; then
           echo "ERROR: provider=vault with empty secretStore.vault.server should fail"; exit 1
         fi
-        if helm template status-list-server deploy/helm/chart \
+        if helm template status-list-server "$CHART_DIR" \
             --set externalSecret.enabled=true \
             --set statuslist.fallbackSecret.enabled=false \
             --set secretStore.enabled=true \
             --set secretStore.provider=gcp >/dev/null 2>&1; then
           echo "ERROR: provider=gcp with empty secretStore.gcp.projectID should fail"; exit 1
         fi
-        if helm template status-list-server deploy/helm/chart \
+        if helm template status-list-server "$CHART_DIR" \
             --set externalSecret.enabled=true \
             --set statuslist.fallbackSecret.enabled=false \
             --set secretStore.enabled=true \
@@ -393,7 +394,7 @@ runs:
             --set secretStore.azure.vaultUrl=https://example.vault.azure.net >/dev/null 2>&1; then
           echo "ERROR: provider=azure WorkloadIdentity without serviceAccountRef.name should fail"; exit 1
         fi
-        if helm template status-list-server deploy/helm/chart \
+        if helm template status-list-server "$CHART_DIR" \
             --set externalSecret.enabled=true \
             --set statuslist.fallbackSecret.enabled=false \
             --set secretStore.enabled=true \
@@ -403,7 +404,7 @@ runs:
           echo "ERROR: provider=azure without identity configuration should fail"; exit 1
         fi
         # authType is an enum per the ESO AzureKVProvider CRD; an invalid value must fail.
-        if helm template status-list-server deploy/helm/chart \
+        if helm template status-list-server "$CHART_DIR" \
             --set externalSecret.enabled=true \
             --set statuslist.fallbackSecret.enabled=false \
             --set secretStore.enabled=true \
@@ -414,34 +415,34 @@ runs:
           echo "ERROR: provider=azure with invalid authType=ClientSecret should fail"; exit 1
         fi
         # Contradictory modes: ESO disabled but SecretStore enabled must not render a SecretStore.
-        if helm template status-list-server deploy/helm/chart \
+        if helm template status-list-server "$CHART_DIR" \
             --set externalSecret.enabled=false \
             --set secretStore.enabled=true 2>/dev/null | grep "kind: SecretStore" >/dev/null; then
           echo "ERROR: no-ESO mode must not render a SecretStore CR"; exit 1
         fi
         # Inverse: an ExternalSecret must not render without a SecretStore (dangling secretStoreRef).
-        if helm template status-list-server deploy/helm/chart \
+        if helm template status-list-server "$CHART_DIR" \
             --set externalSecret.enabled=true \
             --set statuslist.fallbackSecret.enabled=false \
             --set secretStore.enabled=false >/dev/null 2>&1; then
           echo "ERROR: externalSecret.enabled with secretStore.enabled=false should fail (dangling secretStoreRef)"; exit 1
         fi
         # Fail-closed scaling: HPA must reject minReplicas > maxReplicas.
-        if helm template status-list-server deploy/helm/chart \
+        if helm template status-list-server "$CHART_DIR" \
             --set autoscaling.enabled=true \
             --set autoscaling.minReplicas=5 \
             --set autoscaling.maxReplicas=2 >/dev/null 2>&1; then
           echo "ERROR: autoscaling.minReplicas > maxReplicas should fail"; exit 1
         fi
         # Fail-closed scaling: PDB must reject both minAvailable and maxUnavailable set.
-        if helm template status-list-server deploy/helm/chart \
+        if helm template status-list-server "$CHART_DIR" \
             --set podDisruptionBudget.enabled=true \
             --set podDisruptionBudget.minAvailable=1 \
             --set podDisruptionBudget.maxUnavailable=1 >/dev/null 2>&1; then
           echo "ERROR: PDB with both minAvailable and maxUnavailable should fail"; exit 1
         fi
         # Fail-closed scaling: PDB must reject neither minAvailable nor maxUnavailable set.
-        if helm template status-list-server deploy/helm/chart \
+        if helm template status-list-server "$CHART_DIR" \
             --set podDisruptionBudget.enabled=true \
             --set podDisruptionBudget.minAvailable=null \
             --set podDisruptionBudget.maxUnavailable=null >/dev/null 2>&1; then
@@ -449,7 +450,7 @@ runs:
         fi
         # An explicit minAvailable: 0 is a valid PDB setting (prevents voluntary disruptions)
         # and must be preserved as an integer, NOT treated as unset (0 is falsy in Go templates).
-        if ! helm template status-list-server deploy/helm/chart \
+        if ! helm template status-list-server "$CHART_DIR" \
             --set podDisruptionBudget.enabled=true \
             --set podDisruptionBudget.minAvailable=0 \
             --set podDisruptionBudget.maxUnavailable=null 2>/dev/null \
@@ -457,7 +458,7 @@ runs:
           echo "ERROR: PDB with minAvailable: 0 must render minAvailable: 0 (explicit zero preserved)"; exit 1
         fi
         # Conversely an explicit maxUnavailable: 0 must render as maxUnavailable: 0.
-        if ! helm template status-list-server deploy/helm/chart \
+        if ! helm template status-list-server "$CHART_DIR" \
             --set podDisruptionBudget.enabled=true \
             --set podDisruptionBudget.minAvailable=null \
             --set podDisruptionBudget.maxUnavailable=0 2>/dev/null \
@@ -466,7 +467,7 @@ runs:
         fi
 
         # Upgrade render test: legacy secretStore.aws.region must be preserved for APP_AWS__REGION.
-        REGION=$(helm template status-list-server deploy/helm/chart \
+        REGION=$(helm template status-list-server "$CHART_DIR" \
           --set secretStore.provider=aws \
           --set secretStore.aws.region=us-west-2 \
           | grep -A1 'name: APP_AWS__REGION' | grep 'value:' | sed -E 's/.*value: "?([^"]*)"?.*/\1/' || true)
@@ -476,7 +477,7 @@ runs:
         # Upgrade render test: the fallback Secret consumes the same single supported name the
         # Deployment's POSTGRES_PASSWORD secretKeyRef references (statuslist-secret). Assert the
         # actual secretKeyRef name, not a loose global grep.
-        PGREF=$(helm template status-list-server deploy/helm/chart \
+        PGREF=$(helm template status-list-server "$CHART_DIR" \
             --set externalSecret.enabled=false \
             --set statuslist.fallbackSecret.enabled=true \
             --set-string statuslist.fallbackSecret.stringData.postgres-password=x 2>/dev/null \
@@ -486,7 +487,7 @@ runs:
         fi
         # ESO one-name invariant: every consumer shares the single name statuslist-secret, so a
         # custom externalSecret.spec.target.name must fail at render time.
-        if helm template status-list-server deploy/helm/chart \
+        if helm template status-list-server "$CHART_DIR" \
             --set externalSecret.enabled=true \
             --set statuslist.fallbackSecret.enabled=false \
             --set secretStore.enabled=true \
@@ -495,7 +496,7 @@ runs:
           echo "ERROR: externalSecret.spec.target.name other than statuslist-secret should fail"; exit 1
         fi
         # In ESO mode the ExternalSecret target name must equal the app/PostgreSQL secret name.
-        if ! helm template status-list-server deploy/helm/chart \
+        if ! helm template status-list-server "$CHART_DIR" \
             --set externalSecret.enabled=true \
             --set statuslist.fallbackSecret.enabled=false \
             --set secretStore.enabled=true \
@@ -504,16 +505,16 @@ runs:
         fi
         # NetworkPolicy is opt-in: the default must NOT render a NetworkPolicy (an open
         # port-only ingress rule would equal no ingress restriction).
-        if helm template status-list-server deploy/helm/chart 2>/dev/null | grep 'kind: NetworkPolicy' >/dev/null; then
+        if helm template status-list-server "$CHART_DIR" 2>/dev/null | grep 'kind: NetworkPolicy' >/dev/null; then
           echo "ERROR: default render must NOT emit a NetworkPolicy (networkPolicy.enabled defaults to false)"; exit 1
         fi
         # When enabled, internal egress must be scoped to the target pods, not any pod.
-        if ! helm template status-list-server deploy/helm/chart \
+        if ! helm template status-list-server "$CHART_DIR" \
             --set statuslist.networkPolicy.enabled=true 2>/dev/null \
           | grep -E 'app\.kubernetes\.io/name: postgres' >/dev/null; then
           echo "ERROR: NetworkPolicy egress must scope PostgreSQL to its pods (app.kubernetes.io/name: postgres)"; exit 1
         fi
-        if ! helm template status-list-server deploy/helm/chart \
+        if ! helm template status-list-server "$CHART_DIR" \
             --set statuslist.networkPolicy.enabled=true 2>/dev/null \
           | grep -E '^\s+- podSelector:\s*$' >/dev/null; then
           echo "ERROR: NetworkPolicy egress internal rule must have a to:/podSelector (not any pod)"; exit 1
@@ -521,33 +522,33 @@ runs:
 
         # Fail-closed alerting render tests:
         # 1. alerting.enabled=true with unsupported platform fails.
-        if helm template status-list-server deploy/helm/chart \
+        if helm template status-list-server "$CHART_DIR" \
             --set alerting.enabled=true \
             --set alerting.platform=unsupported >/dev/null 2>&1; then
           echo "ERROR: alerting.enabled=true with unsupported platform should fail"; exit 1
         fi
         # 2. alerting.enabled=true with missing webhookUrl fails for webhook platforms.
-        if helm template status-list-server deploy/helm/chart \
+        if helm template status-list-server "$CHART_DIR" \
             --set alerting.enabled=true \
             --set alerting.platform=slack >/dev/null 2>&1; then
           echo "ERROR: alerting.enabled=true with platform=slack and missing webhookUrl should fail"; exit 1
         fi
         # 3. alerting.enabled=true with platform=email and missing email.to, smtpHost or smtpFrom fails.
-        if helm template status-list-server deploy/helm/chart \
+        if helm template status-list-server "$CHART_DIR" \
             --set alerting.enabled=true \
             --set alerting.platform=email \
             --set alerting.email.smtpHost=smtp.example.com \
             --set alerting.email.smtpFrom=alerts@example.com >/dev/null 2>&1; then
           echo "ERROR: alerting.platform=email with missing email.to should fail"; exit 1
         fi
-        if helm template status-list-server deploy/helm/chart \
+        if helm template status-list-server "$CHART_DIR" \
             --set alerting.enabled=true \
             --set alerting.platform=email \
             --set alerting.email.to=ops@example.com \
             --set alerting.email.smtpFrom=alerts@example.com >/dev/null 2>&1; then
           echo "ERROR: alerting.platform=email with missing email.smtpHost should fail"; exit 1
         fi
-        if helm template status-list-server deploy/helm/chart \
+        if helm template status-list-server "$CHART_DIR" \
             --set alerting.enabled=true \
             --set alerting.platform=email \
             --set alerting.email.to=ops@example.com \
@@ -557,7 +558,7 @@ runs:
 
         # Positive alerting render tests:
         # Webhook platform renders AlertmanagerConfig and Secret.
-        helm template status-list-server deploy/helm/chart \
+        helm template status-list-server "$CHART_DIR" \
           --set alerting.enabled=true \
           --set alerting.platform=slack \
           --set alerting.webhookUrl=https://hooks.slack.com/services/XXX \
@@ -571,7 +572,7 @@ runs:
 
         # Email platform renders to/from/smarthost as plain CRD strings (host:port),
         # stores only the optional SMTP password in the Secret.
-        helm template status-list-server deploy/helm/chart \
+        helm template status-list-server "$CHART_DIR" \
           --set alerting.enabled=true \
           --set alerting.platform=email \
           --set alerting.email.to=ops@example.com \
@@ -593,14 +594,14 @@ runs:
           echo "ERROR: email to/smarthost/from must NOT be stored in the Secret (they are plain CRD strings)"; exit 1
         fi
         # Email without smtpPassword/dmsWebhookUrl must NOT render an empty Secret.
-        if helm template status-list-server deploy/helm/chart \
+        if helm template status-list-server "$CHART_DIR" \
             --set alerting.enabled=true \
             --set alerting.platform=email \
             --set alerting.email.to=ops@example.com \
             --set alerting.email.smtpHost=smtp.example.com \
             --set alerting.email.smtpFrom=alerts@example.com \
           | grep -q 'kind: Secret' && \
-            helm template status-list-server deploy/helm/chart \
+            helm template status-list-server "$CHART_DIR" \
             --set alerting.enabled=true \
             --set alerting.platform=email \
             --set alerting.email.to=ops@example.com \
