@@ -168,6 +168,51 @@ That assertion is permanent by design. The failure it guards against looks exact
 
 The build assertion covers the binary. It says nothing about the SBOM BuildKit attaches, which is a different artifact produced by a different tool — if BuildKit's bundled Syft were older than v1.15.0, the assertion would pass and an empty SBOM would still ship. `scan-image` therefore closes the chain from the other end: it pulls the published SBOM **for both platforms** and fails unless each lists at least one `pkg:cargo/` purl. Both, because whether BuildKit's cataloguer ran is a per-platform property, and the binary assertion is not evidence about it in either direction. It asserts a cargo purl rather than a package count because SPDX output includes a synthetic package describing the image itself, which would satisfy a bare "not empty" check on nothing, and it deduplicates the purls because each appears in both `externalRefs` and `relationships`.
 
+## Which Provenance to Verify
+
+A released image carries **two** provenance documents, and they are not two renderings of one fact. Verifying the wrong one for your question gets a confident answer to something you did not ask. The decision to carry both, and the argument for it, is [ADR 0001](adr/0001-container-image-provenance.md).
+
+|                  | BuildKit provenance                     | GitHub attestation                       |
+| ---------------- | --------------------------------------- | ---------------------------------------- |
+| Predicate        | `https://slsa.dev/provenance/v0.2`      | `https://slsa.dev/provenance/v1`         |
+| Answers          | **How** it was built                    | **Who** built it                         |
+| Produced by      | `provenance: mode=max` on the build     | `actions/attest-build-provenance`        |
+| Signed           | No — `builder.id` is self-asserted      | Yes — Sigstore/Fulcio, logged in Rekor   |
+| Read with        | `docker buildx imagetools inspect`      | `gh attestation verify`                  |
+| Protects against | The image being altered after the build | Someone else publishing an image as ours |
+
+**Verify the GitHub attestation to decide whether to trust an image.** It is the only one of the two that a person with push access to the GHCR package cannot forge. BuildKit's is integrity-protected — the index digest chain covers it — but its `builder.id` is JSON BuildKit wrote, so an attacker who can push can publish an index whose provenance inspects identically.
+
+**Read the BuildKit provenance to answer questions about a build you already trust** — which base image, which build arguments, which Dockerfile produced this digest. The signed v1 statement does not carry that detail.
+
+### A signature is not the gate's verdict
+
+**A verified attestation establishes who built a digest, from which commit, in which workflow — and nothing else.** In particular it is **not** a statement that the image passed the vulnerability gate. The two are produced at different points and answer to different jobs: `build-and-push` attests immediately after the push, which is _before_ `scan-image` has run at all. So an image the gate goes on to **reject** still carries a fully valid, correctly signed attestation under its `sha-<commit>` tag, and the verification command below passes clean on it.
+
+That is the intended design rather than a hole in it — provenance answers "who built this", not "is this fit to deploy", and conflating them is the same error this whole section is about, one level up. But it means the two checks have to be read together: **consume by release tag, not by commit SHA tag.** The withheld tag is the gate's verdict; the signature is not. An image that is both attested _and_ named `v1.2.3` or `latest-<variant>` has passed both, because [`promote-tags`](#the-scanned-artifact-is-the-deployed-artifact) applies those names only after the scan and then verifies the signature against the digest they resolve to.
+
+### When they disagree
+
+Disagreement here means one specific thing: the registry content and the signed claim no longer describe the same artifact. That is a compromise signal, not a discrepancy to be reconciled. Concretely, any of these:
+
+- `gh attestation verify` fails on a digest whose BuildKit provenance looks correct.
+- A release tag resolves to a digest with no attestation from this repository.
+- The signed attestation names a workflow, repository or ref that is not the release you expect. This one is enforced rather than left to your eye: the wrapper pins the certificate identity to `deploy.yml` at a specific ref, so a signature from another workflow, another repository or another ref of `deploy.yml` fails the command rather than passing it with a surprising line in the output.
+
+On the release path the same disagreement surfaces at whichever of three points reaches it first — `verify-provenance` before any release tag is applied, `promote-tags` against the digest the tag resolves to, or `deploy` against the digest about to reach the cluster. Which one failed narrows the cause: the first is a signing or build fault, the second and third mean the tag moved after it was gated.
+
+**Do this, in order:**
+
+1. **Do not roll back yet, and do not delete the image.** The pushed artifact is the evidence. Deleting it destroys the only copy of what was published, and a rollback that races an attacker's next push tells you nothing.
+2. **Stop the bleeding at the pull, not the registry.** Pin the running deployment to the last digest that _does_ verify — `helm upgrade` with `statuslist.image.digest` set to it. The chart prefers a digest over any tag, so this is proof against the tag being repointed again.
+3. **Notify the repository owners and treat GHCR package push access as compromised** until shown otherwise. This is the access that makes the failure possible; the image is the symptom.
+
+   **Scope it by which way the check failed, because the two are different incidents.** An image whose signature is _absent or invalid_ needs only package push access. An image carrying a signature that _verifies against a ref or workflow you did not expect_ needs repository write access — the certificate identity is minted by Actions, so producing one means running a workflow here. The second is the larger blast radius and pulls in every other secret this repository can reach.
+4. **Record the digest, the tag, and the `gh attestation verify` output** before doing anything that changes registry state. Rekor is append-only, so a genuine build's entry is still there and is the reference point for what should have been published.
+5. Only then decide about the tag. Re-promoting over a suspect tag before step 3 is complete just publishes a second claim from the same compromised position.
+
+A verification that fails because your `gh` is too old is **not** this situation — see the version floor below. Rule that out first; it is by far the more common cause.
+
 ## Never Pass Secrets as Build Arguments
 
 `deploy.yml` builds with `provenance: mode=max`. `mode=max` records the full build invocation in the provenance attestation, and that includes **every `build-arg` value**. The attestation is published alongside the image and is readable by anyone who can pull it.
@@ -233,6 +278,59 @@ docker buildx imagetools inspect ghcr.io/adorsys/status-list-server:<tag> \
 docker buildx imagetools inspect ghcr.io/adorsys/status-list-server:<tag> \
   --format '{{ json (index .Provenance "linux/amd64") }}'
 ```
+
+Verify the signed provenance — the check that answers _who built this_, and the one to use when deciding whether to trust an image. Use the wrapper rather than `gh` directly; it is the same script the release path runs, so a local pass means what the pipeline means by it:
+
+```bash
+bash scripts/verify-attestation.sh \
+  "ghcr.io/adorsys/status-list-server@sha256:<index-digest>" \
+  adorsys/status-list-server
+```
+
+Pass the release's ref as an optional third argument when you know it, and the signing identity is pinned exactly rather than by shape:
+
+```bash
+bash scripts/verify-attestation.sh \
+  "ghcr.io/adorsys/status-list-server@sha256:<index-digest>" \
+  adorsys/status-list-server refs/tags/v1.2.3
+```
+
+**The identity checked.** With a ref, the wrapper runs `gh attestation verify` with
+
+```text
+--cert-identity https://github.com/adorsys/status-list-server/.github/workflows/deploy.yml@refs/tags/v1.2.3
+--source-ref    refs/tags/v1.2.3
+--deny-self-hosted-runners
+```
+
+Without one, it uses a `--cert-identity-regex` anchored at both ends that accepts only a release-tag ref. Do not substitute `--repo` or `--signer-workflow`: neither pins the ref, so a signature from any branch of this workflow would pass. [ADR 0001](adr/0001-container-image-provenance.md) has the reasoning.
+
+**Requirements.** `gh` 2.67.0 or newer (older releases exit 0 when no attestation exists; the wrapper refuses to run on them) and `jq`.
+
+**What a failure means.** The wrapper passes only when `gh` exits 0 _and_ its `--format json` result contains a verified subject matching the digest you passed. A failure means one of: the image could not be fetched, no attestation exists, it was signed by a different workflow or ref, or `gh`'s JSON output could not be read. `gh`'s own output is printed below the error and says which. Treat any failure as an unverified image. Transient API errors are retried three times before failing.
+
+`scripts/attestation-selftest.sh` proves the wrapper can both pass and reject, against a stubbed `gh`, on every pull request, in `local-ci.sh`, and once on the release path.
+
+Verifying by digest is deliberate. A tag is mutable, so verifying one establishes only that something carrying a valid attestation once answered to that name — and it may resolve to a different digest by the time you pull it. To check a tag, resolve it first and verify what it resolves to, which is what `promote-tags` does:
+
+```bash
+digest=$(docker buildx imagetools inspect ghcr.io/adorsys/status-list-server:<tag> \
+  --format '{{ .Manifest.Digest }}')
+
+bash scripts/verify-attestation.sh \
+  "ghcr.io/adorsys/status-list-server@${digest}" adorsys/status-list-server
+```
+
+The attestation is fetched from GitHub's attestation API, not from the registry, because the build sets `push-to-registry: false`. **What would have to be true to flip that to `true`:** GHCR would have to serve the OCI Referrers API for our packages, so that an attestation is discoverable from the image digest alone by someone who does not know it came from GitHub. Check it directly rather than trusting a release note — this asks the registry whether it will list referrers for a digest, and a `200` with a populated `manifests` array is the answer we need:
+
+```bash
+token=$(curl -s "https://ghcr.io/token?scope=repository:adorsys/status-list-server:pull" | jq -r .token)
+curl -s -o /dev/null -w '%{http_code}\n' \
+  -H "Authorization: Bearer ${token}" \
+  "https://ghcr.io/v2/adorsys/status-list-server/referrers/sha256:<index-digest>"
+```
+
+A `404` or an empty list means an attestation pushed there would be undiscoverable, which is why it is `false` today. Until that returns referrers, pushing one buys nothing and looks like it buys something.
 
 Confirm the shipped binary carries audit data. An SBOM that lists no crates almost always means this section is missing:
 
@@ -391,7 +489,10 @@ The DB is global (variant- and architecture-independent), so a single cache entr
 - **The nightly's reporting logic is only partly tested.** The gate it runs is proven on every run by `scripts/gate-selftest.sh`, the `expired_at` window has unit tests, and the variant lists are asserted by `scripts/check-variant-parity.py` — but the tracking-issue state machine, the aggregation and the SARIF merge are still exercised only by running them. That state machine is the notification path for a security control, and when it misbehaves the symptom is silence, which is indistinguishable from a clean scan. It is also unreachable before merge: `schedule:` and `workflow_dispatch:` only fire from the default branch, so the first live signal arrives on the first night after this lands. Extracting the issue decision into a testable script, the way the gate already is, is tracked in [#469](https://github.com/adorsys/status-list-server/issues/469).
 - **A scheduled workflow is disabled after 60 days without repository activity.** GitHub stops running the cron and does not fail anything; the Security tab keeps showing the last upload, and this document keeps claiming nightly coverage. For a workflow whose entire value is covering a time axis, the failure mode is that it silently stops covering it. Re-enable it from the Actions tab. Nothing here detects the condition, because the thing that would detect it is the workflow that is not running.
 - **Release-run scan results still never reach GitHub code scanning.** Alerts filed against a `refs/tags/*` ref are not surfaced in the Security tab's branch view, so `scan-image` deliberately emits no SARIF; the nightly is what files alerts, from a branch ref. See [Where Results Go](#where-results-go).
-- **BuildKit attestations are unsigned** and carry no Sigstore identity, so provenance has no verifiable issuer. It is a record of the build, not evidence about it: anyone with push access to the repository could produce an equivalent document. Adding `actions/attest-build-provenance` is tracked in [#402](https://github.com/adorsys/status-list-server/issues/402), and is not a one-line change — it emits a second provenance document alongside BuildKit's, which forces a decision about keeping both or setting `provenance: false` and giving up the `mode=max` build detail.
+- **The signed attestation is not discoverable from the registry alone.** [#402](https://github.com/adorsys/status-list-server/issues/402) is resolved: releases now carry a Sigstore-signed SLSA v1 statement alongside BuildKit's unsigned v0.2 provenance, so the image has a verifiable issuer and not merely a self-asserted one — see [Which Provenance to Verify](#which-provenance-to-verify) and [ADR 0001](adr/0001-container-image-provenance.md). What remains is retrieval: the build sets `push-to-registry: false`, so the attestation lives in GitHub's attestation API rather than beside the image, and a consumer who has only the digest cannot find it without knowing to ask GitHub. That is deliberate — GHCR's Referrers API support is unsettled, and an attestation pushed where nothing can discover it would be coverage-shaped and coverage-free — but it does mean verification is not self-service from the registry. [Verifying Locally](#verifying-locally) gives the exact check for whether this can be flipped.
+- **The signed attestation depends on this repository staying public.** GitHub artifact attestations are available on public repositories on all plans, but on private or internal repositories they require GitHub Enterprise Cloud. A visibility change would therefore stop the signing step working, where it would only _degrade_ BuildKit's provenance to `mode=min` — and that only if the explicit pin were also removed. This asymmetry is the reason both documents are kept rather than one; check it before changing repository visibility.
+- **The signing job holds `id-token: write`, and what that is worth depends on an AWS trust policy this repository cannot see.** `build-and-push` must be able to mint an OIDC token for Fulcio, which means any step in that job can mint one asserting this repository's identity. The role `deploy` assumes must therefore condition `sub` on `repo:<owner>/<repo>:environment:production`; under `repo:<owner>/<repo>:*` the build job could assume the production deploy role. Nothing in CI can verify this — the condition lives in IAM — so it is a standing precondition rather than a check. See [ADR 0001](adr/0001-container-image-provenance.md) and the deployment runbook.
+- **A `workflow_dispatch` build is attested and verified but never promoted, and its `sha-<commit>` tag stays.** `verify-provenance` runs on dispatch by design, so the real verification path is exercised outside a release. The consequence is that dispatch runs leave signed, verifiable images under commit-sha tags that never passed the vulnerability gate. That is the same point [A signature is not the gate's verdict](#a-signature-is-not-the-gates-verdict) makes, and the same mitigation applies: consume by release tag.
 - **Gate behaviour is reproducible against a fixed advisory database, not across time.** A finding can move from absent to blocking with no change in this repository. That is intentional — it is how post-merge advisories are meant to reach the gate — but it means "reproducible" holds for a given database snapshot.
 - **The Trivy vulnerability database is fetched unauthenticated from a third party.** Both `deploy.yml` (scan-image) and `scheduled-image-scan.yml` (rescan) now persist the Trivy cache directory across runs (see [Trivy Vulnerability Database Cache and Staleness](#trivy-vulnerability-database-cache-and-staleness)). On a fetch failure, the `scripts/ensure-trivy-db.sh` script degrades to the cached DB with a loud warning and step-summary entry showing the DB age, rather than failing the job — provided the cached DB is within the 24-hour staleness bound. Beyond that bound, a fetch failure is fatal. The first run after this change is a cold cache and still fetches ~108 MiB; resilience is realized from the second run onward. Tracked in [#405](https://github.com/adorsys/status-list-server/issues/405); a mirrored or authenticated `TRIVY_DB_REPOSITORY` remains the long-term fix for upstream availability.
 - **The builder-stage audit assertion runs only on the release path.** `deploy.yml` does not run on pull requests, so a change that breaks the auditable build is green on the PR and fails during a release. Tracked against [#316](https://github.com/adorsys/status-list-server/issues/316).

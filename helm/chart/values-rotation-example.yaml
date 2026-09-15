@@ -225,7 +225,7 @@ serviceAccount:
   automountServiceAccountToken: false
   annotations: {}
   # For EKS IRSA:
-  # eks.amazonaws.com/role-arn: arn:aws:iam::123456789012:role/statuslist
+  #   eks.amazonaws.com/role-arn: arn:aws:iam::123456789012:role/statuslist
 
 networkPolicy:
   enabled: true
