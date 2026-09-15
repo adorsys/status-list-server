@@ -34,11 +34,18 @@ groups:
       # The `up` series is created by the scrape itself, so `max(up) == 0`
       # catches a target that is present but failing scrapes while `absent(up)`
       # catches a target that is gone entirely.
+      #
+      # NOTE: this standalone copy selects the target that the shipped configs
+      # (observability/prometheus/prometheus.yml and prometheus.production.yml)
+      # actually scrape: `job="status_list_server"` targeting `instance="app:8000"`.
+      # `up` carries the scrape's own job/instance labels, NOT the application's
+      # `otel_scope_name` instrument label, so selecting on otel_scope_name would
+      # never match a healthy target and absent() would page continuously.
       - alert: StatusListMetricsAbsent
         expr: |
-          absent(up{otel_scope_name="status-list-server"})
+          absent(up{job="status_list_server",instance="app:8000"})
           or
-          max by (otel_scope_name)(up{otel_scope_name="status-list-server"}) == 0
+          max by (job, instance)(up{job="status_list_server",instance="app:8000"}) == 0
         for: 5m
         labels:
           severity: page

@@ -342,10 +342,11 @@ tests:
         alertname: StatusListMetricsAbsent
         exp_alerts:
           - exp_labels:
+              job: "status_list_server"
+              instance: "app:8000"
               service: "status-list-server"
               severity: "page"
               team: "statuslist"
-              otel_scope_name: "status-list-server"
             exp_annotations:
               summary: "status-list-server metrics absent for 5m (target down or not scraped)"
               description: "namespace : Status List /metrics target is unreachable or absent (up == 0 or no up series for 5m)"
@@ -364,33 +365,36 @@ tests:
               dashboard_url: "http://localhost:3000/d/status-list-slo"
 
   # StatusListMetricsAbsent "target present but scrape failing" state. The app
-  # IS reachable for discovery (an up series exists) but the scrape yields
-  # up == 0. A histogram-based absence check would NOT page here (the histogram
-  # may still exist), but the up-based guard must: max(up) == 0 fires.
+  # IS reachable for discovery (an up series exists for the configured scrape
+  # target status_list_server/app:8000) but the scrape yields up == 0. A
+  # histogram-based absence check would NOT page here (the histogram may still
+  # exist), but the up-based guard must: max(up) == 0 fires.
   - interval: 1m
     input_series:
-      - series: 'up{otel_scope_name="status-list-server"}'
+      - series: 'up{job="status_list_server",instance="app:8000"}'
         values: '0x10'
     alert_rule_test:
       - eval_time: 10m
         alertname: StatusListMetricsAbsent
         exp_alerts:
           - exp_labels:
+              job: "status_list_server"
+              instance: "app:8000"
               service: "status-list-server"
               severity: "page"
               team: "statuslist"
-              otel_scope_name: "status-list-server"
             exp_annotations:
               summary: "status-list-server metrics absent for 5m (target down or not scraped)"
               description: "namespace : Status List /metrics target is unreachable or absent (up == 0 or no up series for 5m)"
               runbook_url: "https://github.com/adorsys/status-list-server/blob/develop/observability/README.md"
               dashboard_url: "http://localhost:3000/d/status-list-slo"
 
-  # StatusListMetricsAbsent healthy state: a live scrape (up == 1) must NOT page,
-  # even though the request histogram may not exist yet on an idle deployment.
+  # StatusListMetricsAbsent healthy state: a live scrape of the configured target
+  # (status_list_server/app:8000, up == 1) must NOT page, even though the request
+  # histogram may not exist yet on an idle deployment.
   - interval: 1m
     input_series:
-      - series: 'up{otel_scope_name="status-list-server"}'
+      - series: 'up{job="status_list_server",instance="app:8000"}'
         values: '1x10'
     alert_rule_test:
       - eval_time: 10m

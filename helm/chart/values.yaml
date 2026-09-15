@@ -357,18 +357,22 @@ grafanaDashboard:
 # Cluster dependency notes for the shared kube-prometheus-stack integration
 # (managed centrally by wallet-eks-env, not by this chart):
 #
-# 1. CRD install order: the resources below differ in what the API server
-#    requires. ServiceMonitor, PrometheusRule, and AlertmanagerConfig are CRDs
-#    owned by the kube-prometheus-stack operator, so they can only be created
-#    AFTER those CRDs exist. On a fresh cluster, install the monitoring stack
-#    (which installs the CRDs) BEFORE this Helm release, otherwise the API server
-#    rejects those objects. The Grafana dashboard, by contrast, is a core/v1
-#    ConfigMap: the API server accepts it without kube-prometheus-stack; it only
-#    becomes *operational* once the Grafana sidecar is present. So the overall
-#    order is still stack first, then this application, but only the
-#    operator-owned CRD objects are hard dependencies for first install. Use
-#    bounded readiness gates / a staged pipeline; an upgrade on a cluster where
-#    the CRDs already exist does not prove first-install ordering.
+# 1. CRD install order + served API versions: the resources below differ in what
+#    the API server requires. ServiceMonitor, PrometheusRule, and AlertmanagerConfig
+#    are CRDs owned by the kube-prometheus-stack operator, so they can only be
+#    created AFTER those CRDs exist AND at an API version the installed operator
+#    actually serves. Notably, the pinned kube-prometheus-stack 91.4.0
+#    AlertmanagerConfig CRD serves only monitoring.coreos.com/v1alpha1, so
+#    installing the stack first is necessary but not sufficient — the rendered CR
+#    must also be on a served API (see the alerting block below). On a fresh
+#    cluster, install the monitoring stack (which installs the CRDs) BEFORE this
+#    Helm release, otherwise the API server rejects those objects. The Grafana
+#    dashboard, by contrast, is a core/v1 ConfigMap: the API server accepts it
+#    without kube-prometheus-stack; it only becomes *operational* once the Grafana
+#    sidecar is present. So the overall order is still stack first, then this
+#    application, but only the operator-owned CRD objects are hard dependencies for
+#    first install. Use bounded readiness gates / a staged pipeline; an upgrade on a
+#    cluster where the CRDs already exist does not prove first-install ordering.
 # 2. Retention: the SLO rules here use 30d windows (sli:error_rate:30d,
 #    sli:token_gen_failure_rate:30d, error-budget gates). The shared Prometheus
 #    must retain >30 days (with enough storage that the retention-size limit does
@@ -390,6 +394,12 @@ grafanaDashboard:
 # configured notification channel. This is the Kubernetes equivalent of the Docker
 # Compose ALERTMANAGER_PLATFORM + generate-alertmanager-config.sh setup — the same
 # six platforms are supported and no webhook URL is committed to source control.
+#
+# API VERSION: the pinned kube-prometheus-stack 91.4.0 AlertmanagerConfig CRD
+# (prometheus-operator v0.94.0) serves only monitoring.coreos.com/v1alpha1. The
+# rendered CR (templates/alertmanagerconfig.yaml) is on v1alpha1; do NOT bump it
+# to v1beta1 unless the operator CRD is upgraded to a version that serves it,
+# otherwise this optional route is rejected by the API server on a fresh cluster.
 #
 # Supported platforms (alerting.platform):
 #   discord     -> alerting.webhookUrl  (Discord channel webhook URL)

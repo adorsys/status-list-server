@@ -665,3 +665,64 @@ runs:
           | grep -q -- '-alerting'; then
           echo "ERROR: email without smtpPassword/dmsWebhookUrl must not render an empty alerting Secret"; exit 1
         fi
+
+    - name: Validate enabled AlertmanagerConfig route against pinned 91.4.0 CRD
+      shell: bash
+      # The rendered AlertmanagerConfig must be accepted by the EXACT
+      # kube-prometheus-stack AlertmanagerConfig CRD that ships with the pinned
+      # operator (91.4.0 / prometheus-operator v0.94.0), which serves ONLY
+      # monitoring.coreos.com/v1alpha1. The grep checks above prove the file is
+      # rendered with the expected fields, but they would NOT catch a bumped /
+      # unsupported apiVersion or a field value the served CRD rejects. Here we
+      # validate the enabled production route (the alerting-slack variant rendered
+      # above) against the pinned CRD's served v1alpha1 OpenAPI schema.
+      run: |
+        set -euo pipefail
+        pip install --quiet --disable-pip-version-check jsonschema
+
+        crd=/tmp/crd-alertmanagerconfigs-91.4.0.yaml
+        curl -fsSL -o "$crd" \
+          "https://raw.githubusercontent.com/prometheus-community/helm-charts/kube-prometheus-stack-91.4.0/charts/kube-prometheus-stack/charts/crds/crds/crd-alertmanagerconfigs.yaml"
+
+        python3 - <<'PY'
+        import sys, yaml
+        from jsonschema import Draft7Validator
+
+        # The pinned CRD uses the OpenAPI "=" scalar (e.g. enum: ["=", "!=", ...])
+        # which yaml.safe_load rejects; map the value tag to a scalar/mapping safely.
+        def _value_constructor(loader, node):
+            if isinstance(node, yaml.ScalarNode):
+                return loader.construct_scalar(node)
+            return loader.construct_mapping(node, deep=True)
+
+        class Loader(yaml.SafeLoader):
+            pass
+        Loader.add_constructor('tag:yaml.org,2002:value', _value_constructor)
+
+        crd = yaml.load(open('/tmp/crd-alertmanagerconfigs-91.4.0.yaml'), Loader=Loader)
+        versions = crd['spec']['versions']
+        served = [v['name'] for v in versions]
+        print("pinned 91.4.0 AlertmanagerConfig CRD served versions:", served)
+
+        path = '/tmp/rendered/alerting-slack/status-list-server/templates/alertmanagerconfig.yaml'
+        docs = [d for d in yaml.safe_load_all(open(path)) if d]
+        amc = next((d for d in docs if d.get('kind') == 'AlertmanagerConfig'), None)
+        if amc is None:
+            sys.exit("ERROR: no AlertmanagerConfig rendered for the enabled alerting route")
+
+        api = amc['apiVersion']
+        group, _, version = api.partition('/')
+        if version not in served:
+            sys.exit(f"ERROR: rendered AlertmanagerConfig uses {api}, but the pinned "
+                     f"kube-prometheus-stack 91.4.0 CRD serves only {served}")
+
+        schema = next(v for v in versions if v['name'] == version)['schema']['openAPIV3Schema']
+        errors = sorted(Draft7Validator(schema).iter_errors(amc['spec']),
+                        key=lambda e: list(e.path))
+        if errors:
+            for e in errors:
+                print("INVALID:", list(e.path), "->", e.message)
+            sys.exit(f"ERROR: rendered AlertmanagerConfig fails validation against the "
+                     f"pinned 91.4.0 {api} CRD schema")
+        print("rendered AlertmanagerConfig validates against the pinned 91.4.0 CRD schema")
+        PY

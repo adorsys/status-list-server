@@ -891,25 +891,30 @@ jobs:
           #      expectations gain `namespace: ns1`.
           #   2. StatusListMetricsAbsent is based on the scrape-generated `up`
           #      series selected by `service` (the rendered ServiceMonitor
-          #      Service), not `otel_scope_name`, so its expected label set has no
-          #      `otel_scope_name` and its description namespaces the message.
+          #      Service), not the standalone job/target selector or the app's
+          #      otel_scope_name label, so its expected label set has only
+          #      namespace/service/static labels and its description namespaces
+          #      the message.
           #
           # Rather than maintaining a second copy of the suite for the deployed
           # rules, we rewrite the fixture to match the deployed semantics: any
-          # `up{otel_scope_name="status-list-server"}` input series becomes the
-          # deployed `up{namespace="ns1",service="status-list-server-service"}`
+          # standalone `up{job="status_list_server",instance="app:8000"}` input
+          # series becomes the deployed `up{namespace="ns1",service="status-list-server-service"}`
           # selector, and the StatusListMetricsAbsent expectations are normalized.
           test = yaml.safe_load(open('observability/prometheus/tests/alerting.test.yml'))
           test['rule_files'] = ['helm-rules.yml']
           deployed_up = 'up{namespace="ns1",service="status-list-server-service"}'
+          standalone_up = 'up{job="status_list_server",instance="app:8000"}'
           for block in test['tests']:
               for series in block.get('input_series', []):
                   if isinstance(series, dict) and 'up{' in str(series.get('series', '')):
                       series['series'] = series['series'].replace(
-                          'up{otel_scope_name="status-list-server"}', deployed_up)
+                          standalone_up, deployed_up)
               for at in block.get('alert_rule_test', []):
                   for alert in at.get('exp_alerts', []):
                       if at['alertname'] == 'StatusListMetricsAbsent':
+                          alert['exp_labels'].pop('job', None)
+                          alert['exp_labels'].pop('instance', None)
                           alert['exp_labels'].pop('otel_scope_name', None)
                           alert['exp_labels']['namespace'] = 'ns1'
                           d = alert.get('exp_annotations', {}).get('description', '')
@@ -1011,6 +1016,7 @@ jobs:
           npm install --no-audit --no-fund
           npm run generate-dashboards
           git diff --exit-code ../generated/status-list-slo.json
+          git diff --exit-code ../../../helm/chart/observability/dashboards/generated/status-list-slo.json
           cmp ../generated/status-list-slo.json ../../../helm/chart/observability/dashboards/generated/status-list-slo.json
         env:
           # The generator has no side effects beyond writing this directory.
