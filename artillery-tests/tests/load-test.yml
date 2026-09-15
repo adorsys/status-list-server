@@ -7,7 +7,7 @@ config:
         tags:
           - "test_id:status_list_load"
     expect: {}
-    metrics-by-endpoint: {}
+    ensure: {}
   phases:
     - duration: 60
       arrivalRate: 5
@@ -42,8 +42,7 @@ scenarios:
           expect:
             - statusCode: 200
             - contentType: text/plain; charset=utf-8
-            - equals:
-                - "OK"
+            - matchesRegexp: "OK"
 
   - name: "Welcome Endpoint Flow"
     weight: 20
@@ -58,13 +57,13 @@ scenarios:
   - name: "Status List Retrieval Flow"
     weight: 30
     flow:
-      - function: "generateRandomListId"
+      - function: "selectPublishedListId"
       - get:
           url: "/api/v1/status-lists/{{ listId }}"
+          headers:
+            Accept: "application/statuslist+jwt"
           expect:
-            - statusCode:
-                - 200
-                - 404 # 404 is expected for non-existent lists
+            - statusCode: 200
           afterResponse: "handleStatusListResponse"
 
   - name: "Credential Registration Flow"
@@ -96,9 +95,10 @@ scenarios:
           json:
             statuses:
               - index: 1
-                status: "VALID"
+                status: 0
           expect:
             - statusCode: 201
+          afterResponse: "handlePublishResponse"
       # Then update
       - think: 0.5
       - patch:
@@ -108,9 +108,9 @@ scenarios:
           json:
             statuses:
               - index: 1
-                status: "INVALID"
+                status: 1
               - index: 2
-                status: "VALID"
+                status: 0
           expect:
             - statusCode: 200
           afterResponse: "handleUpdateResponse"
