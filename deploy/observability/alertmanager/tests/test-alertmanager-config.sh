@@ -17,12 +17,12 @@
 #   Linux execution environment (standard for CI and Linux developer machines).
 #
 # Run from the repository root:
-#   observability/alertmanager/tests/test-alertmanager-config.sh
+#   deploy/observability/alertmanager/tests/test-alertmanager-config.sh
 set -euo pipefail
 
-REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
-GENERATOR="$REPO_ROOT/observability/prometheus/generate-alertmanager-config.sh"
-MOCK="$REPO_ROOT/observability/alertmanager/tests/mock_webhook.py"
+REPO_ROOT="$(git -C "$(dirname "${BASH_SOURCE[0]}")" rev-parse --show-toplevel)"
+GENERATOR="$REPO_ROOT/deploy/observability/prometheus/generate-alertmanager-config.sh"
+MOCK="$REPO_ROOT/deploy/observability/alertmanager/tests/mock_webhook.py"
 AM_IMAGE="prom/alertmanager:v0.28.1"
 TMP="$(mktemp -d)"
 HUMAN_PID=""
@@ -186,7 +186,7 @@ firing_payload() {
   cat <<JSON
 [
   {"labels":{"alertname":"$1","severity":"$2","service":"status-list-server","sli":"cert_renewal"},
-   "annotations":{"summary":"$1","runbook_url":"https://github.com/adorsys/status-list-server/blob/develop/observability/runbooks/cert-renewal.md"},
+   "annotations":{"summary":"$1","runbook_url":"https://github.com/adorsys/status-list-server/blob/develop/deploy/observability/runbooks/cert-renewal.md"},
    "startsAt":"$NOW"}
 ]
 JSON
@@ -198,7 +198,7 @@ resolved_payload() {
   cat <<JSON
 [
   {"labels":{"alertname":"$1","severity":"$2","service":"status-list-server","sli":"cert_renewal"},
-   "annotations":{"summary":"$1","runbook_url":"https://github.com/adorsys/status-list-server/blob/develop/observability/runbooks/cert-renewal.md"},
+   "annotations":{"summary":"$1","runbook_url":"https://github.com/adorsys/status-list-server/blob/develop/deploy/observability/runbooks/cert-renewal.md"},
    "startsAt":"$(ts_past_iso 5)","endsAt":"$(ts_past_iso 1)"}
 ]
 JSON

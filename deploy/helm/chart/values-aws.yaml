@@ -1,5 +1,5 @@
 # AWS/EKS example overlay. Apply this explicitly on AWS deployments:
-# helm upgrade --install statuslist ./helm/chart -f ./helm/chart/values-aws.yaml
+# helm upgrade --install statuslist ./deploy/helm/chart -f ./deploy/helm/chart/values-aws.yaml
 
 global:
   domain: eudi-adorsys.com

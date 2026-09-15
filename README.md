@@ -117,7 +117,7 @@ Refer to [`.env.template`](.env.template) for the complete configuration diction
 
 For production deployments:
 
-- **Kubernetes**: Refer to the [Helm Chart Guide](helm/README.md) for deploying with the official Helm chart, configuring Workload Identity (if you use AWS, GCP or Azure), and setting resource limits.
+- **Kubernetes**: Refer to the [Helm Chart Guide](deploy/helm/README.md) for deploying with the official Helm chart, configuring Workload Identity (if you use AWS, GCP or Azure), and setting resource limits.
 - **Operations and Runbooks**: Refer to the [Deployment Runbook](docs/deployment-runbook.md) for production checklists, database migrations, backup and restore procedures, and zero-downtime maintenance.
 - **Troubleshooting**: Refer to the [Troubleshooting Guide](docs/troubleshooting.md) for fail-fast error descriptions and common operator error codes.
 - **Container Supply Chain**: Official container images are published with SBOMs and SLSA provenance, and scanned for vulnerabilities by digest. See the [Supply Chain Guide](docs/supply-chain.md).
@@ -138,7 +138,7 @@ For production deployments:
 
 ### Operations and Security
 
-- [Helm Chart Guide](helm/README.md): Kubernetes packaging, pod autoscaling, ingress, and Workload Identity configuration.
+- [Helm Chart Guide](deploy/helm/README.md): Kubernetes packaging, pod autoscaling, ingress, and Workload Identity configuration.
 - [Deployment Runbook](docs/deployment-runbook.md): Production operational procedures, migrations, and disaster recovery.
 - [Troubleshooting Guide](docs/troubleshooting.md): Diagnosing runtime failures and common operator errors.
 - [Observability Guide](docs/observability.md): OpenTelemetry collector setup, Prometheus metrics, and distributed tracing.

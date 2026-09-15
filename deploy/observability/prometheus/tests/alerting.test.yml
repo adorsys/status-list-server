@@ -34,7 +34,7 @@ tests:
               namespace: "ns1"
             exp_annotations:
               summary: "5xx error rate burning the error budget fast (>=14.4x over 0.5% budget on the 1h window)"
-              runbook_url: "https://github.com/adorsys/status-list-server/blob/develop/observability/runbooks/error-rate.md"
+              runbook_url: "https://github.com/adorsys/status-list-server/blob/develop/deploy/observability/runbooks/error-rate.md"
               dashboard_url: "http://localhost:3000/d/status-list-slo"
       - eval_time: 400m
         alertname: ErrorRateSlowBurn
@@ -46,7 +46,7 @@ tests:
               namespace: "ns1"
             exp_annotations:
               summary: "5xx error rate burning the error budget slowly (>=6x over 0.5% budget on the 6h window)"
-              runbook_url: "https://github.com/adorsys/status-list-server/blob/develop/observability/runbooks/error-rate.md"
+              runbook_url: "https://github.com/adorsys/status-list-server/blob/develop/deploy/observability/runbooks/error-rate.md"
               dashboard_url: "http://localhost:3000/d/status-list-slo"
       # Alerts that depend on missing series (histograms / token / cache) must not fire.
       - eval_time: 400m
@@ -89,7 +89,7 @@ tests:
               namespace: "ns1"
             exp_annotations:
               summary: "5xx error rate burning the error budget slowly (>=6x over 0.5% budget on the 6h window)"
-              runbook_url: "https://github.com/adorsys/status-list-server/blob/develop/observability/runbooks/error-rate.md"
+              runbook_url: "https://github.com/adorsys/status-list-server/blob/develop/deploy/observability/runbooks/error-rate.md"
               dashboard_url: "http://localhost:3000/d/status-list-slo"
 
   # Positive-fire coverage for every alert not exercised above. Histogram
@@ -164,7 +164,7 @@ tests:
               namespace: "ns1"
             exp_annotations:
               summary: "Request latency P95 sustainably above 300ms (>300ms on the 1h window)"
-              runbook_url: "https://github.com/adorsys/status-list-server/blob/develop/observability/runbooks/request-latency.md"
+              runbook_url: "https://github.com/adorsys/status-list-server/blob/develop/deploy/observability/runbooks/request-latency.md"
               dashboard_url: "http://localhost:3000/d/status-list-slo"
       - eval_time: 400m
         alertname: RequestLatencySlowBurn
@@ -176,7 +176,7 @@ tests:
               namespace: "ns1"
             exp_annotations:
               summary: "Request latency P95 sustained above 300ms on the 6h window"
-              runbook_url: "https://github.com/adorsys/status-list-server/blob/develop/observability/runbooks/request-latency.md"
+              runbook_url: "https://github.com/adorsys/status-list-server/blob/develop/deploy/observability/runbooks/request-latency.md"
               dashboard_url: "http://localhost:3000/d/status-list-slo"
       - eval_time: 400m
         alertname: DbLatencyFastBurn
@@ -188,7 +188,7 @@ tests:
               namespace: "ns1"
             exp_annotations:
               summary: "DB query latency P95 sustainably above 50ms (>50ms on the 1h window)"
-              runbook_url: "https://github.com/adorsys/status-list-server/blob/develop/observability/runbooks/db-latency.md"
+              runbook_url: "https://github.com/adorsys/status-list-server/blob/develop/deploy/observability/runbooks/db-latency.md"
               dashboard_url: "http://localhost:3000/d/status-list-slo"
       - eval_time: 400m
         alertname: DbLatencySlowBurn
@@ -200,7 +200,7 @@ tests:
               namespace: "ns1"
             exp_annotations:
               summary: "DB query latency P95 sustained above 50ms on the 6h window"
-              runbook_url: "https://github.com/adorsys/status-list-server/blob/develop/observability/runbooks/db-latency.md"
+              runbook_url: "https://github.com/adorsys/status-list-server/blob/develop/deploy/observability/runbooks/db-latency.md"
               dashboard_url: "http://localhost:3000/d/status-list-slo"
       - eval_time: 400m
         alertname: TokenGenerationFastBurn
@@ -212,7 +212,7 @@ tests:
               namespace: "ns1"
             exp_annotations:
               summary: "Token-generation failures burning the error budget fast (>=14.4x over 0.5% budget on the 1h window)"
-              runbook_url: "https://github.com/adorsys/status-list-server/blob/develop/observability/runbooks/token-generation.md"
+              runbook_url: "https://github.com/adorsys/status-list-server/blob/develop/deploy/observability/runbooks/token-generation.md"
               dashboard_url: "http://localhost:3000/d/status-list-slo"
       - eval_time: 400m
         alertname: TokenGenerationSlowBurn
@@ -224,7 +224,7 @@ tests:
               namespace: "ns1"
             exp_annotations:
               summary: "Token-generation failure rate burning the error budget slowly (>=6x over 0.5% budget on the 6h window)"
-              runbook_url: "https://github.com/adorsys/status-list-server/blob/develop/observability/runbooks/token-generation.md"
+              runbook_url: "https://github.com/adorsys/status-list-server/blob/develop/deploy/observability/runbooks/token-generation.md"
               dashboard_url: "http://localhost:3000/d/status-list-slo"
       - eval_time: 400m
         alertname: CacheHitRatioLow
@@ -237,7 +237,7 @@ tests:
             exp_annotations:
               summary: "Status-list cache hit ratio below 85% for 15m (degradation, not outage)"
               description: "Current cache hit ratio: 60%"
-              runbook_url: "https://github.com/adorsys/status-list-server/blob/develop/observability/runbooks/cache-hit-ratio.md"
+              runbook_url: "https://github.com/adorsys/status-list-server/blob/develop/deploy/observability/runbooks/cache-hit-ratio.md"
               dashboard_url: "http://localhost:3000/d/status-list-slo"
       - eval_time: 400m
         alertname: CertRenewalFailures
@@ -251,7 +251,7 @@ tests:
             exp_annotations:
               summary: "Certificate expires within 14 days (renewal loop not refreshing it)"
               description: "Time to expiry: 600000s"
-              runbook_url: "https://github.com/adorsys/status-list-server/blob/develop/observability/runbooks/cert-renewal.md"
+              runbook_url: "https://github.com/adorsys/status-list-server/blob/develop/deploy/observability/runbooks/cert-renewal.md"
               dashboard_url: "http://localhost:3000/d/status-list-slo"
       # Same gauge value is also <= 7d, so the imminent-expiry page fires too.
       - eval_time: 400m
@@ -266,7 +266,7 @@ tests:
             exp_annotations:
               summary: "Certificate expires within 7 days (imminent expiry)"
               description: "Time to expiry: 600000s"
-              runbook_url: "https://github.com/adorsys/status-list-server/blob/develop/observability/runbooks/cert-renewal.md"
+              runbook_url: "https://github.com/adorsys/status-list-server/blob/develop/deploy/observability/runbooks/cert-renewal.md"
               dashboard_url: "http://localhost:3000/d/status-list-slo"
 
   # Edge case: no input series at all. Every recording rule evaluates to NaN /
@@ -326,7 +326,7 @@ tests:
               otel_scope_name: "status-list-server"
             exp_annotations:
               summary: "status-list-server metrics absent for 5m (target down or not scraped)"
-              runbook_url: "https://github.com/adorsys/status-list-server/blob/develop/observability/README.md"
+              runbook_url: "https://github.com/adorsys/status-list-server/blob/develop/deploy/observability/README.md"
               dashboard_url: "http://localhost:3000/d/status-list-slo"
       - eval_time: 10m
         alertname: Watchdog
@@ -336,7 +336,7 @@ tests:
               severity: "none"
             exp_annotations:
               summary: "Prometheus alerting pipeline is healthy (Watchdog)"
-              runbook_url: "https://github.com/adorsys/status-list-server/blob/develop/observability/README.md"
+              runbook_url: "https://github.com/adorsys/status-list-server/blob/develop/deploy/observability/README.md"
               dashboard_url: "http://localhost:3000/d/status-list-slo"
 
   # ErrorBudgetCritical positive fire. A 6h interval spans a full 30d so the
@@ -362,7 +362,7 @@ tests:
             exp_annotations:
               summary: "Error budget is below 10% for the 30d window"
               description: "Remaining error budget: 0%"
-              runbook_url: "https://github.com/adorsys/status-list-server/blob/develop/observability/runbooks/error-budget.md"
+              runbook_url: "https://github.com/adorsys/status-list-server/blob/develop/deploy/observability/runbooks/error-budget.md"
               dashboard_url: "http://localhost:3000/d/status-list-slo"
 
   # TokenGenErrorBudgetCritical positive fire over 30d.
@@ -386,7 +386,7 @@ tests:
             exp_annotations:
               summary: "Token generation error budget below 10% for the 30d window"
               description: "Remaining token generation error budget: 0%"
-              runbook_url: "https://github.com/adorsys/status-list-server/blob/develop/observability/runbooks/token-generation.md"
+              runbook_url: "https://github.com/adorsys/status-list-server/blob/develop/deploy/observability/runbooks/token-generation.md"
               dashboard_url: "http://localhost:3000/d/status-list-slo"
 
   # Boundary: a healthy certificate with plenty of time left (30d = 2592000s,

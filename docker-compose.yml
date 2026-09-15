@@ -120,7 +120,7 @@ services:
     container_name: otel-collector
     command: ["--config", "/etc/otelcol/config.yaml"]
     volumes:
-      - ./otel-collector.yaml:/etc/otelcol/config.yaml
+      - ./deploy/observability/otel-collector.yaml:/etc/otelcol/config.yaml
     ports:
       - 4317:4317
       - 4318:4318
@@ -146,8 +146,8 @@ services:
     ports:
       - 9092:9090
     volumes:
-      - ./observability/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml
-      - ./observability/prometheus/rules:/etc/prometheus/rules
+      - ./deploy/observability/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml
+      - ./deploy/observability/prometheus/rules:/etc/prometheus/rules
     depends_on:
       alertmanager:
         condition: service_started
@@ -172,7 +172,7 @@ services:
       # Webhook-based alert notifications (ticket #446). Select the target
       # channel with ALERTMANAGER_PLATFORM (webhook|discord|slack|teams|
       # mattermost|email) and supply that platform's credential below. The
-      # entrypoint renders observability/prometheus/generate-alertmanager-config.sh,
+      # entrypoint renders deploy/observability/prometheus/generate-alertmanager-config.sh,
       # which emits the native receiver config, so no repo code is platform
       # specific and no webhook URL is committed. We recommend the generic
       # `webhook` platform for a Discord/Slack-compatible endpoint.
@@ -191,7 +191,7 @@ services:
       ALERTMANAGER_SMTP_FROM: ${ALERTMANAGER_SMTP_FROM:-}
       ALERTMANAGER_EMAIL_TO: ${ALERTMANAGER_EMAIL_TO:-}
     volumes:
-      - ./observability/prometheus/generate-alertmanager-config.sh:/generate-alertmanager-config.sh:ro
+      - ./deploy/observability/prometheus/generate-alertmanager-config.sh:/generate-alertmanager-config.sh:ro
     networks:
       - status-list-network
     entrypoint:
@@ -211,9 +211,9 @@ services:
       GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:?GRAFANA_ADMIN_PASSWORD must be set}
       GF_USERS_ALLOW_SIGN_UP: "false"
     volumes:
-      - ./observability/dashboards/provisioning/datasources.yml:/etc/grafana/provisioning/datasources/datasources.yml:ro
-      - ./observability/dashboards/provisioning/dashboards.yml:/etc/grafana/provisioning/dashboards/dashboards.yml:ro
-      - ./observability/dashboards/generated:/var/lib/grafana/dashboards:ro
+      - ./deploy/observability/dashboards/provisioning/datasources.yml:/etc/grafana/provisioning/datasources/datasources.yml:ro
+      - ./deploy/observability/dashboards/provisioning/dashboards.yml:/etc/grafana/provisioning/dashboards/dashboards.yml:ro
+      - ./deploy/observability/dashboards/generated:/var/lib/grafana/dashboards:ro
     depends_on:
       prometheus:
         condition: service_started

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Verify that the chart resolves image references the way the deploy path depends on.
 #
-# The `image` / `imagePullPolicy` conditionals in `helm/chart/templates/deployment.yaml`
+# The `image` / `imagePullPolicy` conditionals in `deploy/helm/chart/templates/deployment.yaml`
 # are what make "production runs the artifact CI scanned" true: `deploy.yml` passes the
 # scanned digest as `statuslist.image.digest`, and the chart must prefer it over any tag.
 # Every other Helm render in CI uses default values, so without this only the tag branch
@@ -22,21 +22,21 @@ for tool in helm yq; do
     }
 done
 
-[ -f helm/chart/Chart.yaml ] || {
-    echo "::error::helm/chart/Chart.yaml not found. Run $0 from the repository root."
+[ -f deploy/helm/chart/Chart.yaml ] || {
+    echo "::error::deploy/helm/chart/Chart.yaml not found. Run $0 from the repository root."
     exit 1
 }
 
 repo="ghcr.io/adorsys/status-list-server"
 digest="sha256:$(printf 'a%.0s' $(seq 1 64))"
-app_version=$(helm show chart helm/chart | sed -nE 's/^appVersion:[[:space:]]*"?([^"]+)"?[[:space:]]*$/\1/p')
+app_version=$(helm show chart deploy/helm/chart | sed -nE 's/^appVersion:[[:space:]]*"?([^"]+)"?[[:space:]]*$/\1/p')
 echo "chart appVersion: ${app_version}"
 
 # Selected by container name rather than by whether the image happens to be
 # quoted, so adding or quoting an initContainer cannot silently retarget it.
 # `tr` strips any quoting yq adds and the CR from a CRLF checkout.
 render() {
-    helm template status-list-server helm/chart -s templates/deployment.yaml "$@" \
+    helm template status-list-server deploy/helm/chart -s templates/deployment.yaml "$@" \
         | yq '.spec.template.spec.containers[]
               | select(.name == "status-list-server")
               | (.image, .imagePullPolicy)' \
@@ -95,7 +95,7 @@ expect "${repo}:test-tag|Always|" \
 
 # A malformed digest must fail at template time, not 10 minutes later as an
 # ImagePullBackOff under `helm upgrade --atomic --wait`.
-if helm template status-list-server helm/chart -s templates/deployment.yaml \
+if helm template status-list-server deploy/helm/chart -s templates/deployment.yaml \
     --set-string statuslist.image.digest=not-a-digest > /dev/null 2>&1; then
     echo "::error::chart accepted a malformed image digest instead of failing."
     exit 1
