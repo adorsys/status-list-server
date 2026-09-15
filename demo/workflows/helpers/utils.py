@@ -98,6 +98,9 @@ def get_status(statuses: bytes, index: int, bits: int) -> int:
     Statuses are packed `bits` wide, least significant bit first
     (draft-ietf-oauth-status-list §4.1).
     """
+    max_index = len(statuses) * 8 // bits - 1
+    if not 0 <= index <= max_index:
+        raise IndexError(f"index {index} out of range (0..{max_index})")
     position = index * bits
     return (statuses[position // 8] >> (position % 8)) & ((1 << bits) - 1)
 

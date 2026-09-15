@@ -41,6 +41,22 @@ def build_certificate(key: ec.EllipticCurvePrivateKey) -> x509.Certificate:
         .not_valid_before(now)
         .not_valid_after(now + VALIDITY)
         .add_extension(x509.SubjectAlternativeName([x509.DNSName(HOSTNAME)]), critical=False)
+        .add_extension(x509.BasicConstraints(ca=False, path_length=None), critical=True)
+        # An ECDSA key only signs, so digitalSignature is the one usage that applies.
+        .add_extension(
+            x509.KeyUsage(
+                digital_signature=True,
+                content_commitment=False,
+                key_encipherment=False,
+                data_encipherment=False,
+                key_agreement=False,
+                key_cert_sign=False,
+                crl_sign=False,
+                encipher_only=False,
+                decipher_only=False,
+            ),
+            critical=True,
+        )
         .sign(key, hashes.SHA256())
     )
 
