@@ -7,7 +7,7 @@ config:
         tags:
           - "test_id:status_list_stress"
     expect: {}
-    metrics-by-endpoint: {}
+    ensure: {}
   phases:
     - duration: 180
       arrivalRate: 50
@@ -30,6 +30,10 @@ config:
 
   processor: "../scripts/processor.js"
 
+  # The issuer is registered and seed lists are published once before the run by
+  # scripts/setup.js (invoked by `npm run test:stress*`), so authenticated flows
+  # start with a valid issuer and reads hit real lists.
+
   ensure:
     maxErrorRate: 25 # Lenient for stress test
     p99: 3000 # 99th percentile < 3s
@@ -43,8 +47,7 @@ scenarios:
           expect:
             - statusCode: 200
             - contentType: text/plain; charset=utf-8
-            - equals:
-                - "OK"
+            - matchesRegexp: "OK"
 
   - name: "Welcome Endpoint"
     weight: 20
@@ -59,13 +62,13 @@ scenarios:
     weight: 30
     flow:
       - loop:
-          - function: "generateRandomListId"
+          - function: "selectPublishedListId"
           - get:
               url: "/api/v1/status-lists/{{ listId }}"
+              headers:
+                Accept: "application/statuslist+jwt"
               expect:
-                - statusCode:
-                    - 200
-                    - 404
+                - statusCode: 200
           - think: 0.2
         count: 3
 
@@ -78,10 +81,10 @@ scenarios:
           json:
             issuer: "{{ issuer }}"
             public_key: "{{ publicKeyJwk }}"
-            expect:
-              - statusCode:
-                  - 202
-                  - 409
+          expect:
+            - statusCode:
+                - 202
+                - 409
           afterResponse: "handleCredentialResponse"
       - think: 0.5
 
@@ -99,9 +102,10 @@ scenarios:
           json:
             statuses:
               - index: 1
-                status: "VALID"
+                status: 0
           expect:
             - statusCode: 201
+          afterResponse: "handlePublishResponse"
       # Then update
       - think: 0.5
       - patch:
@@ -111,9 +115,9 @@ scenarios:
           json:
             statuses:
               - index: 1
-                status: "INVALID"
+                status: 1
               - index: 2
-                status: "VALID"
+                status: 0
           expect:
             - statusCode: 200
           afterResponse: "handleUpdateResponse"
