@@ -203,6 +203,42 @@ fn rendered_chart_templates_mysql_backend_defaults() {
 }
 
 #[test]
+fn rendered_chart_preserves_secret_item_mode() {
+    let Some(rendered) = render_helm(&[
+        "--set-json",
+        r#"statuslist.secretMounts=[{"name":"database-credentials","secretName":"statuslist-secret","mountPath":"/var/run/status-list-server/database","items":[{"key":"postgres-password","path":"password","mode":256}],"fileEnv":{"APP_DATABASE__PASSWORD_FILE":"password"}}]"#,
+    ]) else {
+        return;
+    };
+
+    for expected in ["key: postgres-password", "path: password", "mode: 256"] {
+        assert!(
+            rendered.contains(expected),
+            "rendered Secret volume item should preserve configured field {expected}"
+        );
+    }
+}
+
+#[test]
+fn rendered_chart_preserves_custom_secret_mount_key_for_mysql() {
+    let Some(rendered) = render_helm(&[
+        "--set",
+        "statuslist.env.APP_DATABASE__BACKEND=mysql",
+        "--set-json",
+        r#"statuslist.secretMounts=[{"name":"database-credentials","secretName":"customer-db-secret","mountPath":"/var/run/status-list-server/database","items":[{"key":"postgres-password","path":"password"}],"fileEnv":{"APP_DATABASE__PASSWORD_FILE":"password"}}]"#,
+    ]) else {
+        return;
+    };
+
+    assert!(
+        rendered.contains("secretName: customer-db-secret")
+            && rendered.contains("key: postgres-password")
+            && rendered.contains("path: password"),
+        "custom MySQL secret mounts must keep their configured Secret key"
+    );
+}
+
+#[test]
 fn rendered_chart_rejects_mysql_backend_when_postgres_subchart_is_still_enabled() {
     let Some(output) = render_helm_chart_defaults_failure(&[
         "--set",
@@ -315,6 +351,31 @@ fn rendered_chart_rejects_external_secret_missing_mounted_database_key() {
     assert!(
         String::from_utf8_lossy(&output.stderr).contains("must emit key \"postgres-password\""),
         "helm template should reject ESO mappings that do not emit the mounted password key"
+    );
+}
+
+#[test]
+fn rendered_chart_rejects_external_secret_replace_template_missing_mounted_key() {
+    let Some(output) = render_helm_failure(&[
+        "--set",
+        "externalSecret.enabled=true",
+        "--set",
+        "statuslist.fallbackSecret.enabled=false",
+        "--set",
+        "secretStore.enabled=true",
+        "--set",
+        "secretStore.provider=gcp",
+        "--set",
+        "secretStore.gcp.projectID=my-project-id",
+        "--set-string",
+        "externalSecret.spec.target.template.data.unrelated=value",
+    ]) else {
+        return;
+    };
+
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("must emit key \"postgres-password\""),
+        "ESO template mergePolicy=Replace should validate the final Secret keys, not fetched input keys"
     );
 }
 

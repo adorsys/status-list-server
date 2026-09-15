@@ -299,15 +299,16 @@ spec:
           secret:
             secretName: aws-credentials-secret
       {{- end }}
-      {{- range .Values.statuslist.secretMounts }}
-        - name: {{ .name }}
+      {{- range $mount := .Values.statuslist.secretMounts }}
+        - name: {{ $mount.name }}
           secret:
-            secretName: {{ .secretName }}
-            {{- with .items }}
+            secretName: {{ $mount.secretName }}
+            {{- with $mount.items }}
             items:
-              {{- range . }}
-              - key: {{ include "status-list-server-chart.databasePasswordSecretKey" (dict "root" $ "key" .key) }}
-                path: {{ .path }}
+              {{- range $item := . }}
+              {{- $resolvedKey := include "status-list-server-chart.databasePasswordSecretKey" (dict "root" $ "mount" $mount "item" $item) }}
+              {{- $renderedItem := mustMergeOverwrite (deepCopy $item) (dict "key" $resolvedKey) }}
+              {{- toYaml (list $renderedItem) | nindent 14 }}
               {{- end }}
             {{- end }}
       {{- end }}
