@@ -214,9 +214,45 @@ jobs:
             echo "MANIFEST_${upper}=${manifest}" >> "$GITHUB_ENV"
           done <<< "$resolved"
 
+      - name: Install Trivy
+        # Pinned to the same version trivy-action v0.36.0 uses internally.
+        uses: aquasecurity/setup-trivy@3fb12ec12f41e471780db15c232d5dd185dcb514 # v0.2.6
+        with:
+          version: v0.70.0
+          cache: false
+
+      - name: Restore Trivy vulnerability database cache
+        # The same cache and path deploy.yml uses; see the comments there. Not gated on
+        # `resolved`, so the leg that saves below does so whether or not its own
+        # variant has been released.
+        uses: actions/cache/restore@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        with:
+          path: ${{ runner.temp }}/trivy
+          key: trivy-db-${{ runner.os }}-${{ github.run_id }}
+          restore-keys: |
+            trivy-db-${{ runner.os }}-
+
+      - name: Ensure Trivy vulnerability database
+        # Refreshes the DB; on fetch failure, falls back to the cached DB with a
+        # loud warning (and step-summary entry) if the cached DB is within the
+        # 24h staleness bound. Fails if the cached DB is older, or there is none.
+        run: bash scripts/ensure-trivy-db.sh "$RUNNER_TEMP/trivy" 24
+
+      - name: Save Trivy vulnerability database cache
+        # One leg saves, for the reason in deploy.yml. This run is on the default
+        # branch, so its entry is the one release tags restore from.
+        if: strategy.job-index == 0
+        uses: actions/cache/save@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        with:
+          path: ${{ runner.temp }}/trivy
+          key: trivy-db-${{ runner.os }}-${{ github.run_id }}
+
       - name: Scan image (amd64)
         if: steps.resolve.outputs.resolved == 'true'
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        env:
+          # Freshness was decided above; see deploy.yml.
+          TRIVY_SKIP_DB_UPDATE: "true"
         with:
           scan-type: image
           image-ref: ${{ env.SCAN_REF_AMD64 }}
@@ -225,10 +261,15 @@ jobs:
           exit-code: 0
           format: json
           output: trivy-image-report-amd64.json
+          cache: false
+          cache-dir: ${{ runner.temp }}/trivy
+          skip-setup-trivy: true
 
       - name: Scan image (arm64)
         if: steps.resolve.outputs.resolved == 'true'
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        env:
+          TRIVY_SKIP_DB_UPDATE: "true"
         with:
           scan-type: image
           image-ref: ${{ env.SCAN_REF_ARM64 }}
@@ -237,6 +278,9 @@ jobs:
           exit-code: 0
           format: json
           output: trivy-image-report-arm64.json
+          cache: false
+          cache-dir: ${{ runner.temp }}/trivy
+          skip-setup-trivy: true
 
       - name: Derive reports
         # The same script deploy.yml runs, so the nightly result and the release result
@@ -480,9 +524,10 @@ jobs:
           echo "deployed variant '${DEPLOYED_VARIANT}': ${deployed_status}"
 
       - name: Merge and upload SARIF
-        # One upload: GitHub fails the run when two SARIF files share a tool and
-        # category, so the per-arch reports are merged into one document's `runs`
-        # (the limit is 20) rather than uploaded separately.
+        # One upload, one category per run. Every Trivy run carries the same tool
+        # driver, so runs without a distinct `automationDetails.id` are rejected as
+        # duplicates -- and the `category` input cannot help, because it is applied
+        # after that check and would stamp the same id on every run.
         #
         # `always()` so a failure anywhere upstream does not cost the night its durable
         # sink, which is one of the three things this workflow exists to provide.
@@ -505,18 +550,32 @@ jobs:
             variant=${rest%-*}
             arch=${rest##*-}
 
+            # Two inputs for one image would overwrite each other here, and the run lost
+            # that way never reaches the category check below.
+            if [ -e "tagged/${variant}-${arch}.sarif" ]; then
+              echo "::error::more than one SARIF for ${variant}/${arch}: ${file}"
+              exit 1
+            fi
+
             # Trivy names every run's tool "Trivy", sets no `automationDetails` and no
             # `partialFingerprints`, and for a `lang-pkgs` result -- which is all a
             # `FROM scratch` image holding one Rust binary produces -- the location URI
             # is the target path, unchanged. That path is identical across all five
-            # variants and both architectures, so ten runs uploaded under one category
-            # collapse into one set of alerts, and the only distinction that matters
-            # (which image a finding is in, when one variant is the deployed one) is
-            # precisely the one lost. So it is written into the location and the
-            # message, where the dedup key can see it.
+            # variants and both architectures. Code scanning merges alerts by rule and
+            # location *across* categories, so giving each image its own category does
+            # not keep them apart: without the prefix, one advisory in the binary is one
+            # alert for all ten images, and the only distinction that matters (which
+            # image a finding is in, when one variant is the deployed one) is precisely
+            # the one lost. So it is written into the location and the message, where
+            # that merge key can see it.
+            #
+            # The trailing `/` is load-bearing: code scanning takes the category as
+            # everything before the last `/`, so without it amd64 and arm64 collapse
+            # into one category and the upload is rejected server-side.
             jq --arg tag "${variant}/${arch}" '
               .runs |= map(
-                .results = ((.results // []) | map(
+                .automationDetails.id = ("container-image/" + $tag + "/")
+                | .results = ((.results // []) | map(
                   .message.text = ((.message.text // "") + " (" + $tag + ")")
                   | .locations = ((.locations // []) | map(
                       .physicalLocation.artifactLocation.uri =
@@ -539,6 +598,21 @@ jobs:
             exit 1
           fi
 
+          # The Action only catches duplicate ids; ids that differ but share a category
+          # get past it and fail at GitHub. Check categories, as GitHub derives them:
+          # everything before the last `/`, or empty when the id has no `/` at all. An
+          # empty category is named, or its collision would join to "" and read as none.
+          # `.runs[] | .id // ""` rather than `.runs[].id // ""`: `//` over the whole
+          # stream drops every missing id, so runs without one were never counted.
+          dupes=$(jq -r '[.runs[] | .automationDetails.id // ""
+                          | if test("/") then sub("/[^/]*$"; "") else "" end]
+                         | group_by(.) | map(select(length > 1) | .[0] | if . == "" then "(empty)" else . end)
+                         | join(" ")' merged.sarif)
+          if [ -n "$dupes" ]; then
+            echo "::error::merged.sarif has more than one run in category: ${dupes}"
+            exit 1
+          fi
+
           echo "present=true" >> "$GITHUB_OUTPUT"
           echo "merged ${runs} run(s) into merged.sarif"
 
@@ -548,10 +622,11 @@ jobs:
         # have. Here a failed upload is a failure of the durable sink this workflow
         # exists to provide.
         if: ${{ always() && steps.sarif.outputs.present == 'true' }}
-        uses: github/codeql-action/upload-sarif@4187e74d05793876e9989daffde9c3e66b4acd07 # v3.37.3
+        # No `category` input: each run's `automationDetails.id` already sets it, and
+        # the Action never overwrites one that is present.
+        uses: github/codeql-action/upload-sarif@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4.37.9
         with:
           sarif_file: merged.sarif
-          category: container-image
 
       - name: Check for approaching exception expiry
         # A *finding* here never fails the run: a date three weeks out is notice, not a
