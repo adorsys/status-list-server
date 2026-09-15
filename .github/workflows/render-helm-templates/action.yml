@@ -48,17 +48,16 @@ runs:
           --set secretStore.enabled=true \
           --set secretStore.provider=gcp \
           --set secretStore.gcp.projectID=my-project-id \
-          --set-string 'externalSecret.spec.data[0].secretKey=database-password' \
+          --set-string 'externalSecret.spec.data[0].secretKey=postgres_password' \
           --set-string 'externalSecret.spec.data[0].remoteRef.key=statuslist-database-password' \
           --set-string 'externalSecret.spec.data[0].remoteRef.version=latest' \
           --set-string 'externalSecret.spec.data[0].remoteRef.decodingStrategy=None' \
           --set-string 'externalSecret.spec.data[0].remoteRef.conversionStrategy=Default' \
-          --set-string 'externalSecret.spec.data[1].secretKey=postgres-password' \
-          --set-string 'externalSecret.spec.data[1].remoteRef.key=statuslist-database-password' \
-          --set-string 'externalSecret.spec.data[1].remoteRef.version=latest' \
-          --set-string 'externalSecret.spec.data[1].remoteRef.decodingStrategy=None' \
-          --set-string 'externalSecret.spec.data[1].remoteRef.conversionStrategy=Default' \
           --output-dir /tmp/rendered/gcp-remote-ref
+        GCP_PASSWORD_FETCHES=$(grep -c 'key: statuslist-database-password' /tmp/rendered/gcp-remote-ref/status-list-server/templates/external-secrets.yaml || true)
+        if [ "$GCP_PASSWORD_FETCHES" -ne 1 ]; then
+          echo "ERROR: GCP ExternalSecret must fetch the database password once and template both Kubernetes Secret keys"; exit 1
+        fi
         # Azure Workload Identity: ESO uses its own ServiceAccount, not the app KSA.
         helm template status-list-server helm/chart \
           --set externalSecret.enabled=true \
@@ -106,6 +105,9 @@ runs:
         fi
         if ! grep -q 'app.kubernetes.io/name: external-mysql' /tmp/rendered/mysql/status-list-server/templates/network-policy.yaml; then
           echo "ERROR: MySQL NetworkPolicy render must use statuslist.networkPolicy.databaseEgress"; exit 1
+        fi
+        if ! grep -q 'value: "3306"' /tmp/rendered/mysql/status-list-server/templates/deployment.yaml; then
+          echo "ERROR: MySQL render must default APP_DATABASE__PORT from mysql.service.port"; exit 1
         fi
         if grep -q 'service.beta.kubernetes.io/aws-load-balancer' /tmp/rendered/aws/status-list-server/templates/service.yaml; then
           echo "ERROR: AWS ingress overlay must not render direct AWS load balancer annotations"; exit 1
@@ -524,6 +526,54 @@ runs:
             --set secretStore.enabled=true \
             --set secretStore.provider=aws 2>/dev/null | grep -A1 '^  target:' | grep 'name: statuslist-secret' >/dev/null; then
           echo "ERROR: ExternalSecret target.name must be statuslist-secret"; exit 1
+        fi
+        helm template status-list-server helm/chart \
+          --set externalSecret.enabled=true \
+          --set statuslist.fallbackSecret.enabled=false \
+          --set secretStore.enabled=true \
+          --set secretStore.provider=aws \
+          --set-json 'externalSecret.spec.target.template.templateFrom=[{"configMap":{"name":"statuslist-secret-template","items":[{"key":"secret.tpl"}]}}]' \
+          --output-dir /tmp/rendered/eso-template-from
+        if ! grep -q 'templateFrom:' /tmp/rendered/eso-template-from/status-list-server/templates/external-secrets.yaml; then
+          echo "ERROR: ExternalSecret target.template.templateFrom must render"; exit 1
+        fi
+        if ! grep -q 'database-password:' /tmp/rendered/eso-template-from/status-list-server/templates/external-secrets.yaml; then
+          echo "ERROR: ExternalSecret target.template.data must still emit database-password"; exit 1
+        fi
+        # MySQL is external-only: explicit disable overlays must not fail, but enabling
+        # a bundled mysql subchart, omitting the host, or relying on the default image must.
+        helm template status-list-server helm/chart --set mysql.enabled=false --output-dir /tmp/rendered/mysql-disabled
+        if helm template status-list-server helm/chart \
+            --set mysql.enabled=true >/tmp/rendered/mysql-enabled-fail.out 2>&1; then
+          echo "ERROR: mysql.enabled=true should fail because this chart does not vendor MySQL"; exit 1
+        fi
+        if ! grep -q 'mysql.enabled is not supported' /tmp/rendered/mysql-enabled-fail.out; then
+          echo "ERROR: mysql.enabled=true failure did not explain the unsupported bundled MySQL subchart"; exit 1
+        fi
+        if helm template status-list-server helm/chart \
+            --set postgres.enabled=false \
+            --set-string statuslist.env.APP_DATABASE__BACKEND=mysql \
+            --set-string statuslist.image.tag=mysql >/tmp/rendered/mysql-missing-host-fail.out 2>&1; then
+          echo "ERROR: MySQL without APP_DATABASE__HOST should fail"; exit 1
+        fi
+        if ! grep -q 'statuslist.env.APP_DATABASE__HOST must be set' /tmp/rendered/mysql-missing-host-fail.out; then
+          echo "ERROR: MySQL missing-host failure did not explain APP_DATABASE__HOST"; exit 1
+        fi
+        if helm template status-list-server helm/chart \
+            --set postgres.enabled=false \
+            --set-string statuslist.env.APP_DATABASE__BACKEND=mysql \
+            --set-string statuslist.env.APP_DATABASE__HOST=mysql.example.internal >/tmp/rendered/mysql-missing-image-fail.out 2>&1; then
+          echo "ERROR: MySQL without an explicit image tag or digest should fail"; exit 1
+        fi
+        if ! grep -q 'requires an explicit MySQL-capable image tag or digest' /tmp/rendered/mysql-missing-image-fail.out; then
+          echo "ERROR: MySQL missing-image failure did not explain tag or digest"; exit 1
+        fi
+        if helm template status-list-server helm/chart \
+            --set-string statuslist.env.APP_DATABASE__BACKEND=sqlite >/tmp/rendered/sqlite-backend-fail.out 2>&1; then
+          echo "ERROR: sqlite backend should fail in the Helm chart"; exit 1
+        fi
+        if ! grep -q 'must be either postgres or mysql' /tmp/rendered/sqlite-backend-fail.out; then
+          echo "ERROR: sqlite backend failure did not explain supported Helm backends"; exit 1
         fi
         # NetworkPolicy is opt-in: the default must NOT render a NetworkPolicy (an open
         # port-only ingress rule would equal no ingress restriction).

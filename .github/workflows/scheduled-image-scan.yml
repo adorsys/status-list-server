@@ -113,7 +113,7 @@ jobs:
       contents: read
       packages: read
     strategy:
-      # One variant's registry trouble must not withhold the other variants' findings.
+      # One variant's registry trouble must not withhold the other four's findings.
       # `report` honours this rather than undoing it: a leg that dies becomes a row,
       # not a reason to withhold everything else.
       fail-fast: false
@@ -323,7 +323,7 @@ jobs:
       - name: Evaluate the gate
         # Renders the table but does not decide the run. One verdict is aggregated in
         # `report`, so the counts, the tracking issue and the exit code cannot disagree
-        # about what was found across the released variants.
+        # about what was found across five variants.
         if: steps.resolve.outputs.resolved == 'true'
         env:
           INDEX_DIGEST: ${{ steps.resolve.outputs.index_digest }}
@@ -331,7 +331,7 @@ jobs:
           set -eu
           # scan-summary-<variant>.json is the contract everything downstream reports
           # from. Three steps write it -- this one, "Record an unresolved variant", and
-          # the coverage accounting in `report` -- and several consumers read it, so the shape is
+          # the coverage accounting in `report` -- and four read it, so the shape is
           # fixed and worth stating once:
           #
           #   variant       string    which image variant this row is about
@@ -952,7 +952,7 @@ jobs:
 
           # The deployed variant is the one this workflow is actually about. Any status
           # other than `scanned` means the claim "the released image is re-scanned
-          # nightly" was not true tonight, whatever the other variants did. This is also
+          # nightly" was not true tonight, whatever the other four did. This is also
           # what catches the deployed variant being unresolved or never reporting, so
           # the two checks below can stay advisory without opening a hole.
           case "${DEPLOYED_STATUS:-absent}" in
