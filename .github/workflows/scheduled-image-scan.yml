@@ -113,7 +113,7 @@ jobs:
       contents: read
       packages: read
     strategy:
-      # One of the five variants' registry trouble must not withhold the other variants' findings.
+      # One variant's registry trouble must not withhold the other variants' findings.
       # `report` honours this rather than undoing it: a leg that dies becomes a row,
       # not a reason to withhold everything else.
       fail-fast: false

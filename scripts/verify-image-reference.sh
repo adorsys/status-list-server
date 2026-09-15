@@ -56,6 +56,26 @@ expect() {
     echo "ok: $* -> ${want}"
 }
 
+expect_failure() {
+    want="$1"; shift
+    stderr=$(mktemp)
+    if helm template status-list-server helm/chart -s templates/deployment.yaml "$@" >/dev/null 2>"${stderr}"; then
+        echo "::error::chart accepted invalid image configuration for: $*"
+        rm -f "${stderr}"
+        exit 1
+    fi
+    if ! grep -q "${want}" "${stderr}"; then
+        echo "::error::chart failed with an unexpected message for: $*"
+        echo "  expected stderr to contain: ${want}"
+        echo "  actual stderr:"
+        sed 's/^/    /' "${stderr}"
+        rm -f "${stderr}"
+        exit 1
+    fi
+    rm -f "${stderr}"
+    echo "ok: rejected $* -> ${want}"
+}
+
 # appVersion is the provider-neutral default image tag basis. Release tags are
 # variant-suffixed, so the base chart must resolve to the filesystem-certificate
 # variant while AWS overlays derive the matching AWS tag without hardcoding the
@@ -93,28 +113,11 @@ expect "${repo}:test-tag|Always|" \
     --set-string statuslist.image.tag=test-tag \
     --set statuslist.image.digest=null
 
-# A malformed digest must fail at template time, not 10 minutes later as an
-# ImagePullBackOff under `helm upgrade --atomic --wait`.
-if helm template status-list-server helm/chart -s templates/deployment.yaml \
-    --set-string statuslist.image.digest=not-a-digest > /dev/null 2>&1; then
-    echo "::error::chart accepted a malformed image digest instead of failing."
-    exit 1
-fi
-echo "ok: malformed digest rejected at template time"
+# A malformed digest must fail at template time with the digest validation error.
+expect_failure "Does not match pattern" \
+    --set-string statuslist.image.digest=not-a-digest
 
-if helm template status-list-server helm/chart -s templates/deployment.yaml \
-    --set postgres.enabled=false \
-    --set-string statuslist.env.APP_DATABASE__BACKEND=mysql > /dev/null 2>&1; then
-    echo "::error::chart accepted MySQL backend with the default PostgreSQL-only GHCR image."
-    exit 1
-fi
-echo "ok: MySQL backend requires an explicit MySQL-capable image"
-
-if helm template status-list-server helm/chart -s templates/deployment.yaml \
+expect_failure "statuslist.image.tag or statuslist.image.digest" \
     --set postgres.enabled=false \
     --set-string statuslist.env.APP_DATABASE__BACKEND=mysql \
-    --set-string statuslist.image.repository=example.com/status-list-server > /dev/null 2>&1; then
-    echo "::error::chart accepted MySQL backend without an explicit image tag or digest."
-    exit 1
-fi
-echo "ok: MySQL backend requires an explicit image tag or digest"
+    --set-string statuslist.env.APP_DATABASE__HOST=mysql.example.internal

@@ -92,9 +92,21 @@ runs:
         helm template status-list-server helm/chart \
           --set postgres.enabled=false \
           --set statuslist.env.APP_DATABASE__BACKEND=mysql \
+          --set statuslist.env.APP_DATABASE__HOST=mysql.example.internal \
+          --set statuslist.networkPolicy.enabled=true \
+          --set statuslist.networkPolicy.databaseEgress[0].podSelector.matchLabels.app\\.kubernetes\\.io/name=external-mysql \
           --set statuslist.image.repository=example.com/status-list-server \
           --set statuslist.image.tag=mysql \
           --output-dir /tmp/rendered/mysql
+        if ! grep -q 'until nc -z mysql.example.internal 3306; do' /tmp/rendered/mysql/status-list-server/templates/deployment.yaml; then
+          echo "ERROR: MySQL render must use the explicit database host and default MySQL port"; exit 1
+        fi
+        if ! grep -q 'key: postgres-password' /tmp/rendered/mysql/status-list-server/templates/deployment.yaml; then
+          echo "ERROR: MySQL render must preserve the configured database password Secret key"; exit 1
+        fi
+        if ! grep -q 'app.kubernetes.io/name: external-mysql' /tmp/rendered/mysql/status-list-server/templates/network-policy.yaml; then
+          echo "ERROR: MySQL NetworkPolicy render must use statuslist.networkPolicy.databaseEgress"; exit 1
+        fi
         if grep -q 'service.beta.kubernetes.io/aws-load-balancer' /tmp/rendered/aws/status-list-server/templates/service.yaml; then
           echo "ERROR: AWS ingress overlay must not render direct AWS load balancer annotations"; exit 1
         fi

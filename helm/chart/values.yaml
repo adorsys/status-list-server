@@ -34,8 +34,8 @@ statuslist:
     # select a cloud variant without hardcoding the release version.
     variant: fscert
     # Image tag with variant suffix. The current release workflow publishes only
-    # the PostgreSQL variants below. MySQL deployments must explicitly supply a
-    # non-GHCR statuslist.image.repository and statuslist.image.tag or digest until
+    # the PostgreSQL variants below. MySQL deployments must explicitly supply
+    # statuslist.image.tag or digest for a MySQL-capable image until
     # MySQL-capable images are released.
     #
     # | Tag Suffix       | Cargo Features | Description | Primary Use Case |
@@ -212,15 +212,24 @@ statuslist:
       secretName: statuslist-secret
       mountPath: /var/run/status-list-server/database
       items:
-        # Default to the legacy key so upgrades keep working when statuslist-secret
+        # Empty means deployment.yaml renders statuslist.database.passwordSecretKey.
+        # That defaults to the legacy key so upgrades keep working when statuslist-secret
         # is customer-managed or a custom ESO mapping still emits only postgres-password.
         # The chart-managed fallback Secret and default ExternalSecret emit both
         # postgres-password and database-password; switch this key to database-password
-        # once your secret-delivery path guarantees that key exists.
-        - key: postgres-password
+        # or set statuslist.database.passwordSecretKey once your secret-delivery path
+        # guarantees that key exists.
+        - key: ""
           path: password
       fileEnv:
         APP_DATABASE__PASSWORD_FILE: password
+
+  database:
+    # Default Secret key used when a database password item omits `key`.
+    # Existing deployments keep the legacy postgres-password key by default.
+    # MySQL operators can set this to database-password only after their Secret
+    # provisioning guarantees that key exists.
+    passwordSecretKey: postgres-password
 
   # Watcher configuration for file-based credential rotation detection.
   # When pollIntervalSecs is set, APP_WATCHER__POLL_INTERVAL_SECS is injected.
@@ -261,6 +270,11 @@ statuslist:
     # `to:` NetworkPolicy selector.
     # External ports (443, 53) are always allowed without destination restriction.
     egressInternal: []
+    # Explicit database egress destinations. Optional for bundled PostgreSQL, where
+    # the chart can select postgres pods. Required when APP_DATABASE__BACKEND=mysql,
+    # because this chart does not deploy MySQL and cannot infer the target for RDS,
+    # Cloud SQL, another namespace, or an operator-managed MySQL cluster.
+    databaseEgress: []
   resources:
     requests:
       memory: "256Mi"
@@ -492,9 +506,10 @@ postgres:
 
 mysql:
   # External MySQL connection defaults used by deployment.yaml, initContainers, and
-  # NetworkPolicy when APP_DATABASE__BACKEND=mysql. This chart does not vendor or
-  # deploy a MySQL database; provide the Service through your platform/operator or
-  # a values overlay, and set postgres.enabled=false.
+  # NetworkPolicy ports when APP_DATABASE__BACKEND=mysql. This chart does not vendor
+  # or deploy a MySQL database; set APP_DATABASE__HOST to your external Service/host,
+  # provide that target through your platform/operator or a values overlay, and set
+  # postgres.enabled=false.
   auth:
     username: mysql
     database: status-list
@@ -516,12 +531,13 @@ externalSecret:
       # A custom value fails at render time; this field is intentionally not configurable.
       name: statuslist-secret
       creationPolicy: Owner
+      template:
+        type: Opaque
+        data:
+          database-password: "{{ .postgres_password }}"
+          postgres-password: "{{ .postgres_password }}"
     data:
-      - secretKey: database-password
-        remoteRef:
-          key: statuslist-secret
-          property: POSTGRES_PASSWORD
-      - secretKey: postgres-password
+      - secretKey: postgres_password
         remoteRef:
           key: statuslist-secret
           property: POSTGRES_PASSWORD

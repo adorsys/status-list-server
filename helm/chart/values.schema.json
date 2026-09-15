@@ -177,6 +177,12 @@
             }
           }
         },
+        "database": {
+          "type": "object",
+          "properties": {
+            "passwordSecretKey": { "type": "string", "minLength": 1 }
+          }
+        },
         "watcher": {
           "type": "object",
           "properties": {
@@ -185,7 +191,15 @@
         },
         "livenessProbe": { "type": "object" },
         "readinessProbe": { "type": "object" },
-        "networkPolicy": { "type": "object" },
+        "networkPolicy": {
+          "type": "object",
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "ingress": { "type": "array" },
+            "egressInternal": { "type": "array" },
+            "databaseEgress": { "type": "array" }
+          }
+        },
         "resources": { "type": "object" }
       }
     },

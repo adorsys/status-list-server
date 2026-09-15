@@ -178,7 +178,11 @@ fn rendered_chart_templates_mysql_backend_defaults() {
         "--set",
         "statuslist.env.APP_DATABASE__BACKEND=mysql",
         "--set",
+        "statuslist.env.APP_DATABASE__HOST=mysql.example.internal",
+        "--set",
         "statuslist.networkPolicy.enabled=true",
+        "--set",
+        "statuslist.networkPolicy.databaseEgress[0].ipBlock.cidr=10.10.0.0/24",
         "--set",
         "statuslist.image.repository=example.com/status-list-server",
         "--set",
@@ -189,15 +193,15 @@ fn rendered_chart_templates_mysql_backend_defaults() {
 
     for expected in [
         "name: wait-for-db",
-        "until nc -z status-list-server-mysql.statuslist.svc.cluster.local 3306; do",
+        "until nc -z mysql.example.internal 3306; do",
         "name: APP_DATABASE__BACKEND\n              value: \"mysql\"",
-        "name: APP_DATABASE__HOST\n              value: \"status-list-server-mysql.statuslist.svc.cluster.local\"",
+        "name: APP_DATABASE__HOST\n              value: \"mysql.example.internal\"",
         "name: APP_DATABASE__PORT\n              value: \"3306\"",
         "name: APP_DATABASE__USERNAME\n              value: \"mysql\"",
         "name: APP_DATABASE__NAME\n              value: \"status-list\"",
         "image: \"example.com/status-list-server:mysql\"",
-        "key: database-password",
-        "app.kubernetes.io/name: mysql",
+        "key: postgres-password",
+        "cidr: 10.10.0.0/24",
     ] {
         assert!(
             rendered.contains(expected),
@@ -228,6 +232,8 @@ fn rendered_chart_preserves_custom_secret_mount_key_for_mysql() {
     let Some(rendered) = render_helm(&[
         "--set",
         "statuslist.env.APP_DATABASE__BACKEND=mysql",
+        "--set",
+        "statuslist.env.APP_DATABASE__HOST=mysql.example.internal",
         "--set",
         "statuslist.image.repository=example.com/status-list-server",
         "--set",
@@ -300,16 +306,34 @@ fn rendered_chart_rejects_enabled_postgres_with_mysql_backend() {
 }
 
 #[test]
-fn rendered_chart_rejects_mysql_backend_with_default_ghcr_image() {
-    let Some(output) =
-        render_helm_failure(&["--set", "statuslist.env.APP_DATABASE__BACKEND=mysql"])
-    else {
+fn rendered_chart_preserves_default_secret_mount_key_for_externally_managed_mysql_secret() {
+    let Some(rendered) = render_helm(&[
+        "--set",
+        "statuslist.fallbackSecret.enabled=false",
+        "--set",
+        "externalSecret.enabled=false",
+        "--set",
+        "statuslist.env.APP_DATABASE__BACKEND=mysql",
+        "--set",
+        "statuslist.env.APP_DATABASE__HOST=mysql.example.internal",
+        "--set",
+        "statuslist.image.repository=example.com/status-list-server",
+        "--set",
+        "statuslist.image.tag=mysql",
+    ]) else {
         return;
     };
 
     assert!(
-        String::from_utf8_lossy(&output.stderr).contains("GHCR publishes PostgreSQL variants only"),
-        "helm template should reject MySQL backend without an explicit MySQL-capable image"
+        !rendered.contains("kind: Secret\nmetadata:\n  # Single supported fallback secret name"),
+        "fallback Secret should not render in externally managed Secret mode"
+    );
+    assert!(
+        rendered.contains("secretName: statuslist-secret")
+            && rendered.contains("key: postgres-password")
+            && rendered.contains("path: password")
+            && !rendered.contains("key: database-password"),
+        "MySQL must preserve the configured default mount key for externally managed Secrets"
     );
 }
 
@@ -318,6 +342,8 @@ fn rendered_chart_rejects_mysql_backend_without_explicit_image_tag_or_digest() {
     let Some(output) = render_helm_failure(&[
         "--set",
         "statuslist.env.APP_DATABASE__BACKEND=mysql",
+        "--set",
+        "statuslist.env.APP_DATABASE__HOST=mysql.example.internal",
         "--set",
         "statuslist.image.repository=example.com/status-list-server",
     ]) else {
@@ -332,6 +358,93 @@ fn rendered_chart_rejects_mysql_backend_without_explicit_image_tag_or_digest() {
 }
 
 #[test]
+fn rendered_chart_accepts_mysql_enabled_false_overlay() {
+    let Some(rendered) = render_helm(&[
+        "--set",
+        "mysql.enabled=false",
+        "--set",
+        "statuslist.image.tag=explicit-postgres-tag",
+    ]) else {
+        return;
+    };
+
+    assert!(
+        rendered.contains("image: \"ghcr.io/adorsys/status-list-server:explicit-postgres-tag\""),
+        "mysql.enabled=false should not be treated as enabling an unsupported MySQL subchart"
+    );
+}
+
+#[test]
+fn rendered_chart_rejects_mysql_backend_without_explicit_host() {
+    let Some(output) = render_helm_failure(&[
+        "--set",
+        "statuslist.env.APP_DATABASE__BACKEND=mysql",
+        "--set",
+        "statuslist.image.tag=mysql",
+    ]) else {
+        return;
+    };
+
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("APP_DATABASE__HOST must be set"),
+        "helm template should reject external MySQL without an explicit host"
+    );
+}
+
+#[test]
+fn rendered_chart_rejects_mysql_network_policy_without_database_egress() {
+    let Some(output) = render_helm_failure(&[
+        "--set",
+        "statuslist.env.APP_DATABASE__BACKEND=mysql",
+        "--set",
+        "statuslist.env.APP_DATABASE__HOST=mysql.example.internal",
+        "--set",
+        "statuslist.image.tag=mysql",
+        "--set",
+        "statuslist.networkPolicy.enabled=true",
+    ]) else {
+        return;
+    };
+
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("statuslist.networkPolicy.databaseEgress must be set"),
+        "helm template should reject MySQL NetworkPolicy without an explicit database egress peer"
+    );
+}
+
+#[test]
+fn rendered_chart_resolves_empty_database_env_values_to_helper_defaults() {
+    let Some(rendered) = helm_template_chart_defaults(&[
+        "--set-string",
+        "statuslist.env.APP_DATABASE__BACKEND=",
+        "--set-string",
+        "statuslist.env.APP_DATABASE__HOST=",
+    ]) else {
+        return;
+    };
+
+    assert!(
+        rendered.status.success(),
+        "helm template failed: {}",
+        String::from_utf8_lossy(&rendered.stderr)
+    );
+    let rendered =
+        String::from_utf8(rendered.stdout).expect("helm template output should be valid UTF-8");
+
+    for expected in [
+        "until nc -z status-list-server-postgres.statuslist.svc.cluster.local 5432; do",
+        "name: APP_DATABASE__BACKEND\n              value: \"postgres\"",
+        "name: APP_DATABASE__HOST\n              value: \"status-list-server-postgres.statuslist.svc.cluster.local\"",
+    ] {
+        assert!(
+            rendered.contains(expected),
+            "empty database env value should resolve consistently to {expected}"
+        );
+    }
+}
+
+#[test]
 fn rendered_chart_supports_database_password_mount_after_secret_migration() {
     let Some(rendered) = render_helm(&[
         "--set",
@@ -343,6 +456,21 @@ fn rendered_chart_supports_database_password_mount_after_secret_migration() {
     assert!(
         rendered.contains("key: database-password"),
         "operators must be able to switch the mounted password key after their Secret contains database-password"
+    );
+}
+
+#[test]
+fn rendered_chart_supports_database_password_secret_key_default() {
+    let Some(rendered) = render_helm(&[
+        "--set",
+        "statuslist.database.passwordSecretKey=database-password",
+    ]) else {
+        return;
+    };
+
+    assert!(
+        rendered.contains("key: database-password"),
+        "statuslist.database.passwordSecretKey should control the default database password mount"
     );
 }
 
@@ -383,6 +511,8 @@ fn rendered_chart_rejects_external_secret_missing_mounted_database_key() {
         "--set",
         "secretStore.gcp.projectID=my-project-id",
         "--set-json",
+        "externalSecret.spec.target.template=null",
+        "--set-json",
         r#"externalSecret.spec.data=[{"secretKey":"database-password","remoteRef":{"key":"statuslist-database-password"}}]"#,
     ]) else {
         return;
@@ -391,6 +521,60 @@ fn rendered_chart_rejects_external_secret_missing_mounted_database_key() {
     assert!(
         String::from_utf8_lossy(&output.stderr).contains("must emit key \"postgres-password\""),
         "helm template should reject ESO mappings that do not emit the mounted password key"
+    );
+}
+
+#[test]
+fn rendered_chart_accepts_external_secret_empty_template_overlay_with_data_keys() {
+    let Some(rendered) = render_helm(&[
+        "--set",
+        "externalSecret.enabled=true",
+        "--set",
+        "statuslist.fallbackSecret.enabled=false",
+        "--set",
+        "secretStore.enabled=true",
+        "--set",
+        "secretStore.provider=gcp",
+        "--set",
+        "secretStore.gcp.projectID=my-project-id",
+        "--set-json",
+        r#"externalSecret.spec.target={"name":"statuslist-secret","creationPolicy":"Owner","template":{}}"#,
+        "--set-json",
+        r#"externalSecret.spec.data=[{"secretKey":"postgres-password","remoteRef":{"key":"statuslist-database-password"}}]"#,
+    ]) else {
+        return;
+    };
+
+    assert!(
+        rendered.contains("secretKey: postgres-password"),
+        "an empty ESO target.template overlay should not hide spec.data keys during validation"
+    );
+}
+
+#[test]
+fn rendered_chart_skips_external_secret_key_check_for_template_from() {
+    let Some(rendered) = render_helm(&[
+        "--set",
+        "externalSecret.enabled=true",
+        "--set",
+        "statuslist.fallbackSecret.enabled=false",
+        "--set",
+        "secretStore.enabled=true",
+        "--set",
+        "secretStore.provider=gcp",
+        "--set",
+        "secretStore.gcp.projectID=my-project-id",
+        "--set-json",
+        r#"externalSecret.spec.target={"name":"statuslist-secret","creationPolicy":"Owner","template":{"templateFrom":[{"configMap":{"name":"statuslist-secret-template","items":[{"key":"secret-template"}]}}]}}"#,
+        "--set-json",
+        r#"externalSecret.spec.data=[{"secretKey":"raw-password","remoteRef":{"key":"statuslist-database-password"}}]"#,
+    ]) else {
+        return;
+    };
+
+    assert!(
+        rendered.contains("templateFrom:") && rendered.contains("secretKey: raw-password"),
+        "templateFrom can emit the mounted key, so the chart should not reject it as missing"
     );
 }
 
@@ -408,13 +592,15 @@ fn rendered_chart_rejects_external_secret_replace_template_missing_mounted_key()
         "--set",
         "secretStore.gcp.projectID=my-project-id",
         "--set-string",
+        "statuslist.secretMounts[0].items[0].key=other-password",
+        "--set-string",
         "externalSecret.spec.target.template.data.unrelated=value",
     ]) else {
         return;
     };
 
     assert!(
-        String::from_utf8_lossy(&output.stderr).contains("must emit key \"postgres-password\""),
+        String::from_utf8_lossy(&output.stderr).contains("must emit key \"other-password\""),
         "ESO template mergePolicy=Replace should validate the final Secret keys, not fetched input keys"
     );
 }
@@ -432,6 +618,22 @@ fn rendered_chart_rejects_uppercase_database_backend() {
             .contains("statuslist.env.APP_DATABASE__BACKEND must be either postgres or mysql"),
         "helm template should reject backend values that the application enum would reject"
     );
+}
+
+#[test]
+fn rendered_chart_rejects_non_chart_database_backends() {
+    for backend in ["sqlite", "memory"] {
+        let arg = format!("statuslist.env.APP_DATABASE__BACKEND={backend}");
+        let Some(output) = render_helm_failure(&["--set", &arg]) else {
+            return;
+        };
+
+        assert!(
+            String::from_utf8_lossy(&output.stderr)
+                .contains("statuslist.env.APP_DATABASE__BACKEND must be either postgres or mysql"),
+            "helm template should reject {backend} because the chart only supports postgres/mysql wiring"
+        );
+    }
 }
 
 #[test]

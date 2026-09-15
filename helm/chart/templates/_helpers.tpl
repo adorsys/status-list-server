@@ -96,24 +96,11 @@ Effective database backend for chart-managed defaults.
 {{- end }}
 
 {{/*
-Effective Secret item key for the chart's default database password mount.
-Custom mounts keep their configured keys; only the built-in database password
-item switches to the backend-neutral key for MySQL.
+Default database password Secret item key. Explicit statuslist.secretMounts item
+keys are preserved as written.
 */}}
 {{- define "status-list-server-chart.databasePasswordSecretKey" -}}
-{{- $item := .item | default dict }}
-{{- $mount := .mount | default dict }}
-{{- $key := $item.key | default "postgres-password" }}
-{{- $isDefaultDatabaseMount := and
-      (eq ($mount.name | default "") "database-credentials")
-      (eq ($mount.secretName | default "") (include "status-list-server-chart.appSecretName" .root))
-      (eq ($mount.mountPath | default "") "/var/run/status-list-server/database")
-      (eq ($item.path | default "") "password") }}
-{{- if and $isDefaultDatabaseMount (eq $key "postgres-password") (eq (include "status-list-server-chart.dbBackend" .root) "mysql") -}}
-database-password
-{{- else -}}
-{{- $key -}}
-{{- end }}
+{{- .Values.statuslist.database.passwordSecretKey | default "postgres-password" }}
 {{- end }}
 
 {{/*
@@ -126,7 +113,7 @@ service name for the active backend.
 {{- if get $env "APP_DATABASE__HOST" }}
 {{- get $env "APP_DATABASE__HOST" }}
 {{- else if eq $backend "mysql" }}
-{{- printf "%s-mysql.%s.svc.cluster.local" .Release.Name .Release.Namespace }}
+{{- fail "statuslist.env.APP_DATABASE__HOST must be set when statuslist.env.APP_DATABASE__BACKEND=mysql because this chart does not deploy a MySQL Service" }}
 {{- else if eq $backend "postgres" }}
 {{- printf "%s-postgres.%s.svc.cluster.local" .Release.Name .Release.Namespace }}
 {{- else }}
@@ -183,11 +170,4 @@ Database name helper: returns the configured database name, or the active backen
 {{- else }}
 {{- fail (printf "statuslist.env.APP_DATABASE__BACKEND must be either postgres or mysql for this chart, got %q" $backend) }}
 {{- end }}
-{{- end }}
-
-{{/*
-Database pod label value for the chart-managed NetworkPolicy egress selector.
-*/}}
-{{- define "status-list-server-chart.dbPodSelectorName" -}}
-{{- include "status-list-server-chart.dbBackend" . }}
 {{- end }}

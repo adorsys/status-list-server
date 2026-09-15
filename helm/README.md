@@ -13,7 +13,7 @@ This guide shows you how to deploy the Status List Server on Kubernetes with the
 
 ## Choose Your Image Variant
 
-The server is published as provider-specific PostgreSQL image variants. Published GHCR images currently only support PostgreSQL; operators deploying with MySQL must build and supply their own container image through a non-GHCR `statuslist.image.repository` plus `statuslist.image.tag` or `statuslist.image.digest`.
+The server is published as provider-specific PostgreSQL image variants. Published GHCR images currently only support PostgreSQL; operators deploying with MySQL must build and supply their own container image through `statuslist.image.repository` plus `statuslist.image.tag` or `statuslist.image.digest`.
 
 | Image suffix      | Database   | Signing-credential backend             | Best for                             |
 | ----------------- | ---------- | -------------------------------------- | ------------------------------------ |
@@ -38,7 +38,7 @@ For production, pin the exact artifact by digest rather than tag. A digest is va
 * [`chart/values-production.yaml`](chart/values-production.yaml): production delta applied after `values-aws.yaml` by release deployments.
 * `global.domain`: chart-wide public DNS suffix. When set, Ingress defaults derive `statuslist.<global.domain>` and `*.<global.domain>` from this single value. Rendered hostnames are normalized to lowercase.
 * `postgres.persistence.storageClass`: leave as `""` to use the cluster default StorageClass; set explicitly in environment overlays when needed.
-* `mysql.auth.username`, `mysql.auth.database`, `mysql.service.port`: connection defaults for an external MySQL service.
+* `mysql.auth.username`, `mysql.auth.database`, `mysql.service.port`: connection defaults for an external MySQL database after `APP_DATABASE__HOST` is set.
 * `statuslist.image.variant`: selected image variant when no explicit `tag` or `digest` is set (`fscert`, `aws`, `gcp`, `azure`, or `vault`).
 * `statuslist.image.digest`: takes precedence over `statuslist.image.tag` and renders `repository@digest`.
 
@@ -228,7 +228,7 @@ statuslist:
         APP_DATABASE__PASSWORD_FILE: password
 ```
 
-`fileEnv` values are relative to `mountPath`, and they work with or without `items`. For upgrade safety, PostgreSQL renders the legacy `postgres-password` key from `statuslist-secret` at `/var/run/status-list-server/database/password` and exposes that path through `APP_DATABASE__PASSWORD_FILE`; MySQL renders `database-password` for the same mount. This avoids breaking PostgreSQL customer-managed Secrets or custom ESO mappings that have not yet added `database-password`, because Kubernetes refuses to mount a listed Secret key that does not exist. After your PostgreSQL secret-delivery path guarantees `database-password` exists, switch `statuslist.secretMounts[0].items[0].key` to `database-password`. Existing fallback Secrets that only contain `postgres-password` are read during Helm upgrade and rendered back with both keys.
+`fileEnv` values are relative to `mountPath`, and they work with or without `items`. For upgrade safety, the default mount keeps the legacy `postgres-password` key from `statuslist-secret` at `/var/run/status-list-server/database/password` and exposes that path through `APP_DATABASE__PASSWORD_FILE`. This avoids breaking customer-managed Secrets or custom ESO mappings that have not yet added `database-password`, because Kubernetes refuses to mount a listed Secret key that does not exist. After your secret-delivery path guarantees `database-password` exists, switch `statuslist.secretMounts[0].items[0].key` or `statuslist.database.passwordSecretKey` to `database-password`. Existing fallback Secrets that only contain `postgres-password` are read during Helm upgrade and rendered back with both keys.
 
 This chart support is preparatory for application images that implement the file-watcher and reload behavior from issue #456. Current images that only read `APP_DATABASE__PASSWORD` at startup still need a rollout after secret changes. The `checksum/secret` annotation only reacts to Helm-rendered ExternalSecret template or value changes; it does not change when External Secrets Operator later syncs new data from Vault, AWS, GCP, or Azure into a Kubernetes Secret.
 
@@ -353,7 +353,7 @@ helm upgrade --install statuslist helm/chart \
   --wait --timeout 10m
 ```
 
-The chart bundles PostgreSQL and an OpenTelemetry collector. To point at an external database, disable the bundled PostgreSQL subchart and set the split `APP_DATABASE__*` fields under `statuslist.env`. For MySQL, set `postgres.enabled=false` and `statuslist.env.APP_DATABASE__BACKEND=mysql`; if host, port, username, or database name are omitted, the chart defaults them from the `mysql:` values block (`<release>-mysql.<namespace>.svc.cluster.local`, port `3306`, `mysql.auth.username`, and `mysql.auth.database`). This chart does not vendor a MySQL subchart, so provide that MySQL Service through your platform, operator, or an overlay. Published GHCR images currently only support PostgreSQL, so MySQL deployments must build and supply their own container image through a non-GHCR `statuslist.image.repository` plus `statuslist.image.tag` or `statuslist.image.digest`. In chart `0.4.0`, PostgreSQL still defaults to the legacy `postgres-password` mount key; a future chart version that switches PostgreSQL to `database-password` must call that out in its release notes.
+The chart bundles PostgreSQL and an OpenTelemetry collector. To point at an external database, disable the bundled PostgreSQL subchart and set the split `APP_DATABASE__*` fields under `statuslist.env`. For MySQL, set `postgres.enabled=false`, `statuslist.env.APP_DATABASE__BACKEND=mysql`, `statuslist.env.APP_DATABASE__HOST`, and an explicit `statuslist.image.tag` or `statuslist.image.digest`; if port, username, or database name are omitted, the chart defaults them from the `mysql:` values block (`3306`, `mysql.auth.username`, and `mysql.auth.database`). This chart does not vendor a MySQL subchart, so provide that MySQL Service through your platform, operator, or an overlay. If `statuslist.networkPolicy.enabled=true`, also set `statuslist.networkPolicy.databaseEgress` to the peer that reaches your external MySQL target. Published GHCR images currently only support PostgreSQL, so MySQL deployments must build and supply their own container image. Starting in chart `0.5.0`, the Helm chart intentionally accepts only `postgres` and `mysql` backends; use non-Helm local/custom deployment paths for `sqlite` or `memory`.
 
 ## Verify the Deployment
 
