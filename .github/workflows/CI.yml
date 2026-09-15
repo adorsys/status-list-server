@@ -672,7 +672,7 @@ jobs:
         # `continue-on-error` because fork PRs withhold write scopes.
         if: always()
         continue-on-error: true
-        uses: github/codeql-action/upload-sarif@4187e74d05793876e9989daffde9c3e66b4acd07 # v3.37.3
+        uses: github/codeql-action/upload-sarif@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4.37.9
         with:
           sarif_file: kube-linter-results.sarif
           category: kube-linter
