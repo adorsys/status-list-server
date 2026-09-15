@@ -29,13 +29,14 @@ statuslist:
     # Empty derives from how the image is named: IfNotPresent for a digest, Always
     # for a mutable tag. Set explicitly to override.
     pullPolicy: ""
-    # Used only when tag and digest are empty. The chart derives the
-    # database-specific release tag from appVersion and this provider variant, so
-    # overlays can select a cloud variant without hardcoding the release version.
+    # Used only when tag and digest are empty. The chart derives the PostgreSQL
+    # release tag from appVersion and this provider variant, so overlays can
+    # select a cloud variant without hardcoding the release version.
     variant: fscert
-    # Image tag with variant suffix. The current release workflow publishes the
-    # PostgreSQL variants below. MySQL tags follow the same provider suffix shape
-    # when a MySQL-capable image is explicitly supplied or published by a later release.
+    # Image tag with variant suffix. The current release workflow publishes only
+    # the PostgreSQL variants below. MySQL deployments must explicitly supply a
+    # non-GHCR statuslist.image.repository and statuslist.image.tag or digest until
+    # MySQL-capable images are released.
     #
     # | Tag Suffix       | Cargo Features | Description | Primary Use Case |
     # |------------------|----------------|-------------|------------------|
@@ -44,18 +45,11 @@ statuslist:
     # | -azure           | postgres,azure | PostgreSQL database with Azure Key Vault and Azure DNS support | Azure AKS native deployments |
     # | -vault           | postgres,vault | PostgreSQL database with HashiCorp Vault / OpenBao token material storage | Vault-backed on-prem or multi-cloud deployments |
     # | -fscert          | postgres | PostgreSQL database with filesystem-mounted token signing keys and certificates | Constrained / air-gapped environments using external secret injection |
-    # | -mysql-aws       | mysql,aws | MySQL database with AWS Secrets Manager and Route53 DNS support | Requires a MySQL image release |
-    # | -mysql-gcp       | mysql,gcp | MySQL database with GCP Secret Manager and Cloud DNS support | Requires a MySQL image release |
-    # | -mysql-azure     | mysql,azure | MySQL database with Azure Key Vault and Azure DNS support | Requires a MySQL image release |
-    # | -mysql-vault     | mysql,vault | MySQL database with HashiCorp Vault / OpenBao token material storage | Requires a MySQL image release |
-    # | -mysql-fscert    | mysql | MySQL database with filesystem-mounted token signing keys and certificates | Requires a MySQL image release |
-    #
     # Tag format: <version>-<suffix> (e.g., 1.2.0-aws, 1.2.0-gcp)
     # Latest tags: latest-<suffix> (e.g., latest-aws, latest-gcp)
     #
-    # Empty derives from the chart appVersion plus statuslist.image.variant and
-    # the active database backend. PostgreSQL keeps the historical tag shape
-    # (<version>-fscert); MySQL derives <version>-mysql-fscert.
+    # Empty derives from the chart appVersion plus statuslist.image.variant,
+    # preserving the historical PostgreSQL tag shape (<version>-fscert).
     # Defaulting to "latest" would let an upgrade that changes nothing in this
     # chart still change the running image.
     tag: ""

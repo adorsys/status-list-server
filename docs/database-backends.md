@@ -51,7 +51,7 @@ Good fit when your infrastructure already standardizes on MySQL-compatible servi
 
 The Helm chart provides external MySQL connection defaults under `mysql:`. It does not deploy MySQL.
 
-For Helm-based MySQL deployments, set `postgres.enabled=false` and `statuslist.env.APP_DATABASE__BACKEND=mysql`, then provide a MySQL Service externally. The chart rejects MySQL backend renders while bundled PostgreSQL remains enabled. When `statuslist.image.tag` and `statuslist.image.digest` are empty, this renders a `mysql-<variant>` application image tag such as `1.0.1-mysql-fscert`, which must point to an image built with the `mysql` Cargo feature instead of `postgres`. Existing chart appVersions released before MySQL image variants were published do not have that derived tag; pin `statuslist.image.tag` or `statuslist.image.digest` to an existing MySQL-capable image until a release publishes it.
+For Helm-based MySQL deployments, set `postgres.enabled=false` and `statuslist.env.APP_DATABASE__BACKEND=mysql`, then provide a MySQL Service externally. The chart rejects MySQL backend renders while bundled PostgreSQL remains enabled. Published GHCR images currently only support PostgreSQL, so operators deploying with MySQL must build and supply their own container image through a non-GHCR `statuslist.image.repository` plus `statuslist.image.tag` or `statuslist.image.digest`.
 
 ### SQLite
 

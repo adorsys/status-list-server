@@ -86,13 +86,12 @@ spec:
           {{- end }}
           {{- $pinned := ne $digest "" }}
           {{- $variant := $image.variant | default "fscert" }}
-          {{- $baseAppVersion := regexReplaceAll "-(mysql-)?(aws|gcp|azure|vault|fscert)$" $.Chart.AppVersion "" }}
-          {{- $imageDatabaseBackend := include "status-list-server-chart.dbBackend" . }}
+          {{- $baseAppVersion := regexReplaceAll "-(aws|gcp|azure|vault|fscert)$" $.Chart.AppVersion "" }}
           {{- $defaultVariantTag := printf "%s-%s" $baseAppVersion $variant }}
-          {{- if eq $imageDatabaseBackend "mysql" }}
-            {{- $defaultVariantTag = printf "%s-mysql-%s" $baseAppVersion $variant }}
-          {{- end }}
           {{- $effectiveTag := $image.tag | default $defaultVariantTag }}
+          {{- if and (eq (include "status-list-server-chart.dbBackend" .) "mysql") (or (eq ($image.repository | default "") "ghcr.io/adorsys/status-list-server") (and (not $image.tag) (not $digest))) }}
+          {{- fail "statuslist.env.APP_DATABASE__BACKEND=mysql requires an explicit MySQL-capable image; GHCR publishes PostgreSQL variants only, so set statuslist.image.repository to a non-GHCR image and set statuslist.image.tag or statuslist.image.digest" }}
+          {{- end }}
           {{- /* Digest pins the exact scanned artifact; tag falls back to appVersion plus
                  the selected variant, never to "latest". An empty pullPolicy derives from
                  which one is in use: a digest is content-addressed, a tag is mutable. */}}

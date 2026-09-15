@@ -12,7 +12,6 @@ runs:
         CHART_APP_VERSION=$(helm show chart helm/chart | sed -nE 's/^appVersion:[[:space:]]*"?([^"]+)"?[[:space:]]*$/\1/p')
         CHART_BASE_VERSION="${CHART_APP_VERSION%-fscert}"
         EXPECTED_AWS_TAG="${CHART_BASE_VERSION}-aws"
-        EXPECTED_MYSQL_TAG="${CHART_BASE_VERSION}-mysql-fscert"
         helm lint helm/chart
         helm lint helm/chart -f helm/chart/values-aws.yaml
         helm lint helm/chart -f helm/chart/values-external-secrets.yaml
@@ -93,10 +92,9 @@ runs:
         helm template status-list-server helm/chart \
           --set postgres.enabled=false \
           --set statuslist.env.APP_DATABASE__BACKEND=mysql \
+          --set statuslist.image.repository=example.com/status-list-server \
+          --set statuslist.image.tag=mysql \
           --output-dir /tmp/rendered/mysql
-        if ! grep -q "image: \"ghcr.io/adorsys/status-list-server:${EXPECTED_MYSQL_TAG}\"" /tmp/rendered/mysql/status-list-server/templates/deployment.yaml; then
-          echo "ERROR: MySQL render must derive a MySQL-capable image variant from chart appVersion"; exit 1
-        fi
         if grep -q 'service.beta.kubernetes.io/aws-load-balancer' /tmp/rendered/aws/status-list-server/templates/service.yaml; then
           echo "ERROR: AWS ingress overlay must not render direct AWS load balancer annotations"; exit 1
         fi

@@ -83,13 +83,6 @@ expect "${repo}:${app_version}|Always|"
 # Variant derives a suffixed tag from the chart appVersion without duplicating the release version.
 expect "${repo}:${crate_version}-aws|Always|" \
     --set-string statuslist.image.variant=aws
-expect "${repo}:${crate_version}-mysql-fscert|Always|" \
-    --set postgres.enabled=false \
-    --set-string statuslist.env.APP_DATABASE__BACKEND=mysql
-expect "${repo}:${crate_version}-mysql-aws|Always|" \
-    --set postgres.enabled=false \
-    --set-string statuslist.env.APP_DATABASE__BACKEND=mysql \
-    --set-string statuslist.image.variant=aws
 # An explicit pullPolicy still overrides the derived one.
 expect "${repo}@${digest}|Always|" \
     --set-string statuslist.image.digest="${digest}" \
@@ -108,3 +101,20 @@ if helm template status-list-server helm/chart -s templates/deployment.yaml \
     exit 1
 fi
 echo "ok: malformed digest rejected at template time"
+
+if helm template status-list-server helm/chart -s templates/deployment.yaml \
+    --set postgres.enabled=false \
+    --set-string statuslist.env.APP_DATABASE__BACKEND=mysql > /dev/null 2>&1; then
+    echo "::error::chart accepted MySQL backend with the default PostgreSQL-only GHCR image."
+    exit 1
+fi
+echo "ok: MySQL backend requires an explicit MySQL-capable image"
+
+if helm template status-list-server helm/chart -s templates/deployment.yaml \
+    --set postgres.enabled=false \
+    --set-string statuslist.env.APP_DATABASE__BACKEND=mysql \
+    --set-string statuslist.image.repository=example.com/status-list-server > /dev/null 2>&1; then
+    echo "::error::chart accepted MySQL backend without an explicit image tag or digest."
+    exit 1
+fi
+echo "ok: MySQL backend requires an explicit image tag or digest"

@@ -179,6 +179,10 @@ fn rendered_chart_templates_mysql_backend_defaults() {
         "statuslist.env.APP_DATABASE__BACKEND=mysql",
         "--set",
         "statuslist.networkPolicy.enabled=true",
+        "--set",
+        "statuslist.image.repository=example.com/status-list-server",
+        "--set",
+        "statuslist.image.tag=mysql",
     ]) else {
         return;
     };
@@ -191,7 +195,7 @@ fn rendered_chart_templates_mysql_backend_defaults() {
         "name: APP_DATABASE__PORT\n              value: \"3306\"",
         "name: APP_DATABASE__USERNAME\n              value: \"mysql\"",
         "name: APP_DATABASE__NAME\n              value: \"status-list\"",
-        "image: \"ghcr.io/adorsys/status-list-server:1.0.0-mysql-fscert\"",
+        "image: \"example.com/status-list-server:mysql\"",
         "key: database-password",
         "app.kubernetes.io/name: mysql",
     ] {
@@ -224,6 +228,10 @@ fn rendered_chart_preserves_custom_secret_mount_key_for_mysql() {
     let Some(rendered) = render_helm(&[
         "--set",
         "statuslist.env.APP_DATABASE__BACKEND=mysql",
+        "--set",
+        "statuslist.image.repository=example.com/status-list-server",
+        "--set",
+        "statuslist.image.tag=mysql",
         "--set-json",
         r#"statuslist.secretMounts=[{"name":"database-credentials","secretName":"customer-db-secret","mountPath":"/var/run/status-list-server/database","items":[{"key":"postgres-password","path":"password"}],"fileEnv":{"APP_DATABASE__PASSWORD_FILE":"password"}}]"#,
     ]) else {
@@ -288,6 +296,38 @@ fn rendered_chart_rejects_enabled_postgres_with_mysql_backend() {
             "postgres.enabled=true requires statuslist.env.APP_DATABASE__BACKEND=postgres"
         ),
         "helm template should reject an enabled PostgreSQL backend with MySQL app config"
+    );
+}
+
+#[test]
+fn rendered_chart_rejects_mysql_backend_with_default_ghcr_image() {
+    let Some(output) =
+        render_helm_failure(&["--set", "statuslist.env.APP_DATABASE__BACKEND=mysql"])
+    else {
+        return;
+    };
+
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("GHCR publishes PostgreSQL variants only"),
+        "helm template should reject MySQL backend without an explicit MySQL-capable image"
+    );
+}
+
+#[test]
+fn rendered_chart_rejects_mysql_backend_without_explicit_image_tag_or_digest() {
+    let Some(output) = render_helm_failure(&[
+        "--set",
+        "statuslist.env.APP_DATABASE__BACKEND=mysql",
+        "--set",
+        "statuslist.image.repository=example.com/status-list-server",
+    ]) else {
+        return;
+    };
+
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("set statuslist.image.tag or statuslist.image.digest"),
+        "helm template should reject MySQL backend without an explicit image tag or digest"
     );
 }
 
