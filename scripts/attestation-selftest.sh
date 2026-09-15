@@ -335,7 +335,7 @@ assert_argv "--cert-identity https://github.com/${repo}/.github/workflows/deploy
     "an exact --cert-identity when the ref is known" \
     "Without an exactly pinned SubjectAlternativeName, an attestation signed by this workflow from any
 branch verifies -- and build-and-push runs on workflow_dispatch, so producing one needs only
-repository write access. See the header of scripts/verify-attestation.sh."
+repository write access. See docs/adr/0001-container-image-provenance.md §Consequences."
 assert_argv "--source-ref ${release_ref}" "--source-ref" \
     "This is the independent certificate-extension check on the ref; it is additive to the SAN match."
 assert_argv "--predicate-type https://slsa.dev/provenance/v1" "--predicate-type" \

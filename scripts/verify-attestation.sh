@@ -1,98 +1,18 @@
 #!/usr/bin/env bash
 # Verify the Sigstore-signed provenance GitHub issued for a pushed image digest.
 #
-# This answers "who built this", which BuildKit's own provenance cannot. The
-# `provenance: mode=max` attestation deploy.yml attaches is integrity-protected -- the
-# index digest chain covers it, so it cannot be altered without changing the digest --
-# but its `builder.id` is self-asserted: it is JSON BuildKit wrote, with nothing binding
-# it to the run that allegedly produced it. Anyone with push access to the GHCR package
-# can push an index carrying a fabricated provenance manifest that inspects identically.
-# The statement `actions/attest-build-provenance` issues is a separate document with a
-# Fulcio identity behind it, and this is the check that the identity is really there.
-#
-# Both documents are kept on purpose; docs/adr/0001-container-image-provenance.md is the
-# decision and says which one a consumer should verify for which question.
-#
 # Usage: verify-attestation.sh <image-ref@sha256:...> <owner/repo> [<git-ref>]
 #
-#   <git-ref>  optional; `refs/tags/v1.2.3` or `refs/heads/main`. Supplied, the signing
-#              identity is pinned exactly. Omitted, it is pinned to the shape of a
-#              release tag. See "Pinning the identity" below.
+#   <image-ref>  image reference pinned to a sha256 digest; tags are rejected.
+#   <owner/repo> repository whose .github/workflows/deploy.yml must have signed it.
+#   <git-ref>    optional; `refs/tags/v1.2.3` or `refs/heads/main`. Supplied, the signing
+#                identity is pinned exactly (--cert-identity + --source-ref). Omitted,
+#                it is pinned to a release-tag ref (end-anchored --cert-identity-regex).
 #
-# ---------------------------------------------------------------------------------
-# Pinning the identity
+# Requires gh >= 2.67.0 (older releases exit 0 when no attestation exists) and jq.
+# The result is asserted from `--format json`, not from exit status or gh's output text.
 #
-# The certificate's SubjectAlternativeName is the `job_workflow_ref` of the job that
-# signed: `https://github.com/<owner>/<repo>/.github/workflows/deploy.yml@<ref>`. Three
-# things about it have to be pinned, and the obvious flag pins only one and a half.
-#
-# `--repo` alone scopes attestation *lookup*, so it establishes only that *some*
-# workflow in this repository signed the digest. That is weaker in exactly the direction
-# that matters: the threat is push access, and whoever can publish a forged image can
-# also add a workflow that signs it.
-#
-# `--signer-workflow` is the documented answer to that and is not sufficient either.
-# gh turns it into `"^" + regexp.QuoteMeta("https://<host>/<owner>/<repo>/<path>")`
-# (cli/cli pkg/cmd/attestation/verify/policy.go, validateSignerWorkflow) -- a regex
-# anchored at the *start only*. Two consequences:
-#
-#   1. The `@<ref>` suffix is unconstrained. `build-and-push` is not tag-gated -- it runs
-#      on `workflow_dispatch` -- so anyone with repository write access can dispatch this
-#      very workflow from a branch carrying a modified Dockerfile and receive a genuinely
-#      signed attestation over their image. It would verify. Dispatching the workflow
-#      that already exists is *easier* than adding one, so `--signer-workflow` closes the
-#      wrong half of the hole it is documented as closing.
-#   2. A prefix match admits sibling paths: `.github/workflows/deploy.yml-staging.yml`
-#      matches `^...deploy\.yml`.
-#
-# So the identity is pinned with `--cert-identity` (exact string) when the caller knows
-# the ref, and with an end-anchored `--cert-identity-regex` when it does not. Note that
-# these are not additive with `--signer-workflow`: `newEnforcementCriteria` checks
-# `opts.SANRegex || opts.SAN` *first* and returns before it ever looks at SignerWorkflow,
-# so passing both would silently ignore the latter. Only one is passed, deliberately.
-#
-# `--source-ref` is an independent certificate extension check rather than a SAN match,
-# so it is additive, and is passed as well when the ref is known.
-#
-# `--deny-self-hosted-runners` is always passed: every job in this repository runs on
-# GitHub-hosted runners, so an attestation from a self-hosted runner is by definition not
-# ours.
-#
-# ---------------------------------------------------------------------------------
-# Why the result is read as JSON rather than as gh's output text
-#
-# Exit status alone is not sufficient evidence: a missing binary, an unreachable API and
-# a revoked identity all exit non-zero, and `gh attestation verify` exited *0* when it
-# found no attestation at all until gh 2.67.0 (cli/cli#10418, fixed by #10421) -- the
-# absence-reads-as-success failure this repository is organised against, occurring inside
-# the command documented as the defence against it. The version floor below is enforced
-# rather than assumed for that reason, and the result is asserted on top of it.
-#
-# That assertion reads `--format json`, not the human-readable output, because the
-# obvious text assertion does not work. gh prints
-#
-#     Loaded digest %s for %s
-#
-# to stdout *before* it fetches anything (cli/cli pkg/cmd/attestation/verify/verify.go),
-# echoing back the digest it was handed. So "the output names the digest" is satisfied on
-# every invocation, including a #10418-shaped one, and an implementation that checked it
-# would be checking nothing while appearing to check the central thing. gh's prose is
-# also UI text rather than a contract, and is free to be reworded.
-#
-# The JSON document is the contract: an empty result array cannot be produced by a
-# verification that succeeded, and the subject digest in it is the artifact gh actually
-# resolved rather than the string it was passed. If that document cannot be parsed at the
-# documented path, this fails closed and says so -- a schema change must block a release
-# loudly, not degrade the check silently.
-#
-# scripts/attestation-selftest.sh drives every one of these branches against a stubbed
-# gh whose output is a faithful reproduction of the real thing, `Loaded digest` line
-# included, so a regression to a text assertion fails there rather than in a release.
-#
-# A script rather than an inline step so the release path, the self-test and the command
-# in docs/supply-chain.md are provably the same check. Same reasoning as
-# scripts/vuln-gate.sh: three copies would drift, and a documented command that has
-# drifted from the enforced one tells a consumer nothing about the enforced one.
+# Background and rationale: docs/adr/0001-container-image-provenance.md.
 set -euo pipefail
 
 # The release the cli/cli#10418 fix shipped in, not the release the bug was reported

@@ -565,14 +565,7 @@ jobs:
             .github/workflows
 
       - name: Prove the attestation check can fail
-        # One leg, not five: the self-test is hermetic and identical on every variant, and
-        # it has already run on the pull request. This is the release path's own copy of
-        # the assertion, kept because a release must not trust a verifier it has not seen
-        # reject anything -- the same argument `Prove the gate can fail` makes for the
-        # vulnerability gate.
-        #
-        # Before the verification below rather than after, so a broken verifier fails as
-        # itself instead of silently blessing whatever the next step is handed.
+        # Run hermetic self-test once on release path prior to verification.
         if: matrix.variant.suffix == 'aws'
         run: bash scripts/attestation-selftest.sh
 
@@ -590,8 +583,7 @@ jobs:
         # `$GITHUB_REF` is passed so the signing identity is pinned exactly rather than by
         # prefix. Without it `gh` would accept a signature produced by this workflow from
         # any ref -- and `build-and-push` runs on `workflow_dispatch`, so producing one
-        # needs only repository write access. The header of scripts/verify-attestation.sh
-        # has the full argument.
+        # needs only repository write access. ADR 0001 §Consequences has the full argument.
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -729,20 +721,7 @@ jobs:
           echo "SBOM and provenance present for both platforms on $release_ref"
 
       - name: Verify signed provenance survived promotion
-        # `Verify attestations survived promotion` proves BuildKit's self-asserted
-        # attestations are still attached. This proves a signed statement from this
-        # workflow, from this ref, vouches for the digest the release tag now resolves to
-        # -- the authenticity half, which inspecting the index cannot answer at all.
-        #
-        # `verify-provenance` already verified the built digest, which is what gates
-        # promotion. This is the tag-side question a consumer actually asks: "does the
-        # name I pull resolve to something with verifiable provenance". So the tag is
-        # resolved first and the resolved digest verified on its own terms; the equality
-        # assertion against the built digest comes after, as a separate claim about the
-        # promotion rather than as the thing that makes the verification meaningful.
-        # Ordered that way deliberately: asserting equality first would make the
-        # verification below a re-check of a digest already known equal, which is a
-        # tautology that reads like a second layer of defence.
+        # Re-verify provenance against the promoted tag and assert the resolved digest matches the built artifact.
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
