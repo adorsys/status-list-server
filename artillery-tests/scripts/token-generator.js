@@ -1,6 +1,16 @@
 const jwt = require('jsonwebtoken');
 const fs = require('fs');
 const crypto = require('crypto');
+const path = require('path');
+
+const scriptsDir = __dirname;
+
+// The server rejects management JWTs whose lifetime (`exp - iat`) exceeds
+// `management_auth.max_token_lifetime_secs` (default 3600s). Signing a token
+// with the server's default limit keeps every authenticated request valid for
+// the duration of a run; raise the server config if longer-lived tokens are
+// desired.
+const TOKEN_LIFETIME_SECS = 3600;
 
 // Generate EC key pair
 const { publicKey, privateKey } = crypto.generateKeyPairSync('ec', {
@@ -18,11 +28,7 @@ const { publicKey, privateKey } = crypto.generateKeyPairSync('ec', {
 // Convert public key to JWK format
 const jwk = crypto.createPublicKey(publicKey).export({ format: 'jwk' });
 
-// Save keys
-fs.writeFileSync('artillery-tests/scripts/ec-private-key.pem', privateKey);
-fs.writeFileSync('artillery-tests/scripts/ec-public-key.jwk', JSON.stringify(jwk, null, 2));
-
-const issuerId = `test-issuer-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+const issuerId = `test-issuer-${Date.now()}-${Math.random().toString(36).substring(2, 11)}`;
 
 console.log('Generating tokens...');
 console.log('Issuer ID:', issuerId);
@@ -37,7 +43,7 @@ for (let i = 0; i < 100; i++) {
     {
       iss: issuerId,
       iat: now,
-      exp: now + (365 * 24 * 60 * 60)
+      exp: now + TOKEN_LIFETIME_SECS
     },
     privateKey,
     {
@@ -55,14 +61,20 @@ for (let i = 0; i < 100; i++) {
 const testData = {
   issuerId,
   publicKeyJwk: jwk,
-  privateKey,
   tokens,
   generatedAt: new Date().toISOString()
 };
 
-fs.writeFileSync('artillery-tests/scripts/test-tokens.json', JSON.stringify(testData, null, 2));
+// Write only test-tokens.json. All Artillery scenarios read the issuer, public
+// key and signed JWTs from this one file, so the separate ec-private-key.pem and
+// ec-public-key.jwk files would be unread dead weight. The data is sensitive
+// (it embeds the signing key material via the JWK), so it is written once with
+// mode 0600 (owner read/write only).
+const testDataPath = path.join(scriptsDir, 'test-tokens.json');
+const serialized = JSON.stringify(testData, null, 2);
+const tmp = `${testDataPath}.tmp-${process.pid}`;
+fs.writeFileSync(tmp, serialized, { mode: 0o600 });
+fs.renameSync(tmp, testDataPath);
 
 console.log(`✓ Generated ${tokens.length} valid tokens`);
-console.log('✓ Saved to test-tokens.json');
-console.log('\nPublic Key:');
-console.log(JSON.stringify(jwk, null, 2));
+console.log(`✓ Saved to scripts/test-tokens.json`);
