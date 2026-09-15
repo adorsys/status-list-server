@@ -65,10 +65,12 @@ Create the name of the service account to use
 {{/*
 Effective name of the Kubernetes Secret the application reads (postgres password).
 Single supported name: "statuslist-secret" in both ESO mode (ExternalSecret target) and
-fallback mode. The Deployment, PostgreSQL (postgres.auth.existingSecret), the fallback
-Secret, and the file-based database-credentials secretMount all reference this same name,
-so it is not independently configurable. ESO mode validates externalSecret.spec.target.name
-against it at render time (external-secrets.yaml), failing the release if changed.
+fallback mode. The Deployment, PostgreSQL (postgres.auth.existingSecret), and the fallback
+Secret all reference this same name, so it is not independently configurable. ESO mode
+validates externalSecret.spec.target.name against it at render time (external-secrets.yaml),
+failing the release if changed. The file-based database-credentials entry under
+statuslist.secretMounts is merely the default example mount referencing this name; secretMounts
+is dynamic and may mount arbitrary secret names.
 */}}
 {{- define "status-list-server-chart.appSecretName" -}}
 {{- "statuslist-secret" }}
@@ -92,7 +94,7 @@ defaults to eu-central-1 at the CR level for pure-IRSA / Workload Identity insta
 
 {{/*
 Database port helper: returns the configured database port from env.
-Used by the wait-for-postgres init container (README: nc probe) and by the NetworkPolicy
+Used by the wait-for-postgres init container and by the NetworkPolicy
 egress rule to scope internal egress to the database port.
 Note: APP_DATABASE__PORT is required by deployment.yaml (deployment fails without it); this
 helper assumes the value exists and does not provide a default.

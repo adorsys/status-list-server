@@ -36,9 +36,8 @@ statuslist:
   # Number of application replicas. Omitted when autoscaling.enabled=true so the HPA
   # controls the replica count.
   replicaCount: 1
-  # Extra labels merged onto the Pod template metadata. Required for e.g. Azure Workload
-  # Identity: azure.workload.identity/use: "true" (as a string value, not a boolean —
-  # the render test asserts it is quoted).
+  # Extra labels merged onto Pod metadata. For Azure Workload Identity, specify
+  # azure.workload.identity/use: "true" (must be a quoted string, not a boolean).
   podLabels: {}
   image:
     repository: ghcr.io/adorsys/status-list-server
@@ -89,7 +88,10 @@ statuslist:
     targetPort: 8000
     nodePort: null
   ingress:
+    # NGINX Ingress exposing the application Service. Disable (enabled: false) when
+    # another ingress controller or a service mesh handles external traffic.
     enabled: true
+    # Path and pathType for the single ingress rule.
     path: /
     pathType: Prefix
     annotations:
@@ -102,6 +104,7 @@ statuslist:
       # that provide TLS material or cert-manager ingress-shim annotations.
       secretName: ""
     # Defaults to statuslist.<global.domain> when global.domain is set, otherwise localhost.
+    # Emitted as an external-dns hostname annotation; set explicitly to override the default host.
     externalDnsHostname: ""
   env:
     RUST_LOG: "info"
@@ -352,14 +355,9 @@ podDisruptionBudget:
   minAvailable: null
   maxUnavailable: 1
 
-# ServiceMonitor for kube-prometheus-stack / Prometheus Operator discovery.
-# Enterprise Prometheus deployments using Prometheus Operator ignore annotation-based pod targets.
-# Enable this to provision a ServiceMonitor CRD (monitoring.coreos.com/v1).
-# Prometheus deployments driven by the Prometheus Operator discover scrape targets through
-# ServiceMonitor CRs rather than prometheus.io/* pod annotations. Enable this to define the
-# /metrics endpoint on the application Service so the Operator scrapes it. Selector labels
-# (labels.release matching the kube-prometheus-stack release used by your Prometheus
-# ServiceMonitorSelector) are usually required for discovery.
+# ServiceMonitor (monitoring.coreos.com/v1) for Prometheus Operator scrape discovery.
+# Defines the /metrics scrape endpoint on the application Service. Set labels.release
+# to match your Prometheus ServiceMonitorSelector.
 serviceMonitor:
   enabled: false
   # Additional labels required by your Prometheus Operator (e.g. release: kube-prometheus-stack)
@@ -377,8 +375,8 @@ serviceMonitor:
 # Operator rule discovery.
 # Enables shipping the SLI recording rules (request latency, error rate, DB latency, cache
 # hit ratio, token generation, error budget) and the SLO burn-rate / error-budget alerting
-# rules as a single PrometheusRule CRD. The alert thresholds come from the slo block above;
-# both must stay in lockstep with observability/slo/thresholds.json (enforced by CI) and the
+# rules as a single PrometheusRule CRD. Alert thresholds are defined under the `slo`
+# block and must stay in lockstep with observability/slo/thresholds.json (enforced by CI) and the
 # standalone observability/prometheus/rules/*.rules.yml. See the webhook-notifications
 # runbook for how the resulting alerts reach humans via alerting.existingSecret.
 prometheusRule:
@@ -503,7 +501,7 @@ slo:
   # fastBurnMultiplier (14.4x) on both the 1h and 5m windows for 5m. Pages.
   fastBurnMultiplier: 14.4
   # Slow-burn alert triggers when the observed error rate exceeds errorRateTarget *
-  # slowBurnMultiplier (6.0x) on the 6h and 30m windows for 30m. Warms.
+  # slowBurnMultiplier (6.0x) on the 6h and 30m windows for 30m. Warns.
   slowBurnMultiplier: 6.0
   # P95 request latency target in seconds (300ms). Exceeding it on the 1h/5m windows
   # (fast burn, page) or the 6h/30m windows (slow burn, warn) fires an alert.
@@ -530,7 +528,7 @@ slo:
 # backend at runtime through the APP_DATABASE__* environment variables. The chart maps
 # the defaults here onto APP_DATABASE__HOST/USERNAME/NAME/BACKEND and into the shared
 # statuslist-secret used for the password. MySQL and other backends are supported by the
-# application (see docs/database-backends.md, issue #498) by pointing the APP_DATABASE__*
+# application (see docs/database-backends.md) by pointing the APP_DATABASE__*
 # variables at an external database and disabling this bundled one. Set postgres.enabled
 # to false when you provide an external database.
 postgres:

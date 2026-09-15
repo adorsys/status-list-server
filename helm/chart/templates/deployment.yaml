@@ -1,3 +1,9 @@
+{{/*
+Deployment of the status-list-server application pod.
+Fails if both externalSecret.enabled and statuslist.fallbackSecret.enabled are set.
+Replica count is driven by autoscaling (HPA) when enabled; the chart omits `replicas`
+so the HPA controls the count. Prometheus pod annotations expose the /metrics endpoint.
+*/}}
 {{- if .Values.statuslist.enabled }}
 {{- if and .Values.externalSecret.enabled .Values.statuslist.fallbackSecret.enabled }}
 {{- fail "externalSecret.enabled and statuslist.fallbackSecret.enabled cannot both be true: choose either External Secrets Operator or the fallback Secret for secret delivery, not both" }}

@@ -563,7 +563,7 @@
     "postgres": {
       "type": "object",
       "title": "Bundled PostgreSQL",
-      "description": "Bundled in-cluster PostgreSQL (accepted values of the CloudPirates chart). One possible backend — the application is database-agnostic and selects its backend at runtime via APP_DATABASE__* env vars. Set enabled=false and point APP_DATABASE__* at an external database (including MySQL, see issue #498 and docs/database-backends.md) to use a different backend.",
+      "description": "Bundled in-cluster PostgreSQL (accepted values of the CloudPirates chart). One possible backend: the application is database-agnostic and selects its backend at runtime via APP_DATABASE__* env vars. Set enabled=false and point APP_DATABASE__* at an external database (including MySQL, see docs/database-backends.md) to use a different backend.",
       "properties": {
         "enabled": { "type": "boolean", "title": "Render the PostgreSQL subchart" },
         "resources": { "type": "object", "title": "PostgreSQL resources" },
@@ -664,7 +664,7 @@
       "properties": {
         "errorRateTarget": { "type": "number", "title": "Error-rate SLO target", "description": "Acceptable ratio of 5xx to all requests over the SLO window (0.005 = 0.5%). Denominator of burn-rate multipliers and error-budget success ratio." },
         "fastBurnMultiplier": { "type": "number", "title": "Fast-burn multiplier", "description": "Fast-burn alert triggers when observed error rate exceeds errorRateTarget * this (14.4x) on both the 1h and 5m windows for 5m. Pages." },
-        "slowBurnMultiplier": { "type": "number", "title": "Slow-burn multiplier", "description": "Slow-burn alert triggers when observed error rate exceeds errorRateTarget * this (6.0x) on the 6h and 30m windows for 30m. Warms." },
+        "slowBurnMultiplier": { "type": "number", "title": "Slow-burn multiplier", "description": "Slow-burn alert triggers when observed error rate exceeds errorRateTarget * this (6.0x) on the 6h and 30m windows for 30m. Warns." },
         "requestLatencyP95": { "type": "number", "title": "Request latency P95 target (s)", "description": "P95 request latency target in seconds (0.3 = 300ms). Exceeding on the fast or slow burn windows fires an alert." },
         "dbLatencyP95": { "type": "number", "title": "DB latency P95 target (s)", "description": "P95 database query latency target in seconds (0.05 = 50ms). Same fast/slow burn semantics." },
         "cacheHitRatioMin": { "type": "number", "title": "Minimum cache hit ratio", "description": "Minimum acceptable status-list cache hit ratio (0.85 = 85%); below this for 15m fires a warn." },
