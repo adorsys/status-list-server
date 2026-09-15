@@ -1,4 +1,4 @@
-# Production values for helm/chart. Applied after values-aws.yaml by the
+# Production values for deploy/helm/chart. Applied after values-aws.yaml by the
 # production deploy workflow (deploy.yml) on release-tag deploys to the
 # statuslist-production namespace.
 

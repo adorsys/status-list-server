@@ -7,9 +7,9 @@ against a running `status-list-server`.
 It is the **hands-on companion** to:
 
 - `docs/observability.md` — telemetry/metrics architecture and env contract.
-- `observability/slo/README.md` — SLI/SLO definitions and targets.
-- `observability/README.md` — layout and validation commands.
-- `observability/runbooks/*.md` — per-alert runbooks with diagnostics/mitigation.
+- `deploy/observability/slo/README.md` — SLI/SLO definitions and targets.
+- `deploy/observability/README.md` — layout and validation commands.
+- `deploy/observability/runbooks/*.md` — per-alert runbooks with diagnostics/mitigation.
 
 > What "correct" means here: the app **serves** metrics on `/metrics`, Prometheus
 > **scrapes** them and evaluates the `sli:*` recording rules + alert rules, and
@@ -41,10 +41,10 @@ Run before/without a full stack to prove the PromQL is well-formed and the
 tests pass:
 
 ```bash
-promtool check rules observability/prometheus/rules/recording.rules.yml
-promtool check rules observability/prometheus/rules/alerting.rules.yml
-promtool test rules observability/prometheus/tests/recording.test.yml
-promtool test rules observability/prometheus/tests/alerting.test.yml
+promtool check rules deploy/observability/prometheus/rules/recording.rules.yml
+promtool check rules deploy/observability/prometheus/rules/alerting.rules.yml
+promtool test rules deploy/observability/prometheus/tests/recording.test.yml
+promtool test rules deploy/observability/prometheus/tests/alerting.test.yml
 ```
 
 If `promtool` is not on the host, run it inside the Prometheus image:
@@ -121,7 +121,7 @@ name does not resolve, so change the target to the Docker bridge gateway
 (host from the container's perspective) and reload:
 
 ```bash
-# edit observability/prometheus/prometheus.yml
+# edit deploy/observability/prometheus/prometheus.yml
 #   targets: ['app:8000']  ->  targets: ['192.168.0.1:8000']
 # gateway IP:
 docker network inspect status-list-server_status-list-network \
@@ -148,12 +148,12 @@ curl -s http://localhost:9092/api/v1/rules | python3 -c 'import sys,json;d=json.
 
 ## 6. Fix the Grafana "Data source prometheus was not found" error
 
-The committed dashboard (`observability/dashboards/generated/status-list-slo.json`)
+The committed dashboard (`deploy/observability/dashboards/generated/status-list-slo.json`)
 references the datasource UID `prometheus` in every panel. The provisioning file
 must pin that UID, otherwise Grafana auto-generates a random UID and the panels
 cannot resolve the datasource.
 
-`observability/dashboards/provisioning/datasources.yml`:
+`deploy/observability/dashboards/provisioning/datasources.yml`:
 
 ```yaml
 datasources:
@@ -365,7 +365,7 @@ webhooks) is handled outside of this repository.
 
 ## 10. Cleanup / revert dev-only changes
 
-- **Restore the scrape target** in `observability/prometheus/prometheus.yml` to
+- **Restore the scrape target** in `deploy/observability/prometheus/prometheus.yml` to
   `app:8000` when running the app in Docker.
 - **Rate-limit overrides** are runtime env only — don't ship the high values to
   production.
@@ -391,5 +391,5 @@ webhooks) is handled outside of this repository.
 | `422` on status publish                      | Use integer statuses `0/1/2`, not strings (Section 7).                                          |
 | Recording rules show `NaN` right after start | `rate()[5m]` needs a couple of minutes of scrape history; it resolves.                          |
 
-See the per-alert runbooks in `observability/runbooks/` for diagnostics and
+See the per-alert runbooks in `deploy/observability/runbooks/` for diagnostics and
 mitigation when an alert fires for real.

@@ -128,7 +128,7 @@ groups:
       # OPERATOR NOTE: This rule evaluates over a 30d window. Prometheus MUST be started with
       # --storage.tsdb.retention.time=31d (or longer). The default 15d retention silently
       # halves the window and makes this gauge read artificially optimistic. No error is raised.
-      # See observability/README.md "Retention requirement" for details.
+      # See deploy/observability/README.md "Retention requirement" for details.
       #
       # Computed from the true SLO window (`sli:error_rate:30d`), not a 5m
       # snapshot, and clamped to [0,1] so the gauge cannot go negative or above

@@ -29,10 +29,13 @@ fn dependency_free_chart() -> PathBuf {
         fs::remove_dir_all(&chart_dir).expect("failed to remove stale test chart directory");
     }
     fs::create_dir_all(&chart_dir).expect("failed to create test chart directory");
-    fs::copy("helm/chart/values.yaml", chart_dir.join("values.yaml"))
-        .expect("failed to copy chart values");
+    fs::copy(
+        "deploy/helm/chart/values.yaml",
+        chart_dir.join("values.yaml"),
+    )
+    .expect("failed to copy chart values");
     copy_dir(
-        Path::new("helm/chart/templates"),
+        Path::new("deploy/helm/chart/templates"),
         &chart_dir.join("templates"),
     );
     fs::write(

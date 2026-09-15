@@ -173,7 +173,7 @@ which validates all platforms and asserts firing + resolved notifications reach
 a mock webhook:
 
 ```bash
-observability/alertmanager/tests/test-alertmanager-config.sh
+deploy/observability/alertmanager/tests/test-alertmanager-config.sh
 ```
 
 > [!NOTE]
@@ -252,7 +252,7 @@ When delivering notifications via `webhook`, `teams`, `mattermost`, or generic H
   },
   "commonAnnotations": {
     "summary": "Request latency P95 sustainably above 300ms (>300ms on the 1h window)",
-    "runbook_url": "https://github.com/adorsys/status-list-server/blob/develop/observability/runbooks/request-latency.md",
+    "runbook_url": "https://github.com/adorsys/status-list-server/blob/develop/deploy/observability/runbooks/request-latency.md",
     "dashboard_url": "http://localhost:3000/d/status-list-slo"
   },
   "externalURL": "http://localhost:9093",
@@ -267,7 +267,7 @@ When delivering notifications via `webhook`, `teams`, `mattermost`, or generic H
       },
       "annotations": {
         "summary": "Request latency P95 sustainably above 300ms (>300ms on the 1h window)",
-        "runbook_url": "https://github.com/adorsys/status-list-server/blob/develop/observability/runbooks/request-latency.md",
+        "runbook_url": "https://github.com/adorsys/status-list-server/blob/develop/deploy/observability/runbooks/request-latency.md",
         "dashboard_url": "http://localhost:3000/d/status-list-slo"
       },
       "startsAt": "2026-09-02T10:00:00.000Z",

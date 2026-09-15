@@ -136,7 +136,7 @@ When findings clear, the issue is updated to say so and **left open** — closin
 
 ### The Scanned Artifact Is the Deployed Artifact
 
-The scan binds to the built index digest `...@sha256:<digest>` and scans each architecture child manifest under it. `promote-tags` applies release tags with OCI description annotations, which re-serializes the multi-arch index descriptors. The `deploy` job resolves the promoted variant tag (`<tag>-<variant>`) to its promoted index digest via structured inspection (`docker buildx imagetools inspect <ref> --format '{{ .Manifest.Digest }}'`) before passing it to the chart via `statuslist.image.digest`, which `helm/chart/templates/deployment.yaml` prefers over `statuslist.image.tag`. Tags stay in place for readability but no longer determine what runs.
+The scan binds to the built index digest `...@sha256:<digest>` and scans each architecture child manifest under it. `promote-tags` applies release tags with OCI description annotations, which re-serializes the multi-arch index descriptors. The `deploy` job resolves the promoted variant tag (`<tag>-<variant>`) to its promoted index digest via structured inspection (`docker buildx imagetools inspect <ref> --format '{{ .Manifest.Digest }}'`) before passing it to the chart via `statuslist.image.digest`, which `deploy/helm/chart/templates/deployment.yaml` prefers over `statuslist.image.tag`. Tags stay in place for readability but no longer determine what runs.
 
 This matters because tags are mutable. Binding the scan to a digest and then deploying by tag would leave a window in which a re-run or a manual push could replace the image in between.
 

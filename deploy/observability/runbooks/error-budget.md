@@ -44,7 +44,7 @@ docker compose logs app | grep -i -E "internal error|server error"
 2. Stop the bleed first — restore availability even before tuning the SLO.
 3. Only after the regression is confirmed fixed and the leading 30d window is
    recovering should a target change be considered. SLO targets are defined in
-   `observability/slo/README.md` (and mirrored in `recording.rules.yml` and the
+   `deploy/observability/slo/README.md` (and mirrored in `recording.rules.yml` and the
    dashboard generator); change **all three in lockstep** under review.
 
 ## Escalation

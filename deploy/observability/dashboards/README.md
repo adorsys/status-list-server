@@ -13,7 +13,7 @@ always loads the reviewed artifact (no manual import).
 ## Regenerate
 
 ```bash
-cd observability/dashboards/src
+cd deploy/observability/dashboards/src
 npm install        # first time only (no third-party deps)
 npm run generate-dashboards   # rewrites ../generated/status-list-slo.json
 ```

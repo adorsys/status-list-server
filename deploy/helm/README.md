@@ -340,13 +340,13 @@ With ACME or a cloud secret backend, configure `APP_SERVER__DOMAIN`, the DNS pro
 Render and validate your values first so schema errors surface before anything touches the cluster:
 
 ```bash
-helm template statuslist helm/chart --namespace statuslist --values my-values.yaml
+helm template statuslist deploy/helm/chart --namespace statuslist --values my-values.yaml
 ```
 
 Then deploy:
 
 ```bash
-helm upgrade --install statuslist helm/chart \
+helm upgrade --install statuslist deploy/helm/chart \
   --namespace statuslist --create-namespace \
   --values my-values.yaml \
   --wait --timeout 10m
@@ -463,7 +463,7 @@ The `AlertmanagerConfig` CRD must be installed in the cluster (see the top-level
 ## Further Reading
 
 * [`chart/values.yaml`](chart/values.yaml): the source of truth for every Helm value.
-* [Deployment runbook](../docs/deployment-runbook.md): how to deploy and how CI/CD deploys to production.
-* [Troubleshooting reference](../docs/troubleshooting.md): error-indexed fixes for startup, secrets, Kubernetes/ESO, and Helm/upgrade issues.
-* [Container supply chain](../docs/supply-chain.md): image scanning, SBOM, and SLSA.
+* [Deployment runbook](../../docs/deployment-runbook.md): how to deploy and how CI/CD deploys to production.
+* [Troubleshooting reference](../../docs/troubleshooting.md): error-indexed fixes for startup, secrets, Kubernetes/ESO, and Helm/upgrade issues.
+* [Container supply chain](../../docs/supply-chain.md): image scanning, SBOM, and SLSA.
 * [Project README](../README.md): overview and local-development quick start.

@@ -21,7 +21,7 @@ function checkMatch(content, filename, pattern, description) {
   }
 }
 
-// Parse the scalar `slo:` block in helm/chart/values.yaml into { key: number }.
+// Parse the scalar `slo:` block in deploy/helm/chart/values.yaml into { key: number }.
 // The block is a flat, 2-space-indented set of `key: <number>` lines, so this
 // avoids pulling a YAML parser into the lint (the CI step has no npm deps).
 function parseHelmSlo() {
@@ -57,9 +57,9 @@ for (const [helmKey, thresholdsKey] of Object.entries(helmSloMap)) {
   const expected = thresholds[thresholdsKey];
   const actual = helmSlo[helmKey];
   if (actual === undefined) {
-    errors.push(`[helm/chart/values.yaml] Missing slo.${helmKey} for thresholds.json ${thresholdsKey}`);
+    errors.push(`[deploy/helm/chart/values.yaml] Missing slo.${helmKey} for thresholds.json ${thresholdsKey}`);
   } else if (Math.abs(actual - expected) > 1e-9) {
-    errors.push(`[helm/chart/values.yaml] slo.${helmKey} = ${actual} but thresholds.json ${thresholdsKey} = ${expected}`);
+    errors.push(`[deploy/helm/chart/values.yaml] slo.${helmKey} = ${actual} but thresholds.json ${thresholdsKey} = ${expected}`);
   }
 }
 

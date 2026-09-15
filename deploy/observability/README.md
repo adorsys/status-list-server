@@ -4,7 +4,7 @@ SLO dashboards, Prometheus recording/alerting rules, and runbooks for
 `status-list-server`, versioned as code and PR-reviewed.
 
 ```text
-observability/
+deploy/observability/
   slo/thresholds.json            # single source of truth for SLO targets
   slo/lint-thresholds.mjs        # CI linter verifying target lockstep
   slo/README.md                  # SLI/SLO definitions + methodology
@@ -36,14 +36,14 @@ Cert-renewal and cert-chain-cache series already existed.
 
 ```bash
 # Rules + tests (offline, via Prometheus image)
-promtool check rules observability/prometheus/rules/*.rules.yml
-promtool check config observability/prometheus/prometheus.yml
-promtool check config observability/prometheus/prometheus.production.yml
-promtool test rules observability/prometheus/tests/recording.test.yml
-promtool test rules observability/prometheus/tests/alerting.test.yml
+promtool check rules deploy/observability/prometheus/rules/*.rules.yml
+promtool check config deploy/observability/prometheus/prometheus.yml
+promtool check config deploy/observability/prometheus/prometheus.production.yml
+promtool test rules deploy/observability/prometheus/tests/recording.test.yml
+promtool test rules deploy/observability/prometheus/tests/alerting.test.yml
 
 # SLO threshold consistency lint
-node observability/slo/lint-thresholds.mjs
+node deploy/observability/slo/lint-thresholds.mjs
 
 # The DEPLOYED rule copy (the Helm `PrometheusRule`, `prometheusRule.enabled: true`)
 # is rendered and run through the same `promtool test rules` suite in CI, and a
@@ -90,7 +90,7 @@ The repo ships standalone Prometheus + Grafana for a dev stack. For Kubernetes
 environments running `kube-prometheus-stack`, the Helm chart includes optional
 `templates/servicemonitor.yaml` (`serviceMonitor.enabled: true`) and
 `templates/prometheusrule.yaml` (`prometheusRule.enabled: true`). Alert delivery
-routing is documented in `observability/alertmanager/alertmanager.example.yml`.
+routing is documented in `deploy/observability/alertmanager/alertmanager.example.yml`.
 
 ## Webhook alert notifications
 
@@ -98,9 +98,9 @@ Alerts are forwarded to external systems over webhooks through **Alertmanager**
 (Prometheus → Alertmanager → webhook → Discord/Slack/Teams/Mattermost/email).
 No application code is involved.
 
-- **How it works** — `observability/prometheus/prometheus*.yml` declares an
+- **How it works** — `deploy/observability/prometheus/prometheus*.yml` declares an
   `alerting.alertmanagers` target; the docker-compose `alertmanager` service runs
-  `observability/prometheus/generate-alertmanager-config.sh`, which renders a
+  `deploy/observability/prometheus/generate-alertmanager-config.sh`, which renders a
   native receiver config from environment variables (`ALERTMANAGER_PLATFORM` +
   the matching credential) so **no webhook URL is committed**.
 - **Routing** — page and warn alerts share ONE human channel (the platform
