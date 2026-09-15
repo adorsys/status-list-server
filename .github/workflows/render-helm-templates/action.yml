@@ -13,18 +13,10 @@ runs:
         CHART_BASE_VERSION="${CHART_APP_VERSION%-fscert}"
         EXPECTED_AWS_TAG="${CHART_BASE_VERSION}-aws"
         EXPECTED_MYSQL_TAG="${CHART_BASE_VERSION}-mysql-fscert"
-        MYSQL_IMAGE_REGISTRY=$(sed -nE '/^mysql:/,/^externalSecret:/ s/^[[:space:]]+registry:[[:space:]]+"?([^"]+)"?[[:space:]]*$/\1/p' helm/chart/values.yaml | tail -1)
-        MYSQL_IMAGE_REPOSITORY=$(sed -nE '/^mysql:/,/^externalSecret:/ s/^[[:space:]]+repository:[[:space:]]+"?([^"]+)"?[[:space:]]*$/\1/p' helm/chart/values.yaml | tail -1)
-        MYSQL_IMAGE_TAG=$(sed -nE '/^mysql:/,/^externalSecret:/ s/^[[:space:]]+tag:[[:space:]]+"?([^"]+)"?[[:space:]]*$/\1/p' helm/chart/values.yaml | tail -1)
-        MYSQL_IMAGE_REF="${MYSQL_IMAGE_REGISTRY}/${MYSQL_IMAGE_REPOSITORY}:${MYSQL_IMAGE_TAG}"
-        if [ "${MYSQL_IMAGE_REGISTRY}" = "docker.io" ] && [[ "${MYSQL_IMAGE_REPOSITORY}" != */* ]]; then
-          MYSQL_IMAGE_REF="${MYSQL_IMAGE_REGISTRY}/library/${MYSQL_IMAGE_REPOSITORY}:${MYSQL_IMAGE_TAG}"
-        fi
         helm lint helm/chart
         helm lint helm/chart -f helm/chart/values-aws.yaml
         helm lint helm/chart -f helm/chart/values-external-secrets.yaml
         helm lint helm/chart -f helm/chart/values-aws.yaml -f helm/chart/values-production.yaml
-        docker manifest inspect "${MYSQL_IMAGE_REF}" >/dev/null
         helm template status-list-server helm/chart -f helm/chart/values.yaml --output-dir /tmp/rendered/default
         helm template status-list-server helm/chart -f helm/chart/values-local.yaml --output-dir /tmp/rendered/local
         helm template status-list-server helm/chart -f helm/chart/values-external-secrets.yaml --output-dir /tmp/rendered/external-secrets
@@ -62,6 +54,11 @@ runs:
           --set-string 'externalSecret.spec.data[0].remoteRef.version=latest' \
           --set-string 'externalSecret.spec.data[0].remoteRef.decodingStrategy=None' \
           --set-string 'externalSecret.spec.data[0].remoteRef.conversionStrategy=Default' \
+          --set-string 'externalSecret.spec.data[1].secretKey=postgres-password' \
+          --set-string 'externalSecret.spec.data[1].remoteRef.key=statuslist-database-password' \
+          --set-string 'externalSecret.spec.data[1].remoteRef.version=latest' \
+          --set-string 'externalSecret.spec.data[1].remoteRef.decodingStrategy=None' \
+          --set-string 'externalSecret.spec.data[1].remoteRef.conversionStrategy=Default' \
           --output-dir /tmp/rendered/gcp-remote-ref
         # Azure Workload Identity: ESO uses its own ServiceAccount, not the app KSA.
         helm template status-list-server helm/chart \
@@ -95,7 +92,6 @@ runs:
         fi
         helm template status-list-server helm/chart \
           --set postgres.enabled=false \
-          --set mysql.enabled=true \
           --set statuslist.env.APP_DATABASE__BACKEND=mysql \
           --output-dir /tmp/rendered/mysql
         if ! grep -q "image: \"ghcr.io/adorsys/status-list-server:${EXPECTED_MYSQL_TAG}\"" /tmp/rendered/mysql/status-list-server/templates/deployment.yaml; then

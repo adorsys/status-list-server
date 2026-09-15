@@ -96,6 +96,20 @@ Effective database backend for chart-managed defaults.
 {{- end }}
 
 {{/*
+Effective Secret item key for database password mounts. The historical chart
+default stays postgres-password for PostgreSQL upgrades, while MySQL defaults to
+the backend-neutral database-password key.
+*/}}
+{{- define "status-list-server-chart.databasePasswordSecretKey" -}}
+{{- $key := .key | default "postgres-password" }}
+{{- if and (eq $key "postgres-password") (eq (include "status-list-server-chart.dbBackend" .root) "mysql") -}}
+database-password
+{{- else -}}
+{{- $key -}}
+{{- end }}
+{{- end }}
+
+{{/*
 Database host helper: returns the configured host, or the default in-cluster
 service name for the active backend.
 */}}

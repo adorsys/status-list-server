@@ -90,12 +90,6 @@ postgres:
     repository: postgres
     tag: "16.3"
 
-mysql:
-  image:
-    registry: docker.io
-    repository: mysql
-    tag: "8.4.11"
-
 externalSecret:
   enabled: false
 

@@ -31,6 +31,11 @@ fn dependency_free_chart() -> PathBuf {
     fs::create_dir_all(&chart_dir).expect("failed to create test chart directory");
     fs::copy("helm/chart/values.yaml", chart_dir.join("values.yaml"))
         .expect("failed to copy chart values");
+    fs::copy(
+        "helm/chart/values.schema.json",
+        chart_dir.join("values.schema.json"),
+    )
+    .expect("failed to copy chart values schema");
     copy_dir(
         Path::new("helm/chart/templates"),
         &chart_dir.join("templates"),
@@ -57,31 +62,39 @@ fn helm_available() -> bool {
         .is_ok_and(|output| output.status.success())
 }
 
-fn helm_template(args: &[&str]) -> Option<Output> {
+fn helm_template_with_postgres_default(args: &[&str], disable_postgres: bool) -> Option<Output> {
     if !helm_available() {
         eprintln!("skipping Helm render assertions because helm is not installed");
         return None;
     }
 
     let chart_dir = dependency_free_chart();
+    let mut command = Command::new("helm");
+    command
+        .arg("template")
+        .arg("status-list-server")
+        .arg(&chart_dir)
+        .arg("-f")
+        .arg(chart_dir.join("values.yaml"))
+        .args(["--namespace", "statuslist"])
+        .args(["--set", "opentelemetry-collector.enabled=false"]);
+    if disable_postgres {
+        command.args(["--set", "postgres.enabled=false"]);
+    }
     Some(
-        Command::new("helm")
-            .arg("template")
-            .arg("status-list-server")
-            .arg(&chart_dir)
-            .arg("-f")
-            .arg(chart_dir.join("values.yaml"))
-            .args(["--namespace", "statuslist"])
-            .args([
-                "--set",
-                "postgres.enabled=false",
-                "--set",
-                "opentelemetry-collector.enabled=false",
-            ])
+        command
             .args(args)
             .output()
             .expect("failed to execute helm template"),
     )
+}
+
+fn helm_template(args: &[&str]) -> Option<Output> {
+    helm_template_with_postgres_default(args, true)
+}
+
+fn helm_template_chart_defaults(args: &[&str]) -> Option<Output> {
+    helm_template_with_postgres_default(args, false)
 }
 
 fn render_helm(args: &[&str]) -> Option<String> {
@@ -98,6 +111,18 @@ fn render_helm(args: &[&str]) -> Option<String> {
 
 fn render_helm_failure(args: &[&str]) -> Option<Output> {
     let output = helm_template(args)?;
+
+    assert!(
+        !output.status.success(),
+        "helm template should have failed, stdout: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+
+    Some(output)
+}
+
+fn render_helm_chart_defaults_failure(args: &[&str]) -> Option<Output> {
+    let output = helm_template_chart_defaults(args)?;
 
     assert!(
         !output.status.success(),
@@ -153,8 +178,6 @@ fn rendered_chart_templates_mysql_backend_defaults() {
         "--set",
         "statuslist.env.APP_DATABASE__BACKEND=mysql",
         "--set",
-        "mysql.enabled=true",
-        "--set",
         "statuslist.networkPolicy.enabled=true",
     ]) else {
         return;
@@ -169,7 +192,7 @@ fn rendered_chart_templates_mysql_backend_defaults() {
         "name: APP_DATABASE__USERNAME\n              value: \"mysql\"",
         "name: APP_DATABASE__NAME\n              value: \"status-list\"",
         "image: \"ghcr.io/adorsys/status-list-server:1.0.0-mysql-fscert\"",
-        "key: postgres-password",
+        "key: database-password",
         "app.kubernetes.io/name: mysql",
     ] {
         assert!(
@@ -180,10 +203,23 @@ fn rendered_chart_templates_mysql_backend_defaults() {
 }
 
 #[test]
-fn rendered_chart_rejects_multiple_enabled_database_backends() {
-    let Some(output) = render_helm_failure(&[
+fn rendered_chart_rejects_mysql_backend_when_postgres_subchart_is_still_enabled() {
+    let Some(output) = render_helm_chart_defaults_failure(&[
         "--set",
-        "postgres.enabled=true",
+        "statuslist.env.APP_DATABASE__BACKEND=mysql",
+    ]) else {
+        return;
+    };
+
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("set postgres.enabled=false"),
+        "helm template should name the required fix when MySQL backend is selected with PostgreSQL still enabled"
+    );
+}
+
+#[test]
+fn rendered_chart_rejects_mysql_enabled_as_a_subchart_switch() {
+    let Some(output) = render_helm_failure(&[
         "--set",
         "mysql.enabled=true",
         "--set",
@@ -193,9 +229,10 @@ fn rendered_chart_rejects_multiple_enabled_database_backends() {
     };
 
     assert!(
-        String::from_utf8_lossy(&output.stderr)
-            .contains("postgres.enabled and mysql.enabled cannot both be true"),
-        "helm template should reject enabling multiple database backends"
+        String::from_utf8_lossy(&output.stderr).contains(
+            "mysql.enabled is not supported because this chart does not vendor a MySQL database"
+        ),
+        "helm template should reject mysql.enabled instead of implying this chart deploys MySQL"
     );
 }
 
@@ -257,6 +294,31 @@ fn rendered_chart_default_mount_is_safe_for_legacy_external_secret() {
 }
 
 #[test]
+fn rendered_chart_rejects_external_secret_missing_mounted_database_key() {
+    let Some(output) = render_helm_failure(&[
+        "--set",
+        "externalSecret.enabled=true",
+        "--set",
+        "statuslist.fallbackSecret.enabled=false",
+        "--set",
+        "secretStore.enabled=true",
+        "--set",
+        "secretStore.provider=gcp",
+        "--set",
+        "secretStore.gcp.projectID=my-project-id",
+        "--set-json",
+        r#"externalSecret.spec.data=[{"secretKey":"database-password","remoteRef":{"key":"statuslist-database-password"}}]"#,
+    ]) else {
+        return;
+    };
+
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("must emit key \"postgres-password\""),
+        "helm template should reject ESO mappings that do not emit the mounted password key"
+    );
+}
+
+#[test]
 fn rendered_chart_rejects_uppercase_database_backend() {
     let Some(output) =
         render_helm_failure(&["--set", "statuslist.env.APP_DATABASE__BACKEND=MYSQL"])
@@ -268,21 +330,6 @@ fn rendered_chart_rejects_uppercase_database_backend() {
         String::from_utf8_lossy(&output.stderr)
             .contains("statuslist.env.APP_DATABASE__BACKEND must be either postgres or mysql"),
         "helm template should reject backend values that the application enum would reject"
-    );
-}
-
-#[test]
-fn release_matrix_builds_mysql_fscert_with_mysql_feature_only() {
-    let deploy_workflow = fs::read_to_string(".github/workflows/deploy.yml")
-        .expect("deploy workflow should be readable");
-
-    assert!(
-        deploy_workflow.contains("suffix: mysql-fscert\n            features: \"mysql\""),
-        "deploy workflow must publish a MySQL-capable fscert image"
-    );
-    assert!(
-        !deploy_workflow.contains("suffix: mysql-fscert\n            features: \"postgres,mysql\""),
-        "database-specific image variants must keep SQL backend features mutually exclusive"
     );
 }
 
@@ -329,9 +376,9 @@ fn rendered_chart_fallback_secret_accepts_legacy_postgres_password_key() {
 #[test]
 fn rendered_chart_renders_database_query() {
     let Some(rendered) = render_helm(&[
-        "--set",
+        "--set-string",
         "statuslist.env.APP_DATABASE__PORT=5432",
-        "--set",
+        "--set-string",
         "statuslist.env.APP_DATABASE__QUERY=sslmode=verify-full&sslrootcert=/var/run/postgres/ca.crt",
     ]) else {
         return;
@@ -348,9 +395,9 @@ fn rendered_chart_renders_database_query() {
 #[test]
 fn rendered_chart_rejects_assembled_database_url_env() {
     let Some(output) = render_helm_failure(&[
-        "--set",
+        "--set-string",
         "statuslist.env.APP_DATABASE__PORT=5432",
-        "--set",
+        "--set-string",
         "statuslist.env.APP_DATABASE__URL=postgres://user:pass@db:5432/status-list",
     ]) else {
         return;
@@ -366,9 +413,9 @@ fn rendered_chart_rejects_assembled_database_url_env() {
 #[test]
 fn rendered_chart_rejects_plain_database_password_env() {
     let Some(output) = render_helm_failure(&[
-        "--set",
+        "--set-string",
         "statuslist.env.APP_DATABASE__PORT=5432",
-        "--set",
+        "--set-string",
         "statuslist.env.APP_DATABASE__PASSWORD=plain-secret",
     ]) else {
         return;
@@ -398,7 +445,7 @@ fn rendered_chart_uses_default_database_port() {
 #[test]
 fn rendered_chart_does_not_duplicate_watcher_poll_interval() {
     let Some(rendered) = render_helm(&[
-        "--set",
+        "--set-string",
         "statuslist.env.APP_WATCHER__POLL_INTERVAL_SECS=45",
         "--set",
         "statuslist.watcher.pollIntervalSecs=60",

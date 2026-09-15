@@ -85,7 +85,7 @@ This is the path to a real deployment on a cluster you own. It uses the producti
 
 ### Prepare the database password Secret
 
-The application reads the database password from a Kubernetes Secret named `statuslist-secret`. The chart-managed fallback Secret renders both `database-password` and legacy `postgres-password` with the same value, and on upgrade it can reuse an existing legacy `postgres-password` value. For upgrade safety with customer-managed Secrets and custom ESO mappings, the default chart still mounts `postgres-password` as `/var/run/status-list-server/database/password`; switch `statuslist.secretMounts[0].items[0].key` to `database-password` only after that key is guaranteed to exist. The chart deliberately does **not** inject `APP_DATABASE__PASSWORD` as a literal environment variable, and rejects it if you try.
+The application reads the database password from a Kubernetes Secret named `statuslist-secret`. The chart-managed fallback Secret renders both `database-password` and legacy `postgres-password` with the same value, and on upgrade it can reuse an existing legacy `postgres-password` value. For upgrade safety with customer-managed Secrets and custom ESO mappings, PostgreSQL still mounts `postgres-password` as `/var/run/status-list-server/database/password`; MySQL mounts `database-password`. Switch PostgreSQL `statuslist.secretMounts[0].items[0].key` to `database-password` only after that key is guaranteed to exist. The chart deliberately does **not** inject `APP_DATABASE__PASSWORD` as a literal environment variable, and rejects it if you try.
 
 How the Secret is created depends on your [secrets mode](#secrets-delivery): via an ExternalSecret (ESO) or a plain fallback Secret the chart renders for you.
 
@@ -161,7 +161,7 @@ statuslist:
       database-password: ""
 ```
 
-Leave `database-password` empty to generate a password; Helm reuses an existing `database-password` or legacy `postgres-password` from the cluster Secret on upgrades when it can read it.
+Leave `database-password` empty to generate a password; Helm reuses an existing `database-password` or legacy `postgres-password` from the cluster Secret on upgrades when it can read it. If both existing keys are present with different values, the chart fails rather than overwriting one with the other.
 
 ### Mode B: External Secrets Operator (ESO)
 

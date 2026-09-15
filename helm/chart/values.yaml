@@ -33,7 +33,9 @@ statuslist:
     # database-specific release tag from appVersion and this provider variant, so
     # overlays can select a cloud variant without hardcoding the release version.
     variant: fscert
-    # Image tag with variant suffix. The release workflow publishes these multi-arch variants:
+    # Image tag with variant suffix. The current release workflow publishes the
+    # PostgreSQL variants below. MySQL tags follow the same provider suffix shape
+    # when a MySQL-capable image is explicitly supplied or published by a later release.
     #
     # | Tag Suffix       | Cargo Features | Description | Primary Use Case |
     # |------------------|----------------|-------------|------------------|
@@ -42,11 +44,11 @@ statuslist:
     # | -azure           | postgres,azure | PostgreSQL database with Azure Key Vault and Azure DNS support | Azure AKS native deployments |
     # | -vault           | postgres,vault | PostgreSQL database with HashiCorp Vault / OpenBao token material storage | Vault-backed on-prem or multi-cloud deployments |
     # | -fscert          | postgres | PostgreSQL database with filesystem-mounted token signing keys and certificates | Constrained / air-gapped environments using external secret injection |
-    # | -mysql-aws       | mysql,aws | MySQL database with AWS Secrets Manager and Route53 DNS support | AWS EKS native deployments |
-    # | -mysql-gcp       | mysql,gcp | MySQL database with GCP Secret Manager and Cloud DNS support | GCP GKE native deployments |
-    # | -mysql-azure     | mysql,azure | MySQL database with Azure Key Vault and Azure DNS support | Azure AKS native deployments |
-    # | -mysql-vault     | mysql,vault | MySQL database with HashiCorp Vault / OpenBao token material storage | Vault-backed on-prem or multi-cloud deployments |
-    # | -mysql-fscert    | mysql | MySQL database with filesystem-mounted token signing keys and certificates | Constrained / air-gapped environments using external secret injection |
+    # | -mysql-aws       | mysql,aws | MySQL database with AWS Secrets Manager and Route53 DNS support | Requires a MySQL image release |
+    # | -mysql-gcp       | mysql,gcp | MySQL database with GCP Secret Manager and Cloud DNS support | Requires a MySQL image release |
+    # | -mysql-azure     | mysql,azure | MySQL database with Azure Key Vault and Azure DNS support | Requires a MySQL image release |
+    # | -mysql-vault     | mysql,vault | MySQL database with HashiCorp Vault / OpenBao token material storage | Requires a MySQL image release |
+    # | -mysql-fscert    | mysql | MySQL database with filesystem-mounted token signing keys and certificates | Requires a MySQL image release |
     #
     # Tag format: <version>-<suffix> (e.g., 1.2.0-aws, 1.2.0-gcp)
     # Latest tags: latest-<suffix> (e.g., latest-aws, latest-gcp)
@@ -495,25 +497,15 @@ postgres:
     tag: "18.0"
 
 mysql:
-  # Native MySQL defaults used by deployment.yaml, initContainers, and NetworkPolicy
-  # when APP_DATABASE__BACKEND=mysql. This chart does not vendor a MySQL subchart;
-  # provide the service through your platform/operator or a values overlay.
-  enabled: false
+  # External MySQL connection defaults used by deployment.yaml, initContainers, and
+  # NetworkPolicy when APP_DATABASE__BACKEND=mysql. This chart does not vendor or
+  # deploy a MySQL database; provide the Service through your platform/operator or
+  # a values overlay, and set postgres.enabled=false.
   auth:
     username: mysql
     database: status-list
-    # Keep this aligned with status-list-server-chart.appSecretName if you wire
-    # these values into a MySQL subchart or operator-managed Secret reference.
-    existingSecret: statuslist-secret
-    secretKeys:
-      passwordKey: database-password
   service:
-    type: ClusterIP
     port: 3306
-  image:
-    registry: docker.io
-    repository: mysql
-    tag: "8.4.11"
 
 externalSecret:
   enabled: false

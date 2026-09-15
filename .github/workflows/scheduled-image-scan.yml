@@ -87,7 +87,7 @@ jobs:
       - name: Publish the variant list
         id: list
         env:
-          VARIANTS: aws mysql-aws gcp mysql-gcp azure mysql-azure vault mysql-vault fscert mysql-fscert
+          VARIANTS: aws gcp azure vault fscert
         run: |
           set -euo pipefail
           # Unquoted on purpose: the word splitting is what turns the list into lines.

@@ -3,14 +3,11 @@
 {{- fail "externalSecret.enabled and statuslist.fallbackSecret.enabled cannot both be true: choose either External Secrets Operator or the fallback Secret for secret delivery, not both" }}
 {{- end }}
 {{- $databaseBackend := include "status-list-server-chart.dbBackend" . }}
-{{- if and .Values.postgres.enabled .Values.mysql.enabled }}
-{{- fail "postgres.enabled and mysql.enabled cannot both be true: choose a single database backend" }}
+{{- if hasKey (.Values.mysql | default dict) "enabled" }}
+{{- fail "mysql.enabled is not supported because this chart does not vendor a MySQL database; set postgres.enabled=false, statuslist.env.APP_DATABASE__BACKEND=mysql, and provide the MySQL Service externally" }}
 {{- end }}
 {{- if and .Values.postgres.enabled (ne $databaseBackend "postgres") }}
-{{- fail (printf "postgres.enabled=true requires statuslist.env.APP_DATABASE__BACKEND=postgres, got %q" $databaseBackend) }}
-{{- end }}
-{{- if and .Values.mysql.enabled (ne $databaseBackend "mysql") }}
-{{- fail (printf "mysql.enabled=true requires statuslist.env.APP_DATABASE__BACKEND=mysql, got %q" $databaseBackend) }}
+{{- fail (printf "postgres.enabled=true requires statuslist.env.APP_DATABASE__BACKEND=postgres, got %q; for MySQL set postgres.enabled=false and provide the MySQL Service externally" $databaseBackend) }}
 {{- end }}
 apiVersion: apps/v1
 kind: Deployment
@@ -308,7 +305,10 @@ spec:
             secretName: {{ .secretName }}
             {{- with .items }}
             items:
-              {{- toYaml . | nindent 14 }}
+              {{- range . }}
+              - key: {{ include "status-list-server-chart.databasePasswordSecretKey" (dict "root" $ "key" .key) }}
+                path: {{ .path }}
+              {{- end }}
             {{- end }}
       {{- end }}
 {{- end }}

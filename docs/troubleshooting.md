@@ -741,7 +741,7 @@ a cluster that later shows `ImagePullBackOff`/`CrashLoopBackOff`.
 **Observed with the default chart install:** the chart's `appVersion` is the provider-neutral
 `1.0.1-fscert` variant (`Chart.yaml`), so with `statuslist.image.tag` empty the Deployment
 resolves the image `ghcr.io/adorsys/status-list-server:1.0.1-fscert`. Only **variant-suffixed** tags are published
-(`latest-aws`, `latest-gcp`, `latest-azure`, `latest-vault`, `latest-fscert`, matching `latest-mysql-*` tags, and matching
+(`latest-aws`, `latest-gcp`, `latest-azure`, `latest-vault`, `latest-fscert`, and matching
 `<version>-<variant>` / `sha-…-<variant>` tags); there is no unsuffixed `latest` or `1.0.1`.
 If `1.0.1-fscert` gives `ErrImagePull`, that exact `appVersion` may simply not have been promoted
 for the variant yet. The result is this symptom:
