@@ -314,7 +314,7 @@ This repository now suppresses crate advisories in two places, and they are not 
 | Enforced             | no                                  | `scripts/check-trivyignore.py` (tested)    |
 | Suppressions visible | no                                  | counted in every gate summary              |
 
-Today `deny.toml` ignores `RUSTSEC-2023-0071` (rsa) and `RUSTSEC-2026-0235` (rkyv), and `.trivyignore.yaml` ignores neither, because Trivy's database does not flag either at the versions this project pins — verified, not assumed. So the two ledgers do not currently disagree.
+Today `deny.toml` ignores `RUSTSEC-2023-0071` (rsa), and `.trivyignore.yaml` does not, because Trivy's database does not flag it at the version this project pins — verified, not assumed. So the two ledgers do not currently disagree.
 
 They can, and the failure is asymmetric in an unhelpful direction. If Trivy's database later picks up one of those advisories at HIGH or above, a release blocks on something `cargo-deny` has been deliberately ignoring for months, and the person cutting the release has to rediscover an argument that already exists in `deny.toml`. In the other direction, someone who fixes `rsa` and removes the `deny.toml` entry has no prompt to check whether a `.trivyignore.yaml` entry also became stale.
 
