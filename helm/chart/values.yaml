@@ -75,10 +75,11 @@ statuslist:
     #   2. tag, if set -> image is repository:<tag> and pullPolicy defaults to Always
     #      (tag is mutable and may move).
     #   3. both empty -> the chart derives repository:<baseAppVersion>-<variant>, where
-    #      baseAppVersion strips the variant suffix from appVersion (e.g. the -fscert
-    #      default variant around appVersion 1.0.1-fscert yields 1.0.1-fscert). The chart
-    #      never falls back to "latest", so an upgrade that changes nothing in the chart
-    #      cannot silently advance the running image.
+    #      baseAppVersion strips the variant suffix from appVersion (e.g. for appVersion
+    #      1.0.1-fscert, baseAppVersion becomes 1.0.1, and the default variant fscert
+    #      yields a final derived tag of 1.0.1-fscert). The chart never falls back to
+    #      "latest", so an upgrade that changes nothing in the chart cannot silently
+    #      advance the running image.
     # An empty pullPolicy derives from which case is in use; set it explicitly to override.
   service:
     enabled: true

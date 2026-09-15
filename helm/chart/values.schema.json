@@ -384,7 +384,7 @@
                 "creationPolicy": {
                   "type": "string",
                   "title": "Creation policy",
-                  "enum": ["Owner", "Merge", "Orphan"]
+                  "enum": ["Owner", "Merge", "None"]
                 },
                 "template": { "type": "object", "title": "ESO target template" }
               }
