@@ -1,0 +1,35 @@
+workspace = "boringcache/status-list-server"
+
+[entries.cargo-target]
+kind = "cargo-target"
+tag = "cargo-target"
+path = "target"
+
+[entries.coverage-target]
+kind = "cargo-target"
+tag = "cargo-coverage-target"
+path = "target"
+
+[profiles.dependencies]
+entries = ["cargo-registry-cache", "cargo-registry-index"]
+
+[profiles.cargo]
+entries = ["cargo-target", "cargo-git-db"]
+
+[profiles.coverage]
+entries = ["coverage-target", "cargo-git-db"]
+
+[adapters.cargo]
+profiles = ["cargo"]
+compiler-cache = "sccache"
+fail-on-cache-error = true
+
+[adapters.sccache]
+tag = "rust"
+
+[adapters.docker]
+command = ["docker", "buildx", "bake", "--file", ".github/docker-bake.hcl", "--metadata-file", "target/docker-metadata.json"]
+tag = "docker"
+mount-cache = true
+tool-cache = ["sccache:rust-docker"]
+fail-on-cache-error = true
