@@ -717,7 +717,10 @@ runs:
                      f"kube-prometheus-stack 91.4.0 CRD serves only {served}")
 
         schema = next(v for v in versions if v['name'] == version)['schema']['openAPIV3Schema']
-        errors = sorted(Draft7Validator(schema).iter_errors(amc['spec']),
+        # The CRD schema is a full-object schema (required: ['spec', 'metadata', ...]).
+        # Validate the rendered spec against the spec sub-schema, not the object schema.
+        spec_schema = schema['properties']['spec']
+        errors = sorted(Draft7Validator(spec_schema).iter_errors(amc['spec']),
                         key=lambda e: list(e.path))
         if errors:
             for e in errors:
