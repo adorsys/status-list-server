@@ -513,6 +513,27 @@ jobs:
         with:
           globs: "**/*.md"
 
+  attestation-selftest:
+    name: Attestation Verifier Self-Test
+    runs-on: ubuntu-latest
+    # Its own job rather than a step on trivy-config: that job is a Trivy config scan and
+    # this has nothing to do with Trivy, so a failure there would name the wrong thing in
+    # the checks list.
+    #
+    # Runs on every pull request, unlike scripts/gate-selftest.sh, because this needs
+    # nothing installed: no network, no registry, no image, and not even a real gh --
+    # every case is a stubbed gh on PATH. So drift is caught by whoever changes the
+    # verifier, while they are looking at it, rather than on the last step before a
+    # production deploy.
+    steps:
+      - name: Fetch Repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Prove the attestation check can fail
+        run: bash scripts/attestation-selftest.sh
+
   trivy-config:
     name: Trivy Config Scan (Helm Chart)
     runs-on: ubuntu-latest
@@ -639,17 +660,33 @@ jobs:
       - name: Render Helm templates
         uses: ./.github/workflows/render-helm-templates
 
+      - name: Install KubeLinter
+        # Fetched directly rather than through stackrox/kube-linter-action, which
+        # makes an unretried api.github.com release lookup plus an unretried
+        # download, so a single 504 from either failed CI. The release URL needs no
+        # API call, `--retry` covers transient 5xx responses, and the checksum pins
+        # the exact binary (the asset digest GitHub publishes for v0.8.3), which a
+        # mutable release asset would not.
+        env:
+          KUBE_LINTER_VERSION: v0.8.3
+          KUBE_LINTER_SHA256: 1a6d8419b11971372971fdbc22682b684ebfb7cf1c39591662d1b6ca736c41df
+        run: |
+          set -euo pipefail
+          dir="${RUNNER_TEMP}/kube-linter"
+          mkdir -p "$dir"
+          curl --silent --show-error --fail --location \
+            --retry 5 --retry-delay 5 --retry-connrefused \
+            --output "${dir}/kube-linter-linux.tar.gz" \
+            "https://github.com/stackrox/kube-linter/releases/download/${KUBE_LINTER_VERSION}/kube-linter-linux.tar.gz"
+          echo "${KUBE_LINTER_SHA256}  ${dir}/kube-linter-linux.tar.gz" | sha256sum --check --strict
+          tar -xzf "${dir}/kube-linter-linux.tar.gz" -C "$dir" kube-linter
+          echo "$dir" >> "$GITHUB_PATH"
+
       - name: Run KubeLinter
-        uses: stackrox/kube-linter-action@87802a2f4e01abebb3ee3c67a3002fea71f6eae5 # v1.0.7
-        with:
-          directory: /tmp/rendered
-          format: sarif
-          config: .kube-linter.yaml
-          output-file: kube-linter-results.sarif
-          # Pin the kube-linter binary instead of floating on 'latest' so lint
-          # results are reproducible across runs. The value must be the release
-          # tag (with the leading 'v'), as the action fetches releases/tags/<v>.
-          version: "v0.8.3"
+        run: |
+          set -euo pipefail
+          kube-linter version
+          kube-linter --config .kube-linter.yaml lint /tmp/rendered --format sarif | tee kube-linter-results.sarif
 
       - name: Upload KubeLinter SARIF to code scanning
         # `always()` so the SARIF survives the failing run it matters for.
@@ -971,6 +1008,7 @@ jobs:
       - typos-cli
       - tombi-toml-lint
       - markdown-lint
+      - attestation-selftest
       - trivy-config
       - helm-template-local
       - kube-linter
