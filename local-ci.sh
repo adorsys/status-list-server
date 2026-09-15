@@ -52,7 +52,16 @@ else
     echo "  skipped: trivy not found"
 fi
 
-# 8. Image reference resolution (same as CI)
+# 8. Provenance verification wiring (needs no network, no image and no real gh)
+# Every case is a stubbed gh on PATH, so this runs anywhere jq and bash do. It proves the
+# verifier still rejects each way a verification can be absent rather than successful --
+# including a gh predating the cli/cli#10418 fix, and a gh that exits 0 having found
+# nothing while still echoing back the digest it was handed -- and that it still pins the
+# signing identity exactly rather than by prefix.
+echo "Checking attestation verification wiring..."
+bash scripts/attestation-selftest.sh
+
+# 9. Image reference resolution (same as CI)
 # The digest branch of the chart's image conditionals is only exercised here; a
 # regression means production stops running the digest that was scanned.
 echo "Checking image reference resolution..."
