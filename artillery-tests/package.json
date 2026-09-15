@@ -4,23 +4,25 @@
   "description": "Performance tests for Status List Server using Artillery",
   "scripts": {
     "generate-tokens": "node ./scripts/token-generator.js",
-    "test:load": "artillery run ./tests/load-test.yml",
-    "test:stress": "artillery run artillery-tests/stress-test.yml",
-    "test:spike": "artillery run artillery-tests/spike-test.yml",
-    "test:auth": "artillery run artillery-tests/auth-test.yml",
+    "setup": "node ./scripts/setup.js",
+    "test:load": "npm run setup && artillery run ./tests/load-test.yml",
+    "test:stress": "npm run setup && artillery run ./tests/stress-test.yml",
+    "test:spike": "npm run setup && artillery run ./tests/spike-test.yml",
+    "test:auth": "npm run setup && artillery run ./tests/auth-test.yml",
     "test:all": "npm run test:load && npm run test:stress && npm run test:spike && npm run test:auth",
-    "test:load:report": "artillery run --output artillery-tests/results/load-test.json artillery-tests/load-test.yml && artillery report artillery-tests/results/load-test.json",
-    "test:stress:report": "artillery run --output artillery-tests/results/stress-test.json artillery-tests/stress-test.yml && artillery report artillery-tests/results/stress-test.json",
-    "test:spike:report": "artillery run --output artillery-tests/results/spike-test.json artillery-tests/spike-test.yml && artillery report artillery-tests/results/spike-test.json",
-    "test:auth:report": "artillery run --output artillery-tests/results/auth-test.json artillery-tests/auth-test.yml && artillery report artillery-tests/results/auth-test.json"
+    "test:load:report": "npm run setup && node -e \"require('fs').mkdirSync('results',{recursive:true})\" && artillery run --output results/load-test.json ./tests/load-test.yml",
+    "test:stress:report": "npm run setup && node -e \"require('fs').mkdirSync('results',{recursive:true})\" && artillery run --output results/stress-test.json ./tests/stress-test.yml",
+    "test:spike:report": "npm run setup && node -e \"require('fs').mkdirSync('results',{recursive:true})\" && artillery run --output results/spike-test.json ./tests/spike-test.yml",
+    "test:auth:report": "npm run setup && node -e \"require('fs').mkdirSync('results',{recursive:true})\" && artillery run --output results/auth-test.json ./tests/auth-test.yml"
+  },
+  "engines": {
+    "node": ">=22.18.0"
   },
   "devDependencies": {
-    "artillery": "^2.0.27",
-    "artillery-plugin-metrics-by-endpoint": "^1.21.0",
-    "artillery-plugin-statsd": "^2.2.1"
+    "artillery": "^2.0.34"
   },
   "dependencies": {
-    "jsonwebtoken": "^9.0.2"
+    "jsonwebtoken": "^9.0.3"
   },
   "overrides": {
     "brace-expansion@1.1.12": "~1.1.21",
