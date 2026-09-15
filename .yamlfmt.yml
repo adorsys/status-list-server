@@ -2,7 +2,9 @@ formatter:
   type: basic
   retain_line_breaks_single: true
 
+gitignore_excludes: true
+
 exclude:
-  - helm/chart/templates/
-  - helm/chart/values.yaml
-  - helm/chart/values-local.yaml
+  - deploy/helm/chart/templates/
+  - deploy/helm/chart/values.yaml
+  - deploy/helm/chart/values-local.yaml
