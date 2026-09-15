@@ -1,11 +1,24 @@
+# Chart-wide settings applied to every resource in this release.
 global:
   # Chart-wide public DNS suffix. When set, the default ingress host becomes
   # statuslist.<domain> and the default TLS host becomes *.<domain>.
   # Leave empty for provider-neutral defaults.
   domain: ""
 
+# statuslist: the application core. All fields under this key configure the
+# status-list-server Deployment, its Pod, Service, Ingress, secrets, and runtime env.
+# The base chart is provider-neutral: cloud-specific behavior (AWS/GCP/Azure Workload
+# Identity, per-cloud DNS, per-cloud SecretStore) is selected through the overlays listed
+# in helm/README.md (values-aws.yaml, values-aws-nlb.yaml, values-external-secrets.yaml,
+# values-production.yaml) rather than baked into these defaults.
 statuslist:
   enabled: true
+  # initContainers run before the application container. The default waits for the
+  # bundled PostgreSQL service to accept connections on the database port derived from
+  # APP_DATABASE__PORT (see the status-list-server-chart.dbPort helper). Each stack
+  # is hardened (drop-all capabilities, non-root, read-only rootfs, /tmp emptyDir) and
+  # given small fixed CPU/memory requests regardless of the value provided here, so
+  # operators only supply the wait command and image.
   initContainers:
     - name: wait-for-postgres
       image: busybox:1.37
@@ -20,9 +33,12 @@ statuslist:
           done
           echo "Postgres is up."
 
+  # Number of application replicas. Omitted when autoscaling.enabled=true so the HPA
+  # controls the replica count.
   replicaCount: 1
   # Extra labels merged onto the Pod template metadata. Required for e.g. Azure Workload
-  # Identity: azure.workload.identity/use: "true".
+  # Identity: azure.workload.identity/use: "true" (as a string value, not a boolean —
+  # the render test asserts it is quoted).
   podLabels: {}
   image:
     repository: ghcr.io/adorsys/status-list-server
@@ -53,6 +69,17 @@ statuslist:
     # "sha256:...". Takes precedence over tag and pins the exact digest CI scanned.
     # Each variant has its own digest. Use the digest from the variant you select.
     digest: ""
+    # Image resolution rules (order of precedence):
+    #   1. digest, if set to "sha256:<64 hex chars>" -> image is repository@digest and
+    #      pullPolicy defaults to IfNotPresent (content-addressed, immutable).
+    #   2. tag, if set -> image is repository:<tag> and pullPolicy defaults to Always
+    #      (tag is mutable and may move).
+    #   3. both empty -> the chart derives repository:<baseAppVersion>-<variant>, where
+    #      baseAppVersion strips the variant suffix from appVersion (e.g. the -fscert
+    #      default variant around appVersion 1.0.1-fscert yields 1.0.1-fscert). The chart
+    #      never falls back to "latest", so an upgrade that changes nothing in the chart
+    #      cannot silently advance the running image.
+    # An empty pullPolicy derives from which case is in use; set it explicitly to override.
   service:
     enabled: true
     type: ClusterIP
@@ -87,13 +114,26 @@ statuslist:
     # DNS provider for ACME DNS-01 challenges: route53 | cloudflare | gcloud | azure | acmedns
     # (pebble also exists but is a development-only fake, not for deployments)
     # See docs/dns-providers.md for the settings each provider needs.
-    # GKE Workload Identity example:
-    #   APP_SERVER__CERT__DNS__PROVIDER: "gcloud"
-    #   APP_SERVER__CERT__DNS__GCLOUD__PROJECT_ID: "dns-project-id"
-    # AKS Workload Identity / managed identity example:
-    #   APP_SERVER__CERT__DNS__PROVIDER: "azure"
-    #   APP_SERVER__CERT__DNS__AZURE__SUBSCRIPTION_ID: "subscription-id"
-    #   APP_SERVER__CERT__DNS__AZURE__RESOURCE_GROUP: "dns-resource-group"
+    #
+    # Workload Identity DNS setup per cloud — combine the provider env vars below with
+    # the matching serviceAccount.annotations and podLabels documented under
+    # serviceAccount, plus the cloud SecretStore under secretStore:
+    #   AWS EKS (IRSA) : APP_SERVER__CERT__DNS__PROVIDER=route53, and the EKS IRSA role
+    #                    annotation eks.amazonaws.com/role-arn on the application
+    #                    ServiceAccount; route53 credentials resolve via the role.
+    #   GCP GKE (WI)   : APP_SERVER__CERT__DNS__PROVIDER=gcloud
+    #                    APP_SERVER__CERT__DNS__GCLOUD__PROJECT_ID: "dns-project-id"
+    #                    and the annotation iam.gke.io/gcp-service-account on the
+    #                    application ServiceAccount (GKE Workload Identity).
+    #   Azure AKS (WI) : APP_SERVER__CERT__DNS__PROVIDER=azure, plus the subscription /
+    #                    resource-group identifiers:
+    #                    APP_SERVER__CERT__DNS__AZURE__SUBSCRIPTION_ID: "subscription-id"
+    #                    APP_SERVER__CERT__DNS__AZURE__RESOURCE_GROUP: "dns-resource-group"
+    #                    and the azure.workload.identity/client-id annotation on the
+    #                    application ServiceAccount plus the pod label
+    #                    azure.workload.identity/use: "true".
+    #   On-prem / other: APP_SERVER__CERT__DNS__PROVIDER=acmedns (or cloudflare) is
+    #                    supported where a token/account is supplied.
     # Provider credentials (e.g. APP_SERVER__CERT__DNS__CLOUDFLARE__API_TOKEN, or the
     # APP_SERVER__CERT__DNS__ACMEDNS__ACCOUNTS JSON, which holds every account password)
     # must come from a secret (see externalSecret below), not from plain env values.
@@ -115,7 +155,11 @@ statuslist:
     APP_SERVER__ENABLE_METRICS: "true"
     APP_TELEMETRY__ENVIRONMENT: "production"
     APP_TELEMETRY__SAMPLER_RATIO: "1.0"
-  # Optional AWS configuration for the application.
+  # Optional AWS configuration for the application. The chart defaults to Workload
+  # Identity (IRSA) for AWS credentials: the AWS SDK discovers the role from the Pod's
+  # projected OIDC token and instance metadata, so no files are mounted. Only enable
+  # mountCredentials for the legacy static-credential path (shared "credentials"/"config"
+  # files), which has no dependency on IRSA annotations.
   aws:
     # Mount AWS credential files from aws-credentials-secret into the pod.
     # Disabled by default so the base chart stays provider-neutral.
@@ -309,7 +353,12 @@ podDisruptionBudget:
 
 # ServiceMonitor for kube-prometheus-stack / Prometheus Operator discovery.
 # Enterprise Prometheus deployments using Prometheus Operator ignore annotation-based pod targets.
-# Enable this to provision a ServiceMonitor CRD.
+# Enable this to provision a ServiceMonitor CRD (monitoring.coreos.com/v1).
+# Prometheus deployments driven by the Prometheus Operator discover scrape targets through
+# ServiceMonitor CRs rather than prometheus.io/* pod annotations. Enable this to define the
+# /metrics endpoint on the application Service so the Operator scrapes it. Selector labels
+# (labels.release matching the kube-prometheus-stack release used by your Prometheus
+# ServiceMonitorSelector) are usually required for discovery.
 serviceMonitor:
   enabled: false
   # Additional labels required by your Prometheus Operator (e.g. release: kube-prometheus-stack)
@@ -318,11 +367,19 @@ serviceMonitor:
   interval: ""
   # Scrape timeout (e.g. "10s")
   scrapeTimeout: ""
+  # Additional metricRelabelings applied to scraped metrics (Prometheus relabel config).
   metricRelabelings: []
+  # Additional target relabelings applied before scraping (Prometheus relabel config).
   relabelings: []
 
-# PrometheusRule for kube-prometheus-stack / Prometheus Operator rule discovery.
-# Enables shipping SLI recording rules and SLO alerting rules as a PrometheusRule CRD.
+# PrometheusRule (monitoring.coreos.com/v1) for kube-prometheus-stack / Prometheus
+# Operator rule discovery.
+# Enables shipping the SLI recording rules (request latency, error rate, DB latency, cache
+# hit ratio, token generation, error budget) and the SLO burn-rate / error-budget alerting
+# rules as a single PrometheusRule CRD. The alert thresholds come from the slo block above;
+# both must stay in lockstep with observability/slo/thresholds.json (enforced by CI) and the
+# standalone observability/prometheus/rules/*.rules.yml. See the webhook-notifications
+# runbook for how the resulting alerts reach humans via alerting.existingSecret.
 prometheusRule:
   enabled: false
   # Additional labels required by your Prometheus Operator (e.g. release: kube-prometheus-stack)
@@ -430,19 +487,35 @@ alerting:
     #     insecureSkipVerify: false
     tlsConfig: {}
 
-# Configurable SLO target thresholds for PrometheusRule alerting rules.
+# SLO (service-level objective) target thresholds consumed by the PrometheusRule
+# template (prometheusrule.yaml) to build SLI recording rules and SLO burn-rate
+# alerting rules. Each value here is rendered verbatim into the alert expressions, so
+# changing them changes the alert thresholds without touching the rule template.
 # These must stay in lockstep with observability/slo/thresholds.json (the lint
 # step in CI asserts this) and with the literal values in the standalone
 # observability/prometheus/rules/*.rules.yml.
 slo:
+  # Acceptable ratio of 5xx responses to all requests over the SLO window (0.5% here).
+  # Used as the denominator of burn-rate multipliers and the error-budget success ratio.
   errorRateTarget: 0.005
+  # Fast-burn alert triggers when the observed error rate exceeds errorRateTarget *
+  # fastBurnMultiplier (14.4x) on both the 1h and 5m windows for 5m. Pages.
   fastBurnMultiplier: 14.4
+  # Slow-burn alert triggers when the observed error rate exceeds errorRateTarget *
+  # slowBurnMultiplier (6.0x) on the 6h and 30m windows for 30m. Warms.
   slowBurnMultiplier: 6.0
+  # P95 request latency target in seconds (300ms). Exceeding it on the 1h/5m windows
+  # (fast burn, page) or the 6h/30m windows (slow burn, warn) fires an alert.
   requestLatencyP95: 0.3
+  # P95 database query latency target in seconds (50ms). Same fast/slow burn semantics.
   dbLatencyP95: 0.05
+  # Minimum acceptable status-list cache hit ratio (85%). Below this for 15m fires a warn.
   cacheHitRatioMin: 0.85
+  # Maximum acceptable certificate-renewal failure ratio (1%). Retained for reference
+  # / parity with the standalone rules.
   certRenewalFailureMax: 0.01
-  # Remaining-error-budget gate for the ErrorBudget*Critical page alerts.
+  # Remaining-error-budget gate for the ErrorBudget*Critical page alerts (below 10% of
+  # the 30d budget remaining pages).
   errorBudgetCriticalThreshold: 0.1
   # Certificate expiry gates (seconds remaining until the certificate expires).
   # Warn at <=14d, page at <=7d: cert renewal is a discrete low-frequency event,
@@ -451,6 +524,14 @@ slo:
   certExpiryWarnSeconds: 1209600
   certExpiryCriticalSeconds: 604800
 
+# Bundled in-cluster PostgreSQL database (accepted values of the CloudPirates chart).
+# This is one possible backend: the application is database-agnostic and selects its
+# backend at runtime through the APP_DATABASE__* environment variables. The chart maps
+# the defaults here onto APP_DATABASE__HOST/USERNAME/NAME/BACKEND and into the shared
+# statuslist-secret used for the password. MySQL and other backends are supported by the
+# application (see docs/database-backends.md, issue #498) by pointing the APP_DATABASE__*
+# variables at an external database and disabling this bundled one. Set postgres.enabled
+# to false when you provide an external database.
 postgres:
   enabled: true
   resources:
@@ -480,6 +561,14 @@ postgres:
   image:
     tag: "18.0"
 
+# External Secrets Operator delivery mode (mutually exclusive with
+# statuslist.fallbackSecret; the chart fails if both are enabled). When enabled the chart
+# renders an ExternalSecret that syncs the application Secret (always named
+# "statuslist-secret", holder of the database password) from a cloud/on-prem secret
+# manager referenced by secretStore. This is the recommended production delivery path;
+# cloud credentials are resolved via Workload Identity / IRSA / ManagedIdentity rather
+# than files. The ExternalSecret, the Deployment, and PostgreSQL (postgres.auth.existingSecret)
+# all consume the same single secret name, which is intentionally not configurable.
 externalSecret:
   enabled: false
   metadata:
@@ -506,6 +595,12 @@ externalSecret:
     # and secretStoreRef; defaults come from externalSecret.spec.
     extraExternalSecrets: []
 
+# External Secrets Operator SecretStore / ClusterSecretStore reference that externalSecret
+# syncs from, selecting the cloud or on-prem secret manager. Rendered only when
+# externalSecret.enabled AND secretStore.enabled, and only for a namespace-scoped
+# SecretStore; a ClusterSecretStore kind is expected to pre-exist cluster-wide and is not
+# rendered. Each provider resolves its credentials differently, and the provider's auth is
+# decoupled from the application's own Workload Identity where noted.
 secretStore:
   enabled: false
   # Provider selector: aws | vault | gcp | azure | raw
@@ -551,6 +646,13 @@ secretStore:
   # 'raw: {}' is rejected to avoid silently emitting an empty/insecure SecretStore.
   raw: {}
 
+# OpenTelemetry Collector subchart (opentelemetry-collector dependency). The application
+# ships OTLP traces/metrics/logs; when enabled the Deployment injects
+# APP_TELEMETRY__ENABLED=true and APP_TELEMETRY__OTLP_ENDPOINT pointing at the collector
+# Service, and the bundled PostgreSQL / OTel egress paths in network-policy.yaml open the
+# OTLP ports. The default config uses the `debug` exporter (dev scaffolding that prints to
+# stdout); configure real exporters (e.g. otlp/tempo, prometheusremotewrite, loki) in
+# config.exporters before deploying to production.
 opentelemetry-collector:
   enabled: true
   mode: deployment
