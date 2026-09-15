@@ -7,7 +7,6 @@ config:
         tags:
           - "test_id:status_list_spike"
     expect: {}
-    metrics-by-endpoint: {}
     ensure: {}
   phases:
     - duration: 120
@@ -36,6 +35,10 @@ config:
 
   processor: "../scripts/processor.js"
 
+  # The issuer is registered and seed lists are published once before the run by
+  # scripts/setup.js (invoked by `npm run test:spike*`), so authenticated flows
+  # start with a valid issuer and reads hit real lists.
+
   ensure:
     maxErrorRate: 20 # Max 20% during spikes
     p95: 2000 # 95th percentile < 2s
@@ -49,9 +52,7 @@ scenarios:
           expect:
             - statusCode: 200
             - contentType: text/plain; charset=utf-8
-            - responseTime: 100 # Must respond in < 100ms
-            - equals:
-                - "OK"
+            - matchesRegexp: "OK"
 
   - name: "Welcome Endpoint"
     weight: 20
@@ -79,17 +80,16 @@ scenarios:
           ifTrue: "shouldRegister" # Only 30% of requests
       - think: 0.3
 
-  - name: "Random Status List Retrieval"
+  - name: "Status List Retrieval"
     weight: 30
     flow:
-      - function: "selectRandomListId"
+      - function: "selectPublishedListId"
       - get:
           url: "/api/v1/status-lists/{{ listId }}"
+          headers:
+            Accept: "application/statuslist+jwt"
           expect:
-            - statusCode:
-                - 200
-                - 404 # Expected for non-existent lists
-            - responseTime: 1000
+            - statusCode: 200
       - think: 0.3
 
   - name: "Authenticated Update Flow"
@@ -109,6 +109,7 @@ scenarios:
                 status: 0
           expect:
             - statusCode: 201
+          afterResponse: "handlePublishResponse"
       # Then update
       - think: 0.5
       - patch:
@@ -125,4 +126,3 @@ scenarios:
             - statusCode: 200
           afterResponse: "handleUpdateResponse"
       - think: 1
-

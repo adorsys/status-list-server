@@ -5,6 +5,13 @@ const path = require('path');
 
 const scriptsDir = __dirname;
 
+// The server rejects management JWTs whose lifetime (`exp - iat`) exceeds
+// `management_auth.max_token_lifetime_secs` (default 3600s). Signing a token
+// with the server's default limit keeps every authenticated request valid for
+// the duration of a run; raise the server config if longer-lived tokens are
+// desired.
+const TOKEN_LIFETIME_SECS = 3600;
+
 // Generate EC key pair
 const { publicKey, privateKey } = crypto.generateKeyPairSync('ec', {
   namedCurve: 'P-256',
@@ -36,7 +43,7 @@ for (let i = 0; i < 100; i++) {
     {
       iss: issuerId,
       iat: now,
-      exp: now + (365 * 24 * 60 * 60)
+      exp: now + TOKEN_LIFETIME_SECS
     },
     privateKey,
     {
@@ -58,21 +65,16 @@ const testData = {
   generatedAt: new Date().toISOString()
 };
 
-// Write the private key, JWK, and tokens together so a crash mid-write cannot
-// leave a key that disagrees with the tokens. Each file is written to a temp
-// path first and then renamed, so readers only ever see a complete file.
-const atomicWrite = (filename, data) => {
-  const dest = path.join(scriptsDir, filename);
-  const tmp = path.join(scriptsDir, `${filename}.tmp-${process.pid}`);
-  fs.writeFileSync(tmp, data);
-  fs.renameSync(tmp, dest);
-};
-
-atomicWrite('ec-private-key.pem', privateKey);
-atomicWrite('ec-public-key.jwk', JSON.stringify(jwk, null, 2));
-atomicWrite('test-tokens.json', JSON.stringify(testData, null, 2));
+// Write only test-tokens.json. All Artillery scenarios read the issuer, public
+// key and signed JWTs from this one file, so the separate ec-private-key.pem and
+// ec-public-key.jwk files would be unread dead weight. The data is sensitive
+// (it embeds the signing key material via the JWK), so it is written once with
+// mode 0600 (owner read/write only).
+const testDataPath = path.join(scriptsDir, 'test-tokens.json');
+const serialized = JSON.stringify(testData, null, 2);
+const tmp = `${testDataPath}.tmp-${process.pid}`;
+fs.writeFileSync(tmp, serialized, { mode: 0o600 });
+fs.renameSync(tmp, testDataPath);
 
 console.log(`✓ Generated ${tokens.length} valid tokens`);
-console.log('✓ Saved to test-tokens.json');
-console.log('\nPublic Key:');
-console.log(JSON.stringify(jwk, null, 2));
+console.log(`✓ Saved to scripts/test-tokens.json`);

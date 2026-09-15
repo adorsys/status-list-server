@@ -1,5 +1,4 @@
 const crypto = require('crypto');
-const fs = require('fs');
 
 // Load test tokens
 let testTokens = null;
@@ -14,6 +13,31 @@ try {
 // Public key for credential registration - read from the same file as the
 // tokens so the key can never disagree with the signed JWTs.
 let TEST_PUBLIC_KEY_JWK = testTokens ? testTokens.publicKeyJwk : null;
+
+// Status list IDs created during this run. Reads pick from this pool so they
+// query lists that actually exist instead of random IDs that always 404.
+//
+// Shared across Artillery worker processes via the file written by scripts/setup.js
+// (each worker loads it on module init). Successful publishes during the run are
+// appended to the per-process pool as well, so newly created lists become
+// readable too.
+const fs = require('fs');
+const path = require('path');
+const publishedListIds = loadSeedListIds();
+
+function loadSeedListIds() {
+  const seedFile = path.join(__dirname, 'seed-lists.json');
+  try {
+    const ids = JSON.parse(fs.readFileSync(seedFile, 'utf8'));
+    if (Array.isArray(ids) && ids.length > 0) {
+      console.log(`✓ Loaded ${ids.length} seeded status lists for reads`);
+      return ids;
+    }
+  } catch (error) {
+    // No seed file (e.g. apply/seed run or tests invoked without setup.js).
+  }
+  return [];
+}
 
 // Counters for debugging
 let successCount = 0;
@@ -72,28 +96,19 @@ function generateUUID(context, events, done) {
 }
 
 /**
- * Generate a random list ID
+ * Select a published status list ID recorded earlier in this run. scripts/setup.js
+ * seeds the pool (via scripts/seed-lists.json) with real lists, and every
+ * successful publish adds to it, so reads hit lists that exist instead of random
+ * IDs that always 404. Falls back to a fresh UUID only when no list has been
+ * published yet (unlikely after setup has run).
  */
-function generateRandomListId(context, events, done) {
-  const randomStr = Math.random().toString(36).substring(2, 11);
-  context.vars.listId = `random-${randomStr}`;
-  return done();
-}
-
-/**
- * Select a random status list ID (some exist, some don't)
- */
-function selectRandomListId(context, events, done) {
-  const listIds = [
-    'existing-list-1',
-    'existing-list-2',
-    'non-existent-list',
-    `random-${Math.random().toString(36).substring(2, 11)}`
-  ];
-
-  const randomIndex = Math.floor(Math.random() * listIds.length);
-  context.vars.listId = listIds[randomIndex];
-
+function selectPublishedListId(context, events, done) {
+  if (publishedListIds.length > 0) {
+    const index = Math.floor(Math.random() * publishedListIds.length);
+    context.vars.listId = publishedListIds[index];
+  } else {
+    context.vars.listId = crypto.randomUUID();
+  }
   return done();
 }
 
@@ -109,7 +124,6 @@ function shouldRegister(context, events, done) {
  * After response handlers - for custom metrics and debugging
  */
 function handleStatusListResponse(requestParams, response, context, ee, next) {
-  // 404 is expected for non-existent lists
   if (response.statusCode === 200) {
     successCount++;
   } else if (response.statusCode !== 404) {
@@ -134,6 +148,10 @@ function handleCredentialResponse(requestParams, response, context, ee, next) {
 function handlePublishResponse(requestParams, response, context, ee, next) {
   if (response.statusCode === 201) {
     successCount++;
+    // Record the list for later reads.
+    if (context.vars.listId) {
+      publishedListIds.push(context.vars.listId);
+    }
   } else {
     errorCount++;
     console.error(`Error: Publish failed with ${response.statusCode}`);
@@ -179,8 +197,7 @@ module.exports = {
   generateIssuerPayload,
   selectRandomToken,
   generateUUID,
-  generateRandomListId,
-  selectRandomListId,
+  selectPublishedListId,
   shouldRegister,
   handleStatusListResponse,
   handleCredentialResponse,
