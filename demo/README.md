@@ -45,19 +45,7 @@ Create the environment:
 uv sync
 ```
 
-If your network uses a TLS-intercepting proxy, uv can fail with certificate
-errors. Set `UV_SYSTEM_CERTS=1` so uv trusts the operating system's certificate
-store:
-
-| Shell      | Command                      |
-| ---------- | ---------------------------- |
-| bash / zsh | `export UV_SYSTEM_CERTS=1`   |
-| PowerShell | `$env:UV_SYSTEM_CERTS = "1"` |
-| cmd        | `set UV_SYSTEM_CERTS=1`      |
-
-If `uv help sync` does not list `UV_SYSTEM_CERTS`, your uv release predates it;
-set `UV_NATIVE_TLS=1` the same way instead. Newer releases still accept
-`UV_NATIVE_TLS`.
+If behind a TLS-intercepting proxy, set `UV_SYSTEM_CERTS=1`.
 
 ### Option 2: pip
 
@@ -171,14 +159,7 @@ To execute a notebook top to bottom without opening Jupyter Lab:
 uv run jupyter execute workflows/01-an-issuer-maintains-a-status-list.ipynb
 ```
 
-To use an IDE instead, select the interpreter in `demo/.venv` as the kernel:
-
-- **VS Code**: open a notebook, click **Select Kernel**, choose
-  **Python Environments**, and pick the interpreter in `demo/.venv`.
-- **PyCharm**: open **Settings** > **Python Interpreter**, choose
-  **Add Interpreter** > **Add Local Interpreter**, select an existing
-  environment, and point it to `demo/.venv/bin/python` (macOS, Linux) or
-  `demo\.venv\Scripts\python.exe` (Windows).
+To use an IDE instead, select the interpreter in `demo/.venv` as the kernel.
 
 ## Update dependencies
 

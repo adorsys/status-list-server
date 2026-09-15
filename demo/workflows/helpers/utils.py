@@ -22,6 +22,7 @@ class Status(IntEnum):
     """Token status values as sent to the server."""
     VALID = 0
     INVALID = 1
+    SUSPENDED = 2
 
 
 def get_base_url():
