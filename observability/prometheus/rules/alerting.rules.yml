@@ -20,25 +20,40 @@ groups:
         expr: vector(1)
         labels:
           severity: none
+          team: statuslist
           service: status-list-server
         annotations:
           summary: "Prometheus alerting pipeline is healthy (Watchdog)"
           runbook_url: "https://github.com/adorsys/status-list-server/blob/develop/observability/README.md"
           dashboard_url: "http://localhost:3000/d/status-list-slo"
 
-      # Target-down / absent-SLI guard. If the app stops being scraped (pod
-      # crash, a ServiceMonitor scrape that is removed, deployment deleted), the
-      # raw request metrics go absent, every sli:* recording rule goes NaN, and
-      # every burn alert above goes silent. `absent()` turns that missing series
-      # into an alertable page so a total outage is not invisible.
+      # Target-down / absent-SLI guard. Alert on the scrape-generated `up`
+      # series rather than the request histogram: /metrics and health routes are
+      # excluded from the HTTP metrics middleware, so a healthy but idle app
+      # never produces the histogram and a histogram-based check pages falsely.
+      # The `up` series is created by the scrape itself, so `max(up) == 0`
+      # catches a target that is present but failing scrapes while `absent(up)`
+      # catches a target that is gone entirely.
+      #
+      # NOTE: this standalone copy selects the target that the shipped configs
+      # (observability/prometheus/prometheus.yml and prometheus.production.yml)
+      # actually scrape: `job="status_list_server"` targeting `instance="app:8000"`.
+      # `up` carries the scrape's own job/instance labels, NOT the application's
+      # `otel_scope_name` instrument label, so selecting on otel_scope_name would
+      # never match a healthy target and absent() would page continuously.
       - alert: StatusListMetricsAbsent
-        expr: absent(http_server_duration_seconds_bucket{otel_scope_name="status-list-server"})
+        expr: |
+          absent(up{job="status_list_server",instance="app:8000"})
+          or
+          max by (job, instance)(up{job="status_list_server",instance="app:8000"}) == 0
         for: 5m
         labels:
           severity: page
+          team: statuslist
           service: status-list-server
         annotations:
           summary: "status-list-server metrics absent for 5m (target down or not scraped)"
+          description: "namespace {{ $labels.namespace }}: Status List /metrics target is unreachable or absent (up == 0 or no up series for 5m)"
           runbook_url: "https://github.com/adorsys/status-list-server/blob/develop/observability/README.md"
           dashboard_url: "http://localhost:3000/d/status-list-slo"
 
@@ -51,10 +66,12 @@ groups:
         for: 5m
         labels:
           severity: page
+          team: statuslist
           service: status-list-server
           sli: request_latency
         annotations:
           summary: "Request latency P95 sustainably above 300ms (>300ms on the 1h window)"
+          description: "namespace {{ $labels.namespace }}: request latency P95 is {{ humanize $value }}s on the 1h window (threshold 300ms)"
           runbook_url: "https://github.com/adorsys/status-list-server/blob/develop/observability/runbooks/request-latency.md"
           dashboard_url: "http://localhost:3000/d/status-list-slo"
 
@@ -66,10 +83,12 @@ groups:
         for: 30m
         labels:
           severity: warn
+          team: statuslist
           service: status-list-server
           sli: request_latency
         annotations:
           summary: "Request latency P95 sustained above 300ms on the 6h window"
+          description: "namespace {{ $labels.namespace }}: request latency P95 is {{ humanize $value }}s on the 6h window (threshold 300ms)"
           runbook_url: "https://github.com/adorsys/status-list-server/blob/develop/observability/runbooks/request-latency.md"
           dashboard_url: "http://localhost:3000/d/status-list-slo"
 
@@ -87,10 +106,12 @@ groups:
         for: 5m
         labels:
           severity: page
+          team: statuslist
           service: status-list-server
           sli: error_rate
         annotations:
           summary: "5xx error rate burning the error budget fast (>=14.4x over 0.5% budget on the 1h window)"
+          description: "namespace {{ $labels.namespace }}: 1h error rate is {{ humanizePercentage $value }} (>=14.4x budget)"
           runbook_url: "https://github.com/adorsys/status-list-server/blob/develop/observability/runbooks/error-rate.md"
           dashboard_url: "http://localhost:3000/d/status-list-slo"
 
@@ -102,10 +123,12 @@ groups:
         for: 30m
         labels:
           severity: warn
+          team: statuslist
           service: status-list-server
           sli: error_rate
         annotations:
           summary: "5xx error rate burning the error budget slowly (>=6x over 0.5% budget on the 6h window)"
+          description: "namespace {{ $labels.namespace }}: 6h error rate is {{ humanizePercentage $value }} (>=6x budget)"
           runbook_url: "https://github.com/adorsys/status-list-server/blob/develop/observability/runbooks/error-rate.md"
           dashboard_url: "http://localhost:3000/d/status-list-slo"
 
@@ -118,10 +141,12 @@ groups:
         for: 5m
         labels:
           severity: page
+          team: statuslist
           service: status-list-server
           sli: db_latency
         annotations:
           summary: "DB query latency P95 sustainably above 50ms (>50ms on the 1h window)"
+          description: "namespace {{ $labels.namespace }}: DB query latency P95 is {{ humanize $value }}s on the 1h window (threshold 50ms)"
           runbook_url: "https://github.com/adorsys/status-list-server/blob/develop/observability/runbooks/db-latency.md"
           dashboard_url: "http://localhost:3000/d/status-list-slo"
 
@@ -133,10 +158,12 @@ groups:
         for: 30m
         labels:
           severity: warn
+          team: statuslist
           service: status-list-server
           sli: db_latency
         annotations:
           summary: "DB query latency P95 sustained above 50ms on the 6h window"
+          description: "namespace {{ $labels.namespace }}: DB query latency P95 is {{ humanize $value }}s on the 6h window (threshold 50ms)"
           runbook_url: "https://github.com/adorsys/status-list-server/blob/develop/observability/runbooks/db-latency.md"
           dashboard_url: "http://localhost:3000/d/status-list-slo"
 
@@ -149,10 +176,12 @@ groups:
         for: 5m
         labels:
           severity: page
+          team: statuslist
           service: status-list-server
           sli: token_generation
         annotations:
           summary: "Token-generation failures burning the error budget fast (>=14.4x over 0.5% budget on the 1h window)"
+          description: "namespace {{ $labels.namespace }}: 1h token-generation failure rate is {{ humanizePercentage $value }} (>=14.4x budget)"
           runbook_url: "https://github.com/adorsys/status-list-server/blob/develop/observability/runbooks/token-generation.md"
           dashboard_url: "http://localhost:3000/d/status-list-slo"
 
@@ -164,10 +193,12 @@ groups:
         for: 30m
         labels:
           severity: warn
+          team: statuslist
           service: status-list-server
           sli: token_generation
         annotations:
           summary: "Token-generation failure rate burning the error budget slowly (>=6x over 0.5% budget on the 6h window)"
+          description: "namespace {{ $labels.namespace }}: 6h token-generation failure rate is {{ humanizePercentage $value }} (>=6x budget)"
           runbook_url: "https://github.com/adorsys/status-list-server/blob/develop/observability/runbooks/token-generation.md"
           dashboard_url: "http://localhost:3000/d/status-list-slo"
 
@@ -178,11 +209,12 @@ groups:
         for: 15m
         labels:
           severity: warn
+          team: statuslist
           service: status-list-server
           sli: cache_hit_ratio
         annotations:
           summary: "Status-list cache hit ratio below 85% for 15m (degradation, not outage)"
-          description: "Current cache hit ratio: {{ $value | humanizePercentage }}"
+          description: "namespace {{ $labels.namespace }}: current cache hit ratio is {{ $value | humanizePercentage }}"
           runbook_url: "https://github.com/adorsys/status-list-server/blob/develop/observability/runbooks/cache-hit-ratio.md"
           dashboard_url: "http://localhost:3000/d/status-list-slo"
 
@@ -197,11 +229,12 @@ groups:
         for: 5m
         labels:
           severity: page
+          team: statuslist
           service: status-list-server
           sli: error_budget
         annotations:
           summary: "Error budget is below 10% for the 30d window"
-          description: "Remaining error budget: {{ $value | humanizePercentage }}"
+          description: "namespace {{ $labels.namespace }}: remaining error budget is {{ $value | humanizePercentage }}"
           runbook_url: "https://github.com/adorsys/status-list-server/blob/develop/observability/runbooks/error-budget.md"
           dashboard_url: "http://localhost:3000/d/status-list-slo"
 
@@ -211,11 +244,12 @@ groups:
         for: 5m
         labels:
           severity: page
+          team: statuslist
           service: status-list-server
           sli: token_gen_error_budget
         annotations:
           summary: "Token generation error budget below 10% for the 30d window"
-          description: "Remaining token generation error budget: {{ $value | humanizePercentage }}"
+          description: "namespace {{ $labels.namespace }}: remaining token generation error budget is {{ $value | humanizePercentage }}"
           runbook_url: "https://github.com/adorsys/status-list-server/blob/develop/observability/runbooks/token-generation.md"
           dashboard_url: "http://localhost:3000/d/status-list-slo"
 
@@ -237,11 +271,12 @@ groups:
         for: 30m
         labels:
           severity: warn
+          team: statuslist
           service: status-list-server
           sli: cert_renewal
         annotations:
           summary: "Certificate expires within 14 days (renewal loop not refreshing it)"
-          description: "Time to expiry: {{ $value }}s"
+          description: "namespace {{ $labels.namespace }}: time to expiry is {{ $value }}s"
           runbook_url: "https://github.com/adorsys/status-list-server/blob/develop/observability/runbooks/cert-renewal.md"
           dashboard_url: "http://localhost:3000/d/status-list-slo"
 
@@ -251,11 +286,12 @@ groups:
         for: 10m
         labels:
           severity: page
+          team: statuslist
           service: status-list-server
           sli: cert_renewal
         annotations:
           summary: "Certificate expires within 7 days (imminent expiry)"
-          description: "Time to expiry: {{ $value }}s"
+          description: "namespace {{ $labels.namespace }}: time to expiry is {{ $value }}s"
           runbook_url: "https://github.com/adorsys/status-list-server/blob/develop/observability/runbooks/cert-renewal.md"
           dashboard_url: "http://localhost:3000/d/status-list-slo"
 

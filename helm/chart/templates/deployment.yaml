@@ -19,9 +19,11 @@ spec:
   template:
     metadata:
       annotations:
+        {{- if .Values.statuslist.prometheusAnnotations }}
         prometheus.io/scrape: "true"
         prometheus.io/port: {{ .Values.statuslist.service.targetPort | quote }}
         prometheus.io/path: "/metrics"
+        {{- end }}
         {{- if .Values.externalSecret.enabled }}
         checksum/secret: {{ include (print $.Template.BasePath "/external-secrets.yaml") . | sha256sum }}
         {{- end }}
