@@ -639,17 +639,33 @@ jobs:
       - name: Render Helm templates
         uses: ./.github/workflows/render-helm-templates
 
+      - name: Install KubeLinter
+        # Fetched directly rather than through stackrox/kube-linter-action, which
+        # makes an unretried api.github.com release lookup plus an unretried
+        # download, so a single 504 from either failed CI. The release URL needs no
+        # API call, `--retry` covers transient 5xx responses, and the checksum pins
+        # the exact binary (the asset digest GitHub publishes for v0.8.3), which a
+        # mutable release asset would not.
+        env:
+          KUBE_LINTER_VERSION: v0.8.3
+          KUBE_LINTER_SHA256: 1a6d8419b11971372971fdbc22682b684ebfb7cf1c39591662d1b6ca736c41df
+        run: |
+          set -euo pipefail
+          dir="${RUNNER_TEMP}/kube-linter"
+          mkdir -p "$dir"
+          curl --silent --show-error --fail --location \
+            --retry 5 --retry-delay 5 --retry-connrefused \
+            --output "${dir}/kube-linter-linux.tar.gz" \
+            "https://github.com/stackrox/kube-linter/releases/download/${KUBE_LINTER_VERSION}/kube-linter-linux.tar.gz"
+          echo "${KUBE_LINTER_SHA256}  ${dir}/kube-linter-linux.tar.gz" | sha256sum --check --strict
+          tar -xzf "${dir}/kube-linter-linux.tar.gz" -C "$dir" kube-linter
+          echo "$dir" >> "$GITHUB_PATH"
+
       - name: Run KubeLinter
-        uses: stackrox/kube-linter-action@87802a2f4e01abebb3ee3c67a3002fea71f6eae5 # v1.0.7
-        with:
-          directory: /tmp/rendered
-          format: sarif
-          config: .kube-linter.yaml
-          output-file: kube-linter-results.sarif
-          # Pin the kube-linter binary instead of floating on 'latest' so lint
-          # results are reproducible across runs. The value must be the release
-          # tag (with the leading 'v'), as the action fetches releases/tags/<v>.
-          version: "v0.8.3"
+        run: |
+          set -euo pipefail
+          kube-linter version
+          kube-linter --config .kube-linter.yaml lint /tmp/rendered --format sarif | tee kube-linter-results.sarif
 
       - name: Upload KubeLinter SARIF to code scanning
         # `always()` so the SARIF survives the failing run it matters for.
