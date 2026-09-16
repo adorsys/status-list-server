@@ -1,5 +1,7 @@
+from enum import IntEnum
 from pathlib import Path
 from dotenv import dotenv_values
+import os
 import unittest
 import cbor2
 import zlib
@@ -9,72 +11,98 @@ import base64
 # Handy handle for test-like assertions
 tc = unittest.TestCase()
 
+# RFC 9052 §4.2
+COSE_SIGN1_TAG = 18
+
+# CWT claim key for status_list (draft-ietf-oauth-status-list), as the server sends it
+CWT_STATUS_LIST_CLAIM = 65533
+
+
+class Status(IntEnum):
+    """Token status values as sent to the server."""
+    VALID = 0
+    INVALID = 1
+    SUSPENDED = 2
+
 
 def get_base_url():
     """
-    Discovers the base URL for the server based on a .env file at the project root.
+    Discovers the base URL for the server from the APP_SERVER__PORT variable.
 
-    If a PORT variable is found in the .env file, it returns "http://localhost:PORT".
-    Otherwise, it defaults to "http://localhost:8000".
+    The variable is read from the environment first, then from a .env file at
+    the project root, mirroring how the server resolves it. Without either, it
+    defaults to port 8000.
 
     Returns:
         str: The determined base URL (e.g., "http://localhost:8000").
     """
-    # Navigate to the project root
-    workflows_dir = Path(__file__).parent.parent
-    project_root = workflows_dir.parent.parent
+    project_root = Path(__file__).resolve().parents[3]
+    port = (
+        os.environ.get("APP_SERVER__PORT")
+        or dotenv_values(project_root / ".env").get("APP_SERVER__PORT")
+        or 8000
+    )
 
-    # Path to the .env file at the root
-    dotenv_path = project_root / '.env'
-
-    # Load the .env file - will load if it exists at the specified path
-    dotenv_vars = dotenv_values(dotenv_path)
-
-    # Get the PORT variable from the loaded env vars
-    port = dotenv_vars.get("PORT", 8000)
-
-    # Construct the base URL
-    base_url = f"http://localhost:{port}"
-
-    return base_url
+    return f"http://localhost:{port}"
 
 
 def is_valid_cwt(cwt_data: bytes) -> bool:
     """
-    Verifies if provided bytes represent a valid CWT (possibly COSE_Sign1-wrapped).
+    Verifies if provided bytes represent a status list CWT: a tagged COSE_Sign1
+    structure (RFC 9052 §4.2) whose payload carries a status_list claim.
     """
     try:
         decoded = cbor2.loads(cwt_data)
 
-        # Check if COSE_Sign1 structure
-        if isinstance(decoded, list) and len(decoded) == 4:
-            protected, unprotected, payload, signature = decoded
+        if not (isinstance(decoded, cbor2.CBORTag) and decoded.tag == COSE_SIGN1_TAG):
+            print(f"Decoded data is not tagged as COSE_Sign1 (CBOR tag {COSE_SIGN1_TAG}).")
+            return False
 
-            if not isinstance(payload, bytes):
-                print("COSE_Sign1 payload is not bytes.")
-                return False
-
-            # Now decode the payload (the actual CWT claims)
-            cwt_claims = cbor2.loads(payload)
-
-            if isinstance(cwt_claims, dict):
-                standard_claims = {1, 2, 3, 4, 5, 6}  # 'iss', 'sub', etc.
-                if any(claim in cwt_claims for claim in standard_claims):
-                    return True
-                else:
-                    print("Decoded CWT payload but missing standard claims.")
-                    return False
-            else:
-                print("Decoded payload but not a dict.")
-                return False
-
-        else:
+        # cbor2 decodes arrays nested in a tag as tuples.
+        sign1 = decoded.value
+        if not (isinstance(sign1, (list, tuple)) and len(sign1) == 4):
             print("Decoded data is not a COSE_Sign1 structure (array of 4 elements).")
             return False
+
+        protected, unprotected, payload, signature = sign1
+        if not isinstance(payload, bytes):
+            print("COSE_Sign1 payload is not bytes.")
+            return False
+
+        # Now decode the payload (the actual CWT claims)
+        cwt_claims = cbor2.loads(payload)
+        if not isinstance(cwt_claims, dict):
+            print("Decoded payload but not a dict.")
+            return False
+
+        status_list = cwt_claims.get(CWT_STATUS_LIST_CLAIM)
+        if not (
+            isinstance(status_list, dict)
+            and isinstance(status_list.get("bits"), int)
+            and isinstance(status_list.get("lst"), bytes)
+        ):
+            print("Decoded CWT payload but missing a valid status_list claim.")
+            return False
+
+        return True
 
     except (cbor2.CBORDecodeError, ValueError) as e:
         print(f"Failed to decode CBOR: {e}")
         return False
+
+
+def get_status(statuses: bytes, index: int, bits: int) -> int:
+    """
+    Reads the status at a given index from a decompressed status list.
+
+    Statuses are packed `bits` wide, least significant bit first
+    (draft-ietf-oauth-status-list §4.1).
+    """
+    max_index = len(statuses) * 8 // bits - 1
+    if not 0 <= index <= max_index:
+        raise IndexError(f"index {index} out of range (0..{max_index})")
+    position = index * bits
+    return (statuses[position // 8] >> (position % 8)) & ((1 << bits) - 1)
 
 
 def decode_and_decompress(encoded: str) -> bytes:
