@@ -9,11 +9,19 @@ const IMF_FIXDATE: &[time::format_description::BorrowedFormatItem<'static>] = fo
 pub(crate) enum ConditionalResponse {
     NotModified,
     Modified,
+    StaleRevalidation,
+}
+
+/// Cached-token validity bound for a given record version.
+pub(crate) fn cached_token_expiry(updated_at: i64, token_exp_secs: u64) -> i64 {
+    updated_at.saturating_add(token_exp_secs as i64)
 }
 
 pub(crate) fn evaluate_if_none_match(
     if_none_match: Option<&str>,
     current_etag: &str,
+    now: i64,
+    expiry: i64,
 ) -> ConditionalResponse {
     let Some(header_value) = if_none_match else {
         return ConditionalResponse::Modified;
@@ -21,7 +29,7 @@ pub(crate) fn evaluate_if_none_match(
 
     let trimmed = header_value.trim();
     if trimmed == "*" {
-        return ConditionalResponse::NotModified;
+        return not_modified_or_stale(now, expiry);
     }
 
     for etag in header_value.split(',') {
@@ -30,11 +38,19 @@ pub(crate) fn evaluate_if_none_match(
             continue;
         }
         if etag_eq_weak(etag, current_etag) {
-            return ConditionalResponse::NotModified;
+            return not_modified_or_stale(now, expiry);
         }
     }
 
     ConditionalResponse::Modified
+}
+
+fn not_modified_or_stale(now: i64, expiry: i64) -> ConditionalResponse {
+    if now >= expiry {
+        ConditionalResponse::StaleRevalidation
+    } else {
+        ConditionalResponse::NotModified
+    }
 }
 
 pub(crate) fn evaluate_if_modified_since(
@@ -68,9 +84,16 @@ pub(crate) fn evaluate_conditional_request(
     if_modified_since: Option<&str>,
     current_etag: &str,
     updated_at: i64,
+    now: i64,
+    token_exp_secs: u64,
 ) -> ConditionalResponse {
     if if_none_match.is_some() {
-        return evaluate_if_none_match(if_none_match, current_etag);
+        return evaluate_if_none_match(
+            if_none_match,
+            current_etag,
+            now,
+            cached_token_expiry(updated_at, token_exp_secs),
+        );
     }
     evaluate_if_modified_since(if_modified_since, updated_at)
 }
@@ -117,7 +140,7 @@ mod tests {
         let current_etag = r#"W/"abc123""#;
         let if_none_match = r#"W/"abc123""#;
 
-        let result = evaluate_if_none_match(Some(if_none_match), current_etag);
+        let result = evaluate_if_none_match(Some(if_none_match), current_etag, 0, 1);
         assert_eq!(result, ConditionalResponse::NotModified);
     }
 
@@ -126,7 +149,7 @@ mod tests {
         let current_etag = r#"W/"abc123""#;
         let if_none_match = r#"W/"different""#;
 
-        let result = evaluate_if_none_match(Some(if_none_match), current_etag);
+        let result = evaluate_if_none_match(Some(if_none_match), current_etag, 0, 1);
         assert_eq!(result, ConditionalResponse::Modified);
     }
 
@@ -135,7 +158,7 @@ mod tests {
         let current_etag = r#"W/"abc123""#;
         let if_none_match = r#""abc123""#;
 
-        let result = evaluate_if_none_match(Some(if_none_match), current_etag);
+        let result = evaluate_if_none_match(Some(if_none_match), current_etag, 0, 1);
         assert_eq!(result, ConditionalResponse::NotModified);
     }
 
@@ -144,7 +167,7 @@ mod tests {
         let current_etag = r#""abc123""#;
         let if_none_match = r#"W/"abc123""#;
 
-        let result = evaluate_if_none_match(Some(if_none_match), current_etag);
+        let result = evaluate_if_none_match(Some(if_none_match), current_etag, 0, 1);
         assert_eq!(result, ConditionalResponse::NotModified);
     }
 
@@ -153,7 +176,7 @@ mod tests {
         let current_etag = r#"W/"abc123""#;
         let if_none_match = r#"W/"xyz789", W/"abc123", W/"def456""#;
 
-        let result = evaluate_if_none_match(Some(if_none_match), current_etag);
+        let result = evaluate_if_none_match(Some(if_none_match), current_etag, 0, 1);
         assert_eq!(result, ConditionalResponse::NotModified);
     }
 
@@ -162,7 +185,7 @@ mod tests {
         let current_etag = r#"W/"abc123""#;
         let if_none_match = r#"W/"xyz789", W/"def456""#;
 
-        let result = evaluate_if_none_match(Some(if_none_match), current_etag);
+        let result = evaluate_if_none_match(Some(if_none_match), current_etag, 0, 1);
         assert_eq!(result, ConditionalResponse::Modified);
     }
 
@@ -171,7 +194,7 @@ mod tests {
         let current_etag = r#"W/"abc123""#;
         let if_none_match = "*";
 
-        let result = evaluate_if_none_match(Some(if_none_match), current_etag);
+        let result = evaluate_if_none_match(Some(if_none_match), current_etag, 0, 1);
         assert_eq!(result, ConditionalResponse::NotModified);
     }
 
@@ -179,8 +202,37 @@ mod tests {
     fn test_evaluate_if_none_match_none_header() {
         let current_etag = r#"W/"abc123""#;
 
-        let result = evaluate_if_none_match(None, current_etag);
+        let result = evaluate_if_none_match(None, current_etag, 0, 1);
         assert_eq!(result, ConditionalResponse::Modified);
+    }
+
+    #[test]
+    fn test_evaluate_if_none_match_expired_returns_stale() {
+        let current_etag = r#"W/"abc123""#;
+        let if_none_match = r#"W/"abc123""#;
+
+        // now (10) has reached the cached token's expiry (10).
+        let result = evaluate_if_none_match(Some(if_none_match), current_etag, 10, 10);
+        assert_eq!(result, ConditionalResponse::StaleRevalidation);
+    }
+
+    #[test]
+    fn test_evaluate_if_none_match_expired_wildcard_returns_stale() {
+        // Wildcard "match any representation" is still gated on token freshness.
+        let result = evaluate_if_none_match(Some("*"), r#"W/"abc123""#, 10, 10);
+        assert_eq!(result, ConditionalResponse::StaleRevalidation);
+    }
+
+    #[test]
+    fn test_evaluate_if_none_match_expired_no_match_still_modified() {
+        let result = evaluate_if_none_match(Some(r#"W/"other""#), r#"W/"abc123""#, 10, 10);
+        assert_eq!(result, ConditionalResponse::Modified);
+    }
+
+    #[test]
+    fn test_cached_token_expiry() {
+        assert_eq!(cached_token_expiry(1_000_000, 900), 1_000_900);
+        assert_eq!(cached_token_expiry(5, 0), 5);
     }
 
     #[test]
@@ -188,7 +240,7 @@ mod tests {
         let current_etag = r#"W/"abc123""#;
         let if_none_match = "abc123";
 
-        let result = evaluate_if_none_match(Some(if_none_match), current_etag);
+        let result = evaluate_if_none_match(Some(if_none_match), current_etag, 0, 1);
         assert_eq!(result, ConditionalResponse::NotModified);
     }
 
@@ -251,8 +303,30 @@ mod tests {
             Some(&if_modified_since),
             current_etag,
             updated_at,
+            updated_at,
+            900,
         );
         assert_eq!(result, ConditionalResponse::NotModified);
+    }
+
+    #[test]
+    fn test_evaluate_conditional_request_if_none_match_precedence_stale() {
+        let current_etag = r#"W/"abc123""#;
+        let if_none_match = r#"W/"abc123""#;
+        let updated_at = 1000000;
+        let if_modified_since = format_http_date(999999);
+
+        // `now` has advanced past the cached token's validity window
+        // (updated_at + token_exp_secs), so a 304 must not be returned.
+        let result = evaluate_conditional_request(
+            Some(if_none_match),
+            Some(&if_modified_since),
+            current_etag,
+            updated_at,
+            updated_at + 901,
+            900,
+        );
+        assert_eq!(result, ConditionalResponse::StaleRevalidation);
     }
 
     #[test]
@@ -261,8 +335,14 @@ mod tests {
         let updated_at = 999999;
         let if_modified_since = format_http_date(1000000);
 
-        let result =
-            evaluate_conditional_request(None, Some(&if_modified_since), current_etag, updated_at);
+        let result = evaluate_conditional_request(
+            None,
+            Some(&if_modified_since),
+            current_etag,
+            updated_at,
+            0,
+            900,
+        );
         assert_eq!(result, ConditionalResponse::NotModified);
     }
 
@@ -271,7 +351,7 @@ mod tests {
         let current_etag = r#"W/"abc123""#;
         let updated_at = 1000000;
 
-        let result = evaluate_conditional_request(None, None, current_etag, updated_at);
+        let result = evaluate_conditional_request(None, None, current_etag, updated_at, 0, 900);
         assert_eq!(result, ConditionalResponse::Modified);
     }
 

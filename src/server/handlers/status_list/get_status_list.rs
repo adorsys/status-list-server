@@ -87,12 +87,15 @@ pub async fn get_status_list(
     let last_modified_ts = status_record.updated_at;
     let last_modified = format_http_date(last_modified_ts);
     let cache_control = build_cache_control(state.token_ttl_secs);
+    let now = OffsetDateTime::now_utc().unix_timestamp();
 
     match evaluate_conditional_request(
         if_none_match,
         if_modified_since,
         &current_etag,
         last_modified_ts,
+        now,
+        state.token_exp_secs,
     ) {
         ConditionalResponse::NotModified => Ok((
             StatusCode::NOT_MODIFIED,
@@ -104,7 +107,7 @@ pub async fn get_status_list(
             ],
         )
             .into_response()),
-        ConditionalResponse::Modified => {
+        ConditionalResponse::Modified | ConditionalResponse::StaleRevalidation => {
             let (token_bytes, encoding) = build_status_list_token(
                 &state,
                 &accept_type,
@@ -607,6 +610,115 @@ mod tests {
         .into_response();
 
         assert_eq!(res2.status(), StatusCode::NOT_MODIFIED);
+    }
+
+    #[tokio::test]
+    async fn test_conditional_request_if_none_match_within_validity_returns_304() {
+        let token_id = uuid::Uuid::new_v4().to_string();
+        let app_state = test_app_state(None).await;
+
+        publish_status(
+            State(app_state.clone()),
+            authenticated_issuer("issuer1"),
+            Path(token_id.clone()),
+            Json(StatusesRequest { statuses: vec![] }),
+        )
+        .await
+        .unwrap();
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::ACCEPT,
+            ACCEPT_STATUS_LISTS_HEADER_JWT.parse().unwrap(),
+        );
+
+        let res1 = get_status_list(
+            State(app_state.clone()),
+            Path(token_id.clone()),
+            Ok(Query(StatusListQuery { time: None })),
+            headers.clone(),
+        )
+        .await
+        .unwrap()
+        .into_response();
+        assert_eq!(res1.status(), StatusCode::OK);
+
+        let etag = res1.headers().get(header::ETAG).unwrap().clone();
+        headers.insert(header::IF_NONE_MATCH, etag);
+
+        let res2 = get_status_list(
+            State(app_state),
+            Path(token_id),
+            Ok(Query(StatusListQuery { time: None })),
+            headers,
+        )
+        .await
+        .unwrap()
+        .into_response();
+
+        assert_eq!(res2.status(), StatusCode::NOT_MODIFIED);
+    }
+
+    #[tokio::test]
+    async fn test_conditional_request_expired_token_returns_fresh_200() {
+        let token_id = uuid::Uuid::new_v4().to_string();
+        let mut app_state = test_app_state(None).await;
+        // Simulate the client's cached token having reached its exp time: with a
+        // zero-length validity window the cached token (updated_at + 0) is already
+        // expired at revalidation time, so the server must bypass the 304.
+        app_state.token_exp_secs = 0;
+
+        publish_status(
+            State(app_state.clone()),
+            authenticated_issuer("issuer1"),
+            Path(token_id.clone()),
+            Json(StatusesRequest { statuses: vec![] }),
+        )
+        .await
+        .unwrap();
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::ACCEPT,
+            ACCEPT_STATUS_LISTS_HEADER_JWT.parse().unwrap(),
+        );
+
+        let res1 = get_status_list(
+            State(app_state.clone()),
+            Path(token_id.clone()),
+            Ok(Query(StatusListQuery { time: None })),
+            headers.clone(),
+        )
+        .await
+        .unwrap()
+        .into_response();
+        assert_eq!(res1.status(), StatusCode::OK);
+
+        let etag = res1.headers().get(header::ETAG).unwrap().clone();
+        headers.insert(header::IF_NONE_MATCH, etag);
+
+        let res2 = get_status_list(
+            State(app_state),
+            Path(token_id),
+            Ok(Query(StatusListQuery { time: None })),
+            headers,
+        )
+        .await
+        .unwrap()
+        .into_response();
+
+        assert_eq!(
+            res2.status(),
+            StatusCode::OK,
+            "expired-token revalidation must return a fresh 200 OK"
+        );
+        let body = axum::body::to_bytes(res2.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert!(
+            !body.is_empty(),
+            "expired-token revalidation must carry a newly signed token body"
+        );
     }
 
     #[tokio::test]
