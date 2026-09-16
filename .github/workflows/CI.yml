@@ -19,6 +19,9 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
+env:
+  CHART_DIR: deploy/helm/chart
+
 jobs:
   zizmor-security:
     name: Zizmor Security Check
@@ -347,6 +350,8 @@ jobs:
 
       - name: Install Helm
         uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+        with:
+          version: v4.2.4
 
       - name: Install cargo-nextest
         uses: taiki-e/install-action@c44f6b046f1c29ae5918b1e0bfdbb2f1813836fd # v2.84.1
@@ -513,6 +518,27 @@ jobs:
         with:
           globs: "**/*.md"
 
+  attestation-selftest:
+    name: Attestation Verifier Self-Test
+    runs-on: ubuntu-latest
+    # Its own job rather than a step on trivy-config: that job is a Trivy config scan and
+    # this has nothing to do with Trivy, so a failure there would name the wrong thing in
+    # the checks list.
+    #
+    # Runs on every pull request, unlike scripts/gate-selftest.sh, because this needs
+    # nothing installed: no network, no registry, no image, and not even a real gh --
+    # every case is a stubbed gh on PATH. So drift is caught by whoever changes the
+    # verifier, while they are looking at it, rather than on the last step before a
+    # production deploy.
+    steps:
+      - name: Fetch Repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Prove the attestation check can fail
+        run: bash scripts/attestation-selftest.sh
+
   trivy-config:
     name: Trivy Config Scan (Helm Chart)
     runs-on: ubuntu-latest
@@ -553,7 +579,7 @@ jobs:
           # Upstream chart default values:
           # https://github.com/open-telemetry/opentelemetry-helm-charts/blob/main/charts/opentelemetry-collector/values.yaml
           helm repo add open-telemetry https://open-telemetry.github.io/opentelemetry-helm-charts
-          helm dependency build helm/chart
+          helm dependency build "$CHART_DIR"
 
       - name: Render Helm templates
         uses: ./.github/workflows/render-helm-templates
@@ -590,13 +616,13 @@ jobs:
       - name: Build Helm dependencies
         run: |
           helm repo add open-telemetry https://open-telemetry.github.io/opentelemetry-helm-charts
-          helm dependency build helm/chart
+          helm dependency build "$CHART_DIR"
 
       - name: Validate Helm template with local values
         run: |
           set -euo pipefail
           output_file="/tmp/statuslist-local-rendered.yaml"
-          helm template statuslist-local helm/chart -f helm/chart/values-local.yaml --namespace local > "$output_file"
+          helm template statuslist-local "$CHART_DIR" -f "$CHART_DIR"/values-local.yaml --namespace local > "$output_file"
 
           # Verify APP_ENV is set to "development" as expected for local values
           # The pattern matches the multi-line YAML structure: - name: APP_ENV followed by value: "development"
@@ -634,7 +660,7 @@ jobs:
       - name: Build Helm dependencies
         run: |
           helm repo add open-telemetry https://open-telemetry.github.io/opentelemetry-helm-charts
-          helm dependency build helm/chart
+          helm dependency build "$CHART_DIR"
 
       - name: Render Helm templates
         uses: ./.github/workflows/render-helm-templates
@@ -733,7 +759,7 @@ jobs:
       - name: Validate Compose Collector config
         run: |
           docker run --rm \
-            -v "$PWD/otel-collector.yaml:/etc/otelcol/config.yaml:ro" \
+            -v "$PWD/deploy/observability/otel-collector.yaml:/etc/otelcol/config.yaml:ro" \
             otel/opentelemetry-collector-contrib:0.158.0 \
             validate --config /etc/otelcol/config.yaml
 
@@ -748,13 +774,13 @@ jobs:
       - name: Build Helm dependencies
         run: |
           helm repo add open-telemetry https://open-telemetry.github.io/opentelemetry-helm-charts
-          helm dependency build helm/chart
+          helm dependency build "$CHART_DIR"
 
       - name: Render Helm chart
         env:
           APP_DATABASE_PORT: "5432"
         run: |
-          helm template statuslist helm/chart \
+          helm template statuslist "$CHART_DIR" \
             --namespace statuslist \
             --set-string statuslist.env.APP_DATABASE__PORT="${APP_DATABASE_PORT}" \
             > /tmp/statuslist-rendered.yaml
@@ -808,18 +834,18 @@ jobs:
       - name: Build Helm dependencies
         run: |
           helm repo add open-telemetry https://open-telemetry.github.io/opentelemetry-helm-charts
-          helm dependency build helm/chart
+          helm dependency build "$CHART_DIR"
 
       - name: Validate Prometheus recording rules
         run: |
           docker run --rm --entrypoint promtool \
-            -v "$PWD/observability/prometheus:/etc/prometheus:ro" \
+            -v "$PWD/deploy/observability/prometheus:/etc/prometheus:ro" \
             prom/prometheus:v3.11.3 check rules /etc/prometheus/rules/recording.rules.yml
 
       - name: Validate Prometheus alerting rules
         run: |
           docker run --rm --entrypoint promtool \
-            -v "$PWD/observability/prometheus:/etc/prometheus:ro" \
+            -v "$PWD/deploy/observability/prometheus:/etc/prometheus:ro" \
             prom/prometheus:v3.11.3 check rules /etc/prometheus/rules/alerting.rules.yml
 
       - name: Validate rendered Helm PrometheusRule (no drift / no template errors)
@@ -830,7 +856,7 @@ jobs:
         # verified, not just syntactically checked, and (c) it defines exactly the
         # same rule names as the standalone tested rules so neither copy can drift.
         run: |
-          helm template status-list-server helm/chart \
+          helm template status-list-server "$CHART_DIR" \
             --namespace ns1 \
             --set prometheusRule.enabled=true > /tmp/helm-render.yaml
           python3 - <<'EOF'
@@ -852,7 +878,7 @@ jobs:
                   for r in g['rules']:
                       names.add(r.get('record') or r.get('alert'))
               return names
-          standalone = rule_names('observability/prometheus/rules/recording.rules.yml') | rule_names('observability/prometheus/rules/alerting.rules.yml')
+          standalone = rule_names('deploy/observability/prometheus/rules/recording.rules.yml') | rule_names('deploy/observability/prometheus/rules/alerting.rules.yml')
           deployed = rule_names('/tmp/helm-rules.yml')
           if standalone != deployed:
               raise SystemExit(
@@ -864,7 +890,7 @@ jobs:
           # Unit-test the deployed copy with the same alerting suite used for the
           # standalone rules, adjusted for the static `namespace` label the template
           # stamps on Watchdog / StatusListMetricsAbsent (and rule_files).
-          test = yaml.safe_load(open('observability/prometheus/tests/alerting.test.yml'))
+          test = yaml.safe_load(open('deploy/observability/prometheus/tests/alerting.test.yml'))
           test['rule_files'] = ['helm-rules.yml']
           for block in test['tests']:
               for at in block.get('alert_rule_test', []):
@@ -883,26 +909,26 @@ jobs:
       - name: Validate Prometheus config (dev and production)
         run: |
           docker run --rm --entrypoint promtool \
-            -v "$PWD/observability/prometheus:/etc/prometheus:ro" \
+            -v "$PWD/deploy/observability/prometheus:/etc/prometheus:ro" \
             prom/prometheus:v3.11.3 check config /etc/prometheus/prometheus.yml
           docker run --rm --entrypoint promtool \
-            -v "$PWD/observability/prometheus:/etc/prometheus:ro" \
+            -v "$PWD/deploy/observability/prometheus:/etc/prometheus:ro" \
             prom/prometheus:v3.11.3 check config /etc/prometheus/prometheus.production.yml
 
       - name: Lint SLO thresholds consistency
         run: |
-          node observability/slo/lint-thresholds.mjs
+          node deploy/observability/slo/lint-thresholds.mjs
 
       - name: Run promtool recording rule tests
         run: |
           docker run --rm --entrypoint promtool \
-            -v "$PWD/observability/prometheus:/etc/prometheus:ro" \
+            -v "$PWD/deploy/observability/prometheus:/etc/prometheus:ro" \
             prom/prometheus:v3.11.3 test rules /etc/prometheus/tests/recording.test.yml
 
       - name: Run promtool alerting rule tests
         run: |
           docker run --rm --entrypoint promtool \
-            -v "$PWD/observability/prometheus:/etc/prometheus:ro" \
+            -v "$PWD/deploy/observability/prometheus:/etc/prometheus:ro" \
             prom/prometheus:v3.11.3 test rules /etc/prometheus/tests/alerting.test.yml
 
       - name: Validate Alertmanager config generation + webhook delivery
@@ -911,19 +937,19 @@ jobs:
         # firing and resolved notifications to a (mock) webhook endpoint — the
         # webhook notification mechanism (ticket #446).
         run: |
-          bash observability/alertmanager/tests/test-alertmanager-config.sh
+          bash deploy/observability/alertmanager/tests/test-alertmanager-config.sh
 
       - name: Verify dashboard JSON is committed and valid
         run: |
-          test -s observability/dashboards/generated/status-list-slo.json
-          python3 -c "import json; json.load(open('observability/dashboards/generated/status-list-slo.json'))"
+          test -s deploy/observability/dashboards/generated/status-list-slo.json
+          python3 -c "import json; json.load(open('deploy/observability/dashboards/generated/status-list-slo.json'))"
 
       - name: Verify dashboard matches generator (no drift)
         # Regenerates the committed JSON and fails if it differs from what the
         # generator produces, so a panel-intent change without a regenerated
         # artifact cannot land silently.
         run: |
-          cd observability/dashboards/src
+          cd deploy/observability/dashboards/src
           npm install --no-audit --no-fund
           npm run generate-dashboards
           git diff --exit-code ../generated/status-list-slo.json
@@ -987,6 +1013,7 @@ jobs:
       - typos-cli
       - tombi-toml-lint
       - markdown-lint
+      - attestation-selftest
       - trivy-config
       - helm-template-local
       - kube-linter
