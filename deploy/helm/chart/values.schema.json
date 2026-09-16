@@ -177,6 +177,12 @@
             }
           }
         },
+        "database": {
+          "type": "object",
+          "properties": {
+            "passwordSecretKey": { "type": "string", "minLength": 1 }
+          }
+        },
         "watcher": {
           "type": "object",
           "properties": {
@@ -185,7 +191,15 @@
         },
         "livenessProbe": { "type": "object" },
         "readinessProbe": { "type": "object" },
-        "networkPolicy": { "type": "object" },
+        "networkPolicy": {
+          "type": "object",
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "ingress": { "type": "array" },
+            "egressInternal": { "type": "array" },
+            "databaseEgress": { "type": "array" }
+          }
+        },
         "resources": { "type": "object" }
       }
     },
@@ -387,6 +401,24 @@
           }
         },
         "image": { "type": "object" }
+      }
+    },
+    "mysql": {
+      "type": "object",
+      "properties": {
+        "auth": {
+          "type": "object",
+          "properties": {
+            "username": { "type": "string" },
+            "database": { "type": "string" }
+          }
+        },
+        "service": {
+          "type": "object",
+          "properties": {
+            "port": { "type": "integer", "minimum": 1, "maximum": 65535 }
+          }
+        }
       }
     },
     "autoscaling": {
