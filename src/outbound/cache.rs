@@ -1,9 +1,7 @@
 //! Status-list cache adapters.
 use async_trait::async_trait;
-#[cfg(feature = "cache-memory")]
 use moka::future::Cache as MokaCache;
 use opentelemetry::{KeyValue, metrics::Counter};
-#[cfg(feature = "cache-memory")]
 use std::{sync::Arc, time::Duration};
 
 use crate::domain::{
@@ -45,13 +43,11 @@ fn cache_metrics() -> CacheMetrics {
     })
 }
 
-#[cfg(feature = "cache-memory")]
 #[derive(Clone)]
 pub struct MokaStatusListCache {
     inner: MokaCache<String, Arc<StatusListRecord>>,
 }
 
-#[cfg(feature = "cache-memory")]
 impl MokaStatusListCache {
     /// Build an in-process cache.
     ///
@@ -74,7 +70,6 @@ impl MokaStatusListCache {
     }
 }
 
-#[cfg(feature = "cache-memory")]
 #[async_trait]
 impl StatusListCache for MokaStatusListCache {
     async fn get(&self, key: &str) -> Result<Option<StatusListRecord>, StatusListError> {
@@ -198,7 +193,6 @@ fn cache_error(error: serde_json::Error) -> StatusListError {
 }
 
 #[cfg(test)]
-#[cfg(feature = "cache-memory")]
 mod tests {
     use super::*;
     use crate::{

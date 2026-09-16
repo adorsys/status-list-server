@@ -62,7 +62,7 @@ use crate::domain::{
 use crate::outbound::aws::AwsSecretsManager;
 #[cfg(all(feature = "azure", not(feature = "vault"), not(feature = "gcp")))]
 use crate::outbound::azure_kv::AzureKeyVaultClient;
-#[cfg(all(feature = "cache-memory", not(feature = "cache-redis")))]
+#[cfg(any(feature = "cache-memory", not(feature = "cache-redis")))]
 use crate::outbound::cache::MokaStatusListCache;
 #[cfg(all(feature = "cache-redis", not(feature = "cache-memory")))]
 use crate::outbound::cache::RedisStatusListCache;
@@ -529,7 +529,7 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
         (provider, None)
     };
 
-    #[cfg(all(feature = "cache-memory", not(feature = "cache-redis")))]
+    #[cfg(any(feature = "cache-memory", not(feature = "cache-redis")))]
     let status_list_cache: Arc<dyn crate::domain::ports::StatusListCache> = Arc::new(
         MokaStatusListCache::new(config.cache.ttl, config.cache.max_capacity),
     );
@@ -552,17 +552,6 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
             .await?,
         )
     };
-
-    #[cfg(all(feature = "cache-memory", feature = "cache-redis"))]
-    let status_list_cache: Arc<dyn crate::domain::ports::StatusListCache> =
-        Arc::new(crate::outbound::cache::MokaStatusListCache::new(
-            config.cache.ttl,
-            config.cache.max_capacity,
-        ));
-
-    #[cfg(not(any(feature = "cache-memory", feature = "cache-redis")))]
-    let status_list_cache: Arc<dyn crate::domain::ports::StatusListCache> =
-        unreachable!("one cache backend feature must be enabled");
 
     let snapshot_option = if config.status_list.snapshot_retention_secs == 0 {
         None
