@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Verify that the chart resolves image references the way the deploy path depends on.
 #
-# The `image` / `imagePullPolicy` conditionals in `helm/chart/templates/deployment.yaml`
+# The `image` / `imagePullPolicy` conditionals in `deploy/helm/chart/templates/deployment.yaml`
 # are what make "production runs the artifact CI scanned" true: `deploy.yml` passes the
 # scanned digest as `statuslist.image.digest`, and the chart must prefer it over any tag.
 # Every other Helm render in CI uses default values, so without this only the tag branch
@@ -22,21 +22,21 @@ for tool in helm yq; do
     }
 done
 
-[ -f helm/chart/Chart.yaml ] || {
-    echo "::error::helm/chart/Chart.yaml not found. Run $0 from the repository root."
+[ -f deploy/helm/chart/Chart.yaml ] || {
+    echo "::error::deploy/helm/chart/Chart.yaml not found. Run $0 from the repository root."
     exit 1
 }
 
 repo="ghcr.io/adorsys/status-list-server"
 digest="sha256:$(printf 'a%.0s' $(seq 1 64))"
-app_version=$(helm show chart helm/chart | sed -nE 's/^appVersion:[[:space:]]*"?([^"]+)"?[[:space:]]*$/\1/p')
+app_version=$(helm show chart deploy/helm/chart | sed -nE 's/^appVersion:[[:space:]]*"?([^"]+)"?[[:space:]]*$/\1/p')
 echo "chart appVersion: ${app_version}"
 
 # Selected by container name rather than by whether the image happens to be
 # quoted, so adding or quoting an initContainer cannot silently retarget it.
 # `tr` strips any quoting yq adds and the CR from a CRLF checkout.
 render() {
-    helm template status-list-server helm/chart -s templates/deployment.yaml "$@" \
+    helm template status-list-server deploy/helm/chart -s templates/deployment.yaml "$@" \
         | yq '.spec.template.spec.containers[]
               | select(.name == "status-list-server")
               | (.image, .imagePullPolicy)' \
@@ -54,6 +54,26 @@ expect() {
         exit 1
     fi
     echo "ok: $* -> ${want}"
+}
+
+expect_failure() {
+    want="$1"; shift
+    stderr=$(mktemp)
+    if helm template status-list-server deploy/helm/chart -s templates/deployment.yaml "$@" >/dev/null 2>"${stderr}"; then
+        echo "::error::chart accepted invalid image configuration for: $*"
+        rm -f "${stderr}"
+        exit 1
+    fi
+    if ! grep -q "${want}" "${stderr}"; then
+        echo "::error::chart failed with an unexpected message for: $*"
+        echo "  expected stderr to contain: ${want}"
+        echo "  actual stderr:"
+        sed 's/^/    /' "${stderr}"
+        rm -f "${stderr}"
+        exit 1
+    fi
+    rm -f "${stderr}"
+    echo "ok: rejected $* -> ${want}"
 }
 
 # appVersion is the provider-neutral default image tag basis. Release tags are
@@ -93,11 +113,11 @@ expect "${repo}:test-tag|Always|" \
     --set-string statuslist.image.tag=test-tag \
     --set statuslist.image.digest=null
 
-# A malformed digest must fail at template time, not 10 minutes later as an
-# ImagePullBackOff under `helm upgrade --atomic --wait`.
-if helm template status-list-server helm/chart -s templates/deployment.yaml \
-    --set-string statuslist.image.digest=not-a-digest > /dev/null 2>&1; then
-    echo "::error::chart accepted a malformed image digest instead of failing."
-    exit 1
-fi
-echo "ok: malformed digest rejected at template time"
+# A malformed digest must fail at template time with the digest validation error.
+expect_failure "sha256:\\[a-f0-9\\]{64}" \
+    --set-string statuslist.image.digest=not-a-digest
+
+expect_failure "statuslist.image.tag or statuslist.image.digest" \
+    --set postgres.enabled=false \
+    --set-string statuslist.env.APP_DATABASE__BACKEND=mysql \
+    --set-string statuslist.env.APP_DATABASE__HOST=mysql.example.internal

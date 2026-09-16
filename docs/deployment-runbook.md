@@ -6,17 +6,17 @@ This runbook describes how to deploy the Status List Server project on a Kuberne
 
 You have three broad ways to run the Status List Server:
 
-- **Local / development** (Minikube, kind, Docker Desktop): manual testing and iteration, using [`chart/values-local.yaml`](../helm/chart/values-local.yaml).
+- **Local / development** (Minikube, kind, Docker Desktop): manual testing and iteration, using [`chart/values-local.yaml`](../deploy/helm/chart/values-local.yaml).
 - **Self-managed deploy** (recommended; any cluster you own): a real, repeatable deployment using `chart/values.yaml` plus your own overrides.
 - **Bundled chart only**: bring your own containers or compose workflows (non-Helm).
 
-The project ships a Helm chart (`helm/chart`) that is the recommended, supported way to deploy. The chart bundles:
+The project ships a Helm chart (`deploy/helm/chart`) that is the recommended, supported way to deploy. The chart bundles:
 
 - the **Status List Server** application Deployment, Service, and (optionally) Ingress;
 - a **PostgreSQL** subchart for the database;
 - an **OpenTelemetry Collector** subchart for traces/metrics/logs (optional).
 
-Everything below assumes you deploy with Helm. The chart is the source of truth for how the application is configured and run; see [`helm/README.md`](../helm/README.md) for the full value reference and the [Next steps](#next-steps) section for supporting topics (secrets, DNS providers, database backends, observability).
+Everything below assumes you deploy with Helm. The chart is the source of truth for how the application is configured and run; see [`deploy/helm/README.md`](../deploy/helm/README.md) for the full value reference and the [Next steps](#next-steps) section for supporting topics (secrets, DNS providers, database backends, observability).
 
 ## Prerequisites
 
@@ -49,13 +49,13 @@ kubectl config use-context minikube
 kubectl create namespace local
 
 # 3. Pull chart dependencies and install
-helm dependency update ./helm/chart
+helm dependency update ./deploy/helm/chart
 
 # NOTE: only variant-suffixed tags are published. With an empty tag, the chart
 # uses its provider-neutral appVersion (-fscert). Override the tag only when
 # you want a specific cloud variant or a locally loaded image.
-helm install statuslist-local ./helm/chart \
-  -n local -f ./helm/chart/values-local.yaml
+helm install statuslist-local ./deploy/helm/chart \
+  -n local -f ./deploy/helm/chart/values-local.yaml
 
 # 4. Verify
 kubectl get pods -n local
@@ -85,7 +85,7 @@ This is the path to a real deployment on a cluster you own. It uses the producti
 
 ### Prepare the database password Secret
 
-The application reads the database password from a Kubernetes Secret named `statuslist-secret` (key `postgres-password`), and the bundled PostgreSQL subchart references the same Secret. The chart mounts that Secret as a file (default `mountPath: /var/run/status-list-server/database`, item `postgres-password` → `password`) and exposes it through `APP_DATABASE__PASSWORD_FILE`. It deliberately does **not** inject `APP_DATABASE__PASSWORD` as a literal environment variable, and rejects it if you try.
+The application reads the database password from a Kubernetes Secret named `statuslist-secret`. The chart-managed fallback Secret renders both `database-password` and legacy `postgres-password` with the same value, and on upgrade it can reuse an existing legacy `postgres-password` value. For upgrade safety with customer-managed Secrets and custom ESO mappings, the default mount still uses `postgres-password` as `/var/run/status-list-server/database/password`. Switch `statuslist.secretMounts[0].items[0].key` or `statuslist.database.passwordSecretKey` to `database-password` only after that key is guaranteed to exist. The chart deliberately does **not** inject `APP_DATABASE__PASSWORD` as a literal environment variable, and rejects it if you try.
 
 How the Secret is created depends on your [secrets mode](#secrets-delivery): via an ExternalSecret (ESO) or a plain fallback Secret the chart renders for you.
 
@@ -93,7 +93,7 @@ How the Secret is created depends on your [secrets mode](#secrets-delivery): via
 
 The chart's `statuslist.env` holds the application configuration. Set the values your deployment needs:
 
-- **Database port**: `APP_DATABASE__PORT` (e.g. `5432`). This is **not** inferred from the PostgreSQL subchart: set it explicitly.
+- **Database port**: `APP_DATABASE__PORT` (e.g. `5432` for PostgreSQL, `3306` for MySQL). If omitted, the chart derives it from `APP_DATABASE__BACKEND`.
 - **Certificate files or ACME**: the default `-fscert` image reads the certificate and signing key from files mounted into the pod. ACME-enabled image variants perform DNS-01 certificate issuance at startup, so configure `APP_SERVER__CERT__*` values for the DNS provider and deliver provider credentials from a Secret, not plain env values. See [dns-providers.md](dns-providers.md) for what each provider (`route53`, `cloudflare`, `gcloud`, `azure`, `acmedns`) requires.
 - **Region** (`statuslist.aws.region`, renders `APP_AWS__REGION`): only required when you use an AWS-backed secret or DNS backend; omit it for other providers.
 - **Telemetry / limits / rate limiting / cache**: defaults are sensible; over-ride only what your sizing needs.
@@ -102,16 +102,16 @@ The chart's `statuslist.env` holds the application configuration. Set the values
 
 ```bash
 # Pull and package dependencies once
-helm dependency update ./helm/chart
+helm dependency update ./deploy/helm/chart
 
 # Install with your values file (or inline --set overrides)
-helm upgrade --install statuslist ./helm/chart \
+helm upgrade --install statuslist ./deploy/helm/chart \
   --namespace statuslist \
   --create-namespace \
   --rollback-on-failure \
   --wait \
   --timeout 10m \
-  -f ./helm/chart/values.yaml \
+  -f ./deploy/helm/chart/values.yaml \
   -f ./my-deployment-values.yaml
 ```
 
@@ -143,7 +143,7 @@ When `digest` is set it takes precedence over `tag`, and Kubernetes runs `reposi
 
 ## Secrets Delivery
 
-The chart supports fallback Secret, ESO, and Workload Identity paths. Pick the one that matches your cluster. The trade-offs for ESO vs Workload Identity are covered in [`helm/README.md`](../helm/README.md) and the database/secret backend options in [secrets-backends.md](secrets-backends.md).
+The chart supports fallback Secret, ESO, and Workload Identity paths. Pick the one that matches your cluster. The trade-offs for ESO vs Workload Identity are covered in [`deploy/helm/README.md`](../deploy/helm/README.md) and the database/secret backend options in [secrets-backends.md](secrets-backends.md).
 
 ### Mode A: Fallback plain Secret (default)
 
@@ -158,10 +158,10 @@ statuslist:
   fallbackSecret:
     enabled: true
     stringData:
-      postgres-password: ""
+      database-password: ""
 ```
 
-Leave `postgres-password` empty to generate a password; Helm reuses the existing cluster Secret on upgrades when it can read it.
+Leave `database-password` empty to generate a password; Helm reuses an existing `database-password` or legacy `postgres-password` from the cluster Secret on upgrades when it can read it. If both existing keys are present with different values, the chart fails rather than overwriting one with the other.
 
 ### Mode B: External Secrets Operator (ESO)
 
@@ -169,7 +169,7 @@ Use ESO to synchronize secrets from a provider instead of storing them as Helm-r
 
 - `externalSecret.enabled=true`, `secretStore.enabled=true`, and `statuslist.fallbackSecret.enabled=false` render ESO CRs:
   - a provider-neutral `SecretStore` (`secretStore.provider` selects `aws`, `vault`, `gcp`, `azure`, or `raw`);
-  - an `ExternalSecret` that syncs `postgres-password` into a Kubernetes Secret named `statuslist-secret`;
+  - an `ExternalSecret` that syncs `database-password` and `postgres-password` into a Kubernetes Secret named `statuslist-secret`;
   - when `statuslist.aws.mountCredentials=true`, a second `ExternalSecret` that provisions `aws-credentials-secret` (the AWS shared `credentials`/`config` files mounted under `/home/nobody/.aws`).
 
 **To use ESO** you must install External Secrets Operator in your cluster and configure:
@@ -191,10 +191,10 @@ A ready `ExternalSecret` shows a `SecretSynced` condition. A missing remote key 
 
 Instead of ESO-mounted static credentials, the application can use **ambient** cloud credentials via Workload Identity (EKS IRSA, GCP WI, Azure WIF):
 
-- attach the role annotation via `serviceAccount.annotations` (e.g. `eks.amazonaws.com/role-arn` on EKS; see the [Workload Identity section of `helm/README.md`](../helm/README.md#use-workload-identity-instead-of-mounted-credentials) for GCP/Azure, and note Azure also needs the pod label `azure.workload.identity/use: "true"`);
+- attach the role annotation via `serviceAccount.annotations` (e.g. `eks.amazonaws.com/role-arn` on EKS; see the [Workload Identity section of `deploy/helm/README.md`](../deploy/helm/README.md#use-workload-identity-instead-of-mounted-credentials) for GCP/Azure, and note Azure also needs the pod label `azure.workload.identity/use: "true"`);
 - set `statuslist.aws.mountCredentials=false` so no credential files are mounted.
 
-Attach a least-privilege policy to the role (see the example in the Workload Identity section of [`helm/README.md`](../helm/README.md) for Route53 / Secrets Manager / S3).
+Attach a least-privilege policy to the role (see the example in the Workload Identity section of [`deploy/helm/README.md`](../deploy/helm/README.md) for Route53 / Secrets Manager / S3).
 
 In fallback mode, `aws-credentials-secret` is not provisioned automatically: either create it yourself when `mountCredentials=true`, switch to ESO, or use Workload Identity.
 
@@ -279,6 +279,85 @@ Note: pinning by `digest` keeps rollbacks reproducible, since the stored digest 
 - Certificates fail to provision or renew.
 - Check `APP_SERVER__CERT__ACME_DIRECTORY_URL` (staging vs production), the DNS provider settings and credentials in [dns-providers.md](dns-providers.md), and that the DNS-01 challenge can reach your DNS provider (network + IAM/cloud role).
 
+### Image Assertion Failure
+
+Symptoms:
+
+- `Scan Image for Vulnerabilities` fails at `Assert published SBOMs list Rust crates`, or at `Resolve the architecture manifest to scan`.
+- The image exists in GHCR under its `sha-<short_sha>` tag, but the release tags were never applied and `Deploy to Production` is skipped.
+
+Check:
+
+- The run artifacts and the job summary. Reports and SBOMs are uploaded before the assertion runs, so a failure here still leaves the full report attached to the run. They arrive as two artifacts per variant: `container-scan-reports-<variant>` and `container-sboms-<variant>` (e.g., `container-scan-reports-aws`, `container-sboms-aws`).
+- For an SBOM failure, whether the builder-stage audit assertion also changed behaviour recently. An empty published SBOM with a passing build assertion points at BuildKit's cataloguer, not at the binary.
+- For a resolution failure, the message names how many `linux/amd64` manifests were found in the index. Zero means the build stopped producing that platform; more than one means the index is not shaped the way this pipeline assumes. Neither is a scanner problem.
+
+### Vulnerability Gate Findings
+
+Symptoms:
+
+- `Vulnerability gate` fails, the summary lists the blocking advisories, and the release tags are never applied.
+
+Check:
+
+- `trivy-gate-findings-<arch>.json` in the `container-scan-reports` artifact is the exact blocking set for that architecture. The gate's table is rendered from those same files, so the summary count and the table cannot disagree.
+- The summary reports distinct advisories and package occurrences separately. One CVE affecting three crates is three rows in the table and one thing to triage.
+- Whether the advisory is already argued in `deny.toml`. The two ledgers are not connected, so a release can block on something `cargo-deny` has been ignoring deliberately.
+
+Triage steps and the exception format are in [Container Supply Chain](supply-chain.md). Fix it at the lockfile if a fix exists; add a dated ledger entry only if one does not.
+
+### Gate Self-Test Failure
+
+Symptoms:
+
+- `Prove the gate can fail` fails with "the vulnerability gate cannot fail and is not protecting this release".
+
+Check:
+
+- This is not a finding about the image. It means `scripts/vuln-gate.sh` returned success against a fixture that contains a CRITICAL, so the gate would have passed the real scan no matter what was in it.
+- Likely causes: `--exit-code` was changed or dropped in `scripts/vuln-gate.sh`, or a Trivy upgrade changed `convert`'s exit-code behaviour.
+- Do not work around it by skipping the step. A release cut while this is failing has an unverified gate.
+
+### Tag Promotion Failure
+
+Symptoms:
+
+- `Promote Scanned Digest to Release Tags` fails for one or more variants, and the release exists in GHCR only as `sha-<short_sha>-<variant>`.
+- `Deploy to Production` is skipped because it depends on promotion.
+
+Check:
+
+- Whether `Verify attestations survived promotion` is the failing step. That means the retag succeeded but the SBOM or provenance manifests did not carry through, which would publish a release whose metadata silently vanished.
+- The failing variant's matrix job logs to see which specific suffix (`-aws`, `-gcp`, etc.) failed.
+- Re-running the job is safe: `imagetools create` is idempotent for a given digest and tag set. **Re-run `promote-tags` alone** — `deploy` depends on it, so a successful re-run unblocks production without cutting a new release. A promotion failure is not a reason to re-tag the repository.
+
+### Builder Audit Assertion Failure
+
+Symptoms:
+
+- The image build fails in the builder stage at the `rust-audit-info` assertion, or at the `cargo install` layer above it, on a commit that changed nothing relevant.
+
+Check:
+
+- This means the binary no longer carries readable `.dep-v0` audit data, usually because the floating stable toolchain drifted away from the pinned `cargo-auditable` version. Bump `CARGO_AUDITABLE_VERSION` and `RUST_AUDIT_INFO_VERSION` in the `Dockerfile`.
+- The assertion is deliberate. Without it the build would succeed and publish an empty SBOM.
+
+### Attestation Verification Failure
+
+Symptoms:
+
+- `Verify Signed Provenance` fails for one or more variants, and `Promote Scanned Digest to Release Tags` is skipped because it depends on `verify-provenance`.
+- The image exists in GHCR under its `sha-<short_sha>-<variant>` tag, but no release tags are applied and `Deploy to Production` never runs.
+
+Check:
+
+- `gh` version floor: the verification wrapper (`scripts/verify-attestation.sh`) requires `gh >= 2.67.0`. Until 2.67.0, `gh attestation verify` exited 0 when no attestation was found at all ([cli/cli#10418](https://github.com/cli/cli/issues/10418)). The runner image must provide a new enough `gh`; if it does not, the step will pass incorrectly and the failure will surface later as a missing signature on the promoted tag.
+- Certificate identity mismatch: the wrapper pins the exact SubjectAlternativeName (workflow path **and** ref) via `--cert-identity` and `--source-ref`. A signature from a different ref, a different workflow, or a different repository will fail verification even if the digest is correct. The error message names the expected and actual identities.
+- Transient API errors vs genuine absence: the wrapper retries three times. A failure after retries means either GitHub's attestation API is unavailable, Sigstore's trust root cannot be fetched, or no signed provenance exists for the digest. Check the step logs for `gh`'s JSON output to distinguish.
+- `gh attestation verify` output: the wrapper parses `--format json` and requires a non-empty result array whose verified subject digest matches the one asked about. An empty result array means no attestation was found for that digest in this repository.
+
+Do not bypass this gate. It is the only check that establishes a signed statement from this workflow, from this ref, over the digest that will be promoted. A digest that passes the vulnerability gate but fails provenance verification is an artifact whose builder identity cannot be confirmed — promoting it would publish a release with no verifiable origin.
+
 ## External Dependencies
 
 - **External Secrets Operator**: needed only when you choose ESO secret delivery; the default fallback Secret path does not require ESO CRDs.
@@ -287,9 +366,9 @@ Note: pinning by `digest` keeps rollbacks reproducible, since the stored digest 
 
 ## Next Steps
 
-- [helm/README.md](../helm/README.md): full chart value reference and configuration guide.
+- [deploy/helm/README.md](../deploy/helm/README.md): full chart value reference and configuration guide.
 - [LOCAL_DEPLOYMENT.md](LOCAL_DEPLOYMENT.md): detailed local quickstart.
 - [dns-providers.md](dns-providers.md): ACME DNS-01 provider setup per provider.
-- [secrets-backends.md](secrets-backends.md): database/secret backend options, and the Workload Identity opt-in in [`helm/README.md`](../helm/README.md).
+- [secrets-backends.md](secrets-backends.md): database/secret backend options, and the Workload Identity opt-in in [`deploy/helm/README.md`](../deploy/helm/README.md).
 - [database-backends.md](database-backends.md): supported database backends.
 - [observability.md](observability.md): OpenTelemetry / metrics / logs.

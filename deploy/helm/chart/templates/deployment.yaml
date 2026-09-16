@@ -1,0 +1,304 @@
+{{- if .Values.statuslist.enabled }}
+{{- if and .Values.externalSecret.enabled .Values.statuslist.fallbackSecret.enabled }}
+{{- fail "externalSecret.enabled and statuslist.fallbackSecret.enabled cannot both be true: choose either External Secrets Operator or the fallback Secret for secret delivery, not both" }}
+{{- end }}
+{{- $databaseBackend := include "status-list-server-chart.dbBackend" . }}
+{{- if (.Values.mysql | default dict).enabled }}
+{{- fail "mysql.enabled is not supported because this chart does not vendor a MySQL database; set postgres.enabled=false, statuslist.env.APP_DATABASE__BACKEND=mysql, and provide the MySQL Service externally" }}
+{{- end }}
+{{- if and .Values.postgres.enabled (ne $databaseBackend "postgres") }}
+{{- fail (printf "postgres.enabled=true requires statuslist.env.APP_DATABASE__BACKEND=postgres, got %q; for MySQL set postgres.enabled=false and provide the MySQL Service externally" $databaseBackend) }}
+{{- end }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "status-list-server-chart.fullname" . }}-deployment
+  labels:
+    {{- include "status-list-server-chart.labels" . | nindent 4 }}
+  namespace: {{ .Release.Namespace }}
+spec:
+  {{- if not .Values.autoscaling.enabled }}
+  replicas: {{ .Values.statuslist.replicaCount }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "status-list-server-chart.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: {{ .Values.statuslist.service.targetPort | quote }}
+        prometheus.io/path: "/metrics"
+        {{- if .Values.externalSecret.enabled }}
+        checksum/secret: {{ include (print $.Template.BasePath "/external-secrets.yaml") . | sha256sum }}
+        {{- end }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      labels:
+        {{- include "status-list-server-chart.labels" . | nindent 8 }}
+        {{- with .Values.statuslist.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      {{- if or .Values.serviceAccount.create (ne .Values.serviceAccount.name "") }}
+      serviceAccountName: {{ include "status-list-server-chart.serviceAccountName" . }}
+      {{- end }}
+      {{- with .Values.statuslist.initContainers }}
+      initContainers:
+        {{- range $ic := . }}
+        {{- $hardened := dict
+              "securityContext" (dict
+                "readOnlyRootFilesystem" true
+                "allowPrivilegeEscalation" false
+                "capabilities" (dict "drop" (list "ALL")))
+              "resources" (dict
+                "requests" (dict "cpu" "50m" "memory" "64Mi")
+                "limits" (dict "cpu" "100m" "memory" "128Mi"))
+              "volumeMounts" (list (dict "name" "tmp" "mountPath" "/tmp")) }}
+        - {{- tpl (toYaml (mustMergeOverwrite $ic $hardened)) $ | nindent 10 }}
+        {{- end }}
+      {{- end }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        runAsGroup: 65534
+        fsGroup: 65534
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: {{ include "status-list-server-chart.name" . }}
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+            seccompProfile:
+              type: RuntimeDefault
+          {{- $image := .Values.statuslist.image }}
+          {{- /* `default ""` rather than `toString`: toString renders a nil digest as
+                 "<nil>", so `--set statuslist.image.digest=null` -- the documented way
+                 to clear it -- would pin the image to a literal "<nil>". */}}
+          {{- $digest := $image.digest | default "" }}
+          {{- if and $digest (not (regexMatch "^sha256:[a-f0-9]{64}$" $digest)) }}
+          {{- fail (printf "statuslist.image.digest must be sha256:<64 hex chars>, got %q" $digest) }}
+          {{- end }}
+          {{- $pinned := ne $digest "" }}
+          {{- $variant := $image.variant | default "fscert" }}
+          {{- $baseAppVersion := regexReplaceAll "-(aws|gcp|azure|vault|fscert)$" $.Chart.AppVersion "" }}
+          {{- $defaultVariantTag := printf "%s-%s" $baseAppVersion $variant }}
+          {{- $effectiveTag := $image.tag | default $defaultVariantTag }}
+          {{- if and (eq (include "status-list-server-chart.dbBackend" .) "mysql") (not $image.tag) (not $digest) }}
+          {{- fail "statuslist.env.APP_DATABASE__BACKEND=mysql requires an explicit MySQL-capable image tag or digest; set statuslist.image.tag or statuslist.image.digest" }}
+          {{- end }}
+          {{- /* Digest pins the exact scanned artifact; tag falls back to appVersion plus
+                 the selected variant, never to "latest". An empty pullPolicy derives from
+                 which one is in use: a digest is content-addressed, a tag is mutable. */}}
+          image: "{{ $image.repository }}{{ if $pinned }}@{{ $digest }}{{ else }}:{{ $effectiveTag }}{{ end }}"
+          imagePullPolicy: {{ $image.pullPolicy | default (ternary "IfNotPresent" "Always" $pinned) }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.statuslist.service.targetPort | int }}
+              protocol: TCP
+          {{- with .Values.statuslist.livenessProbe }}
+          livenessProbe:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.statuslist.readinessProbe }}
+          readinessProbe:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.statuslist.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          env:
+            {{- $env := dict }}
+            {{- range $name, $value := .Values.statuslist.env }}
+            {{- $_ := set $env $name $value }}
+            {{- end }}
+            {{- $secretFileEnv := dict }}
+            {{- range $mount := .Values.statuslist.secretMounts }}
+              {{- $items := $mount.items | default list }}
+              {{- $itemPaths := dict }}
+              {{- range $item := $items }}
+                {{- $itemPath := trim (toString $item.path) }}
+                {{- $normalizedItemPath := clean $itemPath }}
+                {{- $_ := set $itemPaths $normalizedItemPath true }}
+              {{- end }}
+              {{- with $mount.fileEnv }}
+                {{- range $name, $path := . }}
+                  {{- $pathString := trim (toString $path) }}
+                  {{- $normalizedPath := clean $pathString }}
+                  {{- if eq $pathString "" }}
+                    {{- fail (printf "statuslist.secretMounts[%s].fileEnv.%s must be a non-empty relative file path" $mount.name $name) }}
+                  {{- end }}
+                  {{- if hasPrefix "/" $pathString }}
+                    {{- fail (printf "statuslist.secretMounts[%s].fileEnv.%s must be relative to mountPath, got absolute path %q" $mount.name $name $pathString) }}
+                  {{- end }}
+                  {{- if or (eq $normalizedPath ".") (eq $normalizedPath "..") (hasPrefix "../" $normalizedPath) }}
+                    {{- fail (printf "statuslist.secretMounts[%s].fileEnv.%s must resolve inside mountPath, got %q" $mount.name $name $pathString) }}
+                  {{- end }}
+                  {{- if ne $normalizedPath $pathString }}
+                    {{- fail (printf "statuslist.secretMounts[%s].fileEnv.%s must be a normalized relative file path, got %q" $mount.name $name $pathString) }}
+                  {{- end }}
+                  {{- if and (gt (len $items) 0) (not (hasKey $itemPaths $normalizedPath)) }}
+                    {{- fail (printf "statuslist.secretMounts[%s].fileEnv.%s references %q, but items mounts only: %s" $mount.name $name $pathString (keys $itemPaths | sortAlpha | join ", ")) }}
+                  {{- end }}
+                  {{- if hasKey $env $name }}
+                    {{- fail (printf "statuslist.secretMounts[%s].fileEnv.%s duplicates statuslist.env.%s; define each environment variable only once" $mount.name $name $name) }}
+                  {{- end }}
+                  {{- if hasKey $secretFileEnv $name }}
+                    {{- fail (printf "statuslist.secretMounts fileEnv defines %s more than once" $name) }}
+                  {{- end }}
+                  {{- $_ := set $secretFileEnv $name (printf "%s/%s" $mount.mountPath $normalizedPath) }}
+                {{- end }}
+              {{- end }}
+            {{- end }}
+            {{- range $name, $_ := $secretFileEnv }}
+              {{- if eq $name "APP_DATABASE__URL" }}
+                {{- fail "statuslist.secretMounts fileEnv must not define APP_DATABASE__URL because it would expose assembled credentials in pod metadata; use APP_DATABASE__HOST/PORT/USERNAME/NAME/QUERY plus APP_DATABASE__PASSWORD_FILE" }}
+              {{- end }}
+              {{- if eq $name "APP_DATABASE__PASSWORD" }}
+                {{- fail "statuslist.secretMounts fileEnv must not define APP_DATABASE__PASSWORD; use APP_DATABASE__PASSWORD_FILE for mounted database password files" }}
+              {{- end }}
+            {{- end }}
+            {{- if hasKey $env "APP_DATABASE__URL" }}
+              {{- fail "statuslist.env.APP_DATABASE__URL is not supported by this chart because it exposes assembled credentials in pod metadata; use APP_DATABASE__HOST/PORT/USERNAME/NAME/QUERY plus APP_DATABASE__PASSWORD_FILE" }}
+            {{- end }}
+            {{- if hasKey $env "APP_DATABASE__PASSWORD" }}
+              {{- fail "statuslist.env.APP_DATABASE__PASSWORD must not be set as a plain env value; use the chart-managed APP_DATABASE__PASSWORD_FILE mounted Secret path" }}
+            {{- end }}
+            {{- if not (hasKey $env "APP_SERVER__DOMAIN") }}
+              {{- $globalDomain := trimSuffix "." (dig "domain" "" (.Values.global | default dict) | default "" | lower) }}
+              {{- if or .Values.statuslist.ingress.externalDnsHostname $globalDomain }}
+                {{- $_ := set $env "APP_SERVER__DOMAIN" (.Values.statuslist.ingress.externalDnsHostname | default (printf "statuslist.%s" $globalDomain) | lower) }}
+              {{- else }}
+                {{- $_ := set $env "APP_SERVER__DOMAIN" "localhost" }}
+              {{- end }}
+            {{- end }}
+            {{- $otel := index .Values "opentelemetry-collector" | default dict }}
+            {{- if $otel.enabled }}
+              {{- if not (hasKey $env "APP_TELEMETRY__ENABLED") }}
+                {{- $_ := set $env "APP_TELEMETRY__ENABLED" "true" }}
+              {{- end }}
+              {{- if not (hasKey $env "APP_TELEMETRY__OTLP_ENDPOINT") }}
+                {{- $otlpPort := dig "ports" "otlp" "servicePort" 4317 $otel }}
+                {{- /* Mirror the upstream opentelemetry-collector.fullname helper exactly:        */}}
+                {{- /* 1. fullnameOverride → use as-is (trunc 63)                                */}}
+                {{- /* 2. else: effectiveName = nameOverride ?? chart name                        */}}
+                {{- /*    if release.contains(effectiveName) → use release (trunc 63)            */}}
+                {{- /*    else → "$release-$effectiveName" (trunc 63)                            */}}
+                {{- $collectorSvcName := "" }}
+                {{- if $otel.fullnameOverride }}
+                  {{- $collectorSvcName = $otel.fullnameOverride | trunc 63 | trimSuffix "-" }}
+                {{- else }}
+                  {{- $effectiveName := $otel.nameOverride | default "opentelemetry-collector" }}
+                  {{- if contains $effectiveName .Release.Name }}
+                    {{- $collectorSvcName = .Release.Name | trunc 63 | trimSuffix "-" }}
+                  {{- else }}
+                    {{- $collectorSvcName = printf "%s-%s" .Release.Name $effectiveName | trunc 63 | trimSuffix "-" }}
+                  {{- end }}
+                {{- end }}
+                {{- $_ := set $env "APP_TELEMETRY__OTLP_ENDPOINT" (printf "http://%s.%s.svc.cluster.local:%d" $collectorSvcName .Release.Namespace ($otlpPort | int)) }}
+              {{- end }}
+            {{- else }}
+              {{- if not (hasKey $env "APP_TELEMETRY__ENABLED") }}
+                {{- $_ := set $env "APP_TELEMETRY__ENABLED" "false" }}
+              {{- end }}
+            {{- end }}
+            {{- $backend := include "status-list-server-chart.dbBackend" . }}
+            {{- if and (ne $backend "postgres") (ne $backend "mysql") }}
+              {{- fail (printf "statuslist.env.APP_DATABASE__BACKEND must be either postgres or mysql for this chart, got %q" $backend) }}
+            {{- end }}
+            {{- $_ := set $env "APP_DATABASE__BACKEND" $backend }}
+            {{- $_ := set $env "APP_DATABASE__HOST" (include "status-list-server-chart.dbHost" .) }}
+            {{- $_ := set $env "APP_DATABASE__PORT" (include "status-list-server-chart.dbPort" .) }}
+            {{- $_ := set $env "APP_DATABASE__USERNAME" (include "status-list-server-chart.dbUsername" .) }}
+            {{- $_ := set $env "APP_DATABASE__NAME" (include "status-list-server-chart.dbName" .) }}
+            {{- range $name, $_ := $secretFileEnv }}
+              {{- if hasKey $env $name }}
+                {{- fail (printf "statuslist.secretMounts fileEnv defines %s, which duplicates a rendered statuslist environment variable; define each environment variable only once" $name) }}
+              {{- end }}
+            {{- end }}
+            {{- $chartManagedEnv := dict }}
+            {{- $appRegionForValidation := include "status-list-server-chart.appRegion" . }}
+            {{- $watcherPollInterval := "" }}
+            {{- if .Values.statuslist.watcher }}
+              {{- $watcherPollInterval = trim (toString (.Values.statuslist.watcher.pollIntervalSecs | default "")) }}
+            {{- end }}
+            {{- if and (eq .Values.secretStore.provider "aws") $appRegionForValidation }}
+              {{- $_ := set $chartManagedEnv "APP_AWS__REGION" true }}
+            {{- end }}
+            {{- if .Values.statuslist.aws.mountCredentials }}
+              {{- $_ := set $chartManagedEnv "AWS_SHARED_CREDENTIALS_FILE" true }}
+              {{- $_ := set $chartManagedEnv "AWS_CONFIG_FILE" true }}
+            {{- end }}
+            {{- if and (ne $watcherPollInterval "") (not (hasKey $env "APP_WATCHER__POLL_INTERVAL_SECS")) }}
+              {{- $_ := set $chartManagedEnv "APP_WATCHER__POLL_INTERVAL_SECS" true }}
+            {{- end }}
+            {{- range $name, $_ := $secretFileEnv }}
+              {{- if hasKey $chartManagedEnv $name }}
+                {{- fail (printf "statuslist.secretMounts fileEnv defines %s, which duplicates a chart-managed environment variable; define each environment variable only once" $name) }}
+              {{- end }}
+            {{- end }}
+            {{- range $name, $value := $env }}
+            - name: {{ $name }}
+              value: {{ $value | quote }}
+            {{- end }}
+            {{- $appRegion := include "status-list-server-chart.appRegion" . }}
+            {{- if and (eq .Values.secretStore.provider "aws") $appRegion }}
+            - name: APP_AWS__REGION
+              value: {{ $appRegion | quote }}
+            {{- end }}
+          {{- if .Values.statuslist.aws.mountCredentials }}
+            - name: AWS_SHARED_CREDENTIALS_FILE
+              value: /home/nobody/.aws/credentials
+            - name: AWS_CONFIG_FILE
+              value: /home/nobody/.aws/config
+            {{- end }}
+            {{- range $name, $path := $secretFileEnv }}
+            - name: {{ $name }}
+              value: {{ $path | quote }}
+            {{- end }}
+            {{- /* Watcher poll interval for credential rotation detection */}}
+            {{- if and (ne $watcherPollInterval "") (not (hasKey $env "APP_WATCHER__POLL_INTERVAL_SECS")) }}
+            - name: APP_WATCHER__POLL_INTERVAL_SECS
+              value: {{ $watcherPollInterval | quote }}
+            {{- end }}
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+          {{- if .Values.statuslist.aws.mountCredentials }}
+            - name: aws-credentials-volume
+              mountPath: /home/nobody/.aws
+              readOnly: true
+          {{- end }}
+          {{- range .Values.statuslist.secretMounts }}
+            - name: {{ .name }}
+              mountPath: {{ .mountPath }}
+              readOnly: true
+          {{- end }}
+      volumes:
+        - name: tmp
+          emptyDir: {}
+      {{- if .Values.statuslist.aws.mountCredentials }}
+        - name: aws-credentials-volume
+          secret:
+            secretName: aws-credentials-secret
+      {{- end }}
+      {{- range $mount := .Values.statuslist.secretMounts }}
+        - name: {{ $mount.name }}
+          secret:
+            secretName: {{ $mount.secretName }}
+            {{- with $mount.items }}
+            items:
+              {{- range $item := . }}
+              {{- $resolvedKey := $item.key | default (include "status-list-server-chart.databasePasswordSecretKey" $) }}
+              {{- $renderedItem := mustMergeOverwrite (deepCopy $item) (dict "key" $resolvedKey) }}
+              {{- toYaml (list $renderedItem) | nindent 14 }}
+              {{- end }}
+            {{- end }}
+      {{- end }}
+{{- end }}

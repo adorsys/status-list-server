@@ -77,7 +77,8 @@ kubectl get secret statuslist-secret -n statuslist-production \
     --image=alpine -- sh -c 'command -v nc || apk add --no-cache netcat-openbsd; nc -vz <db-host> <db-port>'
   ```
 
-- Fix credentials: rotate `postgres-password` in the secret, or correct the database
+- Fix credentials: rotate the database password key mounted by the chart (`postgres-password`
+  by default for upgrade safety, or `database-password` after migration), or correct the database
   `username`/`name`. See the Kubernetes section below when a `CrashLoopBackOff` wraps this.
 - If the error is `kind=connection_acquire`, raise `database.pool.max_connections` headroom or
   the `acquire_timeout_secs` in your values (`APP_DATABASE__POOL__*`).
@@ -100,7 +101,7 @@ keeps exiting after roughly the same delay.
 ready, DNS resolves, raw TCP to the ClusterIP is open, and a standalone `psql` client
 (`sslmode=disable`) connects and returns `SELECT 1`, yet the application's connection pool still
 times out. Critically, **PostgreSQL logs (e.g. `kubectl logs <postgres-pod>`) show no connection
-activity at all** and the app init container's `wait-for-postgres` `nc -z` probe succeeds. This
+activity at all** and the app init container's `wait-for-db` `nc -z` probe succeeds. This
 means the pool connectors are not completing a connection to the database.
 
 **Diagnostics:**
@@ -220,7 +221,8 @@ _Source: `src/config.rs:641, 646` (`required_config_field` / `required_secret_fi
 
 **Root cause:** A required config value is not present. In the Helm/deployment model this is
 usually a **missing or empty secret mount / env**: the pod has no `APP_DATABASE__PASSWORD_FILE`
-pointing at a mounted password, or `statuslist-secret` is missing the `postgres-password` key.
+pointing at a mounted password, or `statuslist-secret` is missing the configured mounted key
+(`postgres-password` by default, or `database-password` after migration).
 
 **Diagnostics:**
 
@@ -232,9 +234,10 @@ kubectl get secret statuslist-secret -n statuslist-production \
 kubectl describe pod -l app.kubernetes.io/name=status-list-server -n statuslist-production
 ```
 
-**Fix:** Ensure the secret with the `postgres-password` key exists and is referenced. In ESO
+**Fix:** Ensure the secret with the configured mounted key exists and is referenced. In ESO
 mode, confirm the ExternalSecret synced it (see the Kubernetes section). In fallback mode,
-confirm `statuslist.fallbackSecret.stringData` contains the key.
+confirm `statuslist.fallbackSecret.stringData` contains the key. PostgreSQL deployments should
+also keep the compatibility `postgres-password` key for the bundled PostgreSQL chart.
 
 **Prevention:** Never deliver the password as a plain env value; the chart rejects
 `APP_DATABASE__PASSWORD` as a literal and mounts the secret to a file via
@@ -339,7 +342,7 @@ platform) and keep the K8s role bound to the minimal ServiceAccount.
 
 ### Database pool rotation after password-file change
 
-**When you see this:** You rotate `postgres-password` and update the Secret the pod mounts. The
+**When you see this:** You rotate the configured database password key and update the Secret the pod mounts. The
 running pod picks the change up without a restart once the watcher notices the mounted file
 changed.
 
@@ -482,7 +485,7 @@ exiting with one of the startup errors in the first section.
 
 **Root cause:** The pod cannot reach the database or cannot read a required secret at startup
 (config errors above surface as a crash, not a healthy retry). Initializing containers
-(`statuslist.initContainers`, e.g. a `wait-for-postgres` probe) may also be failing, keeping the
+(`statuslist.initContainers`, e.g. a `wait-for-db` probe) may also be failing, keeping the
 app from ever starting.
 
 **Diagnostics:**
@@ -635,7 +638,7 @@ key path is missing or unreadable, independent of the key parses as PEM.
 **When you see this:** The app logs timeout/connection errors to Postgres, Vault, or the OTLP
 collector, or readiness fails on `database unreachable`, while the services are verifiably up.
 
-_Source (chart): `helm/chart/templates/network-policy.yaml`_
+_Source (chart): `deploy/helm/chart/templates/network-policy.yaml`_
 
 **Root cause:** When `statuslist.networkPolicy.enabled`, the rendered `NetworkPolicy` scopes
 egress as follows:
@@ -693,7 +696,7 @@ chart does not open (Vault on a non-443 port), plan on providing your own `Netwo
 ### Values schema validation rejections
 
 **When you see this:** `helm upgrade`/`helm install` fails at validation with a schema/render
-error. Validation comes from two layers: the JSON Schema at `helm/chart/values.schema.json` and
+error. Validation comes from two layers: the JSON Schema at `deploy/helm/chart/values.schema.json` and
 explicit `fail` guards in the templates.
 
 Template `fail` messages you may hit include (from the chart source):
@@ -714,11 +717,11 @@ enabled).
 **Diagnostics / Fix:**
 
 ```bash
-helm lint helm/chart -f <your-values>.yaml
-helm template statuslist helm/chart -f <your-values>.yaml --namespace statuslist-production \
+helm lint deploy/helm/chart -f <your-values>.yaml
+helm template statuslist deploy/helm/chart -f <your-values>.yaml --namespace statuslist-production \
   --debug --validate
 # Show just the failing assertion when present:
-helm template statuslist helm/chart -f <your-values>.yaml --namespace statuslist-production 2>&1 | head -40
+helm template statuslist deploy/helm/chart -f <your-values>.yaml --namespace statuslist-production 2>&1 | head -40
 ```
 
 Correct the flagged value. Fixes are implied by each message: pick one, mutually-exclusive mode;
@@ -774,7 +777,7 @@ it with `--set statuslist.image.digest=null`); a plain tag change under `--reuse
 "succeed" and change nothing.
 
 ```bash
-helm upgrade statuslist helm/chart -n statuslist-production \
+helm upgrade statuslist deploy/helm/chart -n statuslist-production \
   --reuse-values \
   --set statuslist.image.repository=<repo> \
   --set statuslist.image.tag=<tag> \

@@ -1,7 +1,7 @@
 //! HTTP request latency and count SLI instruments.
 //!
 //! These are the two series the SLO dashboards and burn-rate alerts in
-//! `observability/` query:
+//! `deploy/observability/` query:
 //! - `http_server_duration_seconds` – a histogram of server-side request latency
 //! - `http_server_requests_total` – a counter of requests by status class
 //!
