@@ -555,13 +555,22 @@ components:
           $ref: "#/components/schemas/StatusValue"
 
     StatusValue:
-      type: string
-      description: "Status value."
-      enum:
-        - VALID
-        - INVALID
-        - SUSPENDED
-      example: "INVALID"
+      description: >
+        Status of a referenced token. Accepted as **either** a numeric integer or a case-insensitive string name. Stringified integers (e.g. `"0"`) are also accepted.
+
+        | Value | Integer | String        | |-------|---------|---------------| | Valid     | `0` | `"VALID"`     | | Invalid   | `1` | `"INVALID"`   | | Suspended | `2` | `"SUSPENDED"` |
+
+        Integer values `>= 256` (and their stringified equivalents) are accepted for application-specific statuses. Values `3`–`255` are reserved and rejected.
+      oneOf:
+        - type: integer
+          description: Numeric status code.
+          enum: [0, 1, 2]
+          example: 0
+        - type: string
+          description: >
+            Named status value (case-insensitive) or a stringified integer.
+          enum: ["VALID", "INVALID", "SUSPENDED"]
+          example: "VALID"
 
     StatusList:
       type: object
