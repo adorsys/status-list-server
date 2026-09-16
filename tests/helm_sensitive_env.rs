@@ -1,5 +1,5 @@
 use std::{
-    fs,
+    env, fs,
     path::{Path, PathBuf},
     process::{Command, Output},
 };
@@ -29,15 +29,18 @@ fn dependency_free_chart() -> PathBuf {
         fs::remove_dir_all(&chart_dir).expect("failed to remove stale test chart directory");
     }
     fs::create_dir_all(&chart_dir).expect("failed to create test chart directory");
-    fs::copy("helm/chart/values.yaml", chart_dir.join("values.yaml"))
-        .expect("failed to copy chart values");
     fs::copy(
-        "helm/chart/values.schema.json",
+        "deploy/helm/chart/values.yaml",
+        chart_dir.join("values.yaml"),
+    )
+    .expect("failed to copy chart values");
+    fs::copy(
+        "deploy/helm/chart/values.schema.json",
         chart_dir.join("values.schema.json"),
     )
     .expect("failed to copy chart values schema");
     copy_dir(
-        Path::new("helm/chart/templates"),
+        Path::new("deploy/helm/chart/templates"),
         &chart_dir.join("templates"),
     );
     fs::write(
@@ -57,13 +60,16 @@ appVersion: "1.0.0"
 
 fn helm_available() -> bool {
     Command::new("helm")
-        .args(["version", "--client"])
+        .arg("version")
         .output()
         .is_ok_and(|output| output.status.success())
 }
 
 fn helm_template_with_postgres_default(args: &[&str], disable_postgres: bool) -> Option<Output> {
     if !helm_available() {
+        if env::var_os("CI").is_some() {
+            panic!("helm is required for helm_sensitive_env tests in CI");
+        }
         eprintln!("skipping Helm render assertions because helm is not installed");
         return None;
     }

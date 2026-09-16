@@ -6,17 +6,17 @@ This runbook describes how to deploy the Status List Server project on a Kuberne
 
 You have three broad ways to run the Status List Server:
 
-- **Local / development** (Minikube, kind, Docker Desktop): manual testing and iteration, using [`chart/values-local.yaml`](../helm/chart/values-local.yaml).
+- **Local / development** (Minikube, kind, Docker Desktop): manual testing and iteration, using [`chart/values-local.yaml`](../deploy/helm/chart/values-local.yaml).
 - **Self-managed deploy** (recommended; any cluster you own): a real, repeatable deployment using `chart/values.yaml` plus your own overrides.
 - **Bundled chart only**: bring your own containers or compose workflows (non-Helm).
 
-The project ships a Helm chart (`helm/chart`) that is the recommended, supported way to deploy. The chart bundles:
+The project ships a Helm chart (`deploy/helm/chart`) that is the recommended, supported way to deploy. The chart bundles:
 
 - the **Status List Server** application Deployment, Service, and (optionally) Ingress;
 - a **PostgreSQL** subchart for the database;
 - an **OpenTelemetry Collector** subchart for traces/metrics/logs (optional).
 
-Everything below assumes you deploy with Helm. The chart is the source of truth for how the application is configured and run; see [`helm/README.md`](../helm/README.md) for the full value reference and the [Next steps](#next-steps) section for supporting topics (secrets, DNS providers, database backends, observability).
+Everything below assumes you deploy with Helm. The chart is the source of truth for how the application is configured and run; see [`deploy/helm/README.md`](../deploy/helm/README.md) for the full value reference and the [Next steps](#next-steps) section for supporting topics (secrets, DNS providers, database backends, observability).
 
 ## Prerequisites
 
@@ -49,13 +49,13 @@ kubectl config use-context minikube
 kubectl create namespace local
 
 # 3. Pull chart dependencies and install
-helm dependency update ./helm/chart
+helm dependency update ./deploy/helm/chart
 
 # NOTE: only variant-suffixed tags are published. With an empty tag, the chart
 # uses its provider-neutral appVersion (-fscert). Override the tag only when
 # you want a specific cloud variant or a locally loaded image.
-helm install statuslist-local ./helm/chart \
-  -n local -f ./helm/chart/values-local.yaml
+helm install statuslist-local ./deploy/helm/chart \
+  -n local -f ./deploy/helm/chart/values-local.yaml
 
 # 4. Verify
 kubectl get pods -n local
@@ -102,16 +102,16 @@ The chart's `statuslist.env` holds the application configuration. Set the values
 
 ```bash
 # Pull and package dependencies once
-helm dependency update ./helm/chart
+helm dependency update ./deploy/helm/chart
 
 # Install with your values file (or inline --set overrides)
-helm upgrade --install statuslist ./helm/chart \
+helm upgrade --install statuslist ./deploy/helm/chart \
   --namespace statuslist \
   --create-namespace \
   --rollback-on-failure \
   --wait \
   --timeout 10m \
-  -f ./helm/chart/values.yaml \
+  -f ./deploy/helm/chart/values.yaml \
   -f ./my-deployment-values.yaml
 ```
 
@@ -143,7 +143,7 @@ When `digest` is set it takes precedence over `tag`, and Kubernetes runs `reposi
 
 ## Secrets Delivery
 
-The chart supports fallback Secret, ESO, and Workload Identity paths. Pick the one that matches your cluster. The trade-offs for ESO vs Workload Identity are covered in [`helm/README.md`](../helm/README.md) and the database/secret backend options in [secrets-backends.md](secrets-backends.md).
+The chart supports fallback Secret, ESO, and Workload Identity paths. Pick the one that matches your cluster. The trade-offs for ESO vs Workload Identity are covered in [`deploy/helm/README.md`](../deploy/helm/README.md) and the database/secret backend options in [secrets-backends.md](secrets-backends.md).
 
 ### Mode A: Fallback plain Secret (default)
 
@@ -191,10 +191,10 @@ A ready `ExternalSecret` shows a `SecretSynced` condition. A missing remote key 
 
 Instead of ESO-mounted static credentials, the application can use **ambient** cloud credentials via Workload Identity (EKS IRSA, GCP WI, Azure WIF):
 
-- attach the role annotation via `serviceAccount.annotations` (e.g. `eks.amazonaws.com/role-arn` on EKS; see the [Workload Identity section of `helm/README.md`](../helm/README.md#use-workload-identity-instead-of-mounted-credentials) for GCP/Azure, and note Azure also needs the pod label `azure.workload.identity/use: "true"`);
+- attach the role annotation via `serviceAccount.annotations` (e.g. `eks.amazonaws.com/role-arn` on EKS; see the [Workload Identity section of `deploy/helm/README.md`](../deploy/helm/README.md#use-workload-identity-instead-of-mounted-credentials) for GCP/Azure, and note Azure also needs the pod label `azure.workload.identity/use: "true"`);
 - set `statuslist.aws.mountCredentials=false` so no credential files are mounted.
 
-Attach a least-privilege policy to the role (see the example in the Workload Identity section of [`helm/README.md`](../helm/README.md) for Route53 / Secrets Manager / S3).
+Attach a least-privilege policy to the role (see the example in the Workload Identity section of [`deploy/helm/README.md`](../deploy/helm/README.md) for Route53 / Secrets Manager / S3).
 
 In fallback mode, `aws-credentials-secret` is not provisioned automatically: either create it yourself when `mountCredentials=true`, switch to ESO, or use Workload Identity.
 
@@ -366,9 +366,9 @@ Do not bypass this gate. It is the only check that establishes a signed statemen
 
 ## Next Steps
 
-- [helm/README.md](../helm/README.md): full chart value reference and configuration guide.
+- [deploy/helm/README.md](../deploy/helm/README.md): full chart value reference and configuration guide.
 - [LOCAL_DEPLOYMENT.md](LOCAL_DEPLOYMENT.md): detailed local quickstart.
 - [dns-providers.md](dns-providers.md): ACME DNS-01 provider setup per provider.
-- [secrets-backends.md](secrets-backends.md): database/secret backend options, and the Workload Identity opt-in in [`helm/README.md`](../helm/README.md).
+- [secrets-backends.md](secrets-backends.md): database/secret backend options, and the Workload Identity opt-in in [`deploy/helm/README.md`](../deploy/helm/README.md).
 - [database-backends.md](database-backends.md): supported database backends.
 - [observability.md](observability.md): OpenTelemetry / metrics / logs.

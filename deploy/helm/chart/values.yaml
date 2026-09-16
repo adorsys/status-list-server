@@ -362,7 +362,7 @@ prometheusRule:
 #   discord     -> alerting.webhookUrl  (Discord channel webhook URL)
 #   slack       -> alerting.webhookUrl  (Slack incoming-webhook URL)
 #   teams       -> alerting.webhookUrl  (MS Teams classic inbound webhook; posts Alertmanager's
-#                 generic JSON, not an Adaptive Card — see observability/runbooks/webhook-notifications.md
+#                 generic JSON, not an Adaptive Card — see deploy/observability/runbooks/webhook-notifications.md
 #                 for the rendering limitation and bridge options)
 #   mattermost  -> alerting.webhookUrl  (Mattermost incoming webhook)
 #   webhook     -> alerting.webhookUrl  (generic endpoint accepting Alertmanager JSON)
@@ -455,9 +455,9 @@ alerting:
     tlsConfig: {}
 
 # Configurable SLO target thresholds for PrometheusRule alerting rules.
-# These must stay in lockstep with observability/slo/thresholds.json (the lint
+# These must stay in lockstep with deploy/observability/slo/thresholds.json (the lint
 # step in CI asserts this) and with the literal values in the standalone
-# observability/prometheus/rules/*.rules.yml.
+# deploy/observability/prometheus/rules/*.rules.yml.
 slo:
   errorRateTarget: 0.005
   fastBurnMultiplier: 14.4

@@ -32,8 +32,8 @@ kubectl create namespace local
 > locally loaded image. See `docs/troubleshooting.md` -> "Image pull errors on variant tags".
 
 ```bash
-helm dependency update ./helm/chart
-helm install statuslist-local ./helm/chart -n local -f ./helm/chart/values-local.yaml
+helm dependency update ./deploy/helm/chart
+helm install statuslist-local ./deploy/helm/chart -n local -f ./deploy/helm/chart/values-local.yaml
 ```
 
 > **Certificates:** the default `-fscert` image is provider-neutral and requires certificate and

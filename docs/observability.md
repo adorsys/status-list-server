@@ -19,7 +19,7 @@ Telemetry behavior is determined primarily by the deployment environment (`APP_E
 
 ## 2. Helm Deployment Architecture & Wiring
 
-When deploying via Helm (`helm/chart`), OpenTelemetry Collector integration is provided by the official
+When deploying via Helm (`deploy/helm/chart`), OpenTelemetry Collector integration is provided by the official
 [`open-telemetry/opentelemetry-collector`](https://github.com/open-telemetry/opentelemetry-helm-charts/tree/main/charts/opentelemetry-collector)
 subchart. Configuration is under the `opentelemetry-collector` key in `values.yaml`.
 

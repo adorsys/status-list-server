@@ -1,7 +1,7 @@
 # SLIs & SLOs for status-list-server
 
 This document defines the Service Level Indicators (SLIs) and Service Level
-Objectives (SLOs) that drive the dashboards and alerts in `observability/`.
+Objectives (SLOs) that drive the dashboards and alerts in `deploy/observability/`.
 Everything here is **versioned as code and reviewed via PR** — a change to an
 objective must land in this doc together with the alert rule and, where they
 differ, its runbook.
@@ -80,7 +80,7 @@ set keeps cardinality in check.
 
 We follow Google SRE's multi-window multi-burn-rate model (`severity=page`
 slow + fast pairs) per SLI that represents an outage (request latency, error
-rate, DB latency, token-gen). See `observability/prometheus/rules/alerting.rules.yml`.
+rate, DB latency, token-gen). See `deploy/observability/prometheus/rules/alerting.rules.yml`.
 
 - **Fast burn (page)**: the burn rate exceeds **14.4x** the 0.5% budget
   (error/token ratio ≥ 0.072) — or the latency P95 breaches its threshold — on
@@ -148,15 +148,15 @@ Every SLO target in this doc is duplicated as a **literal constant** in more tha
 one file. A change to a target must be applied to **all** of them together, or
 dashboards and alerts drift from the documented objective:
 
-| Target               | Files that hard-code it                                                                                                                                      |
-| -------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| 300 ms latency       | `alerting.rules.yml` (0.3), `dashboards/src/generate.mjs` (0.3), this doc                                                                                    |
-| 0.5% error budget    | `recording.rules.yml` (`0.005` denominator), `alerting.rules.yml` (0.072/0.030), `dashboards/src/generate.mjs` (0.005), this doc                             |
-| 85% cache hit        | `alerting.rules.yml` (0.85), `dashboards/src/generate.mjs` (0.85), this doc                                                                                  |
-| 50 ms DB latency     | `alerting.rules.yml` (0.05), `dashboards/src/generate.mjs` (0.05), this doc                                                                                  |
-| 1% cert renewal      | `dashboards/src/generate.mjs` (0.01, diagnostic reference only); alerting uses expiry thresholds below                                                       |
-| 14d / 7d cert expiry | `alerting.rules.yml` (1209600 / 604800 s), `helm/chart/values.yaml` (`slo.certExpiryWarnSeconds` / `certExpiryCriticalSeconds`), `thresholds.json`, this doc |
-| 0.5% token-gen       | `recording.rules.yml` (0.005), `alerting.rules.yml` (0.072/0.030), this doc                                                                                  |
+| Target               | Files that hard-code it                                                                                                                                            |
+| -------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| 300 ms latency       | `alerting.rules.yml` (0.3), `dashboards/src/generate.mjs` (0.3), this doc                                                                                          |
+| 0.5% error budget    | `recording.rules.yml` (`0.005` denominator), `alerting.rules.yml` (0.072/0.030), `dashboards/src/generate.mjs` (0.005), this doc                                   |
+| 85% cache hit        | `alerting.rules.yml` (0.85), `dashboards/src/generate.mjs` (0.85), this doc                                                                                        |
+| 50 ms DB latency     | `alerting.rules.yml` (0.05), `dashboards/src/generate.mjs` (0.05), this doc                                                                                        |
+| 1% cert renewal      | `dashboards/src/generate.mjs` (0.01, diagnostic reference only); alerting uses expiry thresholds below                                                             |
+| 14d / 7d cert expiry | `alerting.rules.yml` (1209600/604800s), `deploy/helm/chart/values.yaml` (`slo.certExpiryWarnSeconds` / `certExpiryCriticalSeconds`), `thresholds.json`, this doc   |
+| 0.5% token-gen       | `recording.rules.yml` (0.005), `alerting.rules.yml` (0.072/0.030), this doc                                                                                        |
 
 Because the dashboard JSON is generated, change `dashboards/src/generate.mjs`
 and commit the regenerated `generated/status-list-slo.json` (`npm run

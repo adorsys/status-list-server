@@ -638,7 +638,7 @@ key path is missing or unreadable, independent of the key parses as PEM.
 **When you see this:** The app logs timeout/connection errors to Postgres, Vault, or the OTLP
 collector, or readiness fails on `database unreachable`, while the services are verifiably up.
 
-_Source (chart): `helm/chart/templates/network-policy.yaml`_
+_Source (chart): `deploy/helm/chart/templates/network-policy.yaml`_
 
 **Root cause:** When `statuslist.networkPolicy.enabled`, the rendered `NetworkPolicy` scopes
 egress as follows:
@@ -696,7 +696,7 @@ chart does not open (Vault on a non-443 port), plan on providing your own `Netwo
 ### Values schema validation rejections
 
 **When you see this:** `helm upgrade`/`helm install` fails at validation with a schema/render
-error. Validation comes from two layers: the JSON Schema at `helm/chart/values.schema.json` and
+error. Validation comes from two layers: the JSON Schema at `deploy/helm/chart/values.schema.json` and
 explicit `fail` guards in the templates.
 
 Template `fail` messages you may hit include (from the chart source):
@@ -717,11 +717,11 @@ enabled).
 **Diagnostics / Fix:**
 
 ```bash
-helm lint helm/chart -f <your-values>.yaml
-helm template statuslist helm/chart -f <your-values>.yaml --namespace statuslist-production \
+helm lint deploy/helm/chart -f <your-values>.yaml
+helm template statuslist deploy/helm/chart -f <your-values>.yaml --namespace statuslist-production \
   --debug --validate
 # Show just the failing assertion when present:
-helm template statuslist helm/chart -f <your-values>.yaml --namespace statuslist-production 2>&1 | head -40
+helm template statuslist deploy/helm/chart -f <your-values>.yaml --namespace statuslist-production 2>&1 | head -40
 ```
 
 Correct the flagged value. Fixes are implied by each message: pick one, mutually-exclusive mode;
@@ -777,7 +777,7 @@ it with `--set statuslist.image.digest=null`); a plain tag change under `--reuse
 "succeed" and change nothing.
 
 ```bash
-helm upgrade statuslist helm/chart -n statuslist-production \
+helm upgrade statuslist deploy/helm/chart -n statuslist-production \
   --reuse-values \
   --set statuslist.image.repository=<repo> \
   --set statuslist.image.tag=<tag> \
