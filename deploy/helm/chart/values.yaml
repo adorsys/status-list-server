@@ -99,8 +99,13 @@ statuslist:
     # must come from a secret (see externalSecret below), not from plain env values.
     APP_DATABASE__PORT: "5432"
     # Status-list record cache TTL in seconds. "0" disables this cache.
+    # Cache backend is selected at image build time with cache-memory (default)
+    # or cache-redis. For cache-redis, provide APP_CACHE__REDIS_URL via env or
+    # a secret-backed env source.
     APP_CACHE__TTL: "300"
+    # In-process cache maximum entries. Ignored by cache-redis images.
     APP_CACHE__MAX_CAPACITY: "1000"
+    APP_CACHE__REDIS_KEY_PREFIX: "status-list-server:status-list:"
     APP_STATUS_LIST__TOKEN_EXP_SECS: "900"
     APP_STATUS_LIST__TOKEN_TTL_SECS: "300"
     APP_RATE_LIMIT__STRICT_BURST_SIZE: "10"

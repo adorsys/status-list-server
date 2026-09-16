@@ -5,9 +5,11 @@
 //! them. Put plain literals in [`crate::test_fixtures`], which is dependency-
 //! free precisely so that any test module can reach it whatever its own gate.
 
-use crate::domain::ports::{CredentialRepo, StatusListRepo, StatusListSnapshotRepo};
+use crate::domain::models::status_list::{StatusListError, StatusListRecord};
+use crate::domain::ports::{
+    CredentialRepo, StatusListCache, StatusListRepo, StatusListSnapshotRepo,
+};
 use crate::domain::service::Service;
-use crate::outbound::cache::MokaStatusListCache;
 #[cfg(feature = "memory")]
 use crate::outbound::memory::{MemoryCredentials, MemoryStatusListSnapshotRepo, MemoryStatusLists};
 #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mysql"))]
@@ -22,7 +24,9 @@ use crate::{cert_manager::storage::StorageError, utils::cert_manager::storage::S
 use async_trait::async_trait;
 #[cfg(feature = "acme")]
 use std::collections::HashMap;
+use std::collections::HashMap as StdHashMap;
 use std::sync::Arc;
+use tokio::sync::RwLock;
 
 pub(crate) fn authenticated_issuer(issuer: impl Into<String>) -> AuthenticatedIssuer {
     AuthenticatedIssuer::new(crate::domain::models::credential::Issuer(issuer.into()))
@@ -77,7 +81,7 @@ pub(crate) async fn test_app_state_without_snapshots() -> AppState {
     let service = Arc::new(Service::from_arcs(
         Arc::new(MemoryStatusLists::default()),
         Arc::new(MemoryCredentials::default()),
-        Arc::new(MokaStatusListCache::new(5 * 60, 100)),
+        Arc::new(TestStatusListCache::default()),
         None,
         Arc::new(TestCertProvider {
             key_pem: include_str!("../test_data/ec-private.pem").to_string(),
@@ -117,6 +121,31 @@ impl crate::domain::ports::CertificateProvider for TestCertProvider {
             certificate_chain: Some(self.cert_chain.clone()),
             signing_key_pem: self.key_pem.clone(),
         })
+    }
+}
+
+#[derive(Default)]
+struct TestStatusListCache {
+    records: RwLock<StdHashMap<String, StatusListRecord>>,
+}
+
+#[async_trait]
+impl StatusListCache for TestStatusListCache {
+    async fn get(&self, list_id: &str) -> Result<Option<StatusListRecord>, StatusListError> {
+        Ok(self.records.read().await.get(list_id).cloned())
+    }
+
+    async fn put(&self, status_list: StatusListRecord) -> Result<(), StatusListError> {
+        self.records
+            .write()
+            .await
+            .insert(status_list.list_id.clone(), status_list);
+        Ok(())
+    }
+
+    async fn invalidate(&self, list_id: &str) -> Result<(), StatusListError> {
+        self.records.write().await.remove(list_id);
+        Ok(())
     }
 }
 
@@ -162,7 +191,7 @@ async fn build_test_app_state(
         Arc::new(memory_snapshot),
     );
 
-    let status_list_cache = Arc::new(MokaStatusListCache::new(5 * 60, 100));
+    let status_list_cache = Arc::new(TestStatusListCache::default());
     let cert_provider = Arc::new(TestCertProvider {
         key_pem,
         cert_chain: vec!["ZHVtbXlfY2VydA==".into()],

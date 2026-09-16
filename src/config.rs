@@ -979,6 +979,11 @@ pub struct CacheConfig {
     /// Setting this to 0 disables caching entirely.
     pub ttl: u64,
     pub max_capacity: u64,
+    /// Redis connection URL used by binaries built with the `cache-redis` feature.
+    #[serde(default)]
+    pub redis_url: Option<SecretString>,
+    /// Prefix for Redis keys, allowing multiple deployments to share one Redis database safely.
+    pub redis_key_prefix: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -1127,6 +1132,8 @@ fn base_builder() -> Result<ConfigBuilder<DefaultState>, ConfigError> {
         .set_default("azure_keyvault.secrets_cache_ttl", 300)?
         .set_default("cache.ttl", 5 * 60)?
         .set_default("cache.max_capacity", 100)?
+        .set_default("cache.redis_url", Option::<String>::None)?
+        .set_default("cache.redis_key_prefix", "status-list-server:status-list:")?
         .set_default("status_list.token_exp_secs", 900)?
         .set_default("status_list.token_ttl_secs", 300)?
         .set_default("status_list.snapshot_retention_secs", 7776000)?
@@ -1292,6 +1299,8 @@ mod tests {
             ("aws.region", "us-west-2"),
             ("cache.ttl", "600"),
             ("cache.max_capacity", "2000"),
+            ("cache.redis_url", "redis://redis:6379/0"),
+            ("cache.redis_key_prefix", "test-prefix:"),
             ("status_list.token_exp_secs", "1800"),
             ("status_list.token_ttl_secs", "600"),
             ("management_auth.leeway_secs", "30"),
@@ -1340,6 +1349,16 @@ mod tests {
         assert_eq!(overridden.aws.region, "us-west-2");
         assert_eq!(overridden.cache.ttl, 600);
         assert_eq!(overridden.cache.max_capacity, 2000);
+        assert_eq!(
+            overridden
+                .cache
+                .redis_url
+                .as_ref()
+                .expect("redis url override")
+                .expose_secret(),
+            "redis://redis:6379/0"
+        );
+        assert_eq!(overridden.cache.redis_key_prefix, "test-prefix:");
         assert_eq!(overridden.status_list.token_exp_secs, 1800);
         assert_eq!(overridden.status_list.token_ttl_secs, 600);
         assert_eq!(overridden.management_auth.leeway_secs, 30);

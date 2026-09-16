@@ -63,6 +63,7 @@ statuslist:
     # Status-list record cache TTL in seconds. "0" disables this cache.
     APP_CACHE__TTL: "120"
     APP_CACHE__MAX_CAPACITY: "500"
+    APP_CACHE__REDIS_KEY_PREFIX: "status-list-server:local:status-list:"
     APP_STATUS_LIST__TOKEN_EXP_SECS: "900"
     APP_STATUS_LIST__TOKEN_TTL_SECS: "300"
     APP_RATE_LIMIT__STRICT_BURST_SIZE: "10"

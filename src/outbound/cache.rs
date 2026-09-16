@@ -1,7 +1,9 @@
-//! In-process status-list cache adapter.
+//! Status-list cache adapters.
 use async_trait::async_trait;
+#[cfg(feature = "cache-memory")]
 use moka::future::Cache as MokaCache;
 use opentelemetry::{KeyValue, metrics::Counter};
+#[cfg(feature = "cache-memory")]
 use std::{sync::Arc, time::Duration};
 
 use crate::domain::{
@@ -43,11 +45,13 @@ fn cache_metrics() -> CacheMetrics {
     })
 }
 
+#[cfg(feature = "cache-memory")]
 #[derive(Clone)]
 pub struct MokaStatusListCache {
     inner: MokaCache<String, Arc<StatusListRecord>>,
 }
 
+#[cfg(feature = "cache-memory")]
 impl MokaStatusListCache {
     /// Build an in-process cache.
     ///
@@ -70,6 +74,7 @@ impl MokaStatusListCache {
     }
 }
 
+#[cfg(feature = "cache-memory")]
 #[async_trait]
 impl StatusListCache for MokaStatusListCache {
     async fn get(&self, key: &str) -> Result<Option<StatusListRecord>, StatusListError> {
@@ -100,7 +105,100 @@ impl StatusListCache for MokaStatusListCache {
     }
 }
 
+#[cfg(feature = "cache-redis")]
+#[derive(Clone)]
+pub struct RedisStatusListCache {
+    connection: redis::aio::ConnectionManager,
+    ttl_secs: u64,
+    key_prefix: String,
+}
+
+#[cfg(feature = "cache-redis")]
+impl RedisStatusListCache {
+    pub async fn new(
+        redis_url: &str,
+        ttl_secs: u64,
+        key_prefix: impl Into<String>,
+    ) -> Result<Self, StatusListError> {
+        let client = redis::Client::open(redis_url).map_err(redis_error)?;
+        let connection = redis::aio::ConnectionManager::new(client)
+            .await
+            .map_err(redis_error)?;
+        Ok(Self {
+            connection,
+            ttl_secs,
+            key_prefix: key_prefix.into(),
+        })
+    }
+
+    fn key(&self, list_id: &str) -> String {
+        format!("{}{}", self.key_prefix, list_id)
+    }
+}
+
+#[cfg(feature = "cache-redis")]
+#[async_trait]
+impl StatusListCache for RedisStatusListCache {
+    async fn get(&self, list_id: &str) -> Result<Option<StatusListRecord>, StatusListError> {
+        use redis::AsyncCommands;
+
+        let key = self.key(list_id);
+        let mut connection = self.connection.clone();
+        let cached: Option<String> = connection.get(key).await.map_err(redis_error)?;
+        let metrics = cache_metrics();
+        if let Some(value) = cached {
+            metrics
+                .hits
+                .add(1, &[KeyValue::new("cache", "status_list")]);
+            let record = serde_json::from_str(&value).map_err(cache_error)?;
+            Ok(Some(record))
+        } else {
+            metrics
+                .misses
+                .add(1, &[KeyValue::new("cache", "status_list")]);
+            Ok(None)
+        }
+    }
+
+    async fn put(&self, record: StatusListRecord) -> Result<(), StatusListError> {
+        use redis::AsyncCommands;
+
+        if self.ttl_secs == 0 {
+            return Ok(());
+        }
+
+        let key = self.key(&record.list_id);
+        let value = serde_json::to_string(&record).map_err(cache_error)?;
+        let mut connection = self.connection.clone();
+        let _: () = connection
+            .set_ex(key, value, self.ttl_secs)
+            .await
+            .map_err(redis_error)?;
+        Ok(())
+    }
+
+    async fn invalidate(&self, list_id: &str) -> Result<(), StatusListError> {
+        use redis::AsyncCommands;
+
+        let key = self.key(list_id);
+        let mut connection = self.connection.clone();
+        let _: () = connection.del(key).await.map_err(redis_error)?;
+        Ok(())
+    }
+}
+
+#[cfg(feature = "cache-redis")]
+fn redis_error(error: redis::RedisError) -> StatusListError {
+    StatusListError::Backend(Box::new(error))
+}
+
+#[cfg(feature = "cache-redis")]
+fn cache_error(error: serde_json::Error) -> StatusListError {
+    StatusListError::Backend(Box::new(error))
+}
+
 #[cfg(test)]
+#[cfg(feature = "cache-memory")]
 mod tests {
     use super::*;
     use crate::{
@@ -187,5 +285,58 @@ mod tests {
                 "missing metric series {metric_prefix}; body:\n{body}"
             );
         }
+    }
+}
+
+#[cfg(test)]
+#[cfg(feature = "cache-redis")]
+mod redis_tests {
+    use super::*;
+    use crate::domain::models::credential::Issuer;
+    use crate::domain::models::status_list::StatusList;
+
+    fn record(list_id: &str) -> StatusListRecord {
+        StatusListRecord {
+            list_id: list_id.to_string(),
+            issuer: Issuer("issuer".into()),
+            status_list: StatusList {
+                bits: 1,
+                lst: "lst".into(),
+            },
+            sub: "sub".into(),
+            updated_at: 0,
+        }
+    }
+
+    #[tokio::test]
+    async fn redis_cache_round_trips_and_invalidates_when_test_url_is_set() {
+        let Ok(redis_url) = std::env::var("TEST_REDIS_URL") else {
+            return;
+        };
+        let prefix = format!("status-list-server:test:{}:", uuid::Uuid::new_v4());
+        let cache = RedisStatusListCache::new(&redis_url, 60, prefix)
+            .await
+            .expect("connect to redis");
+
+        let record = record("list-1");
+        cache.put(record.clone()).await.expect("put record");
+        assert_eq!(cache.get("list-1").await.expect("get record"), Some(record));
+
+        cache.invalidate("list-1").await.expect("invalidate record");
+        assert_eq!(cache.get("list-1").await.expect("get invalidated"), None);
+    }
+
+    #[tokio::test]
+    async fn redis_cache_ttl_zero_disables_puts_when_test_url_is_set() {
+        let Ok(redis_url) = std::env::var("TEST_REDIS_URL") else {
+            return;
+        };
+        let prefix = format!("status-list-server:test:{}:", uuid::Uuid::new_v4());
+        let cache = RedisStatusListCache::new(&redis_url, 0, prefix)
+            .await
+            .expect("connect to redis");
+
+        cache.put(record("list-2")).await.expect("put skipped");
+        assert_eq!(cache.get("list-2").await.expect("get skipped"), None);
     }
 }

@@ -62,7 +62,10 @@ use crate::domain::{
 use crate::outbound::aws::AwsSecretsManager;
 #[cfg(all(feature = "azure", not(feature = "vault"), not(feature = "gcp")))]
 use crate::outbound::azure_kv::AzureKeyVaultClient;
+#[cfg(all(feature = "cache-memory", not(feature = "cache-redis")))]
 use crate::outbound::cache::MokaStatusListCache;
+#[cfg(all(feature = "cache-redis", not(feature = "cache-memory")))]
+use crate::outbound::cache::RedisStatusListCache;
 #[cfg(feature = "acme")]
 use crate::outbound::cert::AcmeCertificateProvider;
 #[cfg(not(feature = "acme"))]
@@ -526,7 +529,40 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
         (provider, None)
     };
 
-    let status_list_cache = MokaStatusListCache::new(config.cache.ttl, config.cache.max_capacity);
+    #[cfg(all(feature = "cache-memory", not(feature = "cache-redis")))]
+    let status_list_cache: Arc<dyn crate::domain::ports::StatusListCache> = Arc::new(
+        MokaStatusListCache::new(config.cache.ttl, config.cache.max_capacity),
+    );
+
+    #[cfg(all(feature = "cache-redis", not(feature = "cache-memory")))]
+    let status_list_cache: Arc<dyn crate::domain::ports::StatusListCache> = {
+        use secrecy::ExposeSecret;
+
+        let redis_url = config.cache.redis_url.as_ref().ok_or_else(|| {
+            color_eyre::eyre::eyre!(
+                "cache.redis_url is required when the 'cache-redis' feature is enabled"
+            )
+        })?;
+        Arc::new(
+            RedisStatusListCache::new(
+                redis_url.expose_secret(),
+                config.cache.ttl,
+                config.cache.redis_key_prefix.clone(),
+            )
+            .await?,
+        )
+    };
+
+    #[cfg(all(feature = "cache-memory", feature = "cache-redis"))]
+    let status_list_cache: Arc<dyn crate::domain::ports::StatusListCache> =
+        Arc::new(crate::outbound::cache::MokaStatusListCache::new(
+            config.cache.ttl,
+            config.cache.max_capacity,
+        ));
+
+    #[cfg(not(any(feature = "cache-memory", feature = "cache-redis")))]
+    let status_list_cache: Arc<dyn crate::domain::ports::StatusListCache> =
+        unreachable!("one cache backend feature must be enabled");
 
     let snapshot_option = if config.status_list.snapshot_retention_secs == 0 {
         None
@@ -537,7 +573,7 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
     let service = Arc::new(Service::from_arcs(
         status_list_repo,
         credential_repo,
-        Arc::new(status_list_cache),
+        status_list_cache,
         snapshot_option,
         cert_provider,
     ));
