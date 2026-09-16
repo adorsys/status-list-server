@@ -109,7 +109,7 @@ impl From<StatusEntry> for crate::domain::models::status_list::StatusEntry {
 
 #[cfg(test)]
 mod tests {
-    use super::Status;
+    use super::{Status, StatusEntry};
 
     #[test]
     fn status_serde_integer_roundtrip() {
@@ -136,5 +136,114 @@ mod tests {
         assert!(serde_json::from_str::<Status>("3").is_err());
         assert!(serde_json::from_str::<Status>("100").is_err());
         assert!(serde_json::from_str::<Status>("255").is_err());
+    }
+
+    #[test]
+    fn status_deser_string_names() {
+        assert_eq!(
+            serde_json::from_str::<Status>(r#""VALID""#).unwrap(),
+            Status::VALID
+        );
+        assert_eq!(
+            serde_json::from_str::<Status>(r#""INVALID""#).unwrap(),
+            Status::INVALID
+        );
+        assert_eq!(
+            serde_json::from_str::<Status>(r#""SUSPENDED""#).unwrap(),
+            Status::SUSPENDED
+        );
+    }
+
+    #[test]
+    fn status_deser_string_names_case_insensitive() {
+        assert_eq!(
+            serde_json::from_str::<Status>(r#""valid""#).unwrap(),
+            Status::VALID
+        );
+        assert_eq!(
+            serde_json::from_str::<Status>(r#""Valid""#).unwrap(),
+            Status::VALID
+        );
+        assert_eq!(
+            serde_json::from_str::<Status>(r#""iNvAlId""#).unwrap(),
+            Status::INVALID
+        );
+        assert_eq!(
+            serde_json::from_str::<Status>(r#""suspended""#).unwrap(),
+            Status::SUSPENDED
+        );
+        assert_eq!(
+            serde_json::from_str::<Status>(r#""Suspended""#).unwrap(),
+            Status::SUSPENDED
+        );
+    }
+
+    #[test]
+    fn status_deser_stringified_integers() {
+        assert_eq!(
+            serde_json::from_str::<Status>(r#""0""#).unwrap(),
+            Status::VALID
+        );
+        assert_eq!(
+            serde_json::from_str::<Status>(r#""1""#).unwrap(),
+            Status::INVALID
+        );
+        assert_eq!(
+            serde_json::from_str::<Status>(r#""2""#).unwrap(),
+            Status::SUSPENDED
+        );
+        assert_eq!(
+            serde_json::from_str::<Status>(r#""256""#).unwrap(),
+            Status::ApplicationSpecific(256)
+        );
+        assert_eq!(
+            serde_json::from_str::<Status>(r#""512""#).unwrap(),
+            Status::ApplicationSpecific(512)
+        );
+    }
+
+    #[test]
+    fn status_deser_rejects_reserved_integers() {
+        assert!(serde_json::from_str::<Status>("3").is_err());
+        assert!(serde_json::from_str::<Status>("100").is_err());
+        assert!(serde_json::from_str::<Status>("255").is_err());
+    }
+
+    #[test]
+    fn status_deser_rejects_reserved_string_integers() {
+        assert!(serde_json::from_str::<Status>(r#""3""#).is_err());
+        assert!(serde_json::from_str::<Status>(r#""100""#).is_err());
+        assert!(serde_json::from_str::<Status>(r#""255""#).is_err());
+    }
+
+    #[test]
+    fn status_deser_rejects_invalid_strings() {
+        assert!(serde_json::from_str::<Status>(r#""foo""#).is_err());
+        assert!(serde_json::from_str::<Status>(r#""REVOKED""#).is_err());
+        assert!(serde_json::from_str::<Status>(r#""""#).is_err());
+    }
+
+    #[test]
+    fn status_deser_full_entry_string() {
+        let entry: StatusEntry =
+            serde_json::from_str(r#"{"index": 0, "status": "VALID"}"#).unwrap();
+        assert_eq!(entry.index, 0);
+        assert_eq!(entry.status, Status::VALID);
+
+        let entry: StatusEntry =
+            serde_json::from_str(r#"{"index": 5, "status": "suspended"}"#).unwrap();
+        assert_eq!(entry.index, 5);
+        assert_eq!(entry.status, Status::SUSPENDED);
+    }
+
+    #[test]
+    fn status_deser_full_entry_integer() {
+        let entry: StatusEntry = serde_json::from_str(r#"{"index": 0, "status": 0}"#).unwrap();
+        assert_eq!(entry.index, 0);
+        assert_eq!(entry.status, Status::VALID);
+
+        let entry: StatusEntry = serde_json::from_str(r#"{"index": 1, "status": 2}"#).unwrap();
+        assert_eq!(entry.index, 1);
+        assert_eq!(entry.status, Status::SUSPENDED);
     }
 }
