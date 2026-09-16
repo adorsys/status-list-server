@@ -72,6 +72,7 @@ jobs:
     # job needs its SARIF upload scope granted here too.
     permissions:
       contents: read
+      id-token: write
       security-events: write
 
   build-and-push:
@@ -85,21 +86,7 @@ jobs:
     permissions:
       contents: read
       packages: write
-      # `id-token: write` mints the OIDC token Fulcio exchanges for a signing certificate.
-      # `attestations: write` persists the signed bundle. `artifact-metadata: write` is
-      # deliberately not granted; see `create-storage-record` on the attest step.
-      #
-      # `id-token: write` is not free: it lets any step in this job mint an OIDC token
-      # asserting this repository's identity, and this job builds from the source tree.
-      # The blast radius is therefore whatever trusts that identity, which here is the
-      # AWS role `deploy` assumes. That role's trust policy must condition `sub` on
-      # `repo:<owner>/<repo>:environment:production`, not on `repo:<owner>/<repo>:*` --
-      # under the looser condition this grant would let the build job assume the
-      # production deploy role, which is the privilege `environment: production` exists
-      # to gate. Recorded in docs/adr/0001-container-image-provenance.md and checked in
-      # docs/deployment-runbook.md.
       id-token: write
-      attestations: write
     strategy:
       fail-fast: false
       matrix:
@@ -149,29 +136,27 @@ jobs:
           labels: |
             org.opencontainers.image.description=${{ matrix.variant.description }}
 
-      - name: Build and push Docker image
-        id: build
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+      - name: Prepare Docker output
+        run: mkdir -p target
+
+      - name: BoringCache Docker
+        uses: boringcache/one@a610ec5a564efd9b360925056dbade04deb5def6 # v1.30.0
         with:
-          context: .
-          file: ./Dockerfile
-          push: true
-          platforms: linux/amd64,linux/arm64
-          tags: ${{ steps.meta.outputs.tags }}
-          cache-from: type=gha,scope=build-${{ matrix.variant.suffix }}
-          cache-to: type=gha,mode=max,scope=build-${{ matrix.variant.suffix }}
-          # Explicit: the action defaults to mode=max on public repos and mode=min on
-          # private, so a visibility change would silently degrade provenance.
-          #
-          # BuildKit attaches both as in-toto manifests in the pushed index, which is
-          # why the image cannot be scanned before it is pushed.
-          provenance: mode=max
-          sbom: true
-          build-args: |
-            FEATURES=${{ matrix.variant.features }}
-          labels: ${{ steps.meta.outputs.labels }}
-          annotations: |
-            index,manifest:org.opencontainers.image.description=${{ matrix.variant.description }}
+          mode: docker
+          fail-on-cache-error: true
+        env:
+          RELEASE_BUILD: "true"
+          BUILD_VARIANT: ${{ matrix.variant.suffix }}
+          FEATURES: ${{ matrix.variant.features }}
+          DOCKER_METADATA_OUTPUT_JSON: ${{ steps.meta.outputs.json }}
+
+      - name: Read built image digest
+        id: build
+        env:
+          SUFFIX: ${{ matrix.variant.suffix }}
+        run: |
+          digest=$(jq -er '.[env.SUFFIX]["containerimage.digest"]' target/docker-metadata.json)
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
 
       - name: Assert a digest was produced
         # An empty digest would silently fall back to tag-based deployment, which is
@@ -187,7 +172,7 @@ jobs:
           SUFFIX: ${{ matrix.variant.suffix }}
         run: |
           if [ -z "$DIGEST" ]; then
-            echo "::error::build-push-action produced no image digest for variant ${SUFFIX}."
+            echo "::error::Docker build produced no image digest for variant ${SUFFIX}."
             exit 1
           fi
           echo "image digest for ${SUFFIX}: $DIGEST"
