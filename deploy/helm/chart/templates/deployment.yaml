@@ -2,7 +2,10 @@
 Deployment of the status-list-server application pod.
 Fails if both externalSecret.enabled and statuslist.fallbackSecret.enabled are set.
 Replica count is driven by autoscaling (HPA) when enabled; the chart omits `replicas`
-so the HPA controls the count. Prometheus pod annotations expose the /metrics endpoint.
+so the HPA controls the count. Pod annotations are emitted unconditionally: the
+prometheus.io/scrape hints are for annotation-based scrape discovery (they do not "expose"
+anything). If you also enable serviceMonitor with a Prometheus doing both ServiceMonitor
+and annotation discovery, installs scrape these pods twice (doubled samples/cost).
 */}}
 {{- if .Values.statuslist.enabled }}
 {{- if and .Values.externalSecret.enabled .Values.statuslist.fallbackSecret.enabled }}

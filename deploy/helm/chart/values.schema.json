@@ -16,10 +16,20 @@
         }
       }
     },
+    "nameOverride": {
+      "type": "string",
+      "title": "Chart name override",
+      "description": "Overrides the base chart name used by the _helpers.tpl 'name' / 'fullname' helpers (and therefore resource names and selector labels). Read by the templates; empty uses the chart name (status-list-server)."
+    },
+    "fullnameOverride": {
+      "type": "string",
+      "title": "Full name override",
+      "description": "Overrides the fully-qualified name (fullname) used for most resource names and the default ServiceAccount when create=true. Read by the _helpers.tpl 'fullname' helper; empty derives <release>-<name>."
+    },
     "serviceAccount": {
       "type": "object",
       "title": "Application ServiceAccount",
-      "description": "ServiceAccount for the application pods. Attach Workload Identity role annotations here (AWS EKS IRSA eks.amazonaws.com/role-arn, GCP GKE iam.gke.io/gcp-service-account, or Azure AKS azure.workload.identity/client-id) for ambient cloud credentials. Create either chart-managed via create=true or reference an existing one via name.",
+      "description": "ServiceAccount for the application pods. Attach Workload Identity role annotations here (AWS EKS IRSA eks.amazonaws.com/role-arn, GCP GKE iam.gke.io/gcp-service-account, or Azure AKS azure.workload.identity/client-id) for ambient cloud credentials. The ServiceAccount name defaults to the chart fullname (<release>-status-list-server unless release already contains 'status-list-server', or fullnameOverride if set); the cloud-side trust must be keyed on that name, with the federated subject system:serviceaccount:<namespace>:<name> (IAM role trust for IRSA, roles/iam.workloadIdentityUser binding for GKE, a federated identity credential for AKS — see the env block in values.yaml). Create either chart-managed via create=true or reference an existing one via name.",
       "properties": {
         "create": {
           "type": "boolean",
@@ -71,6 +81,12 @@
           "type": "object",
           "title": "Pod labels",
           "description": "Extra labels merged onto the Pod template metadata. Values are rendered as strings; required e.g. for Azure Workload Identity: azure.workload.identity/use: 'true'.",
+          "additionalProperties": { "type": "string" }
+        },
+        "podAnnotations": {
+          "type": "object",
+          "title": "Pod annotations",
+          "description": "Extra annotations merged onto the Pod template metadata (e.g. sidecar injection, monitoring hints), on top of the hard-coded prometheus.io/scrape annotations.",
           "additionalProperties": { "type": "string" }
         },
         "image": {
@@ -171,7 +187,7 @@
         "ingress": {
           "type": "object",
           "title": "Ingress",
-          "description": "NGINX Ingress exposing the application. The host defaults to statuslist.<global.domain> when set, otherwise localhost. TLS hosts default to *.<global.domain> when global.domain is set, or to the rendered ingress host when secretName is set explicitly.",
+          "description": "NGINX Ingress exposing the application. The ingressClassName is hard-coded to 'nginx' (ingress.yaml), so 'disable when another controller handles traffic' is the only option — the class is not configurable. The host defaults to statuslist.<global.domain> when set, otherwise localhost. TLS hosts default to *.<global.domain> when global.domain is set, or to the rendered ingress host when secretName is set explicitly.",
           "properties": {
             "enabled": { "type": "boolean", "title": "Render the Ingress" },
             "path": { "type": "string", "title": "Ingress path", "minLength": 1 },
@@ -219,7 +235,7 @@
         "aws": {
           "type": "object",
           "title": "AWS application configuration",
-          "description": "Optional AWS configuration for the application. Defaults to Workload Identity (IRSA) — the AWS SDK discovers the role from the projected OIDC token and instance metadata, so no files are mounted. Enable mountCredentials only for the legacy static shared-credential-file path.",
+          "description": "Optional AWS configuration for the application. The chart is provider-neutral by default: serviceAccount.annotations is empty and no credentials are mounted, so you must attach the AWS integration yourself. For IRSA, set the eks.amazonaws.com/role-arn annotation and let the pod-identity webhook inject AWS_ROLE_ARN + AWS_WEB_IDENTITY_TOKEN_FILE (the SDK reads the projected OIDC token; it does NOT use node-instance metadata). Enable mountCredentials only for the legacy static shared-credential-file path.",
           "properties": {
             "mountCredentials": {
               "type": "boolean",
@@ -240,7 +256,7 @@
             "region": {
               "type": "string",
               "title": "AWS region",
-              "description": "Plain (non-secret) AWS region. Applies to the ESO AWS SecretStore and renders APP_AWS__REGION only when explicitly set. Leave empty for pure-IRSA / Workload Identity so the SDK discovers the region from instance metadata."
+              "description": "Plain (non-secret) AWS region for the application. APP_AWS__REGION is rendered ONLY when secretStore.provider == 'aws' AND an effective region is set (this value, else the legacy secretStore.aws.region fallback — see the status-list-server-chart.appRegion helper). Setting this alone without provider=aws renders nothing; leave both empty and provider=aws for pure-IRSA / Workload Identity installs so the SDK discovers the region from instance metadata."
             }
           }
         },
@@ -274,7 +290,7 @@
         "secretMounts": {
           "type": "array",
           "title": "File-based secret mounts",
-          "description": "Mount Kubernetes Secrets as files into the container (production credential/key rotation, issue #456). fileEnv maps a mounted file path into an application env var; paths are relative to mountPath and must match the mounted items. When APP_DATABASE__PASSWORD_FILE is configured via statuslist.env or fileEnv, the chart does not inject APP_DATABASE__PASSWORD, so the app cannot silently keep a stale startup password.",
+          "description": "Mount Kubernetes Secrets as files into the container (production credential/key rotation, issue #456). fileEnv maps a mounted file path into an application env var; paths are relative to mountPath and must match the mounted items. APP_DATABASE__PASSWORD cannot be delivered any other way: the chart hard-fails if APP_DATABASE__PASSWORD (or APP_DATABASE__URL) is set as a plain env value or fileEnv key, so the mounted APP_DATABASE__PASSWORD_FILE is the only supported database-password delivery path.",
           "items": {
             "type": "object",
             "required": ["name", "secretName", "mountPath"],
@@ -328,7 +344,7 @@
         "networkPolicy": {
           "type": "object",
           "title": "NetworkPolicy",
-          "description": "Opt-in NetworkPolicy (default OFF). When enabled and ingress is empty, a port-only rule allows ANY source in the cluster — you MUST restrict ingress to your ingress controller. Egress always allows 443/53 and scopes PostgreSQL/OTel to their target pods.",
+          "description": "Opt-in NetworkPolicy (default OFF). When enabled and ingress is empty, a port-only rule allows ANY source in the cluster — you MUST restrict ingress to your ingress controller. Egress always allows 443/53 out to 0.0.0.0/0 (no destination restriction, so outbound exfiltration is not blocked), and scopes PostgreSQL / OTel egress to their labelled pods. statuslist.networkPolicy.egressInternal entries are appended to the PostgreSQL DB-port rule, so they inherit that rule's port — add a matching port when pointing at a different service. This policy does NOT fully isolate the pod on its own.",
           "properties": {
             "enabled": { "type": "boolean", "title": "Render the NetworkPolicy" },
             "ingress": { "type": "array", "title": "Ingress from selectors" },
@@ -345,7 +361,7 @@
     "externalSecret": {
       "type": "object",
       "title": "External Secrets Operator mode",
-      "description": "ESO delivery mode, mutually exclusive with statuslist.fallbackSecret (the chart fails if both are enabled). When enabled the chart renders an ExternalSecret syncs the application Secret (always named 'statuslist-secret', holder of the database password) from the secret manager referenced by secretStore. Cloud credentials resolve via Workload Identity / IRSA / ManagedIdentity. The ExternalSecret target name is intentionally not configurable and fails at render time if changed.",
+      "description": "ESO delivery mode, mutually exclusive with statuslist.fallbackSecret (the chart fails if both are enabled). When enabled the chart renders an ExternalSecret that syncs the application Secret (always named 'statuslist-secret', holder of the database password) from the secret manager referenced by secretStore. With a namespace-scoped SecretStore this requires secretStore.enabled=true or the render fails; only a pre-existing ClusterSecretStore is exempt. Cloud credentials resolve via Workload Identity / IRSA / ManagedIdentity where the provider supports it (Vault token auth and Azure ServicePrincipal + authSecretRef use static secrets instead). The ExternalSecret target name is intentionally not configurable and fails at render time if changed.",
       "properties": {
         "enabled": { "type": "boolean", "title": "Enable the ExternalSecret" },
         "metadata": {
@@ -384,7 +400,8 @@
                 "creationPolicy": {
                   "type": "string",
                   "title": "Creation policy",
-                  "enum": ["Owner", "Merge", "None"]
+                  "description": "Per the upstream External Secrets Operator CreationPolicy: Owner | Orphan | Merge | None | CreateOrMerge. Orphan leaves an existing target Secret in place for Argo pruning to keep deleting; CreateOrMerge merges only on create.",
+                  "enum": ["Owner", "Orphan", "Merge", "None", "CreateOrMerge"]
                 },
                 "template": { "type": "object", "title": "ESO target template" }
               }
@@ -475,7 +492,7 @@
             "region": {
               "type": "string",
               "title": "AWS region",
-              "description": "Region for the ESO AWS SecretStore. Leaves APP_AWS__REGION opt-in (not injected) so pure-IRSA / Workload Identity installs keep SDK region discovery; the CR independently falls back to eu-central-1."
+              "description": "Region for the ESO AWS SecretStore. Setting it here is the legacy fallback: when statuslist.aws.region is empty AND secretStore.provider == 'aws', this value is injected as APP_AWS__REGION (see the status-list-server-chart.appRegion helper). It is NOT 'opt-in / not injected' — set it only if you want the pod's region pinned. Leave both regions empty and provider='aws' with a wildcard/IRSA role to let the SDK discover the region from instance metadata. The ESO AWS SecretStore itself still needs a concrete region and falls back to eu-central-1 at the CR level when both values are empty, so a cluster in another region without an explicit region gets a real SecretSyncedError — treat eu-central-1 as an effective default, not a formality."
             }
           }
         },
@@ -563,7 +580,7 @@
     "postgres": {
       "type": "object",
       "title": "Bundled PostgreSQL",
-      "description": "Bundled in-cluster PostgreSQL (accepted values of the CloudPirates chart). One possible backend: the application is database-agnostic and selects its backend at runtime via APP_DATABASE__* env vars. Set enabled=false and point APP_DATABASE__* at an external database (including MySQL, see docs/database-backends.md) to use a different backend.",
+      "description": "Bundled in-cluster PostgreSQL (accepted values of the CloudPirates chart). One possible backend: the application is database-agnostic and selects its backend at runtime via APP_DATABASE__* env vars. Set enabled=false and point APP_DATABASE__* at an external database for a different backend. Note: only the PostgreSQL backend is delivered by this chart — no MySQL (or other) image variant is published, so 'including MySQL' applies to the application code only, not to a Helm-installable MySQL. If you disable postgres, you must also override statuslist.initContainers (the default wait-for-postgres init container otherwise hangs on <release>-postgres) and add egress for your external database host.",
       "properties": {
         "enabled": { "type": "boolean", "title": "Render the PostgreSQL subchart" },
         "resources": { "type": "object", "title": "PostgreSQL resources" },
@@ -576,7 +593,7 @@
             "existingSecret": {
               "type": "string",
               "title": "Existing secret name",
-              "description": "Must reference the same secret the application reads (statuslist-secret, see the status-list-server-chart.appSecretName helper). Fixed in fallback mode; in ESO mode keep it in sync with externalSecret.spec.target.name."
+              "description": "Must reference the same secret the application reads (statuslist-secret, see the status-list-server-chart.appSecretName helper). Fixed to statuslist-secret in both modes: fallback mode renders that exact name, and ESO mode rejects any externalSecret.spec.target.name other than it at render time — there is nothing to keep in sync."
             },
             "secretKeys": { "type": "object", "title": "Secret key names" }
           }
@@ -647,7 +664,7 @@
     "prometheusRule": {
       "type": "object",
       "title": "PrometheusRule",
-      "description": "PrometheusRule (monitoring.coreos.com/v1) shipping the SLI recording rules and SLO burn-rate / error-budget alerting rules as a single CRD. Alert thresholds come from the slo block; both must stay in lockstep with observability/slo/thresholds.json (enforced by CI) and the standalone observability/prometheus/rules/*.rules.yml.",
+      "description": "PrometheusRule (monitoring.coreos.com/v1) shipping the SLI recording rules and SLO burn-rate / error-budget alerting rules as a single CRD. Alert thresholds come from the slo block. Only the values.yaml slo.* defaults are checked against deploy/observability/slo/thresholds.json and the standalone deploy/observability/prometheus/rules/*.rules.yml by lint-thresholds.mjs; the hard-coded alert summary strings inside this template are not covered by that lint.",
       "properties": {
         "enabled": { "type": "boolean", "title": "Enable the PrometheusRule" },
         "labels": {
@@ -660,18 +677,18 @@
     "slo": {
       "type": "object",
       "title": "SLO thresholds",
-      "description": "SLO target thresholds consumed by the prometheusrule template to build SLI recording rules and SLO burn-rate alerting rules. Each value renders verbatim into alert expressions. Must stay in lockstep with observability/slo/thresholds.json (CI-enforced) and the standalone observability/prometheus/rules/*.rules.yml.",
+      "description": "SLO target thresholds consumed by the prometheusrule template (prometheusrule.yaml) to build SLI recording rules and SLO burn-rate / error-budget alerting rules. Values are accepted as either JSON numbers or numeric strings — helm's --set passes floats as strings, so a number-only type would reject --set slo.errorRateTarget=0.004 (use --set-json or a values file for full parity; --set works for these). The values.yaml slo.* defaults are asserted against deploy/observability/slo/thresholds.json and the standalone deploy/observability/prometheus/rules/*.rules.yml by lint-thresholds.mjs; the summary strings inside prometheusrule.yaml are NOT covered by that lint and are hard-coded.",
       "properties": {
-        "errorRateTarget": { "type": "number", "title": "Error-rate SLO target", "description": "Acceptable ratio of 5xx to all requests over the SLO window (0.005 = 0.5%). Denominator of burn-rate multipliers and error-budget success ratio." },
-        "fastBurnMultiplier": { "type": "number", "title": "Fast-burn multiplier", "description": "Fast-burn alert triggers when observed error rate exceeds errorRateTarget * this (14.4x) on both the 1h and 5m windows for 5m. Pages." },
-        "slowBurnMultiplier": { "type": "number", "title": "Slow-burn multiplier", "description": "Slow-burn alert triggers when observed error rate exceeds errorRateTarget * this (6.0x) on the 6h and 30m windows for 30m. Warns." },
-        "requestLatencyP95": { "type": "number", "title": "Request latency P95 target (s)", "description": "P95 request latency target in seconds (0.3 = 300ms). Exceeding on the fast or slow burn windows fires an alert." },
-        "dbLatencyP95": { "type": "number", "title": "DB latency P95 target (s)", "description": "P95 database query latency target in seconds (0.05 = 50ms). Same fast/slow burn semantics." },
-        "cacheHitRatioMin": { "type": "number", "title": "Minimum cache hit ratio", "description": "Minimum acceptable status-list cache hit ratio (0.85 = 85%); below this for 15m fires a warn." },
-        "certRenewalFailureMax": { "type": "number", "title": "Max certificate-renewal failure ratio", "description": "Maximum acceptable certificate-renewal failure ratio (0.01 = 1%). Parity with the standalone rules." },
-        "errorBudgetCriticalThreshold": { "type": "number", "title": "Error-budget critical threshold", "description": "Remaining-error-budget gate for the ErrorBudget*Critical page alerts; below this fraction of the 30d budget remaining pages." },
-        "certExpiryWarnSeconds": { "type": "number", "title": "Certificate expiry warn seconds", "description": "Seconds remaining that trigger a warn (1209600 = 14d). Cert renewal is a discrete low-frequency event, so alerts watch the continuous cert_time_to_expiry_seconds gauge." },
-        "certExpiryCriticalSeconds": { "type": "number", "title": "Certificate expiry critical seconds", "description": "Seconds remaining that trigger a page (604800 = 7d)." }
+        "errorRateTarget": { "type": ["number", "string"], "pattern": "^[0-9]*\\.?[0-9]+$", "title": "Error-rate SLO target", "description": "Acceptable ratio of 5xx to all requests over the SLO window (0.005 = 0.5%). Multiplicand of the burn-rate thresholds (threshold = errorRateTarget x multiplier) and denominator of the error-budget success ratio. Note: also drives the token-generation burn-rate and budget alerts." },
+        "fastBurnMultiplier": { "type": ["number", "string"], "pattern": "^[0-9]*\\.?[0-9]+$", "title": "Fast-burn multiplier", "description": "Fast-burn alert threshold = errorRateTarget x this (14.4x), evaluated on the 1h and 5m windows for 5m. Pages." },
+        "slowBurnMultiplier": { "type": ["number", "string"], "pattern": "^[0-9]*\\.?[0-9]+$", "title": "Slow-burn multiplier", "description": "Slow-burn alert threshold = errorRateTarget x this (6.0x), evaluated on the 6h and 30m windows for 30m. Warns." },
+        "requestLatencyP95": { "type": ["number", "string"], "pattern": "^[0-9]*\\.?[0-9]+$", "title": "Request latency P95 target (s)", "description": "P95 request latency target in seconds (0.3 = 300ms). Exceeding on the fast or slow burn windows fires an alert." },
+        "dbLatencyP95": { "type": ["number", "string"], "pattern": "^[0-9]*\\.?[0-9]+$", "title": "DB latency P95 target (s)", "description": "P95 database query latency target in seconds (0.05 = 50ms). Same fast/slow burn semantics." },
+        "cacheHitRatioMin": { "type": ["number", "string"], "pattern": "^[0-9]*\\.?[0-9]+$", "title": "Minimum cache hit ratio", "description": "Minimum acceptable status-list cache hit ratio (0.85 = 85%); below this for 15m fires a warn." },
+        "certRenewalFailureMax": { "type": ["number", "string"], "pattern": "^[0-9]*\\.?[0-9]+$", "title": "Max certificate-renewal failure ratio", "description": "Accepted for parity with the standalone rules and thresholds.json, but NOT consumed by prometheusrule.yaml — this chart's cert alert is expiry-driven (certExpiryWarnSeconds / certExpiryCriticalSeconds); tuning this value has no effect here." },
+        "errorBudgetCriticalThreshold": { "type": ["number", "string"], "pattern": "^[0-9]*\\.?[0-9]+$", "title": "Error-budget critical threshold", "description": "Remaining-error-budget gate for the ErrorBudget*Critical page alerts; below this fraction of the 30d budget remaining pages." },
+        "certExpiryWarnSeconds": { "type": ["number", "string"], "pattern": "^[0-9]*\\.?[0-9]+$", "title": "Certificate expiry warn seconds", "description": "Seconds remaining that trigger a warn (1209600 = 14d). Cert renewal is a discrete low-frequency event, so alerts watch the continuous cert_time_to_expiry_seconds gauge." },
+        "certExpiryCriticalSeconds": { "type": ["number", "string"], "pattern": "^[0-9]*\\.?[0-9]+$", "title": "Certificate expiry critical seconds", "description": "Seconds remaining that trigger a page (604800 = 7d)." }
       }
     },
     "alerting": {

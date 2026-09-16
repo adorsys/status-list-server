@@ -1,8 +1,10 @@
 {{/*
 Opt-in NetworkPolicy (default off). With an empty `ingress` list the port-only ingress
 rule allows ANY source in the cluster — you MUST restrict sources via statuslist.networkPolicy.ingress.
-Egress always allows 443/53 and scopes PostgreSQL / OTel egress to their target pods
-(internal egress is not open to arbitrary pods in the cluster).
+Egress always allows 443/53 with NO destination restriction (open to 0.0.0.0/0, so this
+policy does NOT constrain outbound exfiltration). PostgreSQL / OTel egress are scoped to
+their labelled pods; statuslist.networkPolicy.egressInternal entries are appended to the
+PostgreSQL DB-port rule and inherit that rule's port.
 */}}
 {{- if .Values.statuslist.networkPolicy.enabled }}
 {{- $otel := index .Values "opentelemetry-collector" | default dict -}}

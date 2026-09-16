@@ -9,16 +9,21 @@ global:
 # status-list-server Deployment, its Pod, Service, Ingress, secrets, and runtime env.
 # The base chart is provider-neutral: cloud-specific behavior (AWS/GCP/Azure Workload
 # Identity, per-cloud DNS, per-cloud SecretStore) is selected through the overlays listed
-# in helm/README.md (values-aws.yaml, values-aws-nlb.yaml, values-external-secrets.yaml,
+# in deploy/helm/README.md (values-aws.yaml, values-aws-nlb.yaml, values-external-secrets.yaml,
 # values-production.yaml) rather than baked into these defaults.
 statuslist:
   enabled: true
   # initContainers run before the application container. The default waits for the
   # bundled PostgreSQL service to accept connections on the database port derived from
-  # APP_DATABASE__PORT (see the status-list-server-chart.dbPort helper). Each stack
-  # is hardened (drop-all capabilities, non-root, read-only rootfs, /tmp emptyDir) and
-  # given small fixed CPU/memory requests regardless of the value provided here, so
-  # operators only supply the wait command and image.
+  # APP_DATABASE__PORT (see the status-list-server-chart.dbPort helper). If you disable
+  # the bundled PostgreSQL, you MUST override this block (the default waits on
+  # <release>-postgres forever). Each init container is hardened (drop-all capabilities,
+  # non-root, read-only rootfs, /tmp emptyDir) and given small fixed CPU/memory
+  # requests/limits regardless of the values provided here, so operators only supply the
+  # wait command and image. CAUTION: the chart merges the container spec with these
+  # hardened defaults using mustMergeOverwrite, which silently REPLACES any
+  # user-supplied volumeMounts and resources on an init container — a mount you add here
+  # is dropped without warning, so do not add volumeMounts to init containers.
   initContainers:
     - name: wait-for-postgres
       image: busybox:1.37
@@ -41,8 +46,7 @@ statuslist:
   podLabels: {}
   image:
     repository: ghcr.io/adorsys/status-list-server
-    # Empty derives from how the image is named: IfNotPresent for a digest, Always
-    # for a mutable tag. Set explicitly to override.
+    # Empty derives from which resolution is in use (digest -> IfNotPresent, tag -> Always).
     pullPolicy: ""
     # Used only when tag and digest are empty. The chart derives
     # <appVersion-without-suffix>-<variant>, so overlays can select a cloud
@@ -59,18 +63,14 @@ statuslist:
     # | -fscert    | postgres | PostgreSQL database with filesystem-mounted token signing keys and certificates | Constrained / air-gapped environments using external secret injection |
     #
     # Tag format: <version>-<suffix> (e.g., 1.2.0-aws, 1.2.0-gcp)
-    # Latest tags: latest-<suffix> (e.g., latest-aws, latest-gcp)
-    #
-    # Empty derives from the chart appVersion plus statuslist.image.variant.
-    # Defaulting to "latest" would let an upgrade that changes nothing in this
-    # chart still change the running image.
     tag: ""
     # "sha256:...". Takes precedence over tag and pins the exact digest CI scanned.
     # Each variant has its own digest. Use the digest from the variant you select.
     digest: ""
-    # Image resolution rules (order of precedence):
+    # Image resolution rules (single authoritative reference — order of precedence):
     #   1. digest, if set to "sha256:<64 hex chars>" -> image is repository@digest and
     #      pullPolicy defaults to IfNotPresent (content-addressed, immutable).
+    #      An invalid digest does NOT fall through to tag/derived: it fails the render.
     #   2. tag, if set -> image is repository:<tag> and pullPolicy defaults to Always
     #      (tag is mutable and may move).
     #   3. both empty -> the chart derives repository:<baseAppVersion>-<variant>, where
@@ -88,8 +88,9 @@ statuslist:
     targetPort: 8000
     nodePort: null
   ingress:
-    # NGINX Ingress exposing the application Service. Disable (enabled: false) when
-    # another ingress controller or a service mesh handles external traffic.
+    # NGINX Ingress exposing the application Service. The ingressClassName is hard-coded
+    # to "nginx", so if another ingress controller or a service mesh handles external
+    # traffic the only option is to disable this block (enabled: false).
     enabled: true
     # Path and pathType for the single ingress rule.
     path: /
@@ -104,7 +105,10 @@ statuslist:
       # that provide TLS material or cert-manager ingress-shim annotations.
       secretName: ""
     # Defaults to statuslist.<global.domain> when global.domain is set, otherwise localhost.
-    # Emitted as an external-dns hostname annotation; set explicitly to override the default host.
+    # Emitted as an external-dns hostname annotation AND sets the application's own public
+    # domain (APP_SERVER__DOMAIN, via deployment.yaml) when it is non-empty and
+    # APP_SERVER__DOMAIN is not set explicitly — changing what reads like a DNS annotation
+    # also changes application config. Set to override the default host.
     externalDnsHostname: ""
   env:
     RUST_LOG: "info"
@@ -114,14 +118,13 @@ statuslist:
     APP_SERVER__CERT__ACME_DIRECTORY_URL: "https://acme-v02.api.letsencrypt.org/directory"
     APP_SERVER__CERT__EKU: "1,3,6,1,5,5,7,3,30"
     APP_SERVER__CERT__RENEWAL_CRON_SCHEDULE: "0 0 0 * * *"
-    # Parsed certificate chain cache TTL in seconds. "0" means no expiry.
     # DNS provider for ACME DNS-01 challenges: route53 | cloudflare | gcloud | azure | acmedns
     # (pebble also exists but is a development-only fake, not for deployments)
     # See docs/dns-providers.md for the settings each provider needs.
     #
-    # Workload Identity DNS setup per cloud — combine the provider env vars below with
-    # the matching serviceAccount.annotations and podLabels documented under
-    # serviceAccount, plus the cloud SecretStore under secretStore:
+    # Workload Identity DNS setup per cloud — combine the provider env vars below with the
+    # matching serviceAccount.annotations and podLabels documented under serviceAccount,
+    # plus the cloud SecretStore under secretStore:
     #   AWS EKS (IRSA) : APP_SERVER__CERT__DNS__PROVIDER=route53, and the EKS IRSA role
     #                    annotation eks.amazonaws.com/role-arn on the application
     #                    ServiceAccount; route53 credentials resolve via the role.
@@ -138,6 +141,23 @@ statuslist:
     #                    azure.workload.identity/use: "true".
     #   On-prem / other: APP_SERVER__CERT__DNS__PROVIDER=acmedns (or cloudflare) is
     #                    supported where a token/account is supplied.
+    #
+    # CLOUD-SIDE TRUST RELATIONSHIP (the half operators cannot derive on their own). The
+    # annotations above assume a cloud identity already trusts this workload, keyed on the
+    # ServiceAccount name this chart creates: it defaults to the chart fullname
+    # (<release>-status-list-server unless release already contains "status-list-server",
+    # or fullnameOverride if set — see _helpers.tpl). The federated subject is therefore:
+    #     system:serviceaccount:<release-namespace>:<that-serviceaccount-name>
+    # Create the matching trust on the cloud side:
+    #   EKS (IRSA) : IAM role trust policy -> "system:serviceaccount:<ns>:<sa>"; attach the
+    #                route53 policy to that role.
+    #   GKE (WI)   : bind roles/iam.workloadIdentityUser to the target Google SA for
+    #                principalSet: //iam.googleapis.com/projects/<proj>/locations/global/
+    #                workloadIdentityPools/<pool>/subject/system:serviceaccount:<ns>:<sa>.
+    #   AKS (WI)   : create a federated identity credential whose subject is the same
+    #                "system:serviceaccount:<ns>:<sa>".
+    # Also consider EKS Pod Identity as an alternative to IRSA (the direction AWS now
+    # pushes); it uses a different annotation (eks.amazonaws.com/role-arn is IRSA only).
     # Provider credentials (e.g. APP_SERVER__CERT__DNS__CLOUDFLARE__API_TOKEN, or the
     # APP_SERVER__CERT__DNS__ACMEDNS__ACCOUNTS JSON, which holds every account password)
     # must come from a secret (see externalSecret below), not from plain env values.
@@ -159,11 +179,15 @@ statuslist:
     APP_SERVER__ENABLE_METRICS: "true"
     APP_TELEMETRY__ENVIRONMENT: "production"
     APP_TELEMETRY__SAMPLER_RATIO: "1.0"
-  # Optional AWS configuration for the application. The chart defaults to Workload
-  # Identity (IRSA) for AWS credentials: the AWS SDK discovers the role from the Pod's
-  # projected OIDC token and instance metadata, so no files are mounted. Only enable
-  # mountCredentials for the legacy static-credential path (shared "credentials"/"config"
-  # files), which has no dependency on IRSA annotations.
+  # Optional AWS configuration for the application. The chart is provider-neutral by
+  # default: serviceAccount.annotations is empty and no credentials are mounted, so you
+  # must attach the AWS integration yourself. For IRSA, set the eks.amazonaws.com/role-arn
+  # annotation and let the pod-identity webhook inject AWS_ROLE_ARN + AWS_WEB_IDENTITY_TOKEN_FILE
+  # (the SDK reads the projected OIDC token; it does NOT use node-instance metadata).
+  # Only enable mountCredentials for the legacy static-credential path (shared
+  # "credentials"/"config" files). Don't combine the two: in the SDK's default chain,
+  # shared-profile files take precedence over web identity, so mountCredentials quietly
+  # wins with long-lived static keys.
   aws:
     # Mount AWS credential files from aws-credentials-secret into the pod.
     # Disabled by default so the base chart stays provider-neutral.
@@ -183,10 +207,12 @@ statuslist:
       # Optional ESO target.template for the dedicated aws-credentials-secret only.
       # The application ExternalSecret target.template is intentionally not reused here.
       targetTemplate: {}
-    # Plain (non-secret) AWS region. APP_AWS__REGION is rendered only when an effective
-    # region is explicitly configured. Leave empty (default) so the application does not
-    # override the AWS SDK's instance-metadata region discovery (recommended for
-    # pure-IRSA / Workload Identity).
+    # Plain (non-secret) AWS region. APP_AWS__REGION is rendered only when
+    # secretStore.provider == "aws" AND an effective region is set (this value, else the
+    # legacy secretStore.aws.region fallback — see the status-list-server-chart.appRegion
+    # helper). Setting this alone without provider=aws renders nothing. Leave both empty
+    # with provider=aws for pure-IRSA / Workload Identity so the SDK discovers the region
+    # from instance metadata.
     region: ""
   # Fallback Kubernetes Secret for clusters that do not run External Secrets Operator.
   # Only rendered when externalSecret.enabled=false AND statuslist.fallbackSecret.enabled=true.
@@ -228,8 +254,10 @@ statuslist:
   # normalized items[].path values so the chart cannot point the app at a file
   # Kubernetes will not mount.
   # If APP_DATABASE__PASSWORD_FILE is configured via statuslist.env or fileEnv, the
-  # chart does not inject APP_DATABASE__PASSWORD, so the application cannot silently
-  # keep using a stale startup password from an environment variable.
+  # chart does NOT inject APP_DATABASE__PASSWORD — it rejects APP_DATABASE__PASSWORD
+  # outright (deployment.yaml fails if it is set as a plain env value or fileEnv key),
+  # so the mounted file is the only supported database-password delivery path and the
+  # application cannot silently keep a stale startup password from an environment variable.
   # Example:
   # - name: database-credentials
   #   secretName: postgres-access
@@ -294,10 +322,15 @@ statuslist:
     # When ingress is empty [] (and enabled=true), ANY source can reach the service port.
     # Add podSelector/namespaceSelector/ipBlock entries to restrict sources.
     ingress: []
-    # Additional internal egress destinations beyond the built-in PostgreSQL / OTel
-    # pod selectors (which are scoped to the target pods by default). Each entry is a
-    # `to:` NetworkPolicy selector.
-    # External ports (443, 53) are always allowed without destination restriction.
+    # Additional internal egress destinations beyond the built-in PostgreSQL / OTel pod
+    # selectors. CAUTION: each egressInternal entry is appended to the single DB-port
+    # egress rule, so it INHERITS that rule's port (the APP_DATABASE__PORT value) — a
+    # selector for, say, a cache on 6379 needs its own port entry here and will otherwise
+    # get silence. The PostgreSQL rule matches pods labelled app.kubernetes.io/name:
+    # postgres in this namespace, so an external database is NOT reachable; the OTel rule
+    # only exists when the collector is enabled.
+    # External ports (443, 53) are always allowed WITHOUT destination restriction — open to
+    # 0.0.0.0/0, so this policy does not block outbound exfiltration.
     egressInternal: []
   resources:
     requests:
@@ -375,10 +408,12 @@ serviceMonitor:
 # Operator rule discovery.
 # Enables shipping the SLI recording rules (request latency, error rate, DB latency, cache
 # hit ratio, token generation, error budget) and the SLO burn-rate / error-budget alerting
-# rules as a single PrometheusRule CRD. Alert thresholds are defined under the `slo`
-# block and must stay in lockstep with deploy/observability/slo/thresholds.json (enforced by CI) and the
-# standalone deploy/observability/prometheus/rules/*.rules.yml. See the webhook-notifications
-# runbook for how the resulting alerts reach humans via alerting.existingSecret.
+# rules as a single PrometheusRule CRD. Alert thresholds are defined under the `slo` block.
+# Only the values.yaml slo.* defaults are checked against deploy/observability/slo/thresholds.json
+# and the standalone deploy/observability/prometheus/rules/*.rules.yml by lint-thresholds.mjs; the
+# hard-coded alert summary strings inside prometheusrule.yaml are NOT covered by that lint.
+# See the webhook-notifications runbook for how the resulting alerts reach humans via
+# alerting.existingSecret.
 prometheusRule:
   enabled: false
   # Additional labels required by your Prometheus Operator (e.g. release: kube-prometheus-stack)
@@ -487,15 +522,20 @@ alerting:
     tlsConfig: {}
 
 # SLO (service-level objective) target thresholds consumed by the PrometheusRule
-# template (prometheusrule.yaml) to build SLI recording rules and SLO burn-rate
-# alerting rules. Each value here is rendered verbatim into the alert expressions, so
-# changing them changes the alert thresholds without touching the rule template.
-# These must stay in lockstep with deploy/observability/slo/thresholds.json (the lint
-# step in CI asserts this) and with the literal values in the standalone
-# deploy/observability/prometheus/rules/*.rules.yml.
+# template (prometheusrule.yaml) to build SLI recording rules and SLO burn-rate /
+# error-budget alerting rules. These values DO change alert thresholds, but they are not
+# rendered verbatim into every expression: burn-rate thresholds go through printf "%.3f"
+# (so values that round can drift from what you configure, e.g. a 0.0001 target rounds to
+# a 0.001 floor) and the alert SUMMARY strings ("300ms", "14.4x over 0.5%", "85%", "10%",
+# "14 days") are hard-coded and do not follow these values. The values.yaml slo.* defaults
+# are checked against deploy/observability/slo/thresholds.json and the standalone
+# deploy/observability/prometheus/rules/*.rules.yml by lint-thresholds.mjs; that lint does
+# NOT read prometheusrule.yaml, so it cannot catch drift in the summary strings above.
 slo:
   # Acceptable ratio of 5xx responses to all requests over the SLO window (0.5% here).
-  # Used as the denominator of burn-rate multipliers and the error-budget success ratio.
+  # Multiplicand of the burn-rate thresholds (threshold = errorRateTarget x multiplier)
+  # and denominator of the error-budget success ratio. Also drives the token-generation
+  # burn-rate and budget alerts — loosening the HTTP SLO loosens token-gen paging too.
   errorRateTarget: 0.005
   # Fast-burn alert triggers when the observed error rate exceeds errorRateTarget *
   # fastBurnMultiplier (14.4x) on both the 1h and 5m windows for 5m. Pages.
@@ -510,8 +550,9 @@ slo:
   dbLatencyP95: 0.05
   # Minimum acceptable status-list cache hit ratio (85%). Below this for 15m fires a warn.
   cacheHitRatioMin: 0.85
-  # Maximum acceptable certificate-renewal failure ratio (1%). Retained for reference
-  # / parity with the standalone rules.
+  # Maximum acceptable certificate-renewal failure ratio (1%). NO-OP in this chart: it is
+  # retained only for parity with thresholds.json and the standalone rules — prometheusrule.yaml
+  # does not reference it, so tuning it here has no effect (cert alerts are expiry-driven below).
   certRenewalFailureMax: 0.01
   # Remaining-error-budget gate for the ErrorBudget*Critical page alerts (below 10% of
   # the 30d budget remaining pages).
@@ -523,14 +564,18 @@ slo:
   certExpiryWarnSeconds: 1209600
   certExpiryCriticalSeconds: 604800
 
-# Bundled in-cluster PostgreSQL database (accepted values of the CloudPirates chart).
+# Bundled in-cluster PostgreSQL database (accepted CloudPirates-chart values).
 # This is one possible backend: the application is database-agnostic and selects its
-# backend at runtime through the APP_DATABASE__* environment variables. The chart maps
-# the defaults here onto APP_DATABASE__HOST/USERNAME/NAME/BACKEND and into the shared
-# statuslist-secret used for the password. MySQL and other backends are supported by the
-# application (see docs/database-backends.md) by pointing the APP_DATABASE__*
-# variables at an external database and disabling this bundled one. Set postgres.enabled
-# to false when you provide an external database.
+# backend at runtime through the APP_DATABASE__* environment variables. Only PostgreSQL is
+# delivered by this chart — MySQL / other backends are supported by the APPLICATION code
+# (see docs/database-backends.md) but no non-Postgres image variant is published, so
+# 'including MySQL' is not reachable through Helm today (tracks #498). Note also that
+# APP_DATABASE__HOST comes from the release name and APP_DATABASE__BACKEND is the literal
+# "postgres" (deployment.yaml sets all of HOST/BACKEND/USERNAME/NAME regardless of
+# postgres.enabled; only USERNAME/NAME come from postgres.auth). To use an external
+# database, set postgres.enabled=false AND override statuslist.initContainers (the default
+# wait-for-postgres otherwise hangs on <release>-postgres forever) AND add egress for the
+# external DB host (see the networkPolicy caveat).
 postgres:
   enabled: true
   resources:
@@ -544,9 +589,9 @@ postgres:
     username: postgres
     database: status-list
     # Must reference the same secret the application reads (see _helpers.tpl
-    # "status-list-server-chart.appSecretName"). In fallback (no-ESO) mode the chart
-    # renders a Secret named "statuslist-secret" (single supported name), so this stays
-    # fixed. In ESO mode keep it in sync with externalSecret.spec.target.name.
+    # "status-list-server-chart.appSecretName"). Fixed to statuslist-secret in BOTH modes:
+    # fallback renders that exact name, and ESO mode rejects any externalSecret target name
+    # other than it at render time — there is nothing to keep in sync.
     existingSecret: statuslist-secret
     secretKeys:
       passwordKey: postgres-password
@@ -564,9 +609,12 @@ postgres:
 # statuslist.fallbackSecret; the chart fails if both are enabled). When enabled the chart
 # renders an ExternalSecret that syncs the application Secret (always named
 # "statuslist-secret", holder of the database password) from a cloud/on-prem secret
-# manager referenced by secretStore. This is the recommended production delivery path;
-# cloud credentials are resolved via Workload Identity / IRSA / ManagedIdentity rather
-# than files. The ExternalSecret, the Deployment, and PostgreSQL (postgres.auth.existingSecret)
+# manager referenced by secretStore. This is the recommended production delivery path.
+# With a namespace-scoped SecretStore, externalSecret.enabled requires secretStore.enabled
+# or the render fails (only a pre-existing ClusterSecretStore is exempt). Cloud credentials
+# resolve via Workload Identity / IRSA / ManagedIdentity where the provider supports it —
+# Vault token auth and Azure ServicePrincipal + authSecretRef use static secrets instead of
+# files. The ExternalSecret, the Deployment, and PostgreSQL (postgres.auth.existingSecret)
 # all consume the same single secret name, which is intentionally not configurable.
 externalSecret:
   enabled: false
@@ -648,10 +696,11 @@ secretStore:
 # OpenTelemetry Collector subchart (opentelemetry-collector dependency). The application
 # ships OTLP traces/metrics/logs; when enabled the Deployment injects
 # APP_TELEMETRY__ENABLED=true and APP_TELEMETRY__OTLP_ENDPOINT pointing at the collector
-# Service, and the bundled PostgreSQL / OTel egress paths in network-policy.yaml open the
-# OTLP ports. The default config uses the `debug` exporter (dev scaffolding that prints to
-# stdout); configure real exporters (e.g. otlp/tempo, prometheusremotewrite, loki) in
-# config.exporters before deploying to production.
+# Service. When statuslist.networkPolicy.enabled is ALSO set, network-policy.yaml adds a
+# separate OTLP egress rule (ports 4317/4318) scoped to the collector pods, independent of
+# the PostgreSQL rule. The default config uses the `debug` exporter (dev scaffolding that
+# prints to stdout); configure real exporters (e.g. otlp/tempo, prometheusremotewrite,
+# loki) in config.exporters before deploying to production.
 opentelemetry-collector:
   enabled: true
   mode: deployment
