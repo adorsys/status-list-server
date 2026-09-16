@@ -22,6 +22,7 @@ env:
   AWS_REGION: eu-central-1
   REGISTRY: ghcr.io
   IMAGE_BASE: ghcr.io/${{ github.repository_owner }}/status-list-server
+  CHART_DIR: deploy/helm/chart
   HELM_RELEASE_NAME: statuslist
   HELM_NAMESPACE: statuslist-production
   APP_DATABASE_PORT: ${{ vars.APP_DATABASE_PORT }}
@@ -914,7 +915,7 @@ jobs:
       - name: Build Helm dependencies
         run: |
           helm repo add open-telemetry https://open-telemetry.github.io/opentelemetry-helm-charts
-          helm dependency build helm/chart
+          helm dependency build "$CHART_DIR"
 
       - name: Deploy chart
         # The digest is what pins production to the image the scan gate passed; an
@@ -959,10 +960,10 @@ jobs:
           # `:?` on both -- helm reports an empty value as a YAML error pointing
           # nowhere near the cause, and an empty digest silently falls back to the
           # mutable tag, which is the failure this pipeline exists to prevent.
-          helm upgrade --install ${{ env.HELM_RELEASE_NAME }} helm/chart \
+          helm upgrade --install ${{ env.HELM_RELEASE_NAME }} "$CHART_DIR" \
             --namespace ${{ env.HELM_NAMESPACE }} \
-            -f helm/chart/values-aws.yaml \
-            -f helm/chart/values-production.yaml \
+            -f "$CHART_DIR"/values-aws.yaml \
+            -f "$CHART_DIR"/values-production.yaml \
             --wait \
             --rollback-on-failure \
             --timeout 10m \

@@ -19,6 +19,9 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
+env:
+  CHART_DIR: deploy/helm/chart
+
 jobs:
   zizmor-security:
     name: Zizmor Security Check
@@ -574,7 +577,7 @@ jobs:
           # Upstream chart default values:
           # https://github.com/open-telemetry/opentelemetry-helm-charts/blob/main/charts/opentelemetry-collector/values.yaml
           helm repo add open-telemetry https://open-telemetry.github.io/opentelemetry-helm-charts
-          helm dependency build helm/chart
+          helm dependency build "$CHART_DIR"
 
       - name: Render Helm templates
         uses: ./.github/workflows/render-helm-templates
@@ -611,13 +614,13 @@ jobs:
       - name: Build Helm dependencies
         run: |
           helm repo add open-telemetry https://open-telemetry.github.io/opentelemetry-helm-charts
-          helm dependency build helm/chart
+          helm dependency build "$CHART_DIR"
 
       - name: Validate Helm template with local values
         run: |
           set -euo pipefail
           output_file="/tmp/statuslist-local-rendered.yaml"
-          helm template statuslist-local helm/chart -f helm/chart/values-local.yaml --namespace local > "$output_file"
+          helm template statuslist-local "$CHART_DIR" -f "$CHART_DIR"/values-local.yaml --namespace local > "$output_file"
 
           # Verify APP_ENV is set to "development" as expected for local values
           # The pattern matches the multi-line YAML structure: - name: APP_ENV followed by value: "development"
@@ -655,7 +658,7 @@ jobs:
       - name: Build Helm dependencies
         run: |
           helm repo add open-telemetry https://open-telemetry.github.io/opentelemetry-helm-charts
-          helm dependency build helm/chart
+          helm dependency build "$CHART_DIR"
 
       - name: Render Helm templates
         uses: ./.github/workflows/render-helm-templates
@@ -769,13 +772,13 @@ jobs:
       - name: Build Helm dependencies
         run: |
           helm repo add open-telemetry https://open-telemetry.github.io/opentelemetry-helm-charts
-          helm dependency build helm/chart
+          helm dependency build "$CHART_DIR"
 
       - name: Render Helm chart
         env:
           APP_DATABASE_PORT: "5432"
         run: |
-          helm template statuslist helm/chart \
+          helm template statuslist "$CHART_DIR" \
             --namespace statuslist \
             --set-string statuslist.env.APP_DATABASE__PORT="${APP_DATABASE_PORT}" \
             > /tmp/statuslist-rendered.yaml
@@ -829,18 +832,18 @@ jobs:
       - name: Build Helm dependencies
         run: |
           helm repo add open-telemetry https://open-telemetry.github.io/opentelemetry-helm-charts
-          helm dependency build helm/chart
+          helm dependency build "$CHART_DIR"
 
       - name: Validate Prometheus recording rules
         run: |
           docker run --rm --entrypoint promtool \
-            -v "$PWD/observability/prometheus:/etc/prometheus:ro" \
+            -v "$PWD/deploy/observability/prometheus:/etc/prometheus:ro" \
             prom/prometheus:v3.11.3 check rules /etc/prometheus/rules/recording.rules.yml
 
       - name: Validate Prometheus alerting rules
         run: |
           docker run --rm --entrypoint promtool \
-            -v "$PWD/observability/prometheus:/etc/prometheus:ro" \
+            -v "$PWD/deploy/observability/prometheus:/etc/prometheus:ro" \
             prom/prometheus:v3.11.3 check rules /etc/prometheus/rules/alerting.rules.yml
 
       - name: Validate rendered Helm PrometheusRule (no drift / no template errors)
@@ -851,7 +854,7 @@ jobs:
         # verified, not just syntactically checked, and (c) it defines exactly the
         # same rule names as the standalone tested rules so neither copy can drift.
         run: |
-          helm template status-list-server helm/chart \
+          helm template status-list-server "$CHART_DIR" \
             --namespace ns1 \
             --set prometheusRule.enabled=true > /tmp/helm-render.yaml
           python3 - <<'EOF'
@@ -873,7 +876,7 @@ jobs:
                   for r in g['rules']:
                       names.add(r.get('record') or r.get('alert'))
               return names
-          standalone = rule_names('observability/prometheus/rules/recording.rules.yml') | rule_names('observability/prometheus/rules/alerting.rules.yml')
+          standalone = rule_names('deploy/observability/prometheus/rules/recording.rules.yml') | rule_names('deploy/observability/prometheus/rules/alerting.rules.yml')
           deployed = rule_names('/tmp/helm-rules.yml')
           if standalone != deployed:
               raise SystemExit(
@@ -901,7 +904,7 @@ jobs:
           # standalone `up{job="status_list_server",instance="app:8000"}` input
           # series becomes the deployed `up{namespace="ns1",service="status-list-server-service"}`
           # selector, and the StatusListMetricsAbsent expectations are normalized.
-          test = yaml.safe_load(open('observability/prometheus/tests/alerting.test.yml'))
+          test = yaml.safe_load(open('deploy/observability/prometheus/tests/alerting.test.yml'))
           test['rule_files'] = ['helm-rules.yml']
           deployed_up = 'up{namespace="ns1",service="status-list-server-service"}'
           standalone_up = 'up{job="status_list_server",instance="app:8000"}'
@@ -953,7 +956,7 @@ jobs:
                                    'exp_annotations': {
                                    'summary': 'status-list-server metrics absent for 5m (target down or not scraped)',
                                    'description': 'namespace ns1: Status List /metrics target is unreachable or absent (up == 0 or no up series for 5m)',
-                                   'runbook_url': 'https://github.com/adorsys/status-list-server/blob/develop/observability/README.md',
+                                   'runbook_url': 'https://github.com/adorsys/status-list-server/blob/develop/deploy/observability/README.md',
                                    'dashboard_url': 'http://localhost:3000/d/status-list-slo'}}]},
               ],
           })
@@ -969,26 +972,26 @@ jobs:
       - name: Validate Prometheus config (dev and production)
         run: |
           docker run --rm --entrypoint promtool \
-            -v "$PWD/observability/prometheus:/etc/prometheus:ro" \
+            -v "$PWD/deploy/observability/prometheus:/etc/prometheus:ro" \
             prom/prometheus:v3.11.3 check config /etc/prometheus/prometheus.yml
           docker run --rm --entrypoint promtool \
-            -v "$PWD/observability/prometheus:/etc/prometheus:ro" \
+            -v "$PWD/deploy/observability/prometheus:/etc/prometheus:ro" \
             prom/prometheus:v3.11.3 check config /etc/prometheus/prometheus.production.yml
 
       - name: Lint SLO thresholds consistency
         run: |
-          node observability/slo/lint-thresholds.mjs
+          node deploy/observability/slo/lint-thresholds.mjs
 
       - name: Run promtool recording rule tests
         run: |
           docker run --rm --entrypoint promtool \
-            -v "$PWD/observability/prometheus:/etc/prometheus:ro" \
+            -v "$PWD/deploy/observability/prometheus:/etc/prometheus:ro" \
             prom/prometheus:v3.11.3 test rules /etc/prometheus/tests/recording.test.yml
 
       - name: Run promtool alerting rule tests
         run: |
           docker run --rm --entrypoint promtool \
-            -v "$PWD/observability/prometheus:/etc/prometheus:ro" \
+            -v "$PWD/deploy/observability/prometheus:/etc/prometheus:ro" \
             prom/prometheus:v3.11.3 test rules /etc/prometheus/tests/alerting.test.yml
 
       - name: Validate Alertmanager config generation + webhook delivery
@@ -997,12 +1000,12 @@ jobs:
         # firing and resolved notifications to a (mock) webhook endpoint — the
         # webhook notification mechanism (ticket #446).
         run: |
-          bash observability/alertmanager/tests/test-alertmanager-config.sh
+          bash deploy/observability/alertmanager/tests/test-alertmanager-config.sh
 
       - name: Verify dashboard JSON is committed and valid
         run: |
-          test -s observability/dashboards/generated/status-list-slo.json
-          python3 -c "import json; json.load(open('observability/dashboards/generated/status-list-slo.json'))"
+          test -s deploy/observability/dashboards/generated/status-list-slo.json
+          python3 -c "import json; json.load(open('deploy/observability/dashboards/generated/status-list-slo.json'))"
 
       - name: Verify dashboard matches generator (no drift)
         # Regenerates both committed artifacts and fails if either differs from
@@ -1012,7 +1015,7 @@ jobs:
         # byte-for-byte comparison of both guards against a deployed dashboard
         # that drifts from the reviewed source.
         run: |
-          cd observability/dashboards/src
+          cd deploy/observability/dashboards/src
           npm install --no-audit --no-fund
           npm run generate-dashboards
           git diff --exit-code ../generated/status-list-slo.json

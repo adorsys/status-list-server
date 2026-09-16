@@ -1,0 +1,19 @@
+[project]
+name = "status-list-server-demo"
+version = "0.0.0"
+description = "Interactive notebook workflows for the Status List Server"
+readme = "README.md"
+requires-python = ">=3.10,<3.13"
+dependencies = [
+  "cbor2>=5.6.0",
+  "cryptography>=42.0.0",
+  "ipykernel",
+  "jupyterlab>=4.0",
+  "notebook>=7.0",
+  "pyjwt>=2.8.0",
+  "python-dotenv>=1.0.0",
+  "requests>=2.31.0",
+]
+
+[tool.uv]
+package = false

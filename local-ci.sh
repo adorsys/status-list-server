@@ -66,7 +66,7 @@ bash scripts/attestation-selftest.sh
 # regression means production stops running the digest that was scanned.
 echo "Checking image reference resolution..."
 if command -v helm >/dev/null 2>&1 && command -v yq >/dev/null 2>&1; then
-    helm dependency build helm/chart >/dev/null
+    helm dependency build deploy/helm/chart >/dev/null
     bash scripts/verify-image-reference.sh
 else
     echo "  skipped: helm or yq not found"
