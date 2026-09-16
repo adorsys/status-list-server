@@ -26,7 +26,9 @@ APP_DATABASE__QUERY=sslmode=verify-full&sslrootcert=/var/run/postgres/ca.crt
 
 `APP_DATABASE__URL` remains supported for local and custom deployments. Do not combine it with any split database field; startup rejects that ambiguous configuration.
 
-When deploying the Helm chart, `APP_DATABASE__PASSWORD` is not accepted as a plain `statuslist.env` value. The chart exposes `APP_DATABASE__PASSWORD_FILE` through `statuslist.secretMounts` by default, reading the `postgres-password` key from `statuslist-secret`. For external databases, point the split host/port/backend/name/user fields at the external database and create or sync the configured Secret/key with that database password.
+When deploying the Helm chart, `APP_DATABASE__PASSWORD` is not accepted as a plain `statuslist.env` value. The chart exposes `APP_DATABASE__PASSWORD_FILE` through `statuslist.secretMounts` by default. For upgrade safety, the default mount keeps the legacy `postgres-password` key from `statuslist-secret`. After your secret-delivery path guarantees `database-password` exists, switch `statuslist.secretMounts[0].items[0].key` or `statuslist.database.passwordSecretKey` to `database-password`. For external databases, point the split host/port/backend/name/user fields at the external database and create or sync the configured Secret/key with that database password.
+
+The Helm chart's database-agnostic password key is `database-password`. For compatibility with existing deployments, chart-managed fallback and External Secrets Operator examples also keep `postgres-password` populated with the same value. Starting in chart `0.5.0`, the default mounted key remains `postgres-password`; a future chart version that switches the default to `database-password` must call that out in its release notes.
 
 The bundled in-cluster PostgreSQL chart is used without chart-managed database TLS material. For managed or external databases, prefer TLS by setting non-secret query parameters such as `APP_DATABASE__QUERY=sslmode=verify-full&sslrootcert=/var/run/postgres/ca.crt`. The application passes these parameters through after validating that query keys are not credential-like; the referenced CA path must already exist in the container.
 
@@ -46,6 +48,12 @@ Best default for production deployments. PostgreSQL is the safest choice when yo
 ### MySQL
 
 Good fit when your infrastructure already standardizes on MySQL-compatible services or when you want a production database with familiar operational patterns. For MariaDB, use this same backend setting because the driver path is shared.
+
+The Helm chart provides external MySQL connection defaults under `mysql:`. It does not deploy MySQL.
+
+For Helm-based MySQL deployments, set `postgres.enabled=false`, `statuslist.env.APP_DATABASE__BACKEND=mysql`, `statuslist.env.APP_DATABASE__HOST`, and an explicit `statuslist.image.tag` or `statuslist.image.digest`, then provide a MySQL Service externally. If `statuslist.networkPolicy.enabled=true`, set `statuslist.networkPolicy.databaseEgress` to the peer that reaches your external MySQL target. The chart rejects MySQL backend renders while bundled PostgreSQL remains enabled. Published GHCR images currently only support PostgreSQL, so operators deploying with MySQL must build and supply their own container image.
+
+Starting in chart `0.5.0`, the Helm chart intentionally accepts only `postgres` and `mysql` backends. Use non-Helm local/custom deployment paths for `sqlite` or `memory`.
 
 ### SQLite
 
