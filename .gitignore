@@ -5,7 +5,7 @@
 cert.yml
 .kilo/
 tls.crt
-.kilo/
+tls.key
 
 ### JupyterNotebooks ###
 __pycache__
@@ -13,6 +13,7 @@ profile_default/
 ipython_config.py
 .ipynb_checkpoints
 */.ipynb_checkpoints/*
+.venv/
 *.tgz
 
 # MacOs store files

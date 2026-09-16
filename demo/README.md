@@ -1,8 +1,8 @@
 # Demo Workflows with the Status List Server
 
 Typical scenarios for interacting with the Status List Server are showcased
-by means of notebooks. To run the notebooks, a live server is required, and
-you will need to set up a Python environment.
+by means of notebooks. To run the notebooks, you will need a Python environment
+and a live server. The setup works on macOS, Linux, and Windows.
 
 ## Catalog of notebook workflows
 
@@ -13,37 +13,160 @@ You'll find notebooks for the following scenarios in the `./workflows` directory
 - [Issuer B cannot update Issuer A's list](./workflows/03-issuer-b-cannot-update-issuer-a-list.ipynb)
 - [Unregistered issuers cannot publish lists](./workflows/04-unregistered-issuers-cannot-publish-lists.ipynb)
 
+## Set up the Python environment
+
+Run the commands in this section from the `demo` directory. Both options create
+the environment in `demo/.venv`.
+
+### Option 1: uv (recommended)
+
+[uv](https://docs.astral.sh/uv/) installs the Python version pinned in
+`.python-version` and the exact dependencies locked in `uv.lock`.
+
+Install uv on macOS or Linux:
+
+```bash
+curl -LsSf https://astral.sh/uv/install.sh | sh
+```
+
+On macOS, `brew install uv` works as well.
+
+Install uv on Windows (PowerShell):
+
+```powershell
+powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
+```
+
+On Windows, `winget install --id=astral-sh.uv -e` works as well.
+
+Create the environment:
+
+```bash
+uv sync
+```
+
+If behind a TLS-intercepting proxy, set `UV_SYSTEM_CERTS=1`.
+
+### Option 2: pip
+
+Python 3.10, 3.11, or 3.12 is required. Create and activate a virtual
+environment, then install the dependencies. If your default interpreter is
+newer, name a supported one explicitly, for example `python3.12` instead of
+`python3`, or `py -3.12` instead of `py`.
+
+macOS or Linux (bash / zsh):
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -r requirements.txt
+```
+
+Windows (PowerShell):
+
+```powershell
+py -m venv .venv
+.venv\Scripts\Activate.ps1
+python -m pip install -r requirements.txt
+```
+
+If PowerShell refuses to run the activation script, run
+`Set-ExecutionPolicy -Scope Process RemoteSigned` and try again.
+
+Windows (cmd):
+
+```bat
+py -m venv .venv
+.venv\Scripts\activate.bat
+python -m pip install -r requirements.txt
+```
+
+`requirements.txt` pins every package by hash, so pip rejects any extra package
+listed in the same install command. Install additional packages with a separate
+`pip install` command.
+
+With this option, drop the `uv run` prefix from the commands below and run them
+inside the activated environment.
+
 ## Start a live Status List Server
 
-A live instance of the server is required and should be started independently.
-By default, it is assumed the server runs on `http://localhost:8000` or on the
-port configured in a `.env` file at the root of the project. But you can
-always change this address when running a workflow.
-
-## Create a virtual environment to run the notebooks
-
-The `environment.yml` file encodes a tested working environment that you can
-spin up with [conda](https://docs.conda.io/projects/conda/en/stable/index.html).
-If you do not already have `conda` installed, you will need to install it first.
-Go for the `Miniconda` option if you are unfamiliar with conda distributions.
-
-Once installed, run the following command to replicate the tested environment:
+The server signs status list tokens, so it needs a certificate and a matching
+signing key. Generate a self-signed pair for local development once, from the
+`demo` directory:
 
 ```bash
-conda env create -f environment.yml
+uv run python generate-dev-cert.py
 ```
 
-Then activate it with:
+This writes `tls.crt` and `tls.key` to the root of the repository; both are
+ignored by Git. Existing files are kept unless you pass `--force`.
+
+Then start the server with in-memory storage from the root of the repository;
+no `.env` file or database is needed.
+
+The server rate-limits credential registration and status list writes per
+client IP address. By default each allows 10 requests and then gets back one
+request per minute, which is less than the notebooks need when run back to back.
+The commands below raise the limit to 100 for this local server, enough for
+several full runs of all four notebooks.
+
+macOS or Linux (bash / zsh):
 
 ```bash
-conda activate demo-status-list-server
+APP_SERVER__CERT__STORE__CERTIFICATE_PATH=tls.crt \
+APP_SERVER__CERT__STORE__SIGNING_KEY_PATH=tls.key \
+APP_RATE_LIMIT__STRICT_BURST_SIZE=100 \
+cargo run
 ```
 
-## Run Jupyter notebooks
+Windows (PowerShell):
 
-Run the following command to open the Jupyter Lab interface in your default web
-browser, enabling you to explore and run the provided workflows.
+```powershell
+$env:APP_SERVER__CERT__STORE__CERTIFICATE_PATH = "tls.crt"
+$env:APP_SERVER__CERT__STORE__SIGNING_KEY_PATH = "tls.key"
+$env:APP_RATE_LIMIT__STRICT_BURST_SIZE = "100"
+cargo run
+```
+
+Windows (cmd):
+
+```bat
+set APP_SERVER__CERT__STORE__CERTIFICATE_PATH=tls.crt
+set APP_SERVER__CERT__STORE__SIGNING_KEY_PATH=tls.key
+set APP_RATE_LIMIT__STRICT_BURST_SIZE=100
+cargo run
+```
+
+If a cell still fails with HTTP `429`, restart the server. The limit refills
+slowly, so waiting a minute only allows one more request, and requests rejected
+for missing or invalid authentication count against it too.
+
+The notebooks connect to `http://localhost:8000` by default. If
+`APP_SERVER__PORT` is set in the environment of the notebook kernel, or in a
+`.env` file at the root of the repository, the notebooks use that port instead.
+
+## Run the notebooks
+
+From the `demo` directory, open Jupyter Lab to explore and run the workflows:
 
 ```bash
-jupyter lab .
+uv run jupyter lab
+```
+
+To execute a notebook top to bottom without opening Jupyter Lab:
+
+```bash
+uv run jupyter execute workflows/01-an-issuer-maintains-a-status-list.ipynb
+```
+
+To use an IDE instead, select the interpreter in `demo/.venv` as the kernel.
+
+## Update dependencies
+
+After changing the dependencies in `pyproject.toml`, refresh the lock file and
+the pip fallback, then commit both:
+
+```bash
+uv lock
+uv export --format requirements-txt -o requirements.txt
 ```

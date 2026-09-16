@@ -1,7 +1,7 @@
 //! Database query latency SLI instruments.
 //!
 //! These back the DB-latency series used by the SLO dashboards and burn-rate
-//! alerts in `observability/`:
+//! alerts in `deploy/observability/`:
 //! - `db_query_duration_seconds` – histogram of storage-query latency
 //!
 //! Handles are cached on first use (they are only ever needed after
