@@ -319,6 +319,12 @@
             }
           }
         },
+        "database": {
+          "type": "object",
+          "properties": {
+            "passwordSecretKey": { "type": "string", "minLength": 1 }
+          }
+        },
         "watcher": {
           "type": "object",
           "title": "Credential rotation watcher",
@@ -348,7 +354,8 @@
           "properties": {
             "enabled": { "type": "boolean", "title": "Render the NetworkPolicy" },
             "ingress": { "type": "array", "title": "Ingress from selectors" },
-            "egressInternal": { "type": "array", "title": "Additional internal egress to selectors" }
+            "egressInternal": { "type": "array", "title": "Additional internal egress to selectors" },
+            "databaseEgress": { "type": "array", "title": "Egress to external database peer (required for MySQL)" }
           }
         },
         "resources": {
@@ -620,6 +627,24 @@
           }
         },
         "image": { "type": "object", "title": "PostgreSQL image" }
+      }
+    },
+    "mysql": {
+      "type": "object",
+      "properties": {
+        "auth": {
+          "type": "object",
+          "properties": {
+            "username": { "type": "string" },
+            "database": { "type": "string" }
+          }
+        },
+        "service": {
+          "type": "object",
+          "properties": {
+            "port": { "type": "integer", "minimum": 1, "maximum": 65535 }
+          }
+        }
       }
     },
     "autoscaling": {

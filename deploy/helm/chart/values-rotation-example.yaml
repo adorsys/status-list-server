@@ -35,6 +35,7 @@ externalSecret:
       template:
         type: Opaque
         data:
+          database-password: "{{ .postgres_password }}"
           postgres-password: "{{ .postgres_password }}"
     data:
       - secretKey: postgres_password
