@@ -20,21 +20,62 @@ impl Serialize for Status {
     }
 }
 
+/// Map a `u32` to `Status`, rejecting the reserved range 3..=255.
+fn status_from_u32<E: serde::de::Error>(v: u32) -> Result<Status, E> {
+    match v {
+        0 => Ok(Status::VALID),
+        1 => Ok(Status::INVALID),
+        2 => Ok(Status::SUSPENDED),
+        n if n >= 256 => Ok(Status::ApplicationSpecific(n)),
+        other => Err(E::custom(format!(
+            "status value {} is reserved (only 0, 1, 2, or >= 256 allowed)",
+            other
+        ))),
+    }
+}
+
+struct StatusVisitor;
+
+impl<'de> serde::de::Visitor<'de> for StatusVisitor {
+    type Value = Status;
+
+    fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("an integer (0, 1, 2, >=256) or a string status name")
+    }
+
+    fn visit_u64<E: serde::de::Error>(self, v: u64) -> Result<Self::Value, E> {
+        let v =
+            u32::try_from(v).map_err(|_| E::custom(format!("status value {v} overflows u32")))?;
+        status_from_u32(v)
+    }
+
+    fn visit_i64<E: serde::de::Error>(self, v: i64) -> Result<Self::Value, E> {
+        let v = u32::try_from(v)
+            .map_err(|_| E::custom(format!("status value {v} is out of range for u32")))?;
+        status_from_u32(v)
+    }
+
+    fn visit_str<E: serde::de::Error>(self, v: &str) -> Result<Self::Value, E> {
+        // Try case-insensitive name match first.
+        match v.to_ascii_uppercase().as_str() {
+            "VALID" => return Ok(Status::VALID),
+            "INVALID" => return Ok(Status::INVALID),
+            "SUSPENDED" => return Ok(Status::SUSPENDED),
+            _ => {}
+        }
+        // Fall back to parsing as a stringified integer.
+        match v.parse::<u32>() {
+            Ok(n) => status_from_u32(n),
+            Err(_) => Err(E::custom(format!(
+                "unknown status string \"{v}\"; expected VALID, INVALID, SUSPENDED, or a numeric value"
+            ))),
+        }
+    }
+}
+
 impl<'de> Deserialize<'de> for Status {
     fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-        let v = u32::deserialize(d)?;
-        Ok(match v {
-            0 => Status::VALID,
-            1 => Status::INVALID,
-            2 => Status::SUSPENDED,
-            n if n >= 256 => Status::ApplicationSpecific(n),
-            other => {
-                return Err(serde::de::Error::custom(format!(
-                    "status value {} is reserved (only 0, 1, 2, or >= 256 allowed)",
-                    other
-                )));
-            }
-        })
+        d.deserialize_any(StatusVisitor)
     }
 }
 
