@@ -52,7 +52,18 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end }}
 
 {{/*
-Create the name of the service account to use
+Create the name of the service account to use.
+When serviceAccount.create=true the name is the chart fullname (via the fullname helper)
+unless serviceAccount.name is set explicitly, and deployment.yaml injects
+serviceAccountName so the pod uses this SA. When serviceAccount.create=false AND
+serviceAccount.name is empty, this returns "default" — but deployment.yaml does NOT
+inject serviceAccountName at all in that case (see the serviceAccountName `if` guard),
+so the pod actually runs as the namespace default ServiceAccount. Set serviceAccount.name
+explicitly when disabling chart SA creation to control which SA the pod uses. This is the
+name the cloud must trust: Workload Identity (IRSA / GKE WI / AKS WI) is keyed on the SA
+name via the federated subject system:serviceaccount:<namespace>:<name>, so changing this
+breaks the ambient-credential trust relationship unless the cloud identity is updated to
+match.
 */}}
 {{- define "status-list-server-chart.serviceAccountName" -}}
 {{- if .Values.serviceAccount.create }}
@@ -67,7 +78,10 @@ Effective name of the Kubernetes Secret the application reads (database password
 Single supported name: "statuslist-secret" in both ESO mode (ExternalSecret target) and
 fallback mode. The Deployment, PostgreSQL (postgres.auth.existingSecret), and the fallback
 Secret all reference this same name, so it is not independently configurable. ESO mode
-validates externalSecret.spec.target.name against it at render time.
+validates externalSecret.spec.target.name against it at render time (external-secrets.yaml),
+failing the release if changed. The file-based database-credentials entry under
+statuslist.secretMounts is merely the default example mount referencing this name; secretMounts
+is dynamic and may mount arbitrary secret names.
 */}}
 {{- define "status-list-server-chart.appSecretName" -}}
 {{- "statuslist-secret" }}
@@ -77,7 +91,9 @@ validates externalSecret.spec.target.name against it at render time.
 Effective AWS region for the application (renders APP_AWS__REGION for the AWS secretStore
 provider). Preference: explicit statuslist.aws.region, then the legacy secretStore.aws.region
 (upgrade-compatible fallback). Returns empty when neither is set, so APP_AWS__REGION is opt-in
-(explicitly configured) rather than injected unconditionally for non-AWS providers.
+(explicitly configured) rather than injected unconditionally for non-AWS providers. It is also
+used as the ESO AWS SecretStore region fallback (secret-store.yaml), which independently
+defaults to eu-central-1 at the CR level for pure-IRSA / Workload Identity installs.
 */}}
 {{- define "status-list-server-chart.appRegion" -}}
 {{- $r := .Values.statuslist.aws.region }}
@@ -89,6 +105,11 @@ provider). Preference: explicit statuslist.aws.region, then the legacy secretSto
 
 {{/*
 Effective database backend for chart-managed defaults.
+Returns statuslist.env.APP_DATABASE__BACKEND if set, otherwise "postgres". The dbHost,
+dbPort, dbUsername, and dbName helpers each consult it to decide the fallback source
+(postgres.* vs mysql.*), and deployment.yaml sets APP_DATABASE__BACKEND to it. The chart
+rejects any value other than "postgres" or "mysql" at render time (the helpers fail), so
+an unsupported backend surfaces immediately rather than rendering a broken Deployment.
 */}}
 {{- define "status-list-server-chart.dbBackend" -}}
 {{- $env := .Values.statuslist.env | default dict }}
