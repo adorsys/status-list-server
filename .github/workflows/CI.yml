@@ -221,6 +221,9 @@ jobs:
       - name: Memory-only Build
         run: cargo check --no-default-features --features memory
 
+      - name: Redis cache backend build
+        run: cargo clippy --workspace --no-default-features --features memory,postgres,cache-redis -- -D warnings
+
       - name: Release image feature set
         # The Dockerfile default is still the local smoke-build feature set.
         # Release variants are checked by `release-variant-checks` below.
@@ -257,14 +260,22 @@ jobs:
         variant:
           - suffix: aws
             features: "postgres,aws"
+            cache_backend: "memory"
           - suffix: gcp
             features: "postgres,gcp"
+            cache_backend: "memory"
           - suffix: azure
             features: "postgres,azure"
+            cache_backend: "memory"
           - suffix: vault
             features: "postgres,vault"
+            cache_backend: "memory"
           - suffix: fscert
             features: "postgres"
+            cache_backend: "memory"
+          - suffix: fscert-redis
+            features: "postgres"
+            cache_backend: "redis"
 
     steps:
       - name: Fetch Repository
@@ -284,9 +295,15 @@ jobs:
           sudo apt-get install -y cmake golang-go
 
       - name: Cargo check release variant
-        run: cargo check --workspace --features "${FEATURES}"
+        run: |
+          if [ "${CACHE_BACKEND}" = "redis" ]; then
+            cargo check --workspace --no-default-features --features "memory,${FEATURES},cache-redis"
+          else
+            cargo check --workspace --features "${FEATURES}"
+          fi
         env:
           FEATURES: ${{ matrix.variant.features }}
+          CACHE_BACKEND: ${{ matrix.variant.cache_backend }}
 
   docker-build:
     name: Docker Build Smoke

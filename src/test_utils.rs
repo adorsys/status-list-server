@@ -22,9 +22,7 @@ use crate::server::health::Readiness;
 #[cfg(feature = "acme")]
 use crate::{cert_manager::storage::StorageError, utils::cert_manager::storage::Storage};
 use async_trait::async_trait;
-#[cfg(feature = "acme")]
 use std::collections::HashMap;
-use std::collections::HashMap as StdHashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
@@ -126,7 +124,10 @@ impl crate::domain::ports::CertificateProvider for TestCertProvider {
 
 #[derive(Default)]
 struct TestStatusListCache {
-    records: RwLock<StdHashMap<String, StatusListRecord>>,
+    // Keep general HTTP/service tests independent of the real cache adapters.
+    // Adapter behavior is covered in `outbound::cache`; this helper avoids
+    // coupling unrelated tests to cache metrics, TTLs, or Redis/Docker setup.
+    records: RwLock<HashMap<String, StatusListRecord>>,
 }
 
 #[async_trait]

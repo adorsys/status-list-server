@@ -86,7 +86,7 @@ spec:
           {{- end }}
           {{- $pinned := ne $digest "" }}
           {{- $variant := $image.variant | default "fscert" }}
-          {{- $baseAppVersion := regexReplaceAll "-(aws|gcp|azure|vault|fscert)$" $.Chart.AppVersion "" }}
+          {{- $baseAppVersion := regexReplaceAll "-(aws|gcp|azure|vault|fscert|fscert-redis)$" $.Chart.AppVersion "" }}
           {{- $defaultVariantTag := printf "%s-%s" $baseAppVersion $variant }}
           {{- $effectiveTag := $image.tag | default $defaultVariantTag }}
           {{- if and (eq (include "status-list-server-chart.dbBackend" .) "mysql") (not $image.tag) (not $digest) }}
@@ -243,9 +243,31 @@ spec:
                 {{- fail (printf "statuslist.secretMounts fileEnv defines %s, which duplicates a chart-managed environment variable; define each environment variable only once" $name) }}
               {{- end }}
             {{- end }}
+            {{- $secretEnv := .Values.statuslist.secretEnv | default dict }}
+            {{- range $name, $ref := $secretEnv }}
+              {{- if hasKey $env $name }}
+                {{- fail (printf "statuslist.secretEnv.%s duplicates statuslist.env.%s; define each environment variable only once" $name $name) }}
+              {{- end }}
+              {{- if hasKey $secretFileEnv $name }}
+                {{- fail (printf "statuslist.secretEnv.%s duplicates statuslist.secretMounts fileEnv.%s; define each environment variable only once" $name $name) }}
+              {{- end }}
+              {{- if hasKey $chartManagedEnv $name }}
+                {{- fail (printf "statuslist.secretEnv.%s duplicates a chart-managed environment variable; define each environment variable only once" $name) }}
+              {{- end }}
+              {{- if or (not $ref.name) (not $ref.key) }}
+                {{- fail (printf "statuslist.secretEnv.%s requires both name and key" $name) }}
+              {{- end }}
+            {{- end }}
             {{- range $name, $value := $env }}
             - name: {{ $name }}
               value: {{ $value | quote }}
+            {{- end }}
+            {{- range $name, $ref := $secretEnv }}
+            - name: {{ $name }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $ref.name | quote }}
+                  key: {{ $ref.key | quote }}
             {{- end }}
             {{- $appRegion := include "status-list-server-chart.appRegion" . }}
             {{- if and (eq .Values.secretStore.provider "aws") $appRegion }}

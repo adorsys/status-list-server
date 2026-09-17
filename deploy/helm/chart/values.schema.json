@@ -177,6 +177,17 @@
             }
           }
         },
+        "secretEnv": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "object",
+            "required": ["name", "key"],
+            "properties": {
+              "name": { "type": "string", "minLength": 1 },
+              "key": { "type": "string", "minLength": 1 }
+            }
+          }
+        },
         "database": {
           "type": "object",
           "properties": {

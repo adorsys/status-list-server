@@ -60,8 +60,8 @@ services:
     image: redis:8.4-alpine
     restart: always
     container_name: status-list-redis
-    ports:
-      - 6379:6379
+    profiles:
+      - redis
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
@@ -98,6 +98,7 @@ services:
       dockerfile: Dockerfile
       args:
         FEATURES: ${FEATURES:-postgres,aws}
+        CACHE_BACKEND: ${CACHE_BACKEND:-memory}
     container_name: status-list-server
     env_file:
       - path: .env.template
@@ -113,7 +114,6 @@ services:
       APP_TELEMETRY__OTLP_ENDPOINT: "http://otel-collector:4317"
       APP_TELEMETRY__ENABLED: ${APP_TELEMETRY__ENABLED:-true}
       APP_TELEMETRY__SAMPLER_RATIO: ${APP_TELEMETRY__SAMPLER_RATIO:-1.0}
-      APP_CACHE__REDIS_URL: ${APP_CACHE__REDIS_URL:-redis://redis:6379/0}
       APP_CACHE__REDIS_KEY_PREFIX: ${APP_CACHE__REDIS_KEY_PREFIX:-status-list-server:status-list:}
     ports:
       - 8000:8000
@@ -123,8 +123,6 @@ services:
       pebble:
         condition: service_started
       localstack:
-        condition: service_healthy
-      redis:
         condition: service_healthy
       pushgateway:
         condition: service_started

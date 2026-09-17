@@ -8,6 +8,7 @@ default = ["memory", "cache-memory"]
 memory = []
 cache-memory = []
 cache-redis = ["dep:redis"]
+redis-tests = ["cache-redis"]
 history = ["dep:sea-orm", "dep:sea-orm-migration"]
 postgres = ["history", "sea-orm?/sqlx-postgres"]
 sqlite = ["history", "sea-orm?/sqlx-sqlite"]
@@ -81,7 +82,7 @@ tower_governor = "0.8"
 governor = "0.10"
 
 moka = { version = "0.12", features = ["future"] }
-redis = { version = "0.32", features = ["tokio-comp", "connection-manager"], optional = true }
+redis = { version = "0.32", features = ["tokio-comp", "tokio-rustls-comp", "connection-manager"], optional = true }
 
 # Cryptography and Security
 rand = "0.10"

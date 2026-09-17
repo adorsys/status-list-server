@@ -45,7 +45,8 @@ statuslist:
     # | -azure           | postgres,azure | PostgreSQL database with Azure Key Vault and Azure DNS support | Azure AKS native deployments |
     # | -vault           | postgres,vault | PostgreSQL database with HashiCorp Vault / OpenBao token material storage | Vault-backed on-prem or multi-cloud deployments |
     # | -fscert          | postgres | PostgreSQL database with filesystem-mounted token signing keys and certificates | Constrained / air-gapped environments using external secret injection |
-    # Tag format: <version>-<suffix> (e.g., 1.2.0-aws, 1.2.0-gcp)
+    # | -fscert-redis    | postgres,cache-redis | PostgreSQL database with filesystem-mounted token signing keys and Redis cache | HA / multi-replica cache invalidation |
+    # Tag format: <version>-<suffix> (e.g., 1.2.0-aws, 1.2.0-fscert-redis)
     # Latest tags: latest-<suffix> (e.g., latest-aws, latest-gcp)
     #
     # Empty derives from the chart appVersion plus statuslist.image.variant,
@@ -105,14 +106,15 @@ statuslist:
     # backend's native values below (postgres/mysql).
     # Status-list record cache TTL in seconds. "0" disables this cache.
     # Cache backend is selected at image build time. cache-memory is the default,
-    # and wins when all features are enabled. Docker builds automatically disable
-    # Cargo defaults when the image FEATURES build arg contains cache-redis.
-    # For cache-redis images, provide APP_CACHE__REDIS_URL via env or a
-    # secret-backed env source.
+    # and wins when all features are enabled. Docker builds select Redis with
+    # CACHE_BACKEND=redis. For cache-redis images, provide APP_CACHE__REDIS_URL
+    # via statuslist.secretEnv or APP_CACHE__REDIS_URL_FILE via secretMounts.
     APP_CACHE__TTL: "300"
     # Maximum status-list records retained by the selected cache backend.
     APP_CACHE__MAX_CAPACITY: "1000"
     APP_CACHE__REDIS_KEY_PREFIX: "status-list-server:status-list:"
+    APP_CACHE__REDIS_RESPONSE_TIMEOUT_MS: "250"
+    APP_CACHE__REDIS_CONNECTION_TIMEOUT_MS: "250"
     APP_STATUS_LIST__TOKEN_EXP_SECS: "900"
     APP_STATUS_LIST__TOKEN_TTL_SECS: "300"
     APP_RATE_LIMIT__STRICT_BURST_SIZE: "10"
@@ -230,6 +232,14 @@ statuslist:
           path: password
       fileEnv:
         APP_DATABASE__PASSWORD_FILE: password
+  # Optional env vars sourced directly from Secret keys, rendered with
+  # valueFrom.secretKeyRef. Useful for Redis URLs when mounting files is not
+  # convenient.
+  # Example:
+  #   APP_CACHE__REDIS_URL:
+  #     name: redis-credentials
+  #     key: url
+  secretEnv: {}
 
   database:
     # Default Secret key used when a database password item omits `key`.

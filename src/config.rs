@@ -982,8 +982,50 @@ pub struct CacheConfig {
     /// Redis connection URL used by binaries built with the `cache-redis` feature.
     #[serde(default)]
     pub redis_url: Option<SecretString>,
+    /// File containing the Redis connection URL, for secret-mounted deployments.
+    #[serde(default)]
+    pub redis_url_file: Option<PathBuf>,
     /// Prefix for Redis keys, allowing multiple deployments to share one Redis database safely.
     pub redis_key_prefix: String,
+    /// Redis command response timeout in milliseconds.
+    pub redis_response_timeout_ms: u64,
+    /// Redis initial/reconnect timeout in milliseconds.
+    pub redis_connection_timeout_ms: u64,
+}
+
+impl CacheConfig {
+    fn validate(&self) -> Result<(), ConfigError> {
+        if self.redis_response_timeout_ms == 0 {
+            return Err(ConfigError::Message(
+                "cache.redis_response_timeout_ms must be greater than 0".to_string(),
+            ));
+        }
+        if self.redis_connection_timeout_ms == 0 {
+            return Err(ConfigError::Message(
+                "cache.redis_connection_timeout_ms must be greater than 0".to_string(),
+            ));
+        }
+        Ok(())
+    }
+
+    pub async fn load_redis_url(&self) -> Result<Option<SecretString>, ConfigError> {
+        match (&self.redis_url, &self.redis_url_file) {
+            (Some(_), Some(_)) => Err(ConfigError::Message(
+                "Ambiguous Redis cache configuration: use either cache.redis_url or cache.redis_url_file, not both".to_string(),
+            )),
+            (Some(url), None) => Ok(Some(url.clone())),
+            (None, Some(path)) => {
+                let value = tokio::fs::read_to_string(path).await.map_err(|err| {
+                    ConfigError::Message(format!(
+                        "Failed to read cache.redis_url_file '{}': {err}",
+                        path.display()
+                    ))
+                })?;
+                Ok(Some(SecretString::from(value.trim().to_string())))
+            }
+            (None, None) => Ok(None),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -1046,6 +1088,7 @@ impl Config {
         if let Some(query) = trim_non_empty(config.database.query.as_deref()) {
             validate_database_query(query)?;
         }
+        config.cache.validate()?;
         config.management_auth.validate()?;
         Ok(config)
     }
@@ -1133,7 +1176,10 @@ fn base_builder() -> Result<ConfigBuilder<DefaultState>, ConfigError> {
         .set_default("cache.ttl", 5 * 60)?
         .set_default("cache.max_capacity", 1000)?
         .set_default("cache.redis_url", Option::<String>::None)?
+        .set_default("cache.redis_url_file", Option::<String>::None)?
         .set_default("cache.redis_key_prefix", "status-list-server:status-list:")?
+        .set_default("cache.redis_response_timeout_ms", 250)?
+        .set_default("cache.redis_connection_timeout_ms", 250)?
         .set_default("status_list.token_exp_secs", 900)?
         .set_default("status_list.token_ttl_secs", 300)?
         .set_default("status_list.snapshot_retention_secs", 7776000)?
@@ -1301,6 +1347,8 @@ mod tests {
             ("cache.max_capacity", "2000"),
             ("cache.redis_url", "redis://redis:6379/0"),
             ("cache.redis_key_prefix", "test-prefix:"),
+            ("cache.redis_response_timeout_ms", "150"),
+            ("cache.redis_connection_timeout_ms", "175"),
             ("status_list.token_exp_secs", "1800"),
             ("status_list.token_ttl_secs", "600"),
             ("management_auth.leeway_secs", "30"),
@@ -1359,6 +1407,8 @@ mod tests {
             "redis://redis:6379/0"
         );
         assert_eq!(overridden.cache.redis_key_prefix, "test-prefix:");
+        assert_eq!(overridden.cache.redis_response_timeout_ms, 150);
+        assert_eq!(overridden.cache.redis_connection_timeout_ms, 175);
         assert_eq!(overridden.status_list.token_exp_secs, 1800);
         assert_eq!(overridden.status_list.token_ttl_secs, 600);
         assert_eq!(overridden.management_auth.leeway_secs, 30);
