@@ -1,5 +1,10 @@
 {{- if .Values.statuslist.networkPolicy.enabled }}
 {{- $otel := index .Values "opentelemetry-collector" | default dict -}}
+{{- $backend := include "status-list-server-chart.dbBackend" . -}}
+{{- $databaseEgress := .Values.statuslist.networkPolicy.databaseEgress | default list -}}
+{{- if and (eq $backend "mysql") (empty $databaseEgress) }}
+{{- fail "statuslist.networkPolicy.databaseEgress must be set when NetworkPolicy is enabled with APP_DATABASE__BACKEND=mysql because this chart does not deploy the database" }}
+{{- end }}
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -27,13 +32,14 @@ spec:
     - ports:
         - port: {{ include "status-list-server-chart.dbPort" . | int }}
           protocol: TCP
-      # Scope internal egress to the target pods, not "any pod in the cluster".
-      # PostgreSQL is always a dependency. Additional destinations can be appended via
-      # statuslist.networkPolicy.egressInternal.
       to:
+        {{- if not (empty $databaseEgress) }}
+        {{- toYaml $databaseEgress | nindent 8 }}
+        {{- else }}
         - podSelector:
             matchLabels:
               app.kubernetes.io/name: postgres
+        {{- end }}
         {{- with .Values.statuslist.networkPolicy.egressInternal }}
         {{- toYaml . | nindent 8 }}
         {{- end }}

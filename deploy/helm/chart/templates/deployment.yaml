@@ -2,6 +2,13 @@
 {{- if and .Values.externalSecret.enabled .Values.statuslist.fallbackSecret.enabled }}
 {{- fail "externalSecret.enabled and statuslist.fallbackSecret.enabled cannot both be true: choose either External Secrets Operator or the fallback Secret for secret delivery, not both" }}
 {{- end }}
+{{- $databaseBackend := include "status-list-server-chart.dbBackend" . }}
+{{- if (.Values.mysql | default dict).enabled }}
+{{- fail "mysql.enabled is not supported because this chart does not vendor a MySQL database; set postgres.enabled=false, statuslist.env.APP_DATABASE__BACKEND=mysql, and provide the MySQL Service externally" }}
+{{- end }}
+{{- if and .Values.postgres.enabled (ne $databaseBackend "postgres") }}
+{{- fail (printf "postgres.enabled=true requires statuslist.env.APP_DATABASE__BACKEND=postgres, got %q; for MySQL set postgres.enabled=false and provide the MySQL Service externally" $databaseBackend) }}
+{{- end }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -82,7 +89,11 @@ spec:
           {{- $pinned := ne $digest "" }}
           {{- $variant := $image.variant | default "fscert" }}
           {{- $baseAppVersion := regexReplaceAll "-(aws|gcp|azure|vault|fscert)$" $.Chart.AppVersion "" }}
-          {{- $effectiveTag := $image.tag | default (printf "%s-%s" $baseAppVersion $variant) }}
+          {{- $defaultVariantTag := printf "%s-%s" $baseAppVersion $variant }}
+          {{- $effectiveTag := $image.tag | default $defaultVariantTag }}
+          {{- if and (eq (include "status-list-server-chart.dbBackend" .) "mysql") (not $image.tag) (not $digest) }}
+          {{- fail "statuslist.env.APP_DATABASE__BACKEND=mysql requires an explicit MySQL-capable image tag or digest; set statuslist.image.tag or statuslist.image.digest" }}
+          {{- end }}
           {{- /* Digest pins the exact scanned artifact; tag falls back to appVersion plus
                  the selected variant, never to "latest". An empty pullPolicy derives from
                  which one is in use: a digest is content-addressed, a tag is mutable. */}}
@@ -161,9 +172,6 @@ spec:
             {{- if hasKey $env "APP_DATABASE__PASSWORD" }}
               {{- fail "statuslist.env.APP_DATABASE__PASSWORD must not be set as a plain env value; use the chart-managed APP_DATABASE__PASSWORD_FILE mounted Secret path" }}
             {{- end }}
-            {{- if or (not (hasKey $env "APP_DATABASE__PORT")) (eq (trim (toString (get $env "APP_DATABASE__PORT"))) "") }}
-              {{- fail "statuslist.env.APP_DATABASE__PORT is required; set it to the database service port" }}
-            {{- end }}
             {{- if not (hasKey $env "APP_SERVER__DOMAIN") }}
               {{- $globalDomain := trimSuffix "." (dig "domain" "" (.Values.global | default dict) | default "" | lower) }}
               {{- if or .Values.statuslist.ingress.externalDnsHostname $globalDomain }}
@@ -202,18 +210,15 @@ spec:
                 {{- $_ := set $env "APP_TELEMETRY__ENABLED" "false" }}
               {{- end }}
             {{- end }}
-            {{- if not (hasKey $env "APP_DATABASE__BACKEND") }}
-              {{- $_ := set $env "APP_DATABASE__BACKEND" "postgres" }}
+            {{- $backend := include "status-list-server-chart.dbBackend" . }}
+            {{- if and (ne $backend "postgres") (ne $backend "mysql") }}
+              {{- fail (printf "statuslist.env.APP_DATABASE__BACKEND must be either postgres or mysql for this chart, got %q" $backend) }}
             {{- end }}
-            {{- if not (hasKey $env "APP_DATABASE__HOST") }}
-              {{- $_ := set $env "APP_DATABASE__HOST" (printf "%s-postgres.%s.svc.cluster.local" .Release.Name .Release.Namespace) }}
-            {{- end }}
-            {{- if not (hasKey $env "APP_DATABASE__USERNAME") }}
-              {{- $_ := set $env "APP_DATABASE__USERNAME" .Values.postgres.auth.username }}
-            {{- end }}
-            {{- if not (hasKey $env "APP_DATABASE__NAME") }}
-              {{- $_ := set $env "APP_DATABASE__NAME" .Values.postgres.auth.database }}
-            {{- end }}
+            {{- $_ := set $env "APP_DATABASE__BACKEND" $backend }}
+            {{- $_ := set $env "APP_DATABASE__HOST" (include "status-list-server-chart.dbHost" .) }}
+            {{- $_ := set $env "APP_DATABASE__PORT" (include "status-list-server-chart.dbPort" .) }}
+            {{- $_ := set $env "APP_DATABASE__USERNAME" (include "status-list-server-chart.dbUsername" .) }}
+            {{- $_ := set $env "APP_DATABASE__NAME" (include "status-list-server-chart.dbName" .) }}
             {{- range $name, $_ := $secretFileEnv }}
               {{- if hasKey $env $name }}
                 {{- fail (printf "statuslist.secretMounts fileEnv defines %s, which duplicates a rendered statuslist environment variable; define each environment variable only once" $name) }}
@@ -285,13 +290,17 @@ spec:
           secret:
             secretName: aws-credentials-secret
       {{- end }}
-      {{- range .Values.statuslist.secretMounts }}
-        - name: {{ .name }}
+      {{- range $mount := .Values.statuslist.secretMounts }}
+        - name: {{ $mount.name }}
           secret:
-            secretName: {{ .secretName }}
-            {{- with .items }}
+            secretName: {{ $mount.secretName }}
+            {{- with $mount.items }}
             items:
-              {{- toYaml . | nindent 14 }}
+              {{- range $item := . }}
+              {{- $resolvedKey := $item.key | default (include "status-list-server-chart.databasePasswordSecretKey" $) }}
+              {{- $renderedItem := mustMergeOverwrite (deepCopy $item) (dict "key" $resolvedKey) }}
+              {{- toYaml (list $renderedItem) | nindent 14 }}
+              {{- end }}
             {{- end }}
       {{- end }}
 {{- end }}
