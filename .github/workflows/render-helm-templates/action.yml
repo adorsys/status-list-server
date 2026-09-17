@@ -593,6 +593,62 @@ runs:
           echo "ERROR: NetworkPolicy egress internal rule must have a to:/podSelector (not any pod)"; exit 1
         fi
 
+        # --- Cluster-wide kube-prometheus-stack alignment (issue 460) ---
+        # 1. PromQL must be namespace-scoped: every raw selector carries
+        #    namespace="<release namespace>" and the absence alert is namespace
+        #    scoped (never cluster-global). Render in a non-default namespace to be
+        #    sure the matcher reflects the actual release namespace, not a hardcoded one.
+        helm template status-list-server "$CHART_DIR" \
+          --namespace statuslist-prod \
+          --set externalSecret.enabled=false \
+          --set statuslist.fallbackSecret.enabled=true \
+          --set-string statuslist.fallbackSecret.stringData.postgres-password=x \
+          --set prometheusRule.enabled=true \
+          --output-dir /tmp/rendered/scoped-rules
+        RULES=/tmp/rendered/scoped-rules/status-list-server/templates/prometheusrule.yaml
+        if ! grep -q 'otel_scope_name="status-list-server",namespace="statuslist-prod"' "$RULES"; then
+          echo "ERROR: PrometheusRule raw selectors must be namespace-scoped"; exit 1
+        fi
+        if ! grep -q 'absent(up{namespace="statuslist-prod",service="status-list-server-service"})' "$RULES"; then
+          echo "ERROR: StatusListMetricsAbsent must be namespace-scoped and select the rendered Service, not cluster-global"; exit 1
+        fi
+        if ! grep -q 'sli:error_budget:success:30d{namespace="statuslist-prod"}' "$RULES"; then
+          echo "ERROR: recording-series reads in alert rules must be namespace-scoped"; exit 1
+        fi
+        # Every alert must carry team routing ownership (shared Alertmanager contract).
+        ALERTS=$(grep -c -- '- alert:' "$RULES")
+        TEAMS=$(grep -c 'team: statuslist' "$RULES")
+        if [ "$ALERTS" -ne "$TEAMS" ]; then
+          echo "ERROR: every alert must have team: statuslist ($TEAMS of $ALERTS alerts have it)"; exit 1
+        fi
+        # 2. Grafana dashboard ConfigMap is opt-in (default off) and labelled for the
+        #    central Grafana sidecar when enabled.
+        if helm template status-list-server "$CHART_DIR" 2>/dev/null | grep -q 'kind: ConfigMap' \
+            && helm template status-list-server "$CHART_DIR" 2>/dev/null | grep -q 'grafana_dashboard'; then
+          echo "ERROR: default render must NOT emit the Grafana dashboard ConfigMap"; exit 1
+        fi
+        helm template status-list-server "$CHART_DIR" \
+          --set grafanaDashboard.enabled=true \
+          --output-dir /tmp/rendered/dashboard
+        if [ ! -f /tmp/rendered/dashboard/status-list-server/templates/dashboard-configmap.yaml ]; then
+          echo "ERROR: grafanaDashboard.enabled=true must render dashboard-configmap.yaml"; exit 1
+        fi
+        if ! grep -q 'grafana_dashboard: "1"' /tmp/rendered/dashboard/status-list-server/templates/dashboard-configmap.yaml; then
+          echo "ERROR: dashboard ConfigMap must be labelled grafana_dashboard: \"1\""; exit 1
+        fi
+        if ! grep -q '"uid": "status-list-slo"' /tmp/rendered/dashboard/status-list-server/templates/dashboard-configmap.yaml; then
+          echo "ERROR: dashboard ConfigMap must embed the generated SLO dashboard JSON"; exit 1
+        fi
+        # 3. prometheus.io/* Pod annotations are opt-in (ServiceMonitor is the
+        #    authoritative discovery method in kube-prometheus-stack, not annotations).
+        if helm template status-list-server "$CHART_DIR" 2>/dev/null | grep -q 'prometheus.io/scrape'; then
+          echo "ERROR: default render must NOT emit prometheus.io/scrape Pod annotations"; exit 1
+        fi
+        helm template status-list-server "$CHART_DIR" \
+          --set statuslist.prometheusAnnotations=true 2>/dev/null \
+          | grep -q 'prometheus.io/scrape: "true"' \
+          || { echo "ERROR: statuslist.prometheusAnnotations=true must render prometheus.io/scrape"; exit 1; }
+
         # Fail-closed alerting render tests:
         # 1. alerting.enabled=true with unsupported platform fails.
         if helm template status-list-server "$CHART_DIR" \
@@ -683,3 +739,67 @@ runs:
           | grep -q -- '-alerting'; then
           echo "ERROR: email without smtpPassword/dmsWebhookUrl must not render an empty alerting Secret"; exit 1
         fi
+
+    - name: Validate enabled AlertmanagerConfig route against pinned 91.4.0 CRD
+      shell: bash
+      # The rendered AlertmanagerConfig must be accepted by the EXACT
+      # kube-prometheus-stack AlertmanagerConfig CRD that ships with the pinned
+      # operator (91.4.0 / prometheus-operator v0.94.0), which serves ONLY
+      # monitoring.coreos.com/v1alpha1. The grep checks above prove the file is
+      # rendered with the expected fields, but they would NOT catch a bumped /
+      # unsupported apiVersion or a field value the served CRD rejects. Here we
+      # validate the enabled production route (the alerting-slack variant rendered
+      # above) against the pinned CRD's served v1alpha1 OpenAPI schema.
+      run: |
+        set -euo pipefail
+        pip install --quiet --disable-pip-version-check jsonschema
+
+        crd=/tmp/crd-alertmanagerconfigs-91.4.0.yaml
+        curl -fsSL -o "$crd" \
+          "https://raw.githubusercontent.com/prometheus-community/helm-charts/kube-prometheus-stack-91.4.0/charts/kube-prometheus-stack/charts/crds/crds/crd-alertmanagerconfigs.yaml"
+
+        python3 - <<'PY'
+        import sys, yaml
+        from jsonschema import Draft7Validator
+
+        # The pinned CRD uses the OpenAPI "=" scalar (e.g. enum: ["=", "!=", ...])
+        # which yaml.safe_load rejects; map the value tag to a scalar/mapping safely.
+        def _value_constructor(loader, node):
+            if isinstance(node, yaml.ScalarNode):
+                return loader.construct_scalar(node)
+            return loader.construct_mapping(node, deep=True)
+
+        class Loader(yaml.SafeLoader):
+            pass
+        Loader.add_constructor('tag:yaml.org,2002:value', _value_constructor)
+
+        crd = yaml.load(open('/tmp/crd-alertmanagerconfigs-91.4.0.yaml'), Loader=Loader)
+        versions = crd['spec']['versions']
+        served = [v['name'] for v in versions]
+        print("pinned 91.4.0 AlertmanagerConfig CRD served versions:", served)
+
+        path = '/tmp/rendered/alerting-slack/status-list-server/templates/alertmanagerconfig.yaml'
+        docs = [d for d in yaml.safe_load_all(open(path)) if d]
+        amc = next((d for d in docs if d.get('kind') == 'AlertmanagerConfig'), None)
+        if amc is None:
+            sys.exit("ERROR: no AlertmanagerConfig rendered for the enabled alerting route")
+
+        api = amc['apiVersion']
+        group, _, version = api.partition('/')
+        if version not in served:
+            sys.exit(f"ERROR: rendered AlertmanagerConfig uses {api}, but the pinned "
+                     f"kube-prometheus-stack 91.4.0 CRD serves only {served}")
+
+        schema = next(v for v in versions if v['name'] == version)['schema']['openAPIV3Schema']
+        # The CRD schema is a full-object schema (required: ['spec', 'metadata', ...]).
+        # Validate the rendered spec against the spec sub-schema, not the object schema.
+        spec_schema = schema['properties']['spec']
+        errors = sorted(Draft7Validator(spec_schema).iter_errors(amc['spec']),
+                        key=lambda e: list(e.path))
+        if errors:
+            for e in errors:
+                print("INVALID:", list(e.path), "->", e.message)
+            sys.exit(f"ERROR: rendered AlertmanagerConfig fails validation against the "
+                     f"pinned 91.4.0 {api} CRD schema")
+        print("rendered AlertmanagerConfig validates against the pinned 91.4.0 CRD schema")
+        PY
