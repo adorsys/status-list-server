@@ -15,7 +15,7 @@ round trip. It pages only through review (warn).
 1. **Cache TTL too short** — `cache.ttl` expires entries before they are
    re-read; a low TTL guarantees a low hit ratio under a sparse-read workload.
 2. **Cardinality spike** — a burst of distinct `list_id`s exceeds
-   `cache.max_capacity`, thrashing the Moka cache (evictions).
+   `cache.max_capacity`, thrashing the selected cache backend (evictions).
 3. **Cache disabled** — `cache.ttl == 0` disables the cache entirely (hit ratio
    drops to ~0).
 4. **Process restarts** — every restart warms the in-process cache from empty.

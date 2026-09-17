@@ -547,6 +547,7 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
             RedisStatusListCache::new(
                 redis_url.expose_secret(),
                 config.cache.ttl,
+                config.cache.max_capacity,
                 config.cache.redis_key_prefix.clone(),
             )
             .await?,

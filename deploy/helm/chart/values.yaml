@@ -100,10 +100,12 @@ statuslist:
     APP_DATABASE__PORT: "5432"
     # Status-list record cache TTL in seconds. "0" disables this cache.
     # Cache backend is selected at image build time. cache-memory is the default,
-    # and wins when all features are enabled. For cache-redis-only images,
-    # provide APP_CACHE__REDIS_URL via env or a secret-backed env source.
+    # and wins when all features are enabled. Docker builds automatically disable
+    # Cargo defaults when the image FEATURES build arg contains cache-redis.
+    # For cache-redis images, provide APP_CACHE__REDIS_URL via env or a
+    # secret-backed env source.
     APP_CACHE__TTL: "300"
-    # In-process cache maximum entries. Ignored by cache-redis images.
+    # Maximum status-list records retained by the selected cache backend.
     APP_CACHE__MAX_CAPACITY: "1000"
     APP_CACHE__REDIS_KEY_PREFIX: "status-list-server:status-list:"
     APP_STATUS_LIST__TOKEN_EXP_SECS: "900"

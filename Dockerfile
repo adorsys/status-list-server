@@ -50,7 +50,11 @@ RUN --mount=type=bind,source=src,target=src \
         arm64) RUST_TARGET="aarch64-unknown-linux-musl" ;; \
         *) echo "Unsupported architecture: ${TARGETARCH:-unset}" && exit 1 ;; \
     esac; \
-    cargo auditable build --locked --release --target=${RUST_TARGET} --features "${FEATURES}"; \
+    if printf '%s' ",${FEATURES}," | grep -q ',cache-redis,'; then \
+        cargo auditable build --locked --release --target=${RUST_TARGET} --no-default-features --features "memory,${FEATURES}"; \
+    else \
+        cargo auditable build --locked --release --target=${RUST_TARGET} --features "${FEATURES}"; \
+    fi; \
     mv target/${RUST_TARGET}/release/${APP_NAME} .; \
     audit_data=$(rust-audit-info "${APP_NAME}"); \
     audit_packages=$(printf '%s' "${audit_data}" | grep -o '"name":' | wc -l); \

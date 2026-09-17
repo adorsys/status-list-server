@@ -1131,7 +1131,7 @@ fn base_builder() -> Result<ConfigBuilder<DefaultState>, ConfigError> {
         .set_default("azure_keyvault.vault_url", Option::<String>::None)?
         .set_default("azure_keyvault.secrets_cache_ttl", 300)?
         .set_default("cache.ttl", 5 * 60)?
-        .set_default("cache.max_capacity", 100)?
+        .set_default("cache.max_capacity", 1000)?
         .set_default("cache.redis_url", Option::<String>::None)?
         .set_default("cache.redis_key_prefix", "status-list-server:status-list:")?
         .set_default("status_list.token_exp_secs", 900)?
