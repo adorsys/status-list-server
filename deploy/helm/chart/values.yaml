@@ -293,9 +293,10 @@ statuslist:
   # File-based secret mounts for production credential/key rotation.
   # Mounts Kubernetes Secrets as files into the container at specified paths.
   # The current chart support is preparatory for application images that implement
-  # file reload support (see issue #456). Use fileEnv to map a mounted file path
-  # into an application environment variable. Paths are relative to mountPath and
-  # work whether items is present or the whole Secret is mounted.
+  # file-based credential reload (polling the mounted path for changes). Use fileEnv
+  # to map a mounted file path into an application environment variable. Paths are
+  # relative to mountPath and work whether items is present or the whole Secret is
+  # mounted.
   # When items is present, each fileEnv value must exactly match one of the
   # normalized items[].path values so the chart cannot point the app at a file
   # Kubernetes will not mount.
@@ -350,7 +351,8 @@ statuslist:
 
   # Watcher configuration for file-based credential rotation detection.
   # When pollIntervalSecs is set, APP_WATCHER__POLL_INTERVAL_SECS is injected.
-  # This requires an application image that implements the watcher contract from issue #456.
+  # This requires an application image that implements the file-reload watcher contract
+  # (polling mounted secret files for changes and swapping credentials without restart).
   watcher:
     pollIntervalSecs: "30"
   livenessProbe:
@@ -649,9 +651,9 @@ slo:
 # Bundled in-cluster PostgreSQL database (accepted CloudPirates-chart values).
 # This is one possible backend: the application is database-agnostic and selects its
 # backend at runtime through the APP_DATABASE__* environment variables. Only PostgreSQL is
-# delivered by this chart — MySQL / other backends are supported by the APPLICATION code
+# delivered by this chart. MySQL and other backends are supported by the application code
 # (see docs/database-backends.md) but no non-Postgres image variant is published, so
-# 'including MySQL' is not reachable through Helm today (tracks #498). Note also that
+# 'including MySQL' is not reachable through Helm today. Note also that
 # APP_DATABASE__HOST comes from the release name and APP_DATABASE__BACKEND is the literal
 # "postgres" (deployment.yaml sets all of HOST/BACKEND/USERNAME/NAME regardless of
 # postgres.enabled; only USERNAME/NAME come from postgres.auth). To use an external

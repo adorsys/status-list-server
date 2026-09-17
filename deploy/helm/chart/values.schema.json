@@ -290,7 +290,7 @@
         "secretMounts": {
           "type": "array",
           "title": "File-based secret mounts",
-          "description": "Mount Kubernetes Secrets as files into the container (production credential/key rotation, issue #456). fileEnv maps a mounted file path into an application env var; paths are relative to mountPath and must match the mounted items. APP_DATABASE__PASSWORD cannot be delivered any other way: the chart hard-fails if APP_DATABASE__PASSWORD (or APP_DATABASE__URL) is set as a plain env value or fileEnv key, so the mounted APP_DATABASE__PASSWORD_FILE is the only supported database-password delivery path.",
+          "description": "Mount Kubernetes Secrets as files into the container for production credential/key rotation (the application reloads the mounted files on change). fileEnv maps a mounted file path into an application env var; paths are relative to mountPath and must match the mounted items. APP_DATABASE__PASSWORD cannot be delivered any other way: the chart hard-fails if APP_DATABASE__PASSWORD (or APP_DATABASE__URL) is set as a plain env value or fileEnv key, so the mounted APP_DATABASE__PASSWORD_FILE is the only supported database-password delivery path.",
           "items": {
             "type": "object",
             "required": ["name", "secretName", "mountPath"],
@@ -335,7 +335,7 @@
         "watcher": {
           "type": "object",
           "title": "Credential rotation watcher",
-          "description": "Watcher configuration for file-based credential rotation detection. When pollIntervalSecs is set, APP_WATCHER__POLL_INTERVAL_SECS is injected. Requires an application image implementing the watcher contract (issue #456).",
+          "description": "Watcher configuration for file-based credential rotation detection. When pollIntervalSecs is set, APP_WATCHER__POLL_INTERVAL_SECS is injected. Requires an application image implementing the file-reload watcher contract (polling mounted secret files for changes and swapping credentials without restart).",
           "properties": {
             "pollIntervalSecs": {
               "type": ["string", "integer"],
@@ -594,7 +594,7 @@
     "postgres": {
       "type": "object",
       "title": "Bundled PostgreSQL",
-      "description": "Bundled in-cluster PostgreSQL (accepted values of the CloudPirates chart). One possible backend: the application is database-agnostic and selects its backend at runtime via APP_DATABASE__* env vars. Set enabled=false and point APP_DATABASE__* at an external database for a different backend. Note: only the PostgreSQL backend is delivered by this chart — no MySQL (or other) image variant is published, so 'including MySQL' applies to the application code only, not to a Helm-installable MySQL. If you disable postgres, you must also override statuslist.initContainers (the default wait-for-postgres init container otherwise hangs on <release>-postgres) and add egress for your external database host.",
+      "description": "Bundled in-cluster PostgreSQL (accepted values of the CloudPirates chart). One possible backend: the application is database-agnostic and selects its backend at runtime via APP_DATABASE__* env vars. Set enabled=false and point APP_DATABASE__* at an external database for a different backend. Note: only the PostgreSQL backend is delivered by this chart: no MySQL (or other) image variant is published, so 'including MySQL' applies to the application code only, not to a Helm-installable MySQL. If you disable postgres, you must also override statuslist.initContainers (the default wait-for-postgres init container otherwise hangs on <release>-postgres) and add egress for your external database host.",
       "properties": {
         "enabled": { "type": "boolean", "title": "Render the PostgreSQL subchart" },
         "resources": { "type": "object", "title": "PostgreSQL resources" },
@@ -639,7 +639,7 @@
     "mysql": {
       "type": "object",
       "title": "External MySQL defaults",
-      "description": "External MySQL connection defaults used by deployment.yaml, initContainers, and NetworkPolicy ports when APP_DATABASE__BACKEND=mysql. This chart does NOT vendor or deploy a MySQL database (only the PostgreSQL backend ships as an image variant) — 'including MySQL' applies to the application code only, so a MySQL deployment must point APP_DATABASE__HOST at an external Service/operator-managed cluster and set postgres.enabled=false. Only the auth username/database and Service port are used here.",
+      "description": "External MySQL connection defaults used by deployment.yaml, initContainers, and NetworkPolicy ports when APP_DATABASE__BACKEND=mysql. This chart does NOT vendor or deploy a MySQL database (only the PostgreSQL backend ships as an image variant); 'including MySQL' applies to the application code only, so a MySQL deployment must point APP_DATABASE__HOST at an external Service/operator-managed cluster and set postgres.enabled=false. Only the auth username/database and Service port are used here.",
       "properties": {
         "auth": {
           "type": "object",

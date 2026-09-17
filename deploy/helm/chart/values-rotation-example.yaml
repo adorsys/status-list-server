@@ -5,15 +5,17 @@
 # 3. External Secrets Operator with ClusterSecretStore
 #
 # This is preparatory chart support for an application image that implements the
-# file watcher and pool/key reload contract from issue #456. With the current
-# server image, file paths may be injected but database pools and key material are
-# still initialized at process startup.
+# file watcher and pool/key reload contract (polling mounted secret files for changes
+# and swapping credentials/pool connections without restart). With the current server
+# image, file paths may be injected but database pools and key material are still
+# initialized at process startup.
 #
 # How rotation works:
 # 1. Update secrets in your external secret store (Vault, AWS, GCP, Azure)
 # 2. External Secrets Operator syncs changes to Kubernetes Secrets
 # 3. Kubernetes updates mounted Secret volumes
-# 4. An application image with issue #456 detects file changes and swaps credentials
+# 4. An application image with file-reload support detects file changes and swaps
+#    credentials
 # 5. The chart checksum annotation rolls Pods only when Helm-rendered ExternalSecret
 #    manifests change; it does not change when ESO syncs new Secret data from Vault
 
@@ -99,8 +101,8 @@ statuslist:
     enabled: false
 
   image:
-    # Replace with an application image that includes issue #456.
-    tag: "requires-456-file-rotation"
+    # Replace with an application image that implements file-based rotation.
+    tag: "requires-file-rotation"
 
   aws:
     # Use Workload Identity / ambient cloud credentials in this vendor-neutral example.
@@ -273,7 +275,7 @@ opentelemetry-collector:
 #    b. Validate the new credential directly against PostgreSQL before publishing it.
 #    c. Update the external secret store (for example Vault) with the new password.
 #    d. External Secrets Operator syncs to statuslist-db-credentials.
-#    e. An application image with issue #456 detects the mounted file change via
+#    e. An application image with file-reload support detects the mounted file change via
 #       APP_WATCHER__POLL_INTERVAL_SECS and swaps the database pool without restart.
 #    f. Verify new connections succeed and logs show a successful credential reload.
 #    g. Revoke the old database credential only after all replicas are healthy on the
@@ -286,7 +288,7 @@ opentelemetry-collector:
 #    c. External Secrets Operator syncs to statuslist-token-keys and Kubernetes
 #       updates the mounted files; no checksum-triggered rollout happens for data-only
 #       changes synced by ESO
-#    d. Application image with issue #456 reloads key material from the files, or an
+#    d. Application image with file-reload support reloads key material from the files, or an
 #       operator performs kubectl rollout restart if using an older image
 #    e. Verify pods have new keys: kubectl exec <pod> -- ls -la /etc/secrets/token-keys/
 #    f. After grace period, remove old key from external store
@@ -296,7 +298,7 @@ opentelemetry-collector:
 #       If old credentials must be revoked immediately, expect existing connections
 #       to fail until every replica reloads or restarts.
 #    b. Update the external secret store immediately.
-#    c. Force rolling restart when running an image without issue #456, or when the
+#    c. Force rolling restart when running an image without file-reload support, or when the
 #       incident requires replacing all in-memory state:
 #       kubectl rollout restart deployment/statuslist-status-list-server-deployment
 #    d. Verify all pods use new credentials.
