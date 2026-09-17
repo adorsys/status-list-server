@@ -29,11 +29,14 @@ podAnnotations: {}
 # values-production.yaml) rather than baked into these defaults.
 statuslist:
   enabled: true
-  # initContainers run before the application container. The default waits for the
-  # bundled PostgreSQL service to accept connections on the database port derived from
-  # APP_DATABASE__PORT (see the status-list-server-chart.dbPort helper). If you disable
-  # the bundled PostgreSQL, you MUST override this block (the default waits on
-  # <release>-postgres forever). Each init container is hardened (drop-all capabilities,
+  # initContainers run before the application container. The default wait-for-db waits
+  # for the active database backend to accept connections: it resolves the target
+  # dynamically via the status-list-server-chart.dbHost and .dbPort helpers, which
+  # honour statuslist.env.APP_DATABASE__HOST/PORT and fall back to the active backend's
+  # defaults (postgres/mysql). So with an external (or MySQL) backend it connects to that
+  # host and never hangs on the bundled <release>-postgres Service. Pass host/port or
+  # disable the wait explicitly only if you provide no reachable database. Each init
+  # container is hardened (drop-all capabilities,
   # non-root, read-only rootfs, /tmp emptyDir) and given small fixed CPU/memory
   # requests/limits regardless of the values provided here, so operators only supply the
   # wait command and image. CAUTION: the chart merges the container spec with these
@@ -300,11 +303,11 @@ statuslist:
   # When items is present, each fileEnv value must exactly match one of the
   # normalized items[].path values so the chart cannot point the app at a file
   # Kubernetes will not mount.
-  # If APP_DATABASE__PASSWORD_FILE is configured via statuslist.env or fileEnv, the
-  # chart does NOT inject APP_DATABASE__PASSWORD — it rejects APP_DATABASE__PASSWORD
-  # outright (deployment.yaml fails if it is set as a plain env value or fileEnv key),
-  # so the mounted file is the only supported database-password delivery path and the
-  # application cannot silently keep a stale startup password from an environment variable.
+  # The chart never injects APP_DATABASE__PASSWORD from values: setting it as a plain env
+  # value or as a fileEnv key makes deployment.yaml fail outright (regardless of whether
+  # APP_DATABASE__PASSWORD_FILE is configured), so the mounted file is the only supported
+  # database-password delivery path and the application cannot silently keep a stale
+  # startup password from an environment variable.
   # Example:
   # - name: database-credentials
   #   secretName: postgres-access
@@ -653,13 +656,14 @@ slo:
 # backend at runtime through the APP_DATABASE__* environment variables. Only PostgreSQL is
 # delivered by this chart. MySQL and other backends are supported by the application code
 # (see docs/database-backends.md) but no non-Postgres image variant is published, so
-# 'including MySQL' is not reachable through Helm today. Note also that
-# APP_DATABASE__HOST comes from the release name and APP_DATABASE__BACKEND is the literal
-# "postgres" (deployment.yaml sets all of HOST/BACKEND/USERNAME/NAME regardless of
-# postgres.enabled; only USERNAME/NAME come from postgres.auth). To use an external
-# database, set postgres.enabled=false AND override statuslist.initContainers (the default
-# wait-for-postgres otherwise hangs on <release>-postgres forever) AND add egress for the
-# external DB host (see the networkPolicy caveat).
+# 'including MySQL' is not reachable through Helm today. The chart wires the active backend
+# through the dbHost/dbPort/dbUsername/dbName helpers: APP_DATABASE__HOST, __PORT, __BACKEND,
+# __USERNAME, and __NAME are all derived from statuslist.env when set, otherwise from the
+# active backend's values (postgres.auth/postgres.service or mysql.auth/mysql.service). To
+# use an external database, set postgres.enabled=false and point statuslist.env.APP_DATABASE__*
+# at it; the default wait-for-db init container then connects to that external host (no
+# override needed), and allow outbound egress to it via statuslist.networkPolicy.databaseEgress
+# when the NetworkPolicy is enabled.
 postgres:
   enabled: true
   resources:
