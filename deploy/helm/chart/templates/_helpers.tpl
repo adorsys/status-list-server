@@ -52,7 +52,18 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end }}
 
 {{/*
-Create the name of the service account to use
+Create the name of the service account to use.
+When serviceAccount.create=true the name is the chart fullname (via the fullname helper)
+unless serviceAccount.name is set explicitly, and deployment.yaml injects
+serviceAccountName so the pod uses this SA. When serviceAccount.create=false AND
+serviceAccount.name is empty, this returns "default" — but deployment.yaml does NOT
+inject serviceAccountName at all in that case (see the serviceAccountName `if` guard),
+so the pod actually runs as the namespace default ServiceAccount. Set serviceAccount.name
+explicitly when disabling chart SA creation to control which SA the pod uses. This is the
+name the cloud must trust: Workload Identity (IRSA / GKE WI / AKS WI) is keyed on the SA
+name via the federated subject system:serviceaccount:<namespace>:<name>, so changing this
+breaks the ambient-credential trust relationship unless the cloud identity is updated to
+match.
 */}}
 {{- define "status-list-server-chart.serviceAccountName" -}}
 {{- if .Values.serviceAccount.create }}
@@ -94,6 +105,11 @@ defaults to eu-central-1 at the CR level for pure-IRSA / Workload Identity insta
 
 {{/*
 Effective database backend for chart-managed defaults.
+Returns statuslist.env.APP_DATABASE__BACKEND if set, otherwise "postgres". The dbHost,
+dbPort, dbUsername, and dbName helpers each consult it to decide the fallback source
+(postgres.* vs mysql.*), and deployment.yaml sets APP_DATABASE__BACKEND to it. The chart
+rejects any value other than "postgres" or "mysql" at render time (the helpers fail), so
+an unsupported backend surfaces immediately rather than rendering a broken Deployment.
 */}}
 {{- define "status-list-server-chart.dbBackend" -}}
 {{- $env := .Values.statuslist.env | default dict }}

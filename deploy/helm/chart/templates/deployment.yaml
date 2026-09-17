@@ -6,6 +6,11 @@ so the HPA controls the count. Pod annotations are emitted unconditionally: the
 prometheus.io/scrape hints are for annotation-based scrape discovery (they do not "expose"
 anything). If you also enable serviceMonitor with a Prometheus doing both ServiceMonitor
 and annotation discovery, installs scrape these pods twice (doubled samples/cost).
+Extra pod annotations come from the TOP-LEVEL .Values.podAnnotations (defined in the
+schema and values.yaml at the root, alongside global/serviceAccount), NOT from
+statuslist.podAnnotations — there is no statuslist.podAnnotations here, so operator
+values under statuslist are ignored. Pod LABELS, by contrast, come from
+.Values.statuslist.podLabels below.
 */}}
 {{- if .Values.statuslist.enabled }}
 {{- if and .Values.externalSecret.enabled .Values.statuslist.fallbackSecret.enabled }}

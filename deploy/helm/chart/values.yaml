@@ -5,6 +5,22 @@ global:
   # Leave empty for provider-neutral defaults.
   domain: ""
 
+# nameOverride overrides the base chart name used by the _helpers.tpl "name"/"fullname"
+# helpers (and therefore resource names and selector labels). Read by the templates;
+# empty uses the chart name (status-list-server).
+nameOverride: ""
+
+# fullnameOverride overrides the fully-qualified name (fullname) used for most resource
+# names and the default ServiceAccount when create=true. Read by the _helpers.tpl
+# "fullname" helper; empty derives <release>-<name>.
+fullnameOverride: ""
+
+# Extra annotations merged onto the Pod template metadata (deployment.yaml line 44:
+# .Values.podAnnotations), on top of the hard-coded prometheus.io/scrape annotations.
+# Examples: sidecar injection (e.g. istio.io/sidecar: inject), monitoring hints.
+# These are read from the TOP LEVEL (not statuslist), matching the template.
+podAnnotations: {}
+
 # statuslist: the application core. All fields under this key configure the
 # status-list-server Deployment, its Pod, Service, Ingress, secrets, and runtime env.
 # The base chart is provider-neutral: cloud-specific behavior (AWS/GCP/Azure Workload
@@ -89,11 +105,18 @@ statuslist:
     #      advance the running image.
     # An empty pullPolicy derives from which case is in use; set it explicitly to override.
   service:
+    # Render the Kubernetes Service exposing the application.
     enabled: true
+    # Service type: ClusterIP (default) | NodePort | LoadBalancer.
+    # ExternalName is rejected at render time.
     type: ClusterIP
+    # Annotations on the Service, e.g. AWS NLB annotations (see values-aws-nlb.yaml).
     annotations: {}
+    # Service port (the address clients/ingress use).
     port: 8081
+    # Container target port receiving traffic, matching the `http` containerPort.
     targetPort: 8000
+    # NodePort (only valid when type=NodePort; range 30000-32767). Null otherwise.
     nodePort: null
   ingress:
     # NGINX Ingress exposing the application Service. The ingressClassName is hard-coded
@@ -119,12 +142,18 @@ statuslist:
     # also changes application config. Set to override the default host.
     externalDnsHostname: ""
   env:
+    # Log level for the Rust logger (e.g. info, debug, warn, error).
     RUST_LOG: "info"
+    # Application environment tag.
     APP_ENV: "production"
+    # HTTP listener bind address and port (must match service.targetPort).
     APP_SERVER__HOST: "0.0.0.0"
     APP_SERVER__PORT: "8000"
+    # ACME directory URL for automatic certificate issuance/renewal.
     APP_SERVER__CERT__ACME_DIRECTORY_URL: "https://acme-v02.api.letsencrypt.org/directory"
+    # Extended Key Usage OID for issued certificates.
     APP_SERVER__CERT__EKU: "1,3,6,1,5,5,7,3,30"
+    # Cron schedule for certificate renewal attempts.
     APP_SERVER__CERT__RENEWAL_CRON_SCHEDULE: "0 0 0 * * *"
     # DNS provider for ACME DNS-01 challenges: route53 | cloudflare | gcloud | azure | acmedns
     # (pebble also exists but is a development-only fake, not for deployments)
@@ -172,20 +201,27 @@ statuslist:
     # APP_DATABASE__BACKEND defaults to "postgres". When APP_DATABASE__HOST, PORT,
     # USERNAME, or NAME are omitted, deployment.yaml derives them from the active
     # backend's native values below (postgres/mysql).
-    # Status-list record cache TTL in seconds. "0" disables this cache.
+    # Status-list record cache: TTL per entry in seconds ("0" disables the cache) and
+    # maximum number of cached entries.
     APP_CACHE__TTL: "300"
     APP_CACHE__MAX_CAPACITY: "1000"
+    # Status-list token lifetime: EXP_SECS is how long a status-list token is valid for
+    # generation; TTL_SECS is the freshness/rotation window for tokens in the cache.
     APP_STATUS_LIST__TOKEN_EXP_SECS: "900"
     APP_STATUS_LIST__TOKEN_TTL_SECS: "300"
+    # Rate limiting: strict limits apply to privileged/AUI paths; permissive limits to the
+    # public API. Each pair is a burst size and a period in seconds.
     APP_RATE_LIMIT__STRICT_BURST_SIZE: "10"
     APP_RATE_LIMIT__STRICT_PERIOD_SECS: "60"
     APP_RATE_LIMIT__PERMISSIVE_BURST_SIZE: "100"
     APP_RATE_LIMIT__PERMISSIVE_PERIOD_SECS: "60"
+    # Request-size / index limits enforced server-side.
     APP_LIMITS__MAX_BODY_SIZE_BYTES: "2097152"
     APP_LIMITS__MAX_STATUS_INDEX: "100000"
     APP_LIMITS__MAX_STATUSES_PER_REQUEST: "5000"
     APP_LIMITS__MAX_SERIALIZED_LIST_SIZE: "1048576"
-    # Telemetry / OpenTelemetry
+    # Telemetry / OpenTelemetry: expose the Prometheus /metrics endpoint, the deployment
+    # environment tag, and the trace sampling ratio (1.0 = sample every span).
     APP_SERVER__ENABLE_METRICS: "true"
     APP_TELEMETRY__ENVIRONMENT: "production"
     APP_TELEMETRY__SAMPLER_RATIO: "1.0"
@@ -400,7 +436,24 @@ autoscaling:
   enabled: false
   minReplicas: 1
   maxReplicas: 5
+  # HPA metrics (autoscaling/v2 MetricSpec array), e.g.:
+  #   - type: Resource
+  #     resource:
+  #       name: cpu
+  #       target:
+  #         type: Utilization
+  #         averageUtilization: 70
+  # Empty uses the Operator/chart default metric.
   metrics: []
+  # behavior: fine-grained scale-up/down policies (autoscaling/v2
+  # HorizontalPodAutoscalerBehavior), e.g.:
+  #   scaleDown:
+  #     stabilizationWindowSeconds: 300
+  #     policies:
+  #       - type: Percent
+  #         value: 50
+  #         periodSeconds: 60
+  # Uncomment and customize to override the default stabilization window.
   # behavior: {}
 
 # PodDisruptionBudget (policy/v1). Use with replicaCount > 1 / HPA so disruption events

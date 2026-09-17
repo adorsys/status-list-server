@@ -26,6 +26,12 @@
       "title": "Full name override",
       "description": "Overrides the fully-qualified name (fullname) used for most resource names and the default ServiceAccount when create=true. Read by the _helpers.tpl 'fullname' helper; empty derives <release>-<name>."
     },
+    "podAnnotations": {
+      "type": "object",
+      "title": "Pod annotations",
+      "description": "Extra annotations merged onto the Pod template metadata (e.g. sidecar injection, monitoring hints), on top of the hard-coded prometheus.io/scrape annotations. Read from the top level by deployment.yaml (.Values.podAnnotations), so this is the only place to define them.",
+      "additionalProperties": { "type": "string" }
+    },
     "serviceAccount": {
       "type": "object",
       "title": "Application ServiceAccount",
@@ -81,12 +87,6 @@
           "type": "object",
           "title": "Pod labels",
           "description": "Extra labels merged onto the Pod template metadata. Values are rendered as strings; required e.g. for Azure Workload Identity: azure.workload.identity/use: 'true'.",
-          "additionalProperties": { "type": "string" }
-        },
-        "podAnnotations": {
-          "type": "object",
-          "title": "Pod annotations",
-          "description": "Extra annotations merged onto the Pod template metadata (e.g. sidecar injection, monitoring hints), on top of the hard-coded prometheus.io/scrape annotations.",
           "additionalProperties": { "type": "string" }
         },
         "image": {
@@ -229,7 +229,7 @@
         "env": {
           "type": "object",
           "title": "Application environment variables",
-          "description": "RUNTIME environment for the status-list-server container. APP_DATABASE__PORT is required (the chart fails without it). Do not set APP_DATABASE__URL or APP_DATABASE__PASSWORD here — the chart rejects them (see statuslist.secretMounts and statuslist.fallbackSecret for credential delivery). DNS/Workload Identity settings for ACME DNS-01 are documented in the values.yaml env block and docs/dns-providers.md.",
+          "description": "RUNTIME environment for the status-list-server container. APP_DATABASE__PORT is derived from the active backend by default (postgres.service.port or mysql.service.port, see the status-list-server-chart.dbPort helper); set it explicitly only to override the backend default. Do not set APP_DATABASE__URL or APP_DATABASE__PASSWORD here — the chart rejects them (see statuslist.secretMounts and statuslist.fallbackSecret for credential delivery). DNS/Workload Identity settings for ACME DNS-01 are documented in the values.yaml env block and docs/dns-providers.md.",
           "additionalProperties": { "type": "string" }
         },
         "aws": {
@@ -321,8 +321,15 @@
         },
         "database": {
           "type": "object",
+          "title": "Database defaults",
+          "description": "Database-related defaults for credential delivery. The application is database-agnostic; PostgreSQL is bundled (postgres block) and MySQL is supported by the application code but not vendored by the chart (mysql block).",
           "properties": {
-            "passwordSecretKey": { "type": "string", "minLength": 1 }
+            "passwordSecretKey": {
+              "type": "string",
+              "minLength": 1,
+              "title": "Database password Secret key",
+              "description": "Default Secret item key used when a database password secretMount item omits 'key' (see the status-list-server-chart.databasePasswordSecretKey helper). Legacy default 'postgres-password' keeps upgrades working with customer-managed Secrets; switch to 'database-password' only once your secret-delivery path guarantees that key exists (e.g. MySQL operators)."
+            }
           }
         },
         "watcher": {
@@ -631,18 +638,22 @@
     },
     "mysql": {
       "type": "object",
+      "title": "External MySQL defaults",
+      "description": "External MySQL connection defaults used by deployment.yaml, initContainers, and NetworkPolicy ports when APP_DATABASE__BACKEND=mysql. This chart does NOT vendor or deploy a MySQL database (only the PostgreSQL backend ships as an image variant) — 'including MySQL' applies to the application code only, so a MySQL deployment must point APP_DATABASE__HOST at an external Service/operator-managed cluster and set postgres.enabled=false. Only the auth username/database and Service port are used here.",
       "properties": {
         "auth": {
           "type": "object",
+          "title": "MySQL auth",
           "properties": {
-            "username": { "type": "string" },
-            "database": { "type": "string" }
+            "username": { "type": "string", "title": "Database username" },
+            "database": { "type": "string", "title": "Database name" }
           }
         },
         "service": {
           "type": "object",
+          "title": "MySQL Service",
           "properties": {
-            "port": { "type": "integer", "minimum": 1, "maximum": 65535 }
+            "port": { "type": "integer", "minimum": 1, "maximum": 65535, "title": "Service port" }
           }
         }
       }
