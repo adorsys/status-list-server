@@ -286,6 +286,7 @@ jobs:
           - suffix: azure
           - suffix: vault
           - suffix: fscert
+          - suffix: fscert-redis
     env:
       # Every published architecture is scanned. A shared lockfile does not make the
       # package sets identical: the two images are built by different builder images
@@ -616,6 +617,7 @@ jobs:
           - suffix: azure
           - suffix: vault
           - suffix: fscert
+          - suffix: fscert-redis
     env:
       SUFFIX: ${{ matrix.variant.suffix }}
     steps:
@@ -693,6 +695,8 @@ jobs:
             description: "PostgreSQL database with HashiCorp Vault / OpenBao token material storage"
           - suffix: fscert
             description: "PostgreSQL database with filesystem-mounted token signing keys and certificates"
+          - suffix: fscert-redis
+            description: "PostgreSQL database with filesystem-mounted token signing keys and Redis status-list cache"
     env:
       SUFFIX: ${{ matrix.variant.suffix }}
     steps:
