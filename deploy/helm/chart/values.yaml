@@ -7,18 +7,18 @@ global:
 statuslist:
   enabled: true
   initContainers:
-    - name: wait-for-postgres
+    - name: wait-for-db
       image: busybox:1.37
       command:
         - "sh"
         - "-c"
         - |
-          echo "Waiting for postgres..."
-          until nc -z {{ .Release.Name }}-postgres.{{ .Release.Namespace }}.svc.cluster.local {{ include "status-list-server-chart.dbPort" . }}; do
-            echo "postgres not ready. Retrying in 2s...";
+          echo "Waiting for database..."
+          until nc -z {{ include "status-list-server-chart.dbHost" . }} {{ include "status-list-server-chart.dbPort" . }}; do
+            echo "database not ready. Retrying in 2s...";
             sleep 2;
           done
-          echo "Postgres is up."
+          echo "Database is up."
 
   replicaCount: 1
   # Extra labels merged onto the Pod template metadata. Required for e.g. Azure Workload
@@ -29,24 +29,27 @@ statuslist:
     # Empty derives from how the image is named: IfNotPresent for a digest, Always
     # for a mutable tag. Set explicitly to override.
     pullPolicy: ""
-    # Used only when tag and digest are empty. The chart derives
-    # <appVersion-without-suffix>-<variant>, so overlays can select a cloud
-    # variant without hardcoding the release version.
+    # Used only when tag and digest are empty. The chart derives the PostgreSQL
+    # release tag from appVersion and this provider variant, so overlays can
+    # select a cloud variant without hardcoding the release version.
     variant: fscert
-    # Image tag with variant suffix. The release workflow publishes 5 multi-arch variants:
+    # Image tag with variant suffix. The current release workflow publishes only
+    # the PostgreSQL variants below. MySQL deployments must explicitly supply
+    # statuslist.image.tag or digest for a MySQL-capable image until
+    # MySQL-capable images are released.
     #
-    # | Tag Suffix | Cargo Features | Description | Primary Use Case |
-    # |------------|----------------|-------------|------------------|
-    # | -aws       | postgres,aws | PostgreSQL database with AWS Secrets Manager and Route53 DNS support | AWS EKS native deployments |
-    # | -gcp       | postgres,gcp | PostgreSQL database with GCP Secret Manager and Cloud DNS support | GCP GKE native deployments |
-    # | -azure     | postgres,azure | PostgreSQL database with Azure Key Vault and Azure DNS support | Azure AKS native deployments |
-    # | -vault     | postgres,vault | PostgreSQL database with HashiCorp Vault / OpenBao token material storage | Vault-backed on-prem or multi-cloud deployments |
-    # | -fscert    | postgres | PostgreSQL database with filesystem-mounted token signing keys and certificates | Constrained / air-gapped environments using external secret injection |
-    #
+    # | Tag Suffix       | Cargo Features | Description | Primary Use Case |
+    # |------------------|----------------|-------------|------------------|
+    # | -aws             | postgres,aws | PostgreSQL database with AWS Secrets Manager and Route53 DNS support | AWS EKS native deployments |
+    # | -gcp             | postgres,gcp | PostgreSQL database with GCP Secret Manager and Cloud DNS support | GCP GKE native deployments |
+    # | -azure           | postgres,azure | PostgreSQL database with Azure Key Vault and Azure DNS support | Azure AKS native deployments |
+    # | -vault           | postgres,vault | PostgreSQL database with HashiCorp Vault / OpenBao token material storage | Vault-backed on-prem or multi-cloud deployments |
+    # | -fscert          | postgres | PostgreSQL database with filesystem-mounted token signing keys and certificates | Constrained / air-gapped environments using external secret injection |
     # Tag format: <version>-<suffix> (e.g., 1.2.0-aws, 1.2.0-gcp)
     # Latest tags: latest-<suffix> (e.g., latest-aws, latest-gcp)
     #
-    # Empty derives from the chart appVersion plus statuslist.image.variant.
+    # Empty derives from the chart appVersion plus statuslist.image.variant,
+    # preserving the historical PostgreSQL tag shape (<version>-fscert).
     # Defaulting to "latest" would let an upgrade that changes nothing in this
     # chart still change the running image.
     tag: ""
@@ -97,7 +100,9 @@ statuslist:
     # Provider credentials (e.g. APP_SERVER__CERT__DNS__CLOUDFLARE__API_TOKEN, or the
     # APP_SERVER__CERT__DNS__ACMEDNS__ACCOUNTS JSON, which holds every account password)
     # must come from a secret (see externalSecret below), not from plain env values.
-    APP_DATABASE__PORT: "5432"
+    # APP_DATABASE__BACKEND defaults to "postgres". When APP_DATABASE__HOST, PORT,
+    # USERNAME, or NAME are omitted, deployment.yaml derives them from the active
+    # backend's native values below (postgres/mysql).
     # Status-list record cache TTL in seconds. "0" disables this cache.
     # Cache backend is selected at image build time. cache-memory is the default,
     # and wins when all features are enabled. For cache-redis-only images,
@@ -173,7 +178,7 @@ statuslist:
       # lookup access, so an empty value generates a new password on each
       # reconciliation. For GitOps, provide an explicit password from your
       # secret-management flow or set fallbackSecret.enabled=false and use ESO.
-      postgres-password: ""
+      database-password: ""
 
   # File-based secret mounts for production credential/key rotation.
   # Mounts Kubernetes Secrets as files into the container at specified paths.
@@ -212,10 +217,24 @@ statuslist:
       secretName: statuslist-secret
       mountPath: /var/run/status-list-server/database
       items:
-        - key: postgres-password
+        # Empty means deployment.yaml renders statuslist.database.passwordSecretKey.
+        # That defaults to the legacy key so upgrades keep working when statuslist-secret
+        # is customer-managed or a custom ESO mapping still emits only postgres-password.
+        # The chart-managed fallback Secret and default ExternalSecret emit both
+        # postgres-password and database-password; switch this key to database-password
+        # or set statuslist.database.passwordSecretKey once your secret-delivery path
+        # guarantees that key exists.
+        - key: ""
           path: password
       fileEnv:
         APP_DATABASE__PASSWORD_FILE: password
+
+  database:
+    # Default Secret key used when a database password item omits `key`.
+    # Existing deployments keep the legacy postgres-password key by default.
+    # MySQL operators can set this to database-password only after their Secret
+    # provisioning guarantees that key exists.
+    passwordSecretKey: postgres-password
 
   # Watcher configuration for file-based credential rotation detection.
   # When pollIntervalSecs is set, APP_WATCHER__POLL_INTERVAL_SECS is injected.
@@ -256,6 +275,11 @@ statuslist:
     # `to:` NetworkPolicy selector.
     # External ports (443, 53) are always allowed without destination restriction.
     egressInternal: []
+    # Explicit database egress destinations. Optional for bundled PostgreSQL, where
+    # the chart can select postgres pods. Required when APP_DATABASE__BACKEND=mysql,
+    # because this chart does not deploy MySQL and cannot infer the target for RDS,
+    # Cloud SQL, another namespace, or an operator-managed MySQL cluster.
+    databaseEgress: []
   resources:
     requests:
       memory: "256Mi"
@@ -485,6 +509,18 @@ postgres:
   image:
     tag: "18.0"
 
+mysql:
+  # External MySQL connection defaults used by deployment.yaml, initContainers, and
+  # NetworkPolicy ports when APP_DATABASE__BACKEND=mysql. This chart does not vendor
+  # or deploy a MySQL database; set APP_DATABASE__HOST to your external Service/host,
+  # provide that target through your platform/operator or a values overlay, and set
+  # postgres.enabled=false.
+  auth:
+    username: mysql
+    database: status-list
+  service:
+    port: 3306
+
 externalSecret:
   enabled: false
   metadata:
@@ -500,8 +536,13 @@ externalSecret:
       # A custom value fails at render time; this field is intentionally not configurable.
       name: statuslist-secret
       creationPolicy: Owner
+      template:
+        type: Opaque
+        data:
+          database-password: "{{ .postgres_password }}"
+          postgres-password: "{{ .postgres_password }}"
     data:
-      - secretKey: postgres-password
+      - secretKey: postgres_password
         remoteRef:
           key: statuslist-secret
           property: POSTGRES_PASSWORD
