@@ -27,10 +27,10 @@ impl<'de> Deserialize<'de> for Status {
             0 => Status::VALID,
             1 => Status::INVALID,
             2 => Status::SUSPENDED,
-            n if n >= 256 => Status::ApplicationSpecific(n),
+            n @ 3..=255 => Status::ApplicationSpecific(n),
             other => {
                 return Err(serde::de::Error::custom(format!(
-                    "status value {} is reserved (only 0, 1, 2, or >= 256 allowed)",
+                    "status value {} exceeds 8-bit capacity; maximum supported status value is 255",
                     other
                 )));
             }
@@ -82,18 +82,24 @@ mod tests {
             Status::SUSPENDED
         );
         assert_eq!(
-            serde_json::from_str::<Status>("256").unwrap(),
-            Status::ApplicationSpecific(256)
+            serde_json::from_str::<Status>("255").unwrap(),
+            Status::ApplicationSpecific(255)
         );
         assert_eq!(serde_json::to_string(&Status::VALID).unwrap(), "0");
         assert_eq!(serde_json::to_string(&Status::INVALID).unwrap(), "1");
         assert_eq!(serde_json::to_string(&Status::SUSPENDED).unwrap(), "2");
         assert_eq!(
-            serde_json::to_string(&Status::ApplicationSpecific(256)).unwrap(),
-            "256"
+            serde_json::to_string(&Status::ApplicationSpecific(255)).unwrap(),
+            "255"
         );
-        assert!(serde_json::from_str::<Status>("3").is_err());
-        assert!(serde_json::from_str::<Status>("100").is_err());
-        assert!(serde_json::from_str::<Status>("255").is_err());
+        assert_eq!(
+            serde_json::from_str::<Status>("3").unwrap(),
+            Status::ApplicationSpecific(3)
+        );
+        assert_eq!(
+            serde_json::from_str::<Status>("100").unwrap(),
+            Status::ApplicationSpecific(100)
+        );
+        assert!(serde_json::from_str::<Status>("256").is_err());
     }
 }

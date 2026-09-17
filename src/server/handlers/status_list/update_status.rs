@@ -55,6 +55,7 @@ pub async fn update_status(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::models::status_list::StatusList;
     use crate::server::handlers::status_list::publish_status::publish_status;
     use crate::server::handlers::status_list::utils::request::{
         Status as RequestStatus, StatusEntry as RequestStatusEntry,
@@ -150,7 +151,8 @@ mod tests {
         assert_eq!(err.error, "issuer_mismatch");
 
         let record = app_state.service.get_status_list(&token_id).await.unwrap();
-        assert!(record.status_list.lst.is_empty());
+        let empty_list = StatusList::create(vec![]).unwrap();
+        assert_eq!(record.status_list, empty_list);
     }
 
     #[tokio::test]
