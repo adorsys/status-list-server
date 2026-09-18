@@ -29,6 +29,8 @@ RUN --mount=type=cache,target=/root/.cargo/registry,id=registry-cache-${TARGETPL
     env -u CARGO_BUILD_TARGET cargo install --locked --root /usr/local rust-audit-info@${RUST_AUDIT_INFO_VERSION}
 
 ARG FEATURES="postgres,aws"
+ARG CACHE_BACKEND="memory"
+ARG REQUIRED_FEATURES="memory"
 
 # The release profile sets strip, lto and codegen-units = 1, each of which can drop
 # .dep-v0. A missing section yields a passing scan and an empty SBOM, so this must
@@ -50,7 +52,11 @@ RUN --mount=type=bind,source=src,target=src \
         arm64) RUST_TARGET="aarch64-unknown-linux-musl" ;; \
         *) echo "Unsupported architecture: ${TARGETARCH:-unset}" && exit 1 ;; \
     esac; \
-    cargo auditable build --locked --release --target=${RUST_TARGET} --features "${FEATURES}"; \
+    case "${CACHE_BACKEND}" in \
+        memory) cargo auditable build --locked --release --target=${RUST_TARGET} --features "${FEATURES},cache-memory" ;; \
+        redis) cargo auditable build --locked --release --target=${RUST_TARGET} --no-default-features --features "${REQUIRED_FEATURES},${FEATURES},cache-redis" ;; \
+        *) echo "Unsupported CACHE_BACKEND: ${CACHE_BACKEND}. Expected 'memory' or 'redis'." && exit 1 ;; \
+    esac; \
     mv target/${RUST_TARGET}/release/${APP_NAME} .; \
     audit_data=$(rust-audit-info "${APP_NAME}"); \
     audit_packages=$(printf '%s' "${audit_data}" | grep -o '"name":' | wc -l); \

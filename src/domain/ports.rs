@@ -1,8 +1,12 @@
 //! Outbound secondary ports defining contracts.
 
+pub mod cache;
+
 use crate::domain::models::credential::{Credential, CredentialError};
 use crate::domain::models::status_list::{StatusListError, StatusListRecord, StatusListSnapshot};
 use async_trait::async_trait;
+
+pub use cache::Cache as StatusListCache;
 
 /// Interface for managing active status list records.
 #[async_trait]
@@ -47,19 +51,6 @@ pub trait CredentialRepo: Send + Sync + 'static {
 
     /// Insert new issuer credential details into storage.
     async fn insert(&self, credential: Credential) -> Result<(), CredentialError>;
-}
-
-/// In-memory or distributed cache interface for status list records.
-#[async_trait]
-pub trait StatusListCache: Send + Sync + 'static {
-    /// Retrieve a cached status list record by list identifier.
-    async fn get(&self, list_id: &str) -> Result<Option<StatusListRecord>, StatusListError>;
-
-    /// Store a status list record in the cache.
-    async fn put(&self, status_list: StatusListRecord) -> Result<(), StatusListError>;
-
-    /// Invalidate a cached status list entry upon mutation.
-    async fn invalidate(&self, list_id: &str) -> Result<(), StatusListError>;
 }
 
 /// Persistence interface for historical status list snapshots.

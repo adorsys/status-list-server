@@ -8,6 +8,7 @@ All notable changes to this project will be documented in this file.
 ### Changed
 
 - Bump the Helm chart to `0.5.0` for render-time validation changes.
+- Increase the built-in status-list cache capacity default from 100 to 1000 entries; deployments can override with `APP_CACHE__MAX_CAPACITY`.
 - Helm MySQL deployments are external-only and now require `statuslist.env.APP_DATABASE__HOST` plus an explicit `statuslist.image.tag` or `statuslist.image.digest`; when NetworkPolicy is enabled they also require `statuslist.networkPolicy.databaseEgress`.
 - The Helm chart intentionally accepts only `postgres` and `mysql` backends. Use non-Helm local/custom deployment paths for `sqlite` or `memory`.
 - `mysql.enabled=true` remains unsupported, while `mysql.enabled=false` is accepted for overlays that explicitly disable unused components.
@@ -18,5 +19,4 @@ All notable changes to this project will be documented in this file.
 
 - [f4ea335](
 https://github.com/adorsys/status-list-server/commit/f4ea335c21bc5b85aa9f39b2cc4ebc74c096471b) *(uncategorized)* Initialize project baseline for release automation by @Hermann-Core
-
 

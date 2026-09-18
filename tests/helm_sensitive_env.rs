@@ -381,6 +381,32 @@ fn rendered_chart_accepts_mysql_enabled_false_overlay() {
 }
 
 #[test]
+fn rendered_chart_accepts_fscert_redis_variant() {
+    let Some(rendered) = render_helm(&[
+        "--set",
+        "statuslist.image.variant=fscert-redis",
+        "--set",
+        "statuslist.secretEnv.APP_CACHE__REDIS_URL.name=redis-url",
+        "--set",
+        "statuslist.secretEnv.APP_CACHE__REDIS_URL.key=url",
+    ]) else {
+        return;
+    };
+
+    for expected in [
+        "image: \"ghcr.io/adorsys/status-list-server:1.0.0-fscert-redis\"",
+        "name: APP_CACHE__REDIS_URL",
+        "name: \"redis-url\"",
+        "key: \"url\"",
+    ] {
+        assert!(
+            rendered.contains(expected),
+            "rendered Helm output is missing Redis variant field {expected}"
+        );
+    }
+}
+
+#[test]
 fn rendered_chart_rejects_mysql_backend_without_explicit_host() {
     let Some(output) = render_helm_failure(&[
         "--set",
@@ -417,6 +443,59 @@ fn rendered_chart_rejects_mysql_network_policy_without_database_egress() {
             .contains("statuslist.networkPolicy.databaseEgress must be set"),
         "helm template should reject MySQL NetworkPolicy without an explicit database egress peer"
     );
+}
+
+#[test]
+fn rendered_chart_allows_cache_egress_network_policy() {
+    let Some(rendered) = render_helm(&[
+        "--set",
+        "statuslist.networkPolicy.enabled=true",
+        "--set",
+        "statuslist.networkPolicy.cachePort=6380",
+        "--set",
+        "statuslist.networkPolicy.cacheEgress[0].ipBlock.cidr=10.20.0.0/24",
+    ]) else {
+        return;
+    };
+
+    for expected in ["port: 6380", "cidr: 10.20.0.0/24"] {
+        assert!(
+            rendered.contains(expected),
+            "rendered Helm output is missing cache egress field {expected}"
+        );
+    }
+}
+
+#[test]
+fn rendered_chart_rejects_redis_network_policy_without_cache_egress() {
+    let Some(output) = render_helm_failure(&[
+        "--set",
+        "statuslist.image.variant=fscert-redis",
+        "--set",
+        "statuslist.networkPolicy.enabled=true",
+    ]) else {
+        return;
+    };
+
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("statuslist.networkPolicy.cacheEgress must be set"),
+        "helm template should reject Redis cache NetworkPolicy without an explicit cache egress peer"
+    );
+}
+
+#[test]
+fn rendered_chart_rejects_out_of_range_string_cache_port() {
+    let Some(_output) = render_helm_failure(&[
+        "--set",
+        "statuslist.networkPolicy.enabled=true",
+        "--set-string",
+        "statuslist.networkPolicy.cachePort=99999",
+        "--set",
+        "statuslist.networkPolicy.cacheEgress[0].ipBlock.cidr=10.20.0.0/24",
+    ]) else {
+        return;
+    };
 }
 
 #[test]

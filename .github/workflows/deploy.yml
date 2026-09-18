@@ -106,19 +106,28 @@ jobs:
         variant:
           - suffix: aws
             features: "postgres,aws"
+            cache_backend: "memory"
             description: "PostgreSQL database with AWS Secrets Manager and Route53 DNS support"
           - suffix: gcp
             features: "postgres,gcp"
+            cache_backend: "memory"
             description: "PostgreSQL database with GCP Secret Manager and Cloud DNS support"
           - suffix: azure
             features: "postgres,azure"
+            cache_backend: "memory"
             description: "PostgreSQL database with Azure Key Vault and Azure DNS support"
           - suffix: vault
             features: "postgres,vault"
+            cache_backend: "memory"
             description: "PostgreSQL database with HashiCorp Vault / OpenBao token material storage"
           - suffix: fscert
             features: "postgres"
+            cache_backend: "memory"
             description: "PostgreSQL database with filesystem-mounted token signing keys and certificates"
+          - suffix: fscert-redis
+            features: "postgres"
+            cache_backend: "redis"
+            description: "PostgreSQL database with filesystem-mounted token signing keys and Redis status-list cache"
     steps:
       - name: Checkout source code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -169,6 +178,7 @@ jobs:
           sbom: true
           build-args: |
             FEATURES=${{ matrix.variant.features }}
+            CACHE_BACKEND=${{ matrix.variant.cache_backend }}
           labels: ${{ steps.meta.outputs.labels }}
           annotations: |
             index,manifest:org.opencontainers.image.description=${{ matrix.variant.description }}
@@ -276,6 +286,7 @@ jobs:
           - suffix: azure
           - suffix: vault
           - suffix: fscert
+          - suffix: fscert-redis
     env:
       # Every published architecture is scanned. A shared lockfile does not make the
       # package sets identical: the two images are built by different builder images
@@ -606,6 +617,7 @@ jobs:
           - suffix: azure
           - suffix: vault
           - suffix: fscert
+          - suffix: fscert-redis
     env:
       SUFFIX: ${{ matrix.variant.suffix }}
     steps:
@@ -683,6 +695,8 @@ jobs:
             description: "PostgreSQL database with HashiCorp Vault / OpenBao token material storage"
           - suffix: fscert
             description: "PostgreSQL database with filesystem-mounted token signing keys and certificates"
+          - suffix: fscert-redis
+            description: "PostgreSQL database with filesystem-mounted token signing keys and Redis status-list cache"
     env:
       SUFFIX: ${{ matrix.variant.suffix }}
     steps:

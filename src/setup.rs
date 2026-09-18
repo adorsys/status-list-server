@@ -62,7 +62,12 @@ use crate::domain::{
 use crate::outbound::aws::AwsSecretsManager;
 #[cfg(all(feature = "azure", not(feature = "vault"), not(feature = "gcp")))]
 use crate::outbound::azure_kv::AzureKeyVaultClient;
+#[cfg(any(feature = "cache-memory", not(feature = "cache-redis")))]
 use crate::outbound::cache::MokaStatusListCache;
+#[cfg(all(feature = "cache-redis", not(feature = "cache-memory")))]
+use crate::outbound::cache::RedisStatusListCache;
+#[cfg(all(feature = "cache-redis", not(feature = "cache-memory")))]
+use crate::outbound::cache::{DisabledStatusListCache, record_redis_cache_error};
 #[cfg(feature = "acme")]
 use crate::outbound::cert::AcmeCertificateProvider;
 #[cfg(not(feature = "acme"))]
@@ -526,7 +531,77 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
         (provider, None)
     };
 
-    let status_list_cache = MokaStatusListCache::new(config.cache.ttl, config.cache.max_capacity);
+    #[cfg(any(feature = "cache-memory", not(feature = "cache-redis")))]
+    let status_list_cache: Arc<dyn crate::domain::ports::StatusListCache> = {
+        if config.cache.redis_url.is_some() || config.cache.redis_url_file.is_some() {
+            return Err(color_eyre::eyre::eyre!(
+                "cache.redis_url/cache.redis_url_file is configured, but this binary is using the in-memory cache backend. Build with cache-redis and without cache-memory to use Redis."
+            ));
+        }
+        tracing::info!(
+            cache.backend = "memory",
+            cache.ttl_secs = config.cache.ttl,
+            cache.max_capacity = config.cache.max_capacity,
+            "status-list cache backend selected"
+        );
+        Arc::new(MokaStatusListCache::new(
+            config.cache.ttl,
+            config.cache.max_capacity,
+        ))
+    };
+
+    #[cfg(all(feature = "cache-redis", not(feature = "cache-memory")))]
+    let status_list_cache: Arc<dyn crate::domain::ports::StatusListCache> = {
+        use secrecy::ExposeSecret;
+
+        if config.cache.ttl == 0 || config.cache.max_capacity == 0 {
+            tracing::info!(
+                cache.backend = "disabled",
+                cache.reason = "ttl_or_capacity_zero",
+                "status-list cache disabled"
+            );
+            Arc::new(DisabledStatusListCache)
+        } else {
+            match config.cache.load_redis_url().await? {
+                None => {
+                    tracing::warn!(
+                        cache.backend = "disabled",
+                        "cache-redis binary started without cache.redis_url/cache.redis_url_file; status-list cache disabled"
+                    );
+                    Arc::new(DisabledStatusListCache)
+                }
+                Some(redis_url) => match RedisStatusListCache::new(
+                    redis_url.expose_secret(),
+                    config.cache.ttl,
+                    config.cache.max_capacity,
+                    config.cache.redis_key_prefix.clone(),
+                    Duration::from_millis(config.cache.redis_response_timeout_ms),
+                    Duration::from_millis(config.cache.redis_connection_timeout_ms),
+                )
+                .await
+                {
+                    Ok(cache) => {
+                        tracing::info!(
+                            cache.backend = "redis",
+                            cache.ttl_secs = config.cache.ttl,
+                            cache.max_capacity = config.cache.max_capacity,
+                            "status-list cache backend selected"
+                        );
+                        Arc::new(cache)
+                    }
+                    Err(error) => {
+                        record_redis_cache_error("startup");
+                        tracing::warn!(
+                            error = ?error,
+                            cache.backend = "disabled",
+                            "Redis status-list cache unavailable at startup; continuing with cache disabled"
+                        );
+                        Arc::new(DisabledStatusListCache)
+                    }
+                },
+            }
+        }
+    };
 
     let snapshot_option = if config.status_list.snapshot_retention_secs == 0 {
         None
@@ -537,7 +612,7 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
     let service = Arc::new(Service::from_arcs(
         status_list_repo,
         credential_repo,
-        Arc::new(status_list_cache),
+        status_list_cache,
         snapshot_option,
         cert_provider,
     ));

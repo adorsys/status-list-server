@@ -158,6 +158,19 @@ Verify zero-infrastructure in-memory compilation:
 cargo check --no-default-features --features memory
 ```
 
+Compile the Redis cache backend selection path:
+
+```bash
+cargo clippy --no-default-features --features memory,postgres,cache-redis -- -D warnings
+```
+
+Run Redis cache integration tests with either Docker/testcontainers or an
+existing Redis endpoint:
+
+```bash
+TEST_REDIS_URL=redis://localhost:6379/0 cargo test --no-default-features --features memory,redis-tests outbound::cache
+```
+
 Run the complete local CI verification suite (formatting, clippy, tests, and dependency auditing):
 
 ```bash

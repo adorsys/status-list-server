@@ -186,6 +186,20 @@ groups:
           runbook_url: "https://github.com/adorsys/status-list-server/blob/develop/deploy/observability/runbooks/cache-hit-ratio.md"
           dashboard_url: "http://localhost:3000/d/status-list-slo"
 
+      - alert: RedisCacheStartupError
+        expr: |
+          sum by (namespace)(status_list_cache_errors_total{otel_scope_name="status-list-server",operation="startup"}) > 0
+        for: 0m
+        labels:
+          severity: warn
+          service: status-list-server
+          sli: cache_hit_ratio
+        annotations:
+          summary: "Redis status-list cache failed at startup; pod is running with cache disabled"
+          description: "Redis startup cache errors: {{ $value | humanize }}"
+          runbook_url: "https://github.com/adorsys/status-list-server/blob/develop/deploy/observability/runbooks/cache-hit-ratio.md"
+          dashboard_url: "http://localhost:3000/d/status-list-slo"
+
       # --- Error budget exhaustion (critical page) ---------------------------
       # Fires when the 30d error budget (sli:error_budget:success:30d) drops
       # below 10% remaining: error_rate:30d is fast approaching the 0.5% target.
@@ -258,4 +272,3 @@ groups:
           description: "Time to expiry: {{ $value }}s"
           runbook_url: "https://github.com/adorsys/status-list-server/blob/develop/deploy/observability/runbooks/cert-renewal.md"
           dashboard_url: "http://localhost:3000/d/status-list-slo"
-
