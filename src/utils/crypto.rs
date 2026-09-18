@@ -130,12 +130,16 @@ pub trait TokenSigner: Send + Sync {
 pub struct SigningKey {
     algorithm: SigningAlgorithm,
     inner: SigningKeyInner,
-    encoding_key: jsonwebtoken::EncodingKey,
     public_key: Box<[u8]>,
+}
+
+struct SigningKeyInner {
+    pair: KeyPairInner,
+    encoding_key: jsonwebtoken::EncodingKey,
     rng: SystemRandom,
 }
 
-enum SigningKeyInner {
+enum KeyPairInner {
     Ecdsa(EcdsaKeyPair),
     Ed25519(Ed25519KeyPair),
     Rsa(RsaKeyPair),
@@ -144,10 +148,10 @@ enum SigningKeyInner {
 impl SigningKeyInner {
     fn to_pkcs8_der(&self) -> Result<Box<[u8]>, Error> {
         use aws_lc_rs::encoding::AsDer;
-        match self {
-            SigningKeyInner::Ecdsa(kp) => Ok(kp.to_pkcs8v1()?.as_ref().into()),
-            SigningKeyInner::Ed25519(kp) => Ok(kp.to_pkcs8v1()?.as_ref().into()),
-            SigningKeyInner::Rsa(kp) => Ok(kp.as_der()?.as_ref().into()),
+        match &self.pair {
+            KeyPairInner::Ecdsa(kp) => Ok(kp.to_pkcs8v1()?.as_ref().into()),
+            KeyPairInner::Ed25519(kp) => Ok(kp.to_pkcs8v1()?.as_ref().into()),
+            KeyPairInner::Rsa(kp) => Ok(kp.as_der()?.as_ref().into()),
         }
     }
 }
@@ -211,34 +215,36 @@ impl SigningKey {
                 let kp = EcdsaKeyPair::from_pkcs8(&ECDSA_P256_SHA256_FIXED_SIGNING, der)?;
                 let enc_key = jsonwebtoken::EncodingKey::from_ec_der(der);
                 let pub_bytes = kp.public_key().as_ref().to_owned();
-                (SigningKeyInner::Ecdsa(kp), enc_key, pub_bytes.into())
+                (KeyPairInner::Ecdsa(kp), enc_key, pub_bytes.into())
             }
             SigningAlgorithm::Es384 => {
                 let kp = EcdsaKeyPair::from_pkcs8(&ECDSA_P384_SHA384_FIXED_SIGNING, der)?;
                 let enc_key = jsonwebtoken::EncodingKey::from_ec_der(der);
                 let pub_bytes = kp.public_key().as_ref().to_owned();
-                (SigningKeyInner::Ecdsa(kp), enc_key, pub_bytes.into())
+                (KeyPairInner::Ecdsa(kp), enc_key, pub_bytes.into())
             }
             SigningAlgorithm::EdDsa => {
                 let kp = Ed25519KeyPair::from_pkcs8(der)?;
                 let enc_key = jsonwebtoken::EncodingKey::from_ed_der(der);
                 let pub_bytes = kp.public_key().as_ref().to_owned();
-                (SigningKeyInner::Ed25519(kp), enc_key, pub_bytes.into())
+                (KeyPairInner::Ed25519(kp), enc_key, pub_bytes.into())
             }
             SigningAlgorithm::Rs256 => {
                 let kp = RsaKeyPair::from_pkcs8(der)?;
                 let enc_key = jsonwebtoken::EncodingKey::from_rsa_der(pki.private_key.as_bytes());
                 let pub_bytes = kp.public_key().as_ref().to_owned();
-                (SigningKeyInner::Rsa(kp), enc_key, pub_bytes.into())
+                (KeyPairInner::Rsa(kp), enc_key, pub_bytes.into())
             }
         };
 
         Ok(Self {
             algorithm,
-            inner,
-            encoding_key,
+            inner: SigningKeyInner {
+                pair: inner,
+                encoding_key,
+                rng,
+            },
             public_key,
-            rng,
         })
     }
 
@@ -260,18 +266,18 @@ impl SigningKey {
 
     /// Sign arbitrary payload bytes using the configured backend algorithm.
     pub fn sign(&self, data: &[u8]) -> Result<Vec<u8>, Error> {
-        match &self.inner {
-            SigningKeyInner::Ecdsa(kp) => {
-                let sig = kp.sign(&self.rng, data)?;
+        match &self.inner.pair {
+            KeyPairInner::Ecdsa(kp) => {
+                let sig = kp.sign(&self.inner.rng, data)?;
                 Ok(sig.as_ref().to_vec())
             }
-            SigningKeyInner::Ed25519(kp) => {
+            KeyPairInner::Ed25519(kp) => {
                 let sig = kp.sign(data);
                 Ok(sig.as_ref().to_vec())
             }
-            SigningKeyInner::Rsa(kp) => {
+            KeyPairInner::Rsa(kp) => {
                 let mut sig = vec![0u8; kp.public_modulus_len()];
-                kp.sign(&RSA_PKCS1_SHA256, &self.rng, data, &mut sig)?;
+                kp.sign(&RSA_PKCS1_SHA256, &self.inner.rng, data, &mut sig)?;
                 Ok(sig)
             }
         }
@@ -290,13 +296,13 @@ impl SigningKey {
 
 impl From<SigningKey> for jsonwebtoken::EncodingKey {
     fn from(key: SigningKey) -> Self {
-        key.encoding_key
+        key.inner.encoding_key
     }
 }
 
 impl AsRef<jsonwebtoken::EncodingKey> for SigningKey {
     fn as_ref(&self) -> &jsonwebtoken::EncodingKey {
-        &self.encoding_key
+        &self.inner.encoding_key
     }
 }
 
