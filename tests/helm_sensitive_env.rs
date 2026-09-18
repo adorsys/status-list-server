@@ -467,6 +467,43 @@ fn rendered_chart_allows_cache_egress_network_policy() {
 }
 
 #[test]
+fn rendered_chart_rejects_redis_network_policy_without_cache_egress() {
+    let Some(output) = render_helm_failure(&[
+        "--set",
+        "statuslist.image.variant=fscert-redis",
+        "--set",
+        "statuslist.networkPolicy.enabled=true",
+    ]) else {
+        return;
+    };
+
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("statuslist.networkPolicy.cacheEgress must be set"),
+        "helm template should reject Redis cache NetworkPolicy without an explicit cache egress peer"
+    );
+}
+
+#[test]
+fn rendered_chart_rejects_out_of_range_string_cache_port() {
+    let Some(output) = render_helm_failure(&[
+        "--set",
+        "statuslist.networkPolicy.enabled=true",
+        "--set-string",
+        "statuslist.networkPolicy.cachePort=99999",
+        "--set",
+        "statuslist.networkPolicy.cacheEgress[0].ipBlock.cidr=10.20.0.0/24",
+    ]) else {
+        return;
+    };
+
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("statuslist.networkPolicy.cachePort"),
+        "helm schema should reject quoted cachePort values outside the Kubernetes port range"
+    );
+}
+
+#[test]
 fn rendered_chart_resolves_empty_database_env_values_to_helper_defaults() {
     let Some(rendered) = helm_template_chart_defaults(&[
         "--set-string",

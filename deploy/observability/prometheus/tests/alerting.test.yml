@@ -62,6 +62,29 @@ tests:
         alertname: CacheHitRatioLow
         exp_alerts: []
 
+  # A cache-redis pod can start healthy with the cache disabled if Redis is
+  # unreachable during startup. That startup error must be alertable directly,
+  # rather than inferred from a later hit-ratio drop.
+  - interval: 1m
+    input_series:
+      - series: >-
+          status_list_cache_errors_total{otel_scope_name="status-list-server",namespace="ns1",cache="status_list",backend="redis",operation="startup"}
+        values: '0 1+0x30'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: RedisCacheStartupError
+        exp_alerts:
+          - exp_labels:
+              service: "status-list-server"
+              severity: "warn"
+              sli: "cache_hit_ratio"
+              namespace: "ns1"
+            exp_annotations:
+              summary: "Redis status-list cache failed at startup; pod is running with cache disabled"
+              description: "Redis startup cache errors: 1"
+              runbook_url: "https://github.com/adorsys/status-list-server/blob/develop/deploy/observability/runbooks/cache-hit-ratio.md"
+              dashboard_url: "http://localhost:3000/d/status-list-slo"
+
   # Burn-rate model correctness: a MODERATE sustained error rate (0.05) is above
   # the slow-burn 6x threshold (0.030) but below the fast-burn 14.4x threshold
   # (0.072) on every window. It must fire ONLY the slow-burn WARN, and the
@@ -404,4 +427,3 @@ tests:
       - eval_time: 400m
         alertname: CertRenewalErrorBudgetCritical
         exp_alerts: []
-

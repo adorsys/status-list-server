@@ -3,6 +3,7 @@
 Alert:
 
 - `CacheHitRatioLow` (severity=warn)
+- `RedisCacheStartupError` (severity=warn)
 
 ## What fired
 
@@ -19,6 +20,8 @@ round trip. It pages only through review (warn).
 3. **Cache disabled** — `cache.ttl == 0` disables the cache entirely (hit ratio
    drops to ~0).
 4. **Process restarts** — every restart warms the in-process cache from empty.
+5. **Redis unavailable at startup** — `cache-redis` pods start with a disabled
+   cache when Redis cannot be reached before the configured connection timeout.
 
 ## Diagnostics
 
@@ -28,6 +31,8 @@ sum(rate(status_list_cache_hits_total{otel_scope_name="status-list-server"}[15m]
 sum(rate(status_list_cache_misses_total{otel_scope_name="status-list-server"}[15m]))
 # Current ratio
 sli:cache_hit_ratio:5m
+# Redis startup fallback to disabled cache
+sum(status_list_cache_errors_total{otel_scope_name="status-list-server",operation="startup"})
 # Confirms whether slow reads are cache-induced
 sli:db_query_latency:p95:5m
 ```
@@ -44,6 +49,9 @@ grep -i cache .env 2>/dev/null
 2. If eviction-driven, right-size `max_capacity` to the concurrent distinct-list
    working set.
 3. Re-check after a restart warm-up (the ratio recovers over ~one TTL period).
+4. If `RedisCacheStartupError` fired, verify Redis DNS, credentials, TLS mode,
+   and NetworkPolicy `cacheEgress`; then restart affected pods after Redis is
+   reachable so they construct the Redis cache backend.
 
 ## Escalation
 
