@@ -2,6 +2,8 @@
 use async_trait::async_trait;
 use moka::future::Cache as MokaCache;
 use opentelemetry::{KeyValue, metrics::Counter};
+#[cfg(feature = "cache-redis")]
+use std::sync::LazyLock;
 use std::{sync::Arc, time::Duration};
 
 use crate::domain::{
@@ -12,7 +14,85 @@ use crate::domain::{
 const HIT_METRIC: &str = "status_list_cache_hits";
 const MISS_METRIC: &str = "status_list_cache_misses";
 #[cfg(feature = "cache-redis")]
+const ERROR_METRIC: &str = "status_list_cache_errors";
+#[cfg(feature = "cache-redis")]
 const CACHE_SCHEMA_VERSION: &str = "v1";
+
+#[cfg(feature = "cache-redis")]
+static REDIS_GET_SCRIPT: LazyLock<redis::Script> = LazyLock::new(|| {
+    redis::Script::new(
+        r#"
+        local value = redis.call('GET', KEYS[1])
+        if value then
+            local now = redis.call('TIME')
+            local score = tonumber(now[1]) * 1000000 + tonumber(now[2])
+            redis.call('ZADD', KEYS[2], score, ARGV[1])
+        end
+        return value
+        "#,
+    )
+});
+
+#[cfg(feature = "cache-redis")]
+static REDIS_DELETE_CORRUPT_SCRIPT: LazyLock<redis::Script> = LazyLock::new(|| {
+    redis::Script::new(
+        r#"
+        redis.call('DEL', KEYS[1])
+        redis.call('ZREM', KEYS[2], ARGV[1])
+        return 1
+        "#,
+    )
+});
+
+#[cfg(feature = "cache-redis")]
+static REDIS_INVALIDATE_SCRIPT: LazyLock<redis::Script> = LazyLock::new(|| {
+    redis::Script::new(
+        r#"
+        redis.call('DEL', KEYS[1])
+        redis.call('ZREM', KEYS[2], ARGV[1])
+        if ARGV[2] ~= '' then
+            redis.call('SET', KEYS[3], ARGV[2], 'EX', tonumber(ARGV[3]))
+        end
+        return 1
+        "#,
+    )
+});
+
+#[cfg(feature = "cache-redis")]
+static REDIS_PUT_SCRIPT: LazyLock<redis::Script> = LazyLock::new(|| {
+    redis::Script::new(
+        r#"
+        local ttl = tonumber(ARGV[2])
+        local max_capacity = tonumber(ARGV[3])
+        local updated_at = tonumber(ARGV[5])
+        if ttl <= 0 or max_capacity <= 0 then
+            return 0
+        end
+
+        local marker = redis.call('GET', KEYS[3])
+        if marker and updated_at < tonumber(marker) then
+            return 0
+        end
+
+        redis.call('SET', KEYS[1], ARGV[6], 'EX', ttl)
+        redis.call('SET', KEYS[3], ARGV[5], 'EX', ttl)
+
+        local now = redis.call('TIME')
+        local score = tonumber(now[1]) * 1000000 + tonumber(now[2])
+        redis.call('ZADD', KEYS[2], score, ARGV[4])
+
+        local overflow = redis.call('ZCARD', KEYS[2]) - max_capacity
+        if overflow > 0 then
+            local victims = redis.call('ZRANGE', KEYS[2], 0, overflow - 1)
+            for _, victim in ipairs(victims) do
+                redis.call('DEL', ARGV[1] .. victim)
+                redis.call('ZREM', KEYS[2], victim)
+            end
+        end
+        return 1
+        "#,
+    )
+});
 
 /// Cache-hit/miss SLI counters.
 ///
@@ -25,6 +105,8 @@ const CACHE_SCHEMA_VERSION: &str = "v1";
 struct CacheMetrics {
     hits: Counter<u64>,
     misses: Counter<u64>,
+    #[cfg(feature = "cache-redis")]
+    errors: Counter<u64>,
 }
 
 fn cache_metrics() -> CacheMetrics {
@@ -41,8 +123,42 @@ fn cache_metrics() -> CacheMetrics {
                 .u64_counter(MISS_METRIC)
                 .with_description("Status-list cache misses")
                 .build(),
+            #[cfg(feature = "cache-redis")]
+            errors: meter
+                .u64_counter(ERROR_METRIC)
+                .with_description("Status-list cache backend errors")
+                .build(),
         }
     })
+}
+
+fn cache_attrs(backend: &'static str) -> [KeyValue; 2] {
+    [
+        KeyValue::new("cache", "status_list"),
+        KeyValue::new("backend", backend),
+    ]
+}
+
+#[cfg(feature = "cache-redis")]
+fn cache_error_attrs(backend: &'static str, operation: &'static str) -> [KeyValue; 3] {
+    [
+        KeyValue::new("cache", "status_list"),
+        KeyValue::new("backend", backend),
+        KeyValue::new("operation", operation),
+    ]
+}
+
+#[cfg(feature = "cache-redis")]
+pub(crate) fn record_redis_cache_error(operation: &'static str) {
+    cache_metrics()
+        .errors
+        .add(1, &cache_error_attrs("redis", operation));
+}
+
+#[cfg(feature = "cache-redis")]
+fn redis_operation_error(operation: &'static str, error: redis::RedisError) -> StatusListError {
+    record_redis_cache_error(operation);
+    redis_error(error)
 }
 
 #[derive(Clone, Default)]
@@ -51,6 +167,7 @@ pub struct DisabledStatusListCache;
 #[async_trait]
 impl StatusListCache for DisabledStatusListCache {
     async fn get(&self, _list_id: &str) -> Result<Option<StatusListRecord>, StatusListError> {
+        cache_metrics().misses.add(1, &cache_attrs("disabled"));
         Ok(None)
     }
 
@@ -96,13 +213,9 @@ impl StatusListCache for MokaStatusListCache {
         let cached = self.inner.get(key).await;
         let metrics = cache_metrics();
         if cached.is_some() {
-            metrics
-                .hits
-                .add(1, &[KeyValue::new("cache", "status_list")]);
+            metrics.hits.add(1, &cache_attrs("memory"));
         } else {
-            metrics
-                .misses
-                .add(1, &[KeyValue::new("cache", "status_list")]);
+            metrics.misses.add(1, &cache_attrs("memory"));
         }
         Ok(cached.map(|arc| (*arc).clone()))
     }
@@ -141,13 +254,14 @@ impl RedisStatusListCache {
         response_timeout: Duration,
         connection_timeout: Duration,
     ) -> Result<Self, StatusListError> {
-        let client = redis::Client::open(redis_url).map_err(redis_error)?;
+        let client = redis::Client::open(redis_url)
+            .map_err(|error| redis_operation_error("connect", error))?;
         let manager_config = redis::aio::ConnectionManagerConfig::new()
             .set_response_timeout(response_timeout)
             .set_connection_timeout(connection_timeout);
         let connection = redis::aio::ConnectionManager::new_with_config(client, manager_config)
             .await
-            .map_err(redis_error)?;
+            .map_err(|error| redis_operation_error("connect", error))?;
         let key_prefix = key_prefix.into();
         let record_prefix = format!("{key_prefix}rec:{CACHE_SCHEMA_VERSION}:");
         let marker_prefix = format!("{key_prefix}meta:{CACHE_SCHEMA_VERSION}:updated:");
@@ -170,53 +284,18 @@ impl RedisStatusListCache {
         format!("{}{}", self.marker_prefix, list_id)
     }
 
-    async fn touch(
-        &self,
-        connection: &mut redis::aio::ConnectionManager,
-        list_id: &str,
-    ) -> Result<(), StatusListError> {
-        if self.ttl_secs == 0 || self.max_capacity == 0 {
-            return Ok(());
-        }
-
-        let _: () = redis::cmd("EVAL")
-            .arg(
-                r#"
-                local now = redis.call('TIME')
-                local score = tonumber(now[1]) * 1000000 + tonumber(now[2])
-                redis.call('ZADD', KEYS[1], score, ARGV[1])
-                return 1
-                "#,
-            )
-            .arg(1)
-            .arg(&self.lru_key)
-            .arg(list_id)
-            .query_async(connection)
-            .await
-            .map_err(redis_error)?;
-        Ok(())
-    }
-
     async fn delete_corrupt_entry(
         &self,
         connection: &mut redis::aio::ConnectionManager,
         list_id: &str,
     ) -> Result<(), StatusListError> {
-        let _: () = redis::cmd("EVAL")
-            .arg(
-                r#"
-                redis.call('DEL', KEYS[1])
-                redis.call('ZREM', KEYS[2], ARGV[1])
-                return 1
-                "#,
-            )
-            .arg(2)
-            .arg(self.key(list_id))
-            .arg(&self.lru_key)
+        let _: i32 = REDIS_DELETE_CORRUPT_SCRIPT
+            .key(self.key(list_id))
+            .key(&self.lru_key)
             .arg(list_id)
-            .query_async(connection)
+            .invoke_async(connection)
             .await
-            .map_err(redis_error)?;
+            .map_err(|error| redis_operation_error("delete_corrupt", error))?;
         Ok(())
     }
 
@@ -230,21 +309,10 @@ impl RedisStatusListCache {
         }
 
         let mut connection = self.connection.clone();
-        let _: () = redis::cmd("EVAL")
-            .arg(
-                r#"
-                redis.call('DEL', KEYS[1])
-                redis.call('ZREM', KEYS[2], ARGV[1])
-                if ARGV[2] ~= '' then
-                    redis.call('SET', KEYS[3], ARGV[2], 'EX', tonumber(ARGV[3]))
-                end
-                return 1
-                "#,
-            )
-            .arg(3)
-            .arg(self.key(list_id))
-            .arg(&self.lru_key)
-            .arg(self.marker_key(list_id))
+        let _: i32 = REDIS_INVALIDATE_SCRIPT
+            .key(self.key(list_id))
+            .key(&self.lru_key)
+            .key(self.marker_key(list_id))
             .arg(list_id)
             .arg(
                 updated_at
@@ -252,9 +320,9 @@ impl RedisStatusListCache {
                     .unwrap_or_default(),
             )
             .arg(self.ttl_secs)
-            .query_async(&mut connection)
+            .invoke_async(&mut connection)
             .await
-            .map_err(redis_error)?;
+            .map_err(|error| redis_operation_error("invalidate", error))?;
         Ok(())
     }
 }
@@ -263,23 +331,25 @@ impl RedisStatusListCache {
 #[async_trait]
 impl StatusListCache for RedisStatusListCache {
     async fn get(&self, list_id: &str) -> Result<Option<StatusListRecord>, StatusListError> {
-        use redis::AsyncCommands;
-
         if self.ttl_secs == 0 || self.max_capacity == 0 {
+            cache_metrics().misses.add(1, &cache_attrs("redis"));
             return Ok(None);
         }
 
         let key = self.key(list_id);
         let mut connection = self.connection.clone();
-        let cached: Option<String> = connection.get(key).await.map_err(redis_error)?;
+        let cached: Option<String> = REDIS_GET_SCRIPT
+            .key(key)
+            .key(&self.lru_key)
+            .arg(list_id)
+            .invoke_async(&mut connection)
+            .await
+            .map_err(|error| redis_operation_error("get", error))?;
         let metrics = cache_metrics();
         if let Some(value) = cached {
             match serde_json::from_str(&value) {
                 Ok(record) => {
-                    self.touch(&mut connection, list_id).await?;
-                    metrics
-                        .hits
-                        .add(1, &[KeyValue::new("cache", "status_list")]);
+                    metrics.hits.add(1, &cache_attrs("redis"));
                     Ok(Some(record))
                 }
                 Err(error) => {
@@ -289,16 +359,12 @@ impl StatusListCache for RedisStatusListCache {
                         "discarding undecodable Redis status-list cache entry"
                     );
                     self.delete_corrupt_entry(&mut connection, list_id).await?;
-                    metrics
-                        .misses
-                        .add(1, &[KeyValue::new("cache", "status_list")]);
+                    metrics.misses.add(1, &cache_attrs("redis"));
                     Ok(None)
                 }
             }
         } else {
-            metrics
-                .misses
-                .add(1, &[KeyValue::new("cache", "status_list")]);
+            metrics.misses.add(1, &cache_attrs("redis"));
             Ok(None)
         }
     }
@@ -313,52 +379,22 @@ impl StatusListCache for RedisStatusListCache {
         let value = serde_json::to_string(&record).map_err(cache_error)?;
         let mut connection = self.connection.clone();
         let list_id = record.list_id.clone();
-        let _: () = redis::cmd("EVAL")
-            .arg(
-                r#"
-                local ttl = tonumber(ARGV[2])
-                local max_capacity = tonumber(ARGV[3])
-                local updated_at = tonumber(ARGV[5])
-                if ttl <= 0 or max_capacity <= 0 then
-                    return 0
-                end
-
-                local marker = redis.call('GET', KEYS[3])
-                if marker and updated_at < tonumber(marker) then
-                    return 0
-                end
-
-                redis.call('SET', KEYS[1], ARGV[6], 'EX', ttl)
-                redis.call('SET', KEYS[3], ARGV[5], 'EX', ttl)
-
-                local now = redis.call('TIME')
-                local score = tonumber(now[1]) * 1000000 + tonumber(now[2])
-                redis.call('ZADD', KEYS[2], score, ARGV[4])
-
-                local overflow = redis.call('ZCARD', KEYS[2]) - max_capacity
-                if overflow > 0 then
-                    local victims = redis.call('ZRANGE', KEYS[2], 0, overflow - 1)
-                    for _, victim in ipairs(victims) do
-                        redis.call('DEL', ARGV[1] .. victim)
-                        redis.call('ZREM', KEYS[2], victim)
-                    end
-                end
-                return 1
-                "#,
-            )
-            .arg(3)
-            .arg(key)
-            .arg(&self.lru_key)
-            .arg(marker_key)
+        // Marker keys intentionally outlive evicted record keys. They are not
+        // counted against max_capacity because they reject stale DB read-fills
+        // after cross-replica invalidation.
+        let _: i32 = REDIS_PUT_SCRIPT
+            .key(key)
+            .key(&self.lru_key)
+            .key(marker_key)
             .arg(&self.record_prefix)
             .arg(self.ttl_secs)
             .arg(self.max_capacity)
             .arg(&list_id)
             .arg(record.updated_at)
             .arg(value)
-            .query_async(&mut connection)
+            .invoke_async(&mut connection)
             .await
-            .map_err(redis_error)?;
+            .map_err(|error| redis_operation_error("put", error))?;
         Ok(())
     }
 
@@ -465,7 +501,7 @@ mod tests {
 
         for metric in [HIT_METRIC, MISS_METRIC] {
             let metric_prefix = format!(
-                r#"{metric}_total{{cache="status_list",otel_scope_name="status-list-server"}}"#
+                r#"{metric}_total{{backend="memory",cache="status_list",otel_scope_name="status-list-server"}}"#
             );
             assert!(
                 body.contains(&metric_prefix),
@@ -487,7 +523,7 @@ mod redis_tests {
         runners::AsyncRunner,
     };
 
-    fn record(list_id: &str) -> StatusListRecord {
+    fn record_at(list_id: &str, updated_at: i64) -> StatusListRecord {
         StatusListRecord {
             list_id: list_id.to_string(),
             issuer: Issuer("issuer".into()),
@@ -496,8 +532,12 @@ mod redis_tests {
                 lst: "lst".into(),
             },
             sub: "sub".into(),
-            updated_at: 0,
+            updated_at,
         }
+    }
+
+    fn record(list_id: &str) -> StatusListRecord {
+        record_at(list_id, 0)
     }
 
     async fn redis_url() -> (Option<ContainerAsync<GenericImage>>, String) {
@@ -629,6 +669,43 @@ mod redis_tests {
             .await
             .expect("invalidate from peer");
         assert_eq!(cache_a.get("shared").await.expect("invalidated"), None);
+    }
+
+    #[tokio::test]
+    async fn redis_cache_invalidation_marker_rejects_stale_fill() {
+        let (_container, redis_url) = redis_url().await;
+        let prefix = format!("status-list-server:test:{}:", uuid::Uuid::new_v4());
+        let cache = RedisStatusListCache::new(
+            &redis_url,
+            60,
+            100,
+            prefix,
+            Duration::from_millis(250),
+            Duration::from_millis(250),
+        )
+        .await
+        .expect("connect to redis");
+
+        cache
+            .invalidate_after_update("stale", 5)
+            .await
+            .expect("write marker");
+
+        cache
+            .put(record_at("stale", 1))
+            .await
+            .expect("stale put rejected without error");
+        assert_eq!(cache.get("stale").await.expect("stale fill missing"), None);
+
+        let current = record_at("stale", 5);
+        cache
+            .put(current.clone())
+            .await
+            .expect("current put accepted");
+        assert_eq!(
+            cache.get("stale").await.expect("current fill present"),
+            Some(current)
+        );
     }
 
     #[tokio::test]

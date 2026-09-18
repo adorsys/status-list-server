@@ -62,12 +62,12 @@ use crate::domain::{
 use crate::outbound::aws::AwsSecretsManager;
 #[cfg(all(feature = "azure", not(feature = "vault"), not(feature = "gcp")))]
 use crate::outbound::azure_kv::AzureKeyVaultClient;
-#[cfg(all(feature = "cache-redis", not(feature = "cache-memory")))]
-use crate::outbound::cache::DisabledStatusListCache;
 #[cfg(any(feature = "cache-memory", not(feature = "cache-redis")))]
 use crate::outbound::cache::MokaStatusListCache;
 #[cfg(all(feature = "cache-redis", not(feature = "cache-memory")))]
 use crate::outbound::cache::RedisStatusListCache;
+#[cfg(all(feature = "cache-redis", not(feature = "cache-memory")))]
+use crate::outbound::cache::{DisabledStatusListCache, record_redis_cache_error};
 #[cfg(feature = "acme")]
 use crate::outbound::cert::AcmeCertificateProvider;
 #[cfg(not(feature = "acme"))]
@@ -590,6 +590,7 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
                         Arc::new(cache)
                     }
                     Err(error) => {
+                        record_redis_cache_error("startup");
                         tracing::warn!(
                             error = ?error,
                             cache.backend = "disabled",

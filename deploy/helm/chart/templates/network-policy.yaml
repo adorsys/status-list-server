@@ -2,6 +2,7 @@
 {{- $otel := index .Values "opentelemetry-collector" | default dict -}}
 {{- $backend := include "status-list-server-chart.dbBackend" . -}}
 {{- $databaseEgress := .Values.statuslist.networkPolicy.databaseEgress | default list -}}
+{{- $cacheEgress := .Values.statuslist.networkPolicy.cacheEgress | default list -}}
 {{- if and (eq $backend "mysql") (empty $databaseEgress) }}
 {{- fail "statuslist.networkPolicy.databaseEgress must be set when NetworkPolicy is enabled with APP_DATABASE__BACKEND=mysql because this chart does not deploy the database" }}
 {{- end }}
@@ -43,6 +44,13 @@ spec:
         {{- with .Values.statuslist.networkPolicy.egressInternal }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
+    {{- if not (empty $cacheEgress) }}
+    - ports:
+        - port: {{ .Values.statuslist.networkPolicy.cachePort | default 6379 | int }}
+          protocol: TCP
+      to:
+        {{- toYaml $cacheEgress | nindent 8 }}
+    {{- end }}
     - ports:
         - port: 443
           protocol: TCP

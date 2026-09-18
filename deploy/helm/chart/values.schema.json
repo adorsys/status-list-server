@@ -34,7 +34,10 @@
           "properties": {
             "repository": { "type": "string", "minLength": 1 },
             "pullPolicy": { "type": "string", "enum": ["", "Always", "IfNotPresent", "Never"] },
-            "variant": { "type": "string", "enum": ["fscert", "aws", "gcp", "azure", "vault"] },
+            "variant": {
+              "type": "string",
+              "enum": ["fscert", "fscert-redis", "aws", "gcp", "azure", "vault"]
+            },
             "tag": { "type": "string" },
             "digest": {
               "type": ["string", "null"],
@@ -208,7 +211,14 @@
             "enabled": { "type": "boolean" },
             "ingress": { "type": "array" },
             "egressInternal": { "type": "array" },
-            "databaseEgress": { "type": "array" }
+            "databaseEgress": { "type": "array" },
+            "cachePort": {
+              "type": ["integer", "string"],
+              "pattern": "^[0-9]+$",
+              "minimum": 1,
+              "maximum": 65535
+            },
+            "cacheEgress": { "type": "array" }
           }
         },
         "resources": { "type": "object" }
