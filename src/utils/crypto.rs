@@ -210,7 +210,7 @@ impl SigningKey {
         let algorithm = detect_pkcs8_algorithm(&pki)?;
         let rng = SystemRandom::new();
 
-        let (inner, encoding_key, public_key) = match algorithm {
+        let (pair, encoding_key, public_key) = match algorithm {
             SigningAlgorithm::Es256 => {
                 let kp = EcdsaKeyPair::from_pkcs8(&ECDSA_P256_SHA256_FIXED_SIGNING, der)?;
                 let enc_key = jsonwebtoken::EncodingKey::from_ec_der(der);
@@ -240,7 +240,7 @@ impl SigningKey {
         Ok(Self {
             algorithm,
             inner: SigningKeyInner {
-                pair: inner,
+                pair,
                 encoding_key,
                 rng,
             },
