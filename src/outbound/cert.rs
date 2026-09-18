@@ -12,7 +12,7 @@ use crate::domain::{
     models::status_list::StatusListError,
     ports::{CertificateProvider, SigningMaterial},
 };
-use crate::utils::keygen::Keypair;
+use crate::utils::crypto::SigningKey;
 
 /// Adapter bridging ACME `CertManager` to domain `CertificateProvider` port.
 #[cfg(feature = "acme")]
@@ -41,7 +41,7 @@ impl CertificateProvider for AcmeCertificateProvider {
 
 /// Filesystem-backed certificate provider.
 ///
-/// Loads PEM certificate chain and PKCS#8 private key from filesystem paths.
+/// Loads PEM certificate chain and PEM private key (PKCS#8, SEC1, or PKCS#1) from filesystem paths.
 #[cfg(not(feature = "acme"))]
 #[derive(Clone)]
 pub struct ReloadingCertificateProvider {
@@ -91,13 +91,14 @@ impl InlineCertificateProvider {
     /// Validate and construct an inline provider.  Fails immediately if the
     /// certificate and signing key do not match or are malformed.
     pub fn new(cert_pem: String, signing_key_pem: String) -> Result<Self, StatusListError> {
-        validate_signing_material(&cert_pem, &signing_key_pem)?;
+        let signing_key = validate_signing_material(&cert_pem, &signing_key_pem)?;
         let certificate_chain = pem_chain_to_base64_der(&cert_pem)?;
         Ok(Self {
-            material: Arc::new(SigningMaterial {
-                certificate_chain: Some(certificate_chain),
+            material: Arc::new(SigningMaterial::with_signing_key(
+                Some(certificate_chain),
                 signing_key_pem,
-            }),
+                Arc::new(signing_key),
+            )),
         })
     }
 }
@@ -121,12 +122,13 @@ async fn load_and_validate_signing_material(
     let signing_key_pem = tokio::fs::read_to_string(key_path)
         .await
         .map_err(|err| StatusListError::Backend(Box::new(err)))?;
-    validate_signing_material(&cert_pem, &signing_key_pem)?;
+    let signing_key = validate_signing_material(&cert_pem, &signing_key_pem)?;
     let certificate_chain = pem_chain_to_base64_der(&cert_pem)?;
-    Ok(SigningMaterial {
-        certificate_chain: Some(certificate_chain),
+    Ok(SigningMaterial::with_signing_key(
+        Some(certificate_chain),
         signing_key_pem,
-    })
+        Arc::new(signing_key),
+    ))
 }
 
 #[cfg(not(feature = "acme"))]
@@ -154,8 +156,8 @@ pub(crate) fn pem_chain_to_base64_der(cert_pem: &str) -> Result<Vec<String>, Sta
 pub(crate) fn validate_signing_material(
     cert_pem: &str,
     signing_key_pem: &str,
-) -> Result<(), StatusListError> {
-    let keypair = Keypair::from_pkcs8_pem(signing_key_pem)
+) -> Result<SigningKey, StatusListError> {
+    let signing_key = SigningKey::from_pem(signing_key_pem)
         .map_err(|err| StatusListError::Backend(Box::new(err)))?;
     let (_, cert_pem_block) =
         x509_parser::pem::parse_x509_pem(cert_pem.as_bytes()).map_err(|err| {
@@ -172,16 +174,14 @@ pub(crate) fn validate_signing_material(
             )))
         })?;
     let cert_public_key = certificate.public_key().subject_public_key.data.as_ref();
-    let key_public_key = keypair.verifying_key().to_sec1_point(false);
-    if cert_public_key != key_public_key.as_bytes() {
+    let key_public_key = signing_key.public_key_bytes();
+    if cert_public_key != key_public_key {
         return Err(StatusListError::Backend(Box::new(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
             "certificate public key does not match signing key",
         ))));
     }
-    jsonwebtoken::EncodingKey::from_ec_pem(signing_key_pem.as_bytes())
-        .map_err(|err| StatusListError::Backend(Box::new(err)))?;
-    Ok(())
+    Ok(signing_key)
 }
 
 #[cfg(test)]

@@ -422,10 +422,9 @@ kubectl get secret statuslist-secret -n statuslist-production \
   -o go-template='{{range $k,$v := .data}}{{println $k}}{{end}}'
 ```
 
-**Fix:** Replace the material with a **matching** cert + PKCS#8 key pair in the expected encoding
+**Fix:** Replace the material with a matching cert + PEM key pair in the expected encoding
 (PEM containing `-----BEGIN ...`, or standard/base64url DER). Confirm both keys exist and are
-readable at the configured path/store-key. When the signing material is file-mounted under the
-`store` strategy, `spawn_cert_rotation` (`src/setup.rs:252`, called at `:505`) reloads it in-process
+readable at the configured path/store-key. When the signing material is file-mounted, the server reloads it in-process
 on file change; a rollout is only needed to re-read a changed value when it is delivered another
 way:
 

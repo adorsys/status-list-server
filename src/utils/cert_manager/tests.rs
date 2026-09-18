@@ -1,6 +1,6 @@
 use crate::{
     cert_manager::storage::{Storage, StorageError},
-    utils::{keygen::Keypair, metrics::metrics_test_lock},
+    utils::metrics::metrics_test_lock,
 };
 
 use super::*;
@@ -547,10 +547,7 @@ async fn test_store_filesystem_strategy_accepts_der_material() {
 
     let (cert_pem, key_pem) = matching_cert_and_key();
     let (_, cert_der) = x509_parser::pem::parse_x509_pem(cert_pem.as_bytes()).unwrap();
-    let key_der = Keypair::from_pkcs8_pem(&key_pem)
-        .unwrap()
-        .to_pkcs8_der_bytes()
-        .unwrap();
+    let key_der = pem::parse(key_pem.as_bytes()).unwrap().into_contents();
     let temp_dir = std::env::temp_dir().join(format!(
         "status-list-server-cert-store-der-{}",
         uuid::Uuid::new_v4()
@@ -623,10 +620,7 @@ async fn test_store_storage_strategy_accepts_base64_der_material() {
     let material_storage = MockStorage::new();
     let (cert_pem, key_pem) = matching_cert_and_key();
     let (_, cert_der) = x509_parser::pem::parse_x509_pem(cert_pem.as_bytes()).unwrap();
-    let key_der = Keypair::from_pkcs8_pem(&key_pem)
-        .unwrap()
-        .to_pkcs8_der_bytes()
-        .unwrap();
+    let key_der = pem::parse(key_pem.as_bytes()).unwrap().into_contents();
 
     material_storage
         .store("source-cert", &BASE64_STANDARD.encode(cert_der.contents))
