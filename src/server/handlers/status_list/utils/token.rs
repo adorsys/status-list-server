@@ -7,14 +7,13 @@ use coset::{
     iana::{Algorithm, EnumI64, HeaderParameter},
 };
 use flate2::{Compression, write::GzEncoder};
-use jsonwebtoken::{EncodingKey, Header};
+use jsonwebtoken::Header;
 use opentelemetry::{KeyValue, global, metrics::Counter};
-use p256::ecdsa::{Signature, signature::Signer};
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 
 use crate::domain::models::status_list::{StatusListError, StatusListRecord};
-use crate::utils::keygen::Keypair;
+use crate::utils::crypto::{SigningKey, TokenSigner};
 
 use super::constants::{
     ACCEPT_STATUS_LISTS_HEADER_CWT, ACCEPT_STATUS_LISTS_HEADER_JWT, CWT_TYPE, EXP, GZIP_HEADER,
@@ -127,7 +126,7 @@ async fn build_status_list_token_inner(
     let certs_parts = signing_material
         .certificate_chain
         .ok_or(StatusListError::Unavailable)?;
-    let signing_key_pem = signing_material.signing_key_pem;
+    let signing_key = signing_material.signing_key.clone();
 
     let accept = accept.to_string();
     let status_record = status_record.clone();
@@ -140,13 +139,10 @@ async fn build_status_list_token_inner(
     let should_gzip = client_accepts_gzip && accept == ACCEPT_STATUS_LISTS_HEADER_JWT;
 
     tokio::task::spawn_blocking(move || {
-        let keypair = Keypair::from_pkcs8_pem(&signing_key_pem)
-            .map_err(|e| StatusListError::Backend(Box::new(e)))?;
-
         let token_bytes = match accept.as_str() {
             ACCEPT_STATUS_LISTS_HEADER_CWT => issue_cwt(
                 &status_record,
-                &keypair,
+                &*signing_key,
                 &certs_parts,
                 &aggregation_uri,
                 validity_window.0,
@@ -155,7 +151,7 @@ async fn build_status_list_token_inner(
             )?,
             _ => issue_jwt(
                 &status_record,
-                &keypair,
+                &signing_key,
                 &certs_parts,
                 &aggregation_uri,
                 validity_window.0,
@@ -184,7 +180,7 @@ async fn build_status_list_token_inner(
 
 fn issue_cwt(
     status_record: &StatusListRecord,
-    keypair: &Keypair,
+    signer: &impl TokenSigner,
     cert_chain: &[String],
     aggregation_uri: &Option<String>,
     iat: i64,
@@ -235,9 +231,10 @@ fn issue_cwt(
         .to_vec()
         .map_err(|err| StatusListError::Backend(Box::new(err)))?;
 
+    let cose_alg: Algorithm = signer.algorithm().into();
     let x5chain_value = build_x5chain(cert_chain)?;
     let protected = HeaderBuilder::new()
-        .algorithm(Algorithm::ES256)
+        .algorithm(cose_alg)
         .value(HeaderParameter::X5Chain.to_i64(), x5chain_value)
         .value(
             CWT_TYPE,
@@ -245,16 +242,22 @@ fn issue_cwt(
         )
         .build();
 
-    let signing_key = keypair.signing_key();
-
+    let mut sign_err = None;
     let sign1 = CoseSign1Builder::new()
         .protected(protected)
         .payload(payload)
-        .create_signature(&[], |payload| {
-            let signature: Signature = signing_key.sign(payload);
-            signature.to_vec()
+        .create_signature(&[], |tbs| match signer.sign(tbs) {
+            Ok(sig) => sig,
+            Err(err) => {
+                sign_err = Some(err);
+                Vec::new()
+            }
         })
         .build();
+
+    if let Some(err) = sign_err {
+        return Err(StatusListError::Backend(Box::new(err)));
+    }
 
     let cwt_bytes = sign1
         .to_tagged_vec()
@@ -284,7 +287,7 @@ fn build_x5chain(cert_chain: &[String]) -> Result<CborValue, StatusListError> {
 
 fn issue_jwt(
     status_record: &StatusListRecord,
-    keypair: &Keypair,
+    signer: &SigningKey,
     cert_chain: &[String],
     aggregation_uri: &Option<String>,
     iat: i64,
@@ -304,16 +307,83 @@ fn issue_jwt(
         sub: status_record.sub.to_owned(),
         ttl: Some(ttl),
     };
-    let mut header = Header::new(jsonwebtoken::Algorithm::ES256);
+    let jwt_alg: jsonwebtoken::Algorithm = signer.algorithm().into();
+    let mut header = Header::new(jwt_alg);
     header.typ = Some(STATUS_LISTS_HEADER_JWT.into());
     header.x5c = Some(cert_chain.to_vec());
 
-    let pem_bytes = keypair
-        .to_pkcs8_pem_bytes()
-        .map_err(|err| StatusListError::Backend(Box::new(err)))?;
-    let signer = EncodingKey::from_ec_pem(&pem_bytes)
-        .map_err(|err| StatusListError::Backend(Box::new(err)))?;
-    let token = jsonwebtoken::encode(&header, &claims, &signer)
+    let token = jsonwebtoken::encode(&header, &claims, signer.as_ref())
         .map_err(|err| StatusListError::Backend(Box::new(err)))?;
     Ok(token)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::domain::models::status_list::StatusList;
+    use crate::utils::crypto::{SigningAlgorithm, SigningKey};
+    use coset::TaggedCborSerializable;
+
+    use base64::prelude::Engine as _;
+
+    fn sample_record() -> StatusListRecord {
+        StatusListRecord {
+            list_id: "list-1".into(),
+            issuer: "test-issuer".into(),
+            sub: "https://example.com/status-list/1".into(),
+            status_list: StatusList {
+                bits: 1,
+                lst: base64url::encode(b"\x00\x01\x02\x03"),
+            },
+            updated_at: 1000,
+        }
+    }
+
+    #[test]
+    fn test_dynamic_jwt_alg_header() {
+        let record = sample_record();
+        let cert_chain = vec!["MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQE=".to_string()];
+
+        let rsa_pem = include_str!("../../../../../test_data/gcloud_test_key.dummy.pem");
+
+        let test_keys = [
+            SigningKey::generate(SigningAlgorithm::Es256).unwrap(),
+            SigningKey::generate(SigningAlgorithm::Es384).unwrap(),
+            SigningKey::generate(SigningAlgorithm::EdDsa).unwrap(),
+            SigningKey::from_pem(rsa_pem).unwrap(),
+        ];
+
+        for key in &test_keys {
+            let token = issue_jwt(&record, key, &cert_chain, &None, 1000, 2000, 300).unwrap();
+            let header = jsonwebtoken::decode_header(&token).unwrap();
+            let expected_alg: jsonwebtoken::Algorithm = key.algorithm().into();
+            assert_eq!(header.alg, expected_alg);
+            assert_eq!(header.typ.as_deref(), Some(STATUS_LISTS_HEADER_JWT));
+        }
+    }
+
+    #[test]
+    fn test_dynamic_cwt_alg_header() {
+        let record = sample_record();
+        let cert_chain = vec![base64::prelude::BASE64_STANDARD.encode(b"dummy-cert-der")];
+
+        let rsa_pem = include_str!("../../../../../test_data/gcloud_test_key.dummy.pem");
+
+        let test_keys = [
+            SigningKey::generate(SigningAlgorithm::Es256).unwrap(),
+            SigningKey::generate(SigningAlgorithm::Es384).unwrap(),
+            SigningKey::generate(SigningAlgorithm::EdDsa).unwrap(),
+            SigningKey::from_pem(rsa_pem).unwrap(),
+        ];
+
+        for key in &test_keys {
+            let cwt_bytes = issue_cwt(&record, key, &cert_chain, &None, 1000, 2000, 300).unwrap();
+            let sign1 = coset::CoseSign1::from_tagged_slice(&cwt_bytes).unwrap();
+            let expected_alg: Algorithm = key.algorithm().into();
+            assert_eq!(
+                sign1.protected.header.alg,
+                Some(coset::RegisteredLabelWithPrivate::Assigned(expected_alg))
+            );
+        }
+    }
 }
