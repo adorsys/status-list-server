@@ -1,5 +1,8 @@
 //! Outbound secondary ports defining contracts.
 
+use std::sync::Arc;
+
+use crate::crypto::SigningKey;
 use crate::domain::models::credential::{Credential, CredentialError};
 use crate::domain::models::status_list::{StatusListError, StatusListRecord, StatusListSnapshot};
 use async_trait::async_trait;
@@ -80,13 +83,43 @@ pub trait StatusListSnapshotRepo: Send + Sync + 'static {
 }
 
 /// Certificate chain and signing key captured from one provider snapshot.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug)]
 pub struct SigningMaterial {
     /// Base64 DER-encoded x509 certificate chain parts for JWT `x5c` and CWT
     /// `x5chain`.
     pub certificate_chain: Option<Vec<String>>,
-    /// PKCS#8 PEM-encoded signing key.
+    /// PEM-encoded signing key (supports PKCS#8, SEC1, or PKCS#1 format).
     pub signing_key_pem: String,
+    /// Pre-parsed, thread-safe signing key instance.
+    pub signing_key: Arc<SigningKey>,
+}
+
+impl SigningMaterial {
+    /// Construct signing material by parsing the PEM key into a cached `SigningKey`.
+    pub fn new(
+        certificate_chain: Option<Vec<String>>,
+        signing_key_pem: String,
+    ) -> Result<Self, crate::utils::crypto::Error> {
+        let signing_key = SigningKey::from_pem(&signing_key_pem)?;
+        Ok(Self {
+            certificate_chain,
+            signing_key_pem,
+            signing_key: Arc::new(signing_key),
+        })
+    }
+
+    /// Construct signing material with an already-instantiated `SigningKey`.
+    pub fn with_signing_key(
+        certificate_chain: Option<Vec<String>>,
+        signing_key_pem: String,
+        signing_key: Arc<SigningKey>,
+    ) -> Self {
+        Self {
+            certificate_chain,
+            signing_key_pem,
+            signing_key,
+        }
+    }
 }
 
 /// Provider interface for certificate chains and signing keys used for VC/token signatures.
