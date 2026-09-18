@@ -6,7 +6,7 @@ use tracing::info;
 
 use super::{CertError, CertManager, CertificateData};
 use crate::outbound::cert::validate_signing_material;
-use crate::utils::keygen::Keypair;
+use crate::utils::crypto::SigningKey;
 
 /// Provisioning strategy used by [`CertManager`].
 #[async_trait]
@@ -60,12 +60,12 @@ pub enum MaterialSource {
 /// Source for directly provisioned certificate material.
 #[derive(Debug, Clone)]
 pub enum StoreProvisioningSource {
-    /// Load PEM-encoded certificate chain and PKCS#8 signing key from local files.
+    /// Load PEM-encoded certificate chain and PEM signing key from local files.
     Filesystem {
         certificate_path: PathBuf,
         signing_key_path: PathBuf,
     },
-    /// Load PEM-encoded certificate chain and PKCS#8 signing key from the configured material backend.
+    /// Load PEM-encoded certificate chain and PEM signing key from the configured material backend.
     Storage {
         certificate_key: String,
         signing_key_key: String,
@@ -156,7 +156,7 @@ impl CertProvisioningStrategy for StoreProvisioningStrategy {
 
     async fn provision(&self, manager: &CertManager) -> Result<CertificateData, CertError> {
         let (certificate, signing_key) = self.load_material(manager).await?;
-        let signing_key_pem = normalize_pkcs8_key(signing_key)?;
+        let signing_key_pem = normalize_signing_key(signing_key)?;
 
         let certificate_data = manager.certificate_data_from_der_or_pem(certificate)?;
         validate_signing_material(&certificate_data.certificate, &signing_key_pem)
@@ -211,17 +211,17 @@ fn decode_base64_text(value: &str) -> Option<Vec<u8>> {
         .ok()
 }
 
-fn normalize_pkcs8_key(signing_key: Vec<u8>) -> Result<String, CertError> {
+fn normalize_signing_key(signing_key: Vec<u8>) -> Result<String, CertError> {
     if is_pem_private_key(&signing_key) {
         let pem = String::from_utf8(signing_key).map_err(|e| {
             CertError::Validation(format!("signing key PEM is not valid UTF-8: {e}"))
         })?;
-        Keypair::from_pkcs8_pem(&pem)?;
+        SigningKey::from_pem(&pem)?;
         return Ok(pem);
     }
 
-    let keypair = Keypair::from_pkcs8_der(&signing_key)?;
-    keypair.to_pkcs8_pem().map_err(Into::into)
+    let keypair = SigningKey::from_pkcs8_der(&signing_key)?;
+    Ok(keypair.to_pkcs8_pem()?)
 }
 
 fn is_pem_private_key(bytes: &[u8]) -> bool {

@@ -10,7 +10,7 @@ pub mod storage;
 
 use crate::utils::cache::{CertChainCache, CertificateChain};
 use crate::utils::cert_manager::storage::{CryptoStorage, Storage};
-use crate::utils::keygen::Keypair;
+use crate::utils::crypto::{SigningAlgorithm, SigningKey};
 use arc_swap::ArcSwapOption;
 pub use builder::CertificateManagerBuilder;
 use challenge::CleanupFuture;
@@ -412,8 +412,8 @@ impl CertManager {
 
         // If the secret does not exist, try to generate and store a new one
         warn!("No existing server secret found. Generating a new one...");
-        let keypair = Keypair::generate()?;
-        let key_pem = keypair.to_pkcs8_pem()?;
+        let key = SigningKey::generate(SigningAlgorithm::Es256)?;
+        let key_pem = key.to_pkcs8_pem()?;
         let mut retries = 0;
         loop {
             info!("Trying to store the newly generated server secret...");
@@ -489,14 +489,12 @@ impl CertManager {
         }
 
         let signing_key_pem = self.signing_key_pem().await?;
-        let certificate_chain = self
-            .cert_chain_parts()
-            .await?
-            .map(|chain| chain.as_ref().to_vec());
-        let material = SigningMaterial {
-            certificate_chain,
+        let certificate_chain = self.cert_chain_parts().await?;
+        let material = SigningMaterial::new(
+            certificate_chain.map(|c| c.as_ref().to_vec()),
             signing_key_pem,
-        };
+        )
+        .map_err(CertError::KeyOp)?;
         self.active_signing_material
             .store(Some(Arc::new(material.clone())));
         Ok(material)
@@ -787,10 +785,9 @@ impl CertManager {
         signing_key_pem: &str,
     ) -> Result<(), CertError> {
         let certs = self.parse_cert_chain_parts(cert_pem)?;
-        let material = SigningMaterial {
-            certificate_chain: Some(certs.as_ref().to_vec()),
-            signing_key_pem: signing_key_pem.to_string(),
-        };
+        let material =
+            SigningMaterial::new(Some(certs.as_ref().to_vec()), signing_key_pem.to_string())
+                .map_err(CertError::KeyOp)?;
         self.active_signing_material.store(Some(Arc::new(material)));
         Ok(())
     }
