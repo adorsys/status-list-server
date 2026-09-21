@@ -383,6 +383,32 @@ paths:
             type: integer
             format: int64
             example: 1686925000
+        - name: If-None-Match
+          in: header
+          required: false
+          description: |
+            Weak conditional validator (an `ETag` previously returned by this
+            endpoint). When it matches the server's current validator *and* the
+            client's cached token is still within its validity window, the server
+            responds `304 Not Modified`. The validator is keyed to the current
+            token validity window, so once a cached token has expired the validator
+            no longer matches and the server returns a freshly signed `200 OK`
+            token instead of a body-less `304`.
+          schema:
+            type: string
+            example: 'W/"9f2d..."'
+        - name: If-Modified-Since
+          in: header
+          required: false
+          description: |
+            Date-time validator matching the `Last-Modified` header of a previous
+            response. `304 Not Modified` is returned only while the client's
+            cached token is still within its validity window (within
+            `token_exp_secs` of the list's last modification); otherwise the server
+            returns a freshly signed `200 OK` token.
+          schema:
+            type: string
+            example: "Wed, 21 Oct 2015 07:28:00 GMT"
         - name: Accept-Encoding
           in: header
           required: false
@@ -429,11 +455,46 @@ paths:
               schema:
                 type: string
               description: |
-                Always `Accept-Encoding`. Because the response body varies by
-                the request's `Accept-Encoding` header, this is required so
-                that shared caches/CDNs do not serve a gzipped variant to a
-                client that did not request one (RFC 9111 §4.2).
-              example: Accept-Encoding
+                Always `Accept, Accept-Encoding`. The response body varies by both
+                the requested token format (`Accept`) and the negotiated content
+                coding (`Accept-Encoding`), which is required so shared caches/CDNs
+                do not serve a gzipped variant to a client that did not request one
+                (RFC 9111 §4.2).
+              example: Accept, Accept-Encoding
+        "304":
+          description: |
+            Not Modified. Returned for a conditional revalidation (`If-None-Match`
+            or `If-Modified-Since`) when the client's previously cached Status List
+            Token is still inside its validity window and the list has not changed:
+            the client can continue to use its cached token, so no body is sent.
+
+            The server never answers `304` once the cached token would have reached
+            its `exp` time; in that case it returns `200 OK` with a freshly signed
+            token instead (weak validator behaviour per RFC 9110 §8.8.1).
+          headers:
+            ETag:
+              schema:
+                type: string
+              description: |
+                The current weak validator for the live representation, keyed to
+                the current token validity window. It changes when the window
+                rolls over so a stale cached token is no longer validated as
+                current.
+            Last-Modified:
+              schema:
+                type: string
+              description: |
+                The HTTP-date of the last modification of the status list.
+            Cache-Control:
+              schema:
+                type: string
+              description: |
+                Caching directive for intermediaries (e.g. `max-age=<ttl>,
+                immutable`).
+            Vary:
+              schema:
+                type: string
+              description: Always `Accept, Accept-Encoding`.
         "404":
           $ref: "#/components/responses/NotFound"
         "406":
