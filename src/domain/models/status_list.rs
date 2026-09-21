@@ -123,6 +123,9 @@ impl StatusList {
         }
 
         let old_bits = self.bits as usize;
+        // Draft-21 only permits 1, 2, 4, or 8. Rows written by older builds
+        // with wider values must be repaired or migrated before they can be
+        // updated without re-emitting non-conformant status-list tokens.
         validate_bits(old_bits)?;
         let new_bits = determine_bits(&status_updates, Some(old_bits))?;
         let mut status_array = decode_compressed(&self.lst)?;
@@ -172,11 +175,22 @@ fn status_value(status: &Status) -> Result<u32, StatusListError> {
         Status::Valid => Ok(0),
         Status::Invalid => Ok(1),
         Status::Suspended => Ok(2),
-        Status::ApplicationSpecific(value) if *value <= 255 => Ok(*value),
+        Status::ApplicationSpecific(value) if is_application_specific_status_value(*value) => {
+            Ok(*value)
+        }
+        Status::ApplicationSpecific(value) if *value <= 255 => {
+            Err(StatusListError::InvalidStatusList(format!(
+                "status value {value} is reserved for future registration; application-specific status values are 3 and 12 through 15"
+            )))
+        }
         Status::ApplicationSpecific(value) => Err(StatusListError::InvalidStatusList(format!(
             "status value {value} exceeds 8-bit capacity; maximum supported status value is 255"
         ))),
     }
+}
+
+pub(crate) fn is_application_specific_status_value(value: u32) -> bool {
+    matches!(value, 3 | 12..=15)
 }
 
 fn validate_bits(bits: usize) -> Result<(), StatusListError> {
@@ -454,14 +468,14 @@ mod tests {
         let updated = original
             .update(vec![StatusEntry {
                 index: 1,
-                status: Status::ApplicationSpecific(255),
+                status: Status::ApplicationSpecific(15),
             }])
             .unwrap();
 
-        assert_eq!(updated.bits, 8);
-        let statuses = decode_status_array(&decompress(&updated.lst), 8).unwrap();
+        assert_eq!(updated.bits, 4);
+        let statuses = decode_status_array(&decompress(&updated.lst), 4).unwrap();
         assert_eq!(statuses[0], Status::Valid);
-        assert_eq!(statuses[1], Status::ApplicationSpecific(255));
+        assert_eq!(statuses[1], Status::ApplicationSpecific(15));
     }
 
     fn entry(index: i32, status: Status) -> StatusEntry {
@@ -568,35 +582,41 @@ mod tests {
     }
 
     #[test]
-    fn eight_bit_app_specific_exact_layout() {
+    fn four_bit_app_specific_exact_layout() {
         let result = StatusList::create(vec![
             entry(0, Status::Valid),
             entry(1, Status::Invalid),
             entry(2, Status::Suspended),
-            entry(3, Status::ApplicationSpecific(255)),
+            entry(3, Status::ApplicationSpecific(15)),
         ])
         .unwrap();
-        assert_eq!(result.bits, 8);
+        assert_eq!(result.bits, 4);
         let raw = decompress(&result.lst);
-        assert_eq!(raw.len(), 4, "4 entries * 8 bits = 4 bytes");
-        let statuses = decode_status_array(&raw, 8).unwrap();
+        assert_eq!(raw.len(), 2, "4 entries * 4 bits = 2 bytes");
+        let statuses = decode_status_array(&raw, 4).unwrap();
         assert_eq!(statuses[0], Status::Valid);
         assert_eq!(statuses[1], Status::Invalid);
         assert_eq!(statuses[2], Status::Suspended);
-        assert_eq!(statuses[3], Status::ApplicationSpecific(255));
+        assert_eq!(statuses[3], Status::ApplicationSpecific(15));
     }
 
     #[test]
-    fn app_specific_within_8_bit_capacity_roundtrip() {
+    fn app_specific_registry_values_roundtrip() {
         let result = StatusList::create(vec![
-            entry(0, Status::ApplicationSpecific(255)),
-            entry(3, Status::ApplicationSpecific(16)),
+            entry(0, Status::ApplicationSpecific(3)),
+            entry(1, Status::ApplicationSpecific(12)),
+            entry(2, Status::ApplicationSpecific(13)),
+            entry(3, Status::ApplicationSpecific(14)),
+            entry(4, Status::ApplicationSpecific(15)),
         ])
         .unwrap();
         let statuses = decode_status_array(&decompress(&result.lst), result.bits as usize).unwrap();
-        assert_eq!(result.bits, 8);
-        assert_eq!(statuses[0], Status::ApplicationSpecific(255));
-        assert_eq!(statuses[3], Status::ApplicationSpecific(16));
+        assert_eq!(result.bits, 4);
+        assert_eq!(statuses[0], Status::ApplicationSpecific(3));
+        assert_eq!(statuses[1], Status::ApplicationSpecific(12));
+        assert_eq!(statuses[2], Status::ApplicationSpecific(13));
+        assert_eq!(statuses[3], Status::ApplicationSpecific(14));
+        assert_eq!(statuses[4], Status::ApplicationSpecific(15));
     }
 
     #[test]
@@ -611,8 +631,19 @@ mod tests {
     }
 
     #[test]
-    fn app_specific_values_at_or_below_255_are_supported() {
-        for (value, bits) in [(3u32, 2u8), (100, 8), (255, 8)] {
+    fn reserved_status_values_are_rejected() {
+        for value in [4u32, 5, 11, 16, 100, 255] {
+            let result = StatusList::create(vec![entry(0, Status::ApplicationSpecific(value))]);
+            assert!(
+                matches!(result, Err(StatusListError::InvalidStatusList(ref msg)) if msg.contains("reserved for future registration")),
+                "value {value} must be rejected as reserved"
+            );
+        }
+    }
+
+    #[test]
+    fn application_specific_registry_values_are_supported() {
+        for (value, bits) in [(3u32, 2u8), (12, 4), (13, 4), (14, 4), (15, 4)] {
             let result =
                 StatusList::create(vec![entry(0, Status::ApplicationSpecific(value))]).unwrap();
             assert_eq!(result.bits, bits);
@@ -630,6 +661,15 @@ mod tests {
     }
 
     #[test]
+    fn update_rejects_reserved_status_values() {
+        let original = StatusList::create(vec![entry(0, Status::Valid)]).unwrap();
+        let result = original.update(vec![entry(0, Status::ApplicationSpecific(16))]);
+        assert!(
+            matches!(result, Err(StatusListError::InvalidStatusList(ref msg)) if msg.contains("reserved for future registration"))
+        );
+    }
+
+    #[test]
     fn decode_accepts_application_specific_values_within_bit_width() {
         let statuses = decode_status_array(&[0b1110_0100u8], 2).unwrap();
         assert_eq!(
@@ -642,8 +682,8 @@ mod tests {
             ]
         );
 
-        let statuses = decode_status_array(&[100u8], 8).unwrap();
-        assert_eq!(statuses, vec![Status::ApplicationSpecific(100)]);
+        let statuses = decode_status_array(&[15u8], 8).unwrap();
+        assert_eq!(statuses, vec![Status::ApplicationSpecific(15)]);
     }
 
     #[test]
@@ -727,8 +767,6 @@ mod tests {
             Status::Suspended,
             Status::ApplicationSpecific(3),
             Status::ApplicationSpecific(15),
-            Status::ApplicationSpecific(16),
-            Status::ApplicationSpecific(255),
         ] {
             let result = StatusList::create(vec![entry(0, status)]).unwrap();
             assert_allowed_bits(result.bits);
@@ -740,8 +778,6 @@ mod tests {
             Status::Suspended,
             Status::ApplicationSpecific(3),
             Status::ApplicationSpecific(15),
-            Status::ApplicationSpecific(16),
-            Status::ApplicationSpecific(255),
         ] {
             let result = original.update(vec![entry(1, status)]).unwrap();
             assert_allowed_bits(result.bits);
