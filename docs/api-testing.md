@@ -14,12 +14,12 @@ Collection v2.1 exports:
 
 The environment exposes these variables:
 
-| Variable          | Default                                | Purpose                                                              |
-| ----------------- | -------------------------------------- | -------------------------------------------------------------------- |
-| `baseUrl`         | `http://localhost:8000`                | Running status-list-server endpoint.                                 |
-| `list_id`         | `477121aa-b598-419e-916f-1e74654ff38b` | Status list UUID used by publish, update, and retrieve requests.     |
+| Variable          | Default                                | Purpose                                                               |
+| ----------------- | -------------------------------------- | --------------------------------------------------------------------- |
+| `baseUrl`         | `http://localhost:8000`                | Running status-list-server endpoint.                                  |
+| `list_id`         | `477121aa-b598-419e-916f-1e74654ff38b` | Status list UUID used by publish, update, and retrieve requests.      |
 | `issuer_id`       | `my-issuer`                            | Issuer identifier used for credential registration.                   |
-| `token`           | empty                                  | Signed issuer JWT for protected `PUT` and `PATCH` requests.          |
+| `token`           | empty                                  | Signed issuer JWT for protected `PUT` and `PATCH` requests.           |
 | `historical_time` | `1686925000`                           | Unix timestamp used by historical resolution.                         |
 
 The collection is organized into Health & Metrics, Issuer Management, Status
@@ -62,19 +62,19 @@ container, which is fragile on some Docker hosts.
 
 Useful environment overrides:
 
-| Variable                       | Default                                             | Purpose                                                                                           |
-| ------------------------------ | --------------------------------------------------- | ------------------------------------------------------------------------------------------------- |
-| `API_ENDPOINT`                 | `http://localhost:8000`                             | Live API endpoint under test.                                                                     |
-| `API_NAME_VERSION`             | `Status List Server:0.1.0`                          | Microcks service reference, matching OpenAPI title and version.                                   |
-| `STATUS_LIST_AUTH_TOKEN`       | generated                                           | Existing management JWT to use instead of generating one.                                         |
-| `MICROCKS_OPERATIONS_HEADERS`  | generated Authorization header                      | Full Microcks operations headers JSON override.                                                   |
-| `MICROCKS_READY_TIMEOUT`       | `180s`                                              | Maximum time to wait for the ephemeral Microcks container to start.                               |
-| `MICROCKS_WAIT_FOR`            | `30sec`                                             | Maximum wait time for each Microcks test.                                                         |
+| Variable                       | Default                                             | Purpose                                                                                            |
+| ------------------------------ | --------------------------------------------------- | -------------------------------------------------------------------------------------------------- |
+| `API_ENDPOINT`                 | `http://localhost:8000`                             | Live API endpoint under test.                                                                      |
+| `API_NAME_VERSION`             | `Status List Server:0.1.0`                          | Microcks service reference, matching OpenAPI title and version.                                    |
+| `STATUS_LIST_AUTH_TOKEN`       | generated                                           | Existing management JWT to use instead of generating one.                                          |
+| `MICROCKS_OPERATIONS_HEADERS`  | generated Authorization header                      | Full Microcks operations headers JSON override.                                                    |
+| `MICROCKS_READY_TIMEOUT`       | `180s`                                              | Maximum time to wait for the ephemeral Microcks container to start.                                |
+| `MICROCKS_WAIT_FOR`            | `30sec`                                             | Maximum wait time for each Microcks test.                                                          |
 | `RUN_POSTMAN_CONFORMANCE`      | `false`                                             | Set to `true` to additionally try Microcks' Postman runner. The collection is imported either way. |
-| `MICROCKS_VERBOSE`             | `true`                                              | Set to `false` to suppress Microcks CLI request/response dumps.                                   |
-| `MICROCKS_IMAGE`               | `quay.io/microcks/microcks-cli:nightly`             | CLI container image used when no local CLI is installed.                                          |
-| `MICROCKS_UBER_IMAGE`          | `quay.io/microcks/microcks-uber:latest-native`      | Microcks server image used by the Docker fallback.                                                |
-| `MICROCKS_MANAGED_PORT`        | `8585`                                              | Host port for the disposable Microcks server.                                                     |
+| `MICROCKS_VERBOSE`             | `true`                                              | Set to `false` to suppress Microcks CLI request/response dumps.                                    |
+| `MICROCKS_IMAGE`               | `quay.io/microcks/microcks-cli:nightly`             | CLI container image used when no local CLI is installed.                                           |
+| `MICROCKS_UBER_IMAGE`          | `quay.io/microcks/microcks-uber:latest-native`      | Microcks server image used by the Docker fallback.                                                 |
+| `MICROCKS_MANAGED_PORT`        | `8585`                                              | Host port for the disposable Microcks server.                                                      |
 
 Example against a deployed server with an existing issuer token:
 
