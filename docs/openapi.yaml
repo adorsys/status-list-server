@@ -203,10 +203,16 @@ paths:
         "202":
           description: Credentials accepted and stored successfully
           content:
-            text/plain:
+            application/json:
               schema:
-                type: string
-              example: "Credentials stored successfully"
+                type: object
+                required:
+                  - status
+                properties:
+                  status:
+                    type: string
+              example:
+                status: "Credentials stored successfully"
         "400":
           $ref: "#/components/responses/BadRequest"
         "409":
@@ -429,11 +435,12 @@ paths:
               schema:
                 type: string
               description: |
-                Always `Accept-Encoding`. Because the response body varies by
-                the request's `Accept-Encoding` header, this is required so
-                that shared caches/CDNs do not serve a gzipped variant to a
+                Always includes `Accept, Accept-Encoding`. Because the
+                response body varies by token format and by the request's
+                `Accept-Encoding` header, this is required so that shared
+                caches/CDNs do not serve a mismatched representation to a
                 client that did not request one (RFC 9111 §4.2).
-              example: Accept-Encoding
+              example: Accept, Accept-Encoding
         "404":
           $ref: "#/components/responses/NotFound"
         "406":
@@ -555,13 +562,19 @@ components:
           $ref: "#/components/schemas/StatusValue"
 
     StatusValue:
-      type: string
-      description: "Status value."
-      enum:
-        - VALID
-        - INVALID
-        - SUSPENDED
-      example: "INVALID"
+      type: integer
+      format: int32
+      description: |
+        Numeric status value. `0` means valid, `1` means invalid, `2` means
+        suspended. Values from `3` through `255` are reserved; values `>= 256`
+        are application-specific extension values.
+      oneOf:
+        - enum:
+            - 0
+            - 1
+            - 2
+        - minimum: 256
+      example: 1
 
     StatusList:
       type: object
