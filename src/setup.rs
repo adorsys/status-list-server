@@ -14,6 +14,12 @@ use color_eyre::eyre::Result as EyeResult;
 use sea_orm::{ConnectOptions, DbErr};
 #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mysql"))]
 use sea_orm_migration::MigratorTrait;
+#[cfg(any(
+    feature = "sqlite",
+    feature = "postgres",
+    feature = "mysql",
+    feature = "cache-redis"
+))]
 use secrecy::ExposeSecret;
 use std::sync::Arc;
 use std::time::Duration;
