@@ -47,7 +47,9 @@ fn revalidation_metrics() -> RevalidationMetrics {
         RevalidationMetrics {
             total: meter
                 .u64_counter("conditional_revalidation_total")
-                .with_description("Conditional GET revalidation outcomes (not_modified|modified).")
+                .with_description(
+                    "Conditional GET revalidation outcomes (not_modified|modified|expired_token).",
+                )
                 .build(),
         }
     })
@@ -168,42 +170,86 @@ async fn get_status_list_at(
             revalidation_metrics()
                 .total
                 .add(1, &[KeyValue::new("outcome", "modified")]);
-            let (token_bytes, encoding) = build_status_list_token(
+            build_fresh_200_response(
                 &state,
                 &accept_type,
                 &status_record,
-                None,
+                &current_etag,
+                &last_modified,
+                &cache_control,
                 client_accepts_gzip,
             )
-            .await?;
-
-            let mut response = Response::new(token_bytes.into());
-            *response.status_mut() = StatusCode::OK;
-            let h = response.headers_mut();
-            h.insert(
-                header::CONTENT_TYPE,
-                HeaderValue::from_str(&accept_type).unwrap(),
-            );
-            h.insert(header::ETAG, HeaderValue::from_str(&current_etag).unwrap());
-            h.insert(
-                header::LAST_MODIFIED,
-                HeaderValue::from_str(&last_modified).unwrap(),
-            );
-            h.insert(
-                header::CACHE_CONTROL,
-                HeaderValue::from_str(&cache_control).unwrap(),
-            );
-            h.insert(
-                header::VARY,
-                HeaderValue::from_static("Accept, Accept-Encoding"),
-            );
-            if let Some(enc) = encoding {
-                h.insert(header::CONTENT_ENCODING, HeaderValue::from_static(enc));
-            }
-
-            Ok(response)
+            .await
+        }
+        ConditionalResponse::ExpiredToken => {
+            // The list is unchanged but the client's cached token has reached its
+            // `exp`: a 304 would hand the relying party a body-less, expired,
+            // unusable token (RFC 9110 §8.8.1). Track this separately from a true
+            // content change so operators can detect a config regression that
+            // silently turns every conditional GET into a full re-sign.
+            revalidation_metrics()
+                .total
+                .add(1, &[KeyValue::new("outcome", "expired_token")]);
+            build_fresh_200_response(
+                &state,
+                &accept_type,
+                &status_record,
+                &current_etag,
+                &last_modified,
+                &cache_control,
+                client_accepts_gzip,
+            )
+            .await
         }
     }
+}
+
+/// Build a freshly signed `200 OK` status-list token response, reusing the
+/// current validator and freshness headers. Shared by the content-change
+/// (`Modified`) and expiry-forced re-sign (`ExpiredToken`) paths.
+async fn build_fresh_200_response(
+    state: &AppState,
+    accept_type: &str,
+    status_record: &StatusListRecord,
+    current_etag: &str,
+    last_modified: &str,
+    cache_control: &str,
+    client_accepts_gzip: bool,
+) -> Result<Response, ApiError> {
+    let (token_bytes, encoding) = build_status_list_token(
+        state,
+        accept_type,
+        status_record,
+        None,
+        client_accepts_gzip,
+    )
+    .await?;
+
+    let mut response = Response::new(token_bytes.into());
+    *response.status_mut() = StatusCode::OK;
+    let h = response.headers_mut();
+    h.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_str(accept_type).unwrap(),
+    );
+    h.insert(header::ETAG, HeaderValue::from_str(current_etag).unwrap());
+    h.insert(
+        header::LAST_MODIFIED,
+        HeaderValue::from_str(last_modified).unwrap(),
+    );
+    h.insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_str(cache_control).unwrap(),
+    );
+    h.insert(
+        header::VARY,
+        HeaderValue::from_static("Accept, Accept-Encoding"),
+    );
+    if let Some(enc) = encoding {
+        h.insert(header::CONTENT_ENCODING, HeaderValue::from_static(enc));
+    }
+
+    Ok(response)
 }
 
 async fn handle_historical_request(
@@ -326,7 +372,10 @@ fn client_accepts_gzip(headers: &HeaderMap) -> bool {
 }
 
 fn build_cache_control(token_ttl_secs: u64) -> String {
-    format!("max-age={}, immutable", token_ttl_secs)
+    // No `immutable`: live tokens expire and their validators rotate, so a
+    // freshness-honouring cache/browser must still revalidate to obtain a fresh,
+    // unexpired token rather than serving a stale body forever (RFC 9111 §5.2.2.4).
+    format!("max-age={}", token_ttl_secs)
 }
 
 #[cfg(test)]

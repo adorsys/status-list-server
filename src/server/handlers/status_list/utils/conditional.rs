@@ -9,6 +9,10 @@ const IMF_FIXDATE: &[time::format_description::BorrowedFormatItem<'static>] = fo
 pub(crate) enum ConditionalResponse {
     NotModified,
     Modified,
+    /// A 304 must not be answered even though the representation is unchanged:
+    /// the client's cached token has (or imminently will) reach its `exp`, so a
+    /// freshly signed token must be served instead (RFC 9110 §8.8.1).
+    ExpiredToken,
 }
 
 /// Token lifetime policy that shapes the freshness gates below.
@@ -103,7 +107,7 @@ pub(crate) fn evaluate_if_modified_since(
     let ttl_secs = i64::try_from(validity.ttl_secs).unwrap_or(i64::MAX);
     let guaranteed_valid_until = updated_at.saturating_add(exp_secs);
     if guaranteed_valid_until.saturating_sub(now) <= ttl_secs {
-        return ConditionalResponse::Modified;
+        return ConditionalResponse::ExpiredToken;
     }
 
     if updated_at <= client_timestamp {
@@ -135,6 +139,11 @@ pub(crate) fn evaluate_conditional_request(
         let ttl_secs = i64::try_from(validity.ttl_secs).unwrap_or(i64::MAX);
         if matches && runway > ttl_secs {
             return ConditionalResponse::NotModified;
+        }
+        // ETag matched but the cached token has too little (or no) remaining
+        // validity to certify with a 304.
+        if matches {
+            return ConditionalResponse::ExpiredToken;
         }
         return ConditionalResponse::Modified;
     }
@@ -347,7 +356,7 @@ mod tests {
                 updated_at + 901,
                 TokenValidity::new(900, 300)
             ),
-            ConditionalResponse::Modified
+            ConditionalResponse::ExpiredToken
         );
         // At the exact expiry instant (`now == updated_at + exp`) the token is
         // expired too.
@@ -358,7 +367,7 @@ mod tests {
                 updated_at + 900,
                 TokenValidity::new(900, 300)
             ),
-            ConditionalResponse::Modified
+            ConditionalResponse::ExpiredToken
         );
         // A second before expiry the token is not yet expired but has no usable
         // runway (< token_ttl_secs), so we still must not certify it with a 304.
@@ -369,7 +378,7 @@ mod tests {
                 updated_at + 899,
                 TokenValidity::new(900, 300)
             ),
-            ConditionalResponse::Modified
+            ConditionalResponse::ExpiredToken
         );
     }
 
@@ -434,7 +443,7 @@ mod tests {
     }
 
     #[test]
-    fn test_evaluate_conditional_request_if_none_match_insufficient_runway_modified() {
+    fn test_evaluate_conditional_request_if_none_match_insufficient_runway_expired_token() {
         // The ETag matches (same window) but so little validity remains
         // (remaining = window_end - now <= token_ttl_secs) that a 304 would
         // hand the relying party a token that is about to expire -> fresh 200.
@@ -453,7 +462,7 @@ mod tests {
             now,
             TokenValidity::new(900, 300),
         );
-        assert_eq!(result, ConditionalResponse::Modified);
+        assert_eq!(result, ConditionalResponse::ExpiredToken);
     }
 
     #[test]
@@ -492,7 +501,7 @@ mod tests {
             updated_at + 901,
             TokenValidity::new(900, 300),
         );
-        assert_eq!(result, ConditionalResponse::Modified);
+        assert_eq!(result, ConditionalResponse::ExpiredToken);
     }
 
     #[test]

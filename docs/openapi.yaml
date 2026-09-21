@@ -489,8 +489,10 @@ paths:
               schema:
                 type: string
               description: |
-                Caching directive for intermediaries (e.g. `max-age=<ttl>,
-                immutable`).
+                Caching directive for intermediaries (e.g. `max-age=<ttl>`). The
+                live token is not marked `immutable`: it expires and its validator
+                rotates, so freshness-honouring caches/browsers must revalidate to
+                obtain an unexpired token.
             Vary:
               schema:
                 type: string
