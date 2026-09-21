@@ -35,7 +35,7 @@
     "serviceAccount": {
       "type": "object",
       "title": "Application ServiceAccount",
-      "description": "ServiceAccount for the application pods. Attach Workload Identity role annotations here (AWS EKS IRSA eks.amazonaws.com/role-arn, GCP GKE iam.gke.io/gcp-service-account, or Azure AKS azure.workload.identity/client-id) for ambient cloud credentials. The ServiceAccount name defaults to the chart fullname (<release>-status-list-server unless release already contains 'status-list-server', or fullnameOverride if set); the cloud-side trust must be keyed on that name, with the federated subject system:serviceaccount:<namespace>:<name> (IAM role trust for IRSA, roles/iam.workloadIdentityUser binding for GKE, a federated identity credential for AKS — see the env block in values.yaml). Create either chart-managed via create=true or reference an existing one via name.",
+      "description": "ServiceAccount for the application pods. Attach Workload Identity role annotations here (AWS EKS IRSA eks.amazonaws.com/role-arn, GCP GKE iam.gke.io/gcp-service-account, or Azure AKS azure.workload.identity/client-id) for ambient cloud credentials. The ServiceAccount name defaults to the chart fullname (<release>-status-list-server unless release already contains 'status-list-server', or fullnameOverride if set); the cloud-side trust must be keyed on that name, with the federated subject system:serviceaccount:<namespace>:<name> (IAM role trust for IRSA, roles/iam.workloadIdentityUser binding for GKE, a federated identity credential for AKS; see the env block in values.yaml). Create either chart-managed via create=true or reference an existing one via name.",
       "properties": {
         "create": {
           "type": "boolean",
@@ -50,7 +50,7 @@
         "automountServiceAccountToken": {
           "type": "boolean",
           "title": "Mount the Kubernetes API token",
-          "description": "Default false: the application does not need the Kubernetes API, so do not mount the SA bearer token (NSA/CISA hardening, CIS Benchmark 5.1.6). This does NOT break Workload Identity — IRSA / GCP WI / Azure WI use projected OIDC tokens injected by the cloud admission webhook, independent of this setting."
+          "description": "Default false: the application does not need the Kubernetes API, so do not mount the SA bearer token (NSA/CISA hardening, CIS Benchmark 5.1.6). This does NOT break Workload Identity: IRSA / GCP WI / Azure WI use projected OIDC tokens injected by the cloud admission webhook, independent of this setting."
         },
         "annotations": {
           "type": "object",
@@ -187,7 +187,7 @@
         "ingress": {
           "type": "object",
           "title": "Ingress",
-          "description": "NGINX Ingress exposing the application. The ingressClassName is hard-coded to 'nginx' (ingress.yaml), so 'disable when another controller handles traffic' is the only option — the class is not configurable. The host defaults to statuslist.<global.domain> when set, otherwise localhost. TLS hosts default to *.<global.domain> when global.domain is set, or to the rendered ingress host when secretName is set explicitly.",
+          "description": "NGINX Ingress exposing the application. The ingressClassName is hard-coded to 'nginx' (ingress.yaml), so 'disable when another controller handles traffic' is the only option; the class is not configurable. The host defaults to statuslist.<global.domain> when set, otherwise localhost. TLS hosts default to *.<global.domain> when global.domain is set, or to the rendered ingress host when secretName is set explicitly.",
           "properties": {
             "enabled": { "type": "boolean", "title": "Render the Ingress" },
             "path": { "type": "string", "title": "Ingress path", "minLength": 1 },
@@ -229,7 +229,7 @@
         "env": {
           "type": "object",
           "title": "Application environment variables",
-          "description": "RUNTIME environment for the status-list-server container. APP_DATABASE__PORT is derived from the active backend by default (postgres.service.port or mysql.service.port, see the status-list-server-chart.dbPort helper); set it explicitly only to override the backend default. Do not set APP_DATABASE__URL or APP_DATABASE__PASSWORD here — the chart rejects them (see statuslist.secretMounts and statuslist.fallbackSecret for credential delivery). DNS/Workload Identity settings for ACME DNS-01 are documented in the values.yaml env block and docs/dns-providers.md.",
+          "description": "RUNTIME environment for the status-list-server container. APP_DATABASE__PORT is derived from the active backend by default (postgres.service.port or mysql.service.port, see the status-list-server-chart.dbPort helper); set it explicitly only to override the backend default. Do not set APP_DATABASE__URL or APP_DATABASE__PASSWORD here: the chart rejects them (see statuslist.secretMounts and statuslist.fallbackSecret for credential delivery). DNS/Workload Identity settings for ACME DNS-01 are documented in the values.yaml env block and docs/dns-providers.md.",
           "additionalProperties": { "type": "string" }
         },
         "aws": {
@@ -256,7 +256,7 @@
             "region": {
               "type": "string",
               "title": "AWS region",
-              "description": "Plain (non-secret) AWS region for the application. APP_AWS__REGION is rendered ONLY when secretStore.provider == 'aws' AND an effective region is set (this value, else the legacy secretStore.aws.region fallback — see the status-list-server-chart.appRegion helper). Setting this alone without provider=aws renders nothing; leave both empty and provider=aws for pure-IRSA / Workload Identity installs so the SDK discovers the region from instance metadata."
+              "description": "Plain (non-secret) AWS region for the application. APP_AWS__REGION is rendered ONLY when secretStore.provider == 'aws' AND an effective region is set (this value, else the legacy secretStore.aws.region fallback; see the status-list-server-chart.appRegion helper). Setting this alone without provider=aws renders nothing; leave both empty and provider=aws for pure-IRSA / Workload Identity installs so the SDK discovers the region from instance metadata."
             }
           }
         },
@@ -357,7 +357,7 @@
         "networkPolicy": {
           "type": "object",
           "title": "NetworkPolicy",
-          "description": "Opt-in NetworkPolicy (default OFF). When enabled and ingress is empty, a port-only rule allows ANY source in the cluster — you MUST restrict ingress to your ingress controller. Egress always allows 443/53 out to 0.0.0.0/0 (no destination restriction, so outbound exfiltration is not blocked), and scopes PostgreSQL / OTel egress to their labelled pods. statuslist.networkPolicy.egressInternal entries are appended to the PostgreSQL DB-port rule, so they inherit that rule's port — add a matching port when pointing at a different service. This policy does NOT fully isolate the pod on its own.",
+          "description": "Opt-in NetworkPolicy (default OFF). When enabled and ingress is empty, a port-only rule allows ANY source in the cluster; you MUST restrict ingress to your ingress controller. Egress always allows 443/53 out to 0.0.0.0/0 (no destination restriction, so outbound exfiltration is not blocked), and scopes PostgreSQL / OTel egress to their labelled pods. statuslist.networkPolicy.egressInternal entries are appended to the PostgreSQL DB-port rule, so they inherit that rule's port; add a matching port when pointing at a different service. This policy does NOT fully isolate the pod on its own.",
           "properties": {
             "enabled": { "type": "boolean", "title": "Render the NetworkPolicy" },
             "ingress": { "type": "array", "title": "Ingress from selectors" },
@@ -506,7 +506,7 @@
             "region": {
               "type": "string",
               "title": "AWS region",
-              "description": "Region for the ESO AWS SecretStore. Setting it here is the legacy fallback: when statuslist.aws.region is empty AND secretStore.provider == 'aws', this value is injected as APP_AWS__REGION (see the status-list-server-chart.appRegion helper). It is NOT 'opt-in / not injected' — set it only if you want the pod's region pinned. Leave both regions empty and provider='aws' with a wildcard/IRSA role to let the SDK discover the region from instance metadata. The ESO AWS SecretStore itself still needs a concrete region and falls back to eu-central-1 at the CR level when both values are empty, so a cluster in another region without an explicit region gets a real SecretSyncedError — treat eu-central-1 as an effective default, not a formality."
+              "description": "Region for the ESO AWS SecretStore. Setting it here is the legacy fallback: when statuslist.aws.region is empty AND secretStore.provider == 'aws', this value is injected as APP_AWS__REGION (see the status-list-server-chart.appRegion helper). It is NOT 'opt-in / not injected'; set it only if you want the pod's region pinned. Leave both regions empty and provider='aws' with a wildcard/IRSA role to let the SDK discover the region from instance metadata. The ESO AWS SecretStore itself still needs a concrete region and falls back to eu-central-1 at the CR level when both values are empty, so a cluster in another region without an explicit region gets a real SecretSyncedError; treat eu-central-1 as an effective default, not a formality."
             }
           }
         },
@@ -607,7 +607,7 @@
             "existingSecret": {
               "type": "string",
               "title": "Existing secret name",
-              "description": "Must reference the same secret the application reads (statuslist-secret, see the status-list-server-chart.appSecretName helper). Fixed to statuslist-secret in both modes: fallback mode renders that exact name, and ESO mode rejects any externalSecret.spec.target.name other than it at render time — there is nothing to keep in sync."
+              "description": "Must reference the same secret the application reads (statuslist-secret, see the status-list-server-chart.appSecretName helper). Fixed to statuslist-secret in both modes: fallback mode renders that exact name, and ESO mode rejects any externalSecret.spec.target.name other than it at render time; there is nothing to keep in sync."
             },
             "secretKeys": { "type": "object", "title": "Secret key names" }
           }
@@ -713,7 +713,7 @@
     "slo": {
       "type": "object",
       "title": "SLO thresholds",
-      "description": "SLO target thresholds consumed by the prometheusrule template (prometheusrule.yaml) to build SLI recording rules and SLO burn-rate / error-budget alerting rules. Values are accepted as either JSON numbers or numeric strings — helm's --set passes floats as strings, so a number-only type would reject --set slo.errorRateTarget=0.004 (use --set-json or a values file for full parity; --set works for these). The values.yaml slo.* defaults are asserted against deploy/observability/slo/thresholds.json and the standalone deploy/observability/prometheus/rules/*.rules.yml by lint-thresholds.mjs; the summary strings inside prometheusrule.yaml are NOT covered by that lint and are hard-coded.",
+      "description": "SLO target thresholds consumed by the prometheusrule template (prometheusrule.yaml) to build SLI recording rules and SLO burn-rate / error-budget alerting rules. Values are accepted as either JSON numbers or numeric strings; helm's --set passes floats as strings, so a number-only type would reject --set slo.errorRateTarget=0.004 (use --set-json or a values file for full parity; --set works for these). The values.yaml slo.* defaults are asserted against deploy/observability/slo/thresholds.json and the standalone deploy/observability/prometheus/rules/*.rules.yml by lint-thresholds.mjs; the summary strings inside prometheusrule.yaml are NOT covered by that lint and are hard-coded.",
       "properties": {
         "errorRateTarget": { "type": ["number", "string"], "pattern": "^[0-9]*\\.?[0-9]+$", "title": "Error-rate SLO target", "description": "Acceptable ratio of 5xx to all requests over the SLO window (0.005 = 0.5%). Multiplicand of the burn-rate thresholds (threshold = errorRateTarget x multiplier) and denominator of the error-budget success ratio. Note: also drives the token-generation burn-rate and budget alerts." },
         "fastBurnMultiplier": { "type": ["number", "string"], "pattern": "^[0-9]*\\.?[0-9]+$", "title": "Fast-burn multiplier", "description": "Fast-burn alert threshold = errorRateTarget x this (14.4x), evaluated on the 1h and 5m windows for 5m. Pages." },
@@ -721,7 +721,7 @@
         "requestLatencyP95": { "type": ["number", "string"], "pattern": "^[0-9]*\\.?[0-9]+$", "title": "Request latency P95 target (s)", "description": "P95 request latency target in seconds (0.3 = 300ms). Exceeding on the fast or slow burn windows fires an alert." },
         "dbLatencyP95": { "type": ["number", "string"], "pattern": "^[0-9]*\\.?[0-9]+$", "title": "DB latency P95 target (s)", "description": "P95 database query latency target in seconds (0.05 = 50ms). Same fast/slow burn semantics." },
         "cacheHitRatioMin": { "type": ["number", "string"], "pattern": "^[0-9]*\\.?[0-9]+$", "title": "Minimum cache hit ratio", "description": "Minimum acceptable status-list cache hit ratio (0.85 = 85%); below this for 15m fires a warn." },
-        "certRenewalFailureMax": { "type": ["number", "string"], "pattern": "^[0-9]*\\.?[0-9]+$", "title": "Max certificate-renewal failure ratio", "description": "Accepted for parity with the standalone rules and thresholds.json, but NOT consumed by prometheusrule.yaml — this chart's cert alert is expiry-driven (certExpiryWarnSeconds / certExpiryCriticalSeconds); tuning this value has no effect here." },
+        "certRenewalFailureMax": { "type": ["number", "string"], "pattern": "^[0-9]*\\.?[0-9]+$", "title": "Max certificate-renewal failure ratio", "description": "Accepted for parity with the standalone rules and thresholds.json, but NOT consumed by prometheusrule.yaml; this chart's cert alert is expiry-driven (certExpiryWarnSeconds / certExpiryCriticalSeconds); tuning this value has no effect here." },
         "errorBudgetCriticalThreshold": { "type": ["number", "string"], "pattern": "^[0-9]*\\.?[0-9]+$", "title": "Error-budget critical threshold", "description": "Remaining-error-budget gate for the ErrorBudget*Critical page alerts; below this fraction of the 30d budget remaining pages." },
         "certExpiryWarnSeconds": { "type": ["number", "string"], "pattern": "^[0-9]*\\.?[0-9]+$", "title": "Certificate expiry warn seconds", "description": "Seconds remaining that trigger a warn (1209600 = 14d). Cert renewal is a discrete low-frequency event, so alerts watch the continuous cert_time_to_expiry_seconds gauge." },
         "certExpiryCriticalSeconds": { "type": ["number", "string"], "pattern": "^[0-9]*\\.?[0-9]+$", "title": "Certificate expiry critical seconds", "description": "Seconds remaining that trigger a page (604800 = 7d)." }
@@ -730,7 +730,7 @@
     "alerting": {
       "type": "object",
       "title": "AlertmanagerConfig alerting",
-      "description": "AlertmanagerConfig (monitoring.coreos.com/v1beta1) routing SLO alerts to a notification channel — the Kubernetes equivalent of the Docker Compose ALERTMANAGER_PLATFORM + generate-alertmanager-config.sh setup. Supported platforms: discord, slack, teams, mattermost, webhook (via alerting.webhookUrl) and email (via alerting.email.*). Route tree: severity=none -> deadmansswitch, severity=page -> human (repeat 4h), severity=warn -> human (repeat 24h), everything else -> noop.",
+      "description": "AlertmanagerConfig (monitoring.coreos.com/v1beta1) routing SLO alerts to a notification channel: the Kubernetes equivalent of the Docker Compose ALERTMANAGER_PLATFORM + generate-alertmanager-config.sh setup. Supported platforms: discord, slack, teams, mattermost, webhook (via alerting.webhookUrl) and email (via alerting.email.*). Route tree: severity=none -> deadmansswitch, severity=page -> human (repeat 4h), severity=warn -> human (repeat 24h), everything else -> noop.",
       "properties": {
         "enabled": { "type": "boolean", "title": "Enable alert routing" },
         "platform": {
@@ -754,7 +754,7 @@
           "title": "Pre-existing credentials secret",
           "description": "Name of a pre-existing Secret containing credentials. When set the chart does NOT render its own Secret (recommended for production); the Secret must already exist and contain the platform keys (webhook-url, optional dms-webhook-url / smtp-password)."
         },
-        "webhookUrl": { "type": "string", "title": "Webhook URL", "description": "Inline webhook URL for discord/slack/teams/mattermost/webhook. Never commit real tokens — use existingSecret + ESO/Vault in production." },
+        "webhookUrl": { "type": "string", "title": "Webhook URL", "description": "Inline webhook URL for discord/slack/teams/mattermost/webhook. Never commit real tokens: use existingSecret + ESO/Vault in production." },
         "dmsWebhookUrl": { "type": "string", "title": "Dead-man's-switch URL", "description": "The always-firing Watchdog pings this so a collapsed pipeline is detected by its ABSENCE. Empty absorbs the Watchdog." },
         "dmsEnabled": { "type": "boolean", "title": "Enable Dead Man's Switch", "description": "Enable DMS when using existingSecret (reads key dms-webhook-url). When dmsWebhookUrl is set, DMS is enabled implicitly." },
         "webhookTimeout": { "type": "string", "title": "Webhook timeout", "description": "Per-request timeout for webhook/Teams/Mattermost/DMS receivers as a Go duration string (e.g. '10s')." },

@@ -15,7 +15,7 @@ nameOverride: ""
 # "fullname" helper; empty derives <release>-<name>.
 fullnameOverride: ""
 
-# Extra annotations merged onto the Pod template metadata (deployment.yaml line 44:
+# Extra annotations merged onto the Pod template metadata (deployment.yaml,
 # .Values.podAnnotations), on top of the hard-coded prometheus.io/scrape annotations.
 # Examples: sidecar injection (e.g. istio.io/sidecar: inject), monitoring hints.
 # These are read from the TOP LEVEL (not statuslist), matching the template.
@@ -41,7 +41,7 @@ statuslist:
   # requests/limits regardless of the values provided here, so operators only supply the
   # wait command and image. CAUTION: the chart merges the container spec with these
   # hardened defaults using mustMergeOverwrite, which silently REPLACES any
-  # user-supplied volumeMounts and resources on an init container — a mount you add here
+  # user-supplied volumeMounts and resources on an init container: a mount you add here
   # is dropped without warning, so do not add volumeMounts to init containers.
   initContainers:
     - name: wait-for-db
@@ -94,7 +94,7 @@ statuslist:
     # "sha256:...". Takes precedence over tag and pins the exact digest CI scanned.
     # Each variant has its own digest. Use the digest from the variant you select.
     digest: ""
-    # Image resolution rules (single authoritative reference — order of precedence):
+    # Image resolution rules (single authoritative reference; order of precedence):
     #   1. digest, if set to "sha256:<64 hex chars>" -> image is repository@digest and
     #      pullPolicy defaults to IfNotPresent (content-addressed, immutable).
     #      An invalid digest does NOT fall through to tag/derived: it fails the render.
@@ -111,7 +111,7 @@ statuslist:
     # Render the Kubernetes Service exposing the application.
     enabled: true
     # Service type: ClusterIP (default) | NodePort | LoadBalancer.
-    # ExternalName is rejected at render time.
+    # ExternalName is not accepted (rejected by values.schema.json).
     type: ClusterIP
     # Annotations on the Service, e.g. AWS NLB annotations (see values-aws-nlb.yaml).
     annotations: {}
@@ -141,7 +141,7 @@ statuslist:
     # Defaults to statuslist.<global.domain> when global.domain is set, otherwise localhost.
     # Emitted as an external-dns hostname annotation AND sets the application's own public
     # domain (APP_SERVER__DOMAIN, via deployment.yaml) when it is non-empty and
-    # APP_SERVER__DOMAIN is not set explicitly — changing what reads like a DNS annotation
+    # APP_SERVER__DOMAIN is not set explicitly: changing what reads like a DNS annotation
     # also changes application config. Set to override the default host.
     externalDnsHostname: ""
   env:
@@ -162,7 +162,7 @@ statuslist:
     # (pebble also exists but is a development-only fake, not for deployments)
     # See docs/dns-providers.md for the settings each provider needs.
     #
-    # Workload Identity DNS setup per cloud — combine the provider env vars below with the
+    # Workload Identity DNS setup per cloud: combine the provider env vars below with the
     # matching serviceAccount.annotations and podLabels documented under serviceAccount,
     # plus the cloud SecretStore under secretStore:
     #   AWS EKS (IRSA) : APP_SERVER__CERT__DNS__PROVIDER=route53, and the EKS IRSA role
@@ -186,7 +186,7 @@ statuslist:
     # annotations above assume a cloud identity already trusts this workload, keyed on the
     # ServiceAccount name this chart creates: it defaults to the chart fullname
     # (<release>-status-list-server unless release already contains "status-list-server",
-    # or fullnameOverride if set — see _helpers.tpl). The federated subject is therefore:
+    # or fullnameOverride if set; see _helpers.tpl). The federated subject is therefore:
     #     system:serviceaccount:<release-namespace>:<that-serviceaccount-name>
     # Create the matching trust on the cloud side:
     #   EKS (IRSA) : IAM role trust policy -> "system:serviceaccount:<ns>:<sa>"; attach the
@@ -242,7 +242,7 @@ statuslist:
     # Disabled by default so the base chart stays provider-neutral.
     mountCredentials: false
     # When mountCredentials=true and externalSecret.enabled, the chart also
-    # renders a second ExternalSecret that provisions "aws-credentials-secret" — the exact Secret
+    # renders a second ExternalSecret that provisions "aws-credentials-secret": the exact Secret
     # the Deployment's credential volume references (see deployment.yaml). Without it the Pod could
     # never mount that volume and would stay unready. The remote source holds the AWS shared
     # "credentials" and "config" file contents.
@@ -258,7 +258,7 @@ statuslist:
       targetTemplate: {}
     # Plain (non-secret) AWS region. APP_AWS__REGION is rendered only when
     # secretStore.provider == "aws" AND an effective region is set (this value, else the
-    # legacy secretStore.aws.region fallback — see the status-list-server-chart.appRegion
+    # legacy secretStore.aws.region fallback (see the status-list-server-chart.appRegion
     # helper). Setting this alone without provider=aws renders nothing. Leave both empty
     # with provider=aws for pure-IRSA / Workload Identity so the SDK discovers the region
     # from instance metadata.
@@ -389,12 +389,12 @@ statuslist:
     ingress: []
     # Additional internal egress destinations beyond the built-in PostgreSQL / OTel pod
     # selectors. CAUTION: each egressInternal entry is appended to the single DB-port
-    # egress rule, so it INHERITS that rule's port (the APP_DATABASE__PORT value) — a
+    # egress rule, so it INHERITS that rule's port (the APP_DATABASE__PORT value); a
     # selector for, say, a cache on 6379 needs its own port entry here and will otherwise
     # get silence. The PostgreSQL rule matches pods labelled app.kubernetes.io/name:
     # postgres in this namespace, so an external database is NOT reachable; the OTel rule
     # only exists when the collector is enabled.
-    # External ports (443, 53) are always allowed WITHOUT destination restriction — open to
+    # External ports (443, 53) are always allowed WITHOUT destination restriction: open to
     # 0.0.0.0/0, so this policy does not block outbound exfiltration.
     egressInternal: []
     # Explicit database egress destinations. Optional for bundled PostgreSQL, where
@@ -421,7 +421,7 @@ serviceAccount:
   name: "" # default: fullname (via _helpers.tpl)
   # Default false: the application does not need to call the Kubernetes API, so do not
   # mount the SA bearer token (NSA/CISA Kubernetes hardening, CIS Benchmark 5.1.6).
-  # This does NOT break Workload Identity — IRSA / GCP WI / Azure WI use projected OIDC
+  # This does NOT break Workload Identity: IRSA / GCP WI / Azure WI use projected OIDC
   # tokens injected by the cloud admission webhook, independent of this setting.
   automountServiceAccountToken: false
   annotations: {}
@@ -448,7 +448,8 @@ autoscaling:
   #       target:
   #         type: Utilization
   #         averageUtilization: 70
-  # Empty uses the Operator/chart default metric.
+  # Empty omits spec.metrics; the Kubernetes API then defaults the HPA to 80%
+  # average CPU utilization (requires metrics-server).
   metrics: []
   # behavior: fine-grained scale-up/down policies (autoscaling/v2
   # HorizontalPodAutoscalerBehavior), e.g.:
@@ -509,14 +510,14 @@ prometheusRule:
 # AlertmanagerConfig for kube-prometheus-stack / Prometheus Operator alert routing.
 # When enabled, renders an AlertmanagerConfig CRD that routes SLO alerts to the
 # configured notification channel. This is the Kubernetes equivalent of the Docker
-# Compose ALERTMANAGER_PLATFORM + generate-alertmanager-config.sh setup — the same
+# Compose ALERTMANAGER_PLATFORM + generate-alertmanager-config.sh setup: the same
 # six platforms are supported and no webhook URL is committed to source control.
 #
 # Supported platforms (alerting.platform):
 #   discord     -> alerting.webhookUrl  (Discord channel webhook URL)
 #   slack       -> alerting.webhookUrl  (Slack incoming-webhook URL)
 #   teams       -> alerting.webhookUrl  (MS Teams classic inbound webhook; posts Alertmanager's
-#                 generic JSON, not an Adaptive Card — see deploy/observability/runbooks/webhook-notifications.md
+#                 generic JSON, not an Adaptive Card (see deploy/observability/runbooks/webhook-notifications.md)
 #                 for the rendering limitation and bridge options)
 #   mattermost  -> alerting.webhookUrl  (Mattermost incoming webhook)
 #   webhook     -> alerting.webhookUrl  (generic endpoint accepting Alertmanager JSON)
@@ -525,7 +526,7 @@ prometheusRule:
 # Credential model:
 #   By default (existingSecret: "") the chart renders its own Secret from the inline
 #   values (webhookUrl). For production, set existingSecret to the name of
-#   a pre-existing Secret (e.g. managed by ESO or Vault) — the chart then reads from
+#   a pre-existing Secret (e.g. managed by ESO or Vault): the chart then reads from
 #   that Secret and does NOT render its own. The pre-existing Secret must contain the
 #   following keys depending on the platform:
 #     webhook-based platforms: "webhook-url"
@@ -536,7 +537,7 @@ prometheusRule:
 #   NOT read from the Secret.
 #
 # Route tree (mirrors generate-alertmanager-config.sh):
-#   severity=none  -> deadmansswitch receiver (Watchdog — pages on ABSENCE, not firing)
+#   severity=none  -> deadmansswitch receiver (Watchdog pages on ABSENCE, not firing)
 #   severity=page  -> human receiver, repeat every 4h
 #   severity=warn  -> human receiver, repeat every 24h
 #   everything else -> noop sink (never spams a human channel)
@@ -546,7 +547,7 @@ prometheusRule:
 #     release: kube-prometheus-stack
 alerting:
   enabled: false
-  # Platform selector — must match one of the supported values above.
+  # Platform selector: must match one of the supported values above.
   platform: discord
   # Grafana dashboard URL injected into alert annotations (e.g. http://grafana.example.com/d/status-list-slo).
   dashboardUrl: "http://localhost:3000/d/status-list-slo"
@@ -568,7 +569,7 @@ alerting:
   # deploying the chart to avoid a failing AlertmanagerConfig / pending pod.
   existingSecret: ""
   # Inline webhook URL (used for discord, slack, teams, mattermost, webhook platforms).
-  # Never commit real tokens — use existingSecret + ESO/Vault in production.
+  # Never commit real tokens: use existingSecret + ESO/Vault in production.
   webhookUrl: ""
   # Optional dead-man's-switch URL. The always-firing Watchdog (severity=none) pings this
   # URL so a collapsed Prometheus/Alertmanager pipeline is detected by its ABSENCE. When
@@ -588,7 +589,7 @@ alerting:
   webhookTimeout: ""
   # Email settings (required only when platform=email).
   # NOTE: The AlertmanagerConfig EmailConfig CRD defines `to`, `smarthost`, and `from` as plain
-  # strings (not Secret selectors), so these are rendered directly from values — they are NOT read
+  # strings (not Secret selectors), so these are rendered directly from values; they are NOT read
   # from the Secret. Only the SMTP password (when set) is read from the Secret via `smtp-password`.
   email:
     to: ""
@@ -622,7 +623,7 @@ slo:
   # Acceptable ratio of 5xx responses to all requests over the SLO window (0.5% here).
   # Multiplicand of the burn-rate thresholds (threshold = errorRateTarget x multiplier)
   # and denominator of the error-budget success ratio. Also drives the token-generation
-  # burn-rate and budget alerts — loosening the HTTP SLO loosens token-gen paging too.
+  # burn-rate and budget alerts: loosening the HTTP SLO loosens token-gen paging too.
   errorRateTarget: 0.005
   # Fast-burn alert triggers when the observed error rate exceeds errorRateTarget *
   # fastBurnMultiplier (14.4x) on both the 1h and 5m windows for 5m. Pages.
@@ -638,7 +639,7 @@ slo:
   # Minimum acceptable status-list cache hit ratio (85%). Below this for 15m fires a warn.
   cacheHitRatioMin: 0.85
   # Maximum acceptable certificate-renewal failure ratio (1%). NO-OP in this chart: it is
-  # retained only for parity with thresholds.json and the standalone rules — prometheusrule.yaml
+  # retained only for parity with thresholds.json and the standalone rules; prometheusrule.yaml
   # does not reference it, so tuning it here has no effect (cert alerts are expiry-driven below).
   certRenewalFailureMax: 0.01
   # Remaining-error-budget gate for the ErrorBudget*Critical page alerts (below 10% of
@@ -679,7 +680,7 @@ postgres:
     # Must reference the same secret the application reads (see _helpers.tpl
     # "status-list-server-chart.appSecretName"). Fixed to statuslist-secret in BOTH modes:
     # fallback renders that exact name, and ESO mode rejects any externalSecret target name
-    # other than it at render time — there is nothing to keep in sync.
+    # other than it at render time; there is nothing to keep in sync.
     existingSecret: statuslist-secret
     secretKeys:
       passwordKey: postgres-password
@@ -712,7 +713,7 @@ mysql:
 # manager referenced by secretStore. This is the recommended production delivery path.
 # With a namespace-scoped SecretStore, externalSecret.enabled requires secretStore.enabled
 # or the render fails (only a pre-existing ClusterSecretStore is exempt). Cloud credentials
-# resolve via Workload Identity / IRSA / ManagedIdentity where the provider supports it —
+# resolve via Workload Identity / IRSA / ManagedIdentity where the provider supports it:
 # Vault token auth and Azure ServicePrincipal + authSecretRef use static secrets instead of
 # files. The ExternalSecret, the Deployment, and PostgreSQL (postgres.auth.existingSecret)
 # all consume the same single secret name, which is intentionally not configurable.

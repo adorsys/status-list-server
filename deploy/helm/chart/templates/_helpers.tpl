@@ -56,7 +56,7 @@ Create the name of the service account to use.
 When serviceAccount.create=true the name is the chart fullname (via the fullname helper)
 unless serviceAccount.name is set explicitly, and deployment.yaml injects
 serviceAccountName so the pod uses this SA. When serviceAccount.create=false AND
-serviceAccount.name is empty, this returns "default" — but deployment.yaml does NOT
+serviceAccount.name is empty, this returns "default", but deployment.yaml does NOT
 inject serviceAccountName at all in that case (see the serviceAccountName `if` guard),
 so the pod actually runs as the namespace default ServiceAccount. Set serviceAccount.name
 explicitly when disabling chart SA creation to control which SA the pod uses. This is the

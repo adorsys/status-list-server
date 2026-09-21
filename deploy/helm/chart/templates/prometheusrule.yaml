@@ -2,7 +2,7 @@
 PrometheusRule shipping SLI recording rules and SLO burn-rate / error-budget alerts.
 Thresholds are injected from .Values.slo. Only the values.yaml slo.* defaults are checked
 against deploy/observability/slo/thresholds.json and the standalone rules under
-deploy/observability/prometheus/rules/*.rules.yml by lint-thresholds.mjs — that lint does
+deploy/observability/prometheus/rules/*.rules.yml by lint-thresholds.mjs; that lint does
 NOT read this template, so the hard-coded alert summary strings ("300ms", "14.4x over
 0.5%", "85%", "10%", "14 days") and the %.3f burn-threshold rounding here are not covered.
 */}}
