@@ -133,9 +133,6 @@ mod tests {
             serde_json::to_string(&Status::ApplicationSpecific(256)).unwrap(),
             "256"
         );
-        assert!(serde_json::from_str::<Status>("3").is_err());
-        assert!(serde_json::from_str::<Status>("100").is_err());
-        assert!(serde_json::from_str::<Status>("255").is_err());
     }
 
     #[test]
@@ -204,6 +201,7 @@ mod tests {
 
     #[test]
     fn status_deser_rejects_reserved_integers() {
+        assert!(serde_json::from_str::<Status>("-1").is_err());
         assert!(serde_json::from_str::<Status>("3").is_err());
         assert!(serde_json::from_str::<Status>("100").is_err());
         assert!(serde_json::from_str::<Status>("255").is_err());
@@ -234,6 +232,10 @@ mod tests {
             serde_json::from_str(r#"{"index": 5, "status": "suspended"}"#).unwrap();
         assert_eq!(entry.index, 5);
         assert_eq!(entry.status, Status::SUSPENDED);
+
+        let entry: StatusEntry = serde_json::from_str(r#"{"index": 10, "status": "512"}"#).unwrap();
+        assert_eq!(entry.index, 10);
+        assert_eq!(entry.status, Status::ApplicationSpecific(512));
     }
 
     #[test]
@@ -245,5 +247,9 @@ mod tests {
         let entry: StatusEntry = serde_json::from_str(r#"{"index": 1, "status": 2}"#).unwrap();
         assert_eq!(entry.index, 1);
         assert_eq!(entry.status, Status::SUSPENDED);
+
+        let entry: StatusEntry = serde_json::from_str(r#"{"index": 2, "status": 256}"#).unwrap();
+        assert_eq!(entry.index, 2);
+        assert_eq!(entry.status, Status::ApplicationSpecific(256));
     }
 }
