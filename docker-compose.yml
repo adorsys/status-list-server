@@ -97,8 +97,7 @@ services:
       context: .
       dockerfile: Dockerfile
       args:
-        FEATURES: ${FEATURES:-postgres,aws}
-        CACHE_BACKEND: ${CACHE_BACKEND:-memory}
+        FEATURES: ${FEATURES:-postgres,aws,cache-redis}
     container_name: status-list-server
     env_file:
       - path: .env.template
@@ -114,7 +113,9 @@ services:
       APP_TELEMETRY__OTLP_ENDPOINT: "http://otel-collector:4317"
       APP_TELEMETRY__ENABLED: ${APP_TELEMETRY__ENABLED:-true}
       APP_TELEMETRY__SAMPLER_RATIO: ${APP_TELEMETRY__SAMPLER_RATIO:-1.0}
-      APP_CACHE__REDIS_KEY_PREFIX: ${APP_CACHE__REDIS_KEY_PREFIX:-status-list-server:status-list:}
+      APP_CACHE__BACKEND: ${APP_CACHE__BACKEND:-memory}
+      APP_CACHE__HOST: ${APP_CACHE__HOST:-redis}
+      APP_CACHE__PORT: ${APP_CACHE__PORT:-6379}
     ports:
       - 8000:8000
     depends_on:

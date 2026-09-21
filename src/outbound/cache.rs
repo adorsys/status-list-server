@@ -2,8 +2,6 @@
 use async_trait::async_trait;
 use moka::future::Cache as MokaCache;
 use opentelemetry::{KeyValue, metrics::Counter};
-#[cfg(feature = "cache-redis")]
-use std::sync::LazyLock;
 use std::{sync::Arc, time::Duration};
 
 use crate::domain::{
@@ -17,82 +15,12 @@ const MISS_METRIC: &str = "status_list_cache_misses";
 const ERROR_METRIC: &str = "status_list_cache_errors";
 #[cfg(feature = "cache-redis")]
 const CACHE_SCHEMA_VERSION: &str = "v1";
-
 #[cfg(feature = "cache-redis")]
-static REDIS_GET_SCRIPT: LazyLock<redis::Script> = LazyLock::new(|| {
-    redis::Script::new(
-        r#"
-        local value = redis.call('GET', KEYS[1])
-        if value then
-            local now = redis.call('TIME')
-            local score = tonumber(now[1]) * 1000000 + tonumber(now[2])
-            redis.call('ZADD', KEYS[2], score, ARGV[1])
-        end
-        return value
-        "#,
-    )
-});
-
+const REDIS_KEY_PREFIX: &str = "status-list-server:status-list:";
 #[cfg(feature = "cache-redis")]
-static REDIS_DELETE_CORRUPT_SCRIPT: LazyLock<redis::Script> = LazyLock::new(|| {
-    redis::Script::new(
-        r#"
-        redis.call('DEL', KEYS[1])
-        redis.call('ZREM', KEYS[2], ARGV[1])
-        return 1
-        "#,
-    )
-});
-
+const REDIS_RESPONSE_TIMEOUT: Duration = Duration::from_millis(250);
 #[cfg(feature = "cache-redis")]
-static REDIS_INVALIDATE_SCRIPT: LazyLock<redis::Script> = LazyLock::new(|| {
-    redis::Script::new(
-        r#"
-        redis.call('DEL', KEYS[1])
-        redis.call('ZREM', KEYS[2], ARGV[1])
-        if ARGV[2] ~= '' then
-            redis.call('SET', KEYS[3], ARGV[2], 'EX', tonumber(ARGV[3]))
-        end
-        return 1
-        "#,
-    )
-});
-
-#[cfg(feature = "cache-redis")]
-static REDIS_PUT_SCRIPT: LazyLock<redis::Script> = LazyLock::new(|| {
-    redis::Script::new(
-        r#"
-        local ttl = tonumber(ARGV[2])
-        local max_capacity = tonumber(ARGV[3])
-        local updated_at = tonumber(ARGV[5])
-        if ttl <= 0 or max_capacity <= 0 then
-            return 0
-        end
-
-        local marker = redis.call('GET', KEYS[3])
-        if marker and updated_at < tonumber(marker) then
-            return 0
-        end
-
-        redis.call('SET', KEYS[1], ARGV[6], 'EX', ttl)
-        redis.call('SET', KEYS[3], ARGV[5], 'EX', ttl)
-
-        local now = redis.call('TIME')
-        local score = tonumber(now[1]) * 1000000 + tonumber(now[2])
-        redis.call('ZADD', KEYS[2], score, ARGV[4])
-
-        local overflow = redis.call('ZCARD', KEYS[2]) - max_capacity
-        if overflow > 0 then
-            local victims = redis.call('ZRANGE', KEYS[2], 0, overflow - 1)
-            for _, victim in ipairs(victims) do
-                redis.call('DEL', ARGV[1] .. victim)
-                redis.call('ZREM', KEYS[2], victim)
-            end
-        end
-        return 1
-        "#,
-    )
-});
+const REDIS_CONNECTION_TIMEOUT: Duration = Duration::from_millis(250);
 
 /// Cache-hit/miss SLI counters.
 ///
@@ -238,92 +166,30 @@ impl StatusListCache for MokaStatusListCache {
 pub struct RedisStatusListCache {
     connection: redis::aio::ConnectionManager,
     ttl_secs: u64,
-    max_capacity: u64,
-    lru_key: String,
     record_prefix: String,
-    marker_prefix: String,
 }
 
 #[cfg(feature = "cache-redis")]
 impl RedisStatusListCache {
-    pub async fn new(
-        redis_url: &str,
-        ttl_secs: u64,
-        max_capacity: u64,
-        key_prefix: impl Into<String>,
-        response_timeout: Duration,
-        connection_timeout: Duration,
-    ) -> Result<Self, StatusListError> {
+    pub async fn new(redis_url: &str, ttl_secs: u64) -> Result<Self, StatusListError> {
         let client = redis::Client::open(redis_url)
             .map_err(|error| redis_operation_error("connect", error))?;
         let manager_config = redis::aio::ConnectionManagerConfig::new()
-            .set_response_timeout(response_timeout)
-            .set_connection_timeout(connection_timeout);
+            .set_response_timeout(REDIS_RESPONSE_TIMEOUT)
+            .set_connection_timeout(REDIS_CONNECTION_TIMEOUT);
         let connection = redis::aio::ConnectionManager::new_with_config(client, manager_config)
             .await
             .map_err(|error| redis_operation_error("connect", error))?;
-        let key_prefix = key_prefix.into();
-        let record_prefix = format!("{key_prefix}rec:{CACHE_SCHEMA_VERSION}:");
-        let marker_prefix = format!("{key_prefix}meta:{CACHE_SCHEMA_VERSION}:updated:");
-        let lru_key = format!("{key_prefix}meta:{CACHE_SCHEMA_VERSION}:lru");
+        let record_prefix = format!("{REDIS_KEY_PREFIX}rec:{CACHE_SCHEMA_VERSION}:");
         Ok(Self {
             connection,
             ttl_secs,
-            max_capacity,
-            lru_key,
             record_prefix,
-            marker_prefix,
         })
     }
 
     fn key(&self, list_id: &str) -> String {
         format!("{}{}", self.record_prefix, list_id)
-    }
-
-    fn marker_key(&self, list_id: &str) -> String {
-        format!("{}{}", self.marker_prefix, list_id)
-    }
-
-    async fn delete_corrupt_entry(
-        &self,
-        connection: &mut redis::aio::ConnectionManager,
-        list_id: &str,
-    ) -> Result<(), StatusListError> {
-        let _: i32 = REDIS_DELETE_CORRUPT_SCRIPT
-            .key(self.key(list_id))
-            .key(&self.lru_key)
-            .arg(list_id)
-            .invoke_async(connection)
-            .await
-            .map_err(|error| redis_operation_error("delete_corrupt", error))?;
-        Ok(())
-    }
-
-    async fn invalidate_with_marker(
-        &self,
-        list_id: &str,
-        updated_at: Option<i64>,
-    ) -> Result<(), StatusListError> {
-        if self.ttl_secs == 0 || self.max_capacity == 0 {
-            return Ok(());
-        }
-
-        let mut connection = self.connection.clone();
-        let _: i32 = REDIS_INVALIDATE_SCRIPT
-            .key(self.key(list_id))
-            .key(&self.lru_key)
-            .key(self.marker_key(list_id))
-            .arg(list_id)
-            .arg(
-                updated_at
-                    .map(|value| value.to_string())
-                    .unwrap_or_default(),
-            )
-            .arg(self.ttl_secs)
-            .invoke_async(&mut connection)
-            .await
-            .map_err(|error| redis_operation_error("invalidate", error))?;
-        Ok(())
     }
 }
 
@@ -331,18 +197,17 @@ impl RedisStatusListCache {
 #[async_trait]
 impl StatusListCache for RedisStatusListCache {
     async fn get(&self, list_id: &str) -> Result<Option<StatusListRecord>, StatusListError> {
-        if self.ttl_secs == 0 || self.max_capacity == 0 {
+        use redis::AsyncCommands;
+
+        if self.ttl_secs == 0 {
             cache_metrics().misses.add(1, &cache_attrs("redis"));
             return Ok(None);
         }
 
         let key = self.key(list_id);
         let mut connection = self.connection.clone();
-        let cached: Option<String> = REDIS_GET_SCRIPT
-            .key(key)
-            .key(&self.lru_key)
-            .arg(list_id)
-            .invoke_async(&mut connection)
+        let cached: Option<String> = connection
+            .get(&key)
             .await
             .map_err(|error| redis_operation_error("get", error))?;
         let metrics = cache_metrics();
@@ -358,7 +223,10 @@ impl StatusListCache for RedisStatusListCache {
                         error = %error,
                         "discarding undecodable Redis status-list cache entry"
                     );
-                    self.delete_corrupt_entry(&mut connection, list_id).await?;
+                    let _: () = connection
+                        .del(&key)
+                        .await
+                        .map_err(|error| redis_operation_error("delete_corrupt", error))?;
                     metrics.misses.add(1, &cache_attrs("redis"));
                     Ok(None)
                 }
@@ -370,44 +238,31 @@ impl StatusListCache for RedisStatusListCache {
     }
 
     async fn put(&self, record: StatusListRecord) -> Result<(), StatusListError> {
-        if self.ttl_secs == 0 || self.max_capacity == 0 {
+        use redis::AsyncCommands;
+
+        if self.ttl_secs == 0 {
             return Ok(());
         }
 
         let key = self.key(&record.list_id);
-        let marker_key = self.marker_key(&record.list_id);
         let value = serde_json::to_string(&record).map_err(cache_error)?;
         let mut connection = self.connection.clone();
-        let list_id = record.list_id.clone();
-        // Marker keys intentionally outlive evicted record keys. They are not
-        // counted against max_capacity because they reject stale DB read-fills
-        // after cross-replica invalidation.
-        let _: i32 = REDIS_PUT_SCRIPT
-            .key(key)
-            .key(&self.lru_key)
-            .key(marker_key)
-            .arg(&self.record_prefix)
-            .arg(self.ttl_secs)
-            .arg(self.max_capacity)
-            .arg(&list_id)
-            .arg(record.updated_at)
-            .arg(value)
-            .invoke_async(&mut connection)
+        let _: () = connection
+            .set_ex(key, value, self.ttl_secs)
             .await
             .map_err(|error| redis_operation_error("put", error))?;
         Ok(())
     }
 
     async fn invalidate(&self, list_id: &str) -> Result<(), StatusListError> {
-        self.invalidate_with_marker(list_id, None).await
-    }
+        use redis::AsyncCommands;
 
-    async fn invalidate_after_update(
-        &self,
-        list_id: &str,
-        updated_at: i64,
-    ) -> Result<(), StatusListError> {
-        self.invalidate_with_marker(list_id, Some(updated_at)).await
+        let mut connection = self.connection.clone();
+        let _: () = connection
+            .del(self.key(list_id))
+            .await
+            .map_err(|error| redis_operation_error("invalidate", error))?;
+        Ok(())
     }
 }
 
@@ -563,199 +418,84 @@ mod redis_tests {
     #[tokio::test]
     async fn redis_cache_round_trips_and_invalidates() {
         let (_container, redis_url) = redis_url().await;
-        let prefix = format!("status-list-server:test:{}:", uuid::Uuid::new_v4());
-        let cache = RedisStatusListCache::new(
-            &redis_url,
-            60,
-            100,
-            prefix,
-            Duration::from_millis(250),
-            Duration::from_millis(250),
-        )
-        .await
-        .expect("connect to redis");
+        let cache = RedisStatusListCache::new(&redis_url, 60)
+            .await
+            .expect("connect to redis");
 
-        let record = record("list-1");
+        let list_id = format!("list-{}", uuid::Uuid::new_v4());
+        let record = record(&list_id);
         cache.put(record.clone()).await.expect("put record");
-        assert_eq!(cache.get("list-1").await.expect("get record"), Some(record));
+        assert_eq!(cache.get(&list_id).await.expect("get record"), Some(record));
 
-        cache.invalidate("list-1").await.expect("invalidate record");
-        assert_eq!(cache.get("list-1").await.expect("get invalidated"), None);
+        cache.invalidate(&list_id).await.expect("invalidate record");
+        assert_eq!(cache.get(&list_id).await.expect("get invalidated"), None);
     }
 
     #[tokio::test]
     async fn redis_cache_ttl_zero_disables_puts() {
         let (_container, redis_url) = redis_url().await;
-        let prefix = format!("status-list-server:test:{}:", uuid::Uuid::new_v4());
-        let cache = RedisStatusListCache::new(
-            &redis_url,
-            0,
-            100,
-            prefix,
-            Duration::from_millis(250),
-            Duration::from_millis(250),
-        )
-        .await
-        .expect("connect to redis");
+        let cache = RedisStatusListCache::new(&redis_url, 0)
+            .await
+            .expect("connect to redis");
 
-        cache.put(record("list-2")).await.expect("put skipped");
-        assert_eq!(cache.get("list-2").await.expect("get skipped"), None);
-    }
-
-    #[tokio::test]
-    async fn redis_cache_evicts_least_recently_used_record() {
-        let (_container, redis_url) = redis_url().await;
-        let prefix = format!("status-list-server:test:{}:", uuid::Uuid::new_v4());
-        let cache = RedisStatusListCache::new(
-            &redis_url,
-            60,
-            2,
-            prefix,
-            Duration::from_millis(250),
-            Duration::from_millis(250),
-        )
-        .await
-        .expect("connect to redis");
-
-        cache.put(record("a")).await.expect("put a");
-        tokio::time::sleep(Duration::from_millis(2)).await;
-        cache.put(record("b")).await.expect("put b");
-        tokio::time::sleep(Duration::from_millis(2)).await;
-        assert!(cache.get("a").await.expect("touch a").is_some());
-        tokio::time::sleep(Duration::from_millis(2)).await;
-        cache.put(record("c")).await.expect("put c");
-
-        assert!(cache.get("a").await.expect("get a").is_some());
-        assert_eq!(cache.get("b").await.expect("b was evicted"), None);
-        assert!(cache.get("c").await.expect("get c").is_some());
+        let list_id = format!("disabled-{}", uuid::Uuid::new_v4());
+        cache.put(record(&list_id)).await.expect("put skipped");
+        assert_eq!(cache.get(&list_id).await.expect("get skipped"), None);
     }
 
     #[tokio::test]
     async fn redis_cache_shared_prefix_invalidation_clears_other_instance() {
         let (_container, redis_url) = redis_url().await;
-        let prefix = format!("status-list-server:test:{}:", uuid::Uuid::new_v4());
-        let cache_a = RedisStatusListCache::new(
-            &redis_url,
-            60,
-            100,
-            prefix.clone(),
-            Duration::from_millis(250),
-            Duration::from_millis(250),
-        )
-        .await
-        .expect("connect cache a");
-        let cache_b = RedisStatusListCache::new(
-            &redis_url,
-            60,
-            100,
-            prefix,
-            Duration::from_millis(250),
-            Duration::from_millis(250),
-        )
-        .await
-        .expect("connect cache b");
+        let cache_a = RedisStatusListCache::new(&redis_url, 60)
+            .await
+            .expect("connect cache a");
+        let cache_b = RedisStatusListCache::new(&redis_url, 60)
+            .await
+            .expect("connect cache b");
+        let list_id = format!("shared-{}", uuid::Uuid::new_v4());
 
-        cache_a.put(record("shared")).await.expect("put shared");
+        cache_a.put(record(&list_id)).await.expect("put shared");
         assert!(
             cache_b
-                .get("shared")
+                .get(&list_id)
                 .await
                 .expect("cross-instance get")
                 .is_some()
         );
 
         cache_b
-            .invalidate_after_update("shared", 2)
+            .invalidate(&list_id)
             .await
             .expect("invalidate from peer");
-        assert_eq!(cache_a.get("shared").await.expect("invalidated"), None);
-    }
-
-    #[tokio::test]
-    async fn redis_cache_invalidation_marker_rejects_stale_fill() {
-        let (_container, redis_url) = redis_url().await;
-        let prefix = format!("status-list-server:test:{}:", uuid::Uuid::new_v4());
-        let cache = RedisStatusListCache::new(
-            &redis_url,
-            60,
-            100,
-            prefix,
-            Duration::from_millis(250),
-            Duration::from_millis(250),
-        )
-        .await
-        .expect("connect to redis");
-
-        cache
-            .invalidate_after_update("stale", 5)
-            .await
-            .expect("write marker");
-
-        cache
-            .put(record_at("stale", 1))
-            .await
-            .expect("stale put rejected without error");
-        assert_eq!(cache.get("stale").await.expect("stale fill missing"), None);
-
-        let current = record_at("stale", 5);
-        cache
-            .put(current.clone())
-            .await
-            .expect("current put accepted");
-        assert_eq!(
-            cache.get("stale").await.expect("current fill present"),
-            Some(current)
-        );
+        assert_eq!(cache_a.get(&list_id).await.expect("invalidated"), None);
     }
 
     #[tokio::test]
     async fn redis_cache_corrupt_entry_is_miss_and_deleted() {
         let (_container, redis_url) = redis_url().await;
-        let prefix = format!("status-list-server:test:{}:", uuid::Uuid::new_v4());
-        let cache = RedisStatusListCache::new(
-            &redis_url,
-            60,
-            100,
-            prefix,
-            Duration::from_millis(250),
-            Duration::from_millis(250),
-        )
-        .await
-        .expect("connect to redis");
+        let cache = RedisStatusListCache::new(&redis_url, 60)
+            .await
+            .expect("connect to redis");
+        let list_id = format!("bad-{}", uuid::Uuid::new_v4());
 
         let mut connection = cache.connection.clone();
         let _: () = redis::cmd("SET")
-            .arg(cache.key("bad"))
+            .arg(cache.key(&list_id))
             .arg("not-json")
             .query_async(&mut connection)
             .await
             .expect("write corrupt entry");
 
-        assert_eq!(cache.get("bad").await.expect("corrupt becomes miss"), None);
+        assert_eq!(
+            cache.get(&list_id).await.expect("corrupt becomes miss"),
+            None
+        );
         let exists: bool = redis::cmd("EXISTS")
-            .arg(cache.key("bad"))
+            .arg(cache.key(&list_id))
             .query_async(&mut connection)
             .await
             .expect("check corrupt key deleted");
         assert!(!exists);
-    }
-
-    #[tokio::test]
-    async fn redis_cache_max_capacity_zero_skips_redis() {
-        let (_container, redis_url) = redis_url().await;
-        let cache = RedisStatusListCache::new(
-            &redis_url,
-            60,
-            0,
-            format!("status-list-server:test:{}:", uuid::Uuid::new_v4()),
-            Duration::from_millis(250),
-            Duration::from_millis(250),
-        )
-        .await
-        .expect("connect to redis");
-
-        cache.put(record("disabled")).await.expect("put skipped");
-        assert_eq!(cache.get("disabled").await.expect("get skipped"), None);
     }
 
     #[tokio::test]
@@ -764,17 +504,9 @@ mod redis_tests {
         let Some(container) = container else {
             return;
         };
-        let prefix = format!("status-list-server:test:{}:", uuid::Uuid::new_v4());
-        let cache = RedisStatusListCache::new(
-            &redis_url,
-            60,
-            100,
-            prefix,
-            Duration::from_millis(100),
-            Duration::from_millis(100),
-        )
-        .await
-        .expect("connect to redis");
+        let cache = RedisStatusListCache::new(&redis_url, 60)
+            .await
+            .expect("connect to redis");
 
         container.pause().await.expect("pause redis");
         let result = tokio::time::timeout(Duration::from_secs(1), cache.get("any")).await;
@@ -808,17 +540,9 @@ mod redis_tests {
         }
 
         let (_container, redis_url) = redis_url().await;
-        let prefix = format!("status-list-server:test:{}:", uuid::Uuid::new_v4());
-        let cache = RedisStatusListCache::new(
-            &redis_url,
-            60,
-            100,
-            prefix,
-            Duration::from_millis(250),
-            Duration::from_millis(250),
-        )
-        .await
-        .expect("connect to redis");
+        let cache = RedisStatusListCache::new(&redis_url, 60)
+            .await
+            .expect("connect to redis");
 
         let snapshots = MemoryStatusListSnapshotRepo::default();
         let repo = MemoryStatusLists::default().with_snapshot(&snapshots);

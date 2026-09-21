@@ -87,7 +87,7 @@ jobs:
       - name: Publish the variant list
         id: list
         env:
-          VARIANTS: aws gcp azure vault fscert fscert-redis
+          VARIANTS: aws gcp azure vault fscert
         run: |
           set -euo pipefail
           # Unquoted on purpose: the word splitting is what turns the list into lines.

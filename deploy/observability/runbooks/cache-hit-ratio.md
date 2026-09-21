@@ -49,9 +49,9 @@ grep -i cache .env 2>/dev/null
 2. If eviction-driven, right-size `max_capacity` to the concurrent distinct-list
    working set.
 3. Re-check after a restart warm-up (the ratio recovers over ~one TTL period).
-4. If `RedisCacheStartupError` fired, verify Redis DNS, credentials, TLS mode,
-   and NetworkPolicy `cacheEgress`; then restart affected pods after Redis is
-   reachable so they construct the Redis cache backend.
+4. If Redis startup errors are present, verify Redis DNS, credentials, TLS mode,
+   and any required NetworkPolicy `egressInternal` entries; then restart affected
+   pods after Redis is reachable so they construct the Redis cache backend.
 
 ## Escalation
 

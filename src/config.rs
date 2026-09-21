@@ -70,6 +70,23 @@ impl DatabaseBackend {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CacheBackend {
+    #[default]
+    Memory,
+    Redis,
+}
+
+impl CacheBackend {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            CacheBackend::Memory => "memory",
+            CacheBackend::Redis => "redis",
+        }
+    }
+}
+
 /// Recognized values of the APP_ENV environment variable
 pub const ENV_PRODUCTION: &str = "production";
 pub const ENV_DEVELOPMENT: &str = "development";
@@ -975,55 +992,116 @@ pub struct AzureKeyVaultConfig {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct CacheConfig {
+    /// Cache backend selected at runtime.
+    #[serde(default)]
+    pub backend: CacheBackend,
     /// Time-to-live for cached status list items in seconds.
     /// Setting this to 0 disables caching entirely.
     pub ttl: u64,
     pub max_capacity: u64,
-    /// Redis connection URL used by binaries built with the `cache-redis` feature.
+    /// Redis hostname or IP address used when `cache.backend=redis`.
     #[serde(default)]
-    pub redis_url: Option<SecretString>,
-    /// File containing the Redis connection URL, for secret-mounted deployments.
+    pub host: Option<String>,
+    /// Redis port. Defaults to 6379 without TLS and 6380 with TLS.
     #[serde(default)]
-    pub redis_url_file: Option<PathBuf>,
-    /// Prefix for Redis keys, allowing multiple deployments to share one Redis database safely.
-    pub redis_key_prefix: String,
-    /// Redis command response timeout in milliseconds.
-    pub redis_response_timeout_ms: u64,
-    /// Redis initial/reconnect timeout in milliseconds.
-    pub redis_connection_timeout_ms: u64,
+    pub port: Option<u16>,
+    /// Optional Redis username.
+    #[serde(default)]
+    pub username: Option<String>,
+    /// Redis password.
+    #[serde(default)]
+    pub password: Option<SecretString>,
+    /// File containing the Redis password, for secret-mounted deployments.
+    #[serde(default)]
+    pub password_file: Option<PathBuf>,
+    /// Redis database number.
+    #[serde(default)]
+    pub database: Option<u8>,
+    /// Use TLS (`rediss://`) for the Redis connection.
+    #[serde(default)]
+    pub tls: bool,
 }
 
 impl CacheConfig {
     fn validate(&self) -> Result<(), ConfigError> {
-        if self.redis_response_timeout_ms == 0 {
+        if self.password.is_some() && self.password_file.is_some() {
             return Err(ConfigError::Message(
-                "cache.redis_response_timeout_ms must be greater than 0".to_string(),
+                "Ambiguous Redis cache configuration: use either cache.password or cache.password_file, not both".to_string(),
             ));
         }
-        if self.redis_connection_timeout_ms == 0 {
-            return Err(ConfigError::Message(
-                "cache.redis_connection_timeout_ms must be greater than 0".to_string(),
-            ));
+        if self.backend == CacheBackend::Redis {
+            if self.password_file.is_some() {
+                let mut config = self.clone();
+                config.password = Some(SecretString::from("placeholder".to_string()));
+                config.resolved_redis_url()?;
+            } else {
+                self.resolved_redis_url()?;
+            }
         }
         Ok(())
     }
 
-    pub async fn load_redis_url(&self) -> Result<Option<SecretString>, ConfigError> {
-        match (&self.redis_url, &self.redis_url_file) {
-            (Some(_), Some(_)) => Err(ConfigError::Message(
-                "Ambiguous Redis cache configuration: use either cache.redis_url or cache.redis_url_file, not both".to_string(),
-            )),
-            (Some(url), None) => Ok(Some(url.clone())),
-            (None, Some(path)) => {
-                let value = tokio::fs::read_to_string(path).await.map_err(|err| {
-                    ConfigError::Message(format!(
-                        "Failed to read cache.redis_url_file '{}': {err}",
-                        path.display()
-                    ))
-                })?;
-                Ok(Some(SecretString::from(value.trim().to_string())))
+    pub fn resolved_redis_url(&self) -> Result<SecretString, ConfigError> {
+        let host = required_config_field(self.host.as_deref(), "cache.host")?;
+        validate_database_host(host)?;
+        let url_host = format_database_url_host(host);
+        let scheme = if self.tls { "rediss" } else { "redis" };
+        let port = self.port.unwrap_or(if self.tls { 6380 } else { 6379 });
+        let database = self.database.unwrap_or(0);
+        let password = self
+            .password
+            .as_ref()
+            .map(SecretString::expose_secret)
+            .filter(|value| !value.is_empty());
+
+        let auth = match (trim_non_empty(self.username.as_deref()), password) {
+            (Some(username), Some(password)) => {
+                format!(
+                    "{}:{}@",
+                    encode_url_part(username),
+                    encode_url_part(password.trim())
+                )
             }
-            (None, None) => Ok(None),
+            (None, Some(password)) => format!(":{}@", encode_url_part(password.trim())),
+            (Some(username), None) => {
+                return Err(ConfigError::Message(format!(
+                    "Missing required config field: cache.password for Redis username '{}'",
+                    username
+                )));
+            }
+            (None, None) => String::new(),
+        };
+
+        Ok(SecretString::from(format!(
+            "{scheme}://{auth}{url_host}:{port}/{database}"
+        )))
+    }
+
+    pub async fn load_resolved_redis_url(&self) -> Result<SecretString, ConfigError> {
+        let Some(path) = &self.password_file else {
+            return self.resolved_redis_url();
+        };
+        let password = tokio::fs::read_to_string(path).await.map_err(|err| {
+            ConfigError::Message(format!(
+                "Failed to read cache.password_file '{}': {err}",
+                path.display()
+            ))
+        })?;
+        let mut config = self.clone();
+        config.password = Some(SecretString::from(password.trim().to_string()));
+        config.resolved_redis_url()
+    }
+
+    pub fn redacted_redis_target(&self) -> String {
+        match trim_non_empty(self.host.as_deref()) {
+            Some(host) => format!(
+                "backend=redis, host={}, port={}, database={}, tls={}",
+                host,
+                self.port.unwrap_or(if self.tls { 6380 } else { 6379 }),
+                self.database.unwrap_or(0),
+                self.tls
+            ),
+            None => "backend=redis, host=<unset>".to_string(),
         }
     }
 }
@@ -1173,13 +1251,16 @@ fn base_builder() -> Result<ConfigBuilder<DefaultState>, ConfigError> {
         .set_default("gcp_secret_manager.secrets_cache_ttl", 300)?
         .set_default("azure_keyvault.vault_url", Option::<String>::None)?
         .set_default("azure_keyvault.secrets_cache_ttl", 300)?
+        .set_default("cache.backend", "memory")?
         .set_default("cache.ttl", 5 * 60)?
-        .set_default("cache.max_capacity", 1000)?
-        .set_default("cache.redis_url", Option::<String>::None)?
-        .set_default("cache.redis_url_file", Option::<String>::None)?
-        .set_default("cache.redis_key_prefix", "status-list-server:status-list:")?
-        .set_default("cache.redis_response_timeout_ms", 250)?
-        .set_default("cache.redis_connection_timeout_ms", 250)?
+        .set_default("cache.max_capacity", 100)?
+        .set_default("cache.host", Option::<String>::None)?
+        .set_default("cache.port", Option::<u16>::None)?
+        .set_default("cache.username", Option::<String>::None)?
+        .set_default("cache.password", Option::<String>::None)?
+        .set_default("cache.password_file", Option::<String>::None)?
+        .set_default("cache.database", Option::<u8>::None)?
+        .set_default("cache.tls", false)?
         .set_default("status_list.token_exp_secs", 900)?
         .set_default("status_list.token_ttl_secs", 300)?
         .set_default("status_list.snapshot_retention_secs", 7776000)?
@@ -1343,12 +1424,15 @@ mod tests {
             ("server.cert.renewal_cron_schedule", "0 0 12 * * *"),
             ("server.cert.dns_challenge_server_url", "http://pebble:8055"),
             ("aws.region", "us-west-2"),
+            ("cache.backend", "redis"),
             ("cache.ttl", "600"),
             ("cache.max_capacity", "2000"),
-            ("cache.redis_url", "redis://redis:6379/0"),
-            ("cache.redis_key_prefix", "test-prefix:"),
-            ("cache.redis_response_timeout_ms", "150"),
-            ("cache.redis_connection_timeout_ms", "175"),
+            ("cache.host", "redis"),
+            ("cache.port", "6380"),
+            ("cache.username", "default"),
+            ("cache.password", "redis-password"),
+            ("cache.database", "2"),
+            ("cache.tls", "true"),
             ("status_list.token_exp_secs", "1800"),
             ("status_list.token_ttl_secs", "600"),
             ("management_auth.leeway_secs", "30"),
@@ -1395,20 +1479,31 @@ mod tests {
             "https://acme-v02.api.letsencrypt.org/directory"
         );
         assert_eq!(overridden.aws.region, "us-west-2");
+        assert_eq!(overridden.cache.backend, CacheBackend::Redis);
         assert_eq!(overridden.cache.ttl, 600);
         assert_eq!(overridden.cache.max_capacity, 2000);
+        assert_eq!(overridden.cache.host.as_deref(), Some("redis"));
+        assert_eq!(overridden.cache.port, Some(6380));
+        assert_eq!(overridden.cache.username.as_deref(), Some("default"));
         assert_eq!(
             overridden
                 .cache
-                .redis_url
+                .password
                 .as_ref()
-                .expect("redis url override")
+                .expect("redis password override")
                 .expose_secret(),
-            "redis://redis:6379/0"
+            "redis-password"
         );
-        assert_eq!(overridden.cache.redis_key_prefix, "test-prefix:");
-        assert_eq!(overridden.cache.redis_response_timeout_ms, 150);
-        assert_eq!(overridden.cache.redis_connection_timeout_ms, 175);
+        assert_eq!(overridden.cache.database, Some(2));
+        assert!(overridden.cache.tls);
+        assert_eq!(
+            overridden
+                .cache
+                .resolved_redis_url()
+                .expect("redis url")
+                .expose_secret(),
+            "rediss://default:redis-password@redis:6380/2"
+        );
         assert_eq!(overridden.status_list.token_exp_secs, 1800);
         assert_eq!(overridden.status_list.token_ttl_secs, 600);
         assert_eq!(overridden.management_auth.leeway_secs, 30);

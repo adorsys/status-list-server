@@ -259,23 +259,15 @@ jobs:
       matrix:
         variant:
           - suffix: aws
-            features: "postgres,aws"
-            cache_backend: "memory"
+            features: "postgres,aws,cache-redis"
           - suffix: gcp
-            features: "postgres,gcp"
-            cache_backend: "memory"
+            features: "postgres,gcp,cache-redis"
           - suffix: azure
-            features: "postgres,azure"
-            cache_backend: "memory"
+            features: "postgres,azure,cache-redis"
           - suffix: vault
-            features: "postgres,vault"
-            cache_backend: "memory"
+            features: "postgres,vault,cache-redis"
           - suffix: fscert
-            features: "postgres"
-            cache_backend: "memory"
-          - suffix: fscert-redis
-            features: "postgres"
-            cache_backend: "redis"
+            features: "postgres,cache-redis"
 
     steps:
       - name: Fetch Repository
@@ -295,15 +287,9 @@ jobs:
           sudo apt-get install -y cmake golang-go
 
       - name: Cargo check release variant
-        run: |
-          if [ "${CACHE_BACKEND}" = "redis" ]; then
-            cargo check --workspace --no-default-features --features "memory,${FEATURES},cache-redis"
-          else
-            cargo check --workspace --features "${FEATURES}"
-          fi
+        run: cargo check --workspace --features "${FEATURES}"
         env:
           FEATURES: ${{ matrix.variant.features }}
-          CACHE_BACKEND: ${{ matrix.variant.cache_backend }}
 
   docker-build:
     name: Docker Build Smoke

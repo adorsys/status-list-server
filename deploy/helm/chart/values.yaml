@@ -45,8 +45,7 @@ statuslist:
     # | -azure           | postgres,azure | PostgreSQL database with Azure Key Vault and Azure DNS support | Azure AKS native deployments |
     # | -vault           | postgres,vault | PostgreSQL database with HashiCorp Vault / OpenBao token material storage | Vault-backed on-prem or multi-cloud deployments |
     # | -fscert          | postgres | PostgreSQL database with filesystem-mounted token signing keys and certificates | Constrained / air-gapped environments using external secret injection |
-    # | -fscert-redis    | postgres,cache-redis | PostgreSQL database with filesystem-mounted token signing keys and Redis cache | HA / multi-replica cache invalidation |
-    # Tag format: <version>-<suffix> (e.g., 1.2.0-aws, 1.2.0-fscert-redis)
+    # Tag format: <version>-<suffix> (e.g., 1.2.0-aws, 1.2.0-fscert)
     # Latest tags: latest-<suffix> (e.g., latest-aws, latest-gcp)
     #
     # Empty derives from the chart appVersion plus statuslist.image.variant,
@@ -104,22 +103,19 @@ statuslist:
     # APP_DATABASE__BACKEND defaults to "postgres". When APP_DATABASE__HOST, PORT,
     # USERNAME, or NAME are omitted, deployment.yaml derives them from the active
     # backend's native values below (postgres/mysql).
-    # Status-list record cache TTL in seconds. "0" disables this cache.
-    # Cache backend is selected at image build time. cache-memory is the default,
-    # and wins when all features are enabled. Docker builds select Redis with
-    # CACHE_BACKEND=redis. For cache-redis images, provide APP_CACHE__REDIS_URL
-    # via statuslist.secretEnv or APP_CACHE__REDIS_URL_FILE via secretMounts. If
-    # statuslist.networkPolicy.enabled is true, also configure cacheEgress below
-    # for the Redis endpoint and port.
+    # Status-list record cache. Backend is selected at runtime: memory or redis.
+    # Redis requires APP_CACHE__HOST plus optional split fields below; the app
+    # assembles redis:// or rediss:// internally.
+    APP_CACHE__BACKEND: "memory"
     APP_CACHE__TTL: "300"
-    # Maximum status-list records retained by the selected cache backend.
-    # Redis also keeps short-lived marker keys for invalidated IDs so stale
-    # read-fills cannot repopulate old records; size Redis for those TTL-bound
-    # marker keys in addition to this retained-record cap.
-    APP_CACHE__MAX_CAPACITY: "1000"
-    APP_CACHE__REDIS_KEY_PREFIX: "status-list-server:status-list:"
-    APP_CACHE__REDIS_RESPONSE_TIMEOUT_MS: "250"
-    APP_CACHE__REDIS_CONNECTION_TIMEOUT_MS: "250"
+    # Maximum status-list records retained by the in-memory backend. Redis uses
+    # native key expiration based on APP_CACHE__TTL.
+    APP_CACHE__MAX_CAPACITY: "100"
+    APP_CACHE__HOST: ""
+    APP_CACHE__PORT: ""
+    APP_CACHE__USERNAME: ""
+    APP_CACHE__DATABASE: ""
+    APP_CACHE__TLS: "false"
     APP_STATUS_LIST__TOKEN_EXP_SECS: "900"
     APP_STATUS_LIST__TOKEN_TTL_SECS: "300"
     APP_RATE_LIMIT__STRICT_BURST_SIZE: "10"
@@ -238,12 +234,12 @@ statuslist:
       fileEnv:
         APP_DATABASE__PASSWORD_FILE: password
   # Optional env vars sourced directly from Secret keys, rendered with
-  # valueFrom.secretKeyRef. Useful for Redis URLs when mounting files is not
+  # valueFrom.secretKeyRef. Useful for Redis passwords when mounting files is not
   # convenient.
   # Example:
-  #   APP_CACHE__REDIS_URL:
+  #   APP_CACHE__PASSWORD:
   #     name: redis-credentials
-  #     key: url
+  #     key: password
   secretEnv: {}
 
   database:
@@ -297,11 +293,6 @@ statuslist:
     # because this chart does not deploy MySQL and cannot infer the target for RDS,
     # Cloud SQL, another namespace, or an operator-managed MySQL cluster.
     databaseEgress: []
-    # Redis egress destinations for cache-redis image variants. Set cachePort to
-    # 6379 for plain Redis or 6380 for TLS Redis, and add the Redis Service,
-    # namespaceSelector, podSelector, or ipBlock here when networkPolicy.enabled.
-    cachePort: 6379
-    cacheEgress: []
   resources:
     requests:
       memory: "256Mi"

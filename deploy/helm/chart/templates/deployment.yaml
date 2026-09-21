@@ -86,7 +86,7 @@ spec:
           {{- end }}
           {{- $pinned := ne $digest "" }}
           {{- $variant := $image.variant | default "fscert" }}
-          {{- $baseAppVersion := regexReplaceAll "-(aws|gcp|azure|vault|fscert|fscert-redis)$" $.Chart.AppVersion "" }}
+          {{- $baseAppVersion := regexReplaceAll "-(aws|gcp|azure|vault|fscert)$" $.Chart.AppVersion "" }}
           {{- $defaultVariantTag := printf "%s-%s" $baseAppVersion $variant }}
           {{- $effectiveTag := $image.tag | default $defaultVariantTag }}
           {{- if and (eq (include "status-list-server-chart.dbBackend" .) "mysql") (not $image.tag) (not $digest) }}

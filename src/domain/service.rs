@@ -321,10 +321,7 @@ fn build_snapshot(record: &StatusListRecord, token_exp_secs: u64) -> StatusListS
 }
 
 async fn invalidate_after_commit(cache: &dyn StatusListCache, record: &StatusListRecord) {
-    match cache
-        .invalidate_after_update(&record.list_id, record.updated_at)
-        .await
-    {
+    match cache.invalidate(&record.list_id).await {
         Ok(()) => {
             tracing::debug!(list_id = %record.list_id, "invalidated cache entry after commit");
         }
