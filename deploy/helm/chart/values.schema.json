@@ -197,8 +197,7 @@
             "enabled": { "type": "boolean" },
             "ingress": { "type": "array" },
             "egressInternal": { "type": "array" },
-            "databaseEgress": { "type": "array" },
-            "cacheEgress": { "type": "array" }
+            "databaseEgress": { "type": "array" }
           }
         },
         "resources": { "type": "object" }

@@ -103,12 +103,7 @@ statuslist:
     # APP_DATABASE__BACKEND defaults to "postgres". When APP_DATABASE__HOST, PORT,
     # USERNAME, or NAME are omitted, deployment.yaml derives them from the active
     # backend's native values below (postgres/mysql).
-    # Status-list record cache. Backend is selected at runtime: memory or redis.
-    # For Redis, set APP_CACHE__HOST plus optional split fields such as
-    # APP_CACHE__PORT, APP_CACHE__USERNAME, APP_CACHE__DATABASE, APP_CACHE__TLS,
-    # and provide APP_CACHE__PASSWORD via statuslist.secretEnv or
-    # APP_CACHE__PASSWORD_FILE via secretMounts.
-    APP_CACHE__BACKEND: "memory"
+    # Status-list record cache TTL in seconds. "0" disables this cache.
     APP_CACHE__TTL: "300"
     APP_CACHE__MAX_CAPACITY: "1000"
     APP_STATUS_LIST__TOKEN_EXP_SECS: "900"
@@ -280,10 +275,6 @@ statuslist:
     # because this chart does not deploy MySQL and cannot infer the target for RDS,
     # Cloud SQL, another namespace, or an operator-managed MySQL cluster.
     databaseEgress: []
-    # Redis egress destinations used when APP_CACHE__BACKEND=redis. The egress
-    # port is derived from APP_CACHE__PORT when set, otherwise 6380 when
-    # APP_CACHE__TLS=true and 6379 when false.
-    cacheEgress: []
   resources:
     requests:
       memory: "256Mi"

@@ -70,14 +70,6 @@ impl DatabaseBackend {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum CacheBackend {
-    #[default]
-    Memory,
-    Redis,
-}
-
 /// Recognized values of the APP_ENV environment variable
 pub const ENV_PRODUCTION: &str = "production";
 pub const ENV_DEVELOPMENT: &str = "development";
@@ -983,110 +975,10 @@ pub struct AzureKeyVaultConfig {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct CacheConfig {
-    #[serde(default)]
-    pub backend: CacheBackend,
     /// Time-to-live for cached status list items in seconds.
     /// Setting this to 0 disables caching entirely.
     pub ttl: u64,
     pub max_capacity: u64,
-    #[serde(default)]
-    pub host: Option<String>,
-    #[serde(default)]
-    pub port: Option<u16>,
-    #[serde(default)]
-    pub username: Option<String>,
-    #[serde(default)]
-    pub password: Option<SecretString>,
-    #[serde(default)]
-    pub password_file: Option<PathBuf>,
-    #[serde(default)]
-    pub database: Option<u8>,
-    #[serde(default)]
-    pub tls: bool,
-}
-
-impl CacheConfig {
-    fn validate(&self) -> Result<(), ConfigError> {
-        if self.password.is_some() && self.password_file.is_some() {
-            return Err(ConfigError::Message(
-                "Ambiguous Redis cache configuration: use either cache.password or cache.password_file, not both".to_string(),
-            ));
-        }
-        if self.backend == CacheBackend::Redis {
-            if self.password_file.is_some() {
-                let mut config = self.clone();
-                config.password = Some(SecretString::from("placeholder".to_string()));
-                config.resolved_redis_url()?;
-            } else {
-                self.resolved_redis_url()?;
-            }
-        }
-        Ok(())
-    }
-
-    pub fn resolved_redis_url(&self) -> Result<SecretString, ConfigError> {
-        let host = required_config_field(self.host.as_deref(), "cache.host")?;
-        validate_database_host(host)?;
-        let url_host = format_database_url_host(host);
-        let scheme = if self.tls { "rediss" } else { "redis" };
-        let port = self.port.unwrap_or(if self.tls { 6380 } else { 6379 });
-        let database = self.database.unwrap_or(0);
-        let password = self
-            .password
-            .as_ref()
-            .map(SecretString::expose_secret)
-            .filter(|value| !value.is_empty());
-
-        let auth = match (trim_non_empty(self.username.as_deref()), password) {
-            (Some(username), Some(password)) => {
-                format!(
-                    "{}:{}@",
-                    encode_url_part(username),
-                    encode_url_part(password.trim())
-                )
-            }
-            (None, Some(password)) => format!(":{}@", encode_url_part(password.trim())),
-            (Some(username), None) => {
-                return Err(ConfigError::Message(format!(
-                    "Missing required config field: cache.password for Redis username '{}'",
-                    username
-                )));
-            }
-            (None, None) => String::new(),
-        };
-
-        Ok(SecretString::from(format!(
-            "{scheme}://{auth}{url_host}:{port}/{database}"
-        )))
-    }
-
-    pub async fn load_resolved_redis_url(&self) -> Result<SecretString, ConfigError> {
-        let Some(path) = &self.password_file else {
-            return self.resolved_redis_url();
-        };
-        let password = tokio::fs::read_to_string(path).await.map_err(|err| {
-            ConfigError::Message(format!(
-                "Failed to read cache.password_file '{}': {err}",
-                path.display()
-            ))
-        })?;
-        let mut config = self.clone();
-        config.password = Some(SecretString::from(password.trim().to_string()));
-        config.resolved_redis_url()
-    }
-
-    pub fn redacted_redis_target(&self) -> String {
-        match trim_non_empty(self.host.as_deref()) {
-            Some(host) => format!(
-                "backend=redis, host={}, port={}, database={}, tls={}",
-                host,
-                self.port.unwrap_or(if self.tls { 6380 } else { 6379 }),
-                self.database.unwrap_or(0),
-                self.tls
-            ),
-            None => "backend=redis, host=<unset>".to_string(),
-        }
-    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -1149,7 +1041,6 @@ impl Config {
         if let Some(query) = trim_non_empty(config.database.query.as_deref()) {
             validate_database_query(query)?;
         }
-        config.cache.validate()?;
         config.management_auth.validate()?;
         Ok(config)
     }
@@ -1234,16 +1125,8 @@ fn base_builder() -> Result<ConfigBuilder<DefaultState>, ConfigError> {
         .set_default("gcp_secret_manager.secrets_cache_ttl", 300)?
         .set_default("azure_keyvault.vault_url", Option::<String>::None)?
         .set_default("azure_keyvault.secrets_cache_ttl", 300)?
-        .set_default("cache.backend", "memory")?
         .set_default("cache.ttl", 5 * 60)?
         .set_default("cache.max_capacity", 100)?
-        .set_default("cache.host", Option::<String>::None)?
-        .set_default("cache.port", Option::<u16>::None)?
-        .set_default("cache.username", Option::<String>::None)?
-        .set_default("cache.password", Option::<String>::None)?
-        .set_default("cache.password_file", Option::<String>::None)?
-        .set_default("cache.database", Option::<u8>::None)?
-        .set_default("cache.tls", false)?
         .set_default("status_list.token_exp_secs", 900)?
         .set_default("status_list.token_ttl_secs", 300)?
         .set_default("status_list.snapshot_retention_secs", 7776000)?
@@ -1357,7 +1240,6 @@ mod tests {
         assert_eq!(config.limits.max_status_index, 100_000);
         assert_eq!(config.limits.max_statuses_per_request, 5_000);
         assert_eq!(config.limits.max_serialized_list_size, 1_048_576);
-        assert_eq!(config.cache.backend, CacheBackend::Memory);
 
         assert_eq!(config.database.pool.max_connections, 5);
         assert_eq!(config.database.pool.min_connections, 1);
@@ -1408,15 +1290,8 @@ mod tests {
             ("server.cert.renewal_cron_schedule", "0 0 12 * * *"),
             ("server.cert.dns_challenge_server_url", "http://pebble:8055"),
             ("aws.region", "us-west-2"),
-            ("cache.backend", "redis"),
             ("cache.ttl", "600"),
             ("cache.max_capacity", "2000"),
-            ("cache.host", "redis"),
-            ("cache.port", "6380"),
-            ("cache.username", "default"),
-            ("cache.password", "redis-password"),
-            ("cache.database", "2"),
-            ("cache.tls", "true"),
             ("status_list.token_exp_secs", "1800"),
             ("status_list.token_ttl_secs", "600"),
             ("management_auth.leeway_secs", "30"),
@@ -1463,17 +1338,8 @@ mod tests {
             "https://acme-v02.api.letsencrypt.org/directory"
         );
         assert_eq!(overridden.aws.region, "us-west-2");
-        assert_eq!(overridden.cache.backend, CacheBackend::Redis);
         assert_eq!(overridden.cache.ttl, 600);
         assert_eq!(overridden.cache.max_capacity, 2000);
-        assert_eq!(
-            overridden
-                .cache
-                .resolved_redis_url()
-                .expect("redis url")
-                .expose_secret(),
-            "rediss://default:redis-password@redis:6380/2"
-        );
         assert_eq!(overridden.status_list.token_exp_secs, 1800);
         assert_eq!(overridden.status_list.token_ttl_secs, 600);
         assert_eq!(overridden.management_auth.leeway_secs, 30);
