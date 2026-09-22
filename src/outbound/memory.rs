@@ -405,7 +405,10 @@ mod tests {
             .update_statuses(
                 &Issuer("other-issuer".into()),
                 "id",
-                Vec::new(),
+                vec![StatusEntry {
+                    index: 0,
+                    status: Status::Invalid,
+                }],
                 900,
                 100_000,
                 5000,
@@ -414,5 +417,109 @@ mod tests {
             .await;
 
         assert!(matches!(result, Err(StatusListError::IssuerMismatch)));
+    }
+
+    /// An empty PATCH must be rejected at the service boundary before any write:
+    /// the status list version (`updated_at`) must not advance and no duplicate
+    /// history snapshot may be inserted.
+    #[tokio::test]
+    async fn empty_update_is_noop_without_version_advance_or_snapshot() {
+        let repo = MemoryStatusLists::default();
+        let cache = MemoryStatusListCache::default();
+        // Keep a handle to the same backing map the service will share with the
+        // lists repo, so we can count snapshots after the rejected update.
+        let snapshot_repo = MemoryStatusListSnapshotRepo::default();
+        let snapshots = snapshot_repo.values.clone();
+        let lists = repo.clone().with_snapshot(&snapshot_repo);
+        let service = create_test_service(lists, cache, Some(snapshot_repo));
+
+        service
+            .publish_status_list(
+                "id".into(),
+                Issuer("issuer".into()),
+                "https://example/id".into(),
+                Vec::new(),
+                900,
+                100_000,
+                5_000,
+                usize::MAX,
+            )
+            .await
+            .unwrap();
+
+        let published = service.get_status_list("id").await.unwrap();
+
+        let result = service
+            .update_statuses(
+                &Issuer("issuer".into()),
+                "id",
+                Vec::new(),
+                900,
+                100_000,
+                5_000,
+                usize::MAX,
+            )
+            .await;
+
+        assert!(matches!(result, Err(StatusListError::EmptyStatusUpdate)));
+
+        let after = service.get_status_list("id").await.unwrap();
+        assert_eq!(
+            after.updated_at, published.updated_at,
+            "an empty update must not advance the status list version"
+        );
+        assert_eq!(
+            snapshots.read().await.len(),
+            1,
+            "only the publish snapshot may exist; an empty update must not insert a duplicate"
+        );
+    }
+
+    /// Duplicate indices in a single update payload must be rejected outright.
+    #[tokio::test]
+    async fn update_rejects_duplicate_indices() {
+        let repo = MemoryStatusLists::default();
+        let cache = MemoryStatusListCache::default();
+        let service = create_test_service(repo, cache, None);
+
+        service
+            .publish_status_list(
+                "id".into(),
+                Issuer("issuer".into()),
+                "https://example/id".into(),
+                Vec::new(),
+                900,
+                100_000,
+                5_000,
+                usize::MAX,
+            )
+            .await
+            .unwrap();
+
+        let result = service
+            .update_statuses(
+                &Issuer("issuer".into()),
+                "id",
+                vec![
+                    StatusEntry {
+                        index: 0,
+                        status: Status::Invalid,
+                    },
+                    StatusEntry {
+                        index: 0,
+                        status: Status::Suspended,
+                    },
+                ],
+                900,
+                100_000,
+                5_000,
+                usize::MAX,
+            )
+            .await;
+
+        assert!(matches!(
+            result,
+            Err(StatusListError::DuplicateIndex { index: 0 })
+        ));
     }
 }

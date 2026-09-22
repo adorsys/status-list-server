@@ -4,7 +4,8 @@ use std::sync::Arc;
 
 use crate::domain::models::credential::{Credential, CredentialError, Issuer};
 use crate::domain::models::status_list::{
-    StatusEntry, StatusList, StatusListError, StatusListRecord, StatusListSnapshot,
+    validate_unique_indices, StatusEntry, StatusList, StatusListError, StatusListRecord,
+    StatusListSnapshot,
 };
 use crate::domain::ports::{
     CertificateProvider, CredentialRepo, StatusListCache, StatusListRepo, StatusListSnapshotRepo,
@@ -136,6 +137,14 @@ impl Service {
     }
 
     /// Mutate statuses in an existing status list record with optimistic concurrency checks and cache invalidation.
+    ///
+    /// Request-shape validation (count bound, empty payload, duplicate indices,
+    /// index bound) runs before any storage access so a malformed request is
+    /// rejected with `400` consistently and without a wasted `find` or write.
+    /// This means those `400`s take precedence over `404` (list not found) and
+    /// `403` (issuer mismatch), which are resolved only after the payload is
+    /// well-formed. The same checks are re-enforced in the domain model as an
+    /// invariant in case this service boundary is bypassed.
     #[allow(clippy::too_many_arguments)]
     pub async fn update_statuses(
         &self,
@@ -153,6 +162,10 @@ impl Service {
                 max: max_statuses_per_request,
             });
         }
+        if statuses.is_empty() {
+            return Err(StatusListError::EmptyStatusUpdate);
+        }
+        validate_unique_indices(&statuses)?;
         for entry in &statuses {
             if entry.index > max_status_index {
                 return Err(StatusListError::IndexTooLarge {

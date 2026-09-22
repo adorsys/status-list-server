@@ -33,6 +33,10 @@ pub enum StatusListError {
     TooManyStatuses { count: usize, max: usize },
     #[error("status index {index} exceeds configured maximum {max}")]
     IndexTooLarge { index: i32, max: i32 },
+    #[error("at least one status update required")]
+    EmptyStatusUpdate,
+    #[error("duplicate status index {index} in update payload")]
+    DuplicateIndex { index: i32 },
     #[error("the status list was modified concurrently")]
     Conflict,
     /// The write lost a lock race in storage and was rolled back.
@@ -107,6 +111,7 @@ impl StatusList {
             });
         }
 
+        validate_unique_indices(&status_updates)?;
         let bits = determine_bits(&status_updates, None)?;
         let len = calculate_array_size(&status_updates, bits)?;
         let mut status_array = vec![0u8; len];
@@ -122,6 +127,7 @@ impl StatusList {
             return Ok(self.clone());
         }
 
+        validate_unique_indices(&status_updates)?;
         let old_bits = self.bits as usize;
         let new_bits = determine_bits(&status_updates, Some(old_bits))?;
         let mut status_array = decode_compressed(&self.lst)?;
@@ -175,6 +181,24 @@ fn status_value(status: &Status) -> Result<u32, StatusListError> {
             "ApplicationSpecific value must be >= 256".to_string(),
         )),
     }
+}
+
+/// Reject duplicate indices within a single update payload.
+///
+/// Only the caller-supplied entries are validated, never the entries a widening
+/// [`StatusList::update`] re-derives from the existing list: overlapping an
+/// already-set index is a legitimate "change that position", so this check is
+/// scoped to the request itself.
+pub(crate) fn validate_unique_indices(
+    status_updates: &[StatusEntry],
+) -> Result<(), StatusListError> {
+    let mut seen_indices: std::collections::HashSet<i32> = std::collections::HashSet::new();
+    for entry in status_updates {
+        if !seen_indices.insert(entry.index) {
+            return Err(StatusListError::DuplicateIndex { index: entry.index });
+        }
+    }
+    Ok(())
 }
 
 fn determine_bits(
@@ -708,6 +732,25 @@ mod tests {
         assert!(matches!(
             list.update(vec![entry(-5, Status::Invalid)]),
             Err(StatusListError::InvalidIndex)
+        ));
+    }
+
+    #[test]
+    fn create_rejects_duplicate_indices() {
+        let updates = vec![entry(0, Status::Valid), entry(0, Status::Invalid)];
+        assert!(matches!(
+            StatusList::create(updates),
+            Err(StatusListError::DuplicateIndex { index: 0 })
+        ));
+    }
+
+    #[test]
+    fn update_rejects_duplicate_indices() {
+        let list = StatusList::create(vec![entry(0, Status::Valid)]).unwrap();
+        let result = list.update(vec![entry(1, Status::Invalid), entry(1, Status::Suspended)]);
+        assert!(matches!(
+            result,
+            Err(StatusListError::DuplicateIndex { index: 1 })
         ));
     }
 

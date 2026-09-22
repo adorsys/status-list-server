@@ -224,6 +224,85 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_update_status_rejects_empty_statuses() {
+        let token_id = uuid::Uuid::new_v4().to_string();
+        let app_state = test_app_state(None).await;
+
+        publish_status(
+            State(app_state.clone()),
+            authenticated_issuer("issuer1"),
+            Path(token_id.clone()),
+            Json(StatusesRequest { statuses: vec![] }),
+        )
+        .await
+        .unwrap();
+
+        let before = app_state.service.get_status_list(&token_id).await.unwrap();
+
+        let update_res = update_status(
+            State(app_state.clone()),
+            authenticated_issuer("issuer1"),
+            Path(token_id.clone()),
+            Json(StatusesRequest { statuses: vec![] }),
+        )
+        .await;
+
+        let err = match update_res {
+            Ok(_) => panic!("expected empty status update to be rejected"),
+            Err(e) => e,
+        };
+        assert_eq!(err.status, StatusCode::BAD_REQUEST);
+        assert_eq!(err.error, "empty_status_update");
+
+        let after = app_state.service.get_status_list(&token_id).await.unwrap();
+        assert_eq!(
+            after.updated_at, before.updated_at,
+            "an empty PATCH must not advance the status list version"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_update_status_rejects_duplicate_indices() {
+        let token_id = uuid::Uuid::new_v4().to_string();
+        let app_state = test_app_state(None).await;
+
+        publish_status(
+            State(app_state.clone()),
+            authenticated_issuer("issuer1"),
+            Path(token_id.clone()),
+            Json(StatusesRequest { statuses: vec![] }),
+        )
+        .await
+        .unwrap();
+
+        let update_res = update_status(
+            State(app_state.clone()),
+            authenticated_issuer("issuer1"),
+            Path(token_id.clone()),
+            Json(StatusesRequest {
+                statuses: vec![
+                    RequestStatusEntry {
+                        index: 0,
+                        status: RequestStatus::INVALID,
+                    },
+                    RequestStatusEntry {
+                        index: 0,
+                        status: RequestStatus::SUSPENDED,
+                    },
+                ],
+            }),
+        )
+        .await;
+
+        let err = match update_res {
+            Ok(_) => panic!("expected duplicate index update to be rejected"),
+            Err(e) => e,
+        };
+        assert_eq!(err.status, StatusCode::BAD_REQUEST);
+        assert_eq!(err.error, "duplicate_index");
+    }
+
+    #[tokio::test]
     async fn test_update_status_returns_not_found_for_nonexistent_list() {
         let app_state = test_app_state(None).await;
         let nonexistent_id = uuid::Uuid::new_v4().to_string();
@@ -242,6 +321,66 @@ mod tests {
         .await;
 
         assert!(result.is_err());
+    }
+
+    /// Request-shape `400`s are validated before the target list is resolved,
+    /// so an empty PATCH to a list that does not exist — or is owned by another
+    /// issuer — still returns `empty_status_update`, not `404`/`403`. This pins
+    /// the documented precedence.
+    #[tokio::test]
+    async fn test_empty_update_takes_precedence_over_not_found() {
+        let app_state = test_app_state(None).await;
+        let nonexistent_id = uuid::Uuid::new_v4().to_string();
+
+        let update_res = update_status(
+            State(app_state),
+            authenticated_issuer("issuer1"),
+            Path(nonexistent_id),
+            Json(StatusesRequest { statuses: vec![] }),
+        )
+        .await;
+
+        let err = match update_res {
+            Ok(_) => panic!("an empty update must be rejected regardless of list existence"),
+            Err(e) => e,
+        };
+        assert_eq!(err.status, StatusCode::BAD_REQUEST);
+        assert_eq!(err.error, "empty_status_update");
+    }
+
+    /// Duplicate-index rejection is also enforced before list resolution, so a
+    /// duplicate payload to a non-existent list returns `duplicate_index`, not
+    /// `status_list_not_found`.
+    #[tokio::test]
+    async fn test_duplicate_update_takes_precedence_over_not_found() {
+        let app_state = test_app_state(None).await;
+        let nonexistent_id = uuid::Uuid::new_v4().to_string();
+
+        let update_res = update_status(
+            State(app_state),
+            authenticated_issuer("issuer1"),
+            Path(nonexistent_id),
+            Json(StatusesRequest {
+                statuses: vec![
+                    RequestStatusEntry {
+                        index: 0,
+                        status: RequestStatus::INVALID,
+                    },
+                    RequestStatusEntry {
+                        index: 0,
+                        status: RequestStatus::SUSPENDED,
+                    },
+                ],
+            }),
+        )
+        .await;
+
+        let err = match update_res {
+            Ok(_) => panic!("duplicate indices must be rejected regardless of list existence"),
+            Err(e) => e,
+        };
+        assert_eq!(err.status, StatusCode::BAD_REQUEST);
+        assert_eq!(err.error, "duplicate_index");
     }
 
     #[tokio::test]
