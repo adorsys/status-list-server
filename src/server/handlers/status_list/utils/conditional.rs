@@ -9,9 +9,7 @@ const IMF_FIXDATE: &[time::format_description::BorrowedFormatItem<'static>] = fo
 pub(crate) enum ConditionalResponse {
     NotModified,
     Modified,
-    /// A 304 must not be answered even though the representation is unchanged:
-    /// the client's cached token has (or imminently will) reach its `exp`, so a
-    /// freshly signed token must be served instead (RFC 9110 §8.8.1).
+    /// A 304 must not be answered even though the representation is unchanged.
     ExpiredToken,
 }
 
@@ -30,24 +28,23 @@ impl TokenValidity {
     }
 }
 
-/// Boundaries of the token validity window that contains `now`.
+/// Boundaries of the token validity window containing `now`.
 ///
-/// Live tokens are minted with `exp = iat + token_exp_secs` at request time, so
-/// the server cannot know when an individual client last fetched. Grouping all
-/// issuances of the same window into a single validity bucket gives the revalidate
-/// logic a stable-but-rotating anchor: within a window a matching ETag proves the
-/// client's cached token is unexpired (`now < iat + token_exp_secs`), and once the
-/// window rolls over the ETag changes, so a stale client is served a freshly
-/// signed token instead of a body-less 304.
-pub(crate) fn token_window(now: i64, token_exp_secs: u64) -> (i64, i64) {
-    // Defensive: `as i64` would wrap negative past i64::MAX; clamp instead.
-    let exp = i64::try_from(token_exp_secs).unwrap_or(i64::MAX);
-    let start = if exp > 0 {
-        now.div_euclid(exp) * exp
-    } else {
-        now
-    };
-    (start, start.saturating_add(exp))
+/// Live tokens are minted with `exp = iat + exp_secs` at request time, so the
+/// server cannot know when an individual client last fetched. Anchoring the
+/// validator to a window of length `W = exp_secs - ttl_secs` makes it rotate
+/// every `W` seconds: within a window a matching ETag proves the client's cached
+/// token still has more than `ttl_secs` of validity left, and once the window
+/// rolls over the ETag changes so a stale client is served a freshly signed
+/// token instead of a body-less 304. The width is clamped to `>= 1` so the
+/// modulus stays meaningful for degenerate configs (`exp_secs == 0` or
+/// `ttl_secs >= exp_secs`) where the caller must never certify a 304.
+pub(crate) fn token_window(now: i64, validity: TokenValidity) -> (i64, i64) {
+    let exp = i64::try_from(validity.exp_secs).unwrap_or(i64::MAX);
+    let ttl = i64::try_from(validity.ttl_secs).unwrap_or(i64::MAX);
+    let width = exp.saturating_sub(ttl).max(1);
+    let start = now.div_euclid(width) * width;
+    (start, start.saturating_add(width))
 }
 
 pub(crate) fn evaluate_if_none_match(
@@ -97,12 +94,11 @@ pub(crate) fn evaluate_if_modified_since(
     }
 
     // A client holding the current version fetched it no earlier than
-    // `updated_at`, so its token stays valid until at least
-    // `updated_at + token_exp_secs`. Never answer 304 once that bound has been
-    // reached — doing so would strand the client with an expired token and no
-    // body — and require a little runway before it: at least `token_ttl_secs` of
-    // remaining validity so the relying party can actually use the cached token
-    // (and absorb a reasonable amount of clock skew) instead of refetching at once.
+    // `updated_at`, so its token stays valid until at least `updated_at +
+    // exp_secs`. Never answer 304 once that bound has been reached — that would
+    // strand the client with an expired token and no body — and require at least
+    // `ttl_secs` of remaining validity so the relying party can actually use the
+    // token (and absorb clock skew) instead of refetching at once.
     let exp_secs = i64::try_from(validity.exp_secs).unwrap_or(i64::MAX);
     let ttl_secs = i64::try_from(validity.ttl_secs).unwrap_or(i64::MAX);
     let guaranteed_valid_until = updated_at.saturating_add(exp_secs);
@@ -121,31 +117,26 @@ pub(crate) fn evaluate_conditional_request(
     if_none_match: Option<&str>,
     if_modified_since: Option<&str>,
     current_etag: &str,
-    window_end: i64,
     updated_at: i64,
     now: i64,
     validity: TokenValidity,
 ) -> ConditionalResponse {
     if if_none_match.is_some() {
-        // `current_etag` is keyed to the current token validity window (see
-        // etag::generate_etag). A match means the client fetched within this
-        // window, so in the worst case its token still has `window_end - now` of
-        // validity left. Require that to exceed `token_ttl_secs` so a 304 never
-        // certifies a token that is (or will imminently become) unusable under
-        // clock skew; otherwise serve a freshly signed token.
-        let matches =
-            evaluate_if_none_match(if_none_match, current_etag) == ConditionalResponse::NotModified;
-        let runway = window_end.saturating_sub(now);
-        let ttl_secs = i64::try_from(validity.ttl_secs).unwrap_or(i64::MAX);
-        if matches && runway > ttl_secs {
-            return ConditionalResponse::NotModified;
-        }
-        // ETag matched but the cached token has too little (or no) remaining
-        // validity to certify with a 304.
-        if matches {
+        // `current_etag` is keyed to the current `E - ttl` window, so a match
+        // alone already guarantees the cached token has enough remaining
+        // validity (the window rollover enforces the expiry boundary) — no extra
+        // runway check is needed. The one exception is a degenerate config where
+        // `ttl >= E`: no minted token is ever usable, so never certify a 304.
+        if validity.ttl_secs >= validity.exp_secs {
             return ConditionalResponse::ExpiredToken;
         }
-        return ConditionalResponse::Modified;
+        return if evaluate_if_none_match(if_none_match, current_etag)
+            == ConditionalResponse::NotModified
+        {
+            ConditionalResponse::NotModified
+        } else {
+            ConditionalResponse::Modified
+        };
     }
     evaluate_if_modified_since(if_modified_since, updated_at, now, validity)
 }
@@ -269,9 +260,25 @@ mod tests {
 
     #[test]
     fn test_token_window() {
-        assert_eq!(token_window(1_000_000, 900), (999_900, 1_000_800));
-        assert_eq!(token_window(1_000_900, 900), (1_000_800, 1_001_700));
-        assert_eq!(token_window(1_000_800, 900), (1_000_800, 1_001_700));
+        // Defaults E=900, ttl=300 -> window length W=600.
+        let v = TokenValidity::new(900, 300);
+        assert_eq!(token_window(1_000_000, v), (999_600, 1_000_200));
+        assert_eq!(token_window(1_000_600, v), (1_000_200, 1_000_800));
+        assert_eq!(token_window(1_000_200, v), (1_000_200, 1_000_800));
+    }
+
+    #[test]
+    fn test_token_window_degenerate_no_usable_runway() {
+        // ttl >= E leaves no usable lifetime; the window still rotates every
+        // second so the caller never certifies a 304.
+        assert_eq!(
+            token_window(1_000_000, TokenValidity::new(300, 300)),
+            (1_000_000, 1_000_001)
+        );
+        assert_eq!(
+            token_window(1_000_000, TokenValidity::new(0, 300)),
+            (1_000_000, 1_000_001)
+        );
     }
 
     #[test]
@@ -403,7 +410,6 @@ mod tests {
         let current_etag = r#"W/"abc123""#;
         let if_none_match = r#"W/"abc123""#;
         let updated_at = 1000000;
-        let window_end = updated_at + 900;
         let now = updated_at + 100;
         let if_modified_since = format_http_date(999999);
 
@@ -411,14 +417,12 @@ mod tests {
             Some(if_none_match),
             Some(&if_modified_since),
             current_etag,
-            window_end,
             updated_at,
             now,
             TokenValidity::new(900, 300),
         );
-        // If-None-Match takes precedence: a matching (window-keyed) ETag with
-        // enough runway means the cached token is still valid, regardless of how
-        // old the content is.
+        // If-None-Match takes precedence: a matching (window-keyed) ETag means
+        // the cached token is still valid, regardless of how old the content is.
         assert_eq!(result, ConditionalResponse::NotModified);
     }
 
@@ -427,14 +431,12 @@ mod tests {
         let current_etag = r#"W/"abc123""#;
         let if_none_match = r#"W/"different""#;
         let updated_at = 1000000;
-        let window_end = updated_at + 900;
         let now = updated_at + 100;
 
         let result = evaluate_conditional_request(
             Some(if_none_match),
             None,
             current_etag,
-            window_end,
             updated_at,
             now,
             TokenValidity::new(900, 300),
@@ -443,24 +445,20 @@ mod tests {
     }
 
     #[test]
-    fn test_evaluate_conditional_request_if_none_match_insufficient_runway_expired_token() {
-        // The ETag matches (same window) but so little validity remains
-        // (remaining = window_end - now <= token_ttl_secs) that a 304 would
-        // hand the relying party a token that is about to expire -> fresh 200.
+    fn test_evaluate_conditional_request_degenerate_ttl_ge_exp_never_304() {
+        // When ttl >= E no token is ever usable, so a matching ETag must still
+        // not certify a 304 -> ExpiredToken forces a fresh 200.
         let current_etag = r#"W/"abc123""#;
         let if_none_match = r#"W/"abc123""#;
         let updated_at = 1000000;
-        let window_end = updated_at + 900;
-        let now = updated_at + 700; // remaining 200 <= ttl 300
 
         let result = evaluate_conditional_request(
             Some(if_none_match),
             None,
             current_etag,
-            window_end,
             updated_at,
-            now,
-            TokenValidity::new(900, 300),
+            updated_at + 1,
+            TokenValidity::new(300, 300),
         );
         assert_eq!(result, ConditionalResponse::ExpiredToken);
     }
@@ -469,7 +467,6 @@ mod tests {
     fn test_evaluate_conditional_request_if_modified_since_fallback() {
         let current_etag = r#"W/"abc123""#;
         let updated_at = 999999;
-        let window_end = updated_at + 900;
         let now = 1000001;
         let if_modified_since = format_http_date(1000000);
 
@@ -477,7 +474,6 @@ mod tests {
             None,
             Some(&if_modified_since),
             current_etag,
-            window_end,
             updated_at,
             now,
             TokenValidity::new(900, 300),
@@ -489,14 +485,12 @@ mod tests {
     fn test_evaluate_conditional_request_if_modified_since_expired_fallback() {
         let current_etag = r#"W/"abc123""#;
         let updated_at = 1000000;
-        let window_end = updated_at + 900;
         let if_modified_since = format_http_date(1000000);
 
         let result = evaluate_conditional_request(
             None,
             Some(&if_modified_since),
             current_etag,
-            window_end,
             updated_at,
             updated_at + 901,
             TokenValidity::new(900, 300),
@@ -508,13 +502,11 @@ mod tests {
     fn test_evaluate_conditional_request_no_headers() {
         let current_etag = r#"W/"abc123""#;
         let updated_at = 1000000;
-        let window_end = updated_at + 900;
 
         let result = evaluate_conditional_request(
             None,
             None,
             current_etag,
-            window_end,
             updated_at,
             0,
             TokenValidity::new(900, 300),

@@ -1,16 +1,11 @@
 use crate::domain::models::status_list::{StatusListRecord, StatusListSnapshot};
 use sha2::{Digest, Sha256};
 
-/// Generate the weak ETag for the *live* status list representation.
-///
-/// The validator is keyed both to the record content **and** to the start of the
-/// current token validity window (`window_start`). Because live tokens are minted
-/// with `exp = now + token_exp_secs` at request time, the server cannot know when
-/// a particular client last fetched. Anchoring the ETag to the window makes the
-/// validator itself rotate every `token_exp_secs`, so a matching ETag implies the
-/// client's cached token was issued within the same window and is therefore still
-/// valid (`now < iat + token_exp_secs`). Once the window rolls over, the ETag
-/// changes and a stale client is served a freshly signed token instead of a 304.
+/// Weak ETag for the *live* representation, keyed to the record content and the
+/// current `E - ttl` token validity window. Rotating it with the window makes a
+/// matching ETag imply the cached token still has plenty of validity left; once
+/// the window rolls over the ETag changes and a stale client is served a fresh
+/// token instead of a body-less 304.
 pub(crate) fn generate_etag(record: &StatusListRecord, window_start: i64) -> String {
     let mut hasher = Sha256::new();
 
