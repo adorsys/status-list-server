@@ -1,14 +1,14 @@
-use std::fmt;
-use std::sync::Arc;
-
 use aws_lc_rs::rand::SystemRandom;
 use aws_lc_rs::signature::{
     ECDSA_P256_SHA256_FIXED_SIGNING, ECDSA_P384_SHA384_FIXED_SIGNING, EcdsaKeyPair, Ed25519KeyPair,
     KeyPair, RSA_PKCS1_SHA256, RsaKeyPair,
 };
 use der::{Decode, Encode};
-use serde::{Deserialize, Serialize};
+use std::fmt;
 use thiserror::Error;
+
+use crate::domain::models::token::{SigningAlgorithm, TokenSignerError};
+use crate::domain::ports::TokenSigner;
 
 // Standard Cryptographic OIDs
 const OID_ID_EC_PUBLIC_KEY: pkcs8::ObjectIdentifier =
@@ -19,69 +19,6 @@ const OID_SECP384R1: pkcs8::ObjectIdentifier = pkcs8::ObjectIdentifier::new_unwr
 const OID_ED25519: pkcs8::ObjectIdentifier = pkcs8::ObjectIdentifier::new_unwrap("1.3.101.112");
 const OID_RSA_ENCRYPTION: pkcs8::ObjectIdentifier =
     pkcs8::ObjectIdentifier::new_unwrap("1.2.840.113549.1.1.1");
-
-/// Algorithms supported for signing.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub enum SigningAlgorithm {
-    /// ECDSA using P-256 and SHA-256.
-    Es256,
-    /// ECDSA using P-384 and SHA-384.
-    Es384,
-    /// EdDSA using Curve25519.
-    EdDsa,
-    /// RSASSA-PKCS1-v1_5 using SHA-256.
-    Rs256,
-}
-
-impl SigningAlgorithm {
-    /// Return the standard JOSE algorithm name (e.g. "ES256", "RS256").
-    pub const fn jose_name(&self) -> &'static str {
-        match self {
-            Self::Es256 => "ES256",
-            Self::Es384 => "ES384",
-            Self::EdDsa => "EdDSA",
-            Self::Rs256 => "RS256",
-        }
-    }
-
-    /// Return the IANA COSE algorithm integer identifier.
-    pub const fn cose_id(&self) -> i64 {
-        match self {
-            Self::Es256 => -7,
-            Self::Es384 => -35,
-            Self::EdDsa => -8,
-            Self::Rs256 => -257,
-        }
-    }
-}
-
-impl fmt::Display for SigningAlgorithm {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.jose_name())
-    }
-}
-
-impl From<SigningAlgorithm> for jsonwebtoken::Algorithm {
-    fn from(alg: SigningAlgorithm) -> Self {
-        match alg {
-            SigningAlgorithm::Es256 => jsonwebtoken::Algorithm::ES256,
-            SigningAlgorithm::Es384 => jsonwebtoken::Algorithm::ES384,
-            SigningAlgorithm::EdDsa => jsonwebtoken::Algorithm::EdDSA,
-            SigningAlgorithm::Rs256 => jsonwebtoken::Algorithm::RS256,
-        }
-    }
-}
-
-impl From<SigningAlgorithm> for coset::iana::Algorithm {
-    fn from(alg: SigningAlgorithm) -> Self {
-        match alg {
-            SigningAlgorithm::Es256 => coset::iana::Algorithm::ES256,
-            SigningAlgorithm::Es384 => coset::iana::Algorithm::ES384,
-            SigningAlgorithm::EdDsa => coset::iana::Algorithm::EdDSA,
-            SigningAlgorithm::Rs256 => coset::iana::Algorithm::RS256,
-        }
-    }
-}
 
 /// Errors occurring during cryptographic key management and signing.
 #[derive(Debug, Error)]
@@ -114,18 +51,6 @@ pub enum Error {
     UnsupportedKeygen(String),
 }
 
-/// Decoupled signing trait isolating consumers from low-level cryptographic backends.
-pub trait TokenSigner: Send + Sync {
-    /// Return the algorithm associated with this signer.
-    fn algorithm(&self) -> SigningAlgorithm;
-
-    /// Sign arbitrary payload bytes returning raw signature bytes.
-    fn sign(&self, data: &[u8]) -> Result<Vec<u8>, Error>;
-
-    /// Return raw public key bytes for X.509 certificate validation.
-    fn public_key_bytes(&self) -> &[u8];
-}
-
 /// Unified signing key supporting ECDSA (P-256, P-384), Ed25519, and RSA (RS256).
 pub struct SigningKey {
     algorithm: SigningAlgorithm,
@@ -135,7 +60,6 @@ pub struct SigningKey {
 
 struct SigningKeyInner {
     pair: KeyPairInner,
-    encoding_key: jsonwebtoken::EncodingKey,
     rng: SystemRandom,
 }
 
@@ -210,40 +134,32 @@ impl SigningKey {
         let algorithm = detect_pkcs8_algorithm(&pki)?;
         let rng = SystemRandom::new();
 
-        let (pair, encoding_key, public_key) = match algorithm {
+        let (pair, public_key) = match algorithm {
             SigningAlgorithm::Es256 => {
                 let kp = EcdsaKeyPair::from_pkcs8(&ECDSA_P256_SHA256_FIXED_SIGNING, der)?;
-                let enc_key = jsonwebtoken::EncodingKey::from_ec_der(der);
                 let pub_bytes = kp.public_key().as_ref().to_owned();
-                (KeyPairInner::Ecdsa(kp), enc_key, pub_bytes.into())
+                (KeyPairInner::Ecdsa(kp), pub_bytes.into())
             }
             SigningAlgorithm::Es384 => {
                 let kp = EcdsaKeyPair::from_pkcs8(&ECDSA_P384_SHA384_FIXED_SIGNING, der)?;
-                let enc_key = jsonwebtoken::EncodingKey::from_ec_der(der);
                 let pub_bytes = kp.public_key().as_ref().to_owned();
-                (KeyPairInner::Ecdsa(kp), enc_key, pub_bytes.into())
+                (KeyPairInner::Ecdsa(kp), pub_bytes.into())
             }
             SigningAlgorithm::EdDsa => {
                 let kp = Ed25519KeyPair::from_pkcs8(der)?;
-                let enc_key = jsonwebtoken::EncodingKey::from_ed_der(der);
                 let pub_bytes = kp.public_key().as_ref().to_owned();
-                (KeyPairInner::Ed25519(kp), enc_key, pub_bytes.into())
+                (KeyPairInner::Ed25519(kp), pub_bytes.into())
             }
             SigningAlgorithm::Rs256 => {
                 let kp = RsaKeyPair::from_pkcs8(der)?;
-                let enc_key = jsonwebtoken::EncodingKey::from_rsa_der(pki.private_key.as_bytes());
                 let pub_bytes = kp.public_key().as_ref().to_owned();
-                (KeyPairInner::Rsa(kp), enc_key, pub_bytes.into())
+                (KeyPairInner::Rsa(kp), pub_bytes.into())
             }
         };
 
         Ok(Self {
             algorithm,
-            inner: SigningKeyInner {
-                pair,
-                encoding_key,
-                rng,
-            },
+            inner: SigningKeyInner { pair, rng },
             public_key,
         })
     }
@@ -294,43 +210,18 @@ impl SigningKey {
     }
 }
 
-impl From<SigningKey> for jsonwebtoken::EncodingKey {
-    fn from(key: SigningKey) -> Self {
-        key.inner.encoding_key
-    }
-}
-
-impl AsRef<jsonwebtoken::EncodingKey> for SigningKey {
-    fn as_ref(&self) -> &jsonwebtoken::EncodingKey {
-        &self.inner.encoding_key
-    }
-}
-
 impl TokenSigner for SigningKey {
     fn algorithm(&self) -> SigningAlgorithm {
         self.algorithm()
     }
 
-    fn sign(&self, data: &[u8]) -> Result<Vec<u8>, Error> {
+    fn sign(&self, data: &[u8]) -> Result<Vec<u8>, TokenSignerError> {
         self.sign(data)
+            .map_err(|err| TokenSignerError::new(err.to_string()))
     }
 
     fn public_key_bytes(&self) -> &[u8] {
         self.public_key_bytes()
-    }
-}
-
-impl<T: TokenSigner + ?Sized> TokenSigner for Arc<T> {
-    fn algorithm(&self) -> SigningAlgorithm {
-        (**self).algorithm()
-    }
-
-    fn sign(&self, data: &[u8]) -> Result<Vec<u8>, Error> {
-        (**self).sign(data)
-    }
-
-    fn public_key_bytes(&self) -> &[u8] {
-        (**self).public_key_bytes()
     }
 }
 
@@ -399,19 +290,9 @@ mod tests {
         ECDSA_P256_SHA256_FIXED, ECDSA_P384_SHA384_FIXED, ED25519, RSA_PKCS1_2048_8192_SHA256,
         UnparsedPublicKey,
     };
-    use jsonwebtoken::{DecodingKey, Header, Validation, decode, encode};
-    use serde::{Deserialize, Serialize};
-
-    #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
-    struct TestClaims {
-        sub: String,
-        exp: i64,
-    }
 
     #[test]
-    fn test_algorithm_conversions() {
-        use coset::iana::EnumI64 as _;
-
+    fn test_algorithm_identifiers() {
         for (alg, jose, cose_id) in [
             (SigningAlgorithm::Es256, "ES256", -7),
             (SigningAlgorithm::Es384, "ES384", -35),
@@ -420,159 +301,106 @@ mod tests {
         ] {
             assert_eq!(alg.jose_name(), jose);
             assert_eq!(alg.cose_id(), cose_id);
-            let jw_alg: jsonwebtoken::Algorithm = alg.into();
-            let cose_alg: coset::iana::Algorithm = alg.into();
-            assert_eq!(format!("{jw_alg:?}"), jose);
-            assert_eq!(cose_alg.to_i64(), cose_id);
         }
     }
 
     #[test]
-    fn test_es256_jwt_and_raw_signing() {
-        let key = SigningKey::generate(SigningAlgorithm::Es256).unwrap();
+    fn signs_and_verifies_every_supported_algorithm() {
+        let keys = [
+            SigningKey::generate(SigningAlgorithm::Es256).unwrap(),
+            SigningKey::generate(SigningAlgorithm::Es384).unwrap(),
+            SigningKey::generate(SigningAlgorithm::EdDsa).unwrap(),
+            SigningKey::from_pem(include_str!("../../test_data/gcloud_test_key.dummy.pem"))
+                .unwrap(),
+        ];
+
+        for key in &keys {
+            let message = b"status-list-token-signing-input";
+            let signature = key.sign(message).unwrap();
+            match key.algorithm() {
+                SigningAlgorithm::Es256 => {
+                    assert_eq!(signature.len(), 64);
+                    UnparsedPublicKey::new(&ECDSA_P256_SHA256_FIXED, key.public_key_bytes())
+                        .verify(message, &signature)
+                        .expect("ES256 signature verifies");
+                }
+                SigningAlgorithm::Es384 => {
+                    assert_eq!(signature.len(), 96);
+                    UnparsedPublicKey::new(&ECDSA_P384_SHA384_FIXED, key.public_key_bytes())
+                        .verify(message, &signature)
+                        .expect("ES384 signature verifies");
+                }
+                SigningAlgorithm::EdDsa => {
+                    assert_eq!(signature.len(), 64);
+                    UnparsedPublicKey::new(&ED25519, key.public_key_bytes())
+                        .verify(message, &signature)
+                        .expect("Ed25519 signature verifies");
+                }
+                SigningAlgorithm::Rs256 => {
+                    assert_eq!(signature.len(), 256);
+                    UnparsedPublicKey::new(&RSA_PKCS1_2048_8192_SHA256, key.public_key_bytes())
+                        .verify(message, &signature)
+                        .expect("RS256 signature verifies");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn pkcs8_pem_roundtrips_every_supported_algorithm() {
+        let keys = [
+            SigningKey::generate(SigningAlgorithm::Es256).unwrap(),
+            SigningKey::generate(SigningAlgorithm::Es384).unwrap(),
+            SigningKey::generate(SigningAlgorithm::EdDsa).unwrap(),
+            SigningKey::from_pem(include_str!("../../test_data/gcloud_test_key.dummy.pem"))
+                .unwrap(),
+        ];
+
+        for key in keys {
+            let pem = key.to_pkcs8_pem().unwrap();
+            assert!(pem.starts_with("-----BEGIN PRIVATE KEY-----"));
+            let loaded = SigningKey::from_pem(&pem).unwrap();
+            assert_eq!(loaded.algorithm(), key.algorithm());
+            assert_eq!(loaded.public_key_bytes(), key.public_key_bytes());
+        }
+    }
+
+    #[test]
+    fn accepts_sec1_ec_private_key_pem() {
+        let pkcs8 = pem::parse(include_str!("../../test_data/ec-private.pem")).unwrap();
+        let pki = pkcs8::PrivateKeyInfoRef::from_der(pkcs8.contents()).unwrap();
+        let parsed_sec1 = sec1::EcPrivateKey::from_der(pki.private_key.as_bytes()).unwrap();
+        let sec1_with_curve = sec1::EcPrivateKey {
+            private_key: parsed_sec1.private_key,
+            parameters: Some(sec1::EcParameters::NamedCurve(OID_SECP256R1)),
+            public_key: parsed_sec1.public_key,
+        }
+        .to_der()
+        .unwrap();
+        let sec1 = pem::encode(&pem::Pem::new("EC PRIVATE KEY", sec1_with_curve));
+
+        let key = SigningKey::from_pem(&sec1).unwrap();
         assert_eq!(key.algorithm(), SigningAlgorithm::Es256);
-
-        // JWT sign & verify using AsRef<EncodingKey>
-        let header = Header::new(key.algorithm().into());
-        let claims = TestClaims {
-            sub: "test-subject".into(),
-            exp: time::UtcDateTime::now().unix_timestamp() + 3600,
-        };
-        let token = encode(&header, &claims, key.as_ref()).unwrap();
-
-        let decoding_key = DecodingKey::from_ec_der(key.public_key_bytes());
-        let decoded = decode::<TestClaims>(
-            &token,
-            &decoding_key,
-            &Validation::new(key.algorithm().into()),
-        )
-        .unwrap();
-        assert_eq!(decoded.claims, claims);
-
-        // Raw sign & verify
-        let msg = b"status-list-cwt-payload";
-        let sig = key.sign(msg).unwrap();
-        assert_eq!(sig.len(), 64); // IEEE P1363 (R || S)
-
-        let peer_pub = UnparsedPublicKey::new(&ECDSA_P256_SHA256_FIXED, key.public_key_bytes());
-        peer_pub
-            .verify(msg, &sig)
-            .expect("raw signature verification failed");
-
-        // Test From<SigningKey> consumes key
-        let enc_key_owned: jsonwebtoken::EncodingKey = key.into();
-        let token2 = encode(&header, &claims, &enc_key_owned).unwrap();
-        assert!(!token2.is_empty());
     }
 
     #[test]
-    fn test_es384_jwt_and_raw_signing() {
-        let key = SigningKey::generate(SigningAlgorithm::Es384).unwrap();
-        assert_eq!(key.algorithm(), SigningAlgorithm::Es384);
+    fn accepts_pkcs1_rsa_private_key_pem() {
+        let pkcs8 = pem::parse(include_str!("../../test_data/gcloud_test_key.dummy.pem")).unwrap();
+        let pki = pkcs8::PrivateKeyInfoRef::from_der(pkcs8.contents()).unwrap();
+        let pkcs1 = pem::encode(&pem::Pem::new(
+            "RSA PRIVATE KEY",
+            pki.private_key.as_bytes(),
+        ));
 
-        // JWT sign & verify using AsRef<EncodingKey>
-        let header = Header::new(key.algorithm().into());
-        let claims = TestClaims {
-            sub: "test-es384".into(),
-            exp: 9999999999,
-        };
-        let token = encode(&header, &claims, key.as_ref()).unwrap();
-
-        let decoding_key = DecodingKey::from_ec_der(key.public_key_bytes());
-        let decoded = decode::<TestClaims>(
-            &token,
-            &decoding_key,
-            &Validation::new(key.algorithm().into()),
-        )
-        .unwrap();
-        assert_eq!(decoded.claims, claims);
-
-        // Raw sign & verify
-        let msg = b"status-list-cwt-payload-384";
-        let sig = key.sign(msg).unwrap();
-        assert_eq!(sig.len(), 96); // IEEE P1363 (R || S)
-
-        let peer_pub = UnparsedPublicKey::new(&ECDSA_P384_SHA384_FIXED, key.public_key_bytes());
-        peer_pub
-            .verify(msg, &sig)
-            .expect("raw signature verification failed");
-    }
-
-    #[test]
-    fn test_eddsa_jwt_and_raw_signing() {
-        let key = SigningKey::generate(SigningAlgorithm::EdDsa).unwrap();
-        assert_eq!(key.algorithm(), SigningAlgorithm::EdDsa);
-
-        // JWT sign & verify using AsRef<EncodingKey>
-        let header = Header::new(key.algorithm().into());
-        let claims = TestClaims {
-            sub: "test-eddsa".into(),
-            exp: 9999999999,
-        };
-        let token = encode(&header, &claims, key.as_ref()).unwrap();
-
-        let decoding_key = DecodingKey::from_ed_der(key.public_key_bytes());
-        let decoded = decode::<TestClaims>(
-            &token,
-            &decoding_key,
-            &Validation::new(key.algorithm().into()),
-        )
-        .unwrap();
-        assert_eq!(decoded.claims, claims);
-
-        // Raw sign & verify
-        let msg = b"status-list-cwt-payload-ed25519";
-        let sig = key.sign(msg).unwrap();
-        assert_eq!(sig.len(), 64);
-
-        let peer_pub = UnparsedPublicKey::new(&ED25519, key.public_key_bytes());
-        peer_pub
-            .verify(msg, &sig)
-            .expect("raw signature verification failed");
-    }
-
-    #[test]
-    fn test_rs256_jwt_and_raw_signing() {
-        let pem_str = include_str!("../../test_data/gcloud_test_key.dummy.pem");
-        let key = SigningKey::from_pem(pem_str).unwrap();
+        let key = SigningKey::from_pem(&pkcs1).unwrap();
         assert_eq!(key.algorithm(), SigningAlgorithm::Rs256);
-
-        // JWT sign & verify using AsRef<EncodingKey>
-        let header = Header::new(key.algorithm().into());
-        let claims = TestClaims {
-            sub: "test-rs256".into(),
-            exp: 9999999999,
-        };
-        let token = encode(&header, &claims, key.as_ref()).unwrap();
-
-        let decoding_key = DecodingKey::from_rsa_der(key.public_key_bytes());
-        let decoded = decode::<TestClaims>(
-            &token,
-            &decoding_key,
-            &Validation::new(key.algorithm().into()),
-        )
-        .unwrap();
-        assert_eq!(decoded.claims, claims);
-
-        // Raw sign & verify
-        let msg = b"status-list-cwt-payload-rsa";
-        let sig = key.sign(msg).unwrap();
-        assert_eq!(sig.len(), 256); // 2048 bits = 256 bytes
-
-        let peer_pub = UnparsedPublicKey::new(&RSA_PKCS1_2048_8192_SHA256, key.public_key_bytes());
-        peer_pub
-            .verify(msg, &sig)
-            .expect("raw signature verification failed");
     }
 
     #[test]
-    fn test_pem_roundtrip() {
-        let key = SigningKey::generate(SigningAlgorithm::Es256).unwrap();
-        let pem_str = key.to_pkcs8_pem().unwrap();
-        assert!(pem_str.starts_with("-----BEGIN PRIVATE KEY-----"));
-
-        let loaded = SigningKey::from_pem(&pem_str).unwrap();
-        assert_eq!(loaded.algorithm(), SigningAlgorithm::Es256);
-        assert_eq!(loaded.public_key_bytes().len(), 65);
+    fn rejects_automatic_rs256_key_generation() {
+        assert!(matches!(
+            SigningKey::generate(SigningAlgorithm::Rs256),
+            Err(Error::UnsupportedKeygen(algorithm)) if algorithm == "RS256"
+        ));
     }
 }

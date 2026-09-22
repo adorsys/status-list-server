@@ -1,10 +1,10 @@
 //! Outbound secondary ports defining contracts.
 
-use std::sync::Arc;
+use std::{fmt, sync::Arc};
 
-use crate::crypto::SigningKey;
 use crate::domain::models::credential::{Credential, CredentialError};
 use crate::domain::models::status_list::{StatusListError, StatusListRecord, StatusListSnapshot};
+use crate::domain::models::token::{SigningAlgorithm, TokenSignerError};
 use async_trait::async_trait;
 
 /// Interface for managing active status list records.
@@ -83,44 +83,45 @@ pub trait StatusListSnapshotRepo: Send + Sync + 'static {
 }
 
 /// Certificate chain and signing key captured from one provider snapshot.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct SigningMaterial {
     /// Base64 DER-encoded x509 certificate chain parts for JWT `x5c` and CWT
     /// `x5chain`.
     pub certificate_chain: Option<Vec<String>>,
-    /// PEM-encoded signing key (supports PKCS#8, SEC1, or PKCS#1 format).
-    pub signing_key_pem: String,
-    /// Pre-parsed, thread-safe signing key instance.
-    pub signing_key: Arc<SigningKey>,
+    /// Pre-parsed signer. The material deliberately does not retain private
+    /// key encoding after a provider has validated and constructed it.
+    pub signing_key: Arc<dyn TokenSigner>,
 }
 
 impl SigningMaterial {
-    /// Construct signing material by parsing the PEM key into a cached `SigningKey`.
-    pub fn new(
-        certificate_chain: Option<Vec<String>>,
-        signing_key_pem: String,
-    ) -> Result<Self, crate::utils::crypto::Error> {
-        let signing_key = SigningKey::from_pem(&signing_key_pem)?;
-        Ok(Self {
-            certificate_chain,
-            signing_key_pem,
-            signing_key: Arc::new(signing_key),
-        })
-    }
-
-    /// Construct signing material with an already-instantiated `SigningKey`.
-    pub fn with_signing_key(
-        certificate_chain: Option<Vec<String>>,
-        signing_key_pem: String,
-        signing_key: Arc<SigningKey>,
-    ) -> Self {
+    /// Construct material from a validated, pre-parsed signer.
+    pub fn new(certificate_chain: Option<Vec<String>>, signing_key: Arc<dyn TokenSigner>) -> Self {
         Self {
             certificate_chain,
-            signing_key_pem,
             signing_key,
         }
     }
 }
+
+impl fmt::Debug for SigningMaterial {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SigningMaterial")
+            .field("certificate_chain", &self.certificate_chain)
+            .field("signing_algorithm", &self.signing_key.algorithm())
+            .field("public_key_len", &self.signing_key.public_key_bytes().len())
+            .finish()
+    }
+}
+
+impl PartialEq for SigningMaterial {
+    fn eq(&self, other: &Self) -> bool {
+        self.certificate_chain == other.certificate_chain
+            && self.signing_key.algorithm() == other.signing_key.algorithm()
+            && self.signing_key.public_key_bytes() == other.signing_key.public_key_bytes()
+    }
+}
+
+impl Eq for SigningMaterial {}
 
 /// Provider interface for certificate chains and signing keys used for VC/token signatures.
 #[async_trait]
@@ -128,4 +129,20 @@ pub trait CertificateProvider: Send + Sync + 'static {
     /// Retrieve the current certificate chain and signing key from one
     /// internally consistent snapshot.
     async fn signing_material(&self) -> Result<SigningMaterial, StatusListError>;
+}
+
+/// Cryptographic port used by token encoders.
+///
+/// `sign` receives exactly the bytes defined by the caller's token format and
+/// returns the raw signature bytes for the selected algorithm: fixed-width
+/// IEEE P1363 for ECDSA, 64-byte Ed25519, and PKCS#1 v1.5 for RS256.
+pub trait TokenSigner: Send + Sync {
+    /// Return the algorithm associated with this signer.
+    fn algorithm(&self) -> SigningAlgorithm;
+
+    /// Sign the supplied token-format signing input.
+    fn sign(&self, data: &[u8]) -> Result<Vec<u8>, TokenSignerError>;
+
+    /// Return raw public-key bytes for X.509 certificate validation.
+    fn public_key_bytes(&self) -> &[u8];
 }

@@ -264,9 +264,8 @@ mod tests {
                 crate::utils::crypto::SigningAlgorithm::Es256,
             )
             .map_err(|e| StatusListError::Backend(Box::new(e)))?;
-            Ok(crate::domain::ports::SigningMaterial::with_signing_key(
+            Ok(crate::domain::ports::SigningMaterial::new(
                 None,
-                "".into(),
                 std::sync::Arc::new(key),
             ))
         }

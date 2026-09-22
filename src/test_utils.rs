@@ -113,11 +113,14 @@ impl crate::domain::ports::CertificateProvider for TestCertProvider {
         crate::domain::ports::SigningMaterial,
         crate::domain::models::status_list::StatusListError,
     > {
-        crate::domain::ports::SigningMaterial::new(
+        let signing_key =
+            crate::utils::crypto::SigningKey::from_pem(&self.key_pem).map_err(|err| {
+                crate::domain::models::status_list::StatusListError::Backend(Box::new(err))
+            })?;
+        Ok(crate::domain::ports::SigningMaterial::new(
             Some(self.cert_chain.clone()),
-            self.key_pem.clone(),
-        )
-        .map_err(|e| crate::domain::models::status_list::StatusListError::Backend(Box::new(e)))
+            Arc::new(signing_key),
+        ))
     }
 }
 

@@ -201,6 +201,7 @@ tikv-jemallocator = "0.7"
 [[bin]]
 name = "status-list-server"
 path = "src/main.rs"
+required-features = ["memory"]
 
 [profile.dev.package.backtrace]
 opt-level = 3

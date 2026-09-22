@@ -94,9 +94,8 @@ impl InlineCertificateProvider {
         let signing_key = validate_signing_material(&cert_pem, &signing_key_pem)?;
         let certificate_chain = pem_chain_to_base64_der(&cert_pem)?;
         Ok(Self {
-            material: Arc::new(SigningMaterial::with_signing_key(
+            material: Arc::new(SigningMaterial::new(
                 Some(certificate_chain),
-                signing_key_pem,
                 Arc::new(signing_key),
             )),
         })
@@ -124,9 +123,8 @@ async fn load_and_validate_signing_material(
         .map_err(|err| StatusListError::Backend(Box::new(err)))?;
     let signing_key = validate_signing_material(&cert_pem, &signing_key_pem)?;
     let certificate_chain = pem_chain_to_base64_der(&cert_pem)?;
-    Ok(SigningMaterial::with_signing_key(
+    Ok(SigningMaterial::new(
         Some(certificate_chain),
-        signing_key_pem,
         Arc::new(signing_key),
     ))
 }
@@ -235,6 +233,29 @@ mod tests {
     }
 
     #[test]
+    fn validates_matching_ed25519_certificate_and_key() {
+        let key = rcgen::KeyPair::generate_for(&rcgen::PKCS_ED25519)
+            .expect("generate Ed25519 signing key");
+        let params = rcgen::CertificateParams::new(vec!["localhost".to_string()])
+            .expect("certificate parameters");
+        let cert = params
+            .self_signed(&key)
+            .expect("self-sign certificate")
+            .pem();
+        validate_signing_material(&cert, &key.serialize_pem())
+            .expect("matching Ed25519 cert/key should validate");
+    }
+
+    #[test]
+    fn validates_matching_rsa_certificate_and_key() {
+        validate_signing_material(
+            include_str!("../../test_data/gcloud_test_cert.dummy.pem"),
+            include_str!("../../test_data/gcloud_test_key.dummy.pem"),
+        )
+        .expect("matching RSA cert/key should validate");
+    }
+
+    #[test]
     fn rejects_mismatched_certificate_and_key() {
         let err = validate_signing_material(
             include_str!("../../test_data/certs/emulator.crt"),
@@ -262,11 +283,13 @@ mod tests {
         )
         .await
         .expect("provider");
-        let original = provider
+        let original_public_key = provider
             .signing_material()
             .await
             .expect("original material")
-            .signing_key_pem;
+            .signing_key
+            .public_key_bytes()
+            .to_vec();
 
         tokio::fs::write(&key_path, "not a private key")
             .await
@@ -285,8 +308,9 @@ mod tests {
                 .signing_material()
                 .await
                 .expect("retained material")
-                .signing_key_pem,
-            original
+                .signing_key
+                .public_key_bytes(),
+            original_public_key
         );
     }
 
@@ -327,7 +351,11 @@ mod tests {
             .expect("reload");
 
         let material = provider.signing_material().await.expect("material");
-        assert_eq!(material.signing_key_pem, second_key);
+        let expected_key = SigningKey::from_pem(&second_key).expect("second signing key");
+        assert_eq!(
+            material.signing_key.public_key_bytes(),
+            expected_key.public_key_bytes()
+        );
         assert_eq!(
             material.certificate_chain,
             Some(pem_chain_to_base64_der(&second_cert).expect("chain"))

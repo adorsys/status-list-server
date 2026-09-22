@@ -490,11 +490,11 @@ impl CertManager {
 
         let signing_key_pem = self.signing_key_pem().await?;
         let certificate_chain = self.cert_chain_parts().await?;
+        let signing_key = SigningKey::from_pem(&signing_key_pem).map_err(CertError::KeyOp)?;
         let material = SigningMaterial::new(
             certificate_chain.map(|c| c.as_ref().to_vec()),
-            signing_key_pem,
-        )
-        .map_err(CertError::KeyOp)?;
+            Arc::new(signing_key),
+        );
         self.active_signing_material
             .store(Some(Arc::new(material.clone())));
         Ok(material)
@@ -785,9 +785,8 @@ impl CertManager {
         signing_key_pem: &str,
     ) -> Result<(), CertError> {
         let certs = self.parse_cert_chain_parts(cert_pem)?;
-        let material =
-            SigningMaterial::new(Some(certs.as_ref().to_vec()), signing_key_pem.to_string())
-                .map_err(CertError::KeyOp)?;
+        let signing_key = SigningKey::from_pem(signing_key_pem).map_err(CertError::KeyOp)?;
+        let material = SigningMaterial::new(Some(certs.as_ref().to_vec()), Arc::new(signing_key));
         self.active_signing_material.store(Some(Arc::new(material)));
         Ok(())
     }

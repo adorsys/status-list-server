@@ -7,13 +7,13 @@ use coset::{
     iana::{Algorithm, EnumI64, HeaderParameter},
 };
 use flate2::{Compression, write::GzEncoder};
-use jsonwebtoken::Header;
 use opentelemetry::{KeyValue, global, metrics::Counter};
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 
 use crate::domain::models::status_list::{StatusListError, StatusListRecord};
-use crate::utils::crypto::{SigningKey, TokenSigner};
+use crate::domain::models::token::SigningAlgorithm;
+use crate::domain::ports::TokenSigner;
 
 use super::constants::{
     ACCEPT_STATUS_LISTS_HEADER_CWT, ACCEPT_STATUS_LISTS_HEADER_JWT, CWT_TYPE, EXP, GZIP_HEADER,
@@ -74,6 +74,13 @@ pub(crate) struct StatusListToken {
     pub status_list: StatusListClaims,
     pub sub: String,
     pub ttl: Option<i64>,
+}
+
+#[derive(Serialize)]
+struct JwtHeader<'a> {
+    alg: &'static str,
+    typ: &'static str,
+    x5c: &'a [String],
 }
 
 /// Build a signed status-list token (JWT or CWT) for the given record.
@@ -151,7 +158,7 @@ async fn build_status_list_token_inner(
             )?,
             _ => issue_jwt(
                 &status_record,
-                &signing_key,
+                &*signing_key,
                 &certs_parts,
                 &aggregation_uri,
                 validity_window.0,
@@ -180,7 +187,7 @@ async fn build_status_list_token_inner(
 
 fn issue_cwt(
     status_record: &StatusListRecord,
-    signer: &impl TokenSigner,
+    signer: &(impl TokenSigner + ?Sized),
     cert_chain: &[String],
     aggregation_uri: &Option<String>,
     iat: i64,
@@ -231,7 +238,7 @@ fn issue_cwt(
         .to_vec()
         .map_err(|err| StatusListError::Backend(Box::new(err)))?;
 
-    let cose_alg: Algorithm = signer.algorithm().into();
+    let cose_alg = cose_algorithm(signer.algorithm());
     let x5chain_value = build_x5chain(cert_chain)?;
     let protected = HeaderBuilder::new()
         .algorithm(cose_alg)
@@ -242,22 +249,12 @@ fn issue_cwt(
         )
         .build();
 
-    let mut sign_err = None;
     let sign1 = CoseSign1Builder::new()
         .protected(protected)
         .payload(payload)
-        .create_signature(&[], |tbs| match signer.sign(tbs) {
-            Ok(sig) => sig,
-            Err(err) => {
-                sign_err = Some(err);
-                Vec::new()
-            }
-        })
+        .try_create_signature(&[], |tbs| signer.sign(tbs))
+        .map_err(|err| StatusListError::Backend(Box::new(err)))?
         .build();
-
-    if let Some(err) = sign_err {
-        return Err(StatusListError::Backend(Box::new(err)));
-    }
 
     let cwt_bytes = sign1
         .to_tagged_vec()
@@ -287,7 +284,7 @@ fn build_x5chain(cert_chain: &[String]) -> Result<CborValue, StatusListError> {
 
 fn issue_jwt(
     status_record: &StatusListRecord,
-    signer: &SigningKey,
+    signer: &(impl TokenSigner + ?Sized),
     cert_chain: &[String],
     aggregation_uri: &Option<String>,
     iat: i64,
@@ -307,22 +304,48 @@ fn issue_jwt(
         sub: status_record.sub.to_owned(),
         ttl: Some(ttl),
     };
-    let jwt_alg: jsonwebtoken::Algorithm = signer.algorithm().into();
-    let mut header = Header::new(jwt_alg);
-    header.typ = Some(STATUS_LISTS_HEADER_JWT.into());
-    header.x5c = Some(cert_chain.to_vec());
+    let header = JwtHeader {
+        alg: signer.algorithm().jose_name(),
+        typ: STATUS_LISTS_HEADER_JWT,
+        x5c: cert_chain,
+    };
+    let header =
+        serde_json::to_vec(&header).map_err(|err| StatusListError::Backend(Box::new(err)))?;
+    let payload =
+        serde_json::to_vec(&claims).map_err(|err| StatusListError::Backend(Box::new(err)))?;
 
-    let token = jsonwebtoken::encode(&header, &claims, signer.as_ref())
+    let mut token = base64url::encode(header);
+    token.push('.');
+    token.push_str(&base64url::encode(payload));
+
+    let signature = signer
+        .sign(token.as_bytes())
         .map_err(|err| StatusListError::Backend(Box::new(err)))?;
+    token.push('.');
+    token.push_str(&base64url::encode(signature));
     Ok(token)
+}
+
+fn cose_algorithm(algorithm: SigningAlgorithm) -> Algorithm {
+    match algorithm {
+        SigningAlgorithm::Es256 => Algorithm::ES256,
+        SigningAlgorithm::Es384 => Algorithm::ES384,
+        SigningAlgorithm::EdDsa => Algorithm::EdDSA,
+        SigningAlgorithm::Rs256 => Algorithm::RS256,
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::domain::models::status_list::StatusList;
-    use crate::utils::crypto::{SigningAlgorithm, SigningKey};
+    use crate::utils::crypto::SigningKey;
+    use aws_lc_rs::signature::{
+        ECDSA_P256_SHA256_FIXED, ECDSA_P384_SHA384_FIXED, ED25519, RSA_PKCS1_2048_8192_SHA256,
+        UnparsedPublicKey,
+    };
     use coset::TaggedCborSerializable;
+    use jsonwebtoken::{DecodingKey, Validation, decode};
 
     use base64::prelude::Engine as _;
 
@@ -336,6 +359,49 @@ mod tests {
                 lst: base64url::encode(b"\x00\x01\x02\x03"),
             },
             updated_at: 1000,
+        }
+    }
+
+    fn jwt_algorithm(algorithm: SigningAlgorithm) -> jsonwebtoken::Algorithm {
+        match algorithm {
+            SigningAlgorithm::Es256 => jsonwebtoken::Algorithm::ES256,
+            SigningAlgorithm::Es384 => jsonwebtoken::Algorithm::ES384,
+            SigningAlgorithm::EdDsa => jsonwebtoken::Algorithm::EdDSA,
+            SigningAlgorithm::Rs256 => jsonwebtoken::Algorithm::RS256,
+        }
+    }
+
+    fn jwt_decoding_key(key: &SigningKey) -> DecodingKey {
+        match key.algorithm() {
+            SigningAlgorithm::Es256 | SigningAlgorithm::Es384 => {
+                DecodingKey::from_ec_der(key.public_key_bytes())
+            }
+            SigningAlgorithm::EdDsa => DecodingKey::from_ed_der(key.public_key_bytes()),
+            SigningAlgorithm::Rs256 => DecodingKey::from_rsa_der(key.public_key_bytes()),
+        }
+    }
+
+    fn verify_cwt_signature(
+        key: &SigningKey,
+        signature: &[u8],
+        tbs: &[u8],
+    ) -> Result<(), aws_lc_rs::error::Unspecified> {
+        match key.algorithm() {
+            SigningAlgorithm::Es256 => {
+                UnparsedPublicKey::new(&ECDSA_P256_SHA256_FIXED, key.public_key_bytes())
+                    .verify(tbs, signature)
+            }
+            SigningAlgorithm::Es384 => {
+                UnparsedPublicKey::new(&ECDSA_P384_SHA384_FIXED, key.public_key_bytes())
+                    .verify(tbs, signature)
+            }
+            SigningAlgorithm::EdDsa => {
+                UnparsedPublicKey::new(&ED25519, key.public_key_bytes()).verify(tbs, signature)
+            }
+            SigningAlgorithm::Rs256 => {
+                UnparsedPublicKey::new(&RSA_PKCS1_2048_8192_SHA256, key.public_key_bytes())
+                    .verify(tbs, signature)
+            }
         }
     }
 
@@ -356,9 +422,14 @@ mod tests {
         for key in &test_keys {
             let token = issue_jwt(&record, key, &cert_chain, &None, 1000, 2000, 300).unwrap();
             let header = jsonwebtoken::decode_header(&token).unwrap();
-            let expected_alg: jsonwebtoken::Algorithm = key.algorithm().into();
-            assert_eq!(header.alg, expected_alg);
+            assert_eq!(header.alg, jwt_algorithm(key.algorithm()));
             assert_eq!(header.typ.as_deref(), Some(STATUS_LISTS_HEADER_JWT));
+
+            let mut validation = Validation::new(jwt_algorithm(key.algorithm()));
+            validation.validate_exp = false;
+            let decoded = decode::<StatusListToken>(&token, &jwt_decoding_key(key), &validation)
+                .expect("JWT signature verifies with its public key");
+            assert_eq!(decoded.claims.sub, record.sub);
         }
     }
 
@@ -379,11 +450,16 @@ mod tests {
         for key in &test_keys {
             let cwt_bytes = issue_cwt(&record, key, &cert_chain, &None, 1000, 2000, 300).unwrap();
             let sign1 = coset::CoseSign1::from_tagged_slice(&cwt_bytes).unwrap();
-            let expected_alg: Algorithm = key.algorithm().into();
+            let expected_alg = cose_algorithm(key.algorithm());
             assert_eq!(
                 sign1.protected.header.alg,
                 Some(coset::RegisteredLabelWithPrivate::Assigned(expected_alg))
             );
+            sign1
+                .verify_signature(&[], |signature, tbs| {
+                    verify_cwt_signature(key, signature, tbs)
+                })
+                .expect("CWT signature verifies with its public key");
         }
     }
 }
