@@ -18,7 +18,7 @@ use sea_orm_migration::MigratorTrait;
     feature = "sqlite",
     feature = "postgres",
     feature = "mysql",
-    feature = "cache-redis"
+    feature = "redis"
 ))]
 use secrecy::ExposeSecret;
 use std::sync::Arc;
@@ -68,9 +68,9 @@ use crate::domain::{
 use crate::outbound::aws::AwsSecretsManager;
 #[cfg(all(feature = "azure", not(feature = "vault"), not(feature = "gcp")))]
 use crate::outbound::azure_kv::AzureKeyVaultClient;
-#[cfg(feature = "cache-redis")]
+#[cfg(feature = "redis")]
 use crate::outbound::cache::RedisStatusListCache;
-#[cfg(feature = "cache-redis")]
+#[cfg(feature = "redis")]
 use crate::outbound::cache::record_redis_cache_error;
 use crate::outbound::cache::{DisabledStatusListCache, MokaStatusListCache};
 #[cfg(feature = "acme")]
@@ -561,7 +561,7 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
                 );
                 Arc::new(DisabledStatusListCache)
             } else {
-                #[cfg(feature = "cache-redis")]
+                #[cfg(feature = "redis")]
                 {
                     let redis_url = config.cache.load_resolved_redis_url().await?;
                     let cache =
@@ -581,10 +581,10 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
                     );
                     Arc::new(cache)
                 }
-                #[cfg(not(feature = "cache-redis"))]
+                #[cfg(not(feature = "redis"))]
                 {
                     return Err(color_eyre::eyre::eyre!(
-                        "cache.backend=redis is configured, but this binary was not built with the cache-redis feature"
+                        "cache.backend=redis is configured, but this binary was not built with the redis feature"
                     ));
                 }
             }

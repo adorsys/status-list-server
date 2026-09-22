@@ -62,9 +62,8 @@ tests:
         alertname: CacheHitRatioLow
         exp_alerts: []
 
-  # A cache-redis pod can start healthy with the cache disabled if Redis is
-  # unreachable during startup. That startup error must be alertable directly,
-  # rather than inferred from a later hit-ratio drop.
+  # Redis-backed pods that cannot initialize the cache should expose the startup
+  # error directly rather than leaving operators to infer it from hit-ratio data.
   - interval: 1m
     input_series:
       - series: >-
