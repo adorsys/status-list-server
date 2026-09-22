@@ -1,3 +1,14 @@
+{{/*
+PrometheusRule shipping SLI recording rules and SLO burn-rate / error-budget alerting rules
+(monitoring.coreos.com/v1), gated on statuslist.enabled and prometheusRule.enabled.
+
+Thresholds are injected from .Values.slo. CI (lint-thresholds.mjs) only compares the
+values.yaml slo.* DEFAULTS against deploy/observability/slo/thresholds.json and greps the
+standalone rules — it does NOT re-read this template. Consequently the hard-coded alert
+summary strings (e.g. "300ms", "14.4x over 0.5%", "85%", "10%", "14 days") and the %.3f
+burn-threshold rounding here are NOT covered by CI: changing a threshold moves the alert but
+the summary text stays stale.
+*/}}
 {{- if and .Values.statuslist.enabled .Values.prometheusRule.enabled }}
 apiVersion: monitoring.coreos.com/v1
 kind: PrometheusRule
