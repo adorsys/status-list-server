@@ -231,10 +231,13 @@ impl RedisStatusListCache {
         let manager_config = redis::aio::ConnectionManagerConfig::new()
             .set_response_timeout(REDIS_RESPONSE_TIMEOUT)
             .set_connection_timeout(REDIS_CONNECTION_TIMEOUT);
-        let connection =
-            redis::aio::ConnectionManager::new_with_config(self.client.clone(), manager_config)
-                .await
-                .map_err(|error| redis_operation_error(operation, error))?;
+        let connection = tokio::time::timeout(
+            REDIS_CONNECTION_TIMEOUT,
+            redis::aio::ConnectionManager::new_with_config(self.client.clone(), manager_config),
+        )
+        .await
+        .map_err(|_| redis_timeout_error(operation, REDIS_CONNECTION_TIMEOUT))?
+        .map_err(|error| redis_operation_error(operation, error))?;
         *cached = Some(connection.clone());
         Ok(connection)
     }
@@ -372,6 +375,15 @@ impl StatusListCache for RedisStatusListCache {
 #[cfg(feature = "cache-redis")]
 fn redis_error(error: redis::RedisError) -> StatusListError {
     StatusListError::Backend(Box::new(error))
+}
+
+#[cfg(feature = "cache-redis")]
+fn redis_timeout_error(operation: &'static str, timeout: Duration) -> StatusListError {
+    record_redis_cache_error(operation);
+    StatusListError::Backend(Box::new(std::io::Error::new(
+        std::io::ErrorKind::TimedOut,
+        format!("Redis cache {operation} timed out after {timeout:?}"),
+    )))
 }
 
 #[cfg(feature = "cache-redis")]
