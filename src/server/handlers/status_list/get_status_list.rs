@@ -1,4 +1,5 @@
 use std::fmt::Debug;
+use std::sync::{Mutex, OnceLock};
 
 use axum::{
     extract::rejection::QueryRejection,
@@ -6,6 +7,7 @@ use axum::{
     http::{HeaderMap, HeaderValue, StatusCode, header},
     response::{IntoResponse, Response},
 };
+use opentelemetry::{KeyValue, global, metrics::Counter};
 use serde::Deserialize;
 use time::OffsetDateTime;
 
@@ -15,11 +17,43 @@ use crate::{
 };
 
 use super::utils::{
-    conditional::{ConditionalResponse, evaluate_conditional_request, format_http_date},
+    conditional::{
+        ConditionalResponse, TokenValidity, evaluate_conditional_request, format_http_date,
+        token_window,
+    },
     constants::{ACCEPT_STATUS_LISTS_HEADER_CWT, ACCEPT_STATUS_LISTS_HEADER_JWT},
     etag::{generate_etag, generate_historical_etag},
     token::build_status_list_token,
 };
+
+/// Conditional-revalidation SLI counter. Cached after first use (the same
+/// pattern as `token.rs`): the global meter provider is installed by
+/// `setup_metrics` before any request is served, so a handle captured here is
+/// valid (unlike one taken at module init, which would be a permanent no-op).
+///
+/// The `outcome` label lets operators verify the 304 path is still serving
+/// unchanged lists efficiently and spot a regression that silently turns every
+/// conditional GET into a full re-sign (the exact failure mode this fix guards
+/// against).
+#[derive(Clone)]
+struct RevalidationMetrics {
+    total: Counter<u64>,
+}
+
+fn revalidation_metrics() -> RevalidationMetrics {
+    static METRICS: OnceLock<Mutex<Option<(u64, RevalidationMetrics)>>> = OnceLock::new();
+    crate::utils::metrics::cached_instruments(&METRICS, || {
+        let meter = global::meter("status-list-server");
+        RevalidationMetrics {
+            total: meter
+                .u64_counter("conditional_revalidation_total")
+                .with_description(
+                    "Conditional GET revalidation outcomes (not_modified|modified|expired_token).",
+                )
+                .build(),
+        }
+    })
+}
 
 /// Handle GET /status-lists/{list_id} request.
 ///
@@ -33,6 +67,20 @@ pub async fn get_status_list(
     Path(list_id): Path<String>,
     query_result: Result<Query<StatusListQuery>, QueryRejection>,
     headers: HeaderMap,
+) -> Result<impl IntoResponse + Debug + use<>, ApiError> {
+    let now = OffsetDateTime::now_utc().unix_timestamp();
+    get_status_list_at(State(state), list_id, query_result, headers, now).await
+}
+
+/// Request-time implementation of [`get_status_list`] with an explicit `now`
+/// (injected rather than read from the clock inside) so tests can advance the
+/// clock deterministically and pin the token-expiry revalidation behaviour.
+async fn get_status_list_at(
+    State(state): State<AppState>,
+    list_id: String,
+    query_result: Result<Query<StatusListQuery>, QueryRejection>,
+    headers: HeaderMap,
+    now: i64,
 ) -> Result<impl IntoResponse + Debug + use<>, ApiError> {
     let query = match query_result {
         Ok(Query(q)) => q,
@@ -83,7 +131,10 @@ pub async fn get_status_list(
         .and_then(|h| h.to_str().ok());
 
     let status_record = fetch_status_record(&list_id, &state).await?;
-    let current_etag = generate_etag(&status_record);
+    // Anchor the ETag to the current token validity window so the validator
+    // rotates with the token's lifetime (see etag::generate_etag).
+    let validity = TokenValidity::new(state.token_exp_secs, state.token_ttl_secs);
+    let current_etag = generate_etag(&status_record, token_window(now, validity).0);
     let last_modified_ts = status_record.updated_at;
     let last_modified = format_http_date(last_modified_ts);
     let cache_control = build_cache_control(state.token_ttl_secs);
@@ -93,54 +144,103 @@ pub async fn get_status_list(
         if_modified_since,
         &current_etag,
         last_modified_ts,
+        now,
+        validity,
     ) {
-        ConditionalResponse::NotModified => Ok((
-            StatusCode::NOT_MODIFIED,
-            [
-                (header::ETAG, current_etag.as_str()),
-                (header::LAST_MODIFIED, last_modified.as_str()),
-                (header::CACHE_CONTROL, cache_control.as_str()),
-                (header::VARY, "Accept, Accept-Encoding"),
-            ],
-        )
-            .into_response()),
+        ConditionalResponse::NotModified => {
+            revalidation_metrics()
+                .total
+                .add(1, &[KeyValue::new("outcome", "not_modified")]);
+            Ok((
+                StatusCode::NOT_MODIFIED,
+                [
+                    (header::ETAG, current_etag.as_str()),
+                    (header::LAST_MODIFIED, last_modified.as_str()),
+                    (header::CACHE_CONTROL, cache_control.as_str()),
+                    (header::VARY, "Accept, Accept-Encoding"),
+                ],
+            )
+                .into_response())
+        }
         ConditionalResponse::Modified => {
-            let (token_bytes, encoding) = build_status_list_token(
+            revalidation_metrics()
+                .total
+                .add(1, &[KeyValue::new("outcome", "modified")]);
+            build_fresh_200_response(
                 &state,
                 &accept_type,
                 &status_record,
-                None,
+                &current_etag,
+                &last_modified,
+                &cache_control,
                 client_accepts_gzip,
             )
-            .await?;
-
-            let mut response = Response::new(token_bytes.into());
-            *response.status_mut() = StatusCode::OK;
-            let h = response.headers_mut();
-            h.insert(
-                header::CONTENT_TYPE,
-                HeaderValue::from_str(&accept_type).unwrap(),
-            );
-            h.insert(header::ETAG, HeaderValue::from_str(&current_etag).unwrap());
-            h.insert(
-                header::LAST_MODIFIED,
-                HeaderValue::from_str(&last_modified).unwrap(),
-            );
-            h.insert(
-                header::CACHE_CONTROL,
-                HeaderValue::from_str(&cache_control).unwrap(),
-            );
-            h.insert(
-                header::VARY,
-                HeaderValue::from_static("Accept, Accept-Encoding"),
-            );
-            if let Some(enc) = encoding {
-                h.insert(header::CONTENT_ENCODING, HeaderValue::from_static(enc));
-            }
-
-            Ok(response)
+            .await
+        }
+        ConditionalResponse::ExpiredToken => {
+            // The list is unchanged but the client's cached token has reached its
+            // `exp`: a 304 would hand the relying party a body-less, expired,
+            // unusable token (RFC 9110 §8.8.1). Track this separately from a true
+            // content change so operators can detect a config regression that
+            // silently turns every conditional GET into a full re-sign.
+            revalidation_metrics()
+                .total
+                .add(1, &[KeyValue::new("outcome", "expired_token")]);
+            build_fresh_200_response(
+                &state,
+                &accept_type,
+                &status_record,
+                &current_etag,
+                &last_modified,
+                &cache_control,
+                client_accepts_gzip,
+            )
+            .await
         }
     }
+}
+
+/// Build a freshly signed `200 OK` status-list token response, reusing the
+/// current validator and freshness headers. Shared by the content-change
+/// (`Modified`) and expiry-forced re-sign (`ExpiredToken`) paths.
+async fn build_fresh_200_response(
+    state: &AppState,
+    accept_type: &str,
+    status_record: &StatusListRecord,
+    current_etag: &str,
+    last_modified: &str,
+    cache_control: &str,
+    client_accepts_gzip: bool,
+) -> Result<Response, ApiError> {
+    let (token_bytes, encoding) =
+        build_status_list_token(state, accept_type, status_record, None, client_accepts_gzip)
+            .await?;
+
+    let mut response = Response::new(token_bytes.into());
+    *response.status_mut() = StatusCode::OK;
+    let h = response.headers_mut();
+    h.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_str(accept_type).unwrap(),
+    );
+    h.insert(header::ETAG, HeaderValue::from_str(current_etag).unwrap());
+    h.insert(
+        header::LAST_MODIFIED,
+        HeaderValue::from_str(last_modified).unwrap(),
+    );
+    h.insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_str(cache_control).unwrap(),
+    );
+    h.insert(
+        header::VARY,
+        HeaderValue::from_static("Accept, Accept-Encoding"),
+    );
+    if let Some(enc) = encoding {
+        h.insert(header::CONTENT_ENCODING, HeaderValue::from_static(enc));
+    }
+
+    Ok(response)
 }
 
 async fn handle_historical_request(
@@ -263,17 +363,37 @@ fn client_accepts_gzip(headers: &HeaderMap) -> bool {
 }
 
 fn build_cache_control(token_ttl_secs: u64) -> String {
-    format!("max-age={}, immutable", token_ttl_secs)
+    // Deliberately no `immutable`: the representation is *not* immutably fixed.
+    // The token re-signs and its validator rotates each `E - ttl` window, so
+    // freshness-honouring caches/browsers must revalidate to obtain a fresh,
+    // unexpired token rather than serving a stale one for its lifetime.
+    format!("max-age={}", token_ttl_secs)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::server::handlers::status_list::publish_status::publish_status;
-    use crate::server::handlers::status_list::utils::request::StatusesRequest;
+    use crate::server::handlers::status_list::update_status::update_status;
+    use crate::server::handlers::status_list::utils::request::{
+        Status, StatusEntry, StatusesRequest,
+    };
     use crate::test_utils::{authenticated_issuer, test_app_state};
     use axum::extract::Json;
     use axum::http::HeaderMap;
+
+    /// Decode the JWT payload of a freshly served (uncompressed) token so tests
+    /// can assert the `iat`/`exp` claims directly without a verification key.
+    fn decode_jwt_claims(jwt: &[u8]) -> serde_json::Value {
+        use base64::prelude::{BASE64_URL_SAFE_NO_PAD, Engine as _};
+
+        let jwt = std::str::from_utf8(jwt).expect("JWT body is UTF-8");
+        let payload = jwt.split('.').nth(1).expect("JWT has three segments");
+        let decoded = BASE64_URL_SAFE_NO_PAD
+            .decode(payload)
+            .expect("JWT payload is valid base64url");
+        serde_json::from_slice(&decoded).expect("JWT payload is valid JSON")
+    }
 
     #[test]
     fn test_accepts_gzip_simple() {
@@ -607,6 +727,785 @@ mod tests {
         .into_response();
 
         assert_eq!(res2.status(), StatusCode::NOT_MODIFIED);
+    }
+
+    #[tokio::test]
+    async fn test_conditional_request_within_validity_returns_304() {
+        // Deterministic time-advancement: fetch at `now0`, revalidate a short
+        // while later but *within the same* token validity window. The cached
+        // token is still valid, so a body-less 304 is correct and efficient.
+        let token_id = uuid::Uuid::new_v4().to_string();
+        let app_state = test_app_state(None).await;
+        let now0 = 1_000_000_000;
+
+        publish_status(
+            State(app_state.clone()),
+            authenticated_issuer("issuer1"),
+            Path(token_id.clone()),
+            Json(StatusesRequest { statuses: vec![] }),
+        )
+        .await
+        .unwrap();
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::ACCEPT,
+            ACCEPT_STATUS_LISTS_HEADER_JWT.parse().unwrap(),
+        );
+
+        let res1 = get_status_list_at(
+            State(app_state.clone()),
+            token_id.clone(),
+            Ok(Query(StatusListQuery { time: None })),
+            headers.clone(),
+            now0,
+        )
+        .await
+        .unwrap()
+        .into_response();
+        assert_eq!(res1.status(), StatusCode::OK);
+
+        let etag = res1.headers().get(header::ETAG).unwrap().clone();
+        headers.insert(header::IF_NONE_MATCH, etag);
+
+        // Same window (60s < token_exp_secs) -> cached token still valid -> 304.
+        let res2 = get_status_list_at(
+            State(app_state),
+            token_id,
+            Ok(Query(StatusListQuery { time: None })),
+            headers,
+            now0 + 60,
+        )
+        .await
+        .unwrap()
+        .into_response();
+
+        assert_eq!(res2.status(), StatusCode::NOT_MODIFIED);
+    }
+
+    #[tokio::test]
+    async fn test_conditional_request_revalidation_at_dead_zone_boundaries() {
+        // The ETag is keyed to the `E - ttl` window (defaults E=900, ttl=300 ->
+        // W=600). Within the window a matching ETag is always → 304, even exactly
+        // at `window_end - ttl`, because any token issued in the window still has
+        // > ttl of validity left. Revalidating at `window_end` falls into the
+        // next window, the ETag rolls over, and the client is served a fresh
+        // token (200) instead of a stale 304.
+        let token_id = uuid::Uuid::new_v4().to_string();
+        let app_state = test_app_state(None).await;
+        let ttl = app_state.token_ttl_secs as i64;
+        let now0 = 1_000_000_000;
+        // window(1_000_000_000) == [999_999_600, 1_000_000_200)
+        let window_end = 999_999_600 + 600;
+
+        publish_status(
+            State(app_state.clone()),
+            authenticated_issuer("issuer1"),
+            Path(token_id.clone()),
+            Json(StatusesRequest { statuses: vec![] }),
+        )
+        .await
+        .unwrap();
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::ACCEPT,
+            ACCEPT_STATUS_LISTS_HEADER_JWT.parse().unwrap(),
+        );
+
+        let res1 = get_status_list_at(
+            State(app_state.clone()),
+            token_id.clone(),
+            Ok(Query(StatusListQuery { time: None })),
+            headers.clone(),
+            now0,
+        )
+        .await
+        .unwrap()
+        .into_response();
+        assert_eq!(res1.status(), StatusCode::OK);
+        let etag = res1.headers().get(header::ETAG).unwrap().clone();
+        headers.insert(header::IF_NONE_MATCH, etag);
+
+        // Exactly at `window_end - ttl` the cached token still has > ttl left ->
+        // 304.
+        let dead_edge = window_end - ttl;
+        let res2 = get_status_list_at(
+            State(app_state.clone()),
+            token_id.clone(),
+            Ok(Query(StatusListQuery { time: None })),
+            headers.clone(),
+            dead_edge,
+        )
+        .await
+        .unwrap()
+        .into_response();
+        assert_eq!(res2.status(), StatusCode::NOT_MODIFIED);
+
+        // Revalidating at `window_end` rolls the window over -> fresh 200.
+        let res3 = get_status_list_at(
+            State(app_state),
+            token_id,
+            Ok(Query(StatusListQuery { time: None })),
+            headers,
+            window_end,
+        )
+        .await
+        .unwrap()
+        .into_response();
+        assert_eq!(res3.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(res3.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert!(!body.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_conditional_request_expired_token_returns_fresh_200() {
+        // Fetch at `now0`, then revalidate after the token validity window has
+        // rolled over. The client's cached token has expired, so the server must
+        // bypass the 304 and return a freshly signed 200 with a valid body.
+        let token_id = uuid::Uuid::new_v4().to_string();
+        let app_state = test_app_state(None).await;
+        let token_exp_secs = app_state.token_exp_secs;
+        let now0 = 1_000_000_000;
+
+        publish_status(
+            State(app_state.clone()),
+            authenticated_issuer("issuer1"),
+            Path(token_id.clone()),
+            Json(StatusesRequest { statuses: vec![] }),
+        )
+        .await
+        .unwrap();
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::ACCEPT,
+            ACCEPT_STATUS_LISTS_HEADER_JWT.parse().unwrap(),
+        );
+
+        let res1 = get_status_list_at(
+            State(app_state.clone()),
+            token_id.clone(),
+            Ok(Query(StatusListQuery { time: None })),
+            headers.clone(),
+            now0,
+        )
+        .await
+        .unwrap()
+        .into_response();
+        assert_eq!(res1.status(), StatusCode::OK);
+        let etag1 = res1.headers().get(header::ETAG).unwrap().clone();
+        headers.insert(header::IF_NONE_MATCH, etag1.clone());
+
+        // Advance past the window boundary so the previously issued token's
+        // validity window has lapsed.
+        let res2 = get_status_list_at(
+            State(app_state.clone()),
+            token_id.clone(),
+            Ok(Query(StatusListQuery { time: None })),
+            headers.clone(),
+            now0 + token_exp_secs as i64 + 1,
+        )
+        .await
+        .unwrap()
+        .into_response();
+
+        assert_eq!(
+            res2.status(),
+            StatusCode::OK,
+            "expired-token revalidation must return a fresh 200 OK"
+        );
+        let etag2 = res2.headers().get(header::ETAG).unwrap().clone();
+        assert_ne!(
+            etag2, etag1,
+            "the ETag must rotate when the token validity window changes"
+        );
+        let body = axum::body::to_bytes(res2.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert!(
+            !body.is_empty(),
+            "expired-token revalidation must carry a newly signed token body"
+        );
+        // Acceptance criterion #1 requires a freshly signed *valid* token: verify
+        // it carries a full validity window rather than expiring at issuance.
+        let claims = decode_jwt_claims(&body);
+        let iat = claims["iat"].as_i64().expect("token carries iat");
+        let exp = claims["exp"].as_i64().expect("token carries exp");
+        assert_eq!(
+            exp - iat,
+            token_exp_secs as i64,
+            "the freshly signed token must not be born expired"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_conditional_request_if_modified_since_expired_returns_fresh_200() {
+        // An If-Modified-Since revalidation with an expired cached token must
+        // also bypass the 304 and serve a fresh body, otherwise the original bug
+        // remains reachable through the weaker validator.
+        let token_id = uuid::Uuid::new_v4().to_string();
+        let app_state = test_app_state(None).await;
+        let token_exp_secs = app_state.token_exp_secs;
+        let now0 = time::OffsetDateTime::now_utc().unix_timestamp();
+
+        publish_status(
+            State(app_state.clone()),
+            authenticated_issuer("issuer1"),
+            Path(token_id.clone()),
+            Json(StatusesRequest { statuses: vec![] }),
+        )
+        .await
+        .unwrap();
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::ACCEPT,
+            ACCEPT_STATUS_LISTS_HEADER_JWT.parse().unwrap(),
+        );
+
+        let res1 = get_status_list_at(
+            State(app_state.clone()),
+            token_id.clone(),
+            Ok(Query(StatusListQuery { time: None })),
+            headers.clone(),
+            now0,
+        )
+        .await
+        .unwrap()
+        .into_response();
+        assert_eq!(res1.status(), StatusCode::OK);
+        let last_modified = res1.headers().get(header::LAST_MODIFIED).unwrap().clone();
+        headers.insert(header::IF_MODIFIED_SINCE, last_modified);
+
+        // `now` has passed `updated_at + token_exp_secs` -> the cached token is
+        // expired -> the IMS revalidation must not answer 304.
+        let res2 = get_status_list_at(
+            State(app_state),
+            token_id,
+            Ok(Query(StatusListQuery { time: None })),
+            headers,
+            now0 + token_exp_secs as i64 + 1,
+        )
+        .await
+        .unwrap()
+        .into_response();
+
+        assert_eq!(res2.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(res2.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert!(!body.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_conditional_request_cwt_within_window_returns_304() {
+        // The CWT format participates in the same conditional revalidation: a
+        // revalidation within the current `E - ttl` window (matching ETag) must
+        // yield a body-less 304.
+        let token_id = uuid::Uuid::new_v4().to_string();
+        let app_state = test_app_state(None).await;
+        let now0 = 1_000_000_000;
+
+        publish_status(
+            State(app_state.clone()),
+            authenticated_issuer("issuer1"),
+            Path(token_id.clone()),
+            Json(StatusesRequest { statuses: vec![] }),
+        )
+        .await
+        .unwrap();
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::ACCEPT,
+            ACCEPT_STATUS_LISTS_HEADER_CWT.parse().unwrap(),
+        );
+
+        let res1 = get_status_list_at(
+            State(app_state.clone()),
+            token_id.clone(),
+            Ok(Query(StatusListQuery { time: None })),
+            headers.clone(),
+            now0,
+        )
+        .await
+        .unwrap()
+        .into_response();
+        assert_eq!(res1.status(), StatusCode::OK);
+        let etag = res1.headers().get(header::ETAG).unwrap().clone();
+        headers.insert(header::IF_NONE_MATCH, etag);
+
+        let res2 = get_status_list_at(
+            State(app_state),
+            token_id,
+            Ok(Query(StatusListQuery { time: None })),
+            headers,
+            now0 + 60,
+        )
+        .await
+        .unwrap()
+        .into_response();
+        assert_eq!(res2.status(), StatusCode::NOT_MODIFIED);
+    }
+
+    #[tokio::test]
+    async fn test_conditional_request_cwt_window_rolled_returns_fresh_200() {
+        // After the `E - ttl` window rolls over a CWT revalidation must be served
+        // a freshly signed token, not a 304, mirroring the JWT behaviour.
+        let token_id = uuid::Uuid::new_v4().to_string();
+        let app_state = test_app_state(None).await;
+        let now0 = 1_000_000_000;
+
+        publish_status(
+            State(app_state.clone()),
+            authenticated_issuer("issuer1"),
+            Path(token_id.clone()),
+            Json(StatusesRequest { statuses: vec![] }),
+        )
+        .await
+        .unwrap();
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::ACCEPT,
+            ACCEPT_STATUS_LISTS_HEADER_CWT.parse().unwrap(),
+        );
+
+        let res1 = get_status_list_at(
+            State(app_state.clone()),
+            token_id.clone(),
+            Ok(Query(StatusListQuery { time: None })),
+            headers.clone(),
+            now0,
+        )
+        .await
+        .unwrap()
+        .into_response();
+        assert_eq!(res1.status(), StatusCode::OK);
+        let etag1 = res1.headers().get(header::ETAG).unwrap().clone();
+        headers.insert(header::IF_NONE_MATCH, etag1.clone());
+
+        // Past the window boundary (W=600) -> rolled over -> fresh 200.
+        let res2 = get_status_list_at(
+            State(app_state),
+            token_id,
+            Ok(Query(StatusListQuery { time: None })),
+            headers,
+            now0 + 600,
+        )
+        .await
+        .unwrap()
+        .into_response();
+
+        assert_eq!(res2.status(), StatusCode::OK);
+        let etag2 = res2.headers().get(header::ETAG).unwrap().clone();
+        assert_ne!(
+            etag2, etag1,
+            "the ETag must rotate when the window rolls over"
+        );
+        let body = axum::body::to_bytes(res2.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert!(!body.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_conditional_request_expired_returns_gzipped_fresh_200() {
+        // When a revalidation falls into the fresh-re-sign path (window rolled)
+        // the freshly signed JWT must still honour the client's `Accept-Encoding`,
+        // i.e. be gzip-compressed on the 200 even though a 304 was bypassed.
+        let token_id = uuid::Uuid::new_v4().to_string();
+        let app_state = test_app_state(None).await;
+        let now0 = 1_000_000_000;
+
+        publish_status(
+            State(app_state.clone()),
+            authenticated_issuer("issuer1"),
+            Path(token_id.clone()),
+            Json(StatusesRequest { statuses: vec![] }),
+        )
+        .await
+        .unwrap();
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::ACCEPT,
+            ACCEPT_STATUS_LISTS_HEADER_JWT.parse().unwrap(),
+        );
+        headers.insert(header::ACCEPT_ENCODING, "gzip".parse().unwrap());
+
+        let res1 = get_status_list_at(
+            State(app_state.clone()),
+            token_id.clone(),
+            Ok(Query(StatusListQuery { time: None })),
+            headers.clone(),
+            now0,
+        )
+        .await
+        .unwrap()
+        .into_response();
+        assert_eq!(res1.status(), StatusCode::OK);
+        assert_eq!(
+            res1.headers().get(header::CONTENT_ENCODING).unwrap(),
+            "gzip"
+        );
+        let etag = res1.headers().get(header::ETAG).unwrap().clone();
+        headers.insert(header::IF_NONE_MATCH, etag);
+
+        // Window rolled -> fresh 200, still gzipped.
+        let res2 = get_status_list_at(
+            State(app_state),
+            token_id,
+            Ok(Query(StatusListQuery { time: None })),
+            headers,
+            now0 + 600,
+        )
+        .await
+        .unwrap()
+        .into_response();
+        assert_eq!(res2.status(), StatusCode::OK);
+        assert_eq!(
+            res2.headers().get(header::CONTENT_ENCODING).unwrap(),
+            "gzip",
+            "the fresh token on a forced re-sign must still be gzip-compressed"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_conditional_request_expired_token_returns_fresh_headers() {
+        // An `ExpiredToken` outcome (here via an expired If-Modified-Since
+        // validator) must respond 200 with the full set of validator/freshness
+        // headers so downstream caches keep working after the forced re-sign.
+        let token_id = uuid::Uuid::new_v4().to_string();
+        let app_state = test_app_state(None).await;
+        let token_exp_secs = app_state.token_exp_secs;
+        let token_ttl_secs = app_state.token_ttl_secs;
+        let now0 = 1_000_000_000;
+
+        publish_status(
+            State(app_state.clone()),
+            authenticated_issuer("issuer1"),
+            Path(token_id.clone()),
+            Json(StatusesRequest { statuses: vec![] }),
+        )
+        .await
+        .unwrap();
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::ACCEPT,
+            ACCEPT_STATUS_LISTS_HEADER_JWT.parse().unwrap(),
+        );
+
+        let res1 = get_status_list_at(
+            State(app_state.clone()),
+            token_id.clone(),
+            Ok(Query(StatusListQuery { time: None })),
+            headers.clone(),
+            now0,
+        )
+        .await
+        .unwrap()
+        .into_response();
+        assert_eq!(res1.status(), StatusCode::OK);
+        let last_modified = res1.headers().get(header::LAST_MODIFIED).unwrap().clone();
+        headers.insert(header::IF_MODIFIED_SINCE, last_modified);
+
+        let res2 = get_status_list_at(
+            State(app_state),
+            token_id,
+            Ok(Query(StatusListQuery { time: None })),
+            headers,
+            now0 + token_exp_secs as i64 + 1,
+        )
+        .await
+        .unwrap()
+        .into_response();
+
+        assert_eq!(res2.status(), StatusCode::OK);
+        let h = res2.headers();
+        assert!(h.contains_key(header::ETAG));
+        assert_eq!(
+            h.get(header::CACHE_CONTROL).unwrap().to_str().unwrap(),
+            format!("max-age={token_ttl_secs}")
+        );
+        assert_eq!(h.get(header::VARY).unwrap(), "Accept, Accept-Encoding");
+        let body = axum::body::to_bytes(res2.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert!(!body.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_conditional_request_content_changed_and_window_rolled() {
+        // A genuine content change (new statuses published) with the token window
+        // also rolled over must still be answered with a fresh 200 carrying the
+        // updated content, never a 304.
+        let token_id = uuid::Uuid::new_v4().to_string();
+        let app_state = test_app_state(None).await;
+        let now0 = 1_000_000_000;
+
+        publish_status(
+            State(app_state.clone()),
+            authenticated_issuer("issuer1"),
+            Path(token_id.clone()),
+            Json(StatusesRequest { statuses: vec![] }),
+        )
+        .await
+        .unwrap();
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::ACCEPT,
+            ACCEPT_STATUS_LISTS_HEADER_JWT.parse().unwrap(),
+        );
+
+        let res1 = get_status_list_at(
+            State(app_state.clone()),
+            token_id.clone(),
+            Ok(Query(StatusListQuery { time: None })),
+            headers.clone(),
+            now0,
+        )
+        .await
+        .unwrap()
+        .into_response();
+        assert_eq!(res1.status(), StatusCode::OK);
+        let etag1 = res1.headers().get(header::ETAG).unwrap().clone();
+        headers.insert(header::IF_NONE_MATCH, etag1);
+        let body1 = axum::body::to_bytes(res1.into_body(), usize::MAX)
+            .await
+            .unwrap();
+
+        // Change the underlying content (update statuses), then revalidate after
+        // the window would have rolled.
+        update_status(
+            State(app_state.clone()),
+            authenticated_issuer("issuer1"),
+            Path(token_id.clone()),
+            Json(StatusesRequest {
+                statuses: vec![
+                    StatusEntry {
+                        index: 0,
+                        status: Status::VALID,
+                    },
+                    StatusEntry {
+                        index: 1,
+                        status: Status::INVALID,
+                    },
+                ],
+            }),
+        )
+        .await
+        .unwrap();
+
+        let res2 = get_status_list_at(
+            State(app_state),
+            token_id,
+            Ok(Query(StatusListQuery { time: None })),
+            headers,
+            now0 + 600,
+        )
+        .await
+        .unwrap()
+        .into_response();
+        assert_eq!(res2.status(), StatusCode::OK);
+        let body2 = axum::body::to_bytes(res2.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert!(!body2.is_empty());
+        assert_ne!(
+            body1, body2,
+            "the served token must reflect the new content"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_conditional_request_degenerate_ttl_configs_never_304() {
+        // Degenerate configs (ttl >= E) leave no usable token lifetime, so the
+        // server must never answer 304 even on an immediate revalidation — it
+        // always re-signs fresh.
+        for (exp, ttl) in [(0u64, 300u64), (300, 300), (300, 600)] {
+            let token_id = uuid::Uuid::new_v4().to_string();
+            let mut app_state = test_app_state(None).await;
+            app_state.token_exp_secs = exp;
+            app_state.token_ttl_secs = ttl;
+            let now0 = 1_000_000_000;
+
+            publish_status(
+                State(app_state.clone()),
+                authenticated_issuer("issuer1"),
+                Path(token_id.clone()),
+                Json(StatusesRequest { statuses: vec![] }),
+            )
+            .await
+            .unwrap();
+
+            let mut headers = HeaderMap::new();
+            headers.insert(
+                header::ACCEPT,
+                ACCEPT_STATUS_LISTS_HEADER_JWT.parse().unwrap(),
+            );
+
+            let res1 = get_status_list_at(
+                State(app_state.clone()),
+                token_id.clone(),
+                Ok(Query(StatusListQuery { time: None })),
+                headers.clone(),
+                now0,
+            )
+            .await
+            .unwrap()
+            .into_response();
+            assert_eq!(res1.status(), StatusCode::OK);
+            let etag = res1.headers().get(header::ETAG).unwrap().clone();
+            headers.insert(header::IF_NONE_MATCH, etag);
+
+            // Revalidate in the very same window/second — must still get a 200.
+            let res2 = get_status_list_at(
+                State(app_state),
+                token_id,
+                Ok(Query(StatusListQuery { time: None })),
+                headers,
+                now0,
+            )
+            .await
+            .unwrap()
+            .into_response();
+            assert_eq!(
+                res2.status(),
+                StatusCode::OK,
+                "ttl>=exp ({exp}/{ttl}) must never answer 304"
+            );
+        }
+    }
+
+    #[test]
+    fn test_revalidation_metrics_outcome_labels() {
+        use crate::config::{TelemetryConfig, TelemetryEnvironment};
+        use crate::utils::metrics::{metrics_handler, metrics_test_lock, setup_metrics};
+        use opentelemetry_sdk::Resource;
+        use prometheus::Registry;
+
+        // The global meter-provider setup must be serialised with other metric
+        // tests, so the lock is held outside the async runtime below.
+        let _metrics_guard = metrics_test_lock();
+        let registry = Registry::new();
+        let config = TelemetryConfig {
+            environment: TelemetryEnvironment::Development,
+            otlp_endpoint: "http://localhost:4317".to_string(),
+            sampler_ratio: 1.0,
+            enabled: false,
+        };
+        let _meter_provider = setup_metrics(
+            &registry,
+            &config,
+            Resource::builder()
+                .with_service_name("status-list-server-test")
+                .build(),
+        )
+        .expect("metrics setup");
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("tokio runtime");
+        rt.block_on(async {
+            let token_id = uuid::Uuid::new_v4().to_string();
+            let app_state = test_app_state(None).await;
+            let token_exp_secs = app_state.token_exp_secs;
+            // Real clock so `now` lines up with the list's `updated_at` (set at
+            // publish time) for the expired If-Modified-Since branch.
+            let now0 = time::OffsetDateTime::now_utc().unix_timestamp();
+
+            publish_status(
+                State(app_state.clone()),
+                authenticated_issuer("issuer1"),
+                Path(token_id.clone()),
+                Json(StatusesRequest { statuses: vec![] }),
+            )
+            .await
+            .unwrap();
+
+            let mut headers = HeaderMap::new();
+            headers.insert(
+                header::ACCEPT,
+                ACCEPT_STATUS_LISTS_HEADER_JWT.parse().unwrap(),
+            );
+
+            // not_modified: within-window revalidation.
+            let res1 = get_status_list_at(
+                State(app_state.clone()),
+                token_id.clone(),
+                Ok(Query(StatusListQuery { time: None })),
+                headers.clone(),
+                now0,
+            )
+            .await
+            .unwrap()
+            .into_response();
+            assert_eq!(res1.status(), StatusCode::OK);
+            let etag = res1.headers().get(header::ETAG).unwrap().clone();
+            let mut nm_headers = headers.clone();
+            nm_headers.insert(header::IF_NONE_MATCH, etag.clone());
+            let res_nm = get_status_list_at(
+                State(app_state.clone()),
+                token_id.clone(),
+                Ok(Query(StatusListQuery { time: None })),
+                nm_headers,
+                now0 + 60,
+            )
+            .await
+            .unwrap()
+            .into_response();
+            assert_eq!(res_nm.status(), StatusCode::NOT_MODIFIED);
+
+            // modified: window rolled over -> ETag mismatch -> fresh 200.
+            let mut mod_headers = headers.clone();
+            mod_headers.insert(header::IF_NONE_MATCH, etag.clone());
+            let res_mod = get_status_list_at(
+                State(app_state.clone()),
+                token_id.clone(),
+                Ok(Query(StatusListQuery { time: None })),
+                mod_headers,
+                now0 + 600,
+            )
+            .await
+            .unwrap()
+            .into_response();
+            assert_eq!(res_mod.status(), StatusCode::OK);
+
+            // expired_token: expired If-Modified-Since validator.
+            let mut expired_headers = headers.clone();
+            let last_modified = res1.headers().get(header::LAST_MODIFIED).unwrap().clone();
+            expired_headers.insert(header::IF_MODIFIED_SINCE, last_modified);
+            let res_exp = get_status_list_at(
+                State(app_state),
+                token_id,
+                Ok(Query(StatusListQuery { time: None })),
+                expired_headers,
+                now0 + token_exp_secs as i64 + 1,
+            )
+            .await
+            .unwrap()
+            .into_response();
+            assert_eq!(res_exp.status(), StatusCode::OK);
+
+            let rendered = metrics_handler(registry).await;
+            assert!(
+                rendered.contains("conditional_revalidation_total"),
+                "revalidation counter should be exported, got:\n{rendered}"
+            );
+            for label in ["not_modified", "modified", "expired_token"] {
+                assert!(
+                    rendered.contains(&format!("outcome=\"{label}\"")),
+                    "expected outcome=\"{label}\" in exported metrics:\n{rendered}"
+                );
+            }
+        });
     }
 
     #[tokio::test]
