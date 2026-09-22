@@ -7,8 +7,8 @@ use der::{Decode, Encode};
 use std::fmt;
 use thiserror::Error;
 
-use crate::domain::models::token::{SigningAlgorithm, TokenSignerError};
-use crate::domain::ports::TokenSigner;
+use crate::domain::models::token::TokenSignerError;
+pub use crate::domain::{models::token::SigningAlgorithm, ports::TokenSigner};
 
 // Standard Cryptographic OIDs
 const OID_ID_EC_PUBLIC_KEY: pkcs8::ObjectIdentifier =

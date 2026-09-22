@@ -4,7 +4,7 @@ use std::{fmt, sync::Arc};
 
 use crate::domain::models::credential::{Credential, CredentialError};
 use crate::domain::models::status_list::{StatusListError, StatusListRecord, StatusListSnapshot};
-use crate::domain::models::token::{SigningAlgorithm, TokenSignerError};
+pub use crate::domain::models::token::{SigningAlgorithm, TokenSignerError};
 use async_trait::async_trait;
 
 /// Interface for managing active status list records.
