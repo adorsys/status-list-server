@@ -8,6 +8,7 @@ global:
 # statuslist.podLabels which are merged into the pod LABELS). Consumed by deployment.yaml.
 # The chart always emits its own prometheus.io/scrape annotations; these are merged on top.
 # Defaults to an empty map; overlays supply the annotations.
+# Values may be strings, booleans, integers, or numbers.
 podAnnotations: {}
 
 statuslist:
@@ -164,7 +165,7 @@ statuslist:
     APP_TELEMETRY__ENVIRONMENT: "production"
     APP_TELEMETRY__SAMPLER_RATIO: "1.0"
   # Optional AWS configuration for the application. The base chart is provider-neutral:
-  # Workload Identity (IRSA) is NOT configured by default — you opt in by adding the
+  # Workload Identity (IRSA) is NOT configured by default - you opt in by adding the
   # serviceAccount.annotations below and the cloud-side trust relationship. This block is
   # only needed for the legacy path that mounts static shared-credential files.
   aws:
@@ -175,7 +176,7 @@ statuslist:
     # with long-lived static keys over the short-lived role token.
     mountCredentials: false
     # When mountCredentials=true and externalSecret.enabled, the chart also
-    # renders a second ExternalSecret that provisions "aws-credentials-secret" — the exact Secret
+    # renders a second ExternalSecret that provisions "aws-credentials-secret" - the exact Secret
     # the Deployment's credential volume references (see deployment.yaml). Without it the Pod could
     # never mount that volume and would stay unready. The remote source holds the AWS shared
     # "credentials" and "config" file contents.
@@ -233,7 +234,7 @@ statuslist:
   # Secret is mounted. When items is present, each fileEnv value must exactly match one
   # of the normalized items[].path values so the chart cannot point the app at a file
   # Kubernetes will not mount.
-  # The chart never injects APP_DATABASE__PASSWORD — it hard-fails if you try to set it,
+  # The chart never injects APP_DATABASE__PASSWORD - it hard-fails if you try to set it,
   # with or without a file. Database passwords are delivered only via the mounted Secret
   # path referenced by APP_DATABASE__PASSWORD_FILE (below) or the fallback Secret.
   # Example:
@@ -321,15 +322,15 @@ statuslist:
     ingress: []
     # Additional internal egress destinations. IMPORTANT: these entries are appended to the
     # DATABASE egress rule (the one scoped to the DB port), so each inherits the database
-    # port and can only reach that port — a selector for e.g. a cache on 6379 will be
+    # port and can only reach that port - a selector for e.g. a cache on 6379 will be
     # silent. Use a separate NetworkPolicy (not this chart) for arbitrary internal ports.
     # External ports 443/53 are always allowed with NO destination restriction (open to
-    # 0.0.0.0/0 — this policy does not constrain outbound exfiltration).
+    # 0.0.0.0/0 - this policy does not constrain outbound exfiltration).
     egressInternal: []
     # Explicit database egress destinations. Optional for bundled PostgreSQL, where
     # the chart can select postgres pods in-namespace. Required when
     # APP_DATABASE__BACKEND=mysql or the database is external (RDS, Cloud SQL, another
-    # namespace, operator-managed cluster) — because this chart does not deploy MySQL, it
+    # namespace, operator-managed cluster) - because this chart does not deploy MySQL, it
     # cannot infer the target. For an external database, also clear/override the
     # statuslist.initContainers wait-for-db probe, which by default pings the in-cluster
     # Postgres host derived by the dbHost helper.
@@ -348,7 +349,7 @@ statuslist:
 # Workload Identity needs BOTH halves: the annotations below (annotation half) AND the
 # cloud-side trust relationship (permissions half), which is keyed on the SERVICE ACCOUNT
 # NAME this chart derives (default: the chart fullname, see the serviceAccountName helper
-# in _helpers.tpl). Keeping these in sync matters — changing the SA name breaks the
+# in _helpers.tpl). Keeping these in sync matters - changing the SA name breaks the
 # trust relationship unless the cloud identity is updated to match.
 #   EKS: IAM role trust policy with  sub = system:serviceaccount:<namespace>:<sa>
 #        (EKS Pod Identity is an alternative to IRSA: create a pod identity association
@@ -365,7 +366,7 @@ serviceAccount:
   name: "" # default: fullname (via _helpers.tpl)
   # Default false: the application does not need to call the Kubernetes API, so do not
   # mount the SA bearer token (NSA/CISA Kubernetes hardening, CIS Benchmark 5.1.6).
-  # This does NOT break Workload Identity — IRSA / GCP WI / Azure WI use projected OIDC
+  # This does NOT break Workload Identity - IRSA / GCP WI / Azure WI use projected OIDC
   # tokens injected by the cloud admission webhook, independent of this setting.
   automountServiceAccountToken: false
   annotations: {}
@@ -436,14 +437,14 @@ prometheusRule:
 # AlertmanagerConfig for kube-prometheus-stack / Prometheus Operator alert routing.
 # When enabled, renders an AlertmanagerConfig CRD that routes SLO alerts to the
 # configured notification channel. This is the Kubernetes equivalent of the Docker
-# Compose ALERTMANAGER_PLATFORM + generate-alertmanager-config.sh setup — the same
+# Compose ALERTMANAGER_PLATFORM + generate-alertmanager-config.sh setup - the same
 # six platforms are supported and no webhook URL is committed to source control.
 #
 # Supported platforms (alerting.platform):
 #   discord     -> alerting.webhookUrl  (Discord channel webhook URL)
 #   slack       -> alerting.webhookUrl  (Slack incoming-webhook URL)
 #   teams       -> alerting.webhookUrl  (MS Teams classic inbound webhook; posts Alertmanager's
-#                 generic JSON, not an Adaptive Card — see deploy/observability/runbooks/webhook-notifications.md
+#                 generic JSON, not an Adaptive Card - see deploy/observability/runbooks/webhook-notifications.md
 #                 for the rendering limitation and bridge options)
 #   mattermost  -> alerting.webhookUrl  (Mattermost incoming webhook)
 #   webhook     -> alerting.webhookUrl  (generic endpoint accepting Alertmanager JSON)
@@ -452,7 +453,7 @@ prometheusRule:
 # Credential model:
 #   By default (existingSecret: "") the chart renders its own Secret from the inline
 #   values (webhookUrl). For production, set existingSecret to the name of
-#   a pre-existing Secret (e.g. managed by ESO or Vault) — the chart then reads from
+#   a pre-existing Secret (e.g. managed by ESO or Vault) - the chart then reads from
 #   that Secret and does NOT render its own. The pre-existing Secret must contain the
 #   following keys depending on the platform:
 #     webhook-based platforms: "webhook-url"
@@ -463,7 +464,7 @@ prometheusRule:
 #   NOT read from the Secret.
 #
 # Route tree (mirrors generate-alertmanager-config.sh):
-#   severity=none  -> deadmansswitch receiver (Watchdog — pages on ABSENCE, not firing)
+#   severity=none  -> deadmansswitch receiver (Watchdog - pages on ABSENCE, not firing)
 #   severity=page  -> human receiver, repeat every 4h
 #   severity=warn  -> human receiver, repeat every 24h
 #   everything else -> noop sink (never spams a human channel)
@@ -473,7 +474,7 @@ prometheusRule:
 #     release: kube-prometheus-stack
 alerting:
   enabled: false
-  # Platform selector — must match one of the supported values above.
+  # Platform selector - must match one of the supported values above.
   platform: discord
   # Grafana dashboard URL injected into alert annotations (e.g. http://grafana.example.com/d/status-list-slo).
   dashboardUrl: "http://localhost:3000/d/status-list-slo"
@@ -495,7 +496,7 @@ alerting:
   # deploying the chart to avoid a failing AlertmanagerConfig / pending pod.
   existingSecret: ""
   # Inline webhook URL (used for discord, slack, teams, mattermost, webhook platforms).
-  # Never commit real tokens — use existingSecret + ESO/Vault in production.
+  # Never commit real tokens - use existingSecret + ESO/Vault in production.
   webhookUrl: ""
   # Optional dead-man's-switch URL. The always-firing Watchdog (severity=none) pings this
   # URL so a collapsed Prometheus/Alertmanager pipeline is detected by its ABSENCE. When
@@ -515,7 +516,7 @@ alerting:
   webhookTimeout: ""
   # Email settings (required only when platform=email).
   # NOTE: The AlertmanagerConfig EmailConfig CRD defines `to`, `smarthost`, and `from` as plain
-  # strings (not Secret selectors), so these are rendered directly from values — they are NOT read
+  # strings (not Secret selectors), so these are rendered directly from values - they are NOT read
   # from the Secret. Only the SMTP password (when set) is read from the Secret via `smtp-password`.
   email:
     to: ""
@@ -585,7 +586,7 @@ postgres:
   # another backend, set postgres.enabled=false AND APP_DATABASE__BACKEND+APP_DATABASE__HOST
   # (see mysql below and docs/database-backends.md). WARNING: merely disabling postgres
   # without switching the backend leaves APP_DATABASE__BACKEND=postgres and points the pod
-  # at the in-cluster postgres service, which no longer exists — always set the backend
+  # at the in-cluster postgres service, which no longer exists - always set the backend
   # explicitly when you disable postgres.
   enabled: true
   resources:
@@ -616,12 +617,15 @@ postgres:
     tag: "18.0"
 
 mysql:
+  # NOTE: mysql.enabled is NOT a valid field. Setting it fails the render because this
+  # chart does not deploy MySQL. Use postgres.enabled=false and APP_DATABASE__BACKEND=mysql
+  # with an external MySQL host instead.
   # External MySQL connection defaults used by deployment.yaml, initContainers, and
   # NetworkPolicy ports when APP_DATABASE__BACKEND=mysql. This chart does not vendor
   # or deploy a MySQL database; set APP_DATABASE__HOST to your external Service/host,
   # provide that target through your platform/operator or a values overlay, and set
   # postgres.enabled=false. NOTE: the application supports MySQL, but NO published image
-  # variant is built with the mysql feature yet — a MySQL deployment needs an explicit
+  # variant is built with the mysql feature yet - a MySQL deployment needs an explicit
   # statuslist.image.tag or digest for a MySQL-capable image you build and supply, plus a
   # cleared/overridden initContainers probe and networkPolicy.databaseEgress when the
   # NetworkPolicy is enabled.

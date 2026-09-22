@@ -800,10 +800,15 @@
             "smtpFrom": { "type": "string", "title": "From address" },
             "smtpPassword": { "type": "string", "title": "SMTP password" },
             "requireTls": { "type": "boolean", "title": "Require TLS" },
-            "tlsConfig": { "type": "object", "title": "SMTP TLS config" }
-          }
+          "tlsConfig": { "type": "object", "title": "SMTP TLS config" }
         }
       }
+    },
+    "opentelemetry-collector": {
+      "type": "object",
+      "title": "OpenTelemetry Collector",
+      "description": "OpenTelemetry Collector subchart configuration."
     }
   }
+}
 }

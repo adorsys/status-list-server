@@ -7,7 +7,7 @@ this allows ANY source in the cluster; you MUST restrict sources to your ingress
 Egress:
 - Database rule: scoped to the database port, `to:` = statuslist.networkPolicy.databaseEgress
   if set, otherwise the in-cluster postgres pod selector. statuslist.networkPolicy.egressInternal
-  entries are appended to THIS rule, so each inherits the database port — they are NOT general
+  entries are appended to THIS rule, so each inherits the database port - they are NOT general
   outbound destinations.
 - Ports 443/53 are always allowed with NO `to:` entry, i.e. open to 0.0.0.0/0. This policy
   does NOT constrain outbound exfiltration.

@@ -6,7 +6,7 @@ Guard rails enforced at render time:
   chart fails if both are true.
 - Only the "postgres" and "mysql" database backends are accepted (via
   APP_DATABASE__BACKEND); anything else fails. postgres.enabled=true requires backend
-  postgres; mysql.enabled (a values key) is rejected — this chart never deploys MySQL.
+  postgres; mysql.enabled (a values key) is rejected - this chart never deploys MySQL.
 - Image resolution: digest (pinned, IfNotPresent) > tag (Always) > derived
   <baseAppVersion>-<variant>. An invalid digest fails.
 - APP_DATABASE__URL and APP_DATABASE__PASSWORD are rejected as plain env values; the
@@ -16,7 +16,7 @@ Guard rails enforced at render time:
 Replicas are omitted when autoscaling.enabled=true so the HPA controls the count.
 Pod annotations are always emitted with prometheus.io/scrape hints (for annotation-based
 scrape discovery) plus optional TOP-LEVEL .Values.podAnnotations (a documented empty-by-default
-map — note it is distinct from statuslist.podLabels, which are merged into the pod template
+map - note it is distinct from statuslist.podLabels, which are merged into the pod template
 LABELS).
 */}}
 {{- if .Values.statuslist.enabled }}
