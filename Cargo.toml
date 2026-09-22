@@ -4,9 +4,8 @@ version = "1.0.1"
 edition = "2024"
 
 [features]
-default = ["memory", "cache-memory"]
+default = ["memory"]
 memory = []
-cache-memory = []
 cache-redis = ["dep:redis"]
 redis-tests = ["cache-redis"]
 history = ["dep:sea-orm", "dep:sea-orm-migration"]

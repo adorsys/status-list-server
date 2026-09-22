@@ -111,10 +111,6 @@ statuslist:
     # Maximum status-list records retained by the in-memory backend. Redis uses
     # native key expiration based on APP_CACHE__TTL.
     APP_CACHE__MAX_CAPACITY: "100"
-    APP_CACHE__HOST: ""
-    APP_CACHE__PORT: ""
-    APP_CACHE__USERNAME: ""
-    APP_CACHE__DATABASE: ""
     APP_CACHE__TLS: "false"
     APP_STATUS_LIST__TOKEN_EXP_SECS: "900"
     APP_STATUS_LIST__TOKEN_TTL_SECS: "300"
@@ -293,6 +289,10 @@ statuslist:
     # because this chart does not deploy MySQL and cannot infer the target for RDS,
     # Cloud SQL, another namespace, or an operator-managed MySQL cluster.
     databaseEgress: []
+    # Redis egress destinations used when APP_CACHE__BACKEND=redis. The egress
+    # port is derived from APP_CACHE__PORT when set, otherwise 6380 when
+    # APP_CACHE__TLS=true and 6379 when false.
+    cacheEgress: []
   resources:
     requests:
       memory: "256Mi"

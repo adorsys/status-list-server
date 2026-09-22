@@ -1023,13 +1023,25 @@ pub struct CacheConfig {
 }
 
 impl CacheConfig {
-    fn validate(&self) -> Result<(), ConfigError> {
+    fn validate(&self, environment: TelemetryEnvironment) -> Result<(), ConfigError> {
         if self.password.is_some() && self.password_file.is_some() {
             return Err(ConfigError::Message(
                 "Ambiguous Redis cache configuration: use either cache.password or cache.password_file, not both".to_string(),
             ));
         }
         if self.backend == CacheBackend::Redis {
+            if environment.is_production() {
+                if !self.tls {
+                    return Err(ConfigError::Message(
+                        "cache.backend=redis requires cache.tls=true in production".to_string(),
+                    ));
+                }
+                if self.password.is_none() && self.password_file.is_none() {
+                    return Err(ConfigError::Message(
+                        "cache.backend=redis requires cache.password or cache.password_file in production".to_string(),
+                    ));
+                }
+            }
             if self.password_file.is_some() {
                 let mut config = self.clone();
                 config.password = Some(SecretString::from("placeholder".to_string()));
@@ -1166,7 +1178,7 @@ impl Config {
         if let Some(query) = trim_non_empty(config.database.query.as_deref()) {
             validate_database_query(query)?;
         }
-        config.cache.validate()?;
+        config.cache.validate(config.telemetry.environment)?;
         config.management_auth.validate()?;
         Ok(config)
     }
@@ -1503,6 +1515,34 @@ mod tests {
                 .expect("redis url")
                 .expose_secret(),
             "rediss://default:redis-password@redis:6380/2"
+        );
+
+        let redis_without_tls_in_prod = Config::load_from_overrides(&[
+            ("telemetry.environment", "production"),
+            ("cache.backend", "redis"),
+            ("cache.host", "redis"),
+            ("cache.password", "redis-password"),
+        ])
+        .expect_err("production Redis without TLS should be rejected");
+        assert!(
+            redis_without_tls_in_prod
+                .to_string()
+                .contains("cache.tls=true"),
+            "unexpected error: {redis_without_tls_in_prod}"
+        );
+
+        let redis_without_auth_in_prod = Config::load_from_overrides(&[
+            ("telemetry.environment", "production"),
+            ("cache.backend", "redis"),
+            ("cache.host", "redis"),
+            ("cache.tls", "true"),
+        ])
+        .expect_err("production Redis without auth should be rejected");
+        assert!(
+            redis_without_auth_in_prod
+                .to_string()
+                .contains("cache.password or cache.password_file"),
+            "unexpected error: {redis_without_auth_in_prod}"
         );
         assert_eq!(overridden.status_list.token_exp_secs, 1800);
         assert_eq!(overridden.status_list.token_ttl_secs, 600);
