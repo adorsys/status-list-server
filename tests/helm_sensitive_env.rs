@@ -172,13 +172,13 @@ fn rendered_env(rendered: &str) -> Vec<(String, String)> {
 
 #[test]
 fn rendered_chart_default_env_loads_application_config() {
-    let Some(rendered) = helm_template_chart_defaults(&[]).and_then(|output| {
+    let Some(rendered) = helm_template_chart_defaults(&[]).map(|output| {
         assert!(
             output.status.success(),
             "helm template failed: {}",
             String::from_utf8_lossy(&output.stderr)
         );
-        Some(String::from_utf8(output.stdout).expect("helm output should be UTF-8"))
+        String::from_utf8(output.stdout).expect("helm output should be UTF-8")
     }) else {
         return;
     };
