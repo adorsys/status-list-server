@@ -14,7 +14,12 @@ use color_eyre::eyre::Result as EyeResult;
 use sea_orm::{ConnectOptions, DbErr};
 #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mysql"))]
 use sea_orm_migration::MigratorTrait;
-#[cfg(any(feature = "sqlite", feature = "postgres", feature = "mysql"))]
+#[cfg(any(
+    feature = "sqlite",
+    feature = "postgres",
+    feature = "mysql",
+    feature = "redis"
+))]
 use secrecy::ExposeSecret;
 use std::sync::Arc;
 use std::time::Duration;
@@ -46,6 +51,7 @@ use crate::cert_manager::{
     CertManager,
     storage::{CryptoCachePolicy, Storage},
 };
+use crate::config::CacheBackend;
 use crate::config::{Config as AppConfig, DatabaseBackend};
 #[cfg(feature = "acme")]
 use crate::config::{DnsProviderKind, ENV_DEVELOPMENT, ENV_PRODUCTION, ResolvedDnsProvider};
@@ -62,7 +68,9 @@ use crate::domain::{
 use crate::outbound::aws::AwsSecretsManager;
 #[cfg(all(feature = "azure", not(feature = "vault"), not(feature = "gcp")))]
 use crate::outbound::azure_kv::AzureKeyVaultClient;
-use crate::outbound::cache::MokaStatusListCache;
+#[cfg(feature = "redis")]
+use crate::outbound::cache::RedisStatusListCache;
+use crate::outbound::cache::{DisabledStatusListCache, MokaStatusListCache};
 #[cfg(feature = "acme")]
 use crate::outbound::cert::AcmeCertificateProvider;
 #[cfg(not(feature = "acme"))]
@@ -526,7 +534,54 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
         (provider, None)
     };
 
-    let status_list_cache = MokaStatusListCache::new(config.cache.ttl, config.cache.max_capacity);
+    let status_list_cache: Arc<dyn crate::domain::ports::StatusListCache> = match config
+        .cache
+        .backend
+    {
+        CacheBackend::Memory => {
+            tracing::info!(
+                cache.backend = "memory",
+                cache.ttl_secs = config.cache.ttl,
+                cache.max_capacity = config.cache.max_capacity,
+                "status-list cache backend selected"
+            );
+            Arc::new(MokaStatusListCache::new(
+                config.cache.ttl,
+                config.cache.max_capacity,
+            ))
+        }
+        CacheBackend::Redis => {
+            if config.cache.ttl == 0 {
+                tracing::info!(
+                    cache.backend = "disabled",
+                    cache.reason = "ttl_zero",
+                    "status-list cache disabled"
+                );
+                Arc::new(DisabledStatusListCache)
+            } else {
+                #[cfg(feature = "redis")]
+                {
+                    let redis_url = config.cache.load_resolved_redis_url().await?;
+                    let cache =
+                        RedisStatusListCache::new(redis_url.expose_secret(), config.cache.ttl)
+                            .await?;
+                    tracing::info!(
+                        cache.backend = "redis",
+                        cache.ttl_secs = config.cache.ttl,
+                        cache.target = %config.cache.redacted_redis_target(),
+                        "status-list cache backend selected"
+                    );
+                    Arc::new(cache)
+                }
+                #[cfg(not(feature = "redis"))]
+                {
+                    return Err(color_eyre::eyre::eyre!(
+                        "cache.backend=redis is configured, but this binary was not built with the redis feature"
+                    ));
+                }
+            }
+        }
+    };
 
     let snapshot_option = if config.status_list.snapshot_retention_secs == 0 {
         None
@@ -537,7 +592,7 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
     let service = Arc::new(Service::from_arcs(
         status_list_repo,
         credential_repo,
-        Arc::new(status_list_cache),
+        status_list_cache,
         snapshot_option,
         cert_provider,
     ));

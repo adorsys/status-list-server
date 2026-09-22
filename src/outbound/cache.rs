@@ -11,6 +11,16 @@ use crate::domain::{
 
 const HIT_METRIC: &str = "status_list_cache_hits";
 const MISS_METRIC: &str = "status_list_cache_misses";
+#[cfg(feature = "redis")]
+const ERROR_METRIC: &str = "status_list_cache_errors";
+#[cfg(feature = "redis")]
+const CACHE_SCHEMA_VERSION: &str = "v1";
+#[cfg(feature = "redis")]
+const REDIS_KEY_PREFIX: &str = "status-list-server:status-list:";
+#[cfg(feature = "redis")]
+const REDIS_RESPONSE_TIMEOUT: Duration = Duration::from_millis(250);
+#[cfg(feature = "redis")]
+const REDIS_CONNECTION_TIMEOUT: Duration = Duration::from_millis(250);
 
 /// Cache-hit/miss SLI counters.
 ///
@@ -23,6 +33,8 @@ const MISS_METRIC: &str = "status_list_cache_misses";
 struct CacheMetrics {
     hits: Counter<u64>,
     misses: Counter<u64>,
+    #[cfg(feature = "redis")]
+    errors: Counter<u64>,
 }
 
 fn cache_metrics() -> CacheMetrics {
@@ -39,8 +51,53 @@ fn cache_metrics() -> CacheMetrics {
                 .u64_counter(MISS_METRIC)
                 .with_description("Status-list cache misses")
                 .build(),
+            #[cfg(feature = "redis")]
+            errors: meter
+                .u64_counter(ERROR_METRIC)
+                .with_description("Status-list cache backend errors")
+                .build(),
         }
     })
+}
+
+#[cfg(feature = "redis")]
+fn cache_error_attrs(operation: &'static str) -> [KeyValue; 2] {
+    [
+        KeyValue::new("cache", "status_list"),
+        KeyValue::new("operation", operation),
+    ]
+}
+
+#[cfg(feature = "redis")]
+pub(crate) fn record_redis_cache_error(operation: &'static str) {
+    cache_metrics().errors.add(1, &cache_error_attrs(operation));
+}
+
+#[cfg(feature = "redis")]
+fn redis_operation_error(operation: &'static str, error: redis::RedisError) -> StatusListError {
+    record_redis_cache_error(operation);
+    StatusListError::Backend(Box::new(error))
+}
+
+#[derive(Clone, Default)]
+pub struct DisabledStatusListCache;
+
+#[async_trait]
+impl StatusListCache for DisabledStatusListCache {
+    async fn get(&self, _list_id: &str) -> Result<Option<StatusListRecord>, StatusListError> {
+        cache_metrics()
+            .misses
+            .add(1, &[KeyValue::new("cache", "status_list")]);
+        Ok(None)
+    }
+
+    async fn put(&self, _status_list: StatusListRecord) -> Result<(), StatusListError> {
+        Ok(())
+    }
+
+    async fn invalidate(&self, _list_id: &str) -> Result<(), StatusListError> {
+        Ok(())
+    }
 }
 
 #[derive(Clone)]
@@ -98,6 +155,143 @@ impl StatusListCache for MokaStatusListCache {
         self.inner.invalidate(key).await;
         Ok(())
     }
+}
+
+#[cfg(feature = "redis")]
+#[derive(Clone)]
+pub struct RedisStatusListCache {
+    connection: redis::aio::ConnectionManager,
+    ttl_secs: u64,
+    record_prefix: String,
+}
+
+#[cfg(feature = "redis")]
+impl RedisStatusListCache {
+    pub async fn new(redis_url: &str, ttl_secs: u64) -> Result<Self, StatusListError> {
+        let client = redis::Client::open(redis_url)
+            .map_err(|error| redis_operation_error("connect", error))?;
+        let manager_config = redis::aio::ConnectionManagerConfig::new()
+            .set_response_timeout(REDIS_RESPONSE_TIMEOUT)
+            .set_connection_timeout(REDIS_CONNECTION_TIMEOUT);
+        let connection = redis::aio::ConnectionManager::new_with_config(client, manager_config)
+            .await
+            .map_err(|error| redis_operation_error("connect", error))?;
+        Ok(Self {
+            connection,
+            ttl_secs,
+            record_prefix: format!("{REDIS_KEY_PREFIX}rec:{CACHE_SCHEMA_VERSION}:"),
+        })
+    }
+
+    fn key(&self, list_id: &str) -> String {
+        format!("{}{}", self.record_prefix, list_id)
+    }
+
+    async fn delete_corrupt_entry(&self, key: &str) -> Result<(), StatusListError> {
+        use redis::AsyncCommands;
+
+        let mut connection = self.connection.clone();
+        let _: () = connection
+            .del(key)
+            .await
+            .map_err(|error| redis_operation_error("delete_corrupt", error))?;
+        Ok(())
+    }
+}
+
+#[cfg(feature = "redis")]
+#[async_trait]
+impl StatusListCache for RedisStatusListCache {
+    async fn get(&self, list_id: &str) -> Result<Option<StatusListRecord>, StatusListError> {
+        use redis::AsyncCommands;
+
+        if self.ttl_secs == 0 {
+            cache_metrics()
+                .misses
+                .add(1, &[KeyValue::new("cache", "status_list")]);
+            return Ok(None);
+        }
+
+        let key = self.key(list_id);
+        let mut connection = self.connection.clone();
+        let cached: Option<String> = connection
+            .get(&key)
+            .await
+            .map_err(|error| redis_operation_error("get", error))?;
+        let metrics = cache_metrics();
+        if let Some(value) = cached {
+            match serde_json::from_str::<StatusListRecord>(&value) {
+                Ok(record) => {
+                    if record.list_id != list_id {
+                        tracing::warn!(
+                            requested_list_id = %list_id,
+                            cached_list_id = %record.list_id,
+                            "discarding Redis status-list cache entry with mismatched list_id"
+                        );
+                        self.delete_corrupt_entry(&key).await?;
+                        metrics
+                            .misses
+                            .add(1, &[KeyValue::new("cache", "status_list")]);
+                        return Ok(None);
+                    }
+                    metrics
+                        .hits
+                        .add(1, &[KeyValue::new("cache", "status_list")]);
+                    Ok(Some(record))
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        list_id = %list_id,
+                        error = %error,
+                        "discarding undecodable Redis status-list cache entry"
+                    );
+                    self.delete_corrupt_entry(&key).await?;
+                    metrics
+                        .misses
+                        .add(1, &[KeyValue::new("cache", "status_list")]);
+                    Ok(None)
+                }
+            }
+        } else {
+            metrics
+                .misses
+                .add(1, &[KeyValue::new("cache", "status_list")]);
+            Ok(None)
+        }
+    }
+
+    async fn put(&self, record: StatusListRecord) -> Result<(), StatusListError> {
+        use redis::AsyncCommands;
+
+        if self.ttl_secs == 0 {
+            return Ok(());
+        }
+
+        let key = self.key(&record.list_id);
+        let value = serde_json::to_string(&record).map_err(cache_error)?;
+        let mut connection = self.connection.clone();
+        let _: () = connection
+            .set_ex(key, value, self.ttl_secs)
+            .await
+            .map_err(|error| redis_operation_error("put", error))?;
+        Ok(())
+    }
+
+    async fn invalidate(&self, list_id: &str) -> Result<(), StatusListError> {
+        use redis::AsyncCommands;
+
+        let mut connection = self.connection.clone();
+        let _: () = connection
+            .del(self.key(list_id))
+            .await
+            .map_err(|error| redis_operation_error("invalidate", error))?;
+        Ok(())
+    }
+}
+
+#[cfg(feature = "redis")]
+fn cache_error(error: serde_json::Error) -> StatusListError {
+    StatusListError::Backend(Box::new(error))
 }
 
 #[cfg(test)]
