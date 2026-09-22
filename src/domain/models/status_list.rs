@@ -168,6 +168,22 @@ impl StatusList {
             lst: encode_compressed(&status_array)?,
         })
     }
+
+    pub(crate) fn token_representation(&self) -> Result<(u8, String, Vec<u8>), StatusListError> {
+        validate_bits(self.bits as usize)?;
+
+        let raw = decode_compressed(&self.lst)?;
+        let lst = if self.lst.is_empty() {
+            encode_compressed(&raw)?
+        } else {
+            self.lst.clone()
+        };
+        let compressed = base64url::decode(&lst).map_err(|err| {
+            StatusListError::CorruptStoredList(format!("Invalid lst encoding: {err}"))
+        })?;
+
+        Ok((self.bits, lst, compressed))
+    }
 }
 
 fn status_value(status: &Status) -> Result<u32, StatusListError> {
@@ -220,8 +236,7 @@ fn determine_bits(
         0 | 1 => 1,
         2 | 3 => 2,
         4..=15 => 4,
-        16..=255 => 8,
-        _ => unreachable!("status_value rejects values above 255"),
+        _ => unreachable!("status_value rejects unsupported Draft-21 status values"),
     };
 
     if let Some(bits) = original_bits {
@@ -327,6 +342,10 @@ fn encode_compressed(bytes: &[u8]) -> Result<String, StatusListError> {
 }
 
 fn decode_compressed(encoded: &str) -> Result<Vec<u8>, StatusListError> {
+    if encoded.is_empty() {
+        return Ok(Vec::new());
+    }
+
     let bytes = base64url::decode(encoded).map_err(|err| {
         StatusListError::CorruptStoredList(format!("Invalid lst encoding: {err}"))
     })?;
@@ -379,7 +398,14 @@ fn decode_status_array(array: &[u8], bits: usize) -> Result<Vec<Status>, StatusL
             0 => Status::Valid,
             1 => Status::Invalid,
             2 => Status::Suspended,
-            value => Status::ApplicationSpecific(value),
+            value if is_application_specific_status_value(value) => {
+                Status::ApplicationSpecific(value)
+            }
+            value => {
+                return Err(StatusListError::CorruptStoredList(format!(
+                    "stored status list contains reserved status value {value}; reserved values must not be re-encoded as application-specific"
+                )));
+            }
         });
     }
     Ok(statuses)
@@ -737,6 +763,61 @@ mod tests {
             invalid_bits_list.update(vec![entry(1, Status::Invalid)]),
             Err(StatusListError::CorruptStoredList(_))
         ));
+    }
+
+    #[test]
+    fn update_legacy_empty_lst_upgrades_to_compressed_empty_stream() {
+        let legacy_empty = StatusList {
+            bits: 1,
+            lst: String::new(),
+        };
+
+        let updated = legacy_empty
+            .update(vec![entry(0, Status::Invalid)])
+            .unwrap();
+
+        assert_eq!(updated.bits, 1);
+        assert!(!updated.lst.is_empty());
+        assert_eq!(decompress(&updated.lst), vec![0b0000_0001]);
+    }
+
+    #[test]
+    fn decode_rejects_reserved_stored_status_values_as_corruption() {
+        for (raw, bits, value) in [([0x04], 4usize, 4u32), ([0x10], 8, 16)] {
+            let result = decode_status_array(&raw, bits);
+            assert!(
+                matches!(result, Err(StatusListError::CorruptStoredList(ref msg)) if msg.contains(&format!("reserved status value {value}"))),
+                "reserved stored value {value} must be stored-state corruption"
+            );
+        }
+    }
+
+    #[test]
+    fn token_representation_rejects_unsupported_legacy_bits() {
+        let legacy_invalid_bits = StatusList {
+            bits: 9,
+            lst: encode_compressed(&[0x00]).unwrap(),
+        };
+
+        assert!(matches!(
+            legacy_invalid_bits.token_representation(),
+            Err(StatusListError::CorruptStoredList(_))
+        ));
+    }
+
+    #[test]
+    fn token_representation_normalizes_legacy_empty_lst() {
+        let legacy_empty = StatusList {
+            bits: 1,
+            lst: String::new(),
+        };
+
+        let (bits, lst, compressed) = legacy_empty.token_representation().unwrap();
+
+        assert_eq!(bits, 1);
+        assert!(!lst.is_empty());
+        assert_eq!(base64url::decode(&lst).unwrap(), compressed);
+        assert_eq!(decompress(&lst), Vec::<u8>::new());
     }
 
     #[test]

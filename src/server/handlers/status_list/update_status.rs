@@ -1,4 +1,5 @@
 use axum::{
+    extract::rejection::JsonRejection,
     extract::{Json, Path, State},
     response::IntoResponse,
 };
@@ -6,7 +7,7 @@ use hyper::StatusCode;
 
 use crate::server::{AppState, auth::AuthenticatedIssuer, error::ApiError};
 
-use super::utils::request::StatusesRequest;
+use super::utils::request::{StatusesRequest, parse_statuses_payload};
 
 /// Update statuses in a status list.
 ///
@@ -50,6 +51,15 @@ pub async fn update_status(
         .await?;
 
     Ok(StatusCode::OK.into_response())
+}
+
+pub async fn update_status_route(
+    state: State<AppState>,
+    principal: AuthenticatedIssuer,
+    path: Path<String>,
+    payload: Result<Json<StatusesRequest>, JsonRejection>,
+) -> Result<impl IntoResponse, ApiError> {
+    update_status(state, principal, path, parse_statuses_payload(payload)?).await
 }
 
 #[cfg(test)]

@@ -1,6 +1,8 @@
+use axum::{Json, extract::rejection::JsonRejection};
 use serde::{Deserialize, Serialize};
 
 use crate::domain::models::status_list::is_application_specific_status_value;
+use crate::server::error::ApiError;
 
 #[allow(clippy::upper_case_acronyms)]
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -66,6 +68,17 @@ pub struct StatusEntry {
 #[derive(Deserialize)]
 pub struct StatusesRequest {
     pub statuses: Vec<StatusEntry>,
+}
+
+pub(crate) fn parse_statuses_payload(
+    payload: Result<Json<StatusesRequest>, JsonRejection>,
+) -> Result<Json<StatusesRequest>, ApiError> {
+    payload.map_err(|err| {
+        ApiError::bad_request(
+            "invalid_request_body",
+            format!("Invalid status update request body: {err}"),
+        )
+    })
 }
 
 impl From<StatusEntry> for crate::domain::models::status_list::StatusEntry {
