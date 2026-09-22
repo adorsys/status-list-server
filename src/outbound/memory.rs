@@ -261,7 +261,7 @@ mod tests {
             &self,
         ) -> Result<crate::domain::ports::SigningMaterial, StatusListError> {
             let key = crate::utils::crypto::SigningKey::generate(
-                crate::utils::crypto::SigningAlgorithm::Es256,
+                crate::domain::models::token::SigningAlgorithm::Es256,
             )
             .map_err(|e| StatusListError::Backend(Box::new(e)))?;
             Ok(crate::domain::ports::SigningMaterial::new(
