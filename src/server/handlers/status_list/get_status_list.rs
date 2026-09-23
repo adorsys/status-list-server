@@ -1562,4 +1562,225 @@ mod tests {
 
         assert_eq!(response.status(), StatusCode::OK);
     }
+
+    #[tokio::test]
+    async fn test_get_historical_status_list_jwt_has_snapshot_window() {
+        use crate::server::handlers::status_list::utils::token::StatusListToken;
+        use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode};
+
+        let token_id = uuid::Uuid::new_v4().to_string();
+        let app_state = test_app_state(None).await;
+
+        publish_status(
+            State(app_state.clone()),
+            authenticated_issuer("issuer1"),
+            Path(token_id.clone()),
+            Json(StatusesRequest { statuses: vec![] }),
+        )
+        .await
+        .unwrap();
+
+        let req_time = time::OffsetDateTime::now_utc().unix_timestamp();
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::ACCEPT,
+            ACCEPT_STATUS_LISTS_HEADER_JWT.parse().unwrap(),
+        );
+
+        let response = get_status_list(
+            State(app_state.clone()),
+            Path(token_id),
+            Ok(Query(StatusListQuery {
+                time: Some(req_time),
+            })),
+            headers,
+        )
+        .await
+        .unwrap()
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let body_bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let jwt_str = String::from_utf8(body_bytes.to_vec()).unwrap();
+
+        let key_pem = include_str!("../../../../test_data/ec-private.pem");
+        let keypair = crate::utils::keygen::Keypair::from_pkcs8_pem(key_pem).unwrap();
+        use p256::pkcs8::EncodePublicKey;
+        let public_key_pem = keypair
+            .verifying_key()
+            .to_public_key_pem(p256::pkcs8::LineEnding::LF)
+            .unwrap();
+        let decoding_key = DecodingKey::from_ec_pem(public_key_pem.as_bytes()).unwrap();
+        let mut validation = Validation::new(Algorithm::ES256);
+        validation.validate_exp = true;
+
+        let token_data = decode::<StatusListToken>(&jwt_str, &decoding_key, &validation).unwrap();
+
+        assert!(token_data.claims.iat <= req_time);
+        assert!(token_data.claims.exp.unwrap() > req_time);
+    }
+
+    #[tokio::test]
+    async fn test_get_historical_status_list_cwt_has_snapshot_window() {
+        use crate::utils::keygen::Keypair;
+        use coset::{
+            CborSerializable, CoseSign1, TaggedCborSerializable, cbor::Value as CborValue,
+        };
+        use p256::ecdsa::{Signature, signature::Verifier};
+
+        let token_id = uuid::Uuid::new_v4().to_string();
+        let app_state = test_app_state(None).await;
+
+        publish_status(
+            State(app_state.clone()),
+            authenticated_issuer("issuer1"),
+            Path(token_id.clone()),
+            Json(StatusesRequest { statuses: vec![] }),
+        )
+        .await
+        .unwrap();
+
+        let req_time = time::OffsetDateTime::now_utc().unix_timestamp();
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::ACCEPT,
+            ACCEPT_STATUS_LISTS_HEADER_CWT.parse().unwrap(),
+        );
+
+        let response = get_status_list(
+            State(app_state.clone()),
+            Path(token_id),
+            Ok(Query(StatusListQuery {
+                time: Some(req_time),
+            })),
+            headers,
+        )
+        .await
+        .unwrap()
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let body_bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let sign1 = CoseSign1::from_tagged_slice(&body_bytes).unwrap();
+
+        let key_pem = include_str!("../../../../test_data/ec-private.pem");
+        let keypair = Keypair::from_pkcs8_pem(key_pem).unwrap();
+        let sig = Signature::from_slice(&sign1.signature).unwrap();
+        let tbs = sign1.tbs_data(&[]);
+        assert!(keypair.verifying_key().verify(&tbs, &sig).is_ok());
+
+        let payload_bytes = sign1.payload.unwrap();
+        let cbor_val = CborValue::from_slice(&payload_bytes).unwrap();
+        if let CborValue::Map(claims) = cbor_val {
+            let iat = claims
+                .iter()
+                .find(|(k, _)| k == &CborValue::Integer(6.into()))
+                .map(|(_, v)| match v {
+                    CborValue::Integer(i) => i128::from(*i) as i64,
+                    _ => 0,
+                })
+                .unwrap();
+            let exp = claims
+                .iter()
+                .find(|(k, _)| k == &CborValue::Integer(4.into()))
+                .map(|(_, v)| match v {
+                    CborValue::Integer(i) => i128::from(*i) as i64,
+                    _ => 0,
+                })
+                .unwrap();
+
+            assert!(iat <= req_time);
+            assert!(exp > req_time);
+        } else {
+            panic!("Expected CBOR map payload");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_get_historical_status_list_returns_valid_historical_window() {
+        use crate::domain::models::credential::Issuer;
+        use crate::domain::models::status_list::{StatusList, StatusListSnapshot};
+        use crate::server::handlers::status_list::utils::token::StatusListToken;
+        use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode};
+
+        let token_id = uuid::Uuid::new_v4().to_string();
+        let app_state = test_app_state(None).await;
+        let now = time::OffsetDateTime::now_utc().unix_timestamp();
+
+        let past_iat = now - 100_000;
+        let past_exp = past_iat + 900;
+        let req_time = past_iat + 100;
+
+        let snapshot = StatusListSnapshot {
+            snapshot_id: uuid::Uuid::new_v4().to_string(),
+            list_id: token_id.clone(),
+            issuer: Issuer("issuer1".to_string()),
+            status_list: StatusList {
+                bits: 1,
+                lst: "past_snapshot_lst_data".to_string(),
+            },
+            sub: format!("https://example.com/statuslists/{token_id}"),
+            iat: past_iat,
+            exp: past_exp,
+        };
+
+        let snapshot_repo = app_state
+            .service
+            .snapshot_repo
+            .as_ref()
+            .expect("snapshot repo should be configured");
+        snapshot_repo.insert(snapshot).await.unwrap();
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::ACCEPT,
+            ACCEPT_STATUS_LISTS_HEADER_JWT.parse().unwrap(),
+        );
+
+        let response = get_status_list(
+            State(app_state.clone()),
+            Path(token_id),
+            Ok(Query(StatusListQuery {
+                time: Some(req_time),
+            })),
+            headers,
+        )
+        .await
+        .unwrap()
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let body_bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let jwt_str = String::from_utf8(body_bytes.to_vec()).unwrap();
+
+        let key_pem = include_str!("../../../../test_data/ec-private.pem");
+        let keypair = crate::utils::keygen::Keypair::from_pkcs8_pem(key_pem).unwrap();
+        use p256::pkcs8::EncodePublicKey;
+        let public_key_pem = keypair
+            .verifying_key()
+            .to_public_key_pem(p256::pkcs8::LineEnding::LF)
+            .unwrap();
+        let decoding_key = DecodingKey::from_ec_pem(public_key_pem.as_bytes()).unwrap();
+        let mut validation = Validation::new(Algorithm::ES256);
+        validation.validate_exp = false;
+
+        let token_data = decode::<StatusListToken>(&jwt_str, &decoding_key, &validation).unwrap();
+
+        assert_eq!(token_data.claims.iat, past_iat);
+        assert_eq!(token_data.claims.exp, Some(past_exp));
+        assert!(token_data.claims.iat <= req_time && req_time < token_data.claims.exp.unwrap());
+        assert_eq!(token_data.claims.status_list.bits, 1);
+        assert_eq!(token_data.claims.status_list.lst, "past_snapshot_lst_data");
+    }
 }
