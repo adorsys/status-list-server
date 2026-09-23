@@ -62,8 +62,8 @@ tests:
         alertname: CacheHitRatioLow
         exp_alerts: []
 
-  # Redis-backed pods that cannot initialize the cache should expose the startup
-  # error directly rather than leaving operators to infer it from hit-ratio data.
+  # Redis-backed pods continue serving with lazy reconnect after startup cache
+  # failures, and should expose that startup error directly.
   - interval: 1m
     input_series:
       - series: >-

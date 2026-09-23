@@ -566,19 +566,28 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
                     let redis_url = config.cache.load_resolved_redis_url().await?;
                     let cache =
                         RedisStatusListCache::new(redis_url.expose_secret(), config.cache.ttl)
-                            .await
                             .map_err(|error| {
                                 record_redis_cache_error("startup");
                                 color_eyre::eyre::eyre!(
-                                    "failed to initialize Redis status-list cache client: {error}"
+                                    "failed to configure Redis status-list cache client: {error}"
                                 )
                             })?;
-                    tracing::info!(
-                        cache.backend = "redis",
-                        cache.ttl_secs = config.cache.ttl,
-                        cache.target = %config.cache.redacted_redis_target(),
-                        "status-list cache backend selected"
-                    );
+                    if let Err(error) = cache.warm_up().await {
+                        tracing::warn!(
+                            cache.backend = "redis",
+                            cache.ttl_secs = config.cache.ttl,
+                            cache.target = %config.cache.redacted_redis_target(),
+                            error = ?error,
+                            "Redis status-list cache unavailable at startup; continuing with lazy reconnecting cache"
+                        );
+                    } else {
+                        tracing::info!(
+                            cache.backend = "redis",
+                            cache.ttl_secs = config.cache.ttl,
+                            cache.target = %config.cache.redacted_redis_target(),
+                            "status-list cache backend selected"
+                        );
+                    }
                     Arc::new(cache)
                 }
                 #[cfg(not(feature = "redis"))]

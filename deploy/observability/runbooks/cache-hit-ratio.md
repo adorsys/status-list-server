@@ -20,9 +20,9 @@ round trip. It pages only through review (warn).
 3. **Cache disabled** — `cache.ttl == 0` disables the cache entirely (hit ratio
    drops to ~0).
 4. **Process restarts** — every restart warms the in-process cache from empty.
-5. **Redis startup/connectivity errors** — Redis-backed pods cannot initialize
-   the cache when Redis cannot be reached before the configured connection
-   timeout.
+5. **Redis startup/connectivity errors** — Redis-backed pods continue serving
+   with cache misses while the lazy Redis connection manager reconnects; Redis
+   invalidation resumes once Redis is reachable.
 
 ## Diagnostics
 
@@ -51,8 +51,8 @@ grep -i cache .env 2>/dev/null
    working set.
 3. Re-check after a restart warm-up (the ratio recovers over ~one TTL period).
 4. If Redis errors are present, verify Redis DNS, credentials, TLS mode, and
-   NetworkPolicy `cacheEgress`; then restart affected pods once Redis is
-   reachable.
+   NetworkPolicy `cacheEgress`; the Redis cache backend reconnects lazily once
+   Redis is reachable.
 
 ## Escalation
 
