@@ -542,24 +542,18 @@ async fn test_store_filesystem_strategy_persists_material() {
 }
 
 #[tokio::test]
-async fn test_store_filesystem_strategy_accepts_der_material() {
+async fn test_store_filesystem_strategy_rejects_der_material() {
     init_crypto();
 
-    let (cert_pem, key_pem) = matching_cert_and_key();
+    let (cert_pem, _) = matching_cert_and_key();
     let (_, cert_der) = x509_parser::pem::parse_x509_pem(cert_pem.as_bytes()).unwrap();
-    let key_der = pem::parse(key_pem.as_bytes()).unwrap().into_contents();
-    let temp_dir = std::env::temp_dir().join(format!(
-        "status-list-server-cert-store-der-{}",
-        uuid::Uuid::new_v4()
-    ));
-    let cert_path = temp_dir.join("tls.der");
-    let key_path = temp_dir.join("tls.pk8");
+    let temp_dir = TempDir::new();
+    let cert_path = temp_dir.path.join("tls.der");
+    let key_path = temp_dir.path.join("tls.key");
 
-    tokio::fs::create_dir_all(&temp_dir).await.unwrap();
     tokio::fs::write(&cert_path, cert_der.contents)
         .await
         .unwrap();
-    tokio::fs::write(&key_path, key_der).await.unwrap();
 
     let manager = CertManager::builder()
         .domains(["example.com"])
@@ -568,15 +562,14 @@ async fn test_store_filesystem_strategy_accepts_der_material() {
         .build()
         .unwrap();
 
-    let cert_data = manager.request_certificate().await.unwrap();
+    let error = manager
+        .request_certificate()
+        .await
+        .expect_err("raw DER is outside the supported input contract");
 
     assert!(
-        cert_data
-            .certificate
-            .contains("-----BEGIN CERTIFICATE-----")
+        matches!(error, CertError::Validation(message) if message.starts_with("failed to read certificate PEM file "))
     );
-    assert_eq!(manager.signing_key_pem().await.unwrap(), key_pem);
-    assert_eq!(manager.cert_chain_parts().await.unwrap().unwrap().len(), 1);
 }
 
 #[tokio::test]
@@ -612,22 +605,17 @@ async fn test_store_storage_strategy_persists_material() {
 }
 
 #[tokio::test]
-async fn test_store_storage_strategy_accepts_base64_der_material() {
-    use base64::prelude::{BASE64_STANDARD, BASE64_URL_SAFE_NO_PAD, Engine as _};
+async fn test_store_storage_strategy_rejects_base64_der_material() {
+    use base64::prelude::{BASE64_STANDARD, Engine as _};
 
     init_crypto();
 
     let material_storage = MockStorage::new();
-    let (cert_pem, key_pem) = matching_cert_and_key();
+    let (cert_pem, _) = matching_cert_and_key();
     let (_, cert_der) = x509_parser::pem::parse_x509_pem(cert_pem.as_bytes()).unwrap();
-    let key_der = pem::parse(key_pem.as_bytes()).unwrap().into_contents();
 
     material_storage
         .store("source-cert", &BASE64_STANDARD.encode(cert_der.contents))
-        .await
-        .unwrap();
-    material_storage
-        .store("source-key", &BASE64_URL_SAFE_NO_PAD.encode(key_der))
         .await
         .unwrap();
 
@@ -641,14 +629,14 @@ async fn test_store_storage_strategy_accepts_base64_der_material() {
         .build()
         .unwrap();
 
-    let cert_data = manager.request_certificate().await.unwrap();
+    let error = manager
+        .request_certificate()
+        .await
+        .expect_err("base64 DER is outside the supported input contract");
 
     assert!(
-        cert_data
-            .certificate
-            .contains("-----BEGIN CERTIFICATE-----")
+        matches!(error, CertError::Validation(message) if message == "certificate material must be PEM text")
     );
-    assert_eq!(manager.signing_key_pem().await.unwrap(), key_pem);
 }
 
 #[tokio::test]

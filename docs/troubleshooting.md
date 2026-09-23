@@ -400,9 +400,8 @@ non-disruptive but leaves the app on the previous credential until the file is v
 **When you see this:** At startup, when the `-fscert` image loads and parses static certificate
 material. Strings include:
 
-- `{certificate|signing key} material must be PEM text or base64/base64url-encoded DER`
-- `signing key PEM is not valid UTF-8: ...`
-- `failed to read certificate file '...': ...` / `failed to read signing key file '...': ...`
+- `{certificate|signing key} material must be PEM text`
+- `failed to read certificate PEM file '...': ...` / `failed to read signing key PEM file '...': ...`
 - `store certificate key '...' was not found` / `store signing key '...' was not found`
 - Store validation: both-paths-and-keys, missing file, or missing key errors from the
   `StoreProvisioningStrategy` builder
@@ -410,8 +409,8 @@ material. Strings include:
 _Source: `src/utils/cert_manager/strategy.rs:92-222`, `src/utils/cert_manager/builder.rs:171`, `src/setup.rs:494-505` (`store` provider selection and `spawn_cert_rotation`)_
 
 **Root cause:** The cert and signing key do not match (a rotated key paired with the old cert), a
-file/key is missing or unreadable, or the stored value is neither PEM nor base64 DER (e.g. a
-secret written as plain text or with a stray newline).
+file/key is missing or unreadable, or the stored value is not PEM text (e.g. a
+secret written as plain text or DER).
 
 **Diagnostics:**
 
@@ -422,9 +421,8 @@ kubectl get secret statuslist-secret -n statuslist-production \
   -o go-template='{{range $k,$v := .data}}{{println $k}}{{end}}'
 ```
 
-**Fix:** Replace the material with a matching cert + PEM key pair in the expected encoding
-(PEM containing `-----BEGIN ...`, or standard/base64url DER). Confirm both keys exist and are
-readable at the configured path/store-key. When the signing material is file-mounted, the server reloads it in-process
+**Fix:** Replace the material with a matching PEM certificate and PEM key pair. Confirm both keys
+exist and are readable at the configured path/store-key. When the signing material is file-mounted, the server reloads it in-process
 on file change; a rollout is only needed to re-read a changed value when it is delivered another
 way:
 
@@ -808,8 +806,8 @@ For quick grep, the application emits these verbatim (with the primary source fi
 - `failed to read Kubernetes service account token from '...'` / `Kubernetes service account token in '...' is empty`: `src/outbound/vault.rs`
 - `Token renewal failed, re-authenticating: ...` / `token renewal failed: HTTP <status>` / `vault authentication in cooldown backoff after recent failure`: `src/outbound/vault.rs`
 - `vault access denied for path '...'` / `vault load|store|delete failed for path '...': HTTP <status>`: `src/outbound/vault.rs`
-- `... material must be PEM text or base64/base64url-encoded DER` / `signing key PEM is not valid UTF-8: ...`: `src/utils/cert_manager/strategy.rs`
-- `failed to read certificate|signing key file '...'`: `src/utils/cert_manager/strategy.rs`
+- `... material must be PEM text`: `src/utils/cert_manager/strategy.rs`
+- `failed to read certificate|signing key PEM file '...'`: `src/utils/cert_manager/strategy.rs`
 - `store certificate key '...' was not found` / `store signing key '...' was not found`: `src/utils/cert_manager/strategy.rs`
 - `readiness check failed` (WARN): `src/server/health.rs`
 

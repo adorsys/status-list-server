@@ -128,8 +128,8 @@ impl SigningKey {
         }
     }
 
-    /// Parse PKCS#8 DER bytes and auto-detect algorithm.
-    pub fn from_pkcs8_der(der: &[u8]) -> Result<Self, Error> {
+    /// Parse PKCS#8 DER bytes and auto-detect the algorithm.
+    fn from_pkcs8_der(der: &[u8]) -> Result<Self, Error> {
         let pki = pkcs8::PrivateKeyInfoRef::from_der(der)?;
         let algorithm = detect_pkcs8_algorithm(&pki)?;
         let rng = SystemRandom::new();
