@@ -14,6 +14,7 @@ use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 
 use crate::domain::models::status_list::{StatusListError, StatusListRecord};
+use crate::domain::ports::SigningMaterial;
 use crate::utils::keygen::Keypair;
 
 use super::constants::{
@@ -84,12 +85,17 @@ pub(crate) struct StatusListToken {
 /// * `status_record` – the status list data to encode
 /// * `validity_window` – `(iat, exp)` pair; defaults to `(now, now + token_exp_secs)`
 /// * `client_accepts_gzip` – whether to gzip-compress JWT output
+/// * `signing_material` – an already-fetched signing snapshot; this lets the
+///   caller pin the exact key/certificate used so a rotated key (whose
+///   fingerprint also keys the signed-bytes cache) never produces an entry under
+///   a mismatched fingerprint
 pub(crate) async fn build_status_list_token(
     state: &crate::server::AppState,
     accept: &str,
     status_record: &StatusListRecord,
     validity_window: Option<(i64, i64)>,
     client_accepts_gzip: bool,
+    signing_material: SigningMaterial,
 ) -> Result<(Vec<u8>, Option<&'static str>), StatusListError> {
     let format = token_format(accept);
     let attributes = [KeyValue::new("format", format)];
@@ -100,6 +106,7 @@ pub(crate) async fn build_status_list_token(
         status_record,
         validity_window,
         client_accepts_gzip,
+        signing_material,
     )
     .await
     {
@@ -117,15 +124,11 @@ async fn build_status_list_token_inner(
     status_record: &StatusListRecord,
     validity_window: Option<(i64, i64)>,
     client_accepts_gzip: bool,
+    signing_material: SigningMaterial,
 ) -> Result<(Vec<u8>, Option<&'static str>), StatusListError> {
-    let signing_material = state
-        .service
-        .cert_provider()
-        .signing_material()
-        .await
-        .map_err(|e| StatusListError::Backend(Box::new(e)))?;
     let certs_parts = signing_material
         .certificate_chain
+        .clone()
         .ok_or(StatusListError::Unavailable)?;
     let signing_key_pem = signing_material.signing_key_pem;
 

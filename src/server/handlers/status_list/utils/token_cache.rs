@@ -6,6 +6,9 @@ use opentelemetry::{
     metrics::Counter,
     {KeyValue, global},
 };
+use sha2::{Digest, Sha256};
+
+use crate::domain::ports::SigningMaterial;
 
 const HIT_METRIC: &str = "token_bytes_cache_hits";
 const MISS_METRIC: &str = "token_bytes_cache_misses";
@@ -58,16 +61,19 @@ pub(crate) struct CachedToken {
 
 /// An in-memory cache of fully signed, serialised status-list token bytes.
 ///
-/// Entries are keyed by `(list content hash, window_start, format, gzip)` and
-/// are valid for exactly the anchored token window `[window_start,
-/// window_start + exp_secs)`. Because `iat` is anchored to `window_start`, the
-/// bytes are identical for every request in the same window, so the cache lets
-/// a fresh `200` reuse a single sign per `(list, window, format)` per replica.
+/// Entries are keyed by `(list content hash, signer fingerprint, window_start,
+/// format, gzip)` and are valid for exactly the anchored token window
+/// `[window_start, window_start + exp_secs)`. Because `iat` is anchored to
+/// `window_start`, the bytes are identical for every request in the same window,
+/// so the cache lets a fresh `200` reuse a single sign per `(list, window,
+/// format)` per replica.
 ///
 /// Content changes and list identity are covered by the key: a changed list has
 /// a different content hash (immediate miss), and `list_id` keeps otherwise
 /// identical `(content, window, format)` values from different lists distinct.
-/// Expiry is covered by the window bound checked at lookup time plus moka's
+/// Signing-key rotation and certificate renewal are covered by the signer
+/// fingerprint, so a rotated key immediately misses and re-signs with the new
+/// key. Expiry is covered by the window bound checked at lookup time plus moka's
 /// `time_to_live`, so no eager invalidation is needed.
 ///
 /// Per-replica by design: ETag consistency across replicas is out of scope and
@@ -131,20 +137,49 @@ impl TokenBytesCache {
 /// Build the composite cache key for a live status-list token.
 ///
 /// The content hash is the SHA-256 over the representation-driving fields of
-/// `record` (same inputs the ETag used to hash), so any content change produces
-/// a different key and thus a fresh sign.
+/// `record`; the signer fingerprint is derived from the current signing
+/// material (key PEM + certificate chain) so rotating the signing key or
+/// renewing the certificate produces a different key and forces a fresh sign.
+/// `aggregation_uri` and `token_ttl_secs` are folded in too because both are
+/// embedded in the signed token bytes, so a config change to either (not just a
+/// record content change) must also invalidate cached bytes.
+#[allow(clippy::too_many_arguments)] // each parameter is a distinct cache-key dimension
 pub(crate) fn token_bytes_cache_key(
     list_id: &str,
     content_hash: &str,
+    signer_fingerprint: &str,
     window_start: i64,
     format: &str,
     encoding: TokenEncoding,
+    aggregation_uri: &str,
+    token_ttl_secs: u64,
 ) -> String {
     let gzip = match encoding {
         TokenEncoding::Identity => 0,
         TokenEncoding::Gzip => 1,
     };
-    format!("{list_id}\u{1f}{content_hash}\u{1f}{window_start}\u{1f}{format}\u{1f}{gzip}")
+    format!(
+        "{list_id}\u{1f}{content_hash}\u{1f}{signer_fingerprint}\u{1f}{window_start}\u{1f}{format}\u{1f}{gzip}\u{1f}{aggregation_uri}\u{1f}{token_ttl_secs}"
+    )
+}
+
+/// A stable digest of the exact signing material (private key PEM and the
+/// certificate chain) that produced a token's signature.
+///
+/// Every provider serves `SigningMaterial` from an in-memory atomic snapshot that
+/// is swapped atomically on rotation/renewal, so computing this on the hot path is
+/// a cheap in-memory hash, not a key-load or network call. It changes whenever the
+/// key or its certificate changes, which is what makes the signed-bytes cache
+/// self-invalidating on rotation.
+pub(crate) fn signer_fingerprint(material: &SigningMaterial) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(material.signing_key_pem.as_bytes());
+    if let Some(chain) = &material.certificate_chain {
+        for part in chain {
+            hasher.update(part.as_bytes());
+        }
+    }
+    hex::encode(hasher.finalize())
 }
 
 #[cfg(test)]
@@ -159,7 +194,16 @@ mod tests {
 
     async fn cached(w: i64) -> (TokenBytesCache, String) {
         let cache = TokenBytesCache::new(300, 100);
-        let key = token_bytes_cache_key("list", "hash", w, "jwt", TokenEncoding::Identity);
+        let key = key(
+            "list",
+            "hash",
+            "signer",
+            w,
+            "jwt",
+            TokenEncoding::Identity,
+            "",
+            300,
+        );
         cache
             .insert(
                 key.clone(),
@@ -170,6 +214,30 @@ mod tests {
             )
             .await;
         (cache, key)
+    }
+
+    /// Test helper filling the aggregation/ttl key dimensions with defaults.
+    #[allow(clippy::too_many_arguments)]
+    fn key(
+        list_id: &str,
+        content_hash: &str,
+        signer: &str,
+        w: i64,
+        format: &str,
+        encoding: TokenEncoding,
+        aggregation_uri: &str,
+        ttl: u64,
+    ) -> String {
+        token_bytes_cache_key(
+            list_id,
+            content_hash,
+            signer,
+            w,
+            format,
+            encoding,
+            aggregation_uri,
+            ttl,
+        )
     }
 
     #[tokio::test]
@@ -188,19 +256,81 @@ mod tests {
 
     #[tokio::test]
     async fn key_dimensions_are_distinct() {
-        let base = token_bytes_cache_key("l", "h", 1000, "jwt", TokenEncoding::Identity);
-        let other_window = token_bytes_cache_key("l", "h", 1001, "jwt", TokenEncoding::Identity);
-        let other_format = token_bytes_cache_key("l", "h", 1000, "cwt", TokenEncoding::Identity);
-        let other_gzip = token_bytes_cache_key("l", "h", 1000, "jwt", TokenEncoding::Gzip);
-        let other_list = token_bytes_cache_key("l2", "h", 1000, "jwt", TokenEncoding::Identity);
+        let b = &("list", "hash", "signer", 1000i64, "jwt");
+        let base = key(b.0, b.1, b.2, b.3, b.4, TokenEncoding::Identity, "", 300);
+        let other_window = key(b.0, b.1, b.2, 1001, b.4, TokenEncoding::Identity, "", 300);
+        let other_signer = key(
+            b.0,
+            b.1,
+            "signer2",
+            1000,
+            b.4,
+            TokenEncoding::Identity,
+            "",
+            300,
+        );
+        let other_format = key(b.0, b.1, b.2, 1000, "cwt", TokenEncoding::Identity, "", 300);
+        let other_gzip = key(b.0, b.1, b.2, 1000, "jwt", TokenEncoding::Gzip, "", 300);
+        let other_list = key(
+            "list2",
+            b.1,
+            b.2,
+            1000,
+            "jwt",
+            TokenEncoding::Identity,
+            "",
+            300,
+        );
+        let other_aggregation = key(
+            b.0,
+            b.1,
+            b.2,
+            1000,
+            "jwt",
+            TokenEncoding::Identity,
+            "https://agg",
+            300,
+        );
+        let other_ttl = key(b.0, b.1, b.2, 1000, "jwt", TokenEncoding::Identity, "", 600);
+
         assert_ne!(base, other_window);
+        assert_ne!(base, other_signer);
         assert_ne!(base, other_format);
         assert_ne!(base, other_gzip);
         assert_ne!(base, other_list);
+        assert_ne!(
+            base, other_aggregation,
+            "aggregation_uri must be in the key"
+        );
+        assert_ne!(base, other_ttl, "token_ttl_secs must be in the key");
         assert_eq!(
             base,
-            token_bytes_cache_key("l", "h", 1000, "jwt", TokenEncoding::Identity)
+            key(b.0, b.1, b.2, 1000, b.4, TokenEncoding::Identity, "", 300)
         );
+    }
+
+    #[test]
+    fn signer_fingerprint_changes_when_material_changes() {
+        let material_a = SigningMaterial {
+            certificate_chain: Some(vec!["cert-a".to_string()]),
+            signing_key_pem: "key-a".to_string(),
+        };
+        let material_b = SigningMaterial {
+            certificate_chain: Some(vec!["cert-a".to_string()]),
+            signing_key_pem: "key-b".to_string(),
+        };
+        let material_c = SigningMaterial {
+            certificate_chain: None,
+            signing_key_pem: "key-a".to_string(),
+        };
+
+        let fp_a = signer_fingerprint(&material_a);
+        let fp_b = signer_fingerprint(&material_b);
+        let fp_c = signer_fingerprint(&material_c);
+        assert_eq!(fp_a, signer_fingerprint(&material_a), "deterministic");
+        assert_ne!(fp_a, fp_b, "key rotation must change the fingerprint");
+        assert_ne!(fp_a, fp_c, "certificate change must change the fingerprint");
+        assert_eq!(fp_a.len(), 64, "sha-256 hex digest");
     }
 
     #[test]
@@ -223,7 +353,7 @@ mod tests {
         .expect("metrics setup");
 
         let cache = TokenBytesCache::new(300, 100);
-        let key = token_bytes_cache_key("l", "h", 1000, "jwt", TokenEncoding::Identity);
+        let key = key("l", "h", "s", 1000, "jwt", TokenEncoding::Identity, "", 300);
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
