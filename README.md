@@ -161,7 +161,7 @@ cargo check --no-default-features --features memory
 Compile the Redis cache backend selection path:
 
 ```bash
-cargo clippy --no-default-features --features memory,postgres,cache-redis -- -D warnings
+cargo clippy --no-default-features --features memory,postgres,redis -- -D warnings
 ```
 
 Run Redis cache integration tests with either Docker/testcontainers or an

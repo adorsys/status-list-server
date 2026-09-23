@@ -97,7 +97,7 @@ services:
       context: .
       dockerfile: Dockerfile
       args:
-        FEATURES: ${FEATURES:-postgres,aws,cache-redis}
+        FEATURES: ${FEATURES:-postgres,aws,redis}
     container_name: status-list-server
     env_file:
       - path: .env.template
