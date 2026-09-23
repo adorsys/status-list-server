@@ -401,6 +401,7 @@ non-disruptive but leaves the app on the previous credential until the file is v
 material. Strings include:
 
 - `{certificate|signing key} material must be PEM text`
+- `{certificate|signing key} material must be PEM text; file '...' is not valid UTF-8 (DER is unsupported; convert it to PEM)`
 - `failed to read certificate PEM file '...': ...` / `failed to read signing key PEM file '...': ...`
 - `store certificate key '...' was not found` / `store signing key '...' was not found`
 - Store validation: both-paths-and-keys, missing file, or missing key errors from the
@@ -425,6 +426,13 @@ kubectl get secret statuslist-secret -n statuslist-production \
 exist and are readable at the configured path/store-key. When the signing material is file-mounted, the server reloads it in-process
 on file change; a rollout is only needed to re-read a changed value when it is delivered another
 way:
+
+DER is intentionally unsupported. Convert it before configuring the server:
+
+```bash
+openssl x509 -inform DER -in certificate.der -out certificate.pem
+openssl pkey -inform DER -in signing-key.der -out signing-key.pem
+```
 
 ```bash
 kubectl rollout restart deployment/statuslist-status-list-server-deployment -n statuslist-production

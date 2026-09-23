@@ -568,7 +568,7 @@ async fn test_store_filesystem_strategy_rejects_der_material() {
         .expect_err("raw DER is outside the supported input contract");
 
     assert!(
-        matches!(error, CertError::Validation(message) if message.starts_with("failed to read certificate PEM file "))
+        matches!(error, CertError::Validation(message) if message.starts_with("certificate material must be PEM text; file ") && message.ends_with("is not valid UTF-8 (DER is unsupported; convert it to PEM)"))
     );
 }
 

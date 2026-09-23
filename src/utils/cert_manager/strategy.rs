@@ -117,6 +117,13 @@ impl StoreProvisioningStrategy {
         match source {
             MaterialSource::Filesystem(path) => {
                 let material = fs::read_to_string(path).await.map_err(|e| {
+                    if e.kind() == std::io::ErrorKind::InvalidData {
+                        return CertError::Validation(format!(
+                            "{label} material must be PEM text; file '{}' is not valid UTF-8 (DER is unsupported; convert it to PEM)",
+                            path.display()
+                        ));
+                    }
+
                     CertError::Validation(format!(
                         "failed to read {label} PEM file '{}': {e}",
                         path.display()
