@@ -624,23 +624,28 @@ components:
           $ref: "#/components/schemas/StatusValue"
 
     StatusValue:
-      type: integer
-      format: int32
       description: |
-        Draft-21 status type value. `0` = valid, `1` = invalid,
-        `2` = suspended. Values `3` and `12` through `15` are
-        application-specific. Values `4` through `11` and `16` through `255`
-        are reserved for future registration and rejected by this API.
-      enum:
-        - 0
-        - 1
-        - 2
-        - 3
-        - 12
-        - 13
-        - 14
-        - 15
-      example: 1
+        Draft-21 status type value. Accepted as either a numeric integer, a
+        case-insensitive string name, or a stringified supported integer.
+
+        | Value                | Integer | String        |
+        |----------------------|---------|---------------|
+        | Valid                | `0`     | `"VALID"`     |
+        | Invalid              | `1`     | `"INVALID"`   |
+        | Suspended            | `2`     | `"SUSPENDED"` |
+        | Application-specific | `3`     | `"3"`         |
+        | Application-specific | `12-15` | `"12"-"15"`  |
+
+        Values `4` through `11`, `16` through `255`, and values above `255`
+        are rejected by this API.
+      anyOf:
+        - type: integer
+          description: Draft-21 status code.
+          enum: [0, 1, 2, 3, 12, 13, 14, 15]
+          example: 1
+        - type: string
+          description: Named status value (case-insensitive) or a stringified supported integer.
+          example: "VALID"
 
     StatusList:
       type: object
