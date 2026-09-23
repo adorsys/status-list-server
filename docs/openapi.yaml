@@ -383,6 +383,35 @@ paths:
             type: integer
             format: int64
             example: 1686925000
+        - name: If-None-Match
+          in: header
+          required: false
+          description: |
+            Weak conditional validator (an `ETag` previously returned by this
+            endpoint). The validator is keyed to the current token window of
+            length `exp - ttl` (where `exp - iat` and `ttl` are the live token's
+            claims), which rotates every `exp - ttl` seconds. A match therefore
+            proves the client's cached token still has more than `ttl` seconds of
+            validity left, so the server responds `304 Not Modified`. Once the
+            window rolls over — covering the last `ttl` seconds before `exp`, the
+            "dead zone" in which a `304` would hand back a token that is about to
+            expire — the validator changes and the server returns a freshly
+            signed `200 OK` token instead of a body-less `304`.
+          schema:
+            type: string
+            example: 'W/"9f2d..."'
+        - name: If-Modified-Since
+          in: header
+          required: false
+          description: |
+            Date-time validator matching the `Last-Modified` header of a previous
+            response. `304 Not Modified` is returned only while the client's
+            cached token still has more than `ttl` seconds of validity remaining
+            (i.e. within `exp - ttl` of the list's last modification); otherwise
+            the server returns a freshly signed `200 OK` token.
+          schema:
+            type: string
+            example: "Wed, 21 Oct 2015 07:28:00 GMT"
         - name: Accept-Encoding
           in: header
           required: false
@@ -429,11 +458,51 @@ paths:
               schema:
                 type: string
               description: |
-                Always `Accept-Encoding`. Because the response body varies by
-                the request's `Accept-Encoding` header, this is required so
-                that shared caches/CDNs do not serve a gzipped variant to a
-                client that did not request one (RFC 9111 §4.2).
-              example: Accept-Encoding
+                Always `Accept, Accept-Encoding`. The response body varies by both
+                the requested token format (`Accept`) and the negotiated content
+                coding (`Accept-Encoding`), which is required so shared caches/CDNs
+                do not serve a gzipped variant to a client that did not request one
+                (RFC 9111 §4.2).
+              example: Accept, Accept-Encoding
+        "304":
+          description: |
+            Not Modified. Returned for a conditional revalidation (`If-None-Match`
+            or `If-Modified-Since`) when the list has not changed and the client's
+            previously cached Status List Token still has more than `ttl` seconds
+            of validity remaining (`iat <= now < exp - ttl`). The client can
+            continue to use its cached token, so no body is sent.
+
+            The server never answers `304` inside the dead zone — the last `ttl`
+            seconds before `exp` — or once `exp` has passed: a `304` there would
+            hand the relying party a token that is about to expire or already
+            expired, so it returns `200 OK` with a freshly signed token instead
+            (RFC 9110 §8.8.1).
+          headers:
+            ETag:
+              schema:
+                type: string
+              description: |
+                The current weak validator for the live representation, keyed to
+                the current `exp - ttl` token window. It changes when the window
+                rolls over so a stale cached token is no longer validated as
+                current.
+            Last-Modified:
+              schema:
+                type: string
+              description: |
+                The HTTP-date of the last modification of the status list.
+            Cache-Control:
+              schema:
+                type: string
+              description: |
+                Caching directive for intermediaries (e.g. `max-age=<ttl>`). The
+                live token is not marked `immutable`: it expires and its validator
+                rotates, so freshness-honouring caches/browsers must revalidate to
+                obtain an unexpired token.
+            Vary:
+              schema:
+                type: string
+              description: Always `Accept, Accept-Encoding`.
         "404":
           $ref: "#/components/responses/NotFound"
         "406":
@@ -555,13 +624,28 @@ components:
           $ref: "#/components/schemas/StatusValue"
 
     StatusValue:
-      type: string
-      description: "Status value."
-      enum:
-        - VALID
-        - INVALID
-        - SUSPENDED
-      example: "INVALID"
+      description: |
+        Status of a referenced token. Accepted as **either** a numeric integer or a case-insensitive string name. Stringified integers (e.g. `"0"`) are also accepted.
+
+        | Value     | Integer | String        |
+        |-----------|---------|---------------|
+        | Valid     | `0`     | `"VALID"`     |
+        | Invalid   | `1`     | `"INVALID"`   |
+        | Suspended | `2`     | `"SUSPENDED"` |
+
+        Integer values `>= 256` (and their stringified equivalents) are accepted for application-specific statuses. Values `3`–`255` are reserved and rejected.
+      anyOf:
+        - type: integer
+          description: Standard status code.
+          enum: [0, 1, 2]
+          example: 0
+        - type: integer
+          description: Application-specific status code.
+          minimum: 256
+          example: 256
+        - type: string
+          description: Named status value (case-insensitive) or a stringified integer.
+          example: "VALID"
 
     StatusList:
       type: object

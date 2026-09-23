@@ -1,3 +1,24 @@
+{{/*
+Deployment of the status-list-server application pod.
+
+Guard rails enforced at render time:
+- externalSecret.enabled and statuslist.fallbackSecret.enabled are mutually exclusive; the
+  chart fails if both are true.
+- Only the "postgres" and "mysql" database backends are accepted (via
+  APP_DATABASE__BACKEND); anything else fails. postgres.enabled=true requires backend
+  postgres; mysql.enabled (a values key) is rejected - this chart never deploys MySQL.
+- Image resolution: digest (pinned, IfNotPresent) > tag (Always) > derived
+  <baseAppVersion>-<variant>. An invalid digest fails.
+- APP_DATABASE__URL and APP_DATABASE__PASSWORD are rejected as plain env values; the
+  password is delivered through statuslist.secretMounts file mounts
+  (APP_DATABASE__PASSWORD_FILE). secretMounts fileEnv is validated against mounted items.
+
+Replicas are omitted when autoscaling.enabled=true so the HPA controls the count.
+Pod annotations are always emitted with prometheus.io/scrape hints (for annotation-based
+scrape discovery) plus optional TOP-LEVEL .Values.podAnnotations (a documented empty-by-default
+map - note it is distinct from statuslist.podLabels, which are merged into the pod template
+LABELS).
+*/}}
 {{- if .Values.statuslist.enabled }}
 {{- if and .Values.externalSecret.enabled .Values.statuslist.fallbackSecret.enabled }}
 {{- fail "externalSecret.enabled and statuslist.fallbackSecret.enabled cannot both be true: choose either External Secrets Operator or the fallback Secret for secret delivery, not both" }}
