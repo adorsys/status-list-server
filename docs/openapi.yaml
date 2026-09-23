@@ -387,27 +387,28 @@ paths:
           in: header
           required: false
           description: |
-            Weak conditional validator (an `ETag` previously returned by this
-            endpoint). The validator is keyed to the current token window of
-            length `exp - ttl` (where `exp - iat` and `ttl` are the live token's
-            claims), which rotates every `exp - ttl` seconds. A match therefore
-            proves the client's cached token still has more than `ttl` seconds of
-            validity left, so the server responds `304 Not Modified`. Once the
-            window rolls over — covering the last `ttl` seconds before `exp`, the
-            "dead zone" in which a `304` would hand back a token that is about to
-            expire — the validator changes and the server returns a freshly
-            signed `200 OK` token instead of a body-less `304`.
+            Strong conditional validator (an `ETag` previously returned by this
+            endpoint). The validator is a SHA-256 digest of the exact signed
+            token bytes the server serves, so it is stable for the whole token
+            window: live tokens are minted with `iat` anchored to the window
+            start and `exp = iat + (exp - iat)`, and the window rotates every
+            `exp - ttl` seconds. A match therefore proves the client cached the
+            current-window token, still more than `ttl` seconds from `exp`, so
+            the server responds `304 Not Modified`. Once the window rolls over the
+            validator changes and the server returns a freshly signed `200 OK`
+            token instead of a body-less `304`.
           schema:
             type: string
-            example: 'W/"9f2d..."'
+            example: '"9f2d..."'
         - name: If-Modified-Since
           in: header
           required: false
           description: |
             Date-time validator matching the `Last-Modified` header of a previous
-            response. `304 Not Modified` is returned only while the client's
-            cached token still has more than `ttl` seconds of validity remaining
-            (i.e. within `exp - ttl` of the list's last modification); otherwise
+            response. `304 Not Modified` is returned only while `now` still has
+            more than `ttl` seconds of runway before the earliest possible expiry
+            of the client's cached token (its `iat`, anchored to the window
+            containing the list's last modification, plus `exp - iat`); otherwise
             the server returns a freshly signed `200 OK` token.
           schema:
             type: string
@@ -468,24 +469,25 @@ paths:
           description: |
             Not Modified. Returned for a conditional revalidation (`If-None-Match`
             or `If-Modified-Since`) when the list has not changed and the client's
-            previously cached Status List Token still has more than `ttl` seconds
-            of validity remaining (`iat <= now < exp - ttl`). The client can
-            continue to use its cached token, so no body is sent.
+            previously cached Status List Token is still more than `ttl` seconds
+            from `exp`. The client can continue to use its cached token, so no
+            body is sent.
 
-            The server never answers `304` inside the dead zone — the last `ttl`
-            seconds before `exp` — or once `exp` has passed: a `304` there would
-            hand the relying party a token that is about to expire or already
-            expired, so it returns `200 OK` with a freshly signed token instead
-            (RFC 9110 §8.8.1).
+            Because the validator is a digest of the exact signed token bytes,
+            a matching `If-None-Match` proves the client holds the current-window
+            token, which is anchored to expire strictly after the window ends —
+            so a `304` can never strand the relying party with a token that is
+            about to expire or already expired (RFC 9110 §8.8.1).
           headers:
             ETag:
               schema:
                 type: string
               description: |
-                The current weak validator for the live representation, keyed to
-                the current `exp - ttl` token window. It changes when the window
-                rolls over so a stale cached token is no longer validated as
-                current.
+                The current strong validator for the live representation: a
+                SHA-256 digest of the signed token bytes that a `200 OK` would
+                serve. It changes when the token window rolls over or the list
+                content changes, so a stale cached token is no longer validated
+                as current.
             Last-Modified:
               schema:
                 type: string
@@ -682,11 +684,17 @@ components:
           example: "https://statuslist.example.com/statuslists/477121aa-b598-419e-916f-1e74654ff38b"
         iat:
           type: integer
-          description: Issued-at timestamp (seconds since Unix epoch).
+          description: |
+            Issued-at timestamp (seconds since Unix epoch). For live tokens it is
+            anchored to the start of the current token window (matching the
+            window by which the ETag and signed-bytes cache rotate) rather than
+            the request time, so it may predate the request by up to one window.
+            Lifetime is governed by `exp` and `ttl`, not by `iat` skew.
           example: 1752515200
         exp:
           type: integer
-          description: Expiration timestamp (seconds since Unix epoch).
+          description: |
+            Expiration timestamp (seconds since Unix epoch); always `iat + exp_secs`.
           example: 1752516100
         ttl:
           type: integer

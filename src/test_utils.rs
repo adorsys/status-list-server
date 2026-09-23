@@ -96,6 +96,7 @@ pub(crate) async fn test_app_state_without_snapshots() -> AppState {
         max_serialized_list_size: 1_048_576,
         snapshot_retention_secs: 0,
         management_auth: crate::server::ManagementAuthConfig::default(),
+        token_bytes_cache: crate::server::handlers::status_list::TokenBytesCache::new(300, 100),
         readiness: crate::server::health::Readiness::new(Vec::new()),
     }
 }
@@ -187,6 +188,7 @@ async fn build_test_app_state(
         max_serialized_list_size,
         snapshot_retention_secs: 7776000,
         management_auth: crate::server::ManagementAuthConfig::default(),
+        token_bytes_cache: crate::server::handlers::status_list::TokenBytesCache::new(300, 100),
         readiness: Readiness::default(),
     }
 }

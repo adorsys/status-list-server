@@ -1,22 +1,32 @@
 use crate::domain::models::status_list::{StatusListRecord, StatusListSnapshot};
 use sha2::{Digest, Sha256};
 
-/// Weak ETag for the *live* representation, keyed to the record content and the
-/// current `E - ttl` token validity window. Rotating it with the window makes a
-/// matching ETag imply the cached token still has plenty of validity left; once
-/// the window rolls over the ETag changes and a stale client is served a fresh
-/// token instead of a body-less 304.
-pub(crate) fn generate_etag(record: &StatusListRecord, window_start: i64) -> String {
-    let mut hasher = Sha256::new();
+/// Strong ETag for the *live* representation, derived from the actual signed
+/// token bytes that the server serves.
+///
+/// Because the bytes for a given `(list, window_start, format, encoding)` are
+/// identical across the whole anchored window (the token's `iat` is pinned to
+/// `window_start`), the strong ETag *proves which token the client holds*: a
+/// matching `If-None-Match` guarantees the client's cached token is byte-for-byte
+/// the same as the current one, and since that token expires at
+/// `window_start + exp_secs` (which lies strictly after the window), a 304 never
+/// stranding an expired token. This lets the conditional logic drop the separate
+/// expired-token runway handling.
+pub(crate) fn generate_token_etag(token_bytes: &[u8]) -> String {
+    let hash = Sha256::digest(token_bytes);
+    format!("\"{}\"", hex::encode(hash))
+}
 
+/// Content hash over the representation-driving fields of `record`, excluding
+/// the window: used to key the signed-token bytes cache so any content change
+/// immediately produces a fresh sign.
+pub(crate) fn content_hash(record: &StatusListRecord) -> String {
+    let mut hasher = Sha256::new();
     hasher.update(record.status_list.bits.to_string().as_bytes());
     hasher.update(record.status_list.lst.as_bytes());
     hasher.update(record.issuer.0.as_bytes());
     hasher.update(record.sub.as_bytes());
-    hasher.update(window_start.to_string().as_bytes());
-
-    let hash = hasher.finalize();
-    format!("W/\"{}\"", hex::encode(hash))
+    hex::encode(hasher.finalize())
 }
 
 pub(crate) fn generate_historical_etag(snapshot: &StatusListSnapshot) -> String {
@@ -38,8 +48,6 @@ mod tests {
     use crate::domain::models::credential::Issuer;
     use crate::domain::models::status_list::StatusList;
 
-    const WINDOW: i64 = 1_000_900;
-
     fn create_test_record() -> StatusListRecord {
         StatusListRecord {
             list_id: "test-list".to_string(),
@@ -54,113 +62,40 @@ mod tests {
     }
 
     #[test]
-    fn test_generate_etag_format() {
-        let record = create_test_record();
-        let etag = generate_etag(&record, WINDOW);
-
-        assert!(etag.starts_with("W/\""), "ETag should start with W/\"");
+    fn test_generate_token_etag_format() {
+        let etag = generate_token_etag(b"token-bytes");
+        assert!(
+            etag.starts_with('"'),
+            "ETag should be a strong quoted value"
+        );
         assert!(etag.ends_with('"'), "ETag should end with \"");
+        assert!(
+            !etag.starts_with("W/"),
+            "live ETag must be strong, not weak"
+        );
 
-        let hex_part = &etag[3..etag.len() - 1];
+        let hex_part = &etag[1..etag.len() - 1];
         assert_eq!(hex_part.len(), 64);
         assert!(hex_part.chars().all(|c| c.is_ascii_hexdigit()));
     }
 
     #[test]
-    fn test_generate_etag_determinism() {
-        let record1 = create_test_record();
-        let record2 = create_test_record();
-
-        let etag1 = generate_etag(&record1, WINDOW);
-        let etag2 = generate_etag(&record2, WINDOW);
-
-        assert_eq!(etag1, etag2);
-    }
-
-    #[test]
-    fn test_generate_etag_same_content_same_window_stability() {
-        let record1 = create_test_record();
-        let record2 = create_test_record();
-
-        assert_eq!(
-            generate_etag(&record1, WINDOW),
-            generate_etag(&record2, WINDOW)
-        );
-    }
-
-    #[test]
-    fn test_generate_etag_window_sensitivity() {
-        let record = create_test_record();
-
+    fn test_generate_token_etag_determinism() {
+        assert_eq!(generate_token_etag(b"same"), generate_token_etag(b"same"));
         assert_ne!(
-            generate_etag(&record, WINDOW),
-            generate_etag(&record, WINDOW + 1),
-            "the ETag must rotate when the token validity window changes"
+            generate_token_etag(b"same"),
+            generate_token_etag(b"different")
         );
     }
 
     #[test]
-    fn test_generate_etag_updated_at_independence() {
-        let mut record1 = create_test_record();
-        let mut record2 = create_test_record();
-        record1.updated_at = 1000;
-        record2.updated_at = 2000;
+    fn test_content_hash_determinism_and_sensitivity() {
+        let r1 = create_test_record();
+        let r2 = create_test_record();
+        assert_eq!(content_hash(&r1), content_hash(&r2));
 
-        assert_eq!(
-            generate_etag(&record1, WINDOW),
-            generate_etag(&record2, WINDOW)
-        );
-    }
-
-    #[test]
-    fn test_generate_etag_bits_sensitivity() {
-        let mut record1 = create_test_record();
-        let mut record2 = create_test_record();
-        record1.status_list.bits = 1;
-        record2.status_list.bits = 2;
-
-        assert_ne!(
-            generate_etag(&record1, WINDOW),
-            generate_etag(&record2, WINDOW)
-        );
-    }
-
-    #[test]
-    fn test_generate_etag_lst_sensitivity() {
-        let mut record1 = create_test_record();
-        let mut record2 = create_test_record();
-        record1.status_list.lst = "lst1".to_string();
-        record2.status_list.lst = "lst2".to_string();
-
-        assert_ne!(
-            generate_etag(&record1, WINDOW),
-            generate_etag(&record2, WINDOW)
-        );
-    }
-
-    #[test]
-    fn test_generate_etag_issuer_sensitivity() {
-        let mut record1 = create_test_record();
-        let mut record2 = create_test_record();
-        record1.issuer = Issuer("https://issuer1.com".to_string());
-        record2.issuer = Issuer("https://issuer2.com".to_string());
-
-        assert_ne!(
-            generate_etag(&record1, WINDOW),
-            generate_etag(&record2, WINDOW)
-        );
-    }
-
-    #[test]
-    fn test_generate_etag_sub_sensitivity() {
-        let mut record1 = create_test_record();
-        let mut record2 = create_test_record();
-        record1.sub = "https://example.com/1".to_string();
-        record2.sub = "https://example.com/2".to_string();
-
-        assert_ne!(
-            generate_etag(&record1, WINDOW),
-            generate_etag(&record2, WINDOW)
-        );
+        let mut changed = create_test_record();
+        changed.status_list.lst = "changed".to_string();
+        assert_ne!(content_hash(&r1), content_hash(&changed));
     }
 }

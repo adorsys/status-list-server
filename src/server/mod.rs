@@ -51,6 +51,10 @@ pub struct AppState {
     pub max_serialized_list_size: usize,
     pub snapshot_retention_secs: u64,
     pub management_auth: ManagementAuthConfig,
+    /// Per-replica cache of fully signed status-list token bytes, keyed by
+    /// `(list, content, window, format, encoding)` so an unchanged list reuses
+    /// a single sign per window instead of re-signing on every request.
+    pub token_bytes_cache: crate::server::handlers::status_list::TokenBytesCache,
     /// Dependency readiness checks backing the `/health/ready` endpoint.
     pub readiness: health::Readiness,
 }
