@@ -88,8 +88,9 @@ pub struct SigningMaterial {
     /// Base64 DER-encoded x509 certificate chain parts for JWT `x5c` and CWT
     /// `x5chain`.
     pub certificate_chain: Option<Vec<String>>,
-    /// Pre-parsed signer. The material deliberately does not retain private
-    /// key encoding after a provider has validated and constructed it.
+    /// Pre-parsed signer. The material does not retain its PEM/DER encoding
+    /// after a provider has validated and constructed it; private key material
+    /// remains in the signer for its required signing lifetime.
     pub signing_key: Arc<dyn TokenSigner>,
 }
 

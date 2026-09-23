@@ -171,6 +171,9 @@ pub(crate) fn validate_signing_material(
                 err.to_string(),
             )))
         })?;
+    // x509-parser exposes the subjectPublicKey BIT STRING payload, rather than
+    // the enclosing SPKI DER. aws-lc-rs exposes the same family-specific
+    // public-key representation for the supported signing algorithms.
     let cert_public_key = certificate.public_key().subject_public_key.data.as_ref();
     let key_public_key = signing_key.public_key_bytes();
     if cert_public_key != key_public_key {
@@ -230,6 +233,21 @@ mod tests {
     fn validates_matching_ec_certificate_and_key() {
         let (cert, key) = matching_cert_and_key();
         validate_signing_material(&cert, &key).expect("fixture cert/key should validate");
+    }
+
+    #[test]
+    fn validates_matching_p384_certificate_and_key() {
+        let key = rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P384_SHA384)
+            .expect("generate P-384 signing key");
+        let params = rcgen::CertificateParams::new(vec!["localhost".to_string()])
+            .expect("certificate parameters");
+        let cert = params
+            .self_signed(&key)
+            .expect("self-sign certificate")
+            .pem();
+
+        validate_signing_material(&cert, &key.serialize_pem())
+            .expect("matching P-384 cert/key should validate");
     }
 
     #[test]

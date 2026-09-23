@@ -337,7 +337,10 @@ mod tests {
                         .expect("Ed25519 signature verifies");
                 }
                 SigningAlgorithm::Rs256 => {
-                    assert_eq!(signature.len(), 256);
+                    let KeyPairInner::Rsa(kp) = &key.inner.pair else {
+                        unreachable!("RS256 keys use an RSA key pair");
+                    };
+                    assert_eq!(signature.len(), kp.public_modulus_len());
                     UnparsedPublicKey::new(&RSA_PKCS1_2048_8192_SHA256, key.public_key_bytes())
                         .verify(message, &signature)
                         .expect("RS256 signature verifies");
@@ -402,5 +405,13 @@ mod tests {
             SigningKey::generate(SigningAlgorithm::Rs256),
             Err(Error::UnsupportedKeygen(algorithm)) if algorithm == "RS256"
         ));
+    }
+
+    #[test]
+    fn rejects_rsa_keys_smaller_than_2048_bits() {
+        let error = SigningKey::from_pem(include_str!("../../test_data/rsa-1024.dummy.pem"))
+            .expect_err("1024-bit RSA keys must be rejected");
+
+        assert!(matches!(error, Error::KeyRejected(_)));
     }
 }
