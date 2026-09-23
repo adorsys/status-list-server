@@ -860,6 +860,13 @@ the quota is too generous (never too strict) until it is recomputed.
 procedure, not a response to a quota complaint: an undercount produces no error, so nothing
 prompts anyone to run it.
 
+The recount corrects the counter; it does not remove lists. An issuer that published past the
+quota through a pre-quota pod keeps those lists, like lists that existed before the migration,
+and every further publish it makes is refused with `list_quota_exceeded`. The quota is exact only
+from the point every pod enforces it. If it must also hold during the rollout, stop the pre-quota
+pods before any new pod serves traffic (for example with the `Recreate` Deployment strategy), at
+the cost of downtime.
+
 ---
 
 ### Recomputing `credentials.list_count`

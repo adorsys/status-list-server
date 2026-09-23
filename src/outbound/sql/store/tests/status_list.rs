@@ -1286,6 +1286,90 @@ async fn test_postgres_list_quota_is_exact() {
     assert_list_quota_is_exact(db, "issuer-quota-postgres", "Postgres").await;
 }
 
+/// Lists a pre-quota pod published during the rollout stay, but once the
+/// runbook recount has run an over-quota issuer can publish nothing more.
+#[cfg(any(feature = "sqlite", feature = "mysql", feature = "postgres-tests"))]
+async fn assert_over_quota_issuer_is_refused_after_recount(
+    db: Arc<DatabaseConnection>,
+    issuer: &str,
+    backend: &str,
+) {
+    use sea_orm::ConnectionTrait;
+
+    use crate::outbound::sql::migrations::RECOUNT_LIST_COUNT_SQL;
+
+    fixtures::seed_credential(&db, issuer).await;
+    // What a pre-quota pod writes: the list, without touching `list_count`.
+    for n in 1..=3 {
+        db.execute_unprepared(&format!(
+            "INSERT INTO status_lists (list_id, issuer, status_list, sub, updated_at) \
+             VALUES ('{issuer}-old-{n}', '{issuer}', '{{\"bits\":1,\"lst\":\"\"}}', \
+             'sub-{issuer}-old-{n}', 0)"
+        ))
+        .await
+        .unwrap();
+    }
+    assert_eq!(fixtures::list_count(&db, issuer).await, 0);
+
+    db.execute_unprepared(RECOUNT_LIST_COUNT_SQL).await.unwrap();
+    assert_eq!(fixtures::list_count(&db, issuer).await, 3, "on {backend}");
+
+    let store = SeaOrmStore::<StatusListRecord>::new(db.clone());
+    let list_id = format!("{issuer}-new");
+    let record = fixtures::record(&list_id, issuer, "initial", "sub-new", 0);
+    let refused = store.insert_one(record.clone(), 2).await;
+    assert!(
+        matches!(
+            refused,
+            Err(RepositoryError::QuotaExceeded { count: 3, max: 2 })
+        ),
+        "an issuer over quota after the recount must be refused on {backend}, got {refused:?}"
+    );
+    let refused = store
+        .insert_one_with_snapshot(
+            record,
+            fixtures::snapshot("snap-new", &list_id, issuer, "initial", "sub-new", 0, 900),
+            2,
+        )
+        .await;
+    assert!(
+        matches!(
+            refused,
+            Err(RepositoryError::QuotaExceeded { count: 3, max: 2 })
+        ),
+        "the snapshot path must agree on {backend}, got {refused:?}"
+    );
+    assert!(
+        store.find_one_by(&list_id).await.unwrap().is_none(),
+        "a refused publish must not be stored on {backend}"
+    );
+    assert_eq!(fixtures::list_count(&db, issuer).await, 3, "on {backend}");
+}
+
+#[cfg(feature = "sqlite")]
+#[tokio::test]
+async fn test_sqlite_over_quota_issuer_is_refused_after_recount() {
+    let db = fixtures::sqlite_connection().await;
+    assert_over_quota_issuer_is_refused_after_recount(db, "issuer-over-sqlite", "SQLite").await;
+}
+
+#[cfg(feature = "mysql")]
+#[tokio::test]
+async fn test_mysql_over_quota_issuer_is_refused_after_recount() {
+    let test_db = mysql_helpers::MysqlTestDb::start().await;
+    let db = test_db.connection().await;
+    assert_over_quota_issuer_is_refused_after_recount(db, "issuer-over-mysql", "MySQL").await;
+}
+
+#[cfg(feature = "postgres-tests")]
+#[tokio::test]
+async fn test_postgres_over_quota_issuer_is_refused_after_recount() {
+    let test_db = postgres_helpers::postgres_connection().await;
+    let db = test_db.db.clone();
+    assert_over_quota_issuer_is_refused_after_recount(db, "issuer-over-postgres", "Postgres")
+        .await;
+}
+
 /// A full walk returns every list exactly once. Mixed-case IDs sort differently
 /// per backend collation, so this asserts completeness, not order.
 #[cfg(any(feature = "sqlite", feature = "mysql", feature = "postgres-tests"))]
