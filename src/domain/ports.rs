@@ -114,16 +114,6 @@ impl fmt::Debug for SigningMaterial {
     }
 }
 
-impl PartialEq for SigningMaterial {
-    fn eq(&self, other: &Self) -> bool {
-        self.certificate_chain == other.certificate_chain
-            && self.signing_key.algorithm() == other.signing_key.algorithm()
-            && self.signing_key.public_key_bytes() == other.signing_key.public_key_bytes()
-    }
-}
-
-impl Eq for SigningMaterial {}
-
 /// Provider interface for certificate chains and signing keys used for VC/token signatures.
 #[async_trait]
 pub trait CertificateProvider: Send + Sync + 'static {

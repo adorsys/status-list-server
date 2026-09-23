@@ -1,9 +1,8 @@
-use serde::{Deserialize, Serialize};
 use std::fmt;
 use thiserror::Error;
 
 /// Algorithms supported by status-list token signers.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SigningAlgorithm {
     /// ECDSA using P-256 and SHA-256.
     Es256,

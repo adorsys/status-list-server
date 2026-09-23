@@ -238,7 +238,7 @@ fn issue_cwt(
         .to_vec()
         .map_err(|err| StatusListError::Backend(Box::new(err)))?;
 
-    let cose_alg = cose_algorithm(signer.algorithm());
+    let cose_alg = cose_algorithm(signer.algorithm())?;
     let x5chain_value = build_x5chain(cert_chain)?;
     let protected = HeaderBuilder::new()
         .algorithm(cose_alg)
@@ -326,13 +326,13 @@ fn issue_jwt(
     Ok(token)
 }
 
-fn cose_algorithm(algorithm: SigningAlgorithm) -> Algorithm {
-    match algorithm {
-        SigningAlgorithm::Es256 => Algorithm::ES256,
-        SigningAlgorithm::Es384 => Algorithm::ES384,
-        SigningAlgorithm::EdDsa => Algorithm::EdDSA,
-        SigningAlgorithm::Rs256 => Algorithm::RS256,
-    }
+fn cose_algorithm(algorithm: SigningAlgorithm) -> Result<Algorithm, StatusListError> {
+    Algorithm::from_i64(algorithm.cose_id()).ok_or_else(|| {
+        StatusListError::Backend(Box::new(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("unsupported COSE algorithm id: {}", algorithm.cose_id()),
+        )))
+    })
 }
 
 #[cfg(test)]
@@ -450,7 +450,12 @@ mod tests {
         for key in &test_keys {
             let cwt_bytes = issue_cwt(&record, key, &cert_chain, &None, 1000, 2000, 300).unwrap();
             let sign1 = coset::CoseSign1::from_tagged_slice(&cwt_bytes).unwrap();
-            let expected_alg = cose_algorithm(key.algorithm());
+            let expected_alg = match key.algorithm() {
+                SigningAlgorithm::Es256 => Algorithm::ES256,
+                SigningAlgorithm::Es384 => Algorithm::ES384,
+                SigningAlgorithm::EdDsa => Algorithm::EdDSA,
+                SigningAlgorithm::Rs256 => Algorithm::RS256,
+            };
             assert_eq!(
                 sign1.protected.header.alg,
                 Some(coset::RegisteredLabelWithPrivate::Assigned(expected_alg))
