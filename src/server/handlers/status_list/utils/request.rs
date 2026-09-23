@@ -1,4 +1,10 @@
+use axum::{Json, extract::rejection::JsonRejection};
 use serde::{Deserialize, Serialize};
+
+use crate::domain::models::status_list::{
+    is_application_specific_status_value, unsupported_status_value_message,
+};
+use crate::server::error::ApiError;
 
 #[allow(clippy::upper_case_acronyms)]
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -11,26 +17,29 @@ pub enum Status {
 
 impl Serialize for Status {
     fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
-        s.serialize_u32(match self {
+        let value = match self {
             Status::VALID => 0,
             Status::INVALID => 1,
             Status::SUSPENDED => 2,
-            Status::ApplicationSpecific(v) => *v,
-        })
+            Status::ApplicationSpecific(v) if is_application_specific_status_value(*v) => *v,
+            Status::ApplicationSpecific(v) => {
+                return Err(serde::ser::Error::custom(unsupported_status_value_message(
+                    *v,
+                )));
+            }
+        };
+        s.serialize_u32(value)
     }
 }
 
-/// Map a `u32` to `Status`, rejecting the reserved range 3..=255.
+/// Map a `u32` to `Status`, rejecting values outside Draft-21's registered set.
 fn status_from_u32<E: serde::de::Error>(v: u32) -> Result<Status, E> {
     match v {
         0 => Ok(Status::VALID),
         1 => Ok(Status::INVALID),
         2 => Ok(Status::SUSPENDED),
-        n if n >= 256 => Ok(Status::ApplicationSpecific(n)),
-        other => Err(E::custom(format!(
-            "status value {} is reserved (only 0, 1, 2, or >= 256 allowed)",
-            other
-        ))),
+        n if is_application_specific_status_value(n) => Ok(Status::ApplicationSpecific(n)),
+        other => Err(E::custom(unsupported_status_value_message(other))),
     }
 }
 
@@ -40,7 +49,7 @@ impl<'de> serde::de::Visitor<'de> for StatusVisitor {
     type Value = Status;
 
     fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("an integer (0, 1, 2, >=256) or a string status name")
+        f.write_str("a Draft-21 status integer or a string status name")
     }
 
     fn visit_u64<E: serde::de::Error>(self, v: u64) -> Result<Self::Value, E> {
@@ -56,14 +65,13 @@ impl<'de> serde::de::Visitor<'de> for StatusVisitor {
     }
 
     fn visit_str<E: serde::de::Error>(self, v: &str) -> Result<Self::Value, E> {
-        // Try case-insensitive name match first.
         match v.to_ascii_uppercase().as_str() {
             "VALID" => return Ok(Status::VALID),
             "INVALID" => return Ok(Status::INVALID),
             "SUSPENDED" => return Ok(Status::SUSPENDED),
             _ => {}
         }
-        // Fall back to parsing as a stringified integer.
+
         match v.parse::<u32>() {
             Ok(n) => status_from_u32(n),
             Err(_) => Err(E::custom(format!(
@@ -89,6 +97,17 @@ pub struct StatusEntry {
 #[derive(Deserialize)]
 pub struct StatusesRequest {
     pub statuses: Vec<StatusEntry>,
+}
+
+pub(crate) fn parse_statuses_payload(
+    payload: Result<Json<StatusesRequest>, JsonRejection>,
+) -> Result<Json<StatusesRequest>, ApiError> {
+    payload.map_err(|err| {
+        ApiError::bad_request(
+            "invalid_request_body",
+            format!("Invalid status update request body: {err}"),
+        )
+    })
 }
 
 impl From<StatusEntry> for crate::domain::models::status_list::StatusEntry {
@@ -122,17 +141,39 @@ mod tests {
             serde_json::from_str::<Status>("2").unwrap(),
             Status::SUSPENDED
         );
-        assert_eq!(
-            serde_json::from_str::<Status>("256").unwrap(),
-            Status::ApplicationSpecific(256)
-        );
         assert_eq!(serde_json::to_string(&Status::VALID).unwrap(), "0");
         assert_eq!(serde_json::to_string(&Status::INVALID).unwrap(), "1");
         assert_eq!(serde_json::to_string(&Status::SUSPENDED).unwrap(), "2");
         assert_eq!(
-            serde_json::to_string(&Status::ApplicationSpecific(256)).unwrap(),
-            "256"
+            serde_json::from_str::<Status>("3").unwrap(),
+            Status::ApplicationSpecific(3)
         );
+        for value in [12u32, 13, 14, 15] {
+            assert_eq!(
+                serde_json::from_str::<Status>(&value.to_string()).unwrap(),
+                Status::ApplicationSpecific(value)
+            );
+            assert_eq!(
+                serde_json::to_string(&Status::ApplicationSpecific(value)).unwrap(),
+                value.to_string()
+            );
+        }
+        for value in [4u32, 11, 16, 100, 255] {
+            let err = serde_json::from_str::<Status>(&value.to_string()).unwrap_err();
+            assert!(
+                err.to_string()
+                    .contains("not a supported Draft-21 status type"),
+                "value {value} should fail as reserved, got {err}"
+            );
+            let err = serde_json::to_string(&Status::ApplicationSpecific(value)).unwrap_err();
+            assert!(
+                err.to_string()
+                    .contains("not a supported Draft-21 status type"),
+                "value {value} should fail as reserved, got {err}"
+            );
+        }
+        assert!(serde_json::from_str::<Status>("256").is_err());
+        assert!(serde_json::to_string(&Status::ApplicationSpecific(256)).is_err());
     }
 
     #[test]
@@ -190,28 +231,30 @@ mod tests {
             Status::SUSPENDED
         );
         assert_eq!(
-            serde_json::from_str::<Status>(r#""256""#).unwrap(),
-            Status::ApplicationSpecific(256)
+            serde_json::from_str::<Status>(r#""3""#).unwrap(),
+            Status::ApplicationSpecific(3)
         );
         assert_eq!(
-            serde_json::from_str::<Status>(r#""512""#).unwrap(),
-            Status::ApplicationSpecific(512)
+            serde_json::from_str::<Status>(r#""12""#).unwrap(),
+            Status::ApplicationSpecific(12)
         );
     }
 
     #[test]
     fn status_deser_rejects_reserved_integers() {
         assert!(serde_json::from_str::<Status>("-1").is_err());
-        assert!(serde_json::from_str::<Status>("3").is_err());
+        assert!(serde_json::from_str::<Status>("4").is_err());
         assert!(serde_json::from_str::<Status>("100").is_err());
         assert!(serde_json::from_str::<Status>("255").is_err());
+        assert!(serde_json::from_str::<Status>("256").is_err());
     }
 
     #[test]
     fn status_deser_rejects_reserved_string_integers() {
-        assert!(serde_json::from_str::<Status>(r#""3""#).is_err());
+        assert!(serde_json::from_str::<Status>(r#""4""#).is_err());
         assert!(serde_json::from_str::<Status>(r#""100""#).is_err());
         assert!(serde_json::from_str::<Status>(r#""255""#).is_err());
+        assert!(serde_json::from_str::<Status>(r#""256""#).is_err());
     }
 
     #[test]
@@ -233,9 +276,9 @@ mod tests {
         assert_eq!(entry.index, 5);
         assert_eq!(entry.status, Status::SUSPENDED);
 
-        let entry: StatusEntry = serde_json::from_str(r#"{"index": 10, "status": "512"}"#).unwrap();
+        let entry: StatusEntry = serde_json::from_str(r#"{"index": 10, "status": "12"}"#).unwrap();
         assert_eq!(entry.index, 10);
-        assert_eq!(entry.status, Status::ApplicationSpecific(512));
+        assert_eq!(entry.status, Status::ApplicationSpecific(12));
     }
 
     #[test]
@@ -248,8 +291,8 @@ mod tests {
         assert_eq!(entry.index, 1);
         assert_eq!(entry.status, Status::SUSPENDED);
 
-        let entry: StatusEntry = serde_json::from_str(r#"{"index": 2, "status": 256}"#).unwrap();
+        let entry: StatusEntry = serde_json::from_str(r#"{"index": 2, "status": 12}"#).unwrap();
         assert_eq!(entry.index, 2);
-        assert_eq!(entry.status, Status::ApplicationSpecific(256));
+        assert_eq!(entry.status, Status::ApplicationSpecific(12));
     }
 }
