@@ -1366,8 +1366,7 @@ async fn test_mysql_over_quota_issuer_is_refused_after_recount() {
 async fn test_postgres_over_quota_issuer_is_refused_after_recount() {
     let test_db = postgres_helpers::postgres_connection().await;
     let db = test_db.db.clone();
-    assert_over_quota_issuer_is_refused_after_recount(db, "issuer-over-postgres", "Postgres")
-        .await;
+    assert_over_quota_issuer_is_refused_after_recount(db, "issuer-over-postgres", "Postgres").await;
 }
 
 /// A full walk returns every list exactly once. Mixed-case IDs sort differently
