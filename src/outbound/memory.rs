@@ -448,7 +448,12 @@ mod tests {
             .await
             .unwrap();
 
-        let published = service.status_list_repo().find("id").await.unwrap().unwrap();
+        let published = service
+            .status_list_repo()
+            .find("id")
+            .await
+            .unwrap()
+            .unwrap();
 
         let result = service
             .update_statuses(
@@ -464,7 +469,12 @@ mod tests {
 
         let landed = result.expect("an empty update must succeed as a no-op");
 
-        let after = service.status_list_repo().find("id").await.unwrap().unwrap();
+        let after = service
+            .status_list_repo()
+            .find("id")
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(
             after.updated_at, published.updated_at,
             "an empty update must not advance the status list version"
@@ -509,7 +519,12 @@ mod tests {
             .await
             .unwrap();
 
-        let before = service.status_list_repo().find("id").await.unwrap().unwrap();
+        let before = service
+            .status_list_repo()
+            .find("id")
+            .await
+            .unwrap()
+            .unwrap();
 
         // Re-submitting index 0 = VALID, which is already its current value.
         service
@@ -528,7 +543,12 @@ mod tests {
             .await
             .expect("an identical update must succeed as a no-op");
 
-        let after = service.status_list_repo().find("id").await.unwrap().unwrap();
+        let after = service
+            .status_list_repo()
+            .find("id")
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(
             after.updated_at, before.updated_at,
             "re-submitting identical values must not advance the version"

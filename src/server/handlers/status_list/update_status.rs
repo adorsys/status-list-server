@@ -350,9 +350,7 @@ mod tests {
     /// `Json` extraction + rejection adapter that the handler-level tests bypass.
     #[tokio::test]
     async fn patch_route_handles_raw_json_bodies() {
-        use axum::{
-            Router, body::Body, body::to_bytes, http::Method, routing::patch,
-        };
+        use axum::{Router, body::Body, body::to_bytes, http::Method, routing::patch};
         use tower::ServiceExt;
 
         let token_id = uuid::Uuid::new_v4().to_string();
