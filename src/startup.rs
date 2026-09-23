@@ -34,7 +34,7 @@ use crate::config::Config;
 use crate::server::AppState;
 use crate::server::auth::auth;
 use crate::server::handlers::{
-    credential_handler, get_aggregation, get_status_list, publish_status, update_status,
+    credential_handler, get_aggregation, get_status_list, publish_status_route, update_status_route,
 };
 use crate::server::health;
 use crate::utils::metrics::metrics_handler;
@@ -188,8 +188,8 @@ fn api_v1_routes(
         .nest(
             "/status-lists/{list_id}/statuses",
             Router::new()
-                .route("/", put(publish_status))
-                .route("/", patch(update_status)),
+                .route("/", put(publish_status_route))
+                .route("/", patch(update_status_route)),
         )
         .route_layer(from_fn_with_state(state.clone(), auth))
         .layer(GovernorLayer::new(issuer_governor));

@@ -1,4 +1,5 @@
 use axum::{
+    extract::rejection::JsonRejection,
     extract::{Json, Path, State},
     http::StatusCode,
     response::IntoResponse,
@@ -6,7 +7,7 @@ use axum::{
 
 use crate::server::{AppState, auth::AuthenticatedIssuer, error::ApiError};
 
-use super::utils::request::StatusesRequest;
+use super::utils::request::{StatusesRequest, parse_statuses_payload};
 
 /// Publish a new status list.
 ///
@@ -57,6 +58,15 @@ pub async fn publish_status(
     Ok(StatusCode::CREATED.into_response())
 }
 
+pub async fn publish_status_route(
+    state: State<AppState>,
+    principal: AuthenticatedIssuer,
+    path: Path<String>,
+    payload: Result<Json<StatusesRequest>, JsonRejection>,
+) -> Result<impl IntoResponse, ApiError> {
+    publish_status(state, principal, path, parse_statuses_payload(payload)?).await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -65,6 +75,8 @@ mod tests {
         Status as RequestStatus, StatusEntry as RequestStatusEntry,
     };
     use crate::test_utils::{authenticated_issuer, test_app_state};
+    use axum::{Router, body::Body, body::to_bytes, routing::put};
+    use tower::ServiceExt;
 
     #[tokio::test]
     async fn test_publish_token_status_invalid_list_id() {
@@ -106,6 +118,43 @@ mod tests {
 
         let token = app_state.service.get_status_list(&token_id).await.unwrap();
         assert_eq!(token.list_id, token_id);
+    }
+
+    #[tokio::test]
+    async fn publish_route_rejects_status_values_above_255_as_json_400() {
+        let token_id = uuid::Uuid::new_v4().to_string();
+        let app_state = test_app_state(None).await;
+        let router = Router::new()
+            .route(
+                "/status-lists/{list_id}/statuses/",
+                put(publish_status_route),
+            )
+            .with_state(app_state);
+
+        let mut request = axum::http::Request::builder()
+            .method(axum::http::Method::PUT)
+            .uri(format!("/status-lists/{token_id}/statuses/"))
+            .header(axum::http::header::CONTENT_TYPE, "application/json")
+            .body(Body::from(
+                r#"{"statuses":[{"index":0,"status":256}]}"#.to_string(),
+            ))
+            .unwrap();
+        request
+            .extensions_mut()
+            .insert(authenticated_issuer("issuer"));
+
+        let response = router.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["error"], "invalid_request_body");
+        assert!(
+            json["error_description"]
+                .as_str()
+                .unwrap()
+                .contains("not a supported Draft-21 status type")
+        );
     }
 
     #[tokio::test]

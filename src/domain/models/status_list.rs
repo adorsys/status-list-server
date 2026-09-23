@@ -107,7 +107,7 @@ impl StatusList {
         if status_updates.is_empty() {
             return Ok(Self {
                 bits: 1,
-                lst: String::new(),
+                lst: encode_compressed(&[])?,
             });
         }
 
@@ -129,6 +129,11 @@ impl StatusList {
 
         validate_unique_indices(&status_updates)?;
         let old_bits = self.bits as usize;
+        // Draft-21 only permits 1, 2, 4, or 8. Older rows with wider values
+        // are repacked when their stored values are still representable.
+        if validate_bits(old_bits).is_err() {
+            return self.repack_legacy_width()?.update(status_updates);
+        }
         let new_bits = determine_bits(&status_updates, Some(old_bits))?;
         let mut status_array = decode_compressed(&self.lst)?;
 
@@ -161,6 +166,7 @@ impl StatusList {
         status_updates: Vec<StatusEntry>,
         bits: usize,
     ) -> Result<Self, StatusListError> {
+        debug_assert!(matches!(bits, 1 | 2 | 4 | 8));
         let len = calculate_array_size(&status_updates, bits)?;
         let mut status_array = vec![0u8; len];
         apply_updates(&mut status_array, &status_updates, bits)?;
@@ -169,6 +175,52 @@ impl StatusList {
             lst: encode_compressed(&status_array)?,
         })
     }
+
+    /// The `lst` as it must appear in a token: the stored value, or a valid
+    /// zlib-compressed empty stream for legacy `lst = ""` rows.
+    pub(crate) fn token_lst(&self) -> Result<(u8, String), StatusListError> {
+        if validate_bits(self.bits as usize).is_err() {
+            let normalized = self.repack_legacy_width()?;
+            return normalized.token_lst();
+        }
+        let lst = if self.lst.is_empty() {
+            encode_compressed(&[])?
+        } else {
+            self.lst.clone()
+        };
+        Ok((self.bits, lst))
+    }
+
+    /// Raw compressed bytes for the Draft-21 §4.3 CBOR byte string.
+    pub(crate) fn token_lst_bytes(&self) -> Result<(u8, Vec<u8>), StatusListError> {
+        let (bits, lst) = self.token_lst()?;
+        let compressed = base64url::decode(&lst).map_err(|err| {
+            StatusListError::CorruptStoredList(format!("Invalid lst encoding: {err}"))
+        })?;
+
+        Ok((bits, compressed))
+    }
+
+    fn repack_legacy_width(&self) -> Result<Self, StatusListError> {
+        let bits = self.bits as usize;
+        let status_array = decode_compressed(&self.lst)?;
+        let statuses = decode_status_array_legacy_width(&status_array, bits)?;
+        let updates = statuses
+            .into_iter()
+            .enumerate()
+            .map(|(index, status)| StatusEntry {
+                index: index as i32,
+                status,
+            })
+            .collect();
+        Self::create(updates)
+    }
+}
+
+pub(crate) fn unsupported_status_value_message(value: u32) -> String {
+    format!(
+        "status value {value} is not a supported Draft-21 status type; accepted values are 0-3 and 12-15"
+    )
 }
 
 fn status_value(status: &Status) -> Result<u32, StatusListError> {
@@ -176,9 +228,11 @@ fn status_value(status: &Status) -> Result<u32, StatusListError> {
         Status::Valid => Ok(0),
         Status::Invalid => Ok(1),
         Status::Suspended => Ok(2),
-        Status::ApplicationSpecific(value) if *value >= 256 => Ok(*value),
-        Status::ApplicationSpecific(_) => Err(StatusListError::InvalidStatusList(
-            "ApplicationSpecific value must be >= 256".to_string(),
+        Status::ApplicationSpecific(value) if is_application_specific_status_value(*value) => {
+            Ok(*value)
+        }
+        Status::ApplicationSpecific(value) => Err(StatusListError::InvalidStatusList(
+            unsupported_status_value_message(*value),
         )),
     }
 }
@@ -201,6 +255,19 @@ pub(crate) fn validate_unique_indices(
     Ok(())
 }
 
+pub(crate) fn is_application_specific_status_value(value: u32) -> bool {
+    matches!(value, 3 | 12..=15)
+}
+
+fn validate_bits(bits: usize) -> Result<(), StatusListError> {
+    match bits {
+        1 | 2 | 4 | 8 => Ok(()),
+        _ => Err(StatusListError::CorruptStoredList(format!(
+            "stored status list uses unsupported bit width {bits}; expected one of 1, 2, 4, or 8"
+        ))),
+    }
+}
+
 fn determine_bits(
     status_updates: &[StatusEntry],
     original_bits: Option<usize>,
@@ -219,17 +286,10 @@ fn determine_bits(
         0 | 1 => 1,
         2 | 3 => 2,
         4..=15 => 4,
-        16..=255 => 8,
-        _ => {
-            let bits_needed = (max_status_value as usize + 1)
-                .next_power_of_two()
-                .trailing_zeros();
-            if bits_needed == 0 {
-                return Err(StatusListError::InvalidStatusList(
-                    "Status value too large".to_string(),
-                ));
-            }
-            bits_needed as usize
+        value => {
+            return Err(StatusListError::InvalidStatusList(
+                unsupported_status_value_message(value),
+            ));
         }
     };
 
@@ -332,6 +392,10 @@ fn encode_compressed(bytes: &[u8]) -> Result<String, StatusListError> {
 }
 
 fn decode_compressed(encoded: &str) -> Result<Vec<u8>, StatusListError> {
+    if encoded.is_empty() {
+        return Ok(Vec::new());
+    }
+
     let bytes = base64url::decode(encoded).map_err(|err| {
         StatusListError::CorruptStoredList(format!("Invalid lst encoding: {err}"))
     })?;
@@ -344,6 +408,24 @@ fn decode_compressed(encoded: &str) -> Result<Vec<u8>, StatusListError> {
 }
 
 fn decode_status_array(array: &[u8], bits: usize) -> Result<Vec<Status>, StatusListError> {
+    validate_bits(bits)?;
+    decode_status_array_values(array, bits)
+}
+
+fn decode_status_array_legacy_width(
+    array: &[u8],
+    bits: usize,
+) -> Result<Vec<Status>, StatusListError> {
+    if bits == 0 {
+        return Err(StatusListError::CorruptStoredList(
+            "stored status list uses unsupported bit width 0; expected one of 1, 2, 4, or 8"
+                .to_string(),
+        ));
+    }
+    decode_status_array_values(array, bits)
+}
+
+fn decode_status_array_values(array: &[u8], bits: usize) -> Result<Vec<Status>, StatusListError> {
     if array.len() * 8 % bits >= 8 {
         return Err(StatusListError::CorruptStoredList(format!(
             "stored status array of {} bytes leaves an unused trailing byte at {bits}-bit width",
@@ -382,11 +464,13 @@ fn decode_status_array(array: &[u8], bits: usize) -> Result<Vec<Status>, StatusL
             0 => Status::Valid,
             1 => Status::Invalid,
             2 => Status::Suspended,
-            value if value >= 256 => Status::ApplicationSpecific(value),
-            _ => {
-                return Err(StatusListError::CorruptStoredList(
-                    "Invalid status value in existing list".to_string(),
-                ));
+            value if is_application_specific_status_value(value) => {
+                Status::ApplicationSpecific(value)
+            }
+            value => {
+                return Err(StatusListError::CorruptStoredList(format!(
+                    "stored status list contains reserved status value {value}; reserved values must not be re-encoded as application-specific"
+                )));
             }
         });
     }
@@ -405,6 +489,13 @@ mod tests {
         let mut decompressed = Vec::new();
         decoder.read_to_end(&mut decompressed).unwrap();
         decompressed
+    }
+
+    fn assert_allowed_bits(bits: u8) {
+        assert!(
+            matches!(bits, 1 | 2 | 4 | 8),
+            "bits must be one of 1, 2, 4, or 8, got {bits}"
+        );
     }
 
     #[test]
@@ -432,7 +523,7 @@ mod tests {
 
     #[test]
     fn create_status_list_matches_two_bit_spec_vector() {
-        let statuses = [1, 2, 0, 3, 0, 1, 3, 3, 1, 2, 3, 3];
+        let statuses = [1, 2, 0, 3, 0, 1, 0, 1, 1, 2, 3, 3];
         let updates = statuses
             .into_iter()
             .enumerate()
@@ -442,24 +533,20 @@ mod tests {
                     0 => Status::Valid,
                     1 => Status::Invalid,
                     2 => Status::Suspended,
-                    _ => Status::ApplicationSpecific(256),
+                    _ => Status::ApplicationSpecific(3),
                 },
             })
             .collect();
 
         let result = StatusList::create(updates).unwrap();
 
-        assert_eq!(result.bits, 9);
-        assert_eq!(
-            decode_status_array(&decompress(&result.lst), 9)
-                .unwrap()
-                .len(),
-            12
-        );
+        assert_eq!(result.bits, 2);
+        assert_eq!(decompress(&result.lst), vec![0xC9, 0x44, 0xF9]);
+        assert_eq!(result.lst, "eNo76fITAAPfAgc");
     }
 
     #[test]
-    fn update_status_list_bumps_bit_width_for_application_specific_values() {
+    fn update_status_list_bumps_bit_width_for_supported_application_specific_values() {
         let original = StatusList::create(vec![StatusEntry {
             index: 0,
             status: Status::Valid,
@@ -469,14 +556,24 @@ mod tests {
         let updated = original
             .update(vec![StatusEntry {
                 index: 1,
-                status: Status::ApplicationSpecific(256),
+                status: Status::ApplicationSpecific(15),
             }])
             .unwrap();
 
-        assert_eq!(updated.bits, 9);
-        let statuses = decode_status_array(&decompress(&updated.lst), 9).unwrap();
+        assert_eq!(updated.bits, 4);
+        let statuses = decode_status_array(&decompress(&updated.lst), 4).unwrap();
         assert_eq!(statuses[0], Status::Valid);
-        assert_eq!(statuses[1], Status::ApplicationSpecific(256));
+        assert_eq!(statuses[1], Status::ApplicationSpecific(15));
+    }
+
+    #[test]
+    fn update_existing_eight_bit_list_keeps_legacy_width() {
+        let updated = from_raw(&[0, 15], 8)
+            .update(vec![entry(0, Status::Invalid)])
+            .unwrap();
+
+        assert_eq!(updated.bits, 8);
+        assert_eq!(decompress(&updated.lst), vec![1, 15]);
     }
 
     fn entry(index: i32, status: Status) -> StatusEntry {
@@ -583,76 +680,108 @@ mod tests {
     }
 
     #[test]
-    fn nine_bit_app_specific_exact_layout() {
+    fn four_bit_app_specific_exact_layout() {
         let result = StatusList::create(vec![
             entry(0, Status::Valid),
             entry(1, Status::Invalid),
             entry(2, Status::Suspended),
-            entry(3, Status::ApplicationSpecific(256)),
+            entry(3, Status::ApplicationSpecific(15)),
         ])
         .unwrap();
-        assert_eq!(result.bits, 9, "value 256 requires 9 bits");
+        assert_eq!(result.bits, 4);
         let raw = decompress(&result.lst);
-        assert_eq!(raw.len(), 5, "4 entries * 9 bits = 36 bits = 5 bytes");
-        let statuses = decode_status_array(&raw, 9).unwrap();
+        assert_eq!(raw.len(), 2, "4 entries * 4 bits = 2 bytes");
+        let statuses = decode_status_array(&raw, 4).unwrap();
         assert_eq!(statuses[0], Status::Valid);
         assert_eq!(statuses[1], Status::Invalid);
         assert_eq!(statuses[2], Status::Suspended);
-        assert_eq!(statuses[3], Status::ApplicationSpecific(256));
+        assert_eq!(statuses[3], Status::ApplicationSpecific(15));
     }
 
     #[test]
-    fn app_specific_multibyte_roundtrip() {
+    fn app_specific_registry_values_roundtrip() {
         let result = StatusList::create(vec![
-            entry(0, Status::ApplicationSpecific(512)),
-            entry(3, Status::ApplicationSpecific(256)),
+            entry(0, Status::ApplicationSpecific(3)),
+            entry(1, Status::ApplicationSpecific(12)),
+            entry(2, Status::ApplicationSpecific(13)),
+            entry(3, Status::ApplicationSpecific(14)),
+            entry(4, Status::ApplicationSpecific(15)),
         ])
         .unwrap();
         let statuses = decode_status_array(&decompress(&result.lst), result.bits as usize).unwrap();
-        assert_eq!(statuses[0], Status::ApplicationSpecific(512));
-        assert_eq!(statuses[3], Status::ApplicationSpecific(256));
+        assert_eq!(result.bits, 4);
+        assert_eq!(statuses[0], Status::ApplicationSpecific(3));
+        assert_eq!(statuses[1], Status::ApplicationSpecific(12));
+        assert_eq!(statuses[2], Status::ApplicationSpecific(13));
+        assert_eq!(statuses[3], Status::ApplicationSpecific(14));
+        assert_eq!(statuses[4], Status::ApplicationSpecific(15));
     }
 
     #[test]
-    fn thirteen_bit_app_specific_at_offset_roundtrip() {
-        let result = StatusList::create(vec![
-            entry(0, Status::Invalid),
-            entry(3, Status::ApplicationSpecific(4096)),
-        ])
-        .unwrap();
-        assert_eq!(result.bits, 13, "value 4096 requires 13 bits (2^13 = 8192)");
-        let statuses = decode_status_array(&decompress(&result.lst), result.bits as usize).unwrap();
-        assert_eq!(statuses[0], Status::Invalid);
-        assert_eq!(statuses[3], Status::ApplicationSpecific(4096));
-    }
-
-    #[test]
-    fn create_rejects_app_specific_below_256() {
-        for value in [3u32, 100, 255] {
+    fn create_rejects_unsupported_status_values() {
+        for value in [256u32, 512, 4096] {
             let result = StatusList::create(vec![entry(0, Status::ApplicationSpecific(value))]);
             assert!(
-                matches!(result, Err(StatusListError::InvalidStatusList(ref msg)) if msg.contains(">= 256")),
+                matches!(result, Err(StatusListError::InvalidStatusList(ref msg)) if msg.contains("not a supported Draft-21 status type") && msg.contains("0-3 and 12-15")),
                 "value {value} must be rejected"
             );
         }
     }
 
     #[test]
-    fn update_rejects_app_specific_below_256() {
-        let original = StatusList::create(vec![entry(0, Status::Valid)]).unwrap();
-        let result = original.update(vec![entry(0, Status::ApplicationSpecific(3))]);
-        assert!(matches!(result, Err(StatusListError::InvalidStatusList(_))));
+    fn reserved_status_values_are_rejected() {
+        for value in [4u32, 5, 11, 16, 100, 255] {
+            let result = StatusList::create(vec![entry(0, Status::ApplicationSpecific(value))]);
+            assert!(
+                matches!(result, Err(StatusListError::InvalidStatusList(ref msg)) if msg.contains("not a supported Draft-21 status type")),
+                "value {value} must be rejected as reserved"
+            );
+        }
     }
 
     #[test]
-    fn decode_rejects_reserved_values() {
-        for (raw, bits) in [(vec![0b1110_0100u8], 2), (vec![3u8], 2), (vec![100u8], 8)] {
-            let result = decode_status_array(&raw, bits);
-            assert!(
-                matches!(result, Err(StatusListError::CorruptStoredList(_))),
-                "value in {raw:?} at {bits} bits must be rejected as corrupt state"
-            );
+    fn application_specific_registry_values_are_supported() {
+        for (value, bits) in [(3u32, 2u8), (12, 4), (13, 4), (14, 4), (15, 4)] {
+            let result =
+                StatusList::create(vec![entry(0, Status::ApplicationSpecific(value))]).unwrap();
+            assert_eq!(result.bits, bits);
+            assert_allowed_bits(result.bits);
         }
+    }
+
+    #[test]
+    fn update_rejects_unsupported_status_values() {
+        let original = StatusList::create(vec![entry(0, Status::Valid)]).unwrap();
+        let result = original.update(vec![entry(0, Status::ApplicationSpecific(256))]);
+        assert!(
+            matches!(result, Err(StatusListError::InvalidStatusList(ref msg)) if msg.contains("not a supported Draft-21 status type"))
+        );
+    }
+
+    #[test]
+    fn update_rejects_reserved_status_values() {
+        let original = StatusList::create(vec![entry(0, Status::Valid)]).unwrap();
+        let result = original.update(vec![entry(0, Status::ApplicationSpecific(16))]);
+        assert!(
+            matches!(result, Err(StatusListError::InvalidStatusList(ref msg)) if msg.contains("not a supported Draft-21 status type"))
+        );
+    }
+
+    #[test]
+    fn decode_accepts_application_specific_values_within_bit_width() {
+        let statuses = decode_status_array(&[0b1110_0100u8], 2).unwrap();
+        assert_eq!(
+            statuses[..4],
+            [
+                Status::Valid,
+                Status::Invalid,
+                Status::Suspended,
+                Status::ApplicationSpecific(3)
+            ]
+        );
+
+        let statuses = decode_status_array(&[15u8], 8).unwrap();
+        assert_eq!(statuses, vec![Status::ApplicationSpecific(15)]);
     }
 
     #[test]
@@ -680,41 +809,160 @@ mod tests {
     fn update_with_bad_request_value_stays_request_error() {
         let sound = StatusList::create(vec![entry(0, Status::Valid)]).unwrap();
         assert!(matches!(
-            sound.update(vec![entry(0, Status::ApplicationSpecific(3))]),
+            sound.update(vec![entry(0, Status::ApplicationSpecific(256))]),
             Err(StatusListError::InvalidStatusList(_))
         ));
     }
 
     #[test]
-    fn decode_accepts_legitimate_sub_byte_padding() {
-        let one_entry_256 = vec![0x00, 0x01];
-        let statuses = decode_status_array(&one_entry_256, 9).unwrap();
-        assert_eq!(statuses, vec![Status::ApplicationSpecific(256)]);
+    fn decode_rejects_unsupported_bit_widths() {
+        for bits in [0usize, 3, 5, 7, 9, 13] {
+            let result = decode_status_array(&[0x00], bits);
+            assert!(
+                matches!(result, Err(StatusListError::CorruptStoredList(_))),
+                "bit width {bits} must be rejected"
+            );
+        }
     }
 
     #[test]
-    fn decode_rejects_truncated_array_as_corrupt() {
-        let truncated = vec![0x00];
-        assert!(matches!(
-            decode_status_array(&truncated, 9),
-            Err(StatusListError::CorruptStoredList(_))
-        ));
-
-        let truncated_list = StatusList {
+    fn update_rejects_stored_lists_with_unsupported_bit_widths() {
+        let invalid_bits_list = StatusList {
             bits: 9,
-            lst: encode_compressed(&[0x00]).unwrap(),
+            lst: encode_compressed(&[0x00, 0x01]).unwrap(),
         };
         assert!(matches!(
-            truncated_list.update(vec![entry(1, Status::ApplicationSpecific(512))]),
+            invalid_bits_list.update(vec![entry(1, Status::Invalid)]),
             Err(StatusListError::CorruptStoredList(_))
         ));
     }
 
     #[test]
-    fn create_empty_yields_empty_list() {
+    fn update_legacy_empty_lst_upgrades_to_compressed_empty_stream() {
+        let legacy_empty = StatusList {
+            bits: 1,
+            lst: String::new(),
+        };
+
+        let updated = legacy_empty
+            .update(vec![entry(0, Status::Invalid)])
+            .unwrap();
+
+        assert_eq!(updated.bits, 1);
+        assert!(!updated.lst.is_empty());
+        assert_eq!(decompress(&updated.lst), vec![0b0000_0001]);
+    }
+
+    #[test]
+    fn decode_rejects_reserved_stored_status_values_as_corruption() {
+        for (raw, bits, value) in [([0x04], 4usize, 4u32), ([0x10], 8, 16)] {
+            let result = decode_status_array(&raw, bits);
+            assert!(
+                matches!(result, Err(StatusListError::CorruptStoredList(ref msg)) if msg.contains(&format!("reserved status value {value}"))),
+                "reserved stored value {value} must be stored-state corruption"
+            );
+        }
+    }
+
+    #[test]
+    fn token_lst_repacks_representable_legacy_width() {
+        let legacy_representable = StatusList {
+            bits: 9,
+            lst: encode_compressed(&[15, 0]).unwrap(),
+        };
+
+        let (bits, lst) = legacy_representable.token_lst().unwrap();
+
+        assert_eq!(bits, 4);
+        assert_eq!(decompress(&lst), vec![15]);
+    }
+
+    #[test]
+    fn update_repacks_representable_legacy_width() {
+        let legacy_representable = StatusList {
+            bits: 9,
+            lst: encode_compressed(&[15, 0]).unwrap(),
+        };
+
+        let updated = legacy_representable
+            .update(vec![entry(1, Status::Invalid)])
+            .unwrap();
+
+        assert_eq!(updated.bits, 4);
+        assert_eq!(decompress(&updated.lst), vec![0x1F]);
+    }
+
+    #[test]
+    fn token_lst_rejects_unrepresentable_legacy_width_values() {
+        let legacy_unrepresentable = StatusList {
+            bits: 9,
+            lst: encode_compressed(&[0, 1]).unwrap(),
+        };
+
+        assert!(matches!(
+            legacy_unrepresentable.token_lst(),
+            Err(StatusListError::CorruptStoredList(_))
+        ));
+    }
+
+    #[test]
+    fn token_lst_normalizes_legacy_empty_lst() {
+        let legacy_empty = StatusList {
+            bits: 1,
+            lst: String::new(),
+        };
+
+        let (bits, lst) = legacy_empty.token_lst().unwrap();
+
+        assert_eq!(bits, 1);
+        assert!(!lst.is_empty());
+        assert_eq!(decompress(&lst), Vec::<u8>::new());
+    }
+
+    #[test]
+    fn create_empty_yields_zlib_compressed_empty_list() {
         let result = StatusList::create(Vec::new()).unwrap();
         assert_eq!(result.bits, 1);
-        assert_eq!(result.lst, "");
+        assert!(!result.lst.is_empty());
+        assert_eq!(result.lst, "eNoDAAAAAAE");
+        assert_eq!(decompress(&result.lst), Vec::<u8>::new());
+    }
+
+    #[test]
+    fn empty_list_zlib_stream_inflates_with_standard_decoder() {
+        let result = StatusList::create(Vec::new()).unwrap();
+        let compressed = base64url::decode(&result.lst).unwrap();
+        let mut decoder = ZlibDecoder::new(&compressed[..]);
+        let mut inflated = Vec::new();
+
+        decoder.read_to_end(&mut inflated).unwrap();
+
+        assert!(inflated.is_empty());
+    }
+
+    #[test]
+    fn generated_bits_are_always_draft_21_widths() {
+        for status in [
+            Status::Valid,
+            Status::Invalid,
+            Status::Suspended,
+            Status::ApplicationSpecific(3),
+            Status::ApplicationSpecific(15),
+        ] {
+            let result = StatusList::create(vec![entry(0, status)]).unwrap();
+            assert_allowed_bits(result.bits);
+        }
+
+        let original = StatusList::create(vec![entry(0, Status::Valid)]).unwrap();
+        for status in [
+            Status::Invalid,
+            Status::Suspended,
+            Status::ApplicationSpecific(3),
+            Status::ApplicationSpecific(15),
+        ] {
+            let result = original.update(vec![entry(1, status)]).unwrap();
+            assert_allowed_bits(result.bits);
+        }
     }
 
     #[test]
