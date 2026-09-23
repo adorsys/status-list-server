@@ -2,6 +2,7 @@
 
 use crate::domain::models::credential::Issuer;
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::io::{Read, Write};
 
 /// Errors originating from domain validation, storage conflicts, or compression/parsing failures.
@@ -33,8 +34,6 @@ pub enum StatusListError {
     TooManyStatuses { count: usize, max: usize },
     #[error("status index {index} exceeds configured maximum {max}")]
     IndexTooLarge { index: i32, max: i32 },
-    #[error("at least one status update required")]
-    EmptyStatusUpdate,
     #[error("duplicate status index {index} in update payload")]
     DuplicateIndex { index: i32 },
     #[error("the status list was modified concurrently")]
@@ -147,6 +146,10 @@ impl StatusList {
                     status,
                 })
                 .collect();
+            // The pre-existing entries are re-emitted first and the caller's
+            // updates appended after them: an index present in both must end up
+            // with the *update's* value, so this widening path relies on
+            // [`apply_updates`] letting the last write win for any given index.
             full_statuses.extend(status_updates);
             return Self::create_with_bits(full_statuses, new_bits);
         }
@@ -246,7 +249,7 @@ fn status_value(status: &Status) -> Result<u32, StatusListError> {
 pub(crate) fn validate_unique_indices(
     status_updates: &[StatusEntry],
 ) -> Result<(), StatusListError> {
-    let mut seen_indices: std::collections::HashSet<i32> = std::collections::HashSet::new();
+    let mut seen_indices: HashSet<i32> = HashSet::new();
     for entry in status_updates {
         if !seen_indices.insert(entry.index) {
             return Err(StatusListError::DuplicateIndex { index: entry.index });

@@ -5,17 +5,17 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
-### Added
+### Fixed
 
-- Reject `PATCH /status-lists/{list_id}/statuses` requests whose `statuses`
-  array is empty with `400 empty_status_update`, and reject any payload (PUT or
-  PATCH) containing duplicate `index` values with `400 duplicate_index`.
+- `PATCH /status-lists/{list_id}/statuses` no longer writes when the payload
+  leaves the list unchanged: an empty `statuses` array and a payload that
+  re-sets every affected index to its current value are now successful no-ops
+  that neither advance the list version nor insert a redundant history
+  snapshot. A payload containing duplicate `index` values is rejected with
+  `400 duplicate_index` on both `PUT` and `PATCH`.
 
 ### Changed
 
-- **Breaking:** an empty PATCH (`{"statuses": []}`) is now rejected with `400`
-  instead of being silently applied as a redundant no-op write, so it no longer
-  advances the list version or inserts a duplicate history snapshot.
 - Bump the Helm chart to `0.5.0` for render-time validation changes.
 - Helm MySQL deployments are external-only and now require `statuslist.env.APP_DATABASE__HOST` plus an explicit `statuslist.image.tag` or `statuslist.image.digest`; when NetworkPolicy is enabled they also require `statuslist.networkPolicy.databaseEgress`.
 - The Helm chart intentionally accepts only `postgres` and `mysql` backends. Use non-Helm local/custom deployment paths for `sqlite` or `memory`.

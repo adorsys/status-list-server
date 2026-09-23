@@ -593,11 +593,10 @@ components:
         entries in a status list. The number of entries is bounded by the
         operator-configurable `limits.max_statuses_per_request` (default 5000);
         a request exceeding that bound is rejected with `400 Bad Request`.
-        An empty `statuses` array is rejected on `PATCH` with `400 Bad Request`
-        (it would otherwise be a redundant no-op write); creating an empty list
-        via `PUT` remains valid. A `statuses` array containing duplicate
-        `index` values is rejected with `400 Bad Request` on both `PUT` and
-        `PATCH`.
+        A `statuses` array containing duplicate `index` values is rejected with
+        `400 Bad Request` on both `PUT` and `PATCH`. An update that leaves the
+        list unchanged (including an empty `statuses` array on `PATCH`) is a
+        successful no-op.
       required:
         - statuses
       properties:
@@ -759,7 +758,6 @@ components:
             - invalid_public_jwk
             - too_many_statuses
             - index_too_large
-            - empty_status_update
             - duplicate_index
             # 401 — emitted by the authentication middleware
             - invalid_auth_header
@@ -809,16 +807,9 @@ components:
           * a status `index` exceeds `limits.max_status_index`
             (default 100000) — `Status index <n> exceeds the configured
             maximum`; or
-          * a PATCH supplies no status entries (`statuses: []`) —
-            `at least one status update required`; or
           * a payload repeats the same `index` in more than one entry — on
             either `PATCH` or `PUT` — `duplicate status index <n> in update
             payload`.
-
-        Request-shape violations (count, empty, duplicate, index bound) are
-        validated before the target list is resolved, so these `400`s take
-        precedence over `404` (list not found) and `403` (issuer mismatch),
-        which are reported only once the payload is well-formed.
       content:
         application/json:
           schema:

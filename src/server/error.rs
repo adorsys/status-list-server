@@ -236,9 +236,6 @@ impl IntoApiError for StatusListError {
                 "index_too_large",
                 format!("status index {index} exceeds configured maximum {max}"),
             ),
-            StatusListError::EmptyStatusUpdate => {
-                ApiError::bad_request("empty_status_update", "at least one status update required")
-            }
             StatusListError::DuplicateIndex { index } => ApiError::bad_request(
                 "duplicate_index",
                 format!("duplicate status index {index} in update payload"),
@@ -349,11 +346,6 @@ mod tests {
                 StatusListError::IndexTooLarge { index: 2, max: 1 },
                 StatusCode::BAD_REQUEST,
                 "index_too_large",
-            ),
-            (
-                StatusListError::EmptyStatusUpdate,
-                StatusCode::BAD_REQUEST,
-                "empty_status_update",
             ),
             (
                 StatusListError::DuplicateIndex { index: 3 },

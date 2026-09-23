@@ -236,7 +236,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_update_status_rejects_empty_statuses() {
+    async fn test_update_status_empty_payload_is_successful_noop() {
         let token_id = uuid::Uuid::new_v4().to_string();
         let app_state = test_app_state(None).await;
 
@@ -249,7 +249,15 @@ mod tests {
         .await
         .unwrap();
 
-        let before = app_state.service.get_status_list(&token_id).await.unwrap();
+        // Read the version straight from the repo, not through the cache, so a
+        // stale/masked cache entry cannot hide a spurious version bump.
+        let before = app_state
+            .service
+            .status_list_repo()
+            .find(&token_id)
+            .await
+            .unwrap()
+            .unwrap();
 
         let update_res = update_status(
             State(app_state.clone()),
@@ -257,20 +265,151 @@ mod tests {
             Path(token_id.clone()),
             Json(StatusesRequest { statuses: vec![] }),
         )
-        .await;
+        .await
+        .unwrap()
+        .into_response();
 
-        let err = match update_res {
-            Ok(_) => panic!("expected empty status update to be rejected"),
-            Err(e) => e,
-        };
-        assert_eq!(err.status, StatusCode::BAD_REQUEST);
-        assert_eq!(err.error, "empty_status_update");
+        assert_eq!(update_res.status(), StatusCode::OK);
 
-        let after = app_state.service.get_status_list(&token_id).await.unwrap();
+        let after = app_state
+            .service
+            .status_list_repo()
+            .find(&token_id)
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(
             after.updated_at, before.updated_at,
-            "an empty PATCH must not advance the status list version"
+            "an empty PATCH must be a successful no-op and must not advance the list version"
         );
+        assert_eq!(after.status_list, before.status_list);
+    }
+
+    #[tokio::test]
+    async fn test_update_status_unchanged_value_is_successful_noop() {
+        let token_id = uuid::Uuid::new_v4().to_string();
+        let app_state = test_app_state(None).await;
+
+        // An update that re-sets index 0 to its current value (VALID) leaves the
+        // list identical, so it must be a successful no-op: no version bump and
+        // no extra write, mirroring the empty-PATCH contract.
+        publish_status(
+            State(app_state.clone()),
+            authenticated_issuer("issuer1"),
+            Path(token_id.clone()),
+            Json(StatusesRequest {
+                statuses: vec![RequestStatusEntry {
+                    index: 0,
+                    status: RequestStatus::VALID,
+                }],
+            }),
+        )
+        .await
+        .unwrap();
+
+        let before = app_state
+            .service
+            .status_list_repo()
+            .find(&token_id)
+            .await
+            .unwrap()
+            .unwrap();
+
+        let update_res = update_status(
+            State(app_state.clone()),
+            authenticated_issuer("issuer1"),
+            Path(token_id.clone()),
+            Json(StatusesRequest {
+                statuses: vec![RequestStatusEntry {
+                    index: 0,
+                    status: RequestStatus::VALID,
+                }],
+            }),
+        )
+        .await
+        .unwrap()
+        .into_response();
+
+        assert_eq!(update_res.status(), StatusCode::OK);
+
+        let after = app_state
+            .service
+            .status_list_repo()
+            .find(&token_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            after.updated_at, before.updated_at,
+            "re-submitting the current value at an existing index must be a no-op"
+        );
+        assert_eq!(after.status_list, before.status_list);
+    }
+
+    /// Router-level coverage with a raw JSON body, exercising the
+    /// `Json` extraction + rejection adapter that the handler-level tests bypass.
+    #[tokio::test]
+    async fn patch_route_handles_raw_json_bodies() {
+        use axum::{
+            Router, body::Body, body::to_bytes, http::Method, routing::patch,
+        };
+        use tower::ServiceExt;
+
+        let token_id = uuid::Uuid::new_v4().to_string();
+        let app_state = test_app_state(None).await;
+
+        publish_status(
+            State(app_state.clone()),
+            authenticated_issuer("issuer1"),
+            Path(token_id.clone()),
+            Json(StatusesRequest {
+                statuses: vec![RequestStatusEntry {
+                    index: 0,
+                    status: RequestStatus::VALID,
+                }],
+            }),
+        )
+        .await
+        .unwrap();
+
+        let router = Router::new()
+            .route(
+                "/status-lists/{list_id}/statuses/",
+                patch(update_status_route),
+            )
+            .with_state(app_state.clone());
+
+        let send = |body: &'static str| {
+            let router = router.clone();
+            let token_id = token_id.clone();
+            async move {
+                let mut request = axum::http::Request::builder()
+                    .method(Method::PATCH)
+                    .uri(format!("/status-lists/{token_id}/statuses/"))
+                    .header(axum::http::header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap();
+                request
+                    .extensions_mut()
+                    .insert(authenticated_issuer("issuer1"));
+                router.oneshot(request).await.unwrap()
+            }
+        };
+
+        // A valid PATCH returns 200.
+        let ok = send(r#"{"statuses":[{"index":0,"status":1}]}"#).await;
+        assert_eq!(ok.status(), StatusCode::OK);
+
+        // An empty PATCH body is a successful no-op, not a 400.
+        let empty = send(r#"{"statuses":[]}"#).await;
+        assert_eq!(empty.status(), StatusCode::OK);
+
+        // A duplicate-index payload is rejected with 400 duplicate_index.
+        let dup = send(r#"{"statuses":[{"index":0,"status":0},{"index":0,"status":1}]}"#).await;
+        assert_eq!(dup.status(), StatusCode::BAD_REQUEST);
+        let body = to_bytes(dup.into_body(), usize::MAX).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["error"], "duplicate_index");
     }
 
     #[tokio::test]
@@ -335,34 +474,12 @@ mod tests {
         assert!(result.is_err());
     }
 
-    /// Request-shape `400`s are validated before the target list is resolved,
-    /// so an empty PATCH to a list that does not exist — or is owned by another
-    /// issuer — still returns `empty_status_update`, not `404`/`403`. This pins
-    /// the documented precedence.
-    #[tokio::test]
-    async fn test_empty_update_takes_precedence_over_not_found() {
-        let app_state = test_app_state(None).await;
-        let nonexistent_id = uuid::Uuid::new_v4().to_string();
-
-        let update_res = update_status(
-            State(app_state),
-            authenticated_issuer("issuer1"),
-            Path(nonexistent_id),
-            Json(StatusesRequest { statuses: vec![] }),
-        )
-        .await;
-
-        let err = match update_res {
-            Ok(_) => panic!("an empty update must be rejected regardless of list existence"),
-            Err(e) => e,
-        };
-        assert_eq!(err.status, StatusCode::BAD_REQUEST);
-        assert_eq!(err.error, "empty_status_update");
-    }
-
-    /// Duplicate-index rejection is also enforced before list resolution, so a
-    /// duplicate payload to a non-existent list returns `duplicate_index`, not
-    /// `status_list_not_found`.
+    /// An empty PATCH is a no-op, so there is no request-shape `400` to document
+    /// precedence for. The PATCH endpoint no longer rejects empty payloads.
+    ///
+    /// Duplicate-index rejection, by contrast, still runs before the target list
+    /// is resolved, so a duplicate payload to a non-existent list returns
+    /// `duplicate_index`, not `status_list_not_found`.
     #[tokio::test]
     async fn test_duplicate_update_takes_precedence_over_not_found() {
         let app_state = test_app_state(None).await;

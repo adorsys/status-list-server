@@ -419,15 +419,16 @@ mod tests {
         assert!(matches!(result, Err(StatusListError::IssuerMismatch)));
     }
 
-    /// An empty PATCH must be rejected at the service boundary before any write:
-    /// the status list version (`updated_at`) must not advance and no duplicate
-    /// history snapshot may be inserted.
+    /// An empty PATCH is a successful no-op: it must not advance the status
+    /// list version (`updated_at`) and must not insert a duplicate history
+    /// snapshot. Re-submitting the current value at an existing index behaves
+    /// the same way (see `noop_update_with_identical_values`).
     #[tokio::test]
     async fn empty_update_is_noop_without_version_advance_or_snapshot() {
         let repo = MemoryStatusLists::default();
         let cache = MemoryStatusListCache::default();
         // Keep a handle to the same backing map the service will share with the
-        // lists repo, so we can count snapshots after the rejected update.
+        // lists repo, so we can count snapshots after the no-op update.
         let snapshot_repo = MemoryStatusListSnapshotRepo::default();
         let snapshots = snapshot_repo.values.clone();
         let lists = repo.clone().with_snapshot(&snapshot_repo);
@@ -447,7 +448,7 @@ mod tests {
             .await
             .unwrap();
 
-        let published = service.get_status_list("id").await.unwrap();
+        let published = service.status_list_repo().find("id").await.unwrap().unwrap();
 
         let result = service
             .update_statuses(
@@ -461,17 +462,82 @@ mod tests {
             )
             .await;
 
-        assert!(matches!(result, Err(StatusListError::EmptyStatusUpdate)));
+        let landed = result.expect("an empty update must succeed as a no-op");
 
-        let after = service.get_status_list("id").await.unwrap();
+        let after = service.status_list_repo().find("id").await.unwrap().unwrap();
         assert_eq!(
             after.updated_at, published.updated_at,
             "an empty update must not advance the status list version"
         );
         assert_eq!(
+            landed.updated_at, published.updated_at,
+            "the returned record must carry the unchanged version"
+        );
+        assert_eq!(
             snapshots.read().await.len(),
             1,
             "only the publish snapshot may exist; an empty update must not insert a duplicate"
+        );
+    }
+
+    /// The redundant-write guard must catch value-identical updates too, not
+    /// just the literal empty array: re-submitting the current status at an
+    /// existing index must be a successful no-op and must not insert a snapshot.
+    #[tokio::test]
+    async fn noop_update_with_identical_values() {
+        let repo = MemoryStatusLists::default();
+        let cache = MemoryStatusListCache::default();
+        let snapshot_repo = MemoryStatusListSnapshotRepo::default();
+        let snapshots = snapshot_repo.values.clone();
+        let lists = repo.clone().with_snapshot(&snapshot_repo);
+        let service = create_test_service(lists, cache, Some(snapshot_repo));
+
+        service
+            .publish_status_list(
+                "id".into(),
+                Issuer("issuer".into()),
+                "https://example/id".into(),
+                vec![StatusEntry {
+                    index: 0,
+                    status: Status::Valid,
+                }],
+                900,
+                100_000,
+                5_000,
+                usize::MAX,
+            )
+            .await
+            .unwrap();
+
+        let before = service.status_list_repo().find("id").await.unwrap().unwrap();
+
+        // Re-submitting index 0 = VALID, which is already its current value.
+        service
+            .update_statuses(
+                &Issuer("issuer".into()),
+                "id",
+                vec![StatusEntry {
+                    index: 0,
+                    status: Status::Valid,
+                }],
+                900,
+                100_000,
+                5_000,
+                usize::MAX,
+            )
+            .await
+            .expect("an identical update must succeed as a no-op");
+
+        let after = service.status_list_repo().find("id").await.unwrap().unwrap();
+        assert_eq!(
+            after.updated_at, before.updated_at,
+            "re-submitting identical values must not advance the version"
+        );
+        assert_eq!(after.status_list, before.status_list);
+        assert_eq!(
+            snapshots.read().await.len(),
+            1,
+            "an identical update must not insert a redundant snapshot"
         );
     }
 

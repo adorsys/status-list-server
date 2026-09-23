@@ -98,20 +98,7 @@ impl Service {
         max_statuses_per_request: usize,
         max_serialized_list_size: usize,
     ) -> Result<StatusListRecord, StatusListError> {
-        if statuses.len() > max_statuses_per_request {
-            return Err(StatusListError::TooManyStatuses {
-                count: statuses.len(),
-                max: max_statuses_per_request,
-            });
-        }
-        for entry in &statuses {
-            if entry.index > max_status_index {
-                return Err(StatusListError::IndexTooLarge {
-                    index: entry.index,
-                    max: max_status_index,
-                });
-            }
-        }
+        validate_request_shape(&statuses, max_status_index, max_statuses_per_request)?;
 
         let record = StatusListRecord {
             list_id,
@@ -138,13 +125,16 @@ impl Service {
 
     /// Mutate statuses in an existing status list record with optimistic concurrency checks and cache invalidation.
     ///
-    /// Request-shape validation (count bound, empty payload, duplicate indices,
-    /// index bound) runs before any storage access so a malformed request is
-    /// rejected with `400` consistently and without a wasted `find` or write.
-    /// This means those `400`s take precedence over `404` (list not found) and
-    /// `403` (issuer mismatch), which are resolved only after the payload is
-    /// well-formed. The same checks are re-enforced in the domain model as an
-    /// invariant in case this service boundary is bypassed.
+    /// Request-shape validation (count bound, duplicate indices, index bound)
+    /// runs before any storage access so a malformed request is rejected with
+    /// `400` consistently and without a wasted `find` or write. The
+    /// duplicate-index invariant is re-enforced in the domain model as defense
+    /// in depth in case this service boundary is bypassed.
+    ///
+    /// An update that leaves the list unchanged — including a literal empty
+    /// `statuses` payload and a non-empty payload that re-sets every affected
+    /// index to its current value — is a successful no-op: the list version and
+    /// history are untouched and no redundant snapshot is written.
     #[allow(clippy::too_many_arguments)]
     pub async fn update_statuses(
         &self,
@@ -156,24 +146,8 @@ impl Service {
         max_statuses_per_request: usize,
         max_serialized_list_size: usize,
     ) -> Result<StatusListRecord, StatusListError> {
-        if statuses.len() > max_statuses_per_request {
-            return Err(StatusListError::TooManyStatuses {
-                count: statuses.len(),
-                max: max_statuses_per_request,
-            });
-        }
-        if statuses.is_empty() {
-            return Err(StatusListError::EmptyStatusUpdate);
-        }
+        validate_request_shape(&statuses, max_status_index, max_statuses_per_request)?;
         validate_unique_indices(&statuses)?;
-        for entry in &statuses {
-            if entry.index > max_status_index {
-                return Err(StatusListError::IndexTooLarge {
-                    index: entry.index,
-                    max: max_status_index,
-                });
-            }
-        }
 
         let mut existing = self
             .status_list_repo
@@ -185,9 +159,18 @@ impl Service {
             return Err(StatusListError::IssuerMismatch);
         }
 
+        let current_status_list = existing.status_list.clone();
         existing.status_list = existing.status_list.update(statuses)?;
         if existing.status_list.lst.len() > max_serialized_list_size {
             return Err(StatusListError::TooLarge);
+        }
+
+        // A request that does not change the list is a successful no-op. It must
+        // not bump `updated_at` or insert a duplicate history snapshot, which
+        // would both bloat history and (see #484) leave an unnecessary gap in
+        // historical coverage.
+        if existing.status_list == current_status_list {
+            return Ok(existing);
         }
 
         let previous_updated_at = existing.updated_at;
@@ -318,6 +301,29 @@ pub fn current_unix_timestamp() -> i64 {
 
 pub fn next_updated_at(previous: i64, now: i64) -> i64 {
     now.max(previous + 1)
+}
+
+/// Enforce the request-level count and index bounds shared by publish and update.
+fn validate_request_shape(
+    statuses: &[StatusEntry],
+    max_status_index: i32,
+    max_statuses_per_request: usize,
+) -> Result<(), StatusListError> {
+    if statuses.len() > max_statuses_per_request {
+        return Err(StatusListError::TooManyStatuses {
+            count: statuses.len(),
+            max: max_statuses_per_request,
+        });
+    }
+    for entry in statuses {
+        if entry.index > max_status_index {
+            return Err(StatusListError::IndexTooLarge {
+                index: entry.index,
+                max: max_status_index,
+            });
+        }
+    }
+    Ok(())
 }
 
 fn build_snapshot(record: &StatusListRecord, token_exp_secs: u64) -> StatusListSnapshot {
