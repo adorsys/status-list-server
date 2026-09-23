@@ -213,13 +213,12 @@ fn issue_cwt(
         ),
     ];
 
-    let lst_bytes = base64url::decode(&status_record.status_list.lst)
-        .map_err(|err| StatusListError::Backend(Box::new(err)))?;
+    let (bits, lst_bytes) = status_record.status_list.token_lst_bytes()?;
 
     let mut status_list = vec![
         (
             CborValue::Text("bits".into()),
-            CborValue::Integer(status_record.status_list.bits.into()),
+            CborValue::Integer(bits.into()),
         ),
         (CborValue::Text("lst".into()), CborValue::Bytes(lst_bytes)),
     ];
@@ -292,9 +291,10 @@ fn issue_jwt(
     token_ttl_secs: u64,
 ) -> Result<String, StatusListError> {
     let ttl = token_ttl_secs as i64;
+    let (bits, lst) = status_record.status_list.token_lst()?;
     let status_list = StatusListClaims {
-        bits: status_record.status_list.bits,
-        lst: status_record.status_list.lst.clone(),
+        bits,
+        lst,
         aggregation_uri: aggregation_uri.clone(),
     };
     let claims = StatusListToken {
