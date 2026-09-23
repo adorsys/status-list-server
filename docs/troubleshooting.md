@@ -840,26 +840,33 @@ watch the `list_count` of your biggest issuers.
 
 ---
 
-### After deploying the release that adds `credentials.list_count`
+### After any rollout that served a pre-quota release
 
-**When you see this:** A deliberate post-deploy step, not a symptom.
+**When you see this:** A required post-deploy step, not a symptom. It applies to every rollout
+during which a pod without `credentials.list_count` support served traffic:
+
+- the rollout that first adds `credentials.list_count`, and
+- any rollout forward again after rolling back to a release that predates it.
 
 _Source: `src/outbound/sql/migrations.rs` (`credentials_list_count`)_
 
-**Root cause:** The migration adds `credentials.list_count` and backfills it, but migrations run
-at pod startup, so pods still on the previous release keep publishing during the rollout without
-updating the counter. Until the rollout completes the counter can undercount, so the quota is
-briefly too generous (never too strict).
+**Root cause:** Pre-quota pods publish without incrementing `credentials.list_count`. The
+migration's backfill runs at pod startup, so pre-quota pods still serving during the rollout (or
+the whole time after a rollback) add lists it never counts. The counter then undercounts, so
+the quota is too generous (never too strict) until it is recomputed.
 
-**Fix:** Once every pod runs the new release,
-[recompute the counter](#recomputing-credentialslist_count) once.
+**Fix:** Once every pod runs a release with the quota,
+[recompute the counter](#recomputing-credentialslist_count) once. Make this a step in the deploy
+procedure, not a response to a quota complaint: an undercount produces no error, so nothing
+prompts anyone to run it.
 
 ---
 
 ### Recomputing `credentials.list_count`
 
-Recomputes every issuer's counter from the lists that exist. Run it after the rollout above, and
-after any manual `DELETE` from `status_lists`. It is portable across PostgreSQL, MySQL and SQLite,
+Recomputes every issuer's counter from the lists that exist. Run it after every rollout
+described [above](#after-any-rollout-that-served-a-pre-quota-release), and after any manual
+`DELETE` from `status_lists`. It is portable across PostgreSQL, MySQL and SQLite,
 and is the same statement the migration uses for its backfill (a unit test keeps the two
 identical):
 

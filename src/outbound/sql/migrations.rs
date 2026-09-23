@@ -608,21 +608,25 @@ pub(crate) mod credentials_list_count {
     #[allow(elided_lifetimes_in_paths)]
     impl MigrationTrait for Migration {
         async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
-            // DEFAULT 0 is required: during a rolling deploy, pods on the previous
-            // release insert credentials without this column.
-            manager
-                .alter_table(
-                    Table::alter()
-                        .table(Credentials::Table)
-                        .add_column(
-                            ColumnDef::new(Credentials::ListCount)
-                                .big_integer()
-                                .not_null()
-                                .default(0),
-                        )
-                        .to_owned(),
-                )
-                .await?;
+            // MySQL commits the ALTER on its own, so a failed backfill leaves the
+            // column behind with the migration unrecorded; the re-run must skip it.
+            if !manager.has_column("credentials", "list_count").await? {
+                // DEFAULT 0 lets pods on the previous release keep inserting
+                // credentials during a rolling deploy.
+                manager
+                    .alter_table(
+                        Table::alter()
+                            .table(Credentials::Table)
+                            .add_column(
+                                ColumnDef::new(Credentials::ListCount)
+                                    .big_integer()
+                                    .not_null()
+                                    .default(0),
+                            )
+                            .to_owned(),
+                    )
+                    .await?;
+            }
 
             // Old pods also publish without bumping the counter; re-running this
             // after the rollout is the documented post-deploy step.

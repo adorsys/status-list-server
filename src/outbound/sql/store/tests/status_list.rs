@@ -254,9 +254,14 @@ async fn test_insert_at_quota_refuses_without_inserting() {
                 rows_affected: 0,
                 last_insert_id: 0,
             }])
-            .append_query_results::<BTreeMap<String, Value>, Vec<_>, _>(vec![vec![BTreeMap::from(
-                [("list_count".to_string(), Value::from(2i64))],
-            )]])
+            .append_query_results::<BTreeMap<String, Value>, Vec<_>, _>(vec![
+                vec![BTreeMap::from([(
+                    "list_count".to_string(),
+                    Value::from(2i64),
+                )])],
+                // The `list_id` lookup: not taken.
+                vec![],
+            ])
             .into_connection(),
     );
     let store = SeaOrmStore::<StatusListRecord>::new(db_conn.clone());
@@ -774,7 +779,7 @@ async fn test_sqlite_insert_with_snapshot_is_atomic() {
     fixtures::seed_credential(&db, issuer).await;
 
     let store = SeaOrmStore::<StatusListRecord>::new(db.clone());
-    let history = SeaOrmStore::<StatusListHistoryRecord>::new(db);
+    let history = SeaOrmStore::<StatusListHistoryRecord>::new(db.clone());
 
     let new_record = |list_id: &str| {
         fixtures::record(list_id, issuer, "initial", &format!("sub-{list_id}"), 1000)
@@ -809,6 +814,7 @@ async fn test_sqlite_insert_with_snapshot_is_atomic() {
             .is_some(),
         "the opening snapshot must be resolvable at the publish instant"
     );
+    assert_eq!(fixtures::list_count(&db, issuer).await, 1);
 
     // --- Rollback path: the snapshot INSERT collides on its primary key,
     // so the paired row INSERT must not survive. ---
@@ -840,6 +846,12 @@ async fn test_sqlite_insert_with_snapshot_is_atomic() {
         "the status list row must roll back when its snapshot insert fails"
     );
 
+    assert_eq!(
+        fixtures::list_count(&db, issuer).await,
+        1,
+        "a publish whose snapshot insert fails must give its quota slot back"
+    );
+
     // --- Conflict path: a duplicate list_id must stay a DuplicateEntry so
     // a racing publish keeps mapping to 409 rather than 500. ---
     let dup = store
@@ -853,6 +865,7 @@ async fn test_sqlite_insert_with_snapshot_is_atomic() {
         matches!(dup, Err(RepositoryError::DuplicateEntry)),
         "duplicate list_id must map to DuplicateEntry, got {dup:?}"
     );
+    assert_eq!(fixtures::list_count(&db, issuer).await, 1);
     // The rolled-back publish recorded no snapshot either. This must name
     // `list-rolled-back` — the list that actually failed. Asserting against
     // a list_id that was never inserted proves nothing about rollback.
@@ -1222,6 +1235,32 @@ async fn assert_list_quota_is_exact(db: Arc<DatabaseConnection>, issuer: &str, b
         "a refused publish must not be stored on {backend}"
     );
     assert_eq!(fixtures::list_count(&db, issuer).await, 2);
+
+    let retried = store.insert_one(record(2), 2).await;
+    assert!(
+        matches!(retried, Err(RepositoryError::DuplicateEntry)),
+        "a taken list_id at a full quota must still be a 409 on {backend}, got {retried:?}"
+    );
+    let retried = store
+        .insert_one_with_snapshot(
+            record(2),
+            fixtures::snapshot(
+                &format!("snap-retry-{}", list_id(2)),
+                &list_id(2),
+                issuer,
+                "initial",
+                &format!("sub-{}", list_id(2)),
+                0,
+                900,
+            ),
+            2,
+        )
+        .await;
+    assert!(
+        matches!(retried, Err(RepositoryError::DuplicateEntry)),
+        "the snapshot path must agree on {backend}, got {retried:?}"
+    );
+    assert_eq!(fixtures::list_count(&db, issuer).await, 2);
 }
 
 #[cfg(feature = "sqlite")]
@@ -1321,21 +1360,143 @@ async fn test_postgres_list_uris_walk_is_complete() {
     assert_list_uris_walk_is_complete(db, "issuer-walk-postgres", "Postgres").await;
 }
 
-/// Migrates from the previous release's schema: the backfill counts existing
-/// lists, and credential inserts that omit `list_count` (old pods) still work.
+/// Lists that existed when a walk started appear exactly once, even with
+/// publishes mid-walk. Lowercase IDs sort the same under every collation.
+#[cfg(any(feature = "sqlite", feature = "mysql", feature = "postgres-tests"))]
+async fn assert_list_uris_walk_survives_concurrent_publishes(
+    db: Arc<DatabaseConnection>,
+    issuer: &str,
+    backend: &str,
+) {
+    use std::collections::BTreeSet;
+
+    use crate::domain::ports::StatusListRepo;
+    use crate::outbound::sql::SqlStatusListRepo;
+
+    fixtures::seed_credential(&db, issuer).await;
+    let store = SeaOrmStore::<StatusListRecord>::new(db);
+    let publish = |id: &'static str| {
+        let store = store.clone();
+        async move {
+            store
+                .insert_one(
+                    fixtures::record(id, issuer, "initial", &format!("sub-{id}"), 0),
+                    fixtures::NO_LIST_QUOTA,
+                )
+                .await
+                .unwrap();
+        }
+    };
+    for id in ["list-b", "list-d", "list-f"] {
+        publish(id).await;
+    }
+    let repo = SqlStatusListRepo::new(store.clone());
+
+    let first = repo.list_uris(None, 1).await.unwrap();
+    assert_eq!(
+        first.status_lists,
+        ["sub-list-b"],
+        "first page on {backend}"
+    );
+    // One list behind the cursor, one ahead of it.
+    publish("list-a").await;
+    publish("list-z").await;
+
+    let mut seen = first.status_lists;
+    let mut after = first.next_after;
+    while let Some(cursor) = after {
+        let page = repo.list_uris(Some(&cursor), 1).await.unwrap();
+        seen.extend(page.status_lists);
+        after = page.next_after;
+    }
+
+    let unique: BTreeSet<_> = seen.iter().cloned().collect();
+    assert_eq!(
+        unique.len(),
+        seen.len(),
+        "no list may appear twice on {backend}: {seen:?}"
+    );
+    for existing in ["sub-list-b", "sub-list-d", "sub-list-f"] {
+        assert!(
+            unique.contains(existing),
+            "{existing} existed when the walk started and must appear on {backend}: {seen:?}"
+        );
+    }
+    // Beyond the contract, which allows missing either; pins keyset behaviour.
+    assert!(
+        unique.contains("sub-list-z") && !unique.contains("sub-list-a"),
+        "keyset paging sees lists ahead of the cursor, not behind it, on {backend}: {seen:?}"
+    );
+}
+
 #[cfg(feature = "sqlite")]
 #[tokio::test]
-async fn test_sqlite_list_count_migration_backfills_and_accepts_old_pod_writes() {
+async fn test_sqlite_list_uris_walk_survives_concurrent_publishes() {
+    let db = fixtures::sqlite_connection().await;
+    assert_list_uris_walk_survives_concurrent_publishes(db, "issuer-midwalk-sqlite", "SQLite")
+        .await;
+}
+
+#[cfg(feature = "mysql")]
+#[tokio::test]
+async fn test_mysql_list_uris_walk_survives_concurrent_publishes() {
+    let test_db = mysql_helpers::MysqlTestDb::start().await;
+    let db = test_db.connection().await;
+    assert_list_uris_walk_survives_concurrent_publishes(db, "issuer-midwalk-mysql", "MySQL").await;
+}
+
+#[cfg(feature = "postgres-tests")]
+#[tokio::test]
+async fn test_postgres_list_uris_walk_survives_concurrent_publishes() {
+    let test_db = postgres_helpers::postgres_connection().await;
+    let db = test_db.db.clone();
+    assert_list_uris_walk_survives_concurrent_publishes(db, "issuer-midwalk-postgres", "Postgres")
+        .await;
+}
+
+#[cfg(any(feature = "sqlite", feature = "mysql", feature = "postgres-tests"))]
+fn list_count_migration_index() -> usize {
+    use sea_orm_migration::MigratorTrait;
+
+    crate::outbound::sql::Migrator::migrations()
+        .iter()
+        .position(|m| m.name() == "m20260923_000001_credentials_list_count")
+        .expect("the list_count migration must be registered")
+}
+
+#[cfg(any(feature = "mysql", feature = "postgres-tests"))]
+async fn roll_back_to_before_list_count(db: &DatabaseConnection) {
+    use sea_orm_migration::MigratorTrait;
+
+    use crate::outbound::sql::Migrator;
+
+    let steps = Migrator::migrations().len() - list_count_migration_index();
+    Migrator::down(db, Some(steps as u32))
+        .await
+        .expect("rolling back to before list_count must succeed");
+}
+
+/// The backfill counts existing lists, and old-pod credential inserts still
+/// work. `column_already_added` recreates a failed MySQL backfill: column
+/// present, migration unrecorded.
+#[cfg(any(feature = "sqlite", feature = "mysql", feature = "postgres-tests"))]
+async fn assert_list_count_migration_backfills(
+    db: &DatabaseConnection,
+    column_already_added: bool,
+    backend: &str,
+) {
     use sea_orm::ConnectionTrait;
     use sea_orm_migration::MigratorTrait;
 
     use crate::outbound::sql::Migrator;
 
-    let before_list_count = Migrator::migrations()
-        .iter()
-        .position(|m| m.name() == "m20260923_000001_credentials_list_count")
-        .expect("the list_count migration must be registered");
-    let db = fixtures::sqlite_connection_migrated(Some(before_list_count as u32)).await;
+    if column_already_added {
+        db.execute_unprepared(
+            "ALTER TABLE credentials ADD COLUMN list_count BIGINT NOT NULL DEFAULT 0",
+        )
+        .await
+        .unwrap();
+    }
 
     db.execute_unprepared(
         "INSERT INTO credentials (issuer, public_key) \
@@ -1352,15 +1513,61 @@ async fn test_sqlite_list_count_migration_backfills_and_accepts_old_pod_writes()
         .unwrap();
     }
 
-    Migrator::up(&*db, None).await.unwrap();
+    Migrator::up(db, None).await.unwrap_or_else(|e| {
+        panic!("migrating (column_already_added={column_already_added}) on {backend}: {e}")
+    });
 
-    assert_eq!(fixtures::list_count(&db, "issuer-old").await, 2);
-    assert_eq!(fixtures::list_count(&db, "issuer-empty").await, 0);
+    assert_eq!(
+        fixtures::list_count(db, "issuer-old").await,
+        2,
+        "on {backend}"
+    );
+    assert_eq!(
+        fixtures::list_count(db, "issuer-empty").await,
+        0,
+        "on {backend}"
+    );
 
     db.execute_unprepared(
         "INSERT INTO credentials (issuer, public_key) VALUES ('issuer-via-old-pod', '{}')",
     )
     .await
-    .expect("NOT NULL DEFAULT 0 must let pods on the previous release keep registering");
-    assert_eq!(fixtures::list_count(&db, "issuer-via-old-pod").await, 0);
+    .unwrap_or_else(|e| {
+        panic!(
+            "NOT NULL DEFAULT 0 must let pods on the previous release keep registering \
+             on {backend}: {e}"
+        )
+    });
+    assert_eq!(fixtures::list_count(db, "issuer-via-old-pod").await, 0);
+}
+
+#[cfg(feature = "sqlite")]
+#[tokio::test]
+async fn test_sqlite_list_count_migration_backfills_and_accepts_old_pod_writes() {
+    for column_already_added in [false, true] {
+        let steps = list_count_migration_index() as u32;
+        let db = fixtures::sqlite_connection_migrated(Some(steps)).await;
+        assert_list_count_migration_backfills(&db, column_already_added, "SQLite").await;
+    }
+}
+
+#[cfg(feature = "mysql")]
+#[tokio::test]
+async fn test_mysql_list_count_migration_backfills_and_accepts_old_pod_writes() {
+    for column_already_added in [false, true] {
+        let test_db = mysql_helpers::MysqlTestDb::start().await;
+        let db = test_db.connection().await;
+        roll_back_to_before_list_count(&db).await;
+        assert_list_count_migration_backfills(&db, column_already_added, "MySQL").await;
+    }
+}
+
+#[cfg(feature = "postgres-tests")]
+#[tokio::test]
+async fn test_postgres_list_count_migration_backfills_and_accepts_old_pod_writes() {
+    for column_already_added in [false, true] {
+        let test_db = postgres_helpers::postgres_connection().await;
+        roll_back_to_before_list_count(&test_db.db).await;
+        assert_list_count_migration_backfills(&test_db.db, column_already_added, "Postgres").await;
+    }
 }

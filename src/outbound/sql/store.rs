@@ -90,7 +90,8 @@ impl<T> SeaOrmStore<T> {
     /// server default.
     ///
     /// The guard does not need it — `UPDATE ... WHERE` is a current read on both
-    /// engines, and no transaction here issues a `SELECT`. Pinning buys:
+    /// engines, and the only `SELECT`s are on `reserve_list_slot`'s rejection
+    /// path, which relies on seeing rows committed while it waited. Pinning buys:
     ///
     /// - A raised server default (`default_transaction_isolation`,
     ///   `transaction_isolation`) can no longer turn a guard miss into a
@@ -129,9 +130,13 @@ impl<T> SeaOrmStore<T> {
 /// shared lock on this `credentials` row, and two publishes upgrading it would
 /// deadlock on InnoDB (`1213`). Being in the publish transaction, the slot is
 /// rolled back with any later failure. The caller must roll back on `Err`.
+///
+/// An existing `list_id` is reported as `DuplicateEntry` even at a full quota,
+/// so a retried publish still gets its 409.
 async fn reserve_list_slot(
     txn: &DatabaseTransaction,
     issuer: &str,
+    list_id: &str,
     max_lists_per_issuer: u64,
 ) -> Result<(), RepositoryError> {
     let max = i64::try_from(max_lists_per_issuer).unwrap_or(i64::MAX);
@@ -158,10 +163,24 @@ async fn reserve_list_slot(
         .await
         .map_err(find_err)?;
     match count {
-        Some(count) => Err(RepositoryError::QuotaExceeded {
-            count: u64::try_from(count).unwrap_or(0),
-            max: max_lists_per_issuer,
-        }),
+        Some(count) => {
+            // A same-issuer racer held the row lock we waited on, so it has committed.
+            let exists = status_lists::Entity::find_by_id(list_id)
+                .select_only()
+                .column(status_lists::Column::ListId)
+                .into_tuple::<String>()
+                .one(txn)
+                .await
+                .map_err(find_err)?
+                .is_some();
+            if exists {
+                return Err(RepositoryError::DuplicateEntry);
+            }
+            Err(RepositoryError::QuotaExceeded {
+                count: u64::try_from(count).unwrap_or(0),
+                max: max_lists_per_issuer,
+            })
+        }
         // Auth resolved the credential earlier, so a missing row is a server
         // fault (500), as the FK violation was before (see `map_insert_err`).
         None => Err(RepositoryError::InsertError(format!(
@@ -182,7 +201,7 @@ impl SeaOrmStore<StatusListRecord> {
         time_query("insert", "status_list", async {
             let txn = self.begin_read_committed().await.map_err(map_insert_err)?;
             if let Err(reserve_err) =
-                reserve_list_slot(&txn, &entity.issuer, max_lists_per_issuer).await
+                reserve_list_slot(&txn, &entity.issuer, &entity.list_id, max_lists_per_issuer).await
             {
                 txn.rollback().await.map_err(|rollback_err| {
                     RepositoryError::InsertError(format!(
@@ -249,7 +268,7 @@ impl SeaOrmStore<StatusListRecord> {
             let txn = self.begin_read_committed().await.map_err(map_insert_err)?;
 
             if let Err(reserve_err) =
-                reserve_list_slot(&txn, &entity.issuer, max_lists_per_issuer).await
+                reserve_list_slot(&txn, &entity.issuer, &entity.list_id, max_lists_per_issuer).await
             {
                 txn.rollback().await.map_err(|rollback_err| {
                     RepositoryError::InsertError(format!(
@@ -525,6 +544,9 @@ impl SeaOrmStore<StatusListRecord> {
         .await
     }
 
+    /// Test-only: does not decrement `credentials.list_count`. A production
+    /// caller must decrement it in the same transaction as the `DELETE`.
+    #[cfg(test)]
     pub async fn delete_by(&self, value: &str) -> Result<bool, RepositoryError> {
         time_query("delete", "status_list", async {
             let db = self.db.current();

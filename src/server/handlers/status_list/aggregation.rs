@@ -24,9 +24,17 @@ pub(super) struct AggregationResponse {
     pub(super) next_cursor: Option<String>,
 }
 
+/// Lets a future change of paging key tell old cursors from new ones.
+const CURSOR_VERSION: &str = "v1:";
+
+/// Bounds decoding work; far above the length of any stored `list_id`.
+const MAX_CURSOR_LEN: usize = 2048;
+
 /// Handle GET /aggregation: one page of at most `AGGREGATION_MAX_LIMIT` status
 /// list URIs. No total count is returned, as counting every row is unbounded.
-#[tracing::instrument(skip_all, err(Debug))]
+///
+/// Errors log at INFO: on this public endpoint they are mostly malformed queries.
+#[tracing::instrument(skip_all, err(level = "info", Debug))]
 pub async fn get_aggregation(
     State(state): State<AppState>,
     query_result: Result<Query<AggregationQuery>, QueryRejection>,
@@ -34,7 +42,6 @@ pub async fn get_aggregation(
     let query = match query_result {
         Ok(Query(q)) => q,
         Err(e) => {
-            tracing::warn!("Failed to parse query parameters: {e}");
             return Err(ApiError::bad_request(
                 "invalid_query",
                 format!("Failed to parse query parameters: {e}"),
@@ -82,15 +89,22 @@ pub async fn get_aggregation(
 /// Encodes the last `list_id` of a page as an opaque cursor. The `list_id` is
 /// kept exactly as stored; normalising it would shift the page boundary.
 fn encode_cursor(list_id: &str) -> String {
-    URL_SAFE_NO_PAD.encode(list_id)
+    URL_SAFE_NO_PAD.encode(format!("{CURSOR_VERSION}{list_id}"))
 }
 
+/// Deliberately not restricted to UUIDs: rows stored before `list_id` was
+/// validated would otherwise produce a `next_cursor` that strands the walk.
 fn decode_cursor(cursor: &str) -> Result<String, ApiError> {
-    URL_SAFE_NO_PAD
-        .decode(cursor)
-        .ok()
+    (cursor.len() <= MAX_CURSOR_LEN)
+        .then_some(cursor)
+        .and_then(|cursor| URL_SAFE_NO_PAD.decode(cursor).ok())
         .and_then(|bytes| String::from_utf8(bytes).ok())
-        .filter(|list_id| uuid::Uuid::try_parse(list_id).is_ok())
+        .and_then(|decoded| {
+            decoded
+                .strip_prefix(CURSOR_VERSION)
+                .filter(|list_id| !list_id.is_empty())
+                .map(str::to_string)
+        })
         .ok_or_else(|| {
             ApiError::bad_request(
                 "invalid_query",
@@ -261,8 +275,16 @@ mod tests {
         let state = test_app_state(None).await;
         for cursor in [
             "not base64!",
-            URL_SAFE_NO_PAD.encode("not-a-uuid").as_str(),
+            // A bare list_id, without the version tag.
+            URL_SAFE_NO_PAD
+                .encode("477121aa-b598-419e-916f-1e74654ff38b")
+                .as_str(),
+            URL_SAFE_NO_PAD
+                .encode("v2:477121aa-b598-419e-916f-1e74654ff38b")
+                .as_str(),
+            URL_SAFE_NO_PAD.encode(CURSOR_VERSION).as_str(),
             URL_SAFE_NO_PAD.encode([0xff, 0xfe]).as_str(),
+            encode_cursor(&"a".repeat(MAX_CURSOR_LEN)).as_str(),
         ] {
             let err = get(&state, None, Some(cursor)).await.unwrap_err();
             assert_eq!(err.status, StatusCode::BAD_REQUEST, "cursor={cursor}");
@@ -291,9 +313,163 @@ mod tests {
             "{477121aa-b598-419e-916f-1e74654ff38b}",
             "urn:uuid:477121aa-b598-419e-916f-1e74654ff38b",
             "477121aab598419e916f1e74654ff38b",
+            // Stored before list_id had to be a UUID.
+            "legacy-list",
+            "list with spaces/and?query",
         ] {
             let cursor = encode_cursor(list_id);
             assert_eq!(decode_cursor(&cursor).unwrap(), list_id);
         }
+    }
+
+    /// Every accepted `list_id` form, plus a legacy non-UUID one, must round-trip
+    /// through the cursor under the backend's collation. `limit=1` makes every
+    /// ID a cursor.
+    #[cfg(any(feature = "sqlite", feature = "mysql", feature = "postgres-tests"))]
+    async fn assert_aggregation_walk_on_sql(
+        db: std::sync::Arc<sea_orm::DatabaseConnection>,
+        backend: &str,
+    ) {
+        use crate::domain::models::credential::{Credential, PublicJwk};
+        use crate::test_fixtures::TEST_EC_PUBLIC_JWK;
+
+        let state = test_app_state(Some(db)).await;
+        state
+            .service
+            .publish_credential(Credential {
+                issuer: Issuer("issuer1".into()),
+                public_key: PublicJwk::try_new(TEST_EC_PUBLIC_JWK.as_bytes().to_vec()).unwrap(),
+            })
+            .await
+            .unwrap();
+
+        // Distinct UUIDs: MySQL's case-insensitive collation would treat an
+        // uppercase copy as a duplicate key.
+        let uuid = || uuid::Uuid::new_v4();
+        let list_ids = [
+            uuid().hyphenated().to_string(),
+            uuid().hyphenated().to_string().to_uppercase(),
+            uuid().braced().to_string(),
+            uuid().urn().to_string(),
+            uuid().simple().to_string(),
+            "legacy-list".to_string(),
+        ];
+        let mut expected = BTreeSet::new();
+        for list_id in list_ids {
+            let sub = format!("https://example.com/api/v1/status-lists/{list_id}");
+            state
+                .service
+                .publish_status_list(
+                    list_id,
+                    Issuer("issuer1".into()),
+                    sub.clone(),
+                    vec![],
+                    900,
+                    100_000,
+                    5_000,
+                    1_048_576,
+                    u64::MAX,
+                )
+                .await
+                .unwrap();
+            expected.insert(sub);
+        }
+
+        for limit in [1, 2] {
+            let mut seen = Vec::new();
+            let mut cursor: Option<String> = None;
+            loop {
+                let response = get(&state, Some(limit), cursor.as_deref())
+                    .await
+                    .unwrap_or_else(|e| {
+                        panic!("page after {cursor:?} (limit={limit}) on {backend}: {e:?}")
+                    });
+                let has_link = response.headers().contains_key(header::LINK);
+                let page = body(response).await;
+                assert_eq!(
+                    has_link,
+                    page.next_cursor.is_some(),
+                    "Link and next_cursor must agree (limit={limit}) on {backend}"
+                );
+                seen.extend(page.status_lists);
+                match page.next_cursor {
+                    Some(next) => cursor = Some(next),
+                    None => break,
+                }
+            }
+
+            let unique: BTreeSet<_> = seen.iter().cloned().collect();
+            assert_eq!(
+                unique.len(),
+                seen.len(),
+                "no list may appear twice (limit={limit}) on {backend}"
+            );
+            assert_eq!(
+                unique, expected,
+                "every list must appear (limit={limit}) on {backend}"
+            );
+        }
+    }
+
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn test_sqlite_aggregation_walk_end_to_end() {
+        let db = crate::test_utils::sqlite_test_db(None).await;
+        assert_aggregation_walk_on_sql(db, "SQLite").await;
+    }
+
+    #[cfg(feature = "mysql")]
+    #[tokio::test]
+    async fn test_mysql_aggregation_walk_end_to_end() {
+        let test_db =
+            crate::outbound::sql::test_containers::mysql_helpers::MysqlTestDb::start().await;
+        assert_aggregation_walk_on_sql(test_db.connection().await, "MySQL").await;
+    }
+
+    #[cfg(feature = "postgres-tests")]
+    #[tokio::test]
+    async fn test_postgres_aggregation_walk_end_to_end() {
+        let test_db =
+            crate::outbound::sql::test_containers::postgres_helpers::postgres_connection().await;
+        assert_aggregation_walk_on_sql(test_db.db.clone(), "Postgres").await;
+    }
+
+    /// A legacy non-UUID `list_id` must not strand a walk.
+    #[tokio::test]
+    async fn test_aggregation_walk_passes_legacy_non_uuid_list_ids() {
+        let state = test_app_state(None).await;
+        let mut expected = BTreeSet::from([
+            publish(&state, "issuer1").await,
+            publish(&state, "issuer1").await,
+        ]);
+        let legacy_sub = "https://example.com/api/v1/status-lists/legacy-list".to_string();
+        state
+            .service
+            .publish_status_list(
+                "legacy-list".to_string(),
+                Issuer("issuer1".into()),
+                legacy_sub.clone(),
+                vec![],
+                900,
+                100_000,
+                5_000,
+                1_048_576,
+                u64::MAX,
+            )
+            .await
+            .unwrap();
+        expected.insert(legacy_sub);
+
+        let mut seen = BTreeSet::new();
+        let mut cursor: Option<String> = None;
+        loop {
+            let page = body(get(&state, Some(1), cursor.as_deref()).await.unwrap()).await;
+            seen.extend(page.status_lists);
+            match page.next_cursor {
+                Some(next) => cursor = Some(next),
+                None => break,
+            }
+        }
+        assert_eq!(seen, expected);
     }
 }

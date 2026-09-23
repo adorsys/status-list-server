@@ -236,7 +236,9 @@ paths:
         URIs (default and maximum 1000). While `next_cursor` is non-null, pass
         it back as `cursor` to fetch the next page; the same next page is also
         advertised in an RFC 8288 `Link: <…>; rel="next"` header. A full walk
-        returns every list that existed when the walk started exactly once.
+        returns exactly once every list that existed when the walk started
+        and still exists when its page is read; lists are never deleted through
+        the API, but an operator may delete them directly in the database.
         A list published during a walk may be missed, and not only because it
         was published late: `list_id` is chosen by the publisher and can be any
         UUID, so a new list can sort before the current cursor.
@@ -291,7 +293,7 @@ paths:
                 status_lists:
                   - "https://statuslist.example.com/api/v1/status-lists/477121aa-b598-419e-916f-1e74654ff38b"
                   - "https://statuslist.example.com/api/v1/status-lists/8e4ebb4a-dd79-498f-ac97-966f22884037"
-                next_cursor: "OGU0ZWJiNGEtZGQ3OS00OThmLWFjOTctOTY2ZjIyODg0MDM3"
+                next_cursor: "djE6OGU0ZWJiNGEtZGQ3OS00OThmLWFjOTctOTY2ZjIyODg0MDM3"
         "400":
           description: |
             `limit` is outside 1–1000, `cursor` is not a value this endpoint
@@ -332,7 +334,9 @@ paths:
         Each issuer may hold at most `limits.max_lists_per_issuer` status lists
         (default 1000). A publish past that is refused with `400`
         `list_quota_exceeded`; status lists cannot be deleted through the API,
-        so retrying never succeeds until an operator raises the quota.
+        so retrying never succeeds until an operator raises the quota. A
+        `list_id` that already exists is still refused with `409`, even when
+        the quota is full, so retrying a publish that did land is recognisable.
       requestBody:
         required: true
         content:
@@ -787,7 +791,7 @@ components:
           description: |
             Opaque cursor for the next page, to pass back as `cursor`. Always
             present; `null` on the last page.
-          example: "OGU0ZWJiNGEtZGQ3OS00OThmLWFjOTctOTY2ZjIyODg0MDM3"
+          example: "djE6OGU0ZWJiNGEtZGQ3OS00OThmLWFjOTctOTY2ZjIyODg0MDM3"
 
     ErrorResponse:
       type: object

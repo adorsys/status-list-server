@@ -7,8 +7,6 @@ use crate::outbound::sql::SeaOrmStore;
 use crate::outbound::sql::models::{
     Credentials, StatusList, StatusListHistoryRecord, StatusListRecord,
 };
-#[cfg(feature = "sqlite")]
-use sea_orm_migration::MigratorTrait;
 
 pub(super) const TEST_EC_JWK: &str = crate::test_fixtures::TEST_EC_PUBLIC_JWK;
 
@@ -23,16 +21,7 @@ pub(super) async fn sqlite_connection() -> Arc<DatabaseConnection> {
 /// Applies only the first `steps` migrations (`None` applies all).
 #[cfg(feature = "sqlite")]
 pub(super) async fn sqlite_connection_migrated(steps: Option<u32>) -> Arc<DatabaseConnection> {
-    let mut opt = sea_orm::ConnectOptions::new("sqlite::memory:");
-    opt.max_connections(1);
-    opt.map_sqlx_sqlite_opts(|o| o.foreign_keys(true));
-    let db = sea_orm::Database::connect(opt)
-        .await
-        .expect("Failed to connect to SQLite");
-    crate::outbound::sql::Migrator::up(&db, steps)
-        .await
-        .expect("Failed to run migrations on SQLite");
-    Arc::new(db)
+    crate::test_utils::sqlite_test_db(steps).await
 }
 
 /// Seeds a credential whose `issuer` backs the `status_lists.issuer` foreign

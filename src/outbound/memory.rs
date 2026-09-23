@@ -36,13 +36,16 @@ impl MemoryStatusLists {
     }
 }
 
-/// Runs under the insert's write lock, before the duplicate check, matching the
-/// SQL adapter's order.
+/// Runs under the insert's write lock. A taken `list_id` wins over a full
+/// quota, as in the SQL adapter.
 fn check_list_quota(
     values: &HashMap<String, StatusListRecord>,
     record: &StatusListRecord,
     max_lists_per_issuer: u64,
 ) -> Result<(), StatusListError> {
+    if values.contains_key(&record.list_id) {
+        return Err(StatusListError::AlreadyExists);
+    }
     let count = values
         .values()
         .filter(|existing| existing.issuer == record.issuer)
@@ -482,6 +485,13 @@ mod tests {
         assert!(
             repo.find("a3").await.unwrap().is_none(),
             "a refused publish must not be stored"
+        );
+        assert!(
+            matches!(
+                repo.insert(list_record("a2", "issuer-a"), 2).await,
+                Err(StatusListError::AlreadyExists)
+            ),
+            "a retried publish at a full quota must still be a 409"
         );
 
         repo.insert(list_record("b1", "issuer-b"), 2).await.unwrap();
