@@ -52,7 +52,17 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end }}
 
 {{/*
-Create the name of the service account to use
+Create the name of the service account to use.
+Name derivation:
+  - serviceAccount.create=true: explicit serviceAccount.name if set, otherwise the chart
+    fullname (status-list-server-chart.fullname).
+  - serviceAccount.create=false: explicit serviceAccount.name if set, otherwise "default"
+    (the namespace default ServiceAccount; the pod runs with no serviceAccountName injected
+    when name is empty).
+Workload Identity (EKS IRSA, GCP WI, Azure WI) keys its cloud-side trust relationship on
+the derived name, so the returned value must match the annotation half configured in
+values.yaml (serviceAccount.annotations). Changing this name breaks the trust relationship
+unless the cloud identity subject is updated to match.
 */}}
 {{- define "status-list-server-chart.serviceAccountName" -}}
 {{- if .Values.serviceAccount.create }}
@@ -65,9 +75,12 @@ Create the name of the service account to use
 {{/*
 Effective name of the Kubernetes Secret the application reads (database password).
 Single supported name: "statuslist-secret" in both ESO mode (ExternalSecret target) and
-fallback mode. The Deployment, PostgreSQL (postgres.auth.existingSecret), and the fallback
-Secret all reference this same name, so it is not independently configurable. ESO mode
-validates externalSecret.spec.target.name against it at render time.
+fallback mode. The Deployment volume, PostgreSQL (postgres.auth.existingSecret), and the
+fallback Secret all reference this same name, so it is not independently configurable; ESO
+mode validates externalSecret.spec.target.name against it at render time (external-secrets.yaml),
+failing the release if changed. NOTE: statuslist.secretMounts is dynamic and may mount
+arbitrary secret names - the default database-credentials entry in values.yaml happens to
+reference this name, but that is an example, not a requirement of this helper.
 */}}
 {{- define "status-list-server-chart.appSecretName" -}}
 {{- "statuslist-secret" }}
@@ -88,7 +101,12 @@ provider). Preference: explicit statuslist.aws.region, then the legacy secretSto
 {{- end }}
 
 {{/*
-Effective database backend for chart-managed defaults.
+Effective database backend for chart-managed defaults. Returns the value of
+statuslist.env.APP_DATABASE__BACKEND, or "postgres" (the chart default) when unset.
+Consumed by the dbHost, dbPort, dbUsername, and dbName helpers to select which backend's
+native defaults to fall back on, and by deployment.yaml to inject
+APP_DATABASE__BACKEND. Only "postgres" and "mysql" are supported; an unsupported value
+fails at render time (see the dbHost/dbPort/dbUsername/dbName fall-through branches).
 */}}
 {{- define "status-list-server-chart.dbBackend" -}}
 {{- $env := .Values.statuslist.env | default dict }}
@@ -104,8 +122,11 @@ keys are preserved as written.
 {{- end }}
 
 {{/*
-Database host helper: returns the configured host, or the default in-cluster
-service name for the active backend.
+Database host helper: returns the configured APP_DATABASE__HOST if set, otherwise the
+default in-cluster service name for the active backend. For postgres it is
+<release>-postgres.<namespace>.svc.cluster.local; for mysql the chart does not deploy a
+Service, so an explicit APP_DATABASE__HOST is REQUIRED and the helper fails the render
+otherwise.
 */}}
 {{- define "status-list-server-chart.dbHost" -}}
 {{- $env := .Values.statuslist.env | default dict }}
@@ -122,7 +143,10 @@ service name for the active backend.
 {{- end }}
 
 {{/*
-Database port helper: returns the configured port, or the active backend default.
+Database port helper: returns the configured APP_DATABASE__PORT if set, otherwise the
+active backend default (postgres.service.port / mysql.service.port). Used by the
+wait-for-db init container and by the NetworkPolicy egress rule to scope internal egress
+to the database port.
 */}}
 {{- define "status-list-server-chart.dbPort" -}}
 {{- $env := .Values.statuslist.env | default dict }}
@@ -139,7 +163,9 @@ Database port helper: returns the configured port, or the active backend default
 {{- end }}
 
 {{/*
-Database username helper: returns the configured username, or the active backend default.
+Database username helper: returns the configured APP_DATABASE__USERNAME if set, otherwise
+the active backend's native default (mysql.auth.username / postgres.auth.username).
+Used by deployment.yaml to render APP_DATABASE__USERNAME.
 */}}
 {{- define "status-list-server-chart.dbUsername" -}}
 {{- $env := .Values.statuslist.env | default dict }}
@@ -156,7 +182,9 @@ Database username helper: returns the configured username, or the active backend
 {{- end }}
 
 {{/*
-Database name helper: returns the configured database name, or the active backend default.
+Database name helper: returns the configured APP_DATABASE__NAME if set, otherwise the
+active backend's native default (mysql.auth.database / postgres.auth.database).
+Used by deployment.yaml to render APP_DATABASE__NAME.
 */}}
 {{- define "status-list-server-chart.dbName" -}}
 {{- $env := .Values.statuslist.env | default dict }}

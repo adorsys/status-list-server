@@ -4,7 +4,7 @@
 {{- if not (has $platform $validPlatforms) }}
   {{- fail (printf "alerting.platform %q is not supported. Must be one of: slack, discord, teams, mattermost, email, webhook" $platform) }}
 {{- end }}
-{{- /* Resolve the Secret name — either the user-provided existing secret or the chart-managed one */ -}}
+{{- /* Resolve the Secret name - either the user-provided existing secret or the chart-managed one */ -}}
 {{- $secretName := .Values.alerting.existingSecret | default (printf "%s-alerting" (include "status-list-server-chart.fullname" .)) }}
 # AlertmanagerConfig routes SLO alerts from kube-prometheus-stack's Alertmanager to the
 # configured notification channel. The route tree mirrors the Docker Compose
@@ -40,7 +40,7 @@ spec:
     receiver: noop
     routes:
       # Watchdog (severity=none) -> dead-man's-switch. When dmsWebhookUrl is not
-      # set, the deadmansswitch receiver is an empty noop — the Watchdog is
+      # set, the deadmansswitch receiver is an empty noop - the Watchdog is
       # silently absorbed and never reaches a human channel.
       - matchers:
           - name: severity
