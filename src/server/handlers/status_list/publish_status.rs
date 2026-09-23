@@ -51,6 +51,7 @@ pub async fn publish_status(
             appstate.max_status_index,
             appstate.max_statuses_per_request,
             appstate.max_serialized_list_size,
+            appstate.max_lists_per_issuer,
         )
         .await?;
 
@@ -495,5 +496,53 @@ mod tests {
             Err(e) => e,
         };
         assert_eq!(err.status, StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    /// Covers both publish paths: with and without snapshot retention.
+    #[tokio::test]
+    async fn test_publish_status_rejects_issuer_over_list_quota() {
+        use crate::test_utils::test_app_state_without_snapshots;
+
+        for (mut app_state, path) in [
+            (test_app_state(None).await, "with snapshots"),
+            (
+                test_app_state_without_snapshots().await,
+                "without snapshots",
+            ),
+        ] {
+            app_state.max_lists_per_issuer = 2;
+            let publish = |issuer: &'static str| {
+                publish_status(
+                    State(app_state.clone()),
+                    authenticated_issuer(issuer),
+                    Path(uuid::Uuid::new_v4().to_string()),
+                    Json(StatusesRequest { statuses: vec![] }),
+                )
+            };
+
+            for _ in 0..2 {
+                assert!(publish("issuer-full").await.is_ok(), "{path}");
+            }
+
+            let err = match publish("issuer-full").await {
+                Ok(_) => panic!("the publish past the quota must be refused ({path})"),
+                Err(e) => e,
+            };
+            assert_eq!(err.status, StatusCode::BAD_REQUEST, "{path}");
+            assert_eq!(err.error, "list_quota_exceeded", "{path}");
+            let response = err.into_response();
+            assert!(
+                response
+                    .headers()
+                    .get(axum::http::header::RETRY_AFTER)
+                    .is_none(),
+                "waiting never frees a quota slot, so no Retry-After ({path})"
+            );
+
+            assert!(
+                publish("issuer-with-room").await.is_ok(),
+                "another issuer's quota is independent ({path})"
+            );
+        }
     }
 }

@@ -1,7 +1,9 @@
 //! Outbound secondary ports defining contracts.
 
 use crate::domain::models::credential::{Credential, CredentialError};
-use crate::domain::models::status_list::{StatusListError, StatusListRecord, StatusListSnapshot};
+use crate::domain::models::status_list::{
+    StatusListError, StatusListRecord, StatusListSnapshot, StatusListUriPage,
+};
 use async_trait::async_trait;
 
 /// Interface for managing active status list records.
@@ -11,7 +13,14 @@ pub trait StatusListRepo: Send + Sync + 'static {
     async fn find(&self, list_id: &str) -> Result<Option<StatusListRecord>, StatusListError>;
 
     /// Insert a new status list record into persistent storage.
-    async fn insert(&self, status_list: StatusListRecord) -> Result<(), StatusListError>;
+    ///
+    /// Fails with [`StatusListError::QuotaExceeded`] when the issuer already
+    /// holds `max_lists_per_issuer` lists. The check must be atomic with the insert.
+    async fn insert(
+        &self,
+        status_list: StatusListRecord,
+        max_lists_per_issuer: u64,
+    ) -> Result<(), StatusListError>;
 
     /// Concurrently update an existing status list record matching `expected_updated_at`.
     async fn update(
@@ -29,14 +38,21 @@ pub trait StatusListRepo: Send + Sync + 'static {
     ) -> Result<bool, StatusListError>;
 
     /// Insert a new status list record and atomically record its initial historical snapshot.
+    /// Enforces `max_lists_per_issuer` like [`Self::insert`].
     async fn insert_with_snapshot(
         &self,
         status_list: StatusListRecord,
         snapshot: StatusListSnapshot,
+        max_lists_per_issuer: u64,
     ) -> Result<(), StatusListError>;
 
-    /// Return all published status list URIs for aggregation endpoints.
-    async fn list_uris(&self) -> Result<Vec<String>, StatusListError>;
+    /// Return up to `limit` (non-zero) status list URIs in `list_id` order,
+    /// starting strictly after `after`.
+    async fn list_uris(
+        &self,
+        after: Option<&str>,
+        limit: usize,
+    ) -> Result<StatusListUriPage, StatusListError>;
 }
 
 /// Interface for issuer public key credentials.

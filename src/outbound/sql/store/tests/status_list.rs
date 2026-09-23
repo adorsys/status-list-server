@@ -36,7 +36,10 @@ async fn test_sqlite_status_list_round_trip() {
         0,
     );
 
-    store.insert_one(record.clone()).await.unwrap();
+    store
+        .insert_one(record.clone(), fixtures::NO_LIST_QUOTA)
+        .await
+        .unwrap();
 
     let found = store
         .find_one_by("list-sqlite-test")
@@ -123,32 +126,162 @@ async fn test_status_list_find_all() {
     assert_eq!(records[1].status_list.lst, "xyz");
 }
 
+/// Pins the keyset shape, in particular the `LIMIT` that bounds the read.
 #[tokio::test]
-async fn test_status_list_find_all_status_list_uris() {
-    let rows = vec![
-        BTreeMap::from([(
-            "sub".to_string(),
-            Value::from("https://example.com/statuslists/a"),
-        )]),
-        BTreeMap::from([(
-            "sub".to_string(),
-            Value::from("https://example.com/statuslists/b"),
-        )]),
-    ];
+async fn test_find_status_list_uris_after_is_a_bounded_keyset_scan() {
+    let row = |id: &str| {
+        BTreeMap::from([
+            ("list_id".to_string(), Value::from(id)),
+            (
+                "sub".to_string(),
+                Value::from(format!("https://example.com/statuslists/{id}")),
+            ),
+        ])
+    };
 
     let db_conn = Arc::new(
         MockDatabase::new(DatabaseBackend::Postgres)
-            .append_query_results::<BTreeMap<String, Value>, Vec<_>, _>(vec![rows])
+            .append_query_results::<BTreeMap<String, Value>, Vec<_>, _>(vec![vec![
+                row("b"),
+                row("c"),
+            ]])
             .into_connection(),
     );
+    let store = SeaOrmStore::<StatusListRecord>::new(db_conn.clone());
 
-    let store = SeaOrmStore::<StatusListRecord>::new(db_conn);
+    let rows = store
+        .find_status_list_uris_after(Some("a"), 3)
+        .await
+        .unwrap();
+    assert_eq!(
+        rows,
+        [
+            (
+                "b".to_string(),
+                "https://example.com/statuslists/b".to_string()
+            ),
+            (
+                "c".to_string(),
+                "https://example.com/statuslists/c".to_string()
+            ),
+        ]
+    );
 
-    let subs = store.find_all_status_list_uris().await.unwrap();
+    drop(store);
+    let db_conn = Arc::try_unwrap(db_conn).expect("test should own the only DB handle");
+    assert_eq!(
+        db_conn.into_transaction_log(),
+        [Transaction::from_sql_and_values(
+            DatabaseBackend::Postgres,
+            r#"SELECT "status_lists"."list_id", "status_lists"."sub" FROM "status_lists" WHERE "status_lists"."list_id" > $1 ORDER BY "status_lists"."list_id" ASC LIMIT $2"#,
+            ["a".into(), 3u64.into()],
+        )]
+    );
+}
 
-    assert_eq!(subs.len(), 2);
-    assert_eq!(subs[0], "https://example.com/statuslists/a");
-    assert_eq!(subs[1], "https://example.com/statuslists/b");
+/// The quota `UPDATE` must precede the `INSERT`; reversed, InnoDB deadlocks
+/// concurrent publishes for one issuer (see `reserve_list_slot`).
+#[tokio::test]
+async fn test_insert_with_snapshot_reserves_quota_slot_before_insert() {
+    let entity = fixtures::record("list-q", "issuer-q", "initial", "sub-q", 1000);
+    let snapshot = fixtures::snapshot(
+        "snap-q", "list-q", "issuer-q", "initial", "sub-q", 1000, 1900,
+    );
+    let ok = MockExecResult {
+        rows_affected: 1,
+        last_insert_id: 0,
+    };
+
+    let db_conn = Arc::new(
+        MockDatabase::new(DatabaseBackend::Postgres)
+            .append_exec_results([ok.clone(), ok.clone(), ok])
+            .into_connection(),
+    );
+    let store = SeaOrmStore::<StatusListRecord>::new(db_conn.clone());
+
+    store
+        .insert_one_with_snapshot(entity.clone(), snapshot.clone(), 1000)
+        .await
+        .unwrap();
+
+    drop(store);
+    let db_conn = Arc::try_unwrap(db_conn).expect("test should own the only DB handle");
+    assert_eq!(
+        db_conn.into_transaction_log(),
+        [Transaction::many([
+            Statement::from_string(DatabaseBackend::Postgres, "BEGIN"),
+            Statement::from_sql_and_values(
+                DatabaseBackend::Postgres,
+                r#"UPDATE "credentials" SET "list_count" = "list_count" + $1 WHERE "credentials"."issuer" = $2 AND "credentials"."list_count" < $3"#,
+                [1i32.into(), "issuer-q".into(), 1000i64.into()],
+            ),
+            Statement::from_sql_and_values(
+                DatabaseBackend::Postgres,
+                r#"INSERT INTO "status_lists" ("list_id", "issuer", "status_list", "sub", "updated_at") VALUES ($1, $2, $3, $4, $5)"#,
+                [
+                    entity.list_id.into(),
+                    entity.issuer.into(),
+                    serde_json::to_value(entity.status_list).unwrap().into(),
+                    entity.sub.into(),
+                    entity.updated_at.into(),
+                ],
+            ),
+            Statement::from_sql_and_values(
+                DatabaseBackend::Postgres,
+                r#"INSERT INTO "status_list_history" ("snapshot_id", "list_id", "issuer", "status_list", "sub", "iat", "exp") VALUES ($1, $2, $3, $4, $5, $6, $7)"#,
+                [
+                    snapshot.snapshot_id.into(),
+                    snapshot.list_id.into(),
+                    snapshot.issuer.into(),
+                    serde_json::to_value(snapshot.status_list).unwrap().into(),
+                    snapshot.sub.into(),
+                    snapshot.iat.into(),
+                    snapshot.exp.into(),
+                ],
+            ),
+            Statement::from_string(DatabaseBackend::Postgres, "COMMIT"),
+        ])]
+    );
+}
+
+#[tokio::test]
+async fn test_insert_at_quota_refuses_without_inserting() {
+    let entity = fixtures::record("list-full", "issuer-full", "initial", "sub-full", 0);
+
+    let db_conn = Arc::new(
+        MockDatabase::new(DatabaseBackend::Postgres)
+            .append_exec_results([MockExecResult {
+                rows_affected: 0,
+                last_insert_id: 0,
+            }])
+            .append_query_results::<BTreeMap<String, Value>, Vec<_>, _>(vec![vec![BTreeMap::from(
+                [("list_count".to_string(), Value::from(2i64))],
+            )]])
+            .into_connection(),
+    );
+    let store = SeaOrmStore::<StatusListRecord>::new(db_conn.clone());
+
+    let refused = store.insert_one(entity, 2).await;
+    assert!(
+        matches!(
+            refused,
+            Err(RepositoryError::QuotaExceeded { count: 2, max: 2 })
+        ),
+        "a full quota must be QuotaExceeded, got {refused:?}"
+    );
+
+    drop(store);
+    let db_conn = Arc::try_unwrap(db_conn).expect("test should own the only DB handle");
+    let log = db_conn.into_transaction_log();
+    let statements = format!("{log:?}");
+    assert!(
+        !statements.contains("INSERT"),
+        "a refused publish must not reach its INSERT: {statements}"
+    );
+    assert!(
+        statements.contains("ROLLBACK"),
+        "a refused publish must roll back: {statements}"
+    );
 }
 
 /// The lost-update proof: two writers reading the same `updated_at` cannot
@@ -172,7 +305,10 @@ async fn assert_guarded_update_rejects_stale_write(
     // Seed a row at a known guard value V.
     let v = 1000;
     let base = fixtures::record(list_id, issuer, "initial", &format!("sub-{list_id}"), v);
-    store.insert_one(base.clone()).await.unwrap();
+    store
+        .insert_one(base.clone(), fixtures::NO_LIST_QUOTA)
+        .await
+        .unwrap();
 
     // Both writers read the same state, so both guard on V.
     let writer_a = StatusListRecord {
@@ -249,7 +385,10 @@ async fn test_update_one_conflict_loser_can_reread_and_retry() {
         "sub-retry-sqlite",
         v,
     );
-    store.insert_one(base.clone()).await.unwrap();
+    store
+        .insert_one(base.clone(), fixtures::NO_LIST_QUOTA)
+        .await
+        .unwrap();
 
     let writer_a = StatusListRecord {
         status_list: StatusList {
@@ -484,7 +623,10 @@ async fn test_sqlite_update_with_snapshot_is_atomic() {
         "sub-atomic-sqlite",
         v,
     );
-    store.insert_one(base.clone()).await.unwrap();
+    store
+        .insert_one(base.clone(), fixtures::NO_LIST_QUOTA)
+        .await
+        .unwrap();
 
     // --- Happy path: row update and snapshot both commit. ---
     let good_snapshot = fixtures::snapshot(
@@ -654,6 +796,7 @@ async fn test_sqlite_insert_with_snapshot_is_atomic() {
         .insert_one_with_snapshot(
             new_record("list-ok"),
             new_snapshot("snap-ok", "list-ok", "initial"),
+            fixtures::NO_LIST_QUOTA,
         )
         .await
         .unwrap();
@@ -674,6 +817,7 @@ async fn test_sqlite_insert_with_snapshot_is_atomic() {
             new_record("list-rolled-back"),
             // Collides with the snapshot committed above.
             new_snapshot("snap-ok", "list-rolled-back", "initial"),
+            fixtures::NO_LIST_QUOTA,
         )
         .await;
     // Specifically an `InsertError`, not a `DuplicateEntry`: only the *row*
@@ -702,6 +846,7 @@ async fn test_sqlite_insert_with_snapshot_is_atomic() {
         .insert_one_with_snapshot(
             new_record("list-ok"),
             new_snapshot("snap-dup", "list-ok", "initial"),
+            fixtures::NO_LIST_QUOTA,
         )
         .await;
     assert!(
@@ -819,13 +964,21 @@ async fn assert_duplicate_list_id_is_conflict(
     };
 
     store
-        .insert_one_with_snapshot(record(1000), snapshot("snap-first", 1000))
+        .insert_one_with_snapshot(
+            record(1000),
+            snapshot("snap-first", 1000),
+            fixtures::NO_LIST_QUOTA,
+        )
         .await
         .unwrap();
 
     // Racing publish: same list_id, freshly minted snapshot_id.
     let dup = store
-        .insert_one_with_snapshot(record(2000), snapshot("snap-second", 2000))
+        .insert_one_with_snapshot(
+            record(2000),
+            snapshot("snap-second", 2000),
+            fixtures::NO_LIST_QUOTA,
+        )
         .await;
     assert!(
         matches!(dup, Err(RepositoryError::DuplicateEntry)),
@@ -875,7 +1028,9 @@ async fn assert_duplicate_list_id_is_conflict(
     // rollback around it. Reuses this test's backend rather than paying for
     // another container, since the row it collides with is already
     // committed.
-    let plain = store.insert_one(record(3000)).await;
+    let plain = store
+        .insert_one(record(3000), fixtures::NO_LIST_QUOTA)
+        .await;
     assert!(
         matches!(plain, Err(RepositoryError::DuplicateEntry)),
         "duplicate list_id on the snapshot-disabled publish path must also \
@@ -899,7 +1054,10 @@ async fn assert_update_snapshot_rolls_back(
 
     let v = 1000;
     let base = fixtures::record(list_id, issuer, "initial", &format!("sub-{list_id}"), v);
-    store.insert_one(base.clone()).await.unwrap();
+    store
+        .insert_one(base.clone(), fixtures::NO_LIST_QUOTA)
+        .await
+        .unwrap();
 
     // Commit one snapshot so its primary key exists to collide against.
     store
@@ -1002,4 +1160,207 @@ async fn test_postgres_update_with_snapshot_rolls_back_on_history_failure() {
         "snap-postgres",
     )
     .await;
+}
+
+/// The quota is exact on both publish paths, and a publish that fails after
+/// taking a slot gives it back.
+#[cfg(any(feature = "sqlite", feature = "mysql", feature = "postgres-tests"))]
+async fn assert_list_quota_is_exact(db: Arc<DatabaseConnection>, issuer: &str, backend: &str) {
+    fixtures::seed_credential(&db, issuer).await;
+    let store = SeaOrmStore::<StatusListRecord>::new(db.clone());
+    let list_id = |n: u32| format!("{issuer}-list-{n}");
+    let record = |n: u32| {
+        fixtures::record(
+            &list_id(n),
+            issuer,
+            "initial",
+            &format!("sub-{}", list_id(n)),
+            0,
+        )
+    };
+
+    store.insert_one(record(1), 2).await.unwrap();
+    let dup = store.insert_one(record(1), 2).await;
+    assert!(
+        matches!(dup, Err(RepositoryError::DuplicateEntry)),
+        "a taken list_id must still be a 409 on {backend}, got {dup:?}"
+    );
+    assert_eq!(
+        fixtures::list_count(&db, issuer).await,
+        1,
+        "a publish that failed after taking its slot must give it back on {backend}"
+    );
+
+    store
+        .insert_one_with_snapshot(
+            record(2),
+            fixtures::snapshot(
+                &format!("snap-{}", list_id(2)),
+                &list_id(2),
+                issuer,
+                "initial",
+                &format!("sub-{}", list_id(2)),
+                0,
+                900,
+            ),
+            2,
+        )
+        .await
+        .unwrap();
+    assert_eq!(fixtures::list_count(&db, issuer).await, 2);
+
+    let refused = store.insert_one(record(3), 2).await;
+    assert!(
+        matches!(
+            refused,
+            Err(RepositoryError::QuotaExceeded { count: 2, max: 2 })
+        ),
+        "the publish past the quota must be refused on {backend}, got {refused:?}"
+    );
+    assert!(
+        store.find_one_by(&list_id(3)).await.unwrap().is_none(),
+        "a refused publish must not be stored on {backend}"
+    );
+    assert_eq!(fixtures::list_count(&db, issuer).await, 2);
+}
+
+#[cfg(feature = "sqlite")]
+#[tokio::test]
+async fn test_sqlite_list_quota_is_exact() {
+    let db = fixtures::sqlite_connection().await;
+    assert_list_quota_is_exact(db, "issuer-quota-sqlite", "SQLite").await;
+}
+
+#[cfg(feature = "mysql")]
+#[tokio::test]
+async fn test_mysql_list_quota_is_exact() {
+    let test_db = mysql_helpers::MysqlTestDb::start().await;
+    let db = test_db.connection().await;
+    assert_list_quota_is_exact(db, "issuer-quota-mysql", "MySQL").await;
+}
+
+#[cfg(feature = "postgres-tests")]
+#[tokio::test]
+async fn test_postgres_list_quota_is_exact() {
+    let test_db = postgres_helpers::postgres_connection().await;
+    let db = test_db.db.clone();
+    assert_list_quota_is_exact(db, "issuer-quota-postgres", "Postgres").await;
+}
+
+/// A full walk returns every list exactly once. Mixed-case IDs sort differently
+/// per backend collation, so this asserts completeness, not order.
+#[cfg(any(feature = "sqlite", feature = "mysql", feature = "postgres-tests"))]
+async fn assert_list_uris_walk_is_complete(
+    db: Arc<DatabaseConnection>,
+    issuer: &str,
+    backend: &str,
+) {
+    use std::collections::BTreeSet;
+
+    use crate::domain::ports::StatusListRepo;
+    use crate::outbound::sql::SqlStatusListRepo;
+
+    fixtures::seed_credential(&db, issuer).await;
+    let store = SeaOrmStore::<StatusListRecord>::new(db);
+    let ids = ["c", "A", "e", "b", "D"];
+    for id in ids {
+        store
+            .insert_one(
+                fixtures::record(id, issuer, "initial", &format!("sub-{id}"), 0),
+                fixtures::NO_LIST_QUOTA,
+            )
+            .await
+            .unwrap();
+    }
+    let repo = SqlStatusListRepo::new(store);
+
+    let mut seen = Vec::new();
+    let mut page_sizes = Vec::new();
+    let mut after: Option<String> = None;
+    loop {
+        let page = repo.list_uris(after.as_deref(), 2).await.unwrap();
+        page_sizes.push(page.status_lists.len());
+        seen.extend(page.status_lists);
+        match page.next_after {
+            Some(next) => after = Some(next),
+            None => break,
+        }
+    }
+
+    assert_eq!(page_sizes, [2, 2, 1], "page sizes on {backend}");
+    let unique: BTreeSet<_> = seen.iter().cloned().collect();
+    assert_eq!(
+        unique.len(),
+        seen.len(),
+        "no list may appear twice on {backend}"
+    );
+    let expected: BTreeSet<_> = ids.iter().map(|id| format!("sub-{id}")).collect();
+    assert_eq!(unique, expected, "every list must appear on {backend}");
+}
+
+#[cfg(feature = "sqlite")]
+#[tokio::test]
+async fn test_sqlite_list_uris_walk_is_complete() {
+    let db = fixtures::sqlite_connection().await;
+    assert_list_uris_walk_is_complete(db, "issuer-walk-sqlite", "SQLite").await;
+}
+
+#[cfg(feature = "mysql")]
+#[tokio::test]
+async fn test_mysql_list_uris_walk_is_complete() {
+    let test_db = mysql_helpers::MysqlTestDb::start().await;
+    let db = test_db.connection().await;
+    assert_list_uris_walk_is_complete(db, "issuer-walk-mysql", "MySQL").await;
+}
+
+#[cfg(feature = "postgres-tests")]
+#[tokio::test]
+async fn test_postgres_list_uris_walk_is_complete() {
+    let test_db = postgres_helpers::postgres_connection().await;
+    let db = test_db.db.clone();
+    assert_list_uris_walk_is_complete(db, "issuer-walk-postgres", "Postgres").await;
+}
+
+/// Migrates from the previous release's schema: the backfill counts existing
+/// lists, and credential inserts that omit `list_count` (old pods) still work.
+#[cfg(feature = "sqlite")]
+#[tokio::test]
+async fn test_sqlite_list_count_migration_backfills_and_accepts_old_pod_writes() {
+    use sea_orm::ConnectionTrait;
+    use sea_orm_migration::MigratorTrait;
+
+    use crate::outbound::sql::Migrator;
+
+    let before_list_count = Migrator::migrations()
+        .iter()
+        .position(|m| m.name() == "m20260923_000001_credentials_list_count")
+        .expect("the list_count migration must be registered");
+    let db = fixtures::sqlite_connection_migrated(Some(before_list_count as u32)).await;
+
+    db.execute_unprepared(
+        "INSERT INTO credentials (issuer, public_key) \
+         VALUES ('issuer-old', '{}'), ('issuer-empty', '{}')",
+    )
+    .await
+    .unwrap();
+    for id in ["old-1", "old-2"] {
+        db.execute_unprepared(&format!(
+            "INSERT INTO status_lists (list_id, issuer, status_list, sub, updated_at) \
+             VALUES ('{id}', 'issuer-old', '{{\"bits\":1,\"lst\":\"\"}}', 'sub-{id}', 0)"
+        ))
+        .await
+        .unwrap();
+    }
+
+    Migrator::up(&*db, None).await.unwrap();
+
+    assert_eq!(fixtures::list_count(&db, "issuer-old").await, 2);
+    assert_eq!(fixtures::list_count(&db, "issuer-empty").await, 0);
+
+    db.execute_unprepared(
+        "INSERT INTO credentials (issuer, public_key) VALUES ('issuer-via-old-pod', '{}')",
+    )
+    .await
+    .expect("NOT NULL DEFAULT 0 must let pods on the previous release keep registering");
+    assert_eq!(fixtures::list_count(&db, "issuer-via-old-pod").await, 0);
 }

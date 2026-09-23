@@ -13,10 +13,16 @@ backends the equivalent native character type is used.
 
 Stores information about issuers and their cryptographic public keys.
 
-| Column       | Type | Null | Key | Description                           |
-| ------------ | ---- | ---- | --- | ------------------------------------- |
-| `issuer`     | TEXT | NO   | PK  | Unique identifier for the issuer      |
-| `public_key` | JSON | NO   |     | Public key associated with the issuer |
+| Column       | Type   | Null | Key | Description                                                      |
+| ------------ | ------ | ---- | --- | ---------------------------------------------------------------- |
+| `issuer`     | TEXT   | NO   | PK  | Unique identifier for the issuer                                 |
+| `public_key` | JSON   | NO   |     | Public key associated with the issuer                            |
+| `list_count` | BIGINT | NO   |     | Status lists published; backs `max_lists_per_issuer` (default 0) |
+
+`list_count` is incremented by a guarded `UPDATE` inside the publish
+transaction, before the `status_lists` `INSERT`; see `reserve_list_slot` in
+`store.rs` for why that order matters. The `DEFAULT 0` lets pods on the
+previous release keep registering credentials during a rolling deploy.
 
 ### `status_lists`
 
@@ -67,6 +73,7 @@ erDiagram
     credentials {
         TEXT issuer PK "Unique identifier for the issuer"
         JSON public_key "Public key associated with the issuer"
+        BIGINT list_count "Status lists published by the issuer"
     }
     status_lists {
         TEXT list_id PK "Unique identifier for the status list"

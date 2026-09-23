@@ -13,9 +13,15 @@ impl MigratorTrait for Migrator {
             Box::new(add_updated_at::Migration),
             Box::new(status_list_history::Migration),
             Box::new(status_list_history_exp_index::Migration),
+            Box::new(credentials_list_count::Migration),
         ]
     }
 }
+
+/// Recomputes every issuer's `credentials.list_count`. Used as the migration
+/// backfill and quoted verbatim in `docs/troubleshooting.md` as the operator repair.
+pub(crate) const RECOUNT_LIST_COUNT_SQL: &str = "UPDATE credentials SET list_count = \
+     (SELECT COUNT(*) FROM status_lists WHERE status_lists.issuer = credentials.issuer)";
 
 /// Pins InnoDB on MySQL so `update_with_snapshot`'s UPDATE+INSERT roll back as a
 /// unit rather than depending on the server's default engine. MySQL-only:
@@ -585,6 +591,66 @@ pub(crate) mod status_list_history_exp_index {
         Exp,
     }
 }
+
+/// Migration adding the per-issuer list counter behind `limits.max_lists_per_issuer`.
+pub(crate) mod credentials_list_count {
+    use super::*;
+
+    pub(crate) struct Migration;
+
+    impl MigrationName for Migration {
+        fn name(&self) -> &str {
+            "m20260923_000001_credentials_list_count"
+        }
+    }
+
+    #[async_trait::async_trait]
+    #[allow(elided_lifetimes_in_paths)]
+    impl MigrationTrait for Migration {
+        async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+            // DEFAULT 0 is required: during a rolling deploy, pods on the previous
+            // release insert credentials without this column.
+            manager
+                .alter_table(
+                    Table::alter()
+                        .table(Credentials::Table)
+                        .add_column(
+                            ColumnDef::new(Credentials::ListCount)
+                                .big_integer()
+                                .not_null()
+                                .default(0),
+                        )
+                        .to_owned(),
+                )
+                .await?;
+
+            // Old pods also publish without bumping the counter; re-running this
+            // after the rollout is the documented post-deploy step.
+            manager
+                .get_connection()
+                .execute_unprepared(RECOUNT_LIST_COUNT_SQL)
+                .await
+                .map(|_| ())
+        }
+
+        async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+            manager
+                .alter_table(
+                    Table::alter()
+                        .table(Credentials::Table)
+                        .drop_column(Credentials::ListCount)
+                        .to_owned(),
+                )
+                .await
+        }
+    }
+
+    #[derive(Iden)]
+    enum Credentials {
+        Table,
+        ListCount,
+    }
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -670,6 +736,15 @@ mod tests {
                 "binlog_format={variant} is compatible and must not block startup"
             );
         }
+    }
+
+    #[test]
+    fn recount_sql_is_quoted_verbatim_in_the_runbook() {
+        let runbook = include_str!("../../../docs/troubleshooting.md");
+        assert!(
+            runbook.contains(RECOUNT_LIST_COUNT_SQL),
+            "docs/troubleshooting.md must quote RECOUNT_LIST_COUNT_SQL verbatim"
+        );
     }
 
     #[tokio::test]

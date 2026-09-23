@@ -121,12 +121,78 @@ impl<T> SeaOrmStore<T> {
     }
 }
 
+/// Takes one of the issuer's quota slots with a guarded
+/// `UPDATE … SET list_count = list_count + 1 WHERE list_count < max`. The row
+/// lock makes concurrent publishes re-check the guard, so the quota is exact.
+///
+/// Must run before the `status_lists` `INSERT`: that insert's FK check takes a
+/// shared lock on this `credentials` row, and two publishes upgrading it would
+/// deadlock on InnoDB (`1213`). Being in the publish transaction, the slot is
+/// rolled back with any later failure. The caller must roll back on `Err`.
+async fn reserve_list_slot(
+    txn: &DatabaseTransaction,
+    issuer: &str,
+    max_lists_per_issuer: u64,
+) -> Result<(), RepositoryError> {
+    let max = i64::try_from(max_lists_per_issuer).unwrap_or(i64::MAX);
+    let reserved = credentials::Entity::update_many()
+        .col_expr(
+            credentials::Column::ListCount,
+            Expr::col(credentials::Column::ListCount).add(1),
+        )
+        .filter(credentials::Column::Issuer.eq(issuer))
+        .filter(credentials::Column::ListCount.lt(max))
+        .exec(txn)
+        .await
+        .map_err(map_update_err)?;
+    if reserved.rows_affected > 0 {
+        return Ok(());
+    }
+
+    // Zero rows: either the quota is full or the credential row is missing.
+    let count = credentials::Entity::find_by_id(issuer)
+        .select_only()
+        .column(credentials::Column::ListCount)
+        .into_tuple::<i64>()
+        .one(txn)
+        .await
+        .map_err(find_err)?;
+    match count {
+        Some(count) => Err(RepositoryError::QuotaExceeded {
+            count: u64::try_from(count).unwrap_or(0),
+            max: max_lists_per_issuer,
+        }),
+        // Auth resolved the credential earlier, so a missing row is a server
+        // fault (500), as the FK violation was before (see `map_insert_err`).
+        None => Err(RepositoryError::InsertError(format!(
+            "issuer {issuer} has no credential row to reserve a status list slot on"
+        ))),
+    }
+}
+
 impl SeaOrmStore<StatusListRecord> {
     /// Pinned like `insert_one_with_snapshot`, so a racing publish reports the
     /// same error whichever path `history_retention_secs` selects.
     #[tracing::instrument(skip(self, entity), fields(db.system = "sea-orm"))]
-    pub async fn insert_one(&self, entity: StatusListRecord) -> Result<(), RepositoryError> {
+    pub async fn insert_one(
+        &self,
+        entity: StatusListRecord,
+        max_lists_per_issuer: u64,
+    ) -> Result<(), RepositoryError> {
         time_query("insert", "status_list", async {
+            let txn = self.begin_read_committed().await.map_err(map_insert_err)?;
+            if let Err(reserve_err) =
+                reserve_list_slot(&txn, &entity.issuer, max_lists_per_issuer).await
+            {
+                txn.rollback().await.map_err(|rollback_err| {
+                    RepositoryError::InsertError(format!(
+                        "status list slot reservation failed ({reserve_err}); \
+                         rolling the transaction back also failed: {rollback_err}"
+                    ))
+                })?;
+                return Err(reserve_err);
+            }
+
             let active = status_lists::ActiveModel {
                 list_id: Set(entity.list_id),
                 issuer: Set(entity.issuer),
@@ -134,7 +200,6 @@ impl SeaOrmStore<StatusListRecord> {
                 sub: Set(entity.sub),
                 updated_at: Set(entity.updated_at),
             };
-            let txn = self.begin_read_committed().await.map_err(map_insert_err)?;
             if let Err(insert_err) = status_lists::Entity::insert(active)
                 .exec_without_returning(&txn)
                 .await
@@ -168,6 +233,7 @@ impl SeaOrmStore<StatusListRecord> {
         &self,
         entity: StatusListRecord,
         snapshot: StatusListHistoryRecord,
+        max_lists_per_issuer: u64,
     ) -> Result<(), RepositoryError> {
         time_query("insert_with_snapshot", "status_list", async {
             #[cfg(test)]
@@ -181,6 +247,18 @@ impl SeaOrmStore<StatusListRecord> {
             }
 
             let txn = self.begin_read_committed().await.map_err(map_insert_err)?;
+
+            if let Err(reserve_err) =
+                reserve_list_slot(&txn, &entity.issuer, max_lists_per_issuer).await
+            {
+                txn.rollback().await.map_err(|rollback_err| {
+                    RepositoryError::InsertError(format!(
+                        "status list slot reservation failed ({reserve_err}); \
+                         rolling the transaction back also failed: {rollback_err}"
+                    ))
+                })?;
+                return Err(reserve_err);
+            }
 
             let active = status_lists::ActiveModel {
                 list_id: Set(entity.list_id),
@@ -487,16 +565,28 @@ impl SeaOrmStore<StatusListRecord> {
         .await
     }
 
+    /// Up to `limit` `(list_id, sub)` rows with `list_id` after `after`, via a
+    /// keyset scan on the primary key. `list_id` is used rather than
+    /// `updated_at`, which every status update moves.
     #[tracing::instrument(skip(self), fields(db.system = "sea-orm"))]
-    pub async fn find_all_status_list_uris(&self) -> Result<Vec<String>, RepositoryError> {
+    pub async fn find_status_list_uris_after(
+        &self,
+        after: Option<&str>,
+        limit: u64,
+    ) -> Result<Vec<(String, String)>, RepositoryError> {
         time_query("list_uris", "status_list", async {
             let db = self.db.current();
-            status_lists::Entity::find()
+            let mut query = status_lists::Entity::find()
                 .select_only()
-                .column(status_lists::Column::Sub)
-                .group_by(status_lists::Column::Sub)
-                .order_by_asc(status_lists::Column::Sub)
-                .into_tuple::<String>()
+                .column(status_lists::Column::ListId)
+                .column(status_lists::Column::Sub);
+            if let Some(after) = after {
+                query = query.filter(status_lists::Column::ListId.gt(after));
+            }
+            query
+                .order_by_asc(status_lists::Column::ListId)
+                .limit(limit)
+                .into_tuple::<(String, String)>()
                 .all(&*db)
                 .await
                 .map_err(find_err)

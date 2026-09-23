@@ -8,6 +8,7 @@ organized around the four operational areas that account for most incidents:
 2. [Secret & Token Key Rotation Failures](#secret--token-key-rotation-failures)
 3. [Kubernetes & External Secrets Operator Issues](#kubernetes--external-secrets-operator-issues)
 4. [Helm & Upgrade Issues](#helm--upgrade-issues)
+5. [Status List Quota](#status-list-quota)
 
 Object names below follow the production release (`statuslist` in namespace
 `statuslist-production`). Substitute your release/namespace for other deployments.
@@ -790,6 +791,87 @@ failure rolls back instead of wedging the release.
 
 ---
 
+## Status List Quota
+
+Each issuer may publish at most `limits.max_lists_per_issuer` status lists (default `1000`,
+env `APP_LIMITS__MAX_LISTS_PER_ISSUER`). The count lives in `credentials.list_count` and is
+maintained by the publish transaction itself. There is no endpoint that deletes a status list, so
+the count only ever rises.
+
+### Publish rejected with `400` `list_quota_exceeded`
+
+**When you see this:** `PUT /api/v1/status-lists/{list_id}/statuses` returns `400` with
+`"error": "list_quota_exceeded"` and `issuer already has N status lists; the configured maximum is M`.
+The request was well-formed; the issuer's quota is full. Retrying never succeeds, which is why the
+response carries no `Retry-After`.
+
+_Source: `src/server/error.rs` (`StatusListError::QuotaExceeded`), enforced in `src/outbound/sql/store.rs` (`reserve_list_slot`)_
+
+**Root cause:** The issuer has published `max_lists_per_issuer` lists. Because nothing deletes
+lists, an issuer that reaches the quota stays there until an operator acts.
+
+**Diagnostics:** Compare the stored counter with the lists that actually exist:
+
+```sql
+SELECT c.issuer,
+       c.list_count,
+       (SELECT COUNT(*) FROM status_lists s WHERE s.issuer = c.issuer) AS actual
+FROM credentials c
+WHERE c.issuer = '<issuer>';
+```
+
+If `list_count` and `actual` differ, the counter has drifted (see
+[Recomputing `credentials.list_count`](#recomputing-credentialslist_count)); fix that first.
+
+**Fix:** Either:
+
+- **Raise the quota.** Set `APP_LIMITS__MAX_LISTS_PER_ISSUER` and roll the Deployment. The limit is
+  global: it raises the ceiling for every issuer, not only this one.
+- **Delete lists the issuer no longer needs**, directly in the database, then
+  [recompute the counter](#recomputing-credentialslist_count). Only delete a list that no
+  unexpired Referenced Token still points to: relying parties resolving a deleted list get `404`
+  and can no longer check revocation. Also delete its history rows
+  (`DELETE FROM status_list_history WHERE list_id = '<list_id>'`), which have no foreign key to
+  cascade them, and expect the list to stay readable from cache for up to `APP_CACHE__TTL`
+  seconds.
+
+**Prevention:** Size `max_lists_per_issuer` from how many lists your largest issuer needs, and
+watch the `list_count` of your biggest issuers.
+
+---
+
+### After deploying the release that adds `credentials.list_count`
+
+**When you see this:** A deliberate post-deploy step, not a symptom.
+
+_Source: `src/outbound/sql/migrations.rs` (`credentials_list_count`)_
+
+**Root cause:** The migration adds `credentials.list_count` and backfills it, but migrations run
+at pod startup, so pods still on the previous release keep publishing during the rollout without
+updating the counter. Until the rollout completes the counter can undercount, so the quota is
+briefly too generous (never too strict).
+
+**Fix:** Once every pod runs the new release,
+[recompute the counter](#recomputing-credentialslist_count) once.
+
+---
+
+### Recomputing `credentials.list_count`
+
+Recomputes every issuer's counter from the lists that exist. Run it after the rollout above, and
+after any manual `DELETE` from `status_lists`. It is portable across PostgreSQL, MySQL and SQLite,
+and is the same statement the migration uses for its backfill (a unit test keeps the two
+identical):
+
+```sql
+UPDATE credentials SET list_count = (SELECT COUNT(*) FROM status_lists WHERE status_lists.issuer = credentials.issuer);
+```
+
+Run it while no publishes are in flight, or re-run it afterwards: a publish that commits while it
+runs can be missed by the count.
+
+---
+
 ## Index of exact error strings
 
 For quick grep, the application emits these verbatim (with the primary source file):
@@ -813,6 +895,8 @@ For quick grep, the application emits these verbatim (with the primary source fi
 - `failed to read certificate|signing key file '...'`: `src/utils/cert_manager/strategy.rs`
 - `store certificate key '...' was not found` / `store signing key '...' was not found`: `src/utils/cert_manager/strategy.rs`
 - `readiness check failed` (WARN): `src/server/health.rs`
+- `list_quota_exceeded` / `issuer already has N status lists; the configured maximum is M`: `src/server/error.rs`
+- `limits.max_lists_per_issuer must be greater than 0`: `src/config.rs`
 
 Platform-only (no matching application string): `ImagePullBackOff`, `ErrImagePull`,
 `CrashLoopBackOff`, `SecretSyncedError` / `Synced=False`, and all Helm `fail` guards listed in

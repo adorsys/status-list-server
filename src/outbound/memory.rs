@@ -5,7 +5,9 @@ use tokio::sync::RwLock;
 #[cfg(feature = "acme")]
 use crate::cert_manager::storage::StorageError;
 use crate::domain::models::credential::{Credential, CredentialError};
-use crate::domain::models::status_list::{StatusListError, StatusListRecord, StatusListSnapshot};
+use crate::domain::models::status_list::{
+    StatusListError, StatusListRecord, StatusListSnapshot, StatusListUriPage,
+};
 use crate::domain::ports::{
     CredentialRepo, StatusListCache, StatusListRepo, StatusListSnapshotRepo,
 };
@@ -34,6 +36,26 @@ impl MemoryStatusLists {
     }
 }
 
+/// Runs under the insert's write lock, before the duplicate check, matching the
+/// SQL adapter's order.
+fn check_list_quota(
+    values: &HashMap<String, StatusListRecord>,
+    record: &StatusListRecord,
+    max_lists_per_issuer: u64,
+) -> Result<(), StatusListError> {
+    let count = values
+        .values()
+        .filter(|existing| existing.issuer == record.issuer)
+        .count() as u64;
+    if count >= max_lists_per_issuer {
+        return Err(StatusListError::QuotaExceeded {
+            count,
+            max: max_lists_per_issuer,
+        });
+    }
+    Ok(())
+}
+
 #[async_trait]
 impl StatusListRepo for MemoryStatusLists {
     async fn find(&self, id: &str) -> Result<Option<StatusListRecord>, StatusListError> {
@@ -43,8 +65,13 @@ impl StatusListRepo for MemoryStatusLists {
         .await
     }
 
-    async fn insert(&self, record: StatusListRecord) -> Result<(), StatusListError> {
+    async fn insert(
+        &self,
+        record: StatusListRecord,
+        max_lists_per_issuer: u64,
+    ) -> Result<(), StatusListError> {
         let mut values = self.values.write().await;
+        check_list_quota(&values, &record, max_lists_per_issuer)?;
         use std::collections::hash_map::Entry;
         match values.entry(record.list_id.clone()) {
             Entry::Occupied(_) => Err(StatusListError::AlreadyExists),
@@ -93,9 +120,11 @@ impl StatusListRepo for MemoryStatusLists {
         &self,
         record: StatusListRecord,
         snapshot: StatusListSnapshot,
+        max_lists_per_issuer: u64,
     ) -> Result<(), StatusListError> {
         let snapshot_store = self.require_snapshot()?;
         let mut values = self.values.write().await;
+        check_list_quota(&values, &record, max_lists_per_issuer)?;
         use std::collections::hash_map::Entry;
         match values.entry(record.list_id.clone()) {
             Entry::Occupied(_) => Err(StatusListError::AlreadyExists),
@@ -110,15 +139,21 @@ impl StatusListRepo for MemoryStatusLists {
         }
     }
 
-    async fn list_uris(&self) -> Result<Vec<String>, StatusListError> {
-        let uris: std::collections::BTreeSet<String> = self
-            .values
-            .read()
-            .await
+    async fn list_uris(
+        &self,
+        after: Option<&str>,
+        limit: usize,
+    ) -> Result<StatusListUriPage, StatusListError> {
+        let values = self.values.read().await;
+        let mut rows: Vec<(String, String)> = values
             .values()
-            .map(|r| r.sub.clone())
+            .filter(|r| after.is_none_or(|after| r.list_id.as_str() > after))
+            .map(|r| (r.list_id.clone(), r.sub.clone()))
             .collect();
-        Ok(uris.into_iter().collect())
+        // Tuples order by `list_id` first, which is unique.
+        rows.sort_unstable();
+        rows.truncate(limit.saturating_add(1));
+        Ok(StatusListUriPage::from_rows(rows, limit))
     }
 }
 
@@ -299,6 +334,7 @@ mod tests {
                 100_000,
                 5_000,
                 usize::MAX,
+                u64::MAX,
             )
             .await
             .unwrap();
@@ -314,6 +350,7 @@ mod tests {
                     100_000,
                     5_000,
                     usize::MAX,
+                    u64::MAX,
                 )
                 .await,
             Err(StatusListError::AlreadyExists)
@@ -343,6 +380,7 @@ mod tests {
                 100, // max_status_index = 100
                 5_000,
                 usize::MAX,
+                u64::MAX,
             )
             .await;
         assert!(matches!(
@@ -373,6 +411,7 @@ mod tests {
                 100_000,
                 1, // max_statuses_per_request = 1
                 usize::MAX,
+                u64::MAX,
             )
             .await;
         assert!(matches!(
@@ -397,6 +436,7 @@ mod tests {
                 100_000,
                 5_000,
                 usize::MAX,
+                u64::MAX,
             )
             .await
             .unwrap();
@@ -414,5 +454,114 @@ mod tests {
             .await;
 
         assert!(matches!(result, Err(StatusListError::IssuerMismatch)));
+    }
+
+    fn list_record(list_id: &str, issuer: &str) -> StatusListRecord {
+        StatusListRecord {
+            list_id: list_id.to_string(),
+            issuer: Issuer(issuer.to_string()),
+            status_list: crate::domain::models::status_list::StatusList {
+                bits: 1,
+                lst: String::new(),
+            },
+            sub: format!("https://example/{list_id}"),
+            updated_at: 0,
+        }
+    }
+
+    #[tokio::test]
+    async fn insert_enforces_quota_per_issuer() {
+        let repo = MemoryStatusLists::default();
+
+        repo.insert(list_record("a1", "issuer-a"), 2).await.unwrap();
+        repo.insert(list_record("a2", "issuer-a"), 2).await.unwrap();
+        assert!(matches!(
+            repo.insert(list_record("a3", "issuer-a"), 2).await,
+            Err(StatusListError::QuotaExceeded { count: 2, max: 2 })
+        ));
+        assert!(
+            repo.find("a3").await.unwrap().is_none(),
+            "a refused publish must not be stored"
+        );
+
+        repo.insert(list_record("b1", "issuer-b"), 2).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn insert_with_snapshot_enforces_quota() {
+        let snapshots = MemoryStatusListSnapshotRepo::default();
+        let repo = MemoryStatusLists::default().with_snapshot(&snapshots);
+        let snapshot = |id: &str| StatusListSnapshot {
+            snapshot_id: format!("snap-{id}"),
+            list_id: id.to_string(),
+            issuer: Issuer("issuer".into()),
+            status_list: crate::domain::models::status_list::StatusList {
+                bits: 1,
+                lst: String::new(),
+            },
+            sub: format!("https://example/{id}"),
+            iat: 0,
+            exp: 900,
+        };
+
+        repo.insert_with_snapshot(list_record("l1", "issuer"), snapshot("l1"), 1)
+            .await
+            .unwrap();
+        assert!(matches!(
+            repo.insert_with_snapshot(list_record("l2", "issuer"), snapshot("l2"), 1)
+                .await,
+            Err(StatusListError::QuotaExceeded { count: 1, max: 1 })
+        ));
+        assert!(
+            !snapshots.values.read().await.contains_key("snap-l2"),
+            "a refused publish must not leave a snapshot behind"
+        );
+    }
+
+    /// Asserts completeness, not order: SQL collations order mixed-case IDs
+    /// differently from byte order.
+    #[tokio::test]
+    async fn list_uris_pages_cover_every_list_exactly_once() {
+        let repo = MemoryStatusLists::default();
+        let ids = ["c", "A", "e", "b", "D"];
+        for id in ids {
+            repo.insert(list_record(id, "issuer"), u64::MAX)
+                .await
+                .unwrap();
+        }
+
+        let mut seen = Vec::new();
+        let mut page_sizes = Vec::new();
+        let mut after: Option<String> = None;
+        loop {
+            let page = repo.list_uris(after.as_deref(), 2).await.unwrap();
+            page_sizes.push(page.status_lists.len());
+            seen.extend(page.status_lists);
+            match page.next_after {
+                Some(next) => after = Some(next),
+                None => break,
+            }
+        }
+
+        assert_eq!(page_sizes, [2, 2, 1]);
+        let unique: std::collections::BTreeSet<_> = seen.iter().cloned().collect();
+        assert_eq!(unique.len(), seen.len(), "no list may appear twice");
+        let expected: std::collections::BTreeSet<_> = ids
+            .iter()
+            .map(|id| format!("https://example/{id}"))
+            .collect();
+        assert_eq!(unique, expected, "every list must appear");
+    }
+
+    #[tokio::test]
+    async fn list_uris_after_the_last_list_is_empty() {
+        let repo = MemoryStatusLists::default();
+        repo.insert(list_record("a", "issuer"), u64::MAX)
+            .await
+            .unwrap();
+
+        let page = repo.list_uris(Some("z"), 10).await.unwrap();
+        assert!(page.status_lists.is_empty());
+        assert_eq!(page.next_after, None);
     }
 }

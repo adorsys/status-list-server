@@ -180,12 +180,13 @@ When a bucket is exhausted the server returns `429 Too Many Requests`.
 Beyond rate limiting, hard bounds cap incoming request size and the size of
 persisted status lists:
 
-| Bound                      | Default | Exceeded response                     | Where enforced                       |
-| -------------------------- | ------- | ------------------------------------- | ------------------------------------ |
-| `max_body_size_bytes`      | 2 MiB   | `413 Payload Too Large`               | `RequestBodyLimitLayer` (all routes) |
-| `max_status_index`         | 100000  | `400 Bad Request` — `index` too large | publish / update handlers            |
-| `max_statuses_per_request` | 5000    | `400 Bad Request` — too many entries  | publish / update handlers            |
-| `max_serialized_list_size` | 1 MiB   | `422 Unprocessable Entity`            | application services                 |
+| Bound                      | Default | Exceeded response                         | Where enforced                                 |
+| -------------------------- | ------- | ----------------------------------------- | ---------------------------------------------- |
+| `max_body_size_bytes`      | 2 MiB   | `413 Payload Too Large`                   | `RequestBodyLimitLayer` (all routes)           |
+| `max_status_index`         | 100000  | `400 Bad Request` — `index` too large     | publish / update handlers                      |
+| `max_statuses_per_request` | 5000    | `400 Bad Request` — too many entries      | publish / update handlers                      |
+| `max_serialized_list_size` | 1 MiB   | `422 Unprocessable Entity`                | application services                           |
+| `max_lists_per_issuer`     | 1000    | `400 Bad Request` — `list_quota_exceeded` | publish transaction (`credentials.list_count`) |
 
 These bounds protect the server from oversized payloads and unbounded list
 growth. The default schema maximums (`StatusEntry.index.maximum`,
@@ -193,21 +194,34 @@ growth. The default schema maximums (`StatusEntry.index.maximum`,
 lower a bound via configuration should treat the documented maximums as
 defaults, not guarantees.
 
+`max_lists_per_issuer` is enforced exactly, including under concurrent
+publishes: each publish increments `credentials.list_count` with a guarded
+`UPDATE` in the same transaction as its `INSERT`, so a publish that fails
+gives its slot back. It bounds lists **per issuer**, not in total: while
+`POST /api/v1/credentials` accepts unauthenticated registrations, a new issuer
+brings a fresh quota. Lists cannot be deleted through the API, so an issuer at
+its quota stays there until the operator raises it (see
+[troubleshooting](troubleshooting.md#status-list-quota)).
+
+`GET /api/v1/aggregation` is paginated rather than bounded by a configuration
+value: each page holds at most 1000 URIs, read by a keyset scan on `list_id`,
+and there is no total count.
+
 ### Error response summary
 
-| Status | Meaning                                                               |
-| ------ | --------------------------------------------------------------------- |
-| `400`  | Malformed/invalid request, or an enforced count/index bound exceeded  |
-| `401`  | Missing or invalid Bearer token                                       |
-| `403`  | Authenticated issuer does not own the list                            |
-| `404`  | Status list not found                                                 |
-| `406`  | Unsupported `Accept` value                                            |
-| `409`  | List/credentials already exist, or a concurrent update won the race   |
-| `413`  | Request body exceeds `max_body_size_bytes`                            |
-| `422`  | Serialized list exceeds `max_serialized_list_size`, or unparsable JWK |
-| `429`  | Rate-limit quota exhausted                                            |
-| `500`  | Internal server error                                                 |
-| `503`  | Service temporarily unavailable                                       |
+| Status | Meaning                                                                                             |
+| ------ | --------------------------------------------------------------------------------------------------- |
+| `400`  | Malformed/invalid request, an enforced count/index bound exceeded, or the issuer list quota is full |
+| `401`  | Missing or invalid Bearer token                                                                     |
+| `403`  | Authenticated issuer does not own the list                                                          |
+| `404`  | Status list not found                                                                               |
+| `406`  | Unsupported `Accept` value                                                                          |
+| `409`  | List/credentials already exist, or a concurrent update won the race                                 |
+| `413`  | Request body exceeds `max_body_size_bytes`                                                          |
+| `422`  | Serialized list exceeds `max_serialized_list_size`, or unparsable JWK                               |
+| `429`  | Rate-limit quota exhausted                                                                          |
+| `500`  | Internal server error                                                                               |
+| `503`  | Service temporarily unavailable                                                                     |
 
 Authentication and handler-level errors use the shared JSON error shape
 `{"error": "<code>", "error_description": "<human-readable text>"}`. The body

@@ -113,6 +113,20 @@ pub struct LimitsConfig {
     pub max_status_index: i32,
     pub max_statuses_per_request: usize,
     pub max_serialized_list_size: usize,
+    /// Maximum status lists one issuer may publish.
+    pub max_lists_per_issuer: u64,
+}
+
+impl LimitsConfig {
+    fn validate(&self) -> Result<(), ConfigError> {
+        if self.max_lists_per_issuer == 0 {
+            return Err(ConfigError::Message(
+                "limits.max_lists_per_issuer must be greater than 0".to_string(),
+            ));
+        }
+
+        Ok(())
+    }
 }
 
 /// JWT validation policy for protected management endpoints.
@@ -1042,6 +1056,7 @@ impl Config {
             validate_database_query(query)?;
         }
         config.management_auth.validate()?;
+        config.limits.validate()?;
         Ok(config)
     }
 }
@@ -1141,6 +1156,7 @@ fn base_builder() -> Result<ConfigBuilder<DefaultState>, ConfigError> {
         .set_default("limits.max_status_index", 100_000)?
         .set_default("limits.max_statuses_per_request", 5_000)?
         .set_default("limits.max_serialized_list_size", 1_048_576)?
+        .set_default("limits.max_lists_per_issuer", 1_000)?
         .set_default("telemetry.environment", telemetry_environment)?
         .set_default("telemetry.otlp_endpoint", "http://localhost:4317")?
         .set_default("telemetry.sampler_ratio", 1.0)?
@@ -1240,6 +1256,7 @@ mod tests {
         assert_eq!(config.limits.max_status_index, 100_000);
         assert_eq!(config.limits.max_statuses_per_request, 5_000);
         assert_eq!(config.limits.max_serialized_list_size, 1_048_576);
+        assert_eq!(config.limits.max_lists_per_issuer, 1_000);
 
         assert_eq!(config.database.pool.max_connections, 5);
         assert_eq!(config.database.pool.min_connections, 1);
@@ -1308,6 +1325,7 @@ mod tests {
             ("limits.max_status_index", "4096"),
             ("limits.max_statuses_per_request", "256"),
             ("limits.max_serialized_list_size", "32768"),
+            ("limits.max_lists_per_issuer", "25"),
             ("APP_DATABASE__POOL__MAX_CONNECTIONS", "20"),
             ("APP_DATABASE__POOL__MIN_CONNECTIONS", "2"),
             ("APP_DATABASE__POOL__ACQUIRE_TIMEOUT_SECS", "3"),
@@ -1373,6 +1391,7 @@ mod tests {
         assert_eq!(overridden.limits.max_status_index, 4_096);
         assert_eq!(overridden.limits.max_statuses_per_request, 256);
         assert_eq!(overridden.limits.max_serialized_list_size, 32_768);
+        assert_eq!(overridden.limits.max_lists_per_issuer, 25);
         assert_eq!(overridden.database.pool.max_connections, 20);
         assert_eq!(overridden.database.pool.min_connections, 2);
         assert_eq!(overridden.database.pool.acquire_timeout_secs, 3);
@@ -1760,6 +1779,15 @@ mod tests {
                 "status-list-server-management".to_string(),
                 "internal-management".to_string()
             ]
+        );
+    }
+
+    #[test]
+    fn test_zero_list_quota_is_rejected() {
+        let zero_quota = Config::load_from_overrides(&[("limits.max_lists_per_issuer", "0")]);
+        assert!(
+            zero_quota.is_err(),
+            "a zero list quota would refuse every publish and must fail config loading"
         );
     }
 
