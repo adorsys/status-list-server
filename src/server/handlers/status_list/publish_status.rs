@@ -153,7 +153,7 @@ mod tests {
             json["error_description"]
                 .as_str()
                 .unwrap()
-                .contains("exceeds 8-bit capacity")
+                .contains("not a supported Draft-21 status type")
         );
     }
 

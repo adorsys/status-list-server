@@ -1,4 +1,4 @@
-use crate::domain::models::status_list::{StatusListRecord, StatusListSnapshot};
+use crate::domain::models::status_list::{StatusListError, StatusListRecord, StatusListSnapshot};
 use sha2::{Digest, Sha256};
 
 /// Weak ETag for the *live* representation, keyed to the record content and the
@@ -6,30 +6,38 @@ use sha2::{Digest, Sha256};
 /// matching ETag imply the cached token still has plenty of validity left; once
 /// the window rolls over the ETag changes and a stale client is served a fresh
 /// token instead of a body-less 304.
-pub(crate) fn generate_etag(record: &StatusListRecord, window_start: i64) -> String {
+pub(crate) fn generate_etag(
+    record: &StatusListRecord,
+    window_start: i64,
+) -> Result<String, StatusListError> {
     let mut hasher = Sha256::new();
+    let (bits, lst) = record.status_list.token_lst()?;
 
-    hasher.update(record.status_list.bits.to_string().as_bytes());
-    hasher.update(record.status_list.lst.as_bytes());
+    hasher.update(bits.to_string().as_bytes());
+    hasher.update(lst.as_bytes());
     hasher.update(record.issuer.0.as_bytes());
     hasher.update(record.sub.as_bytes());
     hasher.update(window_start.to_string().as_bytes());
 
     let hash = hasher.finalize();
-    format!("W/\"{}\"", hex::encode(hash))
+    Ok(format!("W/\"{}\"", hex::encode(hash)))
 }
 
-pub(crate) fn generate_historical_etag(snapshot: &StatusListSnapshot) -> String {
+pub(crate) fn generate_historical_etag(
+    snapshot: &StatusListSnapshot,
+) -> Result<String, StatusListError> {
     let mut hasher = Sha256::new();
+    let (bits, lst) = snapshot.status_list.token_lst()?;
 
     hasher.update(snapshot.snapshot_id.as_bytes());
     hasher.update(snapshot.iat.to_string().as_bytes());
     hasher.update(snapshot.exp.to_string().as_bytes());
-    hasher.update(snapshot.status_list.lst.as_bytes());
+    hasher.update(bits.to_string().as_bytes());
+    hasher.update(lst.as_bytes());
     hasher.update(snapshot.issuer.0.as_bytes());
 
     let hash = hasher.finalize();
-    hex::encode(hash)
+    Ok(hex::encode(hash))
 }
 
 #[cfg(test)]
@@ -53,10 +61,14 @@ mod tests {
         }
     }
 
+    fn etag(record: &StatusListRecord, window_start: i64) -> String {
+        generate_etag(record, window_start).unwrap()
+    }
+
     #[test]
     fn test_generate_etag_format() {
         let record = create_test_record();
-        let etag = generate_etag(&record, WINDOW);
+        let etag = etag(&record, WINDOW);
 
         assert!(etag.starts_with("W/\""), "ETag should start with W/\"");
         assert!(etag.ends_with('"'), "ETag should end with \"");
@@ -71,8 +83,8 @@ mod tests {
         let record1 = create_test_record();
         let record2 = create_test_record();
 
-        let etag1 = generate_etag(&record1, WINDOW);
-        let etag2 = generate_etag(&record2, WINDOW);
+        let etag1 = etag(&record1, WINDOW);
+        let etag2 = etag(&record2, WINDOW);
 
         assert_eq!(etag1, etag2);
     }
@@ -82,10 +94,7 @@ mod tests {
         let record1 = create_test_record();
         let record2 = create_test_record();
 
-        assert_eq!(
-            generate_etag(&record1, WINDOW),
-            generate_etag(&record2, WINDOW)
-        );
+        assert_eq!(etag(&record1, WINDOW), etag(&record2, WINDOW));
     }
 
     #[test]
@@ -93,8 +102,8 @@ mod tests {
         let record = create_test_record();
 
         assert_ne!(
-            generate_etag(&record, WINDOW),
-            generate_etag(&record, WINDOW + 1),
+            etag(&record, WINDOW),
+            etag(&record, WINDOW + 1),
             "the ETag must rotate when the token validity window changes"
         );
     }
@@ -106,10 +115,7 @@ mod tests {
         record1.updated_at = 1000;
         record2.updated_at = 2000;
 
-        assert_eq!(
-            generate_etag(&record1, WINDOW),
-            generate_etag(&record2, WINDOW)
-        );
+        assert_eq!(etag(&record1, WINDOW), etag(&record2, WINDOW));
     }
 
     #[test]
@@ -119,10 +125,7 @@ mod tests {
         record1.status_list.bits = 1;
         record2.status_list.bits = 2;
 
-        assert_ne!(
-            generate_etag(&record1, WINDOW),
-            generate_etag(&record2, WINDOW)
-        );
+        assert_ne!(etag(&record1, WINDOW), etag(&record2, WINDOW));
     }
 
     #[test]
@@ -132,10 +135,18 @@ mod tests {
         record1.status_list.lst = "lst1".to_string();
         record2.status_list.lst = "lst2".to_string();
 
-        assert_ne!(
-            generate_etag(&record1, WINDOW),
-            generate_etag(&record2, WINDOW)
-        );
+        assert_ne!(etag(&record1, WINDOW), etag(&record2, WINDOW));
+    }
+
+    #[test]
+    fn test_generate_etag_hashes_normalized_legacy_empty_lst() {
+        let mut legacy = create_test_record();
+        legacy.status_list.lst = String::new();
+
+        let mut normalized = legacy.clone();
+        normalized.status_list.lst = StatusList::create(Vec::new()).unwrap().lst;
+
+        assert_eq!(etag(&legacy, WINDOW), etag(&normalized, WINDOW));
     }
 
     #[test]
@@ -145,10 +156,7 @@ mod tests {
         record1.issuer = Issuer("https://issuer1.com".to_string());
         record2.issuer = Issuer("https://issuer2.com".to_string());
 
-        assert_ne!(
-            generate_etag(&record1, WINDOW),
-            generate_etag(&record2, WINDOW)
-        );
+        assert_ne!(etag(&record1, WINDOW), etag(&record2, WINDOW));
     }
 
     #[test]
@@ -158,9 +166,6 @@ mod tests {
         record1.sub = "https://example.com/1".to_string();
         record2.sub = "https://example.com/2".to_string();
 
-        assert_ne!(
-            generate_etag(&record1, WINDOW),
-            generate_etag(&record2, WINDOW)
-        );
+        assert_ne!(etag(&record1, WINDOW), etag(&record2, WINDOW));
     }
 }

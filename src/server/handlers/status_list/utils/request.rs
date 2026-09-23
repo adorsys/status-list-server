@@ -1,7 +1,9 @@
 use axum::{Json, extract::rejection::JsonRejection};
 use serde::{Deserialize, Serialize};
 
-use crate::domain::models::status_list::is_application_specific_status_value;
+use crate::domain::models::status_list::{
+    is_application_specific_status_value, unsupported_status_value_message,
+};
 use crate::server::error::ApiError;
 
 #[allow(clippy::upper_case_acronyms)]
@@ -20,14 +22,9 @@ impl Serialize for Status {
             Status::INVALID => 1,
             Status::SUSPENDED => 2,
             Status::ApplicationSpecific(v) if is_application_specific_status_value(*v) => *v,
-            Status::ApplicationSpecific(v) if *v <= 255 => {
-                return Err(serde::ser::Error::custom(format!(
-                    "status value {v} is reserved for future registration; application-specific status values are 3 and 12 through 15"
-                )));
-            }
             Status::ApplicationSpecific(v) => {
-                return Err(serde::ser::Error::custom(format!(
-                    "status value {v} exceeds 8-bit capacity; maximum supported status value is 255"
+                return Err(serde::ser::Error::custom(unsupported_status_value_message(
+                    *v,
                 )));
             }
         };
@@ -43,15 +40,9 @@ impl<'de> Deserialize<'de> for Status {
             1 => Status::INVALID,
             2 => Status::SUSPENDED,
             n if is_application_specific_status_value(n) => Status::ApplicationSpecific(n),
-            n @ 4..=255 => {
-                return Err(serde::de::Error::custom(format!(
-                    "status value {n} is reserved for future registration; application-specific status values are 3 and 12 through 15"
-                )));
-            }
             other => {
-                return Err(serde::de::Error::custom(format!(
-                    "status value {} exceeds 8-bit capacity; maximum supported status value is 255",
-                    other
+                return Err(serde::de::Error::custom(unsupported_status_value_message(
+                    other,
                 )));
             }
         })
@@ -132,12 +123,14 @@ mod tests {
         for value in [4u32, 11, 16, 100, 255] {
             let err = serde_json::from_str::<Status>(&value.to_string()).unwrap_err();
             assert!(
-                err.to_string().contains("reserved for future registration"),
+                err.to_string()
+                    .contains("not a supported Draft-21 status type"),
                 "value {value} should fail as reserved, got {err}"
             );
             let err = serde_json::to_string(&Status::ApplicationSpecific(value)).unwrap_err();
             assert!(
-                err.to_string().contains("reserved for future registration"),
+                err.to_string()
+                    .contains("not a supported Draft-21 status type"),
                 "value {value} should fail as reserved, got {err}"
             );
         }

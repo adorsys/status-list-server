@@ -210,7 +210,7 @@ fn issue_cwt(
         ),
     ];
 
-    let (bits, _, lst_bytes) = status_record.status_list.token_representation()?;
+    let (bits, lst_bytes) = status_record.status_list.token_lst_bytes()?;
 
     let mut status_list = vec![
         (
@@ -291,7 +291,7 @@ fn issue_jwt(
     token_ttl_secs: u64,
 ) -> Result<String, StatusListError> {
     let ttl = token_ttl_secs as i64;
-    let (bits, lst, _) = status_record.status_list.token_representation()?;
+    let (bits, lst) = status_record.status_list.token_lst()?;
     let status_list = StatusListClaims {
         bits,
         lst,
