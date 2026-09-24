@@ -11,6 +11,7 @@ use std::sync::Arc;
 use tracing::warn;
 
 use super::error::{RepositoryError, contention_err};
+use super::list_quota::list_quota_enforced;
 use super::models::{
     Credentials, StatusListHistoryRecord, StatusListRecord, credentials, status_list_history,
     status_lists,
@@ -90,7 +91,8 @@ impl<T> SeaOrmStore<T> {
     /// server default.
     ///
     /// The guard does not need it — `UPDATE ... WHERE` is a current read on both
-    /// engines, and no transaction here issues a `SELECT`. Pinning buys:
+    /// engines, and the only `SELECT`s are on `reserve_list_slot`'s rejection
+    /// path, which relies on seeing rows committed while it waited. Pinning buys:
     ///
     /// - A raised server default (`default_transaction_isolation`,
     ///   `transaction_isolation`) can no longer turn a guard miss into a
@@ -110,14 +112,92 @@ impl<T> SeaOrmStore<T> {
     /// SQLite and the mock backend are excluded: SQLite has no per-transaction
     /// isolation and sea-orm warns on every transaction if a level is supplied.
     async fn begin_read_committed(&self) -> Result<DatabaseTransaction, DbErr> {
-        let db = self.db.current();
-        match db.get_database_backend() {
-            DatabaseBackend::Postgres | DatabaseBackend::MySql => {
-                db.begin_with_config(Some(IsolationLevel::ReadCommitted), None)
-                    .await
-            }
-            _ => db.begin().await,
+        begin_read_committed(&self.db.current()).await
+    }
+}
+
+/// See [`SeaOrmStore::begin_read_committed`].
+pub(super) async fn begin_read_committed(
+    db: &DatabaseConnection,
+) -> Result<DatabaseTransaction, DbErr> {
+    match db.get_database_backend() {
+        DatabaseBackend::Postgres | DatabaseBackend::MySql => {
+            db.begin_with_config(Some(IsolationLevel::ReadCommitted), None)
+                .await
         }
+        _ => db.begin().await,
+    }
+}
+
+/// Takes one of the issuer's quota slots with a guarded
+/// `UPDATE … SET list_count = list_count + 1 WHERE list_count < max`. The row
+/// lock makes concurrent publishes re-check the guard, so the quota is exact.
+/// While the quota is off, the guard is lifted but the count still kept.
+///
+/// Must run before the `status_lists` `INSERT`: that insert's FK check takes a
+/// shared lock on this `credentials` row, and two publishes upgrading it would
+/// deadlock on InnoDB (`1213`). Being in the publish transaction, the slot is
+/// rolled back with any later failure. The caller must roll back on `Err`.
+///
+/// An existing `list_id` is reported as `DuplicateEntry` even at a full quota,
+/// so a retried publish still gets its 409.
+async fn reserve_list_slot(
+    txn: &DatabaseTransaction,
+    issuer: &str,
+    list_id: &str,
+    max_lists_per_issuer: u64,
+) -> Result<(), RepositoryError> {
+    let max = if list_quota_enforced(txn).await.map_err(map_update_err)? {
+        i64::try_from(max_lists_per_issuer).unwrap_or(i64::MAX)
+    } else {
+        i64::MAX
+    };
+    let reserved = credentials::Entity::update_many()
+        .col_expr(
+            credentials::Column::ListCount,
+            Expr::col(credentials::Column::ListCount).add(1),
+        )
+        .filter(credentials::Column::Issuer.eq(issuer))
+        .filter(credentials::Column::ListCount.lt(max))
+        .exec(txn)
+        .await
+        .map_err(map_update_err)?;
+    if reserved.rows_affected > 0 {
+        return Ok(());
+    }
+
+    // Zero rows: either the quota is full or the credential row is missing.
+    let count = credentials::Entity::find_by_id(issuer)
+        .select_only()
+        .column(credentials::Column::ListCount)
+        .into_tuple::<i64>()
+        .one(txn)
+        .await
+        .map_err(find_err)?;
+    match count {
+        Some(count) => {
+            // A same-issuer racer held the row lock we waited on, so it has committed.
+            let exists = status_lists::Entity::find_by_id(list_id)
+                .select_only()
+                .column(status_lists::Column::ListId)
+                .into_tuple::<String>()
+                .one(txn)
+                .await
+                .map_err(find_err)?
+                .is_some();
+            if exists {
+                return Err(RepositoryError::DuplicateEntry);
+            }
+            Err(RepositoryError::QuotaExceeded {
+                count: u64::try_from(count).unwrap_or(0),
+                max: max_lists_per_issuer,
+            })
+        }
+        // Auth resolved the credential earlier, so a missing row is a server
+        // fault (500), as the FK violation was before (see `map_insert_err`).
+        None => Err(RepositoryError::InsertError(format!(
+            "issuer {issuer} has no credential row to reserve a status list slot on"
+        ))),
     }
 }
 
@@ -125,8 +205,25 @@ impl SeaOrmStore<StatusListRecord> {
     /// Pinned like `insert_one_with_snapshot`, so a racing publish reports the
     /// same error whichever path `history_retention_secs` selects.
     #[tracing::instrument(skip(self, entity), fields(db.system = "sea-orm"))]
-    pub async fn insert_one(&self, entity: StatusListRecord) -> Result<(), RepositoryError> {
+    pub async fn insert_one(
+        &self,
+        entity: StatusListRecord,
+        max_lists_per_issuer: u64,
+    ) -> Result<(), RepositoryError> {
         time_query("insert", "status_list", async {
+            let txn = self.begin_read_committed().await.map_err(map_insert_err)?;
+            if let Err(reserve_err) =
+                reserve_list_slot(&txn, &entity.issuer, &entity.list_id, max_lists_per_issuer).await
+            {
+                txn.rollback().await.map_err(|rollback_err| {
+                    RepositoryError::InsertError(format!(
+                        "status list slot reservation failed ({reserve_err}); \
+                         rolling the transaction back also failed: {rollback_err}"
+                    ))
+                })?;
+                return Err(reserve_err);
+            }
+
             let active = status_lists::ActiveModel {
                 list_id: Set(entity.list_id),
                 issuer: Set(entity.issuer),
@@ -134,7 +231,6 @@ impl SeaOrmStore<StatusListRecord> {
                 sub: Set(entity.sub),
                 updated_at: Set(entity.updated_at),
             };
-            let txn = self.begin_read_committed().await.map_err(map_insert_err)?;
             if let Err(insert_err) = status_lists::Entity::insert(active)
                 .exec_without_returning(&txn)
                 .await
@@ -168,6 +264,7 @@ impl SeaOrmStore<StatusListRecord> {
         &self,
         entity: StatusListRecord,
         snapshot: StatusListHistoryRecord,
+        max_lists_per_issuer: u64,
     ) -> Result<(), RepositoryError> {
         time_query("insert_with_snapshot", "status_list", async {
             #[cfg(test)]
@@ -181,6 +278,18 @@ impl SeaOrmStore<StatusListRecord> {
             }
 
             let txn = self.begin_read_committed().await.map_err(map_insert_err)?;
+
+            if let Err(reserve_err) =
+                reserve_list_slot(&txn, &entity.issuer, &entity.list_id, max_lists_per_issuer).await
+            {
+                txn.rollback().await.map_err(|rollback_err| {
+                    RepositoryError::InsertError(format!(
+                        "status list slot reservation failed ({reserve_err}); \
+                         rolling the transaction back also failed: {rollback_err}"
+                    ))
+                })?;
+                return Err(reserve_err);
+            }
 
             let active = status_lists::ActiveModel {
                 list_id: Set(entity.list_id),
@@ -447,6 +556,9 @@ impl SeaOrmStore<StatusListRecord> {
         .await
     }
 
+    /// Test-only: does not decrement `credentials.list_count`. A production
+    /// caller must decrement it in the same transaction as the `DELETE`.
+    #[cfg(test)]
     pub async fn delete_by(&self, value: &str) -> Result<bool, RepositoryError> {
         time_query("delete", "status_list", async {
             let db = self.db.current();
@@ -487,16 +599,28 @@ impl SeaOrmStore<StatusListRecord> {
         .await
     }
 
+    /// Up to `limit` `(list_id, sub)` rows with `list_id` after `after`, via a
+    /// keyset scan on the primary key. `list_id` is used rather than
+    /// `updated_at`, which every status update moves.
     #[tracing::instrument(skip(self), fields(db.system = "sea-orm"))]
-    pub async fn find_all_status_list_uris(&self) -> Result<Vec<String>, RepositoryError> {
+    pub async fn find_status_list_uris_after(
+        &self,
+        after: Option<&str>,
+        limit: u64,
+    ) -> Result<Vec<(String, String)>, RepositoryError> {
         time_query("list_uris", "status_list", async {
             let db = self.db.current();
-            status_lists::Entity::find()
+            let mut query = status_lists::Entity::find()
                 .select_only()
-                .column(status_lists::Column::Sub)
-                .group_by(status_lists::Column::Sub)
-                .order_by_asc(status_lists::Column::Sub)
-                .into_tuple::<String>()
+                .column(status_lists::Column::ListId)
+                .column(status_lists::Column::Sub);
+            if let Some(after) = after {
+                query = query.filter(status_lists::Column::ListId.gt(after));
+            }
+            query
+                .order_by_asc(status_lists::Column::ListId)
+                .limit(limit)
+                .into_tuple::<(String, String)>()
                 .all(&*db)
                 .await
                 .map_err(find_err)

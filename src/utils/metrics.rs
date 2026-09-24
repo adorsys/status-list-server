@@ -106,6 +106,25 @@ pub(crate) fn record_rotation(target: &'static str, success: bool) {
     }
 }
 
+#[cfg(feature = "history")]
+type InstrumentSlot<T> = OnceLock<Mutex<Option<(u64, T)>>>;
+#[cfg(feature = "history")]
+static LIST_QUOTA_METRICS: InstrumentSlot<Gauge<u64>> = OnceLock::new();
+
+/// As last read by this pod, at startup and on each publish.
+#[cfg(feature = "history")]
+pub(crate) fn record_list_quota_enforced(enforced: bool) {
+    let gauge = cached_instruments(&LIST_QUOTA_METRICS, || {
+        global::meter("status-list-server")
+            .u64_gauge("list_quota_enforced")
+            .with_description(
+                "Whether limits.max_lists_per_issuer is enforced (1) or awaiting `list-quota enable` (0).",
+            )
+            .build()
+    });
+    gauge.record(u64::from(enforced), &[]);
+}
+
 /// Initialize the OpenTelemetry metrics pipeline before any instruments are
 /// created. Metrics are always exposed through the in-process Prometheus
 /// registry. In production, they are also pushed to the Collector over OTLP.
@@ -409,5 +428,38 @@ mod tests {
         assert!(rendered.contains("target=\"token_signing_key\""));
         assert!(rendered.contains("outcome=\"success\""));
         assert!(rendered.contains("outcome=\"failure\""));
+    }
+
+    #[cfg(feature = "history")]
+    #[test]
+    fn list_quota_enforced_is_exported() {
+        let _metrics_guard = metrics_test_lock();
+        let registry = Registry::new();
+        let config = TelemetryConfig {
+            environment: TelemetryEnvironment::Development,
+            otlp_endpoint: "http://localhost:4317".to_string(),
+            sampler_ratio: 1.0,
+            enabled: false,
+        };
+        let _meter_provider = setup_metrics(
+            &registry,
+            &config,
+            Resource::builder()
+                .with_service_name("status-list-server-test")
+                .build(),
+        )
+        .expect("metrics setup");
+
+        record_list_quota_enforced(false);
+
+        let rendered = tokio::runtime::Runtime::new()
+            .expect("tokio runtime")
+            .block_on(metrics_handler(registry));
+        assert!(
+            rendered
+                .lines()
+                .any(|line| line.starts_with("list_quota_enforced") && line.ends_with(" 0")),
+            "{rendered}"
+        );
     }
 }

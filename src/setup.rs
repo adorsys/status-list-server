@@ -13,8 +13,6 @@ use color_eyre::eyre::Result as EyeResult;
 #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mysql"))]
 use sea_orm::{ConnectOptions, DbErr};
 #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mysql"))]
-use sea_orm_migration::MigratorTrait;
-#[cfg(any(feature = "sqlite", feature = "postgres", feature = "mysql"))]
 use secrecy::ExposeSecret;
 use std::sync::Arc;
 use std::time::Duration;
@@ -73,8 +71,10 @@ use crate::outbound::gcp_secret::GcpSecretManagerClient;
 use crate::outbound::memory::{MemoryCredentials, MemoryStatusListSnapshotRepo, MemoryStatusLists};
 #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mysql"))]
 use crate::outbound::sql::{
-    Migrator, SeaOrmStore, SqlCredentialRepo, SqlStatusListRepo, SqlStatusListSnapshotRepo,
-    SwappableDatabaseConnection, verify_binlog_format, verify_innodb_engines,
+    SeaOrmStore, SqlCredentialRepo, SqlStatusListRepo, SqlStatusListSnapshotRepo,
+    SwappableDatabaseConnection,
+    list_quota::{self, StartupState},
+    run_migrations, verify_binlog_format, verify_innodb_engines,
 };
 #[cfg(feature = "vault")]
 use crate::outbound::vault::VaultClient;
@@ -295,6 +295,61 @@ fn spawn_cert_rotation(config: AppConfig, provider: ReloadingCertificateProvider
     });
 }
 
+/// Usage of `status-list-server list-quota`.
+pub const LIST_QUOTA_USAGE: &str =
+    "usage: status-list-server list-quota <status|recount|enable|disable>
+
+  status   show whether limits.max_lists_per_issuer is enforced
+  recount  recompute every issuer's list count (refused while enforced)
+  enable   enforce the quota; refused, naming the issuers, while any issuer
+           has more lists than the cap or a stale count
+  disable  stop enforcing the quota";
+
+/// Runs `list-quota <action>` and returns what to print. Does not migrate.
+#[cfg(any(feature = "sqlite", feature = "postgres", feature = "mysql"))]
+pub async fn run_list_quota_command(config: &AppConfig, action: &str) -> EyeResult<String> {
+    if !matches!(action, "status" | "recount" | "enable" | "disable") {
+        return Err(color_eyre::eyre::eyre!("{LIST_QUOTA_USAGE}"));
+    }
+    if config.database.backend == DatabaseBackend::Memory {
+        return Err(color_eyre::eyre::eyre!(
+            "the memory backend enforces the list quota from startup; list-quota applies to \
+             SQL backends"
+        ));
+    }
+    let db = connect_database_pool(config).await?;
+    let max = config.limits.max_lists_per_issuer;
+    match action {
+        "status" => {
+            let enforced = list_quota::is_enforced(&db).await?;
+            Ok(if enforced {
+                format!("list quota: enforced (max {max} lists per issuer)")
+            } else {
+                "list quota: not enforced".to_string()
+            })
+        }
+        "recount" => {
+            list_quota::recount(&db).await?;
+            Ok("recomputed every issuer's list count".to_string())
+        }
+        "enable" => {
+            list_quota::enable(&db, max).await?;
+            Ok(format!("list quota enforced: max {max} lists per issuer"))
+        }
+        _ => {
+            list_quota::disable(&db).await?;
+            Ok("list quota no longer enforced".to_string())
+        }
+    }
+}
+
+#[cfg(not(any(feature = "sqlite", feature = "postgres", feature = "mysql")))]
+pub async fn run_list_quota_command(_config: &AppConfig, _action: &str) -> EyeResult<String> {
+    Err(color_eyre::eyre::eyre!(
+        "this build has no SQL backend; the memory backend enforces the list quota from startup"
+    ))
+}
+
 /// Assembles application configuration, connects outbound repositories, and builds `AppState`.
 #[cfg(feature = "acme")]
 pub async fn build_state(config: &AppConfig) -> EyeResult<AppState> {
@@ -368,7 +423,7 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
         _db_backend => {
             let db = connect_database_pool(config).await?;
 
-            Migrator::up(&db, None)
+            let fresh = run_migrations(&db)
                 .await
                 .wrap_err("Failed to run database migrations")?;
 
@@ -383,6 +438,29 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
                      isolation level this server pins on every write. See the logged error \
                      above for the fix.",
             )?;
+
+            match list_quota::on_startup(
+                &db,
+                fresh,
+                config.limits.list_quota_transition,
+                config.limits.max_lists_per_issuer,
+            )
+            .await
+            .wrap_err("Startup aborted: the list quota is not enforced")?
+            {
+                StartupState::Enforced => {}
+                StartupState::EnforcedWithTransitionSet => tracing::warn!(
+                    "limits.list_quota_transition is set, but the list quota is already \
+                     enforced; remove APP_LIMITS__LIST_QUOTA_TRANSITION."
+                ),
+                StartupState::Transition => tracing::error!(
+                    "limits.max_lists_per_issuer is NOT enforced: limits.list_quota_transition \
+                     is set. Once no pod of the previous release is left, run \
+                     `status-list-server list-quota recount`, then \
+                     `status-list-server list-quota enable`, then remove \
+                     APP_LIMITS__LIST_QUOTA_TRANSITION."
+                ),
+            }
 
             let db_handle = Arc::new(SwappableDatabaseConnection::new(Arc::new(db)));
             db_arc = Some(db_handle.clone());
@@ -581,6 +659,7 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
         max_status_index: config.limits.max_status_index,
         max_statuses_per_request: config.limits.max_statuses_per_request,
         max_serialized_list_size: config.limits.max_serialized_list_size,
+        max_lists_per_issuer: config.limits.max_lists_per_issuer,
         snapshot_retention_secs: config.status_list.snapshot_retention_secs,
         management_auth: crate::server::ManagementAuthConfig::from(&config.management_auth),
         readiness,
