@@ -816,8 +816,10 @@ example `kubectl exec deploy/<release> -- /app/status-list-server list-quota sta
 
 **When you see this:** A required step after the first rollout of a release with the quota, and
 after rolling forward from a release that predates it. Until it is done, each pod logs at startup:
-`limits.max_lists_per_issuer is not enforced. Once every pod runs this release, run
-`status-list-server list-quota recount`, then `status-list-server list-quota enable`.`
+
+```text
+limits.max_lists_per_issuer is not enforced. Once every pod runs this release, run `status-list-server list-quota recount`, then `status-list-server list-quota enable`.
+```
 
 _Source: `src/outbound/sql/list_quota.rs`, `src/setup.rs` (`run_list_quota_command`)_
 
@@ -949,7 +951,7 @@ For quick grep, the application emits these verbatim (with the primary source fi
 - `list_quota_exceeded` / `issuer already has N status lists; the configured maximum is M`: `src/server/error.rs`
 - `limits.max_lists_per_issuer must be greater than 0`: `src/config.rs`
 - `limits.max_lists_per_issuer is not enforced. Once every pod runs this release, ...` (WARN): `src/setup.rs`
-- `refusing to enable the list quota` / `the list quota is enforced; run `list-quota disable` before recounting`: `src/outbound/sql/list_quota.rs`
+- `refusing to enable the list quota` / ``the list quota is enforced; run `list-quota disable` before recounting``: `src/outbound/sql/list_quota.rs`
 
 Platform-only (no matching application string): `ImagePullBackOff`, `ErrImagePull`,
 `CrashLoopBackOff`, `SecretSyncedError` / `Synced=False`, and all Helm `fail` guards listed in
