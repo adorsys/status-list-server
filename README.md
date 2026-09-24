@@ -158,7 +158,6 @@ Verify zero-infrastructure in-memory compilation:
 cargo check --no-default-features --features memory
 ```
 
-
 ### Status-list cache backend
 
 The status-list record cache backend is selected at runtime with
