@@ -10,7 +10,7 @@ pub mod storage;
 
 use crate::utils::cache::{CertChainCache, CertificateChain};
 use crate::utils::cert_manager::storage::{CryptoStorage, Storage};
-use crate::utils::keygen::Keypair;
+use crate::utils::crypto::{SigningAlgorithm, SigningKey};
 use arc_swap::ArcSwapOption;
 pub use builder::CertificateManagerBuilder;
 use challenge::CleanupFuture;
@@ -412,8 +412,8 @@ impl CertManager {
 
         // If the secret does not exist, try to generate and store a new one
         warn!("No existing server secret found. Generating a new one...");
-        let keypair = Keypair::generate()?;
-        let key_pem = keypair.to_pkcs8_pem()?;
+        let key = SigningKey::generate(SigningAlgorithm::Es256)?;
+        let key_pem = key.to_pkcs8_pem()?;
         let mut retries = 0;
         loop {
             info!("Trying to store the newly generated server secret...");
@@ -489,14 +489,12 @@ impl CertManager {
         }
 
         let signing_key_pem = self.signing_key_pem().await?;
-        let certificate_chain = self
-            .cert_chain_parts()
-            .await?
-            .map(|chain| chain.as_ref().to_vec());
-        let material = SigningMaterial {
-            certificate_chain,
-            signing_key_pem,
-        };
+        let certificate_chain = self.cert_chain_parts().await?;
+        let signing_key = SigningKey::from_pem(&signing_key_pem).map_err(CertError::KeyOp)?;
+        let material = SigningMaterial::new(
+            certificate_chain.map(|c| c.as_ref().to_vec()),
+            Arc::new(signing_key),
+        );
         self.active_signing_material
             .store(Some(Arc::new(material.clone())));
         Ok(material)
@@ -695,25 +693,6 @@ impl CertManager {
         ))
     }
 
-    pub(crate) fn certificate_data_from_der_or_pem(
-        &self,
-        certificate: Vec<u8>,
-    ) -> Result<CertificateData, CertError> {
-        if is_pem_certificate(&certificate) {
-            let certificate_pem = String::from_utf8(certificate).map_err(|e| {
-                CertError::Validation(format!("certificate PEM is not valid UTF-8: {e}"))
-            })?;
-            return self.certificate_data_from_pem(certificate_pem);
-        }
-
-        let (certificate_pem, valid_from, expires_at) = cert_der_chain_to_pem(certificate)?;
-        Ok(CertificateData::new(
-            certificate_pem,
-            valid_from,
-            expires_at,
-        ))
-    }
-
     pub(crate) fn crypto_storage(&self) -> Result<&CryptoStorage, CertError> {
         self.crypto_storage
             .as_ref()
@@ -787,10 +766,8 @@ impl CertManager {
         signing_key_pem: &str,
     ) -> Result<(), CertError> {
         let certs = self.parse_cert_chain_parts(cert_pem)?;
-        let material = SigningMaterial {
-            certificate_chain: Some(certs.as_ref().to_vec()),
-            signing_key_pem: signing_key_pem.to_string(),
-        };
+        let signing_key = SigningKey::from_pem(signing_key_pem).map_err(CertError::KeyOp)?;
+        let material = SigningMaterial::new(Some(certs.as_ref().to_vec()), Arc::new(signing_key));
         self.active_signing_material.store(Some(Arc::new(material)));
         Ok(())
     }
@@ -856,47 +833,6 @@ impl CertificateData {
             updated_at: now_unix_timestamp(),
         }
     }
-}
-
-fn is_pem_certificate(bytes: &[u8]) -> bool {
-    bytes
-        .windows(b"-----BEGIN CERTIFICATE-----".len())
-        .any(|window| window == b"-----BEGIN CERTIFICATE-----")
-}
-
-fn cert_der_chain_to_pem(certificate_der: Vec<u8>) -> Result<(String, i64, i64), CertError> {
-    use x509_parser::parse_x509_certificate;
-
-    let mut remaining = certificate_der.as_slice();
-    let mut certs = Vec::new();
-    let mut validity = None;
-
-    while !remaining.is_empty() {
-        let before_len = remaining.len();
-        let (next, cert) = parse_x509_certificate(remaining)
-            .map_err(|e| CertError::Parsing(format!("invalid DER certificate chain: {e}")))?;
-        let consumed_len = before_len - next.len();
-        if consumed_len == 0 {
-            return Err(CertError::Parsing(
-                "invalid DER certificate chain: parser made no progress".to_string(),
-            ));
-        }
-
-        if validity.is_none() {
-            validity = Some((
-                cert.validity().not_before.timestamp(),
-                cert.validity().not_after.timestamp(),
-            ));
-        }
-
-        let der = &remaining[..consumed_len];
-        certs.push(::pem::Pem::new("CERTIFICATE", der));
-        remaining = next;
-    }
-
-    let (valid_from, expires_at) =
-        validity.ok_or_else(|| CertError::Parsing("empty DER certificate chain".to_string()))?;
-    Ok((::pem::encode_many(&certs), valid_from, expires_at))
 }
 
 /// Setup the certificate renewal scheduler
