@@ -42,6 +42,10 @@ criteria = "safe-to-deploy"
 version = "1.9.2"
 criteria = "safe-to-deploy"
 
+[[exemptions.arcstr]]
+version = "1.2.0"
+criteria = "safe-to-deploy"
+
 [[exemptions.arrayvec]]
 version = "0.7.8"
 criteria = "safe-to-deploy"
@@ -291,7 +295,7 @@ version = "0.3.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.combine]]
-version = "4.6.7"
+version = "4.6.8"
 criteria = "safe-to-deploy"
 
 [[exemptions.compression-codecs]]
@@ -1082,6 +1086,10 @@ criteria = "safe-to-run"
 version = "0.4.8"
 criteria = "safe-to-deploy"
 
+[[exemptions.num-bigint]]
+version = "0.5.1"
+criteria = "safe-to-deploy"
+
 [[exemptions.num-bigint-dig]]
 version = "0.8.6"
 criteria = "safe-to-deploy"
@@ -1431,7 +1439,7 @@ version = "0.14.9"
 criteria = "safe-to-deploy"
 
 [[exemptions.redis]]
-version = "0.32.7"
+version = "1.7.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.redox_syscall]]
@@ -2380,6 +2388,10 @@ criteria = "safe-to-run"
 
 [[exemptions.xmlparser]]
 version = "0.13.6"
+criteria = "safe-to-deploy"
+
+[[exemptions.xxhash-rust]]
+version = "0.8.18"
 criteria = "safe-to-deploy"
 
 [[exemptions.yaml-rust2]]
