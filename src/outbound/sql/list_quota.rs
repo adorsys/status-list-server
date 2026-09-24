@@ -6,7 +6,7 @@
 //! [`enable`], which refuses while any issuer is over the cap or miscounted.
 //!
 //! Every publish reads the switch in its own transaction (see
-//! [`list_quota_enforced`]); [`enable`] and [`recount`] hold the switch row's
+//! `list_quota_enforced`); [`enable`] and [`recount`] hold the switch row's
 //! exclusive lock, so no publish that reads the quota as off can run alongside
 //! them. On SQLite, which has no row locks, the database lock serializes them.
 
