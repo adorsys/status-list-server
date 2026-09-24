@@ -41,6 +41,12 @@ pub enum Error {
     #[error("Unsupported PEM tag: {0}")]
     UnsupportedPemTag(String),
 
+    #[error("PEM does not contain a supported private key")]
+    MissingPemPrivateKey,
+
+    #[error("PEM contains multiple private key blocks")]
+    MultiplePemPrivateKeys,
+
     #[error("Unsupported signing algorithm: {0}")]
     UnsupportedAlgorithm(String),
 
@@ -110,9 +116,24 @@ impl SigningKey {
         }
     }
 
-    /// Load and automatically detect signing key from PEM string (supports PKCS#8, SEC1, or PKCS#1 format).
+    /// Load and automatically detect one signing key from PEM text.
+    ///
+    /// PKCS#8, SEC1, and PKCS#1 private-key blocks are supported. Auxiliary PEM blocks, such as
+    /// OpenSSL EC parameters, are ignored; multiple private-key blocks are rejected.
     pub fn from_pem(pem_str: &str) -> Result<Self, Error> {
-        let parsed = pem::parse(pem_str.as_bytes())?;
+        let mut private_keys = pem::parse_many(pem_str.as_bytes())?
+            .into_iter()
+            .filter(|pem| {
+                matches!(
+                    pem.tag(),
+                    "PRIVATE KEY" | "EC PRIVATE KEY" | "RSA PRIVATE KEY"
+                )
+            });
+        let parsed = private_keys.next().ok_or(Error::MissingPemPrivateKey)?;
+
+        if private_keys.next().is_some() {
+            return Err(Error::MultiplePemPrivateKeys);
+        }
 
         match parsed.tag() {
             "PRIVATE KEY" => Self::from_pkcs8_der(parsed.contents()),
@@ -382,8 +403,23 @@ mod tests {
         .unwrap();
         let sec1 = pem::encode(&pem::Pem::new("EC PRIVATE KEY", sec1_with_curve));
 
-        let key = SigningKey::from_pem(&sec1).unwrap();
+        let ec_parameters = pem::encode(&pem::Pem::new(
+            "EC PARAMETERS",
+            [0x06, 0x08, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07],
+        ));
+        let key = SigningKey::from_pem(&format!("{ec_parameters}\n{sec1}")).unwrap();
         assert_eq!(key.algorithm(), SigningAlgorithm::Es256);
+    }
+
+    #[test]
+    fn rejects_multiple_private_key_blocks() {
+        let key = SigningKey::generate(SigningAlgorithm::Es256).unwrap();
+        let pem = key.to_pkcs8_pem().unwrap();
+
+        assert!(matches!(
+            SigningKey::from_pem(&format!("{pem}\n{pem}")),
+            Err(Error::MultiplePemPrivateKeys)
+        ));
     }
 
     #[test]
