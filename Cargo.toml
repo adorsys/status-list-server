@@ -194,10 +194,6 @@ version = "1.7"
 features = ["tokio-comp", "tokio-rustls-comp", "connection-manager"]
 optional = true
 
-[dependencies.p256]
-version = "0.14"
-features = ["alloc", "ecdsa", "pem", "pkcs8"]
-
 [dev-dependencies]
 rcgen = { version = "0.14", features = ["pem"] }
 wiremock = "0.6"
