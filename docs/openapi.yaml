@@ -58,6 +58,7 @@ info:
     | `max_status_index` | 100000 | `400 Bad Request` (`index` too large) |
     | `max_statuses_per_request` | 5000 | `400 Bad Request` (too many entries) |
     | `max_serialized_list_size` | 1 MiB | `422 Unprocessable Entity` |
+    | `max_lists_per_issuer` | 1000 | `400 Bad Request` (`list_quota_exceeded`) |
 
     These bounds are reflected on the request schemas (`StatusEntry.index`
     `maximum`, `StatusUpdateRequest.statuses` `maxItems`) for the default
@@ -223,19 +224,67 @@ paths:
   /api/v1/aggregation:
     get:
       operationId: getAggregation
-      summary: Aggregate all status list URIs
+      summary: Aggregate status list URIs, one page at a time
       description: |
-        Returns the `sub` URIs of every status list hosted by this server,
-        issuer-agnostic. Intended for relying parties that need to enumerate
-        the set of status lists to poll. The response is a JSON object with a
-        single `status_lists` array of URI strings.
+        Returns the `sub` URIs of the status lists hosted by this server,
+        issuer-agnostic, one bounded page per request. Intended for relying
+        parties that need to enumerate the set of status lists to poll. The
+        response carries the draft-21 §9.3 `status_lists` array plus a
+        `next_cursor` for the following page.
+
+        **Paging.** Pages are ordered by `list_id` and hold at most `limit`
+        URIs (default and maximum 1000). While `next_cursor` is non-null, pass
+        it back as `cursor` to fetch the next page; the same next page is also
+        advertised in an RFC 8288 `Link: <…>; rel="next"` header. A full walk
+        returns exactly once every list that existed when the walk started
+        and still exists when its page is read; lists are never deleted through
+        the API, but an operator may delete them directly in the database.
+        A list published during a walk may be missed, and not only because it
+        was published late: `list_id` is chosen by the publisher and can be any
+        UUID, so a new list can sort before the current cursor.
+
+        **Clients that do not page.** A client that reads only `status_lists`
+        (all draft-21 §9.3 requires) sees the first page and nothing else. The
+        large default page only moves the point at which such a client silently
+        sees a partial set; it does not remove it. Follow `next_cursor` or
+        `Link` to see every list.
+
+        There is no total count: counting every list is itself an unbounded
+        read on a public endpoint.
 
         When `server.aggregation_uri` is configured, that URI is advertised
         inside issued status list tokens (draft-21 §4.2/§4.3).
       security: []
+      parameters:
+        - name: limit
+          in: query
+          required: false
+          description: Maximum number of URIs on this page.
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 1000
+            default: 1000
+        - name: cursor
+          in: query
+          required: false
+          description: |
+            Opaque `next_cursor` value from the previous page. Omit for the
+            first page. Clients must not construct or modify cursors.
+          schema:
+            type: string
       responses:
         "200":
-          description: Aggregation of all hosted status list URIs.
+          description: One page of hosted status list URIs.
+          headers:
+            Link:
+              schema:
+                type: string
+              description: |
+                Present only when another page follows, as
+                `<?limit=<limit>&cursor=<next_cursor>>; rel="next"` (RFC 8288).
+                The target is a relative reference resolved against this
+                request's URI.
           content:
             application/json:
               schema:
@@ -244,6 +293,18 @@ paths:
                 status_lists:
                   - "https://statuslist.example.com/api/v1/status-lists/477121aa-b598-419e-916f-1e74654ff38b"
                   - "https://statuslist.example.com/api/v1/status-lists/8e4ebb4a-dd79-498f-ac97-966f22884037"
+                next_cursor: "djE6OGU0ZWJiNGEtZGQ3OS00OThmLWFjOTctOTY2ZjIyODg0MDM3"
+        "400":
+          description: |
+            `limit` is outside 1–1000, `cursor` is not a value this endpoint
+            returned, or the query string could not be parsed.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              example:
+                error: "invalid_query"
+                error_description: "limit must be between 1 and 1000, got 5000"
         "429":
           $ref: "#/components/responses/TooManyRequests"
         "500":
@@ -269,6 +330,15 @@ paths:
         Creates a new status list for the given `list_id`. The issuer is
         derived from the validated JWT Bearer token. The request body defines
         the initial status entries for the list.
+
+        Each issuer may hold at most `limits.max_lists_per_issuer` status lists
+        (default 1000). A publish past that is refused with `400`
+        `list_quota_exceeded`; status lists cannot be deleted through the API,
+        so retrying never succeeds until an operator raises the quota. A
+        `list_id` that already exists is still refused with `409`, even when
+        the quota is full, so retrying a publish that did land is recognisable.
+        During the upgrade of an existing SQL deployment to a release with the
+        quota, an operator may run it unenforced until it is enabled.
       requestBody:
         required: true
         content:
@@ -713,20 +783,32 @@ components:
     AggregationResponse:
       type: object
       description: |
-        Response body of `GET /api/v1/aggregation`. Contains the `sub` URIs of
-        every status list hosted by the server, issuer-agnostic.
+        Response body of `GET /api/v1/aggregation`: one page of the `sub` URIs
+        of the status lists hosted by the server, issuer-agnostic. The
+        `status_lists` member is the draft-21 §9.3 Status List Aggregation
+        structure; `next_cursor` is an extension for paging.
       required:
         - status_lists
+        - next_cursor
       properties:
         status_lists:
           type: array
-          description: URIs of all hosted status lists.
+          description: URIs of the hosted status lists on this page.
+          maxItems: 1000
           items:
             type: string
             format: uri
           example:
             - "https://statuslist.example.com/api/v1/status-lists/477121aa-b598-419e-916f-1e74654ff38b"
             - "https://statuslist.example.com/api/v1/status-lists/8e4ebb4a-dd79-498f-ac97-966f22884037"
+        next_cursor:
+          type:
+            - string
+            - "null"
+          description: |
+            Opaque cursor for the next page, to pass back as `cursor`. Always
+            present; `null` on the last page.
+          example: "djE6OGU0ZWJiNGEtZGQ3OS00OThmLWFjOTctOTY2ZjIyODg0MDM3"
 
     ErrorResponse:
       type: object
@@ -754,6 +836,7 @@ components:
             - invalid_public_jwk
             - too_many_statuses
             - index_too_large
+            - list_quota_exceeded
             # 401 — emitted by the authentication middleware
             - invalid_auth_header
             - invalid_token
@@ -802,6 +885,12 @@ components:
           * a status `index` exceeds `limits.max_status_index`
             (default 100000) — `Status index <n> exceeds the configured
             maximum`.
+
+        `list_quota_exceeded` (publish only) is different in kind: the request
+        was well-formed, and is refused because the issuer already holds
+        `limits.max_lists_per_issuer` status lists (default 1000). No change
+        to the request and no retry will succeed; the quota must be raised by
+        an operator. It carries no `Retry-After`.
       content:
         application/json:
           schema:

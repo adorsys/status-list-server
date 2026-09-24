@@ -30,6 +30,24 @@ pub(crate) fn authenticated_issuer(issuer: impl Into<String>) -> AuthenticatedIs
     AuthenticatedIssuer::new(crate::domain::models::credential::Issuer(issuer.into()))
 }
 
+/// In-memory SQLite with foreign keys on and the first `steps` migrations
+/// applied (`None` applies all). One connection: each is its own database.
+#[cfg(feature = "sqlite")]
+pub(crate) async fn sqlite_test_db(steps: Option<u32>) -> Arc<sea_orm::DatabaseConnection> {
+    use sea_orm_migration::MigratorTrait;
+
+    let mut opt = sea_orm::ConnectOptions::new("sqlite::memory:");
+    opt.max_connections(1);
+    opt.map_sqlx_sqlite_opts(|o| o.foreign_keys(true));
+    let db = sea_orm::Database::connect(opt)
+        .await
+        .expect("Failed to connect to SQLite");
+    crate::outbound::sql::Migrator::up(&db, steps)
+        .await
+        .expect("Failed to run migrations on SQLite");
+    Arc::new(db)
+}
+
 #[cfg(feature = "acme")]
 #[allow(dead_code)]
 pub(crate) struct MockStorage {
@@ -96,6 +114,7 @@ pub(crate) async fn test_app_state_without_snapshots() -> AppState {
         max_status_index: 100_000,
         max_statuses_per_request: 5_000,
         max_serialized_list_size: 1_048_576,
+        max_lists_per_issuer: 1_000,
         snapshot_retention_secs: 0,
         management_auth: crate::server::ManagementAuthConfig::default(),
         readiness: crate::server::health::Readiness::new(Vec::new()),
@@ -219,6 +238,7 @@ async fn build_test_app_state(
         max_status_index: 100_000,
         max_statuses_per_request: 5_000,
         max_serialized_list_size,
+        max_lists_per_issuer: 1_000,
         snapshot_retention_secs: 7776000,
         management_auth: crate::server::ManagementAuthConfig::default(),
         readiness: Readiness::default(),
