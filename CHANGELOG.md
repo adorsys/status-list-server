@@ -5,25 +5,6 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
-### Breaking
-
-- `PUT /status-lists/{list_id}/statuses` now rejects a payload containing
-  duplicate `index` values with `400 duplicate_index` instead of accepting the
-  last duplicate as the winner. Clients that previously sent overlapping
-  indices in a single publish must deduplicate their payloads.
-- Unchanged updates no longer write a history snapshot. The write-on-every-
-  update "heartbeat" that kept history continuously populated is gone: history
-  is now appended only when a list actually changes.
-
-### Fixed
-
-- `PATCH /status-lists/{list_id}/statuses` no longer writes when the payload
-  leaves the list unchanged: an empty `statuses` array and a payload that
-  re-sets every affected index to its current value are now successful no-ops
-  that neither advance the list version nor insert a redundant history
-  snapshot. A payload containing duplicate `index` values is rejected with
-  `400 duplicate_index` on `PATCH`.
-
 ### Changed
 
 - Bump the Helm chart to `0.5.0` for render-time validation changes.
