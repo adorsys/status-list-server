@@ -150,8 +150,6 @@ statuslist:
     # Status-list record cache TTL in seconds. "0" disables this cache.
     APP_CACHE__TTL: "300"
     APP_CACHE__MAX_CAPACITY: "1000"
-    APP_STATUS_LIST__TOKEN_EXP_SECS: "900"
-    APP_STATUS_LIST__TOKEN_TTL_SECS: "300"
     APP_RATE_LIMIT__STRICT_BURST_SIZE: "10"
     APP_RATE_LIMIT__STRICT_PERIOD_SECS: "60"
     APP_RATE_LIMIT__PERMISSIVE_BURST_SIZE: "100"
@@ -288,6 +286,12 @@ statuslist:
   # published images do not watch files yet, so paths propagate but are loaded at startup.
   watcher:
     pollIntervalSecs: "30"
+  # Status-list token lifetime (secs). Injected as
+  # APP_STATUS_LIST__TOKEN_EXP_SECS / TOKEN_TTL_SECS. Both must be >= 1 and
+  # ttl strictly less than exp; the application rejects these at startup.
+  statusList:
+    tokenExpSecs: "900"
+    tokenTtlSecs: "300"
   livenessProbe:
     # HTTP GET on /health/live (port http). Override the whole block to customize.
     httpGet:

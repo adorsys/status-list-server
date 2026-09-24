@@ -1002,6 +1002,40 @@ pub struct StatusListConfig {
     pub snapshot_retention_secs: u64,
 }
 
+impl StatusListConfig {
+    /// Rejects token-lifetime values the spec forbids.
+    fn validate(&self) -> Result<(), ConfigError> {
+        validate_positive_secs("APP_STATUS_LIST__TOKEN_TTL_SECS", self.token_ttl_secs)?;
+        validate_positive_secs("APP_STATUS_LIST__TOKEN_EXP_SECS", self.token_exp_secs)?;
+        if self.token_ttl_secs >= self.token_exp_secs {
+            return Err(ConfigError::Message(format!(
+                "APP_STATUS_LIST__TOKEN_TTL_SECS ({}) must be less than \
+                 APP_STATUS_LIST__TOKEN_EXP_SECS ({}); a ttl >= exp leaves no usable token lifetime",
+                self.token_ttl_secs, self.token_exp_secs
+            )));
+        }
+        Ok(())
+    }
+}
+
+/// `secs` must be a positive number that fits in `i64`; `0` breaks the spec
+/// (ttl MUST be positive) and values above `i64::MAX` wrap negative in `issue_jwt`.
+fn validate_positive_secs(env_var: &str, secs: u64) -> Result<(), ConfigError> {
+    if secs == 0 {
+        return Err(ConfigError::Message(format!(
+            "{env_var} must be a positive number (greater than 0)"
+        )));
+    }
+    if secs > i64::MAX as u64 {
+        return Err(ConfigError::Message(format!(
+            "{env_var} ({secs}) exceeds the maximum supported value (i64::MAX = {}); \
+             larger values wrap around to a negative lifetime when cast to i64",
+            i64::MAX
+        )));
+    }
+    Ok(())
+}
+
 impl Config {
     /// Loads configuration from built-in defaults, then overrides them with
     /// values sourced from the process environment.
@@ -1042,6 +1076,7 @@ impl Config {
             validate_database_query(query)?;
         }
         config.management_auth.validate()?;
+        config.status_list.validate()?;
         Ok(config)
     }
 }
@@ -1760,6 +1795,59 @@ mod tests {
                 "status-list-server-management".to_string(),
                 "internal-management".to_string()
             ]
+        );
+    }
+
+    #[test]
+    fn test_status_list_validations() {
+        // The valid default (900 / 300) loads without error.
+        let defaults = Config::load_from_overrides(&[]).expect("default config should load");
+        assert_eq!(defaults.status_list.token_exp_secs, 900);
+        assert_eq!(defaults.status_list.token_ttl_secs, 300);
+
+        // token_exp_secs == 0 -> every token is already expired at issue time.
+        let zero_exp = Config::load_from_overrides(&[("status_list.token_exp_secs", "0")]);
+        assert!(
+            zero_exp.is_err(),
+            "zero token_exp_secs should fail config loading"
+        );
+
+        // token_ttl_secs == 0 -> breaks the spec MUST that ttl be positive.
+        let zero_ttl = Config::load_from_overrides(&[("status_list.token_ttl_secs", "0")]);
+        assert!(
+            zero_ttl.is_err(),
+            "zero token_ttl_secs should fail config loading"
+        );
+
+        // Values above i64::MAX wrap around to a negative lifetime when cast as i64.
+        let above_i64_max_exp =
+            Config::load_from_overrides(&[("status_list.token_exp_secs", "9223372036854775808")]);
+        assert!(
+            above_i64_max_exp.is_err(),
+            "token_exp_secs above i64::MAX should fail config loading"
+        );
+
+        let above_i64_max_ttl =
+            Config::load_from_overrides(&[("status_list.token_ttl_secs", "9223372036854775808")]);
+        assert!(
+            above_i64_max_ttl.is_err(),
+            "token_ttl_secs above i64::MAX should fail config loading"
+        );
+
+        // token_ttl_secs >= token_exp_secs leaves no usable token lifetime.
+        let ttl_equals_exp = Config::load_from_overrides(&[("status_list.token_ttl_secs", "900")]);
+        assert!(
+            ttl_equals_exp.is_err(),
+            "token_ttl_secs == token_exp_secs should fail config loading"
+        );
+
+        let ttl_greater_than_exp = Config::load_from_overrides(&[
+            ("status_list.token_exp_secs", "300"),
+            ("status_list.token_ttl_secs", "600"),
+        ]);
+        assert!(
+            ttl_greater_than_exp.is_err(),
+            "token_ttl_secs > token_exp_secs should fail config loading"
         );
     }
 

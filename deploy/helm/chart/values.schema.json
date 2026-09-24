@@ -346,6 +346,25 @@
             }
           }
         },
+        "statusList": {
+          "type": "object",
+          "title": "Status-list token lifetime configuration",
+          "description": "Status-list token lifetime configuration. When set, APP_STATUS_LIST__TOKEN_EXP_SECS and APP_STATUS_LIST__TOKEN_TTL_SECS are injected. The spec (draft-ietf-oauth-status-list §5.1/§5.2) requires ttl to be positive; both values must be >= 1 and ttl must be strictly less than exp.",
+          "properties": {
+            "tokenExpSecs": {
+              "type": ["string", "integer"],
+              "minimum": 1,
+              "title": "Token exp (seconds)",
+              "description": "Seconds added to iat to derive the token exp claim. Must be a positive number (>= 1). Injected as APP_STATUS_LIST__TOKEN_EXP_SECS."
+            },
+            "tokenTtlSecs": {
+              "type": ["string", "integer"],
+              "minimum": 1,
+              "title": "Token ttl (seconds)",
+              "description": "Cache-Control max-age / token ttl claim in seconds. The spec requires ttl to be a positive number (>= 1) and strictly less than exp. Injected as APP_STATUS_LIST__TOKEN_TTL_SECS."
+            }
+          }
+        },
         "livenessProbe": {
           "type": "object",
           "title": "Liveness probe",

@@ -63,14 +63,18 @@ statuslist:
     # Status-list record cache TTL in seconds. "0" disables this cache.
     APP_CACHE__TTL: "120"
     APP_CACHE__MAX_CAPACITY: "500"
-    APP_STATUS_LIST__TOKEN_EXP_SECS: "900"
-    APP_STATUS_LIST__TOKEN_TTL_SECS: "300"
     APP_RATE_LIMIT__STRICT_BURST_SIZE: "10"
     APP_RATE_LIMIT__STRICT_PERIOD_SECS: "60"
     APP_RATE_LIMIT__PERMISSIVE_BURST_SIZE: "100"
     APP_RATE_LIMIT__PERMISSIVE_PERIOD_SECS: "60"
     APP_LIMITS__MAX_BODY_SIZE_BYTES: "2097152"
     APP_TELEMETRY__ENVIRONMENT: "development"
+
+  # Status-list token lifetime (secs); injected as
+  # APP_STATUS_LIST__TOKEN_EXP_SECS / TOKEN_TTL_SECS.
+  statusList:
+    tokenExpSecs: "900"
+    tokenTtlSecs: "300"
 
   resources:
     requests:
