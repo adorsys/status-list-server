@@ -1683,7 +1683,8 @@ mod tests {
             match &first_body {
                 None => first_body = Some(body.to_vec()),
                 Some(first) => assert_eq!(
-                    first, &body.to_vec(),
+                    first,
+                    &body.to_vec(),
                     "all concurrent responses must share the same signed bytes"
                 ),
             }

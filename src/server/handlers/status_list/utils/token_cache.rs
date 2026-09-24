@@ -110,9 +110,7 @@ impl TokenBytesCache {
             .time_to_live(Duration::from_secs(ttl_secs))
             .max_capacity(max_capacity)
             .build();
-        let inflight = MokaSyncCache::builder()
-            .max_capacity(max_capacity)
-            .build();
+        let inflight = MokaSyncCache::builder().max_capacity(max_capacity).build();
         Self { inner, inflight }
     }
 
@@ -580,7 +578,17 @@ mod tests {
         .expect("metrics setup");
 
         let cache = TokenBytesCache::new(300, 100);
-        let key = key("l", "h", "s", 1000, "jwt", TokenEncoding::Identity, "", 300, 900);
+        let key = key(
+            "l",
+            "h",
+            "s",
+            1000,
+            "jwt",
+            TokenEncoding::Identity,
+            "",
+            300,
+            900,
+        );
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
