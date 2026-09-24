@@ -173,7 +173,8 @@ pub(crate) fn token_bytes_cache_key(
 /// self-invalidating on rotation.
 pub(crate) fn signer_fingerprint(material: &SigningMaterial) -> String {
     let mut hasher = Sha256::new();
-    hasher.update(material.signing_key_pem.as_bytes());
+    hasher.update(material.signing_key.algorithm().to_string().as_bytes());
+    hasher.update(material.signing_key.public_key_bytes());
     if let Some(chain) = &material.certificate_chain {
         for part in chain {
             hasher.update(part.as_bytes());
@@ -311,18 +312,22 @@ mod tests {
 
     #[test]
     fn signer_fingerprint_changes_when_material_changes() {
-        let material_a = SigningMaterial {
-            certificate_chain: Some(vec!["cert-a".to_string()]),
-            signing_key_pem: "key-a".to_string(),
-        };
-        let material_b = SigningMaterial {
-            certificate_chain: Some(vec!["cert-a".to_string()]),
-            signing_key_pem: "key-b".to_string(),
-        };
-        let material_c = SigningMaterial {
-            certificate_chain: None,
-            signing_key_pem: "key-a".to_string(),
-        };
+        let key_a: Arc<dyn crate::domain::ports::TokenSigner> = Arc::new(
+            crate::utils::crypto::SigningKey::generate(
+                crate::domain::models::token::SigningAlgorithm::Es256,
+            )
+            .unwrap(),
+        );
+        let key_b: Arc<dyn crate::domain::ports::TokenSigner> = Arc::new(
+            crate::utils::crypto::SigningKey::generate(
+                crate::domain::models::token::SigningAlgorithm::Es256,
+            )
+            .unwrap(),
+        );
+
+        let material_a = SigningMaterial::new(Some(vec!["cert-a".to_string()]), Arc::clone(&key_a));
+        let material_b = SigningMaterial::new(Some(vec!["cert-a".to_string()]), Arc::clone(&key_b));
+        let material_c = SigningMaterial::new(None, Arc::clone(&key_a));
 
         let fp_a = signer_fingerprint(&material_a);
         let fp_b = signer_fingerprint(&material_b);

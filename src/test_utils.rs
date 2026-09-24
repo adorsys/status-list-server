@@ -147,10 +147,14 @@ impl crate::domain::ports::CertificateProvider for TestCertProvider {
         crate::domain::ports::SigningMaterial,
         crate::domain::models::status_list::StatusListError,
     > {
-        Ok(crate::domain::ports::SigningMaterial {
-            certificate_chain: Some(self.cert_chain.clone()),
-            signing_key_pem: self.key_pem.clone(),
-        })
+        let signing_key =
+            crate::utils::crypto::SigningKey::from_pem(&self.key_pem).map_err(|err| {
+                crate::domain::models::status_list::StatusListError::Backend(Box::new(err))
+            })?;
+        Ok(crate::domain::ports::SigningMaterial::new(
+            Some(self.cert_chain.clone()),
+            Arc::new(signing_key),
+        ))
     }
 }
 
@@ -194,10 +198,14 @@ impl crate::domain::ports::CertificateProvider for RotatingCertProvider {
         crate::domain::models::status_list::StatusListError,
     > {
         let m = self.inner.lock().expect("cert provider mutex");
-        Ok(crate::domain::ports::SigningMaterial {
-            certificate_chain: Some(m.cert_chain.clone()),
-            signing_key_pem: m.key_pem.clone(),
-        })
+        let signing_key =
+            crate::utils::crypto::SigningKey::from_pem(&m.key_pem).map_err(|err| {
+                crate::domain::models::status_list::StatusListError::Backend(Box::new(err))
+            })?;
+        Ok(crate::domain::ports::SigningMaterial::new(
+            Some(m.cert_chain.clone()),
+            Arc::new(signing_key),
+        ))
     }
 }
 

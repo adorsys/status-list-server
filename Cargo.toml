@@ -81,8 +81,11 @@ governor = "0.10"
 moka = { version = "0.12", features = ["future"] }
 
 # Cryptography and Security
-rand = "0.10"
+aws-lc-rs = "1"
 pem = "3"
+pkcs8 = { version = "0.11", features = ["std"] }
+sec1 = { version = "0.8", features = ["alloc"] }
+der = { version = "0.8", features = ["alloc"] }
 coset = "0.4"
 instant-acme = { version = "0.8", optional = true }
 rustls = "0.23"
@@ -90,7 +93,7 @@ webpki-roots = "1"
 rustls-pki-types = "1.15"
 secrecy = { version = "0.10", features = ["serde"] }
 rcgen = { version = "0.14", features = ["pem"], optional = true }
-jsonwebtoken = { version = "10.4", features = ["aws_lc_rs"] }
+jsonwebtoken = { version = "11.1", features = ["aws_lc_rs"] }
 sha2 = "0.10"
 hex = "0.4"
 
@@ -183,10 +186,6 @@ optional = true
 [dependencies.azure_core]
 version = "1"
 optional = true
-
-[dependencies.p256]
-version = "0.14"
-features = ["alloc", "ecdsa", "pem", "pkcs8"]
 
 [dev-dependencies]
 rcgen = { version = "0.14", features = ["pem"] }

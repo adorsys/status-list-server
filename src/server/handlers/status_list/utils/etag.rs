@@ -1,4 +1,4 @@
-use crate::domain::models::status_list::{StatusListRecord, StatusListSnapshot};
+use crate::domain::models::status_list::{StatusListError, StatusListRecord, StatusListSnapshot};
 use sha2::{Digest, Sha256};
 
 /// Strong ETag for the *live* representation, derived from the actual signed
@@ -29,17 +29,21 @@ pub(crate) fn content_hash(record: &StatusListRecord) -> String {
     hex::encode(hasher.finalize())
 }
 
-pub(crate) fn generate_historical_etag(snapshot: &StatusListSnapshot) -> String {
+pub(crate) fn generate_historical_etag(
+    snapshot: &StatusListSnapshot,
+) -> Result<String, StatusListError> {
     let mut hasher = Sha256::new();
+    let (bits, lst) = snapshot.status_list.token_lst()?;
 
     hasher.update(snapshot.snapshot_id.as_bytes());
     hasher.update(snapshot.iat.to_string().as_bytes());
     hasher.update(snapshot.exp.to_string().as_bytes());
-    hasher.update(snapshot.status_list.lst.as_bytes());
+    hasher.update(bits.to_string().as_bytes());
+    hasher.update(lst.as_bytes());
     hasher.update(snapshot.issuer.0.as_bytes());
 
     let hash = hasher.finalize();
-    hex::encode(hash)
+    Ok(hex::encode(hash))
 }
 
 #[cfg(test)]
