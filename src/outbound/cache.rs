@@ -879,7 +879,7 @@ mod redis_tests {
         .expect("create valid status list");
         service_a
             .status_list_repo()
-            .insert(old.clone())
+            .insert(old.clone(), 1_000)
             .await
             .expect("insert backing record");
 
@@ -970,7 +970,7 @@ mod redis_tests {
         let saved = record("service-list");
         service
             .status_list_repo()
-            .insert(saved.clone())
+            .insert(saved.clone(), 1_000)
             .await
             .expect("insert backing record");
 
