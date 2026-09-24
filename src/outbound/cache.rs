@@ -19,8 +19,6 @@ const MISS_METRIC: &str = "status_list_cache_misses";
 const ERROR_METRIC: &str = "status_list_cache_errors";
 #[cfg(feature = "redis")]
 const CACHE_SCHEMA_VERSION: &str = "v1";
-#[cfg(feature = "redis")]
-const REDIS_MARKER_TTL_SECS: u64 = 60;
 
 #[cfg(feature = "redis")]
 static REDIS_PUT_SCRIPT: std::sync::LazyLock<redis::Script> = std::sync::LazyLock::new(|| {
@@ -45,12 +43,15 @@ static REDIS_PUT_SCRIPT: std::sync::LazyLock<redis::Script> = std::sync::LazyLoc
 });
 
 #[cfg(feature = "redis")]
+// Committed OCC version markers intentionally have no expiry: a delayed stale read-fill
+// must never become cacheable after the record entry expires.
+
 static REDIS_INVALIDATE_SCRIPT: std::sync::LazyLock<redis::Script> =
     std::sync::LazyLock::new(|| {
         redis::Script::new(
             r#"
         redis.call('DEL', KEYS[1])
-        redis.call('SET', KEYS[2], ARGV[1], 'EX', tonumber(ARGV[2]))
+        redis.call('SET', KEYS[2], ARGV[1])
         return 1
         "#,
         )
@@ -388,10 +389,14 @@ impl StatusListCache for RedisStatusListCache {
     }
 
     async fn invalidate(&self, list_id: &str) -> Result<(), StatusListError> {
-        self.invalidate_after_update(list_id, crate::domain::service::current_unix_timestamp())
+        let mut connection = self.connection("invalidate").await?;
+        let _: i32 = redis::cmd("DEL")
+            .arg(self.key(list_id))
+            .query_async(&mut connection)
             .await
+            .map_err(|error| redis_operation_error("invalidate", error))?;
+        Ok(())
     }
-
     async fn invalidate_after_update(
         &self,
         list_id: &str,
@@ -402,7 +407,6 @@ impl StatusListCache for RedisStatusListCache {
             .key(self.key(list_id))
             .key(self.marker_key(list_id))
             .arg(updated_at)
-            .arg(REDIS_MARKER_TTL_SECS.min(self.ttl_secs))
             .invoke_async(&mut connection)
             .await
             .map_err(|error| redis_operation_error("invalidate", error))?;
@@ -658,7 +662,7 @@ mod redis_tests {
     }
 
     #[tokio::test]
-    async fn redis_cache_invalidation_marker_rejects_stale_fill() {
+    async fn redis_cache_durable_marker_rejects_delayed_stale_fill() {
         let _redis_test_lock = REDIS_TEST_LOCK.lock().await;
         let redis_url = redis_url().await;
         let cache = redis_cache(&redis_url, 60);
@@ -673,6 +677,13 @@ mod redis_tests {
             .invalidate_after_update(&list_id, updated_at + 1)
             .await
             .expect("write invalidation marker");
+        let mut connection = cache.connection("test").await.expect("connect to Redis");
+        let marker_ttl: i64 = redis::cmd("TTL")
+            .arg(cache.marker_key(&list_id))
+            .query_async(&mut connection)
+            .await
+            .expect("read invalidation marker TTL");
+        assert_eq!(marker_ttl, -1, "version marker must outlive delayed fills");
         cache
             .put(record_at(&list_id, updated_at))
             .await
