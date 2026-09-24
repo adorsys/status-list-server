@@ -6,7 +6,7 @@ use tracing::info;
 
 use super::{CertError, CertManager, CertificateData};
 use crate::outbound::cert::validate_signing_material;
-use crate::utils::keygen::Keypair;
+use crate::utils::crypto::SigningKey;
 
 /// Provisioning strategy used by [`CertManager`].
 #[async_trait]
@@ -60,12 +60,12 @@ pub enum MaterialSource {
 /// Source for directly provisioned certificate material.
 #[derive(Debug, Clone)]
 pub enum StoreProvisioningSource {
-    /// Load PEM-encoded certificate chain and PKCS#8 signing key from local files.
+    /// Load PEM-encoded certificate chain and PEM signing key from local files.
     Filesystem {
         certificate_path: PathBuf,
         signing_key_path: PathBuf,
     },
-    /// Load PEM-encoded certificate chain and PKCS#8 signing key from the configured material backend.
+    /// Load PEM-encoded certificate chain and PEM signing key from the configured material backend.
     Storage {
         certificate_key: String,
         signing_key_key: String,
@@ -113,25 +113,35 @@ impl StoreProvisioningStrategy {
         source: &MaterialSource,
         manager: &CertManager,
         label: &str,
-    ) -> Result<Vec<u8>, CertError> {
+    ) -> Result<String, CertError> {
         match source {
-            MaterialSource::Filesystem(path) => fs::read(path).await.map_err(|e| {
-                CertError::Validation(format!(
-                    "failed to read {label} file '{}': {e}",
-                    path.display()
-                ))
-            }),
+            MaterialSource::Filesystem(path) => {
+                let material = fs::read_to_string(path).await.map_err(|e| {
+                    if e.kind() == std::io::ErrorKind::InvalidData {
+                        return CertError::Validation(format!(
+                            "{label} material must be PEM text; file '{}' is not valid UTF-8 (DER is unsupported; convert it to PEM)",
+                            path.display()
+                        ));
+                    }
+
+                    CertError::Validation(format!(
+                        "failed to read {label} PEM file '{}': {e}",
+                        path.display()
+                    ))
+                })?;
+                validate_pem_material(material, label)
+            }
             MaterialSource::Storage(key) => {
                 let material_storage = manager.crypto_storage()?;
                 let secret = material_storage.load_secret(key).await?.ok_or_else(|| {
                     CertError::Validation(format!("store {label} key '{key}' was not found"))
                 })?;
-                decode_text_material(secret, label)
+                validate_pem_material(secret, label)
             }
         }
     }
 
-    async fn load_material(&self, manager: &CertManager) -> Result<(Vec<u8>, Vec<u8>), CertError> {
+    async fn load_material(&self, manager: &CertManager) -> Result<(String, String), CertError> {
         let certificate =
             Self::load_source(&self.certificate_source, manager, "certificate").await?;
         let signing_key =
@@ -156,9 +166,9 @@ impl CertProvisioningStrategy for StoreProvisioningStrategy {
 
     async fn provision(&self, manager: &CertManager) -> Result<CertificateData, CertError> {
         let (certificate, signing_key) = self.load_material(manager).await?;
-        let signing_key_pem = normalize_pkcs8_key(signing_key)?;
+        let signing_key_pem = normalize_signing_key(signing_key)?;
 
-        let certificate_data = manager.certificate_data_from_der_or_pem(certificate)?;
+        let certificate_data = manager.certificate_data_from_pem(certificate)?;
         validate_signing_material(&certificate_data.certificate, &signing_key_pem)
             .map_err(|err| CertError::Validation(err.to_string()))?;
         let current_certificate = manager.certificate().await?;
@@ -180,52 +190,36 @@ impl CertProvisioningStrategy for StoreProvisioningStrategy {
     }
 }
 
-fn decode_text_material(value: String, label: &str) -> Result<Vec<u8>, CertError> {
-    if value.contains("-----BEGIN ") {
-        return Ok(value.into_bytes());
-    }
-
-    let compact: String = value.chars().filter(|c| !c.is_whitespace()).collect();
-    if compact.is_empty() {
+fn validate_pem_material(value: String, label: &str) -> Result<String, CertError> {
+    if value.trim().is_empty() {
         return Err(CertError::Validation(format!("{label} material is empty")));
     }
 
-    decode_base64_text(&compact).ok_or_else(|| {
-        CertError::Validation(format!(
-            "{label} material must be PEM text or base64/base64url-encoded DER"
-        ))
-    })
-}
-
-fn decode_base64_text(value: &str) -> Option<Vec<u8>> {
-    use base64::prelude::{
-        BASE64_STANDARD, BASE64_STANDARD_NO_PAD, BASE64_URL_SAFE, BASE64_URL_SAFE_NO_PAD,
-        Engine as _,
-    };
-
-    BASE64_STANDARD
-        .decode(value)
-        .or_else(|_| BASE64_STANDARD_NO_PAD.decode(value))
-        .or_else(|_| BASE64_URL_SAFE.decode(value))
-        .or_else(|_| BASE64_URL_SAFE_NO_PAD.decode(value))
-        .ok()
-}
-
-fn normalize_pkcs8_key(signing_key: Vec<u8>) -> Result<String, CertError> {
-    if is_pem_private_key(&signing_key) {
-        let pem = String::from_utf8(signing_key).map_err(|e| {
-            CertError::Validation(format!("signing key PEM is not valid UTF-8: {e}"))
-        })?;
-        Keypair::from_pkcs8_pem(&pem)?;
-        return Ok(pem);
+    if !value.contains("-----BEGIN ") {
+        return Err(CertError::Validation(format!(
+            "{label} material must be PEM text"
+        )));
     }
 
-    let keypair = Keypair::from_pkcs8_der(&signing_key)?;
-    keypair.to_pkcs8_pem().map_err(Into::into)
+    Ok(value)
 }
 
-fn is_pem_private_key(bytes: &[u8]) -> bool {
-    bytes
-        .windows(b"-----BEGIN ".len())
-        .any(|window| window == b"-----BEGIN ")
+fn normalize_signing_key(signing_key_pem: String) -> Result<String, CertError> {
+    SigningKey::from_pem(&signing_key_pem)?;
+    Ok(signing_key_pem)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rejects_non_pem_material() {
+        let error = validate_pem_material("MIIEvQIBADANBgkqhkiG9w0BAQEFAASC".into(), "signing key")
+            .expect_err("base64 DER is outside the supported input contract");
+
+        assert!(
+            matches!(error, CertError::Validation(message) if message == "signing key material must be PEM text")
+        );
+    }
 }
