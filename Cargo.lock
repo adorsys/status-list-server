@@ -1652,9 +1652,9 @@ dependencies = [
 
 [[package]]
 name = "der"
-version = "0.8.1"
+version = "0.8.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a69dedd701da44b0536442edf09c81a64b0ab97a7a4a5e3d1971f00027cbc63d"
+checksum = "a878c850e9e421b20262e9b41f9c860e4785fa07541c266b62ff9d1ef998a80a"
 dependencies = [
  "const-oid 0.10.2",
  "pem-rfc7468 1.0.0",
@@ -1816,7 +1816,7 @@ version = "0.17.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c0681a4fc24c767085329728d8dfba959af91228aa4610cca4f8ce317ba46ae0"
 dependencies = [
- "der 0.8.1",
+ "der 0.8.2",
  "digest 0.11.3",
  "elliptic-curve",
  "rfc6979",
@@ -2238,7 +2238,7 @@ dependencies = [
  "hex",
  "hmac 0.13.0",
  "http 1.5.0",
- "jsonwebtoken",
+ "jsonwebtoken 10.4.0",
  "reqwest",
  "rustc_version",
  "rustls",
@@ -3163,6 +3163,22 @@ dependencies = [
  "base64 0.22.1",
  "getrandom 0.2.17",
  "js-sys",
+ "serde",
+ "serde_json",
+ "signature 2.2.0",
+ "zeroize",
+]
+
+[[package]]
+name = "jsonwebtoken"
+version = "11.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e75fe14a82d81e5f5af639997db37d8b96045938a7ac6ab18cdbe1c7467e05e1"
+dependencies = [
+ "aws-lc-rs",
+ "base64 0.22.1",
+ "getrandom 0.2.17",
+ "js-sys",
  "pem",
  "serde",
  "serde_json",
@@ -4049,7 +4065,7 @@ version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "451913da69c775a56034ea8d9003d27ee8948e12443eae7c038ba100a4f21cb7"
 dependencies = [
- "der 0.8.1",
+ "der 0.8.2",
  "spki 0.8.0",
 ]
 
@@ -5119,7 +5135,7 @@ checksum = "d56d437c2f19203ce5f7122e507831de96f3d2d4d3be5af44a0b0a09d8a80e4d"
 dependencies = [
  "base16ct",
  "ctutils",
- "der 0.8.1",
+ "der 0.8.2",
  "hybrid-array",
  "subtle",
  "zeroize",
@@ -5517,7 +5533,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1d9efca8738c78ee9484207732f728b1ef517bbb1833d6fc0879ca898a522f6f"
 dependencies = [
  "base64ct",
- "der 0.8.1",
+ "der 0.8.2",
 ]
 
 [[package]]
@@ -5748,6 +5764,7 @@ dependencies = [
  "arc-swap",
  "async-trait",
  "aws-config",
+ "aws-lc-rs",
  "aws-sdk-route53",
  "aws-sdk-secretsmanager",
  "axum",
@@ -5759,6 +5776,7 @@ dependencies = [
  "color-eyre",
  "config",
  "coset",
+ "der 0.8.2",
  "dotenvy",
  "flate2",
  "google-cloud-auth",
@@ -5769,7 +5787,7 @@ dependencies = [
  "hyper-rustls",
  "hyper-util",
  "instant-acme",
- "jsonwebtoken",
+ "jsonwebtoken 11.1.0",
  "metrics-process",
  "moka",
  "notify",
@@ -5780,9 +5798,9 @@ dependencies = [
  "opentelemetry_sdk",
  "p256",
  "pem",
+ "pkcs8 0.11.0",
  "prometheus",
  "public-suffix",
- "rand 0.10.2",
  "rcgen",
  "redis",
  "reqwest",
@@ -5790,6 +5808,7 @@ dependencies = [
  "rustls-pki-types",
  "sea-orm",
  "sea-orm-migration",
+ "sec1",
  "secrecy",
  "serde",
  "serde-aux",
