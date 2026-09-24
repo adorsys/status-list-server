@@ -796,10 +796,15 @@ mod redis_tests {
             async fn signing_material(
                 &self,
             ) -> Result<crate::domain::ports::SigningMaterial, StatusListError> {
-                Ok(crate::domain::ports::SigningMaterial {
-                    certificate_chain: None,
-                    signing_key_pem: String::new(),
-                })
+                Ok(crate::domain::ports::SigningMaterial::new(
+                    None,
+                    std::sync::Arc::new(
+                        crate::utils::crypto::SigningKey::generate(
+                            crate::domain::models::token::SigningAlgorithm::Es256,
+                        )
+                        .expect("generate test signing key"),
+                    ),
+                ))
             }
         }
 
@@ -891,16 +896,20 @@ mod redis_tests {
         };
 
         struct TestCertProvider;
-
         #[async_trait]
         impl CertificateProvider for TestCertProvider {
             async fn signing_material(
                 &self,
             ) -> Result<crate::domain::ports::SigningMaterial, StatusListError> {
-                Ok(crate::domain::ports::SigningMaterial {
-                    certificate_chain: None,
-                    signing_key_pem: String::new(),
-                })
+                Ok(crate::domain::ports::SigningMaterial::new(
+                    None,
+                    std::sync::Arc::new(
+                        crate::utils::crypto::SigningKey::generate(
+                            crate::domain::models::token::SigningAlgorithm::Es256,
+                        )
+                        .expect("generate test signing key"),
+                    ),
+                ))
             }
         }
 
