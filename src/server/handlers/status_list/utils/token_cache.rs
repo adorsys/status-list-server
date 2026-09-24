@@ -1,12 +1,15 @@
+use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
 
 use moka::future::Cache as MokaCache;
+use moka::sync::Cache as MokaSyncCache;
 use opentelemetry::{
     metrics::Counter,
     {KeyValue, global},
 };
 use sha2::{Digest, Sha256};
+use tokio::sync::Mutex;
 
 use crate::domain::ports::SigningMaterial;
 
@@ -81,6 +84,12 @@ pub(crate) struct CachedToken {
 #[derive(Clone, Debug)]
 pub struct TokenBytesCache {
     inner: MokaCache<String, CachedToken>,
+    /// Per-key in-flight locks that serialize the expensive re-sign path so that
+    /// concurrent misses for the same key build the token only once (single
+    /// flight). Steady-state hits take the lock-free fast path in
+    /// [`TokenBytesCache::get_or_build`], so this only ever contends during a
+    /// genuine miss.
+    inflight: MokaSyncCache<String, Arc<Mutex<()>>>,
 }
 
 impl TokenBytesCache {
@@ -88,18 +97,101 @@ impl TokenBytesCache {
     ///
     /// `ttl_secs` bounds how long an entry may be retained by moka in addition
     /// to its window-based validity; `max_capacity` bounds memory for large
-    /// lists. Both are floor-clamped to 1 so moka's builder never misbehaves.
+    /// lists. A `ttl_secs` of `0` preserves the "cache disabled" semantics used
+    /// elsewhere in this codebase (`MokaStatusListCache`): entries expire
+    /// immediately and every request re-signs. Callers should set `ttl_secs` to
+    /// at least `token_exp_secs` so an entry is not evicted in the middle of a
+    /// validity window (a shorter value only means more re-signs).
     pub(crate) fn new(ttl_secs: u64, max_capacity: u64) -> Self {
+        if ttl_secs == 0 {
+            tracing::info!("Signed-token bytes cache disabled (TTL=0)");
+        }
         let inner = MokaCache::builder()
-            .time_to_live(Duration::from_secs(ttl_secs.max(1)))
-            .max_capacity(max_capacity.max(1))
+            .time_to_live(Duration::from_secs(ttl_secs))
+            .max_capacity(max_capacity)
             .build();
-        Self { inner }
+        let inflight = MokaSyncCache::builder()
+            .max_capacity(max_capacity)
+            .build();
+        Self { inner, inflight }
+    }
+
+    /// Return cached bytes for `key`, only for an entry whose anchored window
+    /// `[window_start, window_start + exp_secs)` still contains `now`. Past that
+    /// bound the bytes are expired and must be re-signed.
+    ///
+    /// Unlike a plain lookup, a miss is not simply reported: `init` is invoked
+    /// to build the token, deduplicated through a per-key in-flight lock so at
+    /// most one builder runs per `key` under concurrency (the #564 "single sign
+    /// per window per replica" guarantee). Callers that are not interested in
+    /// building should use [`TokenBytesCache::get`].
+    ///
+    /// Returns `Ok(None)` when the window is already closed (the bytes are not
+    /// cached and `init` is *not* called); the caller must re-sign with a fresh
+    /// window. Returns `Ok(Some(_))` on a hit or a successful build, and
+    /// `Err(e)` if `init` fails (nothing is cached on error).
+    pub(crate) async fn get_or_build<F, Fut, E>(
+        &self,
+        key: &str,
+        window_start: i64,
+        exp_secs: i64,
+        now: i64,
+        init: F,
+    ) -> Result<Option<CachedToken>, E>
+    where
+        F: FnOnce() -> Fut,
+        Fut: Future<Output = Result<CachedToken, E>>,
+    {
+        // Guard the window bound explicitly so a closed window never serves
+        // bytes beyond their `exp` even before moka's own TTL fires.
+        if now < window_start || now >= window_start.saturating_add(exp_secs) {
+            token_cache_metrics()
+                .misses
+                .add(1, &[KeyValue::new("cache", "token_bytes")]);
+            return Ok(None);
+        }
+
+        let metrics = token_cache_metrics();
+
+        // Lock-free fast path: the value is already cached.
+        if let Some(cached) = self.inner.get(key).await {
+            metrics
+                .hits
+                .add(1, &[KeyValue::new("cache", "token_bytes")]);
+            return Ok(Some(cached));
+        }
+
+        // Slow path: serialize re-signs for this key so concurrent misses build
+        // exactly once. moka's sync cache bounds the number of live lock entries.
+        let lock = self
+            .inflight
+            .get_with(key.to_string(), || Arc::new(Mutex::new(())));
+        let _guard = lock.lock().await;
+
+        // Double-checked lookup: another caller may have built the token while
+        // we waited for the lock.
+        if let Some(cached) = self.inner.get(key).await {
+            metrics
+                .hits
+                .add(1, &[KeyValue::new("cache", "token_bytes")]);
+            return Ok(Some(cached));
+        }
+
+        // We are the elected builder.
+        metrics
+            .misses
+            .add(1, &[KeyValue::new("cache", "token_bytes")]);
+        let value = init().await?;
+        self.inner.insert(key.to_string(), value.clone()).await;
+        Ok(Some(value))
     }
 
     /// Look up cached bytes for `key`, only returning a hit for an entry whose
     /// anchored window `[window_start, window_start + exp_secs)` still contains
     /// `now`. Past that bound the bytes are expired and must be re-signed.
+    ///
+    /// Test helper: the serving path uses [`TokenBytesCache::get_or_build`].
+    #[cfg(test)]
     pub(crate) async fn get(
         &self,
         key: &str,
@@ -107,8 +199,6 @@ impl TokenBytesCache {
         exp_secs: i64,
         now: i64,
     ) -> Option<CachedToken> {
-        // Guard the window bound explicitly so a closed window never serves
-        // bytes beyond their `exp` even before moka's own TTL fires.
         if now < window_start || now >= window_start.saturating_add(exp_secs) {
             token_cache_metrics()
                 .misses
@@ -129,6 +219,7 @@ impl TokenBytesCache {
         cached
     }
 
+    #[cfg(test)]
     pub(crate) async fn insert(&self, key: String, value: CachedToken) {
         self.inner.insert(key, value).await;
     }
@@ -153,13 +244,14 @@ pub(crate) fn token_bytes_cache_key(
     encoding: TokenEncoding,
     aggregation_uri: &str,
     token_ttl_secs: u64,
+    token_exp_secs: u64,
 ) -> String {
     let gzip = match encoding {
         TokenEncoding::Identity => 0,
         TokenEncoding::Gzip => 1,
     };
     format!(
-        "{list_id}\u{1f}{content_hash}\u{1f}{signer_fingerprint}\u{1f}{window_start}\u{1f}{format}\u{1f}{gzip}\u{1f}{aggregation_uri}\u{1f}{token_ttl_secs}"
+        "{list_id}\u{1f}{content_hash}\u{1f}{signer_fingerprint}\u{1f}{window_start}\u{1f}{format}\u{1f}{gzip}\u{1f}{aggregation_uri}\u{1f}{token_ttl_secs}\u{1f}{token_exp_secs}"
     )
 }
 
@@ -204,6 +296,7 @@ mod tests {
             TokenEncoding::Identity,
             "",
             300,
+            900,
         );
         cache
             .insert(
@@ -217,7 +310,7 @@ mod tests {
         (cache, key)
     }
 
-    /// Test helper filling the aggregation/ttl key dimensions with defaults.
+    /// Test helper filling the aggregation/ttl/exp key dimensions with defaults.
     #[allow(clippy::too_many_arguments)]
     fn key(
         list_id: &str,
@@ -228,6 +321,7 @@ mod tests {
         encoding: TokenEncoding,
         aggregation_uri: &str,
         ttl: u64,
+        exp: u64,
     ) -> String {
         token_bytes_cache_key(
             list_id,
@@ -238,6 +332,7 @@ mod tests {
             encoding,
             aggregation_uri,
             ttl,
+            exp,
         )
     }
 
@@ -256,10 +351,82 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn get_or_build_single_flights_concurrent_misses() {
+        // #564 criterion #2: at most one signing operation per (list, window,
+        // format) per replica. N concurrent misses for the same key must run the
+        // builder exactly once and share the resulting bytes.
+        let cache = TokenBytesCache::new(300, 100);
+        let key_str = key(
+            "list",
+            "hash",
+            "signer",
+            1000,
+            "jwt",
+            TokenEncoding::Identity,
+            "",
+            300,
+            900,
+        );
+
+        let builds = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut handles = Vec::new();
+        for _ in 0..16 {
+            let cache = cache.clone();
+            let key_str = key_str.clone();
+            let builds = builds.clone();
+            handles.push(tokio::spawn(async move {
+                let out = cache
+                    .get_or_build(&key_str, 1000, 900, 1400, || {
+                        let builds = builds.clone();
+                        async move {
+                            builds.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                            Ok::<_, std::convert::Infallible>(CachedToken {
+                                bytes: Arc::new(vec![7u8, 8, 9]),
+                                encoding: None,
+                            })
+                        }
+                    })
+                    .await
+                    .expect("infallible");
+                out.expect("window open, so Some")
+            }));
+        }
+        for h in handles {
+            let val = h.await.expect("task");
+            assert_eq!(*val.bytes, vec![7u8, 8, 9]);
+        }
+        assert_eq!(
+            builds.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "concurrent misses must run the builder exactly once (single flight)"
+        );
+    }
+
+    #[tokio::test]
     async fn key_dimensions_are_distinct() {
         let b = &("list", "hash", "signer", 1000i64, "jwt");
-        let base = key(b.0, b.1, b.2, b.3, b.4, TokenEncoding::Identity, "", 300);
-        let other_window = key(b.0, b.1, b.2, 1001, b.4, TokenEncoding::Identity, "", 300);
+        let base = key(
+            b.0,
+            b.1,
+            b.2,
+            b.3,
+            b.4,
+            TokenEncoding::Identity,
+            "",
+            300,
+            900,
+        );
+        let other_window = key(
+            b.0,
+            b.1,
+            b.2,
+            1001,
+            b.4,
+            TokenEncoding::Identity,
+            "",
+            300,
+            900,
+        );
         let other_signer = key(
             b.0,
             b.1,
@@ -269,9 +436,30 @@ mod tests {
             TokenEncoding::Identity,
             "",
             300,
+            900,
         );
-        let other_format = key(b.0, b.1, b.2, 1000, "cwt", TokenEncoding::Identity, "", 300);
-        let other_gzip = key(b.0, b.1, b.2, 1000, "jwt", TokenEncoding::Gzip, "", 300);
+        let other_format = key(
+            b.0,
+            b.1,
+            b.2,
+            1000,
+            "cwt",
+            TokenEncoding::Identity,
+            "",
+            300,
+            900,
+        );
+        let other_gzip = key(
+            b.0,
+            b.1,
+            b.2,
+            1000,
+            "jwt",
+            TokenEncoding::Gzip,
+            "",
+            300,
+            900,
+        );
         let other_list = key(
             "list2",
             b.1,
@@ -281,6 +469,7 @@ mod tests {
             TokenEncoding::Identity,
             "",
             300,
+            900,
         );
         let other_aggregation = key(
             b.0,
@@ -291,8 +480,30 @@ mod tests {
             TokenEncoding::Identity,
             "https://agg",
             300,
+            900,
         );
-        let other_ttl = key(b.0, b.1, b.2, 1000, "jwt", TokenEncoding::Identity, "", 600);
+        let other_ttl = key(
+            b.0,
+            b.1,
+            b.2,
+            1000,
+            "jwt",
+            TokenEncoding::Identity,
+            "",
+            600,
+            900,
+        );
+        let other_exp = key(
+            b.0,
+            b.1,
+            b.2,
+            1000,
+            "jwt",
+            TokenEncoding::Identity,
+            "",
+            300,
+            1200,
+        );
 
         assert_ne!(base, other_window);
         assert_ne!(base, other_signer);
@@ -304,9 +515,20 @@ mod tests {
             "aggregation_uri must be in the key"
         );
         assert_ne!(base, other_ttl, "token_ttl_secs must be in the key");
+        assert_ne!(base, other_exp, "token_exp_secs must be in the key");
         assert_eq!(
             base,
-            key(b.0, b.1, b.2, 1000, b.4, TokenEncoding::Identity, "", 300)
+            key(
+                b.0,
+                b.1,
+                b.2,
+                1000,
+                b.4,
+                TokenEncoding::Identity,
+                "",
+                300,
+                900
+            )
         );
     }
 
@@ -358,7 +580,7 @@ mod tests {
         .expect("metrics setup");
 
         let cache = TokenBytesCache::new(300, 100);
-        let key = key("l", "h", "s", 1000, "jwt", TokenEncoding::Identity, "", 300);
+        let key = key("l", "h", "s", 1000, "jwt", TokenEncoding::Identity, "", 300, 900);
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()

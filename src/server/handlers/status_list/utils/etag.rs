@@ -43,7 +43,7 @@ pub(crate) fn generate_historical_etag(
     hasher.update(snapshot.issuer.0.as_bytes());
 
     let hash = hasher.finalize();
-    Ok(hex::encode(hash))
+    Ok(format!("\"{}\"", hex::encode(hash)))
 }
 
 #[cfg(test)]

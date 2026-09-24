@@ -78,7 +78,7 @@ tower-http = { version = "0.7", features = ["catch-panic", "cors", "limit", "tra
 tower_governor = "0.8"
 governor = "0.10"
 
-moka = { version = "0.12", features = ["future"] }
+moka = { version = "0.12", features = ["future", "sync"] }
 
 # Cryptography and Security
 aws-lc-rs = "1"

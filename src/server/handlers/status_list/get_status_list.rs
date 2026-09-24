@@ -240,41 +240,53 @@ async fn get_or_build_live_token(
         encoding,
         aggregation_uri,
         state.token_ttl_secs,
+        state.token_exp_secs,
     );
     let exp_secs = state.token_exp_secs as i64;
-
-    if let Some(cached) = state
-        .token_bytes_cache
-        .get(&key, window_start, exp_secs, now)
-        .await
-    {
-        let etag = generate_token_etag(&cached.bytes);
-        return Ok((cached.bytes, cached.encoding, etag));
-    }
-
     let validity_window = (window_start, window_start.saturating_add(exp_secs));
-    let (bytes, enc) = build_status_list_token(
-        state,
-        accept_type,
-        status_record,
-        Some(validity_window),
-        client_accepts_gzip,
-        signing_material,
-    )
-    .await?;
-    let bytes = Arc::new(bytes);
-    let etag = generate_token_etag(&bytes);
-    state
+
+    let cached = state
         .token_bytes_cache
-        .insert(
-            key,
-            CachedToken {
-                bytes: Arc::clone(&bytes),
-                encoding: enc,
-            },
-        )
-        .await;
-    Ok((bytes, enc, etag))
+        .get_or_build(&key, window_start, exp_secs, now, || {
+            let signing_material = signing_material.clone();
+            async move {
+                let (bytes, enc) = build_status_list_token(
+                    state,
+                    accept_type,
+                    status_record,
+                    Some(validity_window),
+                    client_accepts_gzip,
+                    signing_material,
+                )
+                .await?;
+                Ok::<CachedToken, ApiError>(CachedToken {
+                    bytes: Arc::new(bytes),
+                    encoding: enc,
+                })
+            }
+        })
+        .await?;
+
+    let (bytes, encoding) = match cached {
+        Some(cached) => (cached.bytes, cached.encoding),
+        // Degenerate `token_exp_secs == 0`: the window is always closed (a minted
+        // token is born expired), so the cache never serves and never builds. We
+        // must still return a body for a plain GET, so re-sign here regardless.
+        None => {
+            let (bytes, enc) = build_status_list_token(
+                state,
+                accept_type,
+                status_record,
+                Some(validity_window),
+                client_accepts_gzip,
+                signing_material,
+            )
+            .await?;
+            (Arc::new(bytes), enc)
+        }
+    };
+    let etag = generate_token_etag(&bytes);
+    Ok((bytes, encoding, etag))
 }
 
 /// Build a `200 OK` status-list token response from already-signed bytes.
@@ -1600,6 +1612,86 @@ mod tests {
         assert_eq!(
             body1, body2,
             "same-window 200s must reuse the cached signed bytes"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn test_concurrent_misses_in_fresh_window_single_sign() {
+        // #564 criterion #2: at most one signing operation per (list, window,
+        // format) per replica. Fire many concurrent GETs into a fresh window so
+        // they all miss; the single-flight cache must run the builder once. We
+        // assert every response carries the *same* strong ETag: with randomized
+        // ECDSA signing, two signs would produce different bytes and hence
+        // different ETags, so a single shared ETag across concurrent responses
+        // proves a single sign.
+        let token_id = uuid::Uuid::new_v4().to_string();
+        let app_state = test_app_state(None).await;
+        let now0 = 1_000_000_000;
+
+        publish_status(
+            State(app_state.clone()),
+            authenticated_issuer("issuer1"),
+            Path(token_id.clone()),
+            Json(StatusesRequest { statuses: vec![] }),
+        )
+        .await
+        .unwrap();
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::ACCEPT,
+            ACCEPT_STATUS_LISTS_HEADER_JWT.parse().unwrap(),
+        );
+
+        let app_state = Arc::new(app_state);
+        let mut handles = Vec::new();
+        for _ in 0..24 {
+            let app_state = app_state.clone();
+            let headers = headers.clone();
+            let token_id = token_id.clone();
+            handles.push(tokio::spawn(async move {
+                let res = get_status_list_at(
+                    State((*app_state).clone()),
+                    token_id,
+                    Ok(Query(StatusListQuery { time: None })),
+                    headers,
+                    now0,
+                )
+                .await
+                .unwrap()
+                .into_response();
+                assert_eq!(res.status(), StatusCode::OK);
+                let etag = res
+                    .headers()
+                    .get(header::ETAG)
+                    .unwrap()
+                    .to_str()
+                    .unwrap()
+                    .to_string();
+                let body = axum::body::to_bytes(res.into_body(), usize::MAX)
+                    .await
+                    .unwrap();
+                (etag, body)
+            }));
+        }
+
+        let mut etags = std::collections::HashSet::new();
+        let mut first_body: Option<Vec<u8>> = None;
+        for h in handles {
+            let (etag, body) = h.await.expect("concurrent request task");
+            etags.insert(etag);
+            match &first_body {
+                None => first_body = Some(body.to_vec()),
+                Some(first) => assert_eq!(
+                    first, &body.to_vec(),
+                    "all concurrent responses must share the same signed bytes"
+                ),
+            }
+        }
+        assert_eq!(
+            etags.len(),
+            1,
+            "concurrent misses in a fresh window must yield a single sign / ETag"
         );
     }
 

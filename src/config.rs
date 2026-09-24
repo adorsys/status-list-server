@@ -83,6 +83,7 @@ pub struct Config {
     pub gcp_secret_manager: GcpSecretManagerConfig,
     pub azure_keyvault: AzureKeyVaultConfig,
     pub cache: CacheConfig,
+    pub token_bytes_cache: TokenBytesCacheConfig,
     pub status_list: StatusListConfig,
     pub management_auth: ManagementAuthConfig,
     pub rate_limit: RateLimitConfig,
@@ -981,6 +982,26 @@ pub struct CacheConfig {
     pub max_capacity: u64,
 }
 
+/// Configuration for the per-replica cache of fully signed status-list token
+/// bytes (#564).
+///
+/// This is deliberately separate from [`CacheConfig`] (which governs the cached
+/// *status list items*): a token cache entry must outlive the status-list item
+/// cache so that an unchanged list reuses a single sign for the whole token
+/// window, and its `ttl` semantics are different (see below).
+#[derive(Debug, Clone, Deserialize)]
+pub struct TokenBytesCacheConfig {
+    /// Time-to-live for cached signed token bytes in seconds.
+    ///
+    /// Should be at least `status_list.token_exp_secs` so an entry is not
+    /// evicted in the middle of a validity window; a shorter value only means
+    /// more re-signs. Setting this to `0` disables caching entirely.
+    pub ttl: u64,
+    /// Upper bound on the number of cached signed-token entries, bounding
+    /// memory for large lists.
+    pub max_capacity: u64,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct StatusListConfig {
     pub token_exp_secs: u64,
@@ -1127,6 +1148,8 @@ fn base_builder() -> Result<ConfigBuilder<DefaultState>, ConfigError> {
         .set_default("azure_keyvault.secrets_cache_ttl", 300)?
         .set_default("cache.ttl", 5 * 60)?
         .set_default("cache.max_capacity", 100)?
+        .set_default("token_bytes_cache.ttl", 900)?
+        .set_default("token_bytes_cache.max_capacity", 100)?
         .set_default("status_list.token_exp_secs", 900)?
         .set_default("status_list.token_ttl_secs", 300)?
         .set_default("status_list.snapshot_retention_secs", 7776000)?
@@ -1198,6 +1221,8 @@ mod tests {
         assert_eq!(config.gcp_secret_manager.secrets_cache_ttl, 300);
         assert_eq!(config.azure_keyvault.vault_url, None);
         assert_eq!(config.azure_keyvault.secrets_cache_ttl, 300);
+        assert_eq!(config.token_bytes_cache.ttl, 900);
+        assert_eq!(config.token_bytes_cache.max_capacity, 100);
         assert_eq!(config.status_list.token_exp_secs, 900);
         assert_eq!(config.status_list.token_ttl_secs, 300);
         assert_eq!(config.management_auth.leeway_secs, 60);
@@ -1292,6 +1317,8 @@ mod tests {
             ("aws.region", "us-west-2"),
             ("cache.ttl", "600"),
             ("cache.max_capacity", "2000"),
+            ("token_bytes_cache.ttl", "1800"),
+            ("token_bytes_cache.max_capacity", "500"),
             ("status_list.token_exp_secs", "1800"),
             ("status_list.token_ttl_secs", "600"),
             ("management_auth.leeway_secs", "30"),
@@ -1340,6 +1367,8 @@ mod tests {
         assert_eq!(overridden.aws.region, "us-west-2");
         assert_eq!(overridden.cache.ttl, 600);
         assert_eq!(overridden.cache.max_capacity, 2000);
+        assert_eq!(overridden.token_bytes_cache.ttl, 1800);
+        assert_eq!(overridden.token_bytes_cache.max_capacity, 500);
         assert_eq!(overridden.status_list.token_exp_secs, 1800);
         assert_eq!(overridden.status_list.token_ttl_secs, 600);
         assert_eq!(overridden.management_auth.leeway_secs, 30);

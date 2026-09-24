@@ -584,8 +584,8 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
         snapshot_retention_secs: config.status_list.snapshot_retention_secs,
         management_auth: crate::server::ManagementAuthConfig::from(&config.management_auth),
         token_bytes_cache: crate::server::handlers::status_list::TokenBytesCache::new(
-            config.cache.ttl,
-            config.cache.max_capacity,
+            config.token_bytes_cache.ttl,
+            config.token_bytes_cache.max_capacity,
         ),
         readiness,
     };
