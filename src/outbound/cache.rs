@@ -49,7 +49,12 @@ static REDIS_INVALIDATE_SCRIPT: std::sync::LazyLock<redis::Script> =
         redis::Script::new(
             r#"
         redis.call('DEL', KEYS[1])
-        redis.call('SET', KEYS[2], ARGV[1])
+
+        local existing_marker = tonumber(redis.call('GET', KEYS[2]))
+        local committed_updated_at = tonumber(ARGV[1])
+        if not existing_marker or committed_updated_at > existing_marker then
+            redis.call('SET', KEYS[2], ARGV[1])
+        end
         return 1
         "#,
         )
@@ -582,7 +587,7 @@ mod redis_tests {
     async fn redis_container() -> &'static ContainerAsync<GenericImage> {
         REDIS_CONTAINER
             .get_or_init(|| async {
-                GenericImage::new("redis", "8.4-alpine")
+                GenericImage::new("redis", "8.10-alpine")
                     .with_exposed_port(6379.tcp())
                     .with_wait_for(WaitFor::message_on_stdout("Ready to accept connections"))
                     .start()
@@ -660,10 +665,10 @@ mod redis_tests {
     }
 
     #[tokio::test]
-    async fn redis_cache_durable_marker_rejects_delayed_stale_fill() {
+    async fn redis_cache_durable_marker_survives_entry_expiry_and_rejects_delayed_stale_fill() {
         let _redis_test_lock = REDIS_TEST_LOCK.lock().await;
         let redis_url = redis_url().await;
-        let cache = redis_cache(&redis_url, 60);
+        let cache = redis_cache(&redis_url, 1);
         let list_id = format!("stale-{}", uuid::Uuid::new_v4());
 
         let updated_at = crate::domain::service::current_unix_timestamp();
@@ -682,6 +687,11 @@ mod redis_tests {
             .await
             .expect("read invalidation marker TTL");
         assert_eq!(marker_ttl, -1, "version marker must outlive delayed fills");
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        assert_eq!(
+            cache.get(&list_id).await.expect("cache entry expires"),
+            None
+        );
         cache
             .put(record_at(&list_id, updated_at))
             .await
@@ -689,6 +699,40 @@ mod redis_tests {
 
         assert_eq!(
             cache.get(&list_id).await.expect("stale fill rejected"),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn redis_cache_reverse_order_invalidation_keeps_newest_version_fence() {
+        let _redis_test_lock = REDIS_TEST_LOCK.lock().await;
+        let redis_url = redis_url().await;
+        let cache = redis_cache(&redis_url, 60);
+        let list_id = format!("reverse-{}", uuid::Uuid::new_v4());
+        let now = crate::domain::service::current_unix_timestamp();
+
+        cache
+            .invalidate_after_update(&list_id, now + 2)
+            .await
+            .expect("write newer invalidation marker");
+        cache
+            .invalidate_after_update(&list_id, now + 1)
+            .await
+            .expect("write delayed older invalidation marker");
+        cache
+            .put(record_at(&list_id, now + 1))
+            .await
+            .expect("older delayed fill is ignored, not an error");
+
+        let mut connection = cache.connection("test").await.expect("connect to Redis");
+        let marker: String = redis::cmd("GET")
+            .arg(cache.marker_key(&list_id))
+            .query_async(&mut connection)
+            .await
+            .expect("read invalidation marker");
+        assert_eq!(marker, (now + 2).to_string());
+        assert_eq!(
+            cache.get(&list_id).await.expect("delayed fill rejected"),
             None
         );
     }
