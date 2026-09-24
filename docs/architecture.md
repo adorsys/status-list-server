@@ -199,10 +199,13 @@ publishes: each publish increments `credentials.list_count` with a guarded
 `UPDATE` in the same transaction as its `INSERT`, so a publish that fails
 gives its slot back.
 
-On the SQL backends the quota ships off, because pods of a release that
-predates it publish without counting. Once no such pod is left, the operator
-runs `status-list-server list-quota recount` and then `list-quota enable`
-(see [troubleshooting](troubleshooting.md#enabling-the-quota)). `enable`
+A pod that finds no migration applied (a fresh install) enforces the quota as
+soon as it has migrated. On a database a release without the quota has served,
+that release's pods publish without counting, so the quota starts off and a pod
+refuses to start while it is off, unless `APP_LIMITS__LIST_QUOTA_TRANSITION` is
+set for that rollout. Once no such pod is left, the operator runs
+`status-list-server list-quota recount` and then `list-quota enable` (see
+[troubleshooting](troubleshooting.md#upgrading-to-the-list-quota)). `enable`
 refuses, naming the issuers, while any issuer has more lists than the cap or a
 `list_count` that differs from its lists, so once enabled no issuer is over the
 cap. Each publish reads the `list_quota` switch in its transaction, and while

@@ -252,7 +252,6 @@ fn quota_switch(enforced: bool) -> BTreeMap<String, Value> {
     BTreeMap::from([("enforced".to_string(), Value::from(enforced))])
 }
 
-/// The publish's read of the `list_quota` switch, with `lock` appended.
 fn read_quota_switch(lock: &str) -> Statement {
     Statement::from_sql_and_values(
         DatabaseBackend::Postgres,
@@ -261,9 +260,6 @@ fn read_quota_switch(lock: &str) -> Statement {
     )
 }
 
-/// Before `list-quota enable`, a publish re-reads the switch under a shared
-/// lock, so it cannot run alongside an `enable` or `recount`, and takes its
-/// slot with the guard lifted, so the counter is still maintained.
 #[tokio::test]
 async fn test_unenforced_quota_rereads_switch_under_shared_lock_and_still_counts() {
     let entity = fixtures::record("list-off", "issuer-off", "initial", "sub-off", 0);
@@ -1522,7 +1518,7 @@ async fn test_postgres_list_uris_walk_survives_concurrent_publishes() {
 }
 
 #[cfg(any(feature = "sqlite", feature = "mysql", feature = "postgres-tests"))]
-fn list_count_migration_index() -> usize {
+pub(super) fn list_count_migration_index() -> usize {
     use sea_orm_migration::MigratorTrait;
 
     crate::outbound::sql::Migrator::migrations()

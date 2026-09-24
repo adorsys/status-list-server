@@ -337,8 +337,8 @@ paths:
         so retrying never succeeds until an operator raises the quota. A
         `list_id` that already exists is still refused with `409`, even when
         the quota is full, so retrying a publish that did land is recognisable.
-        On the SQL backends the quota applies once an operator has enabled it
-        after deployment; until then no publish is refused for it.
+        During the upgrade of an existing SQL deployment to a release with the
+        quota, an operator may run it unenforced until it is enabled.
       requestBody:
         required: true
         content:

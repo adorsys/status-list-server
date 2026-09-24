@@ -13,8 +13,6 @@ use color_eyre::eyre::Result as EyeResult;
 #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mysql"))]
 use sea_orm::{ConnectOptions, DbErr};
 #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mysql"))]
-use sea_orm_migration::MigratorTrait;
-#[cfg(any(feature = "sqlite", feature = "postgres", feature = "mysql"))]
 use secrecy::ExposeSecret;
 use std::sync::Arc;
 use std::time::Duration;
@@ -73,8 +71,10 @@ use crate::outbound::gcp_secret::GcpSecretManagerClient;
 use crate::outbound::memory::{MemoryCredentials, MemoryStatusListSnapshotRepo, MemoryStatusLists};
 #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mysql"))]
 use crate::outbound::sql::{
-    Migrator, SeaOrmStore, SqlCredentialRepo, SqlStatusListRepo, SqlStatusListSnapshotRepo,
-    SwappableDatabaseConnection, verify_binlog_format, verify_innodb_engines,
+    SeaOrmStore, SqlCredentialRepo, SqlStatusListRepo, SqlStatusListSnapshotRepo,
+    SwappableDatabaseConnection,
+    list_quota::{self, StartupState},
+    run_migrations, verify_binlog_format, verify_innodb_engines,
 };
 #[cfg(feature = "vault")]
 use crate::outbound::vault::VaultClient;
@@ -305,13 +305,9 @@ pub const LIST_QUOTA_USAGE: &str =
            has more lists than the cap or a stale count
   disable  stop enforcing the quota";
 
-/// Runs `status-list-server list-quota <action>` against the configured
-/// database and returns what to print. Does not run migrations: the action
-/// applies to a database a pod of this release has already migrated.
+/// Runs `list-quota <action>` and returns what to print. Does not migrate.
 #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mysql"))]
 pub async fn run_list_quota_command(config: &AppConfig, action: &str) -> EyeResult<String> {
-    use crate::outbound::sql::list_quota;
-
     if !matches!(action, "status" | "recount" | "enable" | "disable") {
         return Err(color_eyre::eyre::eyre!("{LIST_QUOTA_USAGE}"));
     }
@@ -427,7 +423,7 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
         _db_backend => {
             let db = connect_database_pool(config).await?;
 
-            Migrator::up(&db, None)
+            let fresh = run_migrations(&db)
                 .await
                 .wrap_err("Failed to run database migrations")?;
 
@@ -443,15 +439,27 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
                      above for the fix.",
             )?;
 
-            if !crate::outbound::sql::list_quota::is_enforced(&db)
-                .await
-                .wrap_err("Failed to read whether the list quota is enforced")?
+            match list_quota::on_startup(
+                &db,
+                fresh,
+                config.limits.list_quota_transition,
+                config.limits.max_lists_per_issuer,
+            )
+            .await
+            .wrap_err("Startup aborted: the list quota is not enforced")?
             {
-                tracing::warn!(
-                    "limits.max_lists_per_issuer is not enforced. Once every pod runs this \
-                     release, run `status-list-server list-quota recount`, then \
-                     `status-list-server list-quota enable`."
-                );
+                StartupState::Enforced => {}
+                StartupState::EnforcedWithTransitionSet => tracing::warn!(
+                    "limits.list_quota_transition is set, but the list quota is already \
+                     enforced; remove APP_LIMITS__LIST_QUOTA_TRANSITION."
+                ),
+                StartupState::Transition => tracing::error!(
+                    "limits.max_lists_per_issuer is NOT enforced: limits.list_quota_transition \
+                     is set. Once no pod of the previous release is left, run \
+                     `status-list-server list-quota recount`, then \
+                     `status-list-server list-quota enable`, then remove \
+                     APP_LIMITS__LIST_QUOTA_TRANSITION."
+                ),
             }
 
             let db_handle = Arc::new(SwappableDatabaseConnection::new(Arc::new(db)));

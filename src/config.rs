@@ -115,6 +115,8 @@ pub struct LimitsConfig {
     pub max_serialized_list_size: usize,
     /// Maximum status lists one issuer may publish.
     pub max_lists_per_issuer: u64,
+    /// Lets pods start with the quota off while upgrading from a release without it.
+    pub list_quota_transition: bool,
 }
 
 impl LimitsConfig {
@@ -1157,6 +1159,7 @@ fn base_builder() -> Result<ConfigBuilder<DefaultState>, ConfigError> {
         .set_default("limits.max_statuses_per_request", 5_000)?
         .set_default("limits.max_serialized_list_size", 1_048_576)?
         .set_default("limits.max_lists_per_issuer", 1_000)?
+        .set_default("limits.list_quota_transition", false)?
         .set_default("telemetry.environment", telemetry_environment)?
         .set_default("telemetry.otlp_endpoint", "http://localhost:4317")?
         .set_default("telemetry.sampler_ratio", 1.0)?
@@ -1257,6 +1260,7 @@ mod tests {
         assert_eq!(config.limits.max_statuses_per_request, 5_000);
         assert_eq!(config.limits.max_serialized_list_size, 1_048_576);
         assert_eq!(config.limits.max_lists_per_issuer, 1_000);
+        assert!(!config.limits.list_quota_transition);
 
         assert_eq!(config.database.pool.max_connections, 5);
         assert_eq!(config.database.pool.min_connections, 1);
@@ -1326,6 +1330,7 @@ mod tests {
             ("limits.max_statuses_per_request", "256"),
             ("limits.max_serialized_list_size", "32768"),
             ("limits.max_lists_per_issuer", "25"),
+            ("limits.list_quota_transition", "true"),
             ("APP_DATABASE__POOL__MAX_CONNECTIONS", "20"),
             ("APP_DATABASE__POOL__MIN_CONNECTIONS", "2"),
             ("APP_DATABASE__POOL__ACQUIRE_TIMEOUT_SECS", "3"),
@@ -1392,6 +1397,7 @@ mod tests {
         assert_eq!(overridden.limits.max_statuses_per_request, 256);
         assert_eq!(overridden.limits.max_serialized_list_size, 32_768);
         assert_eq!(overridden.limits.max_lists_per_issuer, 25);
+        assert!(overridden.limits.list_quota_transition);
         assert_eq!(overridden.database.pool.max_connections, 20);
         assert_eq!(overridden.database.pool.min_connections, 2);
         assert_eq!(overridden.database.pool.acquire_timeout_secs, 3);

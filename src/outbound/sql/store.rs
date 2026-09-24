@@ -132,8 +132,7 @@ pub(super) async fn begin_read_committed(
 /// Takes one of the issuer's quota slots with a guarded
 /// `UPDATE … SET list_count = list_count + 1 WHERE list_count < max`. The row
 /// lock makes concurrent publishes re-check the guard, so the quota is exact.
-/// Until `list-quota enable` has run, the guard is lifted but the counter is
-/// still maintained (see [`list_quota_enforced`]).
+/// While the quota is off, the guard is lifted but the count still kept.
 ///
 /// Must run before the `status_lists` `INSERT`: that insert's FK check takes a
 /// shared lock on this `credentials` row, and two publishes upgrading it would

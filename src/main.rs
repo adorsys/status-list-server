@@ -28,7 +28,6 @@ async fn main() -> Result<()> {
     // Load configuration first so telemetry can read its settings
     let config = AppConfig::load()?;
 
-    // `status-list-server list-quota <action>`: an operator step, not the server.
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.first().map(String::as_str) == Some("list-quota") {
         let action = args.get(1).map(String::as_str).unwrap_or_default();

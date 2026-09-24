@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, HashMap, btree_map::Entry},
     ops::Bound,
     sync::Arc,
 };
@@ -16,8 +16,7 @@ use crate::domain::ports::{
     CredentialRepo, StatusListCache, StatusListRepo, StatusListSnapshotRepo,
 };
 
-/// Lists ordered by `list_id`, so `list_uris` reads one page with a range scan,
-/// plus each issuer's list count, so the quota check does not scan every list.
+/// Ordered by `list_id` for range-scanned pages, with per-issuer counts for the quota.
 #[derive(Default)]
 struct ListStore {
     by_id: BTreeMap<String, StatusListRecord>,
@@ -26,42 +25,24 @@ struct ListStore {
 
 impl ListStore {
     /// A taken `list_id` wins over a full quota, as in the SQL adapter.
-    fn check_insert(
-        &self,
-        record: &StatusListRecord,
+    fn try_insert(
+        &mut self,
+        record: StatusListRecord,
         max_lists_per_issuer: u64,
     ) -> Result<(), StatusListError> {
-        if self.by_id.contains_key(&record.list_id) {
+        let Entry::Vacant(slot) = self.by_id.entry(record.list_id.clone()) else {
             return Err(StatusListError::AlreadyExists);
-        }
-        let count = self.per_issuer.get(&record.issuer.0).copied().unwrap_or(0);
-        if count >= max_lists_per_issuer {
+        };
+        let count = self.per_issuer.entry(record.issuer.0.clone()).or_default();
+        if *count >= max_lists_per_issuer {
             return Err(StatusListError::QuotaExceeded {
-                count,
+                count: *count,
                 max: max_lists_per_issuer,
             });
         }
+        *count += 1;
+        slot.insert(record);
         Ok(())
-    }
-
-    /// Callers run `check_insert` first, under the same write lock.
-    fn insert(&mut self, record: StatusListRecord) {
-        *self.per_issuer.entry(record.issuer.0.clone()).or_default() += 1;
-        self.by_id.insert(record.list_id.clone(), record);
-    }
-
-    /// Replaces an existing list, moving its count if the issuer changed.
-    fn replace(&mut self, record: StatusListRecord) {
-        let issuer = record.issuer.0.clone();
-        let Some(previous) = self.by_id.insert(record.list_id.clone(), record) else {
-            return;
-        };
-        if previous.issuer.0 != issuer {
-            *self.per_issuer.entry(issuer).or_default() += 1;
-            if let Some(count) = self.per_issuer.get_mut(&previous.issuer.0) {
-                *count = count.saturating_sub(1);
-            }
-        }
     }
 }
 
@@ -103,10 +84,10 @@ impl StatusListRepo for MemoryStatusLists {
         record: StatusListRecord,
         max_lists_per_issuer: u64,
     ) -> Result<(), StatusListError> {
-        let mut values = self.values.write().await;
-        values.check_insert(&record, max_lists_per_issuer)?;
-        values.insert(record);
-        Ok(())
+        self.values
+            .write()
+            .await
+            .try_insert(record, max_lists_per_issuer)
     }
 
     async fn update(
@@ -115,11 +96,11 @@ impl StatusListRepo for MemoryStatusLists {
         expected_updated_at: i64,
     ) -> Result<bool, StatusListError> {
         let mut values = self.values.write().await;
-        match values.by_id.get(&record.list_id) {
-            Some(current) if current.updated_at == expected_updated_at => {}
+        match values.by_id.get_mut(&record.list_id) {
+            // The service rejects issuer changes, so the per-issuer counts hold.
+            Some(current) if current.updated_at == expected_updated_at => *current = record,
             _ => return Ok(false),
         }
-        values.replace(record);
         Ok(true)
     }
 
@@ -131,15 +112,14 @@ impl StatusListRepo for MemoryStatusLists {
     ) -> Result<bool, StatusListError> {
         let snapshot_store = self.require_snapshot()?;
         let mut values = self.values.write().await;
-        match values.by_id.get(&record.list_id) {
-            Some(current) if current.updated_at == expected_updated_at => {}
+        match values.by_id.get_mut(&record.list_id) {
+            Some(current) if current.updated_at == expected_updated_at => *current = record,
             _ => return Ok(false),
         }
         snapshot_store
             .write()
             .await
             .insert(snapshot.snapshot_id.clone(), snapshot);
-        values.replace(record);
         Ok(true)
     }
 
@@ -151,16 +131,14 @@ impl StatusListRepo for MemoryStatusLists {
     ) -> Result<(), StatusListError> {
         let snapshot_store = self.require_snapshot()?;
         let mut values = self.values.write().await;
-        values.check_insert(&record, max_lists_per_issuer)?;
+        values.try_insert(record, max_lists_per_issuer)?;
         snapshot_store
             .write()
             .await
             .insert(snapshot.snapshot_id.clone(), snapshot);
-        values.insert(record);
         Ok(())
     }
 
-    /// Reads at most `limit + 1` lists, however many exist.
     async fn list_uris(
         &self,
         after: Option<&str>,

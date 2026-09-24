@@ -1,5 +1,5 @@
-//! The `list-quota` activation gate: the quota ships off, and `enable` refuses
-//! while any issuer is over the cap or miscounted.
+//! The list quota gate: a fresh database enforces from the first start, an
+//! upgraded one needs the transition, and `enable` checks every issuer.
 #![cfg(any(feature = "sqlite", feature = "mysql", feature = "postgres-tests"))]
 
 use std::sync::Arc;
@@ -7,7 +7,7 @@ use std::sync::Arc;
 use sea_orm::DatabaseConnection;
 
 use super::fixtures;
-use crate::outbound::sql::list_quota::{self, IssuerCount, ListQuotaError};
+use crate::outbound::sql::list_quota::{self, IssuerCount, ListQuotaError, StartupState};
 use crate::outbound::sql::models::StatusListRecord;
 use crate::outbound::sql::{RepositoryError, SeaOrmStore};
 
@@ -51,27 +51,117 @@ async fn publish(
     store.insert_one(record, max).await
 }
 
-/// A fresh deploy of this release does not enforce the quota, but counts.
-async fn assert_quota_is_off_until_enabled(db: Arc<DatabaseConnection>, backend: &str) {
+#[cfg(feature = "sqlite")]
+#[tokio::test]
+async fn test_sqlite_run_migrations_reports_whether_the_database_was_fresh() {
+    use crate::outbound::sql::run_migrations;
+
+    let empty = fixtures::sqlite_connection_migrated(Some(0)).await;
+    assert!(
+        run_migrations(&empty).await.unwrap(),
+        "an empty database is fresh"
+    );
+    assert!(
+        !run_migrations(&empty).await.unwrap(),
+        "a restart on the same database is not"
+    );
+
+    let steps = super::status_list::list_count_migration_index() as u32;
+    let upgraded = fixtures::sqlite_connection_migrated(Some(steps)).await;
+    assert!(
+        !run_migrations(&upgraded).await.unwrap(),
+        "a database a release without the quota migrated is not fresh"
+    );
+    assert!(!list_quota::is_enforced(&upgraded).await.unwrap());
+}
+
+async fn assert_fresh_database_enforces_from_first_start(
+    db: Arc<DatabaseConnection>,
+    backend: &str,
+) {
+    let state = list_quota::on_startup(&db, true, false, 2)
+        .await
+        .unwrap_or_else(|e| panic!("a fresh database must start on {backend}: {e}"));
+    assert_eq!(state, StartupState::Enforced, "on {backend}");
+
     fixtures::seed_credential(&db, "issuer").await;
     let store = SeaOrmStore::<StatusListRecord>::new(db.clone());
+    for n in 1..=2 {
+        publish(&store, &format!("list-{n}"), "issuer", 2)
+            .await
+            .unwrap();
+    }
+    let refused = publish(&store, "list-3", "issuer", 2).await;
+    assert!(
+        matches!(
+            refused,
+            Err(RepositoryError::QuotaExceeded { count: 2, max: 2 })
+        ),
+        "a fresh install must refuse the publish past the cap on {backend}, got {refused:?}"
+    );
+}
 
+on_every_backend!(assert_fresh_database_enforces_from_first_start:
+    test_sqlite_fresh_database_enforces_from_first_start,
+    test_mysql_fresh_database_enforces_from_first_start,
+    test_postgres_fresh_database_enforces_from_first_start);
+
+async fn assert_upgrade_refuses_to_start_without_transition(
+    db: Arc<DatabaseConnection>,
+    backend: &str,
+) {
+    let refused = list_quota::on_startup(&db, false, false, 2).await;
+    let message = match refused {
+        Err(err @ ListQuotaError::NotEnforced) => err.to_string(),
+        other => panic!("an upgrade without the transition must not start on {backend}: {other:?}"),
+    };
+    assert!(
+        message.contains("APP_LIMITS__LIST_QUOTA_TRANSITION=true")
+            && message.contains("list-quota enable"),
+        "the refusal must say how to proceed on {backend}: {message}"
+    );
     assert!(!list_quota::is_enforced(&db).await.unwrap(), "on {backend}");
+}
+
+on_every_backend!(assert_upgrade_refuses_to_start_without_transition:
+    test_sqlite_upgrade_refuses_to_start_without_transition,
+    test_mysql_upgrade_refuses_to_start_without_transition,
+    test_postgres_upgrade_refuses_to_start_without_transition);
+
+async fn assert_upgrade_with_transition_counts_until_enabled(
+    db: Arc<DatabaseConnection>,
+    backend: &str,
+) {
+    let state = list_quota::on_startup(&db, false, true, 10).await.unwrap();
+    assert_eq!(state, StartupState::Transition, "on {backend}");
+
+    fixtures::seed_credential(&db, "issuer").await;
+    let store = SeaOrmStore::<StatusListRecord>::new(db.clone());
     for n in 1..=3 {
         publish(&store, &format!("list-{n}"), "issuer", 2)
             .await
-            .unwrap_or_else(|e| panic!("an unenforced quota must not refuse on {backend}: {e:?}"));
+            .unwrap_or_else(|e| panic!("the transition must not refuse on {backend}: {e:?}"));
     }
     assert_eq!(fixtures::list_count(&db, "issuer").await, 3, "on {backend}");
+
+    list_quota::enable(&db, 10).await.unwrap();
+    assert_eq!(
+        list_quota::on_startup(&db, false, true, 10).await.unwrap(),
+        StartupState::EnforcedWithTransitionSet,
+        "on {backend}"
+    );
+    assert_eq!(
+        list_quota::on_startup(&db, false, false, 10).await.unwrap(),
+        StartupState::Enforced,
+        "on {backend}"
+    );
 }
 
-on_every_backend!(assert_quota_is_off_until_enabled:
-    test_sqlite_quota_is_off_until_enabled,
-    test_mysql_quota_is_off_until_enabled,
-    test_postgres_quota_is_off_until_enabled);
+on_every_backend!(assert_upgrade_with_transition_counts_until_enabled:
+    test_sqlite_upgrade_with_transition_counts_until_enabled,
+    test_mysql_upgrade_with_transition_counts_until_enabled,
+    test_postgres_upgrade_with_transition_counts_until_enabled);
 
-/// With every issuer within the cap and correctly counted, `enable` succeeds
-/// and the next publish past the cap is refused.
 async fn assert_enable_succeeds_within_cap(db: Arc<DatabaseConnection>, backend: &str) {
     fixtures::seed_credential(&db, "issuer-full").await;
     fixtures::seed_credential(&db, "issuer-with-room").await;
@@ -105,8 +195,7 @@ on_every_backend!(assert_enable_succeeds_within_cap:
     test_mysql_enable_succeeds_within_cap,
     test_postgres_enable_succeeds_within_cap);
 
-/// The rollout case: a pre-quota pod pushed an issuer past the cap. After the
-/// recount, `enable` refuses, names that issuer, and leaves the quota off.
+/// A pre-quota pod pushed the issuer past the cap during the rollout.
 async fn assert_enable_refuses_and_names_over_cap_issuer(
     db: Arc<DatabaseConnection>,
     backend: &str,
@@ -164,8 +253,7 @@ on_every_backend!(assert_enable_refuses_and_names_over_cap_issuer:
     test_mysql_enable_refuses_and_names_over_cap_issuer,
     test_postgres_enable_refuses_and_names_over_cap_issuer);
 
-/// Skipping the recount is caught: a list a pre-quota pod published is not in
-/// `list_count`, so `enable` refuses until the recount has run.
+/// The recount was skipped, so a pre-quota pod's list is not counted.
 async fn assert_enable_refuses_stale_count_until_recount(
     db: Arc<DatabaseConnection>,
     backend: &str,
@@ -213,8 +301,6 @@ on_every_backend!(assert_enable_refuses_stale_count_until_recount:
     test_mysql_enable_refuses_stale_count_until_recount,
     test_postgres_enable_refuses_stale_count_until_recount);
 
-/// A recount racing enforced publishes could undercount, so it needs the
-/// quota off; `disable` turns it off.
 async fn assert_recount_is_refused_while_enforced(db: Arc<DatabaseConnection>, backend: &str) {
     list_quota::enable(&db, 10).await.unwrap();
 

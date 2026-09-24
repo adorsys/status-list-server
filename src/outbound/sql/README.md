@@ -33,10 +33,12 @@ One row (`id = 1`) that switches `max_lists_per_issuer` on.
 | `id`       | INTEGER | NO   | PK  | Always `1`                                      |
 | `enforced` | BOOLEAN | NO   |     | Whether publishes respect the quota (default 0) |
 
-It starts off, because pods of the previous release publish without counting.
-The operator turns it on with `status-list-server list-quota enable` once none
-is left; see `list_quota.rs`. Publishes read it in their transaction, under a
-shared lock while it is off.
+A pod turns it on right after migrating a fresh database. On a database the
+previous release served, whose pods publish without counting, it stays off until
+the operator runs `status-list-server list-quota enable` once none is left, and
+pods refuse to start meanwhile unless `limits.list_quota_transition` is set; see
+`list_quota.rs`. Publishes read it in their transaction, under a shared lock
+while it is off.
 
 ### `status_lists`
 

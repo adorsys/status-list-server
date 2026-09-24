@@ -798,9 +798,10 @@ env `APP_LIMITS__MAX_LISTS_PER_ISSUER`). The count lives in `credentials.list_co
 maintained by the publish transaction itself. There is no endpoint that deletes a status list, so
 the count only ever rises.
 
-On the SQL backends the quota is **not enforced until an operator enables it** (see
-[Enabling the quota](#enabling-the-quota)); until then publishes are counted but never refused,
-and every pod logs a warning at startup. The memory backend enforces it from startup.
+A fresh install enforces it from the first start. On a database a release without the quota has
+served, pods refuse to start until it is enabled, unless the operator opts into the transition (see
+[Upgrading to the list quota](#upgrading-to-the-list-quota)). The memory backend enforces it from
+startup. Each pod exports `list_quota_enforced` (`1` or `0`) as a metric.
 
 Operators manage it with the server binary, run with the same configuration as the pods (for
 example `kubectl exec deploy/<release> -- /app/status-list-server list-quota status`):
@@ -812,25 +813,37 @@ example `kubectl exec deploy/<release> -- /app/status-list-server list-quota sta
 | `status-list-server list-quota enable`  | Enforces the quota; refused while any issuer is over the cap or miscounted      |
 | `status-list-server list-quota disable` | Stops enforcing the quota                                                       |
 
-### Enabling the quota
+### Upgrading to the list quota
 
-**When you see this:** A required step after the first rollout of a release with the quota, and
-after rolling forward from a release that predates it. Until it is done, each pod logs at startup:
+**When you see this:** A pod refuses to start with:
 
 ```text
-limits.max_lists_per_issuer is not enforced. Once every pod runs this release, run `status-list-server list-quota recount`, then `status-list-server list-quota enable`.
+Startup aborted: the list quota is not enforced: limits.max_lists_per_issuer is not enforced on this database, which a release without the list quota has served. For the rollout from that release, set APP_LIMITS__LIST_QUOTA_TRANSITION=true; once no pod of it is left, run `list-quota recount` and `list-quota enable`, then remove the setting
 ```
 
-_Source: `src/outbound/sql/list_quota.rs`, `src/setup.rs` (`run_list_quota_command`)_
+It happens on the first rollout of a release with the quota onto an existing database, and when
+rolling forward from a release that predates it. The rollout stops at its first new pod; pods of
+the previous release keep serving.
+
+_Source: `src/outbound/sql/list_quota.rs` (`on_startup`), `src/setup.rs`_
 
 **Root cause:** Pods of a release that predates the quota publish without incrementing
 `credentials.list_count`. While any of them serves traffic the counter cannot be trusted, so the
-quota ships off rather than being exact only some of the time.
+quota starts off on such a database, and a pod does not serve without it unless told to.
 
-**Fix:** Once the rollout has finished and **no pod of an older release is left**:
+**Fix:**
 
-1. `status-list-server list-quota recount`
-2. `status-list-server list-quota enable`
+1. Deploy with `APP_LIMITS__LIST_QUOTA_TRANSITION=true`. Pods then start with the quota off and log
+   `limits.max_lists_per_issuer is NOT enforced` at `ERROR` on every start; `list_quota_enforced`
+   reads `0`.
+2. Once the rollout has finished and **no pod of an older release is left**, run
+   `status-list-server list-quota recount`, then `status-list-server list-quota enable`.
+3. Remove `APP_LIMITS__LIST_QUOTA_TRANSITION` and roll again. While it is still set on an enforced
+   database, pods warn `limits.list_quota_transition is set, but the list quota is already enforced`.
+
+No pod of an older release can start once a new pod has migrated the database: it finds a migration
+it has no file for and exits. Only pods already running can still write, which is why step 2 waits
+for them to be gone.
 
 `enable` checks every issuer against the lists that exist and the configured cap. If any issuer
 has more lists than the cap, or a `list_count` that differs from its lists, it leaves the quota off
@@ -852,8 +865,12 @@ refusing to enable the list quota
 finish, so a publish is either counted by the check or refused by the enforced quota.
 
 **Rolling back** to a release that predates the quota: run `list-quota disable` first. Its pods
-publish without counting, and an enforced quota would then undercount. Enable it again, with the
-steps above, after rolling forward.
+publish without counting, and an enforced quota would then undercount. Rolling forward again is
+the upgrade above.
+
+**Fresh installs** need none of this: a pod that finds no migration applied enforces the quota as
+soon as it has migrated. A pod that crashes partway through that first migration leaves a database
+the next start treats as an upgrade; follow the steps above.
 
 ---
 
@@ -906,7 +923,7 @@ watch the `list_count` of your biggest issuers.
 ### Recomputing `credentials.list_count`
 
 Recomputes every issuer's counter from the lists that exist. Needed before
-[enabling the quota](#enabling-the-quota) and after any manual `DELETE` from `status_lists`.
+[enabling the quota](#upgrading-to-the-list-quota) and after any manual `DELETE` from `status_lists`.
 Because a recount racing enforced publishes could miss one, it only runs with the quota off:
 
 1. `status-list-server list-quota disable`
@@ -950,7 +967,8 @@ For quick grep, the application emits these verbatim (with the primary source fi
 - `readiness check failed` (WARN): `src/server/health.rs`
 - `list_quota_exceeded` / `issuer already has N status lists; the configured maximum is M`: `src/server/error.rs`
 - `limits.max_lists_per_issuer must be greater than 0`: `src/config.rs`
-- `limits.max_lists_per_issuer is not enforced. Once every pod runs this release, ...` (WARN): `src/setup.rs`
+- `Startup aborted: the list quota is not enforced: ...`: `src/setup.rs`, `src/outbound/sql/list_quota.rs`
+- `limits.max_lists_per_issuer is NOT enforced: limits.list_quota_transition is set. ...` (ERROR) / `limits.list_quota_transition is set, but the list quota is already enforced; ...` (WARN): `src/setup.rs`
 - `refusing to enable the list quota` / ``the list quota is enforced; run `list-quota disable` before recounting``: `src/outbound/sql/list_quota.rs`
 
 Platform-only (no matching application string): `ImagePullBackOff`, `ErrImagePull`,

@@ -591,10 +591,7 @@ mod database_implementation {
         }
     }
 
-    /// `list-quota enable` must count a publish that read the quota as off and
-    /// has not committed yet. Were the check to run without waiting for it, that
-    /// list would land after the check and leave the issuer over the cap with the
-    /// quota on.
+    /// Without waiting, `enable` would miss this list and leave the issuer over the cap.
     async fn assert_enable_waits_for_in_flight_publish(
         pool_publish: DatabaseConnection,
         pool_enable: DatabaseConnection,

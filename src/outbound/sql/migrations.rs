@@ -19,6 +19,13 @@ impl MigratorTrait for Migrator {
     }
 }
 
+/// Applies pending migrations; returns whether none had been applied before.
+pub async fn run_migrations(db: &sea_orm::DatabaseConnection) -> Result<bool, DbErr> {
+    let fresh = Migrator::get_applied_migrations(db).await?.is_empty();
+    Migrator::up(db, None).await?;
+    Ok(fresh)
+}
+
 /// Recomputes every issuer's `credentials.list_count`. Used as the migration
 /// backfill and quoted verbatim in `docs/troubleshooting.md` as the operator repair.
 pub(crate) const RECOUNT_LIST_COUNT_SQL: &str = "UPDATE credentials SET list_count = \
@@ -634,9 +641,7 @@ pub(crate) mod credentials_list_count {
                     .await?;
             }
 
-            // Old pods also publish without bumping the counter, so the quota
-            // stays off until `list-quota recount` and `list-quota enable` run
-            // after the rollout (see the `list_quota` migration).
+            // Old pods keep publishing uncounted; `list-quota recount` fixes that.
             manager
                 .get_connection()
                 .execute_unprepared(RECOUNT_LIST_COUNT_SQL)
@@ -663,9 +668,8 @@ pub(crate) mod credentials_list_count {
     }
 }
 
-/// Migration adding the switch that turns `limits.max_lists_per_issuer` on.
-/// It starts off: pods of the previous release publish without counting, so
-/// the quota is only enabled, by `list-quota enable`, once none are left.
+/// The switch for `limits.max_lists_per_issuer`, off until `list_quota::on_startup`
+/// or `list-quota enable` turns it on.
 pub(crate) mod list_quota {
     use super::*;
 
@@ -681,7 +685,7 @@ pub(crate) mod list_quota {
     #[allow(elided_lifetimes_in_paths)]
     impl MigrationTrait for Migration {
         async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
-            // InnoDB so publishes can share-lock the row (see `list_quota_enforced`).
+            // InnoDB for the row locks `list_quota` relies on.
             let mut table = Table::create();
             table
                 .table(ListQuota::Table)
