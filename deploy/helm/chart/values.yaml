@@ -4,8 +4,24 @@ global:
   # Leave empty for provider-neutral defaults.
   domain: ""
 
+# Optional annotations merged onto the Pod template metadata (top-level, distinct from
+# statuslist.podLabels which are merged into the pod LABELS). Consumed by deployment.yaml.
+# The chart always emits its own prometheus.io/scrape annotations; these are merged on top.
+# Defaults to an empty map; overlays supply the annotations.
+# Values may be strings, booleans, integers, or numbers.
+podAnnotations: {}
+
 statuslist:
   enabled: true
+  # Optional init containers. The default pings the database via `nc -z` using the
+  # chart-derived host/port (see the dbHost/dbPort helpers) so the app does not start
+  # before the database accepts connections. NOTE: deployment.yaml hardens each entry via
+  # mustMergeOverwrite, which REPLACES any `resources`, `volumeMounts`, and securityContext
+  # you set here with the chart's hardened defaults (readOnlyRootFilesystem, dropped caps,
+  # fixed 50m/100m CPU and 64Mi/128Mi memory, and an /tmp volume). An init container that
+  # needs a custom volume mount or more resources cannot be expressed through this list;
+  # override the whole `initContainers` block in an overlay that disables the default
+  # wait-for-db probe instead.
   initContainers:
     - name: wait-for-db
       image: busybox:1.37
@@ -20,63 +36,86 @@ statuslist:
           done
           echo "Database is up."
 
+  # Number of application replicas. Omitted when autoscaling.enabled=true so the HPA
+  # controls the replica count.
   replicaCount: 1
-  # Extra labels merged onto the Pod template metadata. Required for e.g. Azure Workload
-  # Identity: azure.workload.identity/use: "true".
+  # Extra labels merged onto the Pod template metadata. For Azure Workload Identity,
+  # specify azure.workload.identity/use: "true" (must be a quoted string, not a boolean).
   podLabels: {}
   image:
     repository: ghcr.io/adorsys/status-list-server
-    # Empty derives from how the image is named: IfNotPresent for a digest, Always
-    # for a mutable tag. Set explicitly to override.
+    # Image resolution rules (order of precedence, enforced in deployment.yaml):
+    #   1. digest, if set to "sha256:<64 hex chars>" -> image is repository@digest and
+    #      pullPolicy defaults to IfNotPresent (content-addressed, immutable). An explicit
+    #      value that is not a valid sha256 hex string FAILS the render.
+    #   2. tag, if set -> image is repository:<tag> and pullPolicy defaults to Always
+    #      (a tag is mutable and may move between releases).
+    #   3. both empty -> the chart derives repository:<baseAppVersion>-<variant>, where
+    #      baseAppVersion is appVersion with the variant suffix stripped (e.g. appVersion
+    #      1.0.1-fscert yields baseAppVersion 1.0.1, and with the default variant fscert
+    #      the final derived tag is 1.0.1-fscert). Using "latest" is deliberately avoided
+    #      so an upgrade that changes nothing in this chart does not silently change the
+    #      running image.
+    # pullPolicy below overrides the derived default explicitly.
     pullPolicy: ""
-    # Used only when tag and digest are empty. The chart derives the PostgreSQL
-    # release tag from appVersion and this provider variant, so overlays can
-    # select a cloud variant without hardcoding the release version.
+    # Provider/database variant, used only when tag and digest are empty. It selects the
+    # variant suffix that is appended to the derived tag. The current release workflow
+    # publishes only the PostgreSQL variants below; MySQL-capable images are not yet
+    # published, so a MySQL backend requires an explicit statuslist.image.tag or digest.
+    #
+    # | Variant | Cargo Features | Description | Primary Use Case |
+    # |---------|----------------|-------------|------------------|
+    # | aws     | postgres,aws | PostgreSQL with AWS Secrets Manager and Route53 DNS | AWS EKS native deployments |
+    # | gcp     | postgres,gcp | PostgreSQL with GCP Secret Manager and Cloud DNS | GCP GKE native deployments |
+    # | azure   | postgres,azure | PostgreSQL with Azure Key Vault and Azure DNS | Azure AKS native deployments |
+    # | vault   | postgres,vault | PostgreSQL with HashiCorp Vault / OpenBao token storage | Vault-backed on-prem or multi-cloud |
+    # | fscert  | postgres | PostgreSQL with filesystem-mounted token signing keys | Constrained / air-gapped, external secret injection |
+    # Tag format: <version>-<variant> (e.g. 1.2.0-aws). Latest tags: latest-<variant>.
     variant: fscert
-    # Image tag with variant suffix. The current release workflow publishes only
-    # the PostgreSQL variants below. MySQL deployments must explicitly supply
-    # statuslist.image.tag or digest for a MySQL-capable image until
-    # MySQL-capable images are released.
-    #
-    # | Tag Suffix       | Cargo Features | Description | Primary Use Case |
-    # |------------------|----------------|-------------|------------------|
-    # | -aws             | postgres,aws | PostgreSQL database with AWS Secrets Manager and Route53 DNS support | AWS EKS native deployments |
-    # | -gcp             | postgres,gcp | PostgreSQL database with GCP Secret Manager and Cloud DNS support | GCP GKE native deployments |
-    # | -azure           | postgres,azure | PostgreSQL database with Azure Key Vault and Azure DNS support | Azure AKS native deployments |
-    # | -vault           | postgres,vault | PostgreSQL database with HashiCorp Vault / OpenBao token material storage | Vault-backed on-prem or multi-cloud deployments |
-    # | -fscert          | postgres | PostgreSQL database with filesystem-mounted token signing keys and certificates | Constrained / air-gapped environments using external secret injection |
-    # Tag format: <version>-<suffix> (e.g., 1.2.0-aws, 1.2.0-gcp)
-    # Latest tags: latest-<suffix> (e.g., latest-aws, latest-gcp)
-    #
-    # Empty derives from the chart appVersion plus statuslist.image.variant,
-    # preserving the historical PostgreSQL tag shape (<version>-fscert).
-    # Defaulting to "latest" would let an upgrade that changes nothing in this
-    # chart still change the running image.
+    # Explicit image tag (with variant suffix, e.g. 1.2.0-aws). Empty derives the tag from
+    # appVersion + statuslist.image.variant as described above.
     tag: ""
-    # "sha256:...". Takes precedence over tag and pins the exact digest CI scanned.
-    # Each variant has its own digest. Use the digest from the variant you select.
+    # "sha256:<64 hex chars>". Takes precedence over tag and pins the exact digest CI
+    # scanned. Each variant has its own digest; use the digest matching the selected
+    # variant. If set, it must be a valid sha256 digest or the render fails.
     digest: ""
   service:
+    # Render a Service for the application pod. The Ingress routes to this Service via
+    # service.port, and the container listens on service.targetPort.
     enabled: true
+    # Kubernetes Service type. ClusterIP keeps traffic behind the Ingress TLS layer;
+    # NodePort / LoadBalancer expose it directly (NodePort requires nodePort).
     type: ClusterIP
+    # Optional annotations merged onto the Service metadata.
     annotations: {}
+    # Service port (port the Ingress / other clients use).
     port: 8081
+    # Container port the Service forwards to (matches APP_SERVER__PORT and the pod's
+    # http containerPort).
     targetPort: 8000
+    # NodePort (30000-32767), required only when service.type=NodePort.
     nodePort: null
   ingress:
+    # NGINX Ingress exposing the application. The host defaults to
+    # statuslist.<global.domain> when global.domain is set, otherwise localhost; TLS
+    # hosts default to *.<global.domain> when global.domain is set, or to the rendered
+    # ingress host when tls.secretName is set explicitly.
     enabled: true
     path: /
     pathType: Prefix
     annotations:
       nginx.ingress.kubernetes.io/proxy-body-size: "10m"
     tls:
-      # Defaults to ["*.<global.domain>"] when global.domain is set, or to the
-      # rendered ingress host when secretName is set explicitly.
+      # Explicit TLS hostnames. Empty defaults to ["*.<global.domain>"] when global.domain
+      # is set, or to the rendered ingress host when secretName is set explicitly.
       hosts: []
       # Empty keeps the neutral default render HTTP-only. Set this in overlays
       # that provide TLS material or cert-manager ingress-shim annotations.
       secretName: ""
-    # Defaults to statuslist.<global.domain> when global.domain is set, otherwise localhost.
+    # Ingress hostname. Defaults to statuslist.<global.domain> when global.domain is set,
+    # otherwise localhost. Besides emitting the external-dns hostname annotation, this also
+    # sets APP_SERVER__DOMAIN (the application's own public domain) when the operator does
+    # not set it in statuslist.env, so changing it changes application config, not just DNS.
     externalDnsHostname: ""
   env:
     RUST_LOG: "info"
@@ -86,7 +125,6 @@ statuslist:
     APP_SERVER__CERT__ACME_DIRECTORY_URL: "https://acme-v02.api.letsencrypt.org/directory"
     APP_SERVER__CERT__EKU: "1,3,6,1,5,5,7,3,30"
     APP_SERVER__CERT__RENEWAL_CRON_SCHEDULE: "0 0 0 * * *"
-    # Parsed certificate chain cache TTL in seconds. "0" means no expiry.
     # DNS provider for ACME DNS-01 challenges: route53 | cloudflare | gcloud | azure | acmedns
     # (pebble also exists but is a development-only fake, not for deployments)
     # See docs/dns-providers.md for the settings each provider needs.
@@ -100,9 +138,15 @@ statuslist:
     # Provider credentials (e.g. APP_SERVER__CERT__DNS__CLOUDFLARE__API_TOKEN, or the
     # APP_SERVER__CERT__DNS__ACMEDNS__ACCOUNTS JSON, which holds every account password)
     # must come from a secret (see externalSecret below), not from plain env values.
-    # APP_DATABASE__BACKEND defaults to "postgres". When APP_DATABASE__HOST, PORT,
-    # USERNAME, or NAME are omitted, deployment.yaml derives them from the active
-    # backend's native values below (postgres/mysql).
+    # Database connection: APP_DATABASE__BACKEND selects the backend (postgres | mysql,
+    # default postgres). APP_DATABASE__HOST, PORT, USERNAME, and NAME default to the active
+    # backend's native values below (postgres/mysql) when omitted, and deployment.yaml
+    # always renders all four. Iron rules enforced at render time: the chart REJECTS
+    # APP_DATABASE__URL and APP_DATABASE__PASSWORD as plain env values (it would expose
+    # assembled credentials in pod metadata); database passwords are delivered through
+    # statuslist.secretMounts / APP_DATABASE__PASSWORD_FILE or the fallback Secret instead.
+    # APP_DATABASE__QUERY is accepted for non-secret driver/TLS parameters (e.g.
+    # sslmode=verify-full&sslrootcert=...).
     # Status-list record cache TTL in seconds. "0" disables this cache.
     APP_CACHE__TTL: "300"
     APP_CACHE__MAX_CAPACITY: "1000"
@@ -123,13 +167,19 @@ statuslist:
     APP_SERVER__ENABLE_METRICS: "true"
     APP_TELEMETRY__ENVIRONMENT: "production"
     APP_TELEMETRY__SAMPLER_RATIO: "1.0"
-  # Optional AWS configuration for the application.
+  # Optional AWS configuration for the application. The base chart is provider-neutral:
+  # Workload Identity (IRSA) is NOT configured by default - you opt in by adding the
+  # serviceAccount.annotations below and the cloud-side trust relationship. This block is
+  # only needed for the legacy path that mounts static shared-credential files.
   aws:
     # Mount AWS credential files from aws-credentials-secret into the pod.
-    # Disabled by default so the base chart stays provider-neutral.
+    # Disabled by default so the base chart stays provider-neutral. Do NOT combine this
+    # with IRSA/Workload Identity: in the AWS SDK credential chain shared-credential files
+    # are resolved BEFORE web-identity tokens, so mounting static files would silently win
+    # with long-lived static keys over the short-lived role token.
     mountCredentials: false
     # When mountCredentials=true and externalSecret.enabled, the chart also
-    # renders a second ExternalSecret that provisions "aws-credentials-secret" — the exact Secret
+    # renders a second ExternalSecret that provisions "aws-credentials-secret" - the exact Secret
     # the Deployment's credential volume references (see deployment.yaml). Without it the Pod could
     # never mount that volume and would stay unready. The remote source holds the AWS shared
     # "credentials" and "config" file contents.
@@ -143,10 +193,12 @@ statuslist:
       # Optional ESO target.template for the dedicated aws-credentials-secret only.
       # The application ExternalSecret target.template is intentionally not reused here.
       targetTemplate: {}
-    # Plain (non-secret) AWS region. APP_AWS__REGION is rendered only when an effective
-    # region is explicitly configured. Leave empty (default) so the application does not
-    # override the AWS SDK's instance-metadata region discovery (recommended for
-    # pure-IRSA / Workload Identity).
+    # Plain (non-secret) AWS region. APP_AWS__REGION is rendered into the pod only when
+    # secretStore.provider=aws AND an effective region is set (this value, or the legacy
+    # secretStore.aws.region fallback). For pure-IRSA / Workload Identity installs, leave
+    # both empty so the region comes from the AWS SDK's instance-metadata discovery rather
+    # than being pinned here. Note this field does NOT by itself enable APP_AWS__REGION:
+    # it has no effect unless ESO's AWS provider is active.
     region: ""
   # Fallback Kubernetes Secret for clusters that do not run External Secrets Operator.
   # Only rendered when externalSecret.enabled=false AND statuslist.fallbackSecret.enabled=true.
@@ -180,16 +232,14 @@ statuslist:
 
   # File-based secret mounts for production credential/key rotation.
   # Mounts Kubernetes Secrets as files into the container at specified paths.
-  # The current chart support is preparatory for application images that implement
-  # file reload support (see issue #456). Use fileEnv to map a mounted file path
-  # into an application environment variable. Paths are relative to mountPath and
-  # work whether items is present or the whole Secret is mounted.
-  # When items is present, each fileEnv value must exactly match one of the
-  # normalized items[].path values so the chart cannot point the app at a file
+  # Use fileEnv to map a mounted file path into an application environment variable.
+  # Paths are relative to mountPath and work whether items is present or the whole
+  # Secret is mounted. When items is present, each fileEnv value must exactly match one
+  # of the normalized items[].path values so the chart cannot point the app at a file
   # Kubernetes will not mount.
-  # If APP_DATABASE__PASSWORD_FILE is configured via statuslist.env or fileEnv, the
-  # chart does not inject APP_DATABASE__PASSWORD, so the application cannot silently
-  # keep using a stale startup password from an environment variable.
+  # The chart never injects APP_DATABASE__PASSWORD - it hard-fails if you try to set it,
+  # with or without a file. Database passwords are delivered only via the mounted Secret
+  # path referenced by APP_DATABASE__PASSWORD_FILE (below) or the fallback Secret.
   # Example:
   # - name: database-credentials
   #   secretName: postgres-access
@@ -236,10 +286,13 @@ statuslist:
 
   # Watcher configuration for file-based credential rotation detection.
   # When pollIntervalSecs is set, APP_WATCHER__POLL_INTERVAL_SECS is injected.
-  # This requires an application image that implements the watcher contract from issue #456.
+  # This requires an application image that implements the file watcher contract
+  # (polls mounted secret files and swaps credentials/pools without restart); the current
+  # published images do not watch files yet, so paths propagate but are loaded at startup.
   watcher:
     pollIntervalSecs: "30"
   livenessProbe:
+    # HTTP GET on /health/live (port http). Override the whole block to customize.
     httpGet:
       path: /health/live
       port: http
@@ -248,6 +301,7 @@ statuslist:
     timeoutSeconds: 5
     failureThreshold: 3
   readinessProbe:
+    # HTTP GET on /health/ready (port http). Override the whole block to customize.
     httpGet:
       path: /health/ready
       port: http
@@ -255,6 +309,7 @@ statuslist:
     periodSeconds: 10
     timeoutSeconds: 5
     failureThreshold: 3
+
   networkPolicy:
     # WARNING: default OFF. Enabling this renders a Kubernetes NetworkPolicy, and with an
     # empty `ingress` the service-port ingress rule allows ANY source in the cluster (a
@@ -268,15 +323,20 @@ statuslist:
     # When ingress is empty [] (and enabled=true), ANY source can reach the service port.
     # Add podSelector/namespaceSelector/ipBlock entries to restrict sources.
     ingress: []
-    # Additional internal egress destinations beyond the built-in PostgreSQL / OTel
-    # pod selectors (which are scoped to the target pods by default). Each entry is a
-    # `to:` NetworkPolicy selector.
-    # External ports (443, 53) are always allowed without destination restriction.
+    # Additional internal egress destinations. IMPORTANT: these entries are appended to the
+    # DATABASE egress rule (the one scoped to the DB port), so each inherits the database
+    # port and can only reach that port - a selector for e.g. a cache on 6379 will be
+    # silent. Use a separate NetworkPolicy (not this chart) for arbitrary internal ports.
+    # External ports 443/53 are always allowed with NO destination restriction (open to
+    # 0.0.0.0/0 - this policy does not constrain outbound exfiltration).
     egressInternal: []
     # Explicit database egress destinations. Optional for bundled PostgreSQL, where
-    # the chart can select postgres pods. Required when APP_DATABASE__BACKEND=mysql,
-    # because this chart does not deploy MySQL and cannot infer the target for RDS,
-    # Cloud SQL, another namespace, or an operator-managed MySQL cluster.
+    # the chart can select postgres pods in-namespace. Required when
+    # APP_DATABASE__BACKEND=mysql or the database is external (RDS, Cloud SQL, another
+    # namespace, operator-managed cluster) - because this chart does not deploy MySQL, it
+    # cannot infer the target. For an external database, also clear/override the
+    # statuslist.initContainers wait-for-db probe, which by default pings the in-cluster
+    # Postgres host derived by the dbHost helper.
     databaseEgress: []
   resources:
     requests:
@@ -288,6 +348,18 @@ statuslist:
 
 # ServiceAccount for the application pods. Used to attach Workload Identity role annotations
 # (EKS IRSA: eks.amazonaws.com/role-arn, GCP WI, Azure WI) for ambient cloud credentials.
+#
+# Workload Identity needs BOTH halves: the annotations below (annotation half) AND the
+# cloud-side trust relationship (permissions half), which is keyed on the SERVICE ACCOUNT
+# NAME this chart derives (default: the chart fullname, see the serviceAccountName helper
+# in _helpers.tpl). Keeping these in sync matters - changing the SA name breaks the
+# trust relationship unless the cloud identity is updated to match.
+#   EKS: IAM role trust policy with  sub = system:serviceaccount:<namespace>:<sa>
+#        (EKS Pod Identity is an alternative to IRSA: create a pod identity association
+#        bound to the SA instead of annotating a role ARN).
+#   GKE: bind roles/iam.workloadIdentityUser on the Google service account to
+#        serviceAccount:<project>.svc.id.goog[<namespace>/<sa>].
+#   AKS: a federated identity credential on the managed identity with the same subject.
 serviceAccount:
   # create=true renders the ServiceAccount and injects serviceAccountName (default: chart
   # fullname, or the value of `name`). create=false with an empty `name` injects NO
@@ -297,7 +369,7 @@ serviceAccount:
   name: "" # default: fullname (via _helpers.tpl)
   # Default false: the application does not need to call the Kubernetes API, so do not
   # mount the SA bearer token (NSA/CISA Kubernetes hardening, CIS Benchmark 5.1.6).
-  # This does NOT break Workload Identity — IRSA / GCP WI / Azure WI use projected OIDC
+  # This does NOT break Workload Identity - IRSA / GCP WI / Azure WI use projected OIDC
   # tokens injected by the cloud admission webhook, independent of this setting.
   automountServiceAccountToken: false
   annotations: {}
@@ -334,22 +406,32 @@ podDisruptionBudget:
   minAvailable: null
   maxUnavailable: 1
 
-# ServiceMonitor for kube-prometheus-stack / Prometheus Operator discovery.
-# Enterprise Prometheus deployments using Prometheus Operator ignore annotation-based pod targets.
-# Enable this to provision a ServiceMonitor CRD.
+# ServiceMonitor (monitoring.coreos.com/v1) for Prometheus Operator scrape discovery.
+# Prometheus deployments driven by the Prometheus Operator discover scrape targets through
+# ServiceMonitor CRs rather than annotation-based targets; enabling this defines the
+# /metrics scrape endpoint on the application Service. Set labels.release to match your
+# Prometheus ServiceMonitorSelector. If Prometheus also does annotation discovery, the pod
+# may be scraped twice (doubled samples/cost).
 serviceMonitor:
   enabled: false
   # Additional labels required by your Prometheus Operator (e.g. release: kube-prometheus-stack)
   labels: {}
-  # Scrape interval override (e.g. "15s")
+  # Scrape interval override (e.g. "15s"). Empty uses the Operator default.
   interval: ""
-  # Scrape timeout (e.g. "10s")
+  # Scrape timeout (e.g. "10s"). Empty uses the Operator default.
   scrapeTimeout: ""
+  # Additional metric relabelings applied to scraped metrics.
   metricRelabelings: []
+  # Additional target relabelings applied before scraping.
   relabelings: []
 
-# PrometheusRule for kube-prometheus-stack / Prometheus Operator rule discovery.
-# Enables shipping SLI recording rules and SLO alerting rules as a PrometheusRule CRD.
+# PrometheusRule (monitoring.coreos.com/v1) for kube-prometheus-stack / Prometheus
+# Operator rule discovery.
+# Enables shipping the SLI recording rules (request latency, error rate, DB latency, cache
+# hit ratio, token generation, error budget) and the SLO burn-rate / error-budget alerting
+# rules as a single PrometheusRule CRD. Alert thresholds are defined under the `slo` block
+# and must stay in lockstep with deploy/observability/slo/thresholds.json (enforced by CI)
+# and the standalone deploy/observability/prometheus/rules/*.rules.yml.
 prometheusRule:
   enabled: false
   # Additional labels required by your Prometheus Operator (e.g. release: kube-prometheus-stack)
@@ -358,14 +440,14 @@ prometheusRule:
 # AlertmanagerConfig for kube-prometheus-stack / Prometheus Operator alert routing.
 # When enabled, renders an AlertmanagerConfig CRD that routes SLO alerts to the
 # configured notification channel. This is the Kubernetes equivalent of the Docker
-# Compose ALERTMANAGER_PLATFORM + generate-alertmanager-config.sh setup — the same
+# Compose ALERTMANAGER_PLATFORM + generate-alertmanager-config.sh setup - the same
 # six platforms are supported and no webhook URL is committed to source control.
 #
 # Supported platforms (alerting.platform):
 #   discord     -> alerting.webhookUrl  (Discord channel webhook URL)
 #   slack       -> alerting.webhookUrl  (Slack incoming-webhook URL)
 #   teams       -> alerting.webhookUrl  (MS Teams classic inbound webhook; posts Alertmanager's
-#                 generic JSON, not an Adaptive Card — see deploy/observability/runbooks/webhook-notifications.md
+#                 generic JSON, not an Adaptive Card - see deploy/observability/runbooks/webhook-notifications.md
 #                 for the rendering limitation and bridge options)
 #   mattermost  -> alerting.webhookUrl  (Mattermost incoming webhook)
 #   webhook     -> alerting.webhookUrl  (generic endpoint accepting Alertmanager JSON)
@@ -374,7 +456,7 @@ prometheusRule:
 # Credential model:
 #   By default (existingSecret: "") the chart renders its own Secret from the inline
 #   values (webhookUrl). For production, set existingSecret to the name of
-#   a pre-existing Secret (e.g. managed by ESO or Vault) — the chart then reads from
+#   a pre-existing Secret (e.g. managed by ESO or Vault) - the chart then reads from
 #   that Secret and does NOT render its own. The pre-existing Secret must contain the
 #   following keys depending on the platform:
 #     webhook-based platforms: "webhook-url"
@@ -385,7 +467,7 @@ prometheusRule:
 #   NOT read from the Secret.
 #
 # Route tree (mirrors generate-alertmanager-config.sh):
-#   severity=none  -> deadmansswitch receiver (Watchdog — pages on ABSENCE, not firing)
+#   severity=none  -> deadmansswitch receiver (Watchdog - pages on ABSENCE, not firing)
 #   severity=page  -> human receiver, repeat every 4h
 #   severity=warn  -> human receiver, repeat every 24h
 #   everything else -> noop sink (never spams a human channel)
@@ -395,7 +477,7 @@ prometheusRule:
 #     release: kube-prometheus-stack
 alerting:
   enabled: false
-  # Platform selector — must match one of the supported values above.
+  # Platform selector - must match one of the supported values above.
   platform: discord
   # Grafana dashboard URL injected into alert annotations (e.g. http://grafana.example.com/d/status-list-slo).
   dashboardUrl: "http://localhost:3000/d/status-list-slo"
@@ -417,7 +499,7 @@ alerting:
   # deploying the chart to avoid a failing AlertmanagerConfig / pending pod.
   existingSecret: ""
   # Inline webhook URL (used for discord, slack, teams, mattermost, webhook platforms).
-  # Never commit real tokens — use existingSecret + ESO/Vault in production.
+  # Never commit real tokens - use existingSecret + ESO/Vault in production.
   webhookUrl: ""
   # Optional dead-man's-switch URL. The always-firing Watchdog (severity=none) pings this
   # URL so a collapsed Prometheus/Alertmanager pipeline is detected by its ABSENCE. When
@@ -437,7 +519,7 @@ alerting:
   webhookTimeout: ""
   # Email settings (required only when platform=email).
   # NOTE: The AlertmanagerConfig EmailConfig CRD defines `to`, `smarthost`, and `from` as plain
-  # strings (not Secret selectors), so these are rendered directly from values — they are NOT read
+  # strings (not Secret selectors), so these are rendered directly from values - they are NOT read
   # from the Secret. Only the SMTP password (when set) is read from the Secret via `smtp-password`.
   email:
     to: ""
@@ -457,19 +539,37 @@ alerting:
     #     insecureSkipVerify: false
     tlsConfig: {}
 
-# Configurable SLO target thresholds for PrometheusRule alerting rules.
-# These must stay in lockstep with deploy/observability/slo/thresholds.json (the lint
-# step in CI asserts this) and with the literal values in the standalone
-# deploy/observability/prometheus/rules/*.rules.yml.
+# Configurable SLO target thresholds for the PrometheusRule alerting rules
+# (templates/prometheusrule.yaml). Values in this block move the alert thresholds, but the
+# rule template renders some of them through printf "%.3f" (so very small errorRateTargets
+# can round down) and the alert summary strings are hard-coded text (e.g. "300ms",
+# "14.4x over 0.5%", "85%") that does NOT update when you change a threshold here.
+# The values.yaml defaults must stay in lockstep with
+# deploy/observability/slo/thresholds.json and the standalone
+# deploy/observability/prometheus/rules/*.rules.yml; the CI lint compares the defaults but
+# does not re-read this template or the hard-coded summaries.
 slo:
+  # Acceptable ratio of 5xx responses to all requests over the SLO window (0.005 = 0.5%).
+  # Used as the multiplicand of the burn-rate multipliers (threshold = target x multiplier)
+  # and as the denominator of the error-budget success ratio.
   errorRateTarget: 0.005
+  # Fast-burn alert triggers when the observed rate exceeds errorRateTarget x this (14.4x)
+  # on both the 1h and 5m windows for 5m. Pages.
   fastBurnMultiplier: 14.4
+  # Slow-burn alert triggers when the observed rate exceeds errorRateTarget x this (6.0x)
+  # on the 6h and 30m windows for 30m. Warns.
   slowBurnMultiplier: 6.0
+  # Request latency P95 SLO target in seconds (0.3 = 300ms), fast- and slow-burn gates.
   requestLatencyP95: 0.3
+  # Database query latency P95 SLO target in seconds (0.05 = 50ms).
   dbLatencyP95: 0.05
+  # Minimum acceptable status-list cache hit ratio (0.85 = 85%).
   cacheHitRatioMin: 0.85
+  # Retained for reference / parity: this value is NOT used by any template or rule.
   certRenewalFailureMax: 0.01
-  # Remaining-error-budget gate for the ErrorBudget*Critical page alerts.
+  # Remaining-error-budget gate for the ErrorBudget*Critical page alerts (0.1 = 10%).
+  # NOTE: errorRateTarget/fastBurnMultiplier/slowBurnMultiplier also drive the
+  # token-generation alerts and budget, not just the HTTP SLO.
   errorBudgetCriticalThreshold: 0.1
   # Certificate expiry gates (seconds remaining until the certificate expires).
   # Warn at <=14d, page at <=7d: cert renewal is a discrete low-frequency event,
@@ -479,6 +579,18 @@ slo:
   certExpiryCriticalSeconds: 604800
 
 postgres:
+  # Bundled in-cluster PostgreSQL (the CloudPirates subchart). This is the application's
+  # default backend. The chart maps these values onto the pod env regardless of
+  # postgres.enabled: when APP_DATABASE__BACKEND is unset it defaults to "postgres", HOST
+  # is derived from the release name (<release>-postgres.<namespace>.svc.cluster.local),
+  # and only USERNAME/NAME come from postgres.auth. Note that if you explicitly set
+  # APP_DATABASE__BACKEND=mysql while postgres.enabled=true, the chart FAILS (postgres
+  # requires the postgres backend), rather than overriding your value. To use MySQL or
+  # another backend, set postgres.enabled=false AND APP_DATABASE__BACKEND+APP_DATABASE__HOST
+  # (see mysql below and docs/database-backends.md). WARNING: merely disabling postgres
+  # without switching the backend leaves APP_DATABASE__BACKEND=postgres and points the pod
+  # at the in-cluster postgres service, which no longer exists - always set the backend
+  # explicitly when you disable postgres.
   enabled: true
   resources:
     requests:
@@ -508,11 +620,18 @@ postgres:
     tag: "18.0"
 
 mysql:
+  # NOTE: mysql.enabled is NOT a valid field. Setting it fails the render because this
+  # chart does not deploy MySQL. Use postgres.enabled=false and APP_DATABASE__BACKEND=mysql
+  # with an external MySQL host instead.
   # External MySQL connection defaults used by deployment.yaml, initContainers, and
   # NetworkPolicy ports when APP_DATABASE__BACKEND=mysql. This chart does not vendor
   # or deploy a MySQL database; set APP_DATABASE__HOST to your external Service/host,
   # provide that target through your platform/operator or a values overlay, and set
-  # postgres.enabled=false.
+  # postgres.enabled=false. NOTE: the application supports MySQL, but NO published image
+  # variant is built with the mysql feature yet - a MySQL deployment needs an explicit
+  # statuslist.image.tag or digest for a MySQL-capable image you build and supply, plus a
+  # cleared/overridden initContainers probe and networkPolicy.databaseEgress when the
+  # NetworkPolicy is enabled.
   auth:
     username: mysql
     database: status-list
@@ -520,6 +639,15 @@ mysql:
     port: 3306
 
 externalSecret:
+  # External Secrets Operator (ESO) delivery mode, mutually exclusive with
+  # statuslist.fallbackSecret (the chart fails if both are enabled). When enabled, the
+  # chart renders an ExternalSecret that syncs the application Secret (always named
+  # statuslist-secret, holder of the database password) from the secret manager referenced
+  # by secretStore. Cloud credential resolution here depends on how ESO is configured:
+  # Workload Identity / IRSA / ManagedIdentity where the provider supports it, but Vault
+  # token auth and Azure ServicePrincipal use static secrets instead. IMPORTANT: with a
+  # namespaced SecretStore, externalSecret.enabled REQUIRES secretStore.enabled (the render
+  # fails otherwise); only a pre-existing ClusterSecretStore is exempt.
   enabled: false
   metadata:
     name: statuslist-external-secret
@@ -556,12 +684,14 @@ secretStore:
   provider: ""
   aws:
     service: SecretsManager # SecretsManager | ParameterStore
-    # Empty by default: APP_AWS__REGION is only injected into the pod when a region is
-    # explicitly configured (via statuslist.aws.region, or the legacy secretStore.aws.region
-    # upgrade fallback). For pure-IRSA / Workload Identity installs that rely on the AWS SDK
-    # discovering the region from instance metadata, leave both empty so no APP_AWS__REGION
-    # overrides the SDK. The ESO AWS SecretStore still needs a region; it independently falls
-    # back to eu-central-1 at the CR level (not injected into the pod).
+    # AWS region for the ESO AWS SecretStore. This is a real ESO default, not a formality:
+    # ESO calls Secrets Manager in this region, and when both this and statuslist.aws.region
+    # are empty it falls back to eu-central-1 at the CR level, so a cluster in another region
+    # fails with SecretSyncedError unless the region is set. APP_AWS__REGION is injected into
+    # the pod ONLY when secretStore.provider=aws AND an effective region is set (this value,
+    # or the statuslist.aws.region fallback via the appRegion helper). For pure-IRSA /
+    # Workload Identity installs leave both empty so the SDK discovers the region from
+    # instance metadata, but note the SecretStore CR itself still needs an explicit region.
     region: ""
   vault:
     server: ""
