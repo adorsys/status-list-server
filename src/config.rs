@@ -1020,6 +1020,37 @@ pub struct CacheConfig {
     /// Use TLS (`rediss://`) for the Redis connection.
     #[serde(default)]
     pub tls: bool,
+    /// Optional path to a private CA bundle for Redis TLS deployments.
+    #[serde(default)]
+    pub ca_file: Option<PathBuf>,
+    /// Prefix for all Redis cache keys, used to isolate shared Redis instances.
+    #[serde(default = "default_cache_key_prefix")]
+    pub key_prefix: String,
+    /// Redis response timeout in milliseconds.
+    #[serde(default = "default_cache_response_timeout_ms")]
+    pub response_timeout_ms: u64,
+    /// Redis connection timeout in milliseconds.
+    #[serde(default = "default_cache_connection_timeout_ms")]
+    pub connection_timeout_ms: u64,
+    /// Cooldown in milliseconds after a Redis connection failure before retrying.
+    #[serde(default = "default_cache_reconnect_cooldown_ms")]
+    pub reconnect_cooldown_ms: u64,
+}
+
+fn default_cache_key_prefix() -> String {
+    "status-list-server:status-list:".to_string()
+}
+
+fn default_cache_response_timeout_ms() -> u64 {
+    250
+}
+
+fn default_cache_connection_timeout_ms() -> u64 {
+    250
+}
+
+fn default_cache_reconnect_cooldown_ms() -> u64 {
+    250
 }
 
 impl CacheConfig {
@@ -1041,6 +1072,31 @@ impl CacheConfig {
                         "cache.backend=redis requires cache.password or cache.password_file in production".to_string(),
                     ));
                 }
+            }
+            if let Some(ca_file) = &self.ca_file {
+                if !self.tls {
+                    return Err(ConfigError::Message(
+                        "cache.ca_file requires cache.tls=true".to_string(),
+                    ));
+                }
+                if ca_file.as_os_str().is_empty() {
+                    return Err(ConfigError::Message(
+                        "cache.ca_file must not be empty".to_string(),
+                    ));
+                }
+            }
+            if trim_non_empty(Some(&self.key_prefix)).is_none() {
+                return Err(ConfigError::Message(
+                    "cache.key_prefix must not be empty".to_string(),
+                ));
+            }
+            if self.response_timeout_ms == 0
+                || self.connection_timeout_ms == 0
+                || self.reconnect_cooldown_ms == 0
+            {
+                return Err(ConfigError::Message(
+                    "cache Redis timeout values must be greater than zero".to_string(),
+                ));
             }
             if self.password_file.is_some() {
                 let mut config = self.clone();
@@ -1265,7 +1321,7 @@ fn base_builder() -> Result<ConfigBuilder<DefaultState>, ConfigError> {
         .set_default("azure_keyvault.secrets_cache_ttl", 300)?
         .set_default("cache.backend", "memory")?
         .set_default("cache.ttl", 5 * 60)?
-        .set_default("cache.max_capacity", 100)?
+        .set_default("cache.max_capacity", 1000)?
         .set_default("cache.host", Option::<String>::None)?
         .set_default("cache.port", Option::<u16>::None)?
         .set_default("cache.username", Option::<String>::None)?
@@ -1273,6 +1329,20 @@ fn base_builder() -> Result<ConfigBuilder<DefaultState>, ConfigError> {
         .set_default("cache.password_file", Option::<String>::None)?
         .set_default("cache.database", Option::<u8>::None)?
         .set_default("cache.tls", false)?
+        .set_default("cache.ca_file", Option::<String>::None)?
+        .set_default("cache.key_prefix", default_cache_key_prefix())?
+        .set_default(
+            "cache.response_timeout_ms",
+            default_cache_response_timeout_ms(),
+        )?
+        .set_default(
+            "cache.connection_timeout_ms",
+            default_cache_connection_timeout_ms(),
+        )?
+        .set_default(
+            "cache.reconnect_cooldown_ms",
+            default_cache_reconnect_cooldown_ms(),
+        )?
         .set_default("status_list.token_exp_secs", 900)?
         .set_default("status_list.token_ttl_secs", 300)?
         .set_default("status_list.snapshot_retention_secs", 7776000)?
@@ -1445,6 +1515,11 @@ mod tests {
             ("cache.password", "redis-password"),
             ("cache.database", "2"),
             ("cache.tls", "true"),
+            ("cache.ca_file", "/etc/redis/ca.pem"),
+            ("cache.key_prefix", "tenant-a:status-list:"),
+            ("cache.response_timeout_ms", "150"),
+            ("cache.connection_timeout_ms", "200"),
+            ("cache.reconnect_cooldown_ms", "300"),
             ("status_list.token_exp_secs", "1800"),
             ("status_list.token_ttl_secs", "600"),
             ("management_auth.leeway_secs", "30"),
@@ -1508,6 +1583,14 @@ mod tests {
         );
         assert_eq!(overridden.cache.database, Some(2));
         assert!(overridden.cache.tls);
+        assert_eq!(
+            overridden.cache.ca_file.as_deref(),
+            Some(std::path::Path::new("/etc/redis/ca.pem"))
+        );
+        assert_eq!(overridden.cache.key_prefix, "tenant-a:status-list:");
+        assert_eq!(overridden.cache.response_timeout_ms, 150);
+        assert_eq!(overridden.cache.connection_timeout_ms, 200);
+        assert_eq!(overridden.cache.reconnect_cooldown_ms, 300);
         assert_eq!(
             overridden
                 .cache

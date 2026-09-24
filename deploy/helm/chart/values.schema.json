@@ -394,7 +394,7 @@
             "cacheEgress": {
               "type": "array",
               "title": "Explicit Redis cache egress destinations",
-              "description": "Required when NetworkPolicy is enabled with APP_CACHE__BACKEND=redis. The rule uses APP_CACHE__PORT, or 6379/6380 from APP_CACHE__TLS when the port is omitted."
+              "description": "Required when NetworkPolicy is enabled with APP_CACHE__BACKEND=redis. The rule uses APP_CACHE__PORT, or 6379/6380 from APP_CACHE__TLS when the port is omitted. Use a dedicated Redis ACL user scoped to APP_CACHE__KEY_PREFIX."
             }
           }
         },

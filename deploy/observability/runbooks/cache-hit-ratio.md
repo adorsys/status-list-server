@@ -3,7 +3,7 @@
 Alert:
 
 - `CacheHitRatioLow` (severity=warn)
-- `RedisCacheStartupError` (severity=warn)
+- `RedisCacheErrors` (severity=warn)
 
 ## What fired
 
@@ -32,8 +32,8 @@ sum(rate(status_list_cache_hits_total{otel_scope_name="status-list-server"}[15m]
 sum(rate(status_list_cache_misses_total{otel_scope_name="status-list-server"}[15m]))
 # Current ratio
 sli:cache_hit_ratio:5m
-# Redis startup/connectivity errors
-sum(status_list_cache_errors_total{otel_scope_name="status-list-server",operation="startup"})
+# Redis cache operation errors
+sum(rate(status_list_cache_errors_total{otel_scope_name="status-list-server"}[5m])) by (namespace, operation)
 # Confirms whether slow reads are cache-induced
 sli:db_query_latency:p95:5m
 ```

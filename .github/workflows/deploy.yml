@@ -105,19 +105,19 @@ jobs:
       matrix:
         variant:
           - suffix: aws
-            features: "postgres,aws"
+            features: "postgres,aws,redis"
             description: "PostgreSQL database with AWS Secrets Manager and Route53 DNS support"
           - suffix: gcp
-            features: "postgres,gcp"
+            features: "postgres,gcp,redis"
             description: "PostgreSQL database with GCP Secret Manager and Cloud DNS support"
           - suffix: azure
-            features: "postgres,azure"
+            features: "postgres,azure,redis"
             description: "PostgreSQL database with Azure Key Vault and Azure DNS support"
           - suffix: vault
-            features: "postgres,vault"
+            features: "postgres,vault,redis"
             description: "PostgreSQL database with HashiCorp Vault / OpenBao token material storage"
           - suffix: fscert
-            features: "postgres"
+            features: "postgres,redis"
             description: "PostgreSQL database with filesystem-mounted token signing keys and certificates"
     steps:
       - name: Checkout source code

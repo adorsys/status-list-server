@@ -5,6 +5,8 @@ use async_trait::async_trait;
 use moka::future::Cache as MokaCache;
 use opentelemetry::{KeyValue, metrics::Counter};
 use std::{sync::Arc, time::Duration};
+#[cfg(feature = "redis")]
+use tokio::sync::Mutex;
 
 use crate::domain::{
     models::status_list::{StatusListError, StatusListRecord},
@@ -18,12 +20,6 @@ const ERROR_METRIC: &str = "status_list_cache_errors";
 #[cfg(feature = "redis")]
 const CACHE_SCHEMA_VERSION: &str = "v1";
 #[cfg(feature = "redis")]
-const REDIS_KEY_PREFIX: &str = "status-list-server:status-list:";
-#[cfg(feature = "redis")]
-const REDIS_RESPONSE_TIMEOUT: Duration = Duration::from_millis(250);
-#[cfg(feature = "redis")]
-const REDIS_CONNECTION_TIMEOUT: Duration = Duration::from_millis(250);
-#[cfg(feature = "redis")]
 const REDIS_MARKER_TTL_SECS: u64 = 60;
 
 #[cfg(feature = "redis")]
@@ -36,16 +32,13 @@ static REDIS_PUT_SCRIPT: std::sync::LazyLock<redis::Script> = std::sync::LazyLoc
             return 0
         end
 
-        local current = redis.call('GET', KEYS[1])
-        if current then
-            local decoded = cjson.decode(current)
-            local current_updated_at = tonumber(decoded['updated_at'])
-            if current_updated_at and updated_at < current_updated_at then
-                return 0
-            end
+        local current_updated_at = redis.call('HGET', KEYS[1], 'u')
+        if current_updated_at and updated_at < tonumber(current_updated_at) then
+            return 0
         end
 
-        redis.call('SET', KEYS[1], ARGV[1], 'EX', tonumber(ARGV[3]))
+        redis.call('HSET', KEYS[1], 'v', ARGV[1], 'u', ARGV[2])
+        redis.call('EXPIRE', KEYS[1], tonumber(ARGV[3]))
         return 1
         "#,
     )
@@ -56,18 +49,8 @@ static REDIS_INVALIDATE_SCRIPT: std::sync::LazyLock<redis::Script> =
     std::sync::LazyLock::new(|| {
         redis::Script::new(
             r#"
-        local marker = tonumber(ARGV[1])
-        local current = redis.call('GET', KEYS[1])
-        if current then
-            local decoded = cjson.decode(current)
-            local current_updated_at = tonumber(decoded['updated_at'])
-            if current_updated_at and current_updated_at + 1 > marker then
-                marker = current_updated_at + 1
-            end
-        end
-
         redis.call('DEL', KEYS[1])
-        redis.call('SET', KEYS[2], tostring(marker), 'EX', tonumber(ARGV[2]))
+        redis.call('SET', KEYS[2], ARGV[1], 'EX', tonumber(ARGV[2]))
         return 1
         "#,
         )
@@ -217,22 +200,48 @@ impl StatusListCache for MokaStatusListCache {
 pub struct RedisStatusListCache {
     client: redis::Client,
     connection: Arc<ArcSwapOption<redis::aio::ConnectionManager>>,
+    connect_lock: Arc<Mutex<()>>,
+    circuit_open_until: Arc<std::sync::atomic::AtomicU64>,
     ttl_secs: u64,
-    record_prefix: String,
-    marker_prefix: String,
+    key_prefix: String,
+    response_timeout: Duration,
+    connection_timeout: Duration,
+    reconnect_cooldown: Duration,
 }
 
 #[cfg(feature = "redis")]
 impl RedisStatusListCache {
-    pub fn new(redis_url: &str, ttl_secs: u64) -> Result<Self, StatusListError> {
-        let client = redis::Client::open(redis_url)
-            .map_err(|error| redis_operation_error("connect", error))?;
+    pub fn new(
+        redis_url: &str,
+        ttl_secs: u64,
+        key_prefix: impl Into<String>,
+        response_timeout: Duration,
+        connection_timeout: Duration,
+        reconnect_cooldown: Duration,
+        ca_cert: Option<Vec<u8>>,
+    ) -> Result<Self, StatusListError> {
+        let client = if let Some(root_cert) = ca_cert {
+            redis::Client::build_with_tls(
+                redis_url,
+                redis::TlsCertificates {
+                    client_tls: None,
+                    root_cert: Some(root_cert),
+                },
+            )
+        } else {
+            redis::Client::open(redis_url)
+        }
+        .map_err(|error| redis_operation_error("connect", error))?;
         Ok(Self {
             client,
             connection: Arc::new(ArcSwapOption::from(None)),
+            connect_lock: Arc::new(Mutex::new(())),
+            circuit_open_until: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             ttl_secs,
-            record_prefix: format!("{REDIS_KEY_PREFIX}rec:{CACHE_SCHEMA_VERSION}:"),
-            marker_prefix: format!("{REDIS_KEY_PREFIX}meta:{CACHE_SCHEMA_VERSION}:updated:"),
+            key_prefix: key_prefix.into(),
+            response_timeout,
+            connection_timeout,
+            reconnect_cooldown,
         })
     }
 
@@ -249,26 +258,66 @@ impl RedisStatusListCache {
             return Ok((*connection).clone());
         }
 
+        let now = current_millis();
+        let open_until = self
+            .circuit_open_until
+            .load(std::sync::atomic::Ordering::Relaxed);
+        if now < open_until {
+            record_redis_cache_error(operation);
+            return Err(redis_circuit_open_error(operation, open_until - now));
+        }
+
+        let _guard = self.connect_lock.lock().await;
+        if let Some(connection) = self.connection.load_full() {
+            return Ok((*connection).clone());
+        }
+
         let manager_config = redis::aio::ConnectionManagerConfig::new()
-            .set_response_timeout(REDIS_RESPONSE_TIMEOUT)
-            .set_connection_timeout(REDIS_CONNECTION_TIMEOUT);
-        let connection = tokio::time::timeout(
-            REDIS_CONNECTION_TIMEOUT,
+            .set_response_timeout(self.response_timeout)
+            .set_connection_timeout(self.connection_timeout);
+        let connection_result = tokio::time::timeout(
+            self.connection_timeout,
             redis::aio::ConnectionManager::new_with_config(self.client.clone(), manager_config),
         )
-        .await
-        .map_err(|_| redis_timeout_error(operation, REDIS_CONNECTION_TIMEOUT))?
-        .map_err(|error| redis_operation_error(operation, error))?;
+        .await;
+        let connection = match connection_result {
+            Ok(Ok(connection)) => connection,
+            Ok(Err(error)) => {
+                self.open_circuit();
+                return Err(redis_operation_error(operation, error));
+            }
+            Err(_) => {
+                self.open_circuit();
+                return Err(redis_timeout_error(operation, self.connection_timeout));
+            }
+        };
+        self.circuit_open_until
+            .store(0, std::sync::atomic::Ordering::Relaxed);
         self.connection.store(Some(Arc::new(connection.clone())));
         Ok(connection)
     }
 
     fn key(&self, list_id: &str) -> String {
-        format!("{}{}", self.record_prefix, list_id)
+        format!(
+            "{}rec:{{{}}}:{CACHE_SCHEMA_VERSION}",
+            self.key_prefix, list_id
+        )
     }
 
     fn marker_key(&self, list_id: &str) -> String {
-        format!("{}{}", self.marker_prefix, list_id)
+        format!("{}meta:{{{}}}:updated", self.key_prefix, list_id)
+    }
+
+    fn open_circuit(&self) {
+        let cooldown_ms = self
+            .reconnect_cooldown
+            .as_millis()
+            .try_into()
+            .unwrap_or(u64::MAX);
+        self.circuit_open_until.store(
+            current_millis().saturating_add(cooldown_ms),
+            std::sync::atomic::Ordering::Relaxed,
+        );
     }
 
     async fn delete_corrupt_entry(&self, key: &str) -> Result<(), StatusListError> {
@@ -287,19 +336,17 @@ impl RedisStatusListCache {
 #[async_trait]
 impl StatusListCache for RedisStatusListCache {
     async fn get(&self, list_id: &str) -> Result<Option<StatusListRecord>, StatusListError> {
-        use redis::AsyncCommands;
-
-        if self.ttl_secs == 0 {
-            cache_metrics().misses.add(1, &cache_attrs("redis"));
-            return Ok(None);
-        }
-
         let key = self.key(list_id);
         let mut connection = self.connection("get").await?;
-        let cached: Option<String> = connection
-            .get(&key)
+        let cached: Option<String> = redis::cmd("HGET")
+            .arg(&key)
+            .arg("v")
+            .query_async(&mut connection)
             .await
-            .map_err(|error| redis_operation_error("get", error))?;
+            .map_err(|error| {
+                cache_metrics().misses.add(1, &cache_attrs("redis"));
+                redis_operation_error("get", error)
+            })?;
         let metrics = cache_metrics();
         if let Some(value) = cached {
             match serde_json::from_str::<StatusListRecord>(&value) {
@@ -335,10 +382,6 @@ impl StatusListCache for RedisStatusListCache {
     }
 
     async fn put(&self, record: StatusListRecord) -> Result<(), StatusListError> {
-        if self.ttl_secs == 0 {
-            return Ok(());
-        }
-
         let value = serde_json::to_string(&record).map_err(cache_error)?;
         let key = self.key(&record.list_id);
         let marker_key = self.marker_key(&record.list_id);
@@ -356,22 +399,36 @@ impl StatusListCache for RedisStatusListCache {
     }
 
     async fn invalidate(&self, list_id: &str) -> Result<(), StatusListError> {
-        if self.ttl_secs == 0 {
-            return Ok(());
-        }
+        self.invalidate_after_update(list_id, crate::domain::service::current_unix_timestamp())
+            .await
+    }
 
+    async fn invalidate_after_update(
+        &self,
+        list_id: &str,
+        updated_at: i64,
+    ) -> Result<(), StatusListError> {
         let mut connection = self.connection("invalidate").await?;
-        let marker = crate::domain::service::current_unix_timestamp();
         let _: i32 = REDIS_INVALIDATE_SCRIPT
             .key(self.key(list_id))
             .key(self.marker_key(list_id))
-            .arg(marker)
+            .arg(updated_at)
             .arg(REDIS_MARKER_TTL_SECS.min(self.ttl_secs))
             .invoke_async(&mut connection)
             .await
             .map_err(|error| redis_operation_error("invalidate", error))?;
         Ok(())
     }
+}
+
+#[cfg(feature = "redis")]
+fn current_millis() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .try_into()
+        .unwrap_or(u64::MAX)
 }
 
 #[cfg(feature = "redis")]
@@ -385,6 +442,14 @@ fn redis_timeout_error(operation: &'static str, timeout: Duration) -> StatusList
     StatusListError::Backend(Box::new(std::io::Error::new(
         std::io::ErrorKind::TimedOut,
         format!("Redis cache {operation} timed out after {timeout:?}"),
+    )))
+}
+
+#[cfg(feature = "redis")]
+fn redis_circuit_open_error(operation: &'static str, remaining_ms: u64) -> StatusListError {
+    StatusListError::Backend(Box::new(std::io::Error::new(
+        std::io::ErrorKind::WouldBlock,
+        format!("Redis cache {operation} short-circuited for {remaining_ms}ms"),
     )))
 }
 
@@ -481,6 +546,32 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn status_list_record_cache_json_shape_is_pinned() {
+        let record = StatusListRecord {
+            list_id: "shape".into(),
+            issuer: Issuer("issuer".into()),
+            status_list: StatusList {
+                bits: 1,
+                lst: "lst".into(),
+            },
+            sub: "sub".into(),
+            updated_at: 42,
+        };
+
+        let value = serde_json::to_value(&record).expect("serialize record");
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "list_id": "shape",
+                "issuer": "issuer",
+                "status_list": { "bits": 1, "lst": "lst" },
+                "sub": "sub",
+                "updated_at": 42
+            })
+        );
+    }
 }
 
 #[cfg(test)]
@@ -532,10 +623,23 @@ mod redis_tests {
         (Some(node), format!("redis://{host}:{port}/0"))
     }
 
+    fn redis_cache(redis_url: &str, ttl_secs: u64) -> RedisStatusListCache {
+        RedisStatusListCache::new(
+            redis_url,
+            ttl_secs,
+            "status-list-server:test:",
+            Duration::from_millis(250),
+            Duration::from_millis(250),
+            Duration::from_millis(250),
+            None,
+        )
+        .expect("configure redis cache")
+    }
+
     #[tokio::test]
     async fn redis_cache_round_trips_and_invalidates() {
         let (_container, redis_url) = redis_url().await;
-        let cache = RedisStatusListCache::new(&redis_url, 60).expect("configure redis cache");
+        let cache = redis_cache(&redis_url, 60);
 
         let list_id = format!("list-{}", uuid::Uuid::new_v4());
         let record = record(&list_id);
@@ -547,20 +651,10 @@ mod redis_tests {
     }
 
     #[tokio::test]
-    async fn redis_cache_ttl_zero_disables_puts() {
-        let (_container, redis_url) = redis_url().await;
-        let cache = RedisStatusListCache::new(&redis_url, 0).expect("configure redis cache");
-
-        let list_id = format!("disabled-{}", uuid::Uuid::new_v4());
-        cache.put(record(&list_id)).await.expect("put skipped");
-        assert_eq!(cache.get(&list_id).await.expect("get skipped"), None);
-    }
-
-    #[tokio::test]
     async fn redis_cache_shared_prefix_invalidation_clears_other_instance() {
         let (_container, redis_url) = redis_url().await;
-        let cache_a = RedisStatusListCache::new(&redis_url, 60).expect("configure cache a");
-        let cache_b = RedisStatusListCache::new(&redis_url, 60).expect("configure cache b");
+        let cache_a = redis_cache(&redis_url, 60);
+        let cache_b = redis_cache(&redis_url, 60);
         let list_id = format!("shared-{}", uuid::Uuid::new_v4());
 
         cache_a.put(record(&list_id)).await.expect("put shared");
@@ -582,19 +676,20 @@ mod redis_tests {
     #[tokio::test]
     async fn redis_cache_invalidation_marker_rejects_stale_fill() {
         let (_container, redis_url) = redis_url().await;
-        let cache = RedisStatusListCache::new(&redis_url, 60).expect("configure redis cache");
+        let cache = redis_cache(&redis_url, 60);
         let list_id = format!("stale-{}", uuid::Uuid::new_v4());
 
+        let updated_at = crate::domain::service::current_unix_timestamp();
         cache
-            .put(record_at(&list_id, 1))
+            .put(record_at(&list_id, updated_at))
             .await
             .expect("put stale base");
         cache
-            .invalidate(&list_id)
+            .invalidate_after_update(&list_id, updated_at + 1)
             .await
             .expect("write invalidation marker");
         cache
-            .put(record_at(&list_id, 1))
+            .put(record_at(&list_id, updated_at))
             .await
             .expect("older fill is ignored, not an error");
 
@@ -607,13 +702,16 @@ mod redis_tests {
     #[tokio::test]
     async fn redis_cache_corrupt_entry_is_miss_and_deleted() {
         let (_container, redis_url) = redis_url().await;
-        let cache = RedisStatusListCache::new(&redis_url, 60).expect("configure redis cache");
+        let cache = redis_cache(&redis_url, 60);
         let list_id = format!("bad-{}", uuid::Uuid::new_v4());
 
         let mut connection = cache.connection("test").await.expect("connect to redis");
-        let _: () = redis::cmd("SET")
+        let _: () = redis::cmd("HSET")
             .arg(cache.key(&list_id))
+            .arg("v")
             .arg("not-json")
+            .arg("u")
+            .arg(0)
             .query_async(&mut connection)
             .await
             .expect("write corrupt entry");
@@ -633,15 +731,18 @@ mod redis_tests {
     #[tokio::test]
     async fn redis_cache_mismatched_list_id_is_miss_and_deleted() {
         let (_container, redis_url) = redis_url().await;
-        let cache = RedisStatusListCache::new(&redis_url, 60).expect("configure redis cache");
+        let cache = redis_cache(&redis_url, 60);
         let requested_id = format!("requested-{}", uuid::Uuid::new_v4());
         let wrong_record = record(&format!("other-{}", uuid::Uuid::new_v4()));
         let value = serde_json::to_string(&wrong_record).expect("serialize wrong record");
 
         let mut connection = cache.connection("test").await.expect("connect to redis");
-        let _: () = redis::cmd("SET")
+        let _: () = redis::cmd("HSET")
             .arg(cache.key(&requested_id))
+            .arg("v")
             .arg(value)
+            .arg("u")
+            .arg(wrong_record.updated_at)
             .query_async(&mut connection)
             .await
             .expect("write mismatched entry");
@@ -667,7 +768,7 @@ mod redis_tests {
         let Some(container) = container else {
             return;
         };
-        let cache = RedisStatusListCache::new(&redis_url, 60).expect("configure redis cache");
+        let cache = redis_cache(&redis_url, 60);
 
         container.pause().await.expect("pause redis");
         let result = tokio::time::timeout(Duration::from_secs(1), cache.get("any")).await;
@@ -675,6 +776,107 @@ mod redis_tests {
 
         assert!(result.is_ok(), "cache get exceeded outer timeout");
         assert!(result.expect("outer timeout result").is_err());
+    }
+
+    #[cfg(feature = "memory")]
+    #[tokio::test]
+    async fn ha_patch_invalidation_blocks_stale_read_fill() {
+        use crate::domain::models::status_list::{Status, StatusEntry};
+        use crate::domain::ports::CertificateProvider;
+        use crate::domain::service::Service;
+        use crate::outbound::memory::{
+            MemoryCredentials, MemoryStatusListSnapshotRepo, MemoryStatusLists,
+        };
+
+        struct TestCertProvider;
+
+        #[async_trait]
+        impl CertificateProvider for TestCertProvider {
+            async fn signing_material(
+                &self,
+            ) -> Result<crate::domain::ports::SigningMaterial, StatusListError> {
+                Ok(crate::domain::ports::SigningMaterial {
+                    certificate_chain: None,
+                    signing_key_pem: String::new(),
+                })
+            }
+        }
+
+        let (_container, redis_url) = redis_url().await;
+        let cache_a = redis_cache(&redis_url, 60);
+        let cache_b = redis_cache(&redis_url, 60);
+        let snapshots = MemoryStatusListSnapshotRepo::default();
+        let repo = MemoryStatusLists::default().with_snapshot(&snapshots);
+        let service_a = Service::new(
+            repo.clone(),
+            MemoryCredentials::default(),
+            cache_a.clone(),
+            Some(Arc::new(snapshots.clone())),
+            TestCertProvider,
+        );
+        let service_b = Service::new(
+            repo.clone(),
+            MemoryCredentials::default(),
+            cache_b.clone(),
+            Some(Arc::new(snapshots)),
+            TestCertProvider,
+        );
+
+        let list_id = format!("ha-{}", uuid::Uuid::new_v4());
+        let mut old = record_at(&list_id, crate::domain::service::current_unix_timestamp());
+        old.status_list = StatusList::create(vec![StatusEntry {
+            index: 0,
+            status: Status::Valid,
+        }])
+        .expect("create valid status list");
+        service_a
+            .status_list_repo()
+            .insert(old.clone())
+            .await
+            .expect("insert backing record");
+
+        assert_eq!(
+            service_a
+                .get_status_list(&list_id)
+                .await
+                .expect("reader fill"),
+            old
+        );
+
+        let updated = service_b
+            .update_statuses(
+                &old.issuer,
+                &list_id,
+                vec![StatusEntry {
+                    index: 0,
+                    status: Status::Invalid,
+                }],
+                900,
+                100_000,
+                5_000,
+                1_048_576,
+            )
+            .await
+            .expect("patch status list");
+
+        cache_a
+            .put(old)
+            .await
+            .expect("stale read-fill should be ignored, not fail");
+        assert_eq!(
+            cache_a
+                .get(&list_id)
+                .await
+                .expect("cache after stale fill attempt"),
+            None
+        );
+        assert_eq!(
+            service_a
+                .get_status_list(&list_id)
+                .await
+                .expect("reader refetches patched record"),
+            updated
+        );
     }
 
     #[cfg(feature = "memory")]
@@ -701,7 +903,7 @@ mod redis_tests {
         }
 
         let (_container, redis_url) = redis_url().await;
-        let cache = RedisStatusListCache::new(&redis_url, 60).expect("configure redis cache");
+        let cache = redis_cache(&redis_url, 60);
 
         let snapshots = MemoryStatusListSnapshotRepo::default();
         let repo = MemoryStatusLists::default().with_snapshot(&snapshots);

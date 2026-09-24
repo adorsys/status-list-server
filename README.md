@@ -158,6 +158,20 @@ Verify zero-infrastructure in-memory compilation:
 cargo check --no-default-features --features memory
 ```
 
+
+### Status-list cache backend
+
+The status-list record cache backend is selected at runtime with
+`APP_CACHE__BACKEND=memory|redis`. Release images include the `redis` feature,
+while `memory` remains the default backend. This runtime-selection decision is
+recorded in `docs/adr/0002-runtime-cache-backend-selection.md`.
+
+For Redis deployments, use a dedicated Redis ACL user scoped to the configured
+key prefix. With the default prefix, grant access only to
+`status-list-server:status-list:*` and only the commands the cache needs
+(`GET`, `DEL`, `HGET`, `HSET`, `EXPIRE`, `EVAL`, `EVALSHA`, and script loading).
+Do not share a broad write-capable Redis user with other applications.
+
 Compile the Redis cache backend selection path:
 
 ```bash

@@ -15,6 +15,16 @@ pub trait StatusListCache: Send + Sync + 'static {
 
     /// Invalidate a cached status-list entry upon mutation.
     async fn invalidate(&self, list_id: &str) -> Result<(), StatusListError>;
+
+    /// Invalidate a cached entry after a committed update, carrying the committed
+    /// monotonic version for distributed caches that need stale-fill fencing.
+    async fn invalidate_after_update(
+        &self,
+        list_id: &str,
+        _updated_at: i64,
+    ) -> Result<(), StatusListError> {
+        self.invalidate(list_id).await
+    }
 }
 
 /// Interface for managing active status list records.

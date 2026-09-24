@@ -186,17 +186,17 @@ groups:
           runbook_url: "https://github.com/adorsys/status-list-server/blob/develop/deploy/observability/runbooks/cache-hit-ratio.md"
           dashboard_url: "http://localhost:3000/d/status-list-slo"
 
-      - alert: RedisCacheStartupError
+      - alert: RedisCacheErrors
         expr: |
-          sum by (namespace)(status_list_cache_errors_total{otel_scope_name="status-list-server",operation="startup"}) > 0
-        for: 0m
+          sum by (namespace)(rate(status_list_cache_errors_total{otel_scope_name="status-list-server"}[5m])) > 0
+        for: 5m
         labels:
           severity: warn
           service: status-list-server
           sli: cache_hit_ratio
         annotations:
-          summary: "Redis status-list cache failed at startup; pod is running with cache disabled"
-          description: "Redis startup cache errors: {{ $value | humanize }}"
+          summary: "Redis status-list cache operations are failing"
+          description: "Redis cache error rate: {{ $value | humanize }}"
           runbook_url: "https://github.com/adorsys/status-list-server/blob/develop/deploy/observability/runbooks/cache-hit-ratio.md"
           dashboard_url: "http://localhost:3000/d/status-list-slo"
 

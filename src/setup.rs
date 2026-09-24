@@ -70,8 +70,6 @@ use crate::outbound::aws::AwsSecretsManager;
 use crate::outbound::azure_kv::AzureKeyVaultClient;
 #[cfg(feature = "redis")]
 use crate::outbound::cache::RedisStatusListCache;
-#[cfg(feature = "redis")]
-use crate::outbound::cache::record_redis_cache_error;
 use crate::outbound::cache::{DisabledStatusListCache, MokaStatusListCache};
 #[cfg(feature = "acme")]
 use crate::outbound::cert::AcmeCertificateProvider;
@@ -536,42 +534,55 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
         (provider, None)
     };
 
-    let status_list_cache: Arc<dyn crate::domain::ports::StatusListCache> = match config
-        .cache
-        .backend
+    let status_list_cache: Arc<dyn crate::domain::ports::StatusListCache> = if config.cache.ttl == 0
     {
-        CacheBackend::Memory => {
-            tracing::info!(
-                cache.backend = "memory",
-                cache.ttl_secs = config.cache.ttl,
-                cache.max_capacity = config.cache.max_capacity,
-                "status-list cache backend selected"
-            );
-            Arc::new(MokaStatusListCache::new(
-                config.cache.ttl,
-                config.cache.max_capacity,
-            ))
-        }
-        CacheBackend::Redis => {
-            if config.cache.ttl == 0 {
+        tracing::info!(
+            cache.backend = "disabled",
+            cache.reason = "ttl_zero",
+            "status-list cache disabled"
+        );
+        Arc::new(DisabledStatusListCache)
+    } else {
+        match config.cache.backend {
+            CacheBackend::Memory => {
                 tracing::info!(
-                    cache.backend = "disabled",
-                    cache.reason = "ttl_zero",
-                    "status-list cache disabled"
+                    cache.backend = "memory",
+                    cache.ttl_secs = config.cache.ttl,
+                    cache.max_capacity = config.cache.max_capacity,
+                    "status-list cache backend selected"
                 );
-                Arc::new(DisabledStatusListCache)
-            } else {
+                Arc::new(MokaStatusListCache::new(
+                    config.cache.ttl,
+                    config.cache.max_capacity,
+                ))
+            }
+            CacheBackend::Redis => {
                 #[cfg(feature = "redis")]
                 {
                     let redis_url = config.cache.load_resolved_redis_url().await?;
-                    let cache =
-                        RedisStatusListCache::new(redis_url.expose_secret(), config.cache.ttl)
-                            .map_err(|error| {
-                                record_redis_cache_error("startup");
-                                color_eyre::eyre::eyre!(
-                                    "failed to configure Redis status-list cache client: {error}"
-                                )
-                            })?;
+                    let ca_cert = match &config.cache.ca_file {
+                        Some(path) => Some(tokio::fs::read(path).await.map_err(|err| {
+                            color_eyre::eyre::eyre!(
+                                "failed to read Redis cache CA file '{}': {err}",
+                                path.display()
+                            )
+                        })?),
+                        None => None,
+                    };
+                    let cache = RedisStatusListCache::new(
+                        redis_url.expose_secret(),
+                        config.cache.ttl,
+                        config.cache.key_prefix.clone(),
+                        Duration::from_millis(config.cache.response_timeout_ms),
+                        Duration::from_millis(config.cache.connection_timeout_ms),
+                        Duration::from_millis(config.cache.reconnect_cooldown_ms),
+                        ca_cert,
+                    )
+                    .map_err(|error| {
+                        color_eyre::eyre::eyre!(
+                            "failed to configure Redis status-list cache client: {error}"
+                        )
+                    })?;
                     if let Err(error) = cache.warm_up().await {
                         tracing::warn!(
                             cache.backend = "redis",
@@ -1064,6 +1075,71 @@ mod general_tests {
         if let Err(ref e) = build_state(&config).await {
             panic!("build_state failed under default configuration: {e:?}");
         }
+    }
+
+    #[cfg(all(feature = "redis", not(feature = "acme")))]
+    #[tokio::test]
+    async fn build_state_with_redis_cache_starts_when_redis_is_unreachable() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let certified_key = rcgen::generate_simple_self_signed(vec!["localhost".to_string()])
+            .expect("generate test cert and key");
+        let config = AppConfig::load_from_overrides(&[
+            ("APP_DATABASE__BACKEND", "memory"),
+            ("APP_DATABASE__URL", "memory:"),
+            (
+                "APP_SERVER__CERT__STORE__CERTIFICATE",
+                &certified_key.cert.pem(),
+            ),
+            (
+                "APP_SERVER__CERT__STORE__SIGNING_KEY",
+                &certified_key.signing_key.serialize_pem(),
+            ),
+            ("APP_CACHE__BACKEND", "redis"),
+            ("APP_CACHE__HOST", "127.0.0.1"),
+            ("APP_CACHE__PORT", "1"),
+            ("APP_CACHE__CONNECTION_TIMEOUT_MS", "50"),
+            ("APP_CACHE__RESPONSE_TIMEOUT_MS", "50"),
+            ("APP_CACHE__RECONNECT_COOLDOWN_MS", "50"),
+        ])
+        .expect("load redis cache config");
+
+        build_state(&config)
+            .await
+            .expect("redis cache startup failures should install lazy reconnecting cache");
+    }
+
+    #[cfg(not(feature = "acme"))]
+    #[tokio::test]
+    async fn build_state_uses_disabled_cache_when_ttl_is_zero() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let certified_key = rcgen::generate_simple_self_signed(vec!["localhost".to_string()])
+            .expect("generate test cert and key");
+        let config = AppConfig::load_from_overrides(&[
+            ("APP_DATABASE__BACKEND", "memory"),
+            ("APP_DATABASE__URL", "memory:"),
+            (
+                "APP_SERVER__CERT__STORE__CERTIFICATE",
+                &certified_key.cert.pem(),
+            ),
+            (
+                "APP_SERVER__CERT__STORE__SIGNING_KEY",
+                &certified_key.signing_key.serialize_pem(),
+            ),
+            ("APP_CACHE__BACKEND", "memory"),
+            ("APP_CACHE__TTL", "0"),
+        ])
+        .expect("load ttl-zero cache config");
+
+        let state = build_state(&config).await.expect("build state");
+        assert_eq!(
+            state
+                .service
+                .status_list_cache()
+                .get("any")
+                .await
+                .expect("disabled cache get"),
+            None
+        );
     }
 
     #[cfg(not(feature = "acme"))]

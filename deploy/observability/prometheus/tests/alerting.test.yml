@@ -62,16 +62,16 @@ tests:
         alertname: CacheHitRatioLow
         exp_alerts: []
 
-  # Redis-backed pods continue serving with lazy reconnect after startup cache
-  # failures, and should expose that startup error directly.
+  # Redis-backed pods continue serving with lazy reconnect after cache
+  # failures, and should expose sustained Redis cache errors directly.
   - interval: 1m
     input_series:
       - series: >-
-          status_list_cache_errors_total{otel_scope_name="status-list-server",namespace="ns1",cache="status_list",backend="redis",operation="startup"}
-        values: '0 1+0x30'
+          status_list_cache_errors_total{otel_scope_name="status-list-server",namespace="ns1",cache="status_list",backend="redis",operation="get"}
+        values: '0+60x10'
     alert_rule_test:
       - eval_time: 10m
-        alertname: RedisCacheStartupError
+        alertname: RedisCacheErrors
         exp_alerts:
           - exp_labels:
               service: "status-list-server"
@@ -79,8 +79,8 @@ tests:
               sli: "cache_hit_ratio"
               namespace: "ns1"
             exp_annotations:
-              summary: "Redis status-list cache failed at startup; pod is running with cache disabled"
-              description: "Redis startup cache errors: 1"
+              summary: "Redis status-list cache operations are failing"
+              description: "Redis cache error rate: 1"
               runbook_url: "https://github.com/adorsys/status-list-server/blob/develop/deploy/observability/runbooks/cache-hit-ratio.md"
               dashboard_url: "http://localhost:3000/d/status-list-slo"
 
