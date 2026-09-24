@@ -14,6 +14,7 @@ impl MigratorTrait for Migrator {
             Box::new(status_list_history::Migration),
             Box::new(status_list_history_exp_index::Migration),
             Box::new(credentials_list_count::Migration),
+            Box::new(list_quota::Migration),
         ]
     }
 }
@@ -35,10 +36,15 @@ fn pin_innodb_on_mysql(manager: &SchemaManager<'_>, stmt: &mut TableCreateStatem
 
 /// Tables that must use InnoDB for transactional guarantees and foreign key enforcement.
 /// Extend this list if new transactional tables are added.
-const INNODB_REQUIRED_TABLES: &[&str] = &["credentials", "status_lists", "status_list_history"];
+const INNODB_REQUIRED_TABLES: &[&str] = &[
+    "credentials",
+    "status_lists",
+    "status_list_history",
+    "list_quota",
+];
 
 /// Queries `information_schema.TABLES` after migrations and refuses to boot if
-/// any of the critical tables (`credentials`, `status_lists`, `status_list_history`) are not
+/// any of the tables in `INNODB_REQUIRED_TABLES` are not
 /// InnoDB. MyISAM silently ignores transactions, so a non-InnoDB install breaks
 /// the guarantees from issue #244 without any visible error.
 ///
@@ -628,8 +634,9 @@ pub(crate) mod credentials_list_count {
                     .await?;
             }
 
-            // Old pods also publish without bumping the counter; re-running this
-            // after the rollout is the documented post-deploy step.
+            // Old pods also publish without bumping the counter, so the quota
+            // stays off until `list-quota recount` and `list-quota enable` run
+            // after the rollout (see the `list_quota` migration).
             manager
                 .get_connection()
                 .execute_unprepared(RECOUNT_LIST_COUNT_SQL)
@@ -655,6 +662,89 @@ pub(crate) mod credentials_list_count {
         ListCount,
     }
 }
+
+/// Migration adding the switch that turns `limits.max_lists_per_issuer` on.
+/// It starts off: pods of the previous release publish without counting, so
+/// the quota is only enabled, by `list-quota enable`, once none are left.
+pub(crate) mod list_quota {
+    use super::*;
+
+    pub(crate) struct Migration;
+
+    impl MigrationName for Migration {
+        fn name(&self) -> &str {
+            "m20260923_000002_list_quota"
+        }
+    }
+
+    #[async_trait::async_trait]
+    #[allow(elided_lifetimes_in_paths)]
+    impl MigrationTrait for Migration {
+        async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+            // InnoDB so publishes can share-lock the row (see `list_quota_enforced`).
+            let mut table = Table::create();
+            table
+                .table(ListQuota::Table)
+                .if_not_exists()
+                .col(
+                    ColumnDef::new(ListQuota::Id)
+                        .integer()
+                        .not_null()
+                        .primary_key(),
+                )
+                .col(
+                    ColumnDef::new(ListQuota::Enforced)
+                        .boolean()
+                        .not_null()
+                        .default(false),
+                );
+            pin_innodb_on_mysql(manager, &mut table);
+            manager.create_table(table).await?;
+
+            // MySQL commits the CREATE on its own, so a re-run may find the row.
+            let db = manager.get_connection();
+            let backend = manager.get_database_backend();
+            let existing = db
+                .query_one(
+                    backend.build(
+                        Query::select()
+                            .column(ListQuota::Id)
+                            .from(ListQuota::Table)
+                            .and_where(Expr::col(ListQuota::Id).eq(ROW_ID)),
+                    ),
+                )
+                .await?;
+            if existing.is_none() {
+                db.execute(
+                    backend.build(
+                        Query::insert()
+                            .into_table(ListQuota::Table)
+                            .columns([ListQuota::Id, ListQuota::Enforced])
+                            .values_panic([ROW_ID.into(), false.into()]),
+                    ),
+                )
+                .await?;
+            }
+            Ok(())
+        }
+
+        async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+            manager
+                .drop_table(Table::drop().table(ListQuota::Table).to_owned())
+                .await
+        }
+    }
+
+    const ROW_ID: i32 = crate::outbound::sql::list_quota::ROW_ID;
+
+    #[derive(Iden)]
+    enum ListQuota {
+        Table,
+        Id,
+        Enforced,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

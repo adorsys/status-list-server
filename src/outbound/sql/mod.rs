@@ -1,6 +1,7 @@
 //! Relational database outbound adapters implementing domain ports via SeaORM.
 
 mod error;
+pub mod list_quota;
 mod migrations;
 mod models;
 mod store;

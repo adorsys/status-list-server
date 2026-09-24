@@ -444,6 +444,7 @@ mod database_implementation {
             ))
             .await
             .unwrap();
+        fixtures::enforce_list_quota(&store_verify.db.current()).await;
 
         let list_a = format!("{issuer}-a");
         let list_b = format!("{issuer}-b");
@@ -588,6 +589,126 @@ mod database_implementation {
             )
             .await;
         }
+    }
+
+    /// `list-quota enable` must count a publish that read the quota as off and
+    /// has not committed yet. Were the check to run without waiting for it, that
+    /// list would land after the check and leave the issuer over the cap with the
+    /// quota on.
+    async fn assert_enable_waits_for_in_flight_publish(
+        pool_publish: DatabaseConnection,
+        pool_enable: DatabaseConnection,
+        issuer: &'static str,
+        backend: &'static str,
+    ) {
+        use std::time::Duration;
+        use tokio::sync::oneshot;
+
+        use crate::outbound::sql::list_quota::{self, ListQuotaError};
+
+        let pool_enable = Arc::new(pool_enable);
+        let store = SeaOrmStore::<StatusListRecord>::new(Arc::new(pool_publish));
+        fixtures::seed_credential(&pool_enable, issuer).await;
+        let publish = |n: u32| {
+            let list_id = format!("{issuer}-{n}");
+            let record =
+                fixtures::record(&list_id, issuer, "initial", &format!("sub-{list_id}"), 1000);
+            let snapshot = fixtures::snapshot(
+                &format!("snap-{list_id}"),
+                &list_id,
+                issuer,
+                "initial",
+                &format!("sub-{list_id}"),
+                1000,
+                1900,
+            );
+            (list_id, record, snapshot)
+        };
+
+        let (_, record, snapshot) = publish(1);
+        store
+            .insert_one_with_snapshot(record, snapshot, 1)
+            .await
+            .unwrap();
+
+        let (list_id, record, snapshot) = publish(2);
+        let (tx_ready, rx_ready) = oneshot::channel();
+        let (tx_release, rx_release) = oneshot::channel();
+        snapshot_txn_test_hook::INSERT_BEFORE_COMMIT
+            .install(snapshot_txn_test_hook::Probe {
+                list_id,
+                ready: tx_ready,
+                release: rx_release,
+            })
+            .await;
+        let publisher =
+            tokio::spawn(async move { store.insert_one_with_snapshot(record, snapshot, 1).await });
+        rx_ready
+            .await
+            .expect("the publish never reached its pause point");
+
+        let enabler = {
+            let db = pool_enable.clone();
+            tokio::spawn(async move { list_quota::enable(&db, 1).await })
+        };
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert!(
+            !enabler.is_finished(),
+            "enable must wait for the in-flight publish on {backend}"
+        );
+
+        tx_release.send(()).expect("failed to release the publish");
+        let timeout = Duration::from_secs(30);
+        tokio::time::timeout(timeout, publisher)
+            .await
+            .unwrap_or_else(|_| panic!("timed out waiting for the publish on {backend}"))
+            .expect("the publish panicked")
+            .unwrap_or_else(|e| panic!("an unenforced quota must not refuse on {backend}: {e:?}"));
+        let enabled = tokio::time::timeout(timeout, enabler)
+            .await
+            .unwrap_or_else(|_| panic!("timed out waiting for enable on {backend}"))
+            .expect("enable panicked");
+
+        match enabled {
+            Err(ListQuotaError::Refused { over_quota, .. }) => {
+                assert_eq!(over_quota.len(), 1, "on {backend}: {over_quota:?}");
+                assert_eq!(over_quota[0].issuer, issuer, "on {backend}");
+                assert_eq!(over_quota[0].actual, 2, "on {backend}");
+            }
+            other => panic!(
+                "enable must see the publish it waited for and refuse on {backend}, got {other:?}"
+            ),
+        }
+        assert!(
+            !list_quota::is_enforced(&pool_enable).await.unwrap(),
+            "on {backend}"
+        );
+    }
+
+    #[cfg(feature = "mysql")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+    async fn test_mysql_enable_waits_for_in_flight_publish() {
+        let test_db = mysql_helpers::MysqlTestDb::start().await;
+        assert_enable_waits_for_in_flight_publish(
+            mysql_helpers::connect_to_test_db(&test_db.url, 1).await,
+            mysql_helpers::connect_to_test_db(&test_db.url, 2).await,
+            "issuer-enable-race-mysql",
+            "MySQL",
+        )
+        .await;
+    }
+
+    #[cfg(feature = "postgres-tests")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+    async fn test_postgres_enable_waits_for_in_flight_publish() {
+        let test_db = postgres_helpers::postgres_connection().await;
+        assert_enable_waits_for_in_flight_publish(
+            postgres_helpers::connect_to_test_db(&test_db.url, 1).await,
+            postgres_helpers::connect_to_test_db(&test_db.url, 2).await,
+            "issuer-enable-race-postgres",
+            "Postgres",
+        )
+        .await;
     }
 
     /// The publish race on MySQL, whose driver reports duplicate keys as `1062`.

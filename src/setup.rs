@@ -295,6 +295,65 @@ fn spawn_cert_rotation(config: AppConfig, provider: ReloadingCertificateProvider
     });
 }
 
+/// Usage of `status-list-server list-quota`.
+pub const LIST_QUOTA_USAGE: &str =
+    "usage: status-list-server list-quota <status|recount|enable|disable>
+
+  status   show whether limits.max_lists_per_issuer is enforced
+  recount  recompute every issuer's list count (refused while enforced)
+  enable   enforce the quota; refused, naming the issuers, while any issuer
+           has more lists than the cap or a stale count
+  disable  stop enforcing the quota";
+
+/// Runs `status-list-server list-quota <action>` against the configured
+/// database and returns what to print. Does not run migrations: the action
+/// applies to a database a pod of this release has already migrated.
+#[cfg(any(feature = "sqlite", feature = "postgres", feature = "mysql"))]
+pub async fn run_list_quota_command(config: &AppConfig, action: &str) -> EyeResult<String> {
+    use crate::outbound::sql::list_quota;
+
+    if !matches!(action, "status" | "recount" | "enable" | "disable") {
+        return Err(color_eyre::eyre::eyre!("{LIST_QUOTA_USAGE}"));
+    }
+    if config.database.backend == DatabaseBackend::Memory {
+        return Err(color_eyre::eyre::eyre!(
+            "the memory backend enforces the list quota from startup; list-quota applies to \
+             SQL backends"
+        ));
+    }
+    let db = connect_database_pool(config).await?;
+    let max = config.limits.max_lists_per_issuer;
+    match action {
+        "status" => {
+            let enforced = list_quota::is_enforced(&db).await?;
+            Ok(if enforced {
+                format!("list quota: enforced (max {max} lists per issuer)")
+            } else {
+                "list quota: not enforced".to_string()
+            })
+        }
+        "recount" => {
+            list_quota::recount(&db).await?;
+            Ok("recomputed every issuer's list count".to_string())
+        }
+        "enable" => {
+            list_quota::enable(&db, max).await?;
+            Ok(format!("list quota enforced: max {max} lists per issuer"))
+        }
+        _ => {
+            list_quota::disable(&db).await?;
+            Ok("list quota no longer enforced".to_string())
+        }
+    }
+}
+
+#[cfg(not(any(feature = "sqlite", feature = "postgres", feature = "mysql")))]
+pub async fn run_list_quota_command(_config: &AppConfig, _action: &str) -> EyeResult<String> {
+    Err(color_eyre::eyre::eyre!(
+        "this build has no SQL backend; the memory backend enforces the list quota from startup"
+    ))
+}
+
 /// Assembles application configuration, connects outbound repositories, and builds `AppState`.
 #[cfg(feature = "acme")]
 pub async fn build_state(config: &AppConfig) -> EyeResult<AppState> {
@@ -383,6 +442,17 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
                      isolation level this server pins on every write. See the logged error \
                      above for the fix.",
             )?;
+
+            if !crate::outbound::sql::list_quota::is_enforced(&db)
+                .await
+                .wrap_err("Failed to read whether the list quota is enforced")?
+            {
+                tracing::warn!(
+                    "limits.max_lists_per_issuer is not enforced. Once every pod runs this \
+                     release, run `status-list-server list-quota recount`, then \
+                     `status-list-server list-quota enable`."
+                );
+            }
 
             let db_handle = Arc::new(SwappableDatabaseConnection::new(Arc::new(db)));
             db_arc = Some(db_handle.clone());

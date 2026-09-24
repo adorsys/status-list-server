@@ -197,11 +197,20 @@ defaults, not guarantees.
 `max_lists_per_issuer` is enforced exactly, including under concurrent
 publishes: each publish increments `credentials.list_count` with a guarded
 `UPDATE` in the same transaction as its `INSERT`, so a publish that fails
-gives its slot back. It is exact from the point every pod runs a release that
-enforces it. Lists a pre-quota pod publishes during that rollout are kept, like
-lists that existed before the migration: after the
-[post-deploy recount](troubleshooting.md#after-any-rollout-that-served-a-pre-quota-release)
-such an issuer may sit above the quota, and each further publish is refused.
+gives its slot back.
+
+On the SQL backends the quota ships off, because pods of a release that
+predates it publish without counting. Once no such pod is left, the operator
+runs `status-list-server list-quota recount` and then `list-quota enable`
+(see [troubleshooting](troubleshooting.md#enabling-the-quota)). `enable`
+refuses, naming the issuers, while any issuer has more lists than the cap or a
+`list_count` that differs from its lists, so once enabled no issuer is over the
+cap. Each publish reads the `list_quota` switch in its transaction, and while
+the switch is off re-reads it under a shared lock; `enable` holds the row's
+exclusive lock while it checks, so a publish in flight is either counted by
+the check or refused by the enforced quota. The memory backend enforces the
+quota from startup.
+
 It bounds lists **per issuer**, not in total: while
 `POST /api/v1/credentials` accepts unauthenticated registrations, a new issuer
 brings a fresh quota. Lists cannot be deleted through the API, so an issuer at

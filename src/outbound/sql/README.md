@@ -24,6 +24,20 @@ transaction, before the `status_lists` `INSERT`; see `reserve_list_slot` in
 `store.rs` for why that order matters. The `DEFAULT 0` lets pods on the
 previous release keep registering credentials during a rolling deploy.
 
+### `list_quota`
+
+One row (`id = 1`) that switches `max_lists_per_issuer` on.
+
+| Column     | Type    | Null | Key | Description                                     |
+| ---------- | ------- | ---- | --- | ----------------------------------------------- |
+| `id`       | INTEGER | NO   | PK  | Always `1`                                      |
+| `enforced` | BOOLEAN | NO   |     | Whether publishes respect the quota (default 0) |
+
+It starts off, because pods of the previous release publish without counting.
+The operator turns it on with `status-list-server list-quota enable` once none
+is left; see `list_quota.rs`. Publishes read it in their transaction, under a
+shared lock while it is off.
+
 ### `status_lists`
 
 Stores status list entries and their associated issuer. Each status list is identified

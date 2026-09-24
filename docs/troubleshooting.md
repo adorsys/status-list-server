@@ -798,6 +798,63 @@ env `APP_LIMITS__MAX_LISTS_PER_ISSUER`). The count lives in `credentials.list_co
 maintained by the publish transaction itself. There is no endpoint that deletes a status list, so
 the count only ever rises.
 
+On the SQL backends the quota is **not enforced until an operator enables it** (see
+[Enabling the quota](#enabling-the-quota)); until then publishes are counted but never refused,
+and every pod logs a warning at startup. The memory backend enforces it from startup.
+
+Operators manage it with the server binary, run with the same configuration as the pods (for
+example `kubectl exec deploy/<release> -- /app/status-list-server list-quota status`):
+
+| Command                                 | Does                                                                            |
+| --------------------------------------- | ------------------------------------------------------------------------------- |
+| `status-list-server list-quota status`  | Prints whether the quota is enforced                                            |
+| `status-list-server list-quota recount` | Recomputes every `list_count` from the lists that exist; refused while enforced |
+| `status-list-server list-quota enable`  | Enforces the quota; refused while any issuer is over the cap or miscounted      |
+| `status-list-server list-quota disable` | Stops enforcing the quota                                                       |
+
+### Enabling the quota
+
+**When you see this:** A required step after the first rollout of a release with the quota, and
+after rolling forward from a release that predates it. Until it is done, each pod logs at startup:
+`limits.max_lists_per_issuer is not enforced. Once every pod runs this release, run
+`status-list-server list-quota recount`, then `status-list-server list-quota enable`.`
+
+_Source: `src/outbound/sql/list_quota.rs`, `src/setup.rs` (`run_list_quota_command`)_
+
+**Root cause:** Pods of a release that predates the quota publish without incrementing
+`credentials.list_count`. While any of them serves traffic the counter cannot be trusted, so the
+quota ships off rather than being exact only some of the time.
+
+**Fix:** Once the rollout has finished and **no pod of an older release is left**:
+
+1. `status-list-server list-quota recount`
+2. `status-list-server list-quota enable`
+
+`enable` checks every issuer against the lists that exist and the configured cap. If any issuer
+has more lists than the cap, or a `list_count` that differs from its lists, it leaves the quota off
+and names them:
+
+```text
+refusing to enable the list quota
+  1 issuer(s) have more than 1000 status lists; delete lists or raise limits.max_lists_per_issuer:
+    https://issuer.example (1003 lists)
+```
+
+- **Over the cap:** raise `APP_LIMITS__MAX_LISTS_PER_ISSUER` and roll the Deployment, or delete
+  lists as described [below](#publish-rejected-with-400-list_quota_exceeded), then run
+  `enable` again.
+- **`list_count` does not match:** a pod of an older release published after the recount, or the
+  recount was skipped. Make sure none is left, then run `recount` and `enable` again.
+
+`enable` and `recount` wait for publishes that are in flight and hold off new ones until they
+finish, so a publish is either counted by the check or refused by the enforced quota.
+
+**Rolling back** to a release that predates the quota: run `list-quota disable` first. Its pods
+publish without counting, and an enforced quota would then undercount. Enable it again, with the
+steps above, after rolling forward.
+
+---
+
 ### Publish rejected with `400` `list_quota_exceeded`
 
 **When you see this:** `PUT /api/v1/status-lists/{list_id}/statuses` returns `400` with
@@ -820,8 +877,8 @@ FROM credentials c
 WHERE c.issuer = '<issuer>';
 ```
 
-If `list_count` and `actual` differ, the counter has drifted (see
-[Recomputing `credentials.list_count`](#recomputing-credentialslist_count)); fix that first.
+If `list_count` and `actual` differ, the counter has drifted; recompute it as described under
+[Recomputing `credentials.list_count`](#recomputing-credentialslist_count).
 
 **Fix:** Either:
 
@@ -835,54 +892,34 @@ If `list_count` and `actual` differ, the counter has drifted (see
   cascade them, and expect the list to stay readable from cache for up to `APP_CACHE__TTL`
   seconds.
 
+Lowering `APP_LIMITS__MAX_LISTS_PER_ISSUER` below an issuer's count is not checked: that issuer
+keeps its lists and every further publish is refused. Run `list-quota disable` and then
+`list-quota enable` to check the new cap against every issuer.
+
 **Prevention:** Size `max_lists_per_issuer` from how many lists your largest issuer needs, and
 watch the `list_count` of your biggest issuers.
 
 ---
 
-### After any rollout that served a pre-quota release
-
-**When you see this:** A required post-deploy step, not a symptom. It applies to every rollout
-during which a pod without `credentials.list_count` support served traffic:
-
-- the rollout that first adds `credentials.list_count`, and
-- any rollout forward again after rolling back to a release that predates it.
-
-_Source: `src/outbound/sql/migrations.rs` (`credentials_list_count`)_
-
-**Root cause:** Pre-quota pods publish without incrementing `credentials.list_count`. The
-migration's backfill runs at pod startup, so pre-quota pods still serving during the rollout (or
-the whole time after a rollback) add lists it never counts. The counter then undercounts, so
-the quota is too generous (never too strict) until it is recomputed.
-
-**Fix:** Once every pod runs a release with the quota,
-[recompute the counter](#recomputing-credentialslist_count) once. Make this a step in the deploy
-procedure, not a response to a quota complaint: an undercount produces no error, so nothing
-prompts anyone to run it.
-
-The recount corrects the counter; it does not remove lists. An issuer that published past the
-quota through a pre-quota pod keeps those lists, like lists that existed before the migration,
-and every further publish it makes is refused with `list_quota_exceeded`. The quota is exact only
-from the point every pod enforces it. If it must also hold during the rollout, stop the pre-quota
-pods before any new pod serves traffic (for example with the `Recreate` Deployment strategy), at
-the cost of downtime.
-
----
-
 ### Recomputing `credentials.list_count`
 
-Recomputes every issuer's counter from the lists that exist. Run it after every rollout
-described [above](#after-any-rollout-that-served-a-pre-quota-release), and after any manual
-`DELETE` from `status_lists`. It is portable across PostgreSQL, MySQL and SQLite,
-and is the same statement the migration uses for its backfill (a unit test keeps the two
-identical):
+Recomputes every issuer's counter from the lists that exist. Needed before
+[enabling the quota](#enabling-the-quota) and after any manual `DELETE` from `status_lists`.
+Because a recount racing enforced publishes could miss one, it only runs with the quota off:
+
+1. `status-list-server list-quota disable`
+2. `status-list-server list-quota recount`
+3. `status-list-server list-quota enable`
+
+`recount` runs this statement, which is also the migration's backfill (a unit test keeps the
+two identical). It is portable across PostgreSQL, MySQL and SQLite:
 
 ```sql
 UPDATE credentials SET list_count = (SELECT COUNT(*) FROM status_lists WHERE status_lists.issuer = credentials.issuer);
 ```
 
-Run it while no publishes are in flight, or re-run it afterwards: a publish that commits while it
-runs can be missed by the count.
+Run by hand instead of through `recount`, it can miss a publish that commits while it runs; the
+next `enable` then refuses, naming the issuer.
 
 ---
 
@@ -911,6 +948,8 @@ For quick grep, the application emits these verbatim (with the primary source fi
 - `readiness check failed` (WARN): `src/server/health.rs`
 - `list_quota_exceeded` / `issuer already has N status lists; the configured maximum is M`: `src/server/error.rs`
 - `limits.max_lists_per_issuer must be greater than 0`: `src/config.rs`
+- `limits.max_lists_per_issuer is not enforced. Once every pod runs this release, ...` (WARN): `src/setup.rs`
+- `refusing to enable the list quota` / `the list quota is enforced; run `list-quota disable` before recounting`: `src/outbound/sql/list_quota.rs`
 
 Platform-only (no matching application string): `ImagePullBackOff`, `ErrImagePull`,
 `CrashLoopBackOff`, `SecretSyncedError` / `Synced=False`, and all Helm `fail` guards listed in

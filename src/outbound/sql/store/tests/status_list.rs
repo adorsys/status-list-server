@@ -194,6 +194,9 @@ async fn test_insert_with_snapshot_reserves_quota_slot_before_insert() {
 
     let db_conn = Arc::new(
         MockDatabase::new(DatabaseBackend::Postgres)
+            .append_query_results::<BTreeMap<String, Value>, Vec<_>, _>(vec![vec![quota_switch(
+                true,
+            )]])
             .append_exec_results([ok.clone(), ok.clone(), ok])
             .into_connection(),
     );
@@ -210,6 +213,7 @@ async fn test_insert_with_snapshot_reserves_quota_slot_before_insert() {
         db_conn.into_transaction_log(),
         [Transaction::many([
             Statement::from_string(DatabaseBackend::Postgres, "BEGIN"),
+            read_quota_switch(""),
             Statement::from_sql_and_values(
                 DatabaseBackend::Postgres,
                 r#"UPDATE "credentials" SET "list_count" = "list_count" + $1 WHERE "credentials"."issuer" = $2 AND "credentials"."list_count" < $3"#,
@@ -244,6 +248,67 @@ async fn test_insert_with_snapshot_reserves_quota_slot_before_insert() {
     );
 }
 
+fn quota_switch(enforced: bool) -> BTreeMap<String, Value> {
+    BTreeMap::from([("enforced".to_string(), Value::from(enforced))])
+}
+
+/// The publish's read of the `list_quota` switch, with `lock` appended.
+fn read_quota_switch(lock: &str) -> Statement {
+    Statement::from_sql_and_values(
+        DatabaseBackend::Postgres,
+        format!(r#"SELECT "enforced" FROM "list_quota" WHERE "id" = $1{lock}"#),
+        [1i32.into()],
+    )
+}
+
+/// Before `list-quota enable`, a publish re-reads the switch under a shared
+/// lock, so it cannot run alongside an `enable` or `recount`, and takes its
+/// slot with the guard lifted, so the counter is still maintained.
+#[tokio::test]
+async fn test_unenforced_quota_rereads_switch_under_shared_lock_and_still_counts() {
+    let entity = fixtures::record("list-off", "issuer-off", "initial", "sub-off", 0);
+    let ok = MockExecResult {
+        rows_affected: 1,
+        last_insert_id: 0,
+    };
+
+    let db_conn = Arc::new(
+        MockDatabase::new(DatabaseBackend::Postgres)
+            .append_query_results::<BTreeMap<String, Value>, Vec<_>, _>(vec![
+                vec![quota_switch(false)],
+                vec![quota_switch(false)],
+            ])
+            .append_exec_results([ok.clone(), ok])
+            .into_connection(),
+    );
+    let store = SeaOrmStore::<StatusListRecord>::new(db_conn.clone());
+
+    store.insert_one(entity.clone(), 2).await.unwrap();
+
+    drop(store);
+    let db_conn = Arc::try_unwrap(db_conn).expect("test should own the only DB handle");
+    let log = db_conn.into_transaction_log();
+    let [transaction] = log.as_slice() else {
+        panic!("expected one transaction, got {log:?}");
+    };
+    let statements = transaction.statements();
+    assert_eq!(statements[1], read_quota_switch(""), "{statements:?}");
+    assert_eq!(
+        statements[2],
+        read_quota_switch(" FOR SHARE"),
+        "{statements:?}"
+    );
+    assert_eq!(
+        statements[3],
+        Statement::from_sql_and_values(
+            DatabaseBackend::Postgres,
+            r#"UPDATE "credentials" SET "list_count" = "list_count" + $1 WHERE "credentials"."issuer" = $2 AND "credentials"."list_count" < $3"#,
+            [1i32.into(), "issuer-off".into(), i64::MAX.into()],
+        ),
+        "the guard must be lifted, not the count: {statements:?}"
+    );
+}
+
 #[tokio::test]
 async fn test_insert_at_quota_refuses_without_inserting() {
     let entity = fixtures::record("list-full", "issuer-full", "initial", "sub-full", 0);
@@ -255,6 +320,7 @@ async fn test_insert_at_quota_refuses_without_inserting() {
                 last_insert_id: 0,
             }])
             .append_query_results::<BTreeMap<String, Value>, Vec<_>, _>(vec![
+                vec![quota_switch(true)],
                 vec![BTreeMap::from([(
                     "list_count".to_string(),
                     Value::from(2i64),
@@ -1180,6 +1246,7 @@ async fn test_postgres_update_with_snapshot_rolls_back_on_history_failure() {
 #[cfg(any(feature = "sqlite", feature = "mysql", feature = "postgres-tests"))]
 async fn assert_list_quota_is_exact(db: Arc<DatabaseConnection>, issuer: &str, backend: &str) {
     fixtures::seed_credential(&db, issuer).await;
+    fixtures::enforce_list_quota(&db).await;
     let store = SeaOrmStore::<StatusListRecord>::new(db.clone());
     let list_id = |n: u32| format!("{issuer}-list-{n}");
     let record = |n: u32| {
@@ -1284,89 +1351,6 @@ async fn test_postgres_list_quota_is_exact() {
     let test_db = postgres_helpers::postgres_connection().await;
     let db = test_db.db.clone();
     assert_list_quota_is_exact(db, "issuer-quota-postgres", "Postgres").await;
-}
-
-/// Lists a pre-quota pod published during the rollout stay, but once the
-/// runbook recount has run an over-quota issuer can publish nothing more.
-#[cfg(any(feature = "sqlite", feature = "mysql", feature = "postgres-tests"))]
-async fn assert_over_quota_issuer_is_refused_after_recount(
-    db: Arc<DatabaseConnection>,
-    issuer: &str,
-    backend: &str,
-) {
-    use sea_orm::ConnectionTrait;
-
-    use crate::outbound::sql::migrations::RECOUNT_LIST_COUNT_SQL;
-
-    fixtures::seed_credential(&db, issuer).await;
-    // What a pre-quota pod writes: the list, without touching `list_count`.
-    for n in 1..=3 {
-        db.execute_unprepared(&format!(
-            "INSERT INTO status_lists (list_id, issuer, status_list, sub, updated_at) \
-             VALUES ('{issuer}-old-{n}', '{issuer}', '{{\"bits\":1,\"lst\":\"\"}}', \
-             'sub-{issuer}-old-{n}', 0)"
-        ))
-        .await
-        .unwrap();
-    }
-    assert_eq!(fixtures::list_count(&db, issuer).await, 0);
-
-    db.execute_unprepared(RECOUNT_LIST_COUNT_SQL).await.unwrap();
-    assert_eq!(fixtures::list_count(&db, issuer).await, 3, "on {backend}");
-
-    let store = SeaOrmStore::<StatusListRecord>::new(db.clone());
-    let list_id = format!("{issuer}-new");
-    let record = fixtures::record(&list_id, issuer, "initial", "sub-new", 0);
-    let refused = store.insert_one(record.clone(), 2).await;
-    assert!(
-        matches!(
-            refused,
-            Err(RepositoryError::QuotaExceeded { count: 3, max: 2 })
-        ),
-        "an issuer over quota after the recount must be refused on {backend}, got {refused:?}"
-    );
-    let refused = store
-        .insert_one_with_snapshot(
-            record,
-            fixtures::snapshot("snap-new", &list_id, issuer, "initial", "sub-new", 0, 900),
-            2,
-        )
-        .await;
-    assert!(
-        matches!(
-            refused,
-            Err(RepositoryError::QuotaExceeded { count: 3, max: 2 })
-        ),
-        "the snapshot path must agree on {backend}, got {refused:?}"
-    );
-    assert!(
-        store.find_one_by(&list_id).await.unwrap().is_none(),
-        "a refused publish must not be stored on {backend}"
-    );
-    assert_eq!(fixtures::list_count(&db, issuer).await, 3, "on {backend}");
-}
-
-#[cfg(feature = "sqlite")]
-#[tokio::test]
-async fn test_sqlite_over_quota_issuer_is_refused_after_recount() {
-    let db = fixtures::sqlite_connection().await;
-    assert_over_quota_issuer_is_refused_after_recount(db, "issuer-over-sqlite", "SQLite").await;
-}
-
-#[cfg(feature = "mysql")]
-#[tokio::test]
-async fn test_mysql_over_quota_issuer_is_refused_after_recount() {
-    let test_db = mysql_helpers::MysqlTestDb::start().await;
-    let db = test_db.connection().await;
-    assert_over_quota_issuer_is_refused_after_recount(db, "issuer-over-mysql", "MySQL").await;
-}
-
-#[cfg(feature = "postgres-tests")]
-#[tokio::test]
-async fn test_postgres_over_quota_issuer_is_refused_after_recount() {
-    let test_db = postgres_helpers::postgres_connection().await;
-    let db = test_db.db.clone();
-    assert_over_quota_issuer_is_refused_after_recount(db, "issuer-over-postgres", "Postgres").await;
 }
 
 /// A full walk returns every list exactly once. Mixed-case IDs sort differently

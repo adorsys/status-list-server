@@ -52,6 +52,28 @@ pub(super) async fn list_count(db: &DatabaseConnection, issuer: &str) -> i64 {
         .expect("issuer must have a credential row")
 }
 
+/// Turns the list quota on, as the operator does after the rollout.
+#[cfg(any(feature = "sqlite", feature = "mysql", feature = "postgres-tests"))]
+pub(super) async fn enforce_list_quota(db: &DatabaseConnection) {
+    crate::outbound::sql::list_quota::enable(db, u64::MAX)
+        .await
+        .expect("enabling the list quota with no cap must succeed");
+}
+
+/// Inserts a list the way a pod of a release before the quota did: without
+/// touching `credentials.list_count`.
+#[cfg(any(feature = "sqlite", feature = "mysql", feature = "postgres-tests"))]
+pub(super) async fn insert_list_as_old_pod(db: &DatabaseConnection, list_id: &str, issuer: &str) {
+    use sea_orm::ConnectionTrait;
+
+    db.execute_unprepared(&format!(
+        "INSERT INTO status_lists (list_id, issuer, status_list, sub, updated_at) \
+         VALUES ('{list_id}', '{issuer}', '{{\"bits\":1,\"lst\":\"\"}}', 'sub-{list_id}', 0)"
+    ))
+    .await
+    .unwrap();
+}
+
 pub(super) fn record(
     list_id: &str,
     issuer: &str,

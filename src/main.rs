@@ -7,7 +7,7 @@ use status_list_server::cert_manager::setup_cert_renewal_scheduler;
 use status_list_server::setup::build_state;
 #[cfg(feature = "acme")]
 use status_list_server::setup::build_state_with_cert_manager;
-use status_list_server::setup::setup_snapshot_cleanup_scheduler;
+use status_list_server::setup::{run_list_quota_command, setup_snapshot_cleanup_scheduler};
 use status_list_server::telemetry::init_telemetry;
 use status_list_server::{config::Config as AppConfig, startup::HttpServer};
 #[cfg(not(target_env = "msvc"))]
@@ -27,6 +27,14 @@ async fn main() -> Result<()> {
 
     // Load configuration first so telemetry can read its settings
     let config = AppConfig::load()?;
+
+    // `status-list-server list-quota <action>`: an operator step, not the server.
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.first().map(String::as_str) == Some("list-quota") {
+        let action = args.get(1).map(String::as_str).unwrap_or_default();
+        println!("{}", run_list_quota_command(&config, action).await?);
+        return Ok(());
+    }
 
     // Initialize telemetry (tracing + metrics) based on environment.
     // The guard must be held until shutdown to flush pending OTLP spans.

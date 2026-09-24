@@ -11,6 +11,7 @@ use std::sync::Arc;
 use tracing::warn;
 
 use super::error::{RepositoryError, contention_err};
+use super::list_quota::list_quota_enforced;
 use super::models::{
     Credentials, StatusListHistoryRecord, StatusListRecord, credentials, status_list_history,
     status_lists,
@@ -111,20 +112,28 @@ impl<T> SeaOrmStore<T> {
     /// SQLite and the mock backend are excluded: SQLite has no per-transaction
     /// isolation and sea-orm warns on every transaction if a level is supplied.
     async fn begin_read_committed(&self) -> Result<DatabaseTransaction, DbErr> {
-        let db = self.db.current();
-        match db.get_database_backend() {
-            DatabaseBackend::Postgres | DatabaseBackend::MySql => {
-                db.begin_with_config(Some(IsolationLevel::ReadCommitted), None)
-                    .await
-            }
-            _ => db.begin().await,
+        begin_read_committed(&self.db.current()).await
+    }
+}
+
+/// See [`SeaOrmStore::begin_read_committed`].
+pub(super) async fn begin_read_committed(
+    db: &DatabaseConnection,
+) -> Result<DatabaseTransaction, DbErr> {
+    match db.get_database_backend() {
+        DatabaseBackend::Postgres | DatabaseBackend::MySql => {
+            db.begin_with_config(Some(IsolationLevel::ReadCommitted), None)
+                .await
         }
+        _ => db.begin().await,
     }
 }
 
 /// Takes one of the issuer's quota slots with a guarded
 /// `UPDATE … SET list_count = list_count + 1 WHERE list_count < max`. The row
 /// lock makes concurrent publishes re-check the guard, so the quota is exact.
+/// Until `list-quota enable` has run, the guard is lifted but the counter is
+/// still maintained (see [`list_quota_enforced`]).
 ///
 /// Must run before the `status_lists` `INSERT`: that insert's FK check takes a
 /// shared lock on this `credentials` row, and two publishes upgrading it would
@@ -139,7 +148,11 @@ async fn reserve_list_slot(
     list_id: &str,
     max_lists_per_issuer: u64,
 ) -> Result<(), RepositoryError> {
-    let max = i64::try_from(max_lists_per_issuer).unwrap_or(i64::MAX);
+    let max = if list_quota_enforced(txn).await.map_err(map_update_err)? {
+        i64::try_from(max_lists_per_issuer).unwrap_or(i64::MAX)
+    } else {
+        i64::MAX
+    };
     let reserved = credentials::Entity::update_many()
         .col_expr(
             credentials::Column::ListCount,
