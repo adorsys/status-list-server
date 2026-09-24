@@ -81,7 +81,6 @@ tower_governor = "0.8"
 governor = "0.10"
 
 moka = { version = "0.12", features = ["future"] }
-redis = { version = "0.32", features = ["tokio-comp", "tokio-rustls-comp", "connection-manager"], optional = true }
 
 # Cryptography and Security
 rand = "0.10"
@@ -185,6 +184,11 @@ optional = true
 
 [dependencies.azure_core]
 version = "1"
+optional = true
+
+[dependencies.redis]
+version = "1.7"
+features = ["tokio-comp", "tokio-rustls-comp", "connection-manager"]
 optional = true
 
 [dependencies.p256]

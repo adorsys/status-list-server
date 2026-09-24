@@ -21,8 +21,8 @@ use sea_orm_migration::MigratorTrait;
     feature = "redis"
 ))]
 use secrecy::ExposeSecret;
-use std::sync::Arc;
 use std::time::Duration;
+use std::{num::NonZeroU64, sync::Arc};
 #[cfg(feature = "acme")]
 use tracing::warn;
 
@@ -552,7 +552,8 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
                     "status-list cache backend selected"
                 );
                 Arc::new(MokaStatusListCache::new(
-                    config.cache.ttl,
+                    NonZeroU64::new(config.cache.ttl)
+                        .expect("cache TTL is nonzero after disabled-cache selection"),
                     config.cache.max_capacity,
                 ))
             }

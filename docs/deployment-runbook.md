@@ -98,6 +98,25 @@ The chart's `statuslist.env` holds the application configuration. Set the values
 - **Region** (`statuslist.aws.region`, renders `APP_AWS__REGION`): only required when you use an AWS-backed secret or DNS backend; omit it for other providers.
 - **Telemetry / limits / rate limiting / cache**: defaults are sensible; over-ride only what your sizing needs.
 
+## Redis Status-List Cache
+
+Redis is an optional runtime cache backend. Set `APP_CACHE__BACKEND=redis`, provide
+`APP_CACHE__HOST`, and configure `APP_CACHE__TLS=true` with a password in production.
+For Helm, source `APP_CACHE__PASSWORD` from `statuslist.secretEnv` and set
+`statuslist.networkPolicy.cacheEgress` when NetworkPolicy is enabled.
+
+Use a dedicated Redis ACL user scoped to `APP_CACHE__KEY_PREFIX`. With the default
+prefix, grant only `GET`, `DEL`, `HGET`, `HSET`, `EXPIRE`, `EVAL`, `EVALSHA`, and
+script loading on `status-list-server:status-list:*`; do not share a broad
+write-capable Redis user with other applications. Configure Redis with
+`maxmemory-policy noeviction` so full Redis memory is visible as a cache error rather
+than silently evicting entries.
+
+The cache supports private CA bundles (`APP_CACHE__CA_FILE`) and configurable
+response, connection, and reconnect-cooldown timeouts. See
+[`deploy/helm/chart/values.yaml`](../deploy/helm/chart/values.yaml) for the full
+Helm value reference.
+
 ### Install
 
 ```bash

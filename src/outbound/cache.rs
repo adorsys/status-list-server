@@ -4,7 +4,7 @@ use arc_swap::ArcSwapOption;
 use async_trait::async_trait;
 use moka::future::Cache as MokaCache;
 use opentelemetry::{KeyValue, metrics::Counter};
-use std::{sync::Arc, time::Duration};
+use std::{num::NonZeroU64, sync::Arc, time::Duration};
 #[cfg(feature = "redis")]
 use tokio::sync::Mutex;
 
@@ -149,20 +149,9 @@ pub struct MokaStatusListCache {
 
 impl MokaStatusListCache {
     /// Build an in-process cache.
-    ///
-    /// A `ttl_secs` value of `0` preserves the existing "cache disabled"
-    /// behavior: inserted entries expire immediately and reads miss.
-    ///
-    /// Counter handles are resolved lazily and generation-aware on every read
-    /// through `cache_metrics`/`cached_instruments`, so they stay valid
-    /// regardless of whether the global meter provider has been installed yet
-    /// or has since been replaced (e.g. a re-run of `setup_metrics` in tests).
-    pub fn new(ttl_secs: u64, max_capacity: u64) -> Self {
-        if ttl_secs == 0 {
-            tracing::info!("Cache disabled (TTL=0)");
-        }
+    pub fn new(ttl_secs: NonZeroU64, max_capacity: u64) -> Self {
         let inner = MokaCache::builder()
-            .time_to_live(Duration::from_secs(ttl_secs))
+            .time_to_live(Duration::from_secs(ttl_secs.get()))
             .max_capacity(max_capacity)
             .build();
         Self { inner }
@@ -273,8 +262,8 @@ impl RedisStatusListCache {
         }
 
         let manager_config = redis::aio::ConnectionManagerConfig::new()
-            .set_response_timeout(self.response_timeout)
-            .set_connection_timeout(self.connection_timeout);
+            .set_response_timeout(Some(self.response_timeout))
+            .set_connection_timeout(Some(self.connection_timeout));
         let connection_result = tokio::time::timeout(
             self.connection_timeout,
             redis::aio::ConnectionManager::new_with_config(self.client.clone(), manager_config),
@@ -470,26 +459,6 @@ mod tests {
     use opentelemetry_sdk::Resource;
     use prometheus::{Encoder, Registry, TextEncoder};
 
-    #[tokio::test]
-    async fn ttl_zero_expires_entries_immediately() {
-        let cache = MokaStatusListCache::new(0, 10);
-        cache
-            .put(StatusListRecord {
-                list_id: "id".into(),
-                issuer: Issuer("issuer".into()),
-                status_list: StatusList {
-                    bits: 1,
-                    lst: "lst".into(),
-                },
-                sub: "sub".into(),
-                updated_at: 0,
-            })
-            .await
-            .unwrap();
-
-        assert!(cache.get("id").await.unwrap().is_none());
-    }
-
     #[test]
     fn cache_counts_hits_and_misses_are_exported() {
         let _metrics_guard = metrics_test_lock();
@@ -509,7 +478,7 @@ mod tests {
         )
         .expect("metrics setup");
 
-        let cache = MokaStatusListCache::new(10, 100);
+        let cache = MokaStatusListCache::new(NonZeroU64::new(10).unwrap(), 100);
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -586,6 +555,11 @@ mod redis_tests {
         runners::AsyncRunner,
     };
 
+    use tokio::sync::OnceCell;
+
+    static REDIS_CONTAINER: OnceCell<ContainerAsync<GenericImage>> = OnceCell::const_new();
+    static REDIS_TEST_LOCK: Mutex<()> = Mutex::const_new(());
+
     fn record_at(list_id: &str, updated_at: i64) -> StatusListRecord {
         StatusListRecord {
             list_id: list_id.to_string(),
@@ -603,24 +577,32 @@ mod redis_tests {
         record_at(list_id, 0)
     }
 
-    async fn redis_url() -> (Option<ContainerAsync<GenericImage>>, String) {
+    async fn redis_container() -> &'static ContainerAsync<GenericImage> {
+        REDIS_CONTAINER
+            .get_or_init(|| async {
+                GenericImage::new("redis", "8.4-alpine")
+                    .with_exposed_port(6379.tcp())
+                    .with_wait_for(WaitFor::message_on_stdout("Ready to accept connections"))
+                    .start()
+                    .await
+                    .expect("start Redis container")
+            })
+            .await
+    }
+
+    async fn redis_url() -> String {
         if let Ok(redis_url) = std::env::var("TEST_REDIS_URL") {
-            return (None, redis_url);
+            return redis_url;
         }
 
-        let node = GenericImage::new("redis", "8.4-alpine")
-            .with_exposed_port(6379.tcp())
-            .with_wait_for(WaitFor::message_on_stdout("Ready to accept connections"))
-            .start()
-            .await
-            .expect("start Redis container");
+        let node = redis_container().await;
         let host = node.get_host().await.expect("resolve Redis host");
         let port = node
             .get_host_port_ipv4(6379)
             .await
             .expect("resolve Redis port");
 
-        (Some(node), format!("redis://{host}:{port}/0"))
+        format!("redis://{host}:{port}/0")
     }
 
     fn redis_cache(redis_url: &str, ttl_secs: u64) -> RedisStatusListCache {
@@ -638,7 +620,8 @@ mod redis_tests {
 
     #[tokio::test]
     async fn redis_cache_round_trips_and_invalidates() {
-        let (_container, redis_url) = redis_url().await;
+        let _redis_test_lock = REDIS_TEST_LOCK.lock().await;
+        let redis_url = redis_url().await;
         let cache = redis_cache(&redis_url, 60);
 
         let list_id = format!("list-{}", uuid::Uuid::new_v4());
@@ -652,7 +635,8 @@ mod redis_tests {
 
     #[tokio::test]
     async fn redis_cache_shared_prefix_invalidation_clears_other_instance() {
-        let (_container, redis_url) = redis_url().await;
+        let _redis_test_lock = REDIS_TEST_LOCK.lock().await;
+        let redis_url = redis_url().await;
         let cache_a = redis_cache(&redis_url, 60);
         let cache_b = redis_cache(&redis_url, 60);
         let list_id = format!("shared-{}", uuid::Uuid::new_v4());
@@ -675,7 +659,8 @@ mod redis_tests {
 
     #[tokio::test]
     async fn redis_cache_invalidation_marker_rejects_stale_fill() {
-        let (_container, redis_url) = redis_url().await;
+        let _redis_test_lock = REDIS_TEST_LOCK.lock().await;
+        let redis_url = redis_url().await;
         let cache = redis_cache(&redis_url, 60);
         let list_id = format!("stale-{}", uuid::Uuid::new_v4());
 
@@ -701,7 +686,8 @@ mod redis_tests {
 
     #[tokio::test]
     async fn redis_cache_corrupt_entry_is_miss_and_deleted() {
-        let (_container, redis_url) = redis_url().await;
+        let _redis_test_lock = REDIS_TEST_LOCK.lock().await;
+        let redis_url = redis_url().await;
         let cache = redis_cache(&redis_url, 60);
         let list_id = format!("bad-{}", uuid::Uuid::new_v4());
 
@@ -730,7 +716,8 @@ mod redis_tests {
 
     #[tokio::test]
     async fn redis_cache_mismatched_list_id_is_miss_and_deleted() {
-        let (_container, redis_url) = redis_url().await;
+        let _redis_test_lock = REDIS_TEST_LOCK.lock().await;
+        let redis_url = redis_url().await;
         let cache = redis_cache(&redis_url, 60);
         let requested_id = format!("requested-{}", uuid::Uuid::new_v4());
         let wrong_record = record(&format!("other-{}", uuid::Uuid::new_v4()));
@@ -764,10 +751,12 @@ mod redis_tests {
 
     #[tokio::test]
     async fn redis_cache_get_times_out_when_server_paused() {
-        let (container, redis_url) = redis_url().await;
-        let Some(container) = container else {
+        let _redis_test_lock = REDIS_TEST_LOCK.lock().await;
+        if std::env::var("TEST_REDIS_URL").is_ok() {
             return;
-        };
+        }
+        let container = redis_container().await;
+        let redis_url = redis_url().await;
         let cache = redis_cache(&redis_url, 60);
 
         container.pause().await.expect("pause redis");
@@ -781,6 +770,7 @@ mod redis_tests {
     #[cfg(feature = "memory")]
     #[tokio::test]
     async fn ha_patch_invalidation_blocks_stale_read_fill() {
+        let _redis_test_lock = REDIS_TEST_LOCK.lock().await;
         use crate::domain::models::status_list::{Status, StatusEntry};
         use crate::domain::ports::CertificateProvider;
         use crate::domain::service::Service;
@@ -802,7 +792,7 @@ mod redis_tests {
             }
         }
 
-        let (_container, redis_url) = redis_url().await;
+        let redis_url = redis_url().await;
         let cache_a = redis_cache(&redis_url, 60);
         let cache_b = redis_cache(&redis_url, 60);
         let snapshots = MemoryStatusListSnapshotRepo::default();
@@ -882,6 +872,7 @@ mod redis_tests {
     #[cfg(feature = "memory")]
     #[tokio::test]
     async fn service_get_status_list_uses_redis_cache() {
+        let _redis_test_lock = REDIS_TEST_LOCK.lock().await;
         use crate::domain::ports::CertificateProvider;
         use crate::domain::service::Service;
         use crate::outbound::memory::{
@@ -902,7 +893,7 @@ mod redis_tests {
             }
         }
 
-        let (_container, redis_url) = redis_url().await;
+        let redis_url = redis_url().await;
         let cache = redis_cache(&redis_url, 60);
 
         let snapshots = MemoryStatusListSnapshotRepo::default();

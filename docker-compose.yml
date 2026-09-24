@@ -57,7 +57,7 @@ services:
       - status-list-network
 
   redis:
-    image: redis:8.4-alpine
+    image: redis:8.10-alpine
     restart: always
     container_name: status-list-redis
     profiles:

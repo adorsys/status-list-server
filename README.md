@@ -161,28 +161,11 @@ cargo check --no-default-features --features memory
 ### Status-list cache backend
 
 The status-list record cache backend is selected at runtime with
-`APP_CACHE__BACKEND=memory|redis`. Release images include the `redis` feature,
-while `memory` remains the default backend. This runtime-selection decision is
-recorded in `docs/adr/0002-runtime-cache-backend-selection.md`.
+`APP_CACHE__BACKEND=memory|redis`; `memory` is the default. The selection rationale
+is recorded in [ADR 0002](docs/adr/0002-runtime-cache-backend-selection.md).
 
-For Redis deployments, use a dedicated Redis ACL user scoped to the configured
-key prefix. With the default prefix, grant access only to
-`status-list-server:status-list:*` and only the commands the cache needs
-(`GET`, `DEL`, `HGET`, `HSET`, `EXPIRE`, `EVAL`, `EVALSHA`, and script loading).
-Do not share a broad write-capable Redis user with other applications.
-
-Compile the Redis cache backend selection path:
-
-```bash
-cargo clippy --no-default-features --features memory,postgres,redis -- -D warnings
-```
-
-Run Redis cache integration tests with either Docker/testcontainers or an
-existing Redis endpoint:
-
-```bash
-TEST_REDIS_URL=redis://localhost:6379/0 cargo test --no-default-features --features memory,redis-tests outbound::cache
-```
+See the [deployment runbook](docs/deployment-runbook.md#redis-status-list-cache)
+for Redis configuration and operational guidance.
 
 Run the complete local CI verification suite (formatting, clippy, tests, and dependency auditing):
 
