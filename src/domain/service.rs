@@ -5,8 +5,7 @@ use std::sync::Arc;
 use crate::domain::models::credential::{Credential, CredentialError, Issuer};
 use crate::domain::models::status_list::{
     StatusEntry, StatusList, StatusListError, StatusListRecord, StatusListSnapshot,
-    validate_unique_indices,
-    StatusListUriPage,
+    StatusListUriPage, validate_unique_indices,
 };
 use crate::domain::ports::{
     CertificateProvider, CredentialRepo, StatusListCache, StatusListRepo, StatusListSnapshotRepo,
