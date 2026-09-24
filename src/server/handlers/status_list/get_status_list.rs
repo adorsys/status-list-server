@@ -1436,7 +1436,13 @@ mod tests {
                 ACCEPT_STATUS_LISTS_HEADER_JWT.parse().unwrap(),
             );
 
-            // not_modified: within-window revalidation.
+            // not_modified: within-window revalidation. Revalidate at the same
+            // instant (`now0`) rather than `now0 + N` so the token window (and
+            // therefore the ETag) is guaranteed not to roll over in between — the
+            // window boundary is wall-clock-anchored, so a fixed offset could
+            // straddle it and turn a 304 into a 200 depending on the time of day.
+            // The wall-clock now0 is still required so the expired-token branch
+            // below can line up with the list's real `updated_at`.
             let res1 = get_status_list_at(
                 State(app_state.clone()),
                 token_id.clone(),
@@ -1456,7 +1462,7 @@ mod tests {
                 token_id.clone(),
                 Ok(Query(StatusListQuery { time: None })),
                 nm_headers,
-                now0 + 60,
+                now0,
             )
             .await
             .unwrap()
