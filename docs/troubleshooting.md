@@ -44,8 +44,6 @@ small closed set (`connection`, `connection_acquire`, `execution`, `query`, `con
 `last_insert_id`, `missing_primary_key`, `record_not_found`, `attribute_not_set`, `custom`,
 `type`, `json`, `migration`, `record_not_inserted`, `record_not_updated`).
 
-_Source: `src/setup.rs:163` (message), `src/setup.rs:106` (classifier)_
-
 **Root cause:** One of:
 
 - The database is unreachable on `host:port` (network policy, wrong service name, or the
@@ -83,9 +81,9 @@ kubectl get secret statuslist-secret -n statuslist-production \
 - If the error is `kind=connection_acquire`, raise `database.pool.max_connections` headroom or
   the `acquire_timeout_secs` in your values (`APP_DATABASE__POOL__*`).
 
-**Prevention:** Keep the pool tuning consistent with the database's `max_connections`
-("pool.max = floor(pg_max / replicas) - 5", see `src/config.rs` `DatabasePoolConfig`). Verify a
-password rotation by restarting the rollout and watching this specific message disappear.
+**Prevention:** Keep the pool size below the database's `max_connections` budget across all
+replicas. Verify a password rotation by restarting the rollout and watching this specific message
+disappear.
 
 ---
 
@@ -143,8 +141,6 @@ pool-tuning problem.
 - `Database backend 'X' configured, but feature flag for it was not compiled in.`
   (a backend compiled out entirely, no SQL/memory feature present)
 
-_Source: `src/setup.rs:369` (memory variant), `src/setup.rs:410` (generic variant)_
-
 **Root cause:** Image **variant mismatch**: the container image you pulled was built with a
 different feature set than the configuration expects (e.g. a build without `postgres`/`sqlite`/
 `mysql`/`memory` being told to use that backend).
@@ -158,8 +154,7 @@ kubectl get pod -l app.kubernetes.io/name=status-list-server -n statuslist-produ
 ```
 
 **Fix:** Use the image variant compiled for your backend, or set `database.backend` to a backend
-the image supports. Default backend by feature set is defined in `src/config.rs` `base_builder`
-(`postgres` when `postgres` is compiled, else `sqlite`, else `mysql`, else `memory`).
+the image supports. The default follows the image's compiled backend support.
 
 **Prevention:** Document which image tag/variant each backend maps to, and pin `statuslist.image`
 (digest preferred) so a drifting tag cannot silently change the compiled feature set.
@@ -170,8 +165,6 @@ the image supports. Default backend by feature set is defined in `src/config.rs`
 
 **When you see this:** At startup, when validating the database connection string against the
 selected `database.backend`.
-
-_Source: `src/setup.rs:138`, schemes in `src/config.rs`_
 
 **Root cause:** Backend vs scheme mismatch, e.g. `APP_DATABASE__BACKEND=postgres` with a
 `mysql://` URL, or a URL using `postgresql://` where the validator only accepts the exact
@@ -198,8 +191,6 @@ which avoids assembling URLs in pod metadata entirely).
 **When you see this:** At startup, when both the full `database.url` _and_ any split field
 (`host`, `username`, `password`, `name`) are set.
 
-_Source: `src/config.rs:752`_
-
 **Root cause:** Mixed configuration: the app refuses to guess which source wins.
 
 **Diagnostics / Fix:** Inspect the effective env (`helm get values`, or the pod env as in the
@@ -216,8 +207,6 @@ credentials in pod metadata); see the Helm section. Use the split fields on Kube
 **When you see this:** At startup, when a split database field required to assemble the URL is
 absent/empty. The same pattern applies to `database.host`, `database.username`, `database.name`,
 and to the combined `database.url or split database fields`.
-
-_Source: `src/config.rs:641, 646` (`required_config_field` / `required_secret_field`), call sites `src/config.rs:772-778`, combined-message `src/config.rs:745`_
 
 **Root cause:** A required config value is not present. In the Helm/deployment model this is
 usually a **missing or empty secret mount / env**: the pod has no `APP_DATABASE__PASSWORD_FILE`
@@ -254,8 +243,6 @@ rotation without a pod restart (see the rotation section below).
 - `Invalid database.query: query parameter keys must be non-empty and contain only ASCII letters, digits, '.', '_' or '-'`
 - `Invalid database.query: credential-like query parameter key '...' is not allowed`
 
-_Source: `src/config.rs:690-710` (host validator, message at `709`), `src/config.rs:656-683` (query validator, messages at `669` and `682`)_
-
 **Root cause:** `database.host` contained a scheme/port/userinfo/`@`/`?`/`#`/whitespace, or
 trailing/leading `-`/`.`; or `database.query` used a forbidden credential-like key
 (`password`, `passwd`, `secret`, `token`, `user`, `username`).
@@ -282,8 +269,6 @@ Several distinct strings:
 - `vault {AppRole|Kubernetes} login failed: HTTP <status>: <body>`
 - `failed to read Kubernetes service account token from '...': ...`
 - `Kubernetes service account token in '...' is empty`
-
-_Source: `src/setup.rs:682, 692` (config gate), `src/config.rs:896-909` (secret_id resolve), `src/outbound/vault.rs:491, 498` (SA token), `src/outbound/vault.rs:563, 574` (login)_
 
 **Root cause:**
 
@@ -327,17 +312,15 @@ platform) and keep the K8s role bound to the minimal ServiceAccount.
 ## Secret & Token Key Rotation Failures
 
 > **Accuracy note:** The application reloads the database password **in-process** when it is
-> delivered as a file. `spawn_database_rotation` (`src/setup.rs:171`) watches the path named by
-> `APP_DATABASE__PASSWORD_FILE` (the chart mounts it by default under
-> `/var/run/status-list-server/database/password`) via `FileWatcher`. On change it builds and
+> delivered as a file. It watches the path named by `APP_DATABASE__PASSWORD_FILE` (the chart mounts it by default under
+> `/var/run/status-list-server/database/password`) through file watching. On change it builds and
 > validates a **new** pool, atomically swaps it into the repositories, then drains the old pool.
 > On validation failure the old pool is retained. This replaces the historical "restart required"
 > model for images with the watcher and a file-mounted password; a restart is still required only
 > when the running image predates the watcher or the password is delivered as an environment
 > variable rather than a file.
 >
-> Vault tokens are renewed/re-authenticated in-process by `TokenManager` (see the Vault entry
-> below). The filesystem token-signing material is also watched and reloaded in-process when the
+> Vault tokens are renewed/re-authenticated in-process (see the Vault entry below). The filesystem token-signing material is also watched and reloaded in-process when the
 > `-fscert` image reads static certificate files from mounted Secrets.
 
 ### Database pool rotation after password-file change
@@ -346,7 +329,7 @@ platform) and keep the K8s role bound to the minimal ServiceAccount.
 running pod picks the change up without a restart once the watcher notices the mounted file
 changed.
 
-**How it works (`spawn_database_rotation`, `src/setup.rs:171-222`):**
+**How it works:**
 
 - The watcher uses the OS file watcher where it is available and falls back to polling every
   `watcher.poll_interval_secs` (default `30`). With a Kubernetes Secret volume, the kubelet
@@ -400,18 +383,15 @@ non-disruptive but leaves the app on the previous credential until the file is v
 **When you see this:** At startup, when the `-fscert` image loads and parses static certificate
 material. Strings include:
 
-- `{certificate|signing key} material must be PEM text or base64/base64url-encoded DER`
-- `signing key PEM is not valid UTF-8: ...`
-- `failed to read certificate file '...': ...` / `failed to read signing key file '...': ...`
+- `{certificate|signing key} material must be PEM text`
+- `{certificate|signing key} material must be PEM text; file '...' is not valid UTF-8 (DER is unsupported; convert it to PEM)`
+- `failed to read certificate PEM file '...': ...` / `failed to read signing key PEM file '...': ...`
 - `store certificate key '...' was not found` / `store signing key '...' was not found`
-- Store validation: both-paths-and-keys, missing file, or missing key errors from the
-  `StoreProvisioningStrategy` builder
-
-_Source: `src/utils/cert_manager/strategy.rs:92-222`, `src/utils/cert_manager/builder.rs:171`, `src/setup.rs:494-505` (`store` provider selection and `spawn_cert_rotation`)_
+- Configuration validation errors for incompatible file and storage settings
 
 **Root cause:** The cert and signing key do not match (a rotated key paired with the old cert), a
-file/key is missing or unreadable, or the stored value is neither PEM nor base64 DER (e.g. a
-secret written as plain text or with a stray newline).
+file/key is missing or unreadable, or the stored value is not PEM text (e.g. a
+secret written as plain text or DER).
 
 **Diagnostics:**
 
@@ -422,12 +402,21 @@ kubectl get secret statuslist-secret -n statuslist-production \
   -o go-template='{{range $k,$v := .data}}{{println $k}}{{end}}'
 ```
 
-**Fix:** Replace the material with a **matching** cert + PKCS#8 key pair in the expected encoding
-(PEM containing `-----BEGIN ...`, or standard/base64url DER). Confirm both keys exist and are
-readable at the configured path/store-key. When the signing material is file-mounted under the
-`store` strategy, `spawn_cert_rotation` (`src/setup.rs:252`, called at `:505`) reloads it in-process
+**Fix:** Replace the material with a matching PEM certificate and PEM key pair. Confirm both keys
+exist and are readable at the configured path/store-key. When the signing material is file-mounted, the server reloads it in-process
 on file change; a rollout is only needed to re-read a changed value when it is delivered another
 way:
+
+DER is intentionally unsupported. Convert it before configuring the server:
+
+```bash
+openssl x509 -inform DER -in certificate.der -out certificate.pem
+openssl pkey -inform DER -in signing-key.der -out signing-key.pem
+```
+
+For a secret backend holding standard or URL-safe base64 DER, decode the value to a DER file
+first, run the appropriate conversion above, then replace the stored value with PEM text. The
+application-facing value must be PEM, not base64-encoded PEM or DER.
 
 ```bash
 kubectl rollout restart deployment/statuslist-status-list-server-deployment -n statuslist-production
@@ -441,8 +430,8 @@ writing it to the store/mount.
 
 ### Vault token renewal / re-authentication failures
 
-**When you see this:** Runtime only (Vault is used as the crypto-material backend). The
-`TokenManager` renews at 80% of TTL via `renew-self`, then re-logs-in if renewal fails. Failure
+**When you see this:** Runtime only (Vault is used as the crypto-material backend). The client
+renews at 80% of TTL via `renew-self`, then re-logs-in if renewal fails. Failure
 strings include:
 
 - `Token renewal failed, re-authenticating: <err>` (renewal failed, re-login attempted)
@@ -450,8 +439,6 @@ strings include:
 - `token renewal failed: HTTP <status>: <body>`
 - `vault access denied for path '<path>'` (login OK, but the token lacks the KV policy)
 - `vault load failed for path '<path>': HTTP <status>` / `vault store failed ...`
-
-_Source: `src/outbound/vault.rs:619-780` (TokenManager), `src/outbound/vault.rs:843-920` (KV ops)_
 
 **Root cause:** The Vault token or the underlying role no longer has access (403 on read/write),
 the AppRole `secret_id` was revoked/rotated, the Service Account JWT was rotated and Vault no
@@ -604,12 +591,8 @@ otherwise use `-fscert` with certificate and signing-key files mounted into the 
 Liveness is deliberately decoupled from downstream dependencies; readiness flips only when a
 critical dependency check fails or times out (5s), with results cached 1s.
 
-_Source: `src/server/health.rs:149-155` (ready, `readiness check failed`), checks `src/server/health.rs:183-269`_
-
-**Root cause:** One of the registered readiness checks fails. Checks are named `database`
-(`DbCheck`, pings the pool; reason `database unreachable: ...`) and `cert_store`
-(`CertStoreCheck` for Vault/secret-store reachability, or `FilesystemCertCheck` for the
-filesystem cert paths).
+**Root cause:** One of the registered readiness checks fails: database connectivity, cryptographic
+material storage reachability, or configured certificate-file availability.
 
 **Diagnostics:**
 
@@ -625,8 +608,8 @@ The detailed failure reasons are logged at `WARN` (`readiness check failed`) rat
 exposed in the unauthenticated response: read the pod logs.
 
 **Fix:** Address the failing dependency: DB reachable/auth OK, or the cert store reachable /
-cert files present and readable. In filesystem mode, `FilesystemCertCheck` fails if the cert or
-key path is missing or unreadable, independent of the key parses as PEM.
+cert files present and readable. In filesystem mode, a missing or unreadable cert or key path
+fails readiness independently of whether the key parses as PEM.
 
 **Prevention:** Treat `/health/ready` as the only gate for the readiness probe, and alert on the
 `ready=false` transition rather than process liveness.
@@ -792,27 +775,27 @@ failure rolls back instead of wedging the release.
 
 ## Index of exact error strings
 
-For quick grep, the application emits these verbatim (with the primary source file):
+For quick grep, the application emits these verbatim:
 
-- `Failed to connect to database (kind=..., ...)`: `src/setup.rs`
-- `Database backend '...' configured, but feature flag for it was not compiled in.`: `src/setup.rs`
-  (and `Database backend 'memory' configured, but 'memory' feature flag was not compiled in.`): `src/setup.rs:369`
-- `URL scheme does not match configured backend '...'`: `src/setup.rs`
-- `Ambiguous database configuration: use either database.url or split database fields, not both`: `src/config.rs`
-- `Missing required config field: database.password` (and `database.host`, `database.username`, `database.name`, `database.url or split database fields`): `src/config.rs`
-- `Invalid database.host: expected a hostname or IP address without scheme, port, ...`: `src/config.rs`
-- `Invalid database.query: ...` (two variants): `src/config.rs`
-- `Vault auth_method=approle requires 'role_id' to be configured` / `...'k8s_role'...`: `src/setup.rs`
-- `Vault configuration missing secret_id: provide 'secret_id' or 'secret_id_path'`: `src/config.rs`
-- `Failed to read Vault secret_id from file '...'`: `src/config.rs`
-- `vault AppRole|Kubernetes login denied (HTTP 403)` / `vault ... login failed: HTTP <status>`: `src/outbound/vault.rs`
-- `failed to read Kubernetes service account token from '...'` / `Kubernetes service account token in '...' is empty`: `src/outbound/vault.rs`
-- `Token renewal failed, re-authenticating: ...` / `token renewal failed: HTTP <status>` / `vault authentication in cooldown backoff after recent failure`: `src/outbound/vault.rs`
-- `vault access denied for path '...'` / `vault load|store|delete failed for path '...': HTTP <status>`: `src/outbound/vault.rs`
-- `... material must be PEM text or base64/base64url-encoded DER` / `signing key PEM is not valid UTF-8: ...`: `src/utils/cert_manager/strategy.rs`
-- `failed to read certificate|signing key file '...'`: `src/utils/cert_manager/strategy.rs`
-- `store certificate key '...' was not found` / `store signing key '...' was not found`: `src/utils/cert_manager/strategy.rs`
-- `readiness check failed` (WARN): `src/server/health.rs`
+- `Failed to connect to database (kind=..., ...)`
+- `Database backend '...' configured, but feature flag for it was not compiled in.`
+  (and `Database backend 'memory' configured, but 'memory' feature flag was not compiled in.`)
+- `URL scheme does not match configured backend '...'`
+- `Ambiguous database configuration: use either database.url or split database fields, not both`
+- `Missing required config field: database.password` (and `database.host`, `database.username`, `database.name`, `database.url or split database fields`)
+- `Invalid database.host: expected a hostname or IP address without scheme, port, ...`
+- `Invalid database.query: ...` (two variants)
+- `Vault auth_method=approle requires 'role_id' to be configured` / `...'k8s_role'...`
+- `Vault configuration missing secret_id: provide 'secret_id' or 'secret_id_path'`
+- `Failed to read Vault secret_id from file '...'`
+- `vault AppRole|Kubernetes login denied (HTTP 403)` / `vault ... login failed: HTTP <status>`
+- `failed to read Kubernetes service account token from '...'` / `Kubernetes service account token in '...' is empty`
+- `Token renewal failed, re-authenticating: ...` / `token renewal failed: HTTP <status>` / `vault authentication in cooldown backoff after recent failure`
+- `vault access denied for path '...'` / `vault load|store|delete failed for path '...'`
+- `... material must be PEM text`
+- `failed to read certificate|signing key PEM file '...'`
+- `store certificate key '...' was not found` / `store signing key '...' was not found`
+- `readiness check failed` (WARN)
 
 Platform-only (no matching application string): `ImagePullBackOff`, `ErrImagePull`,
 `CrashLoopBackOff`, `SecretSyncedError` / `Synced=False`, and all Helm `fail` guards listed in
