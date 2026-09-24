@@ -1,4 +1,3 @@
-//! Status-list cache adapters.
 #[cfg(feature = "redis")]
 use arc_swap::ArcSwapOption;
 use async_trait::async_trait;
@@ -45,7 +44,6 @@ static REDIS_PUT_SCRIPT: std::sync::LazyLock<redis::Script> = std::sync::LazyLoc
 #[cfg(feature = "redis")]
 // Committed OCC version markers intentionally have no expiry: a delayed stale read-fill
 // must never become cacheable after the record entry expires.
-
 static REDIS_INVALIDATE_SCRIPT: std::sync::LazyLock<redis::Script> =
     std::sync::LazyLock::new(|| {
         redis::Script::new(
