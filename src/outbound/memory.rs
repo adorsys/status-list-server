@@ -294,10 +294,14 @@ mod tests {
         async fn signing_material(
             &self,
         ) -> Result<crate::domain::ports::SigningMaterial, StatusListError> {
-            Ok(crate::domain::ports::SigningMaterial {
-                certificate_chain: None,
-                signing_key_pem: "".into(),
-            })
+            let key = crate::utils::crypto::SigningKey::generate(
+                crate::domain::models::token::SigningAlgorithm::Es256,
+            )
+            .map_err(|e| StatusListError::Backend(Box::new(e)))?;
+            Ok(crate::domain::ports::SigningMaterial::new(
+                None,
+                std::sync::Arc::new(key),
+            ))
         }
     }
 

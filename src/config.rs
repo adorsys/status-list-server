@@ -258,13 +258,13 @@ pub struct CertStoreConfig {
     /// PEM certificate chain file path.
     #[serde(default)]
     pub certificate_path: Option<String>,
-    /// PKCS#8 PEM private key file path.
+    /// PEM private key file path.
     #[serde(default)]
     pub signing_key_path: Option<String>,
     /// Inline PEM certificate chain.
     #[serde(default)]
     pub certificate: Option<String>,
-    /// Inline PKCS#8 PEM private key.
+    /// Inline PEM private key.
     #[serde(default)]
     pub signing_key: Option<String>,
 }

@@ -330,10 +330,6 @@ criteria = "safe-to-deploy"
 version = "0.4.2"
 criteria = "safe-to-deploy"
 
-[[exemptions.cpubits]]
-version = "0.1.1"
-criteria = "safe-to-deploy"
-
 [[exemptions.cpufeatures]]
 version = "0.2.17"
 criteria = "safe-to-deploy"
@@ -376,10 +372,6 @@ criteria = "safe-to-deploy"
 
 [[exemptions.crunchy]]
 version = "0.2.4"
-criteria = "safe-to-deploy"
-
-[[exemptions.crypto-bigint]]
-version = "0.7.5"
 criteria = "safe-to-deploy"
 
 [[exemptions.crypto-common]]
@@ -451,7 +443,7 @@ version = "0.7.10"
 criteria = "safe-to-deploy"
 
 [[exemptions.der]]
-version = "0.8.1"
+version = "0.8.2"
 criteria = "safe-to-deploy"
 
 [[exemptions.der-parser]]
@@ -510,16 +502,8 @@ criteria = "safe-to-deploy"
 version = "1.0.20"
 criteria = "safe-to-deploy"
 
-[[exemptions.ecdsa]]
-version = "0.17.0"
-criteria = "safe-to-deploy"
-
 [[exemptions.either]]
 version = "1.17.0"
-criteria = "safe-to-deploy"
-
-[[exemptions.elliptic-curve]]
-version = "0.14.1"
 criteria = "safe-to-deploy"
 
 [[exemptions.erased-serde]]
@@ -557,10 +541,6 @@ criteria = "safe-to-deploy"
 [[exemptions.ferroid]]
 version = "2.0.0"
 criteria = "safe-to-run"
-
-[[exemptions.ff]]
-version = "0.14.0"
-criteria = "safe-to-deploy"
 
 [[exemptions.find-msvc-tools]]
 version = "0.1.11"
@@ -696,10 +676,6 @@ criteria = "safe-to-deploy"
 
 [[exemptions.governor]]
 version = "0.10.4"
-criteria = "safe-to-deploy"
-
-[[exemptions.group]]
-version = "0.14.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.h2]]
@@ -942,6 +918,10 @@ criteria = "safe-to-deploy"
 version = "10.4.0"
 criteria = "safe-to-deploy"
 
+[[exemptions.jsonwebtoken]]
+version = "11.1.0"
+criteria = "safe-to-deploy"
+
 [[exemptions.kqueue]]
 version = "1.2.1"
 criteria = "safe-to-deploy"
@@ -1178,10 +1158,6 @@ criteria = "safe-to-deploy"
 version = "4.3.0"
 criteria = "safe-to-deploy"
 
-[[exemptions.p256]]
-version = "0.14.0"
-criteria = "safe-to-deploy"
-
 [[exemptions.parking]]
 version = "2.2.1"
 criteria = "safe-to-deploy"
@@ -1212,10 +1188,6 @@ criteria = "safe-to-deploy"
 
 [[exemptions.pem-rfc7468]]
 version = "0.7.0"
-criteria = "safe-to-deploy"
-
-[[exemptions.pem-rfc7468]]
-version = "1.0.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.percent-encoding]]
@@ -1300,14 +1272,6 @@ criteria = "safe-to-deploy"
 
 [[exemptions.ppv-lite86]]
 version = "0.2.21"
-criteria = "safe-to-deploy"
-
-[[exemptions.primefield]]
-version = "0.14.0"
-criteria = "safe-to-deploy"
-
-[[exemptions.primeorder]]
-version = "0.14.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.proc-macro-crate]]
@@ -1460,10 +1424,6 @@ criteria = "safe-to-deploy"
 
 [[exemptions.reqwest]]
 version = "0.13.4"
-criteria = "safe-to-deploy"
-
-[[exemptions.rfc6979]]
-version = "0.6.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.ring]]
@@ -1674,10 +1634,6 @@ criteria = "safe-to-deploy"
 version = "3.22.0"
 criteria = "safe-to-deploy"
 
-[[exemptions.serdect]]
-version = "0.4.3"
-criteria = "safe-to-deploy"
-
 [[exemptions.sha1]]
 version = "0.10.7"
 criteria = "safe-to-deploy"
@@ -1704,10 +1660,6 @@ criteria = "safe-to-deploy"
 
 [[exemptions.signature]]
 version = "2.2.0"
-criteria = "safe-to-deploy"
-
-[[exemptions.signature]]
-version = "3.0.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.simd-adler32]]
@@ -2344,10 +2296,6 @@ criteria = "safe-to-run"
 
 [[exemptions.wit-bindgen]]
 version = "0.57.1"
-criteria = "safe-to-deploy"
-
-[[exemptions.wnaf]]
-version = "0.14.1"
 criteria = "safe-to-deploy"
 
 [[exemptions.writeable]]

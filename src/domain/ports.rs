@@ -1,9 +1,12 @@
 //! Outbound secondary ports defining contracts.
 
+use std::{fmt, sync::Arc};
+
 use crate::domain::models::credential::{Credential, CredentialError};
 use crate::domain::models::status_list::{
     StatusListError, StatusListRecord, StatusListSnapshot, StatusListUriPage,
 };
+pub use crate::domain::models::token::{SigningAlgorithm, TokenSignerError};
 use async_trait::async_trait;
 
 /// Interface for managing active status list records.
@@ -96,13 +99,35 @@ pub trait StatusListSnapshotRepo: Send + Sync + 'static {
 }
 
 /// Certificate chain and signing key captured from one provider snapshot.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone)]
 pub struct SigningMaterial {
     /// Base64 DER-encoded x509 certificate chain parts for JWT `x5c` and CWT
     /// `x5chain`.
     pub certificate_chain: Option<Vec<String>>,
-    /// PKCS#8 PEM-encoded signing key.
-    pub signing_key_pem: String,
+    /// Pre-parsed signer. The material does not retain its PEM/DER encoding
+    /// after a provider has validated and constructed it; private key material
+    /// remains in the signer for its required signing lifetime.
+    pub signing_key: Arc<dyn TokenSigner>,
+}
+
+impl SigningMaterial {
+    /// Construct material from a validated, pre-parsed signer.
+    pub fn new(certificate_chain: Option<Vec<String>>, signing_key: Arc<dyn TokenSigner>) -> Self {
+        Self {
+            certificate_chain,
+            signing_key,
+        }
+    }
+}
+
+impl fmt::Debug for SigningMaterial {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SigningMaterial")
+            .field("certificate_chain", &self.certificate_chain)
+            .field("signing_algorithm", &self.signing_key.algorithm())
+            .field("public_key_len", &self.signing_key.public_key_bytes().len())
+            .finish()
+    }
 }
 
 /// Provider interface for certificate chains and signing keys used for VC/token signatures.
@@ -111,4 +136,20 @@ pub trait CertificateProvider: Send + Sync + 'static {
     /// Retrieve the current certificate chain and signing key from one
     /// internally consistent snapshot.
     async fn signing_material(&self) -> Result<SigningMaterial, StatusListError>;
+}
+
+/// Cryptographic port used by token encoders.
+///
+/// `sign` receives exactly the bytes defined by the caller's token format and
+/// returns the raw signature bytes for the selected algorithm: fixed-width
+/// IEEE P1363 for ECDSA, 64-byte Ed25519, and PKCS#1 v1.5 for RS256.
+pub trait TokenSigner: Send + Sync {
+    /// Return the algorithm associated with this signer.
+    fn algorithm(&self) -> SigningAlgorithm;
+
+    /// Sign the supplied token-format signing input.
+    fn sign(&self, data: &[u8]) -> Result<Vec<u8>, TokenSignerError>;
+
+    /// Return raw public-key bytes for X.509 certificate validation.
+    fn public_key_bytes(&self) -> &[u8];
 }
