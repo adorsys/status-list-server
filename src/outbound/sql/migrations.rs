@@ -13,9 +13,23 @@ impl MigratorTrait for Migrator {
             Box::new(add_updated_at::Migration),
             Box::new(status_list_history::Migration),
             Box::new(status_list_history_exp_index::Migration),
+            Box::new(credentials_list_count::Migration),
+            Box::new(list_quota::Migration),
         ]
     }
 }
+
+/// Applies pending migrations; returns whether none had been applied before.
+pub async fn run_migrations(db: &sea_orm::DatabaseConnection) -> Result<bool, DbErr> {
+    let fresh = Migrator::get_applied_migrations(db).await?.is_empty();
+    Migrator::up(db, None).await?;
+    Ok(fresh)
+}
+
+/// Recomputes every issuer's `credentials.list_count`. Used as the migration
+/// backfill and quoted verbatim in `docs/troubleshooting.md` as the operator repair.
+pub(crate) const RECOUNT_LIST_COUNT_SQL: &str = "UPDATE credentials SET list_count = \
+     (SELECT COUNT(*) FROM status_lists WHERE status_lists.issuer = credentials.issuer)";
 
 /// Pins InnoDB on MySQL so `update_with_snapshot`'s UPDATE+INSERT roll back as a
 /// unit rather than depending on the server's default engine. MySQL-only:
@@ -29,10 +43,15 @@ fn pin_innodb_on_mysql(manager: &SchemaManager<'_>, stmt: &mut TableCreateStatem
 
 /// Tables that must use InnoDB for transactional guarantees and foreign key enforcement.
 /// Extend this list if new transactional tables are added.
-const INNODB_REQUIRED_TABLES: &[&str] = &["credentials", "status_lists", "status_list_history"];
+const INNODB_REQUIRED_TABLES: &[&str] = &[
+    "credentials",
+    "status_lists",
+    "status_list_history",
+    "list_quota",
+];
 
 /// Queries `information_schema.TABLES` after migrations and refuses to boot if
-/// any of the critical tables (`credentials`, `status_lists`, `status_list_history`) are not
+/// any of the tables in `INNODB_REQUIRED_TABLES` are not
 /// InnoDB. MyISAM silently ignores transactions, so a non-InnoDB install breaks
 /// the guarantees from issue #244 without any visible error.
 ///
@@ -585,6 +604,151 @@ pub(crate) mod status_list_history_exp_index {
         Exp,
     }
 }
+
+/// Migration adding the per-issuer list counter behind `limits.max_lists_per_issuer`.
+pub(crate) mod credentials_list_count {
+    use super::*;
+
+    pub(crate) struct Migration;
+
+    impl MigrationName for Migration {
+        fn name(&self) -> &str {
+            "m20260923_000001_credentials_list_count"
+        }
+    }
+
+    #[async_trait::async_trait]
+    #[allow(elided_lifetimes_in_paths)]
+    impl MigrationTrait for Migration {
+        async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+            // MySQL commits the ALTER on its own, so a failed backfill leaves the
+            // column behind with the migration unrecorded; the re-run must skip it.
+            if !manager.has_column("credentials", "list_count").await? {
+                // DEFAULT 0 lets pods on the previous release keep inserting
+                // credentials during a rolling deploy.
+                manager
+                    .alter_table(
+                        Table::alter()
+                            .table(Credentials::Table)
+                            .add_column(
+                                ColumnDef::new(Credentials::ListCount)
+                                    .big_integer()
+                                    .not_null()
+                                    .default(0),
+                            )
+                            .to_owned(),
+                    )
+                    .await?;
+            }
+
+            // Old pods keep publishing uncounted; `list-quota recount` fixes that.
+            manager
+                .get_connection()
+                .execute_unprepared(RECOUNT_LIST_COUNT_SQL)
+                .await
+                .map(|_| ())
+        }
+
+        async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+            manager
+                .alter_table(
+                    Table::alter()
+                        .table(Credentials::Table)
+                        .drop_column(Credentials::ListCount)
+                        .to_owned(),
+                )
+                .await
+        }
+    }
+
+    #[derive(Iden)]
+    enum Credentials {
+        Table,
+        ListCount,
+    }
+}
+
+/// The switch for `limits.max_lists_per_issuer`, off until `list_quota::on_startup`
+/// or `list-quota enable` turns it on.
+pub(crate) mod list_quota {
+    use super::*;
+
+    pub(crate) struct Migration;
+
+    impl MigrationName for Migration {
+        fn name(&self) -> &str {
+            "m20260923_000002_list_quota"
+        }
+    }
+
+    #[async_trait::async_trait]
+    #[allow(elided_lifetimes_in_paths)]
+    impl MigrationTrait for Migration {
+        async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+            // InnoDB for the row locks `list_quota` relies on.
+            let mut table = Table::create();
+            table
+                .table(ListQuota::Table)
+                .if_not_exists()
+                .col(
+                    ColumnDef::new(ListQuota::Id)
+                        .integer()
+                        .not_null()
+                        .primary_key(),
+                )
+                .col(
+                    ColumnDef::new(ListQuota::Enforced)
+                        .boolean()
+                        .not_null()
+                        .default(false),
+                );
+            pin_innodb_on_mysql(manager, &mut table);
+            manager.create_table(table).await?;
+
+            // MySQL commits the CREATE on its own, so a re-run may find the row.
+            let db = manager.get_connection();
+            let backend = manager.get_database_backend();
+            let existing = db
+                .query_one(
+                    backend.build(
+                        Query::select()
+                            .column(ListQuota::Id)
+                            .from(ListQuota::Table)
+                            .and_where(Expr::col(ListQuota::Id).eq(ROW_ID)),
+                    ),
+                )
+                .await?;
+            if existing.is_none() {
+                db.execute(
+                    backend.build(
+                        Query::insert()
+                            .into_table(ListQuota::Table)
+                            .columns([ListQuota::Id, ListQuota::Enforced])
+                            .values_panic([ROW_ID.into(), false.into()]),
+                    ),
+                )
+                .await?;
+            }
+            Ok(())
+        }
+
+        async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+            manager
+                .drop_table(Table::drop().table(ListQuota::Table).to_owned())
+                .await
+        }
+    }
+
+    const ROW_ID: i32 = crate::outbound::sql::list_quota::ROW_ID;
+
+    #[derive(Iden)]
+    enum ListQuota {
+        Table,
+        Id,
+        Enforced,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -670,6 +834,15 @@ mod tests {
                 "binlog_format={variant} is compatible and must not block startup"
             );
         }
+    }
+
+    #[test]
+    fn recount_sql_is_quoted_verbatim_in_the_runbook() {
+        let runbook = include_str!("../../../docs/troubleshooting.md");
+        assert!(
+            runbook.contains(RECOUNT_LIST_COUNT_SQL),
+            "docs/troubleshooting.md must quote RECOUNT_LIST_COUNT_SQL verbatim"
+        );
     }
 
     #[tokio::test]

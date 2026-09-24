@@ -6,6 +6,7 @@ use crate::domain::models::credential::{Credential, CredentialError, Issuer};
 use crate::domain::models::status_list::{
     StatusEntry, StatusList, StatusListError, StatusListRecord, StatusListSnapshot,
     validate_unique_indices,
+    StatusListUriPage,
 };
 use crate::domain::ports::{
     CertificateProvider, CredentialRepo, StatusListCache, StatusListRepo, StatusListSnapshotRepo,
@@ -85,7 +86,11 @@ impl Service {
         self.snapshot_repo.is_some()
     }
 
-    /// Create and publish a new status list record, enforcing uniqueness and size invariants.
+    /// Create and publish a new status list record, enforcing uniqueness, size
+    /// invariants and the per-issuer list quota.
+    ///
+    /// The quota is checked by the repository inside the insert, since a
+    /// count-then-insert here would race concurrent publishes.
     #[allow(clippy::too_many_arguments)]
     pub async fn publish_status_list(
         &self,
@@ -97,6 +102,7 @@ impl Service {
         max_status_index: i32,
         max_statuses_per_request: usize,
         max_serialized_list_size: usize,
+        max_lists_per_issuer: u64,
     ) -> Result<StatusListRecord, StatusListError> {
         validate_request_shape(&statuses, max_status_index, max_statuses_per_request)?;
 
@@ -115,10 +121,12 @@ impl Service {
         if self.snapshots_enabled() {
             let snapshot = build_snapshot(&record, token_exp_secs);
             self.status_list_repo
-                .insert_with_snapshot(record.clone(), snapshot)
+                .insert_with_snapshot(record.clone(), snapshot, max_lists_per_issuer)
                 .await?;
         } else {
-            self.status_list_repo.insert(record.clone()).await?;
+            self.status_list_repo
+                .insert(record.clone(), max_lists_per_issuer)
+                .await?;
         }
         Ok(record)
     }
@@ -216,9 +224,13 @@ impl Service {
         Ok(record)
     }
 
-    /// List all published status list URIs.
-    pub async fn list_uris(&self) -> Result<Vec<String>, StatusListError> {
-        self.status_list_repo.list_uris().await
+    /// List one page of published status list URIs, starting after `after`.
+    pub async fn list_uris(
+        &self,
+        after: Option<&str>,
+        limit: usize,
+    ) -> Result<StatusListUriPage, StatusListError> {
+        self.status_list_repo.list_uris(after, limit).await
     }
 
     /// Retrieve the snapshot that was active at the given Unix timestamp

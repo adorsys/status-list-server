@@ -36,6 +36,9 @@ pub enum StatusListError {
     IndexTooLarge { index: i32, max: i32 },
     #[error("duplicate status index {index} in update payload")]
     DuplicateIndex { index: i32 },
+    /// The issuer already holds its configured maximum number of status lists.
+    #[error("issuer has {count} status lists, reaching the configured maximum of {max}")]
+    QuotaExceeded { count: u64, max: u64 },
     #[error("the status list was modified concurrently")]
     Conflict,
     /// The write lost a lock race in storage and was rolled back.
@@ -80,6 +83,29 @@ pub struct StatusListRecord {
     pub sub: String,
     /// Unix timestamp (seconds) of last modification
     pub updated_at: i64,
+}
+
+/// One page of published status list URIs, in `list_id` order.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StatusListUriPage {
+    /// `sub` URIs of the lists on this page.
+    pub status_lists: Vec<String>,
+    /// `list_id` of the last list on this page; `None` on the last page.
+    pub next_after: Option<String>,
+}
+
+impl StatusListUriPage {
+    /// Builds a page from `(list_id, sub)` rows fetched with `limit + 1`; the
+    /// extra row only signals that another page exists.
+    pub fn from_rows(mut rows: Vec<(String, String)>, limit: usize) -> Self {
+        let has_more = rows.len() > limit;
+        rows.truncate(limit);
+        let (mut list_ids, status_lists): (Vec<_>, Vec<_>) = rows.into_iter().unzip();
+        Self {
+            status_lists,
+            next_after: list_ids.pop().filter(|_| has_more),
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -1078,5 +1104,32 @@ mod tests {
         let updated = list.update(vec![entry(0, Status::Invalid)]).unwrap();
         assert_eq!(updated.bits, 1);
         assert!(!updated.lst.is_empty());
+    }
+
+    fn uri_rows(ids: &[&str]) -> Vec<(String, String)> {
+        ids.iter()
+            .map(|id| (id.to_string(), format!("https://example.com/{id}")))
+            .collect()
+    }
+
+    #[test]
+    fn uri_page_with_extra_row_points_at_last_returned_list() {
+        let page = StatusListUriPage::from_rows(uri_rows(&["a", "b", "c"]), 2);
+        assert_eq!(
+            page.status_lists,
+            ["https://example.com/a", "https://example.com/b"]
+        );
+        assert_eq!(page.next_after.as_deref(), Some("b"));
+    }
+
+    #[test]
+    fn uri_page_without_extra_row_is_the_last() {
+        let page = StatusListUriPage::from_rows(uri_rows(&["a", "b"]), 2);
+        assert_eq!(page.status_lists.len(), 2);
+        assert_eq!(page.next_after, None);
+
+        let empty = StatusListUriPage::from_rows(Vec::new(), 2);
+        assert!(empty.status_lists.is_empty());
+        assert_eq!(empty.next_after, None);
     }
 }

@@ -7,23 +7,21 @@ use crate::outbound::sql::SeaOrmStore;
 use crate::outbound::sql::models::{
     Credentials, StatusList, StatusListHistoryRecord, StatusListRecord,
 };
-#[cfg(feature = "sqlite")]
-use sea_orm_migration::MigratorTrait;
 
 pub(super) const TEST_EC_JWK: &str = crate::test_fixtures::TEST_EC_PUBLIC_JWK;
 
+/// Quota argument for tests that exercise something other than the quota.
+pub(super) const NO_LIST_QUOTA: u64 = u64::MAX;
+
 #[cfg(feature = "sqlite")]
 pub(super) async fn sqlite_connection() -> Arc<DatabaseConnection> {
-    let mut opt = sea_orm::ConnectOptions::new("sqlite::memory:");
-    opt.max_connections(1);
-    opt.map_sqlx_sqlite_opts(|o| o.foreign_keys(true));
-    let db = sea_orm::Database::connect(opt)
-        .await
-        .expect("Failed to connect to SQLite");
-    crate::outbound::sql::Migrator::up(&db, None)
-        .await
-        .expect("Failed to run migrations on SQLite");
-    Arc::new(db)
+    sqlite_connection_migrated(None).await
+}
+
+/// Applies only the first `steps` migrations (`None` applies all).
+#[cfg(feature = "sqlite")]
+pub(super) async fn sqlite_connection_migrated(steps: Option<u32>) -> Arc<DatabaseConnection> {
+    crate::test_utils::sqlite_test_db(steps).await
 }
 
 /// Seeds a credential whose `issuer` backs the `status_lists.issuer` foreign
@@ -36,6 +34,42 @@ pub(super) async fn seed_credential(db: &Arc<DatabaseConnection>, issuer: &str) 
         .await
         .unwrap();
     key
+}
+
+/// The issuer's stored `credentials.list_count`.
+#[cfg(any(feature = "sqlite", feature = "mysql", feature = "postgres-tests"))]
+pub(super) async fn list_count(db: &DatabaseConnection, issuer: &str) -> i64 {
+    use crate::outbound::sql::models::credentials;
+    use sea_orm::{EntityTrait, QuerySelect};
+
+    credentials::Entity::find_by_id(issuer)
+        .select_only()
+        .column(credentials::Column::ListCount)
+        .into_tuple::<i64>()
+        .one(db)
+        .await
+        .unwrap()
+        .expect("issuer must have a credential row")
+}
+
+#[cfg(any(feature = "sqlite", feature = "mysql", feature = "postgres-tests"))]
+pub(super) async fn enforce_list_quota(db: &DatabaseConnection) {
+    crate::outbound::sql::list_quota::enable(db, u64::MAX)
+        .await
+        .expect("enabling the list quota with no cap must succeed");
+}
+
+/// Inserts a list without counting it, as a pre-quota pod did.
+#[cfg(any(feature = "sqlite", feature = "mysql", feature = "postgres-tests"))]
+pub(super) async fn insert_list_as_old_pod(db: &DatabaseConnection, list_id: &str, issuer: &str) {
+    use sea_orm::ConnectionTrait;
+
+    db.execute_unprepared(&format!(
+        "INSERT INTO status_lists (list_id, issuer, status_list, sub, updated_at) \
+         VALUES ('{list_id}', '{issuer}', '{{\"bits\":1,\"lst\":\"\"}}', 'sub-{list_id}', 0)"
+    ))
+    .await
+    .unwrap();
 }
 
 pub(super) fn record(
