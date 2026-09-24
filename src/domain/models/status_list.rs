@@ -1005,6 +1005,66 @@ mod tests {
         ));
     }
 
+    /// Duplicate detection runs before the negative-index check, so a payload
+    /// whose duplicate is also negative must report `DuplicateIndex`, never
+    /// `InvalidIndex`. This pins that ordering in both create and update.
+    #[test]
+    fn duplicate_negative_index_reports_duplicate_before_invalid() {
+        let duplicates = vec![entry(-1, Status::Valid), entry(-1, Status::Invalid)];
+
+        assert!(matches!(
+            StatusList::create(duplicates.clone()),
+            Err(StatusListError::DuplicateIndex { index: -1 })
+        ));
+
+        let list = StatusList::create(vec![entry(0, Status::Valid)]).unwrap();
+        assert!(matches!(
+            list.update(duplicates),
+            Err(StatusListError::DuplicateIndex { index: -1 })
+        ));
+    }
+
+    /// Duplicate detection must not depend on the duplicates being adjacent:
+    /// a duplicate with other distinct indices in between is still rejected.
+    #[test]
+    fn create_rejects_non_adjacent_duplicate_indices() {
+        let result = StatusList::create(vec![
+            entry(0, Status::Valid),
+            entry(1, Status::Invalid),
+            entry(0, Status::Valid),
+        ]);
+        assert!(matches!(
+            result,
+            Err(StatusListError::DuplicateIndex { index: 0 })
+        ));
+    }
+
+    /// Re-sending the current value on a legacy-width row must still repack the
+    /// list to a supported width, so the result differs from the input. This
+    /// keeps the service's no-op guard (which compares whole lists) from
+    /// swallowing that one-time normalisation write.
+    #[test]
+    fn update_value_identical_on_legacy_width_repacks() {
+        let legacy = from_raw(&[8, 0], 3);
+        let updated = legacy
+            .update(vec![entry(1, Status::Invalid)])
+            .expect("re-sending the current value on a legacy row must succeed");
+
+        assert_eq!(
+            updated.bits, 1,
+            "the legacy 3-bit row must be repacked to a supported 1-bit row"
+        );
+        assert_eq!(
+            decompress(&updated.lst),
+            vec![0b0000_0010],
+            "index 1 = Invalid must survive the repack at 1 bit"
+        );
+        assert_ne!(
+            updated, legacy,
+            "the repacked row must differ from the legacy input so a write happens"
+        );
+    }
+
     #[test]
     fn update_with_no_entries_is_a_noop() {
         let list = StatusList::create(vec![entry(0, Status::Valid)]).unwrap();

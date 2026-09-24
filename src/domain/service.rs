@@ -125,7 +125,7 @@ impl Service {
 
     /// Mutate statuses in an existing status list record with optimistic concurrency checks and cache invalidation.
     ///
-    /// Request-shape validation (count bound, duplicate indices, index bound)
+    /// Request-shape validation (count bound, index bound, duplicate indices)
     /// runs before any storage access so a malformed request is rejected with
     /// `400` consistently and without a wasted `find` or write. The
     /// duplicate-index invariant is re-enforced in the domain model as defense
@@ -161,16 +161,16 @@ impl Service {
 
         let current_status_list = existing.status_list.clone();
         existing.status_list = existing.status_list.update(statuses)?;
-        if existing.status_list.lst.len() > max_serialized_list_size {
-            return Err(StatusListError::TooLarge);
-        }
 
         // A request that does not change the list is a successful no-op. It must
-        // not bump `updated_at` or insert a duplicate history snapshot, which
-        // would both bloat history and (see #484) leave an unnecessary gap in
-        // historical coverage.
+        // not bump `updated_at` or insert a redundant history snapshot, which
+        // would bloat history with a duplicate entry for an unchanged state.
         if existing.status_list == current_status_list {
             return Ok(existing);
+        }
+
+        if existing.status_list.lst.len() > max_serialized_list_size {
+            return Err(StatusListError::TooLarge);
         }
 
         let previous_updated_at = existing.updated_at;
