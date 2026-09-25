@@ -59,7 +59,7 @@ use crate::domain::{
 ))]
 use crate::outbound::aws::AwsSecretsManager;
 #[cfg(all(feature = "azure", not(feature = "vault"), not(feature = "gcp")))]
-use crate::outbound::azure_kv::AzureKeyVaultClient;
+use crate::outbound::azure::kv::AzureKeyVaultClient;
 use crate::outbound::cache::MokaStatusListCache;
 #[cfg(feature = "acme")]
 use crate::outbound::cert::AcmeCertificateProvider;
