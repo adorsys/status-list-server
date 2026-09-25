@@ -103,6 +103,7 @@ pub(crate) async fn test_app_state_with_cert_provider(
         max_status_index: 100_000,
         max_statuses_per_request: 5_000,
         max_serialized_list_size: 1_048_576,
+        max_lists_per_issuer: 1_000,
         snapshot_retention_secs: 0,
         management_auth: crate::server::ManagementAuthConfig::default(),
         token_bytes_cache: crate::server::handlers::status_list::TokenBytesCache::new(300, 100),
