@@ -3,6 +3,7 @@
 [![CI](https://github.com/adorsys/status-list-server/actions/workflows/CI.yml/badge.svg?branch=main)](https://github.com/adorsys/status-list-server/actions/workflows/CI.yml?query=branch%3Amain)
 [![CD](https://github.com/adorsys/status-list-server/actions/workflows/deploy.yml/badge.svg?branch=main)](https://github.com/adorsys/status-list-server/actions/workflows/deploy.yml?query=branch%3Amain)
 [![Specification](https://img.shields.io/badge/IETF-OAuth_Status_List_Draft--21-orange.svg)](https://datatracker.ietf.org/doc/draft-ietf-oauth-status-list/)
+[![dependencies](https://deps.rs/repo/github/adorsys/status-list-server/status.svg)](https://deps.rs/repo/github/adorsys/status-list-server)
 [![License: MIT / Apache 2.0](https://img.shields.io/badge/License-MIT%20%2F%20Apache--2.0-blue.svg)](#license)
 
 The Status List Server is an HTTP service that publishes and manages status lists for verifiable credential issuers and relying parties. It implements the [IETF OAuth Token Status List](https://datatracker.ietf.org/doc/draft-ietf-oauth-status-list/) specification.
