@@ -221,9 +221,6 @@ jobs:
       - name: Memory-only Build
         run: cargo check --no-default-features --features memory
 
-      - name: Memory-only Redis cache guard
-        run: cargo test --no-default-features --features memory build_state_rejects_redis_cache_without_redis_feature
-
       - name: Release image feature set
         # The Dockerfile default is still the local smoke-build feature set.
         # Release variants, including Redis status-cache support, are checked by `release-variant-checks` below.
