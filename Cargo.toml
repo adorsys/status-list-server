@@ -6,6 +6,8 @@ edition = "2024"
 [features]
 default = ["memory"]
 memory = []
+redis = ["dep:redis"]
+redis-tests = ["redis"]
 history = ["dep:sea-orm", "dep:sea-orm-migration"]
 postgres = ["history", "sea-orm?/sqlx-postgres", "sea-orm-migration?/sqlx-postgres"]
 sqlite = ["history", "sea-orm?/sqlx-sqlite", "sea-orm-migration?/sqlx-sqlite"]
@@ -185,6 +187,11 @@ optional = true
 
 [dependencies.azure_core]
 version = "1"
+optional = true
+
+[dependencies.redis]
+version = "1.7"
+features = ["tokio-rustls-comp", "connection-manager"]
 optional = true
 
 [dev-dependencies]

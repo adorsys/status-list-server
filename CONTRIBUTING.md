@@ -225,6 +225,15 @@ Automatic on merge:
 
 See the [README](README.md) and [Local Deployment Guide](docs/LOCAL_DEPLOYMENT.md) for instructions on building and running the project locally.
 
+### Redis cache integration tests
+
+Run the Redis cache integration tests with Docker/testcontainers, or point them at
+an existing Redis endpoint:
+
+```bash
+TEST_REDIS_URL=redis://localhost:6379/0 cargo test --no-default-features --features memory,redis-tests outbound::cache
+```
+
 ### Observability / Alertmanager test suite
 
 The webhook-delivery integration test at

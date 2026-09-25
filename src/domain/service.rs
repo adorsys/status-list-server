@@ -198,7 +198,7 @@ impl Service {
             return Err(StatusListError::Conflict);
         }
 
-        invalidate_after_commit(self.status_list_cache.as_ref(), &existing.list_id).await;
+        invalidate_after_commit(self.status_list_cache.as_ref(), &existing).await;
         Ok(existing)
     }
 
@@ -350,14 +350,17 @@ fn build_snapshot(record: &StatusListRecord, token_exp_secs: u64) -> StatusListS
     }
 }
 
-async fn invalidate_after_commit(cache: &dyn StatusListCache, list_id: &str) {
-    match cache.invalidate(list_id).await {
+async fn invalidate_after_commit(cache: &dyn StatusListCache, record: &StatusListRecord) {
+    match cache
+        .invalidate_after_update(&record.list_id, record.updated_at)
+        .await
+    {
         Ok(()) => {
-            tracing::debug!(list_id = %list_id, "invalidated cache entry after commit");
+            tracing::debug!(list_id = %record.list_id, "invalidated cache entry after commit");
         }
         Err(error) => {
             tracing::warn!(
-                list_id = %list_id,
+                list_id = %record.list_id,
                 error = ?error,
                 "status list write committed, but cache invalidation failed; \
                  reads may be stale until the cache entry expires"
