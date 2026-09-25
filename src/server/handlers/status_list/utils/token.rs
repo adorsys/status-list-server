@@ -1,5 +1,5 @@
 use std::io::Write as _;
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use coset::{
     self, CborSerializable, CoseSign1Builder, HeaderBuilder, TaggedCborSerializable,
@@ -124,16 +124,12 @@ async fn build_status_list_token_inner(
     validity_window: Option<(i64, i64)>,
     client_accepts_gzip: bool,
 ) -> Result<(Vec<u8>, Option<&'static str>), StatusListError> {
-    let signing_material = state
+    let cert_components = state
         .service
         .cert_provider()
-        .signing_material()
+        .get_active_certificate()
         .await
         .map_err(|e| StatusListError::Backend(Box::new(e)))?;
-    let certs_parts = signing_material
-        .certificate_chain
-        .ok_or(StatusListError::Unavailable)?;
-    let signing_key = signing_material.signing_key.clone();
 
     let accept = accept.to_string();
     let status_record = status_record.clone();
@@ -147,25 +143,35 @@ async fn build_status_list_token_inner(
 
     tokio::task::spawn_blocking(move || {
         let token_bytes = match accept.as_str() {
-            ACCEPT_STATUS_LISTS_HEADER_CWT => issue_cwt(
-                &status_record,
-                &*signing_key,
-                &certs_parts,
-                &aggregation_uri,
-                validity_window.0,
-                validity_window.1,
-                token_ttl_secs,
-            )?,
-            _ => issue_jwt(
-                &status_record,
-                &*signing_key,
-                &certs_parts,
-                &aggregation_uri,
-                validity_window.0,
-                validity_window.1,
-                token_ttl_secs,
-            )?
-            .into_bytes(),
+            ACCEPT_STATUS_LISTS_HEADER_CWT => {
+                let x5chain = cert_components
+                    .x5chain
+                    .ok_or(StatusListError::Unavailable)?;
+                issue_cwt(
+                    &status_record,
+                    cert_components.signing_key,
+                    x5chain,
+                    aggregation_uri,
+                    validity_window.0,
+                    validity_window.1,
+                    token_ttl_secs,
+                )?
+            }
+            _ => {
+                let cert_chain = cert_components
+                    .certificate_chain
+                    .ok_or(StatusListError::Unavailable)?;
+                issue_jwt(
+                    &status_record,
+                    cert_components.signing_key,
+                    cert_chain,
+                    aggregation_uri,
+                    validity_window.0,
+                    validity_window.1,
+                    token_ttl_secs,
+                )?
+                .into_bytes()
+            }
         };
 
         if should_gzip {
@@ -187,9 +193,9 @@ async fn build_status_list_token_inner(
 
 fn issue_cwt(
     status_record: &StatusListRecord,
-    signer: &(impl TokenSigner + ?Sized),
-    cert_chain: &[String],
-    aggregation_uri: &Option<String>,
+    signer: Arc<dyn TokenSigner>,
+    x5chain: CborValue,
+    aggregation_uri: Option<String>,
     iat: i64,
     exp: i64,
     token_ttl_secs: u64,
@@ -225,7 +231,7 @@ fn issue_cwt(
     if let Some(uri) = aggregation_uri {
         status_list.push((
             CborValue::Text("aggregation_uri".into()),
-            CborValue::Text(uri.clone()),
+            CborValue::Text(uri),
         ));
     }
     claims.push((
@@ -238,10 +244,9 @@ fn issue_cwt(
         .map_err(|err| StatusListError::Backend(Box::new(err)))?;
 
     let cose_alg = cose_algorithm(signer.algorithm())?;
-    let x5chain_value = build_x5chain(cert_chain)?;
     let protected = HeaderBuilder::new()
         .algorithm(cose_alg)
-        .value(HeaderParameter::X5Chain.to_i64(), x5chain_value)
+        .value(HeaderParameter::X5Chain.to_i64(), x5chain)
         .value(
             CWT_TYPE,
             CborValue::Text(STATUS_LISTS_CWT_TYPE_VALUE.into()),
@@ -262,30 +267,11 @@ fn issue_cwt(
     Ok(cwt_bytes)
 }
 
-fn build_x5chain(cert_chain: &[String]) -> Result<CborValue, StatusListError> {
-    use base64::prelude::{BASE64_STANDARD, Engine as _};
-
-    let result: Result<Vec<Vec<u8>>, _> = cert_chain
-        .iter()
-        .map(|b64| BASE64_STANDARD.decode(b64))
-        .collect();
-    let certs_der = result.map_err(|err| StatusListError::Backend(Box::new(err)))?;
-
-    let x5chain_value = if certs_der.len() == 1 {
-        CborValue::Bytes(certs_der.into_iter().next().unwrap())
-    } else {
-        let cert_array: Vec<CborValue> = certs_der.into_iter().map(CborValue::Bytes).collect();
-        CborValue::Array(cert_array)
-    };
-
-    Ok(x5chain_value)
-}
-
 fn issue_jwt(
     status_record: &StatusListRecord,
-    signer: &(impl TokenSigner + ?Sized),
-    cert_chain: &[String],
-    aggregation_uri: &Option<String>,
+    signer: Arc<dyn TokenSigner>,
+    cert_chain: Vec<String>,
+    aggregation_uri: Option<String>,
     iat: i64,
     exp: i64,
     token_ttl_secs: u64,
@@ -295,7 +281,7 @@ fn issue_jwt(
     let status_list = StatusListClaims {
         bits,
         lst,
-        aggregation_uri: aggregation_uri.clone(),
+        aggregation_uri,
     };
     let claims = StatusListToken {
         exp: Some(exp),
@@ -307,7 +293,7 @@ fn issue_jwt(
     let header = JwtHeader {
         alg: signer.algorithm().jose_name(),
         typ: STATUS_LISTS_HEADER_JWT,
-        x5c: cert_chain,
+        x5c: &cert_chain,
     };
     let header =
         serde_json::to_vec(&header).map_err(|err| StatusListError::Backend(Box::new(err)))?;
@@ -420,7 +406,10 @@ mod tests {
         ];
 
         for key in &test_keys {
-            let token = issue_jwt(&record, key, &cert_chain, &None, 1000, 2000, 300).unwrap();
+            let signer: Arc<dyn TokenSigner> =
+                Arc::new(SigningKey::from_pem(&key.to_pkcs8_pem().unwrap()).unwrap());
+            let token =
+                issue_jwt(&record, signer, cert_chain.clone(), None, 1000, 2000, 300).unwrap();
             let header = jsonwebtoken::decode_header(&token).unwrap();
             assert_eq!(header.alg, jwt_algorithm(key.algorithm()));
             assert_eq!(header.typ.as_deref(), Some(STATUS_LISTS_HEADER_JWT));
@@ -448,7 +437,22 @@ mod tests {
         ];
 
         for key in &test_keys {
-            let cwt_bytes = issue_cwt(&record, key, &cert_chain, &None, 1000, 2000, 300).unwrap();
+            let signer: Arc<dyn TokenSigner> =
+                Arc::new(SigningKey::from_pem(&key.to_pkcs8_pem().unwrap()).unwrap());
+            let material =
+                crate::domain::ports::SigningMaterial::new(Some(cert_chain.clone()), signer);
+            let components = material.into_certificate_components();
+            let x5chain = components.x5chain.expect("pre-built x5chain");
+            let cwt_bytes = issue_cwt(
+                &record,
+                components.signing_key,
+                x5chain,
+                None,
+                1000,
+                2000,
+                300,
+            )
+            .unwrap();
             let sign1 = coset::CoseSign1::from_tagged_slice(&cwt_bytes).unwrap();
             let expected_alg = match key.algorithm() {
                 SigningAlgorithm::Es256 => Algorithm::ES256,
@@ -460,11 +464,76 @@ mod tests {
                 sign1.protected.header.alg,
                 Some(coset::RegisteredLabelWithPrivate::Assigned(expected_alg))
             );
+            let x5chain_label = coset::Label::Int(HeaderParameter::X5Chain.to_i64());
+            let has_x5chain = sign1
+                .protected
+                .header
+                .rest
+                .iter()
+                .any(|(label, _)| *label == x5chain_label);
+            assert!(
+                has_x5chain,
+                "CWT must carry a spec-compliant x5chain protected header"
+            );
             sign1
                 .verify_signature(&[], |signature, tbs| {
                     verify_cwt_signature(key, signature, tbs)
                 })
                 .expect("CWT signature verifies with its public key");
         }
+    }
+
+    /// Hot-path CWT signing throughput benchmark.
+    ///
+    /// Skipped by default (`cargo test`); run explicitly with
+    /// `cargo test --lib -- --ignored server::handlers::status_list::utils::token::tests::benchmark_cwt_throughput`.
+    ///
+    /// Exercises `issue_cwt` with a pre-parsed x5chain (the zero-decode hot
+    /// path) across a fixed number of iterations and reports tokens/second. Run
+    /// against an earlier revision to compare before/after throughput.
+    #[test]
+    #[ignore]
+    fn benchmark_cwt_throughput() {
+        use std::time::Instant;
+
+        const ITERATIONS: usize = 20_000;
+
+        let record = sample_record();
+        let cert_chain = vec![base64::prelude::BASE64_STANDARD.encode(b"dummy-cert-der")];
+        let signer: Arc<dyn crate::domain::ports::TokenSigner> =
+            Arc::new(SigningKey::generate(SigningAlgorithm::Es256).unwrap());
+        let material = crate::domain::ports::SigningMaterial::new(Some(cert_chain), signer);
+        let components = material.into_certificate_components();
+        let x5chain = components.x5chain.expect("pre-built x5chain");
+
+        let start = Instant::now();
+        let mut checksum = 0usize;
+        for _ in 0..ITERATIONS {
+            let bytes = issue_cwt(
+                &record,
+                components.signing_key.clone(),
+                x5chain.clone(),
+                None,
+                1000,
+                2000,
+                300,
+            )
+            .expect("issue_cwt succeeds");
+            checksum = checksum.wrapping_add(bytes.len());
+        }
+        let elapsed = start.elapsed();
+        let per_sec = ITERATIONS as f64 / elapsed.as_secs_f64();
+
+        // A sanity floor (tokens/second) that real hardware comfortably clears
+        // but a regression to per-request base64 re-decoding would not.
+        assert!(
+            per_sec > 1_000.0,
+            "CWT throughput unexpectedly low: {per_sec:.0} tokens/sec"
+        );
+        eprintln!(
+            "CWT signing throughput: {per_sec:.0} tokens/sec over {ITERATIONS} iterations ({} ms)",
+            elapsed.as_millis()
+        );
+        std::hint::black_box(checksum);
     }
 }
