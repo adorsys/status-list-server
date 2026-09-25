@@ -191,7 +191,7 @@ optional = true
 
 [dependencies.redis]
 version = "1.7"
-features = ["tokio-comp", "tokio-rustls-comp", "connection-manager"]
+features = ["tokio-rustls-comp", "connection-manager"]
 optional = true
 
 [dev-dependencies]

@@ -102,7 +102,7 @@ SET GLOBAL binlog_format = 'ROW';  -- then restart the server
 
 ## Compose Profiles
 
-`docker compose up` starts PostgreSQL by default and builds the container with `postgres,aws,redis` features enabled. To run the MySQL service instead:
+`docker compose up` starts PostgreSQL by default and builds the container with `postgres,aws,redis` features enabled. Add `--profile redis` to start the Redis status-cache service, and set `APP_CACHE__BACKEND=redis` to use it. To run the MySQL service instead:
 
 ```bash
 FEATURES="mysql,aws" docker compose --profile mysql up --build
