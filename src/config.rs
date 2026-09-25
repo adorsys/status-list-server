@@ -1211,6 +1211,52 @@ pub struct StatusListConfig {
     pub snapshot_retention_secs: u64,
 }
 
+impl StatusListConfig {
+    /// Rejects token-lifetime values the spec forbids.
+    fn validate(&self) -> Result<(), ConfigError> {
+        validate_positive_secs("APP_STATUS_LIST__TOKEN_TTL_SECS", self.token_ttl_secs)?;
+        validate_positive_secs("APP_STATUS_LIST__TOKEN_EXP_SECS", self.token_exp_secs)?;
+        // The exp claim is `iat + token_exp_secs`; a value at or near i64::MAX would
+        // overflow that addition (wrapping exp negative in release, panicking in debug).
+        // Reject values that cannot be safely added to the current issuance timestamp.
+        let now = time::OffsetDateTime::now_utc().unix_timestamp();
+        if self.token_exp_secs as i64 > i64::MAX - now {
+            return Err(ConfigError::Message(format!(
+                "APP_STATUS_LIST__TOKEN_EXP_SECS ({}) is too large: it cannot be safely added \
+                 to the current issuance timestamp without overflowing i64 (i64::MAX = {})",
+                self.token_exp_secs,
+                i64::MAX
+            )));
+        }
+        if self.token_ttl_secs >= self.token_exp_secs {
+            return Err(ConfigError::Message(format!(
+                "APP_STATUS_LIST__TOKEN_TTL_SECS ({}) must be less than \
+                 APP_STATUS_LIST__TOKEN_EXP_SECS ({}); a ttl >= exp leaves no usable token lifetime",
+                self.token_ttl_secs, self.token_exp_secs
+            )));
+        }
+        Ok(())
+    }
+}
+
+/// `secs` must be a positive number that fits in `i64`; `0` breaks the spec
+/// (ttl MUST be positive) and values above `i64::MAX` wrap negative in `issue_jwt`.
+fn validate_positive_secs(env_var: &str, secs: u64) -> Result<(), ConfigError> {
+    if secs == 0 {
+        return Err(ConfigError::Message(format!(
+            "{env_var} must be a positive number (greater than 0)"
+        )));
+    }
+    if secs > i64::MAX as u64 {
+        return Err(ConfigError::Message(format!(
+            "{env_var} ({secs}) exceeds the maximum supported value (i64::MAX = {}); \
+             larger values wrap around to a negative lifetime when cast to i64",
+            i64::MAX
+        )));
+    }
+    Ok(())
+}
+
 impl Config {
     /// Loads configuration from built-in defaults, then overrides them with
     /// values sourced from the process environment.
@@ -1252,6 +1298,7 @@ impl Config {
         }
         config.cache.validate(config.telemetry.environment)?;
         config.management_auth.validate()?;
+        config.status_list.validate()?;
         config.limits.validate()?;
         Ok(config)
     }
@@ -2072,6 +2119,79 @@ mod tests {
                 "status-list-server-management".to_string(),
                 "internal-management".to_string()
             ]
+        );
+    }
+
+    #[test]
+    fn test_status_list_validations() {
+        // The valid default (900 / 300) loads without error.
+        let defaults = Config::load_from_overrides(&[]).expect("default config should load");
+        assert_eq!(defaults.status_list.token_exp_secs, 900);
+        assert_eq!(defaults.status_list.token_ttl_secs, 300);
+
+        // token_exp_secs == 0 -> every token is already expired at issue time.
+        let zero_exp = Config::load_from_overrides(&[("status_list.token_exp_secs", "0")]);
+        assert!(
+            zero_exp.is_err(),
+            "zero token_exp_secs should fail config loading"
+        );
+
+        // token_ttl_secs == 0 -> breaks the spec MUST that ttl be positive.
+        let zero_ttl = Config::load_from_overrides(&[("status_list.token_ttl_secs", "0")]);
+        assert!(
+            zero_ttl.is_err(),
+            "zero token_ttl_secs should fail config loading"
+        );
+
+        // Values above i64::MAX wrap around to a negative lifetime when cast as i64.
+        let above_i64_max_exp =
+            Config::load_from_overrides(&[("status_list.token_exp_secs", "9223372036854775808")]);
+        assert!(
+            above_i64_max_exp.is_err(),
+            "token_exp_secs above i64::MAX should fail config loading"
+        );
+
+        let above_i64_max_ttl =
+            Config::load_from_overrides(&[("status_list.token_ttl_secs", "9223372036854775808")]);
+        assert!(
+            above_i64_max_ttl.is_err(),
+            "token_ttl_secs above i64::MAX should fail config loading"
+        );
+
+        // Exact i64::MAX still overflows `iat + token_exp_secs` for any positive iat,
+        // so it must be rejected too (regression for the overflow-on-issuance bug).
+        let exact_i64_max_exp =
+            Config::load_from_overrides(&[("status_list.token_exp_secs", "9223372036854775807")]);
+        assert!(
+            exact_i64_max_exp.is_err(),
+            "token_exp_secs == i64::MAX should fail config loading"
+        );
+
+        // A realistic upper bound (e.g. 10 years of seconds) must still load cleanly
+        // alongside a valid ttl, ensuring the overflow guard does not reject sane values.
+        let large_but_safe = Config::load_from_overrides(&[
+            ("status_list.token_exp_secs", "315360000"),
+            ("status_list.token_ttl_secs", "86400"),
+        ]);
+        assert!(
+            large_but_safe.is_ok(),
+            "a large-but-safe token_exp_secs should load without error"
+        );
+
+        // token_ttl_secs >= token_exp_secs leaves no usable token lifetime.
+        let ttl_equals_exp = Config::load_from_overrides(&[("status_list.token_ttl_secs", "900")]);
+        assert!(
+            ttl_equals_exp.is_err(),
+            "token_ttl_secs == token_exp_secs should fail config loading"
+        );
+
+        let ttl_greater_than_exp = Config::load_from_overrides(&[
+            ("status_list.token_exp_secs", "300"),
+            ("status_list.token_ttl_secs", "600"),
+        ]);
+        assert!(
+            ttl_greater_than_exp.is_err(),
+            "token_ttl_secs > token_exp_secs should fail config loading"
         );
     }
 

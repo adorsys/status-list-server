@@ -249,6 +249,12 @@ spec:
             {{- if .Values.statuslist.watcher }}
               {{- $watcherPollInterval = trim (toString (.Values.statuslist.watcher.pollIntervalSecs | default "")) }}
             {{- end }}
+            {{- $statusListTokenExp := "" }}
+            {{- $statusListTokenTtl := "" }}
+            {{- if .Values.statuslist.statusList }}
+              {{- $statusListTokenExp = trim (toString (.Values.statuslist.statusList.tokenExpSecs | default "")) }}
+              {{- $statusListTokenTtl = trim (toString (.Values.statuslist.statusList.tokenTtlSecs | default "")) }}
+            {{- end }}
             {{- if and (eq .Values.secretStore.provider "aws") $appRegionForValidation }}
               {{- $_ := set $chartManagedEnv "APP_AWS__REGION" true }}
             {{- end }}
@@ -258,6 +264,12 @@ spec:
             {{- end }}
             {{- if and (ne $watcherPollInterval "") (not (hasKey $env "APP_WATCHER__POLL_INTERVAL_SECS")) }}
               {{- $_ := set $chartManagedEnv "APP_WATCHER__POLL_INTERVAL_SECS" true }}
+            {{- end }}
+            {{- if and (ne $statusListTokenExp "") (not (hasKey $env "APP_STATUS_LIST__TOKEN_EXP_SECS")) }}
+              {{- $_ := set $chartManagedEnv "APP_STATUS_LIST__TOKEN_EXP_SECS" true }}
+            {{- end }}
+            {{- if and (ne $statusListTokenTtl "") (not (hasKey $env "APP_STATUS_LIST__TOKEN_TTL_SECS")) }}
+              {{- $_ := set $chartManagedEnv "APP_STATUS_LIST__TOKEN_TTL_SECS" true }}
             {{- end }}
             {{- range $name, $_ := $secretFileEnv }}
               {{- if hasKey $chartManagedEnv $name }}
@@ -309,6 +321,15 @@ spec:
             {{- if and (ne $watcherPollInterval "") (not (hasKey $env "APP_WATCHER__POLL_INTERVAL_SECS")) }}
             - name: APP_WATCHER__POLL_INTERVAL_SECS
               value: {{ $watcherPollInterval | quote }}
+            {{- end }}
+            {{- /* Status-list token lifetime (exp / ttl) */}}
+            {{- if and (ne $statusListTokenExp "") (not (hasKey $env "APP_STATUS_LIST__TOKEN_EXP_SECS")) }}
+            - name: APP_STATUS_LIST__TOKEN_EXP_SECS
+              value: {{ $statusListTokenExp | quote }}
+            {{- end }}
+            {{- if and (ne $statusListTokenTtl "") (not (hasKey $env "APP_STATUS_LIST__TOKEN_TTL_SECS")) }}
+            - name: APP_STATUS_LIST__TOKEN_TTL_SECS
+              value: {{ $statusListTokenTtl | quote }}
             {{- end }}
           volumeMounts:
             - name: tmp

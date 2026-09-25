@@ -910,6 +910,54 @@ fn rendered_chart_does_not_duplicate_watcher_poll_interval() {
 }
 
 #[test]
+fn rendered_chart_rejects_zero_string_token_lifetime() {
+    // The schema `minimum` only applies to numeric instances; a quoted `"0"`
+    // previously slipped through as a string. Regression: reject it via `--set-string`.
+    let Some(output) =
+        render_helm_failure(&["--set-string", "statuslist.statusList.tokenExpSecs=0"])
+    else {
+        return;
+    };
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("tokenExpSecs") && stderr.contains("pattern"),
+        "helm should reject string tokenExpSecs=0, stderr: {stderr}"
+    );
+
+    let Some(output) =
+        render_helm_failure(&["--set-string", "statuslist.statusList.tokenTtlSecs=0"])
+    else {
+        return;
+    };
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("tokenTtlSecs") && stderr.contains("pattern"),
+        "helm should reject string tokenTtlSecs=0, stderr: {stderr}"
+    );
+}
+
+#[test]
+fn rendered_chart_accepts_string_token_lifetime() {
+    let Some(rendered) = render_helm(&[
+        "--set-string",
+        "statuslist.statusList.tokenExpSecs=1800",
+        "--set-string",
+        "statuslist.statusList.tokenTtlSecs=600",
+    ]) else {
+        return;
+    };
+    for expected in [
+        "name: APP_STATUS_LIST__TOKEN_EXP_SECS\n              value: \"1800\"",
+        "name: APP_STATUS_LIST__TOKEN_TTL_SECS\n              value: \"600\"",
+    ] {
+        assert!(
+            rendered.contains(expected),
+            "rendered Helm output is missing injected token lifetime env var {expected}"
+        );
+    }
+}
+
+#[test]
 fn rendered_chart_supports_gke_workload_identity_dns_example() {
     let Some(rendered) = render_helm(&[
         "--set",
