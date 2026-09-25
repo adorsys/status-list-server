@@ -36,6 +36,7 @@ impl Service {
             cert_provider,
         }
     }
+    
 
     pub fn new<S, C, SC, CP>(
         status_list_repo: S,
