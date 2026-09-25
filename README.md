@@ -93,7 +93,7 @@ The server compiles with modular feature flags to gate database drivers and clou
 | `gcp`      | GCP Secret Manager and Google Cloud DNS provider                      | ❌ Opt-in  |
 | `azure`    | Azure Key Vault and Azure DNS provider                                | ❌ Opt-in  |
 | `vault`    | HashiCorp Vault / OpenBao secret backend                              | ❌ Opt-in  |
-| `redis`    | Redis status-list cache backend                                        | ❌ Opt-in  |
+| `redis`    | Redis status-list cache backend                                       | ❌ Opt-in  |
 
 Examples:
 
