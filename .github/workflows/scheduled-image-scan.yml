@@ -134,7 +134,7 @@ jobs:
         # `repository_owner`, not `github.actor`: on a schedule event the actor is
         # whoever last touched the workflow file, which is neither meaningful nor
         # stable. GHCR authenticates on the token; the username should say what it is.
-        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.repository_owner }}
@@ -216,7 +216,7 @@ jobs:
 
       - name: Install Trivy
         # Pinned to the same version trivy-action v0.36.0 uses internally.
-        uses: aquasecurity/setup-trivy@3fb12ec12f41e471780db15c232d5dd185dcb514 # v0.2.6
+        uses: aquasecurity/setup-trivy@81e514348e19b6112ce2a7e3ecbafe19c1e1f567 # v0.3.1
         with:
           version: v0.70.0
           cache: false
@@ -225,7 +225,7 @@ jobs:
         # The same cache and path deploy.yml uses; see the comments there. Not gated on
         # `resolved`, so the leg that saves below does so whether or not its own
         # variant has been released.
-        uses: actions/cache/restore@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ runner.temp }}/trivy
           key: trivy-db-${{ runner.os }}-${{ github.run_id }}
@@ -242,7 +242,7 @@ jobs:
         # One leg saves, for the reason in deploy.yml. This run is on the default
         # branch, so its entry is the one release tags restore from.
         if: strategy.job-index == 0
-        uses: actions/cache/save@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ runner.temp }}/trivy
           key: trivy-db-${{ runner.os }}-${{ github.run_id }}
@@ -624,7 +624,7 @@ jobs:
         if: ${{ always() && steps.sarif.outputs.present == 'true' }}
         # No `category` input: each run's `automationDetails.id` already sets it, and
         # the Action never overwrites one that is present.
-        uses: github/codeql-action/upload-sarif@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4.37.9
+        uses: github/codeql-action/upload-sarif@1c5b675653bb5c22dbe9b12b556ec555138e09fd # v4.38.1
         with:
           sarif_file: merged.sarif
 
