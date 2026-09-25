@@ -240,6 +240,14 @@ impl IntoApiError for StatusListError {
                 "duplicate_index",
                 format!("duplicate status index {index} in statuses array"),
             ),
+            StatusListError::IndexOutOfRange { index, size } => ApiError::bad_request(
+                "index_out_of_range",
+                format!("status index {index} is outside the fixed status list size {size}"),
+            ),
+            StatusListError::AllocationExhausted => ApiError::bad_request(
+                "allocation_exhausted",
+                "status list does not have enough unallocated indices",
+            ),
             // Not 429: waiting never frees a slot, so no retry hint. Not 403,
             // which this API reserves for ownership failures.
             StatusListError::QuotaExceeded { count, max } => ApiError::bad_request(
@@ -357,6 +365,16 @@ mod tests {
                 StatusListError::DuplicateIndex { index: 3 },
                 StatusCode::BAD_REQUEST,
                 "duplicate_index",
+            ),
+            (
+                StatusListError::IndexOutOfRange { index: 3, size: 3 },
+                StatusCode::BAD_REQUEST,
+                "index_out_of_range",
+            ),
+            (
+                StatusListError::AllocationExhausted,
+                StatusCode::BAD_REQUEST,
+                "allocation_exhausted",
             ),
             (
                 StatusListError::QuotaExceeded { count: 2, max: 2 },

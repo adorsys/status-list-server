@@ -36,6 +36,10 @@ pub enum StatusListError {
     IndexTooLarge { index: i32, max: i32 },
     #[error("duplicate status index {index} in statuses array")]
     DuplicateIndex { index: i32 },
+    #[error("status index {index} is outside the fixed status list size {size}")]
+    IndexOutOfRange { index: i32, size: u32 },
+    #[error("status list does not have enough unallocated indices")]
+    AllocationExhausted,
     /// The issuer already holds its configured maximum number of status lists.
     #[error("issuer has {count} status lists, reaching the configured maximum of {max}")]
     QuotaExceeded { count: u64, max: u64 },
@@ -125,25 +129,74 @@ pub struct StatusListSnapshot {
 pub struct StatusList {
     pub bits: u8,
     pub lst: String,
+    /// Fixed entry count requested at publish time. `None` preserves legacy,
+    /// grow-on-write lists.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size: Option<u32>,
+    /// Default status used to pre-initialise fixed-size lists.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_status: Option<Status>,
 }
 
 impl StatusList {
     pub fn create(status_updates: Vec<StatusEntry>) -> Result<Self, StatusListError> {
+        Self::create_with_options(status_updates, None, Status::Valid)
+    }
+
+    pub fn create_with_options(
+        status_updates: Vec<StatusEntry>,
+        size: Option<u32>,
+        default_status: Status,
+    ) -> Result<Self, StatusListError> {
+        validate_unique_indices(&status_updates)?;
+        if let Some(size) = size {
+            validate_within_size(&status_updates, size)?;
+        }
+
         if status_updates.is_empty() {
+            if let Some(size) = size {
+                let bits = determine_bits_for_values(&[default_status.clone()], None)?;
+                let rounded_size = round_size_to_byte_boundary(size, bits)?;
+                let mut status_array = vec![0u8; bytes_for_entries(rounded_size, bits)];
+                fill_status_array(&mut status_array, rounded_size, bits, &default_status)?;
+                return Ok(Self {
+                    bits: bits as u8,
+                    lst: encode_compressed(&status_array)?,
+                    size: Some(rounded_size),
+                    default_status: Some(default_status),
+                });
+            }
             return Ok(Self {
                 bits: 1,
                 lst: encode_compressed(&[])?,
+                size: None,
+                default_status: None,
             });
         }
 
-        validate_unique_indices(&status_updates)?;
-        let bits = determine_bits(&status_updates, None)?;
-        let len = calculate_array_size(&status_updates, bits)?;
+        let bits = determine_bits_with_default(
+            &status_updates,
+            size.as_ref().map(|_| &default_status),
+            None,
+        )?;
+        let rounded_size = size
+            .map(|size| round_size_to_byte_boundary(size, bits))
+            .transpose()?;
+        let len = if let Some(rounded_size) = rounded_size {
+            bytes_for_entries(rounded_size, bits)
+        } else {
+            calculate_array_size(&status_updates, bits)?
+        };
         let mut status_array = vec![0u8; len];
+        if let Some(rounded_size) = rounded_size {
+            fill_status_array(&mut status_array, rounded_size, bits, &default_status)?;
+        }
         apply_updates(&mut status_array, &status_updates, bits)?;
         Ok(Self {
             bits: bits as u8,
             lst: encode_compressed(&status_array)?,
+            size: rounded_size,
+            default_status: rounded_size.map(|_| default_status),
         })
     }
 
@@ -153,6 +206,9 @@ impl StatusList {
         }
 
         validate_unique_indices(&status_updates)?;
+        if let Some(size) = self.size {
+            validate_within_size(&status_updates, size)?;
+        }
         let old_bits = self.bits as usize;
         // Draft-21 only permits 1, 2, 4, or 8. Older rows with wider values
         // are repacked when their stored values are still representable.
@@ -177,7 +233,12 @@ impl StatusList {
             // with the *update's* value, so this widening path relies on
             // [`apply_updates`] letting the last write win for any given index.
             full_statuses.extend(status_updates);
-            return Self::create_with_bits(full_statuses, new_bits);
+            return Self::create_with_bits(
+                full_statuses,
+                new_bits,
+                self.size,
+                self.default_status.clone(),
+            );
         }
 
         let required_len = calculate_array_size(&status_updates, old_bits)?;
@@ -188,20 +249,33 @@ impl StatusList {
         Ok(Self {
             bits: self.bits,
             lst: encode_compressed(&status_array)?,
+            size: self.size,
+            default_status: self.default_status.clone(),
         })
     }
 
     fn create_with_bits(
         status_updates: Vec<StatusEntry>,
         bits: usize,
+        size: Option<u32>,
+        default_status: Option<Status>,
     ) -> Result<Self, StatusListError> {
         debug_assert!(matches!(bits, 1 | 2 | 4 | 8));
-        let len = calculate_array_size(&status_updates, bits)?;
+        let len = if let Some(size) = size {
+            bytes_for_entries(size, bits)
+        } else {
+            calculate_array_size(&status_updates, bits)?
+        };
         let mut status_array = vec![0u8; len];
+        if let (Some(size), Some(default_status)) = (size, default_status.as_ref()) {
+            fill_status_array(&mut status_array, size, bits, default_status)?;
+        }
         apply_updates(&mut status_array, &status_updates, bits)?;
         Ok(Self {
             bits: bits as u8,
             lst: encode_compressed(&status_array)?,
+            size,
+            default_status,
         })
     }
 
@@ -301,9 +375,18 @@ fn determine_bits(
     status_updates: &[StatusEntry],
     original_bits: Option<usize>,
 ) -> Result<usize, StatusListError> {
+    determine_bits_with_default(status_updates, None, original_bits)
+}
+
+fn determine_bits_with_default(
+    status_updates: &[StatusEntry],
+    default_status: Option<&Status>,
+    original_bits: Option<usize>,
+) -> Result<usize, StatusListError> {
     let max_status_value = status_updates
         .iter()
         .map(|entry| status_value(&entry.status))
+        .chain(default_status.map(status_value).into_iter())
         .collect::<Result<Vec<_>, _>>()?
         .into_iter()
         .max()
@@ -323,6 +406,57 @@ fn determine_bits(
     };
 
     Ok(original_bits.unwrap_or(required_bits).max(required_bits))
+}
+
+fn determine_bits_for_values(
+    statuses: &[Status],
+    original_bits: Option<usize>,
+) -> Result<usize, StatusListError> {
+    let updates = statuses
+        .iter()
+        .cloned()
+        .enumerate()
+        .map(|(index, status)| StatusEntry {
+            index: index as i32,
+            status,
+        })
+        .collect::<Vec<_>>();
+    determine_bits(&updates, original_bits)
+}
+
+fn round_size_to_byte_boundary(size: u32, bits: usize) -> Result<u32, StatusListError> {
+    validate_bits(bits)?;
+    let entries_per_byte = 8 / bits;
+    let size = usize::try_from(size).map_err(|_| {
+        StatusListError::InvalidStatusList("status list size does not fit usize".to_string())
+    })?;
+    let rounded = if size == 0 {
+        0
+    } else {
+        size.next_multiple_of(entries_per_byte)
+    };
+    u32::try_from(rounded).map_err(|_| {
+        StatusListError::InvalidStatusList("rounded status list size exceeds u32".to_string())
+    })
+}
+
+fn bytes_for_entries(entries: u32, bits: usize) -> usize {
+    (entries as usize * bits).div_ceil(8)
+}
+
+fn validate_within_size(status_updates: &[StatusEntry], size: u32) -> Result<(), StatusListError> {
+    for entry in status_updates {
+        let Ok(index) = u32::try_from(entry.index) else {
+            continue;
+        };
+        if index >= size {
+            return Err(StatusListError::IndexOutOfRange {
+                index: entry.index,
+                size,
+            });
+        }
+    }
+    Ok(())
 }
 
 fn calculate_array_size(
@@ -347,6 +481,24 @@ fn calculate_array_size(
 
     let end_bit = (max_index as usize) * bits + bits - 1;
     Ok(end_bit / 8 + 1)
+}
+
+fn fill_status_array(
+    status_array: &mut [u8],
+    entries: u32,
+    bits: usize,
+    status: &Status,
+) -> Result<(), StatusListError> {
+    if entries == 0 {
+        return Ok(());
+    }
+    let updates = (0..entries)
+        .map(|index| StatusEntry {
+            index: index as i32,
+            status: status.clone(),
+        })
+        .collect::<Vec<_>>();
+    apply_updates(status_array, &updates, bits)
 }
 
 fn apply_updates(
@@ -630,10 +782,34 @@ mod tests {
         assert_eq!(decompress(&result.lst), vec![0b0110_0100]);
     }
 
+    #[test]
+    fn create_pre_sized_list_with_non_zero_default() {
+        let result = StatusList::create_with_options(vec![], Some(5), Status::Invalid).unwrap();
+
+        assert_eq!(result.bits, 1);
+        assert_eq!(result.size, Some(8));
+        assert_eq!(result.default_status, Some(Status::Invalid));
+        assert_eq!(decompress(&result.lst), vec![0b1111_1111]);
+    }
+
+    #[test]
+    fn update_rejects_index_beyond_fixed_size() {
+        let list = StatusList::create_with_options(vec![], Some(8), Status::Valid).unwrap();
+
+        let err = list.update(vec![entry(8, Status::Invalid)]).unwrap_err();
+
+        assert!(matches!(
+            err,
+            StatusListError::IndexOutOfRange { index: 8, size: 8 }
+        ));
+    }
+
     fn from_raw(bytes: &[u8], bits: u8) -> StatusList {
         StatusList {
             bits,
             lst: encode_compressed(bytes).unwrap(),
+            size: None,
+            default_status: None,
         }
     }
 
@@ -818,6 +994,8 @@ mod tests {
         let bad_base64 = StatusList {
             bits: 1,
             lst: "not valid base64!!".to_string(),
+            size: None,
+            default_status: None,
         };
         assert!(matches!(
             bad_base64.update(vec![entry(0, Status::Invalid)]),
@@ -827,6 +1005,8 @@ mod tests {
         let bad_zlib = StatusList {
             bits: 1,
             lst: base64url::encode([0xFF, 0xFF, 0xFF, 0xFF]),
+            size: None,
+            default_status: None,
         };
         assert!(matches!(
             bad_zlib.update(vec![entry(0, Status::Invalid)]),
@@ -859,6 +1039,8 @@ mod tests {
         let invalid_bits_list = StatusList {
             bits: 9,
             lst: encode_compressed(&[0x00, 0x01]).unwrap(),
+            size: None,
+            default_status: None,
         };
         assert!(matches!(
             invalid_bits_list.update(vec![entry(1, Status::Invalid)]),
@@ -871,6 +1053,8 @@ mod tests {
         let legacy_empty = StatusList {
             bits: 1,
             lst: String::new(),
+            size: None,
+            default_status: None,
         };
 
         let updated = legacy_empty
@@ -898,6 +1082,8 @@ mod tests {
         let legacy_representable = StatusList {
             bits: 9,
             lst: encode_compressed(&[15, 0]).unwrap(),
+            size: None,
+            default_status: None,
         };
 
         let (bits, lst) = legacy_representable.token_lst().unwrap();
@@ -911,6 +1097,8 @@ mod tests {
         let legacy_representable = StatusList {
             bits: 9,
             lst: encode_compressed(&[15, 0]).unwrap(),
+            size: None,
+            default_status: None,
         };
 
         let updated = legacy_representable
@@ -926,6 +1114,8 @@ mod tests {
         let legacy_unrepresentable = StatusList {
             bits: 9,
             lst: encode_compressed(&[0, 1]).unwrap(),
+            size: None,
+            default_status: None,
         };
 
         assert!(matches!(
@@ -939,6 +1129,8 @@ mod tests {
         let legacy_empty = StatusList {
             bits: 1,
             lst: String::new(),
+            size: None,
+            default_status: None,
         };
 
         let (bits, lst) = legacy_empty.token_lst().unwrap();

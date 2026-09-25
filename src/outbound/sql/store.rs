@@ -13,8 +13,8 @@ use tracing::warn;
 use super::error::{RepositoryError, contention_err};
 use super::list_quota::list_quota_enforced;
 use super::models::{
-    Credentials, StatusListHistoryRecord, StatusListRecord, credentials, status_list_history,
-    status_lists,
+    Credentials, StatusListHistoryRecord, StatusListRecord, credentials, status_list_allocations,
+    status_list_history, status_lists,
 };
 use crate::utils::metrics_db::time_query;
 
@@ -624,6 +624,157 @@ impl SeaOrmStore<StatusListRecord> {
                 .all(&*db)
                 .await
                 .map_err(find_err)
+        })
+        .await
+    }
+
+    #[tracing::instrument(skip(self), fields(db.system = "sea-orm"))]
+    pub async fn allocate_indices(
+        &self,
+        list_id: &str,
+        count: u32,
+        size: Option<u32>,
+    ) -> Result<Vec<i32>, RepositoryError> {
+        if count == 0 {
+            return Ok(Vec::new());
+        }
+
+        time_query("allocate", "status_list_allocation", async {
+            let txn = self.begin_read_committed().await.map_err(map_insert_err)?;
+
+            let lock_result = status_lists::Entity::update_many()
+                .col_expr(
+                    status_lists::Column::UpdatedAt,
+                    Expr::col(status_lists::Column::UpdatedAt),
+                )
+                .filter(status_lists::Column::ListId.eq(list_id))
+                .exec(&txn)
+                .await;
+            match lock_result {
+                Ok(result) if result.rows_affected == 1 => {}
+                Ok(_) => {
+                    txn.rollback().await.map_err(|rollback_err| {
+                        RepositoryError::UpdateError(format!(
+                            "allocation parent-list lock matched no row; rollback failed: {rollback_err}"
+                        ))
+                    })?;
+                    return Err(RepositoryError::FindError(format!(
+                        "status list {list_id} was not found during allocation"
+                    )));
+                }
+                Err(update_err) => {
+                    txn.rollback().await.map_err(|rollback_err| {
+                        RepositoryError::UpdateError(format!(
+                            "allocation parent-list lock failed ({update_err}); \
+                             rolling the transaction back also failed: {rollback_err}"
+                        ))
+                    })?;
+                    return Err(map_update_err(update_err));
+                }
+            }
+
+            let existing = match status_list_allocations::Entity::find()
+                .select_only()
+                .column(status_list_allocations::Column::Idx)
+                .filter(status_list_allocations::Column::ListId.eq(list_id))
+                .order_by_asc(status_list_allocations::Column::Idx)
+                .into_tuple::<i32>()
+                .all(&txn)
+                .await
+            {
+                Ok(existing) => existing,
+                Err(find_error) => {
+                    txn.rollback().await.map_err(|rollback_err| {
+                        RepositoryError::FindError(format!(
+                            "allocation lookup failed ({find_error}); \
+                             rolling the transaction back also failed: {rollback_err}"
+                        ))
+                    })?;
+                    return Err(find_err(find_error));
+                }
+            };
+
+            let existing: std::collections::BTreeSet<i32> = existing.into_iter().collect();
+            let limit = size.unwrap_or(u32::MAX);
+            let mut allocated = Vec::with_capacity(count as usize);
+            for candidate in 0..limit {
+                let candidate = i32::try_from(candidate).map_err(|_| {
+                    RepositoryError::InsertError("allocation index exceeds i32".to_string())
+                })?;
+                if !existing.contains(&candidate) {
+                    allocated.push(candidate);
+                    if allocated.len() == count as usize {
+                        break;
+                    }
+                }
+            }
+
+            if allocated.len() != count as usize {
+                txn.rollback().await.map_err(|rollback_err| {
+                    RepositoryError::InsertError(format!(
+                        "not enough indices to allocate; rollback failed: {rollback_err}"
+                    ))
+                })?;
+                return Err(RepositoryError::AllocationExhausted);
+            }
+
+            for idx in &allocated {
+                let active = status_list_allocations::ActiveModel {
+                    list_id: Set(list_id.to_string()),
+                    idx: Set(*idx),
+                };
+                if let Err(insert_err) = status_list_allocations::Entity::insert(active)
+                    .exec_without_returning(&txn)
+                    .await
+                {
+                    txn.rollback().await.map_err(|rollback_err| {
+                        RepositoryError::InsertError(format!(
+                            "allocation insert failed ({insert_err}); \
+                             rolling the transaction back also failed: {rollback_err}"
+                        ))
+                    })?;
+                    return Err(map_insert_err(insert_err));
+                }
+            }
+
+            txn.commit().await.map_err(map_insert_err)?;
+            Ok(allocated)
+        })
+        .await
+    }
+
+    #[tracing::instrument(skip(self, indices), fields(db.system = "sea-orm"))]
+    pub async fn record_allocated_indices(
+        &self,
+        list_id: &str,
+        indices: &[i32],
+    ) -> Result<(), RepositoryError> {
+        if indices.is_empty() {
+            return Ok(());
+        }
+
+        time_query("record_allocations", "status_list_allocation", async {
+            let txn = self.begin_read_committed().await.map_err(map_insert_err)?;
+            for idx in indices {
+                let active = status_list_allocations::ActiveModel {
+                    list_id: Set(list_id.to_string()),
+                    idx: Set(*idx),
+                };
+                if let Err(insert_err) = status_list_allocations::Entity::insert(active)
+                    .exec_without_returning(&txn)
+                    .await
+                {
+                    txn.rollback().await.map_err(|rollback_err| {
+                        RepositoryError::InsertError(format!(
+                            "allocation record insert failed ({insert_err}); \
+                             rolling the transaction back also failed: {rollback_err}"
+                        ))
+                    })?;
+                    return Err(map_insert_err(insert_err));
+                }
+            }
+            txn.commit().await.map_err(map_insert_err)?;
+            Ok(())
         })
         .await
     }

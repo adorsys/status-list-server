@@ -88,6 +88,8 @@ async fn test_status_list_find_all() {
             status_list: StatusList {
                 bits: 1,
                 lst: "abc".to_string(),
+                size: None,
+                default_status: None,
             },
             sub: "https://example.com/statuslists/list1".to_string(),
             updated_at: 0,
@@ -98,6 +100,8 @@ async fn test_status_list_find_all() {
             status_list: StatusList {
                 bits: 8,
                 lst: "xyz".to_string(),
+                size: None,
+                default_status: None,
             },
             sub: "https://example.com/statuslists/list2".to_string(),
             updated_at: 0,
@@ -382,6 +386,8 @@ async fn assert_guarded_update_rejects_stale_write(
         status_list: StatusList {
             bits: 1,
             lst: "flip-A".to_string(),
+            size: None,
+            default_status: None,
         },
         updated_at: v + 1,
         ..base.clone()
@@ -390,6 +396,8 @@ async fn assert_guarded_update_rejects_stale_write(
         status_list: StatusList {
             bits: 1,
             lst: "flip-B".to_string(),
+            size: None,
+            default_status: None,
         },
         updated_at: v + 1,
         ..base.clone()
@@ -461,6 +469,8 @@ async fn test_update_one_conflict_loser_can_reread_and_retry() {
         status_list: StatusList {
             bits: 1,
             lst: "flip-A".to_string(),
+            size: None,
+            default_status: None,
         },
         updated_at: v + 1,
         ..base.clone()
@@ -469,6 +479,8 @@ async fn test_update_one_conflict_loser_can_reread_and_retry() {
         status_list: StatusList {
             bits: 1,
             lst: "flip-B-stale".to_string(),
+            size: None,
+            default_status: None,
         },
         updated_at: v + 1,
         ..base.clone()
@@ -490,6 +502,8 @@ async fn test_update_one_conflict_loser_can_reread_and_retry() {
         status_list: StatusList {
             bits: 1,
             lst: "flip-B-retry".to_string(),
+            size: None,
+            default_status: None,
         },
         updated_at: reread.updated_at + 1,
         ..reread.clone()
@@ -712,6 +726,8 @@ async fn test_sqlite_update_with_snapshot_is_atomic() {
                 status_list: StatusList {
                     bits: 1,
                     lst: "flip-1".to_string(),
+                    size: None,
+                    default_status: None,
                 },
                 updated_at: v + 1,
                 ..base.clone()
@@ -755,6 +771,8 @@ async fn test_sqlite_update_with_snapshot_is_atomic() {
                 status_list: StatusList {
                     bits: 1,
                     lst: "flip-2".to_string(),
+                    size: None,
+                    default_status: None,
                 },
                 updated_at: v + 2,
                 ..base.clone()
@@ -799,6 +817,8 @@ async fn test_sqlite_update_with_snapshot_is_atomic() {
                 status_list: StatusList {
                     bits: 1,
                     lst: "flip-3".to_string(),
+                    size: None,
+                    default_status: None,
                 },
                 updated_at: v + 5,
                 ..base.clone()
@@ -1021,6 +1041,8 @@ async fn assert_duplicate_list_id_is_conflict(
         status_list: StatusList {
             bits: 1,
             lst: "initial".to_string(),
+            size: None,
+            default_status: None,
         },
         sub: format!("sub-{list_id}"),
         updated_at,
@@ -1032,6 +1054,8 @@ async fn assert_duplicate_list_id_is_conflict(
         status_list: StatusList {
             bits: 1,
             lst: "initial".to_string(),
+            size: None,
+            default_status: None,
         },
         sub: format!("sub-{list_id}"),
         iat,
@@ -1142,6 +1166,8 @@ async fn assert_update_snapshot_rolls_back(
                 status_list: StatusList {
                     bits: 1,
                     lst: "flip-1".to_string(),
+                    size: None,
+                    default_status: None,
                 },
                 updated_at: v + 1,
                 ..base.clone()
@@ -1178,6 +1204,8 @@ async fn assert_update_snapshot_rolls_back(
                 status_list: StatusList {
                     bits: 1,
                     lst: "flip-2".to_string(),
+                    size: None,
+                    default_status: None,
                 },
                 updated_at: v + 2,
                 ..base.clone()

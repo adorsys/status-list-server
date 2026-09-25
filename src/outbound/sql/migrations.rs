@@ -15,6 +15,7 @@ impl MigratorTrait for Migrator {
             Box::new(status_list_history_exp_index::Migration),
             Box::new(credentials_list_count::Migration),
             Box::new(list_quota::Migration),
+            Box::new(status_list_allocations::Migration),
         ]
     }
 }
@@ -47,6 +48,7 @@ const INNODB_REQUIRED_TABLES: &[&str] = &[
     "credentials",
     "status_lists",
     "status_list_history",
+    "status_list_allocations",
     "list_quota",
 ];
 
@@ -746,6 +748,80 @@ pub(crate) mod list_quota {
         Table,
         Id,
         Enforced,
+    }
+}
+
+/// Allocated status-list indices. The composite primary key is the durable
+/// guard against double allocation of a `(list_id, idx)` pair.
+pub(crate) mod status_list_allocations {
+    use super::*;
+
+    pub(crate) struct Migration;
+
+    impl MigrationName for Migration {
+        fn name(&self) -> &str {
+            "m20260925_000001_status_list_allocations"
+        }
+    }
+
+    #[async_trait::async_trait]
+    #[allow(elided_lifetimes_in_paths)]
+    impl MigrationTrait for Migration {
+        async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+            let mut table = Table::create();
+            table
+                .table(StatusListAllocations::Table)
+                .if_not_exists()
+                .col(
+                    ColumnDef::new(StatusListAllocations::ListId)
+                        .string()
+                        .not_null(),
+                )
+                .col(
+                    ColumnDef::new(StatusListAllocations::Idx)
+                        .integer()
+                        .not_null(),
+                )
+                .primary_key(
+                    Index::create()
+                        .col(StatusListAllocations::ListId)
+                        .col(StatusListAllocations::Idx),
+                )
+                .foreign_key(
+                    ForeignKey::create()
+                        .name("fk_status_list_allocations_list_id")
+                        .from(StatusListAllocations::Table, StatusListAllocations::ListId)
+                        .to(StatusLists::Table, StatusLists::ListId)
+                        .on_delete(ForeignKeyAction::Cascade)
+                        .on_update(ForeignKeyAction::Cascade),
+                );
+            pin_innodb_on_mysql(manager, &mut table);
+            manager.create_table(table).await
+        }
+
+        async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+            manager
+                .drop_table(
+                    Table::drop()
+                        .if_exists()
+                        .table(StatusListAllocations::Table)
+                        .to_owned(),
+                )
+                .await
+        }
+    }
+
+    #[derive(Iden)]
+    enum StatusListAllocations {
+        Table,
+        ListId,
+        Idx,
+    }
+
+    #[derive(Iden)]
+    enum StatusLists {
+        Table,
+        ListId,
     }
 }
 

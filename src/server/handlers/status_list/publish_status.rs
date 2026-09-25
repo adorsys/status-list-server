@@ -4,10 +4,28 @@ use axum::{
     http::StatusCode,
     response::IntoResponse,
 };
+use serde::Deserialize;
 
 use crate::server::{AppState, auth::AuthenticatedIssuer, error::ApiError};
 
-use super::utils::request::{StatusesRequest, parse_statuses_payload};
+use super::utils::request::{Status, StatusEntry, StatusesRequest};
+
+#[derive(Deserialize)]
+pub struct PublishStatusesRequest {
+    pub statuses: Vec<StatusEntry>,
+    pub size: Option<u32>,
+    pub default_status: Option<Status>,
+}
+
+impl From<StatusesRequest> for PublishStatusesRequest {
+    fn from(request: StatusesRequest) -> Self {
+        Self {
+            statuses: request.statuses,
+            size: None,
+            default_status: None,
+        }
+    }
+}
 
 /// Publish a new status list.
 ///
@@ -23,6 +41,21 @@ pub async fn publish_status(
     Path(list_id): Path<String>,
     Json(payload): Json<StatusesRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
+    publish_status_with_options(
+        State(appstate),
+        principal,
+        Path(list_id),
+        Json(payload.into()),
+    )
+    .await
+}
+
+async fn publish_status_with_options(
+    State(appstate): State<AppState>,
+    principal: AuthenticatedIssuer,
+    Path(list_id): Path<String>,
+    Json(payload): Json<PublishStatusesRequest>,
+) -> Result<impl IntoResponse, ApiError> {
     if let Err(e) = uuid::Uuid::try_parse(&list_id) {
         return Err(ApiError::bad_request(
             "invalid_list_id",
@@ -35,6 +68,7 @@ pub async fn publish_status(
         .into_iter()
         .map(Into::into)
         .collect::<Vec<_>>();
+    let default_status = payload.default_status.map(Into::into);
 
     let sub = format!(
         "https://{}/api/v1/status-lists/{list_id}",
@@ -43,11 +77,13 @@ pub async fn publish_status(
 
     appstate
         .service
-        .publish_status_list(
+        .publish_status_list_with_options(
             list_id,
             principal.into(),
             sub,
             statuses,
+            payload.size,
+            default_status,
             appstate.token_exp_secs,
             appstate.max_status_index,
             appstate.max_statuses_per_request,
@@ -63,9 +99,15 @@ pub async fn publish_status_route(
     state: State<AppState>,
     principal: AuthenticatedIssuer,
     path: Path<String>,
-    payload: Result<Json<StatusesRequest>, JsonRejection>,
+    payload: Result<Json<PublishStatusesRequest>, JsonRejection>,
 ) -> Result<impl IntoResponse, ApiError> {
-    publish_status(state, principal, path, parse_statuses_payload(payload)?).await
+    let payload = payload.map_err(|err| {
+        ApiError::bad_request(
+            "invalid_request_body",
+            format!("Invalid status update request body: {err}"),
+        )
+    })?;
+    publish_status_with_options(state, principal, path, payload).await
 }
 
 #[cfg(test)]
@@ -77,7 +119,17 @@ mod tests {
     };
     use crate::test_utils::{authenticated_issuer, test_app_state};
     use axum::{Router, body::Body, body::to_bytes, routing::put};
+    use flate2::read::ZlibDecoder;
+    use std::io::Read;
     use tower::ServiceExt;
+
+    fn decompress(encoded: &str) -> Vec<u8> {
+        let decoded = base64url::decode(encoded).unwrap();
+        let mut decoder = ZlibDecoder::new(&decoded[..]);
+        let mut decompressed = Vec::new();
+        decoder.read_to_end(&mut decompressed).unwrap();
+        decompressed
+    }
 
     #[tokio::test]
     async fn test_publish_token_status_invalid_list_id() {
@@ -156,6 +208,57 @@ mod tests {
                 .unwrap()
                 .contains("not a supported Draft-21 status type")
         );
+    }
+
+    #[tokio::test]
+    async fn publish_route_creates_pre_sized_list_with_default_and_rejects_oob_update() {
+        let token_id = uuid::Uuid::new_v4().to_string();
+        let app_state = test_app_state(None).await;
+        let router = Router::new()
+            .route(
+                "/status-lists/{list_id}/statuses/",
+                put(publish_status_route),
+            )
+            .with_state(app_state.clone());
+
+        let mut request = axum::http::Request::builder()
+            .method(axum::http::Method::PUT)
+            .uri(format!("/status-lists/{token_id}/statuses/"))
+            .header(axum::http::header::CONTENT_TYPE, "application/json")
+            .body(Body::from(
+                r#"{"statuses":[],"size":5,"default_status":1}"#.to_string(),
+            ))
+            .unwrap();
+        request
+            .extensions_mut()
+            .insert(authenticated_issuer("issuer"));
+
+        let response = router.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::CREATED);
+
+        let token = app_state.service.get_status_list(&token_id).await.unwrap();
+        assert_eq!(token.status_list.size, Some(8));
+        assert_eq!(decompress(&token.status_list.lst), vec![0xFF]);
+
+        let err = app_state
+            .service
+            .update_statuses(
+                &Issuer("issuer".to_string()),
+                &token_id,
+                vec![crate::domain::models::status_list::StatusEntry {
+                    index: 8,
+                    status: crate::domain::models::status_list::Status::Valid,
+                }],
+                app_state.token_exp_secs,
+                app_state.max_status_index,
+                app_state.max_statuses_per_request,
+                app_state.max_serialized_list_size,
+            )
+            .await
+            .unwrap_err();
+        let api: ApiError = err.into();
+        assert_eq!(api.status, StatusCode::BAD_REQUEST);
+        assert_eq!(api.error, "index_out_of_range");
     }
 
     #[tokio::test]

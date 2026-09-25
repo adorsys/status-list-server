@@ -339,12 +339,17 @@ paths:
         the quota is full, so retrying a publish that did land is recognisable.
         During the upgrade of an existing SQL deployment to a release with the
         quota, an operator may run it unenforced until it is enabled.
+
+        `size` may be supplied to create a fixed-size list. The server rounds it
+        up so `bits * entries` is byte-aligned and initialises every entry to
+        `default_status` (default `0`). Later writes past that fixed size are
+        refused with `400 index_out_of_range`.
       requestBody:
         required: true
         content:
           application/json:
             schema:
-              $ref: "#/components/schemas/StatusUpdateRequest"
+              $ref: "#/components/schemas/StatusPublishRequest"
       responses:
         "201":
           description: Status list created successfully
@@ -401,6 +406,50 @@ paths:
           $ref: "#/components/responses/TooManyRequests"
         "500":
           $ref: "#/components/responses/UpdateInternalServerError"
+
+  /api/v1/status-lists/{list_id}/allocations:
+    parameters:
+      - name: list_id
+        in: path
+        required: true
+        description: UUID of the status list.
+        schema:
+          type: string
+          format: uuid
+          example: "477121aa-b598-419e-916f-1e74654ff38b"
+
+    post:
+      operationId: allocateStatusListIndices
+      summary: Allocate unused status-list indices
+      description: |
+        Reserves unused indices for the authenticated issuer's status list and
+        returns them in ascending order. Each reserved `(list_id, index)` pair is
+        recorded so it is not returned by a later allocation request.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AllocationRequest"
+      responses:
+        "201":
+          description: Indices allocated successfully
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AllocationResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
 
   /api/v1/status-lists/{list_id}:
     get:
@@ -680,6 +729,46 @@ components:
           items:
             $ref: "#/components/schemas/StatusEntry"
 
+    StatusPublishRequest:
+      allOf:
+        - $ref: "#/components/schemas/StatusUpdateRequest"
+        - type: object
+          properties:
+            size:
+              type: integer
+              format: int32
+              minimum: 0
+              description: |
+                Optional fixed number of entries to create. The server rounds
+                this value up so `bits * entries` is a multiple of 8.
+              example: 100000
+            default_status:
+              $ref: "#/components/schemas/StatusValue"
+
+    AllocationRequest:
+      type: object
+      required:
+        - count
+      properties:
+        count:
+          type: integer
+          format: int32
+          minimum: 0
+          description: Number of unused indices to reserve.
+          example: 10
+
+    AllocationResponse:
+      type: object
+      required:
+        - indices
+      properties:
+        indices:
+          type: array
+          items:
+            type: integer
+            format: int32
+          example: [0, 1, 2]
+
     StatusEntry:
       type: object
       required:
@@ -843,7 +932,9 @@ components:
             - invalid_public_jwk
             - too_many_statuses
             - index_too_large
+            - index_out_of_range
             - duplicate_index
+            - allocation_exhausted
             - list_quota_exceeded
             # 401 — emitted by the authentication middleware
             - invalid_auth_header

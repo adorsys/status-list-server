@@ -357,6 +357,8 @@ mod tests {
             status_list: StatusList {
                 bits: 1,
                 lst: base64url::encode(b"\x00\x01\x02\x03"),
+                size: None,
+                default_status: None,
             },
             updated_at: 1000,
         }

@@ -543,6 +543,8 @@ mod tests {
                 status_list: StatusList {
                     bits: 1,
                     lst: "lst".into(),
+                    size: None,
+                    default_status: None,
                 },
                 sub: "sub".into(),
                 updated_at: 0,
@@ -577,6 +579,8 @@ mod tests {
             status_list: StatusList {
                 bits: 1,
                 lst: "lst".into(),
+                size: None,
+                default_status: None,
             },
             sub: "sub".into(),
             updated_at: 42,
@@ -620,6 +624,8 @@ mod redis_tests {
             status_list: StatusList {
                 bits: 1,
                 lst: "lst".into(),
+                size: None,
+                default_status: None,
             },
             sub: "sub".into(),
             updated_at,
