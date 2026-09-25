@@ -236,6 +236,10 @@ impl IntoApiError for StatusListError {
                 "index_too_large",
                 format!("status index {index} exceeds configured maximum {max}"),
             ),
+            StatusListError::DuplicateIndex { index } => ApiError::bad_request(
+                "duplicate_index",
+                format!("duplicate status index {index} in statuses array"),
+            ),
             // Not 429: waiting never frees a slot, so no retry hint. Not 403,
             // which this API reserves for ownership failures.
             StatusListError::QuotaExceeded { count, max } => ApiError::bad_request(
@@ -348,6 +352,11 @@ mod tests {
                 StatusListError::IndexTooLarge { index: 2, max: 1 },
                 StatusCode::BAD_REQUEST,
                 "index_too_large",
+            ),
+            (
+                StatusListError::DuplicateIndex { index: 3 },
+                StatusCode::BAD_REQUEST,
+                "duplicate_index",
             ),
             (
                 StatusListError::QuotaExceeded { count: 2, max: 2 },

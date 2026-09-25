@@ -207,6 +207,19 @@ spec:
             description: 'Current cache hit ratio: {{ `{{ $value | humanizePercentage }}` }}'
             runbook_url: "https://github.com/adorsys/status-list-server/blob/develop/deploy/observability/runbooks/cache-hit-ratio.md"
             dashboard_url: {{ .Values.alerting.dashboardUrl | default "http://localhost:3000/d/status-list-slo" | quote }}
+        - alert: RedisCacheErrors
+          expr: sum by (namespace)(rate(status_list_cache_errors_total{otel_scope_name="status-list-server"}[5m])) > 0
+          for: 5m
+          labels:
+            severity: warn
+            service: status-list-server
+            namespace: {{ .Release.Namespace | quote }}
+            sli: cache_hit_ratio
+          annotations:
+            summary: "Redis status-list cache operations are failing"
+            description: 'Redis cache error rate: {{ `{{ $value | humanize }}` }}'
+            runbook_url: "https://github.com/adorsys/status-list-server/blob/develop/deploy/observability/runbooks/cache-hit-ratio.md"
+            dashboard_url: {{ .Values.alerting.dashboardUrl | default "http://localhost:3000/d/status-list-slo" | quote }}
         - alert: ErrorBudgetCritical
           expr: sli:error_budget:success:30d < {{ .Values.slo.errorBudgetCriticalThreshold }}
           for: 5m
@@ -260,4 +273,3 @@ spec:
             runbook_url: "https://github.com/adorsys/status-list-server/blob/develop/deploy/observability/runbooks/cert-renewal.md"
             dashboard_url: {{ .Values.alerting.dashboardUrl | default "http://localhost:3000/d/status-list-slo" | quote }}
 {{- end }}
-
