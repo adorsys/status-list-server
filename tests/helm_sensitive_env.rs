@@ -913,10 +913,9 @@ fn rendered_chart_does_not_duplicate_watcher_poll_interval() {
 fn rendered_chart_rejects_zero_string_token_lifetime() {
     // The schema `minimum` only applies to numeric instances; a quoted `"0"`
     // previously slipped through as a string. Regression: reject it via `--set-string`.
-    let Some(output) = render_helm_failure(&[
-        "--set-string",
-        "statuslist.statusList.tokenExpSecs=0",
-    ]) else {
+    let Some(output) =
+        render_helm_failure(&["--set-string", "statuslist.statusList.tokenExpSecs=0"])
+    else {
         return;
     };
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -925,10 +924,9 @@ fn rendered_chart_rejects_zero_string_token_lifetime() {
         "helm should reject string tokenExpSecs=0, stderr: {stderr}"
     );
 
-    let Some(output) = render_helm_failure(&[
-        "--set-string",
-        "statuslist.statusList.tokenTtlSecs=0",
-    ]) else {
+    let Some(output) =
+        render_helm_failure(&["--set-string", "statuslist.statusList.tokenTtlSecs=0"])
+    else {
         return;
     };
     let stderr = String::from_utf8_lossy(&output.stderr);
