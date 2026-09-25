@@ -134,7 +134,7 @@ async fn get_status_list_at(
     // Anchor the ETag to the current token validity window so the validator
     // rotates with the token's lifetime (see etag::generate_etag).
     let validity = TokenValidity::new(state.token_exp_secs, state.token_ttl_secs);
-    let current_etag = generate_etag(&status_record, token_window(now, validity).0);
+    let current_etag = generate_etag(&status_record, token_window(now, validity).0)?;
     let last_modified_ts = status_record.updated_at;
     let last_modified = format_http_date(last_modified_ts);
     let cache_control = build_cache_control(state.token_ttl_secs);
@@ -263,7 +263,7 @@ async fn handle_historical_request(
 
     let snapshot = state.service.get_snapshot_at(list_id, time).await?;
 
-    let etag = generate_historical_etag(&snapshot);
+    let etag = generate_historical_etag(&snapshot)?;
     let last_modified = format_http_date(snapshot.iat);
     let validity_duration = (snapshot.exp - snapshot.iat) as u64;
     let cache_control = format!("max-age={validity_duration}, immutable");
@@ -1420,6 +1420,11 @@ mod tests {
             // Real clock so `now` lines up with the list's `updated_at` (set at
             // publish time) for the expired If-Modified-Since branch.
             let now0 = time::OffsetDateTime::now_utc().unix_timestamp();
+            let (_, window_end) = token_window(
+                now0,
+                TokenValidity::new(app_state.token_exp_secs, app_state.token_ttl_secs),
+            );
+            let within_window_now = (now0 + 60).min(window_end - 1);
 
             publish_status(
                 State(app_state.clone()),
@@ -1456,7 +1461,7 @@ mod tests {
                 token_id.clone(),
                 Ok(Query(StatusListQuery { time: None })),
                 nm_headers,
-                now0 + 60,
+                within_window_now,
             )
             .await
             .unwrap()
@@ -1471,7 +1476,7 @@ mod tests {
                 token_id.clone(),
                 Ok(Query(StatusListQuery { time: None })),
                 mod_headers,
-                now0 + 600,
+                window_end,
             )
             .await
             .unwrap()

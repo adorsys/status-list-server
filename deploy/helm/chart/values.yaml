@@ -160,6 +160,14 @@ statuslist:
     APP_LIMITS__MAX_STATUS_INDEX: "100000"
     APP_LIMITS__MAX_STATUSES_PER_REQUEST: "5000"
     APP_LIMITS__MAX_SERIALIZED_LIST_SIZE: "1048576"
+    # Status lists one issuer may publish; must be > 0. Lists cannot be deleted
+    # via the API, so an issuer at this limit stays there until it is raised.
+    APP_LIMITS__MAX_LISTS_PER_ISSUER: "1000"
+    # Upgrading an existing database from a release without the list quota:
+    # pods refuse to start until the quota is enabled. Set this to "true" for
+    # that rollout only, then run `list-quota recount` and `list-quota enable`
+    # and remove it (see docs/troubleshooting.md, "Upgrading to the list quota").
+    # APP_LIMITS__LIST_QUOTA_TRANSITION: "true"
     # Telemetry / OpenTelemetry
     APP_SERVER__ENABLE_METRICS: "true"
     APP_TELEMETRY__ENVIRONMENT: "production"
