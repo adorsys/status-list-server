@@ -9,6 +9,29 @@ use crate::domain::models::status_list::{
 pub use crate::domain::models::token::{SigningAlgorithm, TokenSignerError};
 use async_trait::async_trait;
 
+/// Pluggable cache interface for recently used status-list records.
+#[async_trait]
+pub trait StatusListCache: Send + Sync + 'static {
+    /// Retrieve a cached status-list record by list identifier.
+    async fn get(&self, list_id: &str) -> Result<Option<StatusListRecord>, StatusListError>;
+
+    /// Store a status-list record in the cache.
+    async fn put(&self, status_list: StatusListRecord) -> Result<(), StatusListError>;
+
+    /// Invalidate a cached status-list entry upon mutation.
+    async fn invalidate(&self, list_id: &str) -> Result<(), StatusListError>;
+
+    /// Invalidate a cached entry after a committed update, carrying the committed
+    /// monotonic version for distributed caches that need stale-fill fencing.
+    async fn invalidate_after_update(
+        &self,
+        list_id: &str,
+        _updated_at: i64,
+    ) -> Result<(), StatusListError> {
+        self.invalidate(list_id).await
+    }
+}
+
 /// Interface for managing active status list records.
 #[async_trait]
 pub trait StatusListRepo: Send + Sync + 'static {
@@ -66,19 +89,6 @@ pub trait CredentialRepo: Send + Sync + 'static {
 
     /// Insert new issuer credential details into storage.
     async fn insert(&self, credential: Credential) -> Result<(), CredentialError>;
-}
-
-/// In-memory or distributed cache interface for status list records.
-#[async_trait]
-pub trait StatusListCache: Send + Sync + 'static {
-    /// Retrieve a cached status list record by list identifier.
-    async fn get(&self, list_id: &str) -> Result<Option<StatusListRecord>, StatusListError>;
-
-    /// Store a status list record in the cache.
-    async fn put(&self, status_list: StatusListRecord) -> Result<(), StatusListError>;
-
-    /// Invalidate a cached status list entry upon mutation.
-    async fn invalidate(&self, list_id: &str) -> Result<(), StatusListError>;
 }
 
 /// Persistence interface for historical status list snapshots.
