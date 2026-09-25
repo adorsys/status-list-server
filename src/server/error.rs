@@ -238,7 +238,7 @@ impl IntoApiError for StatusListError {
             ),
             StatusListError::DuplicateIndex { index } => ApiError::bad_request(
                 "duplicate_index",
-                format!("duplicate status index {index} in update payload"),
+                format!("duplicate status index {index} in statuses array"),
             ),
             // Not 429: waiting never frees a slot, so no retry hint. Not 403,
             // which this API reserves for ownership failures.

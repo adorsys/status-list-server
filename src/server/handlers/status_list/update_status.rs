@@ -303,10 +303,14 @@ mod tests {
         assert_eq!(after.status_list, before.status_list);
 
         // The issue's acceptance criterion is "no redundant history rows": a
-        // no-op must not leave a newer snapshot behind.
+        // no-op must not leave a newer snapshot behind. Resolve the snapshot at
+        // a time strictly after the no-op so a redundant snapshot inserted by
+        // it would surface as a newer `iat`; querying at the fixed publish
+        // timestamp `now` could never observe one and would be vacuous.
+        let after_now = crate::domain::service::current_unix_timestamp();
         let after_snapshot = app_state
             .service
-            .get_snapshot_at(&token_id, now)
+            .get_snapshot_at(&token_id, after_now)
             .await
             .expect("the publish snapshot must still be queryable");
         assert_eq!(
@@ -402,9 +406,13 @@ mod tests {
         );
         assert_eq!(after.status_list, before.status_list);
 
+        // Resolve the snapshot at a time strictly after the no-op so a
+        // redundant snapshot inserted by it would surface as a newer `iat`;
+        // querying at the fixed publish timestamp `now` would be vacuous.
+        let after_now = crate::domain::service::current_unix_timestamp();
         let after_snapshot = app_state
             .service
-            .get_snapshot_at(&token_id, now)
+            .get_snapshot_at(&token_id, after_now)
             .await
             .expect("the publish snapshot must still be queryable");
         assert_eq!(

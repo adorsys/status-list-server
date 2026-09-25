@@ -369,6 +369,11 @@ paths:
       description: |
         Updates the status entries of an existing status list. The JWT Bearer
         token must belong to the issuer that originally published the list.
+
+        An update that leaves the list unchanged is a successful no-op: it
+        neither advances the list version nor records a history snapshot.
+        A payload that is empty (`{"statuses": []}`) or that re-sets every
+        affected `index` to its current value both qualify.
       requestBody:
         required: true
         content:
@@ -664,9 +669,7 @@ components:
         operator-configurable `limits.max_statuses_per_request` (default 5000);
         a request exceeding that bound is rejected with `400 Bad Request`.
         A `statuses` array containing duplicate `index` values is rejected with
-        `400 Bad Request` on both `PUT` and `PATCH`. An update that leaves the
-        list unchanged (including an empty `statuses` array on `PATCH`) is a
-        successful no-op.
+        `400 Bad Request` on both `PUT` and `PATCH`.
       required:
         - statuses
       properties:
@@ -891,8 +894,8 @@ components:
             (default 100000) — `Status index <n> exceeds the configured
             maximum`; or
           * a payload repeats the same `index` in more than one entry — on
-            either `PATCH` or `PUT` — `duplicate status index <n> in update
-            payload`.
+            either `PATCH` or `PUT` — `duplicate status index <n> in statuses
+            array`.
 
         `list_quota_exceeded` (publish only) is different in kind: the request
         was well-formed, and is refused because the issuer already holds

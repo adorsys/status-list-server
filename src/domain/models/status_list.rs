@@ -34,7 +34,7 @@ pub enum StatusListError {
     TooManyStatuses { count: usize, max: usize },
     #[error("status index {index} exceeds configured maximum {max}")]
     IndexTooLarge { index: i32, max: i32 },
-    #[error("duplicate status index {index} in update payload")]
+    #[error("duplicate status index {index} in statuses array")]
     DuplicateIndex { index: i32 },
     /// The issuer already holds its configured maximum number of status lists.
     #[error("issuer has {count} status lists, reaching the configured maximum of {max}")]
