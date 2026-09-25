@@ -1,5 +1,5 @@
 use std::fmt::Debug;
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use axum::{
     extract::rejection::QueryRejection,
@@ -22,8 +22,9 @@ use super::utils::{
         token_window,
     },
     constants::{ACCEPT_STATUS_LISTS_HEADER_CWT, ACCEPT_STATUS_LISTS_HEADER_JWT},
-    etag::{generate_etag, generate_historical_etag},
+    etag::{content_hash, generate_historical_etag, generate_token_etag},
     token::build_status_list_token,
+    token_cache::{CachedToken, TokenEncoding, signer_fingerprint, token_bytes_cache_key},
 };
 
 /// Conditional-revalidation SLI counter. Cached after first use (the same
@@ -47,9 +48,7 @@ fn revalidation_metrics() -> RevalidationMetrics {
         RevalidationMetrics {
             total: meter
                 .u64_counter("conditional_revalidation_total")
-                .with_description(
-                    "Conditional GET revalidation outcomes (not_modified|modified|expired_token).",
-                )
+                .with_description("Conditional GET revalidation outcomes (not_modified|modified).")
                 .build(),
         }
     })
@@ -131,10 +130,24 @@ async fn get_status_list_at(
         .and_then(|h| h.to_str().ok());
 
     let status_record = fetch_status_record(&list_id, &state).await?;
-    // Anchor the ETag to the current token validity window so the validator
-    // rotates with the token's lifetime (see etag::generate_etag).
+
+    // Anchor the token and its validator to the current token validity window so
+    // the signed bytes — and hence the strong ETag — are stable for the whole
+    // window, letting the signed-bytes cache reuse one sign per window.
     let validity = TokenValidity::new(state.token_exp_secs, state.token_ttl_secs);
-    let current_etag = generate_etag(&status_record, token_window(now, validity).0)?;
+    let window_start = token_window(now, validity).0;
+
+    let (token_bytes, token_encoding, current_etag) = get_or_build_live_token(
+        &state,
+        &accept_type,
+        &status_record,
+        &list_id,
+        window_start,
+        now,
+        client_accepts_gzip,
+    )
+    .await?;
+
     let last_modified_ts = status_record.updated_at;
     let last_modified = format_http_date(last_modified_ts);
     let cache_control = build_cache_control(state.token_ttl_secs);
@@ -166,57 +179,126 @@ async fn get_status_list_at(
             revalidation_metrics()
                 .total
                 .add(1, &[KeyValue::new("outcome", "modified")]);
-            build_fresh_200_response(
-                &state,
+            Ok(build_ok_response(
+                &token_bytes,
+                token_encoding,
                 &accept_type,
-                &status_record,
                 &current_etag,
                 &last_modified,
                 &cache_control,
-                client_accepts_gzip,
-            )
-            .await
-        }
-        ConditionalResponse::ExpiredToken => {
-            // The list is unchanged but the client's cached token has reached its
-            // `exp`: a 304 would hand the relying party a body-less, expired,
-            // unusable token (RFC 9110 §8.8.1). Track this separately from a true
-            // content change so operators can detect a config regression that
-            // silently turns every conditional GET into a full re-sign.
-            revalidation_metrics()
-                .total
-                .add(1, &[KeyValue::new("outcome", "expired_token")]);
-            build_fresh_200_response(
-                &state,
-                &accept_type,
-                &status_record,
-                &current_etag,
-                &last_modified,
-                &cache_control,
-                client_accepts_gzip,
-            )
-            .await
+            ))
         }
     }
 }
 
-/// Build a freshly signed `200 OK` status-list token response, reusing the
-/// current validator and freshness headers. Shared by the content-change
-/// (`Modified`) and expiry-forced re-sign (`ExpiredToken`) paths.
-async fn build_fresh_200_response(
+/// Return the signed token bytes for the current window, serving from the
+/// per-replica signed-bytes cache when possible and re-signing only on a miss.
+///
+/// The token is minted with `iat = window_start` and `exp = window_start +
+/// token_exp_secs`, so within a window the bytes are identical across requests
+/// and the cache yields a single sign per `(list, window, format, encoding)`.
+/// The strong ETag is derived from the exact bytes that will be served.
+///
+/// The current signing material is fetched once and both (a) fingerprinted into
+/// the cache key and (b) passed to the signer, so rotating the signing key or
+/// renewing the certificate immediately invalidates cached bytes and re-signs —
+/// the served token always reflects the current key/certificate.
+async fn get_or_build_live_token(
     state: &AppState,
     accept_type: &str,
     status_record: &StatusListRecord,
+    list_id: &str,
+    window_start: i64,
+    now: i64,
+    client_accepts_gzip: bool,
+) -> Result<(Arc<Vec<u8>>, Option<&'static str>, String), ApiError> {
+    let format = if accept_type == ACCEPT_STATUS_LISTS_HEADER_CWT {
+        "cwt"
+    } else {
+        "jwt"
+    };
+    let encoding = if client_accepts_gzip && accept_type == ACCEPT_STATUS_LISTS_HEADER_JWT {
+        TokenEncoding::Gzip
+    } else {
+        TokenEncoding::Identity
+    };
+    let hash = content_hash(status_record);
+    let signing_material = state
+        .service
+        .cert_provider()
+        .signing_material()
+        .await
+        .map_err(|e| ApiError::from(StatusListError::Backend(Box::new(e))))?;
+    let signer = signer_fingerprint(&signing_material);
+    let aggregation_uri = state.aggregation_uri.as_deref().unwrap_or("");
+    let key = token_bytes_cache_key(
+        list_id,
+        &hash,
+        &signer,
+        window_start,
+        format,
+        encoding,
+        aggregation_uri,
+        state.token_ttl_secs,
+        state.token_exp_secs,
+    );
+    let exp_secs = state.token_exp_secs as i64;
+    let validity_window = (window_start, window_start.saturating_add(exp_secs));
+
+    let cached = state
+        .token_bytes_cache
+        .get_or_build(&key, window_start, exp_secs, now, || {
+            let signing_material = signing_material.clone();
+            async move {
+                let (bytes, enc) = build_status_list_token(
+                    state,
+                    accept_type,
+                    status_record,
+                    Some(validity_window),
+                    client_accepts_gzip,
+                    signing_material,
+                )
+                .await?;
+                Ok::<CachedToken, ApiError>(CachedToken {
+                    bytes: Arc::new(bytes),
+                    encoding: enc,
+                })
+            }
+        })
+        .await?;
+
+    let (bytes, encoding) = match cached {
+        Some(cached) => (cached.bytes, cached.encoding),
+        // Degenerate `token_exp_secs == 0`: the window is always closed (a minted
+        // token is born expired), so the cache never serves and never builds. We
+        // must still return a body for a plain GET, so re-sign here regardless.
+        None => {
+            let (bytes, enc) = build_status_list_token(
+                state,
+                accept_type,
+                status_record,
+                Some(validity_window),
+                client_accepts_gzip,
+                signing_material,
+            )
+            .await?;
+            (Arc::new(bytes), enc)
+        }
+    };
+    let etag = generate_token_etag(&bytes);
+    Ok((bytes, encoding, etag))
+}
+
+/// Build a `200 OK` status-list token response from already-signed bytes.
+fn build_ok_response(
+    token_bytes: &Arc<Vec<u8>>,
+    token_encoding: Option<&'static str>,
+    accept_type: &str,
     current_etag: &str,
     last_modified: &str,
     cache_control: &str,
-    client_accepts_gzip: bool,
-) -> Result<Response, ApiError> {
-    let (token_bytes, encoding) =
-        build_status_list_token(state, accept_type, status_record, None, client_accepts_gzip)
-            .await?;
-
-    let mut response = Response::new(token_bytes.into());
+) -> Response {
+    let mut response = Response::new((**token_bytes).clone().into());
     *response.status_mut() = StatusCode::OK;
     let h = response.headers_mut();
     h.insert(
@@ -236,13 +318,20 @@ async fn build_fresh_200_response(
         header::VARY,
         HeaderValue::from_static("Accept, Accept-Encoding"),
     );
-    if let Some(enc) = encoding {
+    if let Some(enc) = token_encoding {
         h.insert(header::CONTENT_ENCODING, HeaderValue::from_static(enc));
     }
 
-    Ok(response)
+    response
 }
 
+/// Serve a historical status-list snapshot for `?time=` replayed at `(iat, exp)`.
+///
+/// Historical tokens are intentionally **not** cached in the signed-bytes cache:
+/// each request targets a possibly distinct snapshot (`time`), so the hit rate
+/// would be negligible and the cache would only churn retained memory. This is
+/// an explicit out-of-scope decision for `#564` acceptance criterion #7; the
+/// token is signed fresh per request against one consistent signing snapshot.
 async fn handle_historical_request(
     list_id: &str,
     time: i64,
@@ -276,12 +365,20 @@ async fn handle_historical_request(
         updated_at: snapshot.iat,
     };
 
+    let signing_material = state
+        .service
+        .cert_provider()
+        .signing_material()
+        .await
+        .map_err(|e| ApiError::from(StatusListError::Backend(Box::new(e))))?;
+
     let (token_bytes, encoding) = build_status_list_token(
         state,
         accept_type,
         &status_record,
         Some((snapshot.iat, snapshot.exp)),
         client_accepts_gzip,
+        signing_material,
     )
     .await?;
 
@@ -378,9 +475,13 @@ mod tests {
     use crate::server::handlers::status_list::utils::request::{
         Status, StatusEntry, StatusesRequest,
     };
-    use crate::test_utils::{authenticated_issuer, test_app_state};
+    use crate::test_utils::{
+        RotatingCertProvider, authenticated_issuer, test_app_state,
+        test_app_state_with_cert_provider,
+    };
     use axum::extract::Json;
     use axum::http::HeaderMap;
+    use std::sync::Arc;
 
     /// Decode the JWT payload of a freshly served (uncompressed) token so tests
     /// can assert the `iat`/`exp` claims directly without a verification key.
@@ -1176,9 +1277,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_conditional_request_expired_token_returns_fresh_headers() {
-        // An `ExpiredToken` outcome (here via an expired If-Modified-Since
-        // validator) must respond 200 with the full set of validator/freshness
-        // headers so downstream caches keep working after the forced re-sign.
+        // An expired If-Modified-Since validator must respond 200 with the full
+        // set of validator/freshness headers so downstream caches keep working
+        // after the fresh re-sign.
         let token_id = uuid::Uuid::new_v4().to_string();
         let app_state = test_app_state(None).await;
         let token_exp_secs = app_state.token_exp_secs;
@@ -1324,11 +1425,72 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_conditional_request_degenerate_ttl_configs_never_304() {
-        // Degenerate configs (ttl >= E) leave no usable token lifetime, so the
-        // server must never answer 304 even on an immediate revalidation — it
-        // always re-signs fresh.
-        for (exp, ttl) in [(0u64, 300u64), (300, 300), (300, 600)] {
+    async fn test_conditional_request_degenerate_exp_zero_always_re_signs() {
+        // `exp == 0` produces born-expired tokens — a minted token's `exp` equals
+        // its `window_start`, so a 304 can never be certified (it would strand an
+        // already-expired token). The server must re-sign a fresh 200 even on an
+        // immediate revalidation.
+        let (exp, ttl) = (0u64, 300u64);
+        let token_id = uuid::Uuid::new_v4().to_string();
+        let mut app_state = test_app_state(None).await;
+        app_state.token_exp_secs = exp;
+        app_state.token_ttl_secs = ttl;
+        let now0 = 1_000_000_000;
+
+        publish_status(
+            State(app_state.clone()),
+            authenticated_issuer("issuer1"),
+            Path(token_id.clone()),
+            Json(StatusesRequest { statuses: vec![] }),
+        )
+        .await
+        .unwrap();
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::ACCEPT,
+            ACCEPT_STATUS_LISTS_HEADER_JWT.parse().unwrap(),
+        );
+
+        let res1 = get_status_list_at(
+            State(app_state.clone()),
+            token_id.clone(),
+            Ok(Query(StatusListQuery { time: None })),
+            headers.clone(),
+            now0,
+        )
+        .await
+        .unwrap()
+        .into_response();
+        assert_eq!(res1.status(), StatusCode::OK);
+        let etag = res1.headers().get(header::ETAG).unwrap().clone();
+        headers.insert(header::IF_NONE_MATCH, etag);
+
+        // Same-second window — a 304 would hand an expired token, so it must 200.
+        let res2 = get_status_list_at(
+            State(app_state),
+            token_id,
+            Ok(Query(StatusListQuery { time: None })),
+            headers,
+            now0,
+        )
+        .await
+        .unwrap()
+        .into_response();
+        assert_eq!(
+            res2.status(),
+            StatusCode::OK,
+            "exp==0 must never answer 304 (born-expired tokens)"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_conditional_request_ttl_ge_exp_same_window_certifies_304() {
+        // With anchored tokens, `ttl >= exp` (exp > 0) no longer leaves the client
+        // stranded: a token minted at `window_start` is valid for the whole
+        // (1-second, degenerate) window, so a same-window revalidation correctly
+        // certifies a 304.
+        for (exp, ttl) in [(300u64, 300u64), (300, 600)] {
             let token_id = uuid::Uuid::new_v4().to_string();
             let mut app_state = test_app_state(None).await;
             app_state.token_exp_secs = exp;
@@ -1364,7 +1526,7 @@ mod tests {
             let etag = res1.headers().get(header::ETAG).unwrap().clone();
             headers.insert(header::IF_NONE_MATCH, etag);
 
-            // Revalidate in the very same window/second — must still get a 200.
+            // Same window/second -> matching strong ETag -> 304 (token anchored and valid).
             let res2 = get_status_list_at(
                 State(app_state),
                 token_id,
@@ -1375,12 +1537,163 @@ mod tests {
             .await
             .unwrap()
             .into_response();
-            assert_eq!(
-                res2.status(),
-                StatusCode::OK,
-                "ttl>=exp ({exp}/{ttl}) must never answer 304"
-            );
+            assert_eq!(res2.status(), StatusCode::NOT_MODIFIED);
         }
+    }
+
+    #[tokio::test]
+    async fn test_same_window_non_conditional_gets_reuse_cached_bytes() {
+        // Two non-conditional 200 GETs in the same window must reuse the same
+        // signed bytes (single sign per window, not one per request): the body is
+        // byte-for-byte identical and the token's `iat` is anchored to the window
+        // start rather than the request time.
+        let token_id = uuid::Uuid::new_v4().to_string();
+        let app_state = test_app_state(None).await;
+        let now0 = 1_000_000_000;
+        let exp_secs = app_state.token_exp_secs;
+        let window = token_window(now0, TokenValidity::new(exp_secs, app_state.token_ttl_secs));
+
+        publish_status(
+            State(app_state.clone()),
+            authenticated_issuer("issuer1"),
+            Path(token_id.clone()),
+            Json(StatusesRequest { statuses: vec![] }),
+        )
+        .await
+        .unwrap();
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::ACCEPT,
+            ACCEPT_STATUS_LISTS_HEADER_JWT.parse().unwrap(),
+        );
+
+        let res1 = get_status_list_at(
+            State(app_state.clone()),
+            token_id.clone(),
+            Ok(Query(StatusListQuery { time: None })),
+            headers.clone(),
+            now0,
+        )
+        .await
+        .unwrap()
+        .into_response();
+        assert_eq!(res1.status(), StatusCode::OK);
+        let body1 = axum::body::to_bytes(res1.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let claims1 = decode_jwt_claims(&body1);
+        assert_eq!(
+            claims1["iat"].as_i64().unwrap(),
+            window.0,
+            "iat must be anchored to the window start, not the request time"
+        );
+        assert_eq!(
+            claims1["exp"].as_i64().unwrap() - claims1["iat"].as_i64().unwrap(),
+            exp_secs as i64
+        );
+
+        // Second request, no validator: still Modified -> 200, but the signed
+        // bytes come from the cache (identical body => no re-sign).
+        let res2 = get_status_list_at(
+            State(app_state),
+            token_id,
+            Ok(Query(StatusListQuery { time: None })),
+            headers,
+            now0 + 30,
+        )
+        .await
+        .unwrap()
+        .into_response();
+        assert_eq!(res2.status(), StatusCode::OK);
+        let body2 = axum::body::to_bytes(res2.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(
+            body1, body2,
+            "same-window 200s must reuse the cached signed bytes"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn test_concurrent_misses_in_fresh_window_single_sign() {
+        // #564 criterion #2: at most one signing operation per (list, window,
+        // format) per replica. Fire many concurrent GETs into a fresh window so
+        // they all miss; the single-flight cache must run the builder once. We
+        // assert every response carries the *same* strong ETag: with randomized
+        // ECDSA signing, two signs would produce different bytes and hence
+        // different ETags, so a single shared ETag across concurrent responses
+        // proves a single sign.
+        let token_id = uuid::Uuid::new_v4().to_string();
+        let app_state = test_app_state(None).await;
+        let now0 = 1_000_000_000;
+
+        publish_status(
+            State(app_state.clone()),
+            authenticated_issuer("issuer1"),
+            Path(token_id.clone()),
+            Json(StatusesRequest { statuses: vec![] }),
+        )
+        .await
+        .unwrap();
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::ACCEPT,
+            ACCEPT_STATUS_LISTS_HEADER_JWT.parse().unwrap(),
+        );
+
+        let app_state = Arc::new(app_state);
+        let mut handles = Vec::new();
+        for _ in 0..24 {
+            let app_state = app_state.clone();
+            let headers = headers.clone();
+            let token_id = token_id.clone();
+            handles.push(tokio::spawn(async move {
+                let res = get_status_list_at(
+                    State((*app_state).clone()),
+                    token_id,
+                    Ok(Query(StatusListQuery { time: None })),
+                    headers,
+                    now0,
+                )
+                .await
+                .unwrap()
+                .into_response();
+                assert_eq!(res.status(), StatusCode::OK);
+                let etag = res
+                    .headers()
+                    .get(header::ETAG)
+                    .unwrap()
+                    .to_str()
+                    .unwrap()
+                    .to_string();
+                let body = axum::body::to_bytes(res.into_body(), usize::MAX)
+                    .await
+                    .unwrap();
+                (etag, body)
+            }));
+        }
+
+        let mut etags = std::collections::HashSet::new();
+        let mut first_body: Option<Vec<u8>> = None;
+        for h in handles {
+            let (etag, body) = h.await.expect("concurrent request task");
+            etags.insert(etag);
+            match &first_body {
+                None => first_body = Some(body.to_vec()),
+                Some(first) => assert_eq!(
+                    first,
+                    &body.to_vec(),
+                    "all concurrent responses must share the same signed bytes"
+                ),
+            }
+        }
+        assert_eq!(
+            etags.len(),
+            1,
+            "concurrent misses in a fresh window must yield a single sign / ETag"
+        );
     }
 
     #[test]
@@ -1483,7 +1796,8 @@ mod tests {
             .into_response();
             assert_eq!(res_mod.status(), StatusCode::OK);
 
-            // expired_token: expired If-Modified-Since validator.
+            // modified via expired If-Modified-Since validator (past the anchored
+            // token's earliest expiry) -> fresh 200.
             let mut expired_headers = headers.clone();
             let last_modified = res1.headers().get(header::LAST_MODIFIED).unwrap().clone();
             expired_headers.insert(header::IF_MODIFIED_SINCE, last_modified);
@@ -1504,7 +1818,7 @@ mod tests {
                 rendered.contains("conditional_revalidation_total"),
                 "revalidation counter should be exported, got:\n{rendered}"
             );
-            for label in ["not_modified", "modified", "expired_token"] {
+            for label in ["not_modified", "modified"] {
                 assert!(
                     rendered.contains(&format!("outcome=\"{label}\"")),
                     "expected outcome=\"{label}\" in exported metrics:\n{rendered}"
@@ -1566,5 +1880,274 @@ mod tests {
         .into_response();
 
         assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    /// Generate a fresh, self-signed EC P-256 key (matching the ES256 signature
+    /// algorithm) plus a distinct certificate chain, so a test can rotate either
+    /// the signing key or the certificate between requests.
+    fn rotated_signing_material() -> (String, Vec<String>) {
+        let certified =
+            rcgen::generate_simple_self_signed(vec!["rotated.local".to_string()]).unwrap();
+        let key_pem = certified.signing_key.serialize_pem();
+        let cert_pem = certified.cert.pem();
+        use base64::prelude::{BASE64_STANDARD, Engine as _};
+        let chain = vec![BASE64_STANDARD.encode(cert_pem.as_bytes())];
+        (key_pem, chain)
+    }
+
+    fn assert_jwt_body(body: &[u8]) {
+        // A served JWT must decode to a runnable token: presence of iat/exp
+        // claims with a full validity span.
+        let claims = decode_jwt_claims(body);
+        let iat = claims["iat"].as_i64().expect("token carries iat");
+        let exp = claims["exp"].as_i64().expect("token carries exp");
+        assert!(exp > iat, "a freshly signed token must not be born expired");
+    }
+
+    #[tokio::test]
+    async fn test_key_rotation_invalidates_cached_token_bytes() {
+        // Rotating the signing key within the same token window must invalidate
+        // the cached signed bytes: the next request re-signs with the new key and
+        // serves different bytes/ETag, never the stale key's token. This is the
+        // core of acceptance criterion #5 ("rotating the signing key ... invalidates
+        // cached tokens").
+        let provider = Arc::new(RotatingCertProvider::new(
+            include_str!("../../../../test_data/ec-private.pem").to_string(),
+            vec!["ZHVtbXlfY2VydA==".to_string()],
+        ));
+        let app_state = test_app_state_with_cert_provider(provider.clone()).await;
+        let token_id = uuid::Uuid::new_v4().to_string();
+        let now0 = 1_000_000_000;
+
+        publish_status(
+            State(app_state.clone()),
+            authenticated_issuer("issuer1"),
+            Path(token_id.clone()),
+            Json(StatusesRequest { statuses: vec![] }),
+        )
+        .await
+        .unwrap();
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::ACCEPT,
+            ACCEPT_STATUS_LISTS_HEADER_JWT.parse().unwrap(),
+        );
+
+        let res1 = get_status_list_at(
+            State(app_state.clone()),
+            token_id.clone(),
+            Ok(Query(StatusListQuery { time: None })),
+            headers.clone(),
+            now0,
+        )
+        .await
+        .unwrap()
+        .into_response();
+        assert_eq!(res1.status(), StatusCode::OK);
+        let etag1 = res1.headers().get(header::ETAG).unwrap().clone();
+        let body1 = axum::body::to_bytes(res1.into_body(), usize::MAX)
+            .await
+            .unwrap();
+
+        // Rotate the signing key; keep it in the same window.
+        let (new_key, new_cert_chain) = rotated_signing_material();
+        provider.rotate(new_key, new_cert_chain);
+
+        let res2 = get_status_list_at(
+            State(app_state),
+            token_id,
+            Ok(Query(StatusListQuery { time: None })),
+            headers,
+            now0 + 60,
+        )
+        .await
+        .unwrap()
+        .into_response();
+        assert_eq!(res2.status(), StatusCode::OK);
+        let etag2 = res2.headers().get(header::ETAG).unwrap().clone();
+        let body2 = axum::body::to_bytes(res2.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_ne!(
+            etag1, etag2,
+            "the ETag must change when the signing key rotates"
+        );
+        assert_ne!(
+            body1, body2,
+            "a rotated signing key must re-sign, never serve the stale key's bytes"
+        );
+        assert_jwt_body(&body2);
+    }
+
+    #[tokio::test]
+    async fn test_certificate_renewal_invalidates_cached_token_bytes() {
+        // Renewing the certificate (fresh x5c/x5chain in the token) within the same
+        // window must also invalidate cached bytes: acceptance criterion #5's
+        // "renewing the certificate ... invalidates cached tokens" half.
+        let provider = Arc::new(RotatingCertProvider::new(
+            include_str!("../../../../test_data/ec-private.pem").to_string(),
+            vec!["ZHVtbXlfY2VydA==".to_string()],
+        ));
+        let app_state = test_app_state_with_cert_provider(provider.clone()).await;
+        let token_id = uuid::Uuid::new_v4().to_string();
+        let now0 = 1_000_000_000;
+
+        publish_status(
+            State(app_state.clone()),
+            authenticated_issuer("issuer1"),
+            Path(token_id.clone()),
+            Json(StatusesRequest { statuses: vec![] }),
+        )
+        .await
+        .unwrap();
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::ACCEPT,
+            ACCEPT_STATUS_LISTS_HEADER_JWT.parse().unwrap(),
+        );
+
+        let res1 = get_status_list_at(
+            State(app_state.clone()),
+            token_id.clone(),
+            Ok(Query(StatusListQuery { time: None })),
+            headers.clone(),
+            now0,
+        )
+        .await
+        .unwrap()
+        .into_response();
+        assert_eq!(res1.status(), StatusCode::OK);
+        let etag1 = res1.headers().get(header::ETAG).unwrap().clone();
+        let body1 = axum::body::to_bytes(res1.into_body(), usize::MAX)
+            .await
+            .unwrap();
+
+        // Renew the certificate only (same signing key), same window.
+        let (same_key, _) = (
+            include_str!("../../../../test_data/ec-private.pem").to_string(),
+            (),
+        );
+        let (_, renewed_chain) = rotated_signing_material();
+        provider.rotate(same_key, renewed_chain);
+
+        let res2 = get_status_list_at(
+            State(app_state),
+            token_id,
+            Ok(Query(StatusListQuery { time: None })),
+            headers,
+            now0 + 60,
+        )
+        .await
+        .unwrap()
+        .into_response();
+        assert_eq!(res2.status(), StatusCode::OK);
+        let etag2 = res2.headers().get(header::ETAG).unwrap().clone();
+        let body2 = axum::body::to_bytes(res2.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_ne!(
+            etag1, etag2,
+            "the ETag must change when the certificate is renewed"
+        );
+        assert_ne!(
+            body1, body2,
+            "a renewed certificate (new x5c) must re-sign, never serve stale bytes"
+        );
+        assert_jwt_body(&body2);
+    }
+
+    #[tokio::test]
+    async fn test_304_never_extends_cached_token_past_exp_property() {
+        // Property-style invariant (acceptance criterion #3): whatever window a
+        // client fetched in, a 304 is only ever certified while the token it
+        // holds is still valid at `now`. We sweep many configs and many revalidation
+        // offsets, fetching with the token's own strong ETag; whenever the server
+        // answers 304 we assert the anchored token (`iat = window_start(now0)`,
+        // `exp = iat + exp`) is still unexpired at `now`.
+        for (exp, ttl) in [(900u64, 300u64), (300, 300), (300, 600), (1, 0), (900, 899)] {
+            let provider = Arc::new(RotatingCertProvider::new(
+                include_str!("../../../../test_data/ec-private.pem").to_string(),
+                vec!["ZHVtbXlfY2VydA==".to_string()],
+            ));
+            let mut app_state = test_app_state_with_cert_provider(provider).await;
+            app_state.token_exp_secs = exp;
+            app_state.token_ttl_secs = ttl;
+            let app_state = app_state;
+
+            let token_id = uuid::Uuid::new_v4().to_string();
+            publish_status(
+                State(app_state.clone()),
+                authenticated_issuer("issuer1"),
+                Path(token_id.clone()),
+                Json(StatusesRequest { statuses: vec![] }),
+            )
+            .await
+            .unwrap();
+
+            let mut headers = HeaderMap::new();
+            headers.insert(
+                header::ACCEPT,
+                ACCEPT_STATUS_LISTS_HEADER_JWT.parse().unwrap(),
+            );
+
+            let now0 = 1_000_000_000i64;
+            let res1 = get_status_list_at(
+                State(app_state.clone()),
+                token_id.clone(),
+                Ok(Query(StatusListQuery { time: None })),
+                headers.clone(),
+                now0,
+            )
+            .await
+            .unwrap()
+            .into_response();
+            assert_eq!(res1.status(), StatusCode::OK);
+            let etag = res1.headers().get(header::ETAG).unwrap().clone();
+            headers.insert(header::IF_NONE_MATCH, etag.clone());
+
+            // The client's cached token is anchored to the window containing
+            // `now0`; its guaranteed expiry is window_start + exp.
+            let validity = TokenValidity::new(exp, ttl);
+            let (window_start, _) = token_window(now0, validity);
+            let cached_token_exp = window_start.saturating_add(exp as i64);
+
+            // Sweep revalidation times from immediately after the fetch past the
+            // cached token's expiry.
+            let mut revalidate_at = now0;
+            while revalidate_at <= cached_token_exp + 2 {
+                let res = get_status_list_at(
+                    State(app_state.clone()),
+                    token_id.clone(),
+                    Ok(Query(StatusListQuery { time: None })),
+                    headers.clone(),
+                    revalidate_at,
+                )
+                .await
+                .unwrap()
+                .into_response();
+
+                match res.status() {
+                    StatusCode::NOT_MODIFIED => {
+                        assert!(
+                            revalidate_at < cached_token_exp,
+                            "(exp={exp}, ttl={ttl}) 304 at now={revalidate_at} but the cached \
+                             token expires at {cached_token_exp}"
+                        );
+                    }
+                    StatusCode::OK => {
+                        // Fresh 200 is always safe: the body carries a token valid
+                        // for the window containing `revalidate_at`.
+                        let body = axum::body::to_bytes(res.into_body(), usize::MAX)
+                            .await
+                            .unwrap();
+                        assert!(!body.is_empty());
+                    }
+                    other => panic!("(exp={exp}, ttl={ttl}) unexpected status {other}"),
+                }
+                revalidate_at += 1;
+            }
+        }
     }
 }

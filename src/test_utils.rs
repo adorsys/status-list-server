@@ -79,6 +79,40 @@ pub(crate) async fn test_app_state(db_conn: Option<Arc<sea_orm::DatabaseConnecti
     build_test_app_state(db_conn, None, 1_048_576).await
 }
 
+/// Build a memory-backed [`AppState`] (snapshots disabled, like
+/// [`test_app_state`]) but with an explicitly supplied certificate provider, so
+/// tests can inject a rotating/mutable signer.
+#[cfg(feature = "memory")]
+pub(crate) async fn test_app_state_with_cert_provider(
+    cert_provider: Arc<dyn crate::domain::ports::CertificateProvider>,
+) -> AppState {
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+
+    let service = Arc::new(Service::from_arcs(
+        Arc::new(MemoryStatusLists::default()),
+        Arc::new(MemoryCredentials::default()),
+        Arc::new(TestStatusListCache::default()),
+        None,
+        cert_provider,
+    ));
+
+    AppState {
+        service,
+        server_domain: "example.com".to_string(),
+        aggregation_uri: None,
+        token_exp_secs: 900,
+        token_ttl_secs: 300,
+        max_status_index: 100_000,
+        max_statuses_per_request: 5_000,
+        max_serialized_list_size: 1_048_576,
+        max_lists_per_issuer: 1_000,
+        snapshot_retention_secs: 0,
+        management_auth: crate::server::ManagementAuthConfig::default(),
+        token_bytes_cache: crate::server::handlers::status_list::TokenBytesCache::new(300, 100),
+        readiness: crate::server::health::Readiness::new(Vec::new()),
+    }
+}
+
 #[cfg(not(feature = "history"))]
 pub(crate) async fn test_app_state(_db_conn: Option<Arc<()>>) -> AppState {
     build_test_app_state(None, 1_048_576).await
@@ -117,6 +151,7 @@ pub(crate) async fn test_app_state_without_snapshots() -> AppState {
         max_lists_per_issuer: 1_000,
         snapshot_retention_secs: 0,
         management_auth: crate::server::ManagementAuthConfig::default(),
+        token_bytes_cache: crate::server::handlers::status_list::TokenBytesCache::new(300, 100),
         readiness: crate::server::health::Readiness::new(Vec::new()),
     }
 }
@@ -140,6 +175,57 @@ impl crate::domain::ports::CertificateProvider for TestCertProvider {
             })?;
         Ok(crate::domain::ports::SigningMaterial::new(
             Some(self.cert_chain.clone()),
+            Arc::new(signing_key),
+        ))
+    }
+}
+
+/// A [`CertificateProvider`] whose signing key and certificate can be swapped at
+/// runtime, used to exercise the signed-token cache's rotation/renewal
+/// invalidation. Holds the material in a mutex; `rotate` replaces it atomically.
+pub(crate) struct RotatingCertProvider {
+    inner: Arc<std::sync::Mutex<RotatingMaterial>>,
+}
+
+#[derive(Clone)]
+struct RotatingMaterial {
+    key_pem: String,
+    cert_chain: Vec<String>,
+}
+
+impl RotatingCertProvider {
+    pub(crate) fn new(key_pem: String, cert_chain: Vec<String>) -> Self {
+        Self {
+            inner: Arc::new(std::sync::Mutex::new(RotatingMaterial {
+                key_pem,
+                cert_chain,
+            })),
+        }
+    }
+
+    pub(crate) fn rotate(&self, key_pem: String, cert_chain: Vec<String>) {
+        *self.inner.lock().expect("cert provider mutex") = RotatingMaterial {
+            key_pem,
+            cert_chain,
+        };
+    }
+}
+
+#[async_trait]
+impl crate::domain::ports::CertificateProvider for RotatingCertProvider {
+    async fn signing_material(
+        &self,
+    ) -> Result<
+        crate::domain::ports::SigningMaterial,
+        crate::domain::models::status_list::StatusListError,
+    > {
+        let m = self.inner.lock().expect("cert provider mutex");
+        let signing_key =
+            crate::utils::crypto::SigningKey::from_pem(&m.key_pem).map_err(|err| {
+                crate::domain::models::status_list::StatusListError::Backend(Box::new(err))
+            })?;
+        Ok(crate::domain::ports::SigningMaterial::new(
+            Some(m.cert_chain.clone()),
             Arc::new(signing_key),
         ))
     }
@@ -241,6 +327,7 @@ async fn build_test_app_state(
         max_lists_per_issuer: 1_000,
         snapshot_retention_secs: 7776000,
         management_auth: crate::server::ManagementAuthConfig::default(),
+        token_bytes_cache: crate::server::handlers::status_list::TokenBytesCache::new(300, 100),
         readiness: Readiness::default(),
     }
 }

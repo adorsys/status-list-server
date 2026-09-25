@@ -156,6 +156,11 @@ statuslist:
     # Maximum status-list records retained by the in-memory backend. Redis uses
     # native key expiration based on APP_CACHE__TTL.
     APP_CACHE__MAX_CAPACITY: "1000"
+    # Signed status-list token bytes cache TTL in seconds (#564). Should be at
+    # least APP_STATUS_LIST__TOKEN_EXP_SECS so an unchanged list reuses a single
+    # sign per window. "0" disables this cache.
+    APP_TOKEN_BYTES_CACHE__TTL: "900"
+    APP_TOKEN_BYTES_CACHE__MAX_CAPACITY: "100"
     APP_CACHE__TLS: "false"
     # Optional Redis settings when APP_CACHE__BACKEND=redis. Prefer secretEnv or
     # secretMounts for passwords. Use a dedicated Redis ACL user scoped to

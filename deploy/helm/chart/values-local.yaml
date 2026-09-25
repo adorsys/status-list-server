@@ -63,6 +63,9 @@ statuslist:
     # Status-list record cache TTL in seconds. "0" disables this cache.
     APP_CACHE__TTL: "120"
     APP_CACHE__MAX_CAPACITY: "500"
+    # Signed status-list token bytes cache TTL in seconds (#564).
+    APP_TOKEN_BYTES_CACHE__TTL: "900"
+    APP_TOKEN_BYTES_CACHE__MAX_CAPACITY: "100"
     APP_STATUS_LIST__TOKEN_EXP_SECS: "900"
     APP_STATUS_LIST__TOKEN_TTL_SECS: "300"
     APP_RATE_LIMIT__STRICT_BURST_SIZE: "10"
