@@ -16,7 +16,7 @@ use tracing::{debug, info, warn};
 use url::Url;
 
 use crate::cert_manager::storage::{Storage, StorageError, normalize_key};
-use crate::outbound::azure_identity::DefaultAzureCredential;
+use crate::outbound::azure::identity::DefaultAzureCredential;
 
 /// Azure Key Vault secret storage adapter.
 ///

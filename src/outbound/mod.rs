@@ -1,9 +1,7 @@
 #[cfg(feature = "aws")]
 pub mod aws;
 #[cfg(feature = "azure")]
-pub mod azure_identity;
-#[cfg(feature = "azure")]
-pub mod azure_kv;
+pub mod azure;
 pub mod cache;
 pub mod cert;
 #[cfg(feature = "gcp")]

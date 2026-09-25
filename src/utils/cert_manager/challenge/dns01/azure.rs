@@ -15,7 +15,7 @@ use tracing::info;
 
 use super::{DnsProvider, ZoneInfo, find_best_match, http_client, token::TokenCache};
 use crate::cert_manager::challenge::ChallengeError;
-use crate::outbound::azure_identity::DefaultAzureCredential;
+use crate::outbound::azure::identity::DefaultAzureCredential;
 
 const PROVIDER: &str = "azure";
 const DEFAULT_API_BASE: &str = "https://management.azure.com";
