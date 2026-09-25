@@ -5,9 +5,11 @@
 //! them. Put plain literals in [`crate::test_fixtures`], which is dependency-
 //! free precisely so that any test module can reach it whatever its own gate.
 
-use crate::domain::ports::{CredentialRepo, StatusListRepo, StatusListSnapshotRepo};
+use crate::domain::models::status_list::{StatusListError, StatusListRecord};
+use crate::domain::ports::{
+    CredentialRepo, StatusListCache, StatusListRepo, StatusListSnapshotRepo,
+};
 use crate::domain::service::Service;
-use crate::outbound::cache::MokaStatusListCache;
 #[cfg(feature = "memory")]
 use crate::outbound::memory::{MemoryCredentials, MemoryStatusListSnapshotRepo, MemoryStatusLists};
 #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mysql"))]
@@ -20,12 +22,30 @@ use crate::server::health::Readiness;
 #[cfg(feature = "acme")]
 use crate::{cert_manager::storage::StorageError, utils::cert_manager::storage::Storage};
 use async_trait::async_trait;
-#[cfg(feature = "acme")]
 use std::collections::HashMap;
 use std::sync::Arc;
+use tokio::sync::RwLock;
 
 pub(crate) fn authenticated_issuer(issuer: impl Into<String>) -> AuthenticatedIssuer {
     AuthenticatedIssuer::new(crate::domain::models::credential::Issuer(issuer.into()))
+}
+
+/// In-memory SQLite with foreign keys on and the first `steps` migrations
+/// applied (`None` applies all). One connection: each is its own database.
+#[cfg(feature = "sqlite")]
+pub(crate) async fn sqlite_test_db(steps: Option<u32>) -> Arc<sea_orm::DatabaseConnection> {
+    use sea_orm_migration::MigratorTrait;
+
+    let mut opt = sea_orm::ConnectOptions::new("sqlite::memory:");
+    opt.max_connections(1);
+    opt.map_sqlx_sqlite_opts(|o| o.foreign_keys(true));
+    let db = sea_orm::Database::connect(opt)
+        .await
+        .expect("Failed to connect to SQLite");
+    crate::outbound::sql::Migrator::up(&db, steps)
+        .await
+        .expect("Failed to run migrations on SQLite");
+    Arc::new(db)
 }
 
 #[cfg(feature = "acme")]
@@ -77,7 +97,7 @@ pub(crate) async fn test_app_state_without_snapshots() -> AppState {
     let service = Arc::new(Service::from_arcs(
         Arc::new(MemoryStatusLists::default()),
         Arc::new(MemoryCredentials::default()),
-        Arc::new(MokaStatusListCache::new(5 * 60, 100)),
+        Arc::new(TestStatusListCache::default()),
         None,
         Arc::new(TestCertProvider {
             key_pem: include_str!("../test_data/ec-private.pem").to_string(),
@@ -94,6 +114,7 @@ pub(crate) async fn test_app_state_without_snapshots() -> AppState {
         max_status_index: 100_000,
         max_statuses_per_request: 5_000,
         max_serialized_list_size: 1_048_576,
+        max_lists_per_issuer: 1_000,
         snapshot_retention_secs: 0,
         management_auth: crate::server::ManagementAuthConfig::default(),
         readiness: crate::server::health::Readiness::new(Vec::new()),
@@ -121,6 +142,34 @@ impl crate::domain::ports::CertificateProvider for TestCertProvider {
             Some(self.cert_chain.clone()),
             Arc::new(signing_key),
         ))
+    }
+}
+
+#[derive(Default)]
+struct TestStatusListCache {
+    // Keep general HTTP/service tests independent of the real cache adapters.
+    // Adapter behavior is covered in `outbound::cache`; this helper avoids
+    // coupling unrelated tests to cache metrics, TTLs, or Redis/Docker setup.
+    records: RwLock<HashMap<String, StatusListRecord>>,
+}
+
+#[async_trait]
+impl StatusListCache for TestStatusListCache {
+    async fn get(&self, list_id: &str) -> Result<Option<StatusListRecord>, StatusListError> {
+        Ok(self.records.read().await.get(list_id).cloned())
+    }
+
+    async fn put(&self, status_list: StatusListRecord) -> Result<(), StatusListError> {
+        self.records
+            .write()
+            .await
+            .insert(status_list.list_id.clone(), status_list);
+        Ok(())
+    }
+
+    async fn invalidate(&self, list_id: &str) -> Result<(), StatusListError> {
+        self.records.write().await.remove(list_id);
+        Ok(())
     }
 }
 
@@ -166,7 +215,7 @@ async fn build_test_app_state(
         Arc::new(memory_snapshot),
     );
 
-    let status_list_cache = Arc::new(MokaStatusListCache::new(5 * 60, 100));
+    let status_list_cache = Arc::new(TestStatusListCache::default());
     let cert_provider = Arc::new(TestCertProvider {
         key_pem,
         cert_chain: vec!["ZHVtbXlfY2VydA==".into()],
@@ -189,6 +238,7 @@ async fn build_test_app_state(
         max_status_index: 100_000,
         max_statuses_per_request: 5_000,
         max_serialized_list_size,
+        max_lists_per_issuer: 1_000,
         snapshot_retention_secs: 7776000,
         management_auth: crate::server::ManagementAuthConfig::default(),
         readiness: Readiness::default(),

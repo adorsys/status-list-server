@@ -147,9 +147,24 @@ statuslist:
     # statuslist.secretMounts / APP_DATABASE__PASSWORD_FILE or the fallback Secret instead.
     # APP_DATABASE__QUERY is accepted for non-secret driver/TLS parameters (e.g.
     # sslmode=verify-full&sslrootcert=...).
+    # Status-list record cache. Backend is selected at runtime: memory or redis.
+    # Redis requires APP_CACHE__HOST plus optional split fields below; the app
+    # assembles redis:// or rediss:// internally.
+    APP_CACHE__BACKEND: "memory"
     # Status-list record cache TTL in seconds. "0" disables this cache.
     APP_CACHE__TTL: "300"
+    # Maximum status-list records retained by the in-memory backend. Redis uses
+    # native key expiration based on APP_CACHE__TTL.
     APP_CACHE__MAX_CAPACITY: "1000"
+    APP_CACHE__TLS: "false"
+    # Optional Redis settings when APP_CACHE__BACKEND=redis. Prefer secretEnv or
+    # secretMounts for passwords. Use a dedicated Redis ACL user scoped to
+    # APP_CACHE__KEY_PREFIX (default status-list-server:status-list:*).
+    # APP_CACHE__CA_FILE: "/var/run/secrets/status-list/redis-ca.pem"
+    # APP_CACHE__KEY_PREFIX: "status-list-server:status-list:"
+    # APP_CACHE__RESPONSE_TIMEOUT_MS: "250"
+    # APP_CACHE__CONNECTION_TIMEOUT_MS: "250"
+    # APP_CACHE__RECONNECT_COOLDOWN_MS: "250"
     APP_RATE_LIMIT__STRICT_BURST_SIZE: "10"
     APP_RATE_LIMIT__STRICT_PERIOD_SECS: "60"
     APP_RATE_LIMIT__PERMISSIVE_BURST_SIZE: "100"
@@ -158,6 +173,14 @@ statuslist:
     APP_LIMITS__MAX_STATUS_INDEX: "100000"
     APP_LIMITS__MAX_STATUSES_PER_REQUEST: "5000"
     APP_LIMITS__MAX_SERIALIZED_LIST_SIZE: "1048576"
+    # Status lists one issuer may publish; must be > 0. Lists cannot be deleted
+    # via the API, so an issuer at this limit stays there until it is raised.
+    APP_LIMITS__MAX_LISTS_PER_ISSUER: "1000"
+    # Upgrading an existing database from a release without the list quota:
+    # pods refuse to start until the quota is enabled. Set this to "true" for
+    # that rollout only, then run `list-quota recount` and `list-quota enable`
+    # and remove it (see docs/troubleshooting.md, "Upgrading to the list quota").
+    # APP_LIMITS__LIST_QUOTA_TRANSITION: "true"
     # Telemetry / OpenTelemetry
     APP_SERVER__ENABLE_METRICS: "true"
     APP_TELEMETRY__ENVIRONMENT: "production"
@@ -271,6 +294,14 @@ statuslist:
           path: password
       fileEnv:
         APP_DATABASE__PASSWORD_FILE: password
+  # Optional env vars sourced directly from Secret keys, rendered with
+  # valueFrom.secretKeyRef. Useful for Redis passwords when mounting files is not
+  # convenient.
+  # Example:
+  #   APP_CACHE__PASSWORD:
+  #     name: redis-credentials
+  #     key: password
+  secretEnv: {}
 
   database:
     # Default Secret key used when a database password item omits `key`.
@@ -339,6 +370,10 @@ statuslist:
     # statuslist.initContainers wait-for-db probe, which by default pings the in-cluster
     # Postgres host derived by the dbHost helper.
     databaseEgress: []
+    # Redis egress destinations used when APP_CACHE__BACKEND=redis. The egress
+    # port is derived from APP_CACHE__PORT when set, otherwise 6380 when
+    # APP_CACHE__TLS=true and 6379 when false.
+    cacheEgress: []
   resources:
     requests:
       memory: "256Mi"
