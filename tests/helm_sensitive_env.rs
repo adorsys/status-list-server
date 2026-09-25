@@ -4,6 +4,8 @@ use std::{
     process::{Command, Output},
 };
 
+use status_list_server::config::Config;
+
 fn copy_dir(src: &Path, dst: &Path) {
     fs::create_dir_all(dst).expect("failed to create test chart directory");
     for entry in fs::read_dir(src).expect("failed to read chart directory") {
@@ -137,6 +139,57 @@ fn render_helm_chart_defaults_failure(args: &[&str]) -> Option<Output> {
     );
 
     Some(output)
+}
+
+fn rendered_env(rendered: &str) -> Vec<(String, String)> {
+    let mut env = Vec::new();
+    let mut current_name: Option<String> = None;
+    let mut in_env = false;
+
+    for line in rendered.lines() {
+        let line = line.trim();
+        if line == "env:" {
+            in_env = true;
+            continue;
+        }
+        if in_env && line == "volumeMounts:" {
+            break;
+        }
+        if !in_env {
+            continue;
+        }
+        if let Some(name) = line.strip_prefix("- name: ") {
+            current_name = Some(name.trim_matches('"').to_string());
+            continue;
+        }
+        if let (Some(name), Some(value)) = (current_name.take(), line.strip_prefix("value: ")) {
+            env.push((name, value.trim_matches('"').to_string()));
+        }
+    }
+
+    env
+}
+
+#[test]
+fn rendered_chart_default_env_loads_application_config() {
+    let Some(rendered) = helm_template_chart_defaults(&[]).map(|output| {
+        assert!(
+            output.status.success(),
+            "helm template failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout).expect("helm output should be UTF-8")
+    }) else {
+        return;
+    };
+
+    let env = rendered_env(&rendered);
+    let overrides = env
+        .iter()
+        .map(|(name, value)| (name.as_str(), value.as_str()))
+        .collect::<Vec<_>>();
+
+    Config::load_from_overrides(&overrides).expect("chart default env should load as app config");
 }
 
 #[test]
@@ -381,6 +434,42 @@ fn rendered_chart_accepts_mysql_enabled_false_overlay() {
 }
 
 #[test]
+fn rendered_chart_accepts_runtime_redis_cache_config() {
+    let Some(rendered) = render_helm(&[
+        "--set",
+        "statuslist.env.APP_CACHE__BACKEND=redis",
+        "--set",
+        "statuslist.env.APP_CACHE__HOST=redis.example.internal",
+        "--set-string",
+        "statuslist.env.APP_CACHE__TLS=true",
+        "--set",
+        "statuslist.secretEnv.APP_CACHE__PASSWORD.name=redis-password",
+        "--set",
+        "statuslist.secretEnv.APP_CACHE__PASSWORD.key=password",
+    ]) else {
+        return;
+    };
+
+    for expected in [
+        "image: \"ghcr.io/adorsys/status-list-server:1.0.0-fscert\"",
+        "name: APP_CACHE__BACKEND",
+        "value: \"redis\"",
+        "name: APP_CACHE__HOST",
+        "value: \"redis.example.internal\"",
+        "name: APP_CACHE__TLS",
+        "value: \"true\"",
+        "name: APP_CACHE__PASSWORD",
+        "name: \"redis-password\"",
+        "key: \"password\"",
+    ] {
+        assert!(
+            rendered.contains(expected),
+            "rendered Helm output is missing Redis cache field {expected}"
+        );
+    }
+}
+
+#[test]
 fn rendered_chart_rejects_mysql_backend_without_explicit_host() {
     let Some(output) = render_helm_failure(&[
         "--set",
@@ -416,6 +505,51 @@ fn rendered_chart_rejects_mysql_network_policy_without_database_egress() {
         String::from_utf8_lossy(&output.stderr)
             .contains("statuslist.networkPolicy.databaseEgress must be set"),
         "helm template should reject MySQL NetworkPolicy without an explicit database egress peer"
+    );
+}
+
+#[test]
+fn rendered_chart_allows_redis_cache_egress_network_policy() {
+    let Some(rendered) = render_helm(&[
+        "--set",
+        "statuslist.env.APP_CACHE__BACKEND=redis",
+        "--set",
+        "statuslist.env.APP_CACHE__HOST=redis.example.internal",
+        "--set-string",
+        "statuslist.env.APP_CACHE__TLS=true",
+        "--set",
+        "statuslist.networkPolicy.enabled=true",
+        "--set",
+        "statuslist.networkPolicy.cacheEgress[0].ipBlock.cidr=10.20.0.0/24",
+    ]) else {
+        return;
+    };
+
+    for expected in ["port: 6380", "cidr: 10.20.0.0/24"] {
+        assert!(
+            rendered.contains(expected),
+            "rendered Helm output is missing cache egress field {expected}"
+        );
+    }
+}
+
+#[test]
+fn rendered_chart_rejects_redis_network_policy_without_cache_egress() {
+    let Some(output) = render_helm_failure(&[
+        "--set",
+        "statuslist.env.APP_CACHE__BACKEND=redis",
+        "--set",
+        "statuslist.env.APP_CACHE__HOST=redis.example.internal",
+        "--set",
+        "statuslist.networkPolicy.enabled=true",
+    ]) else {
+        return;
+    };
+
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("statuslist.networkPolicy.cacheEgress must be set"),
+        "helm template should reject Redis cache NetworkPolicy without an explicit cache egress peer"
     );
 }
 

@@ -98,6 +98,37 @@ The chart's `statuslist.env` holds the application configuration. Set the values
 - **Region** (`statuslist.aws.region`, renders `APP_AWS__REGION`): only required when you use an AWS-backed secret or DNS backend; omit it for other providers.
 - **Telemetry / limits / rate limiting / cache**: defaults are sensible; over-ride only what your sizing needs.
 
+## Redis Status-List Cache
+
+Redis is an optional runtime cache backend. Set `APP_CACHE__BACKEND=redis`, provide
+`APP_CACHE__HOST`, and configure `APP_CACHE__TLS=true` with a password in production.
+For Helm, source `APP_CACHE__PASSWORD` from `statuslist.secretEnv` and set
+`statuslist.networkPolicy.cacheEgress` when NetworkPolicy is enabled.
+
+Use a dedicated Redis ACL user scoped to `APP_CACHE__KEY_PREFIX`; do not share a broad
+write-capable Redis user with other applications. For the default prefix, create one with:
+
+```text
+ACL SETUSER status-list-server reset on >REPLACE_WITH_A_STRONG_PASSWORD ~status-list-server:status-list:* +get +del +hget +hset +expire +set +select +evalsha +script|load
+```
+
+`SET` maintains durable invalidation fences, `SELECT` is needed when
+`APP_CACHE__DATABASE` is non-zero, and `SCRIPT|LOAD` lets `redis::Script` recover
+after a Redis restart. Restrict the key pattern when you configure a custom prefix.
+
+Configure Redis with `maxmemory-policy volatile-lru` (or `volatile-lfu`). Cache record
+keys have a TTL and remain eligible for eviction, while durable marker keys have no TTL
+and stay resident to preserve stale-fill fencing. Do not use any `allkeys-*` policy: it
+can evict a marker and allow a delayed pre-PATCH fill to make a revoked credential look
+valid. Size Redis for one durable marker per distinct status-list ID that has been
+invalidated, in addition to the TTL-bound records; markers deliberately outlive records
+and are not bounded by `APP_CACHE__MAX_CAPACITY`.
+
+The cache supports private CA bundles (`APP_CACHE__CA_FILE`) and configurable
+response, connection, and reconnect-cooldown timeouts. See
+[`deploy/helm/chart/values.yaml`](../deploy/helm/chart/values.yaml) for the full
+Helm value reference.
+
 ### Install
 
 ```bash

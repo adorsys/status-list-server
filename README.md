@@ -14,6 +14,7 @@ The Status List Server is an HTTP service that publishes and manages status list
 - **Standard Compliance**: Implements OAuth Token Status List with JWT and CWT formats, gzip compression on JWT responses, and optional historical status resolution (`?time=`). See the [Compliance Matrix](docs/compliance_matrix.md) for detailed spec alignment.
 - **Zero-Infrastructure Local Mode**: Runs in-memory out of the box with zero external dependencies, allowing local development and testing in seconds.
 - **Pluggable Persistence**: Supports SQL databases (PostgreSQL, MySQL, SQLite) as well as an in-memory repository for development. See [Database Backends](docs/database-backends.md).
+- **Pluggable Status-List Cache**: Select an in-memory or Redis cache backend at runtime for local or multi-replica deployments.
 - **Cloud Secret Management**: Fetches server signing keys from AWS Secrets Manager, GCP Secret Manager, Azure Key Vault, HashiCorp Vault or loads them statically from local files. See [Secret Backends](docs/secrets-backends.md).
 - **Automated Token Signing Certificates**: Provisions and automatically renews X.509 token signing certificates via ACME DNS-01 challenges (Route53, Cloudflare, Google Cloud DNS, Azure DNS, ACME-DNS, Pebble), or loads certificates statically from local files. See [DNS Providers](docs/dns-providers.md).
 - **Cloud-Native Observability**: OpenTelemetry distributed tracing (OTLP gRPC), Prometheus metrics, structured JSON logging, and Kubernetes health probes. See [Observability](docs/observability.md).
@@ -93,6 +94,7 @@ The server compiles with modular feature flags to gate database drivers and clou
 | `gcp`      | GCP Secret Manager and Google Cloud DNS provider                      | ❌ Opt-in  |
 | `azure`    | Azure Key Vault and Azure DNS provider                                | ❌ Opt-in  |
 | `vault`    | HashiCorp Vault / OpenBao secret backend                              | ❌ Opt-in  |
+| `redis`    | Redis status-list cache backend                                       | ❌ Opt-in  |
 
 Examples:
 
