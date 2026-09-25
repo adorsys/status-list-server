@@ -1,4 +1,4 @@
-# ADR 0002: Runtime Cache Backend Selection
+# ADR 0003: Runtime Cache Backend Selection
 
 ## Status
 

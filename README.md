@@ -162,7 +162,7 @@ cargo check --no-default-features --features memory
 
 The status-list record cache backend is selected at runtime with
 `APP_CACHE__BACKEND=memory|redis`; `memory` is the default. The selection rationale
-is recorded in [ADR 0002](docs/adr/0002-runtime-cache-backend-selection.md).
+is recorded in [ADR 0003](docs/adr/0003-runtime-cache-backend-selection.md).
 
 See the [deployment runbook](docs/deployment-runbook.md#redis-status-list-cache)
 for Redis configuration and operational guidance.

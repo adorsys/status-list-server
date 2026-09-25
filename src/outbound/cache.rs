@@ -3,6 +3,8 @@ use arc_swap::ArcSwapOption;
 use async_trait::async_trait;
 use moka::future::Cache as MokaCache;
 use opentelemetry::{KeyValue, metrics::Counter};
+#[cfg(feature = "redis")]
+use std::future::Future;
 use std::{num::NonZeroU64, sync::Arc, time::Duration};
 #[cfg(feature = "redis")]
 use tokio::sync::Mutex;
@@ -251,18 +253,16 @@ impl RedisStatusListCache {
             return Ok((*connection).clone());
         }
 
-        let now = current_millis();
-        let open_until = self
-            .circuit_open_until
-            .load(std::sync::atomic::Ordering::Relaxed);
-        if now < open_until {
-            record_redis_cache_error(operation);
-            return Err(redis_circuit_open_error(operation, open_until - now));
+        if let Some(error) = self.circuit_error(operation) {
+            return Err(error);
         }
 
         let _guard = self.connect_lock.lock().await;
         if let Some(connection) = self.connection.load_full() {
             return Ok((*connection).clone());
+        }
+        if let Some(error) = self.circuit_error(operation) {
+            return Err(error);
         }
 
         let manager_config = redis::aio::ConnectionManagerConfig::new()
@@ -301,6 +301,39 @@ impl RedisStatusListCache {
         format!("{}meta:{{{}}}:updated", self.key_prefix, list_id)
     }
 
+    fn circuit_error(&self, operation: &'static str) -> Option<StatusListError> {
+        let now = current_millis();
+        let open_until = self
+            .circuit_open_until
+            .load(std::sync::atomic::Ordering::Relaxed);
+        if now < open_until {
+            record_redis_cache_error(operation);
+            Some(redis_circuit_open_error(operation, open_until - now))
+        } else {
+            None
+        }
+    }
+
+    async fn with_response_timeout<T>(
+        &self,
+        operation: &'static str,
+        request: impl Future<Output = redis::RedisResult<T>>,
+    ) -> Result<T, StatusListError> {
+        match tokio::time::timeout(self.response_timeout, request).await {
+            Ok(Ok(value)) => Ok(value),
+            Ok(Err(error)) => {
+                self.connection.store(None);
+                self.open_circuit();
+                Err(redis_operation_error(operation, error))
+            }
+            Err(_) => {
+                self.connection.store(None);
+                self.open_circuit();
+                Err(redis_timeout_error(operation, self.response_timeout))
+            }
+        }
+    }
+
     fn open_circuit(&self) {
         let cooldown_ms = self
             .reconnect_cooldown
@@ -317,10 +350,9 @@ impl RedisStatusListCache {
         use redis::AsyncCommands;
 
         let mut connection = self.connection("delete_corrupt").await?;
-        let _: () = connection
-            .del(key)
-            .await
-            .map_err(|error| redis_operation_error("delete_corrupt", error))?;
+        let _: () = self
+            .with_response_timeout("delete_corrupt", connection.del(key))
+            .await?;
         Ok(())
     }
 }
@@ -330,15 +362,20 @@ impl RedisStatusListCache {
 impl StatusListCache for RedisStatusListCache {
     async fn get(&self, list_id: &str) -> Result<Option<StatusListRecord>, StatusListError> {
         let key = self.key(list_id);
-        let mut connection = self.connection("get").await?;
-        let cached: Option<String> = redis::cmd("HGET")
-            .arg(&key)
-            .arg("v")
-            .query_async(&mut connection)
+        let mut connection = self.connection("get").await.inspect_err(|_| {
+            cache_metrics().misses.add(1, &cache_attrs("redis"));
+        })?;
+        let cached: Option<String> = self
+            .with_response_timeout(
+                "get",
+                redis::cmd("HGET")
+                    .arg(&key)
+                    .arg("v")
+                    .query_async(&mut connection),
+            )
             .await
-            .map_err(|error| {
+            .inspect_err(|_| {
                 cache_metrics().misses.add(1, &cache_attrs("redis"));
-                redis_operation_error("get", error)
             })?;
         let metrics = cache_metrics();
         if let Some(value) = cached {
@@ -379,25 +416,31 @@ impl StatusListCache for RedisStatusListCache {
         let key = self.key(&record.list_id);
         let marker_key = self.marker_key(&record.list_id);
         let mut connection = self.connection("put").await?;
-        let _: i32 = REDIS_PUT_SCRIPT
-            .key(key)
-            .key(marker_key)
-            .arg(value)
-            .arg(record.updated_at)
-            .arg(self.ttl_secs)
-            .invoke_async(&mut connection)
-            .await
-            .map_err(|error| redis_operation_error("put", error))?;
+        let _: i32 = self
+            .with_response_timeout(
+                "put",
+                REDIS_PUT_SCRIPT
+                    .key(key)
+                    .key(marker_key)
+                    .arg(value)
+                    .arg(record.updated_at)
+                    .arg(self.ttl_secs)
+                    .invoke_async(&mut connection),
+            )
+            .await?;
         Ok(())
     }
 
     async fn invalidate(&self, list_id: &str) -> Result<(), StatusListError> {
         let mut connection = self.connection("invalidate").await?;
-        let _: i32 = redis::cmd("DEL")
-            .arg(self.key(list_id))
-            .query_async(&mut connection)
-            .await
-            .map_err(|error| redis_operation_error("invalidate", error))?;
+        let _: i32 = self
+            .with_response_timeout(
+                "invalidate",
+                redis::cmd("DEL")
+                    .arg(self.key(list_id))
+                    .query_async(&mut connection),
+            )
+            .await?;
         Ok(())
     }
     async fn invalidate_after_update(
@@ -406,13 +449,16 @@ impl StatusListCache for RedisStatusListCache {
         updated_at: i64,
     ) -> Result<(), StatusListError> {
         let mut connection = self.connection("invalidate").await?;
-        let _: i32 = REDIS_INVALIDATE_SCRIPT
-            .key(self.key(list_id))
-            .key(self.marker_key(list_id))
-            .arg(updated_at)
-            .invoke_async(&mut connection)
-            .await
-            .map_err(|error| redis_operation_error("invalidate", error))?;
+        let _: i32 = self
+            .with_response_timeout(
+                "invalidate",
+                REDIS_INVALIDATE_SCRIPT
+                    .key(self.key(list_id))
+                    .key(self.marker_key(list_id))
+                    .arg(updated_at)
+                    .invoke_async(&mut connection),
+            )
+            .await?;
         Ok(())
     }
 }
@@ -818,6 +864,151 @@ mod redis_tests {
 
         assert!(result.is_ok(), "cache get exceeded outer timeout");
         assert!(result.expect("outer timeout result").is_err());
+    }
+
+    #[tokio::test]
+    async fn redis_cache_concurrent_connect_failures_share_one_timeout() {
+        let _redis_test_lock = REDIS_TEST_LOCK.lock().await;
+        if std::env::var("TEST_REDIS_URL").is_ok() {
+            return;
+        }
+        let container = redis_container().await;
+        let redis_url = redis_url().await;
+        let cache = RedisStatusListCache::new(
+            &redis_url,
+            60,
+            "status-list-server:test:",
+            Duration::from_millis(75),
+            Duration::from_millis(75),
+            Duration::from_secs(1),
+            None,
+        )
+        .expect("configure redis cache");
+
+        container.pause().await.expect("pause redis");
+        let mut reads = tokio::task::JoinSet::new();
+        for _ in 0..8 {
+            let cache = cache.clone();
+            reads.spawn(async move { cache.get("any").await });
+        }
+        let result = tokio::time::timeout(Duration::from_millis(500), async {
+            while let Some(result) = reads.join_next().await {
+                assert!(result.expect("read task").is_err());
+            }
+        })
+        .await;
+        container.unpause().await.expect("unpause redis");
+
+        assert!(
+            result.is_ok(),
+            "concurrent connection attempts serialized past one timeout"
+        );
+    }
+
+    #[tokio::test]
+    async fn redis_cache_recovers_after_redis_resumes() {
+        let _redis_test_lock = REDIS_TEST_LOCK.lock().await;
+        if std::env::var("TEST_REDIS_URL").is_ok() {
+            return;
+        }
+        let redis_url = redis_url().await;
+        let cache = redis_cache(&redis_url, 60);
+        let list_id = format!("recovery-{}", uuid::Uuid::new_v4());
+        let record = record(&list_id);
+        cache.put(record.clone()).await.expect("prime connection");
+
+        let mut admin = cache.connection("test").await.expect("connect as admin");
+        let _: () = redis::cmd("CLIENT")
+            .arg("PAUSE")
+            .arg(500)
+            .arg("ALL")
+            .query_async(&mut admin)
+            .await
+            .expect("pause Redis requests");
+        let failed = tokio::time::timeout(Duration::from_secs(1), cache.get(&list_id)).await;
+        assert!(
+            failed.is_ok(),
+            "cache read exceeded timeout while Redis was paused"
+        );
+        assert!(failed.expect("outer timeout result").is_err());
+        tokio::time::sleep(Duration::from_millis(300)).await;
+
+        let mut recovered = false;
+        let mut last_error = None;
+        for _ in 0..20 {
+            match cache.put(record.clone()).await {
+                Ok(()) => match cache.get(&list_id).await {
+                    Ok(Some(recovered_record)) if recovered_record == record => {
+                        recovered = true;
+                        break;
+                    }
+                    Ok(_) => {
+                        last_error = Some("cache did not return the written record".to_string())
+                    }
+                    Err(error) => last_error = Some(error.to_string()),
+                },
+                Err(error) => last_error = Some(error.to_string()),
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert!(
+            recovered,
+            "cache reconnects after Redis resumes: {last_error:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn redis_cache_works_with_restricted_acl_user() {
+        let _redis_test_lock = REDIS_TEST_LOCK.lock().await;
+        if std::env::var("TEST_REDIS_URL").is_ok() {
+            return;
+        }
+        let redis_url = redis_url().await;
+        let cache = redis_cache(&redis_url, 60);
+        let username = format!("status-list-cache-{}", uuid::Uuid::new_v4().simple());
+        let password = format!("cache{}", uuid::Uuid::new_v4().simple());
+        let mut admin = cache.connection("test").await.expect("connect as admin");
+        let _: () = redis::cmd("ACL")
+            .arg("SETUSER")
+            .arg(&username)
+            .arg("reset")
+            .arg("on")
+            .arg(format!(">{password}"))
+            .arg("~status-list-server:test:*")
+            .arg("+get")
+            .arg("+del")
+            .arg("+hget")
+            .arg("+hset")
+            .arg("+expire")
+            .arg("+set")
+            .arg("+select")
+            .arg("+evalsha")
+            .arg("+script|load")
+            .query_async(&mut admin)
+            .await
+            .expect("create restricted ACL user");
+
+        let host = redis_url
+            .strip_prefix("redis://")
+            .expect("Redis URL scheme");
+        let restricted_url = format!("redis://{}:{}@{}", username, password, host);
+        let restricted = redis_cache(&restricted_url, 60);
+        let list_id = format!("acl-{}", uuid::Uuid::new_v4());
+        let current = record_at(&list_id, 2);
+        restricted.put(current.clone()).await.expect("put with ACL");
+        restricted
+            .invalidate_after_update(&list_id, 3)
+            .await
+            .expect("invalidate with ACL");
+        restricted.put(current).await.expect("fenced fill with ACL");
+        assert_eq!(restricted.get(&list_id).await.expect("get with ACL"), None);
+
+        let _: () = redis::cmd("ACL")
+            .arg("DELUSER")
+            .arg(&username)
+            .query_async(&mut admin)
+            .await
+            .expect("remove restricted ACL user");
     }
 
     #[cfg(feature = "memory")]

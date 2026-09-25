@@ -105,12 +105,24 @@ Redis is an optional runtime cache backend. Set `APP_CACHE__BACKEND=redis`, prov
 For Helm, source `APP_CACHE__PASSWORD` from `statuslist.secretEnv` and set
 `statuslist.networkPolicy.cacheEgress` when NetworkPolicy is enabled.
 
-Use a dedicated Redis ACL user scoped to `APP_CACHE__KEY_PREFIX`. With the default
-prefix, grant only `GET`, `DEL`, `HGET`, `HSET`, `EXPIRE`, `EVAL`, `EVALSHA`, and
-script loading on `status-list-server:status-list:*`; do not share a broad
-write-capable Redis user with other applications. Configure Redis with
-`maxmemory-policy noeviction` so full Redis memory is visible as a cache error rather
-than silently evicting entries.
+Use a dedicated Redis ACL user scoped to `APP_CACHE__KEY_PREFIX`; do not share a broad
+write-capable Redis user with other applications. For the default prefix, create one with:
+
+```text
+ACL SETUSER status-list-server reset on >REPLACE_WITH_A_STRONG_PASSWORD ~status-list-server:status-list:* +get +del +hget +hset +expire +set +select +evalsha +script|load
+```
+
+`SET` maintains durable invalidation fences, `SELECT` is needed when
+`APP_CACHE__DATABASE` is non-zero, and `SCRIPT|LOAD` lets `redis::Script` recover
+after a Redis restart. Restrict the key pattern when you configure a custom prefix.
+
+Configure Redis with `maxmemory-policy volatile-lru` (or `volatile-lfu`). Cache record
+keys have a TTL and remain eligible for eviction, while durable marker keys have no TTL
+and stay resident to preserve stale-fill fencing. Do not use any `allkeys-*` policy: it
+can evict a marker and allow a delayed pre-PATCH fill to make a revoked credential look
+valid. Size Redis for one durable marker per distinct status-list ID that has been
+invalidated, in addition to the TTL-bound records; markers deliberately outlive records
+and are not bounded by `APP_CACHE__MAX_CAPACITY`.
 
 The cache supports private CA bundles (`APP_CACHE__CA_FILE`) and configurable
 response, connection, and reconnect-cooldown timeouts. See

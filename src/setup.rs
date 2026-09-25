@@ -1187,6 +1187,39 @@ mod general_tests {
             .expect("redis cache startup failures should install lazy reconnecting cache");
     }
 
+    #[cfg(all(not(feature = "redis"), not(feature = "acme")))]
+    #[tokio::test]
+    async fn build_state_rejects_redis_cache_without_redis_feature() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let certified_key = rcgen::generate_simple_self_signed(vec!["localhost".to_string()])
+            .expect("generate test cert and key");
+        let config = AppConfig::load_from_overrides(&[
+            ("APP_DATABASE__BACKEND", "memory"),
+            ("APP_DATABASE__URL", "memory:"),
+            (
+                "APP_SERVER__CERT__STORE__CERTIFICATE",
+                &certified_key.cert.pem(),
+            ),
+            (
+                "APP_SERVER__CERT__STORE__SIGNING_KEY",
+                &certified_key.signing_key.serialize_pem(),
+            ),
+            ("APP_CACHE__BACKEND", "redis"),
+            ("APP_CACHE__HOST", "127.0.0.1"),
+            ("APP_CACHE__PORT", "6379"),
+        ])
+        .expect("load redis cache config");
+
+        let Err(error) = build_state(&config).await else {
+            panic!("Redis cache configuration must fail without the redis feature");
+        };
+        assert!(
+            error
+                .to_string()
+                .contains("cache.backend=redis is configured, but this binary was not built with the redis feature")
+        );
+    }
+
     #[cfg(not(feature = "acme"))]
     #[tokio::test]
     async fn build_state_uses_disabled_cache_when_ttl_is_zero() {
